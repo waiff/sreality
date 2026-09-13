@@ -146,7 +146,19 @@ export default function PinAuditMap({
         heightClass ?? 'h-[24rem]',
       ].join(' ')}
     >
-      <div ref={containerRef} className="absolute inset-0" />
+      {/* The inline position/size is NOT redundant with `absolute inset-0`.
+        * MapLibre stamps `.maplibregl-map` onto this element at init, and
+        * `globals.css` imports `maplibre-gl.css` AFTER `tailwindcss`, so that
+        * class's own `position: relative` wins the cascade over Tailwind's
+        * `.absolute` at equal specificity — `inset-0` then sizes nothing and
+        * the container collapses to 0 height, painting no tiles at all. Every
+        * other map in the app (DetailMap, ListingMap, ComparablesMap) carries
+        * the same inline override for the same reason. */}
+      <div
+        ref={containerRef}
+        className="absolute inset-0"
+        style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, width: '100%', height: '100%' }}
+      />
     </div>
   );
 }

@@ -15,6 +15,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Shell from './Shell';
 import * as auth from '@/lib/auth';
 import * as api from '@/lib/api';
+import * as pinAudit from '@/lib/pinAudit';
 
 vi.mock('@/lib/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/auth')>()),
@@ -23,6 +24,10 @@ vi.mock('@/lib/auth', async (importOriginal) => ({
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   getNotificationUnreadCount: vi.fn(),
+}));
+vi.mock('@/lib/pinAudit', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/pinAudit')>()),
+  fetchPinAuditTotal: vi.fn(),
 }));
 vi.mock('@/lib/supabase', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/supabase')>()),
@@ -36,6 +41,7 @@ function Boom(): never {
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.mocked(api.getNotificationUnreadCount).mockResolvedValue(0);
+  vi.mocked(pinAudit.fetchPinAuditTotal).mockResolvedValue(0);
   vi.mocked(auth.useAuth).mockReturnValue({
     isAdmin: true,
     session: null,
@@ -92,5 +98,31 @@ describe('<Shell> notifications badge', () => {
     await waitFor(() =>
       expect(link).toHaveAccessibleName('Notifications 5 unread notifications'),
     );
+  });
+});
+
+/* The pin-loss audit was buried in the NEW DEDUP dropdown while it is the one
+ * decision waiting on the operator. It now leads the nav, and the count of
+ * rows in the audit set rides on it — but navigation can never depend on that
+ * number arriving. */
+describe('<Shell> !AUDIT POLOH', () => {
+  it('is the first nav entry and carries the audit count', async () => {
+    vi.mocked(pinAudit.fetchPinAuditTotal).mockResolvedValue(37052);
+    renderShellWith(<p>page content</p>);
+    const link = await screen.findByRole('link', { name: /^!AUDIT POLOH/ });
+    expect(link).toHaveAttribute('href', '/new-dedup/pin-audit');
+    await waitFor(() =>
+      expect(link).toHaveAccessibleName('!AUDIT POLOH 37052 inzerátů k auditu'),
+    );
+    const nav = screen.getByRole('navigation');
+    expect(nav.querySelectorAll('a')[0]).toBe(link);
+  });
+
+  it('still navigates when the count read fails', async () => {
+    vi.mocked(pinAudit.fetchPinAuditTotal).mockRejectedValue(new Error('nope'));
+    renderShellWith(<p>page content</p>);
+    const link = await screen.findByRole('link', { name: '!AUDIT POLOH' });
+    await waitFor(() => expect(link).toHaveAccessibleName('!AUDIT POLOH'));
+    expect(link).toHaveAttribute('href', '/new-dedup/pin-audit');
   });
 });
