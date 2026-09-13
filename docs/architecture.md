@@ -2073,7 +2073,11 @@ a reader — "declared ahead for a later wave" is how a fleet grows 47 entries t
 Nine contracts, **67 entries**, 4 to 11 apiece; what a portal does not publish is an omission
 recorded in its report, never a placeholder entry. **Entries are immutable**: a fix is a version
 bump, never an edit, so a claim's `extractor_id` always names the rule that produced it — hence no
-per-portal branch in the intake, a new signal is a YAML entry. Two further rails: `ReaderContract`
+per-portal branch in the intake, a new signal is a YAML entry. A locator may name an ordered `fallback` list of alternative paths, each with the transforms ITS
+shape needs, and the reader takes the first that answers — that, not a second entry, is how a portal
+whose payload changed shape keeps reading the older one (sreality@3: 30,265 delisted rows were frozen
+on the pre-cutover JSON, whose whole address is one line in `/locality/value` with the pin in `/map`,
+and every rail the primary locator has applies to each alternative). Two further rails: `ReaderContract`
 records each reader's whole `locator` appetite (the keys it requires plus the ones it merely reads),
 derived back out of the reader bodies by an AST scan over each reader and the helpers it delegates
 its locator to, and a locator key outside that union is refused — a declared key no reader consults

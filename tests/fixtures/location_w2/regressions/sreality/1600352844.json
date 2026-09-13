@@ -1,0 +1,25 @@
+{
+  "_note": "Prod listings.raw_json 2026-09-13, trimmed. The older shape outside Praha, and the hyphen spelling of a statutory-city obvod ('Brno - Dolní Heršpice') rather than the ordinal one.",
+  "raw_json": {
+    "locality": {
+      "name": "Adresa",
+      "value": "Bernáčkova, Brno - Dolní Heršpice",
+      "accuracy": "address"
+    },
+    "map": {
+      "lat": 49.1543468643,
+      "lon": 16.6247708777,
+      "type": "coordinates",
+      "zoom": 14
+    },
+    "seo": {
+      "locality": "brno-dolni-herspice-bernackova",
+      "category_sub_cb": 47,
+      "category_main_cb": 1,
+      "category_type_cb": 2
+    },
+    "locality_district_id": 72
+  },
+  "lat": 49.1543468643,
+  "lon": 16.6247708777
+}

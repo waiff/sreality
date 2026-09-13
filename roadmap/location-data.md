@@ -142,7 +142,19 @@ component is slimmed twice — each wave rewrites one component and slims its st
     | `mmreality@3` | 7 | `mm.det.municipality` — the Vue blob's `/municipality` | **psč**, kraj, čp, čo |
     | `realitymix@5` | 10 | `rm.det.slug` — the canonical link's `/detail/{obec}/` segment | country |
     | `remax@4` | 6 | `rx.det.header_obec` — the head of `h2.pd-header__address` | precision declaration, country, psč, čp, čo |
-    | `sreality@2` | 11 | `sr.det.name_city` — `/locality/city` | *nothing — all eleven types* |
+    | `sreality@3` | 11 | `sr.det.name_city` — `/locality/city` | *nothing — all eleven types* |
+
+    `sreality@3` — the frozen older JSON shape is read through fallback paths (30k unresolved rows).
+    A listing first seen before the client changed what it stores and never content-changed since
+    still carries the pre-cutover shape: the address is ONE line in `/locality/value`, the pin is in
+    `/map`, the precision label is `/locality/accuracy`. @2 read only the flat post-cutover fields,
+    so 30,265 delisted rows plus 80 live ones yielded no claims at all and resolved to nothing —
+    a town-coverage hole that read as a portal publishing no town, and one a detail refetch could
+    never close (a delisted listing is never fetched again). The older shape is NOT a second set of
+    entries: `locator.fallback` is an ordered list of alternative paths on the five entries that
+    already carry those types, each with the transform its shape needs (`address_part_obec`,
+    `address_part_street`, and the new `address_part_cast_obce`, which keeps the quarter the
+    statutory-city fold used to drop). Entry count is unchanged at 11.
 
     Four rulings did the work. A numbered or hyphenated městský obvod is never the town (R4,
     `statutory_city_obec`); where the portal publishes it, it is claimed as `cast_obce_name` rather

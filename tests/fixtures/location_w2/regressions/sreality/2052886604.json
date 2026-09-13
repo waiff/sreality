@@ -1,0 +1,35 @@
+{
+  "_note": "Prod listings.raw_json 2026-09-13, trimmed. The older shape's OTHER arm: no street in the line at all, accuracy 'not_address', and map.type 'geometry' — the pin is the centroid of a drawn quarter polygon, so the cap must be quarter-level. map.geometry's ~2,000-vertex ring is elided: no entry addresses it.",
+  "raw_json": {
+    "locality": {
+      "name": "Adresa",
+      "value": "Praha 5 - Košíře",
+      "accuracy": "not_address"
+    },
+    "map": {
+      "lat": 50.066918790469984,
+      "lon": 14.36232764437294,
+      "type": "geometry",
+      "zoom": 14,
+      "bounding_box": {
+        "rightTopBounding": {
+          "lat": 50.073677694407344,
+          "lon": 14.393376715681304
+        },
+        "leftBottomBounding": {
+          "lat": 50.05767237893756,
+          "lon": 14.341776040725573
+        }
+      }
+    },
+    "seo": {
+      "locality": "praha-kosire-",
+      "category_sub_cb": 6,
+      "category_main_cb": 1,
+      "category_type_cb": 1
+    },
+    "locality_district_id": 5005
+  },
+  "lat": 50.066918790469984,
+  "lon": 14.36232764437294
+}

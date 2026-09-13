@@ -55,6 +55,10 @@ DECLARED_CAP: dict[str, str] = {
     "polygon": "cast_obce_or_quarter",
     # idnes' "Na mapě nezobrazujeme přesnou adresu" disclaimer.
     "no_exact_address": "cast_obce_or_quarter",
+    # sreality's LEGACY `locality.accuracy`, a two-value field: `address` is already capped
+    # above, and `not_address` rides with `map.type: geometry` on every row sampled — the
+    # pin is the centroid of a drawn quarter polygon, not a blurred address.
+    "not_address": "cast_obce_or_quarter",
     "regional": "obec", "municipality": "obec", "obec": "obec",
     # --- W1-c: the rest of what the nine slim contracts emit.
     # bazos' maps anchor says "Přibližná lokalita" on every ad; the contract caps that pin at

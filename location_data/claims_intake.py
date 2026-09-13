@@ -242,14 +242,48 @@ def payload_entries(entries: list[Entry]) -> list[Entry]:
             if e.reader and READERS.get(e.reader) is not None
             and READERS[e.reader].substrate == SUBSTRATE_PAYLOAD]
 
+@dataclass(frozen=True, slots=True)
+class LocatorRead:
+    """One path an entry may answer through, with the normalisers THAT path needs."""
+    locator: dict[str, Any]
+    transform: tuple[str, ...]
+
+
+def locator_reads(entry: Entry) -> list[LocatorRead]:
+    """The entry's reads in order: the primary locator, then each `locator.fallback`.
+
+    One entry, one claim type, one reader — a portal whose payload changed shape does not
+    get a second entry to read the old one (that would make the contract a vote the
+    survivorship policy never asked for, `contracts._check_shape`). It gets alternative
+    PATHS inside the entry it already has, and the reader takes the first that answers.
+
+    Each fallback carries its own `transform` because the shapes differ in more than where
+    the value sits: sreality states the street as a bare `/locality/street` today and as the
+    leading segment of one address line in the frozen older shape, so the same entry needs
+    no normaliser on the first path and `address_part_street` on the second. A fallback that
+    names no transform inherits the entry's.
+    """
+    reads = [LocatorRead(entry.locator, entry.transform)]
+    for raw in entry.locator.get("fallback") or ():
+        if not isinstance(raw, dict):
+            continue
+        declared = raw.get("transform")
+        reads.append(LocatorRead(
+            dict(raw),
+            tuple(str(t) for t in declared) if declared is not None else entry.transform))
+    return reads
+
+
 @reader("scalar")
 def _read_scalar(entry: Entry, row: ListingRow) -> list[Claim]:
-    value = _text(json_pointer(row.raw_json, str(entry.locator["json_pointer"])))
-    value = apply_transforms(value, entry.transform)
-    if value is None:
-        return []
-    number = _number(value) if entry.locator.get("value_kind") == "num" else None
-    return [_base(entry, row, value_text=value, value_num=number)]
+    for read in locator_reads(entry):
+        value = _text(json_pointer(row.raw_json, str(read.locator["json_pointer"])))
+        value = apply_transforms(value, read.transform)
+        if value is None:
+            continue
+        number = _number(value) if entry.locator.get("value_kind") == "num" else None
+        return [_base(entry, row, value_text=value, value_num=number)]
+    return []
 
 
 @reader("conflict_signal")
@@ -285,20 +319,28 @@ def _read_namespaced_id(entry: Entry, row: ListingRow) -> list[Claim]:
 
 @reader("point_pair")
 def _read_point_pair(entry: Entry, row: ListingRow) -> list[Claim]:
-    """A first-party coordinate published inside the portal's own payload."""
-    if row.source == "sreality" and sreality_payload_shape(row.raw_json) != "post_cutover":
-        return []
-    lat = _number(json_pointer(row.raw_json, str(entry.locator["lat_pointer"])))
-    lon = _number(json_pointer(row.raw_json, str(entry.locator["lon_pointer"])))
-    if lat is None or lon is None:
-        return []
-    verdict = coordinate_verdict(row.source, None)
-    if not verdict.admitted:
-        return []
-    if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
-        return []
-    return [_base(entry, row, value_geom_wkt=point_wkt(lat, lon),
-                  licence_class=verdict.licence_class or "portal")]
+    """A first-party coordinate published inside the portal's own payload.
+
+    sreality's legacy shape used to be refused here by a source test hard-coded in the
+    reader: pre-cutover rows carry no `/locality/gps_*`, so the pair read nothing and the
+    test only made that explicit. The contract now NAMES where the older shape keeps its pin
+    (`/map/lat`+`/map/lon`) as a fallback path, so the refusal would suppress the very rows
+    it was written to describe. Where the pin lives is contract data; the reader states the
+    point.
+    """
+    for read in locator_reads(entry):
+        lat = _number(json_pointer(row.raw_json, str(read.locator["lat_pointer"])))
+        lon = _number(json_pointer(row.raw_json, str(read.locator["lon_pointer"])))
+        if lat is None or lon is None:
+            continue
+        verdict = coordinate_verdict(row.source, None)
+        if not verdict.admitted:
+            return []
+        if not guard_admits(entry, GUARD_CZ_BBOX, (lat, lon)):
+            return []
+        return [_base(entry, row, value_geom_wkt=point_wkt(lat, lon),
+                      licence_class=verdict.licence_class or "portal")]
+    return []
 
 
 @reader("declared_quality")
@@ -307,10 +349,14 @@ def _read_declared_quality(entry: Entry, row: ListingRow) -> list[Claim]:
     rather than flattened into the coordinate (06 §6.2.1). The reader states the LABEL;
     `_base` derives the blur axis from `precision_cap.blurred_labels` (W1-c R5), so
     re-calibrating it is a contract version bump, not a code change."""
-    label = _text(json_pointer(row.raw_json, str(entry.locator["json_pointer"])))
-    if label is None:
-        return []
-    return [_base(entry, row, value_text=label, declared_precision_label=label)]
+    for read in locator_reads(entry):
+        label = apply_transforms(
+            _text(json_pointer(row.raw_json, str(read.locator["json_pointer"]))),
+            read.transform)
+        if label is None:
+            continue
+        return [_base(entry, row, value_text=label, declared_precision_label=label)]
+    return []
 
 
 @reader("declared_bool_quality")
@@ -427,8 +473,11 @@ def extract_listing(
     if row.source == "sreality":
         shape = sreality_payload_shape(row.raw_json)
         if shape != "post_cutover":
-            # 06 §6.2.1 caveat: a legacy-shape row can never yield
-            # zip/housenumber/entity_type/inaccuracy_type and a truncated one lost the
+            # 06 §6.2.1 caveat, narrowed by @3: the legacy shape's address, pin and
+            # precision label are read through `locator.fallback` now, so this is no
+            # longer "yielded nothing" — it counts how many rows are still FROZEN on the
+            # older shape, which is what the refetch cohort is sized from. A legacy row
+            # still yields no zip/housenumber/entity_type, and a truncated one lost the
             # locality object outright.
             result.refuse(f"sreality_payload_shape:{shape}")
     return result

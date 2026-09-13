@@ -1223,6 +1223,35 @@ def test_a_statutory_city_obvod_is_never_the_town(value, expected):
     assert apply_transforms(value, ("statutory_city_obec",)) == expected
 
 
+@pytest.mark.parametrize("value,expected", [
+    # Both spellings of the obvod, on the whole address line and on the segment alone.
+    ("Sinkulova, Praha 4 - Podolí", "Podolí"),
+    ("Praha 5 - Košíře", "Košíře"),
+    ("Bernáčkova, Brno - Dolní Heršpice", "Dolní Heršpice"),
+    ("Brno-Židenice", "Židenice"),
+    ("Liberec XXV-Vesec", "Vesec"),
+    ("Praha 10 – Vršovice", "Vršovice"),
+    # NEGATIVES. A bare obvod names no část obce, a town that merely contains a hyphen is
+    # not a city plus a quarter, and an okres spelled like an obvod is neither.
+    ("Praha 8", None),
+    ("Chomutov", None),
+    ("Jirkovská, Chomutov", None),
+    ("Frýdek-Místek", None),
+    ("Kostelec nad Černými Lesy", None),
+    ("Brno-venkov", None),
+    ("Praha-východ", None),
+    # The okres qualifier moves the obec segment, and the part is read off THAT segment.
+    ("Vchynice, okres Litoměřice", None),
+])
+def test_the_named_tail_of_a_statutory_city_obvod_is_the_cast_obce(value, expected):
+    """The mirror of `statutory_city_obec` (@3). "Praha 4 - Podolí" states the town AND the
+    quarter in one segment, and until @3 only the town had a transform — so sreality's
+    frozen older shape, whose whole address is one such line, published no část obce at
+    all. Keyed on the city NAME like the fold it mirrors, and the hyphenated-okres table is
+    consulted first."""
+    assert apply_transforms(value, ("address_part_cast_obce",)) == expected
+
+
 @pytest.mark.parametrize("okres", [
     "Brno-město", "Brno-venkov", "Ostrava-město", "Plzeň-město", "Plzeň-sever",
     "Plzeň-jih", "Praha-východ", "Praha-západ", "Frýdek-Místek",
