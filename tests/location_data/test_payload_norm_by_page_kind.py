@@ -116,6 +116,12 @@ _DETAIL_DIGESTS: dict[tuple[str, str], str] = {
         "c5437bca4fcd8c133bce0f84a6ccacc219f190c42b9f9b1d45d809613b73cee6",
     ("idnes", "location_w2a_refetch/idnes_b1.html"):
         "244c9fb8f70a266ddfbfc9690a1f497452652f802941c3843490ce1f58d7671f",
+    # idnes@4's foreign capture (Malinska, Krk). A third listing in the refetch set rather
+    # than a churn pair: it is committed for what it CARRIES — a null Czech hierarchy and a
+    # `listing_localityState` of "HR" — and it is pinned here because every committed detail
+    # body is, which is the property this table exists to keep true.
+    ("idnes", "location_w2a_refetch/idnes_c1.html"):
+        "043186d06314cc6ba8e1381249ca7987848a1c41ddd750a5a610daa4b9e59669",
     ("mmreality", "location_w2a_refetch/mmreality_a1.html"):
         "1c44407509e96eb3dfe142ef68853c5ca3e63dea8cb02428db5b3cc09e7b44c1",
     ("mmreality", "location_w2a_refetch/mmreality_a2.html"):

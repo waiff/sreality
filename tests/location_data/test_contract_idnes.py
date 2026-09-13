@@ -1,4 +1,4 @@
-"""idnes@3 — the contract as it ships, run over every committed idnes body.
+"""idnes@4 — the contract as it ships, run over every committed idnes body.
 
 `test_page_reader_canon` proves the READERS. This file proves the CONTRACT: every assertion
 loads `contracts/portals/idnes.yaml` through `fx.entries_for` and runs the shipped locator —
@@ -22,6 +22,11 @@ Five committed bodies, and the differences between them are the point:
     maps only exact-address listings, so its own feature is absent from all 21 features.
   * `location_w2a_refetch/idnes_b1.html` — a real Prague listing: the town is "Praha" while
     the address line says "Praha 5 - Hlubočepy" and there is no okres at all.
+  * `location_w2a_refetch/idnes_c1.html` — a real FOREIGN listing (Malinska, Krk), captured
+    for idnes@4: every Czech-hierarchy field the portal publishes is null on it and the
+    country is the only thing that determines the row. It lives in the refetch set so the
+    public repo's PII gate (`test_payload_norm_measured`, which globs that directory)
+    covers it; it is a third listing there, not a member of an a1/a2 churn pair.
 """
 
 from __future__ import annotations
@@ -36,8 +41,11 @@ import pytest
 from selectolax.lexbor import LexborHTMLParser
 
 from location_data import contracts
+from location_data.claims_common import apply_transforms
 from location_data.claims_intake import Entry, ListingRow
 from location_data.html_scope import ScopeRegister, ScopedDocument, scope_html
+from location_data.resolver import check
+from location_data.resolver.types import Claim as ResolverClaim
 from location_data.page_readers import (
     PAGE_READERS,
     ArchivedPayload,
@@ -56,7 +64,7 @@ _REFETCH = _ROOT / "tests" / "fixtures" / "location_w2a_refetch"
 CONTRACT = {c.source: c for c in contracts.load_all()}["idnes"]
 CLOCK = datetime(2026, 1, 1, tzinfo=UTC)
 
-VERSION = 3
+VERSION = 4
 NATIVE = "6a71888887e5da33ca081ad8"
 NEIGHBOUR = "68badb8de7b021a4470fb87d"
 DISCLAIMER = "Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti."
@@ -83,6 +91,9 @@ CLAIM_TYPES = {
 
 # (body, the listing it is keyed by, the town it must yield). The town line: a body that
 # stops yielding one is a `location_town_coverage` regression, not a fixture nit.
+FOREIGN = _REFETCH / "idnes_c1.html"
+FOREIGN_NATIVE = "6aa540b9cdd78699cd0ec464"
+
 TOWN_BODIES = [
     (_PINNED, NATIVE, "Tanvald"),
     (_ARCHIVED, NATIVE, "Tanvald"),
@@ -100,6 +111,17 @@ def entries() -> dict[str, Entry]:
 
 def entry(entry_id: str) -> Entry:
     return entries()[entry_id]
+
+
+def resolver_claim(claim: Any) -> ResolverClaim:
+    """The intake claim as `location_claims` hands it back to the resolver — the two
+    dataclasses are different shapes, and what this test needs to prove is that the VALUE
+    the contract writes is one CHECK maps."""
+    return ResolverClaim(
+        id=1, listing_id=1, source="idnes", claim_type=claim.claim_type,
+        surface="archived_html", extraction_method=claim.extraction_method,
+        licence_class=claim.licence_class, observed_at=CLOCK, value_text=claim.value_text,
+        subject_scoped=claim.subject_scoped, extractor_id=claim.extractor_id)
 
 
 def row(native: str = NATIVE, *, in_mapy_inventory: bool = False) -> ListingRow:
@@ -169,7 +191,7 @@ def page(features: str = "[]", *, info: str = DISCLAIMER, disclaimer: bool = Tru
 
 # ------------------------------------------------------------------ the shape
 
-def test_the_contract_is_v3_with_one_entry_per_type_and_a_town_entry() -> None:
+def test_the_contract_is_v4_with_one_entry_per_type_and_a_town_entry() -> None:
     """The three rails W1-c's loader enforces, pinned here against THIS portal's file so a
     silent renumber, a reorder or a second carrier for one type is a test failure and not a
     review catch."""
@@ -528,22 +550,22 @@ def test_a_subject_whose_geometry_is_not_a_point_yields_no_coordinate() -> None:
 
 
 def test_a_subject_miss_costs_only_the_id_matched_entries() -> None:
-    """The accepted asymmetry, asserted so it can never become an accident: the four
-    id-matched entries abstain on a body keyed to another listing and are COUNTED, while the
-    five `.b-detail__info` entries claim from whatever body the archive handed them — which
-    is sound because a payload row is keyed (source, source_id_native) and the line is the
-    subject's own header block, and is why they declare `subject_scoped: true` explicitly."""
+    """The accepted asymmetry, asserted so it can never become an accident: the FIVE
+    id-matched entries abstain on a body keyed to another listing and are COUNTED (v4 moved
+    the country onto that block too), while the four `.b-detail__info` entries claim from
+    whatever body the archive handed them — which is sound because a payload row is keyed
+    (source, source_id_native) and the line is the subject's own header block, and is why
+    they declare `subject_scoped: true` explicitly."""
     result = extract_page(payload(_PINNED.read_bytes(), native="999999"), row("999999"),
                           fx.entries_for("idnes"), register=register())
     assert sorted(c.extractor_id for c in result.claims) == [
         "id.det.no_exact_disclaimer", "id.det.okres", "id.det.street"]
-    assert dict(result.refusals) == {"subject_not_found:idnes": 4}
+    assert dict(result.refusals) == {"subject_not_found:idnes": 5}
     assert all(c.subject_scoped is True for c in result.claims)
 
 
 @pytest.mark.parametrize("entry_id", [
-    "id.det.no_exact_disclaimer", "id.det.country", "id.det.okres", "id.det.street",
-    "id.det.cp", "id.det.co",
+    "id.det.no_exact_disclaimer", "id.det.okres", "id.det.street", "id.det.cp", "id.det.co",
 ])
 def test_the_page_scoped_entries_declare_their_scope_rather_than_defaulting(
     entry_id: str,
@@ -726,14 +748,64 @@ def test_a_town_only_line_claims_no_street_and_no_number() -> None:
     assert read("id.det.cp", document) == []
 
 
-def test_the_country_is_claimed_only_where_the_line_names_one() -> None:
-    """"Foreign is a determination, never a default" (rule 25). The trailing segment is an
-    obec far more often than a country, so `address_part_country` answers off a closed table
-    and yields the ISO code rather than the spelling — `listing_localityState` is not the
-    carrier because "CZ" on every domestic row is the default this claim type exists to
-    avoid."""
-    assert one_claim("id.det.country",
-                     scoped(page(address="Ulica 5, Split, Chorvatsko"))).value_text == "HR"
-    assert read("id.det.country", scoped(page(address="Tanvald, okres Jablonec"))) == []
+def test_the_country_is_the_structured_code_and_never_the_domestic_default() -> None:
+    """"Foreign is a determination, never a default" (rule 25). v4 moved this entry off the
+    address tail onto the portal's own alpha-2, in the same subject-matched dataLayer block
+    the town comes from: no name table stands between a foreign page and its country, and the
+    `CZ` the field carries on every domestic row — the default this claim type exists to
+    avoid — is dropped rather than claimed. `XX` is the portal's "abroad, unspecified" token
+    and is not a country either."""
+    foreign = scoped(page(data_layer={"listing_localityState": "HR"}))
+    assert one_claim("id.det.country", foreign).value_text == "HR"
+    assert read("id.det.country", scoped(page())) == []
+    assert read("id.det.country",
+                scoped(page(data_layer={"listing_localityState": "XX"}))) == []
+    assert read("id.det.country",
+                scoped(page(data_layer={"listing_localityState": None}))) == []
+    # Every committed CZECH body, which is where a false foreign claim would do the damage.
     for path, native, _ in TOWN_BODIES:
         assert read("id.det.country", scoped(path.read_bytes()), native=native) == []
+
+
+def test_the_address_tail_alone_would_have_lost_20_of_the_portals_38_countries() -> None:
+    """Why the carrier moved, as an assertion rather than a note. The tail of a foreign
+    address line does name the country in Czech, and `address_part_country` would read it —
+    for the 18 countries its closed table spells. idnes offers 38 under `?s-l=STAT-xx`, so
+    Egypt, Thajsko, Malta and 17 more named a country that never became a claim."""
+    tail = ("Malinska, Primorsko-goranska zupanija, Chorvatsko", "Hurghada, Egypt")
+    assert [apply_transforms(t, ("address_part_country",)) for t in tail] == ["HR", None]
+    assert apply_transforms("EG", ("foreign_country_code",)) == "EG"
+
+
+# --------------------------------------------------- the foreign body, claim set by claim
+
+def test_the_foreign_body_claims_a_country_the_resolver_maps_and_a_town_that_cannot_bind(
+) -> None:
+    """The golden claim set of `idnes_c1.html`, the case 3,263 live listings were in on
+    2026-09-12: a Croatian town as the only claim, `country_status='undetermined'`.
+
+    Everything the portal's Czech hierarchy carries is NULL abroad — no kraj, no okres, no
+    část obce, and no map feature to pin — so the country claim is the whole determination,
+    and `resolver.check` has to map its value. `street_name` is the one claim here that is
+    wrong rather than absent: `Malinska` leads the address line and the shared street gates
+    admit it. It binds to no Czech street, so it costs the row nothing today."""
+    document = scoped(FOREIGN.read_bytes())
+    claims = {entry_id: [r.claim for r in read(entry_id, document, native=FOREIGN_NATIVE)]
+              for entry_id in ENTRY_IDS if entry_id != "id.det.subject_feature"}
+    assert {k: [c.value_text for c in v] for k, v in claims.items()} == {
+        "id.det.no_exact_disclaimer": [],
+        "id.det.country": ["HR"],
+        "id.det.kraj": [],
+        "id.det.okres": [],
+        "id.det.obec": ["Malinska"],
+        "id.det.cast_obce": [],
+        "id.det.street": ["Malinska"],
+        "id.det.cp": [],
+        "id.det.co": [],
+    }
+    # The portal maps only exact-address listings; this one carries no feature of its own.
+    with pytest.raises(SubjectNotFound):
+        read("id.det.subject_feature", document, native=FOREIGN_NATIVE)
+    # The claim as the resolver reads it: a bare alpha-2 IS the code, and HR is not CZ, so
+    # CHECK answers `foreign` with `country_code='HR'` instead of `undetermined`.
+    assert check.country_codes([resolver_claim(claims["id.det.country"][0])], {}) == {"HR"}
