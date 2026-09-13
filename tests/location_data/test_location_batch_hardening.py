@@ -62,6 +62,10 @@ LOCATION_BATCH_WORKFLOWS = (
     # stored page body, so it carries what the four deleted lanes carried — a corpus scan,
     # an R2 fan-out and the claim writes in one transaction.
     "location_claims_intake.yml",
+    # W6-a: a 9.5 M-row DELETE over `location_claims` and its seven indexes, plus a
+    # multi-GB `\copy` of the same rows ahead of it. Dispatch-only, but while it runs
+    # it is the heaviest thing in the subsystem.
+    "location_claims_retire.yml",
 )
 OUTER_GROUP = "location-batch"
 

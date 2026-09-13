@@ -633,6 +633,41 @@ component is slimmed twice — each wave rewrites one component and slims its st
     own. The MAP goes (`PinAuditMap` deleted, `legacy_lat`/`legacy_lng` with it): the subject is rows
     with no point to draw. Migration 510 stays on disk as history — 513 retired v1 because it read
     five `properties` place columns 508 drops, and the CI replay skips it.
+  - **W6-a — claims under retired contract versions are DELETED** (operator's word 2026-09-13;
+    migration **515**). The resolver has admitted only ACTIVE-contract + operator claims since W1-c
+    (`resolve_db._ACTIVE_CONTRACT_ENTRY`), so ~9.5 M of ~13.2 M `location_claims` rows — the large
+    majority of a 5.8 GB relation, across 24 retired versions (sreality@1 alone ~3.46 M, then
+    idnes@1/2/3 ~2.45 M, ceskereality, realitymix, bazos, bezrealitky@1, mmreality, remax, maxima) —
+    were evidence nothing could read. `.github/workflows/location_claims_retire.yml` (dispatch-only,
+    in `location-batch`) `\copy`s the doomed rows to a gzipped CSV artifact first — rule 1's backup,
+    90-day retention, size printed — then runs `scripts/location_claims_retire.py`: 20,000-row
+    id-keyset batches, `lock_timeout 5s` + `statement_timeout 120s` per batch, 0.5 s between them,
+    `--max-seconds` budget checked BETWEEN batches, resumable because the cursor is re-derived from
+    the same predicate. **It enqueues NOTHING** — no verdict can move, and a `dirty_locations` write
+    would push ~800 k listings through the drain to recompute answers that cannot change. That is the
+    whole difference from `contracts.py --retract`, which is KEPT unchanged: it withdraws an ACTIVE
+    version's evidence because it was wrong, and its DELETE and enqueue are one inseparable statement.
+    The one reader that lost something is the audit page: `location_pin_audit_mv.old_evidence` (the
+    three-way summary of superseded material) can only say "žádná" once the rows are gone, so
+    migration 515 DROP+CREATEs the matview without it and replaces the three-aggregate evidence
+    lateral with one EXISTS for `claims_now` — **planned total cost 6,623,913 → 1,665,599, a 75 % cut
+    on the hourly refresh**, before the delete shrinks the relation it probes. The page drops the
+    column with it. Net-negative (rule 25) everywhere except the workflow + script that do the work.
+
+  - **W6-b — the bodies cursor continues across passes and resets only on a contract bump**
+    (migration **516**, additive). W1-a6 made the bodies-first cursor survive a run that STOPPED, but
+    a pass that COMPLETED stamped NULL and the next run restarted the walk at id 0 — so with the
+    backlog empty every hourly hop re-walked all 744k `portal_raw_payloads` rows (~500k of them
+    version-eligible bodies that can never be stamped: bodies of unserved listings, and bodies a
+    later body superseded) to stamp nothing: `bodies=416s`, `bodies=272s`, `bodies=176s` on idle hops
+    (2026-09-13), 3–7 minutes of IO an hour. Now "pass complete" means CAUGHT UP: the cursor is kept,
+    and the new `location_claim_batches.bodies_cursor_versions` records the active contract-version
+    set it was taken under (`bazos@5,bezrealitky@2,…`, sorted). `_bodies_resume_point` honours the
+    stamp only while that set still holds, because a bump is the one event that makes rows BELOW the
+    cursor eligible again — poison is re-fetched once per VERSION SET instead of once per pass, and
+    the audit page shows whatever stays unresolved. A NULL version set (every pre-516 row, or one
+    stamped by hand) is a mismatch, which is also the manual reset for the one case a bump does not
+    cover: a code change that widens the served set.
 
   - **W6-c — `listings_public` and `portal_listing_counts` narrowed lock-free (blue-green through
     their six dependent matviews)** (migration **517**). The census first, column by column, over
@@ -674,9 +709,9 @@ component is slimmed twice — each wave rewrites one component and slims its st
      W6-c / migration 517.** The matviews were not re-pointed at `listings` after all: they are
      rebuilt against the narrowed view instead, which is the smaller change and keeps their bodies
      byte-identical.
-  4. **Old-version claim cleanup** — superseded rows are filtered at READ (`_CLAIMS_SELECT`), so
-     deleting them is leisure work: `python -m location_data.contracts --retract <portal>@<version>`,
-     bounded batches, resumable. Not a correctness step.
+  4. **Old-version claim cleanup** — DONE (W6-a, above): superseded rows are filtered at READ
+     (`_CLAIMS_SELECT`), so the delete was leisure work, and it is taken.
+     `location_claims_retire.yml` is the standing lane — dispatch it after any future retirement.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

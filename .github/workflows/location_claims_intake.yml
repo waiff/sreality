@@ -274,7 +274,7 @@ jobs:
           # is dispatched or its own cron fires — and a full-resolve is exactly what a chain
           # hop evicted on 2026-09-10. `test_location_batch_hardening.py` derives this list
           # from the workflows' own concurrency blocks, so a new member cannot be missed.
-          GROUP_WORKFLOWS: "location_claims_intake.yml location_registry_load.yml location_resolve.yml"
+          GROUP_WORKFLOWS: "location_claims_intake.yml location_claims_retire.yml location_registry_load.yml location_resolve.yml"
           # …but for the resolve lane, only a DISPATCHED run counts. Its group is decided by
           # the run's own mode and `gh run list` cannot report a group, so "a queued resolve
           # run" and "a queued resolve run that will hold location-batch" are not the same
