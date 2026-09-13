@@ -191,6 +191,18 @@ create index if not exists location_pin_audit_mv_first_seen
 revoke all on location_pin_audit_mv from anon;
 grant select on location_pin_audit_mv to authenticated;
 
+-- Corollary E (migrations 437/440): a precomputed artifact declares its
+-- producer, cadence and staleness budget, or the freshness surface cannot tell
+-- "fresh" from "the job died three days ago". 130 min = two hourly ticks plus
+-- slack, so one skipped run is not an alarm and two consecutive ones are. The
+-- :25 slot collides with none of the live jobs (*/10 health, */15 browse-list,
+-- 7,37 browse-map, 4,19,34,49 llm-cost, 11,41 location-compare, :10, 30 */6).
+insert into public.derived_artifacts
+  (name, producer, host, cadence, staleness_budget, is_serving)
+values ('location_pin_audit_mv', 'refresh_location_pin_audit_mv', 'pg_cron',
+        '25 * * * *', interval '130 minutes', true)
+on conflict (name) do nothing;
+
 -- The overview matrix: portal rows x property-type columns, split by bucket.
 -- At most (portals x category_main x 4 buckets) rows — ~120 — so the page reads
 -- the whole thing once and sums it for whatever the filters select, instead of
@@ -244,8 +256,15 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  t0 timestamptz := clock_timestamp();
+  n  bigint;
 begin
   refresh materialized view concurrently location_pin_audit_mv;
+  select count(*) into n from location_pin_audit_mv;
+  perform stamp_derived_artifact(
+    'location_pin_audit_mv', n,
+    (extract(epoch from clock_timestamp() - t0) * 1000)::integer);
 end;
 $$;
 
@@ -299,6 +318,11 @@ begin
   end if;
   if to_regprocedure('public.refresh_location_pin_audit_mv()') is null then
     raise exception '510: refresh_location_pin_audit_mv() missing';
+  end if;
+  if not exists (
+    select 1 from public.derived_artifacts where name = 'location_pin_audit_mv'
+  ) then
+    raise exception '510: location_pin_audit_mv not registered in derived_artifacts';
   end if;
   if has_cron then
     if not exists (select 1 from cron.job where jobname = 'refresh-location-pin-audit') then
