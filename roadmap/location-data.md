@@ -616,14 +616,23 @@ component is slimmed twice — each wave rewrites one component and slims its st
     dedup, notifications etc) only after they are properly processed." Implemented as ONE predicate
     over the store — `claims_common.SERVED_LOCATION_PREDICATE`, no flag and no new column — carried by
     `browse_projection` (so `browse_list`, `properties_map_mv`, `browse_stats_properties` and
-    `browse_map_cells` inherit) and `listing_feed_public` in migration **512**, and rendered in code
+    `browse_map_cells` inherit) and `listing_feed_public` in migration **514**, and rendered in code
     by the watchdog matcher (which reads `properties_public` and cannot inherit) and path C candidate
     generation. Detail-by-id surfaces are deliberately untouched: a direct link, the extension, the
     audit page's own links and a pipeline card all keep working. Measured at the ruling: 44,702 of
     711,600 Browse rows (2,953 still-live ads, 37,173 drawing a map pin); 1,163 of them have a sibling
     listing of the same property WITH a resolved location, so choosing a resolved display listing
     would recover ~3 % — a separate, later decision. `check_location_town_coverage` now reports
-    `hidden_n` per portal, so the number is visible outside the audit page.
+    `hidden_n` per portal, so the number is visible outside the audit page. The SAME migration
+    re-creates the operator's audit surface on the durable definition: `location_pin_audit_mv` v2 is
+    `SERVED_LISTING_PREDICATE` minus `SERVED_LOCATION_PREDICATE` — exactly the hidden set, 44,443 rows
+    (1,997 live / 42,446 delisted) measured 2026-09-13 — under 510's own names, functions, hourly
+    pg_cron refresh and registry row, driven from `listing_location` + `properties` by PK because a
+    `listings`-driven form of the same question times out at 120 s. `/new-dedup/pin-audit` is routed
+    again and `!AUDIT POLOH` leads the nav with its count, now a work queue that counts down on its
+    own. The MAP goes (`PinAuditMap` deleted, `legacy_lat`/`legacy_lng` with it): the subject is rows
+    with no point to draw. Migration 510 stays on disk as history — 513 retired v1 because it read
+    five `properties` place columns 508 drops, and the CI replay skips it.
 
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
@@ -631,9 +640,11 @@ component is slimmed twice — each wave rewrites one component and slims its st
      (the map's NULL-lat drop, the browse re-source) is gated on it.
   2. **Operator applies, in order**: migration **502** (W2-b drops), **506** (W3 S4 deletions —
      DROP+CREATE views, so AFTER the deploy), **508** (W4-c, destructive — operator word + `pg_dump`,
-     05:20–05:30 UTC, AFTER the deploy), **512** (W5, additive — BEFORE its merge: it only HIDES rows,
-     so a database that has it while the old code runs is correct; the reverse would leak the exempted
-     set into the watchdog).
+     05:20–05:30 UTC, AFTER the deploy) — ALL APPLIED 2026-09-13, alongside the captain's **511**
+     (backup), **512** (506's cancelled rebuild, re-run at 3600 s) and **513** (v1 of the pin-audit
+     surface retired, a precondition for 508). Left: **514** (W5, additive — BEFORE its merge: it
+     only HIDES rows, so a database that has it while the old code runs is correct; the reverse would
+     leak the exempted set into the watchdog).
   3. **The later lock-free wave**: narrow `listings_public` + `portal_listing_counts` and re-point
      their six dependent matviews at `listings` — held back only because narrowing them inside 508's
      ACCESS EXCLUSIVE window would mean repopulating all six.

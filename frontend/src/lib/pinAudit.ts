@@ -1,7 +1,9 @@
-/* Reads for the pin-loss audit page (migration 510).
+/* Reads for the audit page (`location_pin_audit_mv`, migration 514).
  *
- * TEMPORARY, like the page it feeds: the whole module goes when the operator
- * has ruled on migration 503's pin-collapse guard.
+ * The relation is exactly the set W5 hides from consumers: a SERVED listing
+ * (live, or the display listing of a live property) whose location the store
+ * cannot answer for. It is a WORK QUEUE, not a one-off review — a row leaves it
+ * the moment the resolver lane places the listing.
  *
  * Two reads, deliberately shaped so the page never counts anything itself:
  *   - `fetchPinAuditSummary` — one RPC returning (portal, type, bucket, n).
@@ -28,10 +30,6 @@ import type { SortSpec } from '@/lib/queries';
 
 export const PIN_AUDIT_RELATION = 'location_pin_audit_mv';
 export const PIN_AUDIT_PAGE_SIZE = 100;
-/* The map draws points client-side; beyond this the page says so rather than
- * silently drawing a subset (the operator must never read a capped map as the
- * whole set). */
-export const PIN_AUDIT_MAP_CAP = 5000;
 
 /* The keyset tiebreaker. `property_id` — applyKeyset's default — is NOT legal
  * here: the relation is listing-grain, and `listing_id` is its primary key. */
@@ -68,15 +66,13 @@ export interface PinAuditRow {
   category_type: string | null;
   disposition: string | null;
   area_m2: number | null;
-  street: string | null;
-  locality: string | null;
-  district: string | null;
+  /* The ONE place string (rule 25). NULL on most of this set by construction —
+   * that is the finding, not a defect. */
+  display_label: string | null;
   price_czk: number | null;
   is_active: boolean;
   first_seen_at: string;
   last_seen_at: string;
-  legacy_lat: number;
-  legacy_lng: number;
   country_status: string | null;
   granularity: string | null;
   match_confidence: string | null;
@@ -126,19 +122,15 @@ export const EMPTY_PIN_AUDIT_FILTERS: PinAuditFilters = {
 const ROW_COLS = [
   'listing_id', 'property_id', 'sreality_id', 'source', 'source_id_native',
   'source_url', 'category_main', 'category_type', 'disposition', 'area_m2',
-  'street', 'locality', 'district', 'price_czk', 'is_active', 'first_seen_at',
-  'last_seen_at', 'legacy_lat', 'legacy_lng', 'country_status', 'granularity',
+  'display_label', 'price_czk', 'is_active', 'first_seen_at',
+  'last_seen_at', 'country_status', 'granularity',
   'match_confidence', 'resolver_version', 'resolved_at', 'has_row',
   'has_claims', 'claims_now', 'old_evidence', 'sibling_has_pin', 'quality',
   'refreshed_at',
 ].join(',');
 
-const POINT_COLS =
-  'listing_id,legacy_lat,legacy_lng,quality,is_active,sibling_has_pin';
-
 /* A PostgREST builder narrowed to the filter methods this module uses, so the
- * helper below is shared by the list read and the map read without either
- * leaking supabase-js's generics. */
+ * helper below is shared without leaking supabase-js's generics. */
 interface FilterBuilder {
   in: (column: string, values: readonly string[]) => FilterBuilder;
   eq: (column: string, value: boolean) => FilterBuilder;
@@ -228,44 +220,5 @@ export const fetchPinAuditPage = async (
       sort,
       TIEBREAK,
     ),
-  };
-};
-
-export interface PinAuditPoint {
-  listing_id: number;
-  legacy_lat: number;
-  legacy_lng: number;
-  quality: PinAuditQuality;
-  is_active: boolean;
-  sibling_has_pin: boolean;
-}
-
-export interface PinAuditPoints {
-  points: PinAuditPoint[];
-  /* True when the cohort is larger than the cap, so the map is showing a
-   * prefix. The page must SAY so. */
-  capped: boolean;
-}
-
-/* One bounded read for the map. Ordered by listing_id so the prefix is stable
- * between refetches (an unordered LIMIT may return a different subset each
- * time, which would make pins flicker in and out for no reason). The cap+1
- * probe is how "there are more than we drew" is detected without a count. */
-export const fetchPinAuditPoints = async (
-  f: PinAuditFilters,
-): Promise<PinAuditPoints> => {
-  const base = supabase.from(PIN_AUDIT_RELATION).select(POINT_COLS);
-  const scoped = applyPinAuditFilters(
-    base as unknown as FilterBuilder,
-    f,
-  ) as unknown as typeof base;
-  const { data, error } = await scoped
-    .order('listing_id', { ascending: true })
-    .limit(PIN_AUDIT_MAP_CAP + 1);
-  if (error) throw error;
-  const all = (data ?? []) as unknown as PinAuditPoint[];
-  return {
-    points: all.slice(0, PIN_AUDIT_MAP_CAP),
-    capped: all.length > PIN_AUDIT_MAP_CAP,
   };
 };

@@ -1,22 +1,23 @@
-/* Audit poloh na mapě — the pin-loss review surface (migration 510).
+/* Audit poloh — the listings customers cannot see yet (migration 514).
  *
- * TEMPORARY. It exists for one decision: migration 503 proposes collapsing the
- * Browse map onto the new location store, and this page is the list of pins
- * that would disappear if it did. Delete the page, lib/pinAudit.ts,
- * components/PinAuditMap.tsx and migration 510's objects once the operator has
- * ruled.
+ * W5's consumer rule: a listing reaches Browse, the map, the feed, the watchdog
+ * and dedup only once the location store has an ANSWER for it. This page is that
+ * exempted set, and it is a WORK QUEUE — a row leaves it the moment the resolver
+ * lane places the listing, so the nav badge counts down on its own.
+ *
+ * No map. The whole subject of the page is rows with no point to draw; the old
+ * map drew their LEGACY coordinates, and migration 508 deleted those columns.
  *
  * Every number on the page comes from ONE payload (the summary RPC), so the
  * matrix, the totals and the list can never tell three different stories. The
  * list is a separate keyset read of the same relation under the same filters.
  */
 
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import ErrorBanner from '@/components/ErrorBanner';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
-import { lazyChunk } from '@/lib/lazyChunk';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { categoryMainLabelPlural, categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
@@ -28,12 +29,10 @@ import type { SortSpec } from '@/lib/queries';
 import type { KeysetCursor } from '@/lib/keyset';
 import {
   EMPTY_PIN_AUDIT_FILTERS,
-  PIN_AUDIT_MAP_CAP,
   PIN_AUDIT_TOTAL_KEY,
   PIN_AUDIT_PAGE_SIZE,
   PIN_AUDIT_QUALITIES,
   fetchPinAuditPage,
-  fetchPinAuditPoints,
   fetchPinAuditSummary,
   summaryRowMatches,
   type PinAuditFilters,
@@ -43,8 +42,6 @@ import {
   type PinAuditSummaryRow,
 } from '@/lib/pinAudit';
 import { Link } from 'react-router-dom';
-
-const PinAuditMap = lazyChunk(() => import('@/components/PinAuditMap'));
 
 /* ------------------------------------------------------------------ chrome */
 
@@ -144,7 +141,6 @@ export default function LocationPinAudit() {
     field: 'last_seen_at',
     direction: 'desc',
   });
-  const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const summary = useQuery({
     queryKey: ['pin-audit', 'summary'],
@@ -232,27 +228,21 @@ export default function LocationPinAudit() {
     void qc.invalidateQueries({ queryKey: PIN_AUDIT_TOTAL_KEY });
   }, [qc]);
 
-  const points = useQuery({
-    queryKey: ['pin-audit', 'points', filterKey],
-    queryFn: () => fetchPinAuditPoints(filters),
-    staleTime: 5 * 60_000,
-  });
-
   const toggle = <T extends string>(list: ReadonlyArray<T>, v: T): T[] =>
     list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
 
-  const err = summary.error ?? list.error ?? points.error;
+  const err = summary.error ?? list.error;
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
-      <h1 className="text-2xl leading-tight">Audit poloh na mapě</h1>
+      <h1 className="text-2xl leading-tight">Audit poloh</h1>
       <p className="mt-2 text-[0.85rem] leading-relaxed text-[var(--color-ink-2)] max-w-[52rem]">
-        Které inzeráty by na mapě přišly o špendlík. Mapa je dnes kreslí ze
-        starých souřadnic, ale nový systém pro určování polohy pro ně žádnou
-        českou polohu nemá — buď neměl z čeho vyjít, nebo podklady měl a polohu
-        z nich nedokázal určit. Kdyby se mapa přepnula jen na nový systém,
-        zmizely by právě tyto body. Seznam je tu proto, abyste se na ně mohl
-        podívat, než o tom rozhodnete.
+        Inzeráty, které se zákazníkům nezobrazují, dokud nemají rozhodnutou
+        polohu. Nový systém pro určování polohy pro ně zatím žádnou polohu nemá —
+        buď neměl z čeho vyjít, nebo podklady měl a polohu z nich nedokázal
+        určit — a dokud ji nemá, nejdou vidět nikde: ve vyhledávání, na mapě, v
+        hlídacích psech ani při hledání duplicit. Jakmile je systém určí, inzerát
+        se objeví sám a z tohoto seznamu zmizí.
       </p>
       <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)]">
         Celkem {fmtCount(totalAll)} inzerátů · {fmtCount(split.active)} běží ·{' '}
@@ -262,8 +252,9 @@ export default function LocationPinAudit() {
         {' · '}seznam se obnovuje každou hodinu
       </p>
       <p className="mt-1 text-[0.78rem] text-[var(--color-ink-3)] max-w-[52rem]">
-        Těch {fmtCount(split.sibling)} by šlo zachránit bez jakékoli změny v
-        určování polohy — stačilo by špendlík vzít od sourozeneckého inzerátu.
+        Těch {fmtCount(split.sibling)} by šlo zobrazit bez jakékoli změny v
+        určování polohy — stačilo by polohu převzít od sourozeneckého inzerátu
+        téže nemovitosti. To je samostatné rozhodnutí, zatím se tak neděje.
       </p>
 
       {err ? <ErrorBanner message={(err as Error).message} /> : null}
@@ -271,7 +262,7 @@ export default function LocationPinAudit() {
       <div className="mt-6 grid gap-5">
         <Card
           title="Přehled"
-          lede="Řádky jsou portály, sloupce druhy nemovitosti. Číslo v buňce je počet inzerátů, které by přišly o špendlík — po započtení filtrů níže. Kliknutím na buňku se filtr nastaví právě na ni."
+          lede="Řádky jsou portály, sloupce druhy nemovitosti. Číslo v buňce je počet skrytých inzerátů — po započtení filtrů níže. Kliknutím na buňku se filtr nastaví právě na ni."
         >
           {summary.isLoading ? (
             <Spinner />
@@ -458,38 +449,6 @@ export default function LocationPinAudit() {
         </Card>
 
         <Card
-          title="Mapa"
-          lede="Staré souřadnice vybraných inzerátů — přesně ty body, o které by mapa přišla. Kliknutím na bod se níže v seznamu zvýrazní jeho řádek."
-        >
-          {points.isLoading ? (
-            <Spinner />
-          ) : (points.data?.points.length ?? 0) === 0 ? (
-            <p className="text-sm text-[var(--color-ink-3)]">
-              Pro zvolené filtry nejsou žádné body.
-            </p>
-          ) : (
-            <>
-              <Suspense
-                fallback={
-                  <div className="h-[24rem] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
-                }
-              >
-                <PinAuditMap
-                  points={points.data?.points ?? []}
-                  selectedId={selectedId}
-                  onPick={setSelectedId}
-                />
-              </Suspense>
-              <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)]">
-                {points.data?.capped
-                  ? `Zobrazeno prvních ${fmtCount(PIN_AUDIT_MAP_CAP)} bodů z ${fmtCount(totalMatched)} — zúžením filtrů uvidíte zbytek.`
-                  : `Zobrazeno ${fmtCount(points.data?.points.length ?? 0)} bodů.`}
-              </p>
-            </>
-          )}
-        </Card>
-
-        <Card
           title="Seznam"
           lede="Jeden řádek = jeden inzerát. Název vede na jeho stránku u nás, odkaz „portál“ na původní inzerát. „Verdikt“ shrnuje, co o poloze ví nový systém."
         >
@@ -536,7 +495,6 @@ export default function LocationPinAudit() {
                   <th className={TH}>Stará data</th>
                   <th className={TH}>Sourozenec</th>
                   <th className={TH}>Verdikt</th>
-                  <th className={`${TH} text-right`}>Staré souřadnice</th>
                 </tr>
               </thead>
               <tbody>
@@ -557,12 +515,7 @@ export default function LocationPinAudit() {
                   return (
                     <tr
                       key={r.listing_id}
-                      className={[
-                        ROW,
-                        selectedId === r.listing_id
-                          ? 'bg-[var(--color-copper-soft)]'
-                          : '',
-                      ].join(' ')}
+                      className={ROW}
                       data-testid={`pin-audit-row-${r.listing_id}`}
                     >
                       <td className={TD}>{portalLabel(r.source) ?? r.source}</td>
@@ -577,7 +530,7 @@ export default function LocationPinAudit() {
                           {name || 'Nemovitost'}
                         </Link>
                         <span className="block text-[var(--color-ink-3)]">
-                          {dash(r.locality ?? r.district)}
+                          {dash(r.display_label)}
                         </span>
                         {r.source_url ? (
                           <a
@@ -610,9 +563,6 @@ export default function LocationPinAudit() {
                         {r.has_row
                           ? `${dash(r.country_status)} · ${dash(r.granularity)} · ${dash(r.match_confidence)}`
                           : 'nový systém tento inzerát vůbec nezpracoval'}
-                      </td>
-                      <td className={NUM}>
-                        {r.legacy_lat.toFixed(5)}, {r.legacy_lng.toFixed(5)}
                       </td>
                     </tr>
                   );

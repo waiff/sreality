@@ -124,6 +124,8 @@ export const ROUTES = {
   newDedupExam: def('/new-dedup/exam'),
   newDedupExamReview: def('/new-dedup/exam/review'),
   newDedupTaggingBakeoff: def('/new-dedup/tagging-bakeoff'),
+  // The set W5 hides from consumers until its location is resolved (mig 514).
+  newDedupPinAudit: def('/new-dedup/pin-audit'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;

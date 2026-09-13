@@ -38,7 +38,7 @@ from tests.test_location_w3_projection import _LINE_COMMENT, _columns
 REPO = Path(__file__).resolve().parents[1]
 MIGRATIONS = REPO / "migrations"
 W4C = MIGRATIONS / "508_location_w4c_legacy_drops.sql"
-W5 = MIGRATIONS / "512_location_w5_serve_resolved.sql"
+W5 = MIGRATIONS / "514_location_w5_serve_resolved.sql"
 
 # The two LIST surfaces the rule lands on, with the listing-id expression each one keys
 # it to. `browse_projection` is property-grain and renders its DISPLAY listing;
@@ -103,24 +103,24 @@ def test_the_inner_alias_never_collides_with_the_label_join() -> None:
 
 
 @pytest.mark.parametrize("view,key", sorted(SURFACES.items()))
-def test_migration_512_carries_the_constant_verbatim(view: str, key: str) -> None:
+def test_migration_514_carries_the_constant_verbatim(view: str, key: str) -> None:
     """THE PIN. RED by: hand-editing either text, or re-keying one surface without the
     other. `pg_get_viewdef` re-prints a parsed tree, so the migration's own DO block
     cannot check this — only an offline comparison against the importable constant can."""
     body = _view_body(_sql(W5), view)
     assert served_location_predicate(key) in body, (
-        f"{view} in migration 512 does not carry SERVED_LOCATION_PREDICATE rendered on "
+        f"{view} in migration 514 does not carry SERVED_LOCATION_PREDICATE rendered on "
         f"`{key}`. The two texts are the same rule and must be the same characters."
     )
     # And the comment that says where it came from, so the next reader finds the constant.
     assert "SERVED_LOCATION_PREDICATE" in body
 
 
-# ------------------------------------------------------------------ what 512 may change
+# ------------------------------------------------------------------ what 514 may change
 
 
 @pytest.mark.parametrize("view", sorted(SURFACES))
-def test_512_changes_a_where_and_not_a_column(view: str) -> None:
+def test_514_changes_a_where_and_not_a_column(view: str) -> None:
     """A WHERE is the whole change. `create or replace view` cannot reposition or retype
     an existing column, and `sync_browse_list` inserts into `browse_list` POSITIONALLY
     (toolkit/browse_read_model.py) — a reorder writes every value into the wrong column
@@ -130,16 +130,16 @@ def test_512_changes_a_where_and_not_a_column(view: str) -> None:
 
 
 @pytest.mark.parametrize("view", DETAIL_SURFACES)
-def test_512_leaves_every_detail_surface_alone(view: str) -> None:
+def test_514_leaves_every_detail_surface_alone(view: str) -> None:
     """The ruling hides rows from CONSUMERS. A direct link to an unresolved listing must
     keep working, and a pipeline card the operator created must never vanish from the
     board — rule 22 makes it operator state, not a market read."""
     assert not re.search(_VIEW_RE.format(re.escape(view)), _sql(W5), re.IGNORECASE), (
-        f"migration 512 redefines {view}, which is a detail-by-id surface"
+        f"migration 514 redefines {view}, which is a detail-by-id surface"
     )
 
 
-def test_512_forces_both_rebuilds_and_proves_the_rule_landed() -> None:
+def test_514_forces_both_rebuilds_and_proves_the_rule_landed() -> None:
     """`browse_list` and `properties_map_mv` are MATERIALIZATIONS of the projection, so
     until each is rebuilt the rule is live in the view and absent from what Browse and
     the map actually read."""
@@ -152,6 +152,120 @@ def test_512_forces_both_rebuilds_and_proves_the_rule_landed() -> None:
     assert "begin;" not in sql and "commit;" not in sql
     assert "set lock_timeout = '5s';" in sql
     assert "pg_get_viewdef" in sql and "pg_get_functiondef" in sql
+
+
+# --------------------------------------------------- the operator's audit surface
+
+# The audit page's read contract (frontend/src/lib/pinAudit.ts `ROW_COLS`). It is
+# a PostgREST select list, so a column the matview stops publishing is a 400 at
+# runtime and nothing catches it before the operator opens the page.
+PIN_AUDIT_TS = REPO / "frontend" / "src" / "lib" / "pinAudit.ts"
+
+
+def _audit_matview_sql() -> str:
+    sql = _sql(W5)
+    start = sql.index("create materialized view location_pin_audit_mv as")
+    masked = re.sub(r"--[^\n]*", lambda c: " " * len(c.group(0)), sql)
+    return sql[start: masked.index(";", start) + 1]
+
+
+def test_514_recreates_the_audit_surface_513_retired() -> None:
+    """513 dropped the matview, both functions, the cron job and the registry row,
+    because v1 read five `properties` place columns that 508 removes. W5 brings the
+    surface back on a definition that cannot expire the same way."""
+    sql = _sql(W5).lower()
+    for obj in (
+        "create materialized view location_pin_audit_mv as",
+        "create unique index if not exists location_pin_audit_mv_pk",
+        "create function location_pin_audit_summary()",
+        "create or replace function refresh_location_pin_audit_mv()",
+        "'refresh-location-pin-audit'",
+        "insert into public.derived_artifacts",
+    ):
+        assert obj in sql, f"migration 514 does not restore `{obj}`"
+    # pg_cron is absent from the CI replay container, so the schedule must be
+    # guarded or the whole migration fails there (migrations 136/274/510).
+    assert "create extension if not exists pg_cron" in sql
+    assert "pg_cron unavailable" in sql
+
+
+def test_the_audit_set_is_the_hidden_set_and_nothing_else() -> None:
+    """The point of v2: the page and the rule are ONE definition. The cohort is
+    `SERVED_LISTING_PREDICATE` (the constant the resolver sweep and the claim lane
+    already share) minus `SERVED_LOCATION_PREDICATE` — spelled with both arms of the
+    answer, so a row that is merely foreign is not an audit finding."""
+    from location_data.claims_common import SERVED_LISTING_PREDICATE
+
+    body = _audit_matview_sql()
+    squeeze = lambda t: " ".join(t.split())  # noqa: E731
+    assert squeeze(SERVED_LISTING_PREDICATE) in squeeze(body), (
+        "the audit cohort does not use SERVED_LISTING_PREDICATE verbatim"
+    )
+    assert "ll.geom is null" in body
+    assert "ll.country_status <> 'foreign'" in body
+
+
+def test_the_audit_refresh_never_scans_listings() -> None:
+    """A `listings`-driven form of this same question times out at 120 s on
+    production. Arm 1 walks `listing_location` and joins `listings` by PRIMARY KEY;
+    arm 2 is the no-row case driven from `properties (repr_listing_ref_id)`.
+    RED by: a `from listings l where ...` cohort with no PK join above it."""
+    body = _audit_matview_sql()
+    assert "from listing_location ll" in body
+    assert "join listings l on l.id = c.listing_id" in body
+    assert "from properties p" in body
+    assert "from listings l\n" not in body and "from listings l " not in body
+
+
+def test_the_audit_view_names_no_dropped_properties_column() -> None:
+    """Exactly what killed v1: it selected `p.street` / `p.locality` / `p.district`
+    / `p.lat` / `p.lng`, so Postgres recorded a column dependency and 508's DROP
+    COLUMN could not run until 513 retired the whole surface."""
+    body = _audit_matview_sql()
+    for col in ("street", "locality", "district", "lat", "lng", "geom"):
+        assert not re.search(r"(?<![a-z_])p\." + col + r"\b", body), (
+            f"the audit matview reads properties.{col} — the v1 failure, verbatim"
+        )
+
+
+def test_the_audit_page_reads_only_columns_the_matview_publishes() -> None:
+    body = _audit_matview_sql()
+    published = set(re.findall(r"\bas\s+([a-z_0-9]+)", body))
+    published |= set(re.findall(r"(?<![a-z_])(?:l|ll|c)\.([a-z_0-9]+)", body))
+    ts = PIN_AUDIT_TS.read_text(encoding="utf-8")
+    cols = re.search(r"const ROW_COLS = \[(.*?)\]", ts, re.DOTALL)
+    assert cols, "pinAudit.ts no longer declares ROW_COLS"
+    wanted = set(re.findall(r"'([a-z_0-9]+)'", cols.group(1)))
+    assert wanted <= published, (
+        f"the page selects {sorted(wanted - published)} off location_pin_audit_mv, "
+        f"which the matview does not publish — PostgREST answers that with a 400"
+    )
+
+
+def test_the_map_is_gone_from_the_audit_page() -> None:
+    """The whole subject of the page is rows with NO point to draw; v1's map drew
+    their LEGACY coordinates, and 508 deleted those columns. Less, not a broken map."""
+    assert not (REPO / "frontend" / "src" / "components" / "PinAuditMap.tsx").exists()
+    for rel in ("frontend/src/lib/pinAudit.ts", "frontend/src/pages/LocationPinAudit.tsx"):
+        text = (REPO / rel).read_text(encoding="utf-8")
+        for gone in ("legacy_lat", "legacy_lng", "PinAuditMap", "PIN_AUDIT_MAP_CAP"):
+            assert gone not in text, f"{rel} still names {gone}"
+
+
+def test_the_audit_page_is_routed_and_leads_the_nav() -> None:
+    """513 unrouted the page. It comes back as the FIRST top-level nav entry with
+    its count — the badge is a work queue that counts down on its own."""
+    routes = (REPO / "frontend" / "src" / "lib" / "routes.ts").read_text(encoding="utf-8")
+    assert "newDedupPinAudit: def('/new-dedup/pin-audit')" in routes
+    assert "ROUTES.newDedupPinAudit.childPath" in (
+        REPO / "frontend" / "src" / "routes.tsx"
+    ).read_text(encoding="utf-8")
+    shell = (REPO / "frontend" / "src" / "components" / "Shell.tsx").read_text(encoding="utf-8")
+    start = shell.index("const navItems")
+    nav = shell[start: shell.index("];", start)]
+    assert nav.index("'!AUDIT POLOH'") < nav.index("'Browse'"), (
+        "!AUDIT POLOH is no longer the first nav entry"
+    )
 
 
 # ------------------------------------------------------------------ the code surfaces

@@ -2195,7 +2195,14 @@ its `ll.geom IS NOT NULL` is the same rule minus the foreign arm. **DETAIL STAYS
 the extension, the audit page's own links and an operator's pipeline card (rule 22 operator state)
 all keep working on an unresolved listing. Measured at the ruling: 44,702 of 711,600 Browse rows,
 2,953 of them still-live ads. `check_location_town_coverage` reports the count per portal as
-`hidden_n` — a workload number that never moves the check's status.
+`hidden_n` — a workload number that never moves the check's status. The operator watches the same
+set on `/new-dedup/pin-audit`, whose relation `location_pin_audit_mv` (migration 514) IS that
+definition — `SERVED_LISTING_PREDICATE` minus `SERVED_LOCATION_PREDICATE`, refreshed hourly by
+pg_cron, leading the nav with its count — so the page and the rule can never describe different
+sets. It carries no map: the whole subject is rows with no point to draw. Migration 510's
+property-and-legacy-pin version of that relation stays on disk as history (append-only, rule 1); it
+was retired by 513 because it read five `properties` place columns 508 drops, and 514 re-creates the
+name on inputs that cannot expire the same way.
 
 **WHAT REMAINS OUTSIDE THE STORE, AND WHY.**
 
