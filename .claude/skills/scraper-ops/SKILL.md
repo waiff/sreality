@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -372,6 +372,14 @@ Lanes shipped so far:
   lost connection after one reconnect, stop a worker. Prefetch ceiling 90 s
   (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`). The GH lane stays single-connection. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
   had to be idled before is gone with the pin-collision engine, W2-a.)
+- **Location-intake-fast lane** (W7-a) — THE claim lane's change-driven listing scan
+  (`claims_intake.run`, `mode="incremental"`, payload half only: `skip_bodies=True`, no R2, no
+  process pool) every ~60 s with a **2-minute** snapshot lag and a 45 s budget, under its OWN
+  `claims_intake.FAST_LANE` cursor so it never moves the hourly run's 15-minute one (that run
+  re-reads whatever the short lag skipped). Ships **LIVE**; env knobs on the Railway service:
+  `LOCATION_INTAKE_FAST_{ENABLED,INTERVAL_S,LAG_S,BUDGET_S}` (`1`/60/120/45), `ENABLED=0` idles.
+  Projects the portal contracts from the image once at lane start (warn, never fail). Heartbeat
+  `details.location_intake_fast.last` = `{listings, claims_inserted, enqueued, seconds, cursor}`.
 
 ## Pipeline verification (migration 274)
 

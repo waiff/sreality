@@ -57,6 +57,15 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              constant block below). DARK until
              `realtime_location_resolve_enabled` is set. Safe beside
              location_resolve.yml: both take the SAME location_jobs lease row.
+- location_intake_fast: every `LOCATION_INTAKE_FAST_INTERVAL_S` (default 60),
+             ONE bounded pass of THE claim lane's incremental listing scan
+             (location_data.claims_intake.run, the same code
+             location_claims_intake.yml runs) — payload half only, no bodies
+             pass, a SHORT `LOCATION_INTAKE_FAST_LAG_S` (default 120) snapshot
+             lag and a `LOCATION_INTAKE_FAST_BUDGET_S` (default 45) budget,
+             under its own `claims_intake.FAST_LANE` cursor. LIVE by default
+             (`LOCATION_INTAKE_FAST_ENABLED=0` idles it). One lane, two
+             schedules: see the constant block below.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook.
 
@@ -200,6 +209,59 @@ LOCATION_RESOLVE_LEASE_HEADROOM_MIN_SECONDS = 120
 LOCATION_RESOLVE_WORKERS_ENV = "LOCATION_RESOLVE_WORKERS"
 LOCATION_RESOLVE_WORKERS_DEFAULT = 4
 LOCATION_RESOLVE_WORKERS_CEILING = 8
+
+# location_intake_fast lane (W7-a): ONE LANE, TWO SCHEDULES.
+#
+# The claim lane stays one module (location_data.claims_intake). What this adds is a second
+# SCHEDULE for its incremental listing scan — the same run(), the payload half only. Under
+# W5 the consumers serve only RESOLVED locations, and the producer of those was an hourly
+# GitHub run whose snapshot keyset stands 15 minutes behind the clock: a listing written 45 s
+# after a tick waited the rest of the hour plus the lag before anything mined a claim from
+# it. Measured 2026-09-13: two sreality listings first seen at 18:19:50Z had no claims and
+# no verdict 27 minutes later; worst case ~75 minutes invisible in Browse.
+#
+# WHY THE SHORT LAG IS SAFE HERE AND NOWHERE ELSE. The lag guards a bigserial race —
+# `listing_snapshots.id` is allocated at INSERT and visible at COMMIT, so a row can land
+# below a keyset that has already moved past it, and a keyset never looks back. At 2 minutes
+# this lane WILL occasionally skip such a row. That costs nothing because the hourly run is
+# still 15 minutes back on its OWN cursor (`location_claim_batches.lane` keys the resume) and
+# re-reads the same slice of the log within the hour. Mining a listing twice is free: claim
+# fingerprints are ON CONFLICT DO NOTHING and the resolve enqueue is a bump (W2-a2).
+#
+# NO BODIES PASS. `skip_bodies=True` — the R2 body backlog is the hourly lane's job, it is
+# bounded by the corpus rather than by the minute's change, and it is what builds the
+# forkserver process pool. A 45 s tick is a payload scan and nothing else.
+#
+# ENV VARS, not app_settings rows, and LIVE by default: this is the latency fix itself, and
+# the knobs are properties of the service this process runs on. `LOCATION_INTAKE_FAST_ENABLED=0`
+# is the kill switch (interval 0 = idle-not-dead, the _lane_loop contract).
+LOCATION_INTAKE_FAST_ENABLED_ENV = "LOCATION_INTAKE_FAST_ENABLED"
+LOCATION_INTAKE_FAST_INTERVAL_ENV = "LOCATION_INTAKE_FAST_INTERVAL_S"
+LOCATION_INTAKE_FAST_LAG_ENV = "LOCATION_INTAKE_FAST_LAG_S"
+LOCATION_INTAKE_FAST_BUDGET_ENV = "LOCATION_INTAKE_FAST_BUDGET_S"
+LOCATION_INTAKE_FAST_INTERVAL_DEFAULT = 60
+LOCATION_INTAKE_FAST_LAG_DEFAULT = 120
+LOCATION_INTAKE_FAST_BUDGET_DEFAULT = 45
+# A HEALTHY pass must stay well under check_worker_lane_stall's 1200 s in_flight warn and
+# under LANE_PASS_TIMEOUT_SECONDS, and it must finish inside its own interval or the next
+# tick skips. run() checks its budget BETWEEN batches, so a pass costs the budget plus one
+# batch — which is why the batch is small.
+LOCATION_INTAKE_FAST_BUDGET_CEILING = 300
+# Snapshot rows per batch. Nothing like the hourly lane's 10 000: a minute of fleet-wide
+# change is tens to low hundreds of snapshots, and a small batch is what keeps the
+# budget-plus-one-batch overrun inside the interval.
+LOCATION_INTAKE_FAST_BATCH_SIZE = 2000
+LOCATION_INTAKE_FAST_STATEMENT_TIMEOUT_S = 60
+# The lane's own mutual exclusion INSIDE this process, for the same reason the resolve lane
+# has one: a pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps running (Python cannot kill
+# the thread), and two scans sharing one cursor would each re-read the other's window.
+_INTAKE_FAST_PASS_LOCK = threading.Lock()
+_INTAKE_FAST_WEDGE_LOGGED = False
+# Whether the last pass opened no listing — drives the intake's log level (see
+# _tune_intake_log_level). Starts True so a quiet lane is quiet from the first pass.
+_INTAKE_FAST_LAST_IDLE = True
+# The contract projection is a startup step, not a per-pass one (see _project_contracts_once).
+_INTAKE_FAST_CONTRACTS_PROJECTED = False
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -401,6 +463,47 @@ def _read_location_resolve_workers() -> int:
             LOCATION_RESOLVE_WORKERS_ENV, raw, LOCATION_RESOLVE_WORKERS_DEFAULT)
         value = LOCATION_RESOLVE_WORKERS_DEFAULT
     return max(1, min(value, LOCATION_RESOLVE_WORKERS_CEILING))
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """A clamped integer env knob. A typo is a typo, never a stopped lane: an unparseable
+    value logs and falls back to the default."""
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        LOG.warning("%s=%r is not an integer; using %d", name, raw, default)
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes"}
+
+
+def _read_location_intake_fast_interval() -> int:
+    # The flag gates the lane via interval<=0 (idle-not-dead, the _lane_loop contract).
+    # Ships LIVE — the flag defaults ON, because the lane IS the latency fix.
+    if not _env_flag(LOCATION_INTAKE_FAST_ENABLED_ENV, default=True):
+        return 0
+    return _env_int(LOCATION_INTAKE_FAST_INTERVAL_ENV,
+                    LOCATION_INTAKE_FAST_INTERVAL_DEFAULT, minimum=5, maximum=3600)
+
+
+def _read_location_intake_fast_lag_seconds() -> int:
+    # Floored at 0, not at 60: the rail this trades away is re-taken by the hourly lane's
+    # own 15-minute cursor. Ceiled at an hour so a mis-set value idles the lane's PURPOSE
+    # rather than the lane.
+    return _env_int(LOCATION_INTAKE_FAST_LAG_ENV, LOCATION_INTAKE_FAST_LAG_DEFAULT,
+                    minimum=0, maximum=3600)
+
+
+def _read_location_intake_fast_budget() -> int:
+    return _env_int(LOCATION_INTAKE_FAST_BUDGET_ENV, LOCATION_INTAKE_FAST_BUDGET_DEFAULT,
+                    minimum=1, maximum=LOCATION_INTAKE_FAST_BUDGET_CEILING)
 
 
 def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
@@ -1181,6 +1284,129 @@ async def _location_resolve_pass(
     _record_pass(state, "location_resolve", last)
 
 
+def _tune_intake_log_level(*, idle: bool) -> None:
+    """The intake logs a start + summary line per run and one per batch. At an hourly
+    cadence that is evidence; at 60 s it is ~3k lines/day of `listings=0` burying the other
+    eight lanes in the Railway log. So: full INFO while the lane is finding change, WARNING
+    once a pass comes back empty. Every pass is recorded in the heartbeat either way."""
+    logging.getLogger("location_data.claims_intake").setLevel(
+        logging.WARNING if idle else logging.NOTSET)
+
+
+def _project_contracts_once() -> bool:
+    """Project contracts/portals/*.yaml into portal_contracts, ONCE per process.
+
+    The extractor reads the DB PROJECTION of the contracts, not the files, and the hourly
+    workflow re-projects from git before every run (02 §2.1.8: git is the store of record).
+    This image carries contracts/ for the same reason payload_norm does, so the worker can
+    do the equivalent — idempotent per (portal, contract_version), so on the steady state it
+    is a handful of no-op reads at startup.
+
+    A FAILURE IS A WARNING, NEVER A DEAD LANE. The projection raises by design when a
+    contract's governed bytes changed without a version bump, and the authoritative
+    projector is still the workflow: a worker that refused to start its lane over a
+    condition another lane will report would trade a loud failure for a silent one.
+    """
+    global _INTAKE_FAST_CONTRACTS_PROJECTED
+    if _INTAKE_FAST_CONTRACTS_PROJECTED:
+        return True
+    from location_data import contracts
+
+    try:
+        # Parsed BEFORE the connection is opened: a contract file that does not parse is a
+        # deploy problem, and diagnosing it should not depend on the pooler answering.
+        parsed = contracts.load_all()
+        git_ref = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "railway-worker")
+        with db.connect() as conn:
+            for contract in parsed:
+                contracts.project(conn, contract, git_ref=git_ref)
+    except Exception as exc:  # noqa: BLE001 - the workflow is the authoritative projector
+        LOG.warning(
+            "LOCATION_INTAKE_FAST could not project the portal contracts (%s); the lane "
+            "runs against whatever projection location_claims_intake.yml last loaded", exc)
+        return False
+    _INTAKE_FAST_CONTRACTS_PROJECTED = True
+    LOG.info("LOCATION_INTAKE_FAST projected the portal contracts from the image")
+    return True
+
+
+def _location_intake_fast_sync() -> dict[str, Any]:
+    """One bounded pass of THE claim lane's incremental listing scan, payload half only.
+
+    No lease: the cursor IS the coordination. `location_claim_batches` resumes on (lane,
+    source, scan_mode) and this lane stamps its own lane string, so it cannot read or move
+    the hourly run's position — which is also why the two schedules need no cross-process
+    group. The in-process lock is what stops THIS lane overlapping itself.
+
+    Lazy import keeps location_data (selectolax, boto3) off the worker's startup path;
+    module-attribute calls keep claims_intake.run patchable in tests. No try/except around
+    run(): a raise is the signal, and _lane_loop records the failed pass."""
+    from location_data import claims_intake
+
+    global _INTAKE_FAST_WEDGE_LOGGED, _INTAKE_FAST_LAST_IDLE
+
+    if not _INTAKE_FAST_PASS_LOCK.acquire(blocking=False):
+        if not _INTAKE_FAST_WEDGE_LOGGED:
+            _INTAKE_FAST_WEDGE_LOGGED = True
+            LOG.warning(
+                "LOCATION_INTAKE_FAST lane skipped: the previous pass was abandoned and "
+                "its thread is still scanning")
+        return {"ran": False, "previous_pass_running": True}
+    _INTAKE_FAST_WEDGE_LOGGED = False
+    try:
+        _project_contracts_once()
+        budget = _read_location_intake_fast_budget()
+        lag_seconds = _read_location_intake_fast_lag_seconds()
+        _tune_intake_log_level(idle=_INTAKE_FAST_LAST_IDLE)
+        conn = db.connect_session()
+        try:
+            stats = claims_intake.run(
+                conn,
+                mode="incremental",
+                source=None,
+                batch_size=LOCATION_INTAKE_FAST_BATCH_SIZE,
+                max_seconds=float(budget),
+                limit=None,
+                start_after_id=0,
+                statement_timeout=LOCATION_INTAKE_FAST_STATEMENT_TIMEOUT_S,
+                dry_run=False,
+                note="realtime-worker fast schedule (W7-a)",
+                lane=claims_intake.FAST_LANE,
+                lag_minutes=lag_seconds / 60.0,
+                skip_bodies=True,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+        _INTAKE_FAST_LAST_IDLE = not stats["listings"]
+        return {
+            "ran": True,
+            "listings": stats["listings"],
+            "claims_inserted": stats["claims_inserted"],
+            "enqueued": stats["enqueued"],
+            "seconds": round(float(stats["payload_seconds"]), 1),
+            "cursor": stats["cursor_after_id"],
+        }
+    finally:
+        _INTAKE_FAST_PASS_LOCK.release()
+
+
+async def _location_intake_fast_pass(
+    stop_event: asyncio.Event, state: dict[str, Any],
+) -> None:
+    if stop_event.is_set():
+        return
+    last = await asyncio.to_thread(_location_intake_fast_sync)
+    # Only when the pass did work — see _tune_intake_log_level for the same argument.
+    if last.get("listings"):
+        LOG.info(
+            "LOCATION_INTAKE_FAST lane listings=%d claims=%d enqueued=%d %.1fs cursor=%s",
+            last["listings"], last["claims_inserted"], last["enqueued"],
+            last["seconds"], last["cursor"],
+        )
+    _record_pass(state, "location_intake_fast", last)
+
+
 def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     """The lane state as written to the heartbeat, with elapsed time resolved.
 
@@ -1371,6 +1597,14 @@ async def _amain() -> int:
             lambda: _location_resolve_pass(stop_event, state),
             state,
             default_interval=0)),
+        # default_interval is the lane's OWN cadence here, not 0: this reader touches no
+        # database (env vars only), so it cannot fail the way the app_settings readers can,
+        # and the lane ships LIVE.
+        ("location_intake_fast", lambda: _lane_loop(
+            "location_intake_fast", stop_event, _read_location_intake_fast_interval,
+            lambda: _location_intake_fast_pass(stop_event, state),
+            state,
+            default_interval=LOCATION_INTAKE_FAST_INTERVAL_DEFAULT)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

@@ -703,6 +703,17 @@ component is slimmed twice — each wave rewrites one component and slims its st
     of its own, logging `backlog_remaining=? (count skipped after 60 s)` if even that overruns. On a
     contract bump the cursor is 0 and the count is the full one again, correctly.
 
+  - **W7-a — the change-driven listing scan runs in the realtime worker every minute** (code only;
+    new listings were invisible for up to 75 min under W5). One lane, TWO SCHEDULES: the same
+    `claims_intake.run()` also ticks in `scraper/realtime_worker.py` (lane `location_intake_fast`,
+    LIVE) every ~60 s — payload half only (`skip_bodies=True`: no bodies drain, no R2, no process
+    pool), a **2-minute** snapshot lag instead of 15 and a 45 s budget, stamping its own
+    `FAST_LANE` cursor. The short lag is safe because the cursors are separate: the hourly run
+    stays 15 minutes back and re-reads whatever the bigserial race made the fast tick skip, and
+    mining twice is free. Measured 2026-09-13: two sreality listings first seen 45 s into the 18:19
+    hourly run had no claim and no verdict 27 minutes later. Latency now: ≤2 min lag → ≤1 min tick
+    → the resolve lane → `browse_list`'s */15 rebuild.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream

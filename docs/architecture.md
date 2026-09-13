@@ -2009,6 +2009,28 @@ lane writes `location_claims`, `dirty_locations` and its own `location_claim_bat
 nothing else: a refusal (a withheld coordinate, an oversized value, a subject miss) is a COUNTER and
 one log line per reason per batch.
 
+**ONE LANE, TWO SCHEDULES (W7-a).** The module stays one lane; what it gained is a second
+*schedule* for the payload half. Under W5 the consumers serve only RESOLVED locations, so an hourly
+producer standing 15 minutes behind the clock meant a listing written just after a tick was invisible
+in Browse for up to ~75 minutes (measured 2026-09-13: two sreality listings first seen at 18:19:50Z,
+45 s into the run, had no claims and no verdict 27 minutes later). So the always-on worker
+(`scraper/realtime_worker.py`, lane `location_intake_fast`) runs the SAME `claims_intake.run()` every
+~60 s — `mode="incremental"`, `skip_bodies=True` (no bodies pass, no R2, no forkserver pool), a 45 s
+budget over 2 000-row batches, and a **2-minute** lag instead of 15. Its knobs are Railway env vars
+(`LOCATION_INTAKE_FAST_{ENABLED,INTERVAL_S,LAG_S,BUDGET_S}`), it ships LIVE, and `ENABLED=0` idles it.
+**The short lag is safe only because the two schedules do not share a cursor.** The lag guards the
+bigserial race above, so at 2 minutes the fast schedule will occasionally skip a late-committing id —
+and `location_claim_batches` resumes on `(lane, source, scan_mode)`, so the hourly run, still 15
+minutes back on its own `location_claims_intake` cursor, re-reads exactly that slice within the hour.
+Mining a listing twice costs nothing: claim fingerprints are `ON CONFLICT DO NOTHING` and the resolve
+enqueue is a bump. The fast lane also never inherits a stopped full walk (`_full_walk_handoff` looks
+that cursor up by lane and the fast lane never runs `--mode full`), and it projects the portal
+contracts from the image once at startup — a failure there is a warning, because
+`location_claims_intake.yml` is the authoritative projector. **Expected latency, detail write to
+Browse:** ≤2 min lag → ≤1 min tick → the resolver drain's own worker lane (~15 s) → `browse_list`'s
+pg_cron rebuild, `*/15`. So a claim and a verdict land within ~3–4 minutes, and the read model — not
+the claim lane — is what the operator now waits on.
+
 **The cursor is the lane's only memory, and every run has a budget.**
 `location_claim_batches.cursor_after_id` holds a `listings.id` in full mode and a
 `listing_snapshots.id` in incremental mode. Full mode resumes only from a budget-`stopped`

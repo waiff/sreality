@@ -61,6 +61,11 @@ _SCAN_ROOTS: tuple[tuple[Path, str], ...] = (
 # `test_a_lane_also_declares_the_version_it_stamps_on_its_batches`, not by silence.
 _NAMESPACE_OF: dict[str, str] = {
     "LANE": "lane",
+    # W7-a: one module, one extractor version, TWO schedules — and therefore two lane
+    # strings, because `location_claim_batches` resumes on (lane, source, scan_mode) and
+    # the fast schedule must not read the hourly one's cursor. Registered here so the
+    # second string is protected by the same uniqueness gate as the first.
+    "FAST_LANE": "lane",
     "JOB_NAME": "job_name",
     "CONCURRENCY_GROUP": "concurrency_group",
     "INTAKE_VERSION": "extractor_version",
@@ -87,7 +92,7 @@ _VERSION_NAMES = frozenset(
 # hourly intake (which now reads BOTH substrates), the resolve drain and the registry load.
 # W2-a removed `pin_collision_recompute` with the pin-collision epoch it minted — the whole
 # engine, its weekly cron and the `location_resolve.yml` mode that ran it.
-_KNOWN_LANES = frozenset({"location_claims_intake"})
+_KNOWN_LANES = frozenset({"location_claims_intake", "location_claims_intake_fast"})
 _KNOWN_JOB_NAMES = frozenset({"location_resolve_incremental"})
 _KNOWN_VERSIONS = frozenset({"claims_intake@5"})
 

@@ -114,6 +114,10 @@ class _Conn:
             self.now += timedelta(minutes=1)
             batch = {
                 "id": len(self.batches) + 1, "started_at": self.now,
+                # `lane` is a COLUMN of the resume key since W7-a, so the fake keys on it
+                # too: a fake that ignored it would pass the fast schedule the hourly
+                # lane's cursor and prove the opposite of what these tests assert.
+                "lane": params["lane"],
                 "source": params["source"], "scan_mode": params["scan_mode"],
                 "resumable": params["resumable"], "outcome": "running",
                 "cursor_after_id": None, "cursor_after_ts": None,
@@ -130,7 +134,8 @@ class _Conn:
             # The cutover anchor: the newest row that still carries a pre-W1-a2 timestamp
             # cursor, else the last `ok` watermark, both minus the old 3-hour overlap.
             timestamped = [b for b in self.batches
-                           if b["source"] == params["source"]
+                           if b.get("lane", claims_intake.LANE) == params["lane"]
+                           and b["source"] == params["source"]
                            and b.get("cursor_after_ts") is not None]
             anchor = None
             if timestamped:
@@ -138,18 +143,20 @@ class _Conn:
                              key=lambda b: (b["started_at"], b["id"]))["cursor_after_ts"]
             else:
                 oks = [b.get("coverage_since") or b["started_at"] for b in self.batches
-                       if b["source"] == params["source"] and b["outcome"] == "ok"]
+                       if b.get("lane", claims_intake.LANE) == params["lane"]
+                       and b["source"] == params["source"] and b["outcome"] == "ok"]
                 anchor = max(oks) if oks else None
             cur._result = [(anchor - timedelta(hours=3) if anchor else None,)]
             return
         if "coalesce(max(id), 0) FROM listing_snapshots" in sql:
-            visible = [row for row in self._visible_snapshots()
+            visible = [row for row in self._visible_snapshots(params)
                        if params["watermark"] is None or row[2] <= params["watermark"]]
             cur._result = [(visible[-1][0] if visible else 0,)]
             return
         if "SELECT outcome, cursor_after_id, cursor_after_ts" in sql:
             candidates = [b for b in self.batches
-                          if b["source"] == params["source"]
+                          if b.get("lane", claims_intake.LANE) == params["lane"]
+                          and b["source"] == params["source"]
                           and b["scan_mode"] == params["scan_mode"]
                           and b["resumable"]
                           and b["cursor_after_id"] is not None
@@ -170,14 +177,18 @@ class _Conn:
             return
         raise AssertionError(f"unhandled SQL: {sql[:120]}")
 
-    def _visible_snapshots(self) -> list[tuple[int, int, datetime]]:
-        """`scraped_at < now() - interval '15 minutes'` — the lag, as the SQL applies it."""
-        return [row for row in self.snapshots
-                if row[2] < self.now - timedelta(minutes=15)]
+    def _visible_snapshots(
+        self, params: dict[str, Any],
+    ) -> list[tuple[int, int, datetime]]:
+        """The lag, as the SQL applies it — and since W7-a as the CALLER parameterises it
+        (`make_interval(secs => %(lag_seconds)s)`), so a schedule that shortens it is
+        exercised here rather than asserted about in the abstract."""
+        lag = timedelta(seconds=float(params["lag_seconds"]))
+        return [row for row in self.snapshots if row[2] < self.now - lag]
 
     def _scan(self, sql: str, params: dict[str, Any]) -> list[tuple[Any, ...]]:
         if "FROM listing_snapshots s" in sql:
-            window = [(sid, lid) for sid, lid, _ in self._visible_snapshots()
+            window = [(sid, lid) for sid, lid, _ in self._visible_snapshots(params)
                       if sid > params["after_id"]][:params["batch_size"]]
             newest: dict[int, int] = {}
             for sid, lid in window:
@@ -510,3 +521,129 @@ def test_a_run_with_no_room_for_another_batch_hands_off_nothing(
     assert stats["reached_end"] is True
     assert conn.seen == []
     assert len(conn.batches) == batches_before + 1
+
+
+# ----------------------------------------------- W7-a: one lane, TWO SCHEDULES
+
+def _fast(conn: _Conn, **kwargs: Any) -> dict[str, Any]:
+    """The worker's fast schedule: the same `run()`, its own lane, a 2-minute lag, no
+    bodies."""
+    defaults: dict[str, Any] = {
+        "mode": "incremental", "lane": claims_intake.FAST_LANE,
+        "lag_minutes": 2.0, "skip_bodies": True, "batch_size": 10,
+    }
+    defaults.update(kwargs)
+    return _run(conn, **defaults)
+
+
+def test_the_fast_schedule_carries_its_own_cursor():
+    """THE POINT OF THE SECOND LANE NAME. `_RESUME_SQL` keys on (lane, source, scan_mode),
+    so the two schedules resume independently: the fast lane advancing past a snapshot must
+    never move the hourly run's position, or the 15-minute rail it keeps — the one that
+    re-reads whatever the short lag skipped — would be advanced past exactly those rows."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 4)])
+    # Both schedules take their cold tick on an empty log, so each seeds at 0 and carries a
+    # cursor of its own from here on (a cold tick against a NON-empty log seeds at the head,
+    # which is the pre-W1-a2 cutover behaviour the seed exists for).
+    _run(conn, mode="incremental")
+    _fast(conn)
+    conn.change([1, 2, 3], age_minutes=5)
+
+    fast = _fast(conn)
+
+    assert fast["reached_end"] is True
+    assert conn.seen == [1, 2, 3]
+    # The hourly lane keeps its own cursor, so it seeds from ITS lane's anchor and
+    # opens the same window once the 15-minute rail clears it. The fast lane moved nothing
+    # for it — which is exactly what makes the short lag's skips recoverable.
+    conn.seen.clear()
+    conn.now += timedelta(minutes=20)
+    hourly = _run(conn, mode="incremental")
+
+    assert hourly["outcome"] == "ok"
+    assert conn.seen == [1, 2, 3]
+    assert {b["lane"] for b in conn.batches} == {claims_intake.FAST_LANE, claims_intake.LANE}
+
+
+def test_the_lag_the_caller_passes_is_the_lag_the_keyset_applies():
+    """A change 5 minutes old is INVISIBLE to the hourly schedule (15-minute rail) and
+    VISIBLE to the fast one (2-minute rail). That difference is the whole wave: without it
+    a listing written just after a tick waits the rest of the hour to be mined."""
+    conn = _Conn([_Listing(1, BASE_TS)])
+    _fast(conn)
+    conn.change([1], age_minutes=5)
+
+    assert _run(conn, mode="incremental")["listings"] == 0
+    assert conn.seen == []
+    assert _fast(conn)["listings"] == 1
+    assert conn.seen == [1]
+
+
+def test_the_fast_schedule_mines_no_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`skip_bodies` is not a log line: no R2 client is opened, no scope register is loaded,
+    and the bodies-first pass reports itself complete (a pass that could never run reached
+    its end — the hourly chain reads that field). A 45 s tick that reached for the bucket
+    would spend its budget on the hourly lane's corpus-sized backlog."""
+    def never(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the fast schedule must not touch the page-body half")
+
+    monkeypatch.setattr(claims_intake, "_open_body_store", never)
+    monkeypatch.setattr(claims_intake.page_readers, "load_registers", never)
+    monkeypatch.setattr(claims_intake.page_readers, "extract_pages", never)
+    conn = _Conn([_Listing(1, BASE_TS)])
+    _fast(conn)
+    conn.change([1], age_minutes=5)
+
+    stats = _fast(conn)
+
+    assert stats["listings"] == 1
+    assert stats["bodies_mined"] == 0
+    assert stats["bodies_pass_complete"] is True
+    assert stats["bodies_backlog_remaining"] is None
+
+
+def test_the_fast_schedule_stops_on_its_budget_and_keeps_its_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 45 s budget is a rail, not a suggestion: the scan stops BETWEEN batches, stamps
+    `stopped` (never `ok`) with the cursor of the last committed batch, and the tick 60 s
+    later picks it up there rather than re-reading the window."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 31)])
+    _fast(conn)
+    conn.change(list(range(1, 31)), age_minutes=5)
+    # Every clock reading 10 s after the last, so the budget runs out mid-scan: the first
+    # batch is free to start, and from there `room_for` estimates the next batch at the
+    # last one's measured duration and refuses one that will not finish in time.
+    clock = iter(range(0, 10_000, 10))
+    monkeypatch.setattr(claims_intake.time, "monotonic", lambda: float(next(clock)))
+
+    stats = _fast(conn, max_seconds=45.0)
+
+    assert stats["outcome"] == "stopped"
+    assert stats["stopped_early"] is True
+    assert 0 < stats["listings"] < 30
+    assert conn.batches[-1]["cursor_after_id"] == stats["cursor_after_id"]
+
+    seen_first = list(conn.seen)
+    conn.seen.clear()
+    monkeypatch.setattr(claims_intake.time, "monotonic", lambda: 0.0)
+    resumed = _fast(conn, max_seconds=45.0)
+
+    assert resumed["resumed_from_id"] == stats["cursor_after_id"]
+    assert not set(seen_first) & set(conn.seen), "a resumed tick re-reads nothing"
+
+
+def test_the_fast_schedule_never_inherits_the_full_walk():
+    """A stopped full walk is a ~376k-listing contract re-walk and belongs to the hourly
+    lane. `_full_walk_handoff` looks that cursor up BY LANE and the fast lane never runs
+    `--mode full`, so a tick that empties its change log finds nothing to inherit — even
+    with the hourly lane's own full walk stopped half way."""
+    conn = _Conn([_Listing(i, BASE_TS) for i in range(1, 26)])
+    _run(conn, mode="full", limit=10)
+    conn.seen.clear()
+
+    stats = _fast(conn, max_seconds=600.0)
+
+    assert stats["full_walk_continued"] is False
+    assert stats["reached_end"] is True
+    assert conn.seen == []
