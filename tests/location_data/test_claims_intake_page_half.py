@@ -108,6 +108,8 @@ class _Conn:
         self.stamped: list[dict[str, Any]] = []
         self.claim_writes: list[list[dict[str, Any]]] = []
         self.body_selections: list[int] = []
+        # The `after_body_id` the run-end backlog readout was asked with (W6-b2).
+        self.backlog_asked_from: list[int] = []
         self._scanned = False
 
     def cursor(self) -> _Cursor:
@@ -142,9 +144,12 @@ class _Conn:
             cur._result = [(self.bodies_cursor, self.bodies_cursor_versions)]
             return
         if sql.startswith("SELECT count(*) FROM portal_raw_payloads p"):
-            # The readout carries the joins too, so an orphan is not in the backlog.
+            # The readout carries the joins too, so an orphan is not in the backlog — and
+            # the keyset, so it counts from the cursor this run stamped, not from 0.
+            self.backlog_asked_from.append(params["after_body_id"])
             cur._result = [(len([r for r in self.unmined_bodies
-                                 if r[1] not in self.orphans]),)]
+                                 if r[1] is not None and r[1] not in self.orphans
+                                 and r[1] > params["after_body_id"]]),)]
             return
         if "FROM portal_raw_payloads p" in sql and "%(cap)s" in sql:
             # THE WINDOW: the in-run keyset over payload ids, then the cap. It knows
@@ -487,8 +492,10 @@ def test_bodies_the_pass_can_never_stamp_do_not_stall_the_backlog_behind_them(
     assert [s["id"] for s in conn.stamped] == [203, 204, 205, 206]
     assert stats["bodies_mined"] == 4
     assert stats["bodies_pass_complete"] is True
-    # The three stay in the backlog and are asked for again NEXT run, not next batch.
-    assert stats["bodies_backlog_remaining"] == 3
+    # They are BELOW the cursor the run stamped, so the readout — "what the next pass would
+    # mine from here" (W6-b2) — does not count them; they come back on a contract bump,
+    # which resets the cursor. What they must not do is stall the four above them.
+    assert stats["bodies_backlog_remaining"] == 0
     assert sorted(store.asked) == sorted(_key(200 + i) for i in range(7))
 
 
@@ -517,7 +524,7 @@ def test_a_pass_that_stamps_nothing_still_walks_its_keyset_to_the_end(
 ) -> None:
     """Every GET fails. The pass must still reach the end of the keyset — its cursor is the
     payload id, not the stamp — so the run ends on the same terminal condition as a healthy
-    one and the operator reads a backlog of 7 rather than a lane that quietly stopped."""
+    one instead of quietly stopping at the first unreadable body."""
     monkeypatch.setattr(page_readers, "extract_page", _page_claim)
     conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
     store = _Store(failing={_key(200 + i) for i in range(7)})
@@ -528,7 +535,8 @@ def test_a_pass_that_stamps_nothing_still_walks_its_keyset_to_the_end(
     assert conn.stamped == []
     assert stats["bodies_mined"] == 0
     assert stats["bodies_pass_complete"] is True
-    assert stats["bodies_backlog_remaining"] == 7
+    # Nothing above the cursor is left, which is what the readout answers (W6-b2).
+    assert stats["bodies_backlog_remaining"] == 0
 
 
 def test_a_window_the_joins_empty_still_moves_the_cursor(
@@ -671,6 +679,23 @@ def test_a_completed_pass_keeps_its_cursor_and_the_next_run_continues_there(
     assert after["bodies_resumed_from_id"] == reached
     assert nxt.window_starts == [reached], "one window, above the end of the last pass"
     assert nxt.stamped == [], "nothing new arrived"
+
+
+def test_the_backlog_readout_counts_from_the_cursor_the_run_stamped(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """W6-b2. The readout used to ask from id 0, so every hop re-scanned all 744k payload
+    rows to re-report the dead prefix the cursor exists to skip — 600 s of statement timeout
+    on an idle hop whose drain took 5 s, and by then the only IO the lane still paid for.
+    It asks from the run's own cursor, which is what the chain and the operator read the
+    number as: what the NEXT pass would mine from here."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=202)
+
+    stats = _run(conn, _Store())
+
+    assert conn.backlog_asked_from == [BACKLOG[-1][1]], "the cursor, not 0"
+    assert stats["bodies_backlog_remaining"] == 0
 
 
 def test_a_contract_bump_sends_the_walk_back_to_the_start_once(

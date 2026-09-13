@@ -2018,7 +2018,9 @@ append-only log rather than a coverage claim, and it only ever advances past a b
 transaction closed. `--max-seconds` defaults to 2400 **in the CLI**, not only in the workflow; a
 batch does not START unless the previous batch's measured duration fits what is left, and the run's
 backlog readout runs AFTER the terminal stamp, so it cannot push the job past the 55-minute ceiling
-and lose the cursor of a run that had otherwise finished cleanly. **The lane self-chains while it has
+and lose the cursor of a run that had otherwise finished cleanly — and it is counted **from that
+run's cursor** under a 60 s ceiling of its own (W6-b2), so "backlog remaining" means what the next
+pass would mine from there and a count that overruns reports `?` instead of a 600 s tail. **The lane self-chains while it has
 a backlog**: GitHub fires an hourly cron ~7 times a day, so a contract bump's 250 000-body backlog
 would drain at ~6 000 bodies a fired tick. A run dispatches ONE successor with its own budget when it
 reports an unfinished half THAT IT MOVED (`bodies_pass_complete=false` with `bodies_mined>0`, or

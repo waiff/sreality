@@ -341,21 +341,27 @@ def test_the_intake_preflight_reads_are_bounded_too():
     Each preflight read must be the FIRST statement of a guarded block, not a bare
     `conn.cursor()` on the autocommit connection."""
     sources = {
-        "_ACTIVE_CONTRACT_SQL": inspect.getsource(claims_intake.run),
+        "_ACTIVE_CONTRACT_SQL": (inspect.getsource(claims_intake.run), "statement_timeout"),
         # W1-a2 replaced the watermark read with the cutover seed, in its own helper —
         # two reads, two guarded blocks, neither able to hang the run before its first
         # batch row exists.
-        "_LEGACY_WATERMARK_SQL": inspect.getsource(claims_intake._snapshot_seed),
-        "_SNAPSHOT_SEED_SQL": inspect.getsource(claims_intake._snapshot_seed),
-        # ... and added one more: the drain's window and its backlog readout. (W1-a4 split
-        # the selection in two; the WINDOW is the statement that opens the block.)
-        "_UNMINED_WINDOW_SQL": inspect.getsource(claims_intake.drain_unmined_bodies),
-        "_UNMINED_BODY_BACKLOG_SQL": inspect.getsource(
-            claims_intake._unmined_body_backlog),
+        "_LEGACY_WATERMARK_SQL": (inspect.getsource(claims_intake._snapshot_seed),
+                                  "statement_timeout"),
+        "_SNAPSHOT_SEED_SQL": (inspect.getsource(claims_intake._snapshot_seed),
+                               "statement_timeout"),
+        # ... and added one more: the drain's window. (W1-a4 split the selection in two;
+        # the WINDOW is the statement that opens the block.)
+        "_UNMINED_WINDOW_SQL": (inspect.getsource(claims_intake.drain_unmined_bodies),
+                                "statement_timeout"),
+        # The run-end readout is bounded too, and by a ceiling OF ITS OWN (W6-b2): it is
+        # best-effort, so a count that cannot answer in a minute reports `?` rather than
+        # spending the per-batch 600 s on a run whose work is already done and stamped.
+        "_UNMINED_BODY_BACKLOG_SQL": (inspect.getsource(claims_intake._unmined_body_backlog),
+                                      "_BACKLOG_READOUT_TIMEOUT_S"),
     }
-    for sql, source in sources.items():
+    for sql, (source, timeout) in sources.items():
         opener = source.split(f"cur.execute({sql}")[0].rstrip().splitlines()[-1].strip()
-        assert opener == "with guarded(conn, statement_timeout) as cur:", (
+        assert opener == f"with guarded(conn, {timeout}) as cur:", (
             f"{sql} is not read inside a guarded transaction (opener was {opener!r})"
         )
     # And the drain's SECOND statement rides the SAME transaction — a window whose ids were
