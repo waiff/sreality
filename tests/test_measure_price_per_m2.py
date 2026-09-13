@@ -358,16 +358,11 @@ def test_a_mixed_cohort_is_labelled_mixed_not_guessed(cur):
     cohort pooling a capital sale and a monthly rent is ONE click away. It must
     say so rather than pick one of the two."""
     sale, _l1 = _seed(cur, price=5_000_000, area=50.0)
-    cur.execute(
-        "INSERT INTO properties (category_main, category_type, current_price_czk, "
-        "area_m2, status, is_active, published_at) "
-        "VALUES ('byt', 'pronajem', 20000, 50, 'active', true, now()) RETURNING id"
-    )
-    rent = int(cur.fetchone()[0])
-    cur.execute(
-        "INSERT INTO browse_list SELECT * FROM browse_projection WHERE property_id = %s",
-        (rent,),
-    )
+    # Both halves of the cohort go through `_seed`. The rent side used to be a bare
+    # `properties` INSERT with no child at all, which W5's consumer rule drops from
+    # `browse_projection` — a property with no display listing has no location, so it
+    # is not a Browse row. A childless property was never a real cohort member anyway.
+    rent, _l2 = _seed(cur, price=20_000, area=50.0, category_type="pronajem")
 
     stats = _browse_stats(cur, [sale, rent])
     assert stats["total"] == 2, stats
