@@ -76,8 +76,13 @@ def _seed(
 ) -> tuple[int, int]:
     """One property and its single representative child, with a coherent
     numerator and denominator (that coherence is W3 / migration 424's job; this
-    wave assumes it and measures the ratio). No place at all: W4-c dropped every
-    location column from both tables, and the per-m2 measure never read one."""
+    wave assumes it and measures the ratio).
+
+    It carries a RESOLVED location even though the per-m2 measure never reads one:
+    W5's consumer rule (migration 512) means `browse_projection` publishes a
+    property only when its display listing has an answer in `listing_location`, so
+    a placeless seed is simply not a Browse row any more and there would be nothing
+    to measure. The point is arbitrary; only its EXISTENCE is load-bearing."""
     sid = next(_SREALITY_IDS)
 
     cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
@@ -101,6 +106,17 @@ def _seed(
         "       repr_listing_ref_id = %s "
         " WHERE id = %s",
         (category_main, category_type, price, area, sid, lid, pid),
+    )
+
+    # The W5 consumer rule: no answer row, no Browse row. All four grade/status
+    # columns are NOT NULL by design (a NULL reads as "no gate" and fails open).
+    cur.execute(
+        "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
+        "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
+        "  registry_version) "
+        "VALUES (%s, ST_SetSRID(ST_MakePoint(14.42, 50.08), 4326), 'exact', 'building', "
+        "  5, 'cz', 'test', '\\x00'::bytea, 'test')",
+        (lid,),
     )
 
     # browse_list is a materialised copy of browse_projection (`select *`), so
