@@ -435,6 +435,9 @@ IMPLEMENTED_TRANSFORMS = frozenset({
     # W1-c: a numbered/hyphenated městský obvod is never the town (R4), and the trailing
     # segment of an address is sometimes a country rather than an obec (R1's `country`).
     "statutory_city_obec", "address_part_country",
+    # idnes@4: the same `country` type off a STRUCTURED alpha-2 field instead of an address
+    # tail — no name table to fall outside of, and CZ dropped rather than claimed.
+    "foreign_country_code",
 })
 IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
 

@@ -1279,12 +1279,41 @@ def test_address_part_country_answers_only_where_a_country_is_named(value, expec
     assert apply_transforms(value, ("address_part_country",)) == expected
 
 
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("HR", "HR"),
+        ("hr", "HR"),
+        (" ES ", "ES"),
+        # The countries no name table spells: idnes offers 38 under `?s-l=STAT-xx` and
+        # `address_part_country`'s table spells 18 of them, which is why the structured
+        # field is the carrier.
+        ("EG", "EG"),
+        ("TH", "TH"),
+        # NEGATIVES. "CZ" is the value idnes stamps on every domestic row whether it knows
+        # the country or not — a default, and rule 25 forbids claiming one; "XX" is the
+        # portal's own "abroad, unspecified" token (`check.UNKNOWN_FOREIGN`) and names no
+        # country; anything that is not two ASCII letters is a field that changed shape.
+        ("CZ", None),
+        ("cz", None),
+        ("XX", None),
+        ("Chorvatsko", None),
+        ("", None),
+    ])
+def test_foreign_country_code_keeps_a_determination_and_drops_the_default(value, expected):
+    """idnes@4's `country` carrier. The claim VALUE is the code the resolver compares
+    (`check._code_of` takes a bare alpha-2 as-is), so this transform validates the shape and
+    rules on CZ rather than translating anything."""
+    assert apply_transforms(value, ("foreign_country_code",)) == expected
+
+
 def test_every_new_transform_is_registered_under_the_name_the_contract_gate_enumerates():
     """`contracts.IMPLEMENTED_TRANSFORMS` is pure data and the runtime registry is the truth;
     a name in one and not the other is either a refused entry or a silent no-op."""
     for name in ("address_part_street", "address_part_obec", "address_part_okres",
                  "address_part_house_number", "split_paren_okres", "comma_segment",
-                 "statutory_city_obec", "address_part_country"):
+                 "statutory_city_obec", "address_part_country",
+                 "foreign_country_code"):
         assert name in TRANSFORMS
         assert name in contracts.IMPLEMENTED_TRANSFORMS
 

@@ -763,6 +763,28 @@ def _address_part_country(value: str, arg: str) -> str | None:
     return _COUNTRY_BY_FOLDED.get(_fold(segments[-1]))
 
 
+# The portal's own "abroad, country unspecified" token, and `check.UNKNOWN_FOREIGN`: it is
+# not a country, and a claim carrying it would state as a determination the one thing the
+# field does not know.
+_UNSPECIFIED_COUNTRY = "XX"
+
+
+@transform("foreign_country_code")
+def _foreign_country_code(value: str, arg: str) -> str | None:
+    """A structured ISO-3166 alpha-2 field, kept only where it is not CZ.
+
+    The portal writes the code itself, so unlike `address_part_country` this needs no name
+    table and answers for every country the portal carries rather than the ones a table
+    spells. What it must not do is turn a DEFAULT into a determination: idnes stamps `CZ`
+    on every domestic row whether it knows the country or not, so CZ here states nothing
+    and is dropped ("foreign is a determination, never a default", rule 25). Anything that
+    is not two letters is a field that changed shape, and claims nothing."""
+    code = value.strip().upper()
+    if len(code) != 2 or not code.isalpha() or not code.isascii():
+        return None
+    return None if code in ("CZ", _UNSPECIFIED_COUNTRY) else code
+
+
 @transform("split_paren_okres")
 def _split_paren_okres(value: str, arg: str) -> str | None:
     """`Ostrov (okres Karlovy Vary)` — one string carrying an obec and its okres.

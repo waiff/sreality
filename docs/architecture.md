@@ -2251,6 +2251,12 @@ top-level keys are legal (`portal`, `contract_version`, `persistence`, `exclusio
 entries ahead of it), and every portal's town entry runs on the **hourly** lane rather than on an
 archive sweep that no longer exists. What a portal does NOT publish is now an omission recorded in
 its report, not a placeholder entry: no contract carries an entry no reader executes.
+**`idnes@4` (2026-09-13) is what a bump looks like under that shape:** the portal's one `country`
+entry moved off the address tail onto the `viewDetail` dataLayer's own `listing_localityState`
+alpha-2, because idnes sells 38 countries and `address_part_country`'s closed name table spells 18
+of them — 3,263 active foreign listings sat `undetermined` with a Croatian town as their only claim.
+The new `foreign_country_code` transform drops the `CZ` that field carries on every domestic row:
+foreign is a determination, never a default.
 
 Two further rails, both written by an entry that shipped INERT. `ReaderContract` records each
 reader's whole `locator` appetite — the keys it requires plus the ones it merely reads — and a

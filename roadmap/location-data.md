@@ -179,6 +179,19 @@ component is slimmed twice — each wave rewrites one component and slims its st
     **Next:** the coverage red line is the acceptance check, and it can only be read after deploy —
     every portal but sreality, bezrealitky and mmreality now mints its town from a STORED PAGE BODY,
     so a portal's number moves as the body-mining half works through its backlog, not at merge.
+  - **`idnes@4` — the country claim comes from the structured field, not the address tail**
+    (2026-09-13): 3,263 active idnes listings sat at `country_status='undetermined'` with a
+    Croatian obec_name (Poreč, Pula, Medulin, Rovinj…) as their only claim, measured
+    2026-09-12 — no country, no kraj, no okres, nothing to bind and nothing to determine
+    foreign from. A foreign idnes body states its country twice: the tail of the address line
+    in Czech, which `idnes@3` read, and the `viewDetail` dataLayer's own `listing_localityState`
+    alpha-2. Only the second is complete — the portal sells 38 countries under `?s-l=STAT-xx`
+    and `address_part_country`'s closed name table spells 18 of them, so Egypt, Thajsko, Malta,
+    Švédsko and 16 more named a country that never became a claim (and one sampled Spanish body
+    repeats its own address inside `.b-detail__info`). The new `foreign_country_code` transform
+    drops the `CZ` the same field carries on every domestic row: a portal default is not a
+    determination (rule 25). One entry moved, the other nine unchanged, entry budget still 10/10;
+    no migration — the version bump re-arms every idnes body for the hourly intake lane.
   - **W1-a3 shipped** (2026-09-12): the page half extracts across PROCESSES,
     `os.cpu_count()` wide. The bottleneck was one core — run 34666292569 spent 143-313 s per
     1 500-body batch against ~48 s to fetch the same bodies from R2 on 16 threads, ~5 bodies/s

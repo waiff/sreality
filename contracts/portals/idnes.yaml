@@ -1,9 +1,21 @@
-# idnes — contract v3, one entry per claim type over the stored detail body (rule 25).
+# idnes — contract v4, one entry per claim type over the stored detail body (rule 25).
 # It reads three surfaces of that body: the `dataLayer.push({"event":"viewDetail"…})` block
-# (admin hierarchy, already split), the `.b-detail__info` address line, the MapTiler pin.
+# (admin hierarchy AND the country, already split), the `.b-detail__info` address line, the
+# MapTiler pin.
+#
+# v4 moves the ONE `country` entry off the address tail and onto the dataLayer's own
+# `listing_localityState`. A foreign idnes body states its country twice — the tail of the
+# address line in Czech ("Malinska, Primorsko-goranska zupanija, Chorvatsko") and the
+# structured alpha-2 field ("HR") — but only the second one is complete: the portal offers
+# 38 countries under `?s-l=STAT-xx` and `address_part_country`'s closed name table spells
+# 18 of them, so Egypt, Thajsko, Malta, Švédsko and 16 others named a country the claim
+# never carried. The field also survives a mangled line (one sampled Spanish body repeats
+# its own address twice inside `.b-detail__info`). Measured 2026-09-12: 3,263 active idnes
+# listings sat at `country_status='undetermined'` with a Croatian obec_name as their only
+# claim.
 
 portal: idnes
-contract_version: 3
+contract_version: 4
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -90,15 +102,22 @@ extractions:
     notes: "The portal's own blur sentence; a rewording stops matching instead of relabelling."
 
   - id: id.det.country
-    locator_kind: html_selector
-    extraction_method: html_selector_parse
+    locator_kind: embedded_json
+    extraction_method: portal_structured_field
     page_kind: detail
-    locator: {reader: html_text, css: ".b-detail__info"}
+    locator:
+      reader: json_scalar
+      css: "script"
+      script_match: 'dataLayer\.push\(\s*(?P<config>\{\s*"event"\s*:\s*"viewDetail"[\s\S]*?\})\s*\)\s*;'
+      match: {json_pointer: "/listing_id", equals_row_field: source_id_native}
+      json_pointer: "/listing_localityState"
     claim_type: country
-    transform: ["address_part_country"]
-    subject_scope: {subject_scoped: true}
-    notes: "Only where the line's last segment names a country; a Czech line claims nothing
-      (foreign is a determination, never a default)."
+    transform: ["foreign_country_code"]
+    subject_scope: {kind: id_match, on_miss: fail}
+    notes: "The portal's own alpha-2, on the same subject-matched block as the town — so
+      'HR' is claimed and the 'CZ' it stamps on every domestic row is not (foreign is a
+      determination, never a default). The address tail carried this in v3 and lost every
+      country its name table does not spell."
 
   - id: id.det.kraj
     locator_kind: embedded_json
