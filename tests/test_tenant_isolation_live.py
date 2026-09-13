@@ -234,16 +234,18 @@ _BROKER_PII_RELATIONS: list[str] = [
 
 # Migration 398: contact-PII columns allowed to REMAIN on a browser-readable
 # relation, because that relation projects them as a NULL constant rather than the
-# real value. The names cannot be dropped — CREATE OR REPLACE VIEW cannot remove a
-# column and five matviews depend on listings_public, so DROP ... CASCADE is not
-# available — so a name-based scan alone cannot tell "nulled" from "served".
+# real value — a name-based scan alone cannot tell "nulled" from "served".
+#
+# `listings_public` is NOT in this registry any more: W6-c (migration 517) dropped
+# both names from it outright, blue-green through the five matviews that had made
+# DROP ... CASCADE unavailable. The exemption it used to need would now hide a real
+# regression, so a listings_public that re-grows either column fails here.
 #
 # Listing a column here does NOT exempt it. `_null_projected_columns` re-derives the
 # exemption from the deparsed view body on every run, so a CREATE OR REPLACE that
 # restores the source expression fails BOTH guards below rather than being waved
 # through by its own allowlist entry.
 _NULLED_CONTACT_COLUMNS: dict[str, tuple[str, ...]] = {
-    "listings_public": ("broker_email", "broker_phone"),
     "properties_public": ("broker_email", "broker_phone"),
 }
 

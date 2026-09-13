@@ -514,7 +514,13 @@ def test_w4c_leaves_no_legacy_place_column_on_any_serving_view() -> None:
 
 
 def test_w4c_keeps_listings_public_width_and_resources_it_in_place() -> None:
-    """The one compatibility surface of the wave, and the reason it exists.
+    """The one compatibility surface of W4-c, and the reason it existed.
+
+    SUPERSEDED BY W6-c (migration 517), which narrowed the view 61 -> 44 columns
+    blue-green — rename aside, rebuild the five matviews beside themselves, swap.
+    This still pins 508, whose text is immutable (rule 1); the width that is LIVE
+    is pinned by tests/test_location_w6c_narrow_public_views.py.
+
     FIVE matviews hold an object-level dependency on `listings_public`
     (image_storage_overview_mv / scraper_health_checks_mv / health_summary_mv,
     portal_health_mv, category_trends_mv), so a DROP + CREATE would mean
