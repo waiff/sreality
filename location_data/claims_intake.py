@@ -152,6 +152,9 @@ BODIES_BUDGET_SHARE = 0.5
 STATEMENT_TIMEOUT_ENV = "LOCATION_INTAKE_TIMEOUT_S"
 DEFAULT_STATEMENT_TIMEOUT_S = 600
 _FAILURE_STAMP_TIMEOUT_S = 30
+# And so is the backlog readout's (W6-b2): a best-effort `count(*)` that cannot answer in a
+# minute must not hold the job open for ten (600 s spent on an idle hop whose drain took 5 s).
+_BACKLOG_READOUT_TIMEOUT_S = 60
 
 # THE SCAN BATCH IS NOT THE WRITE SIZE.
 #
@@ -731,9 +734,11 @@ _UNMINED_BODIES_SQL = (
     ORDER BY p.id
 """)
 
-# One count per RUN (never per batch): the summary says how much of the backlog is left,
-# not only what this run took off it. Both statements' predicates rebuilt into one, read
-# from id 0.
+# One count per RUN (never per batch), both statements' predicates rebuilt into one, and
+# read FROM THE CURSOR THIS RUN STAMPED (W6-b2): "backlog remaining" is what the next pass
+# would mine from there, which is how the chain and the operator read it. From 0 it re-scanned
+# all 744k rows to re-report the dead prefix the cursor exists to skip; a contract bump resets
+# the cursor and makes this the full count again.
 _UNMINED_BODY_BACKLOG_SQL = (
     "SELECT count(*)" + _UNMINED_BODIES_FROM + _UNMINED_WINDOW_WHERE + _LATEST_BODY_ONLY)
 
@@ -1303,25 +1308,24 @@ def mine_bodies(
 
 def _unmined_body_backlog(
     conn: psycopg.Connection, *, source: str | None, page_sources: set[str],
-    statement_timeout: int,
+    after_body_id: int,
 ) -> int | None:
-    """How many latest bodies are still unmined, for the run summary. Once per RUN.
-
-    Best-effort by design: this is a readout, and a run that mined 1 500 bodies has already
-    earned its outcome — failing it over a slow `count(*)` would be the reporting tail
-    wagging the lane."""
+    """What the next pass would mine from this run's cursor. Once per RUN, best-effort: a
+    run that mined 1 500 bodies has earned its outcome, so a slow count never fails it and
+    a count that overruns its own 60 s ceiling reports `?`."""
     sources = sorted(page_sources if source is None else page_sources & {source})
     if not sources:
         return None
     try:
-        with guarded(conn, statement_timeout) as cur:
+        with guarded(conn, _BACKLOG_READOUT_TIMEOUT_S) as cur:
             cur.execute(_UNMINED_BODY_BACKLOG_SQL,
                         {"source": source, "page_sources": sources,
-                         "after_body_id": 0})
+                         "after_body_id": after_body_id})
             row = cur.fetchone()
         return int(row[0]) if row else None
     except Exception as exc:  # noqa: BLE001 - a readout must not fail a finished run
-        LOG.warning("INTAKE could not count the unmined-body backlog (%s)", exc)
+        LOG.warning("INTAKE backlog_remaining=? (count skipped after %ds): %s",
+                    _BACKLOG_READOUT_TIMEOUT_S, exc)
         return None
 
 
@@ -1745,14 +1749,14 @@ def run(
     stats["mode"] = mode
     stats["cursor_after_id"] = after_id
 
-    # THE READOUT COMES AFTER THE TERMINAL STAMP, deliberately: a `count(*)` under the 600 s
-    # ceiling, run once the budget is spent. Ahead of the stamp it could push the job past
-    # `timeout-minutes: 55` and lose the cursor of a run that had otherwise finished cleanly.
-    # Nothing below this line decides whether the run is resumable.
+    # THE READOUT COMES AFTER THE TERMINAL STAMP, deliberately: a `count(*)` under its own
+    # 60 s ceiling, run once the budget is spent. Ahead of the stamp it could push the job
+    # past `timeout-minutes: 55` and lose the cursor of a run that had otherwise finished
+    # cleanly. Nothing below this line decides whether the run is resumable.
     if page_capable and store is not None:
         stats["bodies_backlog_remaining"] = _unmined_body_backlog(
             conn, source=source, page_sources=page_capable,
-            statement_timeout=statement_timeout)
+            after_body_id=int(stats["bodies_cursor_after_id"]))
 
     # ONE LINE THE OPERATOR CAN READ A RUN OFF. The per-batch progress lines say what the
     # run was doing; this says what it achieved and what is left.

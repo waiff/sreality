@@ -533,13 +533,15 @@ def test_the_backlog_count_is_both_statements_predicates_rebuilt():
     assert count.startswith("SELECT count(*) FROM portal_raw_payloads p")
     gate = " ".join(_UNMINED_WINDOW_WHERE.split())
     assert gate in count and gate in " ".join(_UNMINED_WINDOW_SQL.split())
-    # The readout passes `after_body_id = 0`, so it counts the whole backlog rather than
-    # the remainder of the run — and carries no `cap`, so it is never a window.
-    assert "%(after_body_id)s" in count and "%(cap)s" not in count
+    # It carries the keyset — the readout is asked from the cursor the run stamped, so the
+    # number is what the NEXT pass would mine (W6-b2) — and no `cap`: it is never a window.
+    assert "p.id > %(after_body_id)s" in count and "%(cap)s" not in count
+    assert "after_body_id=int(stats[\"bodies_cursor_after_id\"])" in " ".join(
+        inspect.getsource(claims_intake.run).split())
 
 
 def test_the_backlog_readout_runs_after_the_terminal_stamp():
-    """It is a `count(*)` under the 600 s ceiling, run when the budget is already spent.
+    """It is a `count(*)` under its own 60 s ceiling, run when the budget is already spent.
     Ahead of the stamp it could push the job past `timeout-minutes: 55` and lose the cursor
     of a run that had otherwise finished cleanly — the exact failure this wave closes."""
     source = inspect.getsource(claims_intake.run)

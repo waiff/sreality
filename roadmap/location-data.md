@@ -694,6 +694,15 @@ component is slimmed twice — each wave rewrites one component and slims its st
     a retry rather than a half-applied file. Six dependencies, five relations:
     `portal_health_mv` is the one that depends on BOTH views.
 
+  - **W6-b2 — the backlog readout counts from the cursor** (code only). With the drain down to ~5 s,
+    the run-end `count(*)` was the last hourly IO: it asked from id 0, re-scanned all 744k payload
+    rows to re-report the dead prefix the cursor exists to skip, and spent its full 600 s statement
+    timeout on the first idle hop after W6-b (`backlog_remaining=?`). It now carries the same window
+    predicate from the cursor the run just stamped — so the number means "what the next pass would
+    mine from here", which is how the chain and the operator already read it — under a 60 s ceiling
+    of its own, logging `backlog_remaining=? (count skipped after 60 s)` if even that overruns. On a
+    contract bump the cursor is 0 and the count is the full one again, correctly.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream
