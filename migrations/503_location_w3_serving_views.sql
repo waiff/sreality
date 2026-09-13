@@ -81,10 +81,11 @@
 --
 --   * SECTION 0 runs BEFORE any DDL: it compares today's `properties_map_mv`
 --     row count with the count the new definition WOULD produce, and aborts the
---     whole file if the map would lose more than 5 % of its pins. A pin collapse
---     is what an incomplete `listing_location` looks like from the map's side,
---     and it must fail loudly here rather than ship a half-empty map. Nothing has
---     been applied when it fires — fix the coverage, then re-run.
+--     whole file on ANY loss beyond the audited residue (`location_pin_audit_mv`,
+--     migration 510) plus an hourly drift allowance. A pin collapse is what an
+--     incomplete `listing_location` looks like from the map's side, and it must
+--     fail loudly here rather than ship a half-empty map. Nothing has been
+--     applied when it fires — fix the coverage, then re-run.
 --
 --   * SECTION 9 runs AFTER the forced rebuilds and asserts both read models are
 --     actually WIDE. Both rebuilds SKIP (notice, not error) when a cron tick
@@ -95,6 +96,13 @@
 --     7,37 cron ticks rebuild both, or re-run this file. **Never merge the SPA
 --     until both read models are confirmed wide** (section 9 passing IS that
 --     confirmation).
+
+-- The guard below refreshes `location_pin_audit_mv` (migration 510) before it
+-- measures, and that refresh needs more than the role's 120 s default. Postgres
+-- arms statement_timeout when the TOP-LEVEL statement begins, so neither the
+-- function nor the DO block can raise its own budget (migration 371's lesson) —
+-- it is armed here, for the session.
+set statement_timeout = '900s';
 
 begin;
 
@@ -110,32 +118,61 @@ set local lock_timeout = '5s';
 --    is the correct posture for a resolved corpus (no pin the resolver will not
 --    stand behind) and a silent disaster for an unresolved one.
 --
+--    THE OPERATOR'S RULE (2026-09-13). Zero new pin loss: a pin the resolver
+--    stands behind may not disappear in this cutover, so the tolerance is 0 %
+--    and not 5 %. The audited residue is the ONE exemption — there is no flag
+--    and no field marking those rows, the set is defined by EVIDENCE and lives
+--    in the temporary audit view `location_pin_audit_mv` (migration 510), and
+--    both this guard and that view are deleted once the cutover has settled.
+--
+--    WHAT THE RESIDUE IS. Every legacy map pin the new store has no Czech pin
+--    for, one row per property, whose only evidence is a legacy column or a
+--    retired contract: measured, zero claims under a LIVE contract arrived after
+--    any of those verdicts and none are queued, so no amount of further mining
+--    moves them. Measurement history: the Czech-side loss read 24.7 -> 18.7 ->
+--    11.6 -> 6.0 -> 5.7 % across 2026-09-12's mining waves; 36,981 rows at
+--    06:50Z 2026-09-13, of which 2,424 are active bazos dead ads and 34,557 are
+--    delisted display listings.
+--
+--    HOW IT IS ENFORCED. The audit view is REFRESHED FIRST, so the exemption is
+--    current rather than an hour stale, and the file aborts as soon as the after
+--    count falls below `before - audited - 500`. The 500 is DRIFT, not
+--    tolerance: the legacy pin path still writes until W4-b/W4-c land, so the
+--    legacy side keeps gaining a handful of pins an hour that even a fresh audit
+--    refresh cannot have seen. It goes away with the legacy writer.
+--
 --    Both numbers are measured HERE, before the replace, so this is a pure
 --    prediction and an abort costs nothing: the transaction rolls back with the
---    schema untouched. 5 % is the tolerance, not 0 %, because the legacy pin
---    includes coordinates the resolver deliberately refuses (a Mapy-class
---    licence, migration 501's claim projection) — a small honest loss is the
---    point of the wave; a large one means the coverage gate was not green.
+--    schema untouched.
 --
 --    FOREIGN ROWS ARE OUT OF BOTH COUNTS. 2026-09-12: 19,275 idnes rows the
---    resolver determined FOREIGN never had an admissible portal pin — their legacy
---    pins were Mapy geocodes, removed by doctrine, not coverage lost — and 4,374
---    bazos town-less rows are dead ads whose latest page is the category index;
---    the Czech-side loss this guard measures is ~1 %. Counting the foreign pins
---    on the BEFORE side alone would read as a collapse the coverage gate has
---    already cleared.
+--    resolver determined FOREIGN never had an admissible portal pin — their
+--    legacy pins were Mapy geocodes, removed by doctrine, not coverage lost.
+--    Counting the foreign pins on the BEFORE side alone would read as a collapse
+--    the coverage gate has already cleared.
 -- ---------------------------------------------------------------------------
 
 do $guard$
 declare
-  v_before bigint;
-  v_after  bigint;
-  v_lost   numeric;
+  v_before  bigint;
+  v_after   bigint;
+  v_audited bigint;
 begin
   if to_regclass('public.properties_map_mv') is null then
     raise notice 'properties_map_mv absent (fresh replay); pin guard skipped';
     return;
   end if;
+
+  -- The audit view is migration 510, i.e. NUMBERED AFTER this file: a fresh
+  -- schema replay reaches this guard before the exemption set exists, and there
+  -- is no corpus to lose pins from there either.
+  if to_regclass('public.location_pin_audit_mv') is null then
+    raise notice 'location_pin_audit_mv absent (fresh replay); pin guard skipped';
+    return;
+  end if;
+
+  perform refresh_location_pin_audit_mv();
+  select count(*) into v_audited from location_pin_audit_mv;
 
   execute $q$
     select count(*)
@@ -152,21 +189,19 @@ begin
      and ll.geom is not null
      and ll.country_status is distinct from 'foreign';
 
-  raise notice 'W3 pin guard: properties_map_mv has % pins today, % after the swap',
-    v_before, v_after;
+  raise notice 'W3 pin guard: properties_map_mv has % pins today, % after the swap; audited residue %, drift allowance 500',
+    v_before, v_after, v_audited;
 
-  if v_before > 0 and v_after < (v_before * 0.95) then
-    -- plpgsql RAISE takes bare `%` placeholders, never printf conversions, so the
-    -- percentage is rounded here rather than formatted in the message.
-    v_lost := round(100.0 * (v_before - v_after) / v_before, 1);
+  if v_before > 0 and v_after < (v_before - v_audited - 500) then
     raise exception
-      'W3 pin collapse: the map would drop from % pins to % -- % %% lost, cap 5 %%. '
-      'This migration is gated on rule 25 coverage: every ACTIVE listing has a '
-      'listing_location row, and the display listing of every active property is '
-      'among them. Check verify_pipeline''s location_town_coverage and the count '
-      'of active properties whose repr_listing_ref_id has no row, then re-run. '
-      'Nothing has been applied.',
-      v_before, v_after, v_lost;
+      'W3 pin collapse: the map would drop from % pins to %, audited residue %, '
+      'drift allowance 500 -- a pin the resolver stands behind was lost — this is '
+      'NEW loss, not the audited residue. The rule is zero new loss: only the rows '
+      'enumerated in location_pin_audit_mv (legacy-column or retired-contract '
+      'evidence only) may disappear. Check verify_pipeline''s '
+      'location_town_coverage and the active properties whose repr_listing_ref_id '
+      'has no listing_location row, then re-run. Nothing has been applied.',
+      v_before, v_after, v_audited;
   end if;
 end
 $guard$;

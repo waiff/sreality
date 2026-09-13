@@ -2091,7 +2091,12 @@ would not stand behind), but only once `count(listing_location) = count(active l
 has a row (Browse serves delisted properties too, so the coverage invariant's "active listings" is
 not by itself the same set). The migration measures that last arm itself: section 0 compares
 today's `properties_map_mv` count with the count the new definition would produce and **aborts
-before any DDL** if the map would lose more than 5 % of its pins.
+before any DDL** on any loss beyond the audited residue. The operator's ruling (2026-09-13) is
+**zero new pin loss**, with ONE exemption: the rows of `location_pin_audit_mv` (migration 510),
+whose only evidence is a legacy column or a retired contract. The guard refreshes that view first
+so the exemption is current, then aborts iff `after < before - audited - 500`; the 500 is the
+hourly drift of the legacy pin writer, which W4-b/W4-c remove. Guard and audit view are both
+deleted once the cutover has settled.
 
 **ONE claim-producing lane** (rule 25, W1-a). `location_data/claims_intake.py`, hourly at
 `35 * * * *`, is the only writer of `location_claims`. It reads BOTH substrates we hold for a
