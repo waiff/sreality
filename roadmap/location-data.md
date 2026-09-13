@@ -634,6 +634,21 @@ component is slimmed twice — each wave rewrites one component and slims its st
     with no point to draw. Migration 510 stays on disk as history — 513 retired v1 because it read
     five `properties` place columns 508 drops, and the CI replay skips it.
 
+  - **W6-b — the bodies cursor continues across passes and resets only on a contract bump**
+    (migration **516**, additive). W1-a6 made the bodies-first cursor survive a run that STOPPED, but
+    a pass that COMPLETED stamped NULL and the next run restarted the walk at id 0 — so with the
+    backlog empty every hourly hop re-walked all 744k `portal_raw_payloads` rows (~500k of them
+    version-eligible bodies that can never be stamped: bodies of unserved listings, and bodies a
+    later body superseded) to stamp nothing: `bodies=416s`, `bodies=272s`, `bodies=176s` on idle hops
+    (2026-09-13), 3–7 minutes of IO an hour. Now "pass complete" means CAUGHT UP: the cursor is kept,
+    and the new `location_claim_batches.bodies_cursor_versions` records the active contract-version
+    set it was taken under (`bazos@5,bezrealitky@2,…`, sorted). `_bodies_resume_point` honours the
+    stamp only while that set still holds, because a bump is the one event that makes rows BELOW the
+    cursor eligible again — poison is re-fetched once per VERSION SET instead of once per pass, and
+    the audit page shows whatever stays unresolved. A NULL version set (every pre-516 row, or one
+    stamped by hand) is a mismatch, which is also the manual reset for the one case a bump does not
+    cover: a code change that widens the served set.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream
