@@ -669,6 +669,31 @@ component is slimmed twice — each wave rewrites one component and slims its st
     stamped by hand) is a mismatch, which is also the manual reset for the one case a bump does not
     cover: a code change that widens the served set.
 
+  - **W6-c — `listings_public` and `portal_listing_counts` narrowed lock-free (blue-green through
+    their six dependent matviews)** (migration **517**). The census first, column by column, over
+    `frontend/src`, `api/`, `toolkit/`, `scripts/`, `location_data/`, every function body in the
+    catalog (none names either view) and the matviews' own COLUMN-level `pg_depend` entries:
+    `listings_public` **61 → 44**, and the 44 that stay are exactly the SPA's `DETAIL_COLS`
+    listing-detail select — `api/notifications.py` reads 15 of them, `api/curation.py` 2, the five
+    matviews 8. The 17 that went had no reader at all: four typed-NULL placeholders
+    (`locality_district_id`, `locality_region_id` from 508; `broker_email`, `broker_phone` from 398),
+    the ten legacy place columns `display_label` replaced (`locality`, `district`, `street`,
+    `house_number`, `obec`, `okres`, `region`, `obec_id`, `okres_id`, `region_id`), `broker_name`, and
+    the two condition levels Browse reads off `browse_list`. Ten of the seventeen were a
+    `listing_location` join output, so the narrowed view stops materializing them per row.
+    `portal_listing_counts` stays **8 → 8** and that is the census answer, not a deferral: all eight
+    are read by `portal_health_mv`, so it is already minimal and a rebuild would remove nothing.
+    **Blue-green**, because a view's columns cannot be removed with `create or replace` and
+    `drop ... cascade` would take the matviews with it: rename the wide view to
+    `listings_public_legacy` (the five follow it by OID and go on serving), create the narrow one
+    under the original name, rebuild each matview beside itself as `<name>_next` from its own
+    `pg_get_viewdef` (never a transcribed body) with its unique index and its ACL replayed through
+    `aclexplode`, swap each in with a drop+rename under `lock_timeout='5s'`, drop the legacy view.
+    Neither the listing-detail read nor the Health dashboard is ever without a relation, and every
+    step is gated on `if exists` so the refresh cron (*/10, no advisory lock) turns a collision into
+    a retry rather than a half-applied file. Six dependencies, five relations:
+    `portal_health_mv` is the one that depends on BOTH views.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream
@@ -680,9 +705,10 @@ component is slimmed twice — each wave rewrites one component and slims its st
      surface retired, a precondition for 508). Left: **514** (W5, additive — BEFORE its merge: it
      only HIDES rows, so a database that has it while the old code runs is correct; the reverse would
      leak the exempted set into the watchdog).
-  3. **The later lock-free wave**: narrow `listings_public` + `portal_listing_counts` and re-point
-     their six dependent matviews at `listings` — held back only because narrowing them inside 508's
-     ACCESS EXCLUSIVE window would mean repopulating all six.
+  3. ~~**The later lock-free wave**: narrow `listings_public` + `portal_listing_counts`~~ — **DONE,
+     W6-c / migration 517.** The matviews were not re-pointed at `listings` after all: they are
+     rebuilt against the narrowed view instead, which is the smaller change and keeps their bodies
+     byte-identical.
   4. **Old-version claim cleanup** — DONE (W6-a, above): superseded rows are filtered at READ
      (`_CLAIMS_SELECT`), so the delete was leisure work, and it is taken.
      `location_claims_retire.yml` is the standing lane — dispatch it after any future retirement.

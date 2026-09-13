@@ -1589,7 +1589,9 @@ renumber.** Navigate by area:
     on `listings_public` survive) but project them as `null::text` — they were owner-rights views
     with a live `authenticated` SELECT grant, i.e. a bulk contact-PII read for any logged-in
     session. The masked `/brokers` API is now the only broker-contact path; `broker_name` stays
-    (a label, not a contact). **Both went through PostgREST until
+    (a label, not a contact). **W6-c/migration 517 dropped all three from `listings_public`** — a
+    NULL placeholder with no reader is not a compatibility surface; `properties_public` still nulls
+    the contact pair. **Both went through PostgREST until
     2026-08-12 and were dark the whole time:** Phase 0's A6 revoked `listing_broker_public` +
     `brokers_public` from `anon` AND `authenticated`, so every read returned SQLSTATE `42501` and
     every card degraded to "no broker shown". `frontend/src/lib/brokers.ts` is now repointed wholesale
@@ -2226,12 +2228,17 @@ name on inputs that cannot expire the same way.
   source; not a location path (`tests/test_portal_raw_pages_guard.py` fails CI on any DROP naming
   it). With it `listings.raw_json`, the content-hash substrate (rule 2) and the resolver's evidence,
   so the legacy place keys live there as history forever.
-* `listings_public` and `portal_listing_counts` keep their WIDTH — five matviews depend on the first
-  and one on the second; none reads a place column (a matview's dependency is on the VIEW, not on its
-  columns), but narrowing either would mean re-creating and REPOPULATING all six. Both take an
-  in-place `create or replace` that re-sources their place columns from `listing_location` (the two
-  sreality portal ids, which have no twin and were never a query dimension, are typed NULL).
-  Re-pointing those matviews at `listings` and narrowing the two views is a later, **lock-free** wave.
+* `listings_public` is **44 columns — exactly its readers** (W6-c, migration 517): the SPA's
+  `DETAIL_COLS` listing-detail select, of which `api/notifications.py` reads 15, `api/curation.py` 2
+  and the five dependent matviews 8. W4-c had left it 61 wide because a matview's dependency is on
+  the VIEW, not on its columns, so `create or replace` (append-only) was the only shape available;
+  517 takes the width **blue-green** — rename the wide view aside, create the narrow one under the
+  original name, rebuild each matview beside itself and swap it in under a 5s `lock_timeout` — so
+  neither the detail read nor the Health dashboard is ever without a relation. The 17 that went had
+  no reader anywhere: four typed-NULL placeholders, the ten legacy place columns `display_label`
+  replaced, `broker_name`, and the two condition levels Browse reads off `browse_list`.
+  `portal_listing_counts` stays 8 wide and that is the census result, not a deferral: all eight are
+  read by `portal_health_mv`, so it is already minimal.
 * `ScrapedListing` keeps `locality`, `district`, `street`, `house_number`, `zip`, `lat`, `lon` —
   `locality` and `district` are content-hash inputs, so removing them would churn a snapshot for
   every listing in the corpus (rule 2), and all seven are the parser's reading of the page, which is
