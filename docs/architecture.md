@@ -2341,6 +2341,28 @@ only five consecutive failures — or a lost connection, told apart by SQLSTATE 
 prefetch runs on its own 90 s ceiling, because a 250-listing bulk claims read legitimately outruns
 the 30 s a per-listing statement gets and cancelling it threw the whole batch away.
 
+**Pin-loss audit page (operator review surface, temporary — delete after the 503 ruling).**
+Migration **510** materialises the exact set migration 503's pin-collapse guard would cost the map:
+every active property that still carries legacy coordinates and for which `listing_location` holds
+no Czech `geom` (a determined `country_status='foreign'` is excluded — that is a correct answer, not
+a loss). ~36.9k rows measured 2026-09-13, ~2.4k of them on live ads. `location_pin_audit_mv` is one
+row per property at its representative listing, carrying the portal, the type, the listing's own
+`source_url`, the legacy pin, the resolver's verdict and two evidence booleans that are NOT the same
+question: `has_claims` (the SAVED verdict consumed at least one claim — `claim_set_hash` is NOT NULL,
+so an empty consumption is the digest of the empty list, `sha256('[]')`, never a NULL) and
+`claims_now` (the claim store holds evidence for that listing today). The gap between them IS the
+finding — 35.6k of the 36.9k verdicts were computed from nothing while the claims were mined
+afterwards, so most of the loss is a stale verdict rather than an unlocatable ad, and the page says
+so on the row rather than letting "no evidence" be read off it. `quality` buckets the set on
+active/delisted x `has_claims`; the SPA page `/new-dedup/pin-audit` filters on those, on the portal
+and on the type, draws the legacy pins (capped at 5,000, and it says when it capped), and reads its
+overview matrix from `location_pin_audit_summary()` so the matrix, the totals and the list cannot
+disagree. It is built over `properties` rather than over `properties_map_mv` because the map matview
+is rebuilt at runtime by `rebuild_properties_map_mv()` and its live column set is newer than the one
+migration 254 statically creates — which is all the CI schema replay ever sees. Refreshed hourly by
+pg_cron (`refresh-location-pin-audit`, guarded so the replay container skips it). Rule 25's deletion
+parity does not apply: this is an operator-requested review surface with a stated end.
+
 ## Cross-reference map
 
 | Topic | Operational how-to |

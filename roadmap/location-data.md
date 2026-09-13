@@ -243,6 +243,10 @@ component is slimmed twice — each wave rewrites one component and slims its st
     the next resume can see it. It CONTINUES, it never STARTS one, and `--mode full` is unchanged.
   - **W1-a8 — the bodies pass mines the served set, not only active listings** (503's map
     guard measured 23 % loss on delisted display listings, 2026-09-12).
+  - **W1-a9 — the pin-loss audit page** (migration **510**, 2026-09-13): `/new-dedup/pin-audit`
+    lists the 36,935 map pins the new store cannot stand behind, per portal x type, so the operator
+    can look at them before ruling on 503. TEMPORARY — the page, `lib/pinAudit.ts`,
+    `PinAuditMap.tsx` and 510's objects are deleted once the ruling lands.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
