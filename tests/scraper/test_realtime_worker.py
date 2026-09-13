@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
+import os
 import threading
 from typing import Any
 
@@ -1218,6 +1220,8 @@ def test_location_resolve_pass_returns_early_when_stopping(monkeypatch):
 _FAST_STATS = {
     "listings": 12, "claims_inserted": 34, "enqueued": 7,
     "payload_seconds": 1.234, "cursor_after_id": 987654,
+    "bodies_mined": 5, "bodies_seconds": 2.0, "bodies_pass_complete": True,
+    "bodies_cursor_after_id": 4242,
 }
 
 
@@ -1300,19 +1304,27 @@ def test_location_intake_fast_sync_runs_the_shared_scan_on_its_own_lane(
     # ITS OWN CURSOR. `location_claim_batches` resumes on (lane, source, scan_mode), so a
     # re-spelled literal here would silently advance the hourly run's position past the
     # rows its 15-minute rail exists to re-read.
-    assert captured["lane"] == claims_intake.FAST_LANE
-    assert captured["lane"] != claims_intake.LANE
+    schedule = captured["schedule"]
+    assert schedule.lane == claims_intake.FAST_LANE
+    assert schedule.lane != claims_intake.LANE
     assert captured["mode"] == "incremental"
-    assert captured["lag_minutes"] == 2.0
-    assert captured["skip_bodies"] is True
+    assert schedule.lag_minutes == 2.0
     assert captured["max_seconds"] == 45.0
     assert captured["dry_run"] is False
     assert captured["source"] is None
     assert captured["conn_obj"].closed is True
-    # The heartbeat's `last`: what the tick achieved and where it left the keyset.
+    # W7-a2: the JSON half first, the bodies pass on the remainder, capped, and no run-end
+    # backlog count at a 60 s cadence.
+    assert schedule.bodies_first is False
+    assert schedule.bodies_cap == 300
+    assert schedule.bodies_budget_share == 1.0
+    assert schedule.backlog_readout is False
+    assert schedule.pool is rw._intake_fast_pool()
+    # The heartbeat's `last`: what the tick achieved and where it left BOTH keysets.
     assert out == {
         "ran": True, "listings": 12, "claims_inserted": 34, "enqueued": 7,
-        "seconds": 1.2, "cursor": 987654,
+        "bodies_mined": 5, "bodies_complete": True, "seconds": 3.2,
+        "cursor": 987654, "bodies_cursor": 4242,
     }
 
 
@@ -1348,6 +1360,7 @@ def test_location_intake_fast_pass_records_the_heartbeat_shape(
     assert lane["started_at"] is None, "a cleared stamp is what says the pass ENDED"
     assert lane["last"]["listings"] == 12
     assert lane["last"]["cursor"] == 987654
+    assert lane["last"]["bodies_mined"] == 5
     # check_worker_lane_stall reads every lane key off `details`, so the new lane is
     # covered the moment it beats — no threshold change for a 60 s lane.
     assert set(lane) >= {"last_pass_at", "passes", "last_duration_s", "failed_passes"}
@@ -1404,3 +1417,66 @@ class _NullConn:
 
     def __exit__(self, *exc: Any) -> bool:
         return False
+
+
+def test_the_extraction_pool_is_built_once_and_reused_across_ticks(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # ONE pool for the life of the lane. Per-tick construction would exec two fresh
+    # interpreters a minute, for ever, to parse the handful of bodies a tick finds — and the
+    # pool object's own rules (contract data moved, or a worker died) are what rebuild it.
+    monkeypatch.setattr(rw, "_INTAKE_FAST_POOL", None)
+    first = rw._intake_fast_pool()
+    assert first is rw._intake_fast_pool()
+    assert first.width == rw.LOCATION_INTAKE_FAST_EXTRACTION_WORKERS == 2
+    # Narrow on purpose: the container is small and seven other lanes share it.
+    assert first.width < (os.cpu_count() or 1) + 2
+
+    captured = _patch_intake_fast(monkeypatch)
+    rw._location_intake_fast_sync()
+    rw._location_intake_fast_sync()
+    assert captured["schedule"].pool is first
+
+
+def test_a_tick_sets_its_own_r2_fetch_width_without_overriding_the_service(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The hourly runner fetches 1 500 bodies a batch at width 32; this lane fetches tens,
+    # beside seven other lanes on one container. setdefault, so a Railway env var wins.
+    _patch_intake_fast(monkeypatch)
+    monkeypatch.delenv("LOCATION_BODY_FETCH_WORKERS", raising=False)
+    rw._location_intake_fast_sync()
+    assert os.environ["LOCATION_BODY_FETCH_WORKERS"] == "8"
+
+    monkeypatch.setenv("LOCATION_BODY_FETCH_WORKERS", "4")
+    rw._location_intake_fast_sync()
+    assert os.environ["LOCATION_BODY_FETCH_WORKERS"] == "4"
+
+
+def test_absent_r2_credentials_warn_once_and_never_stop_the_lane(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    # "Flag on, credentials absent" has shipped here twice. The JSON half must carry on —
+    # nothing branches on this — but a lane that mined no page body all week is a silent
+    # coverage hole, so it says so once per process.
+    for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+                 "R2_BUCKET_NAME"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(rw, "_INTAKE_FAST_R2_WARNED", False)
+    with caplog.at_level(logging.WARNING, logger=rw.LOG.name):
+        assert rw._intake_fast_r2_ready() is False
+        assert rw._intake_fast_r2_ready() is False
+    assert sum("R2_* is not configured" in r.message for r in caplog.records) == 1
+
+    monkeypatch.setattr(rw, "_INTAKE_FAST_R2_WARNED", False)
+    for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+                 "R2_BUCKET_NAME"):
+        monkeypatch.setenv(name, "set")
+    assert rw._intake_fast_r2_ready() is True
+
+
+def test_the_bodies_cap_is_an_env_knob_and_clamped(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(rw.LOCATION_INTAKE_FAST_BODIES_CAP_ENV, raising=False)
+    assert rw._read_location_intake_fast_bodies_cap() == 300
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_BODIES_CAP_ENV, "50")
+    assert rw._read_location_intake_fast_bodies_cap() == 50
+    monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_BODIES_CAP_ENV, "0")
+    assert rw._read_location_intake_fast_bodies_cap() == 1, "0 is not a kill switch"

@@ -2023,7 +2023,14 @@ bigserial race above, so at 2 minutes the fast schedule will occasionally skip a
 and `location_claim_batches` resumes on `(lane, source, scan_mode)`, so the hourly run, still 15
 minutes back on its own `location_claims_intake` cursor, re-reads exactly that slice within the hour.
 Mining a listing twice costs nothing: claim fingerprints are `ON CONFLICT DO NOTHING` and the resolve
-enqueue is a bump. The fast lane also never inherits a stopped full walk (`_full_walk_handoff` looks
+enqueue is a bump. **It mines new page BODIES too (W7-a2)** — six of the nine portals put a listing's
+location only in the stored body, so a JSON-only fast lane left their listings waiting the hour out:
+the tick runs the JSON half first and gives the bodies pass the remainder of its budget, capped at
+`LOCATION_INTAKE_FAST_BODIES_CAP` (300) bodies checked BETWEEN batches, over its own lane-scoped
+W6-b cursor — so the corpus is walked once, on the first tick after a deploy, and every tick after
+that returns only new bodies. The extraction is the same forkserver path, two workers wide, in ONE
+`page_readers.ExtractionPool` reused across ticks (rebuilt when the contract data moves or a worker
+dies; `EXTRACTION_TIMEOUT_S` is what keeps a pathological page from ever holding a tick). The fast lane also never inherits a stopped full walk (`_full_walk_handoff` looks
 that cursor up by lane and the fast lane never runs `--mode full`), and it projects the portal
 contracts from the image once at startup — a failure there is a warning, because
 `location_claims_intake.yml` is the authoritative projector. **Expected latency, detail write to

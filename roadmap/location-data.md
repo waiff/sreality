@@ -727,6 +727,18 @@ component is slimmed twice — each wave rewrites one component and slims its st
     caught up), **39 / 44,370** on the first build after the apply — the pending half is small only
     between bursts, and during a sweep it is thousands, which is the point.
 
+  - **W7-a2 — the fast lane mines new page bodies too** (code only; page-portal listings waited up
+    to an hour). Six portals — idnes, realitymix, bazos, ceskereality, remax, maxima — put a
+    listing's location only in the stored detail BODY, which only the hourly run mined, so W7-a's
+    134 s was a sreality number and theirs was still ~an hour. The tick now runs the JSON half
+    first and gives the bodies pass the remainder of its 45 s, capped at 300 bodies a tick
+    (checked between batches, never truncating a window — the cursor advances to the window's max
+    id). It is cheap because the W6-b/W6-b2 bodies cursor is lane-scoped too: the first tick after
+    a deploy walks the payload keyset once, every tick after that opens only what is above it.
+    Two forkserver workers in ONE pool held for the life of the lane; R2 width 8; no `R2_*` = one
+    warning and JSON only. `run()`'s schedule knobs are now one `claims_intake.Schedule` value
+    whose defaults ARE the hourly run.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream

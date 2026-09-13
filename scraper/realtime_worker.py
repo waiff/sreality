@@ -228,9 +228,14 @@ LOCATION_RESOLVE_WORKERS_CEILING = 8
 # re-reads the same slice of the log within the hour. Mining a listing twice is free: claim
 # fingerprints are ON CONFLICT DO NOTHING and the resolve enqueue is a bump (W2-a2).
 #
-# NO BODIES PASS. `skip_bodies=True` — the R2 body backlog is the hourly lane's job, it is
-# bounded by the corpus rather than by the minute's change, and it is what builds the
-# forkserver process pool. A 45 s tick is a payload scan and nothing else.
+# IT MINES BODIES TOO (W7-a2). Six of the nine portals — idnes, realitymix, bazos,
+# ceskereality, remax, maxima — put a listing's location only in the stored PAGE BODY, and
+# while only the hourly run mined those, their new listings stayed invisible for up to an
+# hour while sreality's took 134 s. So the tick runs the JSON half FIRST (that is what a
+# minute-old listing needs) and gives the bodies pass the REMAINDER of the budget, bounded
+# by `LOCATION_INTAKE_FAST_BODIES_CAP` bodies. It is cheap because of the W6-b/W6-b2 cursor:
+# the window starts at the id this lane's own batch row stamped, so the corpus is walked
+# ONCE — the first tick after a deploy — and every tick after that returns only new bodies.
 #
 # ENV VARS, not app_settings rows, and LIVE by default: this is the latency fix itself, and
 # the knobs are properties of the service this process runs on. `LOCATION_INTAKE_FAST_ENABLED=0`
@@ -252,6 +257,27 @@ LOCATION_INTAKE_FAST_BUDGET_CEILING = 300
 # budget-plus-one-batch overrun inside the interval.
 LOCATION_INTAKE_FAST_BATCH_SIZE = 2000
 LOCATION_INTAKE_FAST_STATEMENT_TIMEOUT_S = 60
+# Bodies MINED per tick, checked between batches (the window is never truncated — the
+# bodies cursor advances to the window's max id, so a truncated window would walk past rows
+# nothing comes back for). 300 is ~4x the fleet's measured page churn of 50-80 new bodies an
+# HOUR, so the cap binds only while the first walk crosses a real backlog.
+LOCATION_INTAKE_FAST_BODIES_CAP_ENV = "LOCATION_INTAKE_FAST_BODIES_CAP"
+LOCATION_INTAKE_FAST_BODIES_CAP_DEFAULT = 300
+# The R2 fetch width. The hourly runner sets 32 for its 1 500-body batches; this lane fetches
+# tens of bodies beside seven other lanes on one small container. `setdefault`, so a Railway
+# env var still wins.
+LOCATION_INTAKE_FAST_FETCH_WORKERS = "8"
+# TWO extraction processes, and ONE pool for the life of the lane. The parse is pure CPU and
+# the container is small, so two is what can overlap without starving the other lanes; the
+# pool is reused across ticks because a forkserver import per tick would cost more than the
+# handful of bodies a tick parses. `page_readers.ExtractionPool` rebuilds it by itself when
+# the contract data moves or a worker dies — and its per-body `EXTRACTION_TIMEOUT_S` is what
+# keeps a pathological page from ever holding a tick (the worker is killed, the body comes
+# back as its own outcome, the rest of the batch finishes on the main thread).
+LOCATION_INTAKE_FAST_EXTRACTION_WORKERS = 2
+_INTAKE_FAST_POOL: Any = None
+# log-once-per-process guard: R2 unconfigured on this service.
+_INTAKE_FAST_R2_WARNED = False
 # The lane's own mutual exclusion INSIDE this process, for the same reason the resolve lane
 # has one: a pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps running (Python cannot kill
 # the thread), and two scans sharing one cursor would each re-read the other's window.
@@ -504,6 +530,11 @@ def _read_location_intake_fast_lag_seconds() -> int:
 def _read_location_intake_fast_budget() -> int:
     return _env_int(LOCATION_INTAKE_FAST_BUDGET_ENV, LOCATION_INTAKE_FAST_BUDGET_DEFAULT,
                     minimum=1, maximum=LOCATION_INTAKE_FAST_BUDGET_CEILING)
+
+
+def _read_location_intake_fast_bodies_cap() -> int:
+    return _env_int(LOCATION_INTAKE_FAST_BODIES_CAP_ENV,
+                    LOCATION_INTAKE_FAST_BODIES_CAP_DEFAULT, minimum=1, maximum=5000)
 
 
 def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
@@ -1330,6 +1361,38 @@ def _project_contracts_once() -> bool:
     return True
 
 
+def _intake_fast_pool() -> Any:
+    """The lane's ONE extraction pool, built on first use and reused for the life of the
+    process. `ExtractionPool` owns the rebuild rules (contract data moved, or the pool
+    died); this only owns the lifetime, so a redeploy is the only thing that resets it."""
+    global _INTAKE_FAST_POOL
+    if _INTAKE_FAST_POOL is None:
+        from location_data import page_readers
+
+        _INTAKE_FAST_POOL = page_readers.ExtractionPool(
+            LOCATION_INTAKE_FAST_EXTRACTION_WORKERS)
+    return _INTAKE_FAST_POOL
+
+
+def _intake_fast_r2_ready() -> bool:
+    """Does this service have R2 credentials? The bodies half needs the bucket; the JSON
+    half never does. A rotated or missing credential must cost the page portals their
+    minute-fresh claims and NOTHING else — `claims_intake` already warns once per run and
+    carries the payload half through, so this is only about saying it once per PROCESS
+    rather than once a minute, for ever."""
+    global _INTAKE_FAST_R2_WARNED
+    ready = all(os.environ.get(name) for name in
+                ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+                 "R2_BUCKET_NAME"))
+    if not ready and not _INTAKE_FAST_R2_WARNED:
+        _INTAKE_FAST_R2_WARNED = True
+        LOG.warning(
+            "LOCATION_INTAKE_FAST: R2_* is not configured on this service, so the lane "
+            "mines JSON payloads only — the six page portals (idnes, realitymix, bazos, "
+            "ceskereality, remax, maxima) keep waiting for the hourly run")
+    return ready
+
+
 def _location_intake_fast_sync() -> dict[str, Any]:
     """One bounded pass of THE claim lane's incremental listing scan, payload half only.
 
@@ -1355,9 +1418,30 @@ def _location_intake_fast_sync() -> dict[str, Any]:
     _INTAKE_FAST_WEDGE_LOGGED = False
     try:
         _project_contracts_once()
+        # The lane's own fetch width, not the hourly runner's 32. `setdefault`, so the
+        # Railway service can still override it without a deploy of this file.
+        os.environ.setdefault("LOCATION_BODY_FETCH_WORKERS",
+                              LOCATION_INTAKE_FAST_FETCH_WORKERS)
+        # Says it once per PROCESS rather than once a run. Nothing branches on it: without
+        # a store `drain_unmined_bodies` returns before its first query, so a missing
+        # credential already costs the page half and nothing else.
+        _intake_fast_r2_ready()
         budget = _read_location_intake_fast_budget()
         lag_seconds = _read_location_intake_fast_lag_seconds()
         _tune_intake_log_level(idle=_INTAKE_FAST_LAST_IDLE)
+        schedule = claims_intake.Schedule(
+            lane=claims_intake.FAST_LANE,
+            lag_minutes=lag_seconds / 60.0,
+            # THE JSON HALF FIRST. It is the half a minute-old listing needs; the bodies
+            # pass takes what is left of the same 45 s.
+            bodies_first=False,
+            bodies_cap=_read_location_intake_fast_bodies_cap(),
+            bodies_budget_share=1.0,
+            # The run-end backlog `count(*)` is the hourly chain's signal. At a 60 s cadence
+            # it would cost more than the drain it measures.
+            backlog_readout=False,
+            pool=_intake_fast_pool(),
+        )
         conn = db.connect_session()
         try:
             stats = claims_intake.run(
@@ -1371,21 +1455,22 @@ def _location_intake_fast_sync() -> dict[str, Any]:
                 statement_timeout=LOCATION_INTAKE_FAST_STATEMENT_TIMEOUT_S,
                 dry_run=False,
                 note="realtime-worker fast schedule (W7-a)",
-                lane=claims_intake.FAST_LANE,
-                lag_minutes=lag_seconds / 60.0,
-                skip_bodies=True,
+                schedule=schedule,
             )
         finally:
             with contextlib.suppress(Exception):
                 conn.close()
-        _INTAKE_FAST_LAST_IDLE = not stats["listings"]
+        _INTAKE_FAST_LAST_IDLE = not (stats["listings"] or stats["bodies_mined"])
         return {
             "ran": True,
             "listings": stats["listings"],
             "claims_inserted": stats["claims_inserted"],
             "enqueued": stats["enqueued"],
-            "seconds": round(float(stats["payload_seconds"]), 1),
+            "bodies_mined": stats["bodies_mined"],
+            "bodies_complete": bool(stats["bodies_pass_complete"]),
+            "seconds": round(float(stats["payload_seconds"] + stats["bodies_seconds"]), 1),
             "cursor": stats["cursor_after_id"],
+            "bodies_cursor": stats["bodies_cursor_after_id"],
         }
     finally:
         _INTAKE_FAST_PASS_LOCK.release()
@@ -1398,11 +1483,13 @@ async def _location_intake_fast_pass(
         return
     last = await asyncio.to_thread(_location_intake_fast_sync)
     # Only when the pass did work — see _tune_intake_log_level for the same argument.
-    if last.get("listings"):
+    if last.get("listings") or last.get("bodies_mined"):
         LOG.info(
-            "LOCATION_INTAKE_FAST lane listings=%d claims=%d enqueued=%d %.1fs cursor=%s",
+            "LOCATION_INTAKE_FAST lane listings=%d claims=%d enqueued=%d bodies=%d "
+            "complete=%s %.1fs cursor=%s bodies_cursor=%s",
             last["listings"], last["claims_inserted"], last["enqueued"],
-            last["seconds"], last["cursor"],
+            last["bodies_mined"], last["bodies_complete"], last["seconds"],
+            last["cursor"], last["bodies_cursor"],
         )
     _record_pass(state, "location_intake_fast", last)
 

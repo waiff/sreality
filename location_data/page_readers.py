@@ -12,6 +12,7 @@ owns the scan, the R2 fetch, the hash gate and the write. The exclusion-zone sco
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import multiprocessing
@@ -1897,10 +1898,83 @@ def _extract_serially(
     return outcomes
 
 
+def _worker_key(
+    entries_by_source: dict[str, list[Entry]],
+    registers: dict[str, ScopeRegister], max_value_bytes: int,
+) -> tuple[Any, ...]:
+    """What a live worker has CACHED, as a comparable value.
+
+    A reused pool's workers hold the contract entries and exclusion-zone registers they were
+    initialised with, so the pool has to be rebuilt the moment those move — a stale worker
+    would scope a body by a contract version that is no longer active and stamp the result
+    as current. Entry ids are immutable per contract version (a change IS a new version, so
+    new rows) and `scope_version` is the register's own content hash, so those two are the
+    whole question; `max_value_bytes` rides along because it is the third initarg."""
+    return (
+        max_value_bytes,
+        tuple(sorted((source, register.scope_version)
+                     for source, register in registers.items())),
+        tuple(sorted((source, tuple(entry.id for entry in entries))
+                     for source, entries in entries_by_source.items())),
+    )
+
+
+class ExtractionPool:
+    """A forkserver pool that OUTLIVES one batch (W7-a2), for a lane that runs many small ones.
+
+    The hourly run builds a pool per batch and amortises the forkserver import over 1 500
+    bodies. The realtime worker's fast lane mines at most a few hundred a MINUTE, for ever,
+    so per-batch construction would spend more time exec'ing interpreters than parsing. This
+    holds ONE pool across ticks and rebuilds it on exactly two events: the contract data the
+    workers cached moved (`_worker_key`), or the pool DIED — a hang is killed, a break is a
+    break. Everything else about `extract_pages` is unchanged, including the rule that a
+    dead pool's unfinished bodies are finished on the main thread.
+
+    Not a global: the lane that wants a warm pool owns the object, so a test, a CLI run and
+    the hourly workflow all keep today's build-it-and-drop-it behaviour by passing nothing.
+    """
+
+    def __init__(self, width: int) -> None:
+        self.width = max(1, width)
+        self._pool: ProcessPoolExecutor | None = None
+        self._key: tuple[Any, ...] | None = None
+        self.builds = 0
+
+    def executor(
+        self, key: tuple[Any, ...], initargs: tuple[Any, ...],
+    ) -> ProcessPoolExecutor:
+        if self._pool is not None and self._key != key:
+            LOG.info("PAGE the extraction pool's contract data moved; rebuilding it")
+            self.discard()
+        if self._pool is None:
+            self._pool = ProcessPoolExecutor(
+                max_workers=self.width, mp_context=_mp_context(),
+                initializer=_worker_init, initargs=initargs)
+            self._key = key
+            self.builds += 1
+        return self._pool
+
+    def discard(self, *, kill: bool = False) -> None:
+        """Drop the pool so the next batch builds a fresh one. `kill` for a HUNG worker:
+        `shutdown(wait=True)` would join the very process the timeout exists to escape."""
+        pool, self._pool, self._key = self._pool, None, None
+        if pool is None:
+            return
+        if kill:
+            for worker in list((pool._processes or {}).values()):  # noqa: SLF001
+                worker.kill()
+        with contextlib.suppress(Exception):
+            pool.shutdown(wait=not kill, cancel_futures=True)
+
+    def close(self) -> None:
+        self.discard()
+
+
 def extract_pages(
     tasks: list[tuple[ListingRow, ArchivedPayload]], *,
     entries_by_source: dict[str, list[Entry]],
     registers: dict[str, ScopeRegister], max_value_bytes: int,
+    pool: ExtractionPool | None = None,
 ) -> list[IntakeResult | Exception]:
     """One outcome per task, IN TASK ORDER: the `IntakeResult`, or the exception it raised.
 
@@ -1926,18 +2000,24 @@ def extract_pages(
             remaining, entries_by_source=entries_by_source, registers=registers,
             max_value_bytes=max_value_bytes)
 
-    width = pool_width(len(tasks))
-    if width == 1:
+    # A WARM pool is used for any batch at all: the floor below exists to keep a handful of
+    # bodies from paying for a fresh interpreter, and a pool that is already running has
+    # nothing left to pay. Without one, the floor stands exactly as it did.
+    width = pool.width if pool is not None else pool_width(len(tasks))
+    if width == 1 or not tasks:
         return main_thread(tasks)
 
     outcomes: list[IntakeResult | Exception] = []
     hung = False
-    pool = ProcessPoolExecutor(
-        max_workers=width, mp_context=_mp_context(), initializer=_worker_init,
-        initargs=(entries_by_source, registers, max_value_bytes,
-                  LOG.getEffectiveLevel()))
+    broken = False
+    initargs = (entries_by_source, registers, max_value_bytes, LOG.getEffectiveLevel())
+    executor = (pool.executor(_worker_key(entries_by_source, registers, max_value_bytes),
+                              initargs)
+                if pool is not None
+                else ProcessPoolExecutor(max_workers=width, mp_context=_mp_context(),
+                                         initializer=_worker_init, initargs=initargs))
     try:
-        futures = [pool.submit(_worker_extract, task) for task in tasks]
+        futures = [executor.submit(_worker_extract, task) for task in tasks]
         for future in futures:
             try:
                 outcomes.append(future.result(timeout=EXTRACTION_TIMEOUT_S))
@@ -1948,21 +2028,28 @@ def extract_pages(
                             len(outcomes) + 1, len(tasks), EXTRACTION_TIMEOUT_S)
                 outcomes.append(timeout)
                 break
-            except BrokenProcessPool as broken:
+            except BrokenProcessPool as break_exc:
+                broken = True
                 LOG.warning("PAGE the extraction pool broke after %d/%d bodies (%s); the "
                             "rest of this batch is extracted on the main thread",
-                            len(outcomes), len(tasks), broken)
+                            len(outcomes), len(tasks), break_exc)
                 break
             except Exception as exc:  # noqa: BLE001 - one body's failure, carried back
                 outcomes.append(exc)
     finally:
-        if hung:
-            # The private `_processes` is the only handle on a worker stuck inside a C
-            # parse, and without it the `shutdown()` below joins it — which is the wedge
-            # this timeout exists to prevent, moved four lines down.
-            for worker in list((pool._processes or {}).values()):  # noqa: SLF001
-                worker.kill()
-        pool.shutdown(wait=not hung, cancel_futures=True)
+        if pool is not None:
+            # A HEALTHY warm pool survives the batch; a dead one is dropped so the next
+            # batch builds a fresh one rather than submitting into a corpse.
+            if hung or broken:
+                pool.discard(kill=hung)
+        else:
+            if hung:
+                # The private `_processes` is the only handle on a worker stuck inside a C
+                # parse, and without it the `shutdown()` below joins it — which is the wedge
+                # this timeout exists to prevent, moved four lines down.
+                for worker in list((executor._processes or {}).values()):  # noqa: SLF001
+                    worker.kill()
+            executor.shutdown(wait=not hung, cancel_futures=True)
     if len(outcomes) < len(tasks):
         outcomes.extend(main_thread(tasks[len(outcomes):]))
     return outcomes

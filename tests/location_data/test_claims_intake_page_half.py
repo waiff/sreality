@@ -16,6 +16,7 @@ cost exactly one listing's page entries and leave that body UNSTAMPED so it is r
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -756,3 +757,128 @@ def test_a_failed_runs_cursor_is_stamped_and_resumed_from(
 
     assert nxt.window_starts[0] == 202
     assert [s["id"] for s in nxt.stamped] == [203, 204, 205, 206]
+
+
+# ------------------------------------- W7-a2: the fast schedule mines bodies too
+
+FAST = claims_intake.Schedule(
+    lane=claims_intake.FAST_LANE, lag_minutes=2.0, bodies_first=False,
+    bodies_cap=300, bodies_budget_share=1.0, backlog_readout=False)
+
+
+def test_the_fast_schedule_mines_bodies_from_its_own_cursor(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """THE WHOLE POINT OF W7-a2. Six of the nine portals put a listing's location only in
+    the stored page BODY, so a fast lane that mined JSON alone left their new listings
+    invisible for an hour while sreality's took 134 s. The pass is the same drain, resumed
+    from the cursor the FAST lane's own batch rows carry (`_BODIES_RESUME_SQL` keys on
+    lane): the hourly lane's position is a different keyset walk and must not be inherited,
+    or the fast lane would start life believing the corpus was already walked."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=203)
+    store = _Store()
+
+    stats = _run(conn, store, schedule=FAST)
+
+    # Resumed at 203, so the three bodies below it are never re-fetched.
+    assert conn.window_starts[0] == 203
+    assert [s["id"] for s in conn.stamped] == [204, 205, 206]
+    assert stats["bodies_mined"] == 3
+    assert stats["bodies_pass_complete"] is True
+    # ...and the run-end count is not paid for at a 60 s cadence.
+    assert stats["bodies_backlog_remaining"] is None
+
+
+def test_the_fast_schedule_walks_from_zero_when_only_the_hourly_lane_has_a_cursor(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """The first tick after the deploy walks the keyset once, from 0 — the hourly lane's
+    stamp belongs to another lane string. Every tick after that resumes from what this one
+    stamped, which is why the walk is paid once and not once a minute."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=None)
+
+    stats = _run(conn, _Store(), schedule=FAST)
+
+    assert conn.window_starts[0] == 0
+    assert stats["bodies_mined"] == len(BACKLOG)
+    assert conn.finished[-1]["bodies_cursor_after_id"] == max(b[1] for b in BACKLOG)
+
+
+def test_the_fast_schedules_cap_stops_the_pass_between_batches(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """A TICK, not a drain. The cap is checked BETWEEN batches and never truncates a window:
+    the cursor advances to the window's max id, so dropping eligible rows from a window
+    would walk past bodies nothing comes back for until the next contract bump. So a tick
+    overruns the cap by at most one window's eligible set — and it leaves the pass
+    INCOMPLETE, with its cursor stamped, for the next tick to continue."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+
+    stats = _run(conn, _Store(), schedule=replace(FAST, bodies_cap=4))
+
+    # Batches of three: the second one crosses the cap, the third never starts.
+    assert stats["bodies_mined"] == 6 and stats["bodies_batches"] == 2
+    assert stats["bodies_pass_complete"] is False
+    assert conn.finished[-1]["bodies_cursor_after_id"] == 205
+
+    # The next tick continues from there rather than re-walking.
+    conn.bodies_cursor = 205
+    conn.stamped.clear()
+    rest = _run(conn, _Store(), schedule=replace(FAST, bodies_cap=4))
+    assert [s["id"] for s in conn.stamped] == [206]
+    assert rest["bodies_pass_complete"] is True
+
+
+def test_the_fast_schedules_bodies_pass_takes_the_remainder_of_the_budget(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """The hourly run splits its budget in half so the payload half is never starved by a
+    corpus-sized backlog. The fast schedule has already RUN the payload half by the time the
+    bodies pass starts, so half a budget would be half a tick thrown away: its share is the
+    whole clock, and what is left of it is what the pass gets."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+
+    def one_run(share: float) -> dict[str, Any]:
+        clock = iter(range(0, 100_000, 10))
+        monkeypatch.setattr(claims_intake.time, "monotonic", lambda: float(next(clock)))
+        conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+        stats = _run(conn, _Store(), max_seconds=100.0,
+                     schedule=replace(FAST, bodies_budget_share=share))
+        assert len(conn.stamped) == stats["bodies_mined"]
+        return stats
+
+    # Same clock, same backlog, one difference: the payload half has already spent more
+    # than half the budget by the time the bodies pass starts.
+    assert one_run(1.0)["bodies_batches"] >= 1
+    assert one_run(0.5)["bodies_batches"] == 0, "half a budget is half a tick thrown away"
+
+
+def test_the_warm_pool_is_handed_to_every_batch_and_reused(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """ONE pool per LANE, not per batch. A 1 500-body hourly batch amortises a forkserver
+    import; a tick that mines a handful a minute, for ever, would spend more time exec'ing
+    interpreters than parsing. The object is the lane's, so `extract_pages` receives the
+    same instance from every batch of every tick."""
+    seen: list[Any] = []
+
+    def capture(tasks: Any, **kwargs: Any) -> list[Any]:
+        seen.append(kwargs.get("pool"))
+        return [IntakeResult() for _ in tasks]
+
+    monkeypatch.setattr(page_readers, "extract_pages", capture)
+    pool = page_readers.ExtractionPool(2)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+
+    _run(conn, _Store(), schedule=replace(FAST, pool=pool))
+
+    assert len(seen) == 3, "three batches"
+    assert all(p is pool for p in seen)
+    # The hourly schedule keeps building one per batch.
+    seen.clear()
+    conn2 = _Conn([NO_BODY], unmined_bodies=BACKLOG)
+    _run(conn2, _Store())
+    assert seen and all(p is None for p in seen)

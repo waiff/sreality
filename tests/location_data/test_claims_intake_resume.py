@@ -525,13 +525,16 @@ def test_a_run_with_no_room_for_another_batch_hands_off_nothing(
 
 # ----------------------------------------------- W7-a: one lane, TWO SCHEDULES
 
+FAST = claims_intake.Schedule(
+    lane=claims_intake.FAST_LANE, lag_minutes=2.0, bodies_first=False,
+    bodies_cap=300, bodies_budget_share=1.0, backlog_readout=False)
+
+
 def _fast(conn: _Conn, **kwargs: Any) -> dict[str, Any]:
-    """The worker's fast schedule: the same `run()`, its own lane, a 2-minute lag, no
-    bodies."""
+    """The worker's fast schedule: the same `run()`, its own lane, a 2-minute lag, the JSON
+    half first and a capped bodies pass on the remainder of the budget."""
     defaults: dict[str, Any] = {
-        "mode": "incremental", "lane": claims_intake.FAST_LANE,
-        "lag_minutes": 2.0, "skip_bodies": True, "batch_size": 10,
-    }
+        "mode": "incremental", "schedule": FAST, "batch_size": 10}
     defaults.update(kwargs)
     return _run(conn, **defaults)
 
@@ -579,17 +582,21 @@ def test_the_lag_the_caller_passes_is_the_lag_the_keyset_applies():
     assert conn.seen == [1]
 
 
-def test_the_fast_schedule_mines_no_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`skip_bodies` is not a log line: no R2 client is opened, no scope register is loaded,
-    and the bodies-first pass reports itself complete (a pass that could never run reached
-    its end — the hourly chain reads that field). A 45 s tick that reached for the bucket
-    would spend its budget on the hourly lane's corpus-sized backlog."""
-    def never(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("the fast schedule must not touch the page-body half")
+def test_the_fast_schedule_runs_the_json_half_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE INVERSION (W7-a2). The hourly run drains bodies first because its backlog is
+    bounded by the corpus; a 45 s tick that did the same would spend its whole budget there
+    and never open the listing a minute old. So the JSON half runs first and the bodies pass
+    takes the REMAINDER — with a cap, and no run-end backlog count to pay for."""
+    seen_when_bodies_ran: list[int] = []
+    captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(claims_intake, "_open_body_store", never)
-    monkeypatch.setattr(claims_intake.page_readers, "load_registers", never)
-    monkeypatch.setattr(claims_intake.page_readers, "extract_pages", never)
+    def record(conn_: Any, **kwargs: Any) -> None:
+        seen_when_bodies_ran.append(len(conn.seen))
+        captured.update(kwargs)
+
+    monkeypatch.setattr(claims_intake, "drain_unmined_bodies", record)
     conn = _Conn([_Listing(1, BASE_TS)])
     _fast(conn)
     conn.change([1], age_minutes=5)
@@ -597,8 +604,11 @@ def test_the_fast_schedule_mines_no_bodies(monkeypatch: pytest.MonkeyPatch) -> N
     stats = _fast(conn)
 
     assert stats["listings"] == 1
-    assert stats["bodies_mined"] == 0
-    assert stats["bodies_pass_complete"] is True
+    assert seen_when_bodies_ran == [0, 1], "the scan had already run both times"
+    schedule = captured["schedule"]
+    assert schedule.bodies_cap == 300
+    assert schedule.bodies_budget_share == 1.0
+    assert schedule.backlog_readout is False
     assert stats["bodies_backlog_remaining"] is None
 
 

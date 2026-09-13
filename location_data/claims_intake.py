@@ -1065,7 +1065,7 @@ def _active_contract_versions(conn: psycopg.Connection) -> str:
 
 
 def _bodies_resume_point(
-    conn: psycopg.Connection, *, source: str | None, versions: str,
+    conn: psycopg.Connection, *, source: str | None, versions: str, lane: str = LANE,
 ) -> int:
     """Where the bodies-first pass picks up: the newest FINISHED run's cursor, or 0.
 
@@ -1078,7 +1078,7 @@ def _bodies_resume_point(
     only advances past a batch whose transaction closed.
     """
     with conn.cursor() as cur:
-        cur.execute(_BODIES_RESUME_SQL, {"lane": LANE, "source": source})
+        cur.execute(_BODIES_RESUME_SQL, {"lane": lane, "source": source})
         row = cur.fetchone()
     if not row or row[0] is None or row[1] != versions:
         return 0
@@ -1206,6 +1206,55 @@ class _Budget:
         return left is None or left > estimate
 
 
+# ------------------------------------------------------------------ the schedule
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """WHAT DIFFERS BETWEEN THE TWO SCHEDULES OF THE ONE LANE (W7-a, W7-a2).
+
+    Every default IS the hourly GitHub run, so `run()` with no schedule behaves byte for
+    byte as it did — the fields exist because the realtime worker runs the SAME function on
+    a minute's cadence and a 45 s budget, which changes five things and nothing else.
+
+      * `lane` — the resume key. `location_claim_batches` resumes on (lane, source,
+        scan_mode) for the listing keyset and on (lane, source) for the bodies keyset, so
+        two schedules under one lane string would read and move each other's cursors.
+      * `lag_minutes` — how far behind the clock the snapshot window stands. The rail the
+        fast schedule trades away is re-taken by the hourly one (see `_SNAPSHOT_SEED_SQL`).
+      * `bodies_first` — the hourly run drains bodies FIRST, because its backlog is bounded
+        by the corpus and can be 250 000 rows behind. The fast schedule runs the JSON half
+        first (that is the half a new listing needs within a minute) and gives the bodies
+        pass whatever budget is left.
+      * `bodies_cap` — a ceiling on bodies MINED per run, checked BETWEEN batches like every
+        other rail here, so a tick can exceed it by at most one window's eligible set. It is
+        deliberately NOT a truncation inside a window: the bodies cursor advances to the
+        window's max id, so dropping eligible rows from a window would walk past bodies
+        nothing would ever come back for.
+      * `backlog_readout` — the run-end `count(*)`. It is the hourly chain's signal; a
+        60 s-cadence lane that paid for it every tick would spend more time counting the
+        backlog than draining it.
+
+    `pool` is not a schedule difference but a lifetime one: a warm `ExtractionPool` for a
+    lane that runs a batch a minute for ever (W7-a2). None = build one per batch, as before.
+    """
+
+    lane: str = LANE
+    lag_minutes: float = DEFAULT_SNAPSHOT_LAG_MINUTES
+    bodies_first: bool = True
+    bodies_cap: int | None = None
+    bodies_budget_share: float = BODIES_BUDGET_SHARE
+    backlog_readout: bool = True
+    pool: page_readers.ExtractionPool | None = None
+
+    @property
+    def lag_seconds(self) -> float:
+        return max(0.0, float(self.lag_minutes) * 60.0)
+
+
+HOURLY = Schedule()
+
+
 # ------------------------------------------------------------------ the run
 
 
@@ -1268,6 +1317,7 @@ def mine_bodies(
     registers: dict[str, page_readers.ScopeRegister],
     store: page_readers.BodyStore | None, result: IntakeResult,
     stats: dict[str, Any], max_value_bytes: int,
+    pool: page_readers.ExtractionPool | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch, extract and account for one set of stored bodies; returns the stamps to write.
 
@@ -1300,7 +1350,7 @@ def mine_bodies(
     outcomes = page_readers.extract_pages(
         [(row, body) for row, body, _ in minable],
         entries_by_source=entries_by_source, registers=registers,
-        max_value_bytes=max_value_bytes)
+        max_value_bytes=max_value_bytes, pool=pool)
     stats["body_extract_seconds"] += time.monotonic() - extract_started
     # The rate's numerator: bodies that reached the extractor, not bodies the bucket served.
     # A fetched body with no register never cost a parse and would flatter the rate.
@@ -1365,7 +1415,7 @@ def drain_unmined_bodies(
     registers: dict[str, page_readers.ScopeRegister],
     store: page_readers.BodyStore | None, cap: int, statement_timeout: int,
     budget: _Budget, batch_id: int | None, dry_run: bool, max_value_bytes: int,
-    stats: dict[str, Any], refusals: dict[str, int],
+    stats: dict[str, Any], refusals: dict[str, int], schedule: Schedule = HOURLY,
 ) -> None:
     """The page half's OWN pass, ahead of the listing scan (W1-a2).
 
@@ -1397,7 +1447,8 @@ def drain_unmined_bodies(
         return
     versions = _active_contract_versions(conn)
     stats["bodies_cursor_versions"] = versions
-    after_body_id = _bodies_resume_point(conn, source=source, versions=versions)
+    after_body_id = _bodies_resume_point(
+        conn, source=source, versions=versions, lane=schedule.lane)
     stats["bodies_resumed_from_id"] = after_body_id
     stats["bodies_cursor_after_id"] = after_body_id
     if after_body_id:
@@ -1405,10 +1456,19 @@ def drain_unmined_bodies(
     else:
         LOG.info("INTAKE bodies-first walking from the start for versions=%s", versions)
     while True:
-        if not budget.room_for(last_seconds, BODIES_BUDGET_SHARE):
+        share = schedule.bodies_budget_share
+        if not budget.room_for(last_seconds, share):
             LOG.info("INTAKE bodies-first stopping: %.0fs of the half budget left, the "
-                     "last batch took %.0fs", budget.left(BODIES_BUDGET_SHARE) or 0.0,
+                     "last batch took %.0fs", budget.left(share) or 0.0,
                      last_seconds)
+            break
+        # THE CAP IS CHECKED BETWEEN BATCHES, never inside a window: the cursor advances to
+        # the WINDOW's max id, so a truncated window would walk past eligible bodies that
+        # nothing comes back for until the next contract bump. A tick therefore overruns the
+        # cap by at most one window's eligible set — the same shape as the budget rail.
+        if schedule.bodies_cap is not None and stats["bodies_mined"] >= schedule.bodies_cap:
+            LOG.info("INTAKE bodies-first stopping: %d bodies mined this run reaches the "
+                     "cap of %d", stats["bodies_mined"], schedule.bodies_cap)
             break
         batch_started = time.monotonic()
         extract_before = stats["body_extract_seconds"]
@@ -1447,7 +1507,7 @@ def drain_unmined_bodies(
             stamps = mine_bodies(
                 cur, candidates, entries_by_source=entries_by_source,
                 registers=registers, store=store, result=result, stats=stats,
-                max_value_bytes=max_value_bytes)
+                max_value_bytes=max_value_bytes, pool=schedule.pool)
             stats["claims"] += len(result.claims)
             stats["claims_page"] += len(result.claims)
             for reason, count in result.refusals.items():
@@ -1508,13 +1568,12 @@ def run(
     dry_run: bool,
     note: str | None,
     store: page_readers.BodyStore | None = None,
-    lane: str = LANE,
-    lag_minutes: float = DEFAULT_SNAPSHOT_LAG_MINUTES,
-    skip_bodies: bool = False,
+    schedule: Schedule = HOURLY,
 ) -> dict[str, Any]:
-    """One pass of the claim lane. The last three parameters are the W7-a SCHEDULE knobs —
-    their defaults ARE the hourly GitHub run, which must keep behaving byte for byte."""
-    lag_seconds = max(0.0, float(lag_minutes) * 60.0)
+    """One pass of the claim lane. `schedule` is what differs between the hourly GitHub run
+    and the realtime worker's minute tick — its DEFAULT is the hourly run, byte for byte."""
+    lane = schedule.lane
+    lag_seconds = schedule.lag_seconds
     missing = missing_relations(conn)
     if missing:
         raise IntakeRefused(
@@ -1543,21 +1602,12 @@ def run(
     # kind has no body this lane can mine. Without the distinction the bodies-first pass
     # would select that portal's rows every batch, stamp none of them, and stop on its own
     # no-progress rail with the rest of the backlog untouched.
-    #
-    # `skip_bodies` EMPTIES THIS SET rather than branching further down (W7-a): with no
-    # page-capable portal the bodies-first pass is skipped, `_body_candidate` returns None
-    # for every row, and `page_readers.extract_pages` — the forkserver process pool — is
-    # never built. A 45 s worker tick must cost one R2-free payload scan and nothing else.
-    page_capable = set() if skip_bodies else {
+    page_capable = {
         s for s in wanted
         if page_readers.page_entries(entries_by_source.get(s, []), "detail")
     }
     registers = page_readers.load_registers(conn) if page_capable else {}
-    if skip_bodies:
-        # Dropped even when the caller passed one: `_body_candidate` gates on the store,
-        # so keeping it would leave the opportunistic mining live in a bodies-free pass.
-        store = None
-    elif store is None:
+    if store is None:
         store = _open_body_store(bool(page_capable))
     body_cap = env_positive_int(BODY_FETCH_CAP_ENV, DEFAULT_BODY_FETCH_CAP)
 
@@ -1634,14 +1684,20 @@ def run(
     scan_mode = mode
     row_count_base = 0
     try:
-        # BODIES FIRST. The backlog is bounded by the corpus, the payload half by the hour's
-        # change, and only the first of those can be behind by 250 000 rows.
-        drain_unmined_bodies(
-            conn, source=source, page_sources=page_capable,
-            entries_by_source=entries_by_source, registers=registers, store=store,
-            cap=body_cap, statement_timeout=statement_timeout, budget=budget,
-            batch_id=batch_id, dry_run=dry_run, max_value_bytes=max_value_bytes,
-            stats=stats, refusals=refusals)
+        # BODIES FIRST, on the hourly schedule: its backlog is bounded by the CORPUS and
+        # the payload half only by the hour's change, and only the first of those can be
+        # 250 000 rows behind. The fast schedule inverts it (W7-a2) — the JSON half is what
+        # a minute-old listing needs, and the bodies pass takes the remainder of the budget.
+        def drain_bodies() -> None:
+            drain_unmined_bodies(
+                conn, source=source, page_sources=page_capable,
+                entries_by_source=entries_by_source, registers=registers, store=store,
+                cap=body_cap, statement_timeout=statement_timeout, budget=budget,
+                batch_id=batch_id, dry_run=dry_run, max_value_bytes=max_value_bytes,
+                stats=stats, refusals=refusals, schedule=schedule)
+
+        if schedule.bodies_first:
+            drain_bodies()
 
         payload_started = time.monotonic()
         last_seconds = 0.0
@@ -1750,6 +1806,8 @@ def run(
                      stats["body_fetch_seconds"], stats["body_extract_seconds"],
                      stats["refusals"], after_id, last_seconds)
         stats["payload_seconds"] = time.monotonic() - payload_started
+        if not schedule.bodies_first:
+            drain_bodies()
     except Exception as exc:
         if batch_id is not None:
             # Guarded like every other write, and for a sharper reason: this is the
@@ -1802,7 +1860,7 @@ def run(
     # 60 s ceiling, run once the budget is spent. Ahead of the stamp it could push the job
     # past `timeout-minutes: 55` and lose the cursor of a run that had otherwise finished
     # cleanly. Nothing below this line decides whether the run is resumable.
-    if page_capable and store is not None:
+    if schedule.backlog_readout and page_capable and store is not None:
         stats["bodies_backlog_remaining"] = _unmined_body_backlog(
             conn, source=source, page_sources=page_capable,
             after_body_id=int(stats["bodies_cursor_after_id"]))
