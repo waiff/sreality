@@ -297,12 +297,18 @@ def test_the_snapshot_window_stands_behind_the_wall_clock():
     multi-statement transaction, concurrently across the per-portal drains and the realtime
     worker. A row whose id is BELOW an already-advanced cursor can therefore become visible
     after that cursor moved — and `s.id > after_id` never looks back, so that listing's
-    content change is skipped PERMANENTLY. The window stands 15 minutes behind the clock;
-    the seed takes the same predicate, or a cold start would jump over the in-flight ids
-    instead of stopping short of them."""
-    lag = "scraped_at < now() - interval '15 minutes'"
+    content change is skipped PERMANENTLY. The window stands behind the clock; the seed
+    takes the same predicate, or a cold start would jump over the in-flight ids instead of
+    stopping short of them.
+
+    W7-a made HOW FAR back the SCHEDULE's parameter — 15 minutes hourly, 2 minutes on the
+    realtime worker's fast lane, which carries its own cursor and whose skips the hourly run
+    re-reads within the hour. What must not move: one predicate, in both statements, and a
+    DEFAULT that is still the rail, so a caller that passes nothing gets 15 minutes."""
+    lag = "scraped_at < now() - make_interval(secs => %(lag_seconds)s::double precision)"
     assert f"s.{lag}" in " ".join(_LISTINGS_INCREMENTAL_SQL.split())
     assert lag in " ".join(_SNAPSHOT_SEED_SQL.split())
+    assert claims_intake.DEFAULT_SNAPSHOT_LAG_MINUTES == 15.0
 
 
 def test_the_cold_start_seeds_at_the_old_lane_s_own_anchor():

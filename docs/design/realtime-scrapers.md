@@ -216,6 +216,36 @@ Two caveats this lane accepts rather than fixes:
   interval 0) → wait ≤ interval + one pass → run the epoch job → re-enable. A shared lease for the
   epoch job (or an epoch re-check between batches) is the real fix, and is a follow-up.
 
+**Location-intake-fast lane (W7-a, ships LIVE):** the claim lane's change-driven listing scan
+(`location_data.claims_intake.run`, `mode="incremental"`) also runs from this worker, every ~60 s.
+Not a second lane — a second SCHEDULE for the same module. The hourly `location_claims_intake.yml`
+plus its 15-minute snapshot lag left a listing written 45 s after a tick with no claims and no
+verdict for up to ~75 minutes, and under W5 the consumers serve only resolved locations, so that is
+~75 minutes invisible in Browse (measured 2026-09-13). The worker pass is the payload half only —
+`skip_bodies=True`: no bodies-first drain, no R2 client, no `forkserver` pool — with a **2-minute**
+lag, a 45 s budget and 2 000-row batches. Env knobs on the Railway service:
+`LOCATION_INTAKE_FAST_{ENABLED,INTERVAL_S,LAG_S,BUDGET_S}` (`1`/60/120/45); `ENABLED=0` idles it.
+- **No lease; the CURSOR is the coordination.** `location_claim_batches` resumes on `(lane, source,
+  scan_mode)` and this schedule stamps `claims_intake.FAST_LANE`, so it can neither read nor advance
+  the hourly run's position. That separation is also what makes the short lag safe: the lag guards a
+  bigserial race (an id allocated at INSERT, visible at COMMIT, below a keyset that already moved),
+  so a 2-minute window WILL skip such a row occasionally — and the hourly run, still 15 minutes back
+  on its own cursor, re-reads exactly that slice within the hour. Mining twice is free (claim
+  fingerprints `ON CONFLICT DO NOTHING`, the resolve enqueue a bump).
+- **An in-process lock, same argument as the resolve lane.** A pass abandoned at
+  `LANE_PASS_TIMEOUT_SECONDS` keeps running; two scans sharing one cursor would each re-read the
+  other's window. `_INTAKE_FAST_PASS_LOCK` is taken non-blockingly for the whole pass and a tick
+  that cannot take it returns `{"ran": false, "previous_pass_running": true}`.
+- **It never inherits the full walk.** `_full_walk_handoff` looks that cursor up BY LANE and this
+  schedule never runs `--mode full`, so a 45 s tick cannot pick up a ~376k-listing contract re-walk.
+- **The contracts are projected from the image once at lane start** (`contracts/` is in the Docker
+  image already, for `payload_norm`), idempotent per `(portal, contract_version)`. A failure is a
+  WARNING, never a dead lane: the projection raises by design when a contract's governed bytes moved
+  without a version bump, and `location_claims_intake.yml` is the authoritative projector.
+- **Latency, detail write to Browse:** ≤2 min lag → ≤1 min tick → the resolve lane (~15 s) →
+  `browse_list`'s `*/15` pg_cron rebuild. Claim and verdict in ~3–4 minutes; the read model is now
+  the slowest hop, not the claim lane.
+
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as
 % of portal size — line ~264), close silent-greens (image-pipeline liveness, dedup
