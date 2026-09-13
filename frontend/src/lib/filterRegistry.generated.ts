@@ -2150,7 +2150,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "city_index_rule_list",
       "pg_column": null,
       "default": null,
-      "description": "Filter listings to those located in a curated city whose qualitative indexes meet every rule in the list. Each rule is `{index_name: str, op: '>='|'<='|'>'|'<'|'=='|'!=', value: float}`; an unrecognised op falls back to `>=`. Rules are AND'd. `index_name` is a slug from `city_index_definitions_public` (e.g. `bezpecnost`, `prakticti_lekari`). A listing matches when its MUNICIPALITY (`listings.obec_id`) is one of the curated cities whose indexes satisfy every rule — resolved once by `curated_cities_matching()` (migration 436). Listings with no municipality are excluded.",
+      "description": "Filter listings to those located in a curated city whose qualitative indexes meet every rule in the list. Each rule is `{index_name: str, op: '>='|'<='|'>'|'<'|'=='|'!=', value: float}`; an unrecognised op falls back to `>=`. Rules are AND'd. `index_name` is a slug from `city_index_definitions_public` (e.g. `bezpecnost`, `prakticti_lekari`). A listing matches when its MUNICIPALITY (`properties_public.obec_id`, sourced from `listing_location`) is one of the curated cities whose indexes satisfy every rule — resolved once by `curated_cities_matching()` (migration 436). Listings with no municipality are excluded.",
       "category": "City quality",
       "ui_control": "city_index_rules",
       "agendas": [

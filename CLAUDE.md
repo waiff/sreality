@@ -245,19 +245,18 @@ incident history: `docs/architecture.md` § Architectural rules.
     (`tests/test_measure_registry_census.py` + `toolkit.measures.REGISTERED_SITES` — three arms over six
     source trees + every migration statement; it names its own blind spots, so read them before trusting
     a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
-24. **ONE location path: `listing_location` (mig 501 — grade axes NOT NULL, RÚIAN codes, `disputed`), read by
-    the resolver's consumers.** W2-b (mig 502) dropped the W1 `*_location_current` projections + every
-    resolver-side relation, and deleted `serving_flags.py` — there is no serving flag; flipping a reader is
-    a PR. W4-c (mig 508) DROPPED the legacy `listings`/`properties` place columns (`geom`, `obec_id`…`ku_id`,
-    `street`/`street_name_key`, trigger 289) — there is no second store to read, only `ll.geom::geography`.
-    W3 S4 (mig 506) deleted `serving_contracts.py` too; granularity compares by RANK, never back-ported.
-25. **Location: one store, one lane, eleven claim types, no flags; every location PR deletes at least as much
-    as it adds.** One answer table (`listing_location`, 26 fields) by ONE four-step resolver (bind → fill →
-    grade → check), one hourly intake lane over the payload + page body, ≤ 1 contract entry per claim type + a
-    reader, **town entry mandatory and live**. Invariant: **every active listing has a row, every active Czech
-    listing has a town** (`location_town_coverage` red until zero; foreign is a determination, never a
-    default). Nothing is added "in case": a field only after a measured slowdown, only to `browse_list`.
-    Supersedes 24 as the waves land. § rule 25 in `docs/architecture.md`.
+24. **Folded into 25** (kept so the citations don't break — rules are never renumbered).
+25. **Location: one store, one lane, one label, one code predicate; every location PR deletes at least
+    as much as it adds.** `listing_location` (26 columns, mig 501) is the ONLY place a listing's location
+    is stored — `listings`/`properties` carry none (mig 508), and there is no serving flag and no
+    granularity floor — so a place read joins `ll on ll.listing_id = l.id` and casts `ll.geom::geography`
+    for metres (uncast measures DEGREES). ONE hourly lane (`claims_intake`) writes `location_claims` off
+    the stored payload + page body; ONE four-step resolver (bind → fill → grade → check) writes the answer
+    table; ELEVEN claim types, ≤ 1 contract entry each, the `obec_name` entry mandatory and live; every
+    display is `location_display_label`, every place filter `<level>_id = any(codes)` at four levels.
+    Invariant: **every served listing has a row, every active Czech listing has a town**
+    (`location_town_coverage` red until zero; foreign is a determination, never a default); a field is
+    added only after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
 
 Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
 these rules touch.
