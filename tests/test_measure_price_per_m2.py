@@ -76,8 +76,13 @@ def _seed(
 ) -> tuple[int, int]:
     """One property and its single representative child, with a coherent
     numerator and denominator (that coherence is W3 / migration 424's job; this
-    wave assumes it and measures the ratio). No place at all: W4-c dropped every
-    location column from both tables, and the per-m2 measure never read one."""
+    wave assumes it and measures the ratio).
+
+    It carries a RESOLVED location even though the per-m2 measure never reads one:
+    W5's consumer rule (migration 512) means `browse_projection` publishes a
+    property only when its display listing has an answer in `listing_location`, so
+    a placeless seed is simply not a Browse row any more and there would be nothing
+    to measure. The point is arbitrary; only its EXISTENCE is load-bearing."""
     sid = next(_SREALITY_IDS)
 
     cur.execute("INSERT INTO properties DEFAULT VALUES RETURNING id")
@@ -101,6 +106,17 @@ def _seed(
         "       repr_listing_ref_id = %s "
         " WHERE id = %s",
         (category_main, category_type, price, area, sid, lid, pid),
+    )
+
+    # The W5 consumer rule: no answer row, no Browse row. All four grade/status
+    # columns are NOT NULL by design (a NULL reads as "no gate" and fails open).
+    cur.execute(
+        "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
+        "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
+        "  registry_version) "
+        "VALUES (%s, ST_SetSRID(ST_MakePoint(14.42, 50.08), 4326), 'exact', 'building', "
+        "  5, 'cz', 'test', '\\x00'::bytea, 'test')",
+        (lid,),
     )
 
     # browse_list is a materialised copy of browse_projection (`select *`), so
@@ -342,16 +358,11 @@ def test_a_mixed_cohort_is_labelled_mixed_not_guessed(cur):
     cohort pooling a capital sale and a monthly rent is ONE click away. It must
     say so rather than pick one of the two."""
     sale, _l1 = _seed(cur, price=5_000_000, area=50.0)
-    cur.execute(
-        "INSERT INTO properties (category_main, category_type, current_price_czk, "
-        "area_m2, status, is_active, published_at) "
-        "VALUES ('byt', 'pronajem', 20000, 50, 'active', true, now()) RETURNING id"
-    )
-    rent = int(cur.fetchone()[0])
-    cur.execute(
-        "INSERT INTO browse_list SELECT * FROM browse_projection WHERE property_id = %s",
-        (rent,),
-    )
+    # Both halves of the cohort go through `_seed`. The rent side used to be a bare
+    # `properties` INSERT with no child at all, which W5's consumer rule drops from
+    # `browse_projection` — a property with no display listing has no location, so it
+    # is not a Browse row. A childless property was never a real cohort member anyway.
+    rent, _l2 = _seed(cur, price=20_000, area=50.0, category_type="pronajem")
 
     stats = _browse_stats(cur, [sale, rent])
     assert stats["total"] == 2, stats

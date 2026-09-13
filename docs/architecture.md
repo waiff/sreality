@@ -2178,6 +2178,32 @@ and the reason the red line gates everything downstream. Browse and the map read
 COPIES those fields at rebuild, so no consumer query joins the store; a field is added only after a
 measured slowdown, and only there.
 
+**THE CONSUMER RULE** (operator ruling 2026-09-13, W5). A listing is SERVED to consumers only when
+`listing_location` has an ANSWER for it — a point, or the determination `country_status = 'foreign'`;
+everything else stays invisible until the lane resolves it. It is not a flag and not a column but a
+predicate over the store itself — `location_data.claims_common.SERVED_LOCATION_PREDICATE`, ONE text
+rendered onto each surface's own listing-id expression — so it covers the 36,981-row migration-510
+audit set, every future listing whose page carries no location, and nothing else; a row returns the
+moment it has a geom, with no backfill and nothing to re-stamp. It is carried by the two LIST
+surfaces — `browse_projection` (keyed on the property's display listing, so `browse_list`,
+`properties_map_mv`, `browse_stats_properties` and `browse_map_cells` all inherit it) and
+`listing_feed_public` — plus, in code, the watchdog matcher (`api/notifications._build_match_clauses`,
+which reads `properties_public` and so cannot inherit) and path C candidate generation
+(`toolkit/dedup_candidates_sql`); `toolkit/comparables._shared_filter_where` needs no clause because
+its `ll.geom IS NOT NULL` is the same rule minus the foreign arm. **DETAIL STAYS REACHABLE**:
+`listings_public`, `properties_public` and `pipeline_board_public` are read by id, so a direct link,
+the extension, the audit page's own links and an operator's pipeline card (rule 22 operator state)
+all keep working on an unresolved listing. Measured at the ruling: 44,702 of 711,600 Browse rows,
+2,953 of them still-live ads. `check_location_town_coverage` reports the count per portal as
+`hidden_n` — a workload number that never moves the check's status. The operator watches the same
+set on `/new-dedup/pin-audit`, whose relation `location_pin_audit_mv` (migration 514) IS that
+definition — `SERVED_LISTING_PREDICATE` minus `SERVED_LOCATION_PREDICATE`, refreshed hourly by
+pg_cron, leading the nav with its count — so the page and the rule can never describe different
+sets. It carries no map: the whole subject is rows with no point to draw. Migration 510's
+property-and-legacy-pin version of that relation stays on disk as history (append-only, rule 1); it
+was retired by 513 because it read five `properties` place columns 508 drops, and 514 re-creates the
+name on inputs that cannot expire the same way.
+
 **WHAT REMAINS OUTSIDE THE STORE, AND WHY.**
 
 * `admin_boundaries` — price stats, the rent map and city proximity still read its geometry and

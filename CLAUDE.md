@@ -126,8 +126,8 @@ restructure is its own PR.
   rather than re-deriving from memory.
 ## Architectural rules (do not violate without asking)
 
-**Numbers are cited by code/tests/design-docs — never renumber.** Full rationale, edge cases, and
-incident history: `docs/architecture.md` § Architectural rules.
+**Numbers are cited by code/tests/design-docs — never renumber.** Full rationale, edge cases and incident
+history: `docs/architecture.md` § Architectural rules — read it BEFORE modifying anything they touch.
 
 1. **Migrations are append-only.** Never edit an existing numbered file; schema changes go in a new
    `NNN_*.sql`, applied via the Supabase MCP. Additive = autonomous; destructive = pause for OK +
@@ -249,17 +249,16 @@ incident history: `docs/architecture.md` § Architectural rules.
 25. **Location: one store, one lane, one label, one code predicate; every location PR deletes at least
     as much as it adds.** `listing_location` (26 columns, mig 501) is the ONLY place a listing's location
     is stored — `listings`/`properties` carry none (mig 508), and there is no serving flag and no
-    granularity floor — so a place read joins `ll on ll.listing_id = l.id` and casts `ll.geom::geography`
-    for metres (uncast measures DEGREES). ONE hourly lane (`claims_intake`) writes `location_claims` off
-    the stored payload + page body; ONE four-step resolver (bind → fill → grade → check) writes the answer
+    granularity floor — so a place read joins `ll on ll.listing_id = l.id`, casting `ll.geom::geography`
+    for metres (uncast = DEGREES). ONE hourly lane (`claims_intake`) writes `location_claims` off the
+    stored payload + page body; ONE four-step resolver (bind → fill → grade → check) writes the answer
     table; ELEVEN claim types, ≤ 1 contract entry each, the `obec_name` entry mandatory and live; every
     display is `location_display_label`, every place filter `<level>_id = any(codes)` at four levels.
-    Invariant: **every served listing has a row, every active Czech listing has a town**
-    (`location_town_coverage` red until zero; foreign is a determination, never a default); a field is
-    added only after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
-
-Full rationale, edge cases, and incident history: read `docs/architecture.md` before modifying anything
-these rules touch.
+    CONSUMERS (browse/map/feed/watchdog/dedup) serve a listing only when its location is resolved or
+    determined foreign — ONE predicate (`claims_common.SERVED_LOCATION_PREDICATE`, mig 514); detail-by-id
+    surfaces stay reachable. Invariant: **every served listing has a row, every active Czech listing has
+    a town** (`location_town_coverage` red until zero; foreign is a determination, never a default); a
+    field is added only after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
 ## Coding conventions
 
 - Python 3.12, type hints on every signature. Prefer the stdlib; justify each dependency.

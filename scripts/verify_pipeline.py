@@ -49,6 +49,7 @@ from urllib.parse import urlencode
 
 import requests
 
+from location_data.claims_common import SERVED_LOCATION_PREDICATE
 from scraper import media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
@@ -2528,7 +2529,14 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
 # names the cohort the old scope could not see. `active_n` / `no_row_n` / `cz_no_town_n` /
 # `town_n` keep their old meaning by filtering on `l.is_active`, so the per-portal series is
 # continuous across this change.
-_LOCATION_TOWN_COVERAGE_SQL = """
+# `hidden_n` is the W5 consumer rule counted OUTSIDE the audit page (operator ruling
+# 2026-09-13): of the listings Browse's population reaches, how many the consumer
+# surfaces now refuse to serve because the store has no answer for them. It is the
+# ONE definition (location_data.claims_common.SERVED_LOCATION_PREDICATE), negated —
+# never a hand-written `geom IS NULL`, which would drift the day the rule gains an arm.
+# Reported per portal and never a threshold: it is a WORKLOAD number, not a failure.
+# The check's own red/green stays `no_row + cz_no_town + display_no_row`.
+_LOCATION_TOWN_COVERAGE_SQL = f"""
     SELECT l.source,
            count(*) FILTER (WHERE l.is_active)                         AS active_n,
            count(*) FILTER (WHERE l.is_active
@@ -2540,7 +2548,8 @@ _LOCATION_TOWN_COVERAGE_SQL = """
            count(*) FILTER (WHERE l.is_active
                               AND p.obec_kod IS NOT NULL)              AS town_n,
            count(*) FILTER (WHERE NOT l.is_active
-                              AND p.listing_id IS NULL)                AS display_no_row_n
+                              AND p.listing_id IS NULL)                AS display_no_row_n,
+           count(*) FILTER (WHERE NOT {SERVED_LOCATION_PREDICATE})     AS hidden_n
       FROM listings l
       LEFT JOIN listing_location p ON p.listing_id = l.id
      WHERE l.is_active
@@ -2558,15 +2567,20 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
 
     Three counts, not two (W2-a4): `display_no_row` is the display listing of an ACTIVE
     property that is itself delisted — a Browse row, and after W3 a Browse row with no place
-    and no map pin. It is red for the same reason and on the same line."""
+    and no map pin. It is red for the same reason and on the same line.
+
+    `hidden` (W5) is the fourth, and the only one that is not a defect: the listings the
+    consumer rule now refuses to serve. It rides the same read so the number the audit page
+    shows is visible from the pipeline verifier too, and it never changes the status."""
     rows = _fetchall(conn, _LOCATION_TOWN_COVERAGE_SQL)
     cells = [{"source": s, "active": int(a), "no_row": int(nr), "cz_no_town": int(nt),
-              "town": int(t), "display_no_row": int(dnr),
+              "town": int(t), "display_no_row": int(dnr), "hidden": int(h),
               "town_share": (int(t) / int(a)) if int(a) else None}
-             for s, a, nr, nt, t, dnr in rows]
+             for s, a, nr, nt, t, dnr, h in rows]
     no_row = sum(c["no_row"] for c in cells)
     cz_no_town = sum(c["cz_no_town"] for c in cells)
     display_no_row = sum(c["display_no_row"] for c in cells)
+    hidden = sum(c["hidden"] for c in cells)
     active = sum(c["active"] for c in cells)
     if not cells:
         return {"check_key": "location_town_coverage", "status": "warn", "value": None,
@@ -2576,6 +2590,10 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
                  f"without a town, {c['display_no_row']:,} delisted display listings "
                  f"without a row (of {c['active']:,})"
                  for c in cells if c["no_row"] or c["cz_no_town"] or c["display_no_row"]]
+    hidden_by_source = "; ".join(
+        f"{c['source']} {c['hidden']:,}"
+        for c in sorted(cells, key=lambda c: -c["hidden"]) if c["hidden"]
+    )
     missing = no_row + cz_no_town + display_no_row
     status = "fail" if missing else "ok"
     message = (
@@ -2587,12 +2605,16 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
         else f"Every one of {active:,} active listings has an answer row, every Czech one a "
              "town, and every delisted display listing Browse serves has a row too."
     )
+    if hidden:
+        message += (
+            f" Consumers currently hide {hidden:,} unresolved listings ({hidden_by_source})."
+        )
     return {
         "check_key": "location_town_coverage",
         "status": status,
         "value": missing,
         "details": {"active": active, "no_row": no_row, "cz_no_town": cz_no_town,
-                    "display_no_row": display_no_row,
+                    "display_no_row": display_no_row, "hidden": hidden,
                     "cells": cells, "offenders": offenders},
         "message": message,
     }

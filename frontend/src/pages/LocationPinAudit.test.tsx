@@ -1,5 +1,6 @@
-/* The pin-loss audit page. Three properties are worth pinning down, because
- * each is a way the page could quietly mislead the operator:
+/* The audit page — the set W5 hides from consumers (migration 514). Three
+ * properties are worth pinning down, because each is a way the page could
+ * quietly mislead the operator:
  *   - the matrix reports what the summary payload says (no client arithmetic
  *     of its own invents or drops a listing);
  *   - a filter reaches the SERVER, so the list under a matrix cell is the same
@@ -23,15 +24,8 @@ vi.mock('@/lib/pinAudit', async (importOriginal) => {
     ...actual,
     fetchPinAuditSummary: vi.fn(),
     fetchPinAuditPage: vi.fn(),
-    fetchPinAuditPoints: vi.fn(),
   };
 });
-
-/* maplibre does not run under jsdom (no WebGL); the map is lazy anyway, so the
- * page must render its table without it. */
-vi.mock('@/components/PinAuditMap', () => ({
-  default: () => <div data-testid="pin-audit-map" />,
-}));
 
 const REFRESHED = '2026-09-13T05:25:00Z';
 
@@ -55,15 +49,11 @@ const ROW: pinAudit.PinAuditRow = {
   category_type: 'pronajem',
   disposition: '1+1',
   area_m2: 47,
-  street: 'Korunní',
-  locality: 'Korunní, Praha 2 - Vinohrady',
-  district: 'Praha 2 - Vinohrady',
+  display_label: 'Korunní 123/4, Praha 2',
   price_czk: 24000,
   is_active: false,
   first_seen_at: '2026-05-01T20:18:00Z',
   last_seen_at: '2026-05-05T11:51:57Z',
-  legacy_lat: 50.0754365,
-  legacy_lng: 14.4402663,
   country_status: 'undetermined',
   granularity: 'unknown',
   match_confidence: 'low',
@@ -96,19 +86,6 @@ describe('LocationPinAudit', () => {
     vi.mocked(pinAudit.fetchPinAuditPage).mockResolvedValue({
       rows: [ROW],
       nextCursor: null,
-    });
-    vi.mocked(pinAudit.fetchPinAuditPoints).mockResolvedValue({
-      points: [
-        {
-          listing_id: 4242,
-          legacy_lat: 50.07,
-          legacy_lng: 14.44,
-          quality: 'delisted_no_claims',
-          is_active: false,
-          sibling_has_pin: true,
-        },
-      ],
-      capped: false,
     });
   });
 
@@ -151,11 +128,6 @@ describe('LocationPinAudit', () => {
       const last = calls[calls.length - 1];
       expect(last[0].qualities).toEqual(['active_no_claims']);
     });
-    /* The map read is filtered by the same object — one cohort, three views. */
-    const pointCalls = vi.mocked(pinAudit.fetchPinAuditPoints).mock.calls;
-    expect(pointCalls[pointCalls.length - 1][0].qualities).toEqual([
-      'active_no_claims',
-    ]);
   });
 
   it('clicking a matrix cell scopes every read to that portal and type', async () => {
@@ -242,21 +214,16 @@ describe('LocationPinAudit', () => {
     expect(cells[cells.length - 1]).toHaveTextContent('10');
   });
 
-  it('says when the map is showing only a prefix of the cohort', async () => {
-    vi.mocked(pinAudit.fetchPinAuditPoints).mockResolvedValue({
-      points: Array.from({ length: pinAudit.PIN_AUDIT_MAP_CAP }, (_, i) => ({
-        listing_id: i,
-        legacy_lat: 50,
-        legacy_lng: 14,
-        quality: 'delisted_no_claims' as const,
-        is_active: false,
-        sibling_has_pin: false,
-      })),
-      capped: true,
-    });
+  it('shows the one place string, never a hand-assembled one', async () => {
     renderPage();
-    await waitFor(() =>
-      expect(screen.getByText(/Zobrazeno prvních/)).toBeInTheDocument(),
-    );
+    const row = await screen.findByTestId('pin-audit-row-4242');
+    expect(within(row).getByText('Korunní 123/4, Praha 2')).toBeInTheDocument();
+  });
+
+  it('says what the set IS: hidden from customers until the location is decided', async () => {
+    renderPage();
+    expect(
+      await screen.findByText(/nezobrazují, dokud nemají rozhodnutou polohu/),
+    ).toBeInTheDocument();
   });
 });

@@ -7,6 +7,8 @@ lifespan) and exercised via the live deployment, not here.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 pytest.importorskip("pydantic")
@@ -85,7 +87,9 @@ def test_build_clauses_emits_spatial_when_set() -> None:
     # spatial predicate builds the point from lat/lng (Slice 2b).
     assert any("l.lat IS NOT NULL" in w for w in where)
     assert any("ST_MakePoint(l.lng, l.lat)" in w for w in where)
-    assert not any("l.geom" in w for w in where)
+    # Anchored: `sl.geom` is the W5 consumer rule's own probe into listing_location,
+    # which is not `properties_public.geom` and must not be flagged as one.
+    assert not any(re.search(r"(?<![a-z_])l\.geom\b", w) for w in where)
     assert params["lat"] == 50.08
     assert params["lng"] == 14.42
     assert params["radius_m"] == 1500

@@ -122,6 +122,22 @@ def _chip_case_arms(func: str) -> list[dict[str, str]]:
     ]
 
 
+@pytest.mark.parametrize(
+    "func,relation",
+    [("browse_stats_properties", "browse_list"), ("browse_map_cells", "properties_map_mv")],
+)
+def test_the_stats_and_map_cohorts_inherit_the_consumer_rule(func: str, relation: str) -> None:
+    """W5, operator ruling 2026-09-13. Neither RPC restates the rule that a listing is
+    served only once its location is resolved or determined foreign — each reads a
+    relation that is materialized FROM `browse_projection`, which carries it (migration
+    512). RED by: re-pointing either body at `properties` or `listings`, which would let
+    the Stats tab count a cohort Browse's own list cannot show."""
+    body = _function_body(func).lower()
+    assert f"from {relation} l" in body
+    for legacy in ("from properties p", "from properties_public", "from listings l"):
+        assert legacy not in body, f"{func} reads {legacy} — it would bypass the rule"
+
+
 @pytest.mark.parametrize("func", ["browse_stats_properties", "browse_map_cells"])
 def test_the_rpc_bodies_compile_the_same_level_map(func: str) -> None:
     """RED by: an RPC arm pointed at a different column than the API/SPA use, or

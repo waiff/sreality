@@ -365,6 +365,11 @@ def _shared_filter_where(
         "radius_m": filters.radius_m,
     }
     where: list[str] = [
+        # THIS IS THE W5 CONSUMER RULE, in its strictly narrower form — do not remove it
+        # thinking the spatial clause below already implies it. A comparable must have a
+        # POINT, so the foreign arm of `claims_common.SERVED_LOCATION_PREDICATE` is the
+        # one thing this lane drops; everything the rule hides, this hides too. Pinned by
+        # tests/test_location_w5_serve_resolved.py.
         "ll.geom IS NOT NULL",
         (
             "ST_DWithin("

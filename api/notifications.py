@@ -52,6 +52,7 @@ from api.location_filter import (
     needs_upgrade,
     upgrade_district_chips,
 )
+from location_data.claims_common import served_location_predicate
 from scraper import db as scraper_db
 
 if TYPE_CHECKING:
@@ -272,7 +273,14 @@ def _build_match_clauses(
     `toolkit/comparables._shared_filter_where` so Browse / Watchdog
     can never disagree on what a filter means.
     """
-    where: list[str] = []
+    # THE CONSUMER RULE (W5, operator ruling 2026-09-13), unconditional and first.
+    # Browse inherits it from `browse_projection` (migration 512); the matcher cannot,
+    # because it reads `properties_public` — a DETAIL-by-id surface that deliberately
+    # keeps serving an unresolved listing to a direct link. So the ONE definition is
+    # rendered here instead, keyed on the property's display listing, which is what
+    # `properties_public.listing_id` is. Without it a watchdog would fire on a listing
+    # nobody can find in Browse, and "matches" would mean two different things.
+    where: list[str] = [served_location_predicate("l.listing_id")]
     params: dict[str, Any] = {}
 
     if spec.category_main_in:

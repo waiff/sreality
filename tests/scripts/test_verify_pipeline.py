@@ -1974,9 +1974,9 @@ def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() ->
     from scripts.verify_pipeline import check_location_town_coverage
 
     conn = _ShapeDriftConn([
-        ("bazos", 40_000, 0, 120, 39_500, 0),
-        ("idnes", 30_000, 900, 11_000, 18_000, 0),
-        ("sreality", 200_000, 0, 0, 199_000, 0),
+        ("bazos", 40_000, 0, 120, 39_500, 0, 120),
+        ("idnes", 30_000, 900, 11_000, 18_000, 0, 11_900),
+        ("sreality", 200_000, 0, 0, 199_000, 0, 0),
     ])
     out = check_location_town_coverage(conn, T)
     assert out["status"] == "fail"
@@ -1986,6 +1986,10 @@ def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() ->
     assert "idnes: 900 without a row, 11,000 Czech without a town" in out["message"]
     assert "sreality" not in out["message"]
     assert any("statement_timeout" in s for s in conn.executed)
+    # W5: the consumer rule's workload number rides the same read, never the status.
+    assert out["details"]["hidden"] == 12_020
+    assert "Consumers currently hide 12,020 unresolved listings (idnes 11,900; bazos 120)" \
+        in out["message"]
 
 
 def test_location_town_coverage_is_red_on_delisted_display_listings_alone() -> None:
@@ -1997,8 +2001,8 @@ def test_location_town_coverage_is_red_on_delisted_display_listings_alone() -> N
     from scripts.verify_pipeline import check_location_town_coverage
 
     out = check_location_town_coverage(_ShapeDriftConn([
-        ("bazos", 40_000, 0, 0, 40_000, 0),
-        ("remax", 30_000, 0, 0, 30_000, 4_200),
+        ("bazos", 40_000, 0, 0, 40_000, 0, 0),
+        ("remax", 30_000, 0, 0, 30_000, 4_200, 4_200),
     ]), T)
     assert out["status"] == "fail"
     assert out["value"] == 4_200
@@ -2014,8 +2018,10 @@ def test_location_town_coverage_is_ok_only_at_zero() -> None:
     from scripts.verify_pipeline import check_location_town_coverage
 
     out = check_location_town_coverage(_ShapeDriftConn([
-        ("bazos", 40_000, 0, 0, 39_000, 0), ("idnes", 30_000, 0, 0, 10_000, 0)]), T)
+        ("bazos", 40_000, 0, 0, 39_000, 0, 0), ("idnes", 30_000, 0, 0, 10_000, 0, 0)]), T)
     assert out["status"] == "ok" and out["value"] == 0
+    assert out["details"]["hidden"] == 0
+    assert "Consumers currently hide" not in out["message"]
     assert out["details"]["cells"][1]["town_share"] == 10_000 / 30_000
     assert "delisted display listing" in out["message"]
 

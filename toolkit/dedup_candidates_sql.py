@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from location_data import claims_common as dc_common
 from toolkit import dedup_candidates as dc
 
 # --------------------------------------------------------------------------- fragments
@@ -60,6 +61,12 @@ _BASE_CTE = (
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod = %(block_key)s::bigint"
     " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
+    # THE CONSUMER RULE (W5, operator ruling 2026-09-13): dedup is a consumer, so it never
+    # sees a listing the store has no answer for. The town key already excludes almost all
+    # of them -- but not all: 34 rows carry an `obec_kod` with a NULL `geom`, and those are
+    # exactly the rows the ruling exempts. Spelled with the ONE definition rather than as a
+    # local `l.geom IS NOT NULL`, so a change to the rule reaches this lane too.
+    f" AND {dc_common.served_location_predicate('l.listing_id')}"
     " AND (NOT %(active_only)s::boolean OR x.is_active)"
     ")"
 )
