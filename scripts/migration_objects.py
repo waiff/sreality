@@ -32,10 +32,7 @@ from pathlib import Path
 # this repo opens with a long prose header, and that prose routinely quotes the
 # very DDL the file runs ("ADD COLUMN IF NOT EXISTS discovered_at ..."), so a
 # parser that reads raw text reports objects the file never creates.
-_LINE_COMMENT = re.compile(r"--[^\n]*")
-_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'", re.DOTALL)
-_DOLLAR_QUOTED = re.compile(r"\$(\w*)\$.*?\$\1\$", re.DOTALL)
+_DOLLAR_TAG = re.compile(r"\$(?:[A-Za-z_]\w*)?\$")
 
 _IDENT = r'(?:"[^"]+"|[a-zA-Z_][a-zA-Z0-9_$]*)'
 _QUALIFIED = rf"(?:{_IDENT}\s*\.\s*)?{_IDENT}"
@@ -89,8 +86,17 @@ class MigrationObject:
 _DO_INTRO = re.compile(r"\bdo\s*(?:language\s+[a-zA-Z_]+\s*)?$", re.IGNORECASE)
 
 
-def _strip_noise(sql: str) -> str:
+def _strip_noise(sql: str, *, inside_apply_time: bool = False) -> str:
     """Remove what is not executed DDL, keeping what is.
+
+    ONE PASS, LEFT TO RIGHT, because these three lexical forms nest inside each
+    other and any fixed order of separate regex passes gets one of them wrong.
+    Stripping comments first deletes the closing quote of a literal that itself
+    contains `--` (`raise exception 'lost -- re-run'`, three times in the W3
+    migrations) and the rest of the file dissolves into one giant string;
+    stripping literals first opens a bogus one on the apostrophe in a prose
+    comment, which every header in this repo has. The scanner reads whichever
+    form OPENS first and skips to its own terminator.
 
     Dollar-quoted regions are NOT uniformly noise. A CREATE FUNCTION body is:
     its statements run when the function is called, not when the migration is
@@ -98,19 +104,61 @@ def _strip_noise(sql: str) -> str:
     there, and this repo uses exactly that shape for lock-race-retrying DDL.
     Migration 438, the outage this whole check exists for, does its
     ALTER TABLE ... ADD CONSTRAINT inside a do-block; a parser that strips both
-    alike is blind to the one migration it most needs to see.
+    alike is blind to the one migration it most needs to see. A kept block is
+    re-scanned (so prose inside it declares nothing) and everything nested in it
+    is kept with it: migrations 480 and 489 run their CREATE TABLE through
+    `execute $sql$ ... $sql$` inside the do-block, which is DDL that executes at
+    apply time exactly like the block around it.
     """
-    kept: list[str] = []
-    pos = 0
-    for m in _DOLLAR_QUOTED.finditer(sql):
-        kept.append(sql[pos : m.start()])
-        kept.append(m.group(0) if _DO_INTRO.search(sql[: m.start()]) else " ")
-        pos = m.end()
-    kept.append(sql[pos:])
-    sql = "".join(kept)
-    sql = _BLOCK_COMMENT.sub(" ", sql)
-    sql = _LINE_COMMENT.sub(" ", sql)
-    return _STRING_LITERAL.sub("' '", sql)
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            else:
+                j = n
+            out.append("' '")
+            i = j
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+            out.append(" ")
+        elif sql.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif sql.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            out.append(" ")
+            i = j
+        else:
+            m = _DOLLAR_TAG.match(sql, i)
+            if not m:
+                out.append(ch)
+                i += 1
+                continue
+            tag = m.group(0)
+            close = sql.find(tag, m.end())
+            end = n if close < 0 else close + len(tag)
+            inner = sql[m.end() : close] if close >= 0 else sql[m.end() :]
+            keep = inside_apply_time or bool(_DO_INTRO.search("".join(out)))
+            out.append(_strip_noise(inner, inside_apply_time=True) if keep else " ")
+            i = end
+    return "".join(out)
 
 
 def _clean(ident: str) -> str:

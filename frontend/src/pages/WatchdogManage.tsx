@@ -169,6 +169,20 @@ function SubRow({
         <span className="block truncate" title={summary}>
           {summary}
         </span>
+        {/* A dead place filter, said out loud. A chip whose name the RÚIAN
+          * index cannot place matches nothing, so this watchdog can never
+          * fire — a silence that otherwise reads as "the market is quiet". */}
+        {sub.unresolved_places?.length ? (
+          <span
+            className="mt-0.5 inline-block text-[0.7rem] text-[var(--color-brick)]"
+            title={
+              `Tato místa se nepodařilo rozpoznat: ${sub.unresolved_places.join(', ')}. `
+              + 'Hlídač na nich nic nenajde — otevřete ho a vyberte místo znovu.'
+            }
+          >
+            ⚠ nerozpoznané místo: {sub.unresolved_places.join(', ')}
+          </span>
+        ) : null}
       </td>
       <td className="px-4 py-2.5 align-middle text-right tabular-nums text-[var(--color-ink-2)]">
         {fmtCount(sub.dispatch_count)}

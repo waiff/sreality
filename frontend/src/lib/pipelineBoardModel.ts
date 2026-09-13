@@ -23,6 +23,10 @@ export const PIPELINE_BOARD_COLS =
    * chip predicate's inputs (matchesDistricts), not display. */
   'display_label, district, disposition, subtype, area_m2, price_czk, mf_gross_yield_pct, ' +
   'total_price_change_pct, price_change_count, obec_id, okres_id, region_id, ' +
+  /* W3 S3: the fourth chip level. The board filters its cards in the browser
+   * (matchesDistricts), so it needs the SAME four codes the server-side
+   * predicate uses or a `cast_obce` chip would match on Browse and not here. */
+  'cast_obce_id, ' +
   'place_search_text, obec, locality, okres, region, is_active, ' +
   /* Migration 425 widened the view for exactly this: the board is deal-agnostic
    * by rule 22 (a card can be added from any cohort, and the pipeline scope is
@@ -55,6 +59,7 @@ export interface PipelineBoardRow {
   obec_id: number | null;
   okres_id: number | null;
   region_id: number | null;
+  cast_obce_id: number | null;
   place_search_text: string | null;
   obec: string | null;
   locality: string | null;
@@ -94,6 +99,7 @@ export function composePipelineCards(
     obec_id: r.obec_id,
     okres_id: r.okres_id,
     region_id: r.region_id,
+    cast_obce_id: r.cast_obce_id,
     place_search_text: r.place_search_text,
     obec: r.obec,
     locality: r.locality,

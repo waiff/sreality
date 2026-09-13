@@ -26,16 +26,20 @@ export interface MapySuggestion {
   [extra: string]: unknown;
 }
 
-/* The resolution of a picked suggestion to a stable admin identity. `admin`
- * (obec/okres/kraj) carries the admin_boundaries id matched by `/maps/resolve`'s
- * point-in-polygon; `locality` (street / POI / address / část obce) carries its
- * containing `obecId` so a street narrows to its municipality + a locality-text
- * match. `point_with_radius` / `unresolved` are the fallbacks for points that
- * resolve to no admin unit (foreign points). */
+/* The resolution of a picked suggestion to a RÚIAN CODE. `admin`
+ * (kraj/okres/obec/cast_obce) carries the code the chip predicate matches on
+ * (`lib/districtCodes`); `locality` (street / POI / address) has no code of its
+ * own and carries its containing `obecId`, so it filters at the obec level.
+ * `point_with_radius` / `unresolved` are the fallbacks for points that resolve
+ * to no admin unit (foreign points).
+ *
+ * `cast_obce` is the one level resolved BY NAME rather than by point: RÚIAN
+ * publishes no part-of-municipality polygon, so the server places the obec from
+ * the point and the part by name inside it (api/maps.py). */
 export type LocationResolution =
   | {
       kind: 'admin';
-      level: 'obec' | 'okres' | 'kraj';
+      level: 'obec' | 'okres' | 'kraj' | 'cast_obce';
       id: number;
       name: string;
       label: string;
@@ -66,7 +70,7 @@ interface SuggestResponse {
 
 interface ResolveResponse {
   kind: 'admin' | 'locality' | 'point_with_radius' | 'unresolved';
-  level: 'obec' | 'okres' | 'kraj' | 'locality' | null;
+  level: 'obec' | 'okres' | 'kraj' | 'cast_obce' | 'locality' | null;
   id: number | null;
   obec_id: number | null;
   name: string | null;
@@ -108,6 +112,9 @@ export const resolveSuggestion = async (
     type: pick.type,
     regional_structure: pick.regionalStructure ?? [],
     raw: pick as unknown as Record<string, unknown>,
+    /* The pick's own name, read server-side for the one level that has no
+     * polygon to point-in-polygon against: `cast_obce`. */
+    name: pick.name,
   };
   const res = await apiPost<ResolveResponse>('/maps/resolve', body);
 
@@ -117,7 +124,8 @@ export const resolveSuggestion = async (
   if (
     res.kind === 'admin'
     && res.id != null
-    && (res.level === 'obec' || res.level === 'okres' || res.level === 'kraj')
+    && (res.level === 'obec' || res.level === 'okres' || res.level === 'kraj'
+        || res.level === 'cast_obce')
   ) {
     return {
       kind: 'admin',
@@ -161,4 +169,40 @@ export const typeBadge = (type: string): string => {
   if (type === 'regional.country') return 'Stát';
   if (type === 'poi') return 'POI';
   return type.replace(/^regional\./, '');
+};
+
+
+/* Resolve stored name-only chips to RÚIAN codes, once, at read time.
+ *
+ * A preset or a URL written before codes existed carries `{name, context}` and
+ * nothing else. The stored blob is NEVER rewritten (a preset stores the full
+ * blob) — `useLegacyChipUpgrade` calls this on the way into the query and
+ * replaces those chips in memory. The Watchdog calls the same server-side
+ * resolver in-process, so a saved filter cannot mean one thing in Browse and
+ * another in the matcher (rule 16).
+ *
+ * A name can legitimately answer at several levels ("Jihlava" is an obec AND an
+ * okres) — all of them come back, which is the closest code-equality has to the
+ * ILIKE-across-four-columns this replaces. */
+export interface ChipNameMatch {
+  level: 'kraj' | 'okres' | 'obec' | 'cast_obce';
+  id: number;
+}
+
+interface ResolveNamesResponse {
+  chips: Array<{
+    name: string;
+    context: string | null;
+    matches: ChipNameMatch[];
+  }>;
+}
+
+export const resolveChipNames = async (
+  chips: ReadonlyArray<{ name: string; context: string | null }>,
+): Promise<ChipNameMatch[][]> => {
+  if (!chips.length) return [];
+  const res = await apiPost<ResolveNamesResponse>('/maps/resolve-names', {
+    chips: chips.map((c) => ({ name: c.name, context: c.context })),
+  });
+  return chips.map((_c, i) => res.chips?.[i]?.matches ?? []);
 };

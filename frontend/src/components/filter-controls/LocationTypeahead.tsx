@@ -10,20 +10,17 @@
  *   value: DistrictChip[] | null  — selected chips
  *   onChange(next)                — null normalises to no constraint
  *
- * Each chip is `{name, context, excluded?, level?, id?}`. On pick, the
- * suggestion's `name` field becomes the chip's `name`; `deriveContext`
- * walks `regionalStructure` for the nearest `regional.municipality` and
- * sets that as `context` (or null for picks already at the
- * municipality / region / country level); `/maps/resolve` fills the
- * admin `level` + `id`. The downstream filter (queries.ts
- * districtsFilterClause + browse_stats migration 182 + the Watchdog
- * matcher in api/notifications.py) matches a resolved chip by STABLE
- * ADMIN ID at its level (obec_id/okres_id/region_id); a 'locality'
- * (street/POI) pick by its containing obec_id AND
- *   place_search_text ILIKE *name*    (street + locality combined)
- * and a legacy chip (no level/id) by
- *   (district/place_search_text/okres/region ILIKE *name*)
- *   AND (context IS NULL OR district/place_search_text/okres/region ILIKE *context*)
+ * Each chip is `{name, context, excluded?, level?, id?}` and MEANS a level
+ * plus a RÚIAN code: `/maps/resolve` fills `level` + `id` from the pick, and
+ * every surface then tests the one predicate `<level>_id = any(codes)`
+ * (lib/districtCodes, api/location_filter, migration 504). Four levels carry a
+ * code — kraj, okres, obec and `cast_obce` (the quarter level, resolved by name
+ * inside its obec because RÚIAN draws no polygon for it) — and a street / POI /
+ * address pick carries its containing obec code. `deriveContext` walks
+ * `regionalStructure` for the nearest `regional.municipality` and stores it as
+ * `context`, which disambiguates a name at read time and is NOT a predicate.
+ * The chip shows its level, because "Žižkov" the část obce and "Žižkov" the POI
+ * that resolved to Praha select different cohorts and must not look identical.
  * INCLUDE chips OR'd (match any), then AND NOT-(OR of EXCLUDE chips). The
  * per-chip `−`/`+` button toggles `excluded` (red chip = subtract this
  * locality). This is the registry-aligned widget for both Browse and
@@ -51,6 +48,7 @@ import {
   typeBadge,
 } from '@/lib/maps';
 import type { DistrictChip } from '@/lib/filters';
+import { districtChipBadge, districtChipKey } from '@/lib/districtCodes';
 
 const QUERY_DEBOUNCE_MS = 150;
 const MIN_QUERY_LEN = 2;
@@ -75,8 +73,11 @@ export function deriveContext(s: MapySuggestion): string | null {
   return muni?.name ?? null;
 }
 
+/* Chip identity is the RESOLVED UNIT when there is one — two picks that resolve
+ * to the same (level, code) are the same chip however Mapy spelled them —
+ * falling back to name+context for a chip with no code yet. */
 const sameChip = (a: DistrictChip, b: DistrictChip): boolean =>
-  a.name === b.name && a.context === b.context;
+  districtChipKey(a) === districtChipKey(b);
 
 export function LocationTypeahead({
   label,
@@ -234,7 +235,8 @@ export function LocationTypeahead({
             const label = chip.context
               ? `${chip.name} · ${chip.context}`
               : chip.name;
-            const key = `${chip.name}::${chip.context ?? ''}`;
+            const key = districtChipKey(chip);
+            const badge = districtChipBadge(chip);
             const excluded = chip.excluded === true;
             /* Excluded chips read as a negative filter: brick (the
              * inactive/failures semantic colour) + a leading minus. The
@@ -257,6 +259,19 @@ export function LocationTypeahead({
                     {excluded ? '+' : '−'}
                   </button>
                   <span className="px-0.5">{excluded ? `− ${label}` : label}</span>
+                  {/* The level the chip filters on. A chip with no code says
+                    * so ("Nerozpoznáno") instead of looking like a live
+                    * filter that quietly matches nothing. */}
+                  <span
+                    className="shrink-0 text-[0.6rem] tracking-[0.08em] uppercase opacity-70"
+                    title={
+                      chip.id != null
+                        ? `${badge} · RÚIAN ${chip.id}`
+                        : 'Bez kódu — tento chip nic nevybírá'
+                    }
+                  >
+                    {badge}
+                  </span>
                   <button
                     type="button"
                     onClick={() => remove(chip)}

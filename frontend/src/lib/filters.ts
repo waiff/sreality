@@ -5,6 +5,9 @@ import {
   type WatchdogFilterSpec,
 } from './types';
 import { fmtArea } from './format';
+/* Value import, but not a runtime cycle: districtCodes imports only TYPES from
+ * this file, and "what a valid RÚIAN code is" must have ONE definition. */
+import { isValidCode } from './districtCodes';
 
 export type TriState = 'any' | 'yes' | 'no';
 export type ListingStatus = 'active' | 'inactive' | 'any';
@@ -106,17 +109,20 @@ export interface NearCityProximity {
  * sent to the watchdog matcher
  * (`api/notifications.WatchdogFilterSpec.districts`) so Browse and
  * Watchdog stay aligned via the shared filter registry. */
-export type LocationLevel = 'obec' | 'okres' | 'kraj' | 'locality';
+export type LocationLevel = 'obec' | 'okres' | 'kraj' | 'cast_obce' | 'locality';
 
 export interface DistrictChip {
   name: string;
   context: string | null;
   excluded?: boolean;
-  /* Resolved admin level of the pick (from `/maps/resolve`). Absent = a legacy
-   * or unresolved chip, matched by name ILIKE (the pre-resolution behaviour). */
+  /* Level of the pick, from `/maps/resolve`. `cast_obce` (W3) is the quarter
+   * level RÚIAN draws no polygon for — the point places the obec, the name
+   * places the part inside it. Absent = a chip stored before codes existed;
+   * `useLegacyChipUpgrade` resolves it once at read time. */
   level?: LocationLevel;
-  /* admin_boundaries.id for an admin level, or the containing obec_id for a
-   * 'locality' chip. Null/absent = unresolved → legacy name match. */
+  /* The RÚIAN CODE at `level`, or the containing obec code for a 'locality'
+   * (street / POI / address) chip. Null/absent = no code yet: the chip matches
+   * NOTHING until it is resolved (`districtCodes.NO_MATCH_CODE`). */
   id?: number | null;
 }
 
@@ -450,7 +456,7 @@ const splitCsv = (s: string | null): string[] =>
 const joinCsv = (xs: string[]): string => xs.map(encodeURIComponent).join(',');
 
 const _LOCATION_LEVELS: ReadonlyArray<LocationLevel> = [
-  'obec', 'okres', 'kraj', 'locality',
+  'obec', 'okres', 'kraj', 'cast_obce', 'locality',
 ];
 
 /* Parse the parallel `districts` (names) + `districts_ctx` (contexts) +
@@ -489,7 +495,9 @@ export const parseDistrictChips = (
       chip.level = lvl as LocationLevel;
       const rawId = ids[i];
       const n = rawId == null || rawId === '' ? null : Number(rawId);
-      chip.id = n != null && Number.isFinite(n) ? n : null;
+      // RÚIAN codes are positive: a URL must not be able to hand the predicate
+      // the no-match sentinel (-1) dressed as a resolved pick.
+      chip.id = isValidCode(n) ? n : null;
     }
     return chip;
   });

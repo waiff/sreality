@@ -178,8 +178,6 @@ UNITLESS_NUMERIC_FILTERS: frozenset[str] = frozenset(
     {
         # identifiers
         "category_sub_cb",
-        "locality_district_id",
-        "locality_region_id",
         # ordinal levels — a rank or a distance in ranks, not a dimension
         "floor_band",
         # ordinal 1..5 condition ranks (rule #14)
@@ -459,21 +457,21 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description=(
                 "Location chips. Each chip is an object `{name: str, "
-                "context: str | null, level: 'obec' | 'okres' | 'kraj' "
-                "| 'locality' | null, id: int | null, excluded: bool}`. "
-                "A resolved chip (level + id set) matches by STABLE "
-                "ADMIN ID at its level (`obec_id` / `okres_id` / "
-                "`region_id`); a 'locality' chip (street / POI / "
-                "address pick) matches its containing `obec_id` AND an "
-                "ILIKE substring on `place_search_text` (street + "
-                "locality combined, so portals that store the street "
-                "outside `locality` match too). A legacy chip (no "
-                "level/id) falls back to ILIKE-by-name across "
-                "`district` / `place_search_text` / `okres` / "
-                "`region`, narrowed by `context` (the parent "
-                "municipality from Mapy.cz's `regionalStructure`) when "
-                "set. INCLUDE chips OR together; chips with "
-                "`excluded: true` are subtracted from the result."
+                "context: str | null, level: 'kraj' | 'okres' | 'obec' "
+                "| 'cast_obce' | 'locality' | null, id: int | null, "
+                "excluded: bool}`, where `id` is the RÚIAN CODE at that "
+                "level. ONE predicate compiles them everywhere (Browse, "
+                "Stats, the map, the Watchdog): `<level>_id = "
+                "any(codes)` with plain equality — `region_id` / "
+                "`okres_id` / `obec_id` / `cast_obce_id`. A 'locality' "
+                "chip (street / POI / address pick) carries its "
+                "containing obec code and filters at the obec level. A "
+                "chip with no code — an old saved filter — is resolved "
+                "by name once at read time; if the RÚIAN name index "
+                "cannot place it, it matches nothing. `context` "
+                "disambiguates that name lookup and is not a predicate. "
+                "INCLUDE chips OR together; chips with `excluded: true` "
+                "are subtracted from the result."
             ),
             category=CATEGORY_SPATIAL,
             ui_control=UiControl.MULTISELECT,
@@ -1437,38 +1435,12 @@ def _build_registry() -> dict[str, FilterDef]:
             unit="m²",
         ),
 
-        # --- locality ids (server-side, agent-friendly) ------------------
-        FilterDef(
-            id="locality_district_id",
-            type=FilterType.INT,
-            pg_column="locality_district_id",
-            default=None,
-            description=(
-                "Sreality district id. Stable across district renames "
-                "(unlike the human-readable `district` text). Useful "
-                "for constraining a cohort to one municipality "
-                "without geocoding."
-            ),
-            category=CATEGORY_SPATIAL,
-            ui_control=UiControl.NUMBER_INPUT,
-            agendas=frozenset({
-                Agenda.COMPARABLES, Agenda.ESTIMATION,
-                Agenda.VELOCITY, Agenda.WATCHDOG,
-            }),
-        ),
-        FilterDef(
-            id="locality_region_id",
-            type=FilterType.INT,
-            pg_column="locality_region_id",
-            default=None,
-            description="Sreality region id. Broader than district.",
-            category=CATEGORY_SPATIAL,
-            ui_control=UiControl.NUMBER_INPUT,
-            agendas=frozenset({
-                Agenda.COMPARABLES, Agenda.ESTIMATION,
-                Agenda.VELOCITY, Agenda.WATCHDOG,
-            }),
-        ),
+        # --- locality ids: DELETED in W3 S3 -------------------------------
+        # `locality_district_id` / `locality_region_id` were SREALITY's own
+        # portal ids, filterable on one portal out of nine and meaningless on
+        # the other eight. Place is now one thing everywhere: a RÚIAN code at a
+        # level (`districts`). Nothing replaced them because `districts` at the
+        # obec / okres level already says it, for every portal.
 
         # --- curation -----------------------------------------------------
         FilterDef(
