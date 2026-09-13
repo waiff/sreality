@@ -236,6 +236,17 @@ lag, a 45 s budget and 2 000-row batches. Env knobs on the Railway service:
   `LANE_PASS_TIMEOUT_SECONDS` keeps running; two scans sharing one cursor would each re-read the
   other's window. `_INTAKE_FAST_PASS_LOCK` is taken non-blockingly for the whole pass and a tick
   that cannot take it returns `{"ran": false, "previous_pass_running": true}`.
+- **It mines new page bodies too (W7-a2).** idnes, realitymix, bazos, ceskereality, remax and
+  maxima carry a listing's location only in the stored detail body, so while only the hourly run
+  mined bodies their new listings waited up to an hour while sreality's took 134 s. The tick runs
+  the JSON half FIRST and hands the bodies pass the REMAINDER of the same 45 s
+  (`bodies_budget_share=1.0`), capped at `LOCATION_INTAKE_FAST_BODIES_CAP` (300) bodies checked
+  BETWEEN batches — never truncating a window, because the bodies cursor advances to the window's
+  max id. R2 fetch width 8 (`setdefault`, so the service can override), extraction two forkserver
+  workers wide in ONE `ExtractionPool` held for the life of the lane. Cheap because of the
+  W6-b/W6-b2 cursor, which is lane-scoped like the listing keyset: the first tick after a deploy
+  walks the payload keyset once and every tick after that opens only the ids above what it stamped.
+  Without `R2_*` on the service the lane warns ONCE per process and mines JSON only.
 - **It never inherits the full walk.** `_full_walk_handoff` looks that cursor up BY LANE and this
   schedule never runs `--mode full`, so a 45 s tick cannot pick up a ~376k-listing contract re-walk.
 - **The contracts are projected from the image once at lane start** (`contracts/` is in the Docker

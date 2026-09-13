@@ -333,3 +333,126 @@ def test_pool_width_is_what_extract_pages_will_actually_use(
 
     monkeypatch.setenv(page_readers.EXTRACTION_WORKERS_ENV, "1")
     assert page_readers.pool_width(10_000) == 1
+
+
+# --------------------------------------------- W7-a2: a pool that outlives one batch
+
+class _HealthyPool(_FakePool):
+    """Every body comes back, from the same serial code the real workers run."""
+
+    def submit(self, fn: Any, task: Any) -> Future[IntakeResult]:
+        future: Future[IntakeResult] = Future()
+        self.submitted += 1
+        future.set_result(self._serial_result(task))
+        return future
+
+
+def _pooled_pages(
+    tasks: list[tuple[ListingRow, page_readers.ArchivedPayload]],
+    pool: page_readers.ExtractionPool,
+    entries: dict[str, list[Entry]] | None = None,
+) -> list[IntakeResult | Exception]:
+    return page_readers.extract_pages(
+        tasks, entries_by_source=entries or ENTRIES, registers=REGISTERS,
+        max_value_bytes=2 * 1024 * 1024, pool=pool)
+
+
+def test_a_warm_pool_is_built_once_and_survives_the_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The realtime worker's fast lane runs a batch a MINUTE, for ever. Building a
+    forkserver pool per batch would exec two fresh interpreters a minute to parse the
+    handful of bodies the minute produced — so the lane owns the pool, and a batch that ends
+    healthily leaves it running."""
+    built: list[_HealthyPool] = []
+
+    def _build(**kwargs: Any) -> _HealthyPool:
+        pool = _HealthyPool(**kwargs)
+        built.append(pool)
+        return pool
+
+    monkeypatch.setattr(page_readers, "ProcessPoolExecutor", _build)
+    pool = page_readers.ExtractionPool(2)
+    tasks = _corpus(3)
+
+    assert _comparable(_pooled_pages(tasks, pool)) == _comparable(_serial(tasks))
+    assert _comparable(_pooled_pages(tasks, pool)) == _comparable(_serial(tasks))
+
+    assert len(built) == 1 and pool.builds == 1
+    assert built[0].shutdowns == [], "a healthy warm pool is never shut down mid-life"
+    pool.close()
+    assert built[0].shutdowns == [(True, True)]
+
+
+def test_a_warm_pool_is_rebuilt_when_the_contract_data_moves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker CACHES the entries and exclusion-zone registers it was initialised with. A
+    contract bump makes those stale, and a stale worker would scope a body by a version
+    that is no longer active and hand back claims stamped as current — so the key is the
+    entry ids and the registers' own content hashes, and a move rebuilds the pool."""
+    monkeypatch.setattr(page_readers, "ProcessPoolExecutor", _HealthyPool)
+    pool = page_readers.ExtractionPool(2)
+    tasks = _corpus(3)
+
+    _pooled_pages(tasks, pool)
+    assert pool.builds == 1
+    _pooled_pages(tasks, pool, entries={"remax": [_entry("remax", blur_evidence="street")]})
+    assert pool.builds == 2, "different contract data, different workers"
+    _pooled_pages(tasks, pool, entries={"remax": [_entry("remax", blur_evidence="street")]})
+    assert pool.builds == 2, "...and unchanged data reuses them"
+
+
+def test_a_warm_pool_that_dies_is_dropped_and_the_batch_still_finishes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The pool's two failure modes are unchanged by reuse — the rest of the batch is
+    finished on the main thread — but a REUSED pool must also be dropped, or the next tick
+    would submit into a corpse every minute until the next redeploy."""
+    class _Broken(_FakePool):
+        def submit(self, fn: Any, task: Any) -> Future[IntakeResult]:
+            future: Future[IntakeResult] = Future()
+            future.set_exception(BrokenProcessPool("A process in the pool died"))
+            return future
+
+    monkeypatch.setattr(page_readers, "ProcessPoolExecutor", _Broken)
+    pool = page_readers.ExtractionPool(2)
+    tasks = _corpus(3)
+
+    assert _comparable(_pooled_pages(tasks, pool)) == _comparable(_serial(tasks))
+    assert "the extraction pool broke" in caplog.text
+    # Dropped, so the next batch builds a fresh one rather than reusing the dead one.
+    assert pool._pool is None
+    _pooled_pages(tasks, pool)
+    assert pool.builds == 2
+
+
+def test_a_warm_pool_holding_a_hung_worker_is_killed_not_joined(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`shutdown(wait=True)` would join the very process the timeout exists to escape — and
+    on this lane that process would hold the tick, then the next one, for ever."""
+    class _Hanging(_FakePool):
+        def submit(self, fn: Any, task: Any) -> Future[IntakeResult]:
+            return Future()  # never resolves
+
+    built: list[_Hanging] = []
+
+    def _build(**kwargs: Any) -> _Hanging:
+        pool_ = _Hanging(**kwargs)
+        built.append(pool_)
+        return pool_
+
+    monkeypatch.setattr(page_readers, "ProcessPoolExecutor", _build)
+    monkeypatch.setattr(page_readers, "EXTRACTION_TIMEOUT_S", 0.05)
+    pool = page_readers.ExtractionPool(2)
+
+    outcomes = _pooled_pages(_corpus(2), pool)
+
+    executor = built[0]
+    worker = next(iter(executor._processes.values()))
+
+    assert isinstance(outcomes[0], TimeoutError)
+    assert worker.killed is True
+    assert executor.shutdowns == [(False, True)], "killed, not joined"
+    assert pool._pool is None

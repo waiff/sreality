@@ -373,13 +373,15 @@ Lanes shipped so far:
   (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`). The GH lane stays single-connection. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
   had to be idled before is gone with the pin-collision engine, W2-a.)
 - **Location-intake-fast lane** (W7-a) — THE claim lane's change-driven listing scan
-  (`claims_intake.run`, `mode="incremental"`, payload half only: `skip_bodies=True`, no R2, no
-  process pool) every ~60 s with a **2-minute** snapshot lag and a 45 s budget, under its OWN
+  (`claims_intake.run`, `mode="incremental"`; JSON half first, then a bodies pass on the
+  remainder — cap `LOCATION_INTAKE_FAST_BODIES_CAP` 300, R2 width 8, ONE 2-wide `ExtractionPool`
+  reused across ticks) every ~60 s with a **2-minute** snapshot lag and a 45 s budget, under its OWN
   `claims_intake.FAST_LANE` cursor so it never moves the hourly run's 15-minute one (that run
   re-reads whatever the short lag skipped). Ships **LIVE**; env knobs on the Railway service:
   `LOCATION_INTAKE_FAST_{ENABLED,INTERVAL_S,LAG_S,BUDGET_S}` (`1`/60/120/45), `ENABLED=0` idles.
-  Projects the portal contracts from the image once at lane start (warn, never fail). Heartbeat
-  `details.location_intake_fast.last` = `{listings, claims_inserted, enqueued, seconds, cursor}`.
+  Projects the portal contracts from the image once at lane start (warn, never fail); no `R2_*` =
+  warn once, JSON only. Heartbeat `details.location_intake_fast.last` = `{listings,
+  claims_inserted, enqueued, bodies_mined, bodies_complete, seconds, cursor, bodies_cursor}`.
 
 ## Pipeline verification (migration 274)
 
