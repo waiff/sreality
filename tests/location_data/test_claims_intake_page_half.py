@@ -32,6 +32,9 @@ from tests.location_data.claim_intake_fixtures import (
 BASE_TS = datetime(2026, 9, 11, 12, 0, tzinfo=UTC)
 BODY = b"<html><body><h1>Byt 3+1</h1></body></html>"
 ACTIVE_VERSION = 1
+# The active contract-version set as `_ACTIVE_VERSIONS_SQL` projects it: what a stamped
+# bodies cursor is valid for (W6-b).
+VERSIONS = f"sreality@{ACTIVE_VERSION}"
 
 # (listing_id, body_id or None, is the body unmined?)
 UNMINED, ALREADY_MINED, NO_BODY = (1, 101, True), (2, 102, False), (3, None, False)
@@ -80,12 +83,15 @@ class _Conn:
                  unmined_bodies: list[tuple[int, int | None, bool]] | None = None,
                  orphans: set[int] | None = None,
                  bodies_cursor: int | None = None,
+                 bodies_cursor_versions: str | None = VERSIONS,
                  fail_on_window: int | None = None) -> None:
         self.rows = rows
         # What the NEWEST finished batch row of this lane/source stamped for the bodies
-        # pass (migration 509): a payload id if that pass stopped on budget, None if it
-        # completed. The pass reads it back instead of restarting at 0 (W1-a6).
+        # pass (migrations 509 + 516): the payload id it reached, and the contract-version
+        # set that position was taken under. The pass resumes from the id only while that
+        # set still matches the live one (W6-b); anything else walks from 0.
         self.bodies_cursor = bodies_cursor
+        self.bodies_cursor_versions = bodies_cursor_versions
         # Every terminal `_BATCH_FINISH_SQL` stamp, in order.
         self.finished: list[dict[str, Any]] = []
         # The `after_body_id` each WINDOW was asked with, and the window the fake dies on.
@@ -118,6 +124,9 @@ class _Conn:
             return
         if "set_config" in sql:
             return
+        if sql.startswith("SELECT string_agg(source"):
+            cur._result = [(VERSIONS,)]
+            return
         if "FROM portal_contracts WHERE source" in sql:
             cur._result = [(1, ACTIVE_VERSION)]
             return
@@ -130,7 +139,7 @@ class _Conn:
         if "SELECT outcome, cursor_after_id" in sql:
             return
         if sql.startswith("SELECT bodies_cursor_after_id"):
-            cur._result = [(self.bodies_cursor,)]
+            cur._result = [(self.bodies_cursor, self.bodies_cursor_versions)]
             return
         if sql.startswith("SELECT count(*) FROM portal_raw_payloads p"):
             # The readout carries the joins too, so an orphan is not in the backlog.
@@ -624,6 +633,8 @@ def test_a_pass_stopped_on_budget_stamps_its_cursor_and_the_next_run_starts_ther
     assert reached < BACKLOG[-1][1], "short of the end of the keyset"
     assert [s["id"] for s in conn.stamped] == [b[1] for b in BACKLOG if b[1] <= reached]
     assert conn.finished[-1]["bodies_cursor_after_id"] == reached
+    # AND THE VERSION SET IT IS VALID FOR, on the same row (W6-b).
+    assert conn.finished[-1]["bodies_cursor_versions"] == VERSIONS
 
     # The NEXT run reads that stamp back and asks its first window above it.
     monkeypatch.setattr(page_readers, "extract_page", _page_claim)
@@ -635,13 +646,14 @@ def test_a_pass_stopped_on_budget_stamps_its_cursor_and_the_next_run_starts_ther
     assert [b[1] for b in BACKLOG if b[1] > reached] == [s["id"] for s in nxt.stamped]
 
 
-def test_a_completed_pass_stamps_null_so_the_next_one_restarts_at_zero(
+def test_a_completed_pass_keeps_its_cursor_and_the_next_run_continues_there(
     monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
 ) -> None:
-    """NULL is the whole contract of the column. A pass that reached the end of the keyset
-    has nothing to resume, and a CONTRACT BUMP makes rows below the cursor eligible again —
-    they are picked up by the pass that starts after this one, so a bump costs at most one
-    pass of delay rather than being skipped for ever."""
+    """W6-b, THE DEFECT THIS WAVE DELETES. A completed pass used to stamp NULL, so the next
+    run restarted at id 0 — and with the backlog empty that meant walking all 744 000
+    payload rows every hour to stamp nothing (`bodies=416s` on an idle hop, 2026-09-13).
+    "Complete" means CAUGHT UP: the cursor is kept, and the successor asks only for the ids
+    above it, which is where every new body is."""
     monkeypatch.setattr(page_readers, "extract_page", _page_claim)
     conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=202)
 
@@ -649,14 +661,52 @@ def test_a_completed_pass_stamps_null_so_the_next_one_restarts_at_zero(
 
     assert conn.window_starts[0] == 202, "this run resumed"
     assert stats["bodies_pass_complete"] is True
-    assert conn.finished[-1]["bodies_cursor_after_id"] is None
+    reached = BACKLOG[-1][1]
+    assert conn.finished[-1]["bodies_cursor_after_id"] == reached
+    assert conn.finished[-1]["bodies_cursor_versions"] == VERSIONS
 
-    nxt = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=None)
+    nxt = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=reached)
     after = _run(nxt, _Store())
 
-    assert after["bodies_resumed_from_id"] == 0
-    assert nxt.window_starts[0] == 0
-    assert [s["id"] for s in nxt.stamped] == [b[1] for b in BACKLOG]
+    assert after["bodies_resumed_from_id"] == reached
+    assert nxt.window_starts == [reached], "one window, above the end of the last pass"
+    assert nxt.stamped == [], "nothing new arrived"
+
+
+def test_a_contract_bump_sends_the_walk_back_to_the_start_once(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """THE ONE RESET, and the reason the version set is stamped beside the cursor. The
+    window's gate is `contract_version IS DISTINCT FROM pc.version`, so a bump is the only
+    event that makes rows BELOW the cursor eligible again; a cursor taken under the old set
+    would skip them for ever. It costs one re-walk per version set, not one per pass."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=BACKLOG[-1][1],
+                 bodies_cursor_versions="sreality@0")
+
+    stats = _run(conn, _Store())
+
+    assert stats["bodies_resumed_from_id"] == 0
+    assert conn.window_starts[0] == 0
+    assert [s["id"] for s in conn.stamped] == [b[1] for b in BACKLOG]
+    # And the new set is what the row now carries, so the NEXT run continues instead.
+    assert conn.finished[-1]["bodies_cursor_versions"] == VERSIONS
+
+
+def test_a_ledger_row_with_no_version_set_walks_from_zero(
+    monkeypatch: pytest.MonkeyPatch, small_body_cap: None,
+) -> None:
+    """Every row written before migration 516 reads NULL there, as does a row stamped NULL
+    by hand — the manual reset for the one case a contract bump does not cover, a code
+    change that widens the served set. NULL is a mismatch, so the next pass walks once."""
+    monkeypatch.setattr(page_readers, "extract_page", _page_claim)
+    conn = _Conn([NO_BODY], unmined_bodies=BACKLOG, bodies_cursor=204,
+                 bodies_cursor_versions=None)
+
+    stats = _run(conn, _Store())
+
+    assert stats["bodies_resumed_from_id"] == 0
+    assert conn.window_starts[0] == 0
 
 
 def test_a_failed_runs_cursor_is_stamped_and_resumed_from(
