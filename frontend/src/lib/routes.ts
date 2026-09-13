@@ -124,6 +124,8 @@ export const ROUTES = {
   newDedupExam: def('/new-dedup/exam'),
   newDedupExamReview: def('/new-dedup/exam/review'),
   newDedupTaggingBakeoff: def('/new-dedup/tagging-bakeoff'),
+  // Temporary operator review surface for the migration-503 pin ruling.
+  newDedupPinAudit: def('/new-dedup/pin-audit'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;

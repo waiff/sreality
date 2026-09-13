@@ -243,6 +243,15 @@ component is slimmed twice — each wave rewrites one component and slims its st
     the next resume can see it. It CONTINUES, it never STARTS one, and `--mode full` is unchanged.
   - **W1-a8 — the bodies pass mines the served set, not only active listings** (503's map
     guard measured 23 % loss on delisted display listings, 2026-09-12).
+  - **W1-a9 — the pin-loss audit page** (migration **510**, 2026-09-13): `/new-dedup/pin-audit`
+    lists the **36,970** map pins the new store cannot stand behind (2,413 live / 34,557 delisted),
+    per portal x type, so the operator can look at them before ruling on 503. Two corrections came
+    out of review: evidence "existing now" must mean **under an ACTIVE contract** (claims under no
+    live contract are legacy-column copies and superseded page versions — nothing is queued, so the
+    earlier "the claims were mined after the verdict" reading was wrong, and `old_evidence` names
+    the superseded material instead); and `sibling_has_pin` shows the **1,163 rows (~3 %)** the
+    property-level fallback would recover with no resolver change. TEMPORARY — the page,
+    `lib/pinAudit.ts`, `PinAuditMap.tsx` and 510's objects are deleted once the ruling lands.
 - **W2 — the resolver at four steps, the answer table at 26 fields** (= plan S3 + the projection
   half of S1): bind → fill → grade → check; policy tables, epochs, contradiction ledger, candidates,
   verifications, labelled samples, metrics rollup, compare cohort deleted; 54 projection columns and
