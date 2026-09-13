@@ -41,13 +41,6 @@ export type PinAuditQuality =
   | 'delisted_no_claims'
   | 'delisted_unresolved';
 
-/* What SUPERSEDED evidence the listing carries, so "no live evidence" is never
- * read as "nothing was ever there". `legacy` = every superseded claim is a
- * `legacy_column` copy (the Mapy-era pin, the legacy PSČ/locality columns the
- * doctrine dropped in W1-b); `archived` = some came off an older page version;
- * `none` = there is none. */
-export type PinAuditOldEvidence = 'none' | 'legacy' | 'archived';
-
 export const PIN_AUDIT_QUALITIES: ReadonlyArray<PinAuditQuality> = [
   'active_no_claims',
   'active_unresolved',
@@ -80,11 +73,11 @@ export interface PinAuditRow {
   resolved_at: string | null;
   has_row: boolean;
   has_claims: boolean;
-  /* Evidence under an ACTIVE contract. Measured 2026-09-13 this is exactly the
-   * `has_claims` set — the lane has consumed everything a live contract
-   * offers, so there is no backlog to wait for. */
+  /* Evidence under an ACTIVE contract — the only evidence there is, since W6-a
+   * deletes a claim the moment its contract version is retired. Measured
+   * 2026-09-13 this is exactly the `has_claims` set: the lane has consumed
+   * everything a live contract offers, so there is no backlog to wait for. */
   claims_now: boolean;
-  old_evidence: PinAuditOldEvidence;
   sibling_has_pin: boolean;
   quality: PinAuditQuality;
   refreshed_at: string;
@@ -125,7 +118,7 @@ const ROW_COLS = [
   'display_label', 'price_czk', 'is_active', 'first_seen_at',
   'last_seen_at', 'country_status', 'granularity',
   'match_confidence', 'resolver_version', 'resolved_at', 'has_row',
-  'has_claims', 'claims_now', 'old_evidence', 'sibling_has_pin', 'quality',
+  'has_claims', 'claims_now', 'sibling_has_pin', 'quality',
   'refreshed_at',
 ].join(',');
 

@@ -3039,6 +3039,61 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_intake.yml"
     },
     {
+      "filename": "location_claims_retire.yml",
+      "name": "Ops: retire claims under old contract versions",
+      "description": "Deletes every `location_claims` row written under a RETIRED contract version (`portal_contracts.is_active = false`) — W6-a of the location simplification sprint, ~9.5 M of ~13.2 M rows measured 2026-09-13. The resolver has never read them: it admits a claim only under an ACTIVE contract header, or an operator claim with no contract entry at all. So no verdict moves and NOTHING is enqueued into `dirty_locations` — which is what separates this from `contracts.py --retract`, the mechanism that withdraws a version's evidence BECAUSE it was wrong and must re-resolve every listing it touched.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "dry_run",
+          "description": "true = back up + count only. false = delete (needs confirm=RETIRE).",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "options": null
+        },
+        {
+          "name": "confirm",
+          "description": "Type RETIRE to arm the delete. Ignored when dry_run=true.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "rows per DELETE statement",
+          "required": false,
+          "type": "string",
+          "default": "20000",
+          "options": null
+        },
+        {
+          "name": "max_seconds",
+          "description": "wall-clock budget; stops between batches, never mid-batch",
+          "required": false,
+          "type": "string",
+          "default": "20000",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_SESSION_URL",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "location-batch",
+      "cancelInProgress": false,
+      "timeoutMinutes": 340,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/location_claims_retire.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/location_claims_retire.yml"
+    },
+    {
       "filename": "location_registry_load.yml",
       "name": "Location: RÚIAN registry load",
       "description": "The registry-group jobs of the location subsystem (design 04 §4.4.2):",
