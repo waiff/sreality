@@ -168,7 +168,7 @@ def test_an_unconfirmed_run_deletes_nothing(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(retire, "connect", lambda: _ConnCtx(conn))
     monkeypatch.setattr(retire, "retired_entry_ids", lambda c: [(7, "bazos", 1)])
     monkeypatch.setattr(retire, "count_doomed", lambda c, ids, **kw: 9_500_000)
-    monkeypatch.setattr(retire, "remine_gaps", lambda c, sources: [("bazos", 900, 0)])
+    monkeypatch.setattr(retire, "remine_gaps", lambda c, ids: [("bazos", 900, 0)])
     monkeypatch.setattr(retire, "delete_batches", _explode)
     assert retire.main(["--dry-run"]) == 0
     assert retire.main([]) == 0
@@ -190,7 +190,7 @@ def _explode(*a: object, **k: object) -> None:
     raise AssertionError("an unarmed run must not reach the delete loop")
 
 
-# ------------------------------------------------- 3. the re-mine rail (W11, 2026-09-14)
+# ------------------------------- 3. the re-mine rail (W11, 2026-09-14; re-aimed W15)
 
 
 def test_a_version_that_is_still_a_listings_newest_evidence_is_not_deletable(
@@ -198,40 +198,48 @@ def test_a_version_that_is_still_a_listings_newest_evidence_is_not_deletable(
 ):
     """The W11 resolver reads a listing's NEWEST EVIDENCE, so a retired version's rows are
     live data until that page has been re-mined under the active contract. An armed run
-    refuses while any portal still has served listings with no active-contract claim, and
-    says how many."""
+    refuses while any portal still has listings this delete would leave with no
+    active-contract claim, and says how many."""
     conn = _StubConn([])
     monkeypatch.setattr(retire, "connect", lambda: _ConnCtx(conn))
     monkeypatch.setattr(retire, "retired_entry_ids", lambda c: [(7, "bezrealitky", 2)])
     monkeypatch.setattr(retire, "count_doomed", lambda c, ids, **kw: 1)
     monkeypatch.setattr(retire, "delete_batches", _explode)
-    monkeypatch.setattr(retire, "remine_gaps", lambda c, s: [("bezrealitky", 5750, 5723)])
+    monkeypatch.setattr(retire, "remine_gaps", lambda c, ids: [("bezrealitky", 5750, 5723)])
     assert retire.main(["--confirm", "RETIRE"]) == 3
     # A DRY RUN still plans — it is the reading that tells the operator how long to wait.
     assert retire.main(["--dry-run"]) == 0
 
 
-def test_the_rail_is_armed_when_every_served_listing_has_an_active_claim(
+def test_the_rail_is_armed_when_no_listing_would_lose_its_last_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ):
     deleted: list[object] = []
     conn = _StubConn([])
     monkeypatch.setattr(retire, "connect", lambda: _ConnCtx(conn))
     monkeypatch.setattr(retire, "retired_entry_ids", lambda c: [(7, "bazos", 1)])
-    monkeypatch.setattr(retire, "remine_gaps", lambda c, s: [("bazos", 5750, 0)])
+    monkeypatch.setattr(retire, "remine_gaps", lambda c, ids: [("bazos", 5750, 0)])
     monkeypatch.setattr(retire, "delete_batches",
                         lambda *a, **k: (deleted.append(1), (10, 1, True))[1])
     assert retire.main(["--confirm", "RETIRE"]) == 0
     assert deleted == [1]
 
 
-def test_the_rail_counts_listings_without_an_active_contract_claim():
-    """The gap query asks the ACTIVE header for the listing's OWN portal — a claim under
-    another portal's active contract must never count as this portal's re-mine."""
+def test_the_rail_measures_exactly_what_the_delete_would_destroy():
+    """W15. The driving set is the DOOMED CLAIMS — the listings this delete would touch —
+    and not a cohort: `l.is_active` was both too wide (a live listing with no doomed claim
+    is not at risk) and too narrow (every listing is in the lane now, delisted included).
+    The gap it counts asks the ACTIVE header for the listing's OWN portal, so a claim under
+    another portal's active contract can never count as this portal's re-mine."""
     flat = _squash(retire._REMINE_GAP_SQL)
+    assert "with doomed as ( select distinct c.listing_id from location_claims c " \
+           "where c.contract_entry_id = any(%(entry_ids)s) )" in flat
+    assert "from doomed d join listings l on l.id = d.listing_id" in flat
     assert "count(*) filter (where not exists" in flat
     assert "where c.listing_id = l.id and pc.is_active and pc.source = l.source" in flat
-    assert "from listings l where l.is_active" in flat
+    # No cohort of its own: the delete's own reach is the whole question.
+    assert "l.is_active" not in flat and "repr_listing_ref_id" not in flat
+    assert "group by l.source" in flat
 
 
 def test_there_is_no_force_flag():

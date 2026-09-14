@@ -108,7 +108,8 @@ def test_the_sweep_compares_the_two_version_columns_on_the_new_answer_table():
     flat = " ".join(drain._SWEEP_SQL.split()).lower()
     assert "from listings l" in flat and "left join listing_location p" in flat
     assert "listing_location_current" not in flat and "property_location_current" not in flat
-    assert "l.is_active" in flat
+    # W15: no cohort filter at all — the sweep walks every listing (rule 25).
+    assert "l.is_active" not in flat
     assert "p.listing_id is null" in flat
     assert "p.resolver_version <> %s" in flat
     assert "p.registry_version <> %s" in flat
@@ -150,7 +151,7 @@ def test_the_sweep_skips_rows_already_queued_without_touching_their_locks():
     assert "do update" not in flat
 
 
-def test_the_sweep_revisits_every_active_czech_listing_without_a_town():
+def test_the_sweep_revisits_every_czech_listing_without_a_town():
     """Rule 2 / rule 25's invariant, made mechanical. A row resolved WITHOUT an `obec_kod` is
     stamped at the current version tuple, so the three version arms see a fresh row and walk
     past it for ever: on 2026-09-12 that left 384,365 rows red with nothing able to re-enqueue
@@ -163,7 +164,7 @@ def test_the_sweep_revisits_every_active_czech_listing_without_a_town():
     assert "or (p.obec_kod is null and p.country_status <> 'foreign')" in flat
     assert flat.count("%s") == 4
     # ...and it is one arm of the SAME disjunction, not a second statement.
-    where = flat[flat.index("where (l.is_active"):]
+    where = flat[flat.index("where ("):]
     assert where.index("p.obec_kod is null") < where.index("and l.id > %s")
     # Served by migration 501's index, so the arm costs the red count, not the corpus.
     ddl = (MIGRATIONS / "501_location_w2a_listing_location.sql").read_text().lower()
@@ -1209,31 +1210,27 @@ def test_the_run_cache_never_holds_its_lock_across_a_registry_question():
     assert cache.get(("admin_chain", 1), lambda: "recomputed") == "slow"
 
 
-# ------------------------------------------- W2-a4: the sweep's scope is what Browse serves
+# ----------------------------------------------- W15: the sweep's scope is EVERY listing
 
 
-def test_the_sweep_drives_off_what_browse_serves_not_off_is_active():
-    """`browse_projection` is `from properties p where status = 'active'` — the MERGE
-    lifecycle ('active' vs 'merged_away'), NOT `is_active`. So a DELISTED property is still a
-    Browse row, and the row it renders is its `repr_listing_ref_id` DISPLAY LISTING, which is
-    `is_active = false`. Driving off `l.is_active` alone meant that listing could never be
-    swept, never get a `listing_location` row, and after W3 would show no place and drop off
-    the map."""
+def test_the_sweep_drives_off_every_listing_and_carries_no_cohort():
+    """Operator ruling 2026-09-14 (rule 25): the location lane covers every listing in the
+    database. W2-a4 had scoped this statement to the served set — live, or the display
+    listing of a live property — which was a cost shortcut that read as a SECOND definition
+    of "what counts" next to the consumer rule. A listing this statement skips is one
+    nothing can ever re-resolve, so there is no driving predicate left: the FROM is
+    `listings`, and the WHERE opens on the staleness disjunction."""
     flat = " ".join(drain._SWEEP_SQL.split()).lower()
-    assert ("where (l.is_active or exists (select 1 from properties pr where "
-            "pr.repr_listing_ref_id = l.id and pr.status = 'active'))") in flat
-    # p.status would read the LEFT JOINed listing_location alias; the properties alias is pr.
-    assert "pr.status = 'active'" in flat and "p.status" not in flat
-    # The merge lifecycle, never the delisting flag: `pr.is_active` here would re-lose exactly
-    # the cohort this arm exists for.
-    assert "pr.is_active" not in flat
+    assert "from listings l left join listing_location p on p.listing_id = l.id" in flat
+    assert "where (p.listing_id is null" in flat
+    assert "repr_listing_ref_id" not in flat and "properties" not in flat
+    assert "l.is_active" not in flat
 
 
-def test_the_widened_scope_keeps_every_other_arm_and_the_placeholder_count():
-    """The new predicate is the DRIVING one — which listings are candidates. The staleness
-    disjunction (missing row / resolver_version / registry_version / Czech row without a town)
-    and the NOT EXISTS lock-avoiding pre-filter are untouched, and `'active'` is a literal so
-    `enqueue_full_sweep` still binds exactly four values."""
+def test_the_sweep_keeps_every_staleness_arm_and_the_placeholder_count():
+    """The staleness disjunction (missing row / resolver_version / registry_version / Czech
+    row without a town) and the NOT EXISTS lock-avoiding pre-filter are untouched by the
+    widening, and `enqueue_full_sweep` still binds exactly four values."""
     flat = " ".join(drain._SWEEP_SQL.split()).lower()
     for arm in ("p.listing_id is null",
                 "or p.resolver_version <> %s",
@@ -1247,17 +1244,17 @@ def test_the_widened_scope_keeps_every_other_arm_and_the_placeholder_count():
     drain.enqueue_full_sweep(_FakeConn(state), window=250_000)
     (_, params), = _sweep_windows(state)
     assert params == (RESOLVER_VERSION, REGISTRY, 0, 100_000)
-    # The driving predicate gates the staleness arms, not the other way round.
+    # The id window is the last filter, so each window stays a keyset slice.
     where = flat[flat.index("where ("):]
-    assert where.index("pr.status = 'active'") < where.index("p.resolver_version")
+    assert where.index("p.resolver_version") < where.index("and l.id > %s")
 
 
-def test_migration_505_indexes_the_correlated_exists_the_sweep_now_runs():
-    """The EXISTS is correlated (`pr.repr_listing_ref_id = l.id`) and sits under an OR, which
-    blocks the semi-join transform: Postgres evaluates it as a per-row subplan. Without an
-    index that is one SEQ SCAN of `properties` per inactive listing, on a statement that walks
-    the whole corpus — `properties` carried eleven indexes and not one led on
-    `repr_listing_ref_id`. Additive, partial on the same predicate the sweep asks."""
+def test_migration_505_indexes_the_correlated_exists_the_sweep_used_to_run():
+    """W2-a4's sweep predicate was a correlated EXISTS under an OR, which blocks the
+    semi-join transform: one SEQ SCAN of `properties` per inactive listing without an index.
+    W15 retired that predicate, but migrations are append-only (rule 1) and the index is
+    still on disk and still serves every read model that joins `listings` on
+    `repr_listing_ref_id`, so the file — and this rail over its shape — stay."""
     text = (MIGRATIONS / "505_location_w2a4_properties_repr_index.sql").read_text()
     # The EXECUTABLE half only: the header documents the rollback DROP and the invalid-index
     # rationale, and a prose scan would be reading the comment, not the migration.

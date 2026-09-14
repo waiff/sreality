@@ -204,31 +204,31 @@ def test_514_recreates_the_audit_surface_513_retired() -> None:
 
 
 def test_the_audit_set_is_the_hidden_set_and_nothing_else() -> None:
-    """The point of v2: the page and the rule are ONE definition. The cohort is
-    `SERVED_LISTING_PREDICATE` (the constant the resolver sweep and the claim lane
-    already share) minus `SERVED_LOCATION_PREDICATE` — spelled with both arms of the
-    answer, so a row that is merely foreign is not an audit finding."""
-    from location_data.claims_common import SERVED_LISTING_PREDICATE
-
+    """The point of the surface: the page and the rule are ONE definition. Since W15
+    (operator ruling 2026-09-14) the cohort is that rule and NOTHING else — every
+    listing that fails `SERVED_LOCATION_PREDICATE`, rendered verbatim and negated, so
+    a row that is merely foreign is not an audit finding and a delisted one is."""
     body = _audit_matview_sql()
     squeeze = lambda t: " ".join(t.split())  # noqa: E731
-    assert squeeze(SERVED_LISTING_PREDICATE) in squeeze(body), (
-        "the audit cohort does not use SERVED_LISTING_PREDICATE verbatim"
+    flat = squeeze(body)
+    assert squeeze("not " + SERVED_LOCATION_PREDICATE) in flat, (
+        "the audit cohort does not negate SERVED_LOCATION_PREDICATE verbatim"
     )
-    assert "ll.geom is null" in body
-    assert "ll.country_status <> 'foreign'" in body
+    # RED by: asking the same question a second way off the left join, which is how
+    # the page and Browse would end up on two definitions of "visible".
+    assert "ll.geom is null" not in body
 
 
-def test_the_audit_refresh_never_scans_listings() -> None:
-    """A `listings`-driven form of this same question times out at 120 s on
-    production. Arm 1 walks `listing_location` and joins `listings` by PRIMARY KEY;
-    arm 2 is the no-row case driven from `properties (repr_listing_ref_id)`.
-    RED by: a `from listings l where ...` cohort with no PK join above it."""
-    body = _audit_matview_sql()
-    assert "from listing_location ll" in body
-    assert "join listings l on l.id = c.listing_id" in body
-    assert "from properties p" in body
-    assert "from listings l\n" not in body and "from listings l " not in body
+def test_the_audit_cohort_carries_no_second_definition_of_what_counts() -> None:
+    """W15 retired the served set (`SERVED_LISTING_PREDICATE`): the lane covers every
+    listing, and a delisted listing with no location is a finding like any other. RED
+    by: a `properties`/`repr_listing_ref_id` arm sneaking back into the cohort."""
+    body = _audit_matview_sql().lower()
+    assert "repr_listing_ref_id" not in body
+    assert "from properties" not in body
+    # ONE arm driven from `listings`, not 514's union of two candidate sets.
+    assert "from listings l" in body
+    assert "with candidates as" not in body
 
 
 def test_the_audit_view_names_no_dropped_properties_column() -> None:

@@ -5,15 +5,22 @@ location audit page so that we know exactly what are the numbers we are looking 
 there and that we are comparing the 'hidden' or 'unresolved' in light of the entire
 db."
 
-`location_audit_waterfall` (migration 523) is that chain — every listing ever
-collected, the not-served history, the served set, what the lane has answered for,
-and the hidden remainder the page lists — written once an hour by the producer that
-already refreshes `location_pin_audit_mv`.
+`location_audit_waterfall` (the table, migration 523) is that chain — every listing
+in the database, what the lane has judged, what it has placed, and the hidden
+remainder the page lists — written once an hour by the producer that already
+refreshes `location_pin_audit_mv`.
+
+W15 (operator ruling, 2026-09-14) retired the served set: the lane covers EVERY
+listing, so the chain lost its served/not-served fork and went from 14 rows to 9.
+The producer is therefore whichever migration REPLACED it last (524 today), found
+the way the W5 rail finds the matview's creator — a rail pinned to 523 would keep
+checking a body production no longer has. The table, its grants and the hourly entry
+point still live in 523, and those tests read 523.
 
 The whole value of it is that it is not a SECOND census. Two things must therefore
 hold, and a migration is not importable at runtime, so this file is the rail:
 
-1. THE PIN. The two cuts are `location_data.claims_common`'s own constants,
+1. THE PIN. The one cut is `location_data.claims_common`'s own consumer rule,
    rendered character for character (the same rail
    tests/test_location_w5_serve_resolved.py runs over the serving surfaces). A
    re-typed predicate here would put the audit page and Browse on two different
@@ -28,26 +35,36 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from location_data.claims_common import (
-    SERVED_LISTING_PREDICATE,
-    SERVED_LOCATION_PREDICATE,
-)
+from location_data.claims_common import SERVED_LOCATION_PREDICATE
 
 REPO = Path(__file__).resolve().parents[1]
-W14 = REPO / "migrations" / "523_location_w14_audit_waterfall.sql"
+MIGRATIONS = REPO / "migrations"
+# The table, its grants and the hourly entry point: written once, in 523.
+W14 = MIGRATIONS / "523_location_w14_audit_waterfall.sql"
 PAGE = REPO / "frontend" / "src" / "pages" / "LocationPinAudit.tsx"
 READER = REPO / "frontend" / "src" / "lib" / "locationWaterfall.ts"
 
 _LINE_COMMENT = re.compile(r"--.*$", re.MULTILINE)
 
 
-def _sql() -> str:
-    return W14.read_text(encoding="utf-8")
+def _producer_file() -> Path:
+    """The migration that LAST replaced the chain's producer, not 523 forever."""
+    written = sorted(
+        f for f in MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")
+        if "create or replace function refresh_location_audit_waterfall()"
+        in f.read_text(encoding="utf-8")
+    )
+    assert written, "no migration writes refresh_location_audit_waterfall()"
+    return written[-1]
 
 
-def _body() -> str:
+def _sql(path: Path | None = None) -> str:
+    return (path or _producer_file()).read_text(encoding="utf-8")
+
+
+def _body(path: Path | None = None) -> str:
     """The file with its prose stripped, so a match is CODE and never a comment."""
-    return _LINE_COMMENT.sub("", _sql())
+    return _LINE_COMMENT.sub("", _sql(path))
 
 
 def _squeeze(t: str) -> str:
@@ -57,10 +74,14 @@ def _squeeze(t: str) -> str:
 # ----------------------------------------------------------------------- the pin
 
 
-def test_the_cohort_is_the_shared_served_predicate_verbatim() -> None:
-    """RED by: re-typing `l.is_active or exists (...)` by hand in the migration.
-    The alias `l` is part of that constant's contract and the waterfall keeps it."""
-    assert _squeeze(SERVED_LISTING_PREDICATE) in _squeeze(_body())
+def test_the_chain_carries_no_second_definition_of_what_counts() -> None:
+    """W15: the served set is retired, so the ONLY cut left in the statement is the
+    consumer rule. RED by: a `repr_listing_ref_id` / `properties` arm coming back,
+    which would make the chain a second census next to the one rule."""
+    body = _body().lower()
+    assert "repr_listing_ref_id" not in body
+    assert "from properties" not in body
+    assert "pr.status" not in body
 
 
 def test_the_answer_is_the_shared_consumer_rule_verbatim() -> None:
@@ -97,20 +118,19 @@ def _step(key: str) -> str:
     return m.group(0)
 
 
-def test_the_six_steps_are_all_there() -> None:
-    for key in (
-        "all_listings", "not_served", "served", "served_with_verdict",
-        "served_located", "hidden",
-    ):
+def test_the_four_steps_are_all_there() -> None:
+    """W15's chain: every listing -> judged -> located, with the hidden set deducted
+    from the whole database. RED by: a served/not-served fork coming back."""
+    for key in ("all_listings", "with_verdict", "located", "hidden"):
         assert _step(key)
+    for gone in ("not_served", "served", "served_with_verdict", "served_located"):
+        assert gone not in _squeeze(_values_block())
 
 
 def test_every_step_carries_its_own_split_where_the_operator_asked_for_one() -> None:
-    """The 41,362 and the 28,174 the operator named are sub-rows of the not-served
-    step, not a second query someone has to remember to run."""
+    """The numbers the operator reads the chain by are sub-rows of their step, not a
+    second query someone has to remember to run."""
     for key in (
-        "not_served_no_verdict", "not_served_verdict_no_location",
-        "not_served_located",          # the not-served split
         "located_town", "located_foreign", "located_no_town",
         "hidden_unresolved", "hidden_pending",
     ):
@@ -119,23 +139,19 @@ def test_every_step_carries_its_own_split_where_the_operator_asked_for_one() -> 
 
 def test_lost_is_the_previous_chain_step_minus_this_one() -> None:
     """Written as a DIFFERENCE in the SQL, never as a hand-typed number. RED by:
-    `g.served, 87756` or any expression that is not the two counts subtracted."""
+    `g.located, 12054` or any expression that is not the two counts subtracted."""
     assert "g.all_listings, 0::bigint" in _squeeze(_step("all_listings"))
-    assert "g.served, g.all_listings - g.served" in _squeeze(_step("served"))
     assert (
-        "g.served_verdict, g.served - g.served_verdict"
-        in _squeeze(_step("served_with_verdict"))
+        "g.with_verdict, g.all_listings - g.with_verdict"
+        in _squeeze(_step("with_verdict"))
     )
-    assert (
-        "g.served_located, g.served_verdict - g.served_located"
-        in _squeeze(_step("served_located"))
-    )
+    assert "g.located, g.with_verdict - g.located" in _squeeze(_step("located"))
 
 
 def test_the_rows_that_do_not_narrow_the_chain_carry_no_loss() -> None:
     """A deduction is a set carved out, and a split partitions its parent; calling
     either one a "loss" would double-count it down the column."""
-    for key in ("not_served", "hidden", "hidden_unresolved", "located_town"):
+    for key in ("hidden", "hidden_unresolved", "located_town"):
         assert "null::bigint" in _squeeze(_step(key))
 
 
@@ -153,17 +169,23 @@ def test_the_hidden_split_comes_from_the_relation_the_page_lists() -> None:
     assert "left join location_pin_audit_mv a on a.listing_id = b.listing_id" in body
     assert "coalesce(a.state, 'pending') = 'unresolved'" in body
     assert "coalesce(a.state, 'pending') = 'pending'" in body
+    # The hidden set IS the audit matview's cohort, so the join cannot lose a row:
+    # both are "fails the consumer rule", one statement apart.
+    assert "where not b.located" in body
 
 
 def test_the_apply_proves_the_four_laws() -> None:
     """The DO block is the part that runs against real numbers; a migration that
     stopped proving them would ship a wrong `lost` straight to the operator."""
-    body = _body()
+    body, sql = _body(), _sql()
     assert "kind = 'chain'" in body and "order by step_no" in body
-    assert "the chain says" in _sql()          # law 1
-    assert "not_served % <> % - %" in _sql()   # law 2
-    assert "sub-rows of % sum to" in _sql()    # law 3
-    assert "is not n/total" in _sql()          # law 4
+    assert "the chain says" in sql                        # law 1: the chain
+    assert "located % + hidden % <> all %" in sql         # law 2: the complement
+    assert "judged-without-location % <> % - %" in sql    # law 2: what step 3 lost
+    assert "sub-rows of % sum to" in sql                  # law 3: the splits
+    assert "is not n/total" in sql                        # law 4: the share
+    # Nine rows: four steps and five sub-rows, counted at apply time.
+    assert "expected 9" in sql
 
 
 # --------------------------------------------------------------- the plumbing
@@ -172,8 +194,9 @@ def test_the_apply_proves_the_four_laws() -> None:
 def test_the_refresh_is_the_one_that_already_runs_hourly() -> None:
     """No second job and no second cadence: the waterfall is written by
     `refresh_location_pin_audit_mv()`, AFTER the matview refresh so the hidden
-    split reads the relation the page is about to list."""
-    body = _body()
+    split reads the relation the page is about to list. (523 wired that entry
+    point and no later file needs to touch it.)"""
+    body = _body(W14)
     assert "create or replace function refresh_location_pin_audit_mv()" in body
     assert "refresh materialized view concurrently location_pin_audit_mv;" in body
     refresh = body.index("refresh materialized view concurrently")
@@ -185,7 +208,7 @@ def test_the_refresh_is_the_one_that_already_runs_hourly() -> None:
 
 
 def test_the_browser_role_can_read_it_and_anon_cannot() -> None:
-    body = _body()
+    body = _body(W14)
     assert "grant select on location_audit_waterfall to authenticated;" in body
     assert "revoke all on location_audit_waterfall from anon, authenticated;" in body
     assert "enable row level security" in body
@@ -198,10 +221,11 @@ def test_the_browser_role_can_read_it_and_anon_cannot() -> None:
 def test_the_file_applies_statement_by_statement() -> None:
     """The apply workflow retries a lock_timeout from statement 1, so a partial
     apply has to be resumable (migration 514's contract)."""
-    body = _body().lower()
-    assert "begin;" not in body and "commit;" not in body
-    assert "set lock_timeout = '5s';" in body
-    assert "create table if not exists location_audit_waterfall" in body
+    for path in (W14, _producer_file()):
+        body = _body(path).lower()
+        assert "begin;" not in body and "commit;" not in body
+        assert "set lock_timeout = '5s';" in body
+    assert "create table if not exists location_audit_waterfall" in _body(W14).lower()
 
 
 # ------------------------------------------------------------ the read contract
@@ -213,7 +237,7 @@ def test_the_page_reads_every_column_the_migration_writes() -> None:
     declared = set(
         re.findall(
             r"^\s{2}(\w+)\s+(?:text|smallint|bigint|numeric|timestamptz)",
-            _sql().split("create table if not exists location_audit_waterfall")[1]
+            _sql(W14).split("create table if not exists location_audit_waterfall")[1]
             .split(");")[0],
             re.MULTILINE,
         )

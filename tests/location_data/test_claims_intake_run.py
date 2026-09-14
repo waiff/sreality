@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 import pytest
 
 from location_data import claims_intake
-from location_data.claims_common import SERVED_LISTING_PREDICATE
 from location_data.resolver import drain
 from location_data.claims_intake import (
     _ACTIVE_VERSIONS_SQL,
@@ -183,16 +182,19 @@ def test_batch_queries_are_keyset_and_bounded():
     assert incremental.count("is_active") == 1 and "pc.is_active" in incremental
 
 
-def test_the_full_walk_visits_only_what_the_resolver_serves():
-    """W1-a5. `listings` holds ~830k rows and the platform serves ~376k of them, so an
-    unfiltered walk spent the payload half of every hop on delisted rows nobody resolves.
-    The predicate is the resolver sweep's own, imported — the two walks cannot drift — and
-    it is a filter on the primary-key walk, not a join."""
-    predicate = " ".join(SERVED_LISTING_PREDICATE.split())
+def test_the_full_walk_visits_every_listing():
+    """W15 (operator ruling 2026-09-14). W1-a5 filtered this keyset walk to the served set
+    — live listings plus a live property's display listing — to save the payload half of
+    every hop on delisted rows. That was a cost shortcut that became a SECOND definition of
+    "what counts", and rule 25 covers the whole database: a listing this walk skips can
+    never be mined, never re-resolved, and the audit page could never explain it. The only
+    filters left are the keyset and the optional portal."""
     flat = " ".join(_LISTINGS_FULL_SQL.split())
-    assert predicate in " ".join(drain._SWEEP_SQL.split())
-    # In the WHERE of the keyset walk, not anywhere else in the statement.
-    assert predicate in flat.split("WHERE l.id > %(after_id)s", 1)[1]
+    where = flat.split("WHERE l.id > %(after_id)s", 1)[1]
+    assert "repr_listing_ref_id" not in flat and "repr_listing_ref_id" not in drain._SWEEP_SQL
+    # `pc.is_active` picks the live contract; nothing here filters on the LISTING's flag.
+    assert "l.is_active" not in flat and flat.count("is_active") == 1
+    assert " ".join(where.split()).startswith("AND (%(source)s::text IS NULL OR l.source =")
     # Filter only: every JOIN in the walk still comes from the shared FROM/body blocks.
     assert flat.count("JOIN") == " ".join((_FROM_LISTINGS + _BODY_JOIN).split()).count("JOIN")
     assert MIN_BATCH_SIZE == 10_000 and MAX_BATCH_SIZE == 30_000
@@ -498,11 +500,11 @@ def test_a_listing_with_no_stored_body_yields_no_candidate():
     assert scan.contract_version == 5 and scan.row.listing_id == 7
 
 
-def test_the_bodies_first_pass_selects_the_latest_body_of_a_served_listing_only():
-    """THE SERVED SET, like the listing scan (W1-a8): a delisted DISPLAY listing still fills
-    Browse and the map (336 813 of 672 299 pins), and `l.is_active` alone held those rows on
-    old-contract claims until 503's guard measured a 23.2 % map loss. The portals stay a
-    parameter: only sources whose contract declares a page entry have bodies worth fetching."""
+def test_the_bodies_first_pass_selects_the_latest_body_of_every_listing():
+    """EVERY LISTING, like the listing scan (W15): the pass mines the latest live detail body
+    of every listing there is, and the served set that scoped it (W1-a8) is retired. The
+    portals stay a parameter: only sources whose contract declares a page entry have bodies
+    worth fetching."""
     # The portal and page-kind filters are on the PAYLOAD row, so the window can ask them
     # without `listings` (the join makes `p.source` and `l.source` the same column anyway).
     # They are the WINDOW's job: the outer statement only resolves the ids it named.
@@ -511,10 +513,12 @@ def test_the_bodies_first_pass_selects_the_latest_body_of_a_served_listing_only(
         assert "p.page_kind = 'detail'" in one
         assert "p.source = ANY(%(page_sources)s::text[])" in one
         assert "(%(source)s::text IS NULL OR p.source = %(source)s)" in one
-    served = " ".join(SERVED_LISTING_PREDICATE.split())  # backlog count shares the same FROM
-    for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):
+    for sql in (_UNMINED_BODIES_SQL, _UNMINED_BODY_BACKLOG_SQL):  # both share the same FROM
         one = " ".join(sql.split())
-        assert served in one and "AND l.is_active" not in one
+        # No cohort filter of any kind on the LISTING: `pc.is_active` picks the live
+        # contract and is the only `is_active` either statement may carry.
+        assert "l.is_active" not in one and "repr_listing_ref_id" not in one
+        assert one.count("is_active") == 1 and "pc.is_active" in one
         # THE SAME definition of "the latest detail body" the listing scan's lateral
         # applies, asked from the other direction and as an ANTI-JOIN (one probe per
         # candidate id, not one per listing): `last_observed_at`, never `first_observed_at`

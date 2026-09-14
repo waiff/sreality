@@ -92,7 +92,6 @@ from location_data.claims_common import (  # noqa: F401 - the lane's public voca
     GUARDS,
     MIRROR_UNSAFE_CHARS,
     MAX_CLAIM_VALUE_BYTES_ENV,
-    SERVED_LISTING_PREDICATE,
     SOURCES,
     SUBSTRATE_ARCHIVED_HTML,
     SUBSTRATE_PAYLOAD,
@@ -699,16 +698,16 @@ _FROM_LISTINGS = """
     FROM listings l
 """
 
-# THE WALK VISITS WHAT THE RESOLVER SERVES; A FAILED RUN RESUMES (W1-a5). Keyset over
-# `listings.id` filtered to the served set — the resolver sweep's own predicate, shared so
-# the two lanes cannot drift. ~830k rows, ~376k served: walking the rest spent the payload
-# half of every hop on delisted rows nobody resolves. Full mode carries no snapshot cursor.
+# THE WALK VISITS EVERY LISTING; A FAILED RUN RESUMES (W1-a5). Keyset over `listings.id`,
+# and nothing else narrows it (W15): rule 25 covers the whole database, and a listing the
+# walk skips is one the audit page can never explain. W1-a5 filtered this to the served set
+# to save the payload half of every hop on delisted rows — a cost shortcut that became a
+# second definition of "what counts", so it is gone. Full mode carries no snapshot cursor.
 _LISTINGS_FULL_SQL = (
     _SELECT_COLUMNS + " NULL::bigint\n"
     + _FROM_LISTINGS + _BODY_JOIN + """
     WHERE l.id > %(after_id)s
       AND (%(source)s::text IS NULL OR l.source = %(source)s)
-      AND """ + SERVED_LISTING_PREDICATE + """
     ORDER BY l.id
     LIMIT %(batch_size)s
 """)
@@ -753,8 +752,8 @@ _LISTINGS_INCREMENTAL_SQL = ("""
 
 # THE BODIES-FIRST BACKLOG (W1-a2), drained in TWO statements (W1-a4).
 #
-# It mines what the resolver SERVES (`SERVED_LISTING_PREDICATE`, W1-a8) — one definition for the
-# walk, this pass and the sweep: a delisted DISPLAY listing is shown by Browse and the map.
+# It mines the latest live body of EVERY listing (W15). W1-a8 scoped it to the served set;
+# rule 25 covers the whole database, so the only filters left are the payload row's own.
 #
 # WHY TWO. With the keyset in one statement's WHERE, Postgres planned it from `listings`: a
 # bitmap scan of all ~250 000 active rows, a payload probe and the latest-body subquery PER
@@ -818,12 +817,11 @@ _UNMINED_WINDOW_SQL = ("""
     LIMIT %(cap)s
 """)
 
-_UNMINED_BODIES_FROM = ("""
+_UNMINED_BODIES_FROM = """
     FROM portal_raw_payloads p
     JOIN listings l ON l.source = p.source AND l.source_id_native = p.source_id_native
-     AND """ + SERVED_LISTING_PREDICATE + """
     JOIN portal_contracts pc ON pc.source = p.source AND pc.is_active
-""")
+"""
 
 _UNMINED_BODIES_SQL = (
     _UNMINED_BODIES_SELECT + _UNMINED_BODIES_FROM + """

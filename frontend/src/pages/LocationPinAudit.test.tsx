@@ -54,10 +54,11 @@ const SUMMARY: pinAudit.PinAuditSummaryRow[] = [
   { state: 'pending', source: 'idnes', category_main: 'dum', quality: 'active_unresolved', sibling_has_pin: true, n: 5, refreshed_at: REFRESHED },
 ];
 
-/* The chain, in production's shape (2026-09-14) but scaled to the fixture above
- * so the two halves of the page tell one story: 1 332 unresolved + 45 pending =
- * 1 377 hidden. `lost` is the previous chain step's n minus this one's, exactly
- * as the store writes it. */
+/* The chain, in production's shape (W15, migration 524) but scaled to the fixture
+ * above so the two halves of the page tell one story: 1 332 unresolved + 45
+ * pending = 1 377 hidden. `lost` is the previous chain step's n minus this one's,
+ * exactly as the store writes it; `hidden` is the complement of `located` over
+ * the whole database, which is why it is a deduction off step 1. */
 const wf = (
   step_no: number,
   sub_no: number,
@@ -75,19 +76,14 @@ const wf = (
 
 const WATERFALL: waterfall.WaterfallRow[] = [
   wf(1, 0, 'all_listings', 'chain', null, 'Inzerátů v databázi celkem', 100000, 0),
-  wf(2, 0, 'not_served', 'deduction', 'all_listings', 'Nezobrazitelné inzeráty', 10000, null),
-  wf(2, 1, 'not_served_no_verdict', 'split', 'not_served', 'systém je nikdy neposuzoval', 3000, null),
-  wf(2, 2, 'not_served_verdict_no_location', 'split', 'not_served', 'posoudil, polohu neurčil', 5000, null),
-  wf(2, 3, 'not_served_located', 'split', 'not_served', 'polohu mají z dřívějška', 2000, null),
-  wf(3, 0, 'served', 'chain', null, 'Zobrazitelné inzeráty', 90000, 10000),
-  wf(4, 0, 'served_with_verdict', 'chain', null, 'Zobrazitelné, už posouzené', 89955, 45),
-  wf(5, 0, 'served_located', 'chain', null, 'Zobrazitelné se známou polohou', 88623, 1332),
-  wf(5, 1, 'located_town', 'split', 'served_located', 'mají přiřazenou obec', 80000, null),
-  wf(5, 2, 'located_foreign', 'split', 'served_located', 'jsou v zahraničí', 8000, null),
-  wf(5, 3, 'located_no_town', 'split', 'served_located', 'bod v ČR bez obce', 623, null),
-  wf(6, 0, 'hidden', 'deduction', 'served', 'Skryté: bez rozhodnuté polohy', 1377, null),
-  wf(6, 1, 'hidden_unresolved', 'split', 'hidden', 'zpracováno, nerozhodnuto', 1332, null),
-  wf(6, 2, 'hidden_pending', 'split', 'hidden', 'čeká na zpracování', 45, null),
+  wf(2, 0, 'with_verdict', 'chain', null, 'U kterých už systém polohu řešil', 99955, 45),
+  wf(3, 0, 'located', 'chain', null, 'Se známou polohou (bod v mapě, nebo zahraničí)', 98623, 1332),
+  wf(3, 1, 'located_town', 'split', 'located', 'mají přiřazenou obec', 90000, null),
+  wf(3, 2, 'located_foreign', 'split', 'located', 'jsou v zahraničí (systém tak rozhodl)', 8000, null),
+  wf(3, 3, 'located_no_town', 'split', 'located', 'mají bod v ČR, ale bez obce', 623, null),
+  wf(4, 0, 'hidden', 'deduction', 'all_listings', 'Bez rozhodnuté polohy — tento seznam', 1377, null),
+  wf(4, 1, 'hidden_unresolved', 'split', 'hidden', 'nevyřešeno', 1332, null),
+  wf(4, 2, 'hidden_pending', 'split', 'hidden', 'čeká na zpracování', 45, null),
 ];
 
 const ROW: pinAudit.PinAuditRow = {
@@ -177,11 +173,11 @@ describe('LocationPinAudit', () => {
     expect(first).toHaveTextContent('100,0');
 
     /* Each step states what was lost getting to it, straight from the payload. */
-    expect(screen.getByTestId('waterfall-step-served')).toHaveTextContent(
-      '−10 000',
+    expect(screen.getByTestId('waterfall-step-with_verdict')).toHaveTextContent(
+      '−45',
     );
     expect(
-      screen.getByTestId('waterfall-step-served_located'),
+      screen.getByTestId('waterfall-step-located'),
     ).toHaveTextContent('−1 332');
 
     /* And the last row is the set the rest of the page lists — read against the
@@ -191,14 +187,14 @@ describe('LocationPinAudit', () => {
     expect(hidden).toHaveTextContent('1,4');
   });
 
-  it('shows the not-served split the operator asked to see in context', async () => {
+  it('splits the located and the hidden rows the operator reads them by', async () => {
     renderPage();
     expect(
-      await screen.findByTestId('waterfall-split-not_served_no_verdict'),
-    ).toHaveTextContent('3 000');
+      await screen.findByTestId('waterfall-split-located_town'),
+    ).toHaveTextContent('90 000');
     expect(
-      screen.getByTestId('waterfall-split-not_served_verdict_no_location'),
-    ).toHaveTextContent('5 000');
+      screen.getByTestId('waterfall-split-located_foreign'),
+    ).toHaveTextContent('8 000');
     expect(
       screen.getByTestId('waterfall-split-hidden_unresolved'),
     ).toHaveTextContent('1 332');
@@ -213,7 +209,7 @@ describe('LocationPinAudit', () => {
       await screen.findByText(/Nic se nikdy nemaže/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Stažené inzeráty, které zároveň nejsou hlavním inzerátem/),
+      screen.getByText(/Každý inzerát bez rozhodnuté polohy/),
     ).toBeInTheDocument();
     expect(screen.getByText(/rozhodl, že jsou v zahraničí/)).toBeInTheDocument();
   });

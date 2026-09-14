@@ -83,7 +83,6 @@ from typing import Any
 import psycopg
 
 from location_data import loader_db
-from location_data.claims_common import SERVED_LISTING_PREDICATE
 from location_data.resolver import core, lease, projection, resolve_db
 from location_data.resolver.types import Claim, ResolverContext
 from location_data.resolver.version import RESOLVER_VERSION
@@ -253,10 +252,10 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
 
 
 # `location_resolve_sweep` — the daily reconcile backstop. ONE statement, driving off
-# `listings`: every ACTIVE listing whose answer row is missing, or was written at a version
-# tuple that is no longer current, is enqueued. Driving off `listings` sees every listing
-# there is, the join to the answer table is on its primary key, and the drain writes a row
-# for a claimless listing too — so coverage is `count(listing_location) = count(active)` by
+# `listings`: every listing whose answer row is missing, or was written at a version tuple
+# that is no longer current, is enqueued. Driving off `listings` sees every listing there
+# is, the join to the answer table is on its primary key, and the drain writes a row for a
+# claimless listing too — so coverage is `count(listing_location) = count(listings)` by
 # construction, and a stale row is caught the same way as a missing one.
 #
 # TWO version columns, not three. `policy_version` was the third and it named
@@ -280,7 +279,7 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
 # would reset a poisoned row's `attempts` backoff and move the oldest row in the queue to the
 # back of it, on a statement that walks the whole corpus. NOT EXISTS + DO NOTHING, deliberately.
 #
-# THE RED-LINE ARM (W2-a2). Rule 25's invariant is "every active Czech listing has a town".
+# THE RED-LINE ARM (W2-a2). Rule 25's invariant is "every Czech listing has a town".
 # The three version arms cannot express it: a row resolved without an `obec_kod` is stamped at
 # the CURRENT version tuple, so the sweep sees a fresh row and walks past it for ever — which
 # is exactly how 2026-09-12 left 384,365 rows red with nothing able to re-enqueue them. The
@@ -288,26 +287,18 @@ def _bounded(conn: psycopg.Connection, seconds: int) -> Iterator[psycopg.Cursor]
 # (never a default — `undetermined` is still red and still swept). It is bounded by the red
 # count, not the corpus, and served by `listing_location (obec_kod, granularity)` from 501.
 #
-# THE DRIVING PREDICATE IS "WHAT BROWSE SERVES", NOT "WHAT IS ACTIVE" (W2-a4). `l.is_active`
-# alone was the wrong scope: `browse_projection` serves `properties WHERE status = 'active'`
-# — the MERGE lifecycle, not `is_active` — so a DELISTED property is still a Browse row, and
-# the row it renders is its `repr_listing_ref_id` DISPLAY LISTING, which is `is_active =
-# false`. Under the old predicate that listing could never be swept, never get a
-# `listing_location` row, and after W3 would show no place and vanish from the map. The
-# second arm brings exactly those display listings in and nothing else.
-#
-# The EXISTS is CORRELATED and sits under an OR, which blocks the semi-join transform, so
-# Postgres evaluates it as a per-row subplan: one index probe per inactive listing WITH an
-# index, one seq scan of `properties` per inactive listing WITHOUT one. Migration 505 adds
-# `properties (repr_listing_ref_id) WHERE status = 'active'` — `properties` carried eleven
-# indexes and not one led on the column every read model joins `listings` on.
+# THERE IS NO DRIVING PREDICATE ANY MORE (W15, operator ruling 2026-09-14). The sweep walks
+# EVERY listing: rule 25 is "every Czech listing has its town", and a listing this statement
+# skips is one nothing can ever re-resolve. W2-a4 scoped it to the served set (live, or the
+# display listing of a live property) — a cost shortcut that read as a second definition of
+# "what counts" next to the consumer rule, so it is gone. What a listing is worth showing is
+# the consumer rule's business (`SERVED_LOCATION_PREDICATE`), never this statement's.
 _SWEEP_SQL = """
 INSERT INTO dirty_locations (listing_id, reason)
 SELECT l.id, 'full_sweep'
   FROM listings l
   LEFT JOIN listing_location p ON p.listing_id = l.id
- WHERE """ + SERVED_LISTING_PREDICATE + """
-   AND (p.listing_id IS NULL
+ WHERE (p.listing_id IS NULL
         OR p.resolver_version <> %s
         OR p.registry_version <> %s
         OR (p.obec_kod IS NULL AND p.country_status <> 'foreign'))

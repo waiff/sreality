@@ -1,22 +1,24 @@
-/* The audit page's waterfall (`location_audit_waterfall`, migration 523).
+/* The audit page's waterfall (`location_audit_waterfall`, migrations 523/524).
  *
  * The page used to state ONE number — the listings no consumer can see — with
  * nothing to read it against. This relation is the whole chain, from every
- * listing ever collected down to that set, so "skryté" is read against the
+ * listing in the database down to that set, so "skryté" is read against the
  * database and not against itself.
  *
  * NO ARITHMETIC HAPPENS HERE. Every count, every loss and every share is
- * computed in the store, in one statement, from the same two predicates Browse
- * and the resolver use (`SERVED_LISTING_PREDICATE` / `SERVED_LOCATION_PREDICATE`
- * in location_data/claims_common.py). A client that recomputed a step would be a
- * second definition of the same question, which is the one thing this wave exists
- * to prevent — so this module only fetches, orders and nests.
+ * computed in the store, in one statement, from the ONE rule Browse and the
+ * resolver use (`SERVED_LOCATION_PREDICATE` in location_data/claims_common.py:
+ * a listing is served once the store has a point for it, or has determined it is
+ * abroad). A client that recomputed a step would be a second definition of the
+ * same question, which is the one thing this wave exists to prevent — so this
+ * module only fetches, orders and nests.
  *
  * THREE KINDS OF ROW:
  *   'chain'     the funnel itself — `lost` is the previous chain step's count
  *               minus this one's, written by the store, never derived here;
- *   'deduction' a set carved OUT of the chain (the not-served rows; the hidden
- *               set) — it does not narrow the next step, so it carries no loss;
+ *   'deduction' a set carved OUT of the chain (the hidden set: every listing
+ *               that fails the rule) — it does not narrow the next step, so it
+ *               carries no loss;
  *   'split'     a sub-row partitioning its parent (`parent_key`) exactly.
  */
 
