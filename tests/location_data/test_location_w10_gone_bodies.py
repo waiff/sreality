@@ -6,10 +6,14 @@ Three gates, all offline.
    on the stored bazos bodies whose bytes ARE the category-index page a removed ad
    answers with, and on nothing else: both #1451 signals must fire, the archived HTML
    must hash to the payload row's own `body_sha256`, and only a 2xx/NULL row is
-   touched. Nothing is deleted. 520 is the one that runs — 519's title pattern carried
-   TWO internal wildcards, which makes LIKE quadratic over a 100 KB document (>180 ms
-   a page against ~2.2 ms) and spent the statement timeout on prod. Both are pinned,
-   and 520 is additionally pinned against ever growing a second wildcard back.
+   touched. Nothing is deleted. THREE files, because two cuts failed on prod and
+   migrations are append-only: 519's title pattern carried TWO internal wildcards
+   (LIKE goes quadratic over a 100 KB document), and 519 and 520 both addressed the
+   batch by an id RANGE — but `portal_raw_pages` interleaves nine portals in one id
+   sequence at 44 ids per bazos row, and the planner puts the `html ilike` tests
+   ahead of `source = 'bazos'`, so each batch detoasted ~44x the pages it wanted,
+   most of them larger idnes ones. 521 addresses the batch by id LIST. All three are
+   pinned on the doctrine; 521 is additionally pinned on the two things that broke.
 
 2. THE PASS ALREADY READS THE STAMP. `location_data.claims_intake` asks for the
    latest body whose fetch SUCCEEDED in all three places it looks at a payload row,
@@ -47,15 +51,32 @@ from scraper.portal_base import ListingGoneError
 _MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
 _FIRST_CUT = (_MIGRATIONS / "519_location_w10_gone_bodies.sql").read_text(encoding="utf-8")
 # The one that runs. Append-only means 519 stays on disk; 520 supersedes its pattern.
-_LIVE = (_MIGRATIONS / "520_location_w10_gone_bodies_retry.sql").read_text(encoding="utf-8")
+_SECOND_CUT = (
+    _MIGRATIONS / "520_location_w10_gone_bodies_retry.sql").read_text(encoding="utf-8")
+# The one that runs. Append-only means 519 and 520 stay on disk; 521 supersedes them.
+_LIVE = (
+    _MIGRATIONS / "521_location_w10_gone_bodies_by_id.sql").read_text(encoding="utf-8")
 
-_BOTH = [("519", _FIRST_CUT), ("520", _LIVE)]
+_BOTH = [("519", _FIRST_CUT), ("520", _SECOND_CUT), ("521", _LIVE)]
+
+
+def _code(migration: str) -> str:
+    """The file with its `--` comments stripped.
+
+    Every structural pin here reads CODE, never prose: 520 and 521 quote the exact
+    patterns and predicates that broke in order to explain them, and a scan that
+    reads an explanation as an instruction fails on the documentation.
+    """
+    return "\n".join(
+        line for line in migration.splitlines() if not line.lstrip().startswith("--")
+    )
 
 
 def _update_block(migration: str) -> str:
     """The `do $$ ... $$` block that stamps — the readout and the assertion blocks
     read the same shape and must not be mistaken for it."""
-    return migration.split("update portal_raw_payloads p")[1].split("get diagnostics")[0]
+    return _code(migration).split("update portal_raw_payloads p")[1].split(
+        "get diagnostics")[0]
 
 
 @pytest.mark.parametrize("name,migration", _BOTH)
@@ -72,8 +93,9 @@ def test_the_stamp_only_touches_a_successful_bazos_detail_body(name: str, migrat
     assert "(p.http_status is null or p.http_status between 200 and 299)" in block, name
     assert "p.source = 'bazos'" in block, name
     assert "p.page_kind = 'detail'" in block, name
-    assert "r.source = 'bazos'" in block, name
-    assert "r.page_kind = 'detail'" in block, name
+    # The PAGE side is scoped either explicitly (519, 520) or by the id list the
+    # keyset probe built from exactly those two predicates (521).
+    assert ("r.source = 'bazos'" in block) or ("r.id = any(v_ids)" in block), name
 
 
 @pytest.mark.parametrize("name,migration", _BOTH)
@@ -95,7 +117,7 @@ def test_the_stamp_is_idempotent_and_batched(name: str, migration: str):
     assert "set statement_timeout = '900s'" in migration, name
     assert "commit;" in migration, name
     # The keyset probe is what makes the file a no-op on the CI replay's empty tables.
-    assert "exit when v_hi is null" in migration, name
+    assert re.search(r"exit when v_(hi|ids) is null", _code(migration)), name
 
 
 def test_no_like_pattern_backtracks():
@@ -107,20 +129,25 @@ def test_no_like_pattern_backtracks():
     5 000-page batch spent a 900 s statement timeout. Every pattern in the file
     that runs must be one leading and one trailing wildcard and nothing else.
     """
-    # COMMENTS OUT FIRST: 520's header quotes 519's bad pattern verbatim to explain
-    # it, and a scan that reads prose as code would fail on the explanation.
-    code = "\n".join(
-        line for line in _LIVE.splitlines() if not line.lstrip().startswith("--")
-    )
-    patterns = re.findall(r"ilike '([^']*)'", code)
+    patterns = re.findall(r"ilike '([^']*)'", _code(_LIVE))
     assert patterns, "the stamp reads the archived HTML with ILIKE"
     for pattern in patterns:
         assert pattern.startswith("%") and pattern.endswith("%"), pattern
         assert pattern.count("%") == 2, pattern
 
 
-def test_the_batch_is_small_enough_that_a_slow_region_is_only_slow():
-    assert "order by id limit 1000" in _LIVE
+def test_the_batch_is_addressed_by_id_list_not_by_id_range():
+    """The second regression: `portal_raw_pages` interleaves nine portals in one id
+    sequence — 142,506 bazos detail pages over ids 3..6,302,167, 44 ids apiece — and
+    the planner evaluates the `html ilike` tests BEFORE `source = 'bazos'`. Bounding
+    a batch by an id RANGE therefore detoasts every portal's page in that range, ~44
+    per bazos page and most of them larger. Measured: >900 s by range against 9.7 s
+    for the same 1,000 pages addressed by list.
+    """
+    code = _code(_LIVE)
+    assert "r.id = any(v_ids)" in code
+    assert "r.id > v_after" not in code, "an id range reintroduces the 44x detoast"
+    assert "array_agg(id)" in code
     # A bad day ends in a committed partial pass with a NOTICE, not a killed job.
     assert "v_deadline" in _LIVE
 

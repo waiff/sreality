@@ -818,16 +818,19 @@ component is slimmed twice — each wave rewrites one component and slims its st
 - **W10 — stored gone pages are stamped 410 so the last live page is mined (bazos removed ads before
   the gone-fix)** (shipped): bazos answers a removed ad with HTTP 200 and its CATEGORY INDEX page, and
   until #1451 the client did not recognise it — so the page was archived as a detail body and the
-  bodies-first pass mined a page with no location on it. Migration 520 (519 re-cut: its `'%<title>%…%'`
-  test carried two internal wildcards, which makes LIKE quadratic over a 100 KB page and spent the
-  900 s statement timeout after committing 3,346 stamps) corrects those stored bodies'
+  bodies-first pass mined a page with no location on it. Migration 521 corrects those stored bodies'
   `http_status` to 410 (the truthful status of a removed ad — no new column, no flag), which the
   pass's three payload predicates already skip, so the previous version becomes the latest body on its
   own. A body is only stamped when the archived HTML hashes to that payload row's own `body_sha256`
   AND both of #1451's signals fire; nothing is deleted. Bazos only — the other portals' markers are
   prose fragments not yet shown to be impossible on a live page, and a false stamp destroys evidence.
   Going forward every HTML portal raises `ListingGoneError` inside its client's `fetch_detail`, before
-  the body reaches the archive writer, so no new gone page is stored.
+  the body reaches the archive writer, so no new gone page is stored. 519 and 520 are 521's failed
+  cuts, kept on disk (append-only): 519's `'%<title>%…%'` test carried two internal wildcards, which
+  makes LIKE quadratic over a 100 KB page, and both bounded a batch by an id RANGE — fatal because
+  `portal_raw_pages` interleaves nine portals at 44 ids per bazos row and the planner runs the html
+  test ahead of `source = 'bazos'`, so each batch detoasted ~44x what it wanted. 521 addresses the
+  batch by id LIST: 9.7 s per 1,000 pages against >900 s.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

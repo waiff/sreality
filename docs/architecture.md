@@ -2009,7 +2009,7 @@ no ad-level location at all — and until #1451 the bazos client did not recogni
 archived like any other detail body and the pass mined it in place of the ad's last live page. The
 fix needs no new column and no flag, because all three payload predicates (`_BODY_JOIN`,
 `_UNMINED_WINDOW_WHERE`, `_LATEST_BODY_ONLY`) already ask for a body whose fetch SUCCEEDED: migration
-520 (519's pattern, de-quadratified — see below) corrects the stored gone pages' `http_status` to **410**, the truthful status of a removed ad, and
+521 (see below — 519 and 520 are its failed cuts) corrects the stored gone pages' `http_status` to **410**, the truthful status of a removed ad, and
 the pass falls through to the previous version on its own (`payloads._PRUNE_SQL` also ranks non-2xx
 last, so a stamped gone page is the first thing the version cap evicts). Nothing is deleted — the
 body and its R2 object stay. A stored body is proven gone only when the archived HTML in
@@ -2018,12 +2018,17 @@ transaction by `upsert_portal_raw_page`, so their timestamps agree too) AND both
 fire on it; on 14 000 sampled bazos pages those two signals never disagreed. Going FORWARD nothing
 new is stamped, because every HTML portal decides "gone" inside its client's `fetch_detail` and
 raises `ListingGoneError` before the body reaches the caller that stages it — the guard is structural,
-there is no body for the writer to refuse. One SQL trap is worth carrying: 519 tested the title
-with `ilike '%<title>%…%'`, and a LIKE pattern with TWO internal wildcards is quadratic over a
-100 KB document (>180 ms a page against ~2.2 ms) — it spent a 900 s statement timeout mid-sweep.
-The anchor bought nothing (both forms selected the same 598 of 3,000 pages), so 520 drops it and
-puts the more selective banner first; `test_location_w10_gone_bodies.py` pins one wildcard pair
-per pattern.
+there is no body for the writer to refuse. TWO SQL traps are worth carrying, because both cost a
+900 s statement timeout on prod before 521 landed. (1) 519 tested the title with
+`ilike '%<title>%…%'`: a LIKE pattern with TWO internal wildcards is quadratic over a 100 KB
+document (>180 ms a page against ~2.2 ms), and the anchor bought nothing — both forms selected
+the same 598 of 3,000 pages. (2) 519 and 520 both bounded a batch by an id RANGE, but
+`portal_raw_pages` interleaves nine portals in ONE id sequence — 142,506 bazos detail pages over
+ids 3..6,302,167, **44 ids apiece** — and the planner puts the `html ilike` tests ahead of
+`source = 'bazos'` in that scan's filter, so every batch detoasted ~44x the pages it wanted, most
+of them larger idnes ones. 521 hands the UPDATE the batch's ids as a `bigint[]`
+(`r.id = ANY(v_ids)`): 9.7 s per 1,000 pages against >900 s for the same work by range.
+`test_location_w10_gone_bodies.py` pins both — one wildcard pair per pattern, and no id range.
 
 If R2 is unconfigured the page half is skipped with ONE warning per run and the payload half runs
 unchanged — the hourly ingest for nine portals must never go dark because a credential rotated. The
