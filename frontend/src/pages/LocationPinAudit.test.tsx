@@ -18,6 +18,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import LocationPinAudit from './LocationPinAudit';
 import * as pinAudit from '@/lib/pinAudit';
+import * as waterfall from '@/lib/locationWaterfall';
 import * as listingUrl from '@/lib/listingUrl';
 
 vi.mock('@/lib/pinAudit', async (importOriginal) => {
@@ -27,6 +28,14 @@ vi.mock('@/lib/pinAudit', async (importOriginal) => {
     fetchPinAuditSummary: vi.fn(),
     fetchPinAuditPage: vi.fn(),
   };
+});
+
+/* The store's read is mocked; `groupWaterfall` is NOT — the nesting the page
+ * renders is the reader's own, so a change there shows up here. */
+vi.mock('@/lib/locationWaterfall', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/locationWaterfall')>();
+  return { ...actual, fetchLocationWaterfall: vi.fn() };
 });
 
 const REFRESHED = '2026-09-13T05:25:00Z';
@@ -43,6 +52,42 @@ const SUMMARY: pinAudit.PinAuditSummaryRow[] = [
    * two shows up as an extra matrix row rather than a bigger number. */
   { state: 'pending', source: 'idnes', category_main: 'dum', quality: 'active_no_claims', sibling_has_pin: false, n: 40, refreshed_at: REFRESHED },
   { state: 'pending', source: 'idnes', category_main: 'dum', quality: 'active_unresolved', sibling_has_pin: true, n: 5, refreshed_at: REFRESHED },
+];
+
+/* The chain, in production's shape (2026-09-14) but scaled to the fixture above
+ * so the two halves of the page tell one story: 1 332 unresolved + 45 pending =
+ * 1 377 hidden. `lost` is the previous chain step's n minus this one's, exactly
+ * as the store writes it. */
+const wf = (
+  step_no: number,
+  sub_no: number,
+  step_key: string,
+  kind: waterfall.WaterfallKind,
+  parent_key: string | null,
+  label_cs: string,
+  n: number,
+  lost: number | null,
+): waterfall.WaterfallRow => ({
+  step_key, step_no, sub_no, kind, parent_key, label_cs, n, lost,
+  share_pct: Math.round((n / 100000) * 100000) / 1000,
+  refreshed_at: REFRESHED,
+});
+
+const WATERFALL: waterfall.WaterfallRow[] = [
+  wf(1, 0, 'all_listings', 'chain', null, 'Inzerátů v databázi celkem', 100000, 0),
+  wf(2, 0, 'not_served', 'deduction', 'all_listings', 'Nezobrazitelné inzeráty', 10000, null),
+  wf(2, 1, 'not_served_no_verdict', 'split', 'not_served', 'systém je nikdy neposuzoval', 3000, null),
+  wf(2, 2, 'not_served_verdict_no_location', 'split', 'not_served', 'posoudil, polohu neurčil', 5000, null),
+  wf(2, 3, 'not_served_located', 'split', 'not_served', 'polohu mají z dřívějška', 2000, null),
+  wf(3, 0, 'served', 'chain', null, 'Zobrazitelné inzeráty', 90000, 10000),
+  wf(4, 0, 'served_with_verdict', 'chain', null, 'Zobrazitelné, už posouzené', 89955, 45),
+  wf(5, 0, 'served_located', 'chain', null, 'Zobrazitelné se známou polohou', 88623, 1332),
+  wf(5, 1, 'located_town', 'split', 'served_located', 'mají přiřazenou obec', 80000, null),
+  wf(5, 2, 'located_foreign', 'split', 'served_located', 'jsou v zahraničí', 8000, null),
+  wf(5, 3, 'located_no_town', 'split', 'served_located', 'bod v ČR bez obce', 623, null),
+  wf(6, 0, 'hidden', 'deduction', 'served', 'Skryté: bez rozhodnuté polohy', 1377, null),
+  wf(6, 1, 'hidden_unresolved', 'split', 'hidden', 'zpracováno, nerozhodnuto', 1332, null),
+  wf(6, 2, 'hidden_pending', 'split', 'hidden', 'čeká na zpracování', 45, null),
 ];
 
 const ROW: pinAudit.PinAuditRow = {
@@ -94,6 +139,7 @@ describe('LocationPinAudit', () => {
       rows: [ROW],
       nextCursor: null,
     });
+    vi.mocked(waterfall.fetchLocationWaterfall).mockResolvedValue(WATERFALL);
   });
 
   it('renders the portal x type matrix from the summary payload', async () => {
@@ -115,8 +161,61 @@ describe('LocationPinAudit', () => {
   it('shows the refresh time so the operator knows how old the list is', async () => {
     renderPage();
     await waitFor(() =>
-      expect(screen.getByText(/stav k/)).toBeInTheDocument(),
+      expect(screen.getByText(/Stav k/)).toBeInTheDocument(),
     );
+    /* ONCE. Two timestamps on one page invite the question of which one the
+     * list is as-of, and both relations come out of the same hourly run. */
+    expect(screen.getAllByText(/Stav k/)).toHaveLength(1);
+  });
+
+  it('renders the whole chain, from every listing down to the hidden set', async () => {
+    renderPage();
+    const first = await screen.findByTestId('waterfall-step-all_listings');
+    expect(first).toHaveTextContent('1.');
+    expect(first).toHaveTextContent('100 000');
+    /* The share is of the DATABASE — the step that is 100 % of it says so. */
+    expect(first).toHaveTextContent('100,0');
+
+    /* Each step states what was lost getting to it, straight from the payload. */
+    expect(screen.getByTestId('waterfall-step-served')).toHaveTextContent(
+      '−10 000',
+    );
+    expect(
+      screen.getByTestId('waterfall-step-served_located'),
+    ).toHaveTextContent('−1 332');
+
+    /* And the last row is the set the rest of the page lists — read against the
+     * whole database (1,4 %), never against itself. */
+    const hidden = screen.getByTestId('waterfall-step-hidden');
+    expect(hidden).toHaveTextContent('1 377');
+    expect(hidden).toHaveTextContent('1,4');
+  });
+
+  it('shows the not-served split the operator asked to see in context', async () => {
+    renderPage();
+    expect(
+      await screen.findByTestId('waterfall-split-not_served_no_verdict'),
+    ).toHaveTextContent('3 000');
+    expect(
+      screen.getByTestId('waterfall-split-not_served_verdict_no_location'),
+    ).toHaveTextContent('5 000');
+    expect(
+      screen.getByTestId('waterfall-split-hidden_unresolved'),
+    ).toHaveTextContent('1 332');
+    expect(
+      screen.getByTestId('waterfall-split-hidden_pending'),
+    ).toHaveTextContent('45');
+  });
+
+  it('explains each step in plain Czech, once', async () => {
+    renderPage();
+    expect(
+      await screen.findByText(/Nic se nikdy nemaže/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Stažené inzeráty, které zároveň nejsou hlavním inzerátem/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/rozhodl, že jsou v zahraničí/)).toBeInTheDocument();
   });
 
   it('sends a quality-bucket filter to the server, not just to the client', async () => {

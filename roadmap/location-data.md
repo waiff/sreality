@@ -871,6 +871,19 @@ component is slimmed twice — each wave rewrites one component and slims its st
   QUERY_CANCELED and never released the old session lock), and raises the budgets to 1800 s / 1500 s
   with pins in `tests/test_cron_statement_timeout_guard.py`.
 
+- **W14 — the audit page shows the waterfall from every listing ever collected to the hidden set**
+  (shipped): the operator's ask, 2026-09-14 — "a proper waterfall from the number 841408 ... so that
+  we know exactly what are the numbers we are looking at there and that we are comparing the
+  'hidden' or 'unresolved' in light of the entire db". Migration 523 adds
+  `location_audit_waterfall`, 14 rows written by the SAME hourly `refresh_location_pin_audit_mv()`
+  run (+19.3 s), and `/new-dedup/pin-audit` renders it above everything else: 841,428 collected →
+  87,756 not served (28,162 never judged · 41,396 judged without a location · 18,198 located from
+  earlier) → 753,672 served → 753,658 with a verdict → 741,604 located (695,130 obec · 45,582 foreign
+  · 892 a point with no obec) → **12,068 hidden = 1.4 % of the database** (12,054 unresolved + 14
+  pending). Cut with `SERVED_LISTING_PREDICATE` / `SERVED_LOCATION_PREDICATE` rendered verbatim and
+  pinned by `tests/test_location_w14_audit_waterfall.py`; no new column on `listings`, no client-side
+  arithmetic, and the migration proves the chain's four arithmetic laws at apply time.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a
