@@ -25,6 +25,8 @@ import { MemoryRouter } from 'react-router-dom';
 
 import NewDedupCandidates from './NewDedupCandidates';
 import * as api from '@/lib/api';
+import { LOCATION_STEPS } from '@/lib/locationSteps';
+import type * as waterfall from '@/lib/locationWaterfall';
 import type {
   NewDedupCandidateGeneration,
   NewDedupCandidateOverview,
@@ -99,6 +101,24 @@ const GENERATION: NewDedupCandidateGeneration = {
 
 /* Deliberately small counts: Czech grouping inserts a non-breaking space above
  * 999, and a test that asserts on "1 500" is really asserting on ICU. */
+/* The chain the LANE stamps (W16). The browser sums and subtracts nothing, so
+ * these rows are the assertion: 800 listings → 700 judged → 630 with a location,
+ * of which 600 are in a named town, 23 are ABROAD (an answer, printed as a split
+ * and never as a loss) and 7 are a Czech point with no town. The town step's loss
+ * is exactly 23 + 7 = 30. `located_town` is a CHAIN step here and a split on the
+ * audit page — same key, same predicate, different role, declared in
+ * location_data/location_steps.py. */
+const WATERFALL: waterfall.WaterfallRow[] = [
+  { step_key: 'all_listings', step_no: 1, sub_no: 0, kind: 'chain', parent_key: null, n: 800, lost: 0, share_pct: 100 },
+  { step_key: 'with_verdict', step_no: 2, sub_no: 0, kind: 'chain', parent_key: null, n: 700, lost: 100, share_pct: 87.5 },
+  { step_key: 'located', step_no: 3, sub_no: 0, kind: 'chain', parent_key: null, n: 630, lost: 70, share_pct: 78.75 },
+  { step_key: 'located_foreign', step_no: 3, sub_no: 1, kind: 'split', parent_key: 'located', n: 23, lost: null, share_pct: 2.875 },
+  { step_key: 'located_no_town', step_no: 3, sub_no: 2, kind: 'split', parent_key: 'located', n: 7, lost: null, share_pct: 0.875 },
+  { step_key: 'located_town', step_no: 4, sub_no: 0, kind: 'chain', parent_key: null, n: 600, lost: 30, share_pct: 75 },
+  { step_key: 'eligible', step_no: 5, sub_no: 0, kind: 'chain', parent_key: null, n: 556, lost: 44, share_pct: 69.5 },
+  { step_key: 'paired', step_no: 6, sub_no: 0, kind: 'chain', parent_key: null, n: 210, lost: 346, share_pct: 26.25 },
+];
+
 const STATS: NewDedupCandidateStats = {
   matrix: [
     { rung: 'C1', category_main_lo: 'byt', category_main_hi: 'byt', category_type: 'prodej', pairs: 120, floor_checked: 90 },
@@ -127,17 +147,21 @@ const STATS: NewDedupCandidateStats = {
   funnel: [
     {
       source: 'sreality', category_main: 'byt', category_type: 'prodej',
-      listings: 600, active: 500, with_projection: 540, with_town: 480,
+      listings: 600, active: 500, with_verdict: 540, located: 500,
+      located_town: 480, located_foreign: 15, located_no_town: 5,
       with_disposition: 420, with_area: 450, byt: 600, byt_with_floor: 360,
       c1_eligible: 420, c3_eligible: 36, town_no_attribute: 24,
     },
     {
       source: 'bazos', category_main: 'pozemek', category_type: 'prodej',
-      listings: 200, active: 160, with_projection: 160, with_town: 120,
+      listings: 200, active: 160, with_verdict: 160, located: 130,
+      located_town: 120, located_foreign: 8, located_no_town: 2,
       with_disposition: 0, with_area: 100, byt: 0, byt_with_floor: 0,
       c1_eligible: 0, c3_eligible: 100, town_no_attribute: 20,
     },
   ],
+  waterfall: WATERFALL,
+  computed_at: '2026-09-15T06:30:00Z',
   top_buckets: [
     { obec_kod: '554782', obec_name: 'Praha', disposition: '2+kk', listings: 400, active: 300 },
     /* A bucket of listings that state no disposition at all. */
@@ -266,20 +290,38 @@ describe('<NewDedupCandidates>', () => {
     renderPage();
     await screen.findByText('Missing data — overall');
 
-    /* 800 listings, 700 with a projection → 100 with none, 12,5 %. The page
-     * emits the Czech non-breaking space before the sign; Testing Library
-     * collapses whitespace when it reads an element but not in the matcher,
-     * so the expectation is written with a plain space. */
-    const noAnswer = screen.getByText('No answer from the location engine at all').closest('tr')!;
-    expect(within(noAnswer).getByText('100')).toBeInTheDocument();
-    expect(within(noAnswer).getByText('12,5 %')).toBeInTheDocument();
-
     /* The floor row's denominator is apartments (600), not all listings — the
-     * share column says so, and 240 of 600 is 40 %. */
+     * share column says so, and 240 of 600 is 40 %. The page emits the Czech
+     * non-breaking space before the sign; Testing Library collapses whitespace
+     * when it reads an element but not in the matcher, so the expectation is
+     * written with a plain space. */
     const floors = screen.getByText('Apartments with no floor stated').closest('tr')!;
     expect(within(floors).getByText('240')).toBeInTheDocument();
     expect(within(floors).getByText('40,0 %')).toBeInTheDocument();
     expect(within(floors).getByText(/of apartments/)).toBeInTheDocument();
+  });
+
+  it('leaves the chain\'s own losses to the chain', async () => {
+    renderPage();
+    await screen.findByText('Missing data — overall');
+    /* W16: these three rows restated the funnel's losses in different English,
+     * and the middle one merged judged-but-not-located with ABROAD and with a
+     * Czech point that has no town. The chain owns them now, split honestly. */
+    expect(screen.queryByText('No answer from the location engine at all')).toBeNull();
+    expect(screen.queryByText('An answer, but too coarse to name a town')).toBeNull();
+    expect(screen.queryByText('A town, but neither a disposition nor an area')).toBeNull();
+  });
+
+  it('shows abroad as a split of "has a location", not as a loss', async () => {
+    renderPage();
+    const abroad = await screen.findByTestId('funnel-split-located_foreign');
+    expect(abroad).toHaveTextContent(LOCATION_STEPS.located_foreign.en);
+    expect(abroad).toHaveTextContent('23');
+    expect(abroad).not.toHaveTextContent('Lost at this step');
+    /* And the town step's loss is exactly abroad (23) plus the point without a
+     * town (7) — one number the operator can now read as two answers. */
+    const town = screen.getAllByText(LOCATION_STEPS.located_town.en)[0].closest('li')!;
+    expect(town).toHaveTextContent('Lost at this step: 30');
   });
 
   it('sorts the per-portal table when a column heading is clicked', async () => {

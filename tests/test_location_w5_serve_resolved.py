@@ -306,6 +306,17 @@ def test_dedup_path_c_refuses_the_exempted_set() -> None:
     assert served_location_predicate("l.listing_id") in _BASE_CTE
 
 
+def test_the_dedup_funnel_is_cut_with_the_same_rule_as_the_lane_it_describes() -> None:
+    """W16. The counterpart the rail above was missing: FUNNEL_SQL is the READOUT of the
+    same population `_BASE_CTE` pairs, and until W16 it was cut one step looser — no geom
+    test, no foreign test — so "placed precisely enough to name a town" counted rows the
+    generator then dropped, and its loss merged three unlike things. RED by: the readout
+    drifting from the lane again."""
+    from toolkit.dedup_candidates_sql import FUNNEL_SQL
+
+    assert served_location_predicate("l.id") in FUNNEL_SQL
+
+
 def test_verify_pipeline_counts_the_hidden_set_with_the_same_rule() -> None:
     """The number is visible outside the audit page, per portal, and it is a WORKLOAD
     number — it never moves the check's status."""

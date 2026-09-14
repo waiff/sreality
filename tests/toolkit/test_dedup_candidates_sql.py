@@ -216,6 +216,73 @@ def test_pair_column_order_matches_migration_492() -> None:
         assert commas + 1 == len(sql.PAIR_COLUMN_NAMES), rung
 
 
+# W16 — THE PAIRING STATEMENTS DID NOT MOVE. The wave re-cut FUNNEL_SQL (a readout, not
+# in the fingerprint) and refactored the obec rank floor out of four statements into
+# `location_data.location_steps.obec_rank_floor_sql`. A refactor that changed one byte of a
+# pairing statement would change what the generator PAIRS, which means
+# `dedup_candidates.GENERATOR_VERSION` would have to bump — minting a new `inputs_id` and
+# orphaning every `candidate_pairs` row ever written. These digests are the SHA-256 of each
+# statement exactly as it stood on origin/main at 004bced9, before the refactor. They are a
+# LEDGER, not a style rule: a deliberate change to the pairing rule updates them AND bumps
+# GENERATOR_VERSION in the same commit.
+_PAIRING_SHA256 = {
+    "_BASE_CTE": "e599297e002decd587de3ae81afb6b893078b846c8f02556f69d79ef01839739",
+    "BLOCKS_SQL": "0bf089244aaa9b4edf59ae2d22ad2c0f2b9884c202b6469ee8eb093ada8349f7",
+    "BLOCK_ATTRS_SQL": "006b7d6ed9fc58dc811939354ea100ea9d853e67b2e32c5fbb03c5c5a607e9ea",
+    "BLOCK_IDS_SQL": "43664e2c29d428f8f2b7c9fbe85d00f256ddc340a20ea9e135651aa0012e6a20",
+    "TOP_BUCKETS_SQL": "3693dbb3e62f59a4033260c7758775337c3d7085b925a4f0c95cb6238ea8b499",
+}
+
+
+def test_the_pairing_statements_are_byte_for_byte_what_they_were() -> None:
+    import hashlib
+
+    for name, digest in _PAIRING_SHA256.items():
+        statement = getattr(sql, name)
+        got = hashlib.sha256(statement.encode("utf-8")).hexdigest()
+        assert got == digest, (
+            f"{name} changed; if that is deliberate, bump dedup_candidates.GENERATOR_VERSION"
+        )
+
+
+def test_every_rung_statement_is_byte_for_byte_what_it_was() -> None:
+    import hashlib
+    import json
+
+    canon = json.dumps({k: v for k, v in sorted(sql.RUNG_SQL.items())}, sort_keys=True)
+    assert hashlib.sha256(canon.encode("utf-8")).hexdigest() == \
+        "2ceb1d6c245843a46a751efeb3eedd2104fbb41d30c130980b42a414e58c63f1", (
+            "a rung statement changed; bump GENERATOR_VERSION in the same commit"
+        )
+    assert dc.GENERATOR_VERSION == {"C": "c3"}
+
+
+def test_the_rank_floor_is_rendered_from_the_one_module() -> None:
+    """The refactor's point: four statements repeated the same floor, and the audit page
+    spelled a fifth, looser version of "has a town". One renderer now, and it must produce
+    the text those statements already carried."""
+    from location_data import location_steps as ls
+
+    floor = ls.obec_rank_floor_sql("gr")
+    for name in ("_BASE_CTE", "BLOCKS_SQL", "BLOCK_ATTRS_SQL", "TOP_BUCKETS_SQL"):
+        assert floor in getattr(sql, name), name
+
+
+def test_the_funnel_reports_the_shared_step_columns() -> None:
+    """W16: the readout's columns ARE the shared step keys. `with_projection` (the same set
+    the audit page calls `with_verdict`, under a name that read as "answered") and
+    `with_town` (a town test with no consumer rule) are gone."""
+    from location_data import location_steps as ls
+
+    for key in ls.SHARED_STEP_KEYS:
+        column = "listings" if key == "all_listings" else key
+        assert f" as {column}" in sql.FUNNEL_SQL or f" AS {column}" in sql.FUNNEL_SQL, key
+    assert "with_projection" not in sql.FUNNEL_SQL
+    assert "AS with_town" not in sql.FUNNEL_SQL
+    assert set(sql.FUNNEL_COLUMNS) >= {"with_verdict", "located", "located_town",
+                                       "located_foreign", "located_no_town"}
+
+
 def test_stale_sweep_is_scoped_to_one_parameter_set() -> None:
     assert "WHERE inputs_id = %(inputs_id)s::bigint AND generation_id <> %(generation_id)s::bigint" in sql.STALE_SWEEP_SQL
 

@@ -84,8 +84,11 @@ FULL_STATS: dict[str, Any] = {
             "category_type": "prodej",
             "listings": 120_000,
             "active": 30_000,
-            "with_projection": 119_400,
-            "with_town": 118_900,
+            "with_verdict": 119_400,
+            "located": 119_100,
+            "located_town": 118_900,
+            "located_foreign": 150,
+            "located_no_town": 50,
             "with_disposition": 117_000,
             "with_area": 119_000,
             "byt": 120_000,
@@ -95,6 +98,27 @@ FULL_STATS: dict[str, Any] = {
             "town_no_attribute": 200,
         }
     ],
+    # W16: the run stamps the SHARED chain, and the route hands it through untouched —
+    # the page sums and subtracts nothing.
+    "waterfall": [
+        {"step_key": "all_listings", "step_no": 1, "sub_no": 0, "kind": "chain",
+         "parent_key": None, "n": 120_000, "lost": 0, "share_pct": 100.0},
+        {"step_key": "with_verdict", "step_no": 2, "sub_no": 0, "kind": "chain",
+         "parent_key": None, "n": 119_400, "lost": 600, "share_pct": 99.5},
+        {"step_key": "located", "step_no": 3, "sub_no": 0, "kind": "chain",
+         "parent_key": None, "n": 119_100, "lost": 300, "share_pct": 99.25},
+        {"step_key": "located_foreign", "step_no": 3, "sub_no": 1, "kind": "split",
+         "parent_key": "located", "n": 150, "lost": None, "share_pct": 0.125},
+        {"step_key": "located_no_town", "step_no": 3, "sub_no": 2, "kind": "split",
+         "parent_key": "located", "n": 50, "lost": None, "share_pct": 0.042},
+        {"step_key": "located_town", "step_no": 4, "sub_no": 0, "kind": "chain",
+         "parent_key": None, "n": 118_900, "lost": 200, "share_pct": 99.083},
+        {"step_key": "eligible", "step_no": 5, "sub_no": 0, "kind": "chain",
+         "parent_key": None, "n": 118_700, "lost": 200, "share_pct": 98.917},
+        {"step_key": "paired", "step_no": 6, "sub_no": 0, "kind": "chain",
+         "parent_key": None, "n": 96_000, "lost": 22_700, "share_pct": 80.0},
+    ],
+    "computed_at": "2026-09-15T06:30:00Z",
     "top_buckets": [
         {
             "obec_kod": "554782",

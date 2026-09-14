@@ -19,6 +19,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import LocationPinAudit from './LocationPinAudit';
 import * as pinAudit from '@/lib/pinAudit';
 import * as waterfall from '@/lib/locationWaterfall';
+import { LOCATION_STEPS } from '@/lib/locationSteps';
 import * as listingUrl from '@/lib/listingUrl';
 
 vi.mock('@/lib/pinAudit', async (importOriginal) => {
@@ -65,25 +66,28 @@ const wf = (
   step_key: string,
   kind: waterfall.WaterfallKind,
   parent_key: string | null,
-  label_cs: string,
   n: number,
   lost: number | null,
 ): waterfall.WaterfallRow => ({
-  step_key, step_no, sub_no, kind, parent_key, label_cs, n, lost,
+  step_key, step_no, sub_no, kind, parent_key, n, lost,
   share_pct: Math.round((n / 100000) * 100000) / 1000,
   refreshed_at: REFRESHED,
 });
 
+/* W16: the store carries KEYS, never wording — `label_cs` left the relation in
+ * migration 526. The Czech the page renders comes from `lib/locationSteps.ts`,
+ * one file for both languages and both readouts, so the expectations below read
+ * it from there rather than restating it. */
 const WATERFALL: waterfall.WaterfallRow[] = [
-  wf(1, 0, 'all_listings', 'chain', null, 'Inzerátů v databázi celkem', 100000, 0),
-  wf(2, 0, 'with_verdict', 'chain', null, 'U kterých už systém polohu řešil', 99955, 45),
-  wf(3, 0, 'located', 'chain', null, 'Se známou polohou (bod v mapě, nebo zahraničí)', 98623, 1332),
-  wf(3, 1, 'located_town', 'split', 'located', 'mají přiřazenou obec', 90000, null),
-  wf(3, 2, 'located_foreign', 'split', 'located', 'jsou v zahraničí (systém tak rozhodl)', 8000, null),
-  wf(3, 3, 'located_no_town', 'split', 'located', 'mají bod v ČR, ale bez obce', 623, null),
-  wf(4, 0, 'hidden', 'deduction', 'all_listings', 'Bez rozhodnuté polohy — tento seznam', 1377, null),
-  wf(4, 1, 'hidden_unresolved', 'split', 'hidden', 'nevyřešeno', 1332, null),
-  wf(4, 2, 'hidden_pending', 'split', 'hidden', 'čeká na zpracování', 45, null),
+  wf(1, 0, 'all_listings', 'chain', null, 100000, 0),
+  wf(2, 0, 'with_verdict', 'chain', null, 99955, 45),
+  wf(3, 0, 'located', 'chain', null, 98623, 1332),
+  wf(3, 1, 'located_town', 'split', 'located', 90000, null),
+  wf(3, 2, 'located_foreign', 'split', 'located', 8000, null),
+  wf(3, 3, 'located_no_town', 'split', 'located', 623, null),
+  wf(4, 0, 'hidden', 'deduction', 'all_listings', 1377, null),
+  wf(4, 1, 'hidden_unresolved', 'split', 'hidden', 1332, null),
+  wf(4, 2, 'hidden_pending', 'split', 'hidden', 45, null),
 ];
 
 const ROW: pinAudit.PinAuditRow = {
@@ -203,15 +207,25 @@ describe('LocationPinAudit', () => {
     ).toHaveTextContent('45');
   });
 
-  it('explains each step in plain Czech, once', async () => {
+  it('labels and explains each step from the ONE wording module', async () => {
     renderPage();
-    expect(
-      await screen.findByText(/Nic se nikdy nemaže/),
-    ).toBeInTheDocument();
+    /* Not a string restated here: the label the page renders IS
+     * locationSteps.ts's Czech for that key, which is what makes the candidates
+     * page's English the same step and not a second one. */
+    const first = await screen.findByTestId('waterfall-step-all_listings');
+    expect(first).toHaveTextContent(LOCATION_STEPS.all_listings.cs);
+    expect(first).toHaveTextContent(/Nic se nikdy nemaže/);
+    expect(screen.getByTestId('waterfall-step-hidden')).toHaveTextContent(
+      LOCATION_STEPS.hidden.cs,
+    );
     expect(
       screen.getByText(/Každý inzerát bez rozhodnuté polohy/),
     ).toBeInTheDocument();
     expect(screen.getByText(/rozhodl, že jsou v zahraničí/)).toBeInTheDocument();
+    /* Abroad is an ANSWER: it is a sub-row of "located", never a chain loss. */
+    expect(screen.getByTestId('waterfall-split-located_foreign')).toHaveTextContent(
+      LOCATION_STEPS.located_foreign.cs,
+    );
   });
 
   it('sends a quality-bucket filter to the server, not just to the client', async () => {

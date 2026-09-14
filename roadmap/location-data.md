@@ -900,6 +900,27 @@ component is slimmed twice — each wave rewrites one component and slims its st
   incident) are re-mined by the next full walk, which re-enqueues each mined listing in the same
   transaction — no one-off tooling.
 
+- **W16 — one step vocabulary for the audit waterfall and the candidates funnel** (shipped): the
+  operator's ruling, 2026-09-14 — the two readouts "must use ONE terminology and, where possible, ONE
+  waterfall". They did not. "Known to the location engine" READ as *answered* while it was
+  byte-for-byte the audit's `with_verdict` (*judged*), and the funnel's town step was cut with no
+  consumer rule, so its single **"lost 99,889"** silently added three unlike things: ≈53,374 judged
+  but still without a location, **45,619 abroad — an ANSWER, which the audit page has always booked
+  as a split inside `located`** — and ≈895 a Czech point with no town. `location_data/location_steps.py`
+  is now the one place the four tests are spelled (`located` = the consumer rule imported, never
+  retyped; `has_town` including dedup's obec RANK floor) plus the step keys, their order and each
+  key's shape for both chains; `FUNNEL_SQL`, the four dedup statements that repeated the rank floor
+  and `verify_pipeline`'s fourth spelling all render from it. Migration 526 replaces
+  `refresh_location_audit_waterfall()` with the same expressions and **drops `label_cs`** — wording
+  moved to `frontend/src/lib/locationSteps.ts`, one file for Czech and English and both pages, so a
+  better sentence costs no migration. A candidate run stamps `stats.waterfall` (the shared keys, with
+  `lost` and `share_pct` computed once by the lane), and the funnel component lost its hardcoded
+  steps, its client sums and its client-side subtraction. Adopting the rank floor onto the audit page
+  cost **0 rows** (measured 2026-09-14); the pairing statements are byte-identical, so
+  `GENERATOR_VERSION` stays `c3` and no `inputs_id` is re-minted (SHA-256 digests pin it). What
+  remains is honest and printed: a run is frozen when it counted, the relation refreshes hourly, and
+  a run may be scoped to active listings — the funnel states both next to its chain.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a

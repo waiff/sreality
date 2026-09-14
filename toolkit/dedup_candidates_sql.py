@@ -37,6 +37,7 @@ import math
 from typing import Any
 
 from location_data import claims_common as dc_common
+from location_data import location_steps as ls
 from toolkit import dedup_candidates as dc
 
 # --------------------------------------------------------------------------- fragments
@@ -60,7 +61,7 @@ _BASE_CTE = (
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod = %(block_key)s::bigint"
-    " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
+    f" AND {ls.obec_rank_floor_sql('gr')}"
     # THE CONSUMER RULE (W5, operator ruling 2026-09-13): dedup is a consumer, so it never
     # sees a listing the store has no answer for. The town key already excludes almost all
     # of them -- but not all: 34 rows carry an `obec_kod` with a NULL `geom`, and those are
@@ -189,7 +190,7 @@ BLOCK_ATTRS_SQL = (
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod = %(block_key)s::bigint"
-    " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
+    f" AND {ls.obec_rank_floor_sql('gr')}"
     " AND (NOT %(active_only)s::boolean OR x.is_active)"
     " ORDER BY x.id"
 )
@@ -201,7 +202,7 @@ BLOCKS_SQL = (
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod IS NOT NULL"
-    " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
+    f" AND {ls.obec_rank_floor_sql('gr')}"
     " AND (NOT %(active_only)s::boolean OR x.is_active)"
     " GROUP BY l.obec_kod ORDER BY l.obec_kod"
 )
@@ -218,37 +219,57 @@ STALE_SWEEP_SQL = (
 
 # --------------------------------------------------------------------------- statistics
 
-# The funnel from the listing side, per portal and property type: how many listings there
-# are, how many the projection knows, how many have a town, and which attributes each rung
-# would need. `town_no_attribute` is the data-quality hole path C cannot see past: a town but
-# neither a disposition nor an area. Runs in estimate mode too — it needs no pair row.
+# The funnel from the listing side, per portal and property type — the SHARED STEPS (W16,
+# operator ruling 2026-09-14), rendered from location_data/location_steps.py so this readout
+# and the audit page's waterfall can never again be two definitions of one question. Before
+# W16 step 2 was `has_projection` (the same set the audit calls `with_verdict`, under another
+# name) and step 3 was a town test with NO consumer rule — so its loss silently added
+# judged-but-not-located, abroad (an ANSWER, not a loss) and a Czech point without a town.
+#
+# THE CONSUMER RULE IS IN IT NOW, so the readout counts the population `_BASE_CTE` actually
+# pairs: `located_town` is `located AND NOT foreign AND the obec rank floor`, and the three
+# eligibility counts key off it rather than off a bare `obec_kod`. (It differs from
+# `_BASE_CTE` only on a row that is BOTH abroad and Czech-towned — a resolver bug the audit
+# already rules on, foreign winning.) Runs in estimate mode too — it needs no pair row.
+_FUNNEL_FLAGS = ls.step_flags_sql()
+
 FUNNEL_SQL = (
-    "WITH r AS (SELECT rank FROM location_granularity_rank WHERE granularity = 'obec'),"
-    " j AS ("
-    " SELECT x.source, x.category_main, x.category_type, x.is_active,"
-    " (l.listing_id IS NOT NULL) AS has_projection,"
-    " (l.obec_kod IS NOT NULL AND gr.rank >= (SELECT rank FROM r)) AS has_town,"
-    " (NULLIF(BTRIM(x.disposition), '') IS NOT NULL) AS has_disposition,"
-    " (CASE WHEN x.category_main = 'pozemek' THEN x.estate_area ELSE x.usable_area END > 0) AS has_area,"
-    " (x.floor IS NOT NULL) AS has_floor"
-    " FROM listings x"
-    " LEFT JOIN listing_location l ON l.listing_id = x.id"
-    " LEFT JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
-    " WHERE (NOT %(active_only)s::boolean OR x.is_active))"
-    " SELECT source, category_main, category_type,"
-    " count(*) AS listings,"
-    " count(*) FILTER (WHERE is_active) AS active,"
-    " count(*) FILTER (WHERE has_projection) AS with_projection,"
-    " count(*) FILTER (WHERE has_town) AS with_town,"
-    " count(*) FILTER (WHERE has_disposition) AS with_disposition,"
-    " count(*) FILTER (WHERE has_area) AS with_area,"
-    " count(*) FILTER (WHERE category_main = 'byt') AS byt,"
-    " count(*) FILTER (WHERE category_main = 'byt' AND has_floor) AS byt_with_floor,"
-    " count(*) FILTER (WHERE has_town AND has_disposition) AS c1_eligible,"
-    " count(*) FILTER (WHERE has_town AND NOT has_disposition AND COALESCE(has_area, false)) AS c3_eligible,"
-    " count(*) FILTER (WHERE has_town AND NOT has_disposition AND NOT COALESCE(has_area, false)) AS town_no_attribute"
-    " FROM j GROUP BY source, category_main, category_type"
-    " ORDER BY source, category_main, category_type"
+    "WITH base AS ("
+    " SELECT l.source, l.category_main, l.category_type, l.is_active,"
+    f" {_FUNNEL_FLAGS['located']} AS located,"
+    f" {_FUNNEL_FLAGS['has_verdict']} AS has_verdict,"
+    f" {_FUNNEL_FLAGS['is_foreign']} AS is_foreign,"
+    f" {_FUNNEL_FLAGS['has_town']} AS has_town,"
+    " (NULLIF(BTRIM(l.disposition), '') IS NOT NULL) AS has_disposition,"
+    " (CASE WHEN l.category_main = 'pozemek' THEN l.estate_area ELSE l.usable_area END > 0) AS has_area,"
+    " (l.floor IS NOT NULL) AS has_floor"
+    " FROM listings l"
+    " LEFT JOIN listing_location ll ON ll.listing_id = l.id"
+    " LEFT JOIN location_granularity_rank gr ON gr.granularity = ll.granularity"
+    " WHERE (NOT %(active_only)s::boolean OR l.is_active))"
+    " SELECT b.source, b.category_main, b.category_type,"
+    f" {ls.step_counts_sql('b', total_as='listings')},"
+    " count(*) FILTER (WHERE b.is_active) AS active,"
+    " count(*) FILTER (WHERE b.has_disposition) AS with_disposition,"
+    " count(*) FILTER (WHERE b.has_area) AS with_area,"
+    " count(*) FILTER (WHERE b.category_main = 'byt') AS byt,"
+    " count(*) FILTER (WHERE b.category_main = 'byt' AND b.has_floor) AS byt_with_floor,"
+    f" count(*) FILTER (WHERE {ls.located_town_sql('b')} AND b.has_disposition) AS c1_eligible,"
+    f" count(*) FILTER (WHERE {ls.located_town_sql('b')} AND NOT b.has_disposition"
+    " AND COALESCE(b.has_area, false)) AS c3_eligible,"
+    f" count(*) FILTER (WHERE {ls.located_town_sql('b')} AND NOT b.has_disposition"
+    " AND NOT COALESCE(b.has_area, false)) AS town_no_attribute"
+    " FROM base b GROUP BY b.source, b.category_main, b.category_type"
+    " ORDER BY b.source, b.category_main, b.category_type"
+)
+
+# The column list the funnel returns, in order — the wire contract the lane stamps into
+# `candidate_generations.stats` and `NewDedupCandidateFunnelRow` mirrors.
+FUNNEL_COLUMNS: tuple[str, ...] = (
+    "source", "category_main", "category_type",
+    "listings", "with_verdict", "located", "located_town", "located_foreign",
+    "located_no_town", "active", "with_disposition", "with_area", "byt",
+    "byt_with_floor", "c1_eligible", "c3_eligible", "town_no_attribute",
 )
 
 # The largest (town, disposition) buckets — the C1 "candidate storm" view, from the listing
@@ -260,7 +281,7 @@ TOP_BUCKETS_SQL = (
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
     " WHERE l.obec_kod IS NOT NULL"
-    " AND gr.rank >= (SELECT r.rank FROM location_granularity_rank r WHERE r.granularity = 'obec')"
+    f" AND {ls.obec_rank_floor_sql('gr')}"
     " AND (NOT %(active_only)s::boolean OR x.is_active)"
     " GROUP BY 1, 2, 3 ORDER BY 4 DESC LIMIT %(limit)s::int"
 )

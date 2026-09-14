@@ -12,6 +12,12 @@ refreshes `location_pin_audit_mv`.
 
 W15 (operator ruling, 2026-09-14) retired the served set: the lane covers EVERY
 listing, so the chain lost its served/not-served fork and went from 14 rows to 9.
+W16 (operator ruling, 2026-09-14) gave the chain a SHARED vocabulary with the NEW
+DEDUP candidates funnel: the four booleans are rendered from
+`location_data/location_steps.py` (so `has_town` now carries dedup's obec rank floor),
+and `label_cs` left the relation — wording lives in `frontend/src/lib/locationSteps.ts`
+for both languages and both readouts. That cross-surface rail is
+tests/test_location_steps_vocabulary.py; this file still owns the chain's own shape.
 The producer is therefore whichever migration REPLACED it last (524 today), found
 the way the W5 rail finds the matview's creator — a rail pinned to 523 would keep
 checking a body production no longer has. The table, its grants and the hourly entry
@@ -90,6 +96,41 @@ def test_the_answer_is_the_shared_consumer_rule_verbatim() -> None:
     off the left join — which would be the same question asked a second way, and
     the next change to the rule would move Browse and leave this page behind."""
     assert SERVED_LOCATION_PREDICATE in _body()
+
+
+def test_the_four_flags_are_the_shared_ones_and_the_town_carries_the_rank_floor() -> None:
+    """W16: one definition per step. `has_town` is no longer a bare `obec_kod is not
+    null` — it carries the obec RANK floor dedup blocks on, so this page's town number
+    IS the number dedup can block on. RED by: either side re-typing the flag, which is
+    how the two readouts came to call two different sets "a town"."""
+    from location_data import location_steps as ls
+
+    body = _squeeze(_body()).lower()
+    for name, expr in ls.step_flags_sql().items():
+        assert _squeeze(expr).lower() in body, name
+    assert "location_granularity_rank" in body
+    assert "granularity >=" not in body and "granularity > " not in body
+
+
+def test_located_no_town_is_the_plain_complement() -> None:
+    """So the three splits partition `located` by construction whatever the rank floor
+    does to the town count. RED by: spelling it as its own positive test, which would
+    let the three splits stop adding up the day a row satisfied none of them."""
+    from location_data import location_steps as ls
+
+    assert _squeeze(ls.shared_count_filters()["located_no_town"]).lower() in \
+        _squeeze(_body()).lower()
+
+
+def test_the_relation_stores_keys_and_never_wording() -> None:
+    """W16: `label_cs` is dropped. A label in the store is a label that can differ from
+    the one the other page prints, and a better sentence must never cost a migration."""
+    body = _body().lower()
+    assert "drop column if exists label_cs" in body
+    assert "label_cs" not in _values_block().lower()
+    reader = READER.read_text(encoding="utf-8")
+    cols = re.search(r"const COLS = \[(.*?)\]", reader, re.DOTALL)
+    assert cols and "label_cs" not in cols.group(1)
 
 
 def test_the_waterfall_adds_no_column_to_listings() -> None:
@@ -247,7 +288,9 @@ def test_the_page_reads_every_column_the_migration_writes() -> None:
     assert cols, "the reader publishes no column list"
     read = set(re.findall(r"'(\w+)'", cols.group(1)))
     assert read <= declared, f"the reader asks for columns the table lacks: {read - declared}"
-    assert {"step_key", "n", "lost", "share_pct", "label_cs"} <= read
+    assert {"step_key", "n", "lost", "share_pct"} <= read
+    # W16: wording is not a column any more.
+    assert "label_cs" not in read
 
 
 def test_the_page_computes_no_step_of_its_own() -> None:
@@ -262,6 +305,8 @@ def test_the_page_computes_no_step_of_its_own() -> None:
     for name, text in (("WaterfallTable", component), ("locationWaterfall.ts", reader)):
         for bad in (".n -", "reduce(", "* 100"):
             assert bad not in text, f"{name} recomputes a waterfall number ({bad})"
-    # It renders exactly what the store wrote.
-    for field in ("row.n", "row.lost", "row.share_pct", "row.label_cs"):
+    # It renders exactly what the store wrote — and the LABEL from the one wording
+    # module, keyed by the store's own step key (W16).
+    for field in ("row.n", "row.lost", "row.share_pct"):
         assert field in component
+    assert "stepLabel(row.step_key, 'cs')" in component

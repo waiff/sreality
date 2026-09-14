@@ -20,6 +20,14 @@
  *               that fails the rule) — it does not narrow the next step, so it
  *               carries no loss;
  *   'split'     a sub-row partitioning its parent (`parent_key`) exactly.
+ *
+ * ONE ROW SHAPE, TWO PRODUCERS (W16). The hourly audit relation writes these
+ * rows; a NEW DEDUP candidate run stamps the SAME keys, kinds and columns into
+ * its own `stats.waterfall`. So this is the type both readouts use, and the only
+ * difference is `refreshed_at`, which only the hourly relation carries — a run's
+ * rows are as-of the run. The WORDING of a step is in `lib/locationSteps.ts`;
+ * `label_cs` left this table in migration 526 so a label could not differ by
+ * surface.
  */
 
 import { supabase } from '@/lib/supabase';
@@ -36,17 +44,17 @@ export interface WaterfallRow {
   kind: WaterfallKind;
   /* The step a sub-row (or a deduction) belongs under; NULL on a chain step. */
   parent_key: string | null;
-  label_cs: string;
   n: number;
   /* Chain rows only. NULL where "lost" is not a truthful word for the row. */
   lost: number | null;
   /* Share of EVERY listing ever collected — the point of the wave. */
   share_pct: number;
-  refreshed_at: string;
+  /* The hourly relation only; a run's stamped rows are as-of that run. */
+  refreshed_at?: string;
 }
 
 const COLS = [
-  'step_key', 'step_no', 'sub_no', 'kind', 'parent_key', 'label_cs',
+  'step_key', 'step_no', 'sub_no', 'kind', 'parent_key',
   'n', 'lost', 'share_pct', 'refreshed_at',
 ].join(',');
 

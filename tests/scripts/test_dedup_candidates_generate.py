@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from location_data import location_steps as ls
 from scripts import dedup_candidates_generate as lane
 from toolkit import dedup_candidates as dc
 from toolkit import dedup_candidates_sql as sql
@@ -135,10 +136,13 @@ class _Conn:
         if s == sql.LISTINGS_WITH_CANDIDATES_SQL:
             return [("byt", 6), ("dum", 3)], ["category_main", "listings"], -1
         if s == sql.FUNNEL_SQL:
-            cols = ["source", "category_main", "category_type", "listings", "active", "with_projection",
-                    "with_town", "with_disposition", "with_area", "byt", "byt_with_floor", "c1_eligible",
+            # W16: the SHARED step columns. 10 listings -> 9 judged -> 8 located, of which
+            # 7 are in a named town, 1 is abroad (an ANSWER) and 0 are a point with no town.
+            cols = ["source", "category_main", "category_type", "listings", "with_verdict",
+                    "located", "located_town", "located_foreign", "located_no_town", "active",
+                    "with_disposition", "with_area", "byt", "byt_with_floor", "c1_eligible",
                     "c3_eligible", "town_no_attribute"]
-            return [("sreality", "byt", "prodej", 10, 5, 9, 8, 7, 8, 10, 6, 7, 1, 0)], cols, -1
+            return [("sreality", "byt", "prodej", 10, 9, 8, 7, 1, 0, 5, 7, 8, 10, 6, 6, 1, 0)], cols, -1
         if s == sql.TOP_BUCKETS_SQL:
             return [("554782", "Praha", "2+kk", 3, 2)], ["obec_kod", "obec_name", "disposition", "listings", "active"], -1
         if s == sql.BLOCK_NAMES_SQL:
@@ -210,7 +214,86 @@ def test_generate_walks_every_town_in_id_chunks_and_records_progress() -> None:
     assert stats["listings_with_candidates"] == [{"category_main": "byt", "listings": 6}, {"category_main": "dum", "listings": 3}]
     assert stats["top_towns"][0]["obec_name"] == "Town 500001"
     assert stats["scope"] == "all"
+    # W16: the run stamps the SHARED chain, with the lane's arithmetic already done.
+    assert [r["step_key"] for r in stats["waterfall"]] == list(ls.RUN_STEPS)
+    assert stats["computed_at"].endswith("Z")
     assert result["pairs"]["total"] == 7
+
+
+# --------------------------------------------------------- the stamped chain (W16)
+
+# Two portals, the way FUNNEL_SQL returns them: one row per (portal, type, deal).
+# 800 listings -> 700 judged -> 630 with a location, of which 600 are in a named town,
+# 23 are ABROAD (an answer) and 7 are a Czech point with no town.
+_FUNNEL = [
+    {"source": "sreality", "listings": 600, "with_verdict": 540, "located": 500,
+     "located_town": 480, "located_foreign": 15, "located_no_town": 5,
+     "c1_eligible": 420, "c3_eligible": 36},
+    {"source": "bazos", "listings": 200, "with_verdict": 160, "located": 130,
+     "located_town": 120, "located_foreign": 8, "located_no_town": 2,
+     "c1_eligible": 0, "c3_eligible": 100},
+]
+_PAIRED = [{"category_main": "byt", "listings": 180}, {"category_main": "dum", "listings": 30}]
+
+
+def _chain(rows: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    return {r["step_key"]: r for r in rows}
+
+
+def test_the_stamped_chain_obeys_the_audit_pages_four_laws() -> None:
+    """The candidates funnel adopted the audit waterfall's chain, so it must obey the
+    same arithmetic the migration proves at apply time — and obey it HERE, once, because
+    the browser is forbidden from summing or subtracting anything."""
+    rows = lane.waterfall_rows(_FUNNEL, _PAIRED, partial=False)
+    by = _chain(rows)
+    assert by["all_listings"]["n"] == 800 and by["with_verdict"]["n"] == 700
+    assert by["located"]["n"] == 630 and by["located_town"]["n"] == 600
+    assert by["eligible"]["n"] == 556 and by["paired"]["n"] == 210
+
+    # Law 1: `lost` is the previous CHAIN row's n minus this one's, and the first is 0.
+    previous = None
+    for r in rows:
+        if r["kind"] != "chain":
+            continue
+        assert r["lost"] == (0 if previous is None else previous - r["n"]), r["step_key"]
+        previous = r["n"]
+
+    # Law 2: a split partitions its parent and carries no loss.
+    for parent in ("located",):
+        splits = [r for r in rows if r["parent_key"] == parent]
+        assert splits and all(r["lost"] is None for r in splits)
+        assert sum(r["n"] for r in splits) + by["located_town"]["n"] == by[parent]["n"]
+
+    # Law 3: the share is out of every listing the run looked at.
+    for r in rows:
+        assert r["share_pct"] == round(r["n"] * 100 / 800, 3), r["step_key"]
+
+    # And the ruling in one line: the town step's loss is exactly abroad plus the Czech
+    # point with no town — never one opaque "lost 99,889".
+    assert by["located_town"]["lost"] == by["located_foreign"]["n"] + by["located_no_town"]["n"]
+
+
+def test_the_stamped_chain_leaves_a_partial_runs_last_drop_blank() -> None:
+    """A block-limited run pairs its own towns while every step above counts the whole
+    corpus, so the drop into `paired` is not a fact about the data. The lane writes NULL
+    and the page says why in its banner — never a misleading subtraction."""
+    by = _chain(lane.waterfall_rows(_FUNNEL, _PAIRED, partial=True))
+    assert by["paired"]["lost"] is None
+    assert by["eligible"]["lost"] == 44          # every step above it is still honest
+
+
+def test_estimate_mode_stamps_the_chain_without_a_paired_row() -> None:
+    """Estimate mode writes no pair row, so the chain simply ends at `eligible`: a gap,
+    never a zero."""
+    rows = lane.waterfall_rows(_FUNNEL, None, partial=False)
+    assert "paired" not in _chain(rows)
+    assert rows[-1]["step_key"] == "eligible"
+
+
+def test_the_chain_survives_a_run_that_counted_nothing() -> None:
+    """RED by: a division by zero on an empty scope — the share is 0, not a crash."""
+    rows = lane.waterfall_rows([], [], partial=False)
+    assert all(r["share_pct"] == 0 for r in rows)
 
 
 def test_partial_run_never_sweeps_stale_rows() -> None:

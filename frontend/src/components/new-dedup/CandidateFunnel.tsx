@@ -6,65 +6,45 @@
  * and the first thing that drifts is which step counts what — at which point
  * the two pages disagree about how many listings the program can even see.
  *
- * EVERY STEP IS SUMMED FROM THE SAME ROWS. `stats.funnel` carries one row per
- * (portal, property type, deal) with the counts already computed by
- * scripts/dedup_candidates_generate.py; this component only adds them up. It
- * derives nothing the lane did not measure, so a step this page cannot fill
- * renders a gap rather than a guess.
+ * W16 — IT IS ALSO ONE VOCABULARY. The chain comes from `stats.waterfall`: rows
+ * the lane stamped with the SHARED step keys (location_data/location_steps.py),
+ * the same keys, kinds and columns `location_audit_waterfall` writes hourly for
+ * `/new-dedup/pin-audit`. The step names and the sentences under them come from
+ * `lib/locationSteps.ts`, which is where a step is worded for both languages and
+ * both pages at once. Nothing is spelled here.
+ *
+ * THIS COMPONENT DOES NO ARITHMETIC. Counts, losses and shares are computed once
+ * by the lane; a browser that re-derived a step would be a second definition of
+ * the same question — the exact fault this wave removed. Before W16 the steps
+ * were summed here and "Lost at this step" was subtracted here, which is how the
+ * town step came to report one loss that was really three unlike things added
+ * together (judged-but-not-located, ABROAD, and a Czech point with no town).
+ *
+ * ABROAD IS AN ANSWER. `located_foreign` and `located_no_town` are SPLITS of
+ * "has a location", printed indented under it and never as a drop. The town
+ * step's loss is exactly those two rows.
+ *
+ * TWO HONEST DIFFERENCES FROM THE AUDIT PAGE, both printed rather than hidden:
+ * a run can be scoped to active listings only, and a run's numbers are frozen at
+ * the moment it counted them while the audit page refreshes hourly. That is the
+ * reading that was missing when two identical predicates looked like a
+ * contradiction.
+ *
+ * A RUN THAT PREDATES W16 carries no `waterfall`, so the chain renders as one
+ * line saying so — a gap, never a zero.
  *
  * THE BARS ARE ONE SERIES, so there is no legend and no second hue: each bar is
- * a share of the FIRST step, drawn on a common baseline, with the number itself
- * printed beside it. The bar is the shape of the drop-off; the digits are the
- * value. Nothing here is readable by colour alone.
- *
- * THE LAST STEP IS BROKEN OUT BOTH WAYS — by property type under the step, by
- * rung (path) under the bars — because the wave text asks for the funnel to end
- * "by type and path" (roadmap/new-dedup.md, PR 3). The type split is the rows of
- * `stats.listings_with_candidates` printed as they arrive; the step's headline
- * stays their sum, so the bar keeps its one series.
+ * the share of the first step the lane measured, drawn on a common baseline,
+ * with the number itself printed beside it. Nothing here is readable by colour
+ * alone.
  */
 
+import ProportionBar from '@/components/new-dedup/ProportionBar';
 import type { NewDedupCandidateStats } from '@/lib/api';
 import { categoryMainLabel } from '@/lib/enums';
-import { fmtCount, fmtPct } from '@/lib/format';
-
-/* A share-of-base bar: thin, rounded at the data end, on a recessive track.
- * `title` gives it the hover reading every mark on a chart owes the reader. */
-export function ProportionBar({
-  value,
-  base,
-  title,
-}: {
-  value: number | null;
-  base: number;
-  title?: string;
-}) {
-  const pct = value == null || base <= 0 ? null : Math.min(100, (value / base) * 100);
-  return (
-    <div
-      className="h-1.5 w-full rounded-full bg-[var(--color-inset)] overflow-hidden"
-      title={title}
-      aria-hidden
-    >
-      {pct != null && (
-        <div
-          className="h-full rounded-full bg-[var(--color-copper)]"
-          style={{ width: `${Math.max(pct, pct > 0 ? 0.5 : 0)}%` }}
-        />
-      )}
-    </div>
-  );
-}
-
-interface Step {
-  key: string;
-  label: string;
-  explanation: string;
-  count: number;
-  /* The split the lane measured for this step, when it measured one. Rendered
-   * under the step as printed rows — never derived, never re-summed. */
-  breakdown?: { key: string; label: string; count: number }[];
-}
+import { fmtAbsolute, fmtCount, fmtPct } from '@/lib/format';
+import { stepLabel, stepNote } from '@/lib/locationSteps';
+import { groupWaterfall } from '@/lib/locationWaterfall';
 
 /* A listing whose property type the portal never stated: the same em dash the
  * audit page's tables use, rather than the generic label — an unrecorded type is
@@ -72,57 +52,28 @@ interface Step {
 const typeLabel = (cm: string | null | undefined): string =>
   cm == null ? '—' : categoryMainLabel(cm);
 
-/* The five sets the corpus narrows through, in order. Each label says what the
- * set IS; each explanation says why a listing falls out before the next one. */
-function steps(stats: NewDedupCandidateStats): Step[] {
-  const f = stats.funnel ?? [];
-  const sum = (pick: (r: (typeof f)[number]) => number): number =>
-    f.reduce((acc, r) => acc + (pick(r) || 0), 0);
+const SCOPE_TEXT: Record<string, string> = {
+  all: 'every listing ever collected, active or delisted',
+  active: 'only listings active today',
+};
 
-  const byType = stats.listings_with_candidates ?? [];
-
-  return [
-    {
-      key: 'listings',
-      label: 'Listings in the database',
-      explanation:
-        'Every listing row this run looked at, across all nine portals. The run’s scope decides whether that means every listing ever collected or only the ones still on sale.',
-      count: sum((r) => r.listings),
-    },
-    {
-      key: 'with_projection',
-      label: 'Known to the location engine',
-      explanation:
-        'The location engine — the service that turns a listing’s address into a place on the map — has an answer for this listing. Without one, nothing below can be asked.',
-      count: sum((r) => r.with_projection),
-    },
-    {
-      key: 'with_town',
-      label: 'Placed precisely enough to name a town',
-      explanation:
-        'The engine’s answer is at least town-grain (an obec — the Czech municipality). Path C compares two listings only when they are in the same town, so a listing that loses its town here can never become a candidate.',
-      count: sum((r) => r.with_town),
-    },
-    {
-      key: 'eligible',
-      label: 'Has an attribute the rule can compare',
-      explanation:
-        'On top of a town, the listing states a disposition (2+kk and the like) or a floor area — one of the two things path C compares. A listing with a town and neither attribute is counted in the missing-data table below.',
-      count: sum((r) => r.c1_eligible) + sum((r) => r.c3_eligible),
-    },
-    {
-      key: 'paired',
-      label: 'Ended up in at least one candidate pair',
-      explanation:
-        'The run actually found another listing to pair it with. A listing can be perfectly eligible and still land here at zero — that only means nothing else in its town matched it.',
-      count: byType.reduce((acc, r) => acc + (r.listings || 0), 0),
-      breakdown: byType.map((r) => ({
-        key: r.category_main ?? 'unknown',
-        label: typeLabel(r.category_main),
-        count: r.listings,
-      })),
-    },
-  ];
+/* The one line that makes this chain comparable with the hourly audit page:
+ * WHICH listings the run looked at, and WHEN it counted them. */
+function AsOf({ stats }: { stats: NewDedupCandidateStats }) {
+  const scope = stats.scope ? (SCOPE_TEXT[stats.scope] ?? stats.scope) : null;
+  if (!scope && !stats.computed_at) return null;
+  return (
+    <p className="mb-3 text-[0.72rem] leading-relaxed text-[var(--color-ink-3)]">
+      {scope ? <>Scope: {scope}. </> : null}
+      {stats.computed_at ? (
+        <>
+          Counted {fmtAbsolute(stats.computed_at)} and frozen with the run — the location
+          audit page asks the same questions of the live database every hour, so the two
+          differ by time as well as by scope.
+        </>
+      ) : null}
+    </p>
+  );
 }
 
 export default function CandidateFunnel({
@@ -136,59 +87,90 @@ export default function CandidateFunnel({
     return <p className="text-sm text-[var(--color-ink-3)]">{emptyText}</p>;
   }
 
-  const rows = steps(stats);
-  const base = rows[0]?.count ?? 0;
+  const chain = groupWaterfall(stats.waterfall ?? []);
+  const byType = stats.listings_with_candidates ?? [];
   const pairs = stats.pairs;
 
   return (
     <div>
-      <ol className="space-y-3">
-        {rows.map((s, i) => {
-          const pct = base > 0 ? (s.count / base) * 100 : null;
-          const previous = i === 0 ? null : rows[i - 1].count;
-          const lost = previous == null ? null : previous - s.count;
-          return (
-            <li key={s.key}>
+      <AsOf stats={stats} />
+
+      {chain.length === 0 ? (
+        <p className="text-sm text-[var(--color-ink-3)]">
+          This run predates the shared steps, so it carries no chain. Its other numbers are
+          unaffected; re-running the generator fills this in.
+        </p>
+      ) : (
+        <ol className="space-y-3">
+          {chain.map(({ row, splits }) => (
+            <li key={row.step_key}>
               <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                <span className="text-sm text-[var(--color-ink)]">{s.label}</span>
+                <span className="text-sm text-[var(--color-ink)]">
+                  {stepLabel(row.step_key, 'en')}
+                </span>
                 <span className="font-mono tabular-nums text-sm text-[var(--color-ink)]">
-                  {fmtCount(s.count)}
+                  {fmtCount(row.n)}
                   <span className="ml-2 text-[0.7rem] text-[var(--color-ink-3)]">
-                    {fmtPct(pct)}
+                    {fmtPct(row.share_pct)}
                   </span>
                 </span>
               </div>
               <div className="mt-1">
                 <ProportionBar
-                  value={s.count}
-                  base={base}
-                  title={`${s.label}: ${fmtCount(s.count)} (${fmtPct(pct)} of all listings)`}
+                  pct={row.share_pct}
+                  title={`${stepLabel(row.step_key, 'en')}: ${fmtCount(row.n)} (${fmtPct(
+                    row.share_pct,
+                  )} of all listings)`}
                 />
               </div>
               <p className="mt-1 text-[0.72rem] leading-relaxed text-[var(--color-ink-3)]">
-                {s.explanation}
-                {lost != null && lost > 0 && (
+                {stepNote(row.step_key, 'en')}
+                {row.lost != null && row.lost > 0 && (
                   <span className="text-[var(--color-ink-4)]">
                     {' '}
-                    Lost at this step: {fmtCount(lost)}.
+                    Lost at this step: {fmtCount(row.lost)}.
                   </span>
                 )}
               </p>
-              {s.breakdown && s.breakdown.length > 0 && (
+
+              {splits.length > 0 && (
+                <ul className="mt-1.5 space-y-1 pl-4 border-l border-[var(--color-rule-soft)]">
+                  {splits.map((s) => (
+                    <li key={s.step_key} data-testid={`funnel-split-${s.step_key}`}>
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                        <span className="text-[0.78rem] text-[var(--color-ink-2)]">
+                          · {stepLabel(s.step_key, 'en')}
+                        </span>
+                        <span className="font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-2)]">
+                          {fmtCount(s.n)}
+                          <span className="ml-2 text-[0.68rem] text-[var(--color-ink-3)]">
+                            {fmtPct(s.share_pct)}
+                          </span>
+                        </span>
+                      </div>
+                      <p className="text-[0.7rem] leading-relaxed text-[var(--color-ink-3)]">
+                        {stepNote(s.step_key, 'en')}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {row.step_key === 'paired' && byType.length > 0 && (
                 <p className="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-0.5 text-[0.72rem] text-[var(--color-ink-3)]">
                   <span className="text-[var(--color-ink-4)]">By property type:</span>
-                  {s.breakdown.map((b) => (
-                    <span key={b.key}>
-                      {b.label}{' '}
-                      <span className="font-mono tabular-nums">{fmtCount(b.count)}</span>
+                  {byType.map((b) => (
+                    <span key={b.category_main ?? 'unknown'}>
+                      {typeLabel(b.category_main)}{' '}
+                      <span className="font-mono tabular-nums">{fmtCount(b.listings)}</span>
                     </span>
                   ))}
                 </p>
               )}
             </li>
-          );
-        })}
-      </ol>
+          ))}
+        </ol>
+      )}
 
       {stats.partial ? (
         <p className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-2 text-[0.72rem] leading-relaxed text-[var(--color-ink-2)]">
@@ -201,8 +183,8 @@ export default function CandidateFunnel({
           {stats.only && stats.only.length > 0
             ? `${fmtCount(stats.only.length)} town${stats.only.length === 1 ? '' : 's'}`
             : 'a limited set of towns'}{' '}
-          only. Read the drop into the last step as meaningless here; a full run is what makes
-          it mean something.
+          only. The lane leaves that step's drop blank here rather than printing a misleading
+          subtraction; a full run is what makes it mean something.
         </p>
       ) : null}
 

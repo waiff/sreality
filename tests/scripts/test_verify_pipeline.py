@@ -2030,8 +2030,8 @@ def test_location_town_coverage_counts_undetermined_as_czech() -> None:
     from scripts.verify_pipeline import _LOCATION_TOWN_COVERAGE_SQL
 
     flat = " ".join(_LOCATION_TOWN_COVERAGE_SQL.split()).lower()
-    assert "p.country_status <> 'foreign' and p.obec_kod is null" in flat
-    assert "from listings l left join listing_location p on p.listing_id = l.id" in flat
+    assert "ll.country_status <> 'foreign' and ll.obec_kod is null" in flat
+    assert "from listings l left join listing_location ll on ll.listing_id = l.id" in flat
     # W2-a repointed it: the frozen projection is not the coverage denominator any more.
     assert "listing_location_current" not in flat
 
@@ -2049,7 +2049,11 @@ def test_location_town_coverage_covers_every_listing() -> None:
         assert text not in flat, text
     # No cohort WHERE at all: the join goes straight into the GROUP BY. (The only
     # `where` left in the statement is the consumer rule's own EXISTS.)
-    assert "listing_location p on p.listing_id = l.id group by l.source" in flat
+    # W16: the listing_location alias is `ll` and the granularity-rank lookup rides
+    # along, because `town_n` is now the SHARED town flag (the obec RANK floor included)
+    # rendered from location_data/location_steps.py instead of a fourth local spelling.
+    assert "listing_location ll on ll.listing_id = l.id" in flat
+    assert "location_granularity_rank gr on gr.granularity = ll.granularity group by l.source" in flat
     assert "l.is_active" not in " ".join(drain._SWEEP_SQL.split()).lower()
     # The cells the operator reads, and nothing the old scope needed.
     for kept in ("as listings_n", "as no_row_n", "as cz_no_town_n", "as town_n",

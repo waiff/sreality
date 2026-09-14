@@ -50,6 +50,7 @@ from urllib.parse import urlencode
 import requests
 
 from location_data.claims_common import SERVED_LOCATION_PREDICATE
+from location_data import location_steps
 from scraper import media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
@@ -2533,17 +2534,28 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
 # covers the whole database, so the denominator is the portal's whole corpus. THE PER-PORTAL
 # SERIES THEREFORE CHANGED MEANING ON 2026-09-14 and the numbers before and after that date
 # are not comparable; `town_share` is the readable one across the step.
+#
+# W16 (operator ruling 2026-09-14): `town_n` and `hidden_n` are the SHARED step flags,
+# rendered from location_data/location_steps.py — the fourth spelling of "has a town" is
+# gone. `town_n` therefore now carries dedup's obec RANK floor as well as `obec_kod`
+# (measured: zero rows of movement on 2026-09-14, and from now on it is the number dedup can
+# block on). `cz_no_town_n` stays the coarser "no obec_kod at all", because THAT is the
+# contract gap the S2 rewrites drive to zero, and it is not a chain step.
+_LOCATION_STEP_FLAGS = location_steps.step_flags_sql()
+
 _LOCATION_TOWN_COVERAGE_SQL = f"""
     SELECT l.source,
            count(*)                                                   AS listings_n,
-           count(*) FILTER (WHERE p.listing_id IS NULL)               AS no_row_n,
-           count(*) FILTER (WHERE p.listing_id IS NOT NULL
-                              AND p.country_status <> 'foreign'
-                              AND p.obec_kod IS NULL)                 AS cz_no_town_n,
-           count(*) FILTER (WHERE p.obec_kod IS NOT NULL)             AS town_n,
-           count(*) FILTER (WHERE NOT {SERVED_LOCATION_PREDICATE})    AS hidden_n
+           count(*) FILTER (WHERE ll.listing_id IS NULL)              AS no_row_n,
+           count(*) FILTER (WHERE ll.listing_id IS NOT NULL
+                              AND ll.country_status <> 'foreign'
+                              AND ll.obec_kod IS NULL)                AS cz_no_town_n,
+           count(*) FILTER (WHERE {_LOCATION_STEP_FLAGS["has_town"]}) AS town_n,
+           count(*) FILTER (WHERE NOT {_LOCATION_STEP_FLAGS["located"]})
+                                                                      AS hidden_n
       FROM listings l
-      LEFT JOIN listing_location p ON p.listing_id = l.id
+      LEFT JOIN listing_location ll ON ll.listing_id = l.id
+      LEFT JOIN location_granularity_rank gr ON gr.granularity = ll.granularity
      GROUP BY l.source
      ORDER BY l.source
 """

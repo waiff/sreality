@@ -208,6 +208,59 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-15 — **W16: the funnel and the location audit waterfall are ONE vocabulary.**
+  Supersedes entry 2026-09-10 (c)'s description of the funnel's five steps. The operator, after
+  reading both pages side by side on 2026-09-14: they "must use ONE terminology and, where
+  possible, ONE waterfall".
+
+  **The diagnosis, in the numbers that prompted it.** Step 2 was a naming problem only: the
+  funnel's `with_projection` (`l.listing_id IS NOT NULL` on a LEFT JOIN) is byte-for-byte the
+  audit page's `with_verdict` — the engine JUDGED the listing. One page called that "Known to the
+  location engine", which reads as *answered*. Step 3 was a real predicate problem: the funnel's
+  town test was `obec_kod IS NOT NULL AND granularity rank ≥ obec` with **no consumer rule at
+  all**, while the audit cuts step 3 with `SERVED_LOCATION_PREDICATE` and then SPLITS the located
+  set three ways. So the funnel's one "lost 99,889" was three unlike things added together —
+  decomposed against production at run #3's clock:
+
+  | | |
+  | --- | ---: |
+  | judged, still without a location | ≈53,374 |
+  | **abroad — an ANSWER, not a loss** | 45,619 |
+  | a point in Czechia, but no town | ≈895 |
+
+  Abroad was **46 %** of that "loss", and the audit page had always booked it as a split INSIDE
+  `located`. The funnel also disagreed with its own lane: `_BASE_CTE` — the rows path C actually
+  pairs — carries the consumer rule and the rank floor; `FUNNEL_SQL` carried neither, so the
+  readout was one step looser than the population it described.
+
+  **What shipped.** `location_data/location_steps.py` is the one place the four location tests are
+  spelled (`has_verdict`, `located` = the consumer rule imported and never retyped, `is_foreign`,
+  `has_town` **including the obec rank floor**, by RANK and never by enum order), plus the step
+  keys, their order and each key's shape for both chains. Every producer renders from it:
+  `FUNNEL_SQL`, the four dedup statements that repeated the rank floor, and
+  `verify_pipeline._LOCATION_TOWN_COVERAGE_SQL` (the fourth spelling, now gone). Migration 526
+  replaces `refresh_location_audit_waterfall()` with the same expressions and **drops `label_cs`**;
+  wording moved to `frontend/src/lib/locationSteps.ts`, one file for Czech and English and both
+  pages. A run now stamps `stats.waterfall` — eight rows with the shared keys, `lost` and
+  `share_pct` computed once by the lane — and `CandidateFunnel.tsx` lost its `steps()` factory,
+  its client sums and its client-side subtraction. `located_town` is a **split** on the audit page
+  and a **chain step** on a run; the town step's loss is now exactly the two split rows above it.
+
+  **Three calls worth recording.**
+  1. **The candidates side adopted the audit's chain, not the other way round** — the audit side
+     was already cut with the one consumer rule and already separated the three things the funnel
+     merged. Adopting dedup's rank floor onto the audit page cost **0 rows** (measured
+     2026-09-14), which is what made the one definition free.
+  2. **The pairing statements did not move.** The rank-floor refactor is byte-identical output, so
+     `GENERATOR_VERSION` stays `c3` and no `inputs_id` is re-minted — pinned by SHA-256 digests in
+     `tests/toolkit/test_dedup_candidates_sql.py`, which say in as many words that a deliberate
+     change must bump the version in the same commit.
+  3. **Two clocks stay, and are now printed.** A run's numbers are frozen when it counted them; the
+     audit relation refreshes hourly. 819,770 next to 821,193 was never a contradiction — it was
+     one predicate read off two clocks, and the funnel now states its scope and its as-of time in
+     one line. A run generated before this change carries no `waterfall` and renders one line
+     saying so: a gap, never a zero.
+
 - 2026-09-10 (f) — **The write path is proven, and looking at the page with real data on it
   found a reading defect no test would have.** A pilot `generate` over three small towns —
   Aš, Bohumín, Benátky nad Jizerou — wrote **10,672 pairs** (C1 8,421, C3 2,251) in 402 s as
