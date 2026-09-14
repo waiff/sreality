@@ -24,6 +24,7 @@ rows, an empty batch ends the walk, and the budget stops it BETWEEN batches.
 
 from __future__ import annotations
 
+import pathlib
 import re
 
 import pytest
@@ -167,6 +168,7 @@ def test_an_unconfirmed_run_deletes_nothing(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(retire, "connect", lambda: _ConnCtx(conn))
     monkeypatch.setattr(retire, "retired_entry_ids", lambda c: [(7, "bazos", 1)])
     monkeypatch.setattr(retire, "count_doomed", lambda c, ids, **kw: 9_500_000)
+    monkeypatch.setattr(retire, "remine_gaps", lambda c, sources: [("bazos", 900, 0)])
     monkeypatch.setattr(retire, "delete_batches", _explode)
     assert retire.main(["--dry-run"]) == 0
     assert retire.main([]) == 0
@@ -186,3 +188,53 @@ class _ConnCtx:
 
 def _explode(*a: object, **k: object) -> None:
     raise AssertionError("an unarmed run must not reach the delete loop")
+
+
+# ------------------------------------------------- 3. the re-mine rail (W11, 2026-09-14)
+
+
+def test_a_version_that_is_still_a_listings_newest_evidence_is_not_deletable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The W11 resolver reads a listing's NEWEST EVIDENCE, so a retired version's rows are
+    live data until that page has been re-mined under the active contract. An armed run
+    refuses while any portal still has served listings with no active-contract claim, and
+    says how many."""
+    conn = _StubConn([])
+    monkeypatch.setattr(retire, "connect", lambda: _ConnCtx(conn))
+    monkeypatch.setattr(retire, "retired_entry_ids", lambda c: [(7, "bezrealitky", 2)])
+    monkeypatch.setattr(retire, "count_doomed", lambda c, ids, **kw: 1)
+    monkeypatch.setattr(retire, "delete_batches", _explode)
+    monkeypatch.setattr(retire, "remine_gaps", lambda c, s: [("bezrealitky", 5750, 5723)])
+    assert retire.main(["--confirm", "RETIRE"]) == 3
+    # A DRY RUN still plans — it is the reading that tells the operator how long to wait.
+    assert retire.main(["--dry-run"]) == 0
+
+
+def test_the_rail_is_armed_when_every_served_listing_has_an_active_claim(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    deleted: list[object] = []
+    conn = _StubConn([])
+    monkeypatch.setattr(retire, "connect", lambda: _ConnCtx(conn))
+    monkeypatch.setattr(retire, "retired_entry_ids", lambda c: [(7, "bazos", 1)])
+    monkeypatch.setattr(retire, "remine_gaps", lambda c, s: [("bazos", 5750, 0)])
+    monkeypatch.setattr(retire, "delete_batches",
+                        lambda *a, **k: (deleted.append(1), (10, 1, True))[1])
+    assert retire.main(["--confirm", "RETIRE"]) == 0
+    assert deleted == [1]
+
+
+def test_the_rail_counts_listings_without_an_active_contract_claim():
+    """The gap query asks the ACTIVE header for the listing's OWN portal — a claim under
+    another portal's active contract must never count as this portal's re-mine."""
+    flat = _squash(retire._REMINE_GAP_SQL)
+    assert "count(*) filter (where not exists" in flat
+    assert "where c.listing_id = l.id and pc.is_active and pc.source = l.source" in flat
+    assert "from listings l where l.is_active" in flat
+
+
+def test_there_is_no_force_flag():
+    """The answer to the rail is to wait 6-8 h for the intake lanes; a flag would exist only
+    to skip that wait, and skipping it is the 2026-09-14 blackout with a DELETE in it."""
+    assert 'add_argument("--force"' not in pathlib.Path(retire.__file__).read_text()

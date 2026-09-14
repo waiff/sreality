@@ -58,43 +58,59 @@ def test_the_licence_gate_is_in_the_claim_read_not_only_in_the_code():
     each store of record to make a Mapy coordinate unstorable. `listing_location` has no such
     column because the guard moved upstream and got stronger: the resolver's own projection
     refuses to SELECT one."""
-    for sql in (resolve_db._CLAIMS_SELECT, resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
+    for sql in (resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
         assert "c.licence_class in ('portal', 'operator')" in " ".join(sql.split()).lower()
 
 
-def test_only_an_active_contracts_claims_are_read():
-    """`location_claims` is append-only and its fingerprint hashes `extractor_version`, so a
-    contract BUMP inserts new rows beside the old ones rather than superseding them — and the
-    superseded row has the LOWER id, so it would win every "first admissible claim of this
-    type" tie. W1-c bumped all nine contracts at once, which makes that the normal case on
-    any listing whose body has not changed since.
+def test_the_claim_read_takes_a_listings_newest_evidence_not_only_the_active_contract():
+    """W11, incident 2026-09-14. W1-c spelled the version rail `pc.is_active`, so the hours
+    between a contract BUMP and its re-mine judged a listing with no claims at all: 595,816
+    rows came out `unknown/undetermined/low` and Browse fell to 45,810 of ~350,000.
 
-    Filtering at READ keeps the evidence on disk and makes W2-b's delete a cleanup rather
-    than a correctness step. `is_active` lives on the contract HEADER, one per source."""
-    for sql in (resolve_db._CLAIMS_SELECT, resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
+    The rail now reads the highest contract version PRESENT for that (listing, portal) that
+    is `<= the active one`, which is the active version's claims the moment they exist."""
+    for sql in (resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
         flat = " ".join(sql.split()).lower()
         assert "join portal_contracts pc on pc.id = pce.contract_id" in flat, flat
-        assert "where pce.id = c.contract_entry_id and pc.is_active" in flat, flat
+        assert "join portal_contracts act on act.source = pc.source and act.is_active" in flat
+        assert "pc.version <= act.version" in flat, flat
+        # ONE version per listing per portal, never a mix of two contracts' halves.
+        assert ("max(pc.version) over (partition by c.listing_id, c.source) "
+                "as newest_version") in flat, flat
+        assert "contract_version is null or contract_version = newest_version" in flat, flat
         # Operator claims carry no entry by construction and are named EXPLICITLY — a
         # NULL-tolerant join would also admit a portal claim that lost its entry id.
         assert "c.contract_entry_id is null and c.licence_class = 'operator'" in flat, flat
 
 
+def test_the_w11_rule_carries_its_own_resolver_version():
+    """A rule that can change an output must move `RESOLVER_VERSION`, or the sweep's version
+    arm never re-queues the rows the old rule got wrong — which here is 595,816 of them."""
+    assert RESOLVER_VERSION == "resolver:v5.1"
+
+
 class _ClaimCursor:
-    """A fake that OBEYS the claim projection's two predicates instead of ignoring them.
+    """A fake that OBEYS the claim projection's rails instead of ignoring them.
 
     It refuses a statement that does not carry them and then applies them to its own rows, so
-    the test below goes red BOTH when the predicate is dropped from the SQL and when the
-    loader stops using that SQL.
+    the tests below go red BOTH when a rail is dropped from the SQL and when the loader stops
+    using that SQL. `sreality` is at version 4 and `bazos` at 6 (the live 2026-09-14 heads).
     """
 
-    #  id, listing_id, licence_class, contract_entry_id, entry_is_active
+    ACTIVE = {"sreality": 4, "bazos": 6}
+
+    #  id, listing_id, source, licence_class, contract version (None = no entry)
     ROWS = (
-        (1, 77, "portal", 10, True),    # the live contract's claim
-        (2, 77, "portal", 9, False),    # the SAME fact, from the superseded version
-        (3, 77, "operator", None, None),  # an operator correction, no entry at all
-        (4, 77, "ephemeral_display_only", 10, True),  # a Mapy coordinate
-        (5, 77, "portal", None, None),  # a portal claim that lost its entry id
+        (1, 77, "sreality", "portal", 4),    # the active version's claim
+        (2, 77, "sreality", "portal", 3),    # the SAME fact, from the superseded version
+        (3, 77, "operator", "operator", None),  # an operator correction, no entry at all
+        (4, 77, "sreality", "ephemeral_display_only", 4),  # a Mapy coordinate
+        (5, 77, "sreality", "portal", None),  # a portal claim that lost its entry id
+        # A LISTING THE BUMP OUTRAN: nothing under bazos@6 yet, so @5 is its newest
+        # evidence — and @4 beside it must NOT be mixed in.
+        (6, 88, "bazos", "portal", 5),
+        (7, 88, "bazos", "portal", 4),
+        (8, 88, "operator", "operator", None),
     )
 
     def __init__(self) -> None:
@@ -109,21 +125,32 @@ class _ClaimCursor:
     def execute(self, sql, params=None):
         flat = " ".join(sql.split()).lower()
         assert "c.licence_class in ('portal', 'operator')" in flat, "licence rail missing"
-        assert "and pc.is_active" in flat, "active-contract rail missing"
+        assert "pc.version <= act.version" in flat, "active-version ceiling missing"
+        assert "newest_version" in flat, "newest-evidence rail missing"
         assert "c.contract_entry_id is null and c.licence_class = 'operator'" in flat
-        self.result = [
-            _row(claim_id, listing_id)
-            for claim_id, listing_id, licence, entry, active in self.ROWS
-            if licence in ("portal", "operator")
-            and ((entry is None and licence == "operator") or active is True)
+        admissible = [
+            r for r in self.ROWS
+            if r[3] in ("portal", "operator")
+            and ((r[4] is None and r[3] == "operator")
+                 or (r[4] is not None and r[4] <= self.ACTIVE[r[2]]))
         ]
+        newest = {}
+        for _, listing, source, _, version in admissible:
+            if version is not None:
+                newest[(listing, source)] = max(newest.get((listing, source), 0), version)
+        self.result = [
+            _row(r[0], r[1], r[2])
+            for r in admissible
+            if r[4] is None or r[4] == newest[(r[1], r[2])]
+        ]
+        self.result.sort(key=lambda row: (row[1], row[0]))
 
     def fetchall(self):
         return self.result
 
 
-def _row(claim_id: int, listing_id: int) -> tuple:
-    return (claim_id, listing_id, "sreality", "obec_name", "api_json",
+def _row(claim_id: int, listing_id: int, source: str = "sreality") -> tuple:
+    return (claim_id, listing_id, source, "obec_name", "api_json",
             "portal_structured_field", "portal", mm._T0, "Praha", None, None, None,
             {}, None, None, "none", "high", True)
 
@@ -136,10 +163,17 @@ class _ClaimConn:
         return self.cur
 
 
-def test_a_retired_contract_entrys_claim_is_never_loaded():
+def test_a_superseded_versions_claim_is_never_loaded_beside_the_active_ones():
     """Five rows for one listing; three are inadmissible and only two reach the resolver."""
     loaded = resolve_db.load_claims_bulk(_ClaimConn(), [77])
     assert [c.id for c in loaded[77]] == [1, 3]
+
+
+def test_a_listing_the_bump_outran_still_reads_its_newest_earlier_version():
+    """bazos@6 is active and this listing has nothing under it yet. It reads @5 — its newest
+    evidence — and never @4 beside it, so the answer is one contract's, not two halves."""
+    loaded = resolve_db.load_claims_bulk(_ClaimConn(), [88])
+    assert [c.id for c in loaded[88]] == [6, 8]
 
 
 # --------------------------------------------------------------- the carousel street

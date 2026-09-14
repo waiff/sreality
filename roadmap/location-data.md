@@ -789,7 +789,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
      rebuilt against the narrowed view instead, which is the smaller change and keeps their bodies
      byte-identical.
   4. **Old-version claim cleanup** — DONE (W6-a, above): superseded rows are filtered at READ
-     (`_CLAIMS_SELECT`), so the delete was leisure work, and it is taken.
+     (`_claims_sql`), so the delete was leisure work, and it is taken.
      `location_claims_retire.yml` is the standing lane — dispatch it after any future retirement.
 
 - **W9 — composite locality names bind against the register and resolve up; the statutory-city regex
@@ -814,6 +814,18 @@ component is slimmed twice — each wave rewrites one component and slims its st
   sensitive regex and published the obvod as the obec) and every obvod spelling that used to lose its
   quarter. The one residual is the SPACE-glued pair ("Praha Stodůlky") — no separator to split on, and
   splitting on the space would read any two-word line as town-plus-quarter.
+
+- **W11 — a contract bump never blacks out (2026-09-14: 595k rows judged without evidence after the
+  W9 bump + sweep)** (shipped): W9 bumped eight contracts at 05:58Z and the corpus sweep ran at
+  06:42Z, hours before the intake lanes had re-mined the pages — and the claim read admitted only the
+  ACTIVE version's rows, so 595,816 listings resolved `unknown/undetermined/low` with no claims at
+  all and Browse fell from ~350,000 active rows to 45,810. The read now takes a listing's NEWEST
+  EVIDENCE: per (listing, portal) the highest contract version present that is `<= the active` one,
+  `max(pc.version) OVER (PARTITION BY listing_id, source)` — one version per listing, never a mix
+  (11 ms / 1.2 k buffers per 250-listing slice on prod, index-driven). `RESOLVER_VERSION` →
+  `resolver:v5.1` re-queues the corpus once. `location_claims_retire.py` gains the matching rail: it
+  refuses (exit 3, no `--force`) while any portal still has a served listing with no claim under its
+  ACTIVE contract, because those older rows are that listing's evidence until the re-mine lands.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
