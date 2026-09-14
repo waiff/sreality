@@ -644,10 +644,18 @@ def test_every_created_object_is_revoked():
         elif not required <= roles:
             missing.append(f"{label} — REVOKE omits {sorted(required - roles)} (got {sorted(roles)})")
 
-    for rel in re.findall(r"create (?:table|view) ([a-z0-9_]+)", sql):
+    # `if not exists` is part of the apply contract (the workflow re-runs a file from
+    # statement 1 after a lock_timeout), and a scanner blind to it skips the REVOKE
+    # check on exactly the idempotent files: migration 523 creates its table that way
+    # and this gate read the word "if" as the relation name. (`or replace` is NOT
+    # widened here: the `_public` views deliberately grant anon, and re-scoping this
+    # gate over them is its own change.)
+    for rel in re.findall(
+        r"create (?:table|view) (?:if not exists )?([a-z0-9_]+)", sql
+    ):
         check(f"table/view {rel}", rf"revoke all on {rel}\b", relation_roles)
 
-    for m in re.finditer(r"create table ([a-z0-9_]+)\s*\(", sql):
+    for m in re.finditer(r"create table (?:if not exists )?([a-z0-9_]+)\s*\(", sql):
         table = m.group(1)
         for col in _column_defs(_balanced(sql, m.end() - 1)):
             parts = col.split()

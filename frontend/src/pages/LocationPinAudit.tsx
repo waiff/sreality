@@ -12,6 +12,13 @@
  * matrix, the totals and the list can never tell three different stories. The
  * list is a separate keyset read of the same relation under the same filters.
  *
+ * THE WATERFALL (W14, migration 523) sits above all of it and answers the
+ * question the page used to leave open: what is this number a fraction OF. It
+ * is the chain from every listing ever collected (841 k) down to this set,
+ * computed in the store by the same hourly refresh, from the same two
+ * predicates Browse uses — so „skryté" is read against the whole database and
+ * never against itself. Nothing on this side recomputes a step.
+ *
  * TWO STATES (W7-b, migration 518), and the page always looks at exactly one:
  * "čeká na zpracování" is the lane still working (no verdict yet, queued for
  * one, or the ad changed after the verdict) — normal traffic; "zpracováno,
@@ -20,7 +27,7 @@
  * the nav badge counts only the issue.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 
 import ErrorBanner from '@/components/ErrorBanner';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
@@ -28,7 +35,14 @@ import Spinner from '@/components/Spinner';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { categoryMainLabelPlural, categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
-import { fmtArea, fmtCount, fmtCzk, fmtDateSlash } from '@/lib/format';
+import { fmtArea, fmtCount, fmtCzk, fmtDateSlash, fmtPct } from '@/lib/format';
+import {
+  WATERFALL_KEY,
+  fetchLocationWaterfall,
+  groupWaterfall,
+  waterfallRefreshedAt,
+  type WaterfallStep,
+} from '@/lib/locationWaterfall';
 import { listingRowPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
 import { useInfiniteList } from '@/lib/useInfiniteList';
@@ -141,6 +155,102 @@ const QUALITY_SHORT: Record<PinAuditQuality, string> = {
 const dash = (v: string | null | undefined): string =>
   v == null || v === '' ? '—' : v;
 
+/* ------------------------------------------------------------- the waterfall */
+
+/* One plain-Czech line per step, keyed by the store's own step key (migration
+ * 523). The COUNTS come from the store and nothing here recomputes them; what
+ * lives on this side is the wording, because a better sentence must never cost
+ * a migration. An unknown key simply renders without a note. */
+const WATERFALL_NOTE: Record<string, string> = {
+  all_listings:
+    'Všechno, co jsme kdy z devíti portálů sebrali. Nic se nikdy nemaže, takže tohle je celá databáze.',
+  not_served:
+    'Stažené inzeráty, které zároveň nejsou hlavním inzerátem žádné běžící nemovitosti. Ty nikde neukazujeme, ať polohu mají, nebo ne — proto se do auditu nepočítají.',
+  served:
+    'Inzeráty, které může zákazník potkat: ve vyhledávání, na mapě, v hlídacích psech a při hledání duplicit. Všechna čísla níže se týkají jen jich.',
+  served_with_verdict:
+    'Systém u nich polohu už řešil a má uložený výsledek. Rozdíl jsou inzeráty, které přišly před chvílí a na řadu teprve přijdou.',
+  served_located:
+    'Mají bod na mapě, nebo systém rozhodl, že jsou v zahraničí. Obojí je odpověď, se kterou už umí zákaznické stránky pracovat.',
+  hidden:
+    'Tento seznam. Zobrazitelné inzeráty, u kterých poloha rozhodnutá není — a dokud nebude, nejsou vidět nikde.',
+};
+
+/* The chain, as the store wrote it: label, count, what was lost at that step and
+ * the share of the WHOLE database. Sub-rows are indented under their step. */
+function WaterfallTable({ steps }: { steps: WaterfallStep[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="text-[0.8rem] min-w-full">
+        <thead className={HEAD}>
+          <tr>
+            <th className={TH}>Krok</th>
+            <th className={`${TH} text-right`}>Počet</th>
+            <th className={`${TH} text-right`}>Ubylo zde</th>
+            <th className={`${TH} text-right`}>Podíl z databáze</th>
+          </tr>
+        </thead>
+        <tbody>
+          {steps.map(({ row, splits }) => {
+            const note = WATERFALL_NOTE[row.step_key];
+            const isChain = row.kind === 'chain';
+            const isHidden = row.step_key === 'hidden';
+            return (
+              <Fragment key={row.step_key}>
+                <tr className={ROW} data-testid={`waterfall-step-${row.step_key}`}>
+                  <td className={TD}>
+                    <span
+                      className={[
+                        isChain ? 'font-medium' : 'text-[var(--color-ink-2)]',
+                        isHidden ? 'text-[var(--color-copper)] font-medium' : '',
+                      ].join(' ')}
+                    >
+                      {isChain ? `${row.step_no}. ` : '↳ '}
+                      {row.label_cs}
+                    </span>
+                    {note ? (
+                      <span className="block text-[0.72rem] leading-snug text-[var(--color-ink-3)] max-w-[44rem]">
+                        {note}
+                      </span>
+                    ) : null}
+                  </td>
+                  <td
+                    className={`${NUM} ${isHidden ? 'text-[var(--color-copper)] font-medium' : ''}`}
+                  >
+                    {fmtCount(row.n)}
+                  </td>
+                  <td className={NUM}>
+                    {row.lost == null || row.lost === 0 ? (
+                      <span className="text-[var(--color-ink-4)]">—</span>
+                    ) : (
+                      `−${fmtCount(row.lost)}`
+                    )}
+                  </td>
+                  <td className={NUM}>{fmtPct(Number(row.share_pct), { digits: 1 })}</td>
+                </tr>
+                {splits.map((s) => (
+                  <tr key={s.step_key} data-testid={`waterfall-split-${s.step_key}`}>
+                    <td className={`${TD} pl-6 text-[var(--color-ink-3)]`}>
+                      · {s.label_cs}
+                    </td>
+                    <td className={`${NUM} text-[var(--color-ink-2)]`}>
+                      {fmtCount(s.n)}
+                    </td>
+                    <td className={NUM} />
+                    <td className={`${NUM} text-[var(--color-ink-3)]`}>
+                      {fmtPct(Number(s.share_pct), { digits: 1 })}
+                    </td>
+                  </tr>
+                ))}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------- page */
 
 export default function LocationPinAudit() {
@@ -155,6 +265,18 @@ export default function LocationPinAudit() {
     queryFn: fetchPinAuditSummary,
     staleTime: 5 * 60_000,
   });
+
+  /* The whole chain, written by the same hourly refresh as the list below it
+   * (migration 523), so the two can never be as-of different hours. */
+  const waterfall = useQuery({
+    queryKey: WATERFALL_KEY,
+    queryFn: fetchLocationWaterfall,
+    staleTime: 5 * 60_000,
+  });
+  const waterfallSteps = useMemo(
+    () => groupWaterfall(waterfall.data ?? []),
+    [waterfall.data],
+  );
 
   const rows: PinAuditSummaryRow[] = useMemo(
     () => summary.data ?? [],
@@ -219,9 +341,15 @@ export default function LocationPinAudit() {
     return { active, delisted, sibling };
   }, [rows, filters.state]);
 
+  /* ONE refresh time on the page, and it is the waterfall's: both relations are
+   * written by the same hourly function, and two timestamps would invite the
+   * question of which one the list is as-of. */
   const refreshedAt = useMemo(
-    () => rows.find((r) => r.refreshed_at != null)?.refreshed_at ?? null,
-    [rows],
+    () =>
+      waterfallRefreshedAt(waterfall.data ?? []) ??
+      rows.find((r) => r.refreshed_at != null)?.refreshed_at ??
+      null,
+    [waterfall.data, rows],
   );
 
   const filterKey = JSON.stringify(filters);
@@ -251,7 +379,7 @@ export default function LocationPinAudit() {
   const toggle = <T extends string>(list: ReadonlyArray<T>, v: T): T[] =>
     list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
 
-  const err = summary.error ?? list.error;
+  const err = summary.error ?? waterfall.error ?? list.error;
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
@@ -266,8 +394,25 @@ export default function LocationPinAudit() {
         stránka ukazuje vždy jen jednu z nich: ty, které systém teprve čekají, a
         ty, u kterých už doběhl a polohu neurčil.
       </p>
+      <div className="mt-5">
+        <Card
+          title="Vodopád"
+          lede={`Odkud se to číslo bere. Cesta od všech inzerátů v databázi až k těm skrytým — u každého kroku je vidět, kolik jich zbylo, kolik jich tam ubylo a jaký je to podíl z celé databáze. Skryté se tak čtou proti celku, ne samy proti sobě.${
+            refreshedAt ? ` Stav k ${fmtDateSlash(refreshedAt)}; přepočítává se každou hodinu.` : ''
+          }`}
+        >
+          {waterfall.isLoading ? (
+            <Spinner />
+          ) : waterfallSteps.length === 0 ? (
+            <p className="text-sm text-[var(--color-ink-3)]">Žádná data.</p>
+          ) : (
+            <WaterfallTable steps={waterfallSteps} />
+          )}
+        </Card>
+      </div>
+
       <div
-        className="mt-3 grid gap-1 text-[0.82rem] max-w-[52rem]"
+        className="mt-5 grid gap-1 text-[0.82rem] max-w-[52rem]"
         data-testid="pin-audit-state-totals"
       >
         <p>
@@ -293,7 +438,6 @@ export default function LocationPinAudit() {
         Níže: {STATE_LABEL[filters.state]} · {fmtCount(split.active)} běží ·{' '}
         {fmtCount(split.delisted)} stažených · u {fmtCount(split.sibling)} má
         jiný inzerát téže nemovitosti polohu určenou
-        {refreshedAt ? ` · stav k ${fmtDateSlash(refreshedAt)}` : ''}
         {' · '}seznam se obnovuje každou hodinu
       </p>
       <p className="mt-1 text-[0.78rem] text-[var(--color-ink-3)] max-w-[52rem]">

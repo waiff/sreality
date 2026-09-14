@@ -2514,6 +2514,22 @@ exists, nothing queued, no newer evidence, still no location) is the issue, and 
 buckets refine that half alone. The page toggles between the two and defaults to `unresolved`; the
 nav badge counts `unresolved` only, because a badge that climbed whenever the scrapers ran would
 teach the operator to ignore it. Measured at the split: 11 pending, 44,370 unresolved.
+**W14 (migration 523) makes the page read against the whole database.** The operator's complaint was
+that the audit set was a number with nothing to measure it by. `location_audit_waterfall` is the
+chain — 14 rows, rewritten hourly by the SAME `refresh_location_pin_audit_mv()` run, after the
+matview so the last step's split reads the relation the page lists: every listing ever collected
+(841,428) → **not served** (87,756: 28,162 never judged, 41,396 judged without a location, 18,198
+located from earlier — delisted rows no surface shows, so they are not audit findings) → **served**
+(753,672, the listings a consumer can meet) → served with a verdict (753,658) → **served and
+located** (741,604 = 695,130 with an obec + 45,582 determined foreign + 892 a Czech point with no
+obec) → **hidden** (12,068 = 12,054 `unresolved` + 14 `pending`), which is 1.4 % of the database and
+not 100 % of itself. Every row is cut with the two shared constants `SERVED_LISTING_PREDICATE` and
+`SERVED_LOCATION_PREDICATE` rendered verbatim (pinned by `tests/test_location_w14_audit_waterfall.py`,
+the W5 rail's shape) — one statement, one snapshot, no new column on `listings`, and the client
+renders `n` / `lost` / `share_pct` without recomputing any of them. Rows are `chain` (the funnel,
+`lost` = the previous step's count minus its own), `deduction` (a set carved out: the not-served
+rows, the hidden set) or `split` (sub-rows that partition their parent); the migration proves all
+four arithmetic laws at apply time. Cost: 19.3 s on top of the hourly refresh's 900 s budget.
 `quality` buckets the set on active/delisted × `has_claims`; the SPA page `/new-dedup/pin-audit`
 filters on those four axes plus the sibling flag, draws the legacy pins (capped at 5,000, and it
 says when it capped), and reads its overview matrix from `location_pin_audit_summary()` so the
