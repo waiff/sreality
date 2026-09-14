@@ -815,6 +815,18 @@ component is slimmed twice — each wave rewrites one component and slims its st
   quarter. The one residual is the SPACE-glued pair ("Praha Stodůlky") — no separator to split on, and
   splitting on the space would read any two-word line as town-plus-quarter.
 
+- **W10 — stored gone pages are stamped 410 so the last live page is mined (bazos removed ads before
+  the gone-fix)** (shipped): bazos answers a removed ad with HTTP 200 and its CATEGORY INDEX page, and
+  until #1451 the client did not recognise it — so the page was archived as a detail body and the
+  bodies-first pass mined a page with no location on it. Migration 519 corrects those stored bodies'
+  `http_status` to 410 (the truthful status of a removed ad — no new column, no flag), which the
+  pass's three payload predicates already skip, so the previous version becomes the latest body on its
+  own. A body is only stamped when the archived HTML hashes to that payload row's own `body_sha256`
+  AND both of #1451's signals fire; nothing is deleted. Bazos only — the other portals' markers are
+  prose fragments not yet shown to be impossible on a live page, and a false stamp destroys evidence.
+  Going forward every HTML portal raises `ListingGoneError` inside its client's `fetch_detail`, before
+  the body reaches the archive writer, so no new gone page is stored.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a

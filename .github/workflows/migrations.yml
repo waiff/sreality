@@ -154,10 +154,15 @@ jobs:
       # test_broker_sources joins the sweep because its statements are GENERATED
       # from the source registry, so no `*_SQL` constant exists for sql_corpus to
       # discover — they would be the one executed-SQL family nothing type-checks.
+      # test_location_w10_gone_bodies_live joins it because PREPARE only proves the
+      # anti-join COMPILES; W10's claim is about which row it RETURNS once a stored
+      # gone page is stamped 410, and only a real schema can answer that.
       - name: PREPARE every SQL statement against the replayed schema
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
-        run: pytest tests/test_sql_schema_prepare.py tests/test_broker_sources.py -q
+        run: |
+          pytest tests/test_sql_schema_prepare.py tests/test_broker_sources.py \
+                 tests/location_data/test_location_w10_gone_bodies_live.py -q
 
       - name: Tenant-isolation sweep (RLS cross-tenant denial, Phase 1)
         env:
