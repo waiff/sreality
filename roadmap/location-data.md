@@ -789,7 +789,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
      rebuilt against the narrowed view instead, which is the smaller change and keeps their bodies
      byte-identical.
   4. **Old-version claim cleanup** — DONE (W6-a, above): superseded rows are filtered at READ
-     (`_CLAIMS_SELECT`), so the delete was leisure work, and it is taken.
+     (`_claims_sql`), so the delete was leisure work, and it is taken.
      `location_claims_retire.yml` is the standing lane — dispatch it after any future retirement.
 
 - **W9 — composite locality names bind against the register and resolve up; the statutory-city regex
@@ -831,6 +831,31 @@ component is slimmed twice — each wave rewrites one component and slims its st
   `portal_raw_pages` interleaves nine portals at 44 ids per bazos row and the planner runs the html
   test ahead of `source = 'bazos'`, so each batch detoasted ~44x what it wanted. 521 addresses the
   batch by id LIST: 9.7 s per 1,000 pages against >900 s.
+
+- **W11 — a contract bump never blacks out (2026-09-14: 595k rows judged without evidence after the
+  W9 bump + sweep)** (shipped): W9 bumped eight contracts at 05:58Z and the corpus sweep ran at
+  06:42Z, hours before the intake lanes had re-mined the pages — and the claim read admitted only the
+  ACTIVE version's rows, so 595,816 listings resolved `unknown/undetermined/low` with no claims at
+  all and Browse fell from ~350,000 active rows to 45,810. The read now takes a listing's NEWEST
+  EVIDENCE: per (listing, portal) the highest contract version present that is `<= the active` one,
+  `max(pc.version) OVER (PARTITION BY listing_id, source)` — one version per listing, never a mix
+  (11 ms / 1.2 k buffers per 250-listing slice on prod, index-driven). `RESOLVER_VERSION` →
+  `resolver:v5.1` re-queues the corpus once. `location_claims_retire.py` gains the matching rail: it
+  refuses (exit 3, no `--force`) while any portal still has a served listing with no claim under its
+  ACTIVE contract, because those older rows are that listing's evidence until the re-mine lands.
+
+- **W12 — intake batches survive lock contention; the fast lane yields to a running GitHub run (two
+  full walks died on a 5 s lock timeout, 2026-09-14)** (shipped): runs 34817669095 (07:23Z) and
+  34824922631 (08:52Z) both died ~80 s in on `LockNotAvailable` — every batch bumps `dirty_locations`
+  rows the resolver's four concurrent drain slices hold, mid-incident with 596k rows still to
+  re-mine. Both batch loops (listing scan, bodies pass) now retry the SAME batch on 55P03/40P01 —
+  the transaction rolled back, the keyset cursor never moved, fingerprints are `ON CONFLICT DO
+  NOTHING` and the enqueue is a bump — backing off 2 s to 30 s, rolling the counters back with the
+  transaction, counting `lock_retries`, and stamping the run `failed` (never skipping rows) after
+  five consecutive losses; everything else, a lost connection above all, stays fatal. The write
+  ceiling goes 5 s → 20 s (`INTAKE_LOCK_TIMEOUT_S`), and the realtime worker's minute lane skips its
+  tick with `yielded_to=<batch_id>` while an hourly-lane batch is stamped `running` younger than 65
+  minutes (older = a stale stamp from a killed run).
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

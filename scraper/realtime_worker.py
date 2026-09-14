@@ -1487,63 +1487,85 @@ def _location_intake_fast_sync() -> dict[str, Any]:
         return {"ran": False, "previous_pass_running": True}
     _INTAKE_FAST_WEDGE_LOGGED = False
     try:
-        _project_contracts_once()
-        # The lane's own fetch width, not the hourly runner's 32. `setdefault`, so the
-        # Railway service can still override it without a deploy of this file.
-        os.environ.setdefault("LOCATION_BODY_FETCH_WORKERS",
-                              LOCATION_INTAKE_FAST_FETCH_WORKERS)
-        # Says it once per PROCESS rather than once a run. Nothing branches on it: without
-        # a store `drain_unmined_bodies` returns before its first query, so a missing
-        # credential already costs the page half and nothing else.
-        _intake_fast_r2_ready()
-        budget = _read_location_intake_fast_budget()
-        lag_seconds = _read_location_intake_fast_lag_seconds()
-        _tune_intake_log_level(idle=_INTAKE_FAST_LAST_IDLE)
-        schedule = claims_intake.Schedule(
-            lane=claims_intake.FAST_LANE,
-            lag_minutes=lag_seconds / 60.0,
-            # THE JSON HALF FIRST. It is the half a minute-old listing needs; the bodies
-            # pass takes what is left of the same 45 s.
-            bodies_first=False,
-            bodies_cap=_read_location_intake_fast_bodies_cap(),
-            bodies_budget_share=1.0,
-            # The run-end backlog `count(*)` is the hourly chain's signal. At a 60 s cadence
-            # it would cost more than the drain it measures.
-            backlog_readout=False,
-            pool=_intake_fast_pool(),
-        )
         conn = db.connect_session()
         try:
-            stats = claims_intake.run(
-                conn,
-                mode="incremental",
-                source=None,
-                batch_size=LOCATION_INTAKE_FAST_BATCH_SIZE,
-                max_seconds=float(budget),
-                limit=None,
-                start_after_id=0,
-                statement_timeout=LOCATION_INTAKE_FAST_STATEMENT_TIMEOUT_S,
-                dry_run=False,
-                note="realtime-worker fast schedule (W7-a)",
-                schedule=schedule,
-            )
+            return _intake_fast_pass(conn)
         finally:
             with contextlib.suppress(Exception):
                 conn.close()
-        _INTAKE_FAST_LAST_IDLE = not (stats["listings"] or stats["bodies_mined"])
-        return {
-            "ran": True,
-            "listings": stats["listings"],
-            "claims_inserted": stats["claims_inserted"],
-            "enqueued": stats["enqueued"],
-            "bodies_mined": stats["bodies_mined"],
-            "bodies_complete": bool(stats["bodies_pass_complete"]),
-            "seconds": round(float(stats["payload_seconds"] + stats["bodies_seconds"]), 1),
-            "cursor": stats["cursor_after_id"],
-            "bodies_cursor": stats["bodies_cursor_after_id"],
-        }
     finally:
         _INTAKE_FAST_PASS_LOCK.release()
+
+
+def _intake_fast_pass(conn: Any) -> dict[str, Any]:
+    """The tick itself, on an open connection — the lock and the connection are the
+    caller's. Split out so the yield below is the FIRST thing the tick does."""
+    from location_data import claims_intake
+
+    global _INTAKE_FAST_LAST_IDLE
+
+    # THE GITHUB RUN OWNS THE LANE WHILE IT IS WALKING (W12). Both schedules write claims and
+    # bump the same `dirty_locations` rows, and the hourly/full run is the one that cannot be
+    # re-dispatched cheaply — a `mode=full` walk is hours of work. So the minute lane stands
+    # aside while one is in flight: nothing is lost (the hourly run re-reads its own
+    # 15-minute-lag slice), and the cost is that a new listing waits for that run instead of a
+    # minute. One read, no lock, no write.
+    yielded_to = claims_intake.running_batch_id(conn)
+    if yielded_to is not None:
+        LOG.info("LOCATION_INTAKE_FAST yielding: batch %d of the %s lane is still running",
+                 yielded_to, claims_intake.LANE)
+        return {"ran": False, "yielded_to": yielded_to}
+
+    _project_contracts_once()
+    # The lane's own fetch width, not the hourly runner's 32. `setdefault`, so the
+    # Railway service can still override it without a deploy of this file.
+    os.environ.setdefault("LOCATION_BODY_FETCH_WORKERS",
+                          LOCATION_INTAKE_FAST_FETCH_WORKERS)
+    # Says it once per PROCESS rather than once a run. Nothing branches on it: without
+    # a store `drain_unmined_bodies` returns before its first query, so a missing
+    # credential already costs the page half and nothing else.
+    _intake_fast_r2_ready()
+    budget = _read_location_intake_fast_budget()
+    lag_seconds = _read_location_intake_fast_lag_seconds()
+    _tune_intake_log_level(idle=_INTAKE_FAST_LAST_IDLE)
+    schedule = claims_intake.Schedule(
+        lane=claims_intake.FAST_LANE,
+        lag_minutes=lag_seconds / 60.0,
+        # THE JSON HALF FIRST. It is the half a minute-old listing needs; the bodies
+        # pass takes what is left of the same 45 s.
+        bodies_first=False,
+        bodies_cap=_read_location_intake_fast_bodies_cap(),
+        bodies_budget_share=1.0,
+        # The run-end backlog `count(*)` is the hourly chain's signal. At a 60 s cadence
+        # it would cost more than the drain it measures.
+        backlog_readout=False,
+        pool=_intake_fast_pool(),
+    )
+    stats = claims_intake.run(
+        conn,
+        mode="incremental",
+        source=None,
+        batch_size=LOCATION_INTAKE_FAST_BATCH_SIZE,
+        max_seconds=float(budget),
+        limit=None,
+        start_after_id=0,
+        statement_timeout=LOCATION_INTAKE_FAST_STATEMENT_TIMEOUT_S,
+        dry_run=False,
+        note="realtime-worker fast schedule (W7-a)",
+        schedule=schedule,
+    )
+    _INTAKE_FAST_LAST_IDLE = not (stats["listings"] or stats["bodies_mined"])
+    return {
+        "ran": True,
+        "listings": stats["listings"],
+        "claims_inserted": stats["claims_inserted"],
+        "enqueued": stats["enqueued"],
+        "bodies_mined": stats["bodies_mined"],
+        "bodies_complete": bool(stats["bodies_pass_complete"]),
+        "seconds": round(float(stats["payload_seconds"] + stats["bodies_seconds"]), 1),
+        "cursor": stats["cursor_after_id"],
+        "bodies_cursor": stats["bodies_cursor_after_id"],
+    }
 
 
 async def _location_intake_fast_pass(
