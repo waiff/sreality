@@ -53,7 +53,7 @@ _REFETCH = _ROOT / "tests" / "fixtures" / "location_w2a_refetch"
 _PINNED = _ROOT / "tests" / "fixtures" / "location_w2"
 
 SOURCE = "ceskereality"
-VERSION = 7
+VERSION = 6
 CONTRACT = {c.source: c for c in contracts.load_all()}[SOURCE]
 
 # The lane copies the payload's `first_observed_at` onto every claim, so a wall clock here
@@ -120,7 +120,7 @@ def by_id(result: IntakeResult) -> dict[str, Claim]:
 
 # ------------------------------------------------------ the shape rule 25 asks for
 
-def test_the_contract_is_at_version_7_and_declares_exactly_these_five_entries() -> None:
+def test_the_contract_is_at_version_6_and_declares_exactly_these_five_entries() -> None:
     assert CONTRACT.version == VERSION
     assert {e.entry_id: e.claim_type for e in CONTRACT.entries} == ENTRIES
 
@@ -136,9 +136,10 @@ def test_every_claim_type_is_declared_at_most_once() -> None:
 def test_the_town_entry_is_present_live_and_names_its_reader() -> None:
     """The mandatory one. `location_town_coverage` is red until every active Czech listing
     has a town, and this entry is where this portal enters the claims spine. The
-    The chain is `split_paren_okres` and nothing else since W9: the half before "(okres " is
-    claimed as the portal wrote it, obvod included, and the register decides what it names.
-    Which spellings that leaves bindable is measured, residual gap included, in
+    `statutory_city_obec` chain is R4: RÚIAN has no obec called "Praha 8", so a town claim
+    carrying an obvod resolves to nothing at all — a coverage hole that reads as a portal
+    publishing no town. Which Prague spellings the chain actually folds is NOT asserted here
+    (no committed body carries one): it is measured, gap included, in
     `test_the_declared_town_chain_over_every_data_city_form_this_portal_emits`."""
     town = {e.entry_id: e for e in CONTRACT.entries}[TOWN_ENTRY]
     assert town.claim_type == "obec_name"
@@ -146,20 +147,12 @@ def test_the_town_entry_is_present_live_and_names_its_reader() -> None:
     assert town.page_kind == "detail"
     assert town.locator["css"] == "input#driving_calculator_from"
     assert town.locator["attr"] == "data-city"
-    assert town.transform == ["split_paren_okres"]
+    assert town.transform == ["split_paren_okres", "statutory_city_obec"]
 
 
 # Every `data-city` spelling this portal is known to write, with where the repo proves it,
-# and what the DECLARED chain (`split_paren_okres`, and since W9 nothing else) makes of it.
-# `bindable` says whether `resolver.composite` can place the value that leaves the chain: a
-# plain town matches an obec whole, an obvod matches a MOMC (whole, or as the token that
-# anchors its quarter), and the SPACE-glued form matches neither — it carries no separator to
-# split on, which is the one residual hole and the reason this column survives the wave.
-# The ONE shape the composite binder cannot place: it matches no unit whole ("Praha Stodůlky"
-# is nobody's official name) and carries no separator to split on. Splitting on the space too
-# would read any two-word line as town-plus-quarter, and a location is never guessed.
-SPACE_GLUED_GAP = "Praha Stodůlky (okres Hlavní město Praha)"
-
+# and what the DECLARED chain (`split_paren_okres` -> `statutory_city_obec`) makes of it.
+# `folded` says whether the value that leaves the chain is an obec RÚIAN can bind.
 DATA_CITY_FORMS: tuple[tuple[str, str, str, bool], ...] = (
     ("České Budějovice (okres České Budějovice)", "České Budějovice",
      "location_w2/ceskereality_detail.html", True),
@@ -169,46 +162,51 @@ DATA_CITY_FORMS: tuple[tuple[str, str, str, bool], ...] = (
      "location_w2a_refetch/ceskereality_a1.html + a2", True),
     # R4's own worked example, wrapped in this portal's `(okres …)` envelope. No committed
     # ceskereality body carries a Prague row, so this is modelled on the ruling, not observed.
-    ("Praha 13 (okres Hlavní město Praha)", "Praha 13", "modelled on W9", True),
-    # THE RECORDED GAP, and W9 does not close it. `claim_intake_fixtures.CESKEREALITY_PAGE`
-    # (listing 3849899) is the one Prague artefact this repo commits and it spells the pair
-    # SPACE-GLUED — "Praha Stodůlky" — which matches no unit whole and carries no separator
-    # the composite binder will split on. Splitting on the space too would read any two-word
-    # line as town-plus-quarter, and "a location is never guessed": the row stays unresolved.
+    ("Praha 13 (okres Hlavní město Praha)", "Praha", "modelled on R4", True),
+    # THE RECORDED GAP. `claim_intake_fixtures.CESKEREALITY_PAGE` (listing 3849899) is the one
+    # Prague artefact this repo commits and it spells the pair SPACE-GLUED — "Praha Stodůlky"
+    # — which is neither of the two shapes `statutory_city_obec` folds (a number / Roman
+    # numeral, or a hyphen in one of five cities that do not include Praha). The chain leaves
+    # it whole, so the town claim is a non-obec string. Pinned, not asserted away: closing it
+    # takes a shared transform or a gazetteer, both out of this wave.
     ("Praha Stodůlky (okres Hlavní město Praha)", "Praha Stodůlky",
      "claim_intake_fixtures.CESKEREALITY_PAGE, space-glued", False),
-    # The separated spellings are bindable BECAUSE they carry a separator: "Praha 5" anchors
-    # the line on a MOMC and "Smíchov" is then found inside Praha and nowhere else.
-    ("Praha 5-Smíchov (okres Hlavní město Praha)", "Praha 5-Smíchov",
-     "the anchoring MOMC token", True),
-    ("Praha 10 - Vršovice (okres Hlavní město Praha)", "Praha 10 - Vršovice",
+    # The hyphenated spelling is NO LONGER a gap: the ordinal arm carries an optional
+    # trailing name, so "Praha 5-Smíchov" and "Praha 10 - Vršovice" fold like the bare
+    # "Praha 13" above. Only the SPACE-glued form is left, and closing it needs a gazetteer.
+    ("Praha 5-Smíchov (okres Hlavní město Praha)", "Praha",
+     "the ordinal arm's optional trailing name", True),
+    ("Praha 10 - Vršovice (okres Hlavní město Praha)", "Praha",
      "the same, spaced", True),
 )
 
 
-@pytest.mark.parametrize(("raw", "town", "provenance", "bindable"), DATA_CITY_FORMS)
+@pytest.mark.parametrize(("raw", "town", "provenance", "folded"), DATA_CITY_FORMS)
 def test_the_declared_town_chain_over_every_data_city_form_this_portal_emits(
-        raw: str, town: str, provenance: str, bindable: bool) -> None:
-    """W9 measured rather than claimed. The chain this entry declares is run over each
-    spelling, and what leaves it is the portal's own half of the line. `bindable` is the
-    register's half, asserted here as the property the composite binder keys on — a value
-    that matches no unit whole and carries no separator to split on has nothing to anchor,
-    and it is the one spelling this portal's own committed payload proves."""
+        raw: str, town: str, provenance: str, folded: bool) -> None:
+    """R4 measured rather than claimed. The chain this entry declares is run over each
+    spelling, and the rows with `folded=False` are the residual: a value that leaves the
+    chain still carrying a Prague quarter is not an obec, so it binds to nothing — the same
+    coverage hole R4 exists to close, surviving on the one spelling this portal's own
+    committed payload proves. It fails the moment the fold widens, which is when this table
+    (and the report's gap paragraph) must be re-typed."""
     entry = {e.entry_id: e for e in CONTRACT.entries}[TOWN_ENTRY]
     assert apply_transforms(raw, tuple(entry.transform)) == town, provenance
-    assert (raw != SPACE_GLUED_GAP) is bindable, provenance
+    # `folded` is about BINDABILITY, not about whether the string moved — on a plain town the
+    # fold is a no-op and the value was an obec already. The only rows that can leave the
+    # chain unbindable are the statutory-city ones, so that is what the flag is checked on.
+    assert ((town == "Praha") if raw.startswith("Praha ") else True) is folded, provenance
 
 
-def test_the_gap_rows_are_the_only_unbindable_ones_and_none_is_a_committed_body() -> None:
-    """The table above is only honest while its `bindable=False` rows are exactly the
-    space-glued Prague ones — a captured body drifting into that half would mean this portal
-    stopped stating a placeable town, which is rule 25's red line and not a row to quietly
-    add here."""
-    unbindable = {raw for raw, _, _, ok in DATA_CITY_FORMS if not ok}
-    assert all(raw.startswith("Praha ") for raw in unbindable)
+def test_the_gap_rows_are_the_only_unfolded_ones_and_none_is_a_committed_body() -> None:
+    """The table above is only honest while its `folded=False` rows are exactly the Prague
+    quarters — a captured body drifting into that half would mean this portal stopped stating
+    a town, which is rule 25's red line and not a row to quietly add here."""
+    unfolded = {raw for raw, _, _, folded in DATA_CITY_FORMS if not folded}
+    assert all(raw.startswith("Praha ") for raw in unfolded)
     for key in BODIES:
         attr = document(key).css_first("#driving_calculator_from").attributes["data-city"]
-        assert attr not in unbindable, key
+        assert attr not in unfolded, key
 
 
 def test_no_entry_is_readerless_and_none_reads_a_legacy_column() -> None:

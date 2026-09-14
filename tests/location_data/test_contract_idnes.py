@@ -65,7 +65,7 @@ _REFETCH = _ROOT / "tests" / "fixtures" / "location_w2a_refetch"
 CONTRACT = {c.source: c for c in contracts.load_all()}["idnes"]
 CLOCK = datetime(2026, 1, 1, tzinfo=UTC)
 
-VERSION = 5
+VERSION = 4
 NATIVE = "6a71888887e5da33ca081ad8"
 NEIGHBOUR = "68badb8de7b021a4470fb87d"
 DISCLAIMER = "Nemovitost nemá přesnou adresu, nachází se ve vyznačené oblasti."
@@ -192,7 +192,7 @@ def page(features: str = "[]", *, info: str = DISCLAIMER, disclaimer: bool = Tru
 
 # ------------------------------------------------------------------ the shape
 
-def test_the_contract_is_v5_with_one_entry_per_type_and_a_town_entry() -> None:
+def test_the_contract_is_v4_with_one_entry_per_type_and_a_town_entry() -> None:
     """The three rails W1-c's loader enforces, pinned here against THIS portal's file so a
     silent renumber, a reorder or a second carrier for one type is a test failure and not a
     review catch."""
@@ -215,7 +215,7 @@ def test_the_town_entry_is_the_data_layer_city_and_names_a_reader_this_lane_runs
     assert town.claim_type == "obec_name"
     assert str(town.reader) == "json_scalar"
     assert town.locator["json_pointer"] == "/listing_localityCity"
-    assert town.transform == ()
+    assert town.transform == ("statutory_city_obec",)
     assert town.subject_scope == {"kind": "id_match", "on_miss": "fail"}
     assert str(town.reader) in PAGE_READERS
 
@@ -357,14 +357,13 @@ def test_the_prague_body_states_the_city_the_quarter_and_no_okres() -> None:
         _REFETCH / "idnes_b1.html").read_text(encoding="utf-8")
 
 
-def test_a_data_layer_city_that_arrives_as_an_obvod_is_claimed_verbatim() -> None:
-    """@5 (W9), proved rather than trusted: "Praha 5" is the official name of a RÚIAN unit
-    whose parent is Praha, so the claim keeps it and the resolver binds it and resolves up.
-    Folding it in the reader needed a hand-typed list of eight city names and lost the
-    quarter, which this portal states separately anyway."""
+def test_a_data_layer_city_that_arrives_as_an_obvod_is_folded_to_the_city() -> None:
+    """The chained `statutory_city_obec` (R4), proved rather than trusted: RÚIAN has no obec
+    called "Praha 5", so a town claim carrying the obvod would resolve to nothing at all and
+    read as a portal that publishes no town."""
     body = page(data_layer={"listing_localityCity": "Praha 5",
                             "listing_localityCityArea": "Hlubočepy"})
-    assert one_claim("id.det.obec", scoped(body)).value_text == "Praha 5"
+    assert one_claim("id.det.obec", scoped(body)).value_text == "Praha"
 
 
 def test_the_blurred_refetch_pair_yields_the_town_but_no_pin() -> None:

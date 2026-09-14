@@ -127,8 +127,8 @@ def og_title(title: str) -> ScopedDocument:
 
 # ------------------------------------------------------------------ the contract shape
 
-def test_the_version_is_six():
-    assert CONTRACT.version == 6
+def test_the_version_is_five():
+    assert CONTRACT.version == 5
 
 
 def test_the_entry_id_set_is_exactly_these_ten():
@@ -170,9 +170,8 @@ def test_the_town_entry_is_mandatory_named_and_reads_the_canonical_slug():
     assert town.reader == TOWN_READER
     assert town.extraction_method == "url_slug_parse"
     assert town.locator["css"] == "link[rel='canonical']"
-    # W9: no transform at all — the slug is claimed as the URL spells it and the register
-    # decides what it names.
-    assert list(town.transform) == []
+    # R4: a numbered/hyphenated městský obvod is never the town, even off a slug.
+    assert list(town.transform) == ["statutory_city_obec"]
 
 
 def test_the_coordinate_entry_declares_its_cap_and_its_ladder_rung():
@@ -224,17 +223,30 @@ def canonical(slug: str) -> ScopedDocument:
                     f'</head><body></body></html>')
 
 
-def test_the_canonical_slug_is_claimed_exactly_as_the_url_spells_it():
-    """W9 (@6). The slug IS the claim — display spelling or ASCII, obvod or town — and the
-    register decides what it names. This entry's one hole closes with the transform that
-    made it: `_STATUTORY_CITY_ORDINAL_RE` was accent- and case-sensitive, so an ASCII slug
-    (`/detail/praha-5/`) was invisible to it and published the obvod as the obec, while the
-    display spelling was folded. The composite binder normalises before it matches, so both
-    spellings reach the same RÚIAN unit — and `karlovy-vary` stays a town, because a whole
-    string that matches an obec is never split."""
-    for slug in ("Plzeň 3", "Praha 8", "Brno-Židenice", "Pardubice II",
-                 "praha-5", "plzen-3", "brno-zidenice",
-                 "karlovy-vary", "benesov-nad-ploucnici", "frenstat-pod-radhostem"):
+def test_a_statutory_city_obvod_slug_is_folded_to_its_city():
+    """R4's chain: a numbered or hyphenated městský obvod is never the town. The transform
+    folds the DISPLAY spelling, which is the form `address_part_obec` feeds it elsewhere."""
+    for slug, city in (("Plzeň 3", "Plzeň"), ("Praha 8", "Praha"),
+                       ("Brno-Židenice", "Brno"), ("Pardubice II", "Pardubice")):
+        assert value(TOWN_ENTRY, canonical(slug)) == city, slug
+
+
+def test_an_ascii_obvod_slug_would_NOT_be_folded_and_this_is_the_entry_s_one_hole():
+    """The negative half, pinned rather than narrated — the ONE way this mandatory entry can
+    go wrong with no other test noticing. `_STATUTORY_CITY_ORDINAL_RE` /
+    `_STATUTORY_CITY_HYPHEN_RE` (claims_common.py) are accent- AND case-sensitive, so an
+    ASCII URL slug is invisible to them: if realitymix ever serves `/detail/praha-5/`, the
+    R4 rail on the town does nothing and the obvod is published as the obec. Asserted as the
+    CURRENT behaviour, so the day the transform is taught the slug form this test fails and
+    is updated deliberately instead of the fold silently starting to matter.
+
+    The same insensitivity is why the fold is safe here: `karlovy-vary` and
+    `benesov-nad-ploucnici` are real committed obec slugs with a hyphen, and a slug-aware
+    transform that folded on the hyphen alone would truncate them to "karlovy" / "benesov".
+    """
+    for slug in ("praha-5", "plzen-3", "brno-zidenice"):
+        assert value(TOWN_ENTRY, canonical(slug)) == slug, slug
+    for slug in ("karlovy-vary", "benesov-nad-ploucnici", "frenstat-pod-radhostem"):
         assert value(TOWN_ENTRY, canonical(slug)) == slug, slug
 
 

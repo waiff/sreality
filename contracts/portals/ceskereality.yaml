@@ -3,7 +3,7 @@
 # input: the town, its okres, the address line and the pin.
 
 portal: ceskereality
-contract_version: 7
+contract_version: 6
 
 exclusion_zones:
   - locator_kind: jsonld
@@ -35,9 +35,8 @@ extractions:
     locator: {reader: html_attr, css: "input#driving_calculator_from", attr: "data-city"}
     claim_type: obec_name
     licence_class: portal
-    transform: [split_paren_okres]
-    notes: "The mandatory town — the half before '(okres ', VERBATIM; an obvod is bound
-      against RÚIAN and resolved up by the resolver (W9)."
+    transform: [split_paren_okres, statutory_city_obec]
+    notes: "The mandatory town — the half before '(okres ', an obvod folded to its city (R4)."
 
   - id: cr.det.city_okres
     locator_kind: html_selector

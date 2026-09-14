@@ -164,11 +164,10 @@ def body_with_header(header: str) -> ScopedDocument:
 
 # --------------------------------------------------------------- the contract's shape
 
-def test_the_contract_pins_version_five():
-    """@5 is W9: `address_part_obec` stopped folding a statutory-city obvod onto its city,
-    which changes what this contract's town entry claims. Entries are immutable per version,
-    so a changed transform is a bump, never an edit."""
-    assert CONTRACT.version == 5
+def test_the_contract_pins_version_four():
+    """origin/main ships @3; entries are immutable per version, so the slim restatement is
+    a bump, never an edit."""
+    assert CONTRACT.version == 4
     assert CONTRACT.source == "remax"
 
 
@@ -256,16 +255,14 @@ def test_the_admin_entries_read_what_each_body_actually_states(
 # ------------------------------------------------------- the header, form by form
 
 @pytest.mark.parametrize("header, obec, cast_obce", [
-    # W9: the town entry claims the header's obec segment VERBATIM. "Praha 3" is the
-    # official RÚIAN name of a unit whose parent is Praha, and the resolver resolves it up —
-    # so the reader keeps the evidence instead of folding it off a list of city names. The
-    # část-obce entry is unchanged and still keeps the named tail where the portal writes one.
-    ("ulice Roháčova, Praha 3 – Žižkov", "Praha 3", "Žižkov"),
-    ("Praha 5 - Stodůlky", "Praha 5", "Stodůlky"),
-    ("Praha 10 - Uhříněves", "Praha 10", "Uhříněves"),
-    ("Plzeň 3 – Skvrňany", "Plzeň 3", "Skvrňany"),
-    ("Pardubice II", "Pardubice II", None),
-    ("Brno-Židenice", "Brno-Židenice", None),
+    # A numbered městský obvod is NEVER the town: RÚIAN has no obec "Praha 3", so a claim
+    # carrying it resolves to nothing and reads as a portal that publishes no town.
+    ("ulice Roháčova, Praha 3 – Žižkov", "Praha", "Žižkov"),
+    ("Praha 5 - Stodůlky", "Praha", "Stodůlky"),
+    ("Praha 10 - Uhříněves", "Praha", "Uhříněves"),
+    ("Plzeň 3 – Skvrňany", "Plzeň", "Skvrňany"),
+    ("Pardubice II", "Pardubice", None),
+    ("Brno-Židenice", "Brno", None),
     # …and a hyphen is not enough on its own: these two are towns, not obvody.
     ("Frýdek-Místek", "Frýdek-Místek", None),
     ("Kostelec nad Černými Lesy", "Kostelec nad Černými Lesy", None),
@@ -279,9 +276,8 @@ def test_the_admin_entries_read_what_each_body_actually_states(
 def test_the_header_splits_the_town_from_the_obvod_it_is_written_with(
     header: str, obec: str, cast_obce: str | None,
 ):
-    """W9, through the shipped entries. The town entry publishes the obec SEGMENT as the
-    portal wrote it and the část-obce entry keeps the named tail; what admin level each names
-    is decided against RÚIAN by `resolver.composite`, not by a regex here."""
+    """R4, through the shipped entries. The town entry publishes the CITY and the část-obce
+    entry keeps the obvod, so nothing is lost and no claim carries a wrong admin level."""
     document = body_with_header(header)
     assert value_of("rx.det.header_obec", document) == obec
     assert value_of("rx.det.header_cast_obce", document) == cast_obce

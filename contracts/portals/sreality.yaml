@@ -13,7 +13,7 @@
 # Entry count is unchanged from @2.
 
 portal: sreality
-contract_version: 4
+contract_version: 3
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -190,16 +190,15 @@ extractions:
     locator:
       reader: scalar
       json_pointer: /locality/city
-      # The obec segment of the older shape's one address line — the comma walk and the
-      # `okres …` qualifier rail, and since W9 nothing else: the segment is claimed as the
-      # portal wrote it.
+      # The obec segment of the older shape's one address line. `address_part_obec` IS
+      # `statutory_city_obec` on a single-segment value, so the two paths agree wherever
+      # they overlap; what it adds is the comma walk and the `okres …` qualifier rail.
       fallback:
         - {json_pointer: /locality/value, transform: [address_part_obec]}
     claim_type: obec_name
+    transform: [statutory_city_obec]
     prior: {granularity: obec}
-    notes: "THE TOWN, VERBATIM (W9). /locality/city is usually already the obec; when it is
-      an obvod ('Praha 4 - Podolí') the resolver binds the whole line against RÚIAN and
-      resolves up, so no reader here folds anything."
+    notes: "THE TOWN. /locality/city is already the obec; the transform is the rail."
 
   - id: sr.det.name_citypart
     locator_kind: api_json
@@ -208,6 +207,10 @@ extractions:
     locator:
       reader: scalar
       json_pointer: /locality/citypart
+      # The named tail the statutory-city fold drops: "Praha 4 - Podolí" states the town
+      # and the quarter in one segment, and @2 kept only the town.
+      fallback:
+        - {json_pointer: /locality/value, transform: [address_part_cast_obce]}
     claim_type: cast_obce_name
     prior: {granularity: cast_obce_or_quarter}
     notes: "The RÚIAN část obce; /locality/quarter is the městská část."

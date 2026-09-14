@@ -3,7 +3,7 @@
 # TYPE), the `div.locality` line (obec / část obce / street), and the description's "okres X".
 
 portal: maxima
-contract_version: 4
+contract_version: 3
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -78,10 +78,9 @@ extractions:
     page_kind: detail
     locator: {reader: html_text, css: "div.locality"}
     claim_type: obec_name
-    transform: ["comma_segment:1@*"]
-    notes: "THE TOWN — segment 1 of every line shape on record, VERBATIM: when the portal
-      writes an obvod there ('Praha 3') the resolver binds it against RÚIAN and resolves up
-      to Praha (W9)."
+    transform: ["comma_segment:1@*", "statutory_city_obec"]
+    notes: "THE TOWN — segment 1 of every line shape on record, folded to the city when the
+      portal writes an obvod there ('Praha 3' -> 'Praha', W1-c R4)."
 
   - id: mx.det.locality_quarter
     locator_kind: html_selector

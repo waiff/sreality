@@ -3,7 +3,7 @@
 # Reads the advert's typed location fields; the country is the tail of `addressInput`.
 
 portal: bezrealitky
-contract_version: 3
+contract_version: 2
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -55,8 +55,9 @@ extractions:
     page_kind: detail
     locator: {reader: scalar, json_pointer: /city}
     claim_type: obec_name
+    transform: ["statutory_city_obec"]
     prior: {granularity: obec}
-    notes: "The town, stated apart from `cityDistrict`, VERBATIM (W9)."
+    notes: "The town, stated apart from `cityDistrict`; the fold is the R4 obvod rail."
 
   - id: bzr.det.city_district
     locator_kind: graphql

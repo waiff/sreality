@@ -35,7 +35,7 @@ from tests.location_data import claim_intake_fixtures as fx
 _ROOT = Path(__file__).resolve().parents[2]
 _CONTRACT = _ROOT / "contracts" / "portals" / "bezrealitky.yaml"
 
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 2
 
 # The town entry. Named here rather than derived, because "which entry carries the town"
 # is the one fact rule 25 makes mandatory — deriving it from the file would let a rename
@@ -221,13 +221,13 @@ def test_the_town_extracts_from_the_fixture_body(claims: dict[str, list[Claim]])
     assert town.value_text == "Praha"
 
 
-def test_a_statutory_city_obvod_is_claimed_as_the_portal_states_it() -> None:
-    """W9 (@3). "Praha 8" is the official RÚIAN name of a unit whose parent is Praha, so the
-    claim keeps it and the resolver resolves up. Folding it here threw away the quarter and
-    needed a hand-typed list of eight city names to do it."""
+def test_a_statutory_city_obvod_never_becomes_the_town() -> None:
+    """R4, on the town entry's own transform. RÚIAN has no obec "Praha 8", so a town claim
+    carrying the obvod resolves to nothing — a coverage hole that reads as a portal with no
+    town. The fold is identity on every real town name."""
     obvod = _by_id(fx.listing("bezrealitky", _live_query_shape(city="Praha 8"),
                               native="1037096"))
-    assert obvod[TOWN_ENTRY_ID][0].value_text == "Praha 8"
+    assert obvod[TOWN_ENTRY_ID][0].value_text == "Praha"
     plain = _by_id(fx.listing("bezrealitky", _live_query_shape(city="Frýdek-Místek"),
                               native="1037096"))
     assert plain[TOWN_ENTRY_ID][0].value_text == "Frýdek-Místek"

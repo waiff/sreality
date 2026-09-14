@@ -130,7 +130,7 @@ def test_the_version_and_the_entry_id_set_are_exactly_what_this_wave_ships():
     reader are GONE rather than re-typed (`mx.det.locality` was minted as a
     mestsky_obvod_name and an id never changes meaning), so every claim stamped with one of
     them is retracted at @2 rather than silently re-read under @3."""
-    assert CONTRACT.version == 4
+    assert CONTRACT.version == 3
     assert {entry.entry_id for entry in ENTRIES} == ENTRY_IDS
     assert all(entry.reader in PAGE_READERS for entry in ENTRIES)
 
@@ -146,20 +146,19 @@ def test_each_claim_type_has_exactly_one_carrier_and_the_town_is_among_them():
     assert set(by_type) <= contracts.CLAIM_TYPES
 
 
-def test_the_town_entry_reads_div_locality_and_claims_segment_one_verbatim():
-    """The town is `div.locality` segment 1, claimed as written (W9). "Praha 3" and
-    "Brno-střed" are the official names of RÚIAN units whose parent is the city; the resolver
-    binds the line against the register and resolves up, so the reader keeps the evidence
-    instead of folding it off a list of eight city names."""
+def test_the_town_entry_reads_div_locality_and_folds_a_statutory_city_obvod():
+    """The town is `div.locality` segment 1 chained through `statutory_city_obec`: RÚIAN has
+    no obec called 'Praha 3', so a town claim carrying the obvod resolves to nothing at all
+    (W1-c R4)."""
     entry = BY_ID["mx.det.locality_obec"]
     assert entry.locator["reader"] == "html_text"
     assert entry.locator["css"] == "div.locality"
-    assert list(entry.transform) == ["comma_segment:1@*"]
+    assert list(entry.transform) == ["comma_segment:1@*", "statutory_city_obec"]
     assert one(run(live_body("Praha 3, Žižkov, Jeseniova", LIVE_CIRCLE)),
-               "mx.det.locality_obec").value_text == "Praha 3"
-    # Both spellings survive: the ordinal one above and the hyphenated one the pinned body
-    # carries.
-    assert one(run(_PINNED.read_bytes()), "mx.det.locality_obec").value_text == "Brno-střed"
+               "mx.det.locality_obec").value_text == "Praha"
+    # Both spellings of an obvod fold: the ordinal one above and the hyphenated one the
+    # pinned body carries.
+    assert one(run(_PINNED.read_bytes()), "mx.det.locality_obec").value_text == "Brno"
 
 
 def test_every_entry_claims_on_the_pinned_body_with_a_resolvable_span():
@@ -169,13 +168,12 @@ def test_every_entry_claims_on_the_pinned_body_with_a_resolvable_span():
     found = claims_by_entry(result)
     assert set(found) == ENTRY_IDS
     assert not result.refusals
-    # `Brno-střed, Veveří, Grohova` — the obvod is claimed as the portal wrote it on the body
-    # the permanent golden scores (W9), so the deletion is pinned by the gate and not only by
-    # a unit test. "Brno-střed" is a RÚIAN MOMC whose parent is Brno.
+    # `Brno-střed, Veveří, Grohova` — the obvod is folded to the city on the body the
+    # permanent golden scores, so W1-c R4 is pinned by the gate and not only by a unit test.
     assert [found[i][0].value_text for i in
             ("mx.det.locality_obec", "mx.det.locality_quarter", "mx.det.locality_street",
              "mx.det.description_okres", "mx.det.map_geometry")] == [
-        "Brno-střed", "Veveří", "Grohova", "Brno-město", "Point"]
+        "Brno", "Veveří", "Grohova", "Brno-město", "Point"]
     # A span that does not resolve to its own quote is worse than no span (mig 382's CHECK
     # only tests substring-ness, so a span pointing at another occurrence still passes it).
     document = scope_html(_PINNED.read_bytes(), register=REGISTER)

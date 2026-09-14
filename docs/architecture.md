@@ -2168,7 +2168,12 @@ portal's payload or its own page, and every other stamp is class E outright.
   binds nothing and the row stays unresolved. The readers no longer interpret a locality at all — the
   `statutory_city_obec` regex over eight hand-typed city names and its `address_part_cast_obce` mirror
   are deleted, the claim carries the portal's line verbatim, and both names on the answer row are the
-  register's own spelling.
+  register's own spelling. **THIS BRANCH IS THE ROLLBACK OF THAT SECOND SENTENCE ONLY** (migration
+  519): the eight contracts go back to their pre-W9 versions and the two transforms come back with
+  them, because the version bump retired the previous headers and `resolve_db`'s admissibility test
+  reads `portal_contracts.is_active` — ~596k rows were re-resolved against no live claims before the
+  re-mine caught up. `composite.py` and `resolver:v5` STAY: a pre-folded "Praha" still binds whole,
+  so the register path is unaffected by the readers folding again.
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
   spelling; only street / čp / čo / psč may fall back to a claim, preserve-if-null, and only an

@@ -1173,35 +1173,113 @@ def test_an_untransformed_read_still_quotes_its_own_value():
 @pytest.mark.parametrize(
     "value,expected",
     [
-        # The obec segment is whatever the portal wrote there. Every one of these used to be
-        # folded or truncated by a regex over eight hand-typed city names; the register reads
-        # them now (`resolver/composite.py`), and a reader that pre-chews a locality can only
-        # ever destroy the evidence the register needs.
-        ("Křimická, Plzeň 3, Plzeň, okres Plzeň-město", "Plzeň"),
-        ("Jeseniova, Praha 3", "Praha 3"),
-        ("Sinkulova, Praha 4 - Podolí", "Praha 4 - Podolí"),
-        ("Bernáčkova, Brno - Dolní Heršpice", "Brno - Dolní Heršpice"),
-        ("Kostelec nad Černými Lesy", "Kostelec nad Černými Lesy"),
+        # The numbered form: Praha's 22 obvody, Plzeň's 4, Pardubice's Roman numerals.
+        ("Praha 8", "Praha"),
+        ("Praha 10", "Praha"),
+        ("Plzeň 3", "Plzeň"),
+        ("Pardubice IV", "Pardubice"),
+        ("Ostrava 1", "Ostrava"),
+        ("Ústí nad Labem 2", "Ústí nad Labem"),
+        # The hyphenated form, only in the five cities whose obvody are NAMED.
+        ("Brno-střed", "Brno"),
+        ("Brno-Židenice", "Brno"),
+        ("Ostrava-Poruba", "Ostrava"),
+        ("Opava-Kateřinky", "Opava"),
+        ("Liberec - Vratislavice nad Nisou", "Liberec"),
+        ("Ústí nad Labem-město", "Ústí nad Labem"),
+        # An en dash is the same separator; portals use both.
+        ("Brno–Bystrc", "Brno"),
+        # NEGATIVES. The city itself is a town, and so is every town whose name merely
+        # contains a hyphen or a number — "Frýdek-Místek" is not a Frýdek obvod, and
+        # stripping after any hyphen is how a town becomes half a town.
+        ("Praha", "Praha"),
+        ("Ostrava", "Ostrava"),
+        ("Nové Město na Moravě", "Nové Město na Moravě"),
         ("Frýdek-Místek", "Frýdek-Místek"),
-        ("Praha-Řeporyje", "Praha-Řeporyje"),
+        ("Havlíčkův Brod", "Havlíčkův Brod"),
+        ("Rožnov pod Radhoštěm", "Rožnov pod Radhoštěm"),
+        # A city NOT on the hyphen list keeps its hyphenated value: Plzeň's obvody are
+        # numbered, so `Plzeň-Bory` is a část obce a `cast_obce_name` entry claims.
         ("Plzeň-Bory", "Plzeň-Bory"),
-        # The okres qualifier still moves which segment is the obec — that rail is keyed on
-        # the qualifier WORD, not on any city name, and it stays.
-        ("Vchynice, okres Litoměřice", "Vchynice"),
-        ("Praha 8", "Praha 8"),
-        ("Brno-venkov", "Brno-venkov"),
+        ("Praha-Řeporyje", "Praha-Řeporyje"),
+        # The ORDINAL arm carries an optional trailing name: the portals write the same
+        # obvod both ways, and before W1-c the longer spelling fell through unchanged and
+        # published a town no gazetteer has.
+        ("Praha 10 - Vršovice", "Praha"),
+        ("Praha 5 - Smíchov", "Praha"),
+        ("Praha 5-Smíchov", "Praha"),
+        ("Praha 13 - Stodůlky", "Praha"),
+        ("Liberec XXV-Vesec", "Liberec"),
+        ("Liberec XIV - Ruprechtice", "Liberec"),
+        ("Plzeň 3 – Bory", "Plzeň"),
+        # …and the SPACE-glued form is still the recorded gap: no number, no hyphen, so
+        # neither arm matches. Closing it needs a gazetteer, not a wider pattern.
+        ("Praha Stodůlky", "Praha Stodůlky"),
     ])
-def test_the_obec_segment_of_an_address_is_claimed_verbatim(value, expected):
-    """W9 (operator ruling 2026-09-14) — the deletion this wave is.
+def test_a_statutory_city_obvod_is_never_the_town(value, expected):
+    """W1-c R4. RÚIAN has no obec called "Praha 8" — the obec is "Praha" and the obvod is a
+    child of it — so a town claim carrying the obvod resolves to NOTHING, which is a
+    town-coverage hole that reads exactly like a portal publishing no town at all."""
+    assert apply_transforms(value, ("statutory_city_obec",)) == expected
 
-    `statutory_city_obec` folded "Praha 4 - Podolí" to "Praha" HERE, in the reader, off a
-    regex carrying the names of eight cities and the nine hyphenated okres names that are
-    spelled like an obvod and are not one. Every such line is now claimed as the portal wrote
-    it and bound against RÚIAN by `resolver.composite.resolve_locality`: the whole string
-    first, then its parts scoped by the anchoring town, and nothing at all when that is
-    ambiguous. Both halves of "Praha 4 - Podolí" survive to the answer row because the claim
-    still carries both."""
-    assert apply_transforms(value, ("address_part_obec",)) == expected
+
+@pytest.mark.parametrize("value,expected", [
+    # Both spellings of the obvod, on the whole address line and on the segment alone.
+    ("Sinkulova, Praha 4 - Podolí", "Podolí"),
+    ("Praha 5 - Košíře", "Košíře"),
+    ("Bernáčkova, Brno - Dolní Heršpice", "Dolní Heršpice"),
+    ("Brno-Židenice", "Židenice"),
+    ("Liberec XXV-Vesec", "Vesec"),
+    ("Praha 10 – Vršovice", "Vršovice"),
+    # NEGATIVES. A bare obvod names no část obce, a town that merely contains a hyphen is
+    # not a city plus a quarter, and an okres spelled like an obvod is neither.
+    ("Praha 8", None),
+    ("Chomutov", None),
+    ("Jirkovská, Chomutov", None),
+    ("Frýdek-Místek", None),
+    ("Kostelec nad Černými Lesy", None),
+    ("Brno-venkov", None),
+    ("Praha-východ", None),
+    # The okres qualifier moves the obec segment, and the part is read off THAT segment.
+    ("Vchynice, okres Litoměřice", None),
+])
+def test_the_named_tail_of_a_statutory_city_obvod_is_the_cast_obce(value, expected):
+    """The mirror of `statutory_city_obec` (@3). "Praha 4 - Podolí" states the town AND the
+    quarter in one segment, and until @3 only the town had a transform — so sreality's
+    frozen older shape, whose whole address is one such line, published no část obce at
+    all. Keyed on the city NAME like the fold it mirrors, and the hyphenated-okres table is
+    consulted first."""
+    assert apply_transforms(value, ("address_part_cast_obce",)) == expected
+
+
+@pytest.mark.parametrize("okres", [
+    "Brno-město", "Brno-venkov", "Ostrava-město", "Plzeň-město", "Plzeň-sever",
+    "Plzeň-jih", "Praha-východ", "Praha-západ", "Frýdek-Místek",
+])
+def test_a_hyphenated_okres_name_is_never_folded_to_its_city(okres):
+    """Every okres whose RÚIAN name is a statutory city plus a hyphen is spelled EXACTLY
+    like an obvod and is not one. Folding "Brno-venkov" claims the second-largest city in
+    the country as the town of any village in its hinterland — and the value arrives here
+    routinely, because `address_part_obec` runs on lines that carry an okres segment and
+    bazos publishes these 76 labels as its town anchor's own TEXT.
+
+    The list is closed: the Czech okres set has not moved since 2007, and these are all of
+    its hyphenated members. An okres is never a town, so it is returned untouched and the
+    portal's okres entry — which is what states this fact — keeps it."""
+    assert apply_transforms(okres, ("statutory_city_obec",)) == okres
+    # …and it survives the implicit fold too, which is the route it actually arrives by.
+    assert apply_transforms(okres, ("address_part_obec",)) == okres
+
+
+def test_the_obec_part_of_an_address_folds_the_obvod_implicitly():
+    """Chaining is not optional and therefore not the entry's job: an entry that forgot
+    `statutory_city_obec` would publish "Praha 4" as a town on the biggest city in the
+    corpus, and nothing downstream would say so."""
+    assert apply_transforms("Křimická, Plzeň 3, Plzeň, okres Plzeň-město",
+                            ("address_part_obec",)) == "Plzeň"
+    assert apply_transforms("Jeseniova, Praha 3", ("address_part_obec",)) == "Praha"
+    assert apply_transforms("Kostelec nad Černými Lesy",
+                            ("address_part_obec",)) == "Kostelec nad Černými Lesy"
 
 
 @pytest.mark.parametrize(
@@ -1263,7 +1341,8 @@ def test_every_new_transform_is_registered_under_the_name_the_contract_gate_enum
     a name in one and not the other is either a refused entry or a silent no-op."""
     for name in ("address_part_street", "address_part_obec", "address_part_okres",
                  "address_part_house_number", "split_paren_okres", "comma_segment",
-                 "address_part_country", "foreign_country_code"):
+                 "statutory_city_obec", "address_part_country",
+                 "foreign_country_code"):
         assert name in TRANSFORMS
         assert name in contracts.IMPLEMENTED_TRANSFORMS
 
@@ -1294,7 +1373,7 @@ CANONICAL_ENTRIES: dict[str, dict[str, Any]] = {
     # The subject header, claimed as the TOWN it states (W1-c R8 + R1): the
     # `address_line_verbatim` type it used to carry is not one of the eleven — nothing
     # resolved a whole address line — and `address_part_obec` is the normaliser that
-    # selects the part this entry claims, verbatim (W9).
+    # selects the part this entry claims (statutory-city obvody folded to their city).
     "html_own_text": {
         "source": "remax", "id": "rx.det.header_address", "locator_kind": "html_selector",
         "extraction_method": "html_selector_parse", "claim_type": "obec_name",
