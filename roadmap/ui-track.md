@@ -7,6 +7,21 @@ This track runs in parallel with the analytical phases above; the
 toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
+### Save-to-collection on the listing detail header (done, 2026-09-14)
+- The Browse card's bookmark now has a twin in the listing-detail action bar, between "Přidat do
+  pipeline" and "New estimation": out of every collection it reads "Uložit do kolekce"; saved, it
+  reads "V kolekci" / "V kolekcích · N" and takes the soft copper tint. Monitoring rides on the
+  collection (the bell in the panel), so this is also the page's monitor switch.
+- Extraction, not duplication: `components/CollectionSaveMenu` (the panel + both writes + the four
+  invalidations) and `components/CollectionMark` (the glyph) are now shared, with the card glyph and
+  the header button as the two thin triggers — the same split PipelineFunnelButton / PipelineToggle
+  already have over `<PipelineStageMenu>`. Membership comes from the caller: the grid's one shared
+  map, or the per-property key the detail page's CurationBlock already subscribes to, so a save in
+  the header is immediately true in the block below it.
+- The panel now distinguishes a FAILED collection list ("Kolekce se nepodařilo načíst") from an empty
+  one; both used to render "Create a collection →", which tells an operator whose collections exist
+  that they have none.
+
 ### External map links on the listing detail (done, 2026-09-14)
 - Under the header map, below "Explore area": Mapy.cz, Google Maps and iKatastr, each opened at the
   listing's resolved coordinate. "Explore area" is the market view of the NEIGHBOURHOOD; these three

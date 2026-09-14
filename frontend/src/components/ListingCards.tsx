@@ -9,9 +9,11 @@ import {
   type ReactNode,
 } from 'react';
 import { Link } from 'react-router-dom';
-import { ROUTES } from '@/lib/routes';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import AnchoredPopover from '@/components/AnchoredPopover';
+import { useQuery } from '@tanstack/react-query';
+import CollectionMark from '@/components/CollectionMark';
+import CollectionSaveMenu, {
+  COLLECTION_SAVE_LABEL,
+} from '@/components/CollectionSaveMenu';
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
@@ -26,11 +28,6 @@ import {
   type CardRow,
   type SortSpec,
 } from '@/lib/queries';
-import {
-  addPropertiesToCollection,
-  listCollections,
-  removePropertyFromCollection,
-} from '@/lib/api';
 import {
   fmtArea, fmtCzk, fmtMeasuredPricePerM2,
   fmtShortDate, fmtTomDays,
@@ -269,19 +266,13 @@ export default function ListingCards({
 }
 
 /* Adjacent to the pipeline funnel (rule #22 keeps the funnel the sole pipeline
- * affordance): a distinct "save to collection" control — a layers glyph that
- * opens a popover of collections with checkmarks (monitored ones first, marked
- * with a bell). Orthogonal to the pipeline: collections are m2m groupings,
- * monitoring opts a collection into change alerts.
+ * affordance): a distinct "save to collection" control — a bookmark glyph that
+ * opens the shared <CollectionSaveMenu>. Orthogonal to the pipeline: collections
+ * are m2m groupings, monitoring opts a collection into change alerts.
  *
- * The panel is the shared <AnchoredPopover> (portalled to <body>), not the
- * hand-rolled `absolute` div it used to be. That div lived inside the photo's
- * `overflow-hidden` frame and inside the card's <Link>, which cost it a
- * document-mousedown dismissal of its own, a panel-wide preventDefault, and an
- * <a>-inside-an-<a> for its empty state. The portal removes all three: the
- * popover escapes the clip, AnchoredPopover owns dismissal (outside
- * pointerdown, Escape — which returns focus to the trigger — and the anchor
- * scrolling out of view), and "Create a collection →" is a plain link again. */
+ * Trigger only. The panel, the writes and the cache policy live in the shared
+ * menu, so this card glyph and the listing header's button do the same thing —
+ * the split mirrors PipelineFunnelButton / PipelineToggle over their one menu. */
 function CollectionSaveButton({
   property_id,
   collectionMembers,
@@ -291,46 +282,14 @@ function CollectionSaveButton({
    * there being any rows to show it for. */
   collectionMembers: Map<number, number[]> | undefined;
 }) {
-  const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   /* Stable so the popover's positioning effect doesn't re-subscribe each render. */
   const close = useCallback(() => setOpen(false), []);
 
-  const collectionsQ = useQuery({
-    queryKey: curationKeys.collections,
-    queryFn: listCollections,
-    staleTime: 30_000,
-    enabled: open,
-  });
   const memberIds = new Set(collectionMembers?.get(property_id) ?? []);
   const inAny = memberIds.size > 0;
-
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: curationKeys.propertyCollectionMembers });
-    // Keep the per-property key (the listing-detail CurationBlock) consistent.
-    qc.invalidateQueries({
-      queryKey: curationKeys.propertyCollections(property_id),
-    });
-    qc.invalidateQueries({ queryKey: curationKeys.collections });
-  };
-  const add = useMutation({
-    mutationFn: (cid: number) => addPropertiesToCollection(cid, [property_id]),
-    onSuccess: invalidate,
-  });
-  const remove = useMutation({
-    mutationFn: (cid: number) => removePropertyFromCollection(cid, property_id),
-    onSuccess: invalidate,
-  });
-  const pending = add.isPending || remove.isPending;
-
-  // Monitored collections first, then alphabetical.
-  const sorted = [...(collectionsQ.data?.data ?? [])].sort(
-    (a, b) =>
-      (b.monitoring_enabled ? 1 : 0) - (a.monitoring_enabled ? 1 : 0) ||
-      a.name.localeCompare(b.name),
-  );
 
   return (
     <>
@@ -338,10 +297,10 @@ function CollectionSaveButton({
         ref={btnRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        aria-label="Uložit do kolekce"
+        aria-label={COLLECTION_SAVE_LABEL}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        title="Uložit do kolekce"
+        title={COLLECTION_SAVE_LABEL}
         className={[
           'flex items-center justify-center w-6 h-6 rounded-[var(--radius-xs)] border backdrop-blur transition-colors',
           inAny
@@ -349,110 +308,21 @@ function CollectionSaveButton({
             : 'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:border-[var(--color-copper)]',
         ].join(' ')}
       >
-        <CollectionGlyph filled={inAny} />
+        <CollectionMark filled={inAny} />
       </button>
       {open && (
-        <AnchoredPopover
+        <CollectionSaveMenu
           id={panelId}
+          property_id={property_id}
+          memberIds={memberIds}
           anchorRef={btnRef}
           onClose={close}
-          ariaLabel="Uložit do kolekce"
-          className="w-56 p-1.5"
-        >
-          <p className="px-1.5 py-1 text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
-            Save to collection
-          </p>
-          {collectionsQ.isLoading ? (
-            <p className="px-1.5 py-1.5 text-[0.78rem] text-[var(--color-ink-3)]">
-              Loading…
-            </p>
-          ) : sorted.length === 0 ? (
-            <Link
-              to={ROUTES.collections.build()}
-              className="block px-1.5 py-1.5 text-[0.78rem] text-[var(--color-copper)] hover:underline"
-            >
-              Create a collection →
-            </Link>
-          ) : (
-            <ul className="max-h-60 overflow-y-auto">
-              {sorted.map((c) => {
-                const member = memberIds.has(c.id);
-                return (
-                  <li key={c.id}>
-                    <button
-                      type="button"
-                      disabled={pending}
-                      onClick={() => (member ? remove : add).mutate(c.id)}
-                      className="w-full flex items-center gap-2 px-1.5 py-1.5 text-left text-[0.82rem] rounded-[var(--radius-xs)] hover:bg-[var(--color-copper-soft)] disabled:opacity-60"
-                    >
-                      <span
-                        aria-hidden
-                        className={[
-                          'inline-flex items-center justify-center w-4 h-4 shrink-0 rounded-[3px] border text-[0.6rem] leading-none',
-                          member
-                            ? 'bg-[var(--color-copper)] border-[var(--color-copper)] text-white'
-                            : 'border-[var(--color-rule-strong)] text-transparent',
-                        ].join(' ')}
-                      >
-                        ✓
-                      </span>
-                      <span className="truncate text-[var(--color-ink)]">
-                        {c.name}
-                      </span>
-                      {c.monitoring_enabled && (
-                        <span
-                          title="Monitored — alerts on changes"
-                          className="ml-auto shrink-0 text-[var(--color-copper)]"
-                        >
-                          <BellGlyph />
-                        </span>
-                      )}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </AnchoredPopover>
+        />
       )}
     </>
   );
 }
 
-function CollectionGlyph({ filled }: { filled: boolean }) {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill={filled ? 'currentColor' : 'none'}
-      stroke="currentColor"
-      strokeWidth="1.3"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M4 2.5 H12 V13.5 L8 10.75 L4 13.5 Z" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function BellGlyph() {
-  return (
-    <svg
-      width="9"
-      height="9"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M8 1.5a3.5 3.5 0 0 0-3.5 3.5c0 3-1.5 4-1.5 4h10s-1.5-1-1.5-4A3.5 3.5 0 0 0 8 1.5ZM6.5 12.5a1.5 1.5 0 0 0 3 0" />
-    </svg>
-  );
-}
 
 function Card({
   r,
