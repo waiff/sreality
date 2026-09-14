@@ -2009,7 +2009,7 @@ no ad-level location at all — and until #1451 the bazos client did not recogni
 archived like any other detail body and the pass mined it in place of the ad's last live page. The
 fix needs no new column and no flag, because all three payload predicates (`_BODY_JOIN`,
 `_UNMINED_WINDOW_WHERE`, `_LATEST_BODY_ONLY`) already ask for a body whose fetch SUCCEEDED: migration
-519 corrects the stored gone pages' `http_status` to **410**, the truthful status of a removed ad, and
+520 (519's pattern, de-quadratified — see below) corrects the stored gone pages' `http_status` to **410**, the truthful status of a removed ad, and
 the pass falls through to the previous version on its own (`payloads._PRUNE_SQL` also ranks non-2xx
 last, so a stamped gone page is the first thing the version cap evicts). Nothing is deleted — the
 body and its R2 object stay. A stored body is proven gone only when the archived HTML in
@@ -2018,7 +2018,12 @@ transaction by `upsert_portal_raw_page`, so their timestamps agree too) AND both
 fire on it; on 14 000 sampled bazos pages those two signals never disagreed. Going FORWARD nothing
 new is stamped, because every HTML portal decides "gone" inside its client's `fetch_detail` and
 raises `ListingGoneError` before the body reaches the caller that stages it — the guard is structural,
-there is no body for the writer to refuse.
+there is no body for the writer to refuse. One SQL trap is worth carrying: 519 tested the title
+with `ilike '%<title>%…%'`, and a LIKE pattern with TWO internal wildcards is quadratic over a
+100 KB document (>180 ms a page against ~2.2 ms) — it spent a 900 s statement timeout mid-sweep.
+The anchor bought nothing (both forms selected the same 598 of 3,000 pages), so 520 drops it and
+puts the more selective banner first; `test_location_w10_gone_bodies.py` pins one wildcard pair
+per pattern.
 
 If R2 is unconfigured the page half is skipped with ONE warning per run and the payload half runs
 unchanged — the hourly ingest for nine portals must never go dark because a credential rotated. The

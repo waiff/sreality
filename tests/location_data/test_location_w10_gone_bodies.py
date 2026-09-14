@@ -2,11 +2,14 @@
 
 Three gates, all offline.
 
-1. THE STAMP SAYS WHAT IT DOES. Migration 519 corrects `http_status` to 410 on the
-   stored bazos bodies whose bytes ARE the category-index page a removed ad answers
-   with, and on nothing else: both #1451 signals must fire, the archived HTML must
-   hash to the payload row's own `body_sha256`, and only a 2xx/NULL row is touched.
-   Nothing is deleted.
+1. THE STAMP SAYS WHAT IT DOES. Migrations 519 and 520 correct `http_status` to 410
+   on the stored bazos bodies whose bytes ARE the category-index page a removed ad
+   answers with, and on nothing else: both #1451 signals must fire, the archived HTML
+   must hash to the payload row's own `body_sha256`, and only a 2xx/NULL row is
+   touched. Nothing is deleted. 520 is the one that runs — 519's title pattern carried
+   TWO internal wildcards, which makes LIKE quadratic over a 100 KB document (>180 ms
+   a page against ~2.2 ms) and spent the statement timeout on prod. Both are pinned,
+   and 520 is additionally pinned against ever growing a second wildcard back.
 
 2. THE PASS ALREADY READS THE STAMP. `location_data.claims_intake` asks for the
    latest body whose fetch SUCCEEDED in all three places it looks at a payload row,
@@ -41,49 +44,85 @@ from scraper import (
 )
 from scraper.portal_base import ListingGoneError
 
-_MIGRATION = (
-    Path(__file__).resolve().parents[2]
-    / "migrations"
-    / "519_location_w10_gone_bodies.sql"
-).read_text(encoding="utf-8")
+_MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+_FIRST_CUT = (_MIGRATIONS / "519_location_w10_gone_bodies.sql").read_text(encoding="utf-8")
+# The one that runs. Append-only means 519 stays on disk; 520 supersedes its pattern.
+_LIVE = (_MIGRATIONS / "520_location_w10_gone_bodies_retry.sql").read_text(encoding="utf-8")
 
-# The `do $$ ... $$` block that does the stamping — the readout and the assertion
-# blocks read the same shape and must not be mistaken for it.
-_UPDATE = _MIGRATION.split("update portal_raw_payloads p")[1].split("get diagnostics")[0]
+_BOTH = [("519", _FIRST_CUT), ("520", _LIVE)]
 
 
-def test_the_stamp_is_410_and_only_410():
-    assert "set http_status = 410" in _UPDATE
+def _update_block(migration: str) -> str:
+    """The `do $$ ... $$` block that stamps — the readout and the assertion blocks
+    read the same shape and must not be mistaken for it."""
+    return migration.split("update portal_raw_payloads p")[1].split("get diagnostics")[0]
+
+
+@pytest.mark.parametrize("name,migration", _BOTH)
+def test_the_stamp_is_410_and_only_410(name: str, migration: str):
+    assert "set http_status = 410" in _update_block(migration), name
     # 410 is the truthful status of a removed ad, not a new column and not a flag.
-    assert "alter table" not in _MIGRATION.lower()
-    assert "delete from" not in _MIGRATION.lower()
+    assert "alter table" not in migration.lower(), name
+    assert "delete from" not in migration.lower(), name
 
 
-def test_the_stamp_only_touches_a_successful_bazos_detail_body():
-    assert "(p.http_status is null or p.http_status between 200 and 299)" in _UPDATE
-    assert "p.source = 'bazos'" in _UPDATE
-    assert "p.page_kind = 'detail'" in _UPDATE
-    assert "r.source = 'bazos'" in _UPDATE
-    assert "r.page_kind = 'detail'" in _UPDATE
+@pytest.mark.parametrize("name,migration", _BOTH)
+def test_the_stamp_only_touches_a_successful_bazos_detail_body(name: str, migration: str):
+    block = _update_block(migration)
+    assert "(p.http_status is null or p.http_status between 200 and 299)" in block, name
+    assert "p.source = 'bazos'" in block, name
+    assert "p.page_kind = 'detail'" in block, name
+    assert "r.source = 'bazos'" in block, name
+    assert "r.page_kind = 'detail'" in block, name
 
 
-def test_both_gone_signals_must_fire_and_the_bytes_must_match():
+@pytest.mark.parametrize("name,migration", _BOTH)
+def test_both_gone_signals_must_fire_and_the_bytes_must_match(name: str, migration: str):
+    block = _update_block(migration)
     # The conjunction, not #1451's disjunction: this stamp is retroactive.
-    assert _UPDATE.count("r.html ilike") == 2
-    assert "inzerce - Reality | Bazoš.cz%'" in _UPDATE
-    assert "%Inzerát byl vymazán%" in _UPDATE
+    assert block.count("r.html ilike") == 2, name
+    assert "inzerce - Reality | Bazoš.cz%'" in block, name
+    assert "%Inzerát byl vymazán%" in block, name
     # The archived HTML must be THIS payload row's bytes: content hash, corroborated
     # by the one-transaction timestamp both writers share.
-    assert "p.body_sha256 = sha256(convert_to(r.html, 'UTF8'))" in _UPDATE
-    assert "abs(extract(epoch from (r.fetched_at - p.last_observed_at))) <= 5" in _UPDATE
+    assert "p.body_sha256 = sha256(convert_to(r.html, 'UTF8'))" in block, name
+    assert "abs(extract(epoch from (r.fetched_at - p.last_observed_at))) <= 5" in block, name
 
 
-def test_the_stamp_is_idempotent_and_batched():
+@pytest.mark.parametrize("name,migration", _BOTH)
+def test_the_stamp_is_idempotent_and_batched(name: str, migration: str):
     # A second run re-reads the same pages and finds every hit already at 410.
-    assert "set statement_timeout = '900s'" in _MIGRATION
-    assert "commit;" in _MIGRATION
+    assert "set statement_timeout = '900s'" in migration, name
+    assert "commit;" in migration, name
     # The keyset probe is what makes the file a no-op on the CI replay's empty tables.
-    assert "exit when v_hi is null" in _MIGRATION
+    assert "exit when v_hi is null" in migration, name
+
+
+def test_no_like_pattern_backtracks():
+    """The regression 519 shipped: a LIKE pattern with TWO internal wildcards.
+
+    `'%<title>%inzerce - Reality | Bazoš.cz%'` makes the matcher retry every
+    '<title>' position against every later position, over a ~100 KB document —
+    >180 ms a page against ~2.2 ms for the single-wildcard form, which is how a
+    5 000-page batch spent a 900 s statement timeout. Every pattern in the file
+    that runs must be one leading and one trailing wildcard and nothing else.
+    """
+    # COMMENTS OUT FIRST: 520's header quotes 519's bad pattern verbatim to explain
+    # it, and a scan that reads prose as code would fail on the explanation.
+    code = "\n".join(
+        line for line in _LIVE.splitlines() if not line.lstrip().startswith("--")
+    )
+    patterns = re.findall(r"ilike '([^']*)'", code)
+    assert patterns, "the stamp reads the archived HTML with ILIKE"
+    for pattern in patterns:
+        assert pattern.startswith("%") and pattern.endswith("%"), pattern
+        assert pattern.count("%") == 2, pattern
+
+
+def test_the_batch_is_small_enough_that_a_slow_region_is_only_slow():
+    assert "order by id limit 1000" in _LIVE
+    # A bad day ends in a committed partial pass with a NOTICE, not a killed job.
+    assert "v_deadline" in _LIVE
 
 
 _OK_BODY = "(p.http_status is null or p.http_status between 200 and 299)"
