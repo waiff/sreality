@@ -2036,7 +2036,17 @@ contracts from the image once at startup — a failure there is a warning, becau
 `location_claims_intake.yml` is the authoritative projector. **Expected latency, detail write to
 Browse:** ≤2 min lag → ≤1 min tick → the resolver drain's own worker lane (~15 s) → `browse_list`'s
 pg_cron rebuild, `*/15`. So a claim and a verdict land within ~3–4 minutes, and the read model — not
-the claim lane — is what the operator now waits on.
+the claim lane — is what the operator now waits on. **A batch that loses a LOCK runs again (W12):**
+55P03 and 40P01 roll the transaction back without moving the keyset cursor and the batch is
+idempotent, so both loops retry THE SAME batch (2 s doubling to 30 s, counters rolled back with the
+transaction, `lock_retries` in the summary) and only five consecutive losses — or any other error,
+a lost connection above all — stamp the run `failed`; the ceiling is `INTAKE_LOCK_TIMEOUT_S`, 20 s
+rather than 5, because waiting behind one of the drain's four concurrent slices is now the normal
+case. **And the minute lane yields while a GitHub run holds the lane:** one bounded read for an
+`outcome='running'` row of the hourly lane younger than 65 minutes (older is a stale stamp from a
+killed run) skips the tick with a `yielded_to=<batch_id>` heartbeat note — nothing is lost, because
+the hourly run re-reads its own 15-minute-lag slice, and only new-listing latency degrades to that
+run while a full walk is in progress.
 
 **A PAGE THAT CARRIED NO LOCATION GETS A SECOND LOOK (W8).** ceskereality and realitymix
 geocode an ad AFTER publishing it. Measured 2026-09-14, of the audit page's active "no data" rows
@@ -2392,6 +2402,10 @@ per-listing statement gets, and cancelling it threw the whole batch away.
   keyset went back to 0 whenever it caught up, so each idle hourly hop re-walked all 744k payload
   rows (~500k of them unstampable) to stamp nothing: `bodies=416s`. Keep the position and reset it on
   the ONE event that makes the rows below it eligible again — here, a contract bump.
+* **A 5 s lock ceiling is not resilience** (W12, 2026-09-14) — two `mode=full` walks died ~80 s
+  in (runs 34817669095, 34824922631) because a queue-row bump waited behind a drain slice; a batch
+  that lost a lock must RETRY ITSELF (idempotent, cursor unmoved) rather than skip its rows, and of
+  two schedules writing the same rows one has to yield.
 * **A contract bump must never outrun its re-mine** (W11, 2026-09-14) — reading only the ACTIVE
   version's claims meant the 6–8 h between a bump and the re-mine judged 595,816 listings with no
   evidence and emptied Browse to 45,810 rows; the resolver reads a listing's NEWEST evidence instead.

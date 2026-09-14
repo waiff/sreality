@@ -827,6 +827,19 @@ component is slimmed twice — each wave rewrites one component and slims its st
   refuses (exit 3, no `--force`) while any portal still has a served listing with no claim under its
   ACTIVE contract, because those older rows are that listing's evidence until the re-mine lands.
 
+- **W12 — intake batches survive lock contention; the fast lane yields to a running GitHub run (two
+  full walks died on a 5 s lock timeout, 2026-09-14)** (shipped): runs 34817669095 (07:23Z) and
+  34824922631 (08:52Z) both died ~80 s in on `LockNotAvailable` — every batch bumps `dirty_locations`
+  rows the resolver's four concurrent drain slices hold, mid-incident with 596k rows still to
+  re-mine. Both batch loops (listing scan, bodies pass) now retry the SAME batch on 55P03/40P01 —
+  the transaction rolled back, the keyset cursor never moved, fingerprints are `ON CONFLICT DO
+  NOTHING` and the enqueue is a bump — backing off 2 s to 30 s, rolling the counters back with the
+  transaction, counting `lock_retries`, and stamping the run `failed` (never skipping rows) after
+  five consecutive losses; everything else, a lost connection above all, stays fatal. The write
+  ceiling goes 5 s → 20 s (`INTAKE_LOCK_TIMEOUT_S`), and the realtime worker's minute lane skips its
+  tick with `yielded_to=<batch_id>` while an hourly-lane batch is stamped `running` younger than 65
+  minutes (older = a stale stamp from a killed run).
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a

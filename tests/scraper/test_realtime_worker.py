@@ -1227,9 +1227,10 @@ _FAST_STATS = {
 
 def _patch_intake_fast(
     monkeypatch: pytest.MonkeyPatch, *, stats: dict[str, Any] | None = None,
+    running_batch: int | None = None,
 ) -> dict[str, Any]:
     """Stub the intake entry points the lane touches and capture run()'s kwargs."""
-    captured: dict[str, Any] = {}
+    captured: dict[str, Any] = {"runs": 0}
 
     class _Conn:
         def __init__(self) -> None:
@@ -1242,10 +1243,16 @@ def _patch_intake_fast(
 
     def fake_run(c: Any, **kwargs: Any) -> dict[str, Any]:
         captured["conn"] = c
+        captured["runs"] += 1
         captured.update(kwargs)
         return dict(stats or _FAST_STATS)
 
+    def fake_running(c: Any, **kwargs: Any) -> int | None:
+        captured["yield_conn"] = c
+        return running_batch
+
     monkeypatch.setattr(rw.db, "connect_session", lambda *a, **k: conn)
+    monkeypatch.setattr("location_data.claims_intake.running_batch_id", fake_running)
     monkeypatch.setattr("location_data.claims_intake.run", fake_run)
     monkeypatch.setattr(rw, "_project_contracts_once", lambda: True)
     monkeypatch.setattr(rw, "_INTAKE_FAST_PASS_LOCK", threading.Lock())
@@ -1289,6 +1296,41 @@ def test_location_intake_fast_knobs_are_env_vars_and_clamped(
     assert rw._read_location_intake_fast_budget() == 45
     monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_INTERVAL_ENV, "0")
     assert rw._read_location_intake_fast_interval() == 5, "an interval knob is not the flag"
+
+
+def test_location_intake_fast_yields_to_a_running_github_run(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """W12. Both schedules bump the same `dirty_locations` rows, and the hourly/full run is
+    the one that cannot be re-dispatched cheaply — a `mode=full` walk is hours of work that
+    two lock timeouts already killed twice (2026-09-14). So the minute lane stands aside
+    while one is in flight and says so in its heartbeat; nothing is lost, because the hourly
+    run re-reads its own 15-minute-lag slice."""
+    captured = _patch_intake_fast(monkeypatch, running_batch=1318)
+
+    out = rw._location_intake_fast_sync()
+
+    assert out == {"ran": False, "yielded_to": 1318}
+    assert captured["runs"] == 0, "the yield comes BEFORE any work"
+    assert captured["conn_obj"].closed is True
+    # A yielded tick is not a failed one, and the async wrapper must not read the
+    # work counters that are absent from it.
+    state: dict[str, Any] = {"lanes": {}}
+    asyncio.run(rw._location_intake_fast_pass(asyncio.Event(), state))
+    assert state["lanes"]["location_intake_fast"]["last"]["yielded_to"] == 1318
+
+
+def test_location_intake_fast_does_not_yield_to_a_stale_stamp(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A killed run leaves its 'running' row behind for ever. `running_batch_id` bounds the
+    read on `started_at`, so a stale stamp reads as none and the tick runs."""
+    captured = _patch_intake_fast(monkeypatch, running_batch=None)
+
+    out = rw._location_intake_fast_sync()
+
+    assert out["ran"] is True
+    assert captured["runs"] == 1
+    # ONE connection for the yield read and the scan: the read is one bounded SELECT.
+    assert captured["yield_conn"] is captured["conn"]
 
 
 def test_location_intake_fast_sync_runs_the_shared_scan_on_its_own_lane(
