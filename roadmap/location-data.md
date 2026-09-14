@@ -770,6 +770,29 @@ component is slimmed twice — each wave rewrites one component and slims its st
      (`_CLAIMS_SELECT`), so the delete was leisure work, and it is taken.
      `location_claims_retire.yml` is the standing lane — dispatch it after any future retirement.
 
+- **W9 — composite locality names bind against the register and resolve up; the statutory-city regex
+  is gone (operator ruling 2026-09-14)** (shipped): *"I do not like this string work, it could be
+  ambiguous. We need to make this deterministic based on some registry with appropriate hierarchy and
+  apply for all the statutory cities."* `claims_common.statutory_city_obec` (two regexes over eight
+  hand-typed city names plus the nine hyphenated okres names) and its `address_part_cast_obce` mirror
+  are DELETED, and `address_part_obec` stopped folding: the eight contracts that chained them claim
+  the portal's locality line VERBATIM (sreality@4, idnes@5, bazos@6, maxima@4, realitymix@6,
+  ceskereality@7, bezrealitky@3, remax@5 — entry counts unchanged, goldens re-blessed). The new
+  `location_data/resolver/composite.py` binds the line against RÚIAN: the whole string first at obec /
+  část obce / MOMC / správní obvod (so "Frýdek-Místek" stays a town and "Praha-Řeporyje" binds the
+  městská část and resolves up to Praha), then — only if nothing matched whole — a split on the
+  portals' separators where a token naming an obec, or a uniquely named part, anchors the rest INSIDE
+  that town, so "Praha 4 - Podolí" publishes Praha + Praha's own Podolí and not the village of that
+  name in okres Brno-venkov. Fail-closed on ambiguity and on a line that matches an okres or a kraj
+  ("Brno-venkov"), which replaces the hand-typed okres table with a LEVEL test. The registry already
+  held every unit needed — 142 `momc`, 22 `spravni_obvod`, 15,106 `cast_obce` at `ruian:2026-08-31`,
+  Praha 1–22, Brno-střed, Plzeň 1–10, Pardubice I–VIII, Ostrava's and Opava's included — so nothing
+  was loaded. `RESOLVER_VERSION` → `resolver:v5`, which re-resolves the corpus once. Two holes close
+  for free: realitymix's ASCII canonical slug (`/detail/praha-5/` was invisible to the accent-
+  sensitive regex and published the obvod as the obec) and every obvod spelling that used to lose its
+  quarter. The one residual is the SPACE-glued pair ("Praha Stodůlky") — no separator to split on, and
+  splitting on the space would read any two-word line as town-plus-quarter.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a

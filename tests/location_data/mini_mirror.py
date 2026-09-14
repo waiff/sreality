@@ -270,3 +270,127 @@ def claim(
         declared_radius_m=declared_radius_m, blur_evidence=blur_evidence,
         claim_confidence=claim_confidence,
     )
+
+
+def statutory_city_mirror() -> MiniMirror:
+    """The eight statutory cities as RÚIAN actually holds them (W9), plus the homonyms that
+    make the fail-closed rule mean something.
+
+    Codes, names and parentage are the live register's (`ruian_admin_units`,
+    `ruian:2026-08-31`, read 2026-09-14): Praha's quarters are MOMC *and* ČástObce rows with
+    different codes, "Poruba" is a ČástObce of Ostrava AND a MOMC of Ostrava AND a ČástObce
+    of Orlová, there is a village called Podolí in okres Brno-venkov, and "Frýdek-Místek" and
+    "Brno-venkov" are an obec and an okres spelled like a městský obvod. Every one of those
+    is a case the deleted regex had to be told about by hand.
+
+    No unit points: RÚIAN draws no polygon at ČástObce or MOMC level, and the towns here are
+    never asked to place a row.
+    """
+    units = [
+        # --- Jihomoravský kraj: Brno, its okres namesake, and the village called Podolí
+        _unit(100, "kraj", 116, "Jihomoravský kraj", "jihomoravsky kraj", "k116",
+              lat=49.1951, lon=16.6068),
+        _unit(101, "okres", 3702, "Brno-město", "brno mesto", "k116.o3702", parent=100,
+              lat=49.1951, lon=16.6068),
+        _unit(102, "okres", 3703, "Brno-venkov", "brno venkov", "k116.o3703", parent=100,
+              lat=49.1951, lon=16.6068),
+        _unit(103, "obec", 582786, "Brno", "brno", "k116.o3702.b582786", parent=101,
+              lat=49.1951, lon=16.6068),
+        _unit(104, "cast_obce", 12114, "Dolní Heršpice", "dolni herspice",
+              "k116.o3702.b582786.c12114", parent=103),
+        _unit(105, "momc", 550973, "Brno-střed", "brno stred", "k116.o3702.b582786.m550973",
+              parent=103),
+        _unit(106, "obec", 583634, "Podolí", "podoli", "k116.o3703.b583634", parent=102,
+              lat=49.2211, lon=16.7530),
+        _unit(107, "cast_obce", 124257, "Podolí", "podoli", "k116.o3703.b583634.c124257",
+              parent=106),
+        # --- Praha: no okres at all, and the quarter at BOTH levels
+        _unit(110, "kraj", 19, "Hlavní město Praha", "hlavni mesto praha", "k19",
+              lat=50.0755, lon=14.4378),
+        _unit(111, "obec", 554782, "Praha", "praha", "k19.b554782", parent=110,
+              lat=50.0755, lon=14.4378),
+        _unit(112, "momc", 500119, "Praha 4", "praha 4", "k19.b554782.m500119", parent=111),
+        _unit(113, "momc", 539635, "Praha-Řeporyje", "praha reporyje",
+              "k19.b554782.m539635", parent=111),
+        _unit(114, "cast_obce", 400190, "Podolí", "podoli", "k19.b554782.c400190",
+              parent=111),
+        _unit(115, "cast_obce", 490270, "Řeporyje", "reporyje", "k19.b554782.c490270",
+              parent=111),
+        # --- Plzeň
+        _unit(120, "kraj", 32, "Plzeňský kraj", "plzensky kraj", "k32",
+              lat=49.7384, lon=13.3736),
+        _unit(121, "okres", 3404, "Plzeň-město", "plzen mesto", "k32.o3404", parent=120,
+              lat=49.7384, lon=13.3736),
+        _unit(122, "obec", 554791, "Plzeň", "plzen", "k32.o3404.b554791", parent=121,
+              lat=49.7384, lon=13.3736),
+        _unit(123, "cast_obce", 406368, "Jižní Předměstí", "jizni predmesti",
+              "k32.o3404.b554791.c406368", parent=122),
+        _unit(124, "momc", 546003, "Plzeň 3", "plzen 3", "k32.o3404.b554791.m546003",
+              parent=122),
+        # --- Moravskoslezský kraj: Ostrava (Poruba twice over), Orlová, Opava, Frýdek-Místek
+        _unit(130, "kraj", 132, "Moravskoslezský kraj", "moravskoslezsky kraj", "k132",
+              lat=49.8209, lon=18.2625),
+        _unit(131, "okres", 3807, "Ostrava-město", "ostrava mesto", "k132.o3807", parent=130,
+              lat=49.8209, lon=18.2625),
+        _unit(132, "obec", 554821, "Ostrava", "ostrava", "k132.o3807.b554821", parent=131,
+              lat=49.8209, lon=18.2625),
+        _unit(133, "cast_obce", 414085, "Poruba", "poruba", "k132.o3807.b554821.c414085",
+              parent=132),
+        _unit(134, "momc", 546224, "Poruba", "poruba", "k132.o3807.b554821.m546224",
+              parent=132),
+        _unit(135, "okres", 3802, "Karviná", "karvina", "k132.o3802", parent=130,
+              lat=49.8543, lon=18.5421),
+        _unit(136, "obec", 507292, "Orlová", "orlova", "k132.o3802.b507292", parent=135,
+              lat=49.8654, lon=18.4302),
+        _unit(137, "cast_obce", 413488, "Poruba", "poruba", "k132.o3802.b507292.c413488",
+              parent=136),
+        _unit(138, "okres", 3805, "Opava", "opava", "k132.o3805", parent=130,
+              lat=49.9387, lon=17.9026),
+        _unit(139, "obec", 505927, "Opava", "opava", "k132.o3805.b505927", parent=138,
+              lat=49.9387, lon=17.9026),
+        _unit(140, "cast_obce", 413909, "Kateřinky", "katerinky",
+              "k132.o3805.b505927.c413909", parent=139),
+        _unit(141, "okres", 3803, "Frýdek-Místek", "frydek mistek", "k132.o3803",
+              parent=130, lat=49.6833, lon=18.3486),
+        _unit(142, "obec", 598003, "Frýdek-Místek", "frydek mistek", "k132.o3803.b598003",
+              parent=141, lat=49.6833, lon=18.3486),
+        _unit(143, "cast_obce", 33235, "Místek", "mistek", "k132.o3803.b598003.c33235",
+              parent=142),
+        # --- Liberec: one MOMC, and it is spelled city-plus-name
+        _unit(150, "kraj", 51, "Liberecký kraj", "liberecky kraj", "k51",
+              lat=50.7663, lon=15.0562),
+        _unit(151, "okres", 3506, "Liberec", "liberec", "k51.o3506", parent=150,
+              lat=50.7663, lon=15.0562),
+        _unit(152, "obec", 563889, "Liberec", "liberec", "k51.o3506.b563889", parent=151,
+              lat=50.7663, lon=15.0562),
+        _unit(153, "momc", 556891, "Liberec-Vratislavice nad Nisou",
+              "liberec vratislavice nad nisou", "k51.o3506.b563889.m556891", parent=152),
+        # --- Ústí nad Labem: the quarter as a ČástObce and as a city-prefixed MOMC
+        _unit(160, "kraj", 42, "Ústecký kraj", "ustecky kraj", "k42",
+              lat=50.6607, lon=14.0328),
+        _unit(161, "okres", 3809, "Ústí nad Labem", "usti nad labem", "k42.o3809",
+              parent=160, lat=50.6607, lon=14.0328),
+        _unit(162, "obec", 554804, "Ústí nad Labem", "usti nad labem", "k42.o3809.b554804",
+              parent=161, lat=50.6607, lon=14.0328),
+        _unit(163, "cast_obce", 409448, "Střekov", "strekov", "k42.o3809.b554804.c409448",
+              parent=162),
+        _unit(164, "momc", 502316, "Ústí nad Labem-Střekov", "usti nad labem strekov",
+              "k42.o3809.b554804.m502316", parent=162),
+        # --- Pardubice: the Roman-numeral MOMC
+        _unit(170, "kraj", 53, "Pardubický kraj", "pardubicky kraj", "k53",
+              lat=50.0343, lon=15.7812),
+        _unit(171, "okres", 3603, "Pardubice", "pardubice", "k53.o3603", parent=170,
+              lat=50.0343, lon=15.7812),
+        _unit(172, "obec", 555134, "Pardubice", "pardubice", "k53.o3603.b555134",
+              parent=171, lat=50.0343, lon=15.7812),
+        _unit(173, "cast_obce", 410632, "Polabiny", "polabiny", "k53.o3603.b555134.c410632",
+              parent=172),
+        _unit(174, "momc", 555151, "Pardubice II", "pardubice ii",
+              "k53.o3603.b555134.m555151", parent=172),
+    ]
+    streets = [
+        # The third token of "Brno - Dolní Heršpice, Bernáčkova": a street, and the register
+        # holds it at no admin level at all, which is how the binder comes to ignore it.
+        Street(code=200, name="Bernáčkova", name_norm="bernackova", obec_kod=582786),
+    ]
+    return MiniMirror(units=units, streets=streets, points=[], obec_polygons={})

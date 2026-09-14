@@ -2118,7 +2118,7 @@ keeps the remediation set one indexed predicate away). Nothing mints one any mor
 and the `mapy_affected` inventory that policed it are gone, so a coordinate claim comes only from a
 portal's payload or its own page, and every other stamp is class E outright.
 
-**THE RESOLVER IS FOUR STEPS** (v4.1, `location_data/resolver/`), and one answer row:
+**THE RESOLVER IS FOUR STEPS** (v5, `location_data/resolver/`), and one answer row:
 
 * **BIND** (`bind.py`) picks the finest RÚIAN entity the claims justify — a portal registry key;
   obec + street + čp/čo; a street inside the constraining obec; an obec / část obce by name; a PSČ
@@ -2131,7 +2131,18 @@ portal's payload or its own page, and every other stamp is class E outright.
   elected by DECLARED QUALITY and only then by claim id, so a listing carrying a blurred pin and a
   precise one takes its town from one and its `geom` from the other. The four rungs whose entity was
   INFERRED rather than named (a PSČ lookup, a reverse geocode, the sliver, a bare region) contribute
-  no agreeing field, so they cannot grade above `low`.
+  no agreeing field, so they cannot grade above `low`. **A COMPOSITE LOCALITY NAME IS BOUND AGAINST
+  THE REGISTER** (`composite.py`, W9, operator ruling 2026-09-14): when the line names no obec, the
+  whole string is matched first at obec / část obce / MOMC / správní obvod — so "Frýdek-Místek" stays
+  a town and "Praha-Řeporyje" binds the městská část and resolves up to Praha — and only if nothing
+  matches whole is it split on the portals' separators, a token naming an obec (or a uniquely named
+  part) anchoring the rest INSIDE that town, which is what makes "Praha 4 - Podolí" publish Praha and
+  Praha's own Podolí rather than the village of that name in okres Brno-venkov. It fails CLOSED: an
+  ambiguous name with nothing to anchor it, or a line that matches an okres or a kraj ("Brno-venkov"),
+  binds nothing and the row stays unresolved. The readers no longer interpret a locality at all — the
+  `statutory_city_obec` regex over eight hand-typed city names and its `address_part_cast_obce` mirror
+  are deleted, the claim carries the portal's line verbatim, and both names on the answer row are the
+  register's own spelling.
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
   spelling; only street / čp / čo / psč may fall back to a claim, preserve-if-null, and only an

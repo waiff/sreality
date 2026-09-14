@@ -27,7 +27,7 @@ from tests.location_data import claim_intake_fixtures as fx
 
 CONTRACT = next(c for c in contracts.load_all() if c.source == "sreality")
 
-VERSION = 3
+VERSION = 4
 TOWN_ENTRY = "sr.det.name_city"
 
 # 02 §2.1.8: ids are permanent and never reused. Every one of these survives from @1.
@@ -91,7 +91,7 @@ W2_FIXTURE, _ = claims(json.loads(_W2_BODY.read_text(encoding="utf-8")))
 
 # ------------------------------------------------------------------ contract shape
 
-def test_the_contract_is_at_version_3() -> None:
+def test_the_contract_is_at_version_4() -> None:
     assert CONTRACT.version == VERSION
 
 
@@ -259,15 +259,15 @@ def test_the_town_survives_a_row_that_has_nothing_else() -> None:
     assert "sr.det.zip" not in by_id
 
 
-def test_a_numbered_obvod_in_the_city_field_is_folded_to_the_city() -> None:
-    """W1-c R4: a numbered městský obvod is never the town. `/locality/city` is already the
-    obec on every committed body, so `statutory_city_obec` is a RAIL on the mandatory claim
-    — it is a no-op on a real obec name and the difference only shows if the portal ever
-    publishes the obvod where the town belongs."""
+def test_a_numbered_obvod_in_the_city_field_is_claimed_as_the_portal_wrote_it() -> None:
+    """W9 (@4): `/locality/city` is already the obec on every committed body, and on the day
+    it is not, the obvod is claimed VERBATIM rather than folded by a regex here. "Praha 8" is
+    the official name of a RÚIAN unit whose parent is Praha, so the resolver binds it and
+    resolves up — and the row gains the quarter the fold used to throw away."""
     obvod = copy.deepcopy(fx.SREALITY_POST_CUTOVER)
     obvod["locality"]["city"] = "Praha 8"
     by_id, _ = claims(obvod)
-    assert by_id["sr.det.name_city"].value_text == "Praha"
+    assert by_id["sr.det.name_city"].value_text == "Praha 8"
     assert POST_CUTOVER["sr.det.name_city"].value_text == "Praha"
 
 
@@ -326,23 +326,24 @@ def test_the_legacy_fallback_never_fires_where_the_post_cutover_field_answers() 
         assert claim.value_text != "not_address", entry_id
 
 
-def test_a_statutory_city_line_states_the_town_and_the_quarter_from_one_segment() -> None:
-    """"Praha 4 - Podolí" names both; @2's `statutory_city_obec` kept the town and dropped
-    the quarter on the floor. Both spellings of the obvod are covered — the ordinal one and
-    the hyphen one — because sreality writes both."""
+def test_a_statutory_city_line_is_claimed_whole_and_left_to_the_register() -> None:
+    """@4 (W9): "Praha 4 - Podolí" names both the town and the quarter, and the CLAIM is the
+    line. @2 folded it to "Praha" and dropped the quarter; @3 recovered the quarter with a
+    second regex keyed on the same eight city names. Both regexes are gone: the town entry
+    states the segment, and `resolver.composite` binds it to Praha + Podolí off RÚIAN.
+    `tests/location_data/test_resolver_composite.py` is where that half is asserted."""
     ordinal, _ = claims({"locality": {"name": "Adresa", "accuracy": "address",
                                       "value": "Sinkulova, Praha 4 - Podolí"},
                          "map": {"lat": 50.0587064, "lon": 14.4222091,
                                  "type": "coordinates"}})
-    assert ordinal[TOWN_ENTRY].value_text == "Praha"
-    assert ordinal["sr.det.name_citypart"].value_text == "Podolí"
+    assert ordinal[TOWN_ENTRY].value_text == "Praha 4 - Podolí"
+    assert "sr.det.name_citypart" not in ordinal
     assert ordinal["sr.det.street"].value_text == "Sinkulova"
     hyphen, _ = claims({"locality": {"name": "Adresa", "accuracy": "address",
                                      "value": "Bernáčkova, Brno - Dolní Heršpice"},
                         "map": {"lat": 49.1543468643, "lon": 16.6247708777,
                                 "type": "coordinates"}})
-    assert hyphen[TOWN_ENTRY].value_text == "Brno"
-    assert hyphen["sr.det.name_citypart"].value_text == "Dolní Heršpice"
+    assert hyphen[TOWN_ENTRY].value_text == "Brno - Dolní Heršpice"
 
 
 def test_a_truncated_payload_claims_nothing_and_says_so() -> None:

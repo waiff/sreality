@@ -26,4 +26,10 @@ from __future__ import annotations
 #      centre, always inside the polygon) instead of leaving `geom` NULL on 29 % of towned
 #      rows. Grade, confidence and radius are untouched, so the bump exists to re-resolve the
 #      corpus once, not to re-grade it.
-RESOLVER_VERSION = "resolver:v4.1"
+# v5 = W9 (operator ruling 2026-09-14): a composite locality name is bound against the
+#      REGISTER instead of being folded by a regex in the reader. The whole string is matched
+#      at obec / část obce / MOMC / správní obvod first; only if nothing matches whole is it
+#      split, and then a token naming an obec (or a uniquely named part) anchors the rest
+#      INSIDE that town, which is what lets "Praha 4 - Podolí" publish Praha + Podolí with
+#      both names spelled by RÚIAN. Ambiguity binds nothing. Every row re-resolves once.
+RESOLVER_VERSION = "resolver:v5"

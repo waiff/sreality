@@ -3,7 +3,7 @@
 # `#map`'s GPS pin and `data-address` line, the ld+json breadcrumb chain, and `og:title`.
 
 portal: realitymix
-contract_version: 5
+contract_version: 6
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -80,7 +80,6 @@ extractions:
     page_kind: detail
     locator: {reader: html_attr_regex, css: "link[rel='canonical']", attr: href,
               pattern: "/detail/(?P<obec>[^/]+)/", group: obec}
-    transform: ["statutory_city_obec"]
     claim_type: obec_name
     licence_class: portal
     notes: "THE TOWN: the `/detail/{obec}/` path segment, on every detail URL, ASCII-folded

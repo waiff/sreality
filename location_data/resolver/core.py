@@ -146,6 +146,12 @@ def _constraining_obec_kods(
     codes: list[int] = []
     for key in constraints.obec_keys:
         codes.extend(u.code for u in ctx.registry.admin_units_by_name(key, levels=("obec",)))
+    if not codes and constraints.obec_lines:
+        # W9: a composite line ("Brno - Dolní Heršpice") names no obec by itself, and without
+        # this the town-as-street test on the same listing had no obec to ask about.
+        composite = step_bind.first_composite_bind(constraints.obec_lines, ctx.registry)
+        if composite.obec is not None:
+            codes.append(composite.obec.code)
     if not codes and constraints.psc:
         codes.extend(ctx.registry.obec_codes_for_psc(constraints.psc))
     return tuple(sorted(set(codes)))

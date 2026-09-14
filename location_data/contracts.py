@@ -435,12 +435,11 @@ IMPLEMENTED_TRANSFORMS = frozenset({
     # per admin level would be nine forks of the same act.
     "address_part_street", "address_part_obec", "address_part_okres",
     "address_part_house_number", "split_paren_okres", "comma_segment",
-    # W1-c: a numbered/hyphenated městský obvod is never the town (R4), and the trailing
-    # segment of an address is sometimes a country rather than an obec (R1's `country`).
-    "statutory_city_obec", "address_part_country",
-    # sreality@3: the část obce the statutory-city fold drops ("Praha 4 - Podolí" states
-    # both the town and the quarter, and only the town had a transform).
-    "address_part_cast_obce",
+    # W1-c: the trailing segment of an address is sometimes a country rather than an obec
+    # (R1's `country`). `statutory_city_obec` and `address_part_cast_obce` stood beside it
+    # until W9 and are gone: a composite locality is bound against the REGISTER now
+    # (`resolver/composite.py`), so no reader carries a list of city names.
+    "address_part_country",
     # idnes@4: the same `country` type off a STRUCTURED alpha-2 field instead of an address
     # tail — no name table to fall outside of, and CZ dropped rather than claimed.
     "foreign_country_code",

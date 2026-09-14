@@ -15,7 +15,7 @@
 # claim.
 
 portal: idnes
-contract_version: 4
+contract_version: 5
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -155,10 +155,10 @@ extractions:
       match: {json_pointer: "/listing_id", equals_row_field: source_id_native}
       json_pointer: "/listing_localityCity"
     claim_type: obec_name
-    transform: ["statutory_city_obec"]
     subject_scope: {kind: id_match, on_miss: fail}
-    notes: "THE TOWN (rule 25): already an obec here ('Praha' where the line says
-      'Praha 5 - Hlubočepy'), and the R4 fold guards the day it is not."
+    notes: "THE TOWN (rule 25), VERBATIM: usually already an obec here ('Praha' where the
+      line says 'Praha 5 - Hlubočepy'); on the day it is not, the resolver binds the whole
+      line against RÚIAN and resolves up (W9)."
 
   - id: id.det.cast_obce
     locator_kind: embedded_json
