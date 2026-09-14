@@ -1,9 +1,14 @@
-/* Audit poloh — the listings customers cannot see yet (migration 514).
+/* Audit poloh — the listings customers cannot see yet (migration 524).
  *
  * W5's consumer rule: a listing reaches Browse, the map, the feed, the watchdog
  * and dedup only once the location store has an ANSWER for it. This page is that
  * exempted set, and it is a WORK QUEUE — a row leaves it the moment the resolver
  * lane places the listing, so the nav badge counts down on its own.
+ *
+ * W15 (operator ruling, 2026-09-14) makes that EVERY listing in the database, not
+ * only the ones a consumer surface would reach: the served set retired, and a
+ * delisted listing with no decided location is a finding like any other. Live vs
+ * delisted is a `quality` filter below, never a reason to hide a row from here.
  *
  * No map. The whole subject of the page is rows with no point to draw; the old
  * map drew their LEGACY coordinates, and migration 508 deleted those columns.
@@ -12,12 +17,12 @@
  * matrix, the totals and the list can never tell three different stories. The
  * list is a separate keyset read of the same relation under the same filters.
  *
- * THE WATERFALL (W14, migration 523) sits above all of it and answers the
+ * THE WATERFALL (W14, migrations 523/524) sits above all of it and answers the
  * question the page used to leave open: what is this number a fraction OF. It
- * is the chain from every listing ever collected (841 k) down to this set,
- * computed in the store by the same hourly refresh, from the same two
- * predicates Browse uses — so „skryté" is read against the whole database and
- * never against itself. Nothing on this side recomputes a step.
+ * is the chain from every listing in the database (841 k) down to this set,
+ * computed in the store by the same hourly refresh, from the same rule Browse
+ * uses — so „skryté" is read against the whole database and never against
+ * itself. Nothing on this side recomputes a step.
  *
  * TWO STATES (W7-b, migration 518), and the page always looks at exactly one:
  * "čeká na zpracování" is the lane still working (no verdict yet, queued for
@@ -163,17 +168,13 @@ const dash = (v: string | null | undefined): string =>
  * a migration. An unknown key simply renders without a note. */
 const WATERFALL_NOTE: Record<string, string> = {
   all_listings:
-    'Všechno, co jsme kdy z devíti portálů sebrali. Nic se nikdy nemaže, takže tohle je celá databáze.',
-  not_served:
-    'Stažené inzeráty, které zároveň nejsou hlavním inzerátem žádné běžící nemovitosti. Ty nikde neukazujeme, ať polohu mají, nebo ne — proto se do auditu nepočítají.',
-  served:
-    'Inzeráty, které může zákazník potkat: ve vyhledávání, na mapě, v hlídacích psech a při hledání duplicit. Všechna čísla níže se týkají jen jich.',
-  served_with_verdict:
-    'Systém u nich polohu už řešil a má uložený výsledek. Rozdíl jsou inzeráty, které přišly před chvílí a na řadu teprve přijdou.',
-  served_located:
+    'Všechno, co jsme kdy z devíti portálů sebrali — běžící i stažené. Nic se nikdy nemaže, takže tohle je celá databáze, a poloha se řeší u každého z nich.',
+  with_verdict:
+    'Systém u nich polohu už řešil a má uložený výsledek. Rozdíl jsou inzeráty, na které zatím nedošla řada.',
+  located:
     'Mají bod na mapě, nebo systém rozhodl, že jsou v zahraničí. Obojí je odpověď, se kterou už umí zákaznické stránky pracovat.',
   hidden:
-    'Tento seznam. Zobrazitelné inzeráty, u kterých poloha rozhodnutá není — a dokud nebude, nejsou vidět nikde.',
+    'Tento seznam. Každý inzerát bez rozhodnuté polohy — dokud ji nemá, není vidět nikde. Jestli běží, nebo je stažený, je jen filtr níže.',
 };
 
 /* The chain, as the store wrote it: label, count, what was lost at that step and
@@ -390,7 +391,8 @@ export default function LocationPinAudit() {
         buď neměl z čeho vyjít, nebo podklady měl a polohu z nich nedokázal
         určit — a dokud ji nemá, nejdou vidět nikde: ve vyhledávání, na mapě, v
         hlídacích psech ani při hledání duplicit. Jakmile je systém určí, inzerát
-        se objeví sám a z tohoto seznamu zmizí. Jsou tu dvě různé skupiny a
+        se objeví sám a z tohoto seznamu zmizí. Je tu každý takový inzerát —
+        běžící i stažený; jestli inzerát běží, je jen filtr níže. Jsou tu dvě různé skupiny a
         stránka ukazuje vždy jen jednu z nich: ty, které systém teprve čekají, a
         ty, u kterých už doběhl a polohu neurčil.
       </p>

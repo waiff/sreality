@@ -27,14 +27,6 @@ SOURCES = (
     "realitymix", "maxima",
 )
 
-# THE SERVED SET, spelled once so the two lanes that walk `listings` cannot drift (the
-# resolver's corpus sweep and the claim lane's full walk): a listing is served if it is live
-# or is the representative row of a live property. The rest is history nobody resolves. Both
-# call sites must alias `listings` as `l` — the alias is part of the contract.
-SERVED_LISTING_PREDICATE = """(l.is_active
-        OR EXISTS (SELECT 1 FROM properties pr
-                    WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active'))"""
-
 # THE CONSUMER RULE (operator ruling 2026-09-13, rule 25). A listing is SERVED to
 # consumers -- Browse, the map, the feed, the watchdog, dedup -- only when this store
 # has an ANSWER for it: a point, or the determination that it is abroad. No flag and no

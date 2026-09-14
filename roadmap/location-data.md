@@ -637,7 +637,7 @@ component is slimmed twice — each wave rewrites one component and slims its st
     would recover ~3 % — a separate, later decision. `check_location_town_coverage` now reports
     `hidden_n` per portal, so the number is visible outside the audit page. The SAME migration
     re-creates the operator's audit surface on the durable definition: `location_pin_audit_mv` v2 is
-    `SERVED_LISTING_PREDICATE` minus `SERVED_LOCATION_PREDICATE` — exactly the hidden set, 44,443 rows
+    the served set minus `SERVED_LOCATION_PREDICATE` — exactly the hidden set, 44,443 rows
     (1,997 live / 42,446 delisted) measured 2026-09-13 — under 510's own names, functions, hourly
     pg_cron refresh and registry row, driven from `listing_location` + `properties` by PK because a
     `listings`-driven form of the same question times out at 120 s. `/new-dedup/pin-audit` is routed
@@ -880,9 +880,25 @@ component is slimmed twice — each wave rewrites one component and slims its st
   87,756 not served (28,162 never judged · 41,396 judged without a location · 18,198 located from
   earlier) → 753,672 served → 753,658 with a verdict → 741,604 located (695,130 obec · 45,582 foreign
   · 892 a point with no obec) → **12,068 hidden = 1.4 % of the database** (12,054 unresolved + 14
-  pending). Cut with `SERVED_LISTING_PREDICATE` / `SERVED_LOCATION_PREDICATE` rendered verbatim and
-  pinned by `tests/test_location_w14_audit_waterfall.py`; no new column on `listings`, no client-side
-  arithmetic, and the migration proves the chain's four arithmetic laws at apply time.
+  pending). Cut with `SERVED_LOCATION_PREDICATE` (and, until W15, the served set) rendered verbatim
+  and pinned by `tests/test_location_w14_audit_waterfall.py`; no new column on `listings`, no
+  client-side arithmetic, and the migration proves the chain's four arithmetic laws at apply time.
+
+- **W15 — the lane covers every listing; the served set retires** (shipped): the operator's ruling,
+  2026-09-14 — the 87,756 listings W14 reported as "not served" ARE listings inside this programme,
+  so the lane must walk every listing in the database and anything it cannot place must be VISIBLE on
+  the audit page. `SERVED_LISTING_PREDICATE` is deleted: the intake full walk, the bodies pass, the
+  resolver sweep, the W11 retire rail and `check_location_town_coverage` all drive off `listings`
+  unfiltered. The retire rail now measures exactly what its delete would destroy (per portal: the
+  listings carrying a doomed claim, and how many of those would be left with no active-contract
+  claim) instead of a cohort. Migration 524 re-creates `location_pin_audit_mv` on ONE arm — every
+  listing that fails the consumer rule, ~44 k → ~80 k rows — and rewrites the waterfall to 9 rows:
+  every listing → judged → located (obec · foreign · point without obec) → hidden (unresolved ·
+  pending), the hidden set being the complement of `located` over the whole database. The only rule
+  left in the programme is the CONSUMER rule, and it decides what is SHOWN, never what is WORKED.
+  The 41,068 `undetermined` verdicts that consumed zero claims (collateral of the 2026-09-14
+  incident) are re-mined by the next full walk, which re-enqueues each mined listing in the same
+  transaction — no one-off tooling.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

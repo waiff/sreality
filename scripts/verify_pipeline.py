@@ -2512,98 +2512,79 @@ def check_location_payload_shape_drift(conn: Any, thresholds: dict[str, Any]) ->
     }
 
 
-# The location programme's one invariant (CLAUDE.md rule 25, 2026-09-11): every active
-# listing has an answer row, and every active listing that is not foreign has a town
-# (`obec_kod`). Per portal, absolute counts, red when either is not zero — this is the line
-# the S2 contract rewrites drive to zero portal by portal and the guard that keeps it there.
-# `country_status <> 'foreign'` deliberately counts `undetermined` and `disputed` as Czech:
-# foreign is a determination the resolver makes, never a default for "no town found".
+# The location programme's one invariant (CLAUDE.md rule 25): every listing has an answer
+# row, and every listing that is not foreign has a town (`obec_kod`). Per portal, absolute
+# counts, red when either is not zero — this is the line the S2 contract rewrites drive to
+# zero portal by portal and the guard that keeps it there. `country_status <> 'foreign'`
+# deliberately counts `undetermined` and `disputed` as Czech: foreign is a determination the
+# resolver makes, never a default for "no town found".
 #
-# THE RED LINE COVERS WHAT BROWSE SERVES (W2-a4), which is wider than "active".
-# `browse_projection` serves `properties WHERE status = 'active'` — the MERGE lifecycle, not
-# `is_active` — so a DELISTED property is still a Browse row, rendered from its
-# `repr_listing_ref_id` DISPLAY LISTING, which is `is_active = false`. A check scoped to
-# active listings alone reports zero while those rows show no place and drop off the map.
-# The driving predicate is therefore the sweep's (`drain._SWEEP_SQL`), stated the same way so
-# the guard and the producer cannot disagree about who is in scope, and `display_no_row_n`
-# names the cohort the old scope could not see. `active_n` / `no_row_n` / `cz_no_town_n` /
-# `town_n` keep their old meaning by filtering on `l.is_active`, so the per-portal series is
-# continuous across this change.
 # `hidden_n` is the W5 consumer rule counted OUTSIDE the audit page (operator ruling
-# 2026-09-13): of the listings Browse's population reaches, how many the consumer
-# surfaces now refuse to serve because the store has no answer for them. It is the
-# ONE definition (location_data.claims_common.SERVED_LOCATION_PREDICATE), negated —
-# never a hand-written `geom IS NULL`, which would drift the day the rule gains an arm.
-# Reported per portal and never a threshold: it is a WORKLOAD number, not a failure.
-# The check's own red/green stays `no_row + cz_no_town + display_no_row`.
+# 2026-09-13): how many listings the consumer surfaces refuse to serve because the store has
+# no answer for them. It is the ONE definition
+# (location_data.claims_common.SERVED_LOCATION_PREDICATE), negated — never a hand-written
+# `geom IS NULL`, which would drift the day the rule gains an arm. Reported per portal and
+# never a threshold: it is a WORKLOAD number, not a failure. The check's own red/green is
+# `no_row + cz_no_town`.
+#
+# EVERY LISTING, no WHERE (W15, operator ruling 2026-09-14). This read used to be scoped to
+# the served set — live listings, plus the display listing of a live property — and its four
+# original counts additionally filtered on `l.is_active`. Both are gone: the location lane
+# covers the whole database, so the denominator is the portal's whole corpus. THE PER-PORTAL
+# SERIES THEREFORE CHANGED MEANING ON 2026-09-14 and the numbers before and after that date
+# are not comparable; `town_share` is the readable one across the step.
 _LOCATION_TOWN_COVERAGE_SQL = f"""
     SELECT l.source,
-           count(*) FILTER (WHERE l.is_active)                         AS active_n,
-           count(*) FILTER (WHERE l.is_active
-                              AND p.listing_id IS NULL)                AS no_row_n,
-           count(*) FILTER (WHERE l.is_active
-                              AND p.listing_id IS NOT NULL
+           count(*)                                                   AS listings_n,
+           count(*) FILTER (WHERE p.listing_id IS NULL)               AS no_row_n,
+           count(*) FILTER (WHERE p.listing_id IS NOT NULL
                               AND p.country_status <> 'foreign'
-                              AND p.obec_kod IS NULL)                  AS cz_no_town_n,
-           count(*) FILTER (WHERE l.is_active
-                              AND p.obec_kod IS NOT NULL)              AS town_n,
-           count(*) FILTER (WHERE NOT l.is_active
-                              AND p.listing_id IS NULL)                AS display_no_row_n,
-           count(*) FILTER (WHERE NOT {SERVED_LOCATION_PREDICATE})     AS hidden_n
+                              AND p.obec_kod IS NULL)                 AS cz_no_town_n,
+           count(*) FILTER (WHERE p.obec_kod IS NOT NULL)             AS town_n,
+           count(*) FILTER (WHERE NOT {SERVED_LOCATION_PREDICATE})    AS hidden_n
       FROM listings l
       LEFT JOIN listing_location p ON p.listing_id = l.id
-     WHERE l.is_active
-        OR EXISTS (SELECT 1 FROM properties pr
-                    WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active')
      GROUP BY l.source
      ORDER BY l.source
 """
 
 
 def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Red when any listing BROWSE SERVES has no answer row, or any active non-foreign
-    listing has no town. Absolute counts, no threshold: the invariant is zero, and a number
-    that is not zero names the portal whose contract has to change.
+    """Red when ANY listing has no answer row, or any non-foreign one has no town. Absolute
+    counts, no threshold: the invariant is zero, and a number that is not zero names the
+    portal whose contract has to change.
 
-    Three counts, not two (W2-a4): `display_no_row` is the display listing of an ACTIVE
-    property that is itself delisted — a Browse row, and after W3 a Browse row with no place
-    and no map pin. It is red for the same reason and on the same line.
-
-    `hidden` (W5) is the fourth, and the only one that is not a defect: the listings the
-    consumer rule now refuses to serve. It rides the same read so the number the audit page
-    shows is visible from the pipeline verifier too, and it never changes the status."""
+    `hidden` (W5) is the one number here that is not a defect: the listings the consumer rule
+    refuses to serve. It rides the same read so the number the audit page shows is visible
+    from the pipeline verifier too, and it never changes the status."""
     rows = _fetchall(conn, _LOCATION_TOWN_COVERAGE_SQL)
-    cells = [{"source": s, "active": int(a), "no_row": int(nr), "cz_no_town": int(nt),
-              "town": int(t), "display_no_row": int(dnr), "hidden": int(h),
-              "town_share": (int(t) / int(a)) if int(a) else None}
-             for s, a, nr, nt, t, dnr, h in rows]
+    cells = [{"source": s, "listings": int(n), "no_row": int(nr), "cz_no_town": int(nt),
+              "town": int(t), "hidden": int(h),
+              "town_share": (int(t) / int(n)) if int(n) else None}
+             for s, n, nr, nt, t, h in rows]
     no_row = sum(c["no_row"] for c in cells)
     cz_no_town = sum(c["cz_no_town"] for c in cells)
-    display_no_row = sum(c["display_no_row"] for c in cells)
     hidden = sum(c["hidden"] for c in cells)
-    active = sum(c["active"] for c in cells)
+    listings = sum(c["listings"] for c in cells)
     if not cells:
         return {"check_key": "location_town_coverage", "status": "warn", "value": None,
-                "details": {"skipped": "no active listings read", "cells": []},
-                "message": "Location town coverage verified NOTHING — no active listings read."}
+                "details": {"skipped": "no listings read", "cells": []},
+                "message": "Location town coverage verified NOTHING — no listings read."}
     offenders = [f"{c['source']}: {c['no_row']:,} without a row, {c['cz_no_town']:,} Czech "
-                 f"without a town, {c['display_no_row']:,} delisted display listings "
-                 f"without a row (of {c['active']:,})"
-                 for c in cells if c["no_row"] or c["cz_no_town"] or c["display_no_row"]]
+                 f"without a town (of {c['listings']:,})"
+                 for c in cells if c["no_row"] or c["cz_no_town"]]
     hidden_by_source = "; ".join(
         f"{c['source']} {c['hidden']:,}"
         for c in sorted(cells, key=lambda c: -c["hidden"]) if c["hidden"]
     )
-    missing = no_row + cz_no_town + display_no_row
+    missing = no_row + cz_no_town
     status = "fail" if missing else "ok"
     message = (
-        f"{missing:,} listings Browse serves have no town "
-        f"({no_row:,} active without an answer row, {cz_no_town:,} active Czech without "
-        f"obec_kod, {display_no_row:,} delisted display listings of an active property "
-        f"without a row): " + "; ".join(offenders)
+        f"{missing:,} listings have no town "
+        f"({no_row:,} without an answer row, {cz_no_town:,} Czech without obec_kod): "
+        + "; ".join(offenders)
         if missing
-        else f"Every one of {active:,} active listings has an answer row, every Czech one a "
-             "town, and every delisted display listing Browse serves has a row too."
+        else f"Every one of {listings:,} listings has an answer row and every Czech one a town."
     )
     if hidden:
         message += (
@@ -2613,9 +2594,8 @@ def check_location_town_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[
         "check_key": "location_town_coverage",
         "status": status,
         "value": missing,
-        "details": {"active": active, "no_row": no_row, "cz_no_town": cz_no_town,
-                    "display_no_row": display_no_row, "hidden": hidden,
-                    "cells": cells, "offenders": offenders},
+        "details": {"listings": listings, "no_row": no_row, "cz_no_town": cz_no_town,
+                    "hidden": hidden, "cells": cells, "offenders": offenders},
         "message": message,
     }
 

@@ -50,10 +50,13 @@ startup into a list of `portal_contract_entries.id`, and the batch predicate is
 (`location_data/operator_corrections.py`), and NULL is never `= ANY` of anything, so the
 operator's own corrections cannot be reached by this module even by mistake.
 
-AND IT WAITS FOR THE RE-MINE (W11). Since the 2026-09-14 blackout the resolver reads a
-listing's NEWEST EVIDENCE, so a retired version's rows are live data until the page has been
-re-mined under the active one. The run refuses (exit 3) while any portal still has a served
-listing carrying no claim under its ACTIVE contract, and names the number. No `--force`.
+AND IT WAITS FOR THE RE-MINE (W11, re-aimed in W15). Since the 2026-09-14 blackout the
+resolver reads a listing's NEWEST EVIDENCE, so a retired version's rows are live data until
+the page has been re-mined under the active one. The rail measures exactly what this delete
+would destroy, over EVERY listing: per portal, the listings carrying a claim under one of
+the doomed entries, and how many of those have NO claim under that portal's active contract
+— i.e. would be left with no evidence at all. Any non-zero number refuses the run (exit 3)
+and names the portal. No `--force`.
 
     python3 -m scripts.location_claims_retire --dry-run
     python3 -m scripts.location_claims_retire --confirm RETIRE
@@ -90,29 +93,36 @@ _RETIRED_ENTRIES_SQL = """
      ORDER BY pc.source, pc.version, pce.id
 """
 
-# THE RE-MINE RAIL (W11, incident 2026-09-14). A retired version's claims are NOT dead
-# weight while the portal's pages have not been re-mined under the ACTIVE version: since W11
-# the resolver reads a listing's NEWEST EVIDENCE (the highest contract version present for
-# that listing that is <= the active one), so an old version's rows are what keeps a
-# half-re-mined listing on the map. Deleting them mid-re-mine is exactly the blackout W11
-# fixed, spelled as a DELETE instead of a SELECT — and this one would not self-heal.
+# THE RE-MINE RAIL (W11, incident 2026-09-14; re-aimed W15). A retired version's claims are
+# NOT dead weight while the portal's pages have not been re-mined under the ACTIVE version:
+# since W11 the resolver reads a listing's NEWEST EVIDENCE (the highest contract version
+# present for that listing that is <= the active one), so an old version's rows are what
+# keeps a half-re-mined listing on the map. Deleting them mid-re-mine is exactly the blackout
+# W11 fixed, spelled as a DELETE instead of a SELECT — and this one would not self-heal.
 #
-# So the gate is per portal and it is a fact, not a wait: a version of portal P is deletable
-# only when every SERVED listing of P (active, which is what consumers show) already carries
-# at least one claim under P's ACTIVE contract. `count(*) FILTER (WHERE NOT EXISTS ...)` is
-# the number still awaiting its re-mine; any portal with a non-zero number refuses the run
-# and names it. There is deliberately no `--force`: the answer is to wait 6-8 h for the
-# intake lanes, and a flag would exist only to skip that wait.
+# IT MEASURES THE DAMAGE, NOT A COHORT. W11 asked the question of `l.is_active` listings,
+# which was both too wide (a live listing with no doomed claim is not at risk) and too narrow
+# (W15 retires the served set: every listing is in the lane, and a delisted one that loses its
+# only evidence is a listing the audit page must then explain for ever). So the driving set is
+# the DOOMED CLAIMS themselves — the listings this delete would touch — and the number that
+# blocks is how many of them would be left with no claim under their portal's ACTIVE contract.
+# Any non-zero count refuses the run and names the portal. There is deliberately no `--force`:
+# the answer is to wait for the intake lanes, and a flag would exist only to skip that wait.
 _REMINE_GAP_SQL = """
-    SELECT l.source, count(*) AS served,
+    WITH doomed AS (
+        SELECT DISTINCT c.listing_id
+          FROM location_claims c
+         WHERE c.contract_entry_id = ANY(%(entry_ids)s)
+    )
+    SELECT l.source, count(*) AS touched,
            count(*) FILTER (WHERE NOT EXISTS (
                SELECT 1 FROM location_claims c
                  JOIN portal_contract_entries pce ON pce.id = c.contract_entry_id
                  JOIN portal_contracts pc ON pc.id = pce.contract_id
                 WHERE c.listing_id = l.id AND pc.is_active AND pc.source = l.source
                   AND c.licence_class IN ('portal', 'operator'))) AS awaiting_remine
-      FROM listings l
-     WHERE l.is_active AND l.source = ANY(%(sources)s)
+      FROM doomed d
+      JOIN listings l ON l.id = d.listing_id
      GROUP BY l.source
      ORDER BY l.source
 """
@@ -159,11 +169,17 @@ def retired_entry_ids(conn: psycopg.Connection) -> list[tuple[int, str, int]]:
         return [(int(r[0]), str(r[1]), int(r[2])) for r in cur.fetchall()]
 
 
-def remine_gaps(conn: psycopg.Connection, sources: list[str]) -> list[tuple[str, int, int]]:
-    """(portal, served listings, listings with no claim under the ACTIVE contract)."""
-    with conn.cursor() as cur:
-        cur.execute(_REMINE_GAP_SQL, {"sources": sources})
-        return [(str(r[0]), int(r[1]), int(r[2])) for r in cur.fetchall()]
+def remine_gaps(conn: psycopg.Connection, entry_ids: list[int],
+                *, timeout: str = "600s") -> list[tuple[str, int, int]]:
+    """(portal, listings this delete touches, those with no ACTIVE-contract claim left).
+
+    `SET LOCAL` inside an explicit transaction, for `count_doomed`'s reason: the rail walks
+    the doomed set once and must not die on the role's 120 s default."""
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = '{timeout}'")
+            cur.execute(_REMINE_GAP_SQL, {"entry_ids": entry_ids})
+            return [(str(r[0]), int(r[1]), int(r[2])) for r in cur.fetchall()]
 
 
 def count_doomed(conn: psycopg.Connection, entry_ids: list[int], *,
@@ -254,12 +270,11 @@ def main(argv: list[str] | None = None) -> int:
         LOG.info("RETIRE plan: %d entries under %d retired versions (%s)",
                  len(entry_ids), len(versions), ", ".join(versions))
 
-        blocked = [g for g in remine_gaps(conn, sorted({src for _, src, _ in entries}))
-                   if g[2] > 0]
-        for source, served, awaiting in blocked:
-            LOG.error("RETIRE blocked by %s: %d of %d served listings carry no claim under "
-                      "its ACTIVE contract — the retired versions are still their newest "
-                      "evidence", source, awaiting, served)
+        blocked = [g for g in remine_gaps(conn, entry_ids) if g[2] > 0]
+        for source, touched, awaiting in blocked:
+            LOG.error("RETIRE blocked by %s: %d of the %d listings this delete would touch "
+                      "carry no claim under its ACTIVE contract — the retired versions are "
+                      "still their only evidence", source, awaiting, touched)
         if armed and blocked:
             LOG.error("RETIRE nothing was deleted; re-run once the intake lanes have "
                       "re-mined those pages")

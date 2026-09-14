@@ -1952,7 +1952,7 @@ def test_worker_lane_stall_does_not_double_alarm_a_dead_worker() -> None:
     assert "worker_liveness" in out["message"]
 
 
-# --- location_town_coverage (rule 25's invariant, 2026-09-11) --------------------
+# --- location_town_coverage (rule 25's invariant; every listing since W15) --------
 
 
 def test_location_town_coverage_is_registered_and_runs_first() -> None:
@@ -1974,15 +1974,14 @@ def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() ->
     from scripts.verify_pipeline import check_location_town_coverage
 
     conn = _ShapeDriftConn([
-        ("bazos", 40_000, 0, 120, 39_500, 0, 120),
-        ("idnes", 30_000, 900, 11_000, 18_000, 0, 11_900),
-        ("sreality", 200_000, 0, 0, 199_000, 0, 0),
+        ("bazos", 40_000, 0, 120, 39_500, 120),
+        ("idnes", 30_000, 900, 11_000, 18_000, 11_900),
+        ("sreality", 200_000, 0, 0, 199_000, 0),
     ])
     out = check_location_town_coverage(conn, T)
     assert out["status"] == "fail"
     assert out["value"] == 12_020
     assert out["details"]["no_row"] == 900 and out["details"]["cz_no_town"] == 11_120
-    assert out["details"]["display_no_row"] == 0
     assert "idnes: 900 without a row, 11,000 Czech without a town" in out["message"]
     assert "sreality" not in out["message"]
     assert any("statement_timeout" in s for s in conn.executed)
@@ -1992,25 +1991,24 @@ def test_location_town_coverage_is_red_while_any_czech_listing_lacks_a_town() ->
         in out["message"]
 
 
-def test_location_town_coverage_is_red_on_delisted_display_listings_alone() -> None:
-    """W2-a4. `browse_projection` serves `properties WHERE status = 'active'` — the MERGE
-    lifecycle, not `is_active` — so a DELISTED property is still a Browse row, rendered from
-    its `repr_listing_ref_id` display listing, which is `is_active = false`. Every active
-    listing can have a town and the check still has to be red: after W3 those rows show no
-    place and drop off the map. The old scope could not see them at all."""
+def test_location_town_coverage_measures_every_listing_not_only_the_live_ones() -> None:
+    """W15 (operator ruling 2026-09-14). The read was scoped to the served set and its four
+    counts additionally filtered on `l.is_active`; both are gone. A DELISTED listing with no
+    answer row is now red exactly like a live one, and the denominator is the portal's whole
+    corpus — which is why the per-portal series is not comparable across that date."""
     from scripts.verify_pipeline import check_location_town_coverage
 
     out = check_location_town_coverage(_ShapeDriftConn([
-        ("bazos", 40_000, 0, 0, 40_000, 0, 0),
-        ("remax", 30_000, 0, 0, 30_000, 4_200, 4_200),
+        ("bazos", 40_000, 0, 0, 40_000, 0),
+        ("remax", 30_000, 4_200, 0, 25_800, 4_200),
     ]), T)
     assert out["status"] == "fail"
     assert out["value"] == 4_200
-    assert out["details"]["no_row"] == 0 and out["details"]["cz_no_town"] == 0
-    assert out["details"]["display_no_row"] == 4_200
-    assert out["details"]["cells"][1]["display_no_row"] == 4_200
-    assert "remax: 0 without a row, 0 Czech without a town, 4,200 delisted display " \
-           "listings without a row" in out["message"]
+    assert out["details"]["cz_no_town"] == 0
+    assert out["details"]["listings"] == 70_000
+    assert out["details"]["cells"][1]["listings"] == 30_000
+    assert out["details"]["cells"][1]["town_share"] == 25_800 / 30_000
+    assert "remax: 4,200 without a row, 0 Czech without a town (of 30,000)" in out["message"]
     assert "bazos" not in out["message"]
 
 
@@ -2018,12 +2016,12 @@ def test_location_town_coverage_is_ok_only_at_zero() -> None:
     from scripts.verify_pipeline import check_location_town_coverage
 
     out = check_location_town_coverage(_ShapeDriftConn([
-        ("bazos", 40_000, 0, 0, 39_000, 0, 0), ("idnes", 30_000, 0, 0, 10_000, 0, 0)]), T)
+        ("bazos", 40_000, 0, 0, 39_000, 0), ("idnes", 30_000, 0, 0, 10_000, 0)]), T)
     assert out["status"] == "ok" and out["value"] == 0
     assert out["details"]["hidden"] == 0
     assert "Consumers currently hide" not in out["message"]
     assert out["details"]["cells"][1]["town_share"] == 10_000 / 30_000
-    assert "delisted display listing" in out["message"]
+    assert "Every one of 70,000 listings" in out["message"]
 
 
 def test_location_town_coverage_counts_undetermined_as_czech() -> None:
@@ -2036,28 +2034,29 @@ def test_location_town_coverage_counts_undetermined_as_czech() -> None:
     assert "from listings l left join listing_location p on p.listing_id = l.id" in flat
     # W2-a repointed it: the frozen projection is not the coverage denominator any more.
     assert "listing_location_current" not in flat
-    assert "where l.is_active" in flat
 
 
-def test_location_town_coverage_is_scoped_to_what_browse_serves_not_to_is_active() -> None:
-    """W2-a4. The guard and the producer must not disagree about who is in scope, so the
-    driving predicate is stated exactly as `drain._SWEEP_SQL` states it. The four original
-    counts keep their old meaning by filtering on `l.is_active`, so the per-portal series is
-    continuous across the widening; `display_no_row_n` is the cohort the old scope could not
-    see at all."""
+def test_location_town_coverage_covers_every_listing() -> None:
+    """W15. The guard and the producer must not disagree about who is in scope, and since
+    the operator's 2026-09-14 ruling that is EVERY listing: the served set is retired, so
+    the read carries no WHERE and no per-count `l.is_active` filter, exactly like
+    `drain._SWEEP_SQL`. RED by: a cohort creeping back into either one."""
     from location_data.resolver import drain
     from scripts.verify_pipeline import _LOCATION_TOWN_COVERAGE_SQL
 
     flat = " ".join(_LOCATION_TOWN_COVERAGE_SQL.split()).lower()
-    served = ("exists (select 1 from properties pr where pr.repr_listing_ref_id = l.id "
-              "and pr.status = 'active')")
-    assert served in flat
-    assert served in " ".join(drain._SWEEP_SQL.split()).lower()
-    assert "where l.is_active or exists" in flat
-    assert "count(*) filter (where not l.is_active and p.listing_id is null) as display_no_row_n" in flat
-    for original in ("as active_n", "as no_row_n", "as cz_no_town_n", "as town_n"):
-        assert original in flat, original
-    assert flat.count("filter (where l.is_active") == 4
+    for text in ("repr_listing_ref_id", "properties", "l.is_active"):
+        assert text not in flat, text
+    # No cohort WHERE at all: the join goes straight into the GROUP BY. (The only
+    # `where` left in the statement is the consumer rule's own EXISTS.)
+    assert "listing_location p on p.listing_id = l.id group by l.source" in flat
+    assert "l.is_active" not in " ".join(drain._SWEEP_SQL.split()).lower()
+    # The cells the operator reads, and nothing the old scope needed.
+    for kept in ("as listings_n", "as no_row_n", "as cz_no_town_n", "as town_n",
+                 "as hidden_n"):
+        assert kept in flat, kept
+    assert "display_no_row" not in flat and "active_n" not in flat
+    assert "filter (where l.is_active" not in flat
 
 
 # --- location_payload_shape_drift (W4's standing P6 check) ---------------------

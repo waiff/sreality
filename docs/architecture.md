@@ -2264,22 +2264,26 @@ failure stamp) is bounded by the `enqueued_at` the slice claimed, so evidence ar
 leaves the row queued instead of deleted-unresolved; the sweep alone uses `NOT EXISTS` + `DO NOTHING`
 , because it carries no evidence and a bump there would reset a poisoned row's backoff and push the
 queue's oldest row to the back. A listing with no live claim gets an `undetermined` row (granularity
-`unknown`, no position) instead of no row, so coverage is `count(listing_location) = count(served
-listings)` by construction.
+`unknown`, no position) instead of no row, so coverage is `count(listing_location) = count(listings)`
+by construction.
 
-**The driving predicate is what BROWSE SERVES, not what is active**: `l.is_active OR EXISTS
-(properties pr WHERE pr.repr_listing_ref_id = l.id AND pr.status = 'active')` — one constant,
-`SERVED_LISTING_PREDICATE` in `location_data/claims_common.py`, which every half of the lane and the
-sweep import rather than re-spell. `browse_projection`
-serves `properties.status = 'active'`, the merge lifecycle, so a delisted property is still a Browse
-row rendered from its `is_active = false` display listing. The sweep, the queue and the coverage
-check all count that same cohort (migration 505 indexes the correlated EXISTS — `CREATE INDEX
-CONCURRENTLY`, so it is applied through `apply_migration.yml`, never the MCP, which wraps every
-payload in a transaction). **The red line**: `check_location_town_coverage`
-(`scripts/verify_pipeline.py`) reports, per portal and in absolute counts, served listings with no
-row and active Czech listings with no `obec_kod`, and is RED until both are zero. That is the
-invariant the whole shape exists for; the mandatory town entry, BIND's tail rungs and the sweep's
-fourth arm are all rails that serve it.
+**THERE IS NO COHORT: THE LANE COVERS EVERY LISTING** (W15, operator ruling 2026-09-14). W1 scoped
+the walks and the sweep to a "served set" — `l.is_active OR EXISTS (properties pr WHERE
+pr.repr_listing_ref_id = l.id AND pr.status = 'active')`, the constant `SERVED_LISTING_PREDICATE` —
+to save the payload half of every hop on delisted rows. It was a cost shortcut, and it became a
+SECOND definition of "what counts" next to the consumer rule: the 87,756 listings it excluded are
+legitimate listings, they must be walked, mined and re-resolved like any other, and while their
+location cannot be determined they must be VISIBLE on the audit page. So the constant is deleted and
+every walk, sweep, rail and audit surface drives off `listings` unfiltered (migration 505's partial
+index on `properties (repr_listing_ref_id)` stays — append-only, and every read model that joins
+`listings` on that column still uses it). The one rule left in the programme is the CONSUMER rule
+`SERVED_LOCATION_PREDICATE`, below, and it decides what is *shown*, never what is *worked*. **The red
+line**: `check_location_town_coverage` (`scripts/verify_pipeline.py`) reports, per portal and in
+absolute counts, listings with no row and non-foreign listings with no `obec_kod` over the portal's
+WHOLE corpus, and is RED until both are zero — its per-portal series changed meaning on 2026-09-14
+and numbers either side of that date are not comparable. That is the invariant the whole shape exists
+for; the mandatory town entry, BIND's tail rungs and the sweep's fourth arm are all rails that serve
+it.
 
 **ONE LABEL, ONE CODE PREDICATE.** Every surface renders `location_display_label(...)` (migration
 503, one IMMUTABLE SQL function over seven columns): foreign country code, else street + čp/čo +
@@ -2335,10 +2339,12 @@ the extension, the audit page's own links and an operator's pipeline card (rule 
 all keep working on an unresolved listing. Measured at the ruling: 44,702 of 711,600 Browse rows,
 2,953 of them still-live ads. `check_location_town_coverage` reports the count per portal as
 `hidden_n` — a workload number that never moves the check's status. The operator watches the same
-set on `/new-dedup/pin-audit`, whose relation `location_pin_audit_mv` (migration 514) IS that
-definition — `SERVED_LISTING_PREDICATE` minus `SERVED_LOCATION_PREDICATE`, refreshed hourly by
-pg_cron, leading the nav with its count — so the page and the rule can never describe different
-sets. It carries no map: the whole subject is rows with no point to draw. Migration 510's
+set on `/new-dedup/pin-audit`, whose relation `location_pin_audit_mv` (migration 524) IS that
+definition — every listing that fails `SERVED_LOCATION_PREDICATE` and nothing else, refreshed hourly
+by pg_cron, leading the nav with its count — so the page and the rule can never describe different
+sets. W15 widened that cohort from ~44 k to ~80 k by retiring the served set: a delisted listing with
+no decided location is a finding like any other, and live-vs-delisted is one of the page's `quality`
+filters rather than a reason to hide the row. It carries no map: the whole subject is rows with no point to draw. Migration 510's
 property-and-legacy-pin version of that relation stays on disk as history (append-only, rule 1); it
 was retired by 513 because it read five `properties` place columns 508 drops, and 514 re-creates the
 name on inputs that cannot expire the same way.
@@ -2514,30 +2520,31 @@ exists, nothing queued, no newer evidence, still no location) is the issue, and 
 buckets refine that half alone. The page toggles between the two and defaults to `unresolved`; the
 nav badge counts `unresolved` only, because a badge that climbed whenever the scrapers ran would
 teach the operator to ignore it. Measured at the split: 11 pending, 44,370 unresolved.
-**W14 (migration 523) makes the page read against the whole database.** The operator's complaint was
-that the audit set was a number with nothing to measure it by. `location_audit_waterfall` is the
-chain — 14 rows, rewritten hourly by the SAME `refresh_location_pin_audit_mv()` run, after the
-matview so the last step's split reads the relation the page lists: every listing ever collected
-(841,428) → **not served** (87,756: 28,162 never judged, 41,396 judged without a location, 18,198
-located from earlier — delisted rows no surface shows, so they are not audit findings) → **served**
-(753,672, the listings a consumer can meet) → served with a verdict (753,658) → **served and
-located** (741,604 = 695,130 with an obec + 45,582 determined foreign + 892 a Czech point with no
-obec) → **hidden** (12,068 = 12,054 `unresolved` + 14 `pending`), which is 1.4 % of the database and
-not 100 % of itself. Every row is cut with the two shared constants `SERVED_LISTING_PREDICATE` and
-`SERVED_LOCATION_PREDICATE` rendered verbatim (pinned by `tests/test_location_w14_audit_waterfall.py`,
-the W5 rail's shape) — one statement, one snapshot, no new column on `listings`, and the client
-renders `n` / `lost` / `share_pct` without recomputing any of them. Rows are `chain` (the funnel,
-`lost` = the previous step's count minus its own), `deduction` (a set carved out: the not-served
-rows, the hidden set) or `split` (sub-rows that partition their parent); the migration proves all
-four arithmetic laws at apply time. Cost: 19.3 s on top of the hourly refresh's 900 s budget.
-`quality` buckets the set on active/delisted × `has_claims`; the SPA page `/new-dedup/pin-audit`
-filters on those four axes plus the sibling flag, draws the legacy pins (capped at 5,000, and it
-says when it capped), and reads its overview matrix from `location_pin_audit_summary()` so the
-matrix, the header split and the list cannot disagree. It is built over `properties` rather than
-over `properties_map_mv` because the map matview is rebuilt at runtime by
-`rebuild_properties_map_mv()` and its live column set is newer than the one migration 254 statically
-creates — which is all the CI schema replay ever sees; the cohort CTE is MATERIALIZED so the
-evidence laterals run ~37k times and not once per active property. Refreshed hourly by pg_cron
+**W14 (migration 523) makes the page read against the whole database, and W15 (migration 524)
+simplifies the chain to the one rule.** The operator's complaint was that the audit set was a number
+with nothing to measure it by. `location_audit_waterfall` is the chain — **9 rows** since W15,
+rewritten hourly by the SAME `refresh_location_pin_audit_mv()` run, after the matview so the last
+step's split reads the relation the page lists: every listing in the database (841,428) → **judged**
+(the lane has a stored verdict for it; the loss is the listings it has never reached) → **located**
+(a point, or the determination that it is abroad — split into with-an-obec / foreign / a Czech point
+with no obec) → **hidden**, the complement of `located` over the WHOLE database, split into
+`unresolved` and `pending`, which is the set this page lists and is read as a share of 841 k rather
+than 100 % of itself. W14 shipped it as 14 rows with a served / not-served fork; retiring the served
+set removed the fork, and the hidden set grew from 12,068 to ~80 k because the ~68 k delisted rows it
+used to exclude are now findings. The one cut is `SERVED_LOCATION_PREDICATE`, rendered verbatim
+(pinned by `tests/test_location_w14_audit_waterfall.py`, the W5 rail's shape) — one statement, one
+snapshot, no new column on `listings`, and the client renders `n` / `lost` / `share_pct` without
+recomputing any of them. Rows are `chain` (the funnel, `lost` = the previous step's count minus its
+own), `deduction` (a set carved out: the hidden set) or `split` (sub-rows that partition their
+parent); the migration proves the arithmetic laws at apply time. Cost: 19.3 s on top of the hourly
+refresh's 900 s budget.
+`quality` buckets the set on active/delisted × `has_claims` — and since W15 `listings.is_active` is
+the page's ONLY live/delisted notion; the SPA page `/new-dedup/pin-audit` filters on those four axes
+plus the sibling flag and reads its overview matrix from `location_pin_audit_summary()` so the
+matrix, the header split and the list cannot disagree. The cohort is ONE arm — `listings` LEFT JOINed
+to `listing_location`, `WHERE NOT <the consumer rule>` — instead of 514's union of two candidate
+sets, and the cohort CTE is MATERIALIZED so the evidence and snapshot laterals run once per cohort
+row (~80 k) and not once per listing. Refreshed hourly by pg_cron
 (`refresh-location-pin-audit`, guarded so the replay container skips it) with the budget armed **in
 the cron command** — migration 371's rule, or the refresh would silently die at the 120 s database
 default. Rule 25's deletion parity did not apply: it was an operator-requested review surface with
