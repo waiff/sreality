@@ -257,6 +257,37 @@ lag, a 45 s budget and 2 000-row batches. Env knobs on the Railway service:
   `browse_list`'s `*/15` pg_cron rebuild. Claim and verdict in ~3–4 minutes; the read model is now
   the slowest hop, not the claim lane.
 
+**Location-refetch lane (location simplification W8, ships LIVE):** once a day
+(`LOCATION_REFETCH_INTERVAL_S`, default 86400, first tick after a
+`LOCATION_REFETCH_FIRST_DELAY_SECONDS` = 300 s delay so a redeploy loop cannot turn "daily" into
+"per restart"), queue the audit page's active "no data" listings for ONE more detail fetch.
+
+- **Why.** ceskereality and realitymix geocode an ad after publishing it; our detail fetch ran at
+  discovery, read empty location fields, and the index card never changed, so no re-fetch was ever
+  enqueued (measured 2026-09-14: 56 of 63 ceskereality and 56 of 112 realitymix rows in that bucket
+  were fetched within two minutes of first sighting and never again).
+- **The audit relation IS the candidate list** — `location_pin_audit_mv` with
+  `state='unresolved'` + `quality='active_no_claims'`, joined to `listings` by PK for the live
+  `source_url` / `price_czk` / `is_active` (the matview is an hourly snapshot; a re-fetch must not
+  be aimed by a stale URL). Rows whose newest `portal_raw_pages` / `portal_raw_payloads` record is
+  younger than `LOCATION_REFETCH_MIN_AGE_S` (6 h) are skipped — re-reading a page fetched minutes
+  ago only re-reads the same empty moment.
+- **Bounded per portal, oldest-fetched first.** `LOCATION_REFETCH_CAP_PER_SOURCE` (500) rows per
+  portal per tick, so bazos's dead ads (their page answers with the category listing →
+  `ListingGoneError` → delisted by the same fetch) drain over days instead of flooding one drain
+  pass. The heartbeat's `last` carries the UNCAPPED per-portal backlog beside what it queued.
+- **It enqueues and nothing else.** `db.enqueue_location_refetch` writes at
+  `QUEUE_PRIORITY_VERIFY` with `LEAST` on priority and `given_up=false, attempts=0` (the rows it
+  most wants are the ones the drain gave up on; nothing else re-arms them). `claim_detail_batch`
+  reserves a share of every claim for that class and never filters on `supports_complete_walk`, so
+  every portal's drain — worker or Actions — serves them. Then the drain rewrites the page, the
+  `location_intake_fast` lane mines the new body within a minute, and the resolver answers.
+- **No lease, no in-process lock.** One SELECT plus one INSERT per portal; the enqueue is idempotent
+  on `(source, native_id)` and never disturbs a claimed row. A missing `location_pin_audit_mv` (a
+  branch database) skips the tick with ONE warning per process.
+- **A daily lane is not a dead lane.** `check_worker_lane_stall` reads `in_flight_s` — a pass
+  RUNNING too long — and skips a lane that is idle between passes, so no threshold changed.
+
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as
 % of portal size — line ~264), close silent-greens (image-pipeline liveness, dedup

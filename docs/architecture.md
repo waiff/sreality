@@ -2038,6 +2038,32 @@ Browse:** ≤2 min lag → ≤1 min tick → the resolver drain's own worker lan
 pg_cron rebuild, `*/15`. So a claim and a verdict land within ~3–4 minutes, and the read model — not
 the claim lane — is what the operator now waits on.
 
+**A PAGE THAT CARRIED NO LOCATION GETS A SECOND LOOK (W8).** ceskereality and realitymix
+geocode an ad AFTER publishing it. Measured 2026-09-14, of the audit page's active "no data" rows
+(`location_pin_audit_mv`, `state='unresolved'` + `quality='active_no_claims'`) 56 of 63 ceskereality
+and 56 of 112 realitymix listings had been fetched within TWO MINUTES of first sighting and never
+fetched again: our one detail fetch read the page while its location fields were still empty, the
+index card never changed afterwards, so nothing ever re-enqueued them and the listing had no claims
+for ever. Checked live the same day, ceskereality 3876635 now carries "Zlín, ulice Mlýnská" and
+coordinates — so the fix is a re-fetch, not a contract change. The `location_refetch` lane in
+`scraper/realtime_worker.py` runs once a day (`LOCATION_REFETCH_INTERVAL_S`, first tick ~5 minutes
+after start, `LOCATION_REFETCH_ENABLED=0` idles it), asks the audit relation for those rows — joined
+to `listings` by primary key, so the URL it aims at and the row's liveness are current and not an
+hour-old snapshot — keeps the ones whose newest stored page or payload is older than
+`LOCATION_REFETCH_MIN_AGE_S` (6 h, so a listing discovered today gets its second look on tomorrow's
+tick), and enqueues at most `LOCATION_REFETCH_CAP_PER_SOURCE` (500) per portal, longest-unfetched
+first, into `listing_detail_queue` at `QUEUE_PRIORITY_VERIFY`. It enqueues and nothing else: the
+drain re-fetches and rewrites the page, the fast intake lane mines the new body within a minute, the
+resolver answers. `enqueue_location_refetch` is its own writer rather than `enqueue_detail` because
+the two directions differ — `LEAST` on priority (a second look must never promote a row above the
+new listings the drain is fetching) and `given_up=false, attempts=0`, since the rows it most wants
+are exactly the ones the drain gave up on and no claim can see (rule #5). The bound is what makes it
+polite: bazos's share of that bucket is dead ads whose page answers with the category listing, which
+raises `ListingGoneError` and delists the row, so a portal carrying thousands of them drains over
+days instead of flooding one drain pass. A daily lane never reads as a dead one —
+`check_worker_lane_stall` alarms on `in_flight_s` (a pass running too long), never on the gap
+between passes.
+
 **The cursor is the lane's only memory, and every run has a budget.**
 `location_claim_batches.cursor_after_id` holds a `listings.id` in full mode and a
 `listing_snapshots.id` in incremental mode. Full mode resumes only from a budget-`stopped`

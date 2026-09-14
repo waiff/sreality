@@ -1480,3 +1480,183 @@ def test_the_bodies_cap_is_an_env_knob_and_clamped(
     assert rw._read_location_intake_fast_bodies_cap() == 50
     monkeypatch.setenv(rw.LOCATION_INTAKE_FAST_BODIES_CAP_ENV, "0")
     assert rw._read_location_intake_fast_bodies_cap() == 1, "0 is not a kill switch"
+
+
+# --- W8: the daily location re-fetch lane ------------------------------------
+
+
+def _refetch_row(source: str, nid: str, total: int = 3, **over: Any) -> dict[str, Any]:
+    row = {
+        "source": source, "native_id": nid, "detail_ref": f"https://x/{nid}",
+        "price_czk": 100, "source_total": total,
+    }
+    row.update(over)
+    return row
+
+
+def _patch_refetch(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Stub the two db entry points the lane touches and capture their calls."""
+    captured: dict[str, Any] = {"enqueued": [], "kwargs": {}}
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _Conn()
+
+    def fake_candidates(c: Any, **kwargs: Any) -> list[dict[str, Any]] | None:
+        captured["conn"] = c
+        captured["kwargs"] = kwargs
+        return rows
+
+    def fake_enqueue(c: Any, source: str, entries: Any) -> int:
+        captured["enqueued"].append((source, list(entries)))
+        return len(list(entries))
+
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(rw.db, "location_refetch_candidates", fake_candidates)
+    monkeypatch.setattr(rw.db, "enqueue_location_refetch", fake_enqueue)
+    monkeypatch.setattr(rw, "_LOCATION_REFETCH_VIEW_WARNED", False)
+    captured["conn_obj"] = conn
+    return captured
+
+
+def test_location_refetch_lane_registered_and_live_by_default(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # LIVE by default for the intake lane's reason: an env var the operator has to
+    # remember to set on the Railway service is a fix that never runs.
+    src = inspect.getsource(rw._amain)
+    assert '("location_refetch"' in src
+    monkeypatch.delenv(rw.LOCATION_REFETCH_ENABLED_ENV, raising=False)
+    monkeypatch.delenv(rw.LOCATION_REFETCH_INTERVAL_ENV, raising=False)
+    assert rw._read_location_refetch_interval() == 86400
+    monkeypatch.setenv(rw.LOCATION_REFETCH_ENABLED_ENV, "0")
+    assert rw._read_location_refetch_interval() == 0
+
+
+def test_location_refetch_knobs_are_env_vars_and_clamped(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    for env in (rw.LOCATION_REFETCH_INTERVAL_ENV, rw.LOCATION_REFETCH_MIN_AGE_ENV,
+                rw.LOCATION_REFETCH_CAP_ENV):
+        monkeypatch.delenv(env, raising=False)
+    assert rw._read_location_refetch_min_age() == 21600
+    assert rw._read_location_refetch_cap() == 500
+    # A typo must not stop a lane that ships live.
+    monkeypatch.setenv(rw.LOCATION_REFETCH_CAP_ENV, "five hundred")
+    assert rw._read_location_refetch_cap() == 500
+    monkeypatch.setenv(rw.LOCATION_REFETCH_CAP_ENV, "0")
+    assert rw._read_location_refetch_cap() == 1, "a cap knob is not the flag"
+    monkeypatch.setenv(rw.LOCATION_REFETCH_INTERVAL_ENV, "1")
+    assert rw._read_location_refetch_interval() == 3600, "the interval has an hour floor"
+
+
+def test_location_refetch_tick_queues_every_portal_at_verify_priority(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [
+        _refetch_row("ceskereality", "1", total=63),
+        _refetch_row("ceskereality", "2", total=63),
+        _refetch_row("realitymix", "9", total=112),
+    ]
+    captured = _patch_refetch(monkeypatch, rows)
+    monkeypatch.setenv(rw.LOCATION_REFETCH_MIN_AGE_ENV, "21600")
+    monkeypatch.setenv(rw.LOCATION_REFETCH_CAP_ENV, "500")
+
+    out = rw._location_refetch_sync()
+
+    assert captured["kwargs"] == {"min_age_seconds": 21600, "cap_per_source": 500}
+    # ONE enqueue per portal, carrying (native_id, detail_ref, price) — the drain needs
+    # the stored URL to fetch a crawler portal's page at all.
+    assert [src for src, _ in captured["enqueued"]] == ["ceskereality", "realitymix"]
+    assert captured["enqueued"][0][1] == [
+        ("1", "https://x/1", 100), ("2", "https://x/2", 100)]
+    assert out["ran"] is True
+    assert out["candidates"] == 3
+    assert out["queued"] == 3
+    # The UNCAPPED backlog rides along, so a capped tick still says what is left.
+    assert out["sources"]["ceskereality"] == {
+        "candidates": 2, "queued": 2, "backlog": 63}
+    assert out["sources"]["realitymix"]["backlog"] == 112
+    assert captured["conn_obj"].closed is True
+
+
+def test_location_refetch_tick_skips_when_the_audit_view_is_missing(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    captured = _patch_refetch(monkeypatch, None)
+
+    with caplog.at_level(logging.WARNING, logger="scraper.realtime_worker"):
+        first = rw._location_refetch_sync()
+        second = rw._location_refetch_sync()
+
+    assert first["ran"] is False and first["reason"] == "audit_view_missing"
+    assert second["ran"] is False
+    assert captured["enqueued"] == [], "nothing is queued without the audit set"
+    # Once per process, not once a tick.
+    assert sum("location_pin_audit_mv is absent" in r.message for r in caplog.records) == 1
+
+
+def test_location_refetch_pass_records_the_heartbeat_shape(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_refetch(monkeypatch, [_refetch_row("bazos", "7", total=203)])
+    state = rw._new_state()
+    rw._record_pass_start(state, "location_refetch")
+
+    asyncio.run(rw._location_refetch_pass(asyncio.Event(), state))
+
+    lane = state["lanes"]["location_refetch"]
+    assert lane["passes"] == 1
+    assert lane["started_at"] is None
+    assert lane["last"]["queued"] == 1
+    assert lane["last"]["sources"]["bazos"]["backlog"] == 203
+    assert "seconds" in lane["last"]
+    # Jsonb-able: the heartbeat writes this dict straight into worker_heartbeats.
+    Jsonb(rw._lane_snapshot(state["lanes"]))
+
+
+def test_location_refetch_pass_returns_early_when_stopping(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def never() -> dict[str, Any]:
+        raise AssertionError("a stopping worker must not open a tick")
+
+    monkeypatch.setattr(rw, "_location_refetch_sync", never)
+    stop = asyncio.Event()
+    stop.set()
+    state = rw._new_state()
+    asyncio.run(rw._location_refetch_pass(stop, state))
+    assert "location_refetch" not in state["lanes"]
+
+
+def test_a_first_delay_holds_the_pass_and_still_stops_cleanly() -> None:
+    # The daily lane must not run its pass in the second the container boots, and a
+    # SIGTERM inside that delay must exit rather than run one pass first.
+    async def scenario() -> list[int]:
+        stop = asyncio.Event()
+        calls: list[int] = []
+
+        async def run_pass() -> None:
+            calls.append(1)
+
+        stop.set()
+        await rw._lane_loop(
+            "t", stop, lambda: 86400, run_pass, rw._new_state(),
+            default_interval=86400, first_delay_seconds=60)
+        return calls
+
+    assert asyncio.run(scenario()) == []
+    assert rw.LOCATION_REFETCH_FIRST_DELAY_SECONDS > 0
+
+
+def test_the_daily_lane_never_reads_as_a_stalled_one() -> None:
+    # check_worker_lane_stall alarms on in_flight_s — a pass RUNNING too long — and
+    # never on the gap between passes, so a lane that ticks once a day is skipped by
+    # the check while it idles. This pins that contract from the worker's side.
+    from scripts import verify_pipeline
+
+    src = inspect.getsource(verify_pipeline.check_worker_lane_stall)
+    assert "if elapsed is None:\n            continue" in src
+    assert "last_pass_at" not in src
