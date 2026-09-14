@@ -3,7 +3,7 @@
 # visible text is the OKRES), plus the ad's own maps link beside it — blur marker and pin.
 
 portal: bazos
-contract_version: 5
+contract_version: 6
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -53,7 +53,6 @@ extractions:
     claim_type: obec_name
     licence_class: portal
     blur_evidence: none
-    transform: ["statutory_city_obec"]
     prior: {granularity: obec}
     subject_scope: {subject_scoped: true}
     notes: "The town anchor's HREF — its visible TEXT is the okres; a `-8`/`-26` tail is postal."

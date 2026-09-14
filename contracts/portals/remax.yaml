@@ -3,7 +3,7 @@
 # Header -> town / část obce / okres; breadcrumb -> kraj; subject map -> pin + street.
 
 portal: remax
-contract_version: 4
+contract_version: 5
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -78,7 +78,9 @@ extractions:
       group: 1
     transform: ["address_part_obec"]
     claim_type: obec_name
-    notes: "THE TOWN. address_part_obec folds an obvod onto its city: `Praha 3` -> Praha."
+    notes: "THE TOWN. address_part_obec walks the commas and the `okres …` qualifier and
+      claims that segment VERBATIM; an obvod (`Praha 3`) is bound against RÚIAN and resolved
+      up to its city by the resolver, not by this reader (W9)."
 
   - id: rx.det.header_cast_obce
     locator_kind: html_selector

@@ -37,6 +37,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from location_data.resolver.composite import CompositeBind, resolve_locality
 from location_data.resolver.geo import distance_between
 from location_data.resolver.normalize import normalize_match_key
 from location_data.resolver.types import (
@@ -169,6 +170,10 @@ class Constraints:
     okres_keys: tuple[str, ...] = ()
     kraj_keys: tuple[str, ...] = ()
     obec_keys: tuple[str, ...] = ()
+    # The same `obec_name` claims UNSPLIT and unfolded — what the portal actually wrote. The
+    # match key folds every separator to a space, so the composite binder cannot read the
+    # line off `obec_keys`: "Praha 4 - Podolí" and "Praha 4 Podolí" normalise identically.
+    obec_lines: tuple[str, ...] = ()
     cast_obce_keys: tuple[str, ...] = ()
     katuz_keys: tuple[str, ...] = ()
     qualifiers: tuple[str, ...] = ()
@@ -203,6 +208,7 @@ def collect_constraints(
         "okres": [], "kraj": [], "obec": [], "cast_obce": [], "katuz": [], "qualifier": [],
     }
     ids: dict[str, list[int]] = {}
+    obec_lines: list[str] = []
     street_key = street_verbatim = None
     cp = co = kod_adm = None
     znak: str | None = None
@@ -252,6 +258,7 @@ def collect_constraints(
             note("house_number_co", claim.id)
         elif t == "obec_name" and key and not rejected:
             buckets["obec"].append(key)
+            obec_lines.append(str((norm.value_cf if norm else None) or claim.value_text or ""))
             note("obec_name", claim.id)
         elif t in ("cast_obce_name", "quarter_name", "mestsky_obvod_name") and key:
             buckets["cast_obce"].append(key)
@@ -284,6 +291,7 @@ def collect_constraints(
         okres_keys=tuple(dict.fromkeys(buckets["okres"])),
         kraj_keys=tuple(dict.fromkeys(buckets["kraj"])),
         obec_keys=tuple(dict.fromkeys(buckets["obec"])),
+        obec_lines=tuple(dict.fromkeys(line for line in obec_lines if line)),
         cast_obce_keys=tuple(dict.fromkeys(buckets["cast_obce"])),
         katuz_keys=tuple(dict.fromkeys(buckets["katuz"])),
         qualifiers=tuple(dict.fromkeys(buckets["qualifier"])),
@@ -481,6 +489,7 @@ def bind(
     # Counting "obec" and "psc" as two fields there was one fact counted twice, and it graded
     # a PSČ-only bind `high`.
     obec_rung = "R4"
+    composite = CompositeBind()
     if constraints.obec_kods:
         obec_units = [
             chain[0]
@@ -508,6 +517,18 @@ def bind(
         )
         obec_qualifiers = list(dict.fromkeys(["psc", *applied]))
         obec_rung = "R6"
+
+    if not obec_units and not constraints.obec_kods and constraints.obec_lines:
+        # W9: the line named no obec, so the REGISTER is asked what it DOES name — the whole
+        # string at every level first, then its parts scoped by the anchoring town, and
+        # nothing at all when that is ambiguous. "Praha 4 - Podolí" lands here and comes back
+        # as Praha + Podolí, both spelled by RÚIAN. The town it anchors on joins the
+        # constraining set, so a street claim on the same listing still reaches R1-R3.
+        composite = first_composite_bind(constraints.obec_lines, registry)
+        if composite.bound:
+            obec_units = [composite.obec]  # type: ignore[list-item]
+            obec_qualifiers = ["composite_locality"]
+            obec_rung = "R4"
 
     constraining_obec_kods = tuple(sorted({u.code for u in obec_units}))
 
@@ -595,6 +616,18 @@ def bind(
                     )
                 )
 
+    if composite.part is not None:
+        # The part the composite line named, at the rung and with the qualifier a separately
+        # CLAIMED část obce gets: a registry bind grades by the unit it landed on, not by the
+        # shape of the string that pointed at it.
+        out.append(
+            _admin_candidate(
+                composite.part, rung="R4", granularity="cast_obce_or_quarter",
+                claim_ids=_ids(constraints, "obec_name"),
+                qualifiers=("obec_constrained",),
+            )
+        )
+
     # ---- R7: coordinate only. DERIVED, never a claim (§3.6.3) — it can only produce an
     # admin-level candidate, never a street or house number.
     #
@@ -678,6 +711,20 @@ def bind(
         ),
         constraints,
     )
+
+
+def first_composite_bind(lines: Sequence[str], registry: RegistryView) -> CompositeBind:
+    """The first locality line the register can place. Lines are already deduped and in
+    claim-id order, so this is deterministic; a line that binds nothing carries its reason
+    forward for the caller that wants to say why."""
+    unbound = CompositeBind()
+    for line in lines:
+        found = resolve_locality(line, registry)
+        if found.bound:
+            return found
+        if unbound.reason == "no_match":
+            unbound = found
+    return unbound
 
 
 def _dedupe_units(units: Sequence[AdminUnit]) -> list[AdminUnit]:

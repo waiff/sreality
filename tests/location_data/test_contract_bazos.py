@@ -112,8 +112,8 @@ def claim_of(entry_id: str, doc: ScopedDocument | None = None) -> Any:
 
 # ------------------------------------------------------------------ the contract shape
 
-def test_the_contract_is_bazos_at_version_5():
-    assert (CONTRACT.source, CONTRACT.version) == ("bazos", 5)
+def test_the_contract_is_bazos_at_version_6():
+    assert (CONTRACT.source, CONTRACT.version) == ("bazos", 6)
 
 
 def test_the_entry_ids_are_exactly_the_four_this_version_ships():
@@ -268,17 +268,16 @@ def test_a_numbered_postal_district_is_folded_to_the_city_it_belongs_to():
             normalize_match_key(unfolded), levels=("obec",))
 
 
-def test_the_okres_label_can_never_reach_the_statutory_city_transform():
-    """The hazard this carrier retires. `statutory_city_obec` is chained per R4 because the
-    entry is slug-fed, and on an OKRES label it would manufacture a big-city town out of a
-    rural district — "Brno-venkov" -> "Brno", 30 km of villages claimed as the city. bazos
-    publishes exactly those 76 labels as the anchor's TEXT, so the rail is that the entry
-    reads the href: a page whose anchor text is "Brno-venkov" claims the href's own obec.
+def test_the_okres_label_can_never_become_a_big_city_town():
+    """The hazard this carrier retires. On an OKRES label a fold would manufacture a big-city
+    town out of a rural district — "Brno-venkov" -> "Brno", 30 km of villages claimed as the
+    city. bazos publishes exactly those 76 labels as the anchor's TEXT, so the rail is that
+    the entry reads the HREF: a page whose anchor text is "Brno-venkov" claims the href's own
+    obec.
 
-    TWO rails now, and the second closes the class rather than this instance: the transform
-    itself refuses every hyphenated OKRES name (`_HYPHENATED_OKRES_NAMES`), so an okres that
-    reaches it by any other route — `address_part_obec` runs on lines that carry one — is
-    returned untouched instead of folded."""
+    TWO rails, and W9 rebuilt the second as a LEVEL test instead of a list of names: the
+    entry declares no transform at all now, and `resolver.composite` refuses any line whose
+    whole string matches an okres or a kraj before it will split anything."""
     assert apply_transforms("Brno-venkov", ENTRIES[TOWN_ENTRY].transform) == "Brno-venkov"
     body = ('<html><body><table><tr><td>Lokalita:</td><td>'
             '<a href="https://www.google.com/maps/place/49.30,16.62/@49.30,16.62,12z" '
