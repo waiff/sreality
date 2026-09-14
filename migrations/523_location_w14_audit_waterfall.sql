@@ -343,7 +343,7 @@ declare
   total bigint;
   prev  bigint;
   cur   bigint;
-  lost  bigint;
+  v_lost  bigint;
   r     record;
 begin
   if to_regclass('public.location_audit_waterfall') is null then
@@ -393,9 +393,9 @@ begin
     raise exception '523: not_served % <> % - %', prev, total, cur;
   end if;
   select n into prev from location_audit_waterfall where step_key = 'served_located';
-  select n into lost from location_audit_waterfall where step_key = 'hidden';
-  if lost <> cur - prev then
-    raise exception '523: hidden % <> served % - located %', lost, cur, prev;
+  select n into v_lost from location_audit_waterfall where step_key = 'hidden';
+  if v_lost <> cur - prev then
+    raise exception '523: hidden % <> served % - located %', v_lost, cur, prev;
   end if;
 
   -- Law 3: every split partitions its parent exactly.
