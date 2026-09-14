@@ -2343,6 +2343,31 @@ property-and-legacy-pin version of that relation stays on disk as history (appen
 was retired by 513 because it read five `properties` place columns 508 drops, and 514 re-creates the
 name on inputs that cannot expire the same way.
 
+**THE REBUILD BUDGET SCALES WITH THE CORPUS** (W13, migration 522, after the 2026-09-14 freeze).
+`browse_list` and `properties_map_mv` are whole-relation rebuilds of `browse_projection` on pg_cron
+(`*/15` and `7,37`), so their cost tracks the corpus and their `statement_timeout` must too. It did
+not: as the location store recovered to 712,932 rows with a town the list rebuild grew 173 s → 257 s
+→ 405 s → past its fixed 600 s budget, timed out 11 times in 6 h, and froze Browse at 315,827 active
+rows for two and a half hours while each tick threw away ten minutes of work. Two lessons landed
+with it. **The cost:** W5 appended the consumer rule to `browse_projection` as an EXISTS against a
+SECOND alias of `listing_location` — but the projection already LEFT JOINs that table on the SAME
+key for the label and the chip codes, and `listing_location_pkey` is UNIQUE on `listing_id`, so the
+answer was already in hand and the EXISTS bought a second full pass over an 821k-row table (join
+skeleton 283,226 → 229,197). Both spellings are sanctioned and
+`tests/test_browse_read_path_guardrail.py` accepts either, provided the rule still names
+`listing_location` and still carries BOTH arms. **The lock:** both rebuilds took a SESSION advisory
+lock released in an `exception when others` handler, and PL/pgSQL's OTHERS does not match
+QUERY_CANCELED — so every one of the 11 cancellations skipped the release. Nothing wedged only
+because pg_cron opens a fresh connection per run; from a pooled session the first cancel would have
+left the key held and every later tick would have returned "skipping tick" forever while
+`cron.job_run_details` reported success. Both now use `pg_try_advisory_xact_lock`, which Postgres
+releases on commit, rollback AND cancel. **And the blast radius:** the failing `*/15` job kept the
+box in `DataFileRead` for 10 minutes in every 15, the pg_cron scheduler lagged past the minute
+boundary, and pg_cron does not catch up a MISSED slot — so `browse-map-rebuild`, whose whole
+schedule is two single minutes an hour (:07 and :37, both inside a rebuild window), stopped firing
+entirely for 3.5 h with no run row and no log line. A starved job looks exactly like a wedged one;
+`pg_locks`, an orphaned `_next` relation and `pg_stat_activity` are what tell them apart.
+
 **WHAT REMAINS OUTSIDE THE STORE, AND WHY.**
 
 * `admin_boundaries` — price stats, the rent map and city proximity still read its geometry and
@@ -2415,6 +2440,9 @@ per-listing statement gets, and cancelling it threw the whole batch away.
 
 **LESSONS A FUTURE SESSION NEEDS** (2026-09-12 unless noted), one line each:
 
+* **The read-model rebuild budget must scale with the corpus, and a cancelled rebuild must not
+  leave a lock** (2026-09-14) — a fixed `statement_timeout` on a whole-relation rebuild is a freeze
+  waiting for the corpus to grow into it, and `exception when others` never runs on a cancel.
 * **A keyset in the same statement's WHERE is not a fence** — Postgres planned the bodies pass from
   `listings` and applied `p.id > after` as a POST-FILTER, so every batch paid the whole corpus and
   died on the 600 s ceiling with 186,546 bodies queued; a `LIMIT` subquery planned alone stops at
