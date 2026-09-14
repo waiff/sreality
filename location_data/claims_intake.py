@@ -73,7 +73,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, NamedTuple, TypeVar
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -127,6 +127,7 @@ LOG = logging.getLogger("location_data.claims_intake")
 # @5 is W1-a2 — the selection became change-driven and the page half got its own pass.
 INTAKE_VERSION = "claims_intake@5"
 LANE = "location_claims_intake"
+_T = TypeVar("_T")
 WAVE = "W1"
 
 # ONE LANE, TWO SCHEDULES (W7-a). This module is still the only claim producer; what W7-a
@@ -169,6 +170,14 @@ BODIES_BUDGET_SHARE = 0.5
 STATEMENT_TIMEOUT_ENV = "LOCATION_INTAKE_TIMEOUT_S"
 DEFAULT_STATEMENT_TIMEOUT_S = 600
 _FAILURE_STAMP_TIMEOUT_S = 30
+# A BATCH HERE WAITS BEHIND THE RESOLVER, NOT BEHIND A HUMAN (W12). Every batch bumps
+# `dirty_locations` rows that the drain's four concurrent slices hold at that instant, so a
+# few seconds of waiting is the normal case now, not a symptom. 5 s killed two `mode=full`
+# walks ~80 s in on 2026-09-14 (runs 34817669095, 34824922631); 20 s absorbs the ordinary
+# wait and the retry below absorbs the rest.
+LOCK_TIMEOUT_ENV = "INTAKE_LOCK_TIMEOUT_S"
+DEFAULT_LOCK_TIMEOUT_S = 20
+_RUNNING_BATCH_TIMEOUT_S = 10
 # And so is the backlog readout's (W6-b2): a best-effort `count(*)` that cannot answer in a
 # minute must not hold the job open for ten (600 s spent on an idle hop whose drain took 5 s).
 _BACKLOG_READOUT_TIMEOUT_S = 60
@@ -531,6 +540,23 @@ _BATCH_INSERT_SQL = """
             %(job_run_id)s, 'running', %(note)s, %(scan_mode)s, %(resumable)s)
     RETURNING id
 """
+
+# THE YIELD READ (W12): is a GitHub run of `lane` still in flight? One indexed-enough read —
+# the table is ~1 300 rows, so no migration buys anything a sequential scan does not already
+# give. `started_at` bounds it because a killed run leaves its 'running' stamp behind for
+# ever, and a stale marker must never silence the minute lane permanently.
+_RUNNING_BATCH_SQL = """
+    SELECT id FROM location_claim_batches
+    WHERE lane = %(lane)s
+      AND outcome = 'running'
+      AND started_at > now() - (%(max_age_minutes)s * interval '1 minute')
+    ORDER BY id DESC
+    LIMIT 1
+"""
+
+# The hourly job's own ceiling is `timeout-minutes: 55`, so anything older than this is a
+# stamp nothing will ever finish.
+RUNNING_BATCH_MAX_AGE_MINUTES = 65
 
 # `cursor_after_ts` is NOT written any more, by either mode: leaving it NULL on every row this
 # lane writes is what lets `_resume_point` tell a W1-a2 snapshot cursor from a pre-W1-a2
@@ -926,11 +952,13 @@ _CLAIM_WRITE_SQL = f"""
 
 @contextmanager
 def guarded(
-    conn: psycopg.Connection, statement_timeout_s: int, lock_timeout_s: int = 5,
+    conn: psycopg.Connection, statement_timeout_s: int, lock_timeout_s: int | None = None,
 ) -> Iterator[psycopg.Cursor]:
     """One transaction with transaction-LOCAL timeouts. `db.connect()` is autocommit and
     points at the transaction-mode pooler, where a session-level SET can land on a
     different backend than the statement it was meant to guard."""
+    if lock_timeout_s is None:
+        lock_timeout_s = env_positive_int(LOCK_TIMEOUT_ENV, DEFAULT_LOCK_TIMEOUT_S)
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(_TIMEOUT_GUARD_SQL, {
@@ -938,6 +966,99 @@ def guarded(
                 "lock_timeout": f"{lock_timeout_s}s",
             })
             yield cur
+
+
+def running_batch_id(
+    conn: psycopg.Connection, *, lane: str = LANE,
+    max_age_minutes: int = RUNNING_BATCH_MAX_AGE_MINUTES,
+) -> int | None:
+    """The id of a run of `lane` that is still stamped 'running', for a schedule that wants
+    to yield to it. Read-only; a stale stamp (see `_RUNNING_BATCH_SQL`) reads as none."""
+    with guarded(conn, _RUNNING_BATCH_TIMEOUT_S) as cur:
+        cur.execute(_RUNNING_BATCH_SQL,
+                    {"lane": lane, "max_age_minutes": max_age_minutes})
+        row = cur.fetchone()
+    return int(row[0]) if row else None
+
+
+# ------------------------------------------------------------------ lock resilience (W12)
+
+# A batch that lost a LOCK lost a race, not its data: the transaction rolled back on the way
+# out, the keyset cursor has not moved, and re-running it writes the same rows (claim
+# fingerprints are ON CONFLICT DO NOTHING, the enqueue is a bump). So the same batch runs
+# again — the intake never skips rows to make progress. Everything else, a lost connection
+# above all, is raised for `run()` to stamp `failed` on, exactly as before: the workflow
+# restarts and the cursor is where the last committed batch left it.
+_LOCK_SQLSTATES = frozenset({"55P03", "40P01"})  # lock_not_available, deadlock_detected
+BATCH_RETRY_BACKOFF_S = 2.0
+BATCH_RETRY_BACKOFF_MAX_S = 30.0
+# Five in a row is a condition, not a blip: the run stamps `failed` with the lock as its
+# reason rather than spending its whole budget losing the same race.
+MAX_CONSECUTIVE_LOCK_FAILURES = 5
+
+
+class _BodyBatch(NamedTuple):
+    """What one bodies batch committed, read by the rails and the log line after it."""
+
+    cursor: int
+    selected: int
+    eligible: int
+    mined: int
+    claims: int
+
+
+class _Phase:
+    """Which statement family a batch was in when it lost its lock. The claims insert and the
+    `dirty_locations` bump are ONE statement (the `ins`/`enqueued` CTE), the mined stamp is a
+    second and the scan that opens the batch a third — a retry line that cannot tell them
+    apart cannot say which contention to go and look at."""
+
+    def __init__(self) -> None:
+        self.name = "scan"
+
+
+def _backoff_sleep(seconds: float, budget: _Budget) -> None:
+    """Never past the run's budget: a batch asleep through it is a run that stamps nothing."""
+    left = budget.left()
+    time.sleep(seconds if left is None else max(0.0, min(seconds, left)))
+
+
+def _with_lock_retry(
+    work: Callable[[_Phase], _T], *, family: str, stats: dict[str, Any],
+    refusals: dict[str, int], budget: _Budget,
+) -> _T:
+    """Run ONE batch transaction, retrying it while the only thing wrong is a lock.
+
+    The counters are rolled back with the transaction. A batch that dies on its write has
+    already added its listings, claims and refusals to `stats`, and a retry that kept them
+    would report work that was never committed — so each attempt starts from the snapshot the
+    previous one began at, and only `lock_retries` survives.
+    """
+    consecutive = 0
+    backoff = BATCH_RETRY_BACKOFF_S
+    while True:
+        before_stats, before_refusals = dict(stats), dict(refusals)
+        phase = _Phase()
+        try:
+            return work(phase)
+        except psycopg.Error as exc:
+            if getattr(exc, "sqlstate", None) not in _LOCK_SQLSTATES:
+                raise
+            stats.clear()
+            stats.update(before_stats)
+            refusals.clear()
+            refusals.update(before_refusals)
+            consecutive += 1
+            stats["lock_retries"] = int(stats.get("lock_retries", 0)) + 1
+            LOG.warning(
+                "INTAKE %s batch lost a lock on the %s statement (%s %s: %s) — %d "
+                "consecutive; the cursor has not moved, retrying the same batch",
+                family, phase.name, type(exc).__name__, exc.sqlstate,
+                " ".join(str(exc).split())[:200], consecutive)
+            if consecutive >= MAX_CONSECUTIVE_LOCK_FAILURES:
+                raise
+            _backoff_sleep(backoff, budget)
+            backoff = min(backoff * 2, BATCH_RETRY_BACKOFF_MAX_S)
 
 
 def missing_relations(conn: psycopg.Connection) -> list[str]:
@@ -1504,6 +1625,51 @@ def drain_unmined_bodies(
         LOG.info("INTAKE bodies-first resuming from id=%d", after_body_id)
     else:
         LOG.info("INTAKE bodies-first walking from the start for versions=%s", versions)
+    def body_batch(phase: _Phase) -> _BodyBatch:
+        """ONE batch transaction, so the retry around it re-runs exactly this and nothing
+        else. A window that came back empty reports `selected=0`; the caller owns the rails."""
+        result = IntakeResult()
+        stamps: list[dict[str, Any]] = []
+        with guarded(conn, statement_timeout) as cur:
+            cur.execute(_UNMINED_WINDOW_SQL, {
+                "source": source, "page_sources": sources, "cap": cap,
+                "after_body_id": after_body_id})
+            window = [int(row[0]) for row in cur.fetchall()]
+            if not window:
+                return _BodyBatch(after_body_id, 0, 0, 0, 0)
+            # The cursor is the WINDOW's max, not the surviving rows': a window whose rows
+            # all belong to inactive listings or superseded bodies still moves the walk on.
+            batch_cursor = max(window)
+            cur.execute(_UNMINED_BODIES_SQL, {"ids": window})
+            candidates: list[BodyCandidate] = []
+            for record in cur.fetchall():
+                scan = _row_from_record(record)
+                entries = entries_by_source.get(scan.row.source)
+                if not entries:
+                    continue
+                candidate = _body_candidate(scan, entries, store=store)
+                if candidate is not None:
+                    candidates.append(candidate)
+            stats["bodies_eligible"] += len(candidates)
+            stamps = mine_bodies(
+                cur, candidates, entries_by_source=entries_by_source,
+                registers=registers, store=store, result=result, stats=stats,
+                max_value_bytes=max_value_bytes, pool=schedule.pool)
+            stats["claims"] += len(result.claims)
+            stats["claims_page"] += len(result.claims)
+            for reason, count in result.refusals.items():
+                refusals[reason] = refusals.get(reason, 0) + count
+                stats["refusals"] += count
+            if not dry_run and batch_id is not None:
+                phase.name = "claims insert / enqueue"
+                inserted, enqueued = write_result(cur, result)
+                phase.name = "mined stamp"
+                stamp_mined_bodies(cur, stamps)
+                stats["claims_inserted"] += inserted
+                stats["enqueued"] += enqueued
+        return _BodyBatch(batch_cursor, len(window), len(candidates), len(stamps),
+                          len(result.claims))
+
     while True:
         share = schedule.bodies_budget_share
         if not budget.room_for(last_seconds, share):
@@ -1522,54 +1688,16 @@ def drain_unmined_bodies(
         batch_started = time.monotonic()
         extract_before = stats["body_extract_seconds"]
         extracted_before = stats["bodies_extracted"]
-        result = IntakeResult()
-        stamps: list[dict[str, Any]] = []
-        selected = 0
-        eligible = 0
-        batch_cursor = after_body_id
-        with guarded(conn, statement_timeout) as cur:
-            cur.execute(_UNMINED_WINDOW_SQL, {
-                "source": source, "page_sources": sources, "cap": cap,
-                "after_body_id": after_body_id})
-            window = [int(row[0]) for row in cur.fetchall()]
-            selected = len(window)
-            if not window:
-                stats["bodies_pass_complete"] = True
-                LOG.info("INTAKE bodies-first: no unmined bodies left above id=%d",
-                         after_body_id)
-                break
-            # The cursor is the WINDOW's max, not the surviving rows': a window whose rows
-            # all belong to inactive listings or superseded bodies still moves the walk on.
-            batch_cursor = max(window)
-            cur.execute(_UNMINED_BODIES_SQL, {"ids": window})
-            candidates: list[BodyCandidate] = []
-            for record in cur.fetchall():
-                scan = _row_from_record(record)
-                entries = entries_by_source.get(scan.row.source)
-                if not entries:
-                    continue
-                candidate = _body_candidate(scan, entries, store=store)
-                if candidate is not None:
-                    candidates.append(candidate)
-            eligible = len(candidates)
-            stats["bodies_eligible"] += eligible
-            stamps = mine_bodies(
-                cur, candidates, entries_by_source=entries_by_source,
-                registers=registers, store=store, result=result, stats=stats,
-                max_value_bytes=max_value_bytes, pool=schedule.pool)
-            stats["claims"] += len(result.claims)
-            stats["claims_page"] += len(result.claims)
-            for reason, count in result.refusals.items():
-                refusals[reason] = refusals.get(reason, 0) + count
-                stats["refusals"] += count
-            if not dry_run and batch_id is not None:
-                inserted, enqueued = write_result(cur, result)
-                stamp_mined_bodies(cur, stamps)
-                stats["claims_inserted"] += inserted
-                stats["enqueued"] += enqueued
+        batch = _with_lock_retry(body_batch, family="bodies-first", stats=stats,
+                                 refusals=refusals, budget=budget)
+        if not batch.selected:
+            stats["bodies_pass_complete"] = True
+            LOG.info("INTAKE bodies-first: no unmined bodies left above id=%d",
+                     after_body_id)
+            break
         # Advanced only here, after the transaction closed — the same rule the payload
         # half's cursor follows, and what makes a `failed` run's stamp safe to resume from.
-        after_body_id = batch_cursor
+        after_body_id = batch.cursor
         stats["bodies_cursor_after_id"] = after_body_id
         last_seconds = time.monotonic() - batch_started
         stats["bodies_batches"] += 1
@@ -1582,7 +1710,7 @@ def drain_unmined_bodies(
         LOG.info("INTAKE bodies-first batch window=%d eligible=%d mined=%d claims=%d "
                  "inserted=%d through_id=%d in %.1fs extract=%.1fs %.1f bodies/s "
                  "(workers=%d)",
-                 selected, eligible, len(stamps), len(result.claims),
+                 batch.selected, batch.eligible, batch.mined, batch.claims,
                  stats["claims_inserted"], after_body_id, last_seconds, extract_seconds,
                  extracted / extract_seconds if extract_seconds > 0 else 0.0,
                  page_readers.pool_width(extracted))
@@ -1596,7 +1724,7 @@ def drain_unmined_bodies(
             break
         # The WINDOW is what ends the pass, never the survivors: a short window is the end
         # of the keyset, a window that lost every row to the joins is not.
-        if selected < cap:
+        if batch.selected < cap:
             stats["bodies_pass_complete"] = True
             LOG.info("INTAKE bodies-first: the keyset reached its end at id=%d",
                      after_body_id)
@@ -1722,7 +1850,7 @@ def run(
         "bodies_backlog_remaining": None, "payload_seconds": 0.0,
         "bodies_resumed_from_id": 0, "bodies_cursor_after_id": 0,
         "bodies_cursor_versions": None,
-        "full_walk_continued": False, "full_walk_cursor": None,
+        "full_walk_continued": False, "full_walk_cursor": None, "lock_retries": 0,
         "stopped_early": False, "reached_end": False, "resumed_from_id": after_id,
     }
     refusals: dict[str, int] = {}
@@ -1748,22 +1876,11 @@ def run(
         if schedule.bodies_first:
             drain_bodies()
 
-        payload_started = time.monotonic()
-        last_seconds = 0.0
-        while True:
-            if limit is not None and stats["listings"] >= limit:
-                stats["stopped_early"] = True
-                break
-            # NOT "is there time left" but "is there time for ANOTHER BATCH". The estimate
-            # is the last batch's measured duration; the first batch is free to start.
-            if not budget.room_for(last_seconds):
-                LOG.info("INTAKE payload half stopping: %.0fs of budget left, the last "
-                         "batch took %.0fs", budget.left() or 0.0, last_seconds)
-                stats["stopped_early"] = True
-                break
-            size = batch_size if limit is None else min(batch_size, limit - stats["listings"])
-            batch_started = time.monotonic()
-
+        # ONE batch transaction, so the retry around it re-runs exactly this and nothing
+        # else. Returns the cursor the batch reached, or None when the window was empty —
+        # the handoff that follows an empty window opens its own transactions and belongs
+        # to the loop, not to a batch that is going to be retried.
+        def scan_batch(phase: _Phase, size: int) -> int | None:
             with guarded(conn, statement_timeout) as cur:
                 statement = (_LISTINGS_INCREMENTAL_SQL if scan_mode == "incremental"
                              else _LISTINGS_FULL_SQL)
@@ -1772,27 +1889,7 @@ def run(
                     "lag_seconds": lag_seconds})
                 records = cur.fetchall()
                 if not records:
-                    # The ONLY way this scan earns outcome='ok'. Everything else — a
-                    # budget, a limit, an exception — leaves rows unopened behind the
-                    # cursor, and a cursor that moves past unopened rows never comes back
-                    # for them.
-                    handoff = _full_walk_handoff(
-                        conn, scan_mode=scan_mode, source=source, anchored=anchored,
-                        dry_run=dry_run, budget=budget, last_seconds=last_seconds,
-                        lane=lane)
-                    if handoff is None:
-                        stats["reached_end"] = True
-                        break
-                    batch_id = _finish_and_open_full_batch(
-                        conn, batch_id=batch_id, stats=stats,
-                        row_count=stats["claims_inserted"] - row_count_base,
-                        cursor_after_id=after_id, source=source, contract_id=contract_id,
-                        note=note, statement_timeout=statement_timeout, lane=lane)
-                    after_id, scan_mode = handoff, "full"
-                    stats["full_walk_continued"] = True
-                    stats["full_walk_cursor"] = handoff
-                    row_count_base = stats["claims_inserted"]
-                    continue
+                    return None
 
                 result = IntakeResult()
                 candidates: list[BodyCandidate] = []
@@ -1835,10 +1932,54 @@ def run(
                     refusals[reason] = refusals.get(reason, 0) + count
                     stats["refusals"] += count
                 if not dry_run and batch_id is not None:
+                    phase.name = "claims insert / enqueue"
                     inserted, enqueued = write_result(cur, result)
+                    phase.name = "mined stamp"
                     stamp_mined_bodies(cur, stamps)
                     stats["claims_inserted"] += inserted
                     stats["enqueued"] += enqueued
+            return batch_cursor
+
+        payload_started = time.monotonic()
+        last_seconds = 0.0
+        while True:
+            if limit is not None and stats["listings"] >= limit:
+                stats["stopped_early"] = True
+                break
+            # NOT "is there time left" but "is there time for ANOTHER BATCH". The estimate
+            # is the last batch's measured duration; the first batch is free to start.
+            if not budget.room_for(last_seconds):
+                LOG.info("INTAKE payload half stopping: %.0fs of budget left, the last "
+                         "batch took %.0fs", budget.left() or 0.0, last_seconds)
+                stats["stopped_early"] = True
+                break
+            size = batch_size if limit is None else min(batch_size, limit - stats["listings"])
+            batch_started = time.monotonic()
+
+            batch_cursor = _with_lock_retry(
+                lambda phase: scan_batch(phase, size), family="payload", stats=stats,
+                refusals=refusals, budget=budget)
+            if batch_cursor is None:
+                # The ONLY way this scan earns outcome='ok'. Everything else — a budget, a
+                # limit, an exception — leaves rows unopened behind the cursor, and a cursor
+                # that moves past unopened rows never comes back for them.
+                handoff = _full_walk_handoff(
+                    conn, scan_mode=scan_mode, source=source, anchored=anchored,
+                    dry_run=dry_run, budget=budget, last_seconds=last_seconds,
+                    lane=lane)
+                if handoff is None:
+                    stats["reached_end"] = True
+                    break
+                batch_id = _finish_and_open_full_batch(
+                    conn, batch_id=batch_id, stats=stats,
+                    row_count=stats["claims_inserted"] - row_count_base,
+                    cursor_after_id=after_id, source=source, contract_id=contract_id,
+                    note=note, statement_timeout=statement_timeout, lane=lane)
+                after_id, scan_mode = handoff, "full"
+                stats["full_walk_continued"] = True
+                stats["full_walk_cursor"] = handoff
+                row_count_base = stats["claims_inserted"]
+                continue
             # ADVANCED ONLY HERE, after the transaction closed. The cursor that gets
             # stamped on the batch row — including by the failure path below — is the last
             # one whose claims are actually committed, which is what makes a 'failed'
@@ -1918,13 +2059,14 @@ def run(
     # run was doing; this says what it achieved and what is left.
     LOG.info("INTAKE summary mode=%s source=%s outcome=%s listings=%d payload_claims=%d "
              "claims_inserted=%d bodies_mined=%d backlog_remaining=%s refusals=%s "
-             "bodies=%.0fs (fetch %.0fs extract %.0fs) payload=%.0fs cursor=%d",
+             "lock_retries=%d bodies=%.0fs (fetch %.0fs extract %.0fs) payload=%.0fs "
+             "cursor=%d",
              mode, source or "*", outcome, stats["listings"], stats["claims_payload"],
              stats["claims_inserted"], stats["bodies_mined"],
              stats["bodies_backlog_remaining"]
              if stats["bodies_backlog_remaining"] is not None else "?",
              ",".join(f"{r}={c}" for r, c in stats["refusal_reasons"].items()) or "none",
-             stats["bodies_seconds"], stats["body_fetch_seconds"],
+             stats["lock_retries"], stats["bodies_seconds"], stats["body_fetch_seconds"],
              stats["body_extract_seconds"], stats["payload_seconds"], after_id)
     return stats
 
