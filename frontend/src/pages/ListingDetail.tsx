@@ -58,6 +58,7 @@ import ErrorBoundary from '@/components/ErrorBoundary';
 import Skeleton from '@/components/Skeleton';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
+import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
 import { lazyChunk } from '@/lib/lazyChunk';
 
@@ -439,7 +440,16 @@ export default function ListingDetail() {
             <LatestActiveLink listing={listing} sources={sources} />
           </div>
         }
-        mapFooter={<ExploreAreaButton listing={listing} images={images} />}
+        mapFooter={
+          /* Under the header map: our own market view first, then the three
+             external maps for the exact-location / cadastre check. */
+          <div className="space-y-1.5">
+            <ExploreAreaButton listing={listing} images={images} />
+            {listing.lat != null && listing.lng != null && (
+              <ExternalMapLinks lat={listing.lat} lng={listing.lng} />
+            )}
+          </div>
+        }
         estimatesSlot={
           /* The estimation chapter: MF reference + our runs, side by side —
              in the prime slot after the description (the map moved into the

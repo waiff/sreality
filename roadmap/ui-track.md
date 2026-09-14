@@ -7,6 +7,16 @@ This track runs in parallel with the analytical phases above; the
 toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
+### External map links on the listing detail (done, 2026-09-14)
+- Under the header map, below "Explore area": Mapy.cz, Google Maps and iKatastr, each opened at the
+  listing's resolved coordinate. "Explore area" is the market view of the NEIGHBOURHOOD; these three
+  answer "where exactly is this, and on whose parcel" — the cadastre link lands on the parcel with
+  iKatastr's info panel open.
+- `lib/geoLinks.ts` builds the three documented, key-free deep links (Mapy.cz takes lon,lat; Google
+  and iKatastr lat,lon — the swap is pinned by tests); `components/listing-detail/ExternalMapLinks`
+  renders the row. Same coordinate gate as the map itself: no coordinate, no row. Precision is
+  inherited, never implied — a street-level pin opens the wrong building on all three, by design.
+
 ### Portal links read the stored URL — reconstruction deleted (2026-09-11, W2 of the URL contract)
 - Operator-reported: the listing page's Sreality chip 404'd (`rodinny-dum` vs sreality's `rodinny`).
   The SPA rebuilt sreality URLs from `CATEGORY_SUB_LABELS`; wrong for 14 of 48 codes, both auction
