@@ -751,6 +751,28 @@ component is slimmed twice — each wave rewrites one component and slims its st
     warning and JSON only. `run()`'s schedule knobs are now one `claims_intake.Schedule` value
     whose defaults ARE the hourly run.
 
+  - **W8 — a page that carried no location gets a second look after a day (portals geocode after
+    publication)** (code only). Measured 2026-09-14 on the audit page's active "no data" bucket
+    (`state='unresolved'` + `quality='active_no_claims'`): ceskereality 63, realitymix 112, bazos 804,
+    idnes 1 — and 56 of the ceskereality rows and 56 of the realitymix rows had been fetched within
+    TWO MINUTES of first sighting and never fetched again. The portals fill an ad's location in a
+    little AFTER publication, our detail fetch read the page while those fields were empty, and the
+    index card never changed, so nothing ever re-enqueued them (live check the same day: ceskereality
+    3876635 now carries "Zlín, ulice Mlýnská" + coordinates). So: a `location_refetch` lane in the
+    realtime worker, daily (`LOCATION_REFETCH_INTERVAL_S` 86400, first tick 5 min after start,
+    `LOCATION_REFETCH_ENABLED=0` idles), reading THE audit relation — the operator's list is the
+    queue's list — joined to `listings` by PK for the live URL, keeping rows whose newest stored page
+    or payload is older than `LOCATION_REFETCH_MIN_AGE_S` (6 h, so today's listing gets its second
+    look tomorrow) and enqueuing ≤ `LOCATION_REFETCH_CAP_PER_SOURCE` (500) per portal per tick,
+    oldest-fetched first, at `QUEUE_PRIORITY_VERIFY`. It enqueues and nothing else: the drain rewrites
+    the page, the W7-a lane mines it within a minute, the resolver answers — and bazos's share is dead
+    ads whose page answers with the category listing, so the same fetch raises `ListingGoneError` and
+    delists them. `enqueue_location_refetch` is its own writer because `enqueue_detail`'s `GREATEST`
+    would promote a queued row and it leaves `given_up` alone: a second look takes `LEAST` and re-arms
+    `given_up`/`attempts`, since the rows it most wants are the ones the drain gave up on (rule #5).
+    No threshold moved — `check_worker_lane_stall` alarms on a pass RUNNING too long, never on the gap
+    between passes, so a daily lane never reads as a dead one.
+
 **What is left of the sprint** (nothing further to build):
   1. **The gate** — `check_location_town_coverage` red until every portal reports zero served
      listings with no row and zero active Czech listings with no `obec_kod`. Everything downstream

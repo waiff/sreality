@@ -383,6 +383,16 @@ Lanes shipped so far:
   warn once, JSON only. Heartbeat `details.location_intake_fast.last` = `{listings,
   claims_inserted, enqueued, bodies_mined, bodies_complete, seconds, cursor, bodies_cursor}`.
 
+- **Location-refetch lane** (W8) — once a day (`LOCATION_REFETCH_INTERVAL_S` 86400, first tick 5 min
+  after start; `LOCATION_REFETCH_ENABLED=0` idles) queue the audit page's active "no data" rows
+  (`location_pin_audit_mv` `state='unresolved'`+`quality='active_no_claims'`, joined to `listings` by
+  PK) whose newest stored page/payload is older than `LOCATION_REFETCH_MIN_AGE_S` (6 h) into
+  `listing_detail_queue` at VERIFY, ≤`LOCATION_REFETCH_CAP_PER_SOURCE` (500)/portal/tick,
+  oldest-fetched first. ceskereality/realitymix geocode AFTER publishing; the drain + intake lane do
+  the rest, and a bazos dead ad delists on the same fetch. Heartbeat
+  `details.location_refetch.last` = `{candidates, queued, sources:{src:{candidates,queued,backlog}},
+  min_age_s, cap, seconds}`; no audit view = skip + one warning.
+
 ## Pipeline verification (migration 274)
 
 **No publication gate any more.** Migration 273 used to hide a new property from Browse, the

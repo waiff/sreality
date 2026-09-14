@@ -3228,6 +3228,171 @@ def enqueue_detail(
     return total
 
 
+# --- W8: a page that carried no location gets a second look -----------------
+#
+# ceskereality and realitymix GEOCODE AN AD AFTER IT IS PUBLISHED. Measured
+# 2026-09-14: of the audit page's active "no data" rows, 56 of 63 ceskereality
+# and 56 of 112 realitymix listings were fetched within TWO MINUTES of first
+# sighting and never fetched again — our one detail fetch read the page while
+# its location fields were still empty, and the index card never changed, so
+# nothing ever re-read it. Checked live the same day, ceskereality 3876635 now
+# carries "Zlín, ulice Mlýnská" and coordinates. The claim lane mines PAGES, so
+# the fix is a second fetch, not a contract change.
+#
+# The audit relation IS the list — `location_pin_audit_mv` state='unresolved' +
+# quality='active_no_claims' is exactly "live, the resolver has spoken, and no
+# admissible evidence was ever found" — so this asks it rather than
+# re-deriving the set. `listings` is joined by primary key for the row's LIVE
+# source_url / price / is_active, because the matview is an hourly snapshot and
+# a re-fetch must not be aimed by a stale URL.
+_LOCATION_REFETCH_AUDIT_MV = "location_pin_audit_mv"
+
+# "Old enough to be worth another look." A listing fetched minutes ago would
+# only be re-read at the same empty moment; six hours is well past the portals'
+# geocoding lag and it means a row discovered today gets its second look on
+# tomorrow's tick rather than in a fortnight.
+_LOCATION_REFETCH_CANDIDATES_SQL = """
+WITH audit AS (
+    SELECT a.listing_id
+    FROM location_pin_audit_mv a
+    WHERE a.state = 'unresolved'
+      AND a.is_active
+      AND a.quality = 'active_no_claims'
+),
+cand AS (
+    SELECT l.source,
+           l.source_id_native,
+           l.source_url,
+           l.price_czk,
+           GREATEST(COALESCE(pg.fetched_at, '-infinity'::timestamptz),
+                    COALESCE(pl.observed_at, '-infinity'::timestamptz)) AS last_fetch_at
+    FROM audit a
+    JOIN listings l ON l.id = a.listing_id
+    LEFT JOIN LATERAL (
+        SELECT max(p.fetched_at) AS fetched_at
+        FROM portal_raw_pages p
+        WHERE p.source = l.source AND p.source_id_native = l.source_id_native
+    ) pg ON true
+    LEFT JOIN LATERAL (
+        SELECT max(p.last_observed_at) AS observed_at
+        FROM portal_raw_payloads p
+        WHERE p.source = l.source AND p.source_id_native = l.source_id_native
+    ) pl ON true
+    WHERE l.is_active
+      AND l.source_id_native IS NOT NULL
+),
+old AS (
+    SELECT c.*,
+           row_number() OVER (PARTITION BY c.source
+                              ORDER BY c.last_fetch_at, c.source_id_native) AS rn,
+           count(*) OVER (PARTITION BY c.source) AS source_total
+    FROM cand c
+    WHERE c.last_fetch_at < now() - make_interval(secs => %(min_age)s::double precision)
+)
+SELECT source, source_id_native, source_url, price_czk, last_fetch_at, source_total
+FROM old
+WHERE rn <= %(cap)s::int
+ORDER BY source, rn
+"""
+
+
+def location_refetch_candidates(
+    conn: psycopg.Connection,
+    *,
+    min_age_seconds: int,
+    cap_per_source: int,
+) -> list[dict[str, Any]] | None:
+    """Listings whose page carried no location and whose page is old enough to
+    re-read, oldest-fetched first, at most `cap_per_source` per portal.
+
+    None (not an empty list) when the audit matview is absent: a caller must be
+    able to tell "nothing to do" from "this database cannot answer", and on a
+    branch database without the location relations the lane skips instead of
+    raising every tick. `source_total` carries the UNCAPPED per-portal backlog,
+    so a capped tick still says how much is left for tomorrow.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT to_regclass(%s) IS NOT NULL",
+            (f"public.{_LOCATION_REFETCH_AUDIT_MV}",),
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        cur.execute(
+            _LOCATION_REFETCH_CANDIDATES_SQL,
+            {"min_age": float(min_age_seconds), "cap": int(cap_per_source)},
+        )
+        rows = cur.fetchall()
+    return [
+        {
+            "source": r[0],
+            "native_id": str(r[1]),
+            "detail_ref": detail_ref(r[0], r[2]),
+            "price_czk": r[3],
+            "last_fetch_at": r[4],
+            "source_total": int(r[5]),
+        }
+        for r in rows
+    ]
+
+
+def enqueue_location_refetch(
+    conn: psycopg.Connection,
+    source: str,
+    entries: Sequence[tuple[str, str | None, int | None]],
+) -> int:
+    """Queue (native_id, detail_ref, index_price_czk) rows for a second look at
+    QUEUE_PRIORITY_VERIFY. Returns the number of rows inserted or re-armed.
+
+    Not `enqueue_detail`: that one raises a queued row's priority (GREATEST) and
+    leaves `given_up` alone, which is wrong in both directions here. This lane
+    must never promote a row above the presence checks it shares a class with
+    (LEAST), and the rows it most wants are precisely the ones the drain gave up
+    on after five failures — invisible to every claim until something re-arms
+    them, exactly as `enqueue_presence_checks` re-arms its own (rule #5:
+    tracked, not dropped). `enqueued_at` is left alone so the oldest wait still
+    sorts first inside the verify class; a claimed row is never disturbed.
+    """
+    rows = list(entries)
+    if not rows:
+        return 0
+    total = 0
+    with conn.cursor() as cur:
+        for start in range(0, len(rows), _QUEUE_ENQUEUE_CHUNK):
+            chunk = rows[start : start + _QUEUE_ENQUEUE_CHUNK]
+            cur.execute(
+                """
+                INSERT INTO listing_detail_queue
+                    (source, native_id, detail_ref, index_price_czk, priority,
+                     sreality_id)
+                SELECT %(source)s, u.nid, u.ref, u.price, %(verify)s,
+                       CASE WHEN %(source)s = 'sreality'
+                            THEN u.nid::bigint ELSE NULL END
+                FROM unnest(
+                    %(nids)s::text[], %(refs)s::text[], %(prices)s::int[]
+                ) AS u(nid, ref, price)
+                ON CONFLICT (source, native_id) DO UPDATE SET
+                    detail_ref      = EXCLUDED.detail_ref,
+                    index_price_czk = EXCLUDED.index_price_czk,
+                    priority        = LEAST(listing_detail_queue.priority,
+                                            EXCLUDED.priority),
+                    given_up        = false,
+                    attempts        = 0
+                WHERE listing_detail_queue.claimed_at IS NULL
+                """,
+                {
+                    "source": source,
+                    "verify": QUEUE_PRIORITY_VERIFY,
+                    "nids": [str(nid) for nid, _, _ in chunk],
+                    "refs": [ref for _, ref, _ in chunk],
+                    "prices": [sane_price_czk(p) for _, _, p in chunk],
+                },
+            )
+            total += cur.rowcount or 0
+    return total
+
+
 def claim_detail_batch(
     conn: psycopg.Connection,
     source: str,

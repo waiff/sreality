@@ -66,6 +66,16 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              under its own `claims_intake.FAST_LANE` cursor. LIVE by default
              (`LOCATION_INTAKE_FAST_ENABLED=0` idles it). One lane, two
              schedules: see the constant block below.
+- location_refetch: every `LOCATION_REFETCH_INTERVAL_S` (default 86400, first
+             tick a few minutes after start), queue the audit page's active
+             "no data" listings for ONE more detail fetch, at
+             db.QUEUE_PRIORITY_VERIFY and capped at
+             `LOCATION_REFETCH_CAP_PER_SOURCE` (default 500) rows per portal per
+             tick. ceskereality and realitymix geocode an ad AFTER publishing it,
+             so a listing fetched at discovery carried no location and nothing
+             ever re-read it; the drain does the rest (a bazos category page
+             raises ListingGoneError and delists instead). LIVE by default
+             (`LOCATION_REFETCH_ENABLED=0` idles it).
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook.
 
@@ -288,6 +298,44 @@ _INTAKE_FAST_WEDGE_LOGGED = False
 _INTAKE_FAST_LAST_IDLE = True
 # The contract projection is a startup step, not a per-pass one (see _project_contracts_once).
 _INTAKE_FAST_CONTRACTS_PROJECTED = False
+
+# location_refetch lane (W8): A PAGE THAT CARRIED NO LOCATION GETS A SECOND LOOK.
+#
+# Two portals fill an ad's location in AFTER publishing it. Our one detail fetch ran at
+# discovery — measured 2026-09-14, 56 of 63 ceskereality and 56 of 112 realitymix rows in
+# the audit page's active "no data" bucket were fetched within two minutes of first
+# sighting and never again — and the index card never changed afterwards, so no re-fetch
+# was ever enqueued. The listing then has no claims, so it has no location, for ever.
+#
+# This lane is the second look, and NOTHING ELSE: it enqueues, and the machinery that
+# already exists does the rest — the drain re-fetches and rewrites the page, the
+# location_intake_fast lane mines the new body within a minute, the resolver answers. A
+# bazos dead ad answers with the category page, which raises ListingGoneError, so the same
+# fetch also delists it sooner.
+#
+# DAILY, AND BOUNDED PER PORTAL. The set is a few hundred rows and a portal's geocoding lag
+# is minutes-to-hours, so once a day is plenty and the cap (500/portal/tick, oldest-fetched
+# first) is what keeps a portal with thousands of dead ads polite: it drains over days
+# instead of flooding one drain pass. Env vars, not app_settings: like the intake lane,
+# these are properties of the service this process runs on, and the reader touching no
+# database is what lets the lane ship LIVE (see _read_location_refetch_interval).
+LOCATION_REFETCH_ENABLED_ENV = "LOCATION_REFETCH_ENABLED"
+LOCATION_REFETCH_INTERVAL_ENV = "LOCATION_REFETCH_INTERVAL_S"
+LOCATION_REFETCH_MIN_AGE_ENV = "LOCATION_REFETCH_MIN_AGE_S"
+LOCATION_REFETCH_CAP_ENV = "LOCATION_REFETCH_CAP_PER_SOURCE"
+LOCATION_REFETCH_INTERVAL_DEFAULT = 86400
+# Older than this and the page is worth re-reading. Six hours, not a day: it is well past
+# the portals' geocoding lag, and it means a listing discovered today gets its second look
+# on TOMORROW's tick rather than waiting for the day after.
+LOCATION_REFETCH_MIN_AGE_DEFAULT = 21600
+LOCATION_REFETCH_CAP_DEFAULT = 500
+# The first tick waits, for two reasons: a redeploy restarts every lane at once (the drain's
+# first pass, the contract projection, the intake's first walk) and a daily lane has no
+# reason to compete for that minute; and a deploy loop must not fire a queue-writing pass
+# every time the container restarts.
+LOCATION_REFETCH_FIRST_DELAY_SECONDS = 300.0
+# log-once-per-process guard: the audit matview is absent (a branch database).
+_LOCATION_REFETCH_VIEW_WARNED = False
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -535,6 +583,28 @@ def _read_location_intake_fast_budget() -> int:
 def _read_location_intake_fast_bodies_cap() -> int:
     return _env_int(LOCATION_INTAKE_FAST_BODIES_CAP_ENV,
                     LOCATION_INTAKE_FAST_BODIES_CAP_DEFAULT, minimum=1, maximum=5000)
+
+
+def _read_location_refetch_interval() -> int:
+    # The flag gates the lane via interval<=0 (idle-not-dead, the _lane_loop contract).
+    # Ships LIVE — the lane is the fix itself, and an env var the operator must remember to
+    # set on the Railway service is a fix that never runs.
+    if not _env_flag(LOCATION_REFETCH_ENABLED_ENV, default=True):
+        return 0
+    # Floor of an hour: this lane writes to the shared queue, and nothing about it gets
+    # better by running more often than the portals geocode.
+    return _env_int(LOCATION_REFETCH_INTERVAL_ENV, LOCATION_REFETCH_INTERVAL_DEFAULT,
+                    minimum=3600, maximum=7 * 86400)
+
+
+def _read_location_refetch_min_age() -> int:
+    return _env_int(LOCATION_REFETCH_MIN_AGE_ENV, LOCATION_REFETCH_MIN_AGE_DEFAULT,
+                    minimum=600, maximum=30 * 86400)
+
+
+def _read_location_refetch_cap() -> int:
+    return _env_int(LOCATION_REFETCH_CAP_ENV, LOCATION_REFETCH_CAP_DEFAULT,
+                    minimum=1, maximum=10000)
 
 
 def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
@@ -1494,6 +1564,78 @@ async def _location_intake_fast_pass(
     _record_pass(state, "location_intake_fast", last)
 
 
+def _location_refetch_sync() -> dict[str, Any]:
+    """One daily tick: read the audit set's active no-data rows whose page is old
+    enough, and queue them for one more detail fetch at VERIFY priority.
+
+    No lease and no in-process lock: the pass is one SELECT plus one INSERT per portal,
+    the enqueue is idempotent on (source, native_id), and a second caller would at worst
+    re-write rows it already wrote."""
+    global _LOCATION_REFETCH_VIEW_WARNED
+
+    started = time.monotonic()
+    min_age = _read_location_refetch_min_age()
+    cap = _read_location_refetch_cap()
+    conn = db.connect()
+    try:
+        rows = db.location_refetch_candidates(
+            conn, min_age_seconds=min_age, cap_per_source=cap)
+        if rows is None:
+            if not _LOCATION_REFETCH_VIEW_WARNED:
+                _LOCATION_REFETCH_VIEW_WARNED = True
+                LOG.warning(
+                    "LOCATION_REFETCH: location_pin_audit_mv is absent on this database; "
+                    "the lane has nothing to read and skips every tick")
+            return {"ran": False, "reason": "audit_view_missing",
+                    "seconds": round(time.monotonic() - started, 1)}
+        by_source: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            by_source.setdefault(row["source"], []).append(row)
+        sources: dict[str, Any] = {}
+        queued_total = 0
+        for source, items in sorted(by_source.items()):
+            queued = db.enqueue_location_refetch(
+                conn, source,
+                [(it["native_id"], it["detail_ref"], it["price_czk"]) for it in items],
+            )
+            queued_total += queued
+            sources[source] = {
+                "candidates": len(items),
+                "queued": queued,
+                # The UNCAPPED backlog: how many this portal still owes after the cap.
+                "backlog": items[0]["source_total"],
+            }
+        return {
+            "ran": True,
+            "candidates": len(rows),
+            "queued": queued_total,
+            "sources": sources,
+            "min_age_s": min_age,
+            "cap": cap,
+            "seconds": round(time.monotonic() - started, 1),
+        }
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+async def _location_refetch_pass(
+    stop_event: asyncio.Event, state: dict[str, Any],
+) -> None:
+    if stop_event.is_set():
+        return
+    last = await asyncio.to_thread(_location_refetch_sync)
+    # Once a day, so it is always logged: a lane whose whole output is one line a day
+    # should leave that line even when it found nothing.
+    LOG.info(
+        "LOCATION_REFETCH lane candidates=%s queued=%s sources=%s %ss",
+        last.get("candidates", 0), last.get("queued", 0),
+        {k: v["queued"] for k, v in last.get("sources", {}).items()},
+        last.get("seconds"),
+    )
+    _record_pass(state, "location_refetch", last)
+
+
 def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     """The lane state as written to the heartbeat, with elapsed time resolved.
 
@@ -1546,11 +1688,23 @@ async def _lane_loop(
     *,
     default_interval: float,
     idle_seconds: float = IDLE_WAIT_SECONDS,
+    first_delay_seconds: float = 0.0,
 ) -> None:
     """One forever-lane: re-read the interval each pass (live app_settings
     edits apply on the next wake), interval<=0 = idle-not-dead, per-pass
     try/except, clean stop_event exit. Mirrors notifications.matcher_loop."""
     LOG.info("%s lane starting", name)
+    if first_delay_seconds > 0:
+        # A lane that ticks once a day (location_refetch) does not run its pass in the
+        # same second the container boots: every other lane is starting too, and a deploy
+        # loop would otherwise turn "daily" into "per redeploy".
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=first_delay_seconds)
+        except asyncio.TimeoutError:
+            pass
+        else:
+            LOG.info("%s lane stopped", name)
+            return
     while not stop_event.is_set():
         interval = default_interval
         try:
@@ -1692,6 +1846,15 @@ async def _amain() -> int:
             lambda: _location_intake_fast_pass(stop_event, state),
             state,
             default_interval=LOCATION_INTAKE_FAST_INTERVAL_DEFAULT)),
+        # Daily, and it does NOT alarm as dead between ticks: check_worker_lane_stall
+        # reads `in_flight_s` (a pass RUNNING too long), never the gap between passes, so
+        # an idle lane is simply skipped by the check.
+        ("location_refetch", lambda: _lane_loop(
+            "location_refetch", stop_event, _read_location_refetch_interval,
+            lambda: _location_refetch_pass(stop_event, state),
+            state,
+            default_interval=LOCATION_REFETCH_INTERVAL_DEFAULT,
+            first_delay_seconds=LOCATION_REFETCH_FIRST_DELAY_SECONDS)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),
