@@ -32,4 +32,9 @@ from __future__ import annotations
 #      split, and then a token naming an obec (or a uniquely named part) anchors the rest
 #      INSIDE that town, which is what lets "Praha 4 - Podolí" publish Praha + Podolí with
 #      both names spelled by RÚIAN. Ambiguity binds nothing. Every row re-resolves once.
-RESOLVER_VERSION = "resolver:v5"
+# v5.1 = W11 (incident 2026-09-14): a contract bump never blacks out. The claim read takes a
+#      listing's NEWEST EVIDENCE — the highest contract version present for that (listing,
+#      portal) that is <= the active one — instead of the active version only, so the hours
+#      between a bump and its re-mine no longer judge a listing with no claims at all. The
+#      bump re-queues the 595,816 rows the W9 sweep emptied.
+RESOLVER_VERSION = "resolver:v5.1"

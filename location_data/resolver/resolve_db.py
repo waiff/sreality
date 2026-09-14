@@ -61,10 +61,6 @@ from location_data.resolver.types import (
 
 _CURRENT_REGISTRY_SQL = "SELECT id, label FROM registry_versions WHERE is_current LIMIT 1"
 
-# ONE projection, ONE admissibility predicate — the row unpacking in `_claim` is positional,
-# so a second hand-written column list is a silent mis-mapping waiting to happen
-# (`test_resolver_jobs.test_the_claims_select_maps_onto_claim_positionally` pins it).
-#
 # THE LICENCE RAIL LIVES HERE (W2-a). Migration 384 enforced it with three CHECK constraints
 # on the stores of record — a `position_licence_class` column on each projection and on the
 # resolution, each constrained `<> 'ephemeral_display_only'`. `listing_location` has no such
@@ -72,48 +68,82 @@ _CURRENT_REGISTRY_SQL = "SELECT id, label FROM registry_versions WHERE is_curren
 # coordinate is not refused at write time, it is never READ.
 _ADMISSIBLE_LICENCE_CLASSES = "('portal', 'operator')"
 
-# AND SO DOES THE CONTRACT-VERSION RAIL, for the same reason and in the same predicate.
+# AND SO DOES THE CONTRACT-VERSION RAIL — BUT A BUMP MUST NEVER BLACK A LISTING OUT (W11).
 # `location_claims` is append-only and its fingerprint hashes `extractor_version`, so a
 # contract BUMP does not supersede the old version's rows — it inserts new ones beside them.
-# W1-c bumped all nine contracts at once, which means every listing whose body has not
-# changed since carries two claims for the same fact, and the SUPERSEDED one has the LOWER
-# id: it would win every "first admissible claim of this type" tie in BIND and FILL, and the
-# resolver would serve the retired contract's answer indefinitely.
+# The superseded row has the LOWER id, so it would win every "first admissible claim of this
+# type" tie in BIND and FILL: the version rail is what stops the retired contract's answer
+# being served forever.
 #
-# Filtering at READ is what makes that a cleanup rather than a correctness step: the rows
-# stay on disk (nothing in this program deletes evidence in place) and W2-b's migration
-# deletes the inactive-entry claims at its leisure. `is_active` lives on the contract HEADER,
-# one per source, so the EXISTS is two primary-key hops per claim row.
+# W1-c spelled that rail `pc.is_active`, and on 2026-09-14 that spelling cost the corpus its
+# location. W9 bumped eight contracts at 05:58Z and a full-resolve sweep ran at 06:42Z, hours
+# before the intake lanes had re-mined the pages under the new versions: 595,816 listings were
+# re-judged with NO admissible claim at all and came out `unknown/undetermined/low`, and under
+# W5 (consumers serve only resolved locations) Browse fell from ~350 k rows to 45,810.
 #
-# Operator claims carry NO contract entry by construction
+# So the rail reads a listing's NEWEST EVIDENCE instead of only the newest CONTRACT: per
+# (listing, portal) the resolver takes the claims of the highest contract version present
+# that is `<= the active version` — the active version's claims the moment they exist, the
+# most recent earlier version's until then. `max(...) OVER (PARTITION BY listing_id, source)`
+# is one version per listing per portal and NEVER a mix, so a half-re-mined listing still
+# reads one contract's answer rather than two contracts' halves. A bump is then what it
+# always should have been: invisible until the evidence arrives.
+#
+# `contract_version` is NULL for an operator claim (no entry by construction), which `max()`
+# ignores and the outer filter keeps — operator corrections are unchanged.
+#
+# Operator claims carry NO contract entry
 # (`location_data/operator_corrections.py` writes `contract_entry_id NULL` +
-# `licence_class 'operator'`), so they are named explicitly rather than let through by a
-# NULL-tolerant join — a portal claim that somehow lost its entry id must NOT be admitted.
-_ACTIVE_CONTRACT_ENTRY = """
+# `licence_class 'operator'`), so they are named explicitly rather than let through by the
+# LEFT JOIN — a portal claim that somehow lost its entry id must NOT be admitted.
+_ADMISSIBLE_CONTRACT = """
        (c.contract_entry_id IS NULL AND c.licence_class = 'operator'
-        OR EXISTS (SELECT 1 FROM portal_contract_entries pce
-                     JOIN portal_contracts pc ON pc.id = pce.contract_id
-                    WHERE pce.id = c.contract_entry_id AND pc.is_active))"""
+        OR pc.id IS NOT NULL AND pc.version <= act.version)"""
 
-_CLAIMS_SELECT = f"""
-SELECT id, listing_id, source, claim_type::text, surface::text, extraction_method::text,
-       licence_class::text, first_observed_at, value_text, value_num,
+# ONE projection, ONE admissibility predicate — the row unpacking in `_claim` is positional,
+# so a second hand-written column list is a silent mis-mapping waiting to happen
+# (`test_resolver_jobs.test_the_claims_select_maps_onto_claim_positionally` pins it).
+_CLAIM_COLUMNS = """id, listing_id, source, claim_type::text, surface::text,
+       extraction_method::text, licence_class::text, first_observed_at, value_text,
+       value_num,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_Y(value_geom) END,
        CASE WHEN value_geom IS NULL THEN NULL ELSE ST_X(value_geom) END,
        value_jsonb, declared_precision_label, declared_radius_m,
-       blur_evidence::text, claim_confidence::text, subject_scoped
+       blur_evidence::text, claim_confidence::text, subject_scoped"""
+
+
+def _claims_sql(listing_filter: str, order_by: str) -> str:
+    """The claim read, with the caller's listing filter INSIDE the window's scope.
+
+    The filter cannot be appended to a finished statement any more: `max(pc.version) OVER
+    (PARTITION BY ...)` would then be computed over the whole table before the listing was
+    picked. Measured on prod over a 250-listing slice, the shape below is 11 ms / 1.2 k
+    buffers against 152 ms / 75 k for the same rule written as a correlated anti-join.
+    """
+    return f"""
+WITH evidence AS (
+SELECT c.*, pc.version AS contract_version,
+       max(pc.version) OVER (PARTITION BY c.listing_id, c.source) AS newest_version
   FROM location_claims c
+  LEFT JOIN portal_contract_entries pce ON pce.id = c.contract_entry_id
+  LEFT JOIN portal_contracts pc ON pc.id = pce.contract_id
+  LEFT JOIN portal_contracts act ON act.source = pc.source AND act.is_active
  WHERE c.licence_class IN {_ADMISSIBLE_LICENCE_CLASSES}
-   AND{_ACTIVE_CONTRACT_ENTRY}
+   AND{_ADMISSIBLE_CONTRACT}
+   AND {listing_filter}
+)
+SELECT {_CLAIM_COLUMNS}
+  FROM evidence
+ WHERE contract_version IS NULL OR contract_version = newest_version
+ ORDER BY {order_by}
 """
 
-_CLAIMS_SQL = _CLAIMS_SELECT + "   AND c.listing_id = %s\n ORDER BY c.id"
+
+_CLAIMS_SQL = _claims_sql("c.listing_id = %s", "id")
 
 # The whole SLICE in one query instead of one per listing; the per-listing order is still
 # `id`, which is what `core.resolve` re-sorts on anyway.
-_CLAIMS_BULK_SQL = (
-    _CLAIMS_SELECT + "   AND c.listing_id = ANY(%s::bigint[])\n ORDER BY c.listing_id, c.id"
-)
+_CLAIMS_BULK_SQL = _claims_sql("c.listing_id = ANY(%s::bigint[])", "listing_id, id")
 
 _SOURCES_BULK_SQL = "SELECT id, source FROM listings WHERE id = ANY(%s::bigint[])"
 

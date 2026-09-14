@@ -337,7 +337,7 @@ def test_the_per_listing_reads_are_prefetched_once_per_slice():
     state = _drained([[(101, 0), (102, 0), (103, 0)], [(104, 0), (105, 0)]])
     assert state["stats"].claimed == 5
     for needle in (
-        "from location_claims c where c.licence_class in ('portal', 'operator')",
+        "from location_claims c left join portal_contract_entries pce",
         "select id, source from listings where id = any(",
     ):
         assert _count(state, needle) == 2, needle
@@ -430,12 +430,11 @@ def test_a_queued_listing_with_no_live_claims_gets_a_row_not_a_skip():
 
 
 def test_the_claims_select_maps_onto_claim_positionally():
-    """`_claim` unpacks `_CLAIMS_SELECT`'s row BY INDEX, so a column added, removed or
+    """`_claim` unpacks `_CLAIM_COLUMNS`'s row BY INDEX, so a column added, removed or
     reordered in one and not the other is a silent mis-mapping: every value still has the
     right TYPE one slot over (three texts in a row, two floats, two nullable texts), so
     nothing raises — the resolver just reads the surface as the extraction method."""
-    select = resolve_db._CLAIMS_SELECT
-    body = select[select.index("SELECT") + len("SELECT"):select.index("FROM location_claims")]
+    body = resolve_db._CLAIM_COLUMNS
     names, depth, current = [], 0, []
     for ch in body:
         if ch == "(":
@@ -1125,7 +1124,7 @@ def test_workers_1_is_the_single_connection_path_statement_for_statement(monkeyp
         "select listing_id, attemp",
         # the prefetch on its own budget, restored before anything writes (W2-a6)
         "set local statement_timeout = '90s'",
-        "select id, listing_id, so", "select id, source from li",
+        "with evidence as ( select", "select id, source from li",
         "set local statement_timeout = '30s'",
         "insert into listing_locat", "delete from dirty_locatio",
         "set local statement_timeout = '30s'", "set local lock_timeout = '5s'",

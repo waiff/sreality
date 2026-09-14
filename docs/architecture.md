@@ -2124,9 +2124,9 @@ foreign is a determination, never a default.
 **A contract BUMP does not supersede the old version's rows** — `location_claims` is append-only and
 its fingerprint hashes `extractor_version`, so a bump inserts new rows beside the old ones, and the
 superseded row has the LOWER id, which wins every "first admissible claim of this type" tie. So the
-resolver's claim projection (`_CLAIMS_SELECT`) admits a claim only when its `contract_entry_id`
-belongs to a contract whose header is `is_active`, plus operator claims, which carry no entry by
-construction (`contract_entry_id IS NULL` + `licence_class = 'operator'` — named explicitly, so a
+resolver's claim projection (`_claims_sql`) admits a claim only when its `contract_entry_id`
+belongs to a contract version that is a listing's NEWEST EVIDENCE, plus operator claims, which carry
+no entry by construction (`contract_entry_id IS NULL` + `licence_class = 'operator'` — named explicitly, so a
 portal claim that lost its entry id is NOT let through). Filtering at READ is what made deleting the
 superseded rows a cleanup rather than a correctness step, and **W6-a took it**: a claim under a
 retired contract version is now DELETED — 9.5 M of 13.2 M rows, the large majority of the table —
@@ -2135,7 +2135,23 @@ artifact (rule 1's backup, 90-day retention) and then runs `scripts/location_cla
 20,000-row id-keyset batches, bounded, paused and resumable. It enqueues NOTHING: the resolver never
 read these rows, so no verdict can move — which is the whole difference from `contracts.py
 --retract`, the mechanism that withdraws a version's evidence BECAUSE it was wrong and must
-re-resolve every listing it touched. Re-dispatch the workflow after any future retirement. **Licence
+re-resolve every listing it touched. Re-dispatch the workflow after any future retirement.
+
+**A CONTRACT BUMP NEVER BLACKS OUT (W11, 2026-09-14).** W1-c spelled that rail `pc.is_active`, and
+the resolver then read the ACTIVE version's claims or nothing — so in the 6–8 h a re-mine takes, a
+bumped portal's listings were judged with NO evidence at all. On 2026-09-14 a W9 bump of eight
+contracts at 05:58Z met a full-resolve sweep at 06:42Z and 595,816 rows came out
+`unknown/undetermined/low`; under W5 Browse fell from ~350,000 active rows to 45,810. The rail now
+reads **a listing's newest evidence**: per (listing, portal) the claims of the highest contract
+version present that is `<= the active version` — the active one the moment its rows exist, the most
+recent earlier one until then, and `max(pc.version) OVER (PARTITION BY listing_id, source)` makes
+that ONE version per listing per portal rather than a mix of two contracts' halves (measured on prod
+over a 250-listing slice: 11 ms / 1.2 k buffers, index-driven). `claim_set_hash` fingerprints the
+CONSUMED set including claim ids, so the re-mine's new rows change the hash and the listing
+re-resolves normally. **Retirement waits for the re-mine**: those older rows are live data until the
+page has been re-mined, so `location_claims_retire.py` refuses (exit 3) while any portal still has a
+SERVED listing carrying no claim under its ACTIVE contract, and names the number. There is no
+`--force` — the answer is to wait for the intake lanes. **Licence
 enforcement rides the same predicate**: `licence_class` is the program's single licence vocabulary
 and `ephemeral_display_only` (Mapy.cz-class) its poison value; `listing_location` carries no
 `position_licence_class` column because `licence_class IN ('portal','operator')` is part of
@@ -2376,6 +2392,9 @@ per-listing statement gets, and cancelling it threw the whole batch away.
   keyset went back to 0 whenever it caught up, so each idle hourly hop re-walked all 744k payload
   rows (~500k of them unstampable) to stamp nothing: `bodies=416s`. Keep the position and reset it on
   the ONE event that makes the rows below it eligible again — here, a contract bump.
+* **A contract bump must never outrun its re-mine** (W11, 2026-09-14) — reading only the ACTIVE
+  version's claims meant the 6–8 h between a bump and the re-mine judged 595,816 listings with no
+  evidence and emptied Browse to 45,810 rows; the resolver reads a listing's NEWEST evidence instead.
 * **An enqueue that no-ops loses the listing** — the 07:13Z contract bump re-mined ~60k listings
   already queued from a ~540k sweep; every enqueue no-opped, the drain resolved them from the OLD
   claims and deleted the rows, and 384,500 answer rows with 135 towns had nothing that could

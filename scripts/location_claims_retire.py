@@ -2,9 +2,9 @@
 
 W6-a of the location simplification sprint. A claim whose `contract_entry_id` belongs to a
 `portal_contracts` row with `is_active = false` is invisible to the resolver and has been
-since W1-c: `location_data/resolver/resolve_db._ACTIVE_CONTRACT_ENTRY` admits a claim only
-when its entry hangs off an ACTIVE contract, or when it is an operator claim (no entry at
-all). Measured 2026-09-13 that is ~9.5 M of ~13.2 M rows — the large majority of a 5.8 GB
+since W1-c: `location_data/resolver/resolve_db._ADMISSIBLE_CONTRACT` admits a claim only
+when its entry hangs off the newest contract version present for that listing, or when it is
+an operator claim (no entry at all). Measured 2026-09-13 that is ~9.5 M of ~13.2 M rows — the large majority of a 5.8 GB
 relation, carried by seven indexes, read by nothing.
 
 NO VERDICT MOVES, SO NOTHING IS ENQUEUED. This is the whole difference between this script
@@ -50,6 +50,11 @@ startup into a list of `portal_contract_entries.id`, and the batch predicate is
 (`location_data/operator_corrections.py`), and NULL is never `= ANY` of anything, so the
 operator's own corrections cannot be reached by this module even by mistake.
 
+AND IT WAITS FOR THE RE-MINE (W11). Since the 2026-09-14 blackout the resolver reads a
+listing's NEWEST EVIDENCE, so a retired version's rows are live data until the page has been
+re-mined under the active one. The run refuses (exit 3) while any portal still has a served
+listing carrying no claim under its ACTIVE contract, and names the number. No `--force`.
+
     python3 -m scripts.location_claims_retire --dry-run
     python3 -m scripts.location_claims_retire --confirm RETIRE
 """
@@ -83,6 +88,33 @@ _RETIRED_ENTRIES_SQL = """
       JOIN portal_contracts pc ON pc.id = pce.contract_id
      WHERE NOT pc.is_active
      ORDER BY pc.source, pc.version, pce.id
+"""
+
+# THE RE-MINE RAIL (W11, incident 2026-09-14). A retired version's claims are NOT dead
+# weight while the portal's pages have not been re-mined under the ACTIVE version: since W11
+# the resolver reads a listing's NEWEST EVIDENCE (the highest contract version present for
+# that listing that is <= the active one), so an old version's rows are what keeps a
+# half-re-mined listing on the map. Deleting them mid-re-mine is exactly the blackout W11
+# fixed, spelled as a DELETE instead of a SELECT — and this one would not self-heal.
+#
+# So the gate is per portal and it is a fact, not a wait: a version of portal P is deletable
+# only when every SERVED listing of P (active, which is what consumers show) already carries
+# at least one claim under P's ACTIVE contract. `count(*) FILTER (WHERE NOT EXISTS ...)` is
+# the number still awaiting its re-mine; any portal with a non-zero number refuses the run
+# and names it. There is deliberately no `--force`: the answer is to wait 6-8 h for the
+# intake lanes, and a flag would exist only to skip that wait.
+_REMINE_GAP_SQL = """
+    SELECT l.source, count(*) AS served,
+           count(*) FILTER (WHERE NOT EXISTS (
+               SELECT 1 FROM location_claims c
+                 JOIN portal_contract_entries pce ON pce.id = c.contract_entry_id
+                 JOIN portal_contracts pc ON pc.id = pce.contract_id
+                WHERE c.listing_id = l.id AND pc.is_active AND pc.source = l.source
+                  AND c.licence_class IN ('portal', 'operator'))) AS awaiting_remine
+      FROM listings l
+     WHERE l.is_active AND l.source = ANY(%(sources)s)
+     GROUP BY l.source
+     ORDER BY l.source
 """
 
 # THE COUNT IS A DRY-RUN LUXURY, not a precondition. It walks the whole partial index
@@ -125,6 +157,13 @@ def retired_entry_ids(conn: psycopg.Connection) -> list[tuple[int, str, int]]:
     with conn.cursor() as cur:
         cur.execute(_RETIRED_ENTRIES_SQL)
         return [(int(r[0]), str(r[1]), int(r[2])) for r in cur.fetchall()]
+
+
+def remine_gaps(conn: psycopg.Connection, sources: list[str]) -> list[tuple[str, int, int]]:
+    """(portal, served listings, listings with no claim under the ACTIVE contract)."""
+    with conn.cursor() as cur:
+        cur.execute(_REMINE_GAP_SQL, {"sources": sources})
+        return [(str(r[0]), int(r[1]), int(r[2])) for r in cur.fetchall()]
 
 
 def count_doomed(conn: psycopg.Connection, entry_ids: list[int], *,
@@ -214,6 +253,17 @@ def main(argv: list[str] | None = None) -> int:
         versions = sorted({f"{src}@{ver}" for _, src, ver in entries})
         LOG.info("RETIRE plan: %d entries under %d retired versions (%s)",
                  len(entry_ids), len(versions), ", ".join(versions))
+
+        blocked = [g for g in remine_gaps(conn, sorted({src for _, src, _ in entries}))
+                   if g[2] > 0]
+        for source, served, awaiting in blocked:
+            LOG.error("RETIRE blocked by %s: %d of %d served listings carry no claim under "
+                      "its ACTIVE contract — the retired versions are still their newest "
+                      "evidence", source, awaiting, served)
+        if armed and blocked:
+            LOG.error("RETIRE nothing was deleted; re-run once the intake lanes have "
+                      "re-mined those pages")
+            return 3
 
         if not armed:
             n = count_doomed(conn, entry_ids)
