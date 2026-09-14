@@ -857,6 +857,20 @@ component is slimmed twice — each wave rewrites one component and slims its st
   tick with `yielded_to=<batch_id>` while an hourly-lane batch is stamped `running` younger than 65
   minutes (older = a stale stamp from a killed run).
 
+- **W13 — read-model rebuild budgets scale with the corpus; a cancelled rebuild releases its lock
+  (Browse froze at 315k for 2 h, 2026-09-14)** (shipped): `browse-list-rebuild` timed out 11 times in
+  6 h — the rebuild had grown 173 s → 257 s → 405 s with the recovering store while its budget stayed
+  600 s — so `browse_list` sat at 315,827 active rows from 14:26Z while 712,932 rows had a town. The
+  */15 job burning 10 minutes in every 15 also starved `browse-map-rebuild` (:07 and :37, both inside
+  a rebuild window) out of the pg_cron scheduler entirely for 3.5 h: no run row, no log line, and —
+  checked before assuming — no held advisory lock, no orphaned `_next` relation, no zombie backend.
+  Migration 522 cuts the cost (W5's consumer rule was an EXISTS against a second alias of
+  `listing_location`, which the projection already LEFT JOINs on the same unique key — provably the
+  same rows, one 821k-row pass instead of two, skeleton cost 283,226 → 229,197), makes both rebuilds
+  cancel-safe (`pg_try_advisory_xact_lock`, since PL/pgSQL's `when others` does not match
+  QUERY_CANCELED and never released the old session lock), and raises the budgets to 1800 s / 1500 s
+  with pins in `tests/test_cron_statement_timeout_guard.py`.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a

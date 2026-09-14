@@ -201,15 +201,42 @@ def test_the_effective_list_definition_carries_the_consumer_rule(view: str) -> N
     RED by: a later migration re-creating either view from an older body and dropping
     the clause on the way — exactly the failure mode `_latest_migration_defining` exists
     for. The character-level pin against the Python constant is
-    tests/test_location_w5_serve_resolved.py."""
+    tests/test_location_w5_serve_resolved.py.
+
+    TWO SANCTIONED SPELLINGS, one meaning (W13, migration 522). Every surface carrying
+    this rule ALREADY joins `listing_location ll` for the display label and the chip
+    codes, and `listing_location_pkey` is UNIQUE on `listing_id` — so that LEFT JOIN
+    yields at most one row for exactly the key the rule asks about, and the answer can
+    either be re-fetched through `SERVED_LOCATION_PREDICATE`'s own `sl` subquery or read
+    straight off `ll`. They select the identical rows (probed on production: 40,000
+    properties, 0 disagreements). The EXISTS form costs a second full pass over an
+    821k-row table, which is why `browse_projection` — rebuilt whole every 15 minutes —
+    uses the join form and the feed still uses the subquery.
+
+    What this rail actually guarantees, in BOTH spellings: the rule is still there, it
+    still reads `listing_location`, and it still carries BOTH arms of the answer (a
+    point, or the determination that the listing is abroad). Dropping the clause, or
+    quietly losing the `foreign` arm, is RED either way."""
     from location_data.claims_common import SERVED_LOCATION_PREDICATE
 
     sql = _strip_comments(_latest_migration_defining(view).read_text())
     body = sql[sql.lower().index(f"view {view} as"):]
     body = " ".join(body[: body.index(";")].split())
-    rule = SERVED_LOCATION_PREDICATE[: SERVED_LOCATION_PREDICATE.index("sl.listing_id")]
-    assert rule in body, f"{view}'s effective definition dropped the consumer rule"
-    assert "sl.geom IS NOT NULL OR sl.country_status = 'foreign'" in body
+
+    subquery_form = SERVED_LOCATION_PREDICATE[: SERVED_LOCATION_PREDICATE.index("sl.listing_id")]
+    alias = "sl" if subquery_form in body else "ll"
+    if alias == "ll":
+        # The join form is only legal because the label join is already keyed on the
+        # rule's own key. If that join is gone, `ll` means something else entirely.
+        assert "left join listing_location ll" in body.lower(), (
+            f"{view} spells the consumer rule on `ll` but no longer LEFT JOINs "
+            f"listing_location as ll — the rule is keyed on nothing."
+        )
+    assert f"{alias}.geom IS NOT NULL OR {alias}.country_status = 'foreign'" in body, (
+        f"{view}'s effective definition dropped the consumer rule (neither "
+        f"SERVED_LOCATION_PREDICATE's EXISTS form nor the equivalent predicate on the "
+        f"label join is present, with both arms of the answer)."
+    )
 
 
 # ------------------------------------------------------------- read contract --
