@@ -45,7 +45,14 @@ _STATEMENT_TIMEOUT_SQL = "SET statement_timeout = '600s'"
 
 _REBUILD_POLL_SECONDS = 30.0
 
-_LOCK_RETRY_ATTEMPTS = 3
+# The window these three have to cover is the ~90 s of row locks the hourly MF-yield
+# recompute holds on `listings` twice an hour — the failure this rail exists for. With a
+# caller-armed `lock_timeout` the wait itself is bounded, so the RETRIES are what has to
+# outlast the holder: 4 attempts with a 15 s × attempt backoff give 15 + 30 + 45 = 90 s of
+# pauses on top of the four bounded waits (≥ 30 s each at the recommended lock_timeout),
+# i.e. well past 120 s. Three attempts and a 5 s lock_timeout came to ~60 s and would have
+# given up while the holder was still working.
+_LOCK_RETRY_ATTEMPTS = 4
 _LOCK_DEADLOCK_DELAY = 2.0
 _LOCK_WAIT_DELAY = 15.0
 

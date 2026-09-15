@@ -243,12 +243,17 @@ the two gaps found while adding property list are closed in the same PR that add
      ledger of the pairing statements was re-pinned in the same commit — exactly the drill W16
      wrote down. Existing `candidate_pairs` rows are pilot output under the old meaning and are
      orphaned deliberately; nothing mixes key spaces.
-  2. **The heal writes no snapshot.** `area_m2` is in the content hash, but this corrects OUR
-     mis-parse of the SAME stored page (the `backfill_idnes_areas` precedent), so rule 2's
-     sanctioned exception applies; a live row's next detail refetch appends exactly one genuine
-     snapshot, spread over the normal cadence.
-  3. **Not every land row gains one.** 3,016 land rows carry no area from their portal at all —
-     an honest gap, and it stays visible as one rather than being guessed at.
+  2. **The heal writes no snapshot, and for sreality nothing ever will.** `area_m2` is in the
+     content hash, but this corrects OUR mis-parse of the SAME stored page (the
+     `backfill_idnes_areas` precedent), so rule 2's sanctioned exception applies. idnes and
+     bezrealitky hash the PARSED fields, so the PARSER change makes each live row's next detail
+     fetch append exactly one genuine snapshot; sreality hashes the RAW payload, which did not
+     change, so its 44,237 rows get none — the heal is their only write.
+  3. **Not every land row gains one.** 3,016 land rows carry no area from their portal at all,
+     and 20 hold a parcel beyond `area_m2`'s numeric(7,1) ceiling (largest 16,809,800 m²) —
+     `scraper.area.MAX_AREA_M2` declines those rather than stamping a basis for a value the row
+     cannot store, which is also what keeps the heal's first batch off a 22003 abort. Honest
+     gaps, visible as gaps rather than guessed at.
 
 - 2026-09-15 — **W16: the funnel and the location audit waterfall are ONE vocabulary.**
   Supersedes entry 2026-09-10 (c)'s description of the funnel's five steps. The operator, after

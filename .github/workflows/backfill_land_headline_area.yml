@@ -12,20 +12,40 @@ name: Backfill land headline area (the plot three parsers never handed to the ru
 # same page already gave us:
 #
 #   area_m2 = estate_area, area_basis = 'plot'
-#   WHERE category_main = 'pozemek' AND (area_m2 IS NULL OR area_m2 <= 0) AND estate_area > 0
+#   WHERE category_main IN <LAND_CATEGORIES> AND (area_m2 IS NULL OR area_m2 <= 0)
+#     AND estate_area > 0 AND estate_area < MAX_AREA_M2
 #
-# ALL rows, active or not — coverage is every listing. Writes NO `listing_snapshots` row:
+# ALL rows, active or not — coverage is every listing. The CEILING is part of the
+# population: `area_m2` is numeric(7,1) while `estate_area` is numeric(9,1), so 20 pending
+# rows (sreality 11, idnes 9; largest 16,809,800 m²) hold a parcel the headline column
+# cannot store, and `SET area_m2 = estate_area` on one of them raises 22003 — a numeric
+# overflow, not a lock fight, so it aborts the batch instead of being replayed. The first
+# sits inside the FIRST page, so without the bound the job heals nothing at all. Those rows
+# are MEANT to have no headline (the ingest path NULLs an out-of-range area_m2 the same
+# way, and since W17 `derive_headline_area` declines the measure rather than stamping a
+# basis for a value the row will not hold); both counts are reported per portal in dry-run
+# and write modes.
+#
+# Writes NO `listing_snapshots` row, and for most of the population nothing ever will.
 # `area_m2` is hashed, but correcting our own mis-parse of the SAME stored page is the
-# sanctioned exception (the `backfill_idnes_areas` precedent), and a live row's next detail
-# refetch appends exactly ONE genuine snapshot, spread over the normal cadence. Idempotent
-# with no marker — a healed row fails the predicate for ever after, so the selection empties
-# itself. Batched by id (5,000 per UPDATE), each batch in its own transaction with `SET
-# LOCAL statement_timeout` + `lock_timeout` and a replay through the shared lock-retry rail.
-# DML, not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; it waits for a
-# read-model rebuild gap first, bounded, then proceeds anyway since the contention is I/O
-# and never a lock conflict. Healed listings are enqueued into `dirty_properties` so the
-# singleton `properties.area_m2` mirror is recomputed (rule 20). NOT a portal ingest
-# workflow, so it carries no `# portal:` tag.
+# sanctioned exception (the `backfill_idnes_areas` precedent). idnes + bezrealitky hash the
+# PARSED fields, so W17's parser change — not this heal — makes a live row's next detail
+# fetch append exactly ONE genuine snapshot, spread over the normal cadence (≤7,946 rows,
+# active ones only). sreality hashes the RAW payload, which did not change: its 44,237 rows
+# never get a snapshot at all, the heal is the only write they receive, and later refetches
+# rewrite the same column silently.
+#
+# Idempotent with no marker — a healed row fails the predicate for ever after, so the
+# selection empties itself; `--after` resumes, and the cursor advances only past a page that
+# was actually written, so a failed page is re-read rather than skipped. Batched by id
+# (5,000 per UPDATE), each batch in its own transaction with `SET LOCAL statement_timeout`
+# (120 s) + `lock_timeout` (30 s) and a replay through the shared lock-retry rail, whose
+# window is sized for the ~90 s of row locks the hourly MF-yield recompute holds on
+# `listings`. DML, not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; a WRITING
+# pass waits for a read-model rebuild gap first, bounded, then proceeds anyway since the
+# contention is I/O and never a lock conflict (a dry run never waits). Healed listings are
+# enqueued into `dirty_properties` so the singleton `properties.area_m2` mirror is
+# recomputed (rule 20). NOT a portal ingest workflow, so it carries no `# portal:` tag.
 #
 # The script DEFAULTS TO DRY-RUN: it reports the pending count per portal and exits unless
 # `write` is true.
@@ -64,7 +84,7 @@ on:
         default: ""
         type: string
       rebuild_wait_seconds:
-        description: How long to wait for a read-model rebuild gap before starting anyway
+        description: How long a WRITING pass waits for a read-model rebuild gap before starting anyway
         required: false
         default: ""
         type: string
@@ -103,13 +123,23 @@ jobs:
       - name: Install
         run: pip install -e .
 
+      # Inputs reach the shell as env vars, never interpolated into the script body.
       - name: Heal the land headline area
+        env:
+          IN_WRITE: ${{ inputs.write }}
+          IN_LIMIT: ${{ inputs.limit }}
+          IN_AFTER: ${{ inputs.after }}
+          IN_BATCH_SIZE: ${{ inputs.batch_size }}
+          IN_MAX_SECONDS: ${{ inputs.max_seconds }}
+          IN_REBUILD_WAIT_SECONDS: ${{ inputs.rebuild_wait_seconds }}
+          IN_IGNORE_REBUILD: ${{ inputs.ignore_rebuild }}
+          IN_VERBOSE: ${{ inputs.verbose }}
         run: |
-          ARGS="--after ${{ inputs.after || '0' }} --batch-size ${{ inputs.batch_size || '5000' }}"
-          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
-          if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
-          if [ "${{ inputs.write }}" = "true" ]; then ARGS="$ARGS --write"; fi
-          if [ -n "${{ inputs.rebuild_wait_seconds }}" ]; then ARGS="$ARGS --rebuild-wait-seconds ${{ inputs.rebuild_wait_seconds }}"; fi
-          if [ "${{ inputs.ignore_rebuild }}" = "true" ]; then ARGS="$ARGS --ignore-rebuild"; fi
-          if [ "${{ inputs.verbose }}" = "true" ]; then ARGS="$ARGS --verbose"; fi
+          ARGS="--after ${IN_AFTER:-0} --batch-size ${IN_BATCH_SIZE:-5000}"
+          if [ -n "$IN_LIMIT" ]; then ARGS="$ARGS --limit $IN_LIMIT"; fi
+          if [ -n "$IN_MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $IN_MAX_SECONDS"; fi
+          if [ "$IN_WRITE" = "true" ]; then ARGS="$ARGS --write"; fi
+          if [ -n "$IN_REBUILD_WAIT_SECONDS" ]; then ARGS="$ARGS --rebuild-wait-seconds $IN_REBUILD_WAIT_SECONDS"; fi
+          if [ "$IN_IGNORE_REBUILD" = "true" ]; then ARGS="$ARGS --ignore-rebuild"; fi
+          if [ "$IN_VERBOSE" = "true" ]; then ARGS="$ARGS --verbose"; fi
           python -m scripts.backfill_land_headline_area $ARGS

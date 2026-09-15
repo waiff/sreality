@@ -1675,9 +1675,17 @@ renumber.** Navigate by area:
     (+ its dispatch-only workflow) heals exactly that population, active or not, by moving the
     stored value into the column the one rule would put it in today; it writes **no snapshot**
     (the sanctioned rule-2 exception: our own mis-parse of the SAME stored page, the
-    `backfill_idnes_areas` precedent — a live row's next detail refetch appends the one genuine
-    snapshot) and is idempotent because the write empties its own selection. 3,016 land rows
-    carry no area from their portal at all: an honest gap, left as one.
+    `backfill_idnes_areas` precedent) and is idempotent because the write empties its own
+    selection. What follows the heal differs by portal: idnes and bezrealitky hash the PARSED
+    fields, so W17's parser change — not the heal — makes each live row's next detail fetch
+    append exactly ONE genuine snapshot; **sreality hashes the RAW payload**
+    (`scraper.hashing.content_hash`), which did not change, so its 44,237 rows get no snapshot
+    ever — the heal is the only write they receive and later refetches re-derive the same value
+    and rewrite the column silently. Two populations are deliberately left with no headline:
+    3,016 land rows carry no area from their portal at all, and 20 hold a parcel beyond
+    `area_m2`'s `numeric(7,1)` ceiling (largest 16,809,800 m²) — `MAX_AREA_M2` in the rule
+    declines the measure rather than stamping a basis for a value the row cannot store, which
+    is also what keeps the heal's first batch from aborting on a 22003.
 
     **`area_m2` is what every consumer reads — the dedup rule included.** NEW DEDUP path C used
     to spell its own choice (`estate_area` for pozemek, else `usable_area`), a second answer to

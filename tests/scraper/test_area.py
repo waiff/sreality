@@ -1,6 +1,6 @@
 """The one headline-area precedence, shared by all nine portals."""
 
-from scraper.area import AREA_BASES, MIN_AREA_M2, derive_headline_area
+from scraper.area import AREA_BASES, MAX_AREA_M2, MIN_AREA_M2, derive_headline_area
 
 
 def test_usable_wins_when_present():
@@ -117,6 +117,33 @@ def test_the_bound_does_not_reach_small_units_or_land():
     assert derive_headline_area(category_main="ostatni", usable=3.0) == (3.0, "usable")
     assert derive_headline_area(category_main="pozemek", total=4.0) == (4.0, "plot")
     assert derive_headline_area(category_main=None, fallback=2.0) == (2.0, "unknown")
+
+
+def test_a_measure_the_column_cannot_hold_is_declined_on_every_category():
+    # `listings.area_m2` is numeric(7,1): the write boundary NULLs anything at or
+    # beyond 10^6 (scraper.db.sane_listing_numerics). Declining it HERE means the
+    # resolver falls through instead of stamping a basis for a value the row will
+    # not hold — production carries 20 land rows whose parcel is that big (up to
+    # 16,809,800 m2), and their parcel belongs in estate_area, not the headline.
+    assert derive_headline_area(category_main="pozemek", plot=16_809_800.0) == (None, None)
+    assert derive_headline_area(
+        category_main="pozemek", plot=16_809_800.0, total=1200.0
+    ) == (1200.0, "plot")
+    assert derive_headline_area(category_main="byt", usable=MAX_AREA_M2) == (None, None)
+    assert derive_headline_area(
+        category_main="byt", usable=MAX_AREA_M2, total=64.0
+    ) == (64.0, "total")
+    # the last value the column DOES hold is still a measure
+    assert derive_headline_area(category_main="pozemek", plot=999_999.9) == (999_999.9, "plot")
+
+
+def test_the_ceiling_is_the_column_bound_the_write_boundary_enforces():
+    # Imported HERE and not in scraper/area.py, which is stdlib-only: the test is
+    # what keeps the two spellings of one column bound from drifting, the same way
+    # `_NUMERIC_ABS_MAX` itself is pinned to LISTING_COLUMNS by an assert.
+    from scraper.db import _NUMERIC_ABS_MAX
+
+    assert MAX_AREA_M2 == float(_NUMERIC_ABS_MAX["area_m2"])
 
 
 def test_every_emitted_basis_is_in_the_declared_vocabulary():

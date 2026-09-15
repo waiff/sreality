@@ -27,9 +27,17 @@ same way the per-portal `or` chains this replaces skipped it. The same arm
 carries the measure's lower validity bound: on byt / dum / komercni a headline
 under MIN_AREA_M2 is a parse artifact (a title-number garble, a per-m2 note read
 as the area), never a unit, so the resolver declines it and tries the next
-measure. The bound lives HERE, not at the write boundary, because a refused
-measure has to reach the content hash — a value dropped after hashing would
-leave `listings` disagreeing with its own newest snapshot forever (rule 2/8).
+measure. MAX_AREA_M2 is the same idea from above, for EVERY category: `area_m2`
+is `numeric(7,1)`, so a measure at or beyond 10^6 cannot be stored at all — the
+write boundary NULLs it (`scraper.db.sane_listing_numerics`). Declining it HERE
+instead means the resolver falls through to the next measure and, crucially,
+never stamps a basis for a value the row will not hold; a parcel of 16,809,800 m2
+is real on the portal and belongs in `estate_area` (numeric(9,1)), not in the
+headline.
+
+BOTH bounds live HERE, not at the write boundary, because a refused measure has
+to reach the content hash — a value dropped after hashing would leave `listings`
+disagreeing with its own newest snapshot forever (rule 2/8).
 """
 
 from __future__ import annotations
@@ -43,6 +51,13 @@ LAND_CATEGORIES: frozenset[str] = frozenset({"pozemek"})
 # bounded, and neither is land: 202 active parcels really are under 5 m2.
 BOUNDED_CATEGORIES: frozenset[str] = frozenset({"byt", "dum", "komercni"})
 MIN_AREA_M2 = 5.0
+
+# The first value `listings.area_m2` (numeric(7,1)) cannot store. Kept equal to
+# `scraper.db._NUMERIC_ABS_MAX["area_m2"]` — which is what NULLs an out-of-range
+# value at the write boundary — by `tests/scraper/test_area.py`, so the two can
+# never drift; spelled here rather than imported because this module is
+# stdlib-only and must not pull in psycopg.
+MAX_AREA_M2 = 1_000_000.0
 
 
 def derive_headline_area(
@@ -61,7 +76,7 @@ def derive_headline_area(
         # because a land page's "celková plocha" is that same parcel, and a stray
         # "užitná plocha" on one is a mislabel of it again.
         for value in (plot, total, usable, floor, fallback):
-            if value:
+            if value and value < MAX_AREA_M2:
                 return value, "plot"
         return None, None
     min_m2 = MIN_AREA_M2 if category_main in BOUNDED_CATEGORIES else 0.0
@@ -71,6 +86,6 @@ def derive_headline_area(
         (total, "total"),
         (fallback, "unknown"),
     ):
-        if value and value >= min_m2:
+        if value and min_m2 <= value < MAX_AREA_M2:
             return value, basis
     return None, None

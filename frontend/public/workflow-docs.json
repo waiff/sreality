@@ -595,7 +595,7 @@
         },
         {
           "name": "rebuild_wait_seconds",
-          "description": "How long to wait for a read-model rebuild gap before starting anyway",
+          "description": "How long a WRITING pass waits for a read-model rebuild gap before starting anyway",
           "required": false,
           "type": "string",
           "default": "",
