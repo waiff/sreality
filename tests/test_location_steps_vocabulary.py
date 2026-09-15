@@ -22,7 +22,9 @@ Four properties, each one a way the vocabulary could quietly fork again:
 1.  Every shared flag and every shared count the module renders appears VERBATIM in the
     migration that last replaced `refresh_location_audit_waterfall()` AND in FUNNEL_SQL.
 2.  Every step key either producer can stamp is WORDED in the frontend module, in both
-    languages, with a non-empty label and a non-empty note.
+    languages, with a non-empty label and a non-empty note — the KEYS are pinned, never
+    the strings, because a label that cannot change without a migration is the thing
+    dropping `label_cs` was for.
 3.  No surface hardcodes a step's name. A step renamed in the module is renamed
     everywhere, in both languages, at once.
 4.  The candidates funnel does no arithmetic — the rule the audit page has always had,
@@ -153,15 +155,17 @@ def test_the_frontend_words_nothing_the_backend_does_not_stamp() -> None:
     assert set(_ts_steps()) == set(ls.STEP_KEYS)
 
 
-def test_the_czech_labels_are_the_ones_the_store_used_to_carry() -> None:
-    """Migration 526 drops `label_cs`; the nine strings must survive the move intact, or the
-    audit page silently re-words itself on the day the column goes."""
-    ts = _ts_steps()
-    prior = (MIGRATIONS / "524_location_w15_every_listing.sql").read_text(encoding="utf-8")
-    for key in ls.AUDIT_STEPS:
-        label = ts[key]["cs"]
-        # 524's hidden row carries a longer sentence; the module keeps it verbatim.
-        assert label in prior, f"{key}: the Czech label is not the one 524 wrote"
+def test_every_step_the_producer_inserts_is_worded_and_nothing_else_is() -> None:
+    """The KEYS are the contract between the producer and the page — deliberately NOT the
+    strings. Pinning the Czech to migration 524 (an immutable file) would have re-imposed
+    exactly what dropping `label_cs` bought: a label nobody can improve without a migration.
+    So the rail checks that the nine keys the producer INSERTS are the nine `AUDIT_STEPS`
+    the module words, and no more. RED by: a step key in the SQL that no page can name."""
+    # the step key is the third field of every VALUES row: (step_no, sub_no, step_key, …)
+    inserted = set(re.findall(r"\d+::smallint, \d+::smallint, '(\w+)'",
+                              _squeeze(_producer_sql())))
+    assert inserted == set(ls.AUDIT_STEPS), inserted ^ set(ls.AUDIT_STEPS)
+    assert set(ls.AUDIT_STEPS) <= set(_ts_steps())
 
 
 def test_abroad_is_worded_as_an_answer_and_never_as_a_loss() -> None:
@@ -205,6 +209,22 @@ def test_both_readouts_read_the_wording_module() -> None:
     assert "@/lib/locationSteps" in FUNNEL.read_text(encoding="utf-8")
     assert "@/lib/locationSteps" in AUDIT_PAGE.read_text(encoding="utf-8")
     assert "@/lib/locationSteps" in CANDIDATES_PAGE.read_text(encoding="utf-8")
+
+
+_JS_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
+
+
+def test_the_two_hidden_states_have_one_czech_name_on_the_audit_page() -> None:
+    """The hidden set's two states are the waterfall's split rows AND the listing list's
+    filter pill, header total and note — one number, four places. They were briefly reading
+    two different Czech names ("nevyřešeno" in the split, "zpracováno, nerozhodnuto" in the
+    list), which is the same fault as two names for one step, one level down. RED by: a
+    state name typed back into the page instead of read from the module."""
+    code = _JS_COMMENT.sub("", AUDIT_PAGE.read_text(encoding="utf-8"))
+    ts = _ts_steps()
+    for key in ("hidden_pending", "hidden_unresolved"):
+        assert f"stepLabel('{key}', 'cs')" in code, f"{key} is not read from the module"
+        assert ts[key]["cs"] not in code, f"the page re-types {key}'s Czech name"
 
 
 # --------------------------------------------------------- 4. no client arithmetic

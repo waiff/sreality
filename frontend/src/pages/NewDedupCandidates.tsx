@@ -272,7 +272,7 @@ export default function NewDedupCandidates() {
             <>
               <Card
                 title="Funnel — from every listing to a candidate"
-                lede="Each step is a smaller set than the one above it, and the gap between two steps is what was lost there — as the lane measured it, not as this page subtracted it. The indented rows under “has a location” are not losses: abroad is an ANSWER the engine gave, and it leaves the chain only at the town step, together with the handful of Czech points that have no town. These are the same steps, in the same words, as the location audit page’s waterfall; the two differ only by scope and by when they were counted, both stated below."
+                lede={`Each step is a smaller set than the one above it, and the gap between two steps is what was lost there — as the lane measured it, not as this page subtracted it. The indented rows under “${stepLabel('located', 'en')}” are not losses: abroad is an ANSWER the engine gave, and it leaves the chain only at the town step, together with the handful of Czech points that have no town. These are the same steps, in the same words, as the location audit page’s waterfall; the two differ only by scope and by when they were counted, both stated below.`}
               >
                 <CandidateFunnel stats={stats} />
               </Card>

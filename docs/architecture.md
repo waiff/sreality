@@ -2553,7 +2553,13 @@ obec RANK floor, so this page's town number IS the number dedup can block on (me
 rows of movement), and `located_no_town` stays the plain complement so the three splits keep
 partitioning `located` by construction. And `label_cs` was **dropped**: wording moved to
 `frontend/src/lib/locationSteps.ts`, one file holding Czech and English for every key, so a better
-sentence costs no migration and a step cannot be renamed on one page only. A candidate run stamps the
+sentence costs no migration and a step cannot be renamed on one page only — and, one level down,
+the hidden set's two states now carry ONE Czech name across the waterfall split, the filter pill,
+the header total and the note. Two operational constraints ride with the drop, both in 526's header:
+the column is made NULLABLE **before** the producer is replaced and dropped only **after**, so the
+:25 cron cannot land between two statements and fail; and the migration is applied only once the
+merge commit's Railway `vite` rollout is green, because the bundle on `main` still selects
+`label_cs` and PostgREST answers 400 for a column the table no longer publishes. A candidate run stamps the
 same keys into `candidate_generations.stats.waterfall` with the losses and shares already computed by
 the lane, so the two readouts can now differ only by SCOPE (a run may be narrowed to active listings)
 and by TIME (a run is frozen; this relation refreshes hourly) — and the candidates page prints both

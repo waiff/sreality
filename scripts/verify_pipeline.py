@@ -49,7 +49,6 @@ from urllib.parse import urlencode
 
 import requests
 
-from location_data.claims_common import SERVED_LOCATION_PREDICATE
 from location_data import location_steps
 from scraper import media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect

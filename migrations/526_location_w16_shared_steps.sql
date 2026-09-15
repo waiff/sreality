@@ -44,6 +44,10 @@
 --      must never cost a migration. The nine strings are not lost: they are in
 --      git, in migrations 523 and 524, and now in that module.
 --
+--      The column is made NULLABLE before the producer is replaced and DROPPED
+--      only after, so the hourly cron cannot land in a half-applied state (see
+--      APPLY ORDER below).
+--
 --      NO pg_dump IS TAKEN, and none is needed: this is a 9-row derived rollup
 --      that `refresh_location_pin_audit_mv()` rewrites from scratch every hour
 --      (`delete from` + one `insert`). Recovery from any mistake here is one
@@ -55,23 +59,46 @@
 -- row, and the hourly entry point in 523 that calls this function AFTER the
 -- matview refresh. NO new column on `listings`, no new table, no new job.
 --
--- psql applies this statement by statement under the role's 120 s default, and
--- the producer's base CTE walks ~842 k listings (19.3 s today, plus one lookup
--- join) -- so the timeout is raised here and reset at the end, as 524 did. Safe
+-- APPLY ORDER MATTERS, because psql applies this statement by statement and the
+-- hourly cron fires at :25 -- so there is a real window BETWEEN two statements in
+-- which `refresh_location_pin_audit_mv()` can run. Either naive order breaks it:
+-- dropping the column first leaves the OLD producer inserting a column that is
+-- gone, and replacing the producer first leaves the NEW one omitting a NOT NULL
+-- column. So the column is made NULLABLE first -- after which BOTH producers
+-- succeed -- then the producer is replaced, and only then is the column dropped.
+-- No window in which the hourly refresh can fail.
+--
+-- APPLY THIS ONLY AFTER THE W16 SPA ROLLOUT IS GREEN. The deployed frontend on
+-- `main` still asks PostgREST for `label_cs`; a select naming a column the table
+-- no longer publishes is a 400, and the audit page's waterfall would go blank
+-- until the new bundle lands. Merge the PR, wait for Railway's `vite` service to
+-- report success on the merge commit (`gh api repos/{owner}/{repo}/commits/<sha>/status`),
+-- then apply.
+--
+-- The producer's base CTE walks ~842 k listings (19.3 s today, plus one lookup
+-- join), so the timeout is raised here and reset at the end, as 524 did. Safe
 -- to re-run; it replays on an empty database.
 
 set lock_timeout = '5s';
 set statement_timeout = '900s';
 
 -- ---------------------------------------------------------------------------
--- 1. The label column goes. The relation keeps every other column, its index,
---    its RLS policy and its grants.
+-- 1. Make the label optional FIRST. This is the statement that removes the apply
+--    window: with `label_cs` nullable, the producer that is live right now (524's,
+--    which writes the label) and the one installed two statements below (which does
+--    not) are BOTH valid, so whichever one the :25 cron catches, it succeeds.
+--    Guarded so the file re-runs after the column is already gone.
 -- ---------------------------------------------------------------------------
 
-alter table location_audit_waterfall drop column if exists label_cs;
-
-comment on table location_audit_waterfall is
-  'W16: the audit page''s chain from every listing in the database down to the set no consumer can see. Rewritten hourly by refresh_location_pin_audit_mv(); the cuts are the SHARED step flags of location_data/location_steps.py (the consumer rule plus the obec rank floor). Wording lives in frontend/src/lib/locationSteps.ts, keyed by step_key, never in this table.';
+do $nn$
+begin
+  if exists (select 1 from pg_attribute
+              where attrelid = 'public.location_audit_waterfall'::regclass
+                and attname = 'label_cs' and not attisdropped) then
+    alter table location_audit_waterfall alter column label_cs drop not null;
+  end if;
+end
+$nn$;
 
 -- ---------------------------------------------------------------------------
 -- 2. The producer, 524 § 4 with the shared flags and without the label. NINE
@@ -191,14 +218,25 @@ revoke execute on function refresh_location_audit_waterfall()
   from public, anon, authenticated;
 
 -- ---------------------------------------------------------------------------
--- 3. First fill, so the page has the nine label-less rows the moment this lands
+-- 3. NOW the column goes -- no producer names it any more. The relation keeps
+--    every other column, its unique (step_no, sub_no) index, its RLS policy and
+--    its `authenticated`-only grant.
+-- ---------------------------------------------------------------------------
+
+alter table location_audit_waterfall drop column if exists label_cs;
+
+comment on table location_audit_waterfall is
+  'W16: the audit page''s chain from every listing in the database down to the set no consumer can see. Rewritten hourly by refresh_location_pin_audit_mv(); the cuts are the SHARED step flags of location_data/location_steps.py (the consumer rule plus the obec rank floor). Wording lives in frontend/src/lib/locationSteps.ts, keyed by step_key, never in this table.';
+
+-- ---------------------------------------------------------------------------
+-- 4. First fill, so the page has the nine label-less rows the moment this lands
 --    rather than at :25.
 -- ---------------------------------------------------------------------------
 
 select public.refresh_location_audit_waterfall();
 
 -- ---------------------------------------------------------------------------
--- 4. The proof. The four arithmetic laws and "expected 9" run against the real
+-- 5. The proof. The four arithmetic laws and "expected 9" run against the real
 --    numbers, exactly as 524/525 ran them; the consumer-rule assertion is
 --    525's race-safe form -- a snapshot compared with ITSELF (`resolved_at <=
 --    refreshed_at`), never with the moving store, because the lanes resolve

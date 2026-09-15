@@ -178,8 +178,8 @@ export default function CandidateFunnel({
             This run covered only part of the country, so the last step is not comparable with
             the steps above it.
           </strong>{' '}
-          Every step down to "has an attribute to compare" counts the whole database, because
-          that is a fact about the listings. The pair count below it was produced over{' '}
+          Every step down to “{stepLabel('eligible', 'en')}” counts the whole database,
+          because that is a fact about the listings. The pair count below it was produced over{' '}
           {stats.only && stats.only.length > 0
             ? `${fmtCount(stats.only.length)} town${stats.only.length === 1 ? '' : 's'}`
             : 'a limited set of towns'}{' '}

@@ -103,8 +103,12 @@ export const LOCATION_STEPS: Record<string, LocationStepWording> = {
       'Every listing that fails the rule, read against the whole database. It is a set carved out, not a step: what it holds was already lost at the two steps above.',
     livesOn: 'audit',
   },
+  /* The two hidden states are ALSO the audit page's list filter, so this is the one
+   * Czech name each of them has anywhere on that page — the waterfall's split row, the
+   * header total, the filter pill and the note under it all read it from here. Two
+   * names for one number is the same fault as two names for one step. */
   hidden_unresolved: {
-    cs: 'nevyřešeno',
+    cs: 'zpracováno, nerozhodnuto',
     en: 'Unresolved — the actual issue',
     note_cs: 'Rozhodnuto bylo, poloha z toho ale nevyšla — tohle je ten problém.',
     note_en:

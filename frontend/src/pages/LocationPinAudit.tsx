@@ -140,10 +140,16 @@ const QUALITY_LABEL: Record<PinAuditQuality, string> = {
 };
 
 /* The two states, in the operator's words and with the verdict attached: one of
- * them is a finding and the other is not, and the label has to say so. */
+ * them is a finding and the other is not, and the label has to say so.
+ *
+ * ONE NAME PER STATE ON THE WHOLE PAGE (W16). These two states are the waterfall's
+ * `hidden` split as well as this list's filter, so the name comes from the shared
+ * wording module and nothing here re-types it — the header total, the filter pill, the
+ * note and the split row under "Bez rozhodnuté polohy" are the same number, and were
+ * briefly reading two different Czech names for it. */
 const STATE_LABEL: Record<PinAuditState, string> = {
-  pending: 'čeká na zpracování',
-  unresolved: 'zpracováno, nerozhodnuto',
+  pending: stepLabel('hidden_pending', 'cs'),
+  unresolved: stepLabel('hidden_unresolved', 'cs'),
 };
 
 const STATE_NOTE: Record<PinAuditState, string> = {
@@ -404,7 +410,7 @@ export default function LocationPinAudit() {
         data-testid="pin-audit-state-totals"
       >
         <p>
-          <span className="text-[var(--color-ink-2)]">čeká na zpracování:</span>{' '}
+          <span className="text-[var(--color-ink-2)]">{STATE_LABEL.pending}:</span>{' '}
           <span className="font-medium tabular-nums">
             {fmtCount(stateTotals.pending)}
           </span>{' '}
@@ -413,9 +419,7 @@ export default function LocationPinAudit() {
           </span>
         </p>
         <p>
-          <span className="text-[var(--color-ink-2)]">
-            zpracováno, nerozhodnuto:
-          </span>{' '}
+          <span className="text-[var(--color-ink-2)]">{STATE_LABEL.unresolved}:</span>{' '}
           <span className="font-medium tabular-nums">
             {fmtCount(stateTotals.unresolved)}
           </span>{' '}
