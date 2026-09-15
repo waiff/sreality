@@ -2538,6 +2538,32 @@ recomputing any of them. Rows are `chain` (the funnel, `lost` = the previous ste
 own), `deduction` (a set carved out: the hidden set) or `split` (sub-rows that partition their
 parent); the migration proves the arithmetic laws at apply time. Cost: 19.3 s on top of the hourly
 refresh's 900 s budget.
+**W16 (migration 526) makes it ONE vocabulary with the NEW DEDUP candidates funnel.** The two
+readouts asked the same first questions in different words, and at one step with genuinely different
+rules: the funnel's "Known to the location engine" read as *answered* while it was byte-for-byte this
+chain's `with_verdict` (*judged*), and its town step was cut with NO consumer rule — so its single
+"lost 99,889" silently added three unlike things together (≈53,374 judged-but-not-located, 45,619
+**abroad — an ANSWER, which this chain has always booked as a split INSIDE `located`**, and ≈895 a
+Czech point with no town). The four booleans are now rendered from
+`location_data/location_steps.py`, which also declares the step keys, their order and each key's
+shape for BOTH chains: `located_town` is a **split** of `located` here (this page's subject is the
+hidden set) and a **chain step** on a candidate run (that page's subject is pairing) — same key, same
+predicate, same wording, the role declared in one place. Two consequences. `has_town` gained dedup's
+obec RANK floor, so this page's town number IS the number dedup can block on (measured 2026-09-14: 0
+rows of movement), and `located_no_town` stays the plain complement so the three splits keep
+partitioning `located` by construction. And `label_cs` was **dropped**: wording moved to
+`frontend/src/lib/locationSteps.ts`, one file holding Czech and English for every key, so a better
+sentence costs no migration and a step cannot be renamed on one page only — and, one level down,
+the hidden set's two states now carry ONE Czech name across the waterfall split, the filter pill,
+the header total and the note. Two operational constraints ride with the drop, both in 526's header:
+the column is made NULLABLE **before** the producer is replaced and dropped only **after**, so the
+:25 cron cannot land between two statements and fail; and the migration is applied only once the
+merge commit's Railway `vite` rollout is green, because the bundle on `main` still selects
+`label_cs` and PostgREST answers 400 for a column the table no longer publishes. A candidate run stamps the
+same keys into `candidate_generations.stats.waterfall` with the losses and shares already computed by
+the lane, so the two readouts can now differ only by SCOPE (a run may be narrowed to active listings)
+and by TIME (a run is frozen; this relation refreshes hourly) — and the candidates page prints both
+next to its chain. The cross-surface rail is `tests/test_location_steps_vocabulary.py`.
 `quality` buckets the set on active/delisted × `has_claims` — and since W15 `listings.is_active` is
 the page's ONLY live/delisted notion; the SPA page `/new-dedup/pin-audit` filters on those four axes
 plus the sibling flag and reads its overview matrix from `location_pin_audit_summary()` so the

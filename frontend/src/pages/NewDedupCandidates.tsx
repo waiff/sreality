@@ -42,7 +42,9 @@ import {
   type NewDedupCandidateRecentGeneration,
   type NewDedupCandidateStats,
 } from '@/lib/api';
-import CandidateFunnel, { ProportionBar } from '@/components/new-dedup/CandidateFunnel';
+import CandidateFunnel from '@/components/new-dedup/CandidateFunnel';
+import ProportionBar from '@/components/new-dedup/ProportionBar';
+import { stepLabel } from '@/lib/locationSteps';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import { categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
@@ -270,7 +272,7 @@ export default function NewDedupCandidates() {
             <>
               <Card
                 title="Funnel — from every listing to a candidate"
-                lede="Each step is a smaller set than the one above it, and the gap between two steps is what was lost there. Read it top to bottom: if a step drops far more than you expect, that step is where data quality — not the rule — is deciding who gets a chance to be matched."
+                lede={`Each step is a smaller set than the one above it, and the gap between two steps is what was lost there — as the lane measured it, not as this page subtracted it. The indented rows under “${stepLabel('located', 'en')}” are not losses: abroad is an ANSWER the engine gave, and it leaves the chain only at the town step, together with the handful of Czech points that have no town. These are the same steps, in the same words, as the location audit page’s waterfall; the two differ only by scope and by when they were counted, both stated below.`}
               >
                 <CandidateFunnel stats={stats} />
               </Card>
@@ -284,14 +286,14 @@ export default function NewDedupCandidates() {
 
               <Card
                 title="Missing data — overall"
-                lede="The same losses as the funnel, named as what is absent rather than as what survived. Every count is shown with the share it represents and the group that share is out of, because two of these rows have a different denominator: the floor row is a share of apartments, not of all listings."
+                lede="What is ABSENT, where the chain above does not already say it: the attribute side, which no step measures. Every count is shown with the share it represents and the group that share is out of, because one of these rows has a different denominator — the floor row is a share of apartments, not of all listings."
               >
                 <MissingOverall stats={stats} />
               </Card>
 
               <Card
                 title="Missing data — per portal, per property type"
-                lede="The same gaps again, one row per portal and property type, so a portal that systematically omits a field shows up as a column of low percentages rather than being averaged away. Click any column heading to sort by it."
+                lede="The chain and the attribute gaps again, one row per portal and property type, so a portal that systematically omits a field shows up as a column of low percentages rather than being averaged away. The first step columns are the same three questions the chain asks, in the same words. Click any column heading to sort by it."
               >
                 <MissingPerPortal rows={stats.funnel ?? []} />
               </Card>
@@ -506,6 +508,14 @@ interface MissingRow {
   explanation: string;
 }
 
+/* WHAT IS ABSENT, where the chain above does not already say it (W16). The three
+ * rows that used to open this table — "no answer from the location engine", "an
+ * answer, but too coarse to name a town", "a town, but neither a disposition nor
+ * an area" — were the funnel's own losses restated in different English, and the
+ * middle one was exactly the misreading the operator ruled on: it merged
+ * judged-but-not-located with ABROAD (an answer) and with a Czech point that has
+ * no town. The chain owns those three now, split honestly; what stays here is the
+ * attribute side, which no step measures. */
 function missingRows(stats: NewDedupCandidateStats): MissingRow[] {
   const f = stats.funnel ?? [];
   const sum = (pick: (r: NewDedupCandidateFunnelRow) => number): number =>
@@ -515,30 +525,6 @@ function missingRows(stats: NewDedupCandidateStats): MissingRow[] {
   const byt = sum((r) => r.byt);
 
   return [
-    {
-      label: 'No answer from the location engine at all',
-      count: listings - sum((r) => r.with_projection),
-      basis: 'of all listings',
-      basisCount: listings,
-      explanation:
-        'The location engine has no row for this listing — most often because the listing predates the portal sweep that would have produced one.',
-    },
-    {
-      label: 'An answer, but too coarse to name a town',
-      count: sum((r) => r.with_projection) - sum((r) => r.with_town),
-      basis: 'of all listings',
-      basisCount: listings,
-      explanation:
-        'The engine placed the listing, but only at a grain above the town (a district or a region). Path C needs the town itself, so these cannot be paired by it.',
-    },
-    {
-      label: 'A town, but neither a disposition nor an area',
-      count: sum((r) => r.town_no_attribute),
-      basis: 'of all listings',
-      basisCount: listings,
-      explanation:
-        'The listing is in a town the rule can block on, but states nothing the rule can compare — no disposition (2+kk and the like) and no floor area. These are the candidates data quality costs outright.',
-    },
     {
       label: 'No disposition stated',
       count: listings - sum((r) => r.with_disposition),
@@ -606,19 +592,28 @@ type PortalSortKey =
   | 'category_main'
   | 'category_type'
   | 'listings'
-  | 'with_town'
+  | 'with_verdict'
+  | 'located'
+  | 'located_town'
   | 'with_disposition'
   | 'with_area'
   | 'c1_eligible'
   | 'c3_eligible'
   | 'town_no_attribute';
 
+/* The SHARED step vocabulary, per portal (W16): the same three questions the
+ * chain asks, in the same words, so a portal can be checked against it rather
+ * than against a second set of names. The step columns are worded by
+ * `lib/locationSteps.ts` — this table never spells a step itself. The four that
+ * follow are attribute columns, which are not steps. */
 const PORTAL_COLUMNS: { key: PortalSortKey; label: string; numeric: boolean; pct: boolean }[] = [
   { key: 'source', label: 'Portal', numeric: false, pct: false },
   { key: 'category_main', label: 'Property type', numeric: false, pct: false },
   { key: 'category_type', label: 'Deal', numeric: false, pct: false },
-  { key: 'listings', label: 'Listings', numeric: true, pct: false },
-  { key: 'with_town', label: 'With a town', numeric: true, pct: true },
+  { key: 'listings', label: stepLabel('all_listings', 'en'), numeric: true, pct: false },
+  { key: 'with_verdict', label: stepLabel('with_verdict', 'en'), numeric: true, pct: true },
+  { key: 'located', label: stepLabel('located', 'en'), numeric: true, pct: true },
+  { key: 'located_town', label: stepLabel('located_town', 'en'), numeric: true, pct: true },
   { key: 'with_disposition', label: 'With a disposition', numeric: true, pct: true },
   { key: 'with_area', label: 'With an area', numeric: true, pct: true },
   { key: 'c1_eligible', label: 'Can take C1', numeric: true, pct: true },
@@ -635,8 +630,10 @@ function MissingPerPortal({ rows }: { rows: NewDedupCandidateFunnelRow[] }) {
   const sorted = useMemo(() => {
     const copy = [...rows];
     copy.sort((a, b) => {
-      const av = a[sort.key];
-      const bv = b[sort.key];
+      /* A run that predates W16 carries no step columns; an absent number sorts
+       * last rather than as a zero. */
+      const av = a[sort.key] ?? null;
+      const bv = b[sort.key] ?? null;
       if (typeof av === 'number' && typeof bv === 'number') {
         return sort.desc ? bv - av : av - bv;
       }
@@ -688,7 +685,9 @@ function MissingPerPortal({ rows }: { rows: NewDedupCandidateFunnelRow[] }) {
               <td className={TD}>{typeLabel(r.category_main)}</td>
               <td className={`${TD} text-[var(--color-ink-2)]`}>{dealLabel(r.category_type)}</td>
               <td className={NUM}>{fmtCount(r.listings)}</td>
-              <Cell value={r.with_town} of={r.listings} />
+              <Cell value={r.with_verdict ?? null} of={r.listings} />
+              <Cell value={r.located ?? null} of={r.listings} />
+              <Cell value={r.located_town ?? null} of={r.listings} />
               <Cell value={r.with_disposition} of={r.listings} />
               <Cell value={r.with_area} of={r.listings} />
               <Cell value={r.c1_eligible} of={r.listings} />

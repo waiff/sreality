@@ -48,6 +48,7 @@ import {
   waterfallRefreshedAt,
   type WaterfallStep,
 } from '@/lib/locationWaterfall';
+import { stepLabel, stepNote } from '@/lib/locationSteps';
 import { listingRowPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
 import { useInfiniteList } from '@/lib/useInfiniteList';
@@ -139,10 +140,16 @@ const QUALITY_LABEL: Record<PinAuditQuality, string> = {
 };
 
 /* The two states, in the operator's words and with the verdict attached: one of
- * them is a finding and the other is not, and the label has to say so. */
+ * them is a finding and the other is not, and the label has to say so.
+ *
+ * ONE NAME PER STATE ON THE WHOLE PAGE (W16). These two states are the waterfall's
+ * `hidden` split as well as this list's filter, so the name comes from the shared
+ * wording module and nothing here re-types it — the header total, the filter pill, the
+ * note and the split row under "Bez rozhodnuté polohy" are the same number, and were
+ * briefly reading two different Czech names for it. */
 const STATE_LABEL: Record<PinAuditState, string> = {
-  pending: 'čeká na zpracování',
-  unresolved: 'zpracováno, nerozhodnuto',
+  pending: stepLabel('hidden_pending', 'cs'),
+  unresolved: stepLabel('hidden_unresolved', 'cs'),
 };
 
 const STATE_NOTE: Record<PinAuditState, string> = {
@@ -162,21 +169,6 @@ const dash = (v: string | null | undefined): string =>
 
 /* ------------------------------------------------------------- the waterfall */
 
-/* One plain-Czech line per step, keyed by the store's own step key (migration
- * 523). The COUNTS come from the store and nothing here recomputes them; what
- * lives on this side is the wording, because a better sentence must never cost
- * a migration. An unknown key simply renders without a note. */
-const WATERFALL_NOTE: Record<string, string> = {
-  all_listings:
-    'Všechno, co jsme kdy z devíti portálů sebrali — běžící i stažené. Nic se nikdy nemaže, takže tohle je celá databáze, a poloha se řeší u každého z nich.',
-  with_verdict:
-    'Systém u nich polohu už řešil a má uložený výsledek. Rozdíl jsou inzeráty, na které zatím nedošla řada.',
-  located:
-    'Mají bod na mapě, nebo systém rozhodl, že jsou v zahraničí. Obojí je odpověď, se kterou už umí zákaznické stránky pracovat.',
-  hidden:
-    'Tento seznam. Každý inzerát bez rozhodnuté polohy — dokud ji nemá, není vidět nikde. Jestli běží, nebo je stažený, je jen filtr níže.',
-};
-
 /* The chain, as the store wrote it: label, count, what was lost at that step and
  * the share of the WHOLE database. Sub-rows are indented under their step. */
 function WaterfallTable({ steps }: { steps: WaterfallStep[] }) {
@@ -193,7 +185,7 @@ function WaterfallTable({ steps }: { steps: WaterfallStep[] }) {
         </thead>
         <tbody>
           {steps.map(({ row, splits }) => {
-            const note = WATERFALL_NOTE[row.step_key];
+            const note = stepNote(row.step_key, 'cs');
             const isChain = row.kind === 'chain';
             const isHidden = row.step_key === 'hidden';
             return (
@@ -207,7 +199,7 @@ function WaterfallTable({ steps }: { steps: WaterfallStep[] }) {
                       ].join(' ')}
                     >
                       {isChain ? `${row.step_no}. ` : '↳ '}
-                      {row.label_cs}
+                      {stepLabel(row.step_key, 'cs')}
                     </span>
                     {note ? (
                       <span className="block text-[0.72rem] leading-snug text-[var(--color-ink-3)] max-w-[44rem]">
@@ -232,7 +224,7 @@ function WaterfallTable({ steps }: { steps: WaterfallStep[] }) {
                 {splits.map((s) => (
                   <tr key={s.step_key} data-testid={`waterfall-split-${s.step_key}`}>
                     <td className={`${TD} pl-6 text-[var(--color-ink-3)]`}>
-                      · {s.label_cs}
+                      · {stepLabel(s.step_key, 'cs')}
                     </td>
                     <td className={`${NUM} text-[var(--color-ink-2)]`}>
                       {fmtCount(s.n)}
@@ -418,7 +410,7 @@ export default function LocationPinAudit() {
         data-testid="pin-audit-state-totals"
       >
         <p>
-          <span className="text-[var(--color-ink-2)]">čeká na zpracování:</span>{' '}
+          <span className="text-[var(--color-ink-2)]">{STATE_LABEL.pending}:</span>{' '}
           <span className="font-medium tabular-nums">
             {fmtCount(stateTotals.pending)}
           </span>{' '}
@@ -427,9 +419,7 @@ export default function LocationPinAudit() {
           </span>
         </p>
         <p>
-          <span className="text-[var(--color-ink-2)]">
-            zpracováno, nerozhodnuto:
-          </span>{' '}
+          <span className="text-[var(--color-ink-2)]">{STATE_LABEL.unresolved}:</span>{' '}
           <span className="font-medium tabular-nums">
             {fmtCount(stateTotals.unresolved)}
           </span>{' '}

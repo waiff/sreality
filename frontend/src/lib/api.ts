@@ -56,6 +56,7 @@ import type {
   MergedPropertiesResponse,
 } from './types';
 import type { PresetSpec } from './filters';
+import type { WaterfallRow } from './locationWaterfall';
 import { supabase } from './supabase';
 
 /* Sources the backend allowlists for high-confidence parsing.
@@ -780,15 +781,24 @@ export interface NewDedupCandidateMatrixRow {
   floor_checked: number;
 }
 
-/* The listing-side funnel, one row per (portal, property type, deal). */
+/* The listing-side funnel, one row per (portal, property type, deal) — the SHARED
+ * step vocabulary since W16 (location_data/location_steps.py). `with_verdict` was
+ * `with_projection` and `located_town` was `with_town`; `located`,
+ * `located_foreign` and `located_no_town` are new, and they are what turned one
+ * misleading "lost 99,889" into three honest readings. A run generated before W16
+ * carries the old keys and no `waterfall`, so every one of these is optional and
+ * the page renders a gap rather than a zero. */
 export interface NewDedupCandidateFunnelRow {
   source: string;
   category_main: string | null;
   category_type: string | null;
   listings: number;
   active: number;
-  with_projection: number;
-  with_town: number;
+  with_verdict?: number;
+  located?: number;
+  located_town?: number;
+  located_foreign?: number;
+  located_no_town?: number;
   with_disposition: number;
   with_area: number;
   byt: number;
@@ -838,6 +848,15 @@ export interface NewDedupCandidateStats {
   top_towns: NewDedupCandidateTownRow[];
   distribution: NewDedupCandidateDistributionRow[];
   funnel: NewDedupCandidateFunnelRow[];
+  /* W16 — THE CHAIN, stamped by the lane with the SHARED step keys, the same
+   * shape `location_audit_waterfall` writes hourly for the audit page. One row
+   * type for both readouts; the browser sums and subtracts nothing. Optional
+   * because a run generated before W16 has none. */
+  waterfall?: WaterfallRow[];
+  /* When the lane COUNTED those rows — the funnel re-reads `listings` live at the
+   * end of a run, so this, and not the generation row's completed_at, is what the
+   * page's as-of line can honestly claim. */
+  computed_at?: string;
   top_buckets: NewDedupCandidateBucketRow[];
   /* Stamped onto the stats after the statistics step, so a run that predates a
    * field (or failed early) simply has none. */

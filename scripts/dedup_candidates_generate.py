@@ -32,6 +32,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from location_data import location_steps as ls
 from scraper import db
 from toolkit import dedup_candidates as dc
 from toolkit import dedup_candidates_sql as sql
@@ -156,7 +157,9 @@ def estimate(conn: Any, inputs: dict[str, Any], *, scopes: list[str], only: Sequ
             "distribution": _distribution(per_block),
             "seconds": round(time.monotonic() - t0, 1),
         }
-        report["scopes"][scope]["funnel"] = fetch_funnel(conn, active_only=params["active_only"])
+        funnel = fetch_funnel(conn, active_only=params["active_only"])
+        report["scopes"][scope]["funnel"] = funnel
+        report["scopes"][scope]["waterfall"] = waterfall_rows(funnel, None, partial=bool(only))
         report["scopes"][scope]["top_buckets"] = fetch_top_buckets(
             conn, active_only=params["active_only"], limit=top)
     return report
@@ -290,6 +293,67 @@ def fetch_top_buckets(conn: Any, *, active_only: bool, limit: int) -> list[dict[
     return _rows(conn, sql.TOP_BUCKETS_SQL, {"active_only": active_only, "limit": limit})
 
 
+def _sum(rows: Sequence[dict[str, Any]], key: str) -> int:
+    return sum(int(r.get(key) or 0) for r in rows)
+
+
+def waterfall_rows(funnel: Sequence[dict[str, Any]],
+                   paired_by_type: Sequence[dict[str, Any]] | None,
+                   *, partial: bool) -> list[dict[str, Any]]:
+    """The run's chain in the SHARED step vocabulary (W16, location_data/location_steps.py):
+    the same keys, the same order and the same three row kinds the audit page's
+    `location_audit_waterfall` writes hourly. The two readouts can now differ only by SCOPE
+    (a run can be narrowed to active listings) and by TIME (a run is frozen, the audit page
+    refreshes hourly) — which is why both are printed next to the chain.
+
+    THE ARITHMETIC HAPPENS HERE, ONCE. `lost` is the previous CHAIN row's count minus this
+    one's; a split partitions its parent and carries none; `share_pct` is out of every
+    listing the run looked at. Nothing downstream may sum or subtract — a browser that
+    recomputed a step would be a second definition of the same question, which is the whole
+    reason this wave exists.
+
+    `located_foreign` is a SPLIT of `located`, never a loss: abroad is an ANSWER. The town
+    step's loss is exactly those two split rows added together.
+    """
+    n: dict[str, int] = {
+        "all_listings": _sum(funnel, "listings"),
+        "with_verdict": _sum(funnel, "with_verdict"),
+        "located": _sum(funnel, "located"),
+        "located_foreign": _sum(funnel, "located_foreign"),
+        "located_no_town": _sum(funnel, "located_no_town"),
+        "located_town": _sum(funnel, "located_town"),
+        "eligible": _sum(funnel, "c1_eligible") + _sum(funnel, "c3_eligible"),
+    }
+    if paired_by_type is not None:
+        n["paired"] = _sum(paired_by_type, "listings")
+    base = n["all_listings"]
+    rows: list[dict[str, Any]] = []
+    previous: int | None = None
+    for key, shape in ls.RUN_STEPS.items():
+        if key not in n:
+            continue                      # estimate mode writes no pair row, so no `paired`
+        count = n[key]
+        if shape.kind != "chain":
+            lost = None
+        elif previous is None:
+            lost = 0
+        elif key == "paired" and partial:
+            # A block-limited run pairs its own towns while every step above it counts the
+            # whole corpus: the drop into this step would not be a fact about the data.
+            lost = None
+        else:
+            lost = previous - count
+        if shape.kind == "chain":
+            previous = count
+        rows.append({
+            "step_key": key, "step_no": shape.step_no, "sub_no": shape.sub_no,
+            "kind": shape.kind, "parent_key": shape.parent_key,
+            "n": count, "lost": lost,
+            "share_pct": round(count * 100 / base, 3) if base else 0.0,
+        })
+    return rows
+
+
 def _block_names(conn: Any, keys: Sequence[str]) -> dict[str, str | None]:
     if not keys:
         return {}
@@ -297,7 +361,8 @@ def _block_names(conn: Any, keys: Sequence[str]) -> dict[str, str | None]:
     return {str(r["obec_kod"]): r["obec_name"] for r in rows}
 
 
-def generation_stats(conn: Any, gen: dc.Generation, *, top: int) -> dict[str, Any]:
+def generation_stats(conn: Any, gen: dc.Generation, *, top: int,
+                     partial: bool = False) -> dict[str, Any]:
     """The audit numbers, computed once over the finished store and written onto the
     generation row — the Candidate audit page never scans the pair table itself."""
     params = sql.rung_params(gen.inputs)
@@ -312,6 +377,11 @@ def generation_stats(conn: Any, gen: dc.Generation, *, top: int) -> dict[str, An
     for r in top_blocks:
         r["obec_name"] = names.get(r["block_key"])
     matrix = _rows(conn, sql.PAIR_MATRIX_SQL, {"inputs_id": gen.inputs_id})
+    paired_by_type = [
+        {"category_main": r["category_main"], "listings": int(r["listings"])}
+        for r in _rows(conn, sql.LISTINGS_WITH_CANDIDATES_SQL, {"inputs_id": gen.inputs_id})
+    ]
+    funnel = fetch_funnel(conn, active_only=params["active_only"])
     return {
         "matrix": [{**m, "pairs": int(m["pairs"]), "floor_checked": int(m["floor_checked"])} for m in matrix],
         "pairs": {
@@ -319,14 +389,15 @@ def generation_stats(conn: Any, gen: dc.Generation, *, top: int) -> dict[str, An
             "C3": sum(int(m["pairs"]) for m in matrix if m["rung"] == "C3"),
             "total": sum(int(m["pairs"]) for m in matrix),
         },
-        "listings_with_candidates": [
-            {"category_main": r["category_main"], "listings": int(r["listings"])}
-            for r in _rows(conn, sql.LISTINGS_WITH_CANDIDATES_SQL, {"inputs_id": gen.inputs_id})
-        ],
+        "listings_with_candidates": paired_by_type,
         "towns_with_pairs": len(per_block),
         "top_towns": top_blocks,
         "distribution": _distribution(ranked),
-        "funnel": fetch_funnel(conn, active_only=params["active_only"]),
+        "funnel": funnel,
+        "waterfall": waterfall_rows(funnel, paired_by_type, partial=partial),
+        # The funnel counts `listings` LIVE, at the end of the run — so this, and not the
+        # generation row's completed_at, is what the page's "as of" line is honest about.
+        "computed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "top_buckets": fetch_top_buckets(conn, active_only=params["active_only"], limit=top),
     }
 
@@ -424,7 +495,7 @@ def generate(conn: Any, path: str, *, only: Sequence[str], chunk: int, resume: b
                 cur.execute(sql.STALE_SWEEP_SQL, {"inputs_id": gen.inputs_id, "generation_id": gen.id})
                 stale_deleted = max(cur.rowcount, 0)
         log.info("computing statistics …")
-        stats = generation_stats(conn, gen, top=top)
+        stats = generation_stats(conn, gen, top=top, partial=partial)
         stats.update({
             "partial": partial, "only": list(only), "stale_deleted": stale_deleted,
             "chunks_done": progress["chunks_done"], "pairs_upserted": progress["pairs_upserted"],
@@ -448,6 +519,20 @@ def generate(conn: Any, path: str, *, only: Sequence[str], chunk: int, resume: b
 
 def _fmt(n: Any) -> str:
     return f"{int(n):,}" if isinstance(n, (int, float)) and n is not None else str(n)
+
+
+def _chain_markdown(rows: Sequence[dict[str, Any]]) -> list[str]:
+    """The chain, printed with the SHARED step keys and nothing else. A step's WORDING lives
+    in exactly one file (frontend/src/lib/locationSteps.ts); a second English sentence here
+    would be a second vocabulary, which is what W16 removed."""
+    lines = ["| step | kind | listings | lost here | share of all |",
+             "| --- | --- | ---: | ---: | ---: |"]
+    for r in rows:
+        lead = "· " if r["kind"] == "split" else ""
+        lost = "—" if r["lost"] is None else _fmt(r["lost"])
+        lines.append(f"| {lead}{r['step_key']} | {r['kind']} | {_fmt(r['n'])} | {lost} | "
+                     f"{r['share_pct']} % |")
+    return lines
 
 
 def estimate_markdown(report: dict[str, Any]) -> str:
@@ -476,12 +561,15 @@ def estimate_markdown(report: dict[str, Any]) -> str:
         for r in s["top_buckets"]:
             lines.append(f"| {r.get('obec_name') or r['obec_kod']} | {r['disposition'] or '(none)'} | "
                          f"{_fmt(r['listings'])} | {_fmt(r['active'])} |")
-        lines += ["", f"### scope `{scope}` — funnel per portal × type", "",
-                  "| source | type | deal | listings | with town | with dispo | with area | C1-eligible | C3-eligible | town, no attribute |",
-                  "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+        lines += ["", f"### scope `{scope}` — the chain", ""]
+        lines += _chain_markdown(s["waterfall"])
+        lines += ["", f"### scope `{scope}` — the same steps per portal × type", "",
+                  "| source | type | deal | listings | with_verdict | located | located_town | with dispo | with area | C1-eligible | C3-eligible | town, no attribute |",
+                  "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
         for r in s["funnel"]:
             lines.append(f"| {r['source']} | {r['category_main'] or '—'} | {r['category_type'] or '—'} | "
-                         f"{_fmt(r['listings'])} | {_fmt(r['with_town'])} | {_fmt(r['with_disposition'])} | "
+                         f"{_fmt(r['listings'])} | {_fmt(r['with_verdict'])} | {_fmt(r['located'])} | "
+                         f"{_fmt(r['located_town'])} | {_fmt(r['with_disposition'])} | "
                          f"{_fmt(r['with_area'])} | {_fmt(r['c1_eligible'])} | {_fmt(r['c3_eligible'])} | "
                          f"{_fmt(r['town_no_attribute'])} |")
     return "\n".join(lines) + "\n"
@@ -504,6 +592,9 @@ def generate_markdown(result: dict[str, Any]) -> str:
     lines += ["", "| type | listings with ≥ 1 candidate |", "| --- | ---: |"]
     for r in result["listings_with_candidates"]:
         lines.append(f"| {r['category_main'] or '—'} | {_fmt(r['listings'])} |")
+    if result.get("waterfall"):
+        lines += ["", "### the chain (as of " + str(result.get("computed_at") or "—") + ")", ""]
+        lines += _chain_markdown(result["waterfall"])
     return "\n".join(lines) + "\n"
 
 

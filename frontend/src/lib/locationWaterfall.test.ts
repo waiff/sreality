@@ -33,7 +33,6 @@ const row = (
   sub_no,
   kind,
   parent_key,
-  label_cs: step_key,
   n,
   lost,
   share_pct: Math.round((n / 841428) * 100_000) / 1000,
