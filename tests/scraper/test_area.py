@@ -55,6 +55,30 @@ def test_land_prefers_the_plot_shaped_measure():
     ) == (1074.0, "plot")
 
 
+def test_land_takes_the_labelled_parcel_over_every_other_measure():
+    # W17: the portal's own "plocha pozemku" / surfaceLand / estate_area leads the
+    # land arm. 52,183 land rows (sreality 44,237, idnes 5,292, bezrealitky 2,654)
+    # carried exactly this input and no headline at all, because three parsers only
+    # ever handed the resolver an interior measure land pages do not state.
+    assert derive_headline_area(
+        category_main="pozemek", usable=400.0, floor=410.0, total=1074.0,
+        plot=1200.0, fallback=99.0,
+    ) == (1200.0, "plot")
+    assert derive_headline_area(category_main="pozemek", plot=1200.0) == (1200.0, "plot")
+
+
+def test_the_plot_is_never_a_dwellings_headline():
+    # A house's parcel sits BESIDE its floor area (estate_area) and must never
+    # become the headline — that is the mmreality defect the divergence check
+    # watches for. The dwelling arm does not read `plot` at all.
+    assert derive_headline_area(
+        category_main="dum", usable=148.0, plot=905.0
+    ) == (148.0, "usable")
+    assert derive_headline_area(category_main="dum", plot=905.0) == (None, None)
+    assert derive_headline_area(category_main="byt", plot=905.0) == (None, None)
+    assert derive_headline_area(category_main=None, plot=905.0) == (None, None)
+
+
 def test_land_from_free_text_only_is_still_plot():
     # The bazos shape: no structured area field anywhere, only the title/description
     # scrape. Nothing is deleted — the value survives, labelled for what it is.
@@ -100,6 +124,9 @@ def test_every_emitted_basis_is_in_the_declared_vocabulary():
     emitted = {
         derive_headline_area(category_main=c, **{k: 10.0})[1]
         for c in ("byt", "pozemek")
-        for k in ("usable", "floor", "total", "fallback")
+        for k in ("usable", "floor", "total", "plot", "fallback")
     }
-    assert emitted <= AREA_BASES
+    # `plot` on a dwelling is not a measure that arm reads, so it emits no basis at
+    # all — a legal answer, and not a token. Every token emitted must be declared.
+    assert emitted - {None} <= AREA_BASES
+    assert {"usable", "floor", "total", "plot", "unknown"} <= emitted

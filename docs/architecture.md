@@ -1660,6 +1660,37 @@ renumber.** Navigate by area:
     unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
     publishing relations return byte-identical figures.
 
+    **The headline area has ONE rule, and every portal feeds it the same way** (W17,
+    2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
+    fallback)` picks `area_m2` and stamps `area_basis`; the land arm is
+    `plot -> total -> usable -> floor -> fallback`, always stamped `plot`, and the dwelling arm
+    never reads `plot` at all (a house's parcel sits beside its floor area in `estate_area`).
+    All nine parsers now hand over their "plocha pozemku" / `surfaceLand` / `estate_area` value
+    — including the six whose land pages already reached the headline under another label, so
+    the rule is fed identically everywhere (rule 21) rather than by nine arrangements of which
+    argument a parcel happens to arrive in. Before W17 three parsers passed no plot at all:
+    **52,183 land rows** (sreality 44,237 of 44,237, idnes 5,292 of 45,500, bezrealitky 2,654 of
+    2,667; ~32.7k active) stored a parcel in `estate_area` and carried `area_m2` NULL — no per-m²
+    price and no area for any consumer reading the headline. `scripts/backfill_land_headline_area.py`
+    (+ its dispatch-only workflow) heals exactly that population, active or not, by moving the
+    stored value into the column the one rule would put it in today; it writes **no snapshot**
+    (the sanctioned rule-2 exception: our own mis-parse of the SAME stored page, the
+    `backfill_idnes_areas` precedent — a live row's next detail refetch appends the one genuine
+    snapshot) and is idempotent because the write empties its own selection. 3,016 land rows
+    carry no area from their portal at all: an honest gap, left as one.
+
+    **`area_m2` is what every consumer reads — the dedup rule included.** NEW DEDUP path C used
+    to spell its own choice (`estate_area` for pozemek, else `usable_area`), a second answer to
+    "which area is this listing's area" that disagreed with the headline on every one of those
+    52,183 rows and on every dwelling measured only by a floor/total label. W17 deleted it:
+    `toolkit/dedup_candidates_sql.py` reads `area_m2 > 0` for every category, and the per-category
+    IDENTITY ATTRIBUTES are one vocabulary (`dedup_candidates.IDENTITY_ATTRS` — `pozemek`: area
+    only, everything else disposition + area) rendered into both the pairing SQL and the Python
+    oracle, so C1 never joins two parcels on a room count. That changed what the generator PAIRS,
+    so `GENERATOR_VERSION` moved `c3 -> c4` (a new `inputs_id`; the pilot's pair rows are
+    orphaned deliberately) and the SHA-256 ledger of the pairing statements in
+    `tests/toolkit/test_dedup_candidates_sql.py` was re-pinned in the same commit.
+
     **The basis is resolved from `(category_main, category_type)`, rent-first, and NEVER from
     `listings.price_unit`** — that column is four legacy spellings of two concepts across nine
     portals, a duplicate of `category_type`, not a per-area unit. The three tokens

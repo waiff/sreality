@@ -706,10 +706,12 @@ def parse_detail(
 
     usable_text = params.get("uzitna plocha")
     total_text = params.get("celkova plocha") or params.get("plocha")
+    estate_area = _parse_area(params.get("plocha pozemku"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_parse_area(usable_text),
         total=_parse_area(total_text),
+        plot=estate_area,
         fallback=_parse_area(title),
     )
 
@@ -765,7 +767,7 @@ def parse_detail(
         garage=_yes_no(params.get("garaz")),
         has_parking=_yes_no(params.get("parkovani")) or _yes_no(params.get("garaz")),
         furnished=_norm_furnished(params.get("vybaveno")),
-        estate_area=_parse_area(params.get("plocha pozemku")),
+        estate_area=estate_area,
         garden_area=_parse_area(params.get("plocha zahrady")),
         description=_description(tree),
         raw=raw,

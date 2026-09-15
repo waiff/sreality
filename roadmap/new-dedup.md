@@ -593,6 +593,14 @@ expandable to path A (a second `PathDef`).
       small towns as generation 2; the audit page renders all five sections from it in production.
       The pilot caught a missing SQL parameter that had passed 7,460 offline tests, and a funnel
       that read a partial run as a 98 % loss; both fixed with rails.
+- [x] **W17 — one headline area** (2026-09-15, PR "one headline area"): the rule reads
+      `listings.area_m2` for EVERY category instead of its own `estate_area`-for-pozemek CASE,
+      and the per-category identity attributes became one vocabulary (`IDENTITY_ATTRS`:
+      `pozemek` = area only), so C1 never joins two parcels on a disposition. Generator version
+      **c3 → c4**, digests re-pinned; the pilot's pair rows are orphaned deliberately. The
+      parser side of the same PR + `scripts/backfill_land_headline_area.py` give 52,183 land
+      rows (sreality 44,237, idnes 5,292, bezrealitky 2,654) the headline area they never had —
+      rows path C could not compare at all before.
 - [ ] **The full-corpus generate**, then Gate 2. **Awaiting the operator**: ~56.5 M rows is on the
       order of 10 GB in `dedup_sim`, which is real storage cost on the Supabase plan.
 - [ ] **Gate 2** (RULED 2026-09-10: it closes on path C alone): the operator, reading the audit

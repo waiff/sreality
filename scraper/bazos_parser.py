@@ -530,10 +530,12 @@ def parse_detail(
 
     posted_text = _text(tree.css_first("span.velikost10"))
 
-    # bazos has no structured area field at all — only the free-text scrape, so
-    # the resolver's untyped fallback arm is the whole story here.
+    # bazos has no structured area field at all — no interior measure and no
+    # "plocha pozemku", so `plot` is genuinely absent rather than unread, and the
+    # resolver's untyped fallback arm is the whole story here (on land it stamps
+    # that free-text number 'plot', which is what it is on a parcel ad).
     area_m2, area_basis = derive_headline_area(
-        category_main=category_main, fallback=_parse_area(haystack),
+        category_main=category_main, plot=None, fallback=_parse_area(haystack),
     )
 
     raw = {

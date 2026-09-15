@@ -116,6 +116,29 @@ def test_area_zero_is_a_placeholder_not_a_measure(sample):
     assert row["area_basis"] is None
 
 
+def test_land_headline_is_the_parcel_stamped_plot():
+    # W17. sreality publishes a parcel as `estate_area` and nothing as `usable_area`,
+    # so before the plot reached the resolver ALL 44,237 land rows carried area_m2
+    # NULL — no per-m2 measure, and no area for the dedup rule to compare.
+    row = parse_listing(_estate(category_main_cb={"name": "Pozemky", "value": 3},
+                                estate_area=1200, usable_area=0))
+    assert row["category_main"] == "pozemek"
+    assert row["area_m2"] == 1200.0
+    assert row["area_basis"] == "plot"
+    assert row["estate_area"] == 1200.0   # the column keeps its own value too
+
+
+def test_a_dwelling_never_takes_the_parcel_as_its_headline(sample):
+    # The same payload shape on a house: `estate_area` is the plot BESIDE the floor
+    # area, and the headline stays the interior measure.
+    row = parse_listing(_estate(category_main_cb={"name": "Domy", "value": 2},
+                                usable_area=148, estate_area=905))
+    assert (row["area_m2"], row["area_basis"]) == (148.0, "usable")
+    assert row["estate_area"] == 905.0
+    # and the byt fixture is untouched
+    assert parse_listing(sample)["area_m2"] == 85.0
+
+
 def test_disposition(sample):
     assert parse_listing(sample)["disposition"] == "3+kk"
 

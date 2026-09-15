@@ -142,6 +142,22 @@ def test_rent_price_unit():
     assert listing.price_unit == "měsíc"
 
 
+def test_land_headline_is_surface_land_stamped_plot():
+    # W17. `surfaceLand` used to reach only estate_area, so 2,654 of 2,667 land rows
+    # had a parcel stored and no headline area at all.
+    listing = parse_advert(_advert(estateType="POZEMEK", disposition=None,
+                                   surface=0, surfaceLand=1450))
+    assert listing.category_main == "pozemek"
+    assert (listing.area_m2, listing.area_basis) == (1450, "plot")
+    assert listing.estate_area == 1450
+
+
+def test_a_dwelling_never_takes_surface_land_as_its_headline():
+    listing = parse_advert(_advert(estateType="DUM", surface=148, surfaceLand=905))
+    assert (listing.area_m2, listing.area_basis) == (148, "usable")
+    assert listing.estate_area == 905
+
+
 def test_zero_surface_is_none_sentinel():
     # bezrealitky uses 0 as the "not specified" sentinel for numeric fields.
     listing = parse_advert(_advert(surface=0, etage=0, totalFloors=0))

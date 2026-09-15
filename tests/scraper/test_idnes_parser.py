@@ -393,6 +393,36 @@ def test_land_headline_area_is_stamped_plot():
     assert listing.area_basis == "plot"
 
 
+# The same live pozemek markup with the area struck from the TITLE — the shape of
+# the 5,292 idnes land rows that carried no headline area at all before W17,
+# because "Plocha pozemku" reached only `estate_area` and the title fallback had
+# nothing to parse.
+LAND_DETAIL_NO_TITLE_AREA_HTML = LAND_DETAIL_HTML.replace(
+    "<h1>Prodej pole 1&nbsp;074 m²</h1>", "<h1>Prodej pole</h1>",
+)
+
+
+def test_land_without_a_title_area_still_takes_the_parcel_as_its_headline():
+    listing = parse_detail(
+        LAND_DETAIL_NO_TITLE_AREA_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/pozemek/bzenec/6a18deadbeefdeadbeef0022/",
+        category_main="pozemek", category_type="prodej",
+    )
+    assert (listing.area_m2, listing.area_basis) == (1074.0, "plot")
+    assert listing.estate_area == 1074.0
+
+
+def test_a_house_never_takes_its_plot_as_the_headline():
+    # HOUSE_DETAIL_HTML states both a floor area and "Plocha pozemku" 1033 m2.
+    listing = parse_detail(
+        HOUSE_DETAIL_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/dum/horni-lhota/6a18deadbeefdeadbeef0011/",
+        category_main="dum", category_type="prodej",
+    )
+    assert listing.estate_area == 1033.0
+    assert (listing.area_m2, listing.area_basis) == (142.0, "usable")
+
+
 def test_parse_detail_del_only_price_falls_back_to_current():
     # No <strong>: the flattened element's FIRST price run used to be the
     # struck <del> original; the fallback now strips <del> first.

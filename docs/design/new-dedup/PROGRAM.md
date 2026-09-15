@@ -208,6 +208,48 @@ the two gaps found while adding property list are closed in the same PR that add
 
 ## Progress ledger (update every session, newest first)
 
+- 2026-09-15 — **W17: one headline area. The rule's meaning changed: `c3 -> c4`.** The operator
+  asked whether path C's "has an attribute the rule can compare" and the pairing itself use the
+  PLOT for pozemek or a floor area. They used `estate_area` for pozemek and `usable_area`
+  otherwise — a **second spelling** of "which area is this listing's area", next to
+  `scraper/area.derive_headline_area` (the parser rule) and `measure_price_per_m2` (the per-m²
+  measure). It disagreed with the headline in both directions:
+
+  | | |
+  | --- | ---: |
+  | land rows with a parcel in `estate_area` and **no `area_m2` at all** | 52,183 |
+  | of which sreality (every land row it has) | 44,237 |
+  | idnes / bezrealitky | 5,292 / 2,654 |
+  | active land rows with a meaningless `disposition` the rule read | 165 |
+
+  Those 52,183 rows had no per-m² price either — the measure divides by `area_m2`. Cause: three
+  parsers (sreality, bezrealitky, idnes) never handed the plot to `derive_headline_area`, though
+  each stored it in `estate_area`. The other six did, under a `total`-shaped label.
+
+  **What shipped.** (a) `derive_headline_area` gained `plot=`, land precedence
+  `plot -> total -> usable -> floor -> fallback`, and ALL NINE parsers now pass it — including
+  the six that already worked, so the one rule is fed identically everywhere (rule 21) instead
+  of by nine arrangements of which argument a parcel arrives in. (b)
+  `toolkit/dedup_candidates_sql.py` reads `area_m2 > 0` for every category, and the per-category
+  IDENTITY ATTRIBUTES are ONE vocabulary (`dedup_candidates.IDENTITY_ATTRS`, `pozemek` = area
+  only) rendered into the base CTE, the funnel's `has_disposition` and the Python oracle — so a
+  parcel reaches the rule with no disposition and always meets another parcel on C3, where the
+  2 % land tolerance applies. (c) `scripts/backfill_land_headline_area.py` +
+  `backfill_land_headline_area.yml` (dispatch-only, dry-run by default) heal the stored rows.
+
+  **Three calls worth recording.**
+  1. **The version bumped, on purpose.** Both changes alter what the generator PAIRS, so
+     `GENERATOR_VERSION` is `c4`, the fingerprint moved to `96527b73da4cff52`, and the SHA-256
+     ledger of the pairing statements was re-pinned in the same commit — exactly the drill W16
+     wrote down. Existing `candidate_pairs` rows are pilot output under the old meaning and are
+     orphaned deliberately; nothing mixes key spaces.
+  2. **The heal writes no snapshot.** `area_m2` is in the content hash, but this corrects OUR
+     mis-parse of the SAME stored page (the `backfill_idnes_areas` precedent), so rule 2's
+     sanctioned exception applies; a live row's next detail refetch appends exactly one genuine
+     snapshot, spread over the normal cadence.
+  3. **Not every land row gains one.** 3,016 land rows carry no area from their portal at all —
+     an honest gap, and it stays visible as one rather than being guessed at.
+
 - 2026-09-15 — **W16: the funnel and the location audit waterfall are ONE vocabulary.**
   Supersedes entry 2026-09-10 (c)'s description of the funnel's five steps. The operator, after
   reading both pages side by side on 2026-09-14: they "must use ONE terminology and, where

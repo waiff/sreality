@@ -13,8 +13,15 @@ How the rule of toolkit/dedup_candidates.py (the oracle) maps onto SQL, once:
   the block key, the granularity floor `dedup_path_c` applied by RANK through
   `location_granularity_rank` (never by enum order). Nothing legacy — no `listings.geom`,
   `obec_id`, `street`.
-* "Not available": disposition = `nullif(btrim(disposition), '')`; area = the category's
-  area column when > 0 (`estate_area` for pozemek, else `usable_area`), else NULL.
+* "Not available": disposition = `nullif(btrim(disposition), '')`, and only where the
+  category compares on one at all — `dedup_candidates.IDENTITY_ATTRS` is rendered into the
+  base CTE, so a `pozemek` row arrives with a NULL disposition and cannot reach C1; area =
+  `listings.area_m2` when > 0, else NULL. That is THE headline area
+  (`scraper/area.derive_headline_area`): the plot on land, the interior measure otherwise.
+  This module spells no area choice of its own — before W17 it carried a second one
+  (`estate_area` for pozemek, else `usable_area`), which disagreed with the headline on
+  every land row three parsers left without one and on every dwelling measured by floor
+  area alone.
 * Rung C1 joins on equal disposition (both present, by construction of the join); rung C3
   takes only pairs with a disposition missing on at least one side and compares areas.
 * The category guards and the byt floor rule are the same predicates on both rungs.
@@ -42,16 +49,33 @@ from toolkit import dedup_candidates as dc
 
 # --------------------------------------------------------------------------- fragments
 
+
+def identity_disposition_sql(alias: str) -> str:
+    """The disposition column as the RULE sees it: trimmed to NULL when blank, and NULL
+    outright for a category that does not compare on a disposition (land). Rendered from
+    `dedup_candidates.IDENTITY_ATTRS` so the SQL and the Python oracle read one vocabulary.
+
+    COALESCE, not a bare `NOT IN`: `NULL NOT IN ('pozemek')` is NULL, which would strip the
+    disposition off every row whose category is unknown — the oracle keeps it (an unknown
+    category takes the default identity attributes)."""
+    skipped = ", ".join(f"'{c}'" for c in dc.categories_not_comparing("disposition"))
+    col = f"{alias}disposition"
+    trimmed = f"NULLIF(BTRIM({col}), '')"
+    if not skipped:
+        return trimmed
+    return f"CASE WHEN COALESCE({alias}category_main, '') NOT IN ({skipped}) THEN {trimmed} END"
+
+
 # Path C's floor (dedup_path_c: granularity ≥ obec, any confidence, obec_kod present),
 # compared by rank. `obec_kod` is a BIGINT on the answer table (migration 501); the lane passes
 # the block key as an int and the pair row stores it as text. `active_only` narrows to listings active on BOTH sides (scope 'active').
 _BASE_CTE = (
     "WITH base AS ("
     " SELECT x.id AS listing_id, x.category_type, x.category_main,"
-    " NULLIF(BTRIM(x.disposition), '') AS disposition, x.floor,"
-    " CASE WHEN x.category_main = 'pozemek'"
-    "      THEN CASE WHEN x.estate_area > 0 THEN x.estate_area END"
-    "      ELSE CASE WHEN x.usable_area > 0 THEN x.usable_area END END AS area,"
+    f" {identity_disposition_sql('x.')} AS disposition, x.floor,"
+    # THE ONE HEADLINE AREA (W17). `area_m2` is polymorphic by design — the plot on land,
+    # the interior measure otherwise — so the rule asks one question of every category.
+    " CASE WHEN x.area_m2 > 0 THEN x.area_m2 END AS area,"
     # The city district, but ONLY in a split town and ONLY when the answer table knows it.
     # NULL means "reaches the whole town": an unknown district cannot veto a pair, exactly
     # as an unknown floor cannot (operator ruling 2026-09-10).
@@ -185,7 +209,7 @@ PAIR_COLUMN_NAMES: tuple[str, ...] = tuple(c.strip() for c in _PAIR_COLUMNS.spli
 # available" definitions itself — the point of verify mode is that SQL and Python agree).
 BLOCK_ATTRS_SQL = (
     "SELECT x.id AS listing_id, x.category_type, x.category_main, x.disposition, x.floor,"
-    " x.usable_area, x.estate_area, l.cast_obce_kod::text AS district_code"
+    " x.area_m2, l.cast_obce_kod::text AS district_code"
     " FROM listing_location l"
     " JOIN location_granularity_rank gr ON gr.granularity = l.granularity"
     " JOIN listings x ON x.id = l.listing_id"
@@ -240,8 +264,8 @@ FUNNEL_SQL = (
     f" {_FUNNEL_FLAGS['has_verdict']} AS has_verdict,"
     f" {_FUNNEL_FLAGS['is_foreign']} AS is_foreign,"
     f" {_FUNNEL_FLAGS['has_town']} AS has_town,"
-    " (NULLIF(BTRIM(l.disposition), '') IS NOT NULL) AS has_disposition,"
-    " (CASE WHEN l.category_main = 'pozemek' THEN l.estate_area ELSE l.usable_area END > 0) AS has_area,"
+    f" ({identity_disposition_sql('l.')} IS NOT NULL) AS has_disposition,"
+    " (l.area_m2 > 0) AS has_area,"
     " (l.floor IS NOT NULL) AS has_floor"
     " FROM listings l"
     " LEFT JOIN listing_location ll ON ll.listing_id = l.id"

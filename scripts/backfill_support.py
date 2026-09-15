@@ -10,15 +10,20 @@ copy of each rule:
   anyway once the budget expires.
 * `execute_with_lock_retry` — the hourly MF-yield recompute holds row locks on `listings`
   for ~90 s twice an hour; a batched UPDATE that lands behind it dies with
-  DeadlockDetected or a lock-wait QueryCanceled (the same two failures
-  `scraper.db._touch_chunk_with_retry` documents). Both leave an autocommit connection
-  usable, and every batch here is idempotent, so a short pause and a replay is the fix.
+  DeadlockDetected, a lock-wait QueryCanceled, or — when the job arms its own
+  `lock_timeout` — LockNotAvailable (the first two are the failures
+  `scraper.db._touch_chunk_with_retry` documents). All three leave an autocommit
+  connection usable, and every batch here is idempotent, so a short pause and a replay is
+  the fix. Pass `setup` to run the batch inside ONE transaction preceded by `SET LOCAL`
+  guards: on an autocommit connection a bare `SET LOCAL` applies to nothing at all, so a
+  job that wants a statement/lock timeout on its write must take the transaction too.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from typing import Any
 
 import psycopg
@@ -75,23 +80,35 @@ def wait_for_rebuild_gap(conn: Any, budget_seconds: float) -> bool:
 
 def execute_with_lock_retry(
     conn: Any, sql: str, params: dict[str, Any], *, label: str,
+    setup: Sequence[str] = (),
 ) -> int:
     """Run one idempotent batched statement, replaying it when it loses a lock fight.
 
     Deadlock -> the victim is already rolled back, the other side completes, a short
-    pause suffices. Lock-wait cancel (statement_timeout while locking tuple) -> the
-    holder is usually done, a longer pause lets it release. Anything else raises.
-    Returns the statement's rowcount.
+    pause suffices. Lock-wait cancel (statement_timeout while locking tuple) or an armed
+    `lock_timeout` firing -> the holder is usually done, a longer pause lets it release.
+    Anything else raises. Returns the statement's rowcount.
+
+    `setup` statements (`SET LOCAL ...`) run first, inside the transaction this then opens
+    around the batch — the only shape in which a `SET LOCAL` binds on these autocommit
+    connections. With no `setup` the statement runs exactly as before, unwrapped.
     """
     for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
         try:
+            if setup:
+                with conn.transaction(), conn.cursor() as cur:
+                    for statement in setup:
+                        cur.execute(statement)
+                    cur.execute(sql, params)
+                    return int(cur.rowcount)
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 return int(cur.rowcount)
-        except (psycopg.errors.DeadlockDetected, psycopg.errors.QueryCanceled) as exc:
+        except (psycopg.errors.DeadlockDetected, psycopg.errors.QueryCanceled,
+                psycopg.errors.LockNotAvailable) as exc:
             if attempt == _LOCK_RETRY_ATTEMPTS:
                 raise
-            lock_wait = isinstance(exc, psycopg.errors.QueryCanceled)
+            lock_wait = not isinstance(exc, psycopg.errors.DeadlockDetected)
             LOG.warning("%s: %s (attempt %d/%d); retrying", label,
                         "lock-wait timeout" if lock_wait else "deadlock",
                         attempt, _LOCK_RETRY_ATTEMPTS)

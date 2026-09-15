@@ -645,11 +645,16 @@ def parse_detail(
         or _text(params.get("podlahová plocha"))
         or _text(params.get("plocha"))
     )
+    # "Plocha pozemku" is the parcel and reaches the resolver as `plot` — before
+    # W17 it went only to `estate_area`, so 5,292 land rows whose title states no
+    # area carried no headline at all.
+    estate_area = _clamp(_parse_area(_text(params.get("plocha pozemku"))), _AREA_LARGE_MAX)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_clamp(_parse_area(_text(params.get("užitná plocha"))), _AREA_M2_MAX),
         floor=_clamp(_parse_area(_text(params.get("podlahová plocha"))), _AREA_M2_MAX),
         total=_clamp(_parse_area(_text(params.get("plocha"))), _AREA_M2_MAX),
+        plot=estate_area,
         fallback=_clamp(_parse_area(title), _AREA_M2_MAX),
     )
 
@@ -740,7 +745,7 @@ def parse_detail(
             (parking_lots > 0) if parking_lots is not None else None,
         ),
         parking_lots=parking_lots,
-        estate_area=_clamp(_parse_area(_text(params.get("plocha pozemku"))), _AREA_LARGE_MAX),
+        estate_area=estate_area,
         garden_area=_clamp(_parse_area(_text(params.get("plocha zahrady"))), _AREA_LARGE_MAX),
         description=description,
         raw=raw,

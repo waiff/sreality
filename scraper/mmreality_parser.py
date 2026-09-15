@@ -513,10 +513,16 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     # it is routed to estate_area below, the column mmreality has never filled.
     is_house = category_main == "dum"
     total_area = _to_float(obj.get("totalArea"))
+    estate_area = (
+        _to_float(obj.get("landArea"))
+        or _to_float(obj.get("plotArea"))
+        or (total_area if is_house else None)
+    )
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_to_float(obj.get("usableArea")),
         total=None if is_house else total_area,
+        plot=estate_area,
     )
 
     image_urls = _image_urls(obj)
@@ -560,11 +566,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         garage=_has_any(accessories, "garaz"),
         has_parking=(True if parking_lots else _has_any(accessories, "parkov", "garaz")),
         parking_lots=parking_lots,
-        estate_area=(
-            _to_float(obj.get("landArea"))
-            or _to_float(obj.get("plotArea"))
-            or (total_area if is_house else None)
-        ),
+        estate_area=estate_area,
         garden_area=_to_float(obj.get("gardenArea")),
         description=obj.get("description") or None,
         raw=raw,

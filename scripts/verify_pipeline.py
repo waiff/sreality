@@ -280,11 +280,14 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "area_divergence_min_rows": 100,
     # Coverage: the share of a cell's active rows the measure has NO INPUT for (no
     # price, or no positive area). Severity is a property of the ARM, not of the
-    # number. The stock arm can only WARN: the live offenders are the four sreality
-    # `pozemek` cells at 100.0% and bezrealitky pozemek/prodej at 99.5% — land plot
-    # size lives in `estate_area`, which the measure does not read — and that is a
-    # standing, sanctioned gap (charter: a NULL measure is a visible gap, never a
-    # guess), so it is amber, named, and not a red tile nobody can clear. The next
+    # number. The stock arm can only WARN: the live offenders were the four sreality
+    # `pozemek` cells at 100.0% and bezrealitky pozemek/prodej at 99.5% — three parsers
+    # kept the parcel out of `area_m2`, which is the only area the measure reads. W17
+    # closed that (the plot reaches `derive_headline_area` from every portal, and
+    # `backfill_land_headline_area` heals the 52,183 stored rows), so those cells should
+    # clear; a land cell with no portal area at all stays a visible gap by charter (a NULL
+    # measure is never a guess), amber and named rather than a red tile nobody can clear.
+    # The next
     # cell down is realitymix ostatni/pronajem at 89.4%, so 0.95 separates "this
     # cell has no measure" from ordinary portal incompleteness with 5.6pp of
     # headroom. The 7d arm FAILS at 0.90: a gap that large among the rows that
@@ -1867,8 +1870,8 @@ def check_ppm2_measure_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[s
         f"{len(offenders)} portal/basis cell(s) have no per-m2 measure to speak of "
         f"(worst {worst:.1%} of rows with no price or no area): " + "; ".join(offenders[:6])
         + " — the measure is undefined for this cohort; check that the portal writes "
-        "area_m2 and price_czk for it (land plot size lives in estate_area, which the "
-        "measure does not read)."
+        "area_m2 and price_czk for it (on land area_m2 IS the plot, since W17: a land cell "
+        "that reads empty means the portal published no area, or the row predates the heal)."
         if offenders
         else f"The per-m2 measure resolves across the corpus (worst cell {worst:.1%} of "
              f"rows without inputs, across {scored} scored arm(s))."

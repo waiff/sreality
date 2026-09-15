@@ -117,11 +117,15 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("could not determine sreality_id from response")
 
     category_main = CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb")))
-    # sreality's only interior measure is `usable_area`; the headline value is
-    # unchanged, the shared resolver just stamps which physical area it is.
+    # sreality's only interior measure is `usable_area`; `estate_area` is the parcel,
+    # which it publishes on every land row and this parser used to keep OUT of the
+    # headline (44,237 of 44,237 land rows carried area_m2 NULL). Both reach the one
+    # resolver; which of them becomes the headline is the resolver's call, not ours.
+    estate_area = _numeric_or_none(raw.get("estate_area"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_numeric_or_none(raw.get("usable_area")),
+        plot=estate_area,
     )
 
     return {
@@ -141,7 +145,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "building_type": _building_type(raw.get("building_type")),
         "condition": _condition(raw.get("building_condition")),
         "energy_rating": _energy_rating(raw.get("energy_efficiency_rating_cb")),
-        "estate_area": _numeric_or_none(raw.get("estate_area")),
+        "estate_area": estate_area,
         "usable_area": _numeric_or_none(raw.get("usable_area")),
         "garden_area": _numeric_or_none(raw.get("garden_area")),
         "category_sub_cb": _cb_value(raw.get("category_sub_cb")),
