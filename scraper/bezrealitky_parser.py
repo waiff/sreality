@@ -171,9 +171,14 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     raw = dict(advert)
     raw["image_urls"] = _image_urls(advert)
 
-    # `surface` is bezrealitky's interior measure (it also feeds usable_area).
+    # `surface` is bezrealitky's interior measure (it also feeds usable_area);
+    # `surfaceLand` is the parcel (it also feeds estate_area). Both go to the one
+    # resolver — before W17 only `surface` did, and 2,654 of 2,667 land rows had a
+    # parcel in `estate_area` and nothing in `area_m2`.
+    surface_land = _num(advert.get("surfaceLand"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main, usable=_num(advert.get("surface")),
+        plot=surface_land,
     )
 
     return ScrapedListing(
@@ -205,7 +210,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         building_type=CONSTRUCTION.get(advert.get("construction")),
         condition=CONDITION.get(advert.get("condition")),
         energy_rating=_energy(advert.get("penb")),
-        estate_area=_num(advert.get("surfaceLand")),
+        estate_area=surface_land,
         usable_area=_num(advert.get("surface")),
         garden_area=_num(advert.get("frontGarden")),
         category_sub_cb=None,

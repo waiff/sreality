@@ -621,10 +621,12 @@ def parse_detail(
     # carried; the headline goes through the shared resolver on SEPARATE measures.
     area_text = params.get("plocha užitná") or params.get("užitná plocha") or params.get("plocha")
     usable_area = _parse_area(area_text)
+    estate_area = _parse_area(params.get("plocha pozemku"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_parse_area(params.get("plocha užitná") or params.get("užitná plocha")),
         total=_parse_area(params.get("plocha")),
+        plot=estate_area,
         fallback=_parse_area(title),
     )
 
@@ -687,7 +689,7 @@ def parse_detail(
         energy_rating=_energy_rating(
             params.get("energetická náročnost") or params.get("penb")
         ),
-        estate_area=_parse_area(params.get("plocha pozemku")),
+        estate_area=estate_area,
         garden_area=_parse_area(params.get("plocha zahrady")),
         description=description,
         # "Datum vložení" — the portal's own insertion date ("10. února 2026"),

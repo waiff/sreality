@@ -259,9 +259,11 @@ def verify(conn: Any, inputs: dict[str, Any], *, only: Sequence[str], max_listin
         with conn.transaction(), conn.cursor() as cur:
             _set_timeout(cur)
             cur.execute(sql.BLOCK_ATTRS_SQL, {**params, "block_key": int(b.key)})
+            # BLOCK_ATTRS_SQL hands over the RAW attributes — the oracle applies the
+            # availability definitions itself, which is the whole point of verify mode.
             attrs = [
-                dc.ListingAttrs(int(r[0]), b.key, r[1], r[2], r[3], r[4], r[5], r[6],
-                                dc.district_of(b.key, r[7], inputs))
+                dc.ListingAttrs(int(r[0]), b.key, r[1], r[2], r[3], r[4], r[5],
+                                dc.district_of(b.key, r[6], inputs))
                 for r in cur.fetchall()
             ]
         oracle = oracle_pairs(attrs, inputs)

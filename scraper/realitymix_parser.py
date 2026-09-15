@@ -575,6 +575,11 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     locality = full_address or obec or _fallback_locality(source_url, street_name)
 
     usable_area = _parse_area(params.get("užitná plocha"))
+    estate_area = _parse_area(
+        params.get("plocha parcely")
+        or params.get("plocha pozemku")
+        or params.get("výměra pozemku")
+    )
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=usable_area,
@@ -582,12 +587,8 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
             params.get("celková podlahová plocha") or params.get("podlahová plocha")
         ),
         total=_parse_area(params.get("plocha")),
+        plot=estate_area,
         fallback=_parse_area(title),
-    )
-    estate_area = _parse_area(
-        params.get("plocha parcely")
-        or params.get("plocha pozemku")
-        or params.get("výměra pozemku")
     )
     other = _strip_diacritics(params.get("ostatní", "")).lower()
 

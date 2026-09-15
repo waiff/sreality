@@ -540,6 +540,95 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_idnes_brokers.yml"
     },
     {
+      "filename": "backfill_land_headline_area.yml",
+      "name": "Backfill land headline area (the plot three parsers never handed to the rule)",
+      "description": "One-off, dispatch-only heal for W17 (\"one headline area\"). `listings.area_m2` is polymorphic by design — the interior measure for a dwelling, THE PLOT for `pozemek` — and `scraper.area.derive_headline_area` is the one rule that picks it. Until W17 the sreality, bezrealitky and idnes parsers never handed that rule the plot at all, though each of them DID store it in `estate_area`: 52,183 land rows (sreality 44,237 of 44,237, idnes 5,292 of 45,500, bezrealitky 2,654 of 2,667; ~32.7k of them active) carry a parcel and no headline area, so they have no per-m² price and no area for any consumer that reads the headline — including the NEW DEDUP path C candidate rule. The parser change fixes every future write; this fixes the rows already stored, with the same value the same page already gave us:",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "write",
+          "description": "Actually write. Left false, this only reports what would change.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "limit",
+          "description": "Max listings healed this run (blank = all of them)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "after",
+          "description": "Resume from this listings.id cursor (exclusive)",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "Rows per keyset page, and per UPDATE statement",
+          "required": false,
+          "type": "string",
+          "default": "5000",
+          "options": null
+        },
+        {
+          "name": "max_seconds",
+          "description": "Wall-clock budget in seconds (blank = no budget)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "rebuild_wait_seconds",
+          "description": "How long a WRITING pass waits for a read-model rebuild gap before starting anyway",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "ignore_rebuild",
+          "description": "Start immediately, without waiting for a rebuild gap at all",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "verbose",
+          "description": "Log every page's id range and portals (DEBUG)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "backfill-land-headline-area",
+      "cancelInProgress": false,
+      "timeoutMinutes": 120,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_land_headline_area.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_land_headline_area.yml"
+    },
+    {
       "filename": "backfill_mmreality_areas.yml",
       "name": "Backfill mmreality areas (plot stored as the headline)",
       "description": "One-off, dispatch-only backfill for the per-m² measure program's W2 heal. Before W1, mmreality's own `or` chain read `totalArea or usableArea`, and for a HOUSE mmreality's `totalArea` is the PARCEL — so thousands of active `dum` rows carry a ~905 m² plot in `area_m2` with the real ~130 m² floor area sitting unused in `usableArea`, yielding a median ~5,700 Kč/m² against ~48,000 on every other portal. Re-derives the area columns from the source object ALREADY staged in `raw_json` (NO re-fetch of mmreality) by re-running the fixed parser's own decision, and stamps `area_basis` on every processed row. All four area columns are in the content hash but this writes NO snapshot — correcting our own mis-parse of the SAME staged state is a data-quality fix, and each healed row appends exactly one genuine snapshot on its next successful detail refetch. Idempotent + resumable (each row stamped `raw_json.area_reparse_v2`); rerun until \"pending=0\". Healed rows enqueue their property so the */5 incremental recompute propagates the corrected denominator into properties + the map matview. NOT a portal ingest workflow, so it carries no `# portal:` tag.",

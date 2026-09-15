@@ -1,6 +1,6 @@
 """The one headline-area precedence, shared by all nine portals."""
 
-from scraper.area import AREA_BASES, MIN_AREA_M2, derive_headline_area
+from scraper.area import AREA_BASES, MAX_AREA_M2, MIN_AREA_M2, derive_headline_area
 
 
 def test_usable_wins_when_present():
@@ -55,6 +55,30 @@ def test_land_prefers_the_plot_shaped_measure():
     ) == (1074.0, "plot")
 
 
+def test_land_takes_the_labelled_parcel_over_every_other_measure():
+    # W17: the portal's own "plocha pozemku" / surfaceLand / estate_area leads the
+    # land arm. 52,183 land rows (sreality 44,237, idnes 5,292, bezrealitky 2,654)
+    # carried exactly this input and no headline at all, because three parsers only
+    # ever handed the resolver an interior measure land pages do not state.
+    assert derive_headline_area(
+        category_main="pozemek", usable=400.0, floor=410.0, total=1074.0,
+        plot=1200.0, fallback=99.0,
+    ) == (1200.0, "plot")
+    assert derive_headline_area(category_main="pozemek", plot=1200.0) == (1200.0, "plot")
+
+
+def test_the_plot_is_never_a_dwellings_headline():
+    # A house's parcel sits BESIDE its floor area (estate_area) and must never
+    # become the headline — that is the mmreality defect the divergence check
+    # watches for. The dwelling arm does not read `plot` at all.
+    assert derive_headline_area(
+        category_main="dum", usable=148.0, plot=905.0
+    ) == (148.0, "usable")
+    assert derive_headline_area(category_main="dum", plot=905.0) == (None, None)
+    assert derive_headline_area(category_main="byt", plot=905.0) == (None, None)
+    assert derive_headline_area(category_main=None, plot=905.0) == (None, None)
+
+
 def test_land_from_free_text_only_is_still_plot():
     # The bazos shape: no structured area field anywhere, only the title/description
     # scrape. Nothing is deleted — the value survives, labelled for what it is.
@@ -95,11 +119,41 @@ def test_the_bound_does_not_reach_small_units_or_land():
     assert derive_headline_area(category_main=None, fallback=2.0) == (2.0, "unknown")
 
 
+def test_a_measure_the_column_cannot_hold_is_declined_on_every_category():
+    # `listings.area_m2` is numeric(7,1): the write boundary NULLs anything at or
+    # beyond 10^6 (scraper.db.sane_listing_numerics). Declining it HERE means the
+    # resolver falls through instead of stamping a basis for a value the row will
+    # not hold — production carries 20 land rows whose parcel is that big (up to
+    # 16,809,800 m2), and their parcel belongs in estate_area, not the headline.
+    assert derive_headline_area(category_main="pozemek", plot=16_809_800.0) == (None, None)
+    assert derive_headline_area(
+        category_main="pozemek", plot=16_809_800.0, total=1200.0
+    ) == (1200.0, "plot")
+    assert derive_headline_area(category_main="byt", usable=MAX_AREA_M2) == (None, None)
+    assert derive_headline_area(
+        category_main="byt", usable=MAX_AREA_M2, total=64.0
+    ) == (64.0, "total")
+    # the last value the column DOES hold is still a measure
+    assert derive_headline_area(category_main="pozemek", plot=999_999.9) == (999_999.9, "plot")
+
+
+def test_the_ceiling_is_the_column_bound_the_write_boundary_enforces():
+    # Imported HERE and not in scraper/area.py, which is stdlib-only: the test is
+    # what keeps the two spellings of one column bound from drifting, the same way
+    # `_NUMERIC_ABS_MAX` itself is pinned to LISTING_COLUMNS by an assert.
+    from scraper.db import _NUMERIC_ABS_MAX
+
+    assert MAX_AREA_M2 == float(_NUMERIC_ABS_MAX["area_m2"])
+
+
 def test_every_emitted_basis_is_in_the_declared_vocabulary():
     # The CHECK constraint in migration 423 accepts exactly these five.
     emitted = {
         derive_headline_area(category_main=c, **{k: 10.0})[1]
         for c in ("byt", "pozemek")
-        for k in ("usable", "floor", "total", "fallback")
+        for k in ("usable", "floor", "total", "plot", "fallback")
     }
-    assert emitted <= AREA_BASES
+    # `plot` on a dwelling is not a measure that arm reads, so it emits no basis at
+    # all — a legal answer, and not a token. Every token emitted must be declared.
+    assert emitted - {None} <= AREA_BASES
+    assert {"usable", "floor", "total", "plot", "unknown"} <= emitted

@@ -1,0 +1,145 @@
+name: Backfill land headline area (the plot three parsers never handed to the rule)
+
+# One-off, dispatch-only heal for W17 ("one headline area"). `listings.area_m2` is
+# polymorphic by design — the interior measure for a dwelling, THE PLOT for `pozemek` —
+# and `scraper.area.derive_headline_area` is the one rule that picks it. Until W17 the
+# sreality, bezrealitky and idnes parsers never handed that rule the plot at all, though
+# each of them DID store it in `estate_area`: 52,183 land rows (sreality 44,237 of 44,237,
+# idnes 5,292 of 45,500, bezrealitky 2,654 of 2,667; ~32.7k of them active) carry a parcel
+# and no headline area, so they have no per-m² price and no area for any consumer that
+# reads the headline — including the NEW DEDUP path C candidate rule. The parser change
+# fixes every future write; this fixes the rows already stored, with the same value the
+# same page already gave us:
+#
+#   area_m2 = estate_area, area_basis = 'plot'
+#   WHERE category_main IN <LAND_CATEGORIES> AND (area_m2 IS NULL OR area_m2 <= 0)
+#     AND estate_area > 0 AND estate_area < MAX_AREA_M2
+#
+# ALL rows, active or not — coverage is every listing. The CEILING is part of the
+# population: `area_m2` is numeric(7,1) while `estate_area` is numeric(9,1), so 20 pending
+# rows (sreality 11, idnes 9; largest 16,809,800 m²) hold a parcel the headline column
+# cannot store, and `SET area_m2 = estate_area` on one of them raises 22003 — a numeric
+# overflow, not a lock fight, so it aborts the batch instead of being replayed. The first
+# sits inside the FIRST page, so without the bound the job heals nothing at all. Those rows
+# are MEANT to have no headline (the ingest path NULLs an out-of-range area_m2 the same
+# way, and since W17 `derive_headline_area` declines the measure rather than stamping a
+# basis for a value the row will not hold); both counts are reported per portal in dry-run
+# and write modes.
+#
+# Writes NO `listing_snapshots` row, and for most of the population nothing ever will.
+# `area_m2` is hashed, but correcting our own mis-parse of the SAME stored page is the
+# sanctioned exception (the `backfill_idnes_areas` precedent). idnes + bezrealitky hash the
+# PARSED fields, so W17's parser change — not this heal — makes a live row's next detail
+# fetch append exactly ONE genuine snapshot, spread over the normal cadence (≤7,946 rows,
+# active ones only). sreality hashes the RAW payload, which did not change: its 44,237 rows
+# never get a snapshot at all, the heal is the only write they receive, and later refetches
+# rewrite the same column silently.
+#
+# Idempotent with no marker — a healed row fails the predicate for ever after, so the
+# selection empties itself; `--after` resumes, and the cursor advances only past a page that
+# was actually written, so a failed page is re-read rather than skipped. Batched by id
+# (5,000 per UPDATE), each batch in its own transaction with `SET LOCAL statement_timeout`
+# (120 s) + `lock_timeout` (30 s) and a replay through the shared lock-retry rail, whose
+# window is sized for the ~90 s of row locks the hourly MF-yield recompute holds on
+# `listings`. DML, not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; a WRITING
+# pass waits for a read-model rebuild gap first, bounded, then proceeds anyway since the
+# contention is I/O and never a lock conflict (a dry run never waits). Healed listings are
+# enqueued into `dirty_properties` so the singleton `properties.area_m2` mirror is
+# recomputed (rule 20). NOT a portal ingest workflow, so it carries no `# portal:` tag.
+#
+# The script DEFAULTS TO DRY-RUN: it reports the pending count per portal and exits unless
+# `write` is true.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      write:
+        description: Actually write. Left false, this only reports what would change.
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      limit:
+        description: Max listings healed this run (blank = all of them)
+        required: false
+        default: ""
+        type: string
+      after:
+        description: Resume from this listings.id cursor (exclusive)
+        required: false
+        default: "0"
+        type: string
+      batch_size:
+        description: Rows per keyset page, and per UPDATE statement
+        required: false
+        default: "5000"
+        type: string
+      max_seconds:
+        description: Wall-clock budget in seconds (blank = no budget)
+        required: false
+        default: ""
+        type: string
+      rebuild_wait_seconds:
+        description: How long a WRITING pass waits for a read-model rebuild gap before starting anyway
+        required: false
+        default: ""
+        type: string
+      ignore_rebuild:
+        description: Start immediately, without waiting for a rebuild gap at all
+        required: false
+        default: false
+        type: boolean
+      verbose:
+        description: Log every page's id range and portals (DEBUG)
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: backfill-land-headline-area
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      # Inputs reach the shell as env vars, never interpolated into the script body.
+      - name: Heal the land headline area
+        env:
+          IN_WRITE: ${{ inputs.write }}
+          IN_LIMIT: ${{ inputs.limit }}
+          IN_AFTER: ${{ inputs.after }}
+          IN_BATCH_SIZE: ${{ inputs.batch_size }}
+          IN_MAX_SECONDS: ${{ inputs.max_seconds }}
+          IN_REBUILD_WAIT_SECONDS: ${{ inputs.rebuild_wait_seconds }}
+          IN_IGNORE_REBUILD: ${{ inputs.ignore_rebuild }}
+          IN_VERBOSE: ${{ inputs.verbose }}
+        run: |
+          ARGS="--after ${IN_AFTER:-0} --batch-size ${IN_BATCH_SIZE:-5000}"
+          if [ -n "$IN_LIMIT" ]; then ARGS="$ARGS --limit $IN_LIMIT"; fi
+          if [ -n "$IN_MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $IN_MAX_SECONDS"; fi
+          if [ "$IN_WRITE" = "true" ]; then ARGS="$ARGS --write"; fi
+          if [ -n "$IN_REBUILD_WAIT_SECONDS" ]; then ARGS="$ARGS --rebuild-wait-seconds $IN_REBUILD_WAIT_SECONDS"; fi
+          if [ "$IN_IGNORE_REBUILD" = "true" ]; then ARGS="$ARGS --ignore-rebuild"; fi
+          if [ "$IN_VERBOSE" = "true" ]; then ARGS="$ARGS --verbose"; fi
+          python -m scripts.backfill_land_headline_area $ARGS

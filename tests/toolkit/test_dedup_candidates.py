@@ -16,7 +16,7 @@ from toolkit import dedup_sim_settings as dss
 
 INPUTS: dict[str, Any] = {
     "path": "C",
-    "generator_version": "c3",
+    "generator_version": "c4",
     "l0_path_c_town_key": "obec_kod",
     "l0_path_c_district_key": "cast_obce_kod",
     "l0_path_c_district_split_towns": "554782,582786,554821",
@@ -36,11 +36,10 @@ def _l(
     cmain: str | None = "byt",
     dispo: str | None = "2+kk",
     floor: int | None = 3,
-    usable: float | None = 60.0,
-    estate: float | None = None,
+    area: float | None = 60.0,
     district: str | None = None,
 ) -> dc.ListingAttrs:
-    return dc.ListingAttrs(listing_id, town, ctype, cmain, dispo, floor, usable, estate, district)
+    return dc.ListingAttrs(listing_id, town, ctype, cmain, dispo, floor, area, district)
 
 
 # ------------------------------------------------------------------ registry + inputs
@@ -104,9 +103,11 @@ def test_fingerprint_pins_the_ruled_defaults() -> None:
     # The literal hash of the ruled parameter set. A changed default or generator version
     # MUST move it — pairs generated under different inputs live in different key spaces —
     # and whoever changes it must say so in the ledger. Moved 2026-09-10 by the district
-    # split + the C1 area check (generator version c1 -> c2), and 2026-09-12 by W2-b moving
-    # the block key onto `listing_location` (c2 -> c3).
-    assert dc.fingerprint(INPUTS) == "992cc57488111635"
+    # split + the C1 area check (generator version c1 -> c2), 2026-09-12 by W2-b moving
+    # the block key onto `listing_location` (c2 -> c3), and 2026-09-15 by W17 (c3 -> c4):
+    # the rule reads the ONE headline area `listings.area_m2` and land no longer compares
+    # on a disposition.
+    assert dc.fingerprint(INPUTS) == "96527b73da4cff52"
 
 
 def test_fingerprint_is_canonical_over_how_a_number_was_typed() -> None:
@@ -167,13 +168,38 @@ def test_disposition_availability(value: str | None, available: bool) -> None:
     assert (dc.normalized_disposition(value) is not None) is available
 
 
-def test_area_of_picks_plot_area_for_land_and_treats_zero_as_missing() -> None:
-    assert dc.area_of("byt", 60, 900) == 60.0
-    assert dc.area_of("pozemek", 60, 900) == 900.0
-    assert dc.area_of("pozemek", 60, None) is None
-    assert dc.area_of("byt", 0, None) is None
-    assert dc.area_of("byt", None, 900) is None
-    assert dc.area_of("byt", "72.5", None) == 72.5
+def test_area_of_reads_the_one_headline_area_and_treats_zero_as_missing() -> None:
+    # W17: no second area choice here. `listings.area_m2` already IS the plot on land
+    # and the interior measure elsewhere, by scraper/area.derive_headline_area.
+    assert dc.area_of(60) == 60.0
+    assert dc.area_of(900) == 900.0
+    assert dc.area_of(None) is None
+    assert dc.area_of(0) is None
+    assert dc.area_of("72.5") == 72.5
+
+
+def test_the_identity_attributes_are_per_category_and_land_has_no_disposition() -> None:
+    assert dc.identity_attrs("byt") == ("disposition", "area")
+    assert dc.identity_attrs("dum") == ("disposition", "area")
+    assert dc.identity_attrs(None) == ("disposition", "area")   # unknown keeps both
+    assert dc.identity_attrs("pozemek") == ("area",)
+    assert dc.compares_on("pozemek", "area") is True
+    assert dc.compares_on("pozemek", "disposition") is False
+    assert dc.categories_not_comparing("disposition") == ("pozemek",)
+    assert dc.categories_not_comparing("area") == ()
+    # the per-listing face of the same vocabulary
+    assert dc.identity_disposition("byt", " 2+kk ") == "2+kk"
+    assert dc.identity_disposition("pozemek", "2+kk") is None
+
+
+def test_land_never_pairs_on_a_disposition_even_when_both_sides_print_one() -> None:
+    # 165 active land rows carry a disposition; reading it would put every "2+kk"
+    # parcel in a town on C1 against each other. They meet on the area instead.
+    land = dict(cmain="pozemek", dispo="2+kk")
+    v = dc.evaluate_pair(_l(1, area=1000, **land), _l(2, area=990, **land), INPUTS)
+    assert v is not None and v.rung == "C3" and v.disposition is None
+    # and the area tolerance that applies is the land one (2%), not C1's wide check
+    assert dc.evaluate_pair(_l(1, area=1000, **land), _l(2, area=970, **land), INPUTS) is None
 
 
 def test_area_diff_is_a_percent_of_the_larger_side() -> None:
@@ -218,30 +244,30 @@ def test_c1_needs_both_dispositions_and_they_must_match() -> None:
     v = dc.evaluate_pair(_l(1, dispo="2+kk"), _l(2, dispo="2+kk"), INPUTS)
     assert v == dc.PairVerdict("C1", "2+kk", 60.0, 60.0, 0.0, True)
     # a mismatch does NOT fall back to the area rung — only absence does
-    assert dc.evaluate_pair(_l(1, dispo="2+kk"), _l(2, dispo="3+kk", usable=60.0), INPUTS) is None
+    assert dc.evaluate_pair(_l(1, dispo="2+kk"), _l(2, dispo="3+kk", area=60.0), INPUTS) is None
     # whitespace is not a different disposition
     assert dc.evaluate_pair(_l(1, dispo="2+kk"), _l(2, dispo=" 2+kk "), INPUTS) is not None
 
 
 def test_c1_also_checks_the_area_when_both_sides_state_one() -> None:
     # ruled 2026-09-10: town + disposition + area, +/- 20% by default
-    ok = dc.evaluate_pair(_l(1, usable=100), _l(2, usable=81), INPUTS)
+    ok = dc.evaluate_pair(_l(1, area=100), _l(2, area=81), INPUTS)
     assert ok is not None and ok.rung == "C1"
     assert (ok.area_lo, ok.area_hi) == (100.0, 81.0) and ok.area_diff_pct == pytest.approx(19.0)
-    assert dc.evaluate_pair(_l(1, usable=100), _l(2, usable=79), INPUTS) is None
+    assert dc.evaluate_pair(_l(1, area=100), _l(2, area=79), INPUTS) is None
     tight = {**INPUTS, "l0_c1_area_tolerance_pct": 5}
-    assert dc.evaluate_pair(_l(1, usable=100), _l(2, usable=81), tight) is None
+    assert dc.evaluate_pair(_l(1, area=100), _l(2, area=81), tight) is None
 
 
 def test_c1_keeps_the_pair_when_an_area_is_missing_as_with_an_unknown_floor() -> None:
-    for a, b in ((_l(1, usable=None), _l(2)), (_l(1), _l(2, usable=0))):
+    for a, b in ((_l(1, area=None), _l(2)), (_l(1), _l(2, area=0))):
         v = dc.evaluate_pair(a, b, INPUTS)
         assert v is not None and v.rung == "C1"
         assert (v.area_lo, v.area_hi, v.area_diff_pct) == (None, None, None)
 
 
 def test_c1_area_lo_hi_follow_listing_id_order() -> None:
-    v = dc.evaluate_pair(_l(9, usable=100), _l(4, usable=90), INPUTS)
+    v = dc.evaluate_pair(_l(9, area=100), _l(4, area=90), INPUTS)
     assert v is not None and (v.area_lo, v.area_hi) == (90.0, 100.0)
 
 
@@ -254,20 +280,20 @@ def test_missing_disposition_on_either_side_falls_back_to_the_area_rung() -> Non
 
 
 def test_c3_needs_area_on_both_sides() -> None:
-    assert dc.evaluate_pair(_l(1, dispo=None, usable=None), _l(2), INPUTS) is None
-    assert dc.evaluate_pair(_l(1, dispo=None), _l(2, usable=0), INPUTS) is None
+    assert dc.evaluate_pair(_l(1, dispo=None, area=None), _l(2), INPUTS) is None
+    assert dc.evaluate_pair(_l(1, dispo=None), _l(2, area=0), INPUTS) is None
 
 
 def test_c3_area_tolerance_general_and_pozemek() -> None:
-    assert dc.evaluate_pair(_l(1, dispo=None, usable=100), _l(2, usable=95), INPUTS) is not None
-    assert dc.evaluate_pair(_l(1, dispo=None, usable=100), _l(2, usable=94), INPUTS) is None
-    land = dict(cmain="pozemek", dispo=None, usable=None)
-    assert dc.evaluate_pair(_l(1, estate=1000, **land), _l(2, estate=980, **land), INPUTS) is not None
-    assert dc.evaluate_pair(_l(1, estate=1000, **land), _l(2, estate=970, **land), INPUTS) is None
+    assert dc.evaluate_pair(_l(1, dispo=None, area=100), _l(2, area=95), INPUTS) is not None
+    assert dc.evaluate_pair(_l(1, dispo=None, area=100), _l(2, area=94), INPUTS) is None
+    land = dict(cmain="pozemek", dispo=None)
+    assert dc.evaluate_pair(_l(1, area=1000, **land), _l(2, area=980, **land), INPUTS) is not None
+    assert dc.evaluate_pair(_l(1, area=1000, **land), _l(2, area=970, **land), INPUTS) is None
 
 
 def test_c3_area_lo_hi_follow_listing_id_order_not_argument_order() -> None:
-    v = dc.evaluate_pair(_l(9, dispo=None, usable=100), _l(4, usable=96), INPUTS)
+    v = dc.evaluate_pair(_l(9, dispo=None, area=100), _l(4, area=96), INPUTS)
     assert v is not None and (v.area_lo, v.area_hi) == (96.0, 100.0)
     assert v.area_diff_pct == pytest.approx(4.0)
 
@@ -300,7 +326,7 @@ def test_floor_tolerance_comes_from_the_inputs() -> None:
 def test_rule_is_symmetric() -> None:
     cases = [
         (_l(1, dispo="2+kk"), _l(2, dispo="2+kk")),
-        (_l(1, dispo=None, usable=100), _l(2, usable=97)),
+        (_l(1, dispo=None, area=100), _l(2, area=97)),
         (_l(1, floor=1), _l(2, floor=4)),
         (_l(1, ctype="prodej"), _l(2, ctype="pronajem")),
     ]

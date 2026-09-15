@@ -140,11 +140,31 @@ def test_c1_checks_the_area_but_only_when_both_are_known() -> None:
     assert "NULL::numeric, NULL::numeric, NULL::numeric" not in body
 
 
-def test_area_is_the_plot_for_land_and_zero_means_missing() -> None:
-    assert "CASE WHEN x.category_main = 'pozemek'" in sql.RUNG_SQL["C3"]["rows"]
-    assert "CASE WHEN x.estate_area > 0 THEN x.estate_area END" in sql.RUNG_SQL["C3"]["rows"]
-    assert "CASE WHEN x.usable_area > 0 THEN x.usable_area END" in sql.RUNG_SQL["C3"]["rows"]
-    assert "'pozemek' IN (a.category_main, b.category_main)" in sql.RUNG_SQL["C3"]["rows"]
+def test_the_area_is_the_one_headline_area_and_zero_means_missing() -> None:
+    """W17: ONE area for every category. `listings.area_m2` is already the plot on land
+    (scraper/area.derive_headline_area) — a second choice here was a second definition."""
+    body = sql.RUNG_SQL["C3"]["rows"]
+    assert "CASE WHEN x.area_m2 > 0 THEN x.area_m2 END AS area" in body
+    for gone in ("x.estate_area", "x.usable_area", "CASE WHEN x.category_main = 'pozemek'"):
+        assert gone not in body, gone
+    assert "x.estate_area" not in sql.FUNNEL_SQL and "l.estate_area" not in sql.FUNNEL_SQL
+    assert "(l.area_m2 > 0) AS has_area" in sql.FUNNEL_SQL
+    # the land TOLERANCE is still the land one — the category still steers that
+    assert "'pozemek' IN (a.category_main, b.category_main)" in body
+
+
+def test_the_identity_attributes_are_rendered_from_the_one_vocabulary() -> None:
+    """The per-category identity attributes are spelled once, in `dedup_candidates`, and
+    rendered into both faces of the rule: a `pozemek` reaches the pairing SQL with a NULL
+    disposition (so C1's join can never take it) and counts as having none in the funnel."""
+    rendered = sql.identity_disposition_sql("x.")
+    assert "'pozemek'" in rendered and dc.categories_not_comparing("disposition") == ("pozemek",)
+    # COALESCE, never a bare NOT IN: an unknown category must KEEP its disposition
+    assert "COALESCE(x.category_main, '') NOT IN ('pozemek')" in rendered
+    assert "NULLIF(BTRIM(x.disposition), '')" in rendered
+    for rung in ("C1", "C3"):
+        assert rendered in sql.RUNG_SQL[rung]["rows"]
+    assert sql.identity_disposition_sql("l.") in sql.FUNNEL_SQL
 
 
 @pytest.mark.parametrize("general,pozemek", [(5, 2), (2, 5), (10, 10), (0.5, 0.1), (50, 2)])
@@ -216,20 +236,21 @@ def test_pair_column_order_matches_migration_492() -> None:
         assert commas + 1 == len(sql.PAIR_COLUMN_NAMES), rung
 
 
-# W16 — THE PAIRING STATEMENTS DID NOT MOVE. The wave re-cut FUNNEL_SQL (a readout, not
-# in the fingerprint) and refactored the obec rank floor out of four statements into
-# `location_data.location_steps.obec_rank_floor_sql`. A refactor that changed one byte of a
-# pairing statement would change what the generator PAIRS, which means
-# `dedup_candidates.GENERATOR_VERSION` would have to bump — minting a new `inputs_id` and
-# orphaning every `candidate_pairs` row ever written. These digests are the SHA-256 of each
-# statement exactly as it stood on origin/main at 004bced9, before the refactor. They are a
-# LEDGER, not a style rule: a deliberate change to the pairing rule updates them AND bumps
-# GENERATOR_VERSION in the same commit.
+# THE LEDGER of the pairing statements. A byte of any of these changes what the generator
+# PAIRS, which means `dedup_candidates.GENERATOR_VERSION` has to bump in the same commit —
+# minting a new `inputs_id` and orphaning every `candidate_pairs` row written under the old
+# meaning. Not a style rule: a deliberate change updates BOTH.
+#
+# W16 pinned them because that wave was a refactor and had to prove it moved nothing.
+# W17 MOVED them deliberately (c3 -> c4): the rule reads `listings.area_m2` — the one
+# headline area — instead of its own `estate_area`-for-pozemek CASE, and land no longer
+# carries a disposition into the rule. `BLOCKS_SQL` and `TOP_BUCKETS_SQL` did not move:
+# neither reads an attribute.
 _PAIRING_SHA256 = {
-    "_BASE_CTE": "e599297e002decd587de3ae81afb6b893078b846c8f02556f69d79ef01839739",
+    "_BASE_CTE": "0e48bdb6fc8a86259b30bb142e74ead869e6fdd966925186efd05f444091a218",
     "BLOCKS_SQL": "0bf089244aaa9b4edf59ae2d22ad2c0f2b9884c202b6469ee8eb093ada8349f7",
-    "BLOCK_ATTRS_SQL": "006b7d6ed9fc58dc811939354ea100ea9d853e67b2e32c5fbb03c5c5a607e9ea",
-    "BLOCK_IDS_SQL": "43664e2c29d428f8f2b7c9fbe85d00f256ddc340a20ea9e135651aa0012e6a20",
+    "BLOCK_ATTRS_SQL": "adcf02cad6472fa68c9e834502070fecffe8f5ee60e2c654ee47084e2b7a1401",
+    "BLOCK_IDS_SQL": "68c458998a802410c4c831268c5f9c849b2f554579696b1b216463285846652d",
     "TOP_BUCKETS_SQL": "3693dbb3e62f59a4033260c7758775337c3d7085b925a4f0c95cb6238ea8b499",
 }
 
@@ -251,10 +272,10 @@ def test_every_rung_statement_is_byte_for_byte_what_it_was() -> None:
 
     canon = json.dumps({k: v for k, v in sorted(sql.RUNG_SQL.items())}, sort_keys=True)
     assert hashlib.sha256(canon.encode("utf-8")).hexdigest() == \
-        "2ceb1d6c245843a46a751efeb3eedd2104fbb41d30c130980b42a414e58c63f1", (
+        "7e85adefe9aa4464e11e44448ccac22ce54d31b352e1ff2dab86b83c68795add", (
             "a rung statement changed; bump GENERATOR_VERSION in the same commit"
         )
-    assert dc.GENERATOR_VERSION == {"C": "c3"}
+    assert dc.GENERATOR_VERSION == {"C": "c4"}
 
 
 def test_the_rank_floor_is_rendered_from_the_one_module() -> None:

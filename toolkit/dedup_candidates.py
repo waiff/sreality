@@ -15,11 +15,18 @@ the ledger entry of 2026-09-10 (a), where the operator ruled path C. The vocabul
   first two location tests. A pair is evaluated on exactly ONE rung: C1 when both sides
   carry a disposition, else C3 — the operator's "if not available then fall back" rule.
   A disposition MISMATCH never falls back; only absence does.
-* "NOT AVAILABLE", per side and per field: disposition = NULL or blank after trimming;
-  area = NULL or zero (`usable_area`, `estate_area` for pozemek); town = no `obec_kod` on
-  the projection row (or no projection row at all); floor = NULL. A missing floor does not
-  drop the pair — the byt ±N floor rule simply cannot be checked, and the pair is kept with
-  `floor_checked = false` so the audit can count how often that happened.
+* The IDENTITY ATTRIBUTES are per category (`IDENTITY_ATTRS`): a `pozemek` is compared on
+  its AREA alone, everything else on disposition + area. A parcel has no rooms, so the
+  disposition a portal prints on one is noise (165 active land rows carry one), and reading
+  it would put every "2+kk" parcel in a town on C1 against each other.
+* "NOT AVAILABLE", per side and per field: disposition = NULL, blank after trimming, or not
+  an identity attribute of that category; area = `listings.area_m2` NULL or zero — THE ONE
+  headline area (`scraper/area.derive_headline_area`), which is the plot on land and the
+  interior measure otherwise, so the rule asks the same question of every category and never
+  spells a second area choice of its own; town = no `obec_kod` on the answer row (or no row
+  at all); floor = NULL. A missing floor does not drop the pair — the byt ±N floor rule
+  simply cannot be checked, and the pair is kept with `floor_checked = false` so the audit
+  can count how often that happened.
 * The category rules are the merge chokepoint's (toolkit/property_identity.py), not a
   second opinion: sale and rent never pair (`category_type` equal, NULL = unknown = not a
   conflict) and `category_main_compatible` allows only the dům ↔ komerční cross-type.
@@ -50,7 +57,43 @@ if TYPE_CHECKING:
 # column NAME, different table, written by a different resolver — the town a listing is
 # assigned, and whether it has one at all, can differ row by row. Pairs from before and
 # after must not share an `inputs_id`.
-GENERATOR_VERSION: dict[str, str] = {"C": "c3"}
+#
+# c3 -> c4 (W17): TWO meaning changes in one wave. The area is `listings.area_m2`, the one
+# headline area, instead of this module's own `estate_area`-for-pozemek CASE — which both
+# removes a second spelling of "which area is this listing's area" and changes the input on
+# real rows (52,183 land rows gained a headline area from the parser side of W17, and the
+# dwellings whose only measure is a floor/total one were invisible to the old choice). And
+# `IDENTITY_ATTRS` drops the disposition for land, so C1 no longer joins two parcels on a
+# room count. Existing pairs under c3 are pilot output and are orphaned deliberately.
+GENERATOR_VERSION: dict[str, str] = {"C": "c4"}
+
+
+# THE IDENTITY ATTRIBUTES, per category — what two listings of that category may be
+# compared on, spelled ONCE and rendered into the SQL of the generation lane by
+# `toolkit/dedup_candidates_sql.py` (it imports this module; the dependency runs one way,
+# which is why the vocabulary lives here beside the rule rather than in the SQL).
+# A category absent from the map takes `DEFAULT_IDENTITY_ATTRS`, and so does an unknown
+# (NULL) category — an unclassified row is not thereby stripped of its attributes.
+DEFAULT_IDENTITY_ATTRS: tuple[str, ...] = ("disposition", "area")
+IDENTITY_ATTRS: dict[str, tuple[str, ...]] = {
+    # A parcel has no rooms. The disposition some portals print on a land ad is a form
+    # artefact, not an attribute of the thing being sold.
+    "pozemek": ("area",),
+}
+
+
+def identity_attrs(category_main: str | None) -> tuple[str, ...]:
+    return IDENTITY_ATTRS.get(category_main or "", DEFAULT_IDENTITY_ATTRS)
+
+
+def compares_on(category_main: str | None, attribute: str) -> bool:
+    return attribute in identity_attrs(category_main)
+
+
+def categories_not_comparing(attribute: str) -> tuple[str, ...]:
+    """The categories that do NOT compare on `attribute`, sorted — what the SQL renders
+    into its CASE so the two faces of the vocabulary cannot drift."""
+    return tuple(sorted(c for c, attrs in IDENTITY_ATTRS.items() if attribute not in attrs))
 
 
 @dataclass(frozen=True)
@@ -99,7 +142,9 @@ PATHS: dict[str, PathDef] = {
                     "within the disposition rung's own, wide tolerance — a sanity check "
                     "on top of the disposition, not the match itself; when either states "
                     "no area the check is skipped and the pair is kept. For apartments "
-                    "the floors, when both are known, must be within the floor tolerance."
+                    "the floors, when both are known, must be within the floor tolerance. "
+                    "Land never reaches this rung: a parcel's identity is its area alone, "
+                    "so two parcels always meet on C3."
                 ),
             ),
             RungDef(
@@ -210,8 +255,7 @@ class ListingAttrs:
     category_main: str | None
     disposition: str | None
     floor: int | None
-    usable_area: float | None
-    estate_area: float | None
+    area_m2: float | None
     district: str | None = None
 
 
@@ -233,10 +277,21 @@ def normalized_disposition(value: str | None) -> str | None:
     return value.strip() if disposition_available(value) else None
 
 
-def area_of(category_main: str | None, usable_area: float | None, estate_area: float | None) -> float | None:
-    """The area the rule compares: plot area for land, floor area otherwise; None when
-    missing or zero (a zero area is a parser blank, not a measurement)."""
-    raw = estate_area if category_main == "pozemek" else usable_area
+def identity_disposition(category_main: str | None, value: str | None) -> str | None:
+    """The disposition the rule may use for this listing: the trimmed value, or None when
+    the category does not compare on a disposition at all (land). The SQL's base CTE
+    renders exactly this, so a land row reaches both faces of the rule with no disposition
+    and falls to C3 — where the area decides — rather than joining on a room count."""
+    if not compares_on(category_main, "disposition"):
+        return None
+    return normalized_disposition(value)
+
+
+def area_of(area_m2: float | None) -> float | None:
+    """The area the rule compares: `listings.area_m2`, the ONE headline area — already the
+    plot on land and the interior measure otherwise, by `scraper/area.derive_headline_area`.
+    None when missing or zero (a zero area is a parser blank, not a measurement)."""
+    raw = area_m2
     if raw is None:
         return None
     try:
@@ -298,8 +353,10 @@ def floor_rule(a: ListingAttrs, b: ListingAttrs, tolerance: int) -> tuple[bool, 
 
 
 def rung_for(a: ListingAttrs, b: ListingAttrs) -> str:
-    """C1 when both sides carry a disposition; C3 otherwise (the fallback on absence)."""
-    if disposition_available(a.disposition) and disposition_available(b.disposition):
+    """C1 when both sides carry a USABLE disposition (present, and an identity attribute of
+    that category); C3 otherwise (the fallback on absence)."""
+    if (identity_disposition(a.category_main, a.disposition) is not None
+            and identity_disposition(b.category_main, b.disposition) is not None):
         return "C1"
     return "C3"
 
@@ -323,11 +380,12 @@ def evaluate_pair(a: ListingAttrs, b: ListingAttrs, inputs: dict[str, Any]) -> P
         return None
     rung = rung_for(a, b)
     if rung == "C1":
-        da, db = normalized_disposition(a.disposition), normalized_disposition(b.disposition)
+        da = identity_disposition(a.category_main, a.disposition)
+        db = identity_disposition(b.category_main, b.disposition)
         if da != db:
             return None
-        area_a = area_of(a.category_main, a.usable_area, a.estate_area)
-        area_b = area_of(b.category_main, b.usable_area, b.estate_area)
+        area_a = area_of(a.area_m2)
+        area_b = area_of(b.area_m2)
         if area_a is None or area_b is None:
             # the area check cannot be made; the pair is kept, as with an unknown floor
             return PairVerdict(rung, da, None, None, None, checked)
@@ -336,8 +394,8 @@ def evaluate_pair(a: ListingAttrs, b: ListingAttrs, inputs: dict[str, Any]) -> P
             return None
         lo, hi = (area_a, area_b) if a.listing_id < b.listing_id else (area_b, area_a)
         return PairVerdict(rung, da, lo, hi, diff, checked)
-    area_a = area_of(a.category_main, a.usable_area, a.estate_area)
-    area_b = area_of(b.category_main, b.usable_area, b.estate_area)
+    area_a = area_of(a.area_m2)
+    area_b = area_of(b.area_m2)
     if area_a is None or area_b is None:
         return None
     diff = area_diff_pct(area_a, area_b)

@@ -430,10 +430,12 @@ def parse_detail(
 
     usable_text = params.get("plocha užitná") or params.get("užitná plocha")
     floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
+    estate_area = _parse_area(params.get("plocha pozemku"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_parse_area(usable_text),
         floor=_parse_area(floor_text),
+        plot=estate_area,
         fallback=_parse_area(title),
     )
     floor, total_floors = _parse_floors(params.get("podlaží"))
@@ -504,7 +506,7 @@ def parse_detail(
         terrace=_yes_no(params.get("terasa")),
         garage=_yes_no(params.get("garáž")),
         has_parking=_yes_no(params.get("parkovací stání")) or _yes_no(params.get("garáž")),
-        estate_area=_parse_area(params.get("plocha pozemku")),
+        estate_area=estate_area,
         garden_area=_parse_area(params.get("plocha zahrady")),
         description=description,
         raw=raw,
