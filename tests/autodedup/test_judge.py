@@ -238,15 +238,24 @@ def test_evidence_digest_states_the_engine_numbers_as_facts() -> None:
     }
     text = judge.evidence_digest(
         feats, ["K1", "K5"], ["IMG", "TXT"], "vysocany",
-        attr_conflicts=["building_type", "ownership"],
+        attr_conflicts=[
+            ("energy_rating", "B", "C"),
+            ("ownership", "osobní", "družstevní"),
+        ],
+        pins=(judge.Pin("obec", 40, 2500.0), judge.Pin("address_point", 100, 10.0)),
     )
     assert "block: vysocany" in text
     assert "K1, K5" in text
     assert "(2 of 5): IMG, TXT" in text
     assert "1.20%" in text
-    assert "contradicting fields: building_type, ownership" in text
+    assert (
+        "- contradicting attributes: energy_rating A=B vs B=C;"
+        " ownership A=osobní vs B=družstevní" in text
+    )
     assert judge_prompts.CATALOG_WARNING in text
     assert judge_prompts.DISTANCE_NOT_COMPARABLE in text
+    # The coarse side is NAMED: "at least one pin" sends the model hunting for a second one.
+    assert "(a municipality-grade pin on side A)" in text
     assert judge_prompts.FLOOR_CONVENTION_NOTE in text
     assert "- same broker: yes" in text
     assert "61 days" in text
@@ -313,10 +322,33 @@ def test_evidence_digest_names_the_denominator_of_the_family_ratios() -> None:
 
 def test_evidence_digest_prints_metres_when_the_pins_are_comparable() -> None:
     text = judge.evidence_digest(
-        {"dist_norm": (0.4, True), "same_exact_pin": (0.0, True)}, distance_m=38.0
+        {"dist_norm": (0.4, True), "same_exact_pin": (0.0, True)},
+        distance_m=412.0,
+        pins=(judge.Pin("address_point", 100, 10.0), judge.Pin("street", 60, 50.0)),
     )
-    assert "38 m apart" in text
+    assert "- distance: 412 m (pin radii 10 m + 50 m)" in text
     assert judge_prompts.DISTANCE_NOT_COMPARABLE not in text
+
+
+def test_evidence_digest_still_renders_without_the_optional_pin_facts() -> None:
+    """A re-judge from stored features alone has no listings to measure: the digest degrades to
+    the normalised number rather than inventing metres."""
+    text = judge.evidence_digest({"dist_norm": (0.4, True), "same_exact_pin": (0.0, True)})
+    assert "- distance:" not in text
+    assert "normalised by both pins' uncertainty radii: 0.40" in text
+    coarse = judge.evidence_digest({"dist_norm": (0.0, False)})
+    assert judge_prompts.DISTANCE_NOT_COMPARABLE in coarse
+    assert f"- {judge_prompts.DISTANCE_NOT_COMPARABLE}\n" in coarse + "\n"
+
+
+def test_evidence_digest_names_every_coarse_pin_when_both_sides_are_coarse() -> None:
+    text = judge.evidence_digest(
+        {"dist_norm": (0.0, False)},
+        pins=(judge.Pin("obec", 40, 2500.0), judge.Pin(None, None, 20000.0)),
+    )
+    assert (
+        "(a municipality-grade pin on side A, a pin of unknown grain on side B)" in text
+    )
 
 
 # --- image selection ------------------------------------------------------------------------
@@ -416,6 +448,32 @@ def test_select_images_sequence_first_still_puts_the_plan_last() -> None:
         n_per_side=3, strategy="sequence_first",
     )
     assert [img.image_id for img in left] == [3, 4, 1]
+
+
+def test_select_images_does_not_spend_four_slots_on_one_room() -> None:
+    """Four bathrooms and one of everything else: the fourth bathroom is a paid image that says
+    nothing the second one did not, so the kitchen and the living room take those slots."""
+    tags = [("bathroom", 0.9)] * 4 + [("kitchen", 0.9), ("living_room", 0.9)]
+    images_a = [make_image(i + 1, 1, seq=i, tags=[tags[i]]) for i in range(6)]
+    images_b = [make_image(11 + i, 2, seq=i, tags=[tags[i]]) for i in range(6)]
+    left, right = judge.select_images(
+        make_listing(id=1), images_a, make_listing(id=2), images_b, {}, n_per_side=4
+    )
+    for side in (left, right):
+        assert len(side) == 4
+        rooms = [judge.room_tag(img) for img in side]
+        assert rooms.count("bathroom") == 2
+        assert set(rooms) == {"bathroom", "kitchen", "living_room"}
+
+
+def test_select_images_keeps_filling_when_every_frame_is_the_same_room() -> None:
+    """The cap yields rather than shortens the side: a gallery of six bathrooms still sends four
+    frames, because half an evidence budget is worse than a repeated room."""
+    images = [make_image(i + 1, 1, seq=i, tags=[("bathroom", 0.9)]) for i in range(6)]
+    left, _ = judge.select_images(
+        make_listing(id=1), images, make_listing(id=2), [], {}, n_per_side=4
+    )
+    assert [img.image_id for img in left] == [1, 2, 3, 4]
 
 
 def test_select_images_prefers_an_unmatched_interior_frame_over_the_facade() -> None:

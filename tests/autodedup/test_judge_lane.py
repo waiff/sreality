@@ -762,3 +762,73 @@ def test_the_summary_says_up_front_whether_the_budget_covers_the_draw(
     assert summary["budget_covers_draw"] is False
     rich = lane(tmp_path / "out2", export_run="1", tier="text", n=8, max_usd=5, workers=1)
     assert rich["budget_covers_draw"] is True
+
+
+# --- the pair facts the feature vector cannot carry -----------------------------------------
+
+
+def _pair_job(feats: dict[str, Any]) -> Any:
+    return judge_lane.PairJob(
+        lo=1,
+        hi=2,
+        row={"lo": 1, "hi": 2, "block": "vysocany", "probes": ["K1"], "families": ["ATTR"],
+             "feats": {name: list(entry) for name, entry in feats.items()}},
+        stratum="mid",
+        votes=judge_lane.vote_plan("text"),
+    )
+
+
+def test_the_named_attribute_conflicts_are_exactly_what_the_feature_counted() -> None:
+    """The prompt may not argue with the engine: the names come from the SAME slots and the same
+    equality the `attr_contradictions` count runs on, so one contradiction is never two lines."""
+    from tests.autodedup.test_features import StubFingerprint, compute
+    from tests.autodedup.test_features import listing as ft_listing
+
+    shared = {"building_type": "cihlová", "condition": "velmi dobrý"}
+    la = ft_listing(1, attrs={**shared, "energy_rating": "B", "ownership": "osobní"})
+    lb = ft_listing(2, attrs={**shared, "energy_rating": "C", "ownership": "družstevní"})
+    conflicts = judge_lane.attribute_conflicts(la, lb)
+    feats = compute(StubFingerprint(1), StubFingerprint(2), la, lb)
+
+    assert [name for name, _, _ in conflicts] == ["energy_rating", "ownership"]
+    assert conflicts[0][1:] == ("B", "C")
+    assert float(len(conflicts)) == feats["attr_contradictions"][0]
+
+    _, evidence = judge_lane._inputs(judge, _pair_job(dict(feats)), la, lb)
+    assert (
+        "- contradicting attributes: energy_rating A=B vs B=C;"
+        " ownership A=osobní vs B=družstevní" in evidence
+    )
+
+
+def test_the_lane_measures_the_metres_only_when_both_pins_are_street_grain() -> None:
+    from autodedup import dataset as ds
+    from tests.autodedup.test_features import listing as ft_listing
+
+    fine = ds.Location(
+        lat=50.1075, lon=14.4880, granularity="address_point", granularity_rank=100,
+        uncertainty_radius_m=10.0,
+    )
+    near = ds.Location(
+        lat=50.1075, lon=14.4938, granularity="street", granularity_rank=60,
+        uncertainty_radius_m=50.0,
+    )
+    coarse = ds.Location(
+        lat=50.0900, lon=14.4200, granularity="obec", granularity_rank=40,
+    )
+    la = ft_listing(1, location=fine)
+    lb = ft_listing(2, location=near)
+    metres = judge_lane.pin_distance_m(la, lb)
+    assert metres is not None and 400.0 < metres < 425.0
+
+    _, evidence = judge_lane._inputs(judge, _pair_job({"dist_norm": (0.32, True)}), la, lb)
+    assert re.search(r"- distance: 41\d m \(pin radii 10 m \+ 50 m\)", evidence)
+
+    lc = ft_listing(3, location=coarse)
+    assert judge_lane.pin_distance_m(la, lc) is None
+    _, coarse_evidence = judge_lane._inputs(
+        judge, _pair_job({"dist_norm": (0.0, False)}), la, lc
+    )
+    assert "distance not comparable" in coarse_evidence
+    assert "(a municipality-grade pin on side B)" in coarse_evidence
+    assert "- distance:" not in coarse_evidence

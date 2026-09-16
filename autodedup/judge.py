@@ -30,6 +30,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from autodedup import judge_prompts as prompts
 from autodedup.dataset import CATALOG_POP_MIN, Image, Listing, cosine_norm
 from autodedup.export import NAME_TOKEN, scrub_description
+from autodedup.features import STREET_GRAIN_RANK
 from autodedup.fingerprint import dominant_family, family_scores
 
 JUDGE_VERSION: str = "j1"
@@ -55,6 +56,19 @@ PHASH_PAIR_MAX: int = 11
 CLIP_PAIR_MIN: float = 0.90
 RARE_TOKEN_CAP: float = 5.0
 PIN_POP_WARN_COUNT: float = 5.0
+# At most this many frames of one room per side: slot three onwards of the same bathroom is a
+# paid image that carries no evidence the first two did not (E10 / spec 3c).
+ROOM_TAG_CAP: int = 2
+
+# `location_granularity` in words, for the one line that has to explain why two coordinates
+# cannot be subtracted. Unlisted rungs (street and finer) never reach this map.
+GRAIN_LABELS: dict[str, str] = {
+    "country": "country",
+    "kraj": "region",
+    "okres": "district",
+    "obec": "municipality",
+    "cast_obce_or_quarter": "quarter",
+}
 MISSING_DISCRIMINATOR: str = "no discriminator named for a non-same verdict"
 
 # Families that describe the building rather than the unit: a matched frame from one of these
@@ -376,20 +390,77 @@ def _pct(value: float | None) -> str:
     return prompts.NOT_MEASURED if value is None else f"{value * 100.0:.2f}%"
 
 
+@dataclass(slots=True, frozen=True)
+class Pin:
+    """One side's positional confidence, so the LOCATION lines can state metres and both radii
+    when the pins are comparable and NAME the coarse side when they are not — `dist_norm` alone
+    cannot say whether 0.4 means 40 m between two doorways or 8 km between two town halls."""
+
+    grain: str | None = None
+    rank: int | None = None
+    radius_m: float | None = None
+
+
+def _conflict_text(entry: Any) -> str:
+    """`("energy_rating", "B", "C")` -> `energy_rating A=B vs B=C`; a bare field name is kept as
+    it is, so a caller that only has the names still renders."""
+    if isinstance(entry, (tuple, list)) and len(entry) >= 3:
+        field_name, value_a, value_b = entry[0], entry[1], entry[2]
+        return f"{field_name} A={_clean(value_a) or prompts.ABSENT_TOKEN}" \
+               f" vs B={_clean(value_b) or prompts.ABSENT_TOKEN}"
+    return str(entry)
+
+
+def _radii_note(pins: tuple[Pin, Pin] | None) -> str:
+    if pins is None or pins[0].radius_m is None or pins[1].radius_m is None:
+        return ""
+    return f" (pin radii {pins[0].radius_m:.0f} m + {pins[1].radius_m:.0f} m)"
+
+
+def _grain_label(grain: str | None) -> str:
+    """The resolver's enum token in words: `cast_obce_or_quarter` is a schema name, and a prompt
+    that spends a line on a schema name has spent it on nothing."""
+    clean = _clean(grain)
+    if clean is None or clean == "unknown":
+        return "a pin of unknown grain"
+    return f"a {GRAIN_LABELS.get(clean, clean)}-grade pin"
+
+
+def _coarse_note(pins: tuple[Pin, Pin] | None) -> str:
+    """Which side spoiled the comparison: 'at least one pin' sends the model looking for a second
+    coarse pin that may not exist."""
+    if pins is None:
+        return ""
+    coarse = [
+        (side, pin)
+        for side, pin in zip(("A", "B"), pins)
+        if pin.rank is None or pin.rank < STREET_GRAIN_RANK
+    ]
+    if not coarse:
+        return ""
+    if len(coarse) == 2 and _clean(pins[0].grain) == _clean(pins[1].grain):
+        return f" ({_grain_label(pins[0].grain)} on both sides)"
+    return " (" + ", ".join(
+        f"{_grain_label(pin.grain)} on side {side}" for side, pin in coarse
+    ) + ")"
+
+
 def evidence_digest(
     feats: Mapping[str, tuple[float, bool]],
     probes: Iterable[str] = (),
     families: Iterable[str] = (),
     block: str | None = None,
     *,
-    attr_conflicts: Sequence[str] = (),
+    attr_conflicts: Sequence[Any] = (),
     distance_m: float | None = None,
+    pins: tuple[Pin, Pin] | None = None,
 ) -> str:
     """The engine's own numbers, stated as facts so the model reasons over them (spec 3a).
 
-    `attr_conflicts` and `distance_m` are optional because the feature vector carries counts,
-    not names: the lane passes the contradicting FIELD NAMES and the raw metres when it has
-    them, and the digest degrades to the counts when it does not."""
+    `attr_conflicts`, `distance_m` and `pins` are optional because the feature vector carries
+    counts, not names: the lane passes the contradicting FIELD NAMES with their values, the raw
+    metres and both pins' grain when it has them, and the digest degrades to the counts when it
+    does not."""
     family_list = sorted(set(families))
     area_pct = _value(feats, "area_rel_diff")
     distance = _value(feats, "dist_norm")
@@ -411,7 +482,12 @@ def evidence_digest(
         f"- total floors agree: {_flag(feats, 'total_floors_equal')}",
         f"- attribute agreements: {_num(_value(feats, 'attr_agreements'), digits=1)}"
         f", contradictions: {_num(_value(feats, 'attr_contradictions'), digits=1)}"
-        + (f" (contradicting fields: {', '.join(attr_conflicts)})" if attr_conflicts else ""),
+        + (
+            "\n- contradicting attributes: "
+            + "; ".join(_conflict_text(entry) for entry in attr_conflicts)
+            if attr_conflicts
+            else ""
+        ),
         "",
         "PRICE",
         f"- smaller price / larger price: {_num(_value(feats, 'price_last_ratio'))}"
@@ -475,12 +551,13 @@ def evidence_digest(
         f", same postcode: {_flag(feats, 'same_psc')}",
     ])
     if distance is None:
-        lines.append(f"- {prompts.DISTANCE_NOT_COMPARABLE}")
+        lines.append(f"- {prompts.DISTANCE_NOT_COMPARABLE}{_coarse_note(pins)}")
     else:
-        metres = f" ({distance_m:.0f} m apart)" if distance_m is not None else ""
+        if distance_m is not None:
+            lines.append(f"- distance: {distance_m:.0f} m{_radii_note(pins)}")
         lines.append(
             f"- pin distance normalised by both pins' uncertainty radii: {_num(distance)}"
-            f"{metres}, same exact pin: {_flag(feats, 'same_exact_pin')}"
+            f", same exact pin: {_flag(feats, 'same_exact_pin')}"
         )
     pin_pop = _value(feats, "pin_pop")
     if pin_pop is not None:
@@ -604,6 +681,50 @@ def _fill_order(images: Sequence[Image], chosen: set[int]) -> list[Image]:
     return interior + other + building
 
 
+def room_tag(image: Image) -> str | None:
+    """The image's own top tag — the room, not the family: `bathroom`, not `interior`."""
+    if not image.tags:
+        return None
+    return max(image.tags, key=lambda entry: (entry[1] or 0.0))[0]
+
+
+def _diverse_fill(
+    candidates: Sequence[Image], picked: list[Image], chosen: set[int], n_per_side: int
+) -> None:
+    """Take from `candidates` IN ORDER, but skip a frame whose room tag already has
+    ROOM_TAG_CAP frames on this side while an untaken frame of another room exists (spec 3c):
+    a fourth bathroom costs a vision slot and says nothing the second one did not. The cap
+    yields rather than shortens the side — when every remaining frame is capped, order wins."""
+    counts: dict[str, int] = {}
+    for image in picked:
+        tag = room_tag(image)
+        if tag is not None:
+            counts[tag] = counts.get(tag, 0) + 1
+
+    queue: list[Image] = []
+    seen = set(chosen)
+    for image in candidates:
+        if image.image_id in seen:
+            continue
+        seen.add(image.image_id)
+        queue.append(image)
+
+    def capped(image: Image) -> bool:
+        tag = room_tag(image)
+        return tag is not None and counts.get(tag, 0) >= ROOM_TAG_CAP
+
+    while queue and len(picked) < n_per_side:
+        index = next(
+            (position for position, img in enumerate(queue) if not capped(img)), 0
+        )
+        image = queue.pop(index)
+        picked.append(image)
+        chosen.add(image.image_id)
+        tag = room_tag(image)
+        if tag is not None:
+            counts[tag] = counts.get(tag, 0) + 1
+
+
 def select_images(
     listing_a: Listing,
     images_a: Sequence[Image],
@@ -672,14 +793,10 @@ def select_images(
 
     for side, picked, chosen in ((left, picked_a, chosen_a), (right, picked_b, chosen_b)):
         cover = next((img for img in side if img.seq == 0), None)
-        if cover is not None and cover.image_id not in chosen and len(picked) < n_per_side:
-            picked.append(cover)
-            chosen.add(cover.image_id)
-        for image in _fill_order(side, chosen):
-            if len(picked) >= n_per_side:
-                break
-            picked.append(image)
-            chosen.add(image.image_id)
+        rest = _fill_order(side, chosen)
+        _diverse_fill(
+            ([cover] if cover is not None else []) + rest, picked, chosen, n_per_side
+        )
 
     return picked_a[:n_per_side], picked_b[:n_per_side]
 
@@ -697,7 +814,7 @@ def image_caption(image: Image, side: str, index: int) -> str:
     are worth, because an unlabelled facade is exactly how a building becomes a 'unit match'."""
     family = dominant_family(image)
     label = _FAMILY_LABELS.get(family, prompts.UNCLASSIFIED_LABEL)
-    tag = max(image.tags, key=lambda entry: (entry[1] or 0.0))[0] if image.tags else None
+    tag = room_tag(image)
     position = image.seq if image.seq is not None else "?"
     return (
         f"{side}-{index} {label}"

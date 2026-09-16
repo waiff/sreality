@@ -42,6 +42,12 @@ from typing import Any, Callable
 
 from autodedup import harness
 from autodedup.dataset import Image, Listing, load
+from autodedup.features import (
+    STREET_GRAIN_RANK,
+    attribute_conflicts,
+    haversine_m,
+    uncertainty_radius_m,
+)
 from autodedup.judge_sql import (
     JUDGEMENT_CACHED_SQL,
     JUDGEMENT_COST_SQL,
@@ -768,6 +774,32 @@ def _estimate(judge: Any, dataset: Any, jobs: list[PairJob],
     }
 
 
+def pin_of(judge: Any, listing: Listing) -> Any:
+    location = listing.location
+    return judge.Pin(
+        grain=location.granularity,
+        rank=location.granularity_rank,
+        radius_m=uncertainty_radius_m(
+            location.granularity_rank, location.uncertainty_radius_m
+        ),
+    )
+
+
+def pin_distance_m(la: Listing, lb: Listing) -> float | None:
+    """Metres between the two pins, but ONLY under E16's precision gate that `dist_norm` itself
+    uses: below street grain the coordinate is an administrative centroid, so the number would
+    be the distance between two town halls presented to the model as the distance between two
+    flats."""
+    a, b = la.location, lb.location
+    if not (a.has_point() and b.has_point()):
+        return None
+    if a.granularity_rank is None or b.granularity_rank is None:
+        return None
+    if a.granularity_rank < STREET_GRAIN_RANK or b.granularity_rank < STREET_GRAIN_RANK:
+        return None
+    return haversine_m(float(a.lat), float(a.lon), float(b.lat), float(b.lon))
+
+
 def _inputs(judge: Any, job: PairJob, la: Listing, lb: Listing) -> tuple[Any, str]:
     digests = (judge.listing_digest(scrubbed(la)), judge.listing_digest(scrubbed(lb)))
     evidence = judge.evidence_digest(
@@ -775,6 +807,9 @@ def _inputs(judge: Any, job: PairJob, la: Listing, lb: Listing) -> tuple[Any, st
         job.row.get("probes") or [],
         job.row.get("families") or [],
         job.row.get("block"),
+        attr_conflicts=attribute_conflicts(la, lb),
+        distance_m=pin_distance_m(la, lb),
+        pins=(pin_of(judge, la), pin_of(judge, lb)),
     )
     return digests, evidence
 
