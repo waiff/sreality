@@ -239,3 +239,82 @@ def disposition_norm(s: str | None) -> str | None:
 def rare_tokens(toks: Iterable[str], df: dict[str, int], max_df: int) -> set[str]:
     """Tokens whose in-block document frequency is at most `max_df` (E20's discriminators)."""
     return {token for token in set(toks) if df.get(token, 1) <= max_df}
+
+
+# --- Value-level portal vocabulary (W4e) --------------------------------------------------
+# One fact, nine spellings: `attr_token` folds a stored enum label to one shape and
+# `canonical_attr` folds the SYNONYMS onto one token, so `features.pair_features` counts an
+# agreement where the portals only disagreed about wording. Measured on the W4 cohort (export
+# 35096363646, 5,402 listings, 2026-09-16) against the gold > vision > text labels — 639 judged
+# positive pairs, 746 negative — as the contradiction rate on true duplicates vs on non-duplicates:
+#
+#   slot           raw POS / NEG      canonical POS / NEG   what the alias does
+#   condition      16.2% / 25.7%      6.1% / 19.3%          velmi_dobry == dobry (47 of the 75
+#                                                            positive contradictions were that one
+#                                                            adjacent-grade pair), realitymix's
+#                                                            `ve_vystavbe_(hruba_stavba)`
+#   building_type  10.6% / 33.6%      5.6% / 30.4%          ceskereality's `jina` (123 rows) drops
+#                                                            out, bazos `zdeny` == cihla
+#   furnished      11.9% / 25.0%      3.6% / 17.0%          ano == castecne (the portals disagree
+#                                                            about "partly" on 16 true duplicates)
+#   ownership       0.3% /  9.7%      unchanged             osobni/druzstevni/statni is already one
+#                                                            vocabulary on all nine portals
+#
+# Each alias RAISES the discrimination ratio (POS contradiction rate against NEG): condition
+# 1.59 -> 3.16, building_type 3.17 -> 5.43, furnished 2.10 -> 4.72. A value that is not listed
+# passes through as itself, so a portal's new vocabulary still compares.
+#
+# The map is keyed on EXACT tokens and is pinned to that census: it covers the 13 condition, 10
+# building_type and 3 furnished spellings the cohort contains and nothing else, so a portal that
+# relabels (`hruba_stavba` for `ve_vystavbe_hruba_stavba`, `zdena` for `zdeny`) silently falls
+# through to a contradiction rather than to an error. `test_normalize` pins the observed
+# vocabulary against this map; re-run the census with any new portal. Two entries are DOMAIN
+# JUDGEMENTS on n=1, not measurements, and are the first things to revisit at the next refit —
+# they are marked below; the measured building_type gain is almost entirely `jina`.
+_ATTR_TOKEN = re.compile(r"[^0-9a-z]+")
+
+# "other"/"unspecified": a portal that says `jiná` knows no more than a portal that says nothing,
+# and E12 is that absence is never a mismatch — so these tokens read as ABSENT, not as a value.
+UNKNOWN_ATTR_TOKENS: frozenset[str] = frozenset({
+    "jina", "jine", "jiny", "ostatni", "neuvedeno", "nezadano", "nespecifikovano",
+    "neznamy", "nezname", "unknown", "other",
+})
+
+ATTR_ALIASES: dict[str, dict[str, str | None]] = {
+    "condition": {
+        "velmi_dobry": "dobry",
+        "udrzovany": "dobry",  # judgement, n=1 (one idnes row)
+        "ve_vystavbe_hruba_stavba": "ve_vystavbe",
+        "urceny_k_demolici": "k_demolici",
+    },
+    "building_type": {
+        "zdeny": "cihla",  # judgement, n=1 (one bazos row)
+        # judgement, n=1: bazos puts a CONDITION in the building-type slot
+        "novostavba": None,
+    },
+    "furnished": {
+        "ano": "vybaveno",
+        "castecne": "vybaveno",
+        "ne": "nevybaveno",
+    },
+}
+
+
+def attr_token(value: object) -> str:
+    """One spelling per stored value: `Ve výstavbě (hrubá stavba)` -> `ve_vystavbe_hruba_stavba`."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return _ATTR_TOKEN.sub("_", fold(str(value))).strip("_")
+
+
+def canonical_attr(key: str, value: object) -> str | None:
+    """The canonical token of one attribute value; None means ABSENT (never a mismatch)."""
+    token = attr_token(value)
+    if not token or token in UNKNOWN_ATTR_TOKENS:
+        return None
+    aliases = ATTR_ALIASES.get(key)
+    if aliases is not None and token in aliases:
+        return aliases[token]
+    return token

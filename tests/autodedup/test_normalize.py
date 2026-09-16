@@ -7,6 +7,8 @@ import pytest
 from autodedup.normalize import (
     MASK64,
     _simhash64_wide,
+    attr_token,
+    canonical_attr,
     disposition_norm,
     normalize_text,
     numeric_facts,
@@ -157,3 +159,84 @@ def test_rare_tokens_are_the_low_document_frequency_ones() -> None:
 
 def test_rare_tokens_treat_an_unseen_token_as_rare() -> None:
     assert rare_tokens(["novotoken"], {}, 2) == {"novotoken"}
+
+
+def test_attr_token_is_one_spelling_per_stored_value() -> None:
+    assert attr_token("Ve výstavbě (hrubá stavba)") == "ve_vystavbe_hruba_stavba"
+    assert attr_token("  Velmi Dobrý ") == "velmi_dobry"
+    assert attr_token(True) == "true" and attr_token(False) == "false"
+    assert attr_token(None) == "" and attr_token(4) == "4"
+
+
+def test_canonical_attr_folds_portal_synonyms_onto_one_token() -> None:
+    """Measured on the W4 cohort (2026-09-16): each alias is a spelling the portals use for ONE
+    fact, and each lifts the contradiction ratio between judged duplicates and non-duplicates."""
+    assert canonical_attr("condition", "ve_vystavbe_(hruba_stavba)") == "ve_vystavbe"
+    assert canonical_attr("condition", "urceny_k_demolici") == "k_demolici"
+    assert canonical_attr("condition", "velmi_dobry") == canonical_attr("condition", "dobry")
+    assert canonical_attr("building_type", "zdeny") == "cihla"
+    assert canonical_attr("furnished", "ano") == canonical_attr("furnished", "castecne")
+    assert canonical_attr("furnished", "ne") == "nevybaveno"
+
+
+def test_canonical_attr_reads_an_unknown_value_as_absence() -> None:
+    """`jiná` / `neuvedeno` is what a portal says when it does not know; E12 says that is
+    absence, never a mismatch. bazos also writes a CONDITION into the building-type slot."""
+    assert canonical_attr("building_type", "jina") is None
+    assert canonical_attr("building_type", "novostavba") is None
+    assert canonical_attr("condition", "neuvedeno") is None
+    assert canonical_attr("ownership", None) is None
+    assert canonical_attr("condition", "") is None
+
+
+def test_canonical_attr_passes_an_unlisted_value_through() -> None:
+    """A closed alias map, not a closed vocabulary: a portal's new value still compares."""
+    assert canonical_attr("building_type", "Panel") == "panel"
+    assert canonical_attr("ownership", "osobní") == "osobni"
+    assert canonical_attr("condition", "novy_zvlastni_stav") == "novy_zvlastni_stav"
+    assert canonical_attr("energy_rating", "B") == "b"
+
+
+# The full per-slot vocabulary of the W4 cohort (export 35096363646, 5,402 listings, 2026-09-16),
+# every distinct `attr_token` with its row count. `ATTR_ALIASES` is keyed on EXACT tokens, so a
+# portal that relabels falls through to a silent contradiction rather than to an error — this
+# fixture is the tripwire: re-run the census when a portal is added and update both together.
+COHORT_ATTR_VOCABULARY: dict[str, dict[str, int]] = {
+    "condition": {
+        "velmi_dobry": 1938, "novostavba": 1007, "dobry": 733, "po_rekonstrukci": 437,
+        "pred_rekonstrukci": 98, "ve_vystavbe": 85, "projekt": 20, "spatny": 7,
+        "v_rekonstrukci": 6, "ve_vystavbe_hruba_stavba": 6, "k_demolici": 3,
+        "urceny_k_demolici": 2, "udrzovany": 1,
+    },
+    "building_type": {
+        "cihla": 2203, "smisena": 754, "skelet": 583, "panel": 515, "jina": 123, "drevo": 61,
+        "montovana": 23, "kamen": 13, "zdeny": 1, "novostavba": 1,
+    },
+    "furnished": {"castecne": 813, "ano": 702, "ne": 692},
+    "ownership": {"osobni": 2673, "druzstevni": 261, "statni": 14},
+}
+
+# What each slot means AFTER canonicalisation: the closed set the comparison is allowed to see.
+CANONICAL_ATTR_VOCABULARY: dict[str, set[str]] = {
+    "condition": {
+        "novostavba", "dobry", "po_rekonstrukci", "pred_rekonstrukci",
+        "ve_vystavbe", "projekt", "spatny", "v_rekonstrukci", "k_demolici",
+    },
+    "building_type": {"cihla", "smisena", "skelet", "panel", "drevo", "montovana", "kamen"},
+    "furnished": {"vybaveno", "nevybaveno"},
+    "ownership": {"osobni", "druzstevni", "statni"},
+}
+
+
+def test_the_alias_map_covers_the_whole_measured_vocabulary() -> None:
+    """Every spelling the cohort contains folds onto a KNOWN canonical token or onto absence.
+
+    The map is pinned to one census; without this test a portal's relabel would be invisible."""
+    for slot, values in COHORT_ATTR_VOCABULARY.items():
+        canonical = {canonical_attr(slot, value) for value in values}
+        assert canonical - {None} == CANONICAL_ATTR_VOCABULARY[slot], slot
+    # `velmi_dobry` is 1,938 of the cohort's 4,343 condition values and it is NOT a grade any
+    # more: the alias retires it onto `dobry`. That is a domain judgement, the largest one in the
+    # map, and this assertion is where it is written down.
+    assert canonical_attr("condition", "velmi_dobry") == "dobry"
+    assert "velmi_dobry" not in CANONICAL_ATTR_VOCABULARY["condition"]

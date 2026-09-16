@@ -11,12 +11,14 @@ CLIP anchors) are precomputed ONCE in `FeatureContext`, never per pair.
 from __future__ import annotations
 
 import math
+import re
 from array import array
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Dataset, Image, Listing, cosine_norm, hamming64
+from autodedup.normalize import canonical_attr
 
 if TYPE_CHECKING:  # the sibling modules are imported for their types only, never at runtime
     from autodedup.fingerprint import Fingerprint
@@ -41,9 +43,9 @@ RADIUS_BY_RANK: tuple[tuple[int, float], ...] = (
 DIST_FLOOR_M: float = 25.0
 
 # `FEATURE_ORDER` is a closed vocabulary; this is its version, bumped whenever the tuple changes
-# shape. v2 appends `unit_number_shared` (E45). The lane's `score_lane.FEATURE_VERSION` stamp on
-# `autodedup.pairs` must follow this number.
-FEATURE_VERSION: int = 2
+# shape. v2 appends `unit_number_shared` (E45); v3 appends the two plot-area slots (W4e). The
+# lane's `score_lane.FEATURE_VERSION` stamp on `autodedup.pairs` must follow this number.
+FEATURE_VERSION: int = 3
 
 # Comparable attribute slots: `attrs` keys (autodedup/export_sql.ATTR_COLUMNS) that carry a
 # categorical value, plus the listing-level subtype. Numeric side-areas and timestamps are not
@@ -75,6 +77,93 @@ CONFLATED_WEIGHT: float = 0.5
 
 AREA_EXACT_REL: float = 0.01
 AREA_EXACT_ABS: float = 0.5
+
+# The PLOT (parcel) area, measured on the W4 cohort (export 35096363646, 2026-09-16):
+#   * `estate_area` IS the plot everywhere it appears — on `dum` rows its median is 3.56x the
+#     headline `area_m2` (295 rows carrying both), i.e. the headline is the BUILDING;
+#   * on `pozemek` rows the headline area is the plot: `estate_area == area_m2` on 177 of 177
+#     rows that carry both, so the headline is the fallback carrier for land and only for land;
+#   * `garden_area` is NOT a plot fallback — on the 89 rows carrying both it is a median 0.84 of
+#     `estate_area` and matches it exactly on only 8% (within 2% on 11%), so reading it as the
+#     parcel would manufacture contradictions on true duplicates.
+LAND_CATEGORY: str = "pozemek"
+PLOT_EXACT_REL: float = 0.02
+
+# Five portals parse an area with `(\d+(?:[.,]\d+)?)\s*m2`, which reads "5 870 m²" as 870 — a
+# thousands-separator truncation that is INVISIBLE in the stored number:
+# `scraper/{bazos,ceskereality,realitymix,remax,maxima}_parser.py` all carry the same regex
+# (bazos_parser.py:76, ceskereality_parser.py:89, realitymix_parser.py:91, remax_parser.py:164,
+# maxima_parser.py:89). Census of the carriers `plot_area` below actually SELECTS (n above the
+# PLOT_MIN_M2 floor / share >= 1000 / how many the per-value test below flags):
+#   idnes        estate    195 / 43% /  0      clean
+#   ceskereality estate    173 /  0% / 19      <- truncating, gated per SOURCE
+#   sreality     estate    168 / 45% /  0      clean
+#   realitymix   estate     50 / 28% /  0      clean (a different code path)
+#   bazos        headline   40 / 32% /  6      <- truncating, gated per VALUE
+#   realitymix   headline   20 /  0% /  6      <- truncating, gated per SOURCE
+#   bezrealitky  estate     18 / 55% /  0      clean
+#   mmreality    headline    9 / 44% /  0      clean
+#   mmreality    estate      4 / 50% /  0      too thin to census, left trusted
+#   maxima       estate      2 /  0% /  2      too thin to census, left trusted
+#   remax        headline    1 /  0% /  0      too thin to census, left trusted
+# TWO guards, because the portals fail in two different shapes.
+#
+# Per SOURCE: ceskereality's 173 estate values never reach 1,000 where sreality and idnes reach
+# it on 43-45%, so its truncation is SYSTEMATIC and no threshold can separate a real 870 from a
+# cut 5,870 — the carrier is read as ABSENT wholesale. Same for realitymix's land headline (0 of
+# 20). `("ceskereality", "headline")` is dead in this cohort — all 29 ceskereality land rows also
+# carry an `estate_area`, so the fallback is never reached — and is kept as a forward guard only:
+# the same parser cuts that column too (0 of its 709 headline areas reaches 1,000).
+PLOT_TRUNCATING_SOURCES: frozenset[tuple[str, str]] = frozenset({
+    ("ceskereality", "estate"),
+    ("ceskereality", "headline"),
+    ("realitymix", "headline"),
+})
+# Per VALUE: bazos is the largest headline carrier (40 of the 70 rows the code reads through it)
+# and carries the same regex, but it DOES reach 1,000 on 13 of 40 — its truncation depends on
+# whether the seller typed "1 500" or "1500", so the population has no signature and only the
+# individual advert can convict the number. The test: the stored plot is a three-digit tail of a
+# space-grouped number the listing's OWN description writes ("11 197 m²" stored as 197). It flags
+# 6 of bazos' 40 and 0 of the 431 values on the four clean carriers, so it costs nothing to run
+# everywhere — and it survives the re-census the source table owes once the parsers are fixed.
+_GROUPED_THOUSANDS = re.compile(r"\d{1,3}(?:[ \u00a0\u202f]\d{3})+")
+# The same artefact between two carriers neither guard convicts: a plot that is the last THREE
+# digits of the other side's plot is a cut number, not a different parcel (870 of 5,870; 400 of
+# 3,400). Exactly three: a thousands cut leaves the whole final group, where a shorter residue
+# would match a coincidental digit tail (a 1-digit low matches ~1 high in 10). Such a pair is read
+# as ABSENT rather than as a contradiction.
+PLOT_TRUNCATION_GROUP_DIGITS: int = 3
+# A parcel below this is a data-entry artefact, not land: 36 rows in the cohort carry
+# `estate_area = 1`. Such a value must never reach the comparison — via the truncation guard above
+# it would read two real disagreements as absence.
+PLOT_MIN_M2: float = 10.0
+
+# False-by-omission (same cohort, 2026-09-16). Per (source, boolean slot): the portals that emit
+# `true` or NOTHING and never `false`, over at least 30 observed trues —
+#   bezrealitky cellar 110 / terrace 39 / has_balcony 152, ceskereality has_balcony 180,
+#   idnes cellar 336 / terrace 108 / has_lift 374 / has_balcony 345 / has_parking 355,
+#   mmreality cellar 36 / has_parking 59, realitymix has_balcony 36, all with ZERO falses.
+# For such a portal "no cellar" is not a fact it publishes, so a `false` in that slot is a parser
+# default, and a default may not contradict the other side's `true`. This is a FORWARD guard: no
+# row in the measured cohort trips it (that is what "never emits false" means), and it fires the
+# day a parser starts writing its default into the column.
+# The broader reading — suppress every cross-portal `false` — is REFUTED by the same labels: on
+# judged pairs a sreality `cellar=false` is the discriminator on 34 non-duplicates against 2 true
+# duplicates, so a portal that DOES publish the negative must keep contradicting.
+FALSE_BY_OMISSION: frozenset[tuple[str, str]] = frozenset({
+    ("bezrealitky", "cellar"),
+    ("bezrealitky", "terrace"),
+    ("bezrealitky", "has_balcony"),
+    ("ceskereality", "has_balcony"),
+    ("idnes", "cellar"),
+    ("idnes", "terrace"),
+    ("idnes", "has_lift"),
+    ("idnes", "has_balcony"),
+    ("idnes", "has_parking"),
+    ("mmreality", "cellar"),
+    ("mmreality", "has_parking"),
+    ("realitymix", "has_balcony"),
+})
 
 PRICE_EVENT_MIN_REL: float = 0.001
 PRICE_EVENT_DAY_TOL: float = 3.0
@@ -180,6 +269,10 @@ FEATURE_ORDER: tuple[str, ...] = (
     # v2 append-only tail (E45): the unit-number fact the "same building, different unit" class
     # is missing. FEATURE_ORDER grows at the END only, so a stored vector stays readable.
     "unit_number_shared",
+    # v3 append-only tail (W4e): the PARCEL area, which no ATTR slot compared — `estate_area` and
+    # `garden_area` are numeric, so they sit outside ATTR_KEYS and nothing looked at them.
+    "plot_area_rel_diff",
+    "plot_area_exact",
 )
 
 FAMILY_OF: dict[str, str] = {
@@ -228,6 +321,8 @@ FAMILY_OF: dict[str, str] = {
     "both_active": "TIME",
     "same_source": "TIME",
     "unit_number_shared": "TXT",
+    "plot_area_rel_diff": "ATTR",
+    "plot_area_exact": "ATTR",
 }
 
 # E11 counts corroboration over five families only; PRICE and TIME are scored, never counted as
@@ -244,6 +339,19 @@ EVIDENCE_RULES: dict[str, tuple[tuple[Condition, ...], ...]] = {
         (("area_rel_diff", 0.0, ATTR_EXACT_AREA_REL),),
         (("area_rel_diff", 0.0, ATTR_UNIT_AREA_REL), ("dispo_equal", 1.0, 1.0)),
         (("attr_agreements_rare", ATTR_RARE_EVIDENCE, math.inf),),
+        # A parcel area is a CADASTRAL fact, not a describable one — but the labelled evidence for
+        # that is THIN and does not yet separate: 40 of 42 judged duplicates that carry two trusted
+        # plots agree within 2%, against 3 of the 9 — the whole labelled negative set — that carry
+        # them. Two tightenings were measured and REFUTED: the threshold buys nothing (all three
+        # false fires are EXACT equalities, and 0.5% scores the same 40/3 as 2%), and rarity buys
+        # less than nothing (the false fires sit at corpus df 8-11, but so do 8 of the true
+        # duplicates — a df gate that drops them drops 19 positives). The failure mode is a modal
+        # parcel: 740 m² is the median `dum` estate on both sreality and idnes and appears 11 times
+        # in the cohort. The rule is kept because the mechanism is sound and it decides NOTHING
+        # today (measured: removing it moves 0 pairs between zones, 0 reasons, 0 certificates — it
+        # only shows in the recorded family bitmask of 27 pairs); it is owed a labelled draw of
+        # plot-carrying negatives before the refit can lean on it.
+        (("plot_area_exact", 1.0, 1.0),),
     ),
     # E20: only the unit-specific half of the text corroborates. Template similarity — jaccard,
     # tf-idf, containment — stays a scored feature; a broker's reused boilerplate is exactly what
@@ -296,6 +404,56 @@ def rel_diff(a: float, b: float) -> float:
     """Symmetric relative difference; 0.0 when both sides are zero."""
     scale = max(abs(a), abs(b))
     return 0.0 if scale == 0.0 else abs(a - b) / scale
+
+
+def plot_area(listing: Listing) -> float | None:
+    """The parcel area of one side, or None when the portal's number cannot be trusted.
+
+    `estate_area` is the plot; on land the headline area is (measured identical on 177/177 rows
+    that carry both). `garden_area` is a different fact and is never read here."""
+    attrs = listing.attrs or {}
+    value = attrs.get("estate_area")
+    carrier = "estate"
+    if value is None and listing.category_main == LAND_CATEGORY:
+        value = listing.area_m2
+        carrier = "headline"
+    if value is None or (listing.source, carrier) in PLOT_TRUNCATING_SOURCES:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < PLOT_MIN_M2 or plot_truncated_in_text(number, listing.description):
+        return None
+    return number
+
+
+def plot_truncated_in_text(value: float, text: str | None) -> bool:
+    """Is this stored plot a three-digit tail of a space-grouped number the advert itself writes?
+
+    That is a thousands cut ("11 197 m²" stored as 197), not a parcel. Measured: 0 false flags
+    over the 431 values on the four carriers whose populations look clean."""
+    if not text or value <= 0.0 or value != int(value):
+        return False
+    digits = str(int(value))
+    if len(digits) != PLOT_TRUNCATION_GROUP_DIGITS:
+        return False
+    for match in _GROUPED_THOUSANDS.finditer(text):
+        joined = re.sub(r"[\s\u00a0\u202f]", "", match.group(0))
+        if len(joined) > len(digits) and joined.endswith(digits):
+            return True
+    return False
+
+
+def thousands_truncation_suspect(a: float, b: float) -> bool:
+    """Is the smaller plot the last THREE digits of the larger one — a cut number, not a parcel?"""
+    low, high = sorted((a, b))
+    if low <= 0.0 or low == high or low != int(low) or high != int(high):
+        return False
+    low_text, high_text = str(int(low)), str(int(high))
+    if len(low_text) != PLOT_TRUNCATION_GROUP_DIGITS or len(high_text) <= len(low_text):
+        return False
+    return high_text.endswith(low_text)
 
 
 def haversine_m(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
@@ -382,6 +540,14 @@ def vocabulary_attr_keys(settings: "Settings | None") -> frozenset[str]:
     return frozenset(settings.vocabulary_attr_keys)
 
 
+def _emitted(listing: Listing, key: str, value: object) -> bool:
+    """Is this a value the portal PUBLISHES? A `false` from a portal that only ever publishes the
+    positive is a parser default (`FALSE_BY_OMISSION`), and a default is absence, not a fact."""
+    if value is None:
+        return False
+    return not (value is False and (listing.source, key) in FALSE_BY_OMISSION)
+
+
 def _attr_raw(listing: Listing, skip: frozenset[str] = frozenset()) -> dict[str, object]:
     out: dict[str, object] = {}
     attrs = listing.attrs or {}
@@ -389,20 +555,25 @@ def _attr_raw(listing: Listing, skip: frozenset[str] = frozenset()) -> dict[str,
         if key in skip:
             continue
         value = listing.subtype if key == "subtype" else attrs.get(key)
-        if value is None:
-            continue
-        out[key] = value
+        if _emitted(listing, key, value):
+            out[key] = value
     for key in CONFLATED_ATTR_KEYS:
         if key in skip:
             continue
         value = attrs.get(key)
-        if value is not None:
+        if _emitted(listing, key, value):
             out[key] = value
     return out
 
 
 def _attr_map(listing: Listing, skip: frozenset[str] = frozenset()) -> dict[str, str]:
-    return {key: str(value).strip().lower() for key, value in _attr_raw(listing, skip).items()}
+    """The slots as the comparison sees them: one canonical token per value, `None` dropped."""
+    out: dict[str, str] = {}
+    for key, value in _attr_raw(listing, skip).items():
+        token = canonical_attr(key, value)
+        if token is not None:
+            out[key] = token
+    return out
 
 
 def attribute_conflicts(
@@ -779,6 +950,15 @@ def pair_features(
     else:
         feats["area_rel_diff"] = ABSENT
         feats["area_exact"] = ABSENT
+    plot_a = plot_area(la)
+    plot_b = plot_area(lb)
+    if plot_a is not None and plot_b is not None and not thousands_truncation_suspect(plot_a, plot_b):
+        difference = rel_diff(plot_a, plot_b)
+        feats["plot_area_rel_diff"] = (difference, True)
+        feats["plot_area_exact"] = (1.0 if difference <= PLOT_EXACT_REL else 0.0, True)
+    else:
+        feats["plot_area_rel_diff"] = ABSENT
+        feats["plot_area_exact"] = ABSENT
     feats["dispo_equal"] = _eq(fa.disposition, fb.disposition)
     feats["floor_diff"] = (
         (float(abs(fa.floor - fb.floor)), True)
