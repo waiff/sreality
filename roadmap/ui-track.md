@@ -31,6 +31,13 @@ toolkit work.
   and iKatastr lat,lon — the swap is pinned by tests); `components/listing-detail/ExternalMapLinks`
   renders the row. Same coordinate gate as the map itself: no coordinate, no row. Precision is
   inherited, never implied — a street-level pin opens the wrong building on all three, by design.
+- **+ Reas.cz (2026-09-16):** a fourth chip opens reas.cz's sold-properties search ("prodané
+  nemovitosti" — actual sale prices) for a ~2 km box around the point: `?bounds=swLat,swLng,neLat,neLng`,
+  LAT FIRST — reas also parses lng-first without complaint and then opens an empty map elsewhere
+  (its own payload stores longitude in the field it calls `southWestLatitude`). The box, not reas's
+  `/<obec>-<RÚIAN obec kód>` path form, because `listings_public` carries no RÚIAN codes and a box is
+  the neighbourhood across municipal borders; ±1 km because ±500 m showed nothing around a small-town
+  listing. The row is a 2×2 grid below `sm` (four equal chips truncated "Mapy.cz" at 360px).
 
 ### Portal links read the stored URL — reconstruction deleted (2026-09-11, W2 of the URL contract)
 - Operator-reported: the listing page's Sreality chip 404'd (`rodinny-dum` vs sreality's `rodinny`).
