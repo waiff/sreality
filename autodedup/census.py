@@ -97,16 +97,10 @@ WITH base AS (
         -- substr makes the length test slice-friendly: 200 characters is all it needs, so
         -- Postgres fetches the first TOAST chunk instead of decompressing every description
         -- on a pass that otherwise touches only fixed-width columns.
-        (length(coalesce(substr(l.description, 1, 200), '')) >= 200)
-                                                      AS has_desc200,
         (l.source_url IS NOT NULL)                    AS has_source_url,
         -- Zero area is not an area anywhere else in this file (`with_area` filters
         -- `area_m2 > 0`), so a zero-area row with nothing else on it is just as unreachable
         -- as a NULL-area one and counts against the ceiling the same way.
-        (coalesce(l.area_m2, 0) <= 0 AND l.disposition IS NULL
-         AND l.broker_identity_id IS NULL
-         AND length(coalesce(substr(l.description, 1, 200), '')) < 200)
-                                                      AS no_signal,
         (ll.geom IS NOT NULL OR ll.country_status = 'foreign') AS served,
         gr.is_address_grain                           AS is_address_grain,
         gr.rank >= (SELECT r.rank FROM location_granularity_rank r
@@ -161,7 +155,6 @@ agg AS (
         count(*) FILTER (WHERE broker_identity_id IS NOT NULL)        AS with_broker,
         count(*) FILTER (WHERE at_street_grain)                       AS with_street,
         count(*) FILTER (WHERE is_address_grain)                      AS with_point,
-        count(*) FILTER (WHERE has_desc200)                           AS with_desc200,
         count(*) FILTER (WHERE has_source_url)                        AS with_source_url,
         -- THE RECALL CEILING: no area, no disposition, no broker and no usable text -
         -- reachable by no probe except photos, so it bounds recall before any threshold.
@@ -205,16 +198,10 @@ WITH base AS (
         -- substr makes the length test slice-friendly: 200 characters is all it needs, so
         -- Postgres fetches the first TOAST chunk instead of decompressing every description
         -- on a pass that otherwise touches only fixed-width columns.
-        (length(coalesce(substr(l.description, 1, 200), '')) >= 200)
-                                                      AS has_desc200,
         (l.source_url IS NOT NULL)                    AS has_source_url,
         -- Zero area is not an area anywhere else in this file (`with_area` filters
         -- `area_m2 > 0`), so a zero-area row with nothing else on it is just as unreachable
         -- as a NULL-area one and counts against the ceiling the same way.
-        (coalesce(l.area_m2, 0) <= 0 AND l.disposition IS NULL
-         AND l.broker_identity_id IS NULL
-         AND length(coalesce(substr(l.description, 1, 200), '')) < 200)
-                                                      AS no_signal,
         (ll.geom IS NOT NULL OR ll.country_status = 'foreign') AS served,
         gr.is_address_grain                           AS is_address_grain,
         gr.rank >= (SELECT r.rank FROM location_granularity_rank r
@@ -269,7 +256,6 @@ agg AS (
         count(*) FILTER (WHERE broker_identity_id IS NOT NULL)        AS with_broker,
         count(*) FILTER (WHERE at_street_grain)                       AS with_street,
         count(*) FILTER (WHERE is_address_grain)                      AS with_point,
-        count(*) FILTER (WHERE has_desc200)                           AS with_desc200,
         count(*) FILTER (WHERE has_source_url)                        AS with_source_url,
         -- THE RECALL CEILING: no area, no disposition, no broker and no usable text -
         -- reachable by no probe except photos, so it bounds recall before any threshold.
@@ -310,7 +296,11 @@ WITH block AS (
         l.broker_identity_id AS broker_identity_id,
         l.first_seen_at      AS first_seen_at,
         l.inactive_at        AS inactive_at,
-        ll.geom              AS geom
+        ll.geom              AS geom,
+        (length(coalesce(substr(l.description, 1, 200), '')) >= 200) AS has_desc200,
+        (coalesce(l.area_m2, 0) <= 0 AND l.disposition IS NULL
+         AND l.broker_identity_id IS NULL
+         AND length(coalesce(substr(l.description, 1, 200), '')) < 200) AS no_signal
     FROM listings l
     JOIN listing_location ll ON ll.listing_id = l.id
     WHERE (%(obec_kod)s::bigint IS NULL OR ll.obec_kod = %(obec_kod)s::bigint)
@@ -351,6 +341,8 @@ years AS (
 )
 SELECT
     (SELECT count(*) FROM block)                                      AS n_block_listings,
+    (SELECT count(*) FROM block WHERE has_desc200)                    AS with_desc200,
+    (SELECT count(*) FROM block WHERE no_signal)                      AS no_signal_at_all,
     coalesce((SELECT sum(n_images) FROM img), 0)::bigint              AS n_images,
     (SELECT count(*) FROM img)                                        AS n_listings_with_images,
     (SELECT count(*) FROM img WHERE n_phash > 0)                      AS n_listings_with_phash,
