@@ -117,6 +117,9 @@ name: "AUTODEDUP: engine lane"
 #             row can be judged for nothing and compared against nothing.
 #             ONE oss MODEL PER judge_version. The store keys a judgement on (pair,
 #             judge_version, tier) and not on the model, so a second `oss_model` at the same
+#             `settings=<name>` / `model=<name>` pick a row under autodedup/settings/ and a fitted
+#             model under autodedup/models/ so the draw reflects that engine's zones (absent =
+#             defaults + hand prior); `judge_version=` keys the per-pair cache.
 #             version is skipped as cached (no pod rented, an EMPTY judgements.jsonl, exit 0)
 #             or, with `refresh=1`, OVERWRITES the first model's rows. To compare two open
 #             models, give the second its own version: `judge_version=<v>-<model-slug>`.

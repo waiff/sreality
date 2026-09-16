@@ -76,9 +76,12 @@ MISSING_DISCRIMINATOR: str = "no discriminator named for a non-same verdict"
 BUILDING_FAMILIES: frozenset[str] = frozenset({"exterior", "common", "plan"})
 
 # `attrs` slots worth stating per side: the unit-discriminating ones first, then the
-# building-level ones the prompt tells the model to weigh second.
+# building-level ones the prompt tells the model to weigh second. Portal VOCABULARY is NOT here:
+# `area_basis` (`usable` on seven portals, `unknown` on bazos) and the `price_unit` suffix
+# (`celkem` vs `za nemovitost` for one and the same fact) cost 10 gold NEGATIVE votes and 47
+# abstentions that cited the artefact as a discriminator — the same two slots `features.py` drops
+# from the contradictions, so the labels and the engine read one vocabulary.
 DIGEST_ATTRS: tuple[tuple[str, str], ...] = (
-    ("area_basis", "area basis"),
     ("usable_area", "usable area"),
     ("estate_area", "plot area"),
     ("garden_area", "garden area"),
@@ -192,7 +195,6 @@ class ListingDigest:
     floor: int | None = None
     total_floors: int | None = None
     price: float | None = None
-    price_unit: str | None = None
     price_history: list[tuple[str, float | None]] = field(default_factory=list)
     attributes: dict[str, str | None] = field(default_factory=dict)
     first_seen: str | None = None
@@ -284,7 +286,6 @@ def listing_digest(listing: Listing) -> ListingDigest:
         floor=listing.floor,
         total_floors=listing.total_floors,
         price=listing.price,
-        price_unit=_clean(attrs.get("price_unit")),
         price_history=list(listing.price_history or [])[-MAX_PRICE_POINTS:],
         attributes=attributes,
         first_seen=_day(listing.first_seen_at),
@@ -324,8 +325,7 @@ def render_digest(d: ListingDigest) -> str:
         f"area: {_area(d.area_m2)}",
         f"floor: {prompts.ABSENT_TOKEN if d.floor is None else d.floor}"
         f" of {prompts.ABSENT_TOKEN if d.total_floors is None else d.total_floors}",
-        f"price: {_amount(d.price)}"
-        + (f" CZK {d.price_unit}" if d.price_unit else (" CZK" if d.price is not None else "")),
+        f"price: {_amount(d.price)}" + (" CZK" if d.price is not None else ""),
     ]
     if d.price_history:
         points = "; ".join(
@@ -929,12 +929,30 @@ class Verdict:
         }
 
 
-def _string_list(value: Any, name: str) -> list[str]:
+def _string_list(value: Any) -> list[str]:
+    """A scalar is read as a one-element list — shape is never a reason to bin a billed verdict.
+
+    The gold run lost 10 qwen3-vl votes to `key_evidence must be a list of strings, got str`
+    (judge.json errors), which is E31's failure shape: the call was paid for and the content
+    was parsable."""
     if value is None:
         return []
-    if not isinstance(value, list):
-        raise JudgeParseError(f"{name} must be a list of strings, got {type(value).__name__}")
-    return [str(entry).strip() for entry in value if str(entry).strip()]
+    if isinstance(value, (str, bytes)):
+        text = value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+        return [text.strip()] if text.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(entry).strip() for entry in value if str(entry).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _one_string(value: Any) -> str:
+    """The inverse leniency: a list-valued `unit_discriminator` is joined, never dropped."""
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return "; ".join(part for part in (str(entry).strip() for entry in value) if part)
+    return str(value).strip()
 
 
 def parse_verdict(tool_call_args: Mapping[str, Any] | str) -> Verdict:
@@ -964,11 +982,10 @@ def parse_verdict(tool_call_args: Mapping[str, Any] | str) -> Verdict:
     if not 0.0 <= confidence <= 1.0:
         raise JudgeParseError(f"confidence must be within [0, 1], got {confidence}")
 
-    discriminator = payload.get("unit_discriminator")
-    discriminator = str(discriminator).strip() if discriminator is not None else ""
+    discriminator = _one_string(payload.get("unit_discriminator"))
 
-    key_evidence = _string_list(payload.get("key_evidence"), "key_evidence")
-    contradicting = _string_list(payload.get("contradicting_evidence"), "contradicting_evidence")
+    key_evidence = _string_list(payload.get("key_evidence"))
+    contradicting = _string_list(payload.get("contradicting_evidence"))
     conflict = bool(payload.get("deal_or_category_conflict", False))
 
     downgraded_from: str | None = None

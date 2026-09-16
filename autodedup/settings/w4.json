@@ -1,0 +1,12 @@
+{
+  "store_floor": 0.02,
+  "t_hi": 1.0,
+  "t_lo": 0.11687524936898601,
+  "t_hi_by_stratum": {
+    "K-A|cross": null,
+    "K-A|same": null,
+    "K-C|same": null,
+    "model|same": null,
+    "model|cross": 0.989394969768
+  }
+}

@@ -1,0 +1,152 @@
+{
+ "_what_this_file_is": "The EVIDENCE behind the per-stratum merge table. The table IN FORCE lives in w4.json as `t_hi_by_stratum` and is read by decide.stratum_t_hi (E48): NULL = propose-only (nothing in that stratum auto-merges, certificate or not), a number = that stratum's own T_hi, an absent key = the global t_hi. Chosen on train+validation of seal 0a0186095f2c and measured on that fit's sealed test split (`harness evaluate --split-map`). Run: scratchpad/run2, eval: scratchpad/eval_run2, model: autodedup/models/w4_gold.json.",
+ "in_force": {
+  "K-A|cross": null,
+  "K-A|same": null,
+  "K-C|same": null,
+  "model|cross": 0.989394969768,
+  "model|same": null,
+  "global_t_hi": 1.0,
+  "global_t_lo": 0.11687524936898601,
+  "store_floor": 0.02
+ },
+ "criteria": {
+  "precision_lb": 0.99,
+  "precision_point": 0.995,
+  "stratum_floor": 0.97,
+  "gate_basis": "unweighted judged counts (Wilson LB); the HT rate and the bootstrap LB are reported beside every cell",
+  "labels_needed_for_lb": 381,
+  "ceiling_note": "With k = n the Wilson lower bound is n/(n+z^2). The WHOLE judged merge set is 292 pairs, so the highest pooled LB this label set can express is 0.9870 even if every auto-merge were correct; the sealed split's 22 merges cap it at 0.8513. D3's 0.99 is label-bound, not model-bound: no rule and no model can clear it here."
+ },
+ "global": {
+  "merge_zone_judged": 292,
+  "merge_zone_correct": 291,
+  "precision_unweighted": 0.9965753424657534,
+  "wilson_lb": 0.9808589,
+  "precision_ht": 0.9945748,
+  "bootstrap_lb": 0.9838,
+  "sealed": {
+   "n_rows": 169,
+   "n_merge": 22,
+   "precision": 1.0,
+   "wilson_lb": 0.8513404742740388,
+   "clopper_pearson_lb": 0.845627487184629,
+   "min_stratum_precision": 1.0,
+   "stratum_floor_ok": true
+  },
+  "verdict": "point estimate clears D3 (0.9966 unweighted / 0.9946 HT >= 0.995 point on all judged merges; 1.00 on the sealed merge set) and every stratum clears the 0.97 floor; the Wilson lower bound does not and cannot at 1,500 labels."
+ },
+ "strata": {
+  "K-B|same": {
+   "ships": "auto-merge",
+   "engine_merges": 1015,
+   "judged_merges": 110,
+   "judged_correct": 109,
+   "precision_unweighted": 0.990909090909091,
+   "wilson_lb": 0.9502931300620922,
+   "precision_ht": 0.9857157844616786,
+   "bootstrap_lb": 0.9571473533850363,
+   "dev_certificate_merges": 98,
+   "dev_certificate_precision": 0.9897959183673469,
+   "sealed_n_merge": 12,
+   "sealed_precision": 1.0,
+   "floor_ok": true,
+   "point_gate_ok": false,
+   "note": "The single residual false merge of the whole engine sits here: 15034630 x 18854134 (gold `same_building_different_unit`), a same-portal re-post at one RUIAN point shared by ~48 listings, n_images_min 0, catalog_ratio_max 1.0, jaccard_shingle 1.0, gap 5 days. It scores 0.7014 between true merges at 0.7016 and 0.6504, so NO score cut separates it. Clauses priced against it, all fitted to this one pair: catalogue-only bands 874 merges (28% of the set) to remove 1 of 292 judged errors; catalogue-only AND attr_agreements < 4 bands 53; a 0.705 score floor splits two pairs four ten-thousandths apart. All rejected (W4 ruling): the cell is 99.09% and above the floor, and the honest fix is labels, not a rule."
+  },
+  "K-C|cross": {
+   "ships": "auto-merge",
+   "engine_merges": 1426,
+   "judged_merges": 127,
+   "judged_correct": 127,
+   "precision_unweighted": 1.0,
+   "wilson_lb": 0.9706393073762475,
+   "precision_ht": 1.0,
+   "dev_certificate_merges": 117,
+   "dev_certificate_precision": 1.0,
+   "sealed_n_merge": 10,
+   "sealed_precision": 1.0,
+   "floor_ok": true,
+   "point_gate_ok": true,
+   "propose_only_reason": null
+  },
+  "K-C|same": {
+   "ships": "propose-only",
+   "propose_only_reason": "precision",
+   "measured_before_the_gate": {
+    "dev_certificate_merges": 19,
+    "dev_certificate_precision": 0.9473684210526315,
+    "sealed_n_merge": 7,
+    "sealed_precision": 0.8571428571428571
+   },
+   "held_back_by_E48": {
+    "pairs": 108,
+    "judged": 31,
+    "positive": 25,
+    "precision": 0.8064516129032258,
+    "note": "The set E48 holds back (K-C|same, plus the K-A and model|same shapes) is 80.65% positive on judged rows — the gate is removing errors, not recall. No sub-condition rescues it above the floor: interior >= 0.5 and n_images >= 1 gives 88.5% (n=26), phash_tight >= 8 with interior >= 0.5 gives 91.3% (n=23), a shared unit number has n=1."
+   },
+   "floor_ok": false
+  },
+  "model|cross": {
+   "ships": "auto-merge at t_hi 0.989394969768",
+   "engine_merges": 676,
+   "judged_merges": 55,
+   "judged_correct": 55,
+   "precision_unweighted": 1.0,
+   "wilson_lb": 0.9347128562105721,
+   "precision_ht": 1.0,
+   "dev_n_at_cut": 49,
+   "dev_precision_at_cut": 1.0,
+   "sealed_n_merge": 7,
+   "sealed_precision": 1.0,
+   "floor_ok": true,
+   "cut_sweep": {
+    "0.989394969768": {"merges": 676, "judged": 55, "precision": 1.0},
+    "0.98": {"merges": 997, "judged": 82, "precision": 0.9878},
+    "0.95": {"merges": 1469, "judged": 122, "precision": 0.9672},
+    "0.90": {"merges": 1682, "judged": 135, "precision": 0.963}
+   },
+   "note": "Precision falls through the 0.97 floor below 0.98, so the fitted cut is also the knee. It is the one stratum where the W4 refit buys merges the hand prior could not: 675 auto-merges with no judged error."
+  },
+  "model|same": {
+   "ships": "propose-only",
+   "propose_only_reason": "precision",
+   "cut_sweep": {
+    "0.989394969768": {"merges": 100, "judged": 15, "precision": 0.8667},
+    "0.98": {"merges": 190, "judged": 25, "precision": 0.92},
+    "0.95": {"merges": 283, "judged": 34, "precision": 0.9412},
+    "0.90": {"merges": 304, "judged": 38, "precision": 0.9474}
+   },
+   "note": "The score layer is WORSE on same-portal pairs at every cut, and monotonically so — the top of the ranking is where the developer re-advert shape lives. No cut reaches the 0.97 floor."
+  },
+  "K-A|cross": {
+   "ships": "propose-only",
+   "propose_only_reason": "precision",
+   "note": "K-A is also disabled at the certificate (settings.certificate_ka_enabled=False): 52.55% HT precision (n=98) on the gold holdout. The stratum entry is belt and braces — turning the certificate back on for an evaluation must not turn auto-merge back on with it."
+  },
+  "K-A|same": {
+   "ships": "propose-only",
+   "propose_only_reason": "precision",
+   "note": "See K-A|cross."
+  }
+ },
+ "cost_dial": {
+  "band_width_E25": 0.20226371126584736,
+  "band_width_basis": "zone == band / stored pairs (7291 of 36047)",
+  "score_in_band_share": 0.3214969345576608,
+  "zone_recall": {
+   "merge": 0.5320451395100527,
+   "band": 0.42509593457093037,
+   "reject": 0.04285892591902202,
+   "basis": "weighted judged positives by the zone decide_pair returned"
+  },
+  "t_lo_curve": {
+   "note": "band pairs / share of stored, and the weighted judged positives that fall into REJECT, as t_lo moves. The sealed split has a cliff between 0.02 and 0.05 (0.00% -> 7.35% missed) — one tie group of high-weight low-scoring positives — so no cut above the store floor meets the 3% recall rule on held-out rows, and no cut anywhere near it meets a 3% band. The two constraints are jointly infeasible on this cohort; t_lo is the operator's dial.",
+   "0.02": {"band_share": 0.9135, "missed_cohort": 0.0, "missed_dev": 0.0, "missed_sealed": 0.0},
+   "0.05": {"band_share": 0.477, "missed_cohort": 0.012, "missed_dev": 0.005, "missed_sealed": 0.0735},
+   "0.11687524936898601": {"band_share": 0.2023, "missed_cohort": 0.0353, "missed_dev": 0.0294, "missed_sealed": 0.0873},
+   "0.30": {"band_share": 0.1536, "missed_cohort": 0.0552, "missed_dev": 0.0503, "missed_sealed": 0.0984}
+  }
+ }
+}

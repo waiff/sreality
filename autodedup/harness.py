@@ -41,10 +41,13 @@ from autodedup.dataset import (
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
 from autodedup.evaluate import (
+    CALIBRATION_AUTO,
     FIT_MAX_ITER,
     FIT_METHODS,
+    L2_GRID,
     evaluate,
     fit_model,
+    rescore_rows,
     split_groups,
     write_report,
 )
@@ -65,7 +68,7 @@ from autodedup.labels import (
     load_sample,
     sample_from_judgements,
 )
-from autodedup.model import LogisticModel, hand_initialised
+from autodedup.model import CALIBRATION_METHODS, LogisticModel, hand_initialised
 from autodedup.settings import Settings
 from autodedup.errors import DEFAULT_TOP, ERRORS_STEM, analyse
 
@@ -745,16 +748,64 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
         sample = sample_from_judgements(judgements)
     settings = run_settings(run_dir, args.settings)
     rows = read_pairs(run_dir)
-    report = evaluate(rows, labels, sample, settings, by_tier=per_tier,
-                      precedence=args.precedence, seed=args.seed)
+    model_note = "run's own scores"
+    expect_seal: str | None = None
+    if args.model:
+        path = Path(args.model)
+        if not path.is_file():
+            print(f"no such model: {path}", file=sys.stderr)
+            return 1
+        try:
+            challenger = LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
+        except ValueError as exc:
+            print(f"unusable --model: {exc}", file=sys.stderr)
+            return 1
+        rows = rescore_rows(rows, challenger, settings)
+        model_note = f"re-decided with {path} ({challenger.version})"
+        expect_seal = ((challenger.provenance.get("seal") or {}).get("sha256") or None)
+    # The split the model was FITTED on, not one re-derived from the merge edges of the run being
+    # evaluated: those edges move with the model, so without this the "sealed" rows are a
+    # different set here than they were at fit time and part of the holdout is training data.
+    split_map = None
+    if args.split_map:
+        split_map = {int(key): int(value) for key, value
+                     in json.loads(Path(args.split_map).read_text(encoding="utf-8")).items()}
+    elif expect_seal:
+        print(f"warning: --model carries seal {expect_seal[:12]} but no --split-map was given; "
+              f"the holdout below is re-derived from this run's own merge edges",
+              file=sys.stderr)
+        expect_seal = None
+    try:
+        report = evaluate(rows, labels, sample, settings, by_tier=per_tier,
+                          precedence=args.precedence, seed=args.seed,
+                          split_map=split_map, expect_seal=expect_seal)
+    except ValueError as exc:
+        print(f"evaluate failed: {exc}", file=sys.stderr)
+        return 1
     json_path, markdown_path = write_report(report, Path(args.out) / EVAL_STEM)
     print(f"evaluate {run_dir}  judgements {', '.join(args.judgements)}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
+    print(f"  model {model_note}", file=out)
     print("", file=out)
     for line in report.headline():
         print(line, file=out)
     print(f"\nwrote {json_path} and {markdown_path}", file=out)
     return 0
+
+
+def parse_l2_grid(raw: str | None) -> tuple[float, ...] | None:
+    """`--l2-grid` as given, `default` as the W4c grid, absent as no sweep at all."""
+    if raw is None:
+        return None
+    if raw == "default":
+        return L2_GRID
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    if not values:
+        raise SystemExit("--l2-grid needs at least one penalty")
+    try:
+        return tuple(float(item) for item in values)
+    except ValueError as exc:
+        raise SystemExit(f"--l2-grid must be comma-separated numbers: {raw!r}") from exc
 
 
 def cmd_fit(args: argparse.Namespace, out: Any) -> int:
@@ -784,7 +835,9 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
         model, report = fit_model(
             rows, labels, sample=sample, seed=args.seed, version=args.version,
             epochs=args.epochs, method=args.method, max_iter=args.max_iter,
-            tol=args.tol, l2=args.l2, weight_cap=args.weight_cap, split_map=groups,
+            tol=args.tol, l2=args.l2, l2_grid=parse_l2_grid(args.l2_grid),
+            calibration=args.calibration,
+            weight_cap=args.weight_cap, split_map=groups,
         )
     except ValueError as exc:
         print(f"fit failed: {exc}", file=sys.stderr)
@@ -896,6 +949,12 @@ def build_parser() -> argparse.ArgumentParser:
                      help="convergence tolerance: max|delta| for irls, mean|grad| for gd"
                           " (default: the method's own)")
     fit.add_argument("--l2", type=float, default=1e-3, help="L2 penalty on the weights")
+    fit.add_argument("--l2-grid", nargs="?", const="default", default=None,
+                     help="sweep L2 and keep the lowest validation log loss: a comma-separated "
+                          f"list, or bare for the W4c grid {','.join(f'{v:g}' for v in L2_GRID)}")
+    fit.add_argument("--calibration", choices=[CALIBRATION_AUTO, *CALIBRATION_METHODS],
+                     default=CALIBRATION_AUTO,
+                     help="calibration map; `auto` picks the lower out-of-fold validation ECE")
     fit.add_argument("--weight-cap", type=float, default=None,
                      help="cap on label weight x stratum weight"
                           " (default: 10x the median weight)")
@@ -905,6 +964,15 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--require-convergence", action="store_true",
                      help="exit 1 when the fit hits its iteration ceiling short of tolerance")
     evaluate_parser = sub.choices["evaluate"]
+    evaluate_parser.add_argument("--model", default=None,
+                                 help="re-decide the stored pairs with this model JSON before "
+                                      "evaluating (the hand prior's own scores are used without "
+                                      "it)")
+    evaluate_parser.add_argument(
+        "--split-map", default=None,
+        help="the split_map.json written beside the model being evaluated, so the sealed split "
+             "is the one the fit held out rather than one re-derived from this run's merge edges",
+    )
     evaluate_parser.add_argument("--settings", default=None,
                                  help="Settings JSON; default: the settings on run.json")
 

@@ -40,9 +40,15 @@ RADIUS_BY_RANK: tuple[tuple[int, float], ...] = (
 )
 DIST_FLOOR_M: float = 25.0
 
+# `FEATURE_ORDER` is a closed vocabulary; this is its version, bumped whenever the tuple changes
+# shape. v2 appends `unit_number_shared` (E45). The lane's `score_lane.FEATURE_VERSION` stamp on
+# `autodedup.pairs` must follow this number.
+FEATURE_VERSION: int = 2
+
 # Comparable attribute slots: `attrs` keys (autodedup/export_sql.ATTR_COLUMNS) that carry a
 # categorical value, plus the listing-level subtype. Numeric side-areas and timestamps are not
-# equality-comparable and are excluded.
+# equality-comparable and are excluded. `Settings.vocabulary_attr_keys` subtracts the slots that
+# are portal VOCABULARY rather than property fact (default `price_unit`, `area_basis`).
 ATTR_KEYS: tuple[str, ...] = (
     "building_type",
     "condition",
@@ -61,6 +67,10 @@ ATTR_KEYS: tuple[str, ...] = (
 )
 # Legacy conflated booleans (balcony-or-loggia, parking-or-garage) carry half weight.
 CONFLATED_ATTR_KEYS: tuple[str, ...] = ("has_balcony", "has_parking")
+# THE default of `Settings.vocabulary_attr_keys` — settings.py imports this tuple rather than
+# restating it, so a settings-less caller (the judge digest) can never drop a different set.
+# The dependency runs one way only: features.py must not import settings at runtime.
+DEFAULT_VOCABULARY_ATTR_KEYS: tuple[str, ...] = ("price_unit", "area_basis")
 CONFLATED_WEIGHT: float = 0.5
 
 AREA_EXACT_REL: float = 0.01
@@ -96,7 +106,9 @@ RARE_TOKEN_CAP: float = 5.0
 
 # `numeral_conflict` is a terminal auto-reject in decide.py, so only IDENTITY slots may raise it:
 # a price cut (kc) or a rounded area (m2) is what an E6 re-listing looks like, not a different unit.
+# `Settings.numeral_conflict_units` is the swept row; this is its default.
 CONFLICT_UNITS: frozenset[str] = frozenset({"floor", "rooms", "unit"})
+UNIT_SLOT: str = "unit"
 
 # Thresholds of the E11 evidence rules below, named because each one is an argued bar.
 ATTR_EXACT_AREA_REL: float = 0.01
@@ -165,6 +177,9 @@ FEATURE_ORDER: tuple[str, ...] = (
     "overlap_days",
     "both_active",
     "same_source",
+    # v2 append-only tail (E45): the unit-number fact the "same building, different unit" class
+    # is missing. FEATURE_ORDER grows at the END only, so a stored vector stays readable.
+    "unit_number_shared",
 )
 
 FAMILY_OF: dict[str, str] = {
@@ -212,6 +227,7 @@ FAMILY_OF: dict[str, str] = {
     "overlap_days": "TIME",
     "both_active": "TIME",
     "same_source": "TIME",
+    "unit_number_shared": "TXT",
 }
 
 # E11 counts corroboration over five families only; PRICE and TIME are scored, never counted as
@@ -355,36 +371,54 @@ def price_path_event_match(
     return matched / len(small)
 
 
-def _attr_raw(listing: Listing) -> dict[str, object]:
+def vocabulary_attr_keys(settings: "Settings | None") -> frozenset[str]:
+    """The attribute slots that are portal VOCABULARY, excluded from agreement AND contradiction.
+
+    Gold eval 2026-09-16: `price_unit` differs on 55% of cross-portal TRUE duplicates (221/401)
+    and on 0% of same-portal ones — the portals spell one fact two ways — and `area_basis`
+    differs on 31% of cross-portal positives against 14% of negatives. Both are anti-signal."""
+    if settings is None:
+        return frozenset(DEFAULT_VOCABULARY_ATTR_KEYS)
+    return frozenset(settings.vocabulary_attr_keys)
+
+
+def _attr_raw(listing: Listing, skip: frozenset[str] = frozenset()) -> dict[str, object]:
     out: dict[str, object] = {}
     attrs = listing.attrs or {}
     for key in ATTR_KEYS:
+        if key in skip:
+            continue
         value = listing.subtype if key == "subtype" else attrs.get(key)
         if value is None:
             continue
         out[key] = value
     for key in CONFLATED_ATTR_KEYS:
+        if key in skip:
+            continue
         value = attrs.get(key)
         if value is not None:
             out[key] = value
     return out
 
 
-def _attr_map(listing: Listing) -> dict[str, str]:
-    return {key: str(value).strip().lower() for key, value in _attr_raw(listing).items()}
+def _attr_map(listing: Listing, skip: frozenset[str] = frozenset()) -> dict[str, str]:
+    return {key: str(value).strip().lower() for key, value in _attr_raw(listing, skip).items()}
 
 
-def attribute_conflicts(la: Listing, lb: Listing) -> list[tuple[str, object, object]]:
+def attribute_conflicts(
+    la: Listing, lb: Listing, settings: "Settings | None" = None
+) -> list[tuple[str, object, object]]:
     """The slots behind the `attr_contradictions` COUNT, as `(field, value A, value B)`.
 
-    Same field set and same equality as the feature (normalised, case-folded), because a prompt
-    that named a conflict the model cannot see in the feature vector would be arguing with it —
-    the values are returned RAW so the digest can print `energy_rating A=B vs B=C` rather than
-    the lower-cased form the comparison runs on."""
-    raw_a = _attr_raw(la)
-    raw_b = _attr_raw(lb)
-    norm_a = _attr_map(la)
-    norm_b = _attr_map(lb)
+    Same field set and same equality as the feature (normalised, case-folded, vocabulary slots
+    dropped), because a prompt that named a conflict the model cannot see in the feature vector
+    would be arguing with it — the values are returned RAW so the digest can print
+    `energy_rating A=B vs B=C` rather than the lower-cased form the comparison runs on."""
+    skip = vocabulary_attr_keys(settings)
+    raw_a = _attr_raw(la, skip)
+    raw_b = _attr_raw(lb, skip)
+    norm_a = _attr_map(la, skip)
+    norm_b = _attr_map(lb, skip)
     return [
         (key, raw_a[key], raw_b[key])
         for key, value_a in norm_a.items()
@@ -393,10 +427,13 @@ def attribute_conflicts(la: Listing, lb: Listing) -> list[tuple[str, object, obj
 
 
 def _numeral_agreement(
-    a: Iterable[tuple[str, float]], b: Iterable[tuple[str, float]]
+    a: Iterable[tuple[str, float]],
+    b: Iterable[tuple[str, float]],
+    conflict_units: frozenset[str] = CONFLICT_UNITS,
 ) -> tuple[float, float]:
     """`(agreements, conflicts)`: a one-to-one sorted sweep per unit, so the count is the same in
-    either argument order, and only an IDENTITY slot (CONFLICT_UNITS) can raise a conflict."""
+    either argument order, and only an IDENTITY slot (`conflict_units`) can raise a conflict —
+    never a Kč or m² slot, which prices and areas already have their own features for."""
     by_unit_a: dict[str, list[float]] = {}
     by_unit_b: dict[str, list[float]] = {}
     for unit, value in a:
@@ -426,9 +463,23 @@ def _numeral_agreement(
             else:
                 index_b += 1
         agreements += hits
-        if hits == 0 and unit in CONFLICT_UNITS:
+        if hits == 0 and unit in conflict_units:
             conflicts += 1.0
     return agreements, conflicts
+
+
+def unit_number_shared(
+    a: Iterable[tuple[str, float]], b: Iterable[tuple[str, float]]
+) -> tuple[float, bool]:
+    """E45: do the two adverts name the SAME unit number? Present only when both name one.
+
+    `normalize.numeric_facts` already isolates the `unit` slot (`jednotka 12`, `č. bytu 12`); a
+    shared unit number is the one text fact the developer-unit false merges never had."""
+    units_a = {value for slot, value in a if slot == UNIT_SLOT}
+    units_b = {value for slot, value in b if slot == UNIT_SLOT}
+    if not units_a or not units_b:
+        return ABSENT
+    return (1.0 if units_a & units_b else 0.0, True)
 
 
 @dataclass(slots=True)
@@ -507,7 +558,7 @@ class FeatureContext:
             if listing is None:
                 continue
             bucket = self.block_attr_df.setdefault(_block_of(fp), {})
-            for key, value in _attr_map(listing).items():
+            for key, value in _attr_map(listing, vocabulary_attr_keys(self.settings)).items():
                 bucket[(key, value)] = bucket.get((key, value), 0) + 1
 
     def events(self, listing: Listing) -> list[tuple[float, float]]:
@@ -736,8 +787,9 @@ def pair_features(
     )
     feats["total_floors_equal"] = _eq(fa.total_floors, fb.total_floors)
 
-    attrs_a = _attr_map(la)
-    attrs_b = _attr_map(lb)
+    skip = vocabulary_attr_keys(settings)
+    attrs_a = _attr_map(la, skip)
+    attrs_b = _attr_map(lb, skip)
     block_a = _block_of(fa)
     block_b = _block_of(fb)
     agreements = 0.0
@@ -835,12 +887,15 @@ def pair_features(
     numerals_a = fa.numerals or set()
     numerals_b = fb.numerals or set()
     if numerals_a and numerals_b:
-        overlap, conflicts = _numeral_agreement(numerals_a, numerals_b)
+        overlap, conflicts = _numeral_agreement(
+            numerals_a, numerals_b, frozenset(settings.numeral_conflict_units)
+        )
         feats["numeric_fact_overlap"] = (overlap, True)
         feats["numeral_conflict"] = (1.0 if conflicts > 0 else 0.0, True)
     else:
         feats["numeric_fact_overlap"] = ABSENT
         feats["numeral_conflict"] = ABSENT
+    feats["unit_number_shared"] = unit_number_shared(numerals_a, numerals_b)
 
     # --- BRK --------------------------------------------------------------------------
     feats["same_broker_key"] = _eq(fa.broker_key, fb.broker_key)

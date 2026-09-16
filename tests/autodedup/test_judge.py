@@ -138,6 +138,26 @@ def test_digest_renders_the_known_facts_and_the_price_path() -> None:
     assert "ownership: osobni" in rendered
 
 
+def test_the_digest_never_states_portal_VOCABULARY_as_if_it_were_a_fact() -> None:
+    """The two slots the engine dropped from the contradictions are dropped from the label
+    source too, or the labels certifying that precision are read off the artefact: `price_unit`
+    spells one fact `celkem` on sreality and `za nemovitost` elsewhere, `area_basis` is `unknown`
+    on bazos and `usable` on the rest. 10 gold NEGATIVE votes and 47 abstentions cited them as
+    the discriminator; deal type is already stated on its own line."""
+    sreality = judge.render_digest(judge.listing_digest(make_listing(
+        id=1, source="sreality", price=5_900_000.0,
+        attrs={"price_unit": "celkem", "area_basis": "usable", "ownership": "osobni"})))
+    bazos = judge.render_digest(judge.listing_digest(make_listing(
+        id=2, source="bazos", price=5_900_000.0,
+        attrs={"price_unit": "za nemovitost", "area_basis": "unknown", "ownership": "osobni"})))
+    for rendered in (sreality, bazos):
+        assert "price: 5 900 000 CZK" in rendered
+        assert "ownership: osobni" in rendered
+        for artefact in ("celkem", "za nemovitost", "area basis"):
+            assert artefact not in rendered
+    assert "area_basis" not in dict(judge.DIGEST_ATTRS)
+
+
 def test_digest_keeps_at_most_eight_price_points() -> None:
     history = [(f"2025-{month:02d}-01T00:00:00+00:00", 1_000_000.0 + month) for month in range(1, 13)]
     digest = judge.listing_digest(make_listing(price_history=history))
@@ -645,12 +665,43 @@ def test_parse_verdict_accepts_a_json_string() -> None:
     {"verdict": "maybe", "confidence": 0.5},
     {"verdict": "same_property", "confidence": 1.5, "key_evidence": ["x"]},
     {"verdict": "same_property", "confidence": "high", "key_evidence": ["x"]},
-    {"verdict": "same_property", "confidence": 0.5, "key_evidence": "not-a-list"},
     "{not json",
 ])
 def test_parse_verdict_rejects_invalid_calls(payload: object) -> None:
+    """Only a verdict that cannot be READ is refused: a bad verdict name, a confidence that is
+    not a probability, broken JSON. Shape is handled leniently — see the tests below."""
     with pytest.raises(judge.JudgeParseError):
         judge.parse_verdict(payload)  # type: ignore[arg-type]
+
+
+def test_parse_verdict_accepts_the_qwen_shape_that_lost_ten_gold_votes() -> None:
+    """The gold run binned 10 qwen3-vl votes on `key_evidence must be a list of strings, got
+    str` (judge.json errors) — a billed, parsable call. A scalar is one element now."""
+    verdict = judge.parse_verdict({
+        "verdict": "same_property",
+        "confidence": 0.9,
+        "deal_or_category_conflict": False,
+        "unit_discriminator": None,
+        "key_evidence": "identical floor plan and the same 4. patro, unit 705",
+        "contradicting_evidence": "",
+        "developer_project_suspected": False,
+    })
+    assert verdict.verdict == "same_property"
+    assert verdict.downgraded_from is None
+    assert verdict.key_evidence == ["identical floor plan and the same 4. patro, unit 705"]
+    assert verdict.contradicting_evidence == []
+
+
+def test_parse_verdict_joins_a_list_valued_unit_discriminator() -> None:
+    verdict = judge.parse_verdict({
+        "verdict": "same_building_different_unit",
+        "confidence": 0.8,
+        "unit_discriminator": ["floor 2 vs floor 5", "unit A12 vs B31"],
+        "key_evidence": ["one facade"],
+        "contradicting_evidence": ["different floor"],
+    })
+    assert verdict.unit_discriminator == "floor 2 vs floor 5; unit A12 vs B31"
+    assert verdict.downgraded_from is None
 
 
 def test_parse_verdict_downgrades_same_property_with_no_evidence() -> None:

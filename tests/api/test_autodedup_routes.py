@@ -1178,6 +1178,19 @@ def test_the_pair_view_carries_no_pii(client, conn):
         assert name not in usql.LISTING_DETAIL_COLUMNS
 
 
+def test_the_pair_view_keeps_the_price_unit_the_judge_digest_dropped(client, conn):
+    """Two behaviours meeting in one payload: W4 removed `price_unit` from `ListingDigest`
+    (the `celkem` / `za nemovitost` suffix is one fact in two portal vocabularies), while the
+    pair page still declares the key (`AutodedupDigest.price_unit`). The route therefore
+    sources it from the raw row, not from the digest."""
+    from autodedup.judge import ListingDigest
+
+    assert not hasattr(ListingDigest(listing_id=1), "price_unit")
+    _pair_evidence(conn)
+    digests = client.get("/autodedup/pair/11/12").json()["data"]["digests"]
+    assert digests["a"]["price_unit"] == "celkem"
+
+
 def test_an_unknown_pair_is_a_404(client, conn):
     assert client.get("/autodedup/pair/11/12").status_code == 404
 

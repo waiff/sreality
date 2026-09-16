@@ -556,11 +556,11 @@ def test_a_pair_that_raises_before_the_call_is_counted_not_lost(
     real = judge_lane._inputs
     seen: list[int] = []
 
-    def exploding(judge_mod, job, la, lb):
+    def exploding(judge_mod, job, la, lb, settings=None):
         seen.append(job.lo)
         if len(seen) == 1:
             raise ValueError("digest blew up")
-        return real(judge_mod, job, la, lb)
+        return real(judge_mod, job, la, lb, settings)
 
     monkeypatch.setattr(judge_lane, "_inputs", exploding)
     summary = lane(out, export_run="1", tier="text", n=6, max_usd=5, workers=1)
@@ -1361,3 +1361,42 @@ def test_the_real_pod_module_exposes_the_receipt_the_lane_writes() -> None:
 
     for name in ("write_receipt", "clear_receipt", "reap_receipt"):
         assert callable(getattr(oss_pod, name)), name
+
+
+# --- one settings row for the engine and the prompt (W4) -----------------------------------
+
+
+def test_the_lane_takes_one_settings_row_for_the_engine_and_the_prompt() -> None:
+    """The row that scores the cohort is the row the digest is built through (`--args settings=`).
+
+    Two rows would let the prompt name a contradiction on a slot the engine refuses to count."""
+    import inspect
+
+    parsed = judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5", "settings": "s.json"}
+    )
+    assert parsed.settings == "s.json"
+    assert judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5"}
+    ).settings is None
+    for name in ("_inputs", "_estimate", "_run_job", "_dispatch"):
+        assert "settings" in inspect.signature(getattr(judge_lane, name)).parameters, name
+
+
+def test_the_lane_scores_the_cohort_with_the_named_model(tmp_path, monkeypatch) -> None:
+    """`--args model=` picks a fitted model under autodedup/models/; absent = the hand prior."""
+    from autodedup import score_lane
+    from autodedup.model import hand_initialised
+
+    parsed = judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5", "model": "w4_gold"}
+    )
+    assert parsed.model == "w4_gold"
+    assert judge_lane.parse_args(
+        {"export_run": "1", "tier": "text", "n": "4", "max_usd": "5"}
+    ).model is None
+    assert judge_lane.load_engine_model(None).feature_order == hand_initialised().feature_order
+    (tmp_path / "m.json").write_text(json.dumps(hand_initialised().to_json()), encoding="utf-8")
+    monkeypatch.setattr(score_lane, "MODELS_DIR", tmp_path)
+    loaded = judge_lane.load_engine_model("m")
+    assert loaded.feature_order == hand_initialised().feature_order

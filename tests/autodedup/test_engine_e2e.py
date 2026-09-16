@@ -26,7 +26,13 @@ from autodedup import features
 from autodedup import harness
 from autodedup.blocking import generate_pairs
 from autodedup.cluster import cluster_pairs
-from autodedup.decide import Decision, decide_pair
+from autodedup.decide import (
+    Decision,
+    decide_pair,
+    developer_colive,
+    developer_signature,
+    unit_evidence,
+)
 from autodedup.features import FeatureContext, pair_features
 from autodedup.fingerprint import build_all
 from autodedup.model import hand_initialised
@@ -437,14 +443,24 @@ def test_duplicate_and_repost_are_candidate_pairs(engine: dict[str, Any]) -> Non
     assert pairs[(REPOST_A, REPOST_B)] & {"attr_dispo", "attr_area", "text", "broker"}
 
 
-def test_cross_portal_duplicate_earns_certificate_a(engine: dict[str, Any]) -> None:
-    """One address point, one disposition, one area: K-A, the near-decisive certificate (E24)."""
+def test_cross_portal_duplicate_merges_without_k_a(engine: dict[str, Any]) -> None:
+    """K-A is demoted (52.6% gold precision), so this pair must merge on evidence it still has:
+    the shared shoot (K-C). Flipping `certificate_ka_enabled` back on restores K-A."""
     decision = engine["decisions"][(DUP_A, DUP_B)]
     assert decision.zone == "merge"
-    assert decision.certificate == "K-A"
-    assert decision.reason == "certificate:K-A"
-    assert engine["feats"][(DUP_A, DUP_B)]["same_ruian_adm_kod"] == (1.0, True)
+    assert decision.certificate == "K-C"
+    assert decision.reason == "certificate:K-C"
+    feats = engine["feats"][(DUP_A, DUP_B)]
+    assert feats["same_ruian_adm_kod"] == (1.0, True)
     assert {"IMG", "TXT", "LOC"} <= decision.families
+
+    ka_settings = Settings(certificate_ka_enabled=True)
+    with_ka = decide_pair(
+        engine["fps"][DUP_A], engine["fps"][DUP_B],
+        engine["dataset"].listings[DUP_A], engine["dataset"].listings[DUP_B],
+        feats, engine["pairs"][(DUP_A, DUP_B)], engine["model"], ka_settings,
+    )
+    assert (with_ka.zone, with_ka.certificate) == ("merge", "K-A")
 
 
 def test_cross_portal_duplicate_without_a_certificate_merges_on_the_model(
@@ -472,6 +488,28 @@ def test_one_shoot_in_gallery_order_earns_certificate_c(engine: dict[str, Any]) 
     assert feats["phash_tight_matches"][0] >= 4.0
     assert feats["seq_monotone_ratio"][0] >= 0.8
     assert "IMG" in decision.families and len(decision.families) >= 2
+
+
+def test_the_merge_set_of_the_fixture_is_exactly_the_four_true_duplicates(
+    engine: dict[str, Any]
+) -> None:
+    """The E45/E46/E47 regression test: naming the merge set, not re-asserting the branch.
+
+    Every other pair of this cohort — the six-unit development, the tied development pair, the
+    filler twins — is a pair the operator's standing warning is about, so any rule change that
+    lets one of them merge fails here instead of showing up in a precision table."""
+    merged = {(d.lo, d.hi): d.reason for d in engine["decision_list"] if d.zone == "merge"}
+    assert merged == {
+        (DUP_A, DUP_B): "certificate:K-C",
+        (REPOST_A, REPOST_B): "certificate:K-B",
+        (MODEL_A, MODEL_B): "model",
+        (PHOTO_A, PHOTO_B): "certificate:K-C",
+    }
+    for lo, hi in merged:
+        feats = engine["feats"][(lo, hi)]
+        assert unit_evidence(feats, engine["settings"]), (lo, hi)
+        assert not developer_signature(feats, engine["settings"]), (lo, hi)
+        assert not developer_colive(feats, engine["settings"]), (lo, hi)
 
 
 def test_same_portal_repost_earns_certificate_b(engine: dict[str, Any]) -> None:
@@ -536,17 +574,23 @@ def test_catalogue_stock_never_supplies_image_evidence(engine: dict[str, Any]) -
     assert seen >= 6
 
 
-@pytest.mark.xfail(
-    reason="hand priors: a shared developer template (+2.9 over jaccard/tfidf/containment)"
-           " outweighs the catalogue (-1.2) and shared-pin (-0.55) penalties, so the pair lands"
-           " 0.0049 above t_hi. The rails are in features/model, not in decide.py.",
-)
 def test_a_development_pair_the_guards_cannot_separate_is_not_merged(
     engine: dict[str, Any]
 ) -> None:
-    """Same floor, same disposition, 0.6% area apart: no guard applies, only the rails are left."""
+    """The operator's standing warning, end to end: same floor, same disposition, 0.6% area
+    apart, one broker, one portal, 599 co-live days, and a gallery the whole development shares.
+
+    The hand priors still score it 0.975 — a shared developer template (+2.9 over
+    jaccard/tfidf/containment) outweighs the catalogue (-1.2) and shared-pin (-0.55) penalties —
+    so the rule floor is what holds it: E46 sees catalogue-only agreement between two co-live
+    adverts, and E47 sees the co-live window with no shared unit number."""
     decision = engine["decisions"][(PROJECT_TIE[0], PROJECT_TIE[1])]
-    assert decision.zone != "merge", (decision.score, decision.reason)
+    assert decision.score > engine["settings"].t_hi
+    assert decision.zone == "band", (decision.score, decision.reason)
+    assert decision.reason == "developer_signature"
+    feats = engine["feats"][(PROJECT_TIE[0], PROJECT_TIE[1])]
+    assert developer_signature(feats, engine["settings"])
+    assert developer_colive(feats, engine["settings"])
 
 
 def test_clusters_are_the_true_pairs(engine: dict[str, Any]) -> None:
@@ -591,9 +635,11 @@ def test_harness_run_writes_the_three_artifacts(cohort: Path, tmp_path: Path) ->
     assert summary["n_listings"] == 46
     assert summary["zones"]["merge"] >= 4
     assert summary["zones"]["reject"] >= 1
-    assert summary["certificates"]["K-A"] == 1
+    # K-A is off by default (W4c demotion) — the pair that used to earn it now merges on K-C.
+    assert summary["certificates"]["K-A"] == 0
     assert summary["certificates"]["K-B"] == 1
-    assert summary["certificates"]["K-C"] == 1
+    # Two K-C: the shared-shoot pair, plus the cross-portal duplicate that used to be K-A.
+    assert summary["certificates"]["K-C"] == 2
     assert 0.0 <= summary["band_width"] <= 1.0
     assert summary["band_width"] == pytest.approx(
         summary["zones"]["band"] / summary["pairs_scored"]

@@ -579,7 +579,11 @@ def _digest(row: dict[str, Any]) -> dict[str, Any]:
         "floor": digest.floor,
         "total_floors": digest.total_floors,
         "price": digest.price,
-        "price_unit": digest.price_unit,
+        # Portal provenance the OPERATOR reads, not part of the judge digest any more:
+        # W4 dropped `price_unit` from `ListingDigest` (the "celkem" / "za nemovitost"
+        # suffix is one fact in two vocabularies and cost gold votes). The pair page still
+        # renders the raw row value, so the wire keeps the key and sources it here.
+        "price_unit": listing.attrs.get("price_unit"),
         "attributes": digest.attributes,
         "first_seen": digest.first_seen,
         "last_seen": digest.last_seen,
