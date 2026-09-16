@@ -32,6 +32,11 @@ COPY contracts/ ./contracts/
 # settings, condition rubrics/markers). load_taxonomy() reads data/clip_taxonomy.json
 # from the image root, so the realtime-worker dedup lane FileNotFoundError'd without it.
 COPY data/ ./data/
+# autodedup/ backs the admin-gated /autodedup/* progress routes: api/routes/autodedup.py
+# imports autodedup/progress_sql.py at module scope, so api.main cannot boot without this
+# tree in the image (setuptools' packages.find matches nothing and fails silently at build
+# time, so the miss only shows as a crash-loop at runtime).
+COPY autodedup/ ./autodedup/
 
 RUN pip install --upgrade pip && pip install ".[api]"
 

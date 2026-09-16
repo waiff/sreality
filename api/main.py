@@ -69,6 +69,7 @@ from api.routes.images import router as images_router
 from api.new_dedup_bakeoff import router as new_dedup_bakeoff_router
 from api.new_dedup_labeling import router as new_dedup_labeling_router
 from api.new_dedup_tags import router as new_dedup_tags_router
+from api.routes.autodedup import router as autodedup_router
 from api.routes.location_quality import router as location_quality_router
 from api.routes.new_dedup import router as new_dedup_router
 from api.routes.new_dedup_candidates import router as new_dedup_candidates_router
@@ -301,6 +302,14 @@ app.include_router(new_dedup_tags_router)
 # come from the generation lane (scripts/dedup_candidates_generate.py). See
 # toolkit/dedup_candidates.py and docs/design/new-dedup/PROGRAM.md (Wave 2).
 app.include_router(new_dedup_candidates_router)
+# /autodedup/* (the autonomous dedup engine's Progress page, migration 528) —
+# read-only, admin-gated: the program ledger `autodedup.iterations` one keyset page
+# at a time, and the spend/wave rollup the header strip shows. Cost is read from
+# `llm_calls` by the lane, never forecast here. Answers store_ready=false instead of
+# failing when the migration is not applied. The whole program is shadow mode: the
+# only writer is the lane (`python -m autodedup.lane`). See autodedup/progress_sql.py
+# and docs/design/autodedup/PROGRAM.md (Q11).
+app.include_router(autodedup_router)
 # /location/* (location-quality dashboard + operator corrections) — the consumer
 # of `listing_location`, the location program's one answer table (mig 501),
 # admin-gated (require_admin). Reads via toolkit/location_quality.py; the

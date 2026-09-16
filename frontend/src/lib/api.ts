@@ -3397,3 +3397,82 @@ export const adminSetEntitlement = (
     json: body,
     jwt: true,
   });
+
+/* ------------------------------------------------------------- AUTODEDUP */
+
+/* The autonomous cross-portal dedup engine's progress ledger
+ * (docs/design/autodedup/PROGRAM.md §12/§13). One row per ITERATION — a unit of
+ * work the operator can read as a story — written by the lane itself into
+ * `autodedup.iterations`. That schema is unreachable from the browser (the
+ * Supabase client is pinned to `public`), so both reads below go through the
+ * admin-gated API: `api/routes/autodedup.py`, the shape of which these types
+ * mirror field for field.
+ *
+ * `cost_usd` is READ BACK from `llm_calls` by the lane, never forecast (E32). */
+export interface AutodedupIteration {
+  id: number;
+  wave: string;
+  title: string;
+  status: 'running' | 'done' | 'failed' | 'skipped';
+  approach: string | null;
+  tools: string[];
+  sample_stats: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  cost_usd: number | null;
+  /* `artifacts jsonb` carries no shape constraint (migration 528), so the type
+   * must not promise one: the render site filters for http(s) strings. */
+  artifacts: Record<string, unknown> | null;
+  run_id: number | null;
+  notes: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+}
+
+/* Keyset page, newest first: `next_after_id` is the last id of this page and is
+ * null on the final one. `data` is null — and `store_ready` false — until
+ * migration 528 is applied, so the page renders an empty state instead of
+ * failing (the `new_dedup_candidates` posture). */
+export interface AutodedupIterationPage {
+  store_ready: boolean;
+  data: {
+    items: AutodedupIteration[];
+    has_more: boolean;
+    next_after_id: number | null;
+  } | null;
+}
+
+/* Per-wave rollup, ordered by the wave's most recent iteration. `last_status`
+ * is the status of that newest iteration, not an aggregate. */
+export interface AutodedupWaveRollup {
+  wave: string;
+  n: number;
+  last_status: string | null;
+  cost_usd: number;
+}
+
+/* The header strip. Every figure is summed from the same per-wave rollup the
+ * `waves` list carries, so the headline and the breakdown cannot disagree. */
+export interface AutodedupStats {
+  n_iterations: number;
+  total_cost_usd: number;
+  last_iteration_at: string | null;
+  waves: AutodedupWaveRollup[];
+}
+
+export const getAutodedupIterations = (q?: {
+  limit?: number | null;
+  after?: number | null;
+}): Promise<AutodedupIterationPage> =>
+  request<AutodedupIterationPage>('/autodedup/iterations', {
+    query: { limit: q?.limit ?? null, after: q?.after ?? null },
+    jwt: true,
+  });
+
+export const getAutodedupStats = (): Promise<{
+  store_ready: boolean;
+  data: AutodedupStats | null;
+}> =>
+  request<{ store_ready: boolean; data: AutodedupStats | null }>('/autodedup/stats', {
+    jwt: true,
+  });
