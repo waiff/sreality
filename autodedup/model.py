@@ -9,6 +9,7 @@ carries the priors that let W2 score before a single label exists.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import dataclass, field
@@ -20,6 +21,20 @@ Feats = Mapping[str, tuple[float, bool]]
 
 MODEL_KIND: str = "autodedup.logistic"
 MODEL_FORMAT: int = 1
+
+# How many hex characters of the feature-order digest a stamp carries. Short enough to read in a
+# report, long enough that two different 45-name orders do not collide by accident.
+FEATURE_DIGEST_CHARS: int = 16
+
+
+def feature_order_digest(feature_order: Sequence[str], chars: int = FEATURE_DIGEST_CHARS) -> str:
+    """An identity for the feature VOCABULARY a model was fitted against.
+
+    A feature added after a fit reads as absent in every stored row, so a model loaded against a
+    changed order scores a different function than the one that was measured. The stamp turns
+    that from a silent drift into a load-time error."""
+    digest = hashlib.sha256("\n".join(str(name) for name in feature_order).encode("utf-8"))
+    return digest.hexdigest()[:chars]
 
 # The calibration map is piecewise LINEAR between bin anchors, not a step per bin: E33 processes
 # cluster edges in descending confidence and E25 moves T_lo to buy band width, and both need an
@@ -41,6 +56,30 @@ IRLS_MAX_HALVINGS: int = 40
 
 # A design column whose train-fold range is under this is constant: not identified, and dropped.
 CONSTANT_COLUMN_EPS: float = 1e-12
+
+# Calibration has two shapes (E21). Isotonic-over-bins is free to bend anywhere and is the right
+# map when the miscalibration is local; Platt is one sigmoid over the log-odds — two parameters,
+# so it survives a thin validation fold that isotonic would overfit bin by bin. Which one is used
+# is a MEASURED choice (validation ECE), never a default, and the chosen name travels on the
+# artifact so a scored row can say which map produced its probability.
+# `isotonic` pools EQUAL-WIDTH bins, so its top knot is the rate of however many deciles PAV
+# pooled together and no cut above it exists; `isotonic_pav` runs the same regression over the
+# distinct scores themselves, which is the map that can still separate the merge end. Both are
+# offered because the bake-off, not this list, decides which one a fold supports.
+CALIBRATION_METHODS: tuple[str, ...] = ("isotonic", "isotonic_pav", "platt")
+
+# Platt is stored as KNOTS on this z-grid rather than as (a, b): one calibration code path
+# (`apply_calibration`) keeps the JSON artifact self-describing and makes an isotonic and a Platt
+# model interchangeable everywhere downstream. The grid is uniform in LOG-ODDS, so the anchors
+# crowd exactly where a probability moves fastest and the piecewise-linear reading of the sigmoid
+# is tight (max abs error < 1e-3 at this spacing).
+PLATT_GRID_Z: float = 12.0
+PLATT_GRID_POINTS: int = 97
+
+# Platt's own target smoothing: a validation fold whose high bin is all-positive is separable, and
+# an unsmoothed fit answers with an infinite slope. (N+ + 1)/(N+ + 2) is Platt (1999) §2.2.
+PLATT_MAX_ITER: int = 100
+PLATT_TOLERANCE: float = 1e-10
 
 
 def sigmoid(z: float) -> float:
@@ -74,27 +113,105 @@ def auc(scores: Sequence[float], labels: Sequence[int]) -> float:
 
 
 def expected_calibration_error(
-    probs: Sequence[float], labels: Sequence[int], bins: int = 10
+    probs: Sequence[float],
+    labels: Sequence[int],
+    bins: int = 10,
+    weights: Sequence[float] | None = None,
 ) -> float:
-    total = len(probs)
-    if total == 0:
-        return 0.0
+    """Binned |predicted - observed|, optionally over DESIGN weights rather than head counts.
+
+    An unweighted ECE on a band-enriched judge sample describes the sample; the precision target
+    it is compared against is a cohort rate, so the two are only the same number when the draw
+    was uniform."""
+    total_mass = 0.0
+    masses = [1.0] * len(probs) if weights is None else [float(w) for w in weights]
+    if len(masses) != len(probs):
+        raise ValueError(f"length mismatch: {len(probs)} probs vs {len(masses)} weights")
     sums = [0.0] * bins
     hits = [0.0] * bins
-    counts = [0] * bins
-    for prob, label in zip(probs, labels):
+    counts = [0.0] * bins
+    for prob, label, mass in zip(probs, labels, masses):
         slot = min(bins - 1, max(0, int(prob * bins)))
-        sums[slot] += prob
-        hits[slot] += 1.0 if label > 0 else 0.0
-        counts[slot] += 1
+        sums[slot] += mass * prob
+        hits[slot] += mass * (1.0 if label > 0 else 0.0)
+        counts[slot] += mass
+        total_mass += mass
+    if total_mass <= 0.0:
+        return 0.0
     error = 0.0
     for slot in range(bins):
-        if counts[slot] == 0:
+        if counts[slot] <= 0.0:
             continue
         mean_prob = sums[slot] / counts[slot]
         rate = hits[slot] / counts[slot]
-        error += (counts[slot] / total) * abs(rate - mean_prob)
+        error += (counts[slot] / total_mass) * abs(rate - mean_prob)
     return error
+
+
+def _logit(probability: float, eps: float = 1e-12) -> float:
+    clipped = min(1.0 - eps, max(eps, probability))
+    return math.log(clipped / (1.0 - clipped))
+
+
+def _platt_coefficients(
+    probs: Sequence[float], labels: Sequence[int], weights: Sequence[float] | None = None
+) -> tuple[float, float]:
+    """Fit `sigmoid(a * logit(p) + b)` by Newton with Platt's smoothed targets.
+
+    Two parameters, so the map cannot chase a single lucky bin — which is the whole reason it is
+    offered beside isotonic on a validation fold of ~150 rows."""
+    masses = [1.0] * len(probs) if weights is None else [float(w) for w in weights]
+    if len(masses) != len(probs) or len(labels) != len(probs):
+        raise ValueError("platt fit needs one label and one weight per probability")
+    positives = sum(mass for mass, label in zip(masses, labels) if label > 0)
+    negatives = sum(masses) - positives
+    hi = (positives + 1.0) / (positives + 2.0) if positives > 0 else 1.0 / 2.0
+    lo = 1.0 / (negatives + 2.0) if negatives > 0 else 1.0 / 2.0
+    zs = [_logit(prob) for prob in probs]
+    targets = [hi if label > 0 else lo for label in labels]
+    a, b = 1.0, 0.0
+    for _ in range(PLATT_MAX_ITER):
+        g_a = g_b = h_aa = h_ab = h_bb = 0.0
+        for z, target, mass in zip(zs, targets, masses):
+            fitted = sigmoid(a * z + b)
+            residual = mass * (fitted - target)
+            curvature = mass * fitted * (1.0 - fitted)
+            g_a += residual * z
+            g_b += residual
+            h_aa += curvature * z * z
+            h_ab += curvature * z
+            h_bb += curvature
+        # A ridge that is small against the curvature keeps the 2x2 solvable when every z is equal
+        # (a constant score column) without moving a well-posed fit.
+        h_aa += 1e-9
+        h_bb += 1e-9
+        determinant = h_aa * h_bb - h_ab * h_ab
+        if abs(determinant) < 1e-18:
+            break
+        step_a = (h_bb * g_a - h_ab * g_b) / determinant
+        step_b = (h_aa * g_b - h_ab * g_a) / determinant
+        a -= step_a
+        b -= step_b
+        if max(abs(step_a), abs(step_b)) <= PLATT_TOLERANCE:
+            break
+    return a, b
+
+
+def _platt_knots(a: float, b: float) -> list[tuple[float, float]]:
+    """The fitted sigmoid sampled on the log-odds grid, as strictly increasing `(anchor, rate)`.
+
+    A negative slope would make the map non-monotone, which no downstream ordering survives: the
+    fit is refused rather than stored, and the caller falls back to the identity."""
+    step = (2.0 * PLATT_GRID_Z) / (PLATT_GRID_POINTS - 1)
+    knots: list[tuple[float, float]] = []
+    for index in range(PLATT_GRID_POINTS):
+        z = -PLATT_GRID_Z + index * step
+        anchor = sigmoid(z)
+        value = sigmoid(a * z + b)
+        if knots and anchor <= knots[-1][0]:
+            anchor = knots[-1][0] + 1e-12
+        knots.append((anchor, value))
+    return knots
 
 
 def _pool_adjacent_violators(
@@ -127,6 +244,35 @@ def _pool_adjacent_violators(
     for value, size in zip(values, sizes):
         out.extend([value] * size)
     return out
+
+
+def _isotonic_observation_knots(
+    probs: Sequence[float], labels: Sequence[int], weights: Sequence[float] | None = None
+) -> list[tuple[float, float]]:
+    """PAV over the DISTINCT scores, not over fixed-width bins (the `isotonic_pav` map).
+
+    Ten equal-width bins pool the whole upper tail into one knot, so the map's ceiling is the
+    rate of that pool and a T_hi above it is unreachable by construction. Aggregating by distinct
+    score first keeps ties on one anchor (two rows at one score cannot be ordered by evidence
+    they do not have) and leaves the regression free to hold a purer sub-population at the top."""
+    masses = [1.0] * len(probs) if weights is None else [float(w) for w in weights]
+    if len(masses) != len(probs) or len(labels) != len(probs):
+        raise ValueError("isotonic fit needs one label and one weight per probability")
+    aggregated: dict[float, list[float]] = {}
+    for prob, label, mass in zip(probs, labels, masses):
+        entry = aggregated.setdefault(float(prob), [0.0, 0.0])
+        entry[0] += mass * (1.0 if label > 0 else 0.0)
+        entry[1] += mass
+    anchors = sorted(aggregated)
+    if not anchors:
+        return []
+    rates = [
+        (aggregated[anchor][0] / aggregated[anchor][1]) if aggregated[anchor][1] > 0.0 else 0.0
+        for anchor in anchors
+    ]
+    block_masses = [aggregated[anchor][1] for anchor in anchors]
+    smoothed = _pool_adjacent_violators(rates, block_masses)
+    return [(anchor, value) for anchor, value in zip(anchors, smoothed)]
 
 
 # IRLS solves a (d x d) symmetric system per Newton step; d is ~100 here, so a dense stdlib
@@ -261,10 +407,16 @@ class LogisticModel:
     intercept: float
     interactions: list[tuple[str, str, float]] = field(default_factory=list)
     calibration: list[tuple[float, float]] | None = None
+    calibration_kind: str | None = None
     means: dict[str, float] = field(default_factory=dict)
     scales: dict[str, float] = field(default_factory=dict)
     version: str = "hand_v1"
     fit_report: dict[str, float] = field(default_factory=dict)
+    # Where this model came from: the split seal it was fitted on, the judgement files and counts
+    # behind its labels, the feature-order digest. Carried ON the dataclass so `to_json` emits it
+    # and `from_json` can CHECK it — a stamp that only lives in a hand-edited file is a claim, not
+    # a guard.
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.feature_order = tuple(self.feature_order)
@@ -637,6 +789,7 @@ class LogisticModel:
             for slot, (left, right, _) in enumerate(self.interactions)
         ]
         self.calibration = None
+        self.calibration_kind = None
         return {
             "terms": width,
             "terms_identified": size,
@@ -647,40 +800,83 @@ class LogisticModel:
         }
 
     def calibrate(
-        self, probs: Sequence[float], labels: Sequence[int], bins: int = 10
+        self,
+        probs: Sequence[float],
+        labels: Sequence[int],
+        bins: int = 10,
+        method: str = "isotonic",
+        weights: Sequence[float] | None = None,
     ) -> float:
-        """Store the isotonic-over-bins KNOTS and return the PRE-calibration 10-bin ECE (E21).
+        """Store the calibration KNOTS and return the PRE-calibration 10-bin ECE (E21).
 
-        A knot is `(mean predicted probability in the bin, isotonic rate)`; `apply_calibration`
-        interpolates between knots, so the map is monotone without being a step function."""
+        `isotonic` bins the fold and pools adjacent violators: a knot is `(mean predicted
+        probability in the bin, isotonic rate)`. `isotonic_pav` runs the same regression over the
+        distinct scores, so the top of the map is not pinned to a pooled decile. `platt` fits one
+        sigmoid over the log-odds and samples it onto the same knot representation, so
+        `apply_calibration` — and every reader of the artifact — has exactly one code path
+        whichever map won the ECE bake-off.
+
+        `weights` are the DESIGN weights of the fold: a map fitted on head counts describes the
+        draw, and the rate it is later compared against is the cohort's."""
         if len(probs) != len(labels):
             raise ValueError(f"length mismatch: {len(probs)} probs vs {len(labels)} labels")
-        error = expected_calibration_error(probs, labels, bins)
-        counts = [0] * bins
+        if method not in CALIBRATION_METHODS:
+            raise ValueError(
+                f"unknown calibration method {method!r}, "
+                f"expected one of {sorted(CALIBRATION_METHODS)}"
+            )
+        masses = None if weights is None else [float(value) for value in weights]
+        if masses is not None and len(masses) != len(probs):
+            raise ValueError(f"length mismatch: {len(probs)} probs vs {len(masses)} weights")
+        error = expected_calibration_error(probs, labels, bins, masses)
+        if method == "isotonic_pav":
+            knots = _isotonic_observation_knots(probs, labels, masses)
+            self.calibration = knots or None
+            self.calibration_kind = "isotonic_pav" if knots else None
+            return error
+        if method == "platt":
+            if not probs:
+                self.calibration = None
+                self.calibration_kind = None
+                return error
+            a, b = _platt_coefficients(probs, labels, masses)
+            if not (a > 0.0) or not math.isfinite(a) or not math.isfinite(b):
+                # A non-positive slope inverts the ranking; refuse it and stay uncalibrated
+                # rather than ship a map that re-orders the merge queue.
+                self.calibration = None
+                self.calibration_kind = None
+                return error
+            self.calibration = _platt_knots(a, b)
+            self.calibration_kind = "platt"
+            return error
+        counts = [0.0] * bins
         hits = [0.0] * bins
         sums = [0.0] * bins
-        for prob, label in zip(probs, labels):
+        for index, (prob, label) in enumerate(zip(probs, labels)):
+            mass = 1.0 if masses is None else masses[index]
             slot = min(bins - 1, max(0, int(prob * bins)))
-            counts[slot] += 1
-            sums[slot] += prob
-            hits[slot] += 1.0 if label > 0 else 0.0
+            counts[slot] += mass
+            sums[slot] += mass * prob
+            hits[slot] += mass * (1.0 if label > 0 else 0.0)
         anchors: list[float] = []
         rates: list[float] = []
-        masses: list[float] = []
+        bin_masses: list[float] = []
         for slot in range(bins):
-            if counts[slot] == 0:
+            if counts[slot] <= 0.0:
                 continue
             anchor = sums[slot] / counts[slot]
             if anchors and anchor <= anchors[-1]:
                 anchor = anchors[-1] + 1e-9
             anchors.append(anchor)
             rates.append(hits[slot] / counts[slot])
-            masses.append(float(counts[slot]))
+            bin_masses.append(counts[slot])
         if not anchors:
             self.calibration = None
+            self.calibration_kind = None
             return error
-        smoothed = _pool_adjacent_violators(rates, masses)
+        smoothed = _pool_adjacent_violators(rates, bin_masses)
         self.calibration = [(anchor, value) for anchor, value in zip(anchors, smoothed)]
+        self.calibration_kind = "isotonic"
         return error
 
     def to_json(self) -> dict[str, Any]:
@@ -696,16 +892,23 @@ class LogisticModel:
             "calibration": (
                 [[edge, value] for edge, value in self.calibration] if self.calibration else None
             ),
+            "calibration_kind": self.calibration_kind,
             "means": dict(self.means),
             "scales": dict(self.scales),
             "fit_report": dict(self.fit_report),
+            **({"provenance": dict(self.provenance)} if self.provenance else {}),
         }
 
+    def feature_digest(self) -> str:
+        return feature_order_digest(self.feature_order)
+
     @classmethod
-    def from_json(cls, payload: Mapping[str, Any] | str) -> "LogisticModel":
+    def from_json(
+        cls, payload: Mapping[str, Any] | str, *, strict: bool = True
+    ) -> "LogisticModel":
         data = json.loads(payload) if isinstance(payload, str) else payload
         calibration = data.get("calibration")
-        return cls(
+        model = cls(
             feature_order=tuple(data["feature_order"]),
             weights={str(k): float(v) for k, v in (data.get("weights") or {}).items()},
             presence_weights={
@@ -719,11 +922,28 @@ class LogisticModel:
             calibration=(
                 [(float(item[0]), float(item[1])) for item in calibration] if calibration else None
             ),
+            calibration_kind=(
+                str(data["calibration_kind"]) if data.get("calibration_kind") else None
+            ),
             means={str(k): float(v) for k, v in (data.get("means") or {}).items()},
             scales={str(k): float(v) for k, v in (data.get("scales") or {}).items()},
             version=str(data.get("version", "hand_v1")),
             fit_report={str(k): float(v) for k, v in (data.get("fit_report") or {}).items()},
+            provenance=dict(data.get("provenance") or {}),
         )
+        if strict:
+            model.check_provenance()
+        return model
+
+    def check_provenance(self) -> None:
+        """Raise when the stamped feature vocabulary is not the one this artifact carries."""
+        stamped = (self.provenance.get("feature_version") or {}).get("sha256_16")
+        if stamped and str(stamped) != self.feature_digest():
+            raise ValueError(
+                f"model {self.version!r} was fitted against feature order {stamped}, "
+                f"but this artifact carries {self.feature_digest()} "
+                f"({len(self.feature_order)} features) — refit before scoring"
+            )
 
     @staticmethod
     def hand_initialised() -> "LogisticModel":

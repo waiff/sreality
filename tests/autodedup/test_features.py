@@ -38,6 +38,8 @@ class StubSettings:
     cluster_area_spread: float = 0.08
     max_cluster_size: int = 8
     rare_token_df: int = 2
+    vocabulary_attr_keys: tuple[str, ...] = ("price_unit", "area_basis")
+    numeral_conflict_units: tuple[str, ...] = ("floor", "rooms", "unit")
 
 
 @dataclass(slots=True)
@@ -198,6 +200,86 @@ def test_attribute_features_and_rare_agreement_weighting() -> None:
     # A rare in-block agreement (energy B, 2 of 22 rows) outweighs the common one (lift, 22/22).
     assert feats["attr_agreements_rare"][0] > feats["attr_agreements"][0]
     assert "ATTR" in ft.evidence_families(feats)
+
+
+def test_portal_vocabulary_slots_neither_agree_nor_contradict() -> None:
+    """`price_unit` differs on 55% of cross-portal TRUE duplicates and 0% of same-portal ones
+    (gold eval 2026-09-16) because sreality/bezrealitky say `celkem|mesic` where the other seven
+    portals say `za nemovitost|za mesic`. `area_basis`: 31% of cross-portal positives, 14% of
+    negatives. Neither may reach `attr_contradictions` — nor `attr_agreements`."""
+    la = listing(1, attrs={"price_unit": "celkem", "area_basis": "usable", "ownership": "osobni"})
+    lb = listing(2, attrs={"price_unit": "za nemovitost", "area_basis": "unknown",
+                           "ownership": "osobni"})
+    feats = compute(StubFingerprint(1), StubFingerprint(2), la, lb)
+    assert feats["attr_contradictions"] == (0.0, True)
+    assert feats["attr_agreements"] == (1.0, True)  # ownership alone
+    assert [key for key, _, _ in ft.attribute_conflicts(la, lb)] == []
+
+    agreeing = listing(3, attrs={"price_unit": "celkem", "area_basis": "usable",
+                                 "ownership": "osobni"})
+    same_vocabulary = compute(StubFingerprint(1), StubFingerprint(3), la, agreeing)
+    assert same_vocabulary["attr_agreements"] == (1.0, True)  # the match is not evidence either
+
+
+def test_the_vocabulary_set_is_settings_driven() -> None:
+    la = listing(1, attrs={"price_unit": "celkem", "ownership": "osobni"})
+    lb = listing(2, attrs={"price_unit": "za nemovitost", "ownership": "druzstevni"})
+    ctx = context({1: StubFingerprint(1), 2: StubFingerprint(2)}, {1: la, 2: lb})
+    kept = ft.pair_features(
+        StubFingerprint(1), StubFingerprint(2), la, lb, [], [], ctx,
+        StubSettings(vocabulary_attr_keys=()),
+    )
+    assert kept["attr_contradictions"] == (2.0, True)
+    assert [key for key, _, _ in ft.attribute_conflicts(la, lb)] == ["ownership"]
+
+
+def test_the_stored_stamp_is_the_vocabularys_own_version_not_a_second_number() -> None:
+    """`autodedup.pairs.feature_version` tells a later pass which vocabulary produced a score.
+    The lane must therefore stamp the number FEATURE_ORDER carries: a constant of its own would
+    let a 44-column v1 vector and a 45-column v2 vector land in the table under the same stamp."""
+    from autodedup import score_lane
+
+    assert score_lane.FEATURE_VERSION == ft.FEATURE_VERSION
+    assert ft.FEATURE_VERSION == 2 and len(ft.FEATURE_ORDER) == 45
+
+
+def test_a_shared_unit_number_is_its_own_feature() -> None:
+    """E45's last arm: `normalize.numeric_facts` isolates the `unit` slot, and FEATURE_ORDER
+    grew at the END only (FEATURE_VERSION 2) so a stored v1 vector still reads."""
+    assert ft.FEATURE_ORDER[-1] == "unit_number_shared"
+    assert ft.FEATURE_VERSION >= 2
+    shared = compute(
+        StubFingerprint(1, numerals={("unit", 705.0), ("m2", 64.0)}),
+        StubFingerprint(2, numerals={("unit", 705.0), ("m2", 64.0)}),
+        listing(1), listing(2),
+    )
+    assert shared["unit_number_shared"] == (1.0, True)
+    different = compute(
+        StubFingerprint(1, numerals={("unit", 705.0)}),
+        StubFingerprint(2, numerals={("unit", 706.0)}),
+        listing(1), listing(2),
+    )
+    assert different["unit_number_shared"] == (0.0, True)
+    assert different["numeral_conflict"] == (1.0, True)
+    one_sided = compute(
+        StubFingerprint(1, numerals={("unit", 705.0)}),
+        StubFingerprint(2, numerals={("m2", 64.0)}),
+        listing(1), listing(2),
+    )
+    assert one_sided["unit_number_shared"] == (0.0, False)  # unknown is never a mismatch
+
+
+def test_only_unit_level_slots_can_raise_a_numeral_conflict() -> None:
+    """Prices and areas have their own features; a Kč or m² disagreement is an E6 re-listing."""
+    fa = StubFingerprint(1, numerals={("kc", 6_900_000.0), ("m2", 78.0)})
+    fb = StubFingerprint(2, numerals={("kc", 5_400_000.0), ("m2", 92.0)})
+    assert compute(fa, fb, listing(1), listing(2))["numeral_conflict"] == (0.0, True)
+    ctx = context({1: fa, 2: fb})
+    widened = ft.pair_features(
+        fa, fb, listing(1), listing(2), [], [], ctx,
+        StubSettings(numeral_conflict_units=("floor", "rooms", "unit", "kc", "m2")),
+    )
+    assert widened["numeral_conflict"] == (1.0, True)
 
 
 def test_area_mismatch_is_a_value_not_an_absence() -> None:

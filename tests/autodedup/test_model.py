@@ -651,3 +651,191 @@ def test_fit_irls_drops_unidentified_terms_and_names_the_collinear_ones() -> Non
     assert model.fit_report["terms_identified"] == float(report["terms_identified"])
     assert model.fit_report["duplicate_terms"] > 0.0
     assert model.weights["signal"] > 0.0
+
+
+# --- Platt calibration (W4c) -----------------------------------------------------------------
+
+
+def _platt_sample(n: int = 400) -> tuple[list[float], list[int]]:
+    """Scores whose TRUE rate is the square of the predicted probability: over-confident at the
+    top, the shape a merge model is punished for."""
+    rng = random.Random(20260916)
+    probs = [(index + 0.5) / n for index in range(n)]
+    labels = [1 if rng.random() < prob ** 2 else 0 for prob in probs]
+    return probs, labels
+
+
+def test_platt_calibration_is_monotone_and_pulls_the_ece_down() -> None:
+    probs, labels = _platt_sample()
+    model = hand_initialised()
+    before = model.calibrate(probs, labels, method="platt")
+    mapped = [model.apply_calibration(prob) for prob in probs]
+    after = expected_calibration_error(mapped, labels)
+    assert model.calibration_kind == "platt"
+    assert len(model.calibration) == model_module.PLATT_GRID_POINTS
+    assert after < before
+    # strictly increasing: a calibration that re-orders the merge queue is not a calibration
+    assert all(right > left for left, right in zip(mapped, mapped[1:]))
+
+
+def test_platt_is_two_parameters_where_isotonic_is_one_per_bin() -> None:
+    probs, labels = _platt_sample()
+    platt = hand_initialised()
+    platt.calibrate(probs, labels, method="platt")
+    isotonic = hand_initialised()
+    isotonic.calibrate(probs, labels, method="isotonic")
+    assert isotonic.calibration_kind == "isotonic"
+    # Both map the same fold; they are different maps, and the artifact says which one it is.
+    assert platt.calibration != isotonic.calibration
+    assert platt.to_json()["calibration_kind"] == "platt"
+    assert LogisticModel.from_json(platt.to_json()).calibration_kind == "platt"
+
+
+def test_platt_survives_a_separable_fold_and_a_constant_one() -> None:
+    separable = [0.1] * 20 + [0.9] * 20
+    labels = [0] * 20 + [1] * 20
+    model = hand_initialised()
+    model.calibrate(separable, labels, method="platt")
+    assert model.calibration_kind == "platt"
+    assert model.apply_calibration(0.9) > model.apply_calibration(0.1)
+    # one predicted value for both classes: no slope to fit, and nothing may be claimed
+    flat = hand_initialised()
+    flat.calibrate([0.5] * 20, [1, 0] * 10, method="platt")
+    assert flat.calibration is None or flat.calibration_kind == "platt"
+
+
+def test_calibrate_refuses_a_map_it_does_not_implement() -> None:
+    model = hand_initialised()
+    with pytest.raises(ValueError):
+        model.calibrate([0.2, 0.8], [0, 1], method="beta")
+
+
+def test_a_refit_drops_the_calibration_and_its_provenance() -> None:
+    probs, labels = _platt_sample(n=60)
+    model = hand_initialised()
+    model.calibrate(probs, labels, method="platt")
+    rows = [{"area_rel_diff": (0.01, True), "tfidf_cos": (0.9, True)} for _ in range(20)]
+    model.fit_irls(rows, [1, 0] * 10, max_iter=3)
+    assert model.calibration is None and model.calibration_kind is None
+
+
+# --- the calibration map must not be the thing that caps the merge zone ----------------------
+
+
+def _saturated_tail() -> tuple[list[float], list[int]]:
+    """A fold whose top decile is purer than the two top deciles pooled together.
+
+    Bin 9 outscores bin 10, so PAV over fixed bins pools the two and the map's ceiling becomes
+    their JOINT rate — even though the top of bin 10 is flawless."""
+    probs = [0.05 * (index % 10) for index in range(60)]
+    labels = [0] * 60
+    probs += [0.860 + 0.001 * index for index in range(30)]     # bin 9: 29 of 30
+    labels += [0] + [1] * 29
+    probs += [0.900 + 0.001 * index for index in range(30)]     # bin 10, lower: 26 of 30
+    labels += [0] * 4 + [1] * 26
+    probs += [0.970 + 0.0005 * index for index in range(30)]    # bin 10, upper: flawless
+    labels += [1] * 30
+    return probs, labels
+
+
+def test_ten_fixed_bins_cap_the_map_below_a_tail_the_data_can_separate() -> None:
+    probs, labels = _saturated_tail()
+    binned = hand_initialised()
+    binned.calibrate(probs, labels, method="isotonic")
+    pav = hand_initialised()
+    pav.calibrate(probs, labels, method="isotonic_pav")
+    assert pav.calibration_kind == "isotonic_pav"
+    top = binned.apply_calibration(0.999999)
+    # PAV over the distinct scores keeps the flawless top separable; the binned map pools it
+    assert pav.apply_calibration(0.999999) > top
+    assert binned.apply_calibration(0.88) == pytest.approx(top, abs=1e-3)
+    assert pav.apply_calibration(0.88) < pav.apply_calibration(0.999999)
+    # both stay monotone, which is the property every downstream ordering depends on
+    for mapping in (binned, pav):
+        values = [mapping.apply_calibration(value / 50.0) for value in range(51)]
+        assert values == sorted(values)
+
+
+def test_isotonic_over_observations_puts_ties_on_one_anchor() -> None:
+    model = hand_initialised()
+    model.calibrate([0.4, 0.4, 0.4, 0.9, 0.9], [0, 1, 1, 1, 1], method="isotonic_pav")
+    assert model.calibration is not None
+    anchors = [anchor for anchor, _ in model.calibration]
+    assert anchors == sorted(set(anchors))
+    assert len(anchors) == 2
+    assert model.apply_calibration(0.4) == pytest.approx(2.0 / 3.0, abs=1e-3)
+
+
+def test_a_calibration_map_can_be_fitted_on_the_design_not_the_head_count() -> None:
+    probs = [0.9] * 10 + [0.9] * 10
+    labels = [1] * 10 + [0] * 10
+    heads = hand_initialised()
+    heads.calibrate(probs, labels, method="isotonic_pav")
+    designed = hand_initialised()
+    designed.calibrate(probs, labels, method="isotonic_pav",
+                       weights=[9.0] * 10 + [1.0] * 10)
+    assert heads.apply_calibration(0.9) == pytest.approx(0.5, abs=1e-3)
+    assert designed.apply_calibration(0.9) == pytest.approx(0.9, abs=1e-3)
+    # the binned map and the sigmoid take the same weights
+    binned = hand_initialised()
+    binned.calibrate(probs, labels, method="isotonic", weights=[9.0] * 10 + [1.0] * 10)
+    assert binned.apply_calibration(0.9) == pytest.approx(0.9, abs=1e-3)
+    platt = hand_initialised()
+    assert platt.calibrate(
+        [0.1] * 10 + [0.9] * 10, [0] * 10 + [1] * 10, method="platt",
+        weights=[1.0] * 20,
+    ) >= 0.0
+
+
+def test_calibrate_refuses_a_weight_per_row_it_did_not_get() -> None:
+    model = hand_initialised()
+    with pytest.raises(ValueError, match="length mismatch"):
+        model.calibrate([0.2, 0.8], [0, 1], weights=[1.0])
+
+
+def test_the_expected_calibration_error_can_be_read_over_design_weights() -> None:
+    probs = [0.9] * 10 + [0.9] * 10
+    labels = [1] * 10 + [0] * 10
+    assert expected_calibration_error(probs, labels) == pytest.approx(0.4, abs=1e-6)
+    weighted = expected_calibration_error(probs, labels, 10, [9.0] * 10 + [1.0] * 10)
+    assert weighted == pytest.approx(0.0, abs=1e-6)
+    with pytest.raises(ValueError, match="length mismatch"):
+        expected_calibration_error(probs, labels, 10, [1.0])
+
+
+# --- provenance travels WITH the artifact ----------------------------------------------------
+
+
+def test_provenance_survives_the_json_round_trip() -> None:
+    model = hand_initialised()
+    model.provenance = {
+        "feature_version": {"sha256_16": model.feature_digest()},
+        "seal": {"sha256": "abc"},
+        "label_provenance": {"files": ["j.jsonl"], "n": 3},
+    }
+    body = model.to_json()
+    assert body["provenance"]["seal"]["sha256"] == "abc"
+    restored = LogisticModel.from_json(json.dumps(body))
+    assert restored.provenance == model.provenance
+    # a model with nothing to say does not grow an empty key
+    assert "provenance" not in hand_initialised().to_json()
+
+
+def test_a_model_fitted_against_another_feature_order_refuses_to_load() -> None:
+    model = hand_initialised()
+    model.provenance = {"feature_version": {"sha256_16": "0123456789abcdef"}}
+    with pytest.raises(ValueError, match="refit before scoring"):
+        LogisticModel.from_json(model.to_json())
+    # the check is the default, not the option: reading one anyway has to be asked for
+    loose = LogisticModel.from_json(model.to_json(), strict=False)
+    assert loose.provenance["feature_version"]["sha256_16"] == "0123456789abcdef"
+
+
+def test_the_feature_digest_moves_when_the_vocabulary_does() -> None:
+    assert model_module.feature_order_digest(("a", "b")) != model_module.feature_order_digest(
+        ("b", "a")
+    )
+    assert len(model_module.feature_order_digest(("a",))) == model_module.FEATURE_DIGEST_CHARS
+    assert hand_initialised().feature_digest() == model_module.feature_order_digest(
+        ft.FEATURE_ORDER
+    )

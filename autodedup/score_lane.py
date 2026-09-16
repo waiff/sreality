@@ -35,7 +35,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
-from autodedup import harness
+from autodedup import features, harness
 from autodedup.dataset import load
 from autodedup.judge_lane import COHORT_FILE, download_cohort
 from autodedup.model import LogisticModel, hand_initialised
@@ -62,9 +62,10 @@ DEFAULT_GENERATION: str = "g1"
 CLUSTER_STATUS: str = "proposed"
 
 # `autodedup.pairs.feature_version` is a smallint stamped on every row so a later pass can tell
-# which feature vocabulary produced a score. FEATURE_ORDER has no version of its own yet, so
-# the number lives here and is bumped BY HAND when that tuple changes shape.
-FEATURE_VERSION: int = 1
+# which feature vocabulary produced a score. The number belongs to the VOCABULARY, so it is
+# imported, never restated here: a second constant would let a stored v1 vector and a v2 vector
+# carry the same stamp the day FEATURE_ORDER changes shape.
+FEATURE_VERSION: int = features.FEATURE_VERSION
 
 # One prepared plan, many rows: psycopg pipelines an executemany. The chunk bounds the
 # PARAMETER BATCH a single execute carries (a 43k-pair cohort in one call is megabytes of

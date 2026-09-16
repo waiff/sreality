@@ -55,7 +55,7 @@ from autodedup.judge_sql import (
     JUDGEMENT_POD_COST_SQL,
     JUDGEMENT_UPSERT_SQL,
 )
-from autodedup.model import hand_initialised
+from autodedup.model import LogisticModel, hand_initialised
 from autodedup.settings import Settings
 from toolkit.vision_batch import is_fatal
 
@@ -144,6 +144,16 @@ SUMMARY_FILE: str = "judge.json"
 
 _JUDGE: Any = None
 
+def load_engine_model(raw: str | None) -> LogisticModel:
+    """`model=<name>` under autodedup/models/ scores the cohort; absent = the hand prior."""
+    if not raw:
+        return hand_initialised()
+    from autodedup.score_lane import MODELS_DIR, repo_path
+
+    path = repo_path(raw, MODELS_DIR)
+    return LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
+
+
 
 def judge_module() -> Any:
     """`autodedup.judge`, imported on first use so the lane registry never depends on it."""
@@ -175,6 +185,10 @@ class JudgeArgs:
     oss_gpu: str | None
     oss_s_per_pair: float
     pairs_from: str | None
+    # The engine row the lane scores AND digests with. One row, or the prompt describes a
+    # different engine than the one that drew the sample.
+    settings: str | None
+    model: str | None
 
 
 def _int_arg(args: dict[str, str], name: str, default: int) -> int:
@@ -268,6 +282,8 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         oss_gpu=(args.get("oss_gpu") or "").strip() or None,
         oss_s_per_pair=_float_arg(args, "oss_s_per_pair", OSS_EST_S_PER_PAIR),
         pairs_from=pairs_from,
+        settings=(args.get("settings") or "").strip() or None,
+        model=(args.get("model") or "").strip() or None,
     )
 
 
@@ -863,7 +879,8 @@ def run_judge(
         raise SystemExit(f"no cohort artifact at {cohort_path}")
 
     dataset = load(cohort_path)
-    engine = harness.run_engine(dataset, Settings(), hand_initialised(), out_dir)
+    settings = Settings.from_json(parsed.settings) if parsed.settings else Settings()
+    engine = harness.run_engine(dataset, settings, load_engine_model(parsed.model), out_dir)
     (out_dir / RUN_FILE).write_text(
         json.dumps(engine, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -964,7 +981,7 @@ def run_judge(
 
     if parsed.dry_run:
         summary.update(counters.to_json())
-        summary["estimate"] = _estimate(judge, dataset, jobs, parsed)
+        summary["estimate"] = _estimate(judge, dataset, jobs, parsed, settings)
         summary["spent_usd"] = 0.0
         summary["budget_stopped"] = False
         summary["elapsed_s"] = round(time.monotonic() - started, 2)
@@ -1049,7 +1066,7 @@ def run_judge(
                 started=pod_started,
             )
         _dispatch(judge, dataset, jobs, parsed, judge_version, budget, counters,
-                  conn_factory, out_dir, client_factory)
+                  conn_factory, out_dir, client_factory, settings)
     finally:
         if pod is not None:
             try:
@@ -1166,7 +1183,7 @@ def _close(conn: Any) -> None:
 
 
 def _estimate(judge: Any, dataset: Any, jobs: list[PairJob],
-              parsed: JudgeArgs) -> dict[str, Any]:
+              parsed: JudgeArgs, settings: Settings | None = None) -> dict[str, Any]:
     """`dry_run=1`: build every prompt, count what it would cost, call nothing."""
     chars = 0
     images = 0
@@ -1174,7 +1191,7 @@ def _estimate(judge: Any, dataset: Any, jobs: list[PairJob],
     cost = 0.0
     for job in jobs:
         la, lb = dataset.listings[job.lo], dataset.listings[job.hi]
-        digests, evidence = _inputs(judge, job, la, lb)
+        digests, evidence = _inputs(judge, job, la, lb, settings)
         for vote in job.votes:
             calls += 1
             cost += vote.est_usd
@@ -1236,14 +1253,21 @@ def pin_distance_m(la: Listing, lb: Listing) -> float | None:
     return haversine_m(float(a.lat), float(a.lon), float(b.lat), float(b.lon))
 
 
-def _inputs(judge: Any, job: PairJob, la: Listing, lb: Listing) -> tuple[Any, str]:
+def _inputs(
+    judge: Any, job: PairJob, la: Listing, lb: Listing, settings: Settings | None = None
+) -> tuple[Any, str]:
+    """The prompt's view of the pair, built through the SAME settings row the engine ran.
+
+    `attribute_conflicts` reads `vocabulary_attr_keys`: a slot the engine refuses to count must
+    not be listed to the judge as a conflict either, or the labels come back arguing against a
+    contradiction the engine never raised."""
     digests = (judge.listing_digest(scrubbed(la)), judge.listing_digest(scrubbed(lb)))
     evidence = judge.evidence_digest(
         feats_of(job.row),
         job.row.get("probes") or [],
         job.row.get("families") or [],
         job.row.get("block"),
-        attr_conflicts=attribute_conflicts(la, lb),
+        attr_conflicts=attribute_conflicts(la, lb, settings=settings),
         distance_m=pin_distance_m(la, lb),
         pins=(pin_of(judge, la), pin_of(judge, lb)),
     )
@@ -1261,6 +1285,7 @@ def _dispatch(
     conn_factory: Callable[[], Any],
     out_dir: Path,
     client_factory: Callable[[Any], Any] = None,  # type: ignore[assignment]
+    settings: Settings | None = None,
 ) -> None:
     client_factory = client_factory or llm_client
     work: queue.Queue = queue.Queue()
@@ -1291,7 +1316,7 @@ def _dispatch(
                     return
                 try:
                     _run_job(judge, dataset, job, parsed, judge_version, budget, counters,
-                             conn, client, r2, stats_lock, _emit)
+                             conn, client, r2, stats_lock, _emit, settings)
                 except Exception as exc:  # noqa: BLE001 — see below
                     # Everything outside the call itself lives here too: a digest, an image
                     # selection, a JSONL write. Unguarded, one malformed listing kills the
@@ -1334,9 +1359,10 @@ def _run_job(
     r2: Any,
     lock: threading.Lock,
     emit: Callable[[dict[str, Any]], None],
+    settings: Settings | None = None,
 ) -> None:
     la, lb = dataset.listings[job.lo], dataset.listings[job.hi]
-    digests, evidence = _inputs(judge, job, la, lb)
+    digests, evidence = _inputs(judge, job, la, lb, settings)
     votes: list[Any] = []
     used: list[Vote] = []
     results: list[dict[str, Any]] = []

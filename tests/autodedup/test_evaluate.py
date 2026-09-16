@@ -16,6 +16,7 @@ import pytest
 from autodedup import evaluate as ev
 from autodedup import harness
 from autodedup.labels import Label, Sample, Stratum
+from autodedup.model import LogisticModel, hand_initialised
 from autodedup.settings import Settings
 
 # The W3 fake-judge outputs live in the session scratchpad, not in the repo: the smoke test runs
@@ -39,6 +40,10 @@ def pair_row(
     cross: bool = True,
     **feats: float,
 ) -> dict[str, Any]:
+    # E45 is a gate on the pair, not on the cut: a fixture row with no unit-grade evidence can
+    # never enter the merge zone, so a threshold test built on one would measure an empty merge
+    # set. The default carries the cheapest arm (rare tokens); a test about the gate overrides it.
+    feats.setdefault("rare_token_overlap", 3.0)
     return {
         "lo": lo,
         "hi": hi,
@@ -689,12 +694,27 @@ def test_certificate_pairs_are_counted_in_the_merge_set_they_actually_enter() ->
     assert report.n_certificate_in_merge_set == 20
 
 
-def test_a_blocked_positive_is_spent_against_the_recall_budget_first() -> None:
-    rows = [scored(0.9, 1) for _ in range(96)] + [scored(0.01, 1, blocked=True) for _ in range(4)]
+def test_a_discarded_positive_is_spent_against_the_recall_budget_first() -> None:
+    rows = [scored(0.9, 1) for _ in range(96)] + [
+        scored(0.01, 1, blocked=True, discarded=True) for _ in range(4)
+    ]
     report = ev.thresholds(rows)
     assert report.weight_positive_unavoidable == pytest.approx(4.0)
     assert report.missed_share_at_t_lo == pytest.approx(0.04)  # already over budget at T_lo=0
     assert report.t_lo == 0.0
+
+
+def test_a_positive_the_merge_zone_gate_demoted_is_banded_not_lost() -> None:
+    # E45/E46 and E11 demote to the BAND: the operator still sees the pair, so it is not spent
+    # against recall — and T_lo still decides whether it reaches the queue at all.
+    banded = [scored(0.9, 1, blocked=True) for _ in range(20)]
+    report = ev.thresholds([scored(0.99, 1) for _ in range(80)] + banded)
+    assert report.weight_positive_unavoidable == 0.0
+    assert report.missed_share_at_t_lo == 0.0
+    # drop them below T_lo and they ARE lost, which is the cost the dial is supposed to price
+    low = [scored(0.01, 1, blocked=True) for _ in range(20)]
+    dropped = ev.thresholds([scored(0.99, 1) for _ in range(80)] + low, store_floor=0.5)
+    assert dropped.missed_share_at_t_lo == pytest.approx(0.2)
 
 
 def test_t_lo_is_clamped_up_to_the_store_floor_and_says_so() -> None:
@@ -1105,3 +1125,511 @@ def test_an_explicit_sample_that_does_not_match_its_judgements_is_fatal(tmp_path
         ["fit", str(run_dir), "--judgements", str(judgements), "--sample", str(bad),
          "--out", str(tmp_path / "fit")], out=io.StringIO()
     ) == 1
+
+
+# --- W4c: the l2 sweep, the calibration bake-off, and per-stratum thresholds -------------------
+
+
+def test_the_l2_sweep_reports_every_penalty_and_keeps_the_best_validation_log_loss() -> None:
+    rows, labels = planted_rows(n=400)
+    model, report = ev.fit_model(rows, labels, l2_grid=(0.001, 0.03, 0.3))
+    sweep = report.sections["l2_grid"]
+    assert [row["l2"] for row in sweep["rows"]] == [0.001, 0.03, 0.3]
+    assert sweep["chosen"] == min(sweep["rows"], key=lambda row: row["selection_log_loss"])["l2"]
+    assert sweep["selected_on"] == "validation"
+    # the penalty that was actually fitted is the one the convergence section reports
+    assert report.sections["convergence"]["l2"] == sweep["chosen"]
+    assert f"l2={sweep['chosen']:g}" in "\n".join(report.headline())
+    assert model.fit_report["converged"] == 1.0
+
+
+def test_the_l2_sweep_breaks_a_tie_towards_the_stiffer_penalty() -> None:
+    rows, labels = planted_rows(n=120)
+    # one penalty, twice: identical fits, so the tie-break is the only thing that can decide
+    _, report = ev.fit_model(rows, labels, l2_grid=(0.01, 0.01))
+    assert report.sections["l2_grid"]["grid"] == [0.01]
+    _, wider = ev.fit_model(rows, labels, l2_grid=(0.01, 0.02))
+    rows_out = {row["l2"]: row["selection_log_loss"] for row in wider.sections["l2_grid"]["rows"]}
+    if rows_out[0.01] == rows_out[0.02]:
+        assert wider.sections["l2_grid"]["chosen"] == 0.02
+
+
+def test_no_grid_means_no_sweep_and_the_caller_s_penalty_stands() -> None:
+    rows, labels = planted_rows(n=120)
+    _, report = ev.fit_model(rows, labels, l2=0.05)
+    assert report.sections["l2_grid"]["rows"] == []
+    assert report.sections["l2_grid"]["chosen"] == 0.05
+    assert report.sections["convergence"]["l2"] == 0.05
+
+
+def test_the_calibration_map_is_chosen_out_of_fold_not_in_sample() -> None:
+    rows, labels = planted_rows(n=400)
+    _, report = ev.fit_model(rows, labels)
+    calibration = report.sections["calibration"]
+    assert calibration["method"] in ev.CALIBRATION_METHODS
+    assert calibration["selected_by"] == "out-of-fold validation ECE (design-weighted)"
+    candidates = calibration["candidates"]
+    assert set(candidates) == set(ev.CALIBRATION_METHODS)
+    scored = {name: body["ece"] for name, body in candidates.items() if body["ece"] is not None}
+    assert calibration["method"] == min(scored, key=lambda name: scored[name])
+    # every out-of-fold prediction came from a map fitted without it
+    for body in candidates.values():
+        assert body["n_out_of_fold"] + body["n_skipped"] == report.sections[
+            "validation_metrics"]["n"]
+    assert "out-of-fold" in "\n".join(report.headline())
+
+
+def test_a_named_calibration_map_is_used_without_a_bake_off() -> None:
+    rows, labels = planted_rows(n=200)
+    model, report = ev.fit_model(rows, labels, calibration="platt")
+    assert report.sections["calibration"]["method"] == "platt"
+    assert report.sections["calibration"]["selected_by"] == "caller"
+    assert model.calibration_kind == "platt"
+    with pytest.raises(ValueError):
+        ev.fit_model(rows, labels, calibration="beta")
+
+
+def test_the_sealed_test_ece_is_the_one_the_gate_reads() -> None:
+    rows, labels = planted_rows(n=400)
+    _, report = ev.fit_model(rows, labels)
+    calibration = report.sections["calibration"]
+    # the in-sample number is published too, and never as the gate
+    assert calibration["test_ece"] == report.sections["test_metrics"]["ece"]
+    assert calibration["ece_gate_ok"] == (calibration["test_ece"] <= 0.05)
+    assert calibration["post_calibration_ece_validation_in_sample"] == report.sections[
+        "validation_metrics"]["ece"]
+
+
+def test_resimulate_calls_the_live_decide_instead_of_re_implementing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+    original = ev.decide.decide_pair
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append("called")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ev.decide, "decide_pair", spy)
+    row = pair_row(1, 2, zone="merge", score=0.99, area_rel_diff=0.0, tfidf_cos=0.95)
+    ev.resimulate(row, hand_initialised(), Settings())
+    assert seen == ["called"]
+
+
+def test_resimulate_replays_the_two_facts_a_stored_row_cannot_recompute() -> None:
+    model, settings = hand_initialised(), Settings()
+    vetoed = pair_row(1, 2, zone="reject")
+    vetoed["veto"] = "area"
+    decision = ev.resimulate(vetoed, model, settings)
+    assert decision.zone == "veto" and decision.veto == "area"
+    # K-B's disjoint-window clause is the one certificate input the row omits, so it is replayed
+    certified = pair_row(3, 4, zone="merge", certificate="K-B", same_source=1.0,
+                         same_broker_key=1.0, containment_max=0.99, area_rel_diff=0.0,
+                         tfidf_cos=0.98, phash_match_ratio=0.9)
+    assert ev.decide.disjoint_windows(
+        ev._SimSide(3, ev.OVERLAPPING_WINDOW), ev._SimSide(4, ev.DISJOINT_WINDOW)
+    ) is True
+    assert ev.resimulate(certified, model, settings).certificate == "K-B"
+
+
+def test_rescoring_a_run_moves_the_zone_with_the_model() -> None:
+    rows = [pair_row(1, 2, zone="merge", score=0.99, area_rel_diff=0.0, tfidf_cos=0.95,
+                     containment_max=0.95, phash_match_ratio=0.9)]
+    blind = LogisticModel(feature_order=("tfidf_cos",), weights={"tfidf_cos": 0.0},
+                          presence_weights={}, intercept=-20.0)
+    rescored = ev.rescore_rows(rows, blind, Settings())
+    assert rescored[0]["score"] < 0.01
+    assert rescored[0]["zone"] in {"reject", "band"}
+    assert rescored[0]["lo"] == 1 and rescored[0]["hi"] == 2  # the pair identity is untouched
+
+
+def test_the_decide_stratum_is_the_layer_crossed_with_the_source_side() -> None:
+    assert ev.decide_stratum(pair_row(1, 2, certificate="K-B", cross=False)) == "K-B|same"
+    assert ev.decide_stratum(pair_row(1, 2, cross=True)) == "model|cross"
+
+
+def test_a_perfect_stratum_still_needs_three_hundred_and_eighty_one_judged_merges() -> None:
+    assert ev.labels_needed_for_lb(0.99) == 381
+    assert ev.wilson_lower(380, 380) < 0.99 <= ev.wilson_lower(381, 381)
+    assert ev.labels_needed_for_lb(0.97) < ev.labels_needed_for_lb(0.99)
+    with pytest.raises(ValueError):
+        ev.labels_needed_for_lb(1.0)
+
+
+def in_cell(score: float, y: int, cell: str, split: str = "train",
+            certificate: str | None = None) -> ev.ScoredRow:
+    return ev.ScoredRow(score=score, y=y, weight=1.0, stratum=cell, cell=cell,
+                        certificate=certificate, split=split)
+
+
+def test_a_stratum_that_cannot_prove_the_bar_ships_propose_only_and_says_why() -> None:
+    # 500 flawless judged merges: enough labels AND enough precision, so this one ships
+    dev = [in_cell(0.99, 1, "model|cross") for _ in range(500)]
+    # a certificate cell that merges wrong pairs at every cut: a precision problem, not a budget
+    dev += [in_cell(0.1, y, "K-C|cross", certificate="K-C") for y in [1] * 90 + [0] * 10]
+    # a flawless but thin cell: the bar is out of reach of the SAMPLE, whatever the model does
+    dev += [in_cell(0.99, 1, "model|same") for _ in range(30)]
+    sealed = [in_cell(0.99, 1, "model|cross", split="test") for _ in range(20)]
+    body = ev.stratum_thresholds(dev, sealed)
+    strata = body["strata"]
+    assert strata["model|cross"]["t_hi"] == pytest.approx(0.99)
+    assert strata["model|cross"]["propose_only"] is False
+    assert strata["model|same"]["propose_only"] is True
+    assert strata["model|same"]["propose_only_reason"] == "sample"
+    assert strata["K-C|cross"]["propose_only_reason"] == "precision"
+    assert strata["K-C|cross"]["n_certificate_merges"] == 100
+    assert strata["K-C|cross"]["precision_certificate_merges"] == pytest.approx(0.9)
+    assert body["t_hi_by_stratum"] == {"model|cross": pytest.approx(0.99),
+                                       "model|same": None, "K-C|cross": None}
+    assert body["auto_merge_strata"] == ["model|cross"]
+    # the sealed rows measure the cut; they never choose it
+    assert strata["model|cross"]["sealed_n_merge"] == 20
+    assert strata["model|cross"]["sealed_precision"] == 1.0
+    assert strata["model|cross"]["measured_at"] == "t_hi"
+    assert strata["model|same"]["measured_at"].startswith("relaxed")
+
+
+def test_effective_t_hi_reads_the_override_and_treats_none_as_propose_only() -> None:
+    settings = Settings()
+    table = {"model|cross": 0.94, "K-C|same": None}
+    assert ev.effective_t_hi(settings, "model|cross", table) == 0.94
+    assert ev.effective_t_hi(settings, "K-C|same", table) is None
+    assert ev.effective_t_hi(settings, "K-B|same", table) == settings.t_hi
+    assert ev.effective_t_hi(settings, "K-B|same") == settings.t_hi
+
+
+def test_effective_t_hi_prefers_the_settings_column_the_row_now_carries() -> None:
+    row = Settings(t_hi_by_stratum={"model|same": None})
+    assert ev.effective_t_hi(row, "model|same") is None
+    assert ev.effective_t_hi(row, "model|cross") == Settings().t_hi
+    # An explicit table still wins over the column: a report may ask what a CANDIDATE table does.
+    assert ev.effective_t_hi(row, "model|same", {"model|same": 0.5}) == 0.5
+
+
+def test_the_evaluation_publishes_a_per_stratum_threshold_table() -> None:
+    rows: list[dict[str, Any]] = []
+    labels: dict[Any, Label] = {}
+    for index in range(400):
+        lo, hi = 2 * index + 1, 2 * index + 2
+        cross = index % 2 == 0
+        rows.append(pair_row(lo, hi, zone="merge", score=0.99 if index % 8 else 0.2, cross=cross))
+        labels[(lo, hi)] = label(lo, hi, 1 if index % 8 else 0)
+    report = ev.evaluate(rows, labels, None, Settings(), draws=50)
+    body = report.sections["thresholds_by_stratum"]
+    assert body["key"] == "certificate|side"
+    assert set(body["strata"]) == {"model|cross", "model|same"}
+    assert body["fitted_on"] == "train+validation"
+    assert body["measured_on"] == "test (sealed)"
+    assert body["labels_needed_for_lb"] == 381
+    assert "Per-stratum thresholds" in report.to_markdown()
+
+
+def test_the_bake_off_reports_the_ceiling_a_threshold_cannot_reach() -> None:
+    rows, labels = planted_rows(n=400)
+    _, report = ev.fit_model(rows, labels)
+    candidates = report.sections["calibration"]["candidates"]
+    isotonic, platt = candidates["isotonic"], candidates["platt"]
+    # isotonic cannot return more than its top bin's observed rate; Platt has no such cap, and a
+    # T_hi above the ceiling would switch the score layer off without saying so
+    assert isotonic["ceiling"] is not None and platt["ceiling"] is not None
+    assert isotonic["n_merge_end"] == platt["n_merge_end"]
+    assert "ceiling" in "\n".join(report.headline())
+    # The mechanism the ceiling exists to expose: a top bin that is 90% positive caps isotonic at
+    # 0.90, so a T_hi of 0.97 would merge nothing at all, while Platt keeps rising past it.
+    probs = [0.05] * 50 + [0.95] * 50
+    ys = [0] * 50 + [1] * 45 + [0] * 5
+    capped = ev._mapped(probs, ys, [0.999999], "isotonic", 10)
+    uncapped = ev._mapped(probs, ys, [0.999999], "platt", 10)
+    assert capped[0] < 0.97 < uncapped[0]
+
+
+def test_a_propose_only_holdout_still_measures_the_certificates_and_the_recall() -> None:
+    sealed = [
+        ev.ScoredRow(score=0.2, y=1, certificate="K-C"),
+        ev.ScoredRow(score=0.2, y=0, certificate="K-C"),
+        ev.ScoredRow(score=0.01, y=1),
+        ev.ScoredRow(score=0.99, y=1),
+    ]
+    body = ev.measure_thresholds(sealed, None, 0.1, draws=50)
+    # no SCORE merges anything, but a certificate still does, and that precision is measurable
+    assert body["t_hi"] is None
+    assert body["n_merge"] == 2 and body["precision"] == pytest.approx(0.5)
+    # one of the three positives is below T_lo: the band never sees it
+    assert body["missed_share_at_t_lo"] == pytest.approx(1 / 3)
+
+
+def test_a_certificate_stratum_is_measured_on_the_sealed_split_even_with_no_cut() -> None:
+    dev = [in_cell(0.1, y, "K-C|cross", certificate="K-C") for y in [1] * 90 + [0] * 10]
+    sealed = [in_cell(0.1, y, "K-C|cross", split="test", certificate="K-C")
+              for y in [1] * 9 + [0]]
+    body = ev.stratum_thresholds(dev, sealed)["strata"]["K-C|cross"]
+    assert body["t_hi"] is None and body["relaxed_t_hi"] is None
+    assert body["measured_at"] == "certificates only (no reachable cut)"
+    assert body["sealed_n_merge"] == 10 and body["sealed_precision"] == pytest.approx(0.9)
+
+
+# --- the reconstruction must agree with the engine ------------------------------------------
+
+
+def reconstructed(rows: Sequence[dict[str, Any]], settings: Settings) -> list[ev.ScoredRow]:
+    """What `evaluate` builds its threshold search on, in the same order as `rows`."""
+    out: list[ev.ScoredRow] = []
+    for row in rows:
+        context = ev.decide_context(row, settings)
+        out.append(ev.ScoredRow(
+            score=ev._score(row), y=1, certificate=context["certificate"],
+            diverse=bool(context["diverse"]), blocked=bool(context["blocked"]),
+        ))
+    return out
+
+
+def gated_run(settings: Settings) -> list[dict[str, Any]]:
+    """One row per shape the rule floor can take, decided by the LIVE `decide_pair`."""
+    unit = dict(area_rel_diff=0.0, tfidf_cos=0.97, containment_max=0.96, jaccard_shingle=0.8)
+    raw = [
+        pair_row(1, 2, **unit),                                    # unit evidence, two families
+        pair_row(3, 4, rare_token_overlap=0.0, **unit),            # E45: no unit-grade evidence
+        pair_row(5, 6, attr_contradictions=9.0, **unit),           # auto-reject
+        pair_row(7, 8, same_source=1.0, same_broker_key=1.0,       # E46: developer signature
+                 overlap_days=400.0, catalog_ratio_max=0.99,
+                 interior_match_ratio=0.0, **unit),
+        pair_row(9, 10, **unit),                                   # one family only (below)
+    ]
+    raw[4]["feats"] = {"rare_token_overlap": [3.0, True], "area_rel_diff": [0.0, True]}
+    raw[-1]["veto"] = None
+    vetoed = pair_row(11, 12, **unit)
+    vetoed["veto"] = "area"
+    raw.append(vetoed)
+    # A model that says "merge" to everything, so what varies between these rows is the rule
+    # floor and nothing else.
+    shouting = LogisticModel(feature_order=("tfidf_cos",), weights={"tfidf_cos": 0.0},
+                             presence_weights={}, intercept=20.0)
+    return ev.rescore_rows(raw, shouting, settings)
+
+
+def test_the_merge_set_evaluate_reconstructs_is_the_one_decide_actually_produced() -> None:
+    settings = Settings(t_hi=0.5, t_lo=0.1)
+    rows = gated_run(settings)
+    engine = {index for index, row in enumerate(rows) if row["zone"] == "merge"}
+    scored = reconstructed(rows, settings)
+    rebuilt = {
+        index for index, row in enumerate(scored)
+        if row.merged_at(settings.t_hi, zone_rule=True)
+    }
+    assert engine, rows
+    assert rebuilt == engine
+    # and the same at every cut: the gates are functions of the pair, not of the threshold
+    for cut in (0.0, 0.25, 0.5, 0.9, 1.0):
+        rebuilt_at = {
+            index for index, row in enumerate(scored) if row.merged_at(cut, zone_rule=True)
+        }
+        assert rebuilt_at <= set(range(len(rows)))
+        assert all(rows[index]["zone"] != "band" or scored[index].blocked
+                   or not scored[index].diverse or scored[index].score < cut
+                   for index in range(len(rows)) if index not in rebuilt_at)
+
+
+def test_a_merge_zone_gate_reads_as_blocked_even_when_the_stored_reason_says_model() -> None:
+    # The pair scored below T_hi, so the run wrote it as a plain `model` band row: its reason
+    # carries no trace of the gate, and a search that trusted the reason would count it back in.
+    row = pair_row(1, 2, zone="band", score=0.2, rare_token_overlap=0.0,
+                   area_rel_diff=0.0, tfidf_cos=0.9)
+    row["reason"] = "model"
+    context = ev.decide_context(row, Settings())
+    assert context["blocked"] is True
+    assert context["merge_zone_block"] == "unit_evidence_gate"
+    assert ev.decide_context(pair_row(3, 4, area_rel_diff=0.0))["blocked"] is False
+
+
+def test_the_gate_is_asked_of_decide_never_parsed_out_of_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+    original = ev.decide.merge_zone_block
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append("called")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ev.decide, "merge_zone_block", spy)
+    ev.decide_context(pair_row(1, 2, area_rel_diff=0.0), Settings())
+    assert seen == ["called"]
+
+
+def test_band_width_is_the_decided_zone_not_the_score_interval() -> None:
+    rows = [pair_row(1, 2, zone="reject", score=0.5), pair_row(3, 4, zone="band", score=0.5)]
+    labels = {(1, 2): label(1, 2, 0), (3, 4): label(3, 4, 1)}
+    body = ev.evaluate(rows, labels, None, Settings(), draws=20).sections["band_composition"]
+    # both scores sit inside (t_lo, t_hi); only one pair is in the band the queue will show
+    assert body["score_in_band_share"] == pytest.approx(1.0)
+    assert body["band_width"] == pytest.approx(0.5)
+    assert body["n_band_zone"] == 1
+    assert body["band_width_basis"] == "zone == band / stored pairs"
+
+
+# --- the sealed split has to be the fit's split ----------------------------------------------
+
+
+def test_evaluate_measures_the_holdout_on_the_fits_split_map_not_a_re_derived_one() -> None:
+    rows: list[dict[str, Any]] = []
+    labels: dict[Any, Label] = {}
+    for index in range(120):
+        lo, hi = 2 * index + 1, 2 * index + 2
+        rows.append(pair_row(lo, hi, zone="band", score=0.99))
+        labels[(lo, hi)] = label(lo, hi, 1 if index % 4 else 0)
+        # an UNJUDGED merge edge chaining this pair to the next: what welds two labelled pairs
+        # into one component, and what stops being an edge the moment the model changes
+        rows.append(pair_row(hi, hi + 1, zone="merge", score=0.99))
+    fit_map = ev.split_groups(rows, labels)
+    seal = ev.split_seal(fit_map)["sha256"]
+    # the same pairs, decided differently: the components — and so the split — move with the model
+    moved = [dict(row, zone="band") for row in rows]
+    assert ev.split_seal(ev.split_groups(moved, labels))["sha256"] != seal
+    derived = ev.evaluate(moved, labels, None, Settings(), draws=20).sections["holdout"]
+    pinned = ev.evaluate(moved, labels, None, Settings(), draws=20,
+                         split_map=fit_map, expect_seal=seal[:12]).sections["holdout"]
+    assert pinned["split_map_source"] == "fit"
+    assert derived["split_map_source"] == "re-derived from this run"
+    assert pinned["seal"]["sha256"] == seal
+    assert pinned["n_sealed"] != derived["n_sealed"]
+
+
+def test_a_foreign_seal_fails_loudly_instead_of_scoring_a_different_holdout() -> None:
+    rows = [pair_row(1, 2, zone="merge", score=0.99)]
+    labels = {(1, 2): label(1, 2, 1)}
+    with pytest.raises(ValueError, match="split seal mismatch"):
+        ev.evaluate(rows, labels, None, Settings(), draws=20,
+                    split_map=ev.split_groups(rows, labels), expect_seal="deadbeefdead")
+
+
+def test_the_evaluate_command_takes_the_split_map_the_fit_wrote(tmp_path: Path) -> None:
+    rows: list[dict[str, Any]] = []
+    labels: dict[Any, Label] = {}
+    for index in range(60):
+        lo, hi = 2 * index + 1, 2 * index + 2
+        rows.append(pair_row(lo, hi, zone="merge", score=0.99))
+        labels[(lo, hi)] = label(lo, hi, 1 if index % 3 else 0)
+    run_dir = write_run(tmp_path, rows)
+    judgement_path = write_judgements(tmp_path / "j.jsonl", labels)
+    fit_map = ev.split_groups(rows, labels)
+    map_path = tmp_path / "split_map.json"
+    map_path.write_text(
+        json.dumps({str(key): value for key, value in fit_map.items()}), encoding="utf-8"
+    )
+    buffer = io.StringIO()
+    code = harness.main(
+        ["evaluate", str(run_dir), "--judgements", str(judgement_path),
+         "--split-map", str(map_path), "--out", str(tmp_path / "out")],
+        out=buffer,
+    )
+    assert code == 0
+    body = json.loads((tmp_path / "out" / "eval.json").read_text(encoding="utf-8"))
+    assert body["holdout"]["split_map_source"] == "fit"
+
+
+# --- a cut has to be read off enough rows, and never off the rows it is measured on ----------
+
+
+def test_a_cut_read_off_a_handful_of_rows_is_refused_and_flagged() -> None:
+    dev = [in_cell(0.99, 1, "model|cross") for _ in range(5)]
+    body = ev.stratum_thresholds(dev, [], precision_lb=0.5, precision_point=0.5)
+    cell = body["strata"]["model|cross"]
+    assert cell["t_hi"] is None
+    assert cell["propose_only_reason"] == "sample"
+    assert cell["relaxed_insufficient_n"] is True
+    assert body["criteria"]["min_n"] == ev.MIN_STRATUM_N
+    wide = ev.stratum_thresholds(
+        [in_cell(0.99, 1, "model|cross") for _ in range(40)], [],
+        precision_lb=0.5, precision_point=0.5,
+    )
+    assert wide["strata"]["model|cross"]["t_hi"] == pytest.approx(0.99)
+    assert wide["strata"]["model|cross"]["relaxed_insufficient_n"] is False
+
+
+def test_with_no_dev_split_every_threshold_is_refused_and_the_label_says_so() -> None:
+    dev = [in_cell(0.99, 1, "model|cross") for _ in range(500)]
+    body = ev.stratum_thresholds(
+        dev, dev, allow_overrides=False, fitted_on="all judged (NO dev split; not held out)"
+    )
+    assert body["t_hi_by_stratum"] == {"model|cross": None}
+    assert body["strata"]["model|cross"]["propose_only_reason"] == "no dev split"
+    assert body["fitted_on"].startswith("all judged")
+    assert body["measured_on"] == "test (same rows as the fit)"
+    assert body["auto_merge_strata"] == []
+
+
+def test_a_certificate_cell_that_merges_wrong_pairs_says_precision_not_sample() -> None:
+    # 116 flawless certificate merges: thin for a 0.99 lower bound, but nothing is wrong with it
+    clean = [in_cell(0.1, 1, "K-C|cross", certificate="K-C") for _ in range(116)]
+    dirty = [in_cell(0.1, y, "K-C|same", certificate="K-C") for y in [1] * 18 + [0] * 2]
+    body = ev.stratum_thresholds(clean + dirty, [])["strata"]
+    assert body["K-C|cross"]["propose_only_reason"] == "sample"
+    assert body["K-C|cross"]["precision_certificate_merges"] == 1.0
+    assert body["K-C|same"]["propose_only_reason"] == "precision"
+
+
+def test_a_published_cut_is_printed_at_a_precision_that_can_be_re_entered() -> None:
+    rows: list[dict[str, Any]] = []
+    labels: dict[Any, Label] = {}
+    for index in range(400):
+        lo, hi = 2 * index + 1, 2 * index + 2
+        # two cuts that differ in the ninth decimal — 4 decimals would print them identically
+        score = 0.953125003065951 if index % 2 else 0.953125030633085
+        rows.append(pair_row(lo, hi, zone="merge", score=score, cross=bool(index % 2)))
+        labels[(lo, hi)] = label(lo, hi, 1)
+    report = ev.evaluate(rows, labels, None, Settings(t_hi=0.9, t_lo=0.3), draws=20)
+    markdown = report.to_markdown()
+    for cut in report.sections["thresholds_by_stratum"]["strata"].values():
+        if cut["relaxed_t_hi"] is not None:
+            assert f"{cut['relaxed_t_hi']:.12g}" in markdown
+    assert "0.9531250" in markdown
+
+
+def test_the_sealed_split_is_also_measured_at_the_settings_actually_loaded() -> None:
+    rows: list[dict[str, Any]] = []
+    labels: dict[Any, Label] = {}
+    for index in range(300):
+        lo, hi = 2 * index + 1, 2 * index + 2
+        rows.append(pair_row(lo, hi, zone="merge", score=0.99 if index % 5 else 0.4))
+        labels[(lo, hi)] = label(lo, hi, 1 if index % 5 else 0)
+    loaded = Settings(t_hi=0.3, t_lo=0.1)
+    report = ev.evaluate(rows, labels, None, loaded, draws=20)
+    searched = report.sections["holdout"]
+    in_force = report.sections["holdout_at_settings"]
+    assert in_force["t_hi"] == loaded.t_hi and in_force["t_lo"] == loaded.t_lo
+    assert in_force["n"] == searched["n"]
+    # the loaded row merges the 0.4 negatives too, which is exactly what the search refused to do
+    assert in_force["n_merge"] > (searched["n_merge"] or 0)
+    assert in_force["precision"] < 1.0
+
+
+def test_decide_context_blocks_a_propose_only_stratum_without_discarding_it() -> None:
+    """E48 removes the pair from the merge set at EVERY cut, but it is still proposed."""
+    row = pair_row(1, 2, zone="band", certificate="K-C", cross=False)
+    gated = Settings(t_hi_by_stratum={"K-C|same": None})
+    context = ev.decide_context(row, gated)
+    assert context["stratum_propose_only"] is True
+    assert context["blocked"] is True
+    assert context["discarded"] is False
+    assert context["merge_zone_block"] is None
+    open_row = ev.decide_context(row, Settings())
+    assert open_row["stratum_propose_only"] is False and open_row["blocked"] is False
+
+
+def test_the_report_carries_zone_recall_beside_the_score_based_line() -> None:
+    """The score line is a function of the cuts alone; the zone line is what the engine did."""
+    rows = [
+        pair_row(1, 2, zone="merge", score=0.99),
+        # A high-scoring positive the RULE FLOOR banded: no cut sees it, the score line cannot.
+        pair_row(3, 4, zone="band", score=0.99, certificate="K-C"),
+        pair_row(5, 6, zone="reject", score=0.01),
+    ]
+    labels = {(1, 2): label(1, 2, 1), (3, 4): label(3, 4, 1), (5, 6): label(5, 6, 1)}
+    body = ev.evaluate(rows, labels, None, Settings(), draws=20).sections["cohort"]
+    zone_recall = body["zone_recall"]
+    assert zone_recall["positives_in_merge_zone_share"] == pytest.approx(1 / 3)
+    assert zone_recall["positives_in_band_zone_share"] == pytest.approx(1 / 3)
+    assert zone_recall["positives_in_reject_zone_share"] == pytest.approx(1 / 3)
+    # The score-based line sees only one of the three as missed, which is the understatement.
+    assert body["positives_in_band_share"] == pytest.approx(0.0)
+    assert body["positives_below_t_lo_share"] == pytest.approx(1 / 3)

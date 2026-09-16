@@ -34,6 +34,7 @@ multiple of the median, with the realised design effect reported); the threshold
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import random
@@ -41,7 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
-from autodedup.decide import MIN_EVIDENCE_FAMILIES
+from autodedup import decide
+from autodedup.decide import MIN_EVIDENCE_FAMILIES, Decision
 from autodedup.labels import (
     CHEAP_TIERS,
     EMPTY_SAMPLE,
@@ -51,6 +53,7 @@ from autodedup.labels import (
     pair_key,
 )
 from autodedup.model import (
+    CALIBRATION_METHODS,
     FIT_TOLERANCE,
     IRLS_TOLERANCE,
     LogisticModel,
@@ -71,6 +74,9 @@ DECIDED_ZONES: tuple[str, ...] = (MERGE_ZONE, REJECT_ZONE)
 
 # D3's per-stratum floor: a pooled 0.99 that hides a 0.90 stratum is not a passing gate.
 STRATUM_FLOOR: float = 0.97
+# No stratum earns a cut of its own off a handful of rows: under this many judged merges the
+# search is describing noise, and a published cut invites someone to run it.
+MIN_STRATUM_N: int = 30
 
 # A stratum weight is a population ratio and the real draw runs to ~500x on the thinnest cell.
 # Capping at a constant would re-order the design (a 4,000-pair stratum and an 80-pair one would
@@ -87,6 +93,27 @@ BOOTSTRAP_SEED: int = 20260916
 # under-fit model is produced deliberately.
 FIT_METHODS: tuple[str, ...] = ("irls", "gd")
 FIT_MAX_ITER: int = 50
+
+# The l2 sweep W4c fits over. A single penalty is a guess about how much the ~86 identified terms
+# should be shrunk; the grid makes it a MEASUREMENT (validation log-loss), and the whole grid is
+# reported so a reader can see how flat — or how sharp — the optimum was.
+# W4c's task grid is the first six; 0.3 and 1.0 extend it so the SELECTED penalty can be shown
+# to be interior rather than sitting on the edge with the curve still falling. A boundary
+# solution is reported as one (`l2_grid.chosen_is_edge`).
+L2_TASK_GRID: tuple[float, ...] = (0.0003, 0.001, 0.003, 0.01, 0.03, 0.1)
+L2_GRID: tuple[float, ...] = (*L2_TASK_GRID, 0.3, 1.0)
+
+# Calibration is chosen out-of-fold INSIDE the validation split: fitting both maps on the fold and
+# comparing their ECE on that same fold always picks isotonic, which has a knot per bin to spend.
+CALIBRATION_FOLDS: int = 5
+CALIBRATION_AUTO: str = "auto"
+
+# The pooled ECE is a mid-range statistic and the auto-merge decision is not: every pair T_hi ever
+# sees sits in the top of the ranking. So the bake-off also reports the ECE over the MERGE END —
+# the rows the model itself ranks above this raw probability — and the CEILING of each map, because
+# isotonic-over-bins cannot return more than its top bin's observed rate, and a T_hi above that
+# ceiling switches the score layer off in silence.
+MERGE_END_RAW: float = 0.90
 
 SPLIT_SEED: int = 20260916
 TRAIN_SHARE: int = 60
@@ -379,19 +406,178 @@ def _feats(row: Mapping[str, Any]) -> dict[str, tuple[float, bool]]:
     return out
 
 
-def decide_context(row: Mapping[str, Any]) -> dict[str, Any]:
+# --- re-deciding a stored run through the LIVE rule ----------------------------------------
+
+# Two windows that overlap and two that do not, so `decide.disjoint_windows` — the one clause of
+# K-B a stored pair row does not carry — can be replayed as the run recorded it.
+OVERLAPPING_WINDOW: tuple[str, str] = ("2020-01-01T00:00:00+00:00", "2020-12-31T00:00:00+00:00")
+DISJOINT_WINDOW: tuple[str, str] = ("2021-01-01T00:00:00+00:00", "2021-06-30T00:00:00+00:00")
+
+
+class _SimSide:
+    """One side of a pair as `decide_pair` may interrogate it, rebuilt from the stored row.
+
+    Everything the row does not carry reads as None — E12's "unknown", which no guard and no
+    certificate may treat as agreement — so a clause `decide` grows tomorrow degrades to
+    abstention here instead of silently inventing evidence."""
+
+    def __init__(self, listing_id: int, window: tuple[str, str]) -> None:
+        self.listing_id = int(listing_id)
+        self.first_seen_at, self.last_seen_at = window
+        self.inactive_at = None
+
+    def __getattr__(self, name: str) -> None:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return None
+
+
+def _sim_sides(row: Mapping[str, Any]) -> tuple["_SimSide", "_SimSide"]:
+    """The two listing stubs a stored row can stand in for, windowed as the run recorded K-B."""
+    lo, hi = int(row["lo"]), int(row["hi"])
+    window = DISJOINT_WINDOW if str(row.get("certificate") or "") == "K-B" else OVERLAPPING_WINDOW
+    return _SimSide(lo, OVERLAPPING_WINDOW), _SimSide(hi, window)
+
+
+def _merge_zone_gate(row: Mapping[str, Any], settings: Settings) -> str | None:
+    """Ask the LIVE E45/E46 gate whether this pair may enter the merge zone at all.
+
+    The gate's arity belongs to `decide`, which reads the pair from the features alone today and
+    took the two listings yesterday; binding to whichever it currently declares keeps this a call
+    into that module rather than a second copy of the rule that drifts out of step with it."""
+    feats = _feats(row)
+    if len(inspect.signature(decide.merge_zone_block).parameters) <= 2:
+        return decide.merge_zone_block(feats, settings)
+    left, right = _sim_sides(row)
+    return decide.merge_zone_block(feats, left, right, settings)
+
+
+def decide_context(
+    row: Mapping[str, Any], settings: Settings | None = None
+) -> dict[str, Any]:
     """What `decide_pair` knew about this pair, read back off the stored row (E11/E22/E24).
 
-    `blocked` is the layer the score cannot reach in either direction — a guard veto or an
-    auto-reject; `diverse` is the E11 evidence gate that demotes a pair to the band however high
-    it scores; a certificate merges at any score at all. A threshold search that ignores the
-    three is describing a decision rule the engine does not run."""
+    `blocked` is the layer the score cannot reach in EITHER direction: a guard veto, an
+    auto-reject, or a merge-zone gate (E45/E46) — all three are functions of the pair rather than
+    of the cut, so a pair carrying one sits outside the merge set at every T_hi. The gate is asked
+    of `decide.merge_zone_block` rather than parsed out of the stored `reason`, because a gated
+    pair that also scored below T_hi was written to the run as a plain `model` band row: its
+    reason says nothing, and a threshold search reading reasons would count it back in.
+
+    `diverse` is the E11 evidence gate that demotes a pair to the band however high it scores; a
+    certificate merges at any score at all. A search that ignores the three describes a decision
+    rule the engine does not run."""
     reason = str(row.get("reason") or "")
+    live = settings if settings is not None else Settings()
+    discarded = bool(row.get("veto")) or reason.startswith("auto_reject")
+    certificate = (str(row["certificate"]) if row.get("certificate") else None)
+    gate: str | None = None
+    propose_only = False
+    if not discarded:
+        gate = _merge_zone_gate(row, live)
+        # E48: a stratum shipped propose-only merges at no cut at all, certificate or not, so it
+        # belongs in `blocked` beside the gates — and NOT in `discarded`, because the pair is
+        # still proposed in the band.
+        feats = _feats(row)
+        # The row carries the side as a FACT (`cross_source`); the stored feature vector is the
+        # engine's copy of it. Prefer the feature, fall back to the fact, so a stub row and a real
+        # one land in the same cell as `decide_stratum` names it.
+        feats.setdefault("same_source", (0.0 if row.get("cross_source") else 1.0, True))
+        propose_only = decide.stratum_t_hi(feats, certificate, live) is None
     return {
-        "certificate": (str(row["certificate"]) if row.get("certificate") else None),
+        "certificate": certificate,
         "diverse": len(row.get("families") or ()) >= MIN_EVIDENCE_FAMILIES,
-        "blocked": bool(row.get("veto")) or reason.startswith("auto_reject"),
+        "blocked": discarded or gate is not None or propose_only,
+        "stratum_propose_only": propose_only,
+        # A guard and an auto-reject take the pair out of the QUEUE; E45/E46 and E11 only take it
+        # out of the merge zone, and the operator still sees it in the band. Recall spends the
+        # first against its budget and must not spend the second.
+        "discarded": discarded,
+        "merge_zone_block": gate,
     }
+
+
+def resimulate(
+    row: Mapping[str, Any], model: LogisticModel, settings: Settings
+) -> Decision:
+    """Re-run THIS pair through `decide.decide_pair` with a new model — never a copy of its logic.
+
+    The two layers a stored row cannot reproduce are replayed from what the run recorded rather
+    than re-derived: a guard veto is a fact about the two listings that no threshold and no model
+    can move, and K-B's disjoint-window clause is the one certificate input the row omits, so the
+    stub windows are made disjoint exactly when the run's certificate was K-B. Everything else —
+    the auto-rejects, K-A, K-C, the E11 diversity gate, the zone cuts — is recomputed by the live
+    module, so a rule Task A changes changes this simulation too."""
+    lo, hi = int(row["lo"]), int(row["hi"])
+    veto = row.get("veto")
+    feats = _feats(row)
+    if veto:
+        return Decision(lo, hi, "veto", 0.0, set(), None, str(veto), f"guard:{veto}")
+    left, right = _sim_sides(row)
+    return decide.decide_pair(
+        left, right, left, right, feats, list(row.get("probes") or ()), model, settings
+    )
+
+
+def rescore_rows(
+    rows: Sequence[Mapping[str, Any]], model: LogisticModel, settings: Settings
+) -> list[dict[str, Any]]:
+    """The stored run re-decided with a different model — same pairs, new score/zone/reason."""
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        decision = resimulate(row, model, settings)
+        out.append({
+            **row,
+            "score": decision.score,
+            "zone": decision.zone,
+            "certificate": decision.certificate,
+            "families": sorted(decision.families),
+            "veto": decision.veto,
+            "reason": decision.reason,
+        })
+    return out
+
+
+def decide_stratum(row: Mapping[str, Any]) -> str:
+    """The stratification D3's per-stratum floor is read on: deciding layer x source side.
+
+    Certificate and model are different precision regimes (one structural, one learned) and the
+    same/cross split is the one contrast the operator's false-merge story turns on (a same-portal
+    developer re-advert is the K-A failure mode). Block is NOT in the key: four blocks would cut
+    every cell below the n a 0.99 lower bound can even reach."""
+    return f"{certificate_class(row)}|{_side(row)}"
+
+
+def effective_t_hi(
+    settings: Settings,
+    stratum_key: str,
+    table: Mapping[str, float | None] | None = None,
+) -> float | None:
+    """The cut THIS stratum merges at: its override when it has one, else the global `t_hi`.
+
+    `None` is not "missing" — it is PROPOSE-ONLY (D3): the stratum could not prove 0.99, so no
+    score may merge it and the zone rule must send it to the band. The override table lives on
+    `settings.t_hi_by_stratum` when the row grows the column, and is passed in until it does."""
+    overrides = table if table is not None else getattr(settings, "t_hi_by_stratum", None)
+    if overrides and stratum_key in overrides:
+        value = overrides[stratum_key]
+        return None if value is None else float(value)
+    return settings.t_hi
+
+
+def labels_needed_for_lb(precision_lb: float, z: float = Z_95) -> int:
+    """How many CONSECUTIVE correct judged merges a stratum needs before it can clear the bar.
+
+    With k = n the Wilson lower bound is exactly `n / (n + z^2)`, so the gate is a statement about
+    label volume before it is one about the model: at 0.99 no stratum passes under ~381 judged
+    merges however perfect it is. Reporting this beside a `None` t_hi is the difference between
+    "the model is not good enough" and "the sample cannot answer the question"."""
+    if not 0.0 < precision_lb < 1.0:
+        raise ValueError(f"precision_lb must be in (0, 1): {precision_lb}")
+    n = max(1, int(math.ceil(precision_lb * z * z / (1.0 - precision_lb))))
+    while wilson_lower(n, n, z) < precision_lb:
+        n += 1
+    return n
 
 
 # --- thresholds ----------------------------------------------------------------------------
@@ -409,7 +595,14 @@ class ScoredRow:
     certificate: str | None = None
     diverse: bool = True
     blocked: bool = False
+    # `blocked` is "no cut merges this pair"; `discarded` is the stronger "no cut even PROPOSES
+    # it" — a guard or an auto-reject. Only the second is a positive that recall has truly lost.
+    discarded: bool = False
     split: str = "train"
+    # The SAMPLER's stratum (`stratum`) is the design cell the HT weight belongs to; `cell` is the
+    # deciding layer x source side D3's per-stratum floor is read on. They are different questions
+    # and a single field would answer neither.
+    cell: str = "(none)"
 
     @property
     def merged_regardless(self) -> bool:
@@ -451,6 +644,7 @@ def _normalise_scored(rows: Iterable[Any]) -> list[ScoredRow]:
             )
             scored.diverse = bool(context.get("diverse", True))
             scored.blocked = bool(context.get("blocked", False))
+            scored.discarded = bool(context.get("discarded", scored.blocked))
         out.append(scored)
     return out
 
@@ -530,18 +724,22 @@ def measure_thresholds(
 
     The same arithmetic as the search, run once: the point is that the rows are different."""
     scored = _normalise_scored(rows)
-    if t_hi is None or not scored:
-        return {"n": len(scored), "t_hi": t_hi, "t_lo": t_lo, "precision": None,
+    if not scored:
+        return {"n": 0, "t_hi": t_hi, "t_lo": t_lo, "precision": None,
                 "n_merge": 0, "n_positive": 0}
-    merged = merge_set(scored, t_hi, zone_rule=zone_rule)
+    # A propose-only T_hi is not "nothing to measure": no SCORE merges a pair, but the certificates
+    # still do, and the recall the band has to carry is still a number the sealed split can report.
+    # An infinite cut is exactly that rule, so the arithmetic below stays one code path.
+    cut = math.inf if t_hi is None else t_hi
+    merged = merge_set(scored, cut, zone_rule=zone_rule)
     k, n = sum(row.y for row in merged), len(merged)
     per_stratum = _per_stratum_precision(merged)
     floors = [body["precision"] for body in per_stratum.values() if body["precision"] is not None]
     weight_positive = sum(row.weight for row in scored if row.y == 1)
     missed = sum(
         row.weight for row in scored
-        if row.y == 1 and not row.merged_at(t_hi, zone_rule=zone_rule)
-        and (row.score <= t_lo or (zone_rule and row.blocked))
+        if row.y == 1 and not row.merged_at(cut, zone_rule=zone_rule)
+        and (row.score <= t_lo or (zone_rule and row.discarded))
     )
     return {
         "n": len(scored),
@@ -670,11 +868,12 @@ def thresholds(
 
     # A positive an auto-reject or a guard already threw away is missed whatever T_lo is, so it
     # is spent against the budget FIRST rather than quietly left out of the recall claim. A
-    # non-diverse positive is NOT unavoidable: E11 sends it to the band, where the judge sees it.
-    unavoidable = sum(row.weight for row in positives if zone_rule and row.blocked)
+    # positive the E11 or E45/E46 gates demoted is NOT unavoidable: those send it to the band,
+    # where the operator sees it, and T_lo still decides whether it gets there.
+    unavoidable = sum(row.weight for row in positives if zone_rule and row.discarded)
     governed = sorted(
         (row for row in positives
-         if not (zone_rule and (row.blocked or row.merged_regardless))),
+         if not (zone_rule and (row.discarded or row.merged_regardless))),
         key=lambda row: row.score,
     )
     t_lo = 0.0
@@ -797,6 +996,150 @@ def thresholds(
     )
 
 
+def stratum_thresholds(
+    dev_rows: Sequence[ScoredRow],
+    sealed_rows: Sequence[ScoredRow],
+    *,
+    precision_lb: float = 0.99,
+    precision_point: float = 0.995,
+    stratum_floor: float = STRATUM_FLOOR,
+    zone_rule: bool = True,
+    min_n: int = MIN_STRATUM_N,
+    fitted_on: str = "train+validation",
+    allow_overrides: bool = True,
+) -> dict[str, Any]:
+    """A T_hi per deciding stratum, CHOSEN on dev and MEASURED on the sealed split (D3/E22-E25).
+
+    A stratum that cannot clear both gates gets `None` — propose-only: no score merges it and the
+    zone rule must send it to the band. Beside every `None` sits the reason it is one, because the
+    two reasons demand opposite work: `precision` (the model merges wrong pairs there) is a
+    modelling problem, `sample` (even a flawless cell cannot reach a 0.99 lower bound at this n)
+    is a labelling budget. The relaxed cut — smallest cut clearing the POINT estimate alone — and
+    the lower bound achieved there make the gap explicit.
+
+    `min_n` is the floor under BOTH cuts: a cell whose merge set is thinner than that gets no
+    threshold of its own at all. The 0.99 gate enforces it by accident (it needs ~381 merges); the
+    relaxed cut, searched with no lower bound, would otherwise publish a cut read off two rows.
+
+    `allow_overrides=False` refuses every threshold whatever the arithmetic says — the honest
+    answer when `dev_rows` are not held out from `sealed_rows`."""
+    needed = labels_needed_for_lb(precision_lb)
+    by_cell: dict[str, list[ScoredRow]] = {}
+    for row in dev_rows:
+        by_cell.setdefault(row.cell, []).append(row)
+    sealed_by_cell: dict[str, list[ScoredRow]] = {}
+    for row in sealed_rows:
+        sealed_by_cell.setdefault(row.cell, []).append(row)
+
+    strata: dict[str, Any] = {}
+    overrides: dict[str, float | None] = {}
+    for cell in sorted(set(by_cell) | set(sealed_by_cell)):
+        members = by_cell.get(cell, [])
+        t_hi, k_hi, n_hi = _t_hi_search(
+            members, precision_lb, precision_point, zone_rule=zone_rule
+        )
+        relaxed_t, relaxed_k, relaxed_n = _t_hi_search(
+            members, 0.0, precision_point, zone_rule=zone_rule
+        )
+        sealed = sealed_by_cell.get(cell, [])
+        at = t_hi if t_hi is not None else relaxed_t
+        # No reachable cut is not "nothing merges here": a certificate stratum merges at every
+        # cut, so an infinite one is what the sealed split must be measured under.
+        sealed_merged = merge_set(
+            sealed, at if at is not None else math.inf, zone_rule=zone_rule
+        )
+        sealed_k, sealed_n = sum(row.y for row in sealed_merged), len(sealed_merged)
+        # What the stratum merges with no score cut at all: its certificates. A certificate
+        # stratum that fails the POINT gate fails it here, at every cut, which is why the
+        # propose-only reason for those cells is "precision" and not "sample".
+        floor_rows = [row for row in members if row.merged_regardless]
+        floor_k, floor_n = sum(row.y for row in floor_rows), len(floor_rows)
+        # A cell whose relaxed merge set is under `min_n` has not measured anything: its cut is
+        # published as a diagnostic, never as a candidate to ship.
+        relaxed_thin = relaxed_t is not None and relaxed_n < min_n
+        if t_hi is not None and n_hi < min_n:
+            t_hi = None
+        reason: str | None = None
+        if t_hi is None:
+            # "sample" and "precision" demand opposite work — more labels, or a better rule — so
+            # the certificate floor decides between them: a cell whose certificates already merge
+            # wrong pairs cannot be fixed by labelling, and one that is flawless but thin can.
+            floor_fails = bool(floor_n) and (floor_k / floor_n) < precision_point
+            reason = (
+                "precision" if floor_fails
+                else ("sample" if (relaxed_t is not None or floor_n < needed) else "precision")
+            )
+        if not allow_overrides:
+            t_hi = None
+            reason = "no dev split"
+        overrides[cell] = t_hi
+        strata[cell] = {
+            "n_dev": len(members),
+            "n_dev_positive": sum(row.y for row in members),
+            "t_hi": t_hi,
+            "n_at_t_hi": n_hi,
+            "precision_at_t_hi": (k_hi / n_hi) if n_hi else None,
+            "wilson_lb_at_t_hi": wilson_lower(k_hi, n_hi) if n_hi else None,
+            "relaxed_t_hi": relaxed_t,
+            "relaxed_insufficient_n": relaxed_thin,
+            "min_n": min_n,
+            "n_at_relaxed": relaxed_n,
+            "precision_at_relaxed": (relaxed_k / relaxed_n) if relaxed_n else None,
+            "wilson_lb_at_relaxed": wilson_lower(relaxed_k, relaxed_n) if relaxed_n else None,
+            "n_certificate_merges": floor_n,
+            "precision_certificate_merges": (floor_k / floor_n) if floor_n else None,
+            "wilson_lb_certificate_merges": wilson_lower(floor_k, floor_n) if floor_n else None,
+            "labels_needed_for_lb": needed,
+            # A cell can fail BOTH ways at once — 97/98 is under the point gate and also far too
+            # thin to tell 0.99 from 0.995 apart — so the reason names the binding constraint and
+            # this says whether more labels alone could ever settle it.
+            "sample_sufficient": max(relaxed_n, floor_n) >= needed,
+            "propose_only": t_hi is None,
+            "propose_only_reason": reason,
+            "sealed_n": len(sealed),
+            "sealed_n_merge": sealed_n,
+            "sealed_n_positive": sealed_k,
+            "sealed_precision": (sealed_k / sealed_n) if sealed_n else None,
+            "sealed_wilson_lb": wilson_lower(sealed_k, sealed_n) if sealed_n else None,
+            "sealed_weighted_precision": hajek_rate(
+                [(row.stratum, row.y, row.weight) for row in sealed_merged]
+            ),
+            # The gate below counts heads; the HT rate above weights them. On 7-12 sealed rows
+            # neither is stable, so the design effect that separates them rides alongside instead
+            # of being left for a reader to infer.
+            "sealed_design": design_effect([row.weight for row in sealed_merged]),
+            "sealed_floor_ok": (
+                None if not sealed_n else (sealed_k / sealed_n) >= stratum_floor
+            ),
+            "measured_at": (
+                "t_hi" if t_hi is not None
+                else ("relaxed_t_hi (diagnostic)" if relaxed_t is not None
+                      else "certificates only (no reachable cut)")
+            ),
+        }
+    shipping = [cell for cell, value in overrides.items() if value is not None]
+    return {
+        "criteria": {
+            "precision_lb": precision_lb, "precision_point": precision_point,
+            "stratum_floor": stratum_floor, "min_n": min_n,
+            # Named rather than left implicit: the gate counts JUDGED PAIRS (Wilson on k/n) while
+            # the target it is compared against is a cohort rate. `sealed_weighted_precision` and
+            # `sealed_design` beside it are what say whether the two agree on this cell.
+            "gate_basis": "unweighted judged counts (Wilson LB); HT rate reported alongside",
+        },
+        "key": "certificate|side",
+        "fitted_on": fitted_on,
+        "measured_on": "test (sealed)" if allow_overrides else "test (same rows as the fit)",
+        "labels_needed_for_lb": needed,
+        "t_hi_by_stratum": overrides,
+        "n_strata": len(strata),
+        "n_auto_merge_strata": len(shipping),
+        "auto_merge_strata": sorted(shipping),
+        "propose_only": sorted(cell for cell in overrides if overrides[cell] is None),
+        "strata": strata,
+    }
+
+
 # --- the evaluation ------------------------------------------------------------------------
 
 
@@ -829,8 +1172,17 @@ def evaluate(
     precedence: Sequence[str] | None = None,
     seed: int = SPLIT_SEED,
     draws: int = BOOTSTRAP_DRAWS,
+    split_map: Mapping[int, int] | None = None,
+    expect_seal: str | None = None,
 ) -> EvalReport:
-    """Every §9 number this program can compute from one run plus one set of judgements."""
+    """Every §9 number this program can compute from one run plus one set of judgements.
+
+    `split_map` is the fit's own partition, and passing it is what makes "the sealed split" mean
+    the same rows here as it did there. Without it the split is re-derived from THIS run's merge
+    edges — which are a function of the model and the thresholds under evaluation, so a challenger
+    silently re-randomises the holdout and half the comparison is measured on rows the model was
+    trained on. `expect_seal` (a prefix of the seal a model artifact carries) turns that from a
+    convention into a check."""
     draw = sample if sample is not None else EMPTY_SAMPLE
     weighted = draw.is_weighted
 
@@ -845,13 +1197,25 @@ def evaluate(
     response: dict[str, list[float]] = {}
     scored: list[ScoredRow] = []
 
-    groups = split_groups(run_pairs, labels)
+    groups = dict(split_map) if split_map is not None else split_groups(run_pairs, labels)
+    seal = split_seal(groups)
+    if expect_seal and not seal["sha256"].startswith(str(expect_seal)):
+        raise ValueError(
+            f"split seal mismatch: the model was fitted on {expect_seal}, this map is "
+            f"{seal['sha256'][:16]} — pass the fit's split_map.json, never a re-derived split"
+        )
     n_rows = 0
     n_labelled = 0
     n_defaulted_weight = 0
     weight_positive_total = 0.0
     weight_positive_below_t_lo = 0.0
     weight_positive_in_band = 0.0
+    weight_positive_discarded = 0.0
+    weight_positive_gated = 0.0
+    # The zone the ENGINE decided, which is the only honest denominator for recall: a score-based
+    # line cannot see the gates (E45/E46/E47/E11) or the certificates, and understates the cost of
+    # the rule floor by the whole of what they demote.
+    weight_positive_by_zone: dict[str, float] = {}
     developer_suspected = 0
 
     seen: set[PairKey] = set()
@@ -894,7 +1258,7 @@ def evaluate(
 
         if label is None or label.y is None:
             continue
-        context = decide_context(row)
+        context = decide_context(row, settings)
         score = _score(row)
         scored.append(ScoredRow(
             score=score,
@@ -905,9 +1269,15 @@ def evaluate(
             diverse=bool(context["diverse"]),
             blocked=bool(context["blocked"]),
             split=split_of(group_of(key, groups), seed),
+            cell=decide_stratum(row),
         ))
         if label.y == 1:
             weight_positive_total += weight
+            weight_positive_by_zone[zone] = weight_positive_by_zone.get(zone, 0.0) + weight
+            if context["discarded"]:
+                weight_positive_discarded += weight
+            elif context["merge_zone_block"] or not context["diverse"]:
+                weight_positive_gated += weight
             if score <= settings.t_lo:
                 weight_positive_below_t_lo += weight
             elif score < settings.t_hi:
@@ -928,6 +1298,7 @@ def evaluate(
         merge_pooled.absorb(cell)
 
     population = [_score(row) for row in run_pairs]
+    n_band_zone = sum(1 for row in run_pairs if str(row.get("zone") or "") == BAND_ZONE)
     dev = [row for row in scored if row.split in DEV_SPLITS]
     sealed = [row for row in scored if row.split == "test"]
     criteria = {"population_scores": population, "store_floor": settings.store_floor,
@@ -936,6 +1307,21 @@ def evaluate(
     threshold_all = thresholds(scored, **criteria)
     holdout = measure_thresholds(
         sealed, threshold_report.t_hi, threshold_report.t_lo, draws=draws
+    )
+    # The searched cut is what D3 asks about; the LOADED row is what the engine is running right
+    # now. They are different questions and a report that answers only the first cannot say what
+    # the settings file in force would do on rows it never saw.
+    holdout_at_settings = measure_thresholds(
+        sealed, settings.t_hi, settings.t_lo, draws=draws
+    )
+    # No dev split is not a licence to select on the sealed rows: the cuts below would then be
+    # fitted and measured on the same pairs, and publishing them under "measured on the holdout"
+    # would be false. The search still runs (its diagnostics are worth having) but every override
+    # is refused, and the label says which rows it was taken over.
+    by_stratum = stratum_thresholds(
+        dev or scored, sealed,
+        fitted_on="train+validation" if dev else "all judged (NO dev split; not held out)",
+        allow_overrides=bool(dev),
     )
 
     tiers = by_tier or {}
@@ -964,7 +1350,14 @@ def evaluate(
             },
             "precedence": list(precedence) if precedence else None,
             "settings": {"t_hi": settings.t_hi, "t_lo": settings.t_lo,
-                         "store_floor": settings.store_floor},
+                         "store_floor": settings.store_floor,
+                         # What the engine RAN, beside `thresholds_by_stratum`, which is what the
+                         # search RECOMMENDS. A reader must be able to tell the two apart.
+                         "t_hi_by_stratum_in_force": dict(settings.t_hi_by_stratum),
+                         "propose_only_strata_in_force": sorted(
+                             key for key, value in settings.t_hi_by_stratum.items()
+                             if value is None
+                         )},
             "sample": {
                 **draw.to_json(),
                 "nonresponse": _nonresponse(response),
@@ -979,14 +1372,20 @@ def evaluate(
             "band_composition": {
                 "pooled": zones.get(BAND_ZONE, Cell()).to_json(bootstrap=True, draws=draws),
                 "by_certificate": _table(band_by_certificate),
-                # E25's dial at the thresholds ACTUALLY in force, read off the stored population
-                # rather than the band-enriched judge sample. Pairs below `store_floor` are not
-                # stored and so are not in this denominator — they are below T_lo by definition.
-                "population_share_at_settings": (
+                # E25's dial is the share of stored pairs that actually LAND in the band — the
+                # zone the engine decided, not a score interval. The two are different numbers:
+                # an auto-rejected pair can score anywhere, and a certificate merges from inside
+                # the interval, so `t_lo < score < t_hi` counts rows the queue never sees. Pairs
+                # below `store_floor` are not stored and so are not in this denominator.
+                "band_width": (n_band_zone / len(run_pairs)) if run_pairs else None,
+                "n_band_zone": n_band_zone,
+                "band_width_basis": "zone == band / stored pairs",
+                # The score interval, kept under a name that says what it is.
+                "score_in_band_share": (
                     sum(1 for score in population if settings.t_lo < score < settings.t_hi)
                     / len(population)
                 ) if population else None,
-                "weighted_sample_share_at_settings": (
+                "weighted_sample_score_in_band_share": (
                     sum(row.weight for row in scored
                         if settings.t_lo < row.score < settings.t_hi)
                     / sum(row.weight for row in scored)
@@ -1012,6 +1411,16 @@ def evaluate(
                 "merge_precision_unweighted": merge_pooled.rate,
                 "weight_positive_total": weight_positive_total,
                 "weight_positive_below_t_lo": weight_positive_below_t_lo,
+            "weight_positive_discarded": weight_positive_discarded,
+            "positives_discarded_share": (
+                weight_positive_discarded / weight_positive_total
+                if weight_positive_total > 0 else None
+            ),
+            "weight_positive_gated_to_band": weight_positive_gated,
+            "positives_gated_to_band_share": (
+                weight_positive_gated / weight_positive_total
+                if weight_positive_total > 0 else None
+            ),
                 "positives_below_t_lo_share": (
                     weight_positive_below_t_lo / weight_positive_total
                     if weight_positive_total > 0 else None
@@ -1021,17 +1430,43 @@ def evaluate(
                     weight_positive_in_band / weight_positive_total
                     if weight_positive_total > 0 else None
                 ),
+                # Recall as the engine decided it, not as the score would have. The two lines
+                # above are functions of `t_lo`/`t_hi` alone; these are functions of the whole
+                # rule floor, and they are the ones a W4 verdict may quote.
+                "zone_recall": {
+                    "basis": "the zone decide_pair returned, gates and certificates included",
+                    "weight_positive_by_zone": dict(sorted(weight_positive_by_zone.items())),
+                    **{
+                        f"positives_in_{name}_zone_share": (
+                            weight_positive_by_zone.get(name, 0.0) / weight_positive_total
+                            if weight_positive_total > 0 else None
+                        )
+                        for name in ("merge", "band", "reject", "veto")
+                    },
+                },
             },
             "tiers": tier_rows,
             "fidelity": judge_fidelity(tiers),
             "thresholds": threshold_report.to_json(),
+            "thresholds_by_stratum": by_stratum,
             "thresholds_all_judged": threshold_all.to_json(),
             "holdout": {
                 "split_seed": seed,
                 "n_dev": len(dev),
                 "n_sealed": len(sealed),
-                "fitted_on": "train+validation" if dev else "all judged (no dev rows)",
+                "fitted_on": (
+                    "train+validation" if dev else "all judged (NO dev split; not held out)"
+                ),
+                "split_map_source": "fit" if split_map is not None else "re-derived from this run",
+                "seal": seal,
+                "expect_seal": expect_seal,
                 **holdout,
+            },
+            "holdout_at_settings": {
+                "n_sealed": len(sealed),
+                "measured_on": "test (sealed)",
+                "chosen_by": "the settings row in force, not the threshold search",
+                **holdout_at_settings,
             },
         }
     )
@@ -1279,6 +1714,172 @@ def _reliability(
     return table
 
 
+def _fold_of(group: int, seed: int, folds: int) -> int:
+    """Calibration folds are drawn by COMPONENT, like the split itself: two pairs of one cluster
+    are not independent, and a calibration fold that straddles them reports its own training set."""
+    digest = hashlib.blake2b(f"cal:{seed}:{group}".encode("utf-8"), digest_size=8).hexdigest()
+    return int(digest, 16) % folds
+
+
+def _mapped(
+    fit_probs: Sequence[float],
+    fit_ys: Sequence[int],
+    eval_probs: Sequence[float],
+    method: str,
+    bins: int,
+    fit_weights: Sequence[float] | None = None,
+) -> list[float] | None:
+    """`eval_probs` through a calibration map fitted on `fit_probs` — one scratch model, so the
+    map is built and applied by exactly the code that will ship on the artifact."""
+    scratch = LogisticModel(
+        feature_order=(), weights={}, presence_weights={}, intercept=0.0
+    )
+    scratch.calibrate(
+        list(fit_probs), list(fit_ys), bins=bins, method=method,
+        weights=None if fit_weights is None else list(fit_weights),
+    )
+    if scratch.calibration is None:
+        return None
+    return [scratch.apply_calibration(prob) for prob in eval_probs]
+
+
+def _cross_fit_ece(
+    probs: Sequence[float],
+    ys: Sequence[int],
+    groups: Sequence[int],
+    method: str,
+    *,
+    folds: int,
+    seed: int,
+    bins: int,
+    weights: Sequence[float] | None = None,
+) -> dict[str, Any]:
+    """Out-of-fold ECE for one calibration map over the validation split.
+
+    Weighted throughout when the draw has weights: the map is fitted on the design, scored on the
+    design, and the selection criterion is the design-weighted ECE — because the precision target
+    it feeds is a cohort rate, not a rate over the band-enriched rows the judge happened to see."""
+    masses = [1.0] * len(probs) if weights is None else [float(value) for value in weights]
+    assignment = [_fold_of(int(group), seed, folds) for group in groups]
+    used = sorted(set(assignment))
+    out_probs: list[float] = []
+    out_ys: list[int] = []
+    out_raw: list[float] = []
+    out_weights: list[float] = []
+    n_skipped = 0
+    for fold in used:
+        held = [index for index, value in enumerate(assignment) if value == fold]
+        rest = [index for index, value in enumerate(assignment) if value != fold]
+        if not held or not rest:
+            n_skipped += len(held)
+            continue
+        mapped = _mapped(
+            [probs[index] for index in rest], [ys[index] for index in rest],
+            [probs[index] for index in held], method, bins,
+            [masses[index] for index in rest],
+        )
+        if mapped is None:
+            n_skipped += len(held)
+            continue
+        out_probs.extend(mapped)
+        out_ys.extend(ys[index] for index in held)
+        out_raw.extend(probs[index] for index in held)
+        out_weights.extend(masses[index] for index in held)
+    tail = [
+        (prob, y, mass)
+        for prob, y, raw, mass in zip(out_probs, out_ys, out_raw, out_weights)
+        if raw >= MERGE_END_RAW
+    ]
+    whole = _mapped(probs, ys, [0.999999], method, bins, masses)
+    tail_probs = [prob for prob, _, _ in tail]
+    tail_ys = [y for _, y, _ in tail]
+    tail_weights = [mass for _, _, mass in tail]
+    tail_mass = sum(tail_weights)
+    return {
+        "method": method,
+        "n_folds": len(used),
+        "n_out_of_fold": len(out_probs),
+        "n_skipped": n_skipped,
+        "weighted": weights is not None,
+        "ece": expected_calibration_error(
+            out_probs, out_ys, bins, out_weights
+        ) if out_probs else None,
+        "ece_unweighted": expected_calibration_error(
+            out_probs, out_ys, bins
+        ) if out_probs else None,
+        "log_loss": _log_loss(out_probs, out_ys) if out_probs else None,
+        "n_merge_end": len(tail),
+        # DIAGNOSTIC, never the selector: a map that returns one constant over the whole tail
+        # scores ~0 here by construction, so choosing on it would reward refusing to discriminate
+        # exactly where T_hi is read. The selector is the pooled out-of-fold ECE above; the
+        # merge-end AUC beside it is the discrimination this number cannot see.
+        "ece_merge_end": expected_calibration_error(
+            tail_probs, tail_ys, bins, tail_weights
+        ) if tail else None,
+        "auc_merge_end": auc(tail_probs, tail_ys) if tail else None,
+        "positive_rate_merge_end": (len(
+            [y for y in tail_ys if y == 1]) / len(tail)) if tail else None,
+        "positive_rate_merge_end_weighted": (
+            sum(mass for _, y, mass in tail if y == 1) / tail_mass
+        ) if tail_mass > 0 else None,
+        # The highest probability this map can return at all, fitted on the WHOLE fold: a T_hi
+        # above it is a threshold no pair can reach. It is a property of the MAP, not of the
+        # model — a binned isotonic pools the top deciles and cannot exceed their joint rate.
+        "ceiling": whole[0] if whole else None,
+    }
+
+
+def _calibrate_model(
+    model: LogisticModel,
+    validation: Sequence[Mapping[str, Any]],
+    *,
+    method: str = CALIBRATION_AUTO,
+    folds: int = CALIBRATION_FOLDS,
+    seed: int = SPLIT_SEED,
+    bins: int = RELIABILITY_BINS,
+) -> dict[str, Any]:
+    """Pick the calibration map by out-of-fold validation ECE, then fit the winner on the fold.
+
+    The number that decides is never the in-sample one: isotonic with a knot per bin can drive the
+    in-sample ECE of any fold to near zero, which says nothing about the sealed test. `method` may
+    also name one map outright, which is how a challenger is forced to a fixed shape."""
+    model.calibration = None
+    model.calibration_kind = None
+    if not validation:
+        return {"method": None, "reason": "no validation rows", "candidates": {}}
+    raw = [model.predict_proba(row["feats"]) for row in validation]
+    ys = [int(row["y"]) for row in validation]
+    masses = [float(row.get("weight", 1.0)) for row in validation]
+    pre = expected_calibration_error(raw, ys, bins, masses)
+    names = list(CALIBRATION_METHODS) if method == CALIBRATION_AUTO else [method]
+    if method != CALIBRATION_AUTO and method not in CALIBRATION_METHODS:
+        raise ValueError(f"unknown calibration method {method!r}")
+    groups = [int(row["group"]) for row in validation]
+    candidates = {
+        name: _cross_fit_ece(
+            raw, ys, groups, name, folds=folds, seed=seed, bins=bins, weights=masses
+        )
+        for name in names
+    }
+    scored = [
+        (body["ece"], name) for name, body in candidates.items() if body["ece"] is not None
+    ]
+    chosen = min(scored)[1] if scored else names[0]
+    pre_again = model.calibrate(raw, ys, bins=bins, method=chosen, weights=masses)
+    return {
+        "method": chosen,
+        "selected_by": (
+            "out-of-fold validation ECE (design-weighted)" if len(names) > 1 else "caller"
+        ),
+        "candidates": candidates,
+        "folds": folds,
+        "weighted": True,
+        "pre_calibration_ece_validation": pre_again if pre_again is not None else pre,
+        "applied": model.calibration_kind,
+        "ceiling": (candidates.get(chosen) or {}).get("ceiling"),
+    }
+
+
 def fit_model(
     run_pairs: Sequence[Mapping[str, Any]],
     labels: Mapping[PairKey, Label],
@@ -1289,12 +1890,15 @@ def fit_model(
     weight_cap: float | None = None,
     weight_cap_multiple: float = WEIGHT_CAP_MEDIAN_MULTIPLE,
     l2: float = 1e-3,
+    l2_grid: Sequence[float] | None = None,
     epochs: int = 3000,
     method: str = "irls",
     max_iter: int = FIT_MAX_ITER,
     tol: float | None = None,
     version: str | None = None,
     split_map: Mapping[int, int] | None = None,
+    calibration: str = CALIBRATION_AUTO,
+    calibration_folds: int = CALIBRATION_FOLDS,
 ) -> tuple[LogisticModel, FitReport]:
     """Fit the §6 scorer on judged pairs, split 60/20/20 by component (never by pair).
 
@@ -1352,35 +1956,74 @@ def fit_model(
         raise ValueError("no training rows: no labelled pair fell in the train split")
 
     prior = hand_initialised()
-    model = hand_initialised()
     feats_train = [row["feats"] for row in train]
     ys_train = [row["y"] for row in train]
     masses_train = [row["weight"] for row in train]
-    design_report: dict[str, Any] = {}
-    if method == "irls":
-        design_report = model.fit_irls(
-            feats_train, ys_train, l2=l2, max_iter=max_iter,
-            tol=IRLS_TOLERANCE if tol is None else tol, sample_weights=masses_train,
-        )
-    else:
-        model.fit(
-            feats_train, ys_train, l2=l2, epochs=epochs,
-            tol=FIT_TOLERANCE if tol is None else tol, sample_weights=masses_train,
-        )
 
-    pre_ece = None
-    if validation:
-        raw = [model.predict_proba(row["feats"]) for row in validation]
-        pre_ece = model.calibrate(raw, [row["y"] for row in validation])
+    def fitted(penalty: float) -> tuple[LogisticModel, dict[str, Any]]:
+        candidate = hand_initialised()
+        if method == "irls":
+            report = candidate.fit_irls(
+                feats_train, ys_train, l2=penalty, max_iter=max_iter,
+                tol=IRLS_TOLERANCE if tol is None else tol, sample_weights=masses_train,
+            )
+        else:
+            candidate.fit(
+                feats_train, ys_train, l2=penalty, epochs=epochs,
+                tol=FIT_TOLERANCE if tol is None else tol, sample_weights=masses_train,
+            )
+            report = {}
+        return candidate, report
+
+    # The sweep is scored on the validation split, UNCALIBRATED (`fit_irls` leaves no knots): a
+    # calibration map fitted on the same fold would absorb part of the penalty's effect and flatten
+    # the grid into noise. Ties go to the STIFFER penalty — same fit, fewer effective parameters.
+    grid = sorted({float(value) for value in l2_grid}) if l2_grid else []
+    grid_rows: list[dict[str, Any]] = []
+    chosen_l2 = float(l2)
+    selected_on = "caller"
+    if grid:
+        selected_on = "validation" if validation else "train"
+        best: tuple[float, float] | None = None
+        for penalty in grid:
+            candidate, _ = fitted(penalty)
+            train_probs = [candidate.predict_proba(row["feats"]) for row in train]
+            scored_rows = validation or train
+            probs = [candidate.predict_proba(row["feats"]) for row in scored_rows]
+            ys = [int(row["y"]) for row in scored_rows]
+            loss = _log_loss(probs, ys)
+            grid_rows.append({
+                "l2": penalty,
+                "in_task_grid": penalty in L2_TASK_GRID,
+                "train_log_loss": _log_loss(train_probs, [int(row["y"]) for row in train]),
+                "selection_log_loss": loss,
+                "selection_auc": auc(probs, ys),
+                "selection_ece": expected_calibration_error(probs, ys),
+                "converged": bool(candidate.fit_report.get("converged")),
+            })
+            if best is None or (loss, -penalty) < (best[0], -best[1]):
+                best = (loss, penalty)
+        chosen_l2 = best[1] if best is not None else chosen_l2
+
+    model, design_report = fitted(chosen_l2)
+    calibration_report = _calibrate_model(
+        model, validation, method=calibration, folds=calibration_folds, seed=seed,
+    )
+    pre_ece = calibration_report.get("pre_calibration_ece_validation")
 
     def measured(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         if not rows:
             return {"n": 0}
         probs = [model.predict_proba(row["feats"]) for row in rows]
         ys = [int(row["y"]) for row in rows]
+        masses = [float(row.get("weight", 1.0)) for row in rows]
         prior_probs = [prior.predict_proba(row["feats"]) for row in rows]
         return {
             "n": len(rows),
+            "ece_weighted": expected_calibration_error(probs, ys, RELIABILITY_BINS, masses),
+            "ece_prior_weighted": expected_calibration_error(
+                prior_probs, ys, RELIABILITY_BINS, masses
+            ),
             "n_positive": sum(ys),
             "n_groups": len({row["group"] for row in rows}),
             "auc": auc(probs, ys),
@@ -1397,6 +2040,21 @@ def fit_model(
     # The optimiser is part of the provenance: two methods on one split are two different
     # coefficient vectors, and `model_version` is what reaches the scored rows in the DB.
     model.version = version or f"fit_{method}_{len(train)}_{seed}"
+    # Stamped on the dataclass, so `to_json` carries it and `from_json` can check the feature
+    # digest: a model fitted before a feature lands scores a different function than the one
+    # measured here, and that has to fail at load rather than drift.
+    model.provenance = {
+        "feature_version": {
+            "sha256_16": model.feature_digest(), "n_features": len(model.feature_order),
+        },
+        "seal": split_seal(groups),
+        "training": {
+            "method": method, "l2": chosen_l2, "seed": seed, "split": split,
+            "n_train": len(train), "n_validation": len(validation), "n_test": len(test),
+            "calibration": calibration_report.get("method"),
+            "weight_cap": cap,
+        },
+    }
 
     weights = sorted(
         ((name, model.weights.get(name, 0.0)) for name in model.feature_order),
@@ -1434,9 +2092,18 @@ def fit_model(
             "validation_metrics": validation_metrics,
             "test_metrics": test_metrics,
             "calibration": {
-                # The validation ECE inside `validation_metrics` is measured AFTER the isotonic
-                # knots were fitted on that same split: in-sample, and not the E21 gate. The two
-                # honest numbers are the pre-fit validation ECE and the sealed test ECE.
+                # The validation ECE inside `validation_metrics` is measured AFTER the knots were
+                # fitted on that same split: in-sample, and not the E21 gate. The honest numbers
+                # are the pre-fit validation ECE, the OUT-OF-FOLD ECE the map was chosen on, and
+                # the sealed test ECE.
+                "method": calibration_report.get("method"),
+                "selected_by": calibration_report.get("selected_by"),
+                "candidates": calibration_report.get("candidates", {}),
+                # The highest probability the CHOSEN map can return: a T_hi above it is a cut no
+                # pair can reach, and that is a fact about the map, not about the model.
+                "ceiling": calibration_report.get("ceiling"),
+                "weighted": calibration_report.get("weighted"),
+                "folds": calibration_report.get("folds"),
                 "pre_calibration_ece_validation": pre_ece,
                 "post_calibration_ece_validation_in_sample": validation_metrics.get("ece"),
                 "test_ece": test_metrics.get("ece"),
@@ -1446,9 +2113,20 @@ def fit_model(
                 ),
                 "knots": [[edge, value] for edge, value in (model.calibration or [])],
             },
+            "l2_grid": {
+                "grid": grid,
+                "task_grid": list(L2_TASK_GRID),
+                "rows": grid_rows,
+                "chosen": chosen_l2,
+                "selected_on": selected_on,
+                "criterion": "log loss, uncalibrated; ties to the stiffer penalty",
+                # A penalty at either end of the grid is not a minimum, it is where the search
+                # ran out of room — say so rather than leaving a reader to compare the rows.
+                "chosen_is_edge": bool(grid) and chosen_l2 in (min(grid), max(grid)),
+            },
             "convergence": {
                 **dict(model.fit_report), "converged_flag": converged, "method": method,
-                "l2": l2, "tol": (IRLS_TOLERANCE if method == "irls" else FIT_TOLERANCE)
+                "l2": chosen_l2, "tol": (IRLS_TOLERANCE if method == "irls" else FIT_TOLERANCE)
                 if tol is None else tol,
                 # Only the ceiling that APPLIED: `epochs` beside a 10-step Newton fit reads as
                 # evidence about a knob that was never consulted.
@@ -1566,16 +2244,26 @@ def _eval_headline(report: EvalReport) -> list[str]:
     lines.append(f"band composition      judged {band['n_judged']}  positive share "
                  f"{_pct(band['rate'])}  HT {_pct(band['weighted_rate'])}"
                  f"   b at the settings in force "
-                 f"{_pct(sections['band_composition']['population_share_at_settings'])}"
-                 f" of {sections['band_composition']['n_population']} stored pairs (E25)")
+                 f"{_pct(sections['band_composition']['band_width'])}"
+                 f" of {sections['band_composition']['n_population']} stored pairs land in the"
+                 f" band (E25; score interval "
+                 f"{_pct(sections['band_composition']['score_in_band_share'])})")
     lines.append(f"reject zone           judged {reject['n_judged']}  positive share "
                  f"{_pct(reject['rate'])}  HT-weighted {_pct(reject['weighted_rate'])}")
-    lines.append(f"missed positives      below T_lo={sections['settings']['t_lo']:.2f}: "
+    lines.append(f"missed positives      below T_lo={sections['settings']['t_lo']:.4g}: "
                  f"{_pct(cohort['positives_below_t_lo_share'])} of weighted positives"
-                 f"   in band: {_pct(cohort['positives_in_band_share'])}" + marker)
+                 f"   in band: {_pct(cohort['positives_in_band_share'])}"
+                 f"   [SCORE-based: blind to the gates and the certificates]" + marker)
+    zone_recall = cohort["zone_recall"]
+    lines.append(f"zone recall           merge "
+                 f"{_pct(zone_recall['positives_in_merge_zone_share'])} of weighted positives"
+                 f"   band {_pct(zone_recall['positives_in_band_zone_share'])}"
+                 f"   reject {_pct(zone_recall['positives_in_reject_zone_share'])}"
+                 f"   veto {_pct(zone_recall['positives_in_veto_zone_share'])}"
+                 f"   [ZONE-based: what the engine actually did]" + marker)
     t_hi = thresholds_json["t_hi"]
     lines.append(
-        f"thresholds (dev)      T_hi {'unattainable' if t_hi is None else f'{t_hi:.4f}'}"
+        f"thresholds (dev)      T_hi {'unattainable' if t_hi is None else f'{t_hi:.12g}'}"
         f"  (n {thresholds_json['n_at_t_hi']} of which {thresholds_json['n_certificate_in_merge_set']}"
         f" certificate, precision {_pct(thresholds_json['precision_at_t_hi'])},"
         f" LB {_pct(thresholds_json['precision_lb_at_t_hi'])})"
@@ -1651,14 +2339,58 @@ def _eval_markdown(report: EvalReport) -> str:
                      f"{_pct(body['agreement'])} | {_pct(body['wilson_lb'])} |")
     lines.append("")
     lines.append(f"gold unanimity: {_pct(fidelity['gold_unanimity'])}")
+    by_stratum = sections.get("thresholds_by_stratum") or {}
+    if by_stratum:
+        lines.extend([
+            "", f"## Per-stratum thresholds (fitted on {by_stratum['fitted_on']}, measured on "
+            f"{by_stratum['measured_on']})", "",
+            f"key `{by_stratum['key']}`   gate LB >= "
+            f"{by_stratum['criteria']['precision_lb']:.2f} and point >= "
+            f"{by_stratum['criteria']['precision_point']:.3f}"
+            f"   a perfect stratum still needs {by_stratum['labels_needed_for_lb']} judged merges "
+            "to clear that lower bound", "",
+            "| stratum | dev n | T_hi | n at cut | precision | wilson LB | relaxed cut "
+            "| n | precision | wilson LB | cert merges | cert precision | sealed n "
+            "| sealed precision | sealed LB | ships |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
+            "| ---: | ---: | ---: | ---: | --- |",
+        ])
+        for name, body in by_stratum["strata"].items():
+            verdict = "auto-merge" if not body["propose_only"] else (
+                f"propose-only ({body['propose_only_reason']})"
+            )
+            # 12 significant digits, not 4: two cuts of a saturated calibration map differ in
+            # the 9th decimal and print identically at 4, and the rounded value names a merge set
+            # ~60x larger than the one measured. A published cut has to be re-enterable.
+            cut = "-" if body["t_hi"] is None else f"{body['t_hi']:.12g}"
+            relaxed = "-" if body["relaxed_t_hi"] is None else f"{body['relaxed_t_hi']:.12g}"
+            lines.append(
+                f"| {name} | {body['n_dev']} "
+                f"| {cut} "
+                f"| {body['n_at_t_hi']} | {_pct(body['precision_at_t_hi'])} "
+                f"| {_pct(body['wilson_lb_at_t_hi'])} "
+                f"| {relaxed} "
+                f"| {body['n_at_relaxed']} | {_pct(body['precision_at_relaxed'])} "
+                f"| {_pct(body['wilson_lb_at_relaxed'])} "
+                f"| {body['n_certificate_merges']} "
+                f"| {_pct(body['precision_certificate_merges'])} "
+                f"| {body['sealed_n_merge']} | {_pct(body['sealed_precision'])} "
+                f"| {_pct(body['sealed_wilson_lb'])} | {verdict} |"
+            )
+        lines.append("")
+        lines.append(f"auto-merge strata: {by_stratum['auto_merge_strata'] or 'none'}   "
+                     f"propose-only: {by_stratum['propose_only'] or 'none'}")
     lines.extend(["", "## Thresholds (fitted on train+validation)", "", "```",
                   json.dumps(sections["thresholds"], indent=2, sort_keys=True), "```", "",
                   "## Thresholds over every judged pair (cross-check, selection-inflated)", "",
                   "```",
                   json.dumps(sections["thresholds_all_judged"], indent=2, sort_keys=True),
                   "```", "",
-                  "## Sealed holdout re-measurement", "", "```",
+                  "## Sealed holdout re-measurement (at the SEARCHED thresholds)", "", "```",
                   json.dumps(sections["holdout"], indent=2, sort_keys=True), "```", "",
+                  "## Sealed holdout at the settings row actually loaded", "", "```",
+                  json.dumps(sections["holdout_at_settings"], indent=2, sort_keys=True),
+                  "```", "",
                   "## Sample design and nonresponse", "", "```",
                   json.dumps(sections["sample"], indent=2, sort_keys=True), "```", ""])
     return "\n".join(lines)
@@ -1693,11 +2425,37 @@ def _fit_headline(report: FitReport) -> list[str]:
         )
     lines.append("")
     lines.append(
-        f"calibration E21       validation ECE pre-fit "
+        f"calibration E21       map {calibration.get('method') or 'none'}"
+        f" ({calibration.get('selected_by') or '-'})"
+        f"   validation ECE pre-fit "
         f"{_pct(calibration['pre_calibration_ece_validation'])}"
         f"   sealed test ECE {_pct(calibration['test_ece'])}"
         f"   gate <= 5.00%: {calibration['ece_gate_ok']}"
     )
+    for name, body in sorted((calibration.get("candidates") or {}).items()):
+        lines.append(
+            f"  out-of-fold           {name:<13} ECE {_pct(body.get('ece'))}"
+            f" (unweighted {_pct(body.get('ece_unweighted'))})"
+            # The merge-end numbers are DIAGNOSTIC: a constant map scores ~0 ECE there by
+            # refusing to discriminate, which the AUC beside it is what catches.
+            f"   merge end: ECE {_pct(body.get('ece_merge_end'))}"
+            f" AUC {_pct(body.get('auc_merge_end'))} (n {body.get('n_merge_end')})"
+            f"   ceiling {_pct(body.get('ceiling'))}"
+            f"   n {body.get('n_out_of_fold')} over {body.get('n_folds')} folds"
+        )
+    sweep = sections.get("l2_grid") or {}
+    if sweep.get("rows"):
+        lines.append(
+            f"l2 grid               chosen {sweep['chosen']:g} on {sweep['selected_on']}"
+            f"  ({sweep['criterion']})"
+        )
+        for row in sweep["rows"]:
+            mark = " <-" if row["l2"] == sweep["chosen"] else ""
+            lines.append(
+                f"  l2={row['l2']:<8g}        log loss {row['selection_log_loss']:.4f}"
+                f"   AUC {row['selection_auc']:.4f}   ECE {row['selection_ece']:.4f}"
+                f"   train log loss {row['train_log_loss']:.4f}{mark}"
+            )
     before = split.get("weights_before_cap") or {}
     after = split.get("weights_after_cap") or {}
     lines.append(f"weights capped {split['n_weights_capped']} at {split['weight_cap']:.2f}"

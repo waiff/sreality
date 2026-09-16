@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
+from autodedup import features
 from autodedup.dataset import Listing, Location
 from autodedup.fingerprint import Fingerprint, build_fingerprint
 from autodedup.guards import (
@@ -169,6 +171,15 @@ def test_a_must_not_link_pair_refuses_the_union_in_either_order() -> None:
         ({"max_cluster_size": 1}, "max_cluster_size"),
         ({"clip_sample": 0}, "clip_sample"),
         ({"phash_sample": 0}, "phash_sample"),
+        ({"vocabulary_attr_keys": ("price_unit", "nonsense")}, "nonsense"),
+        ({"numeral_conflict_units": ("floor", "storeys")}, "storeys"),
+        ({"unit_interior_min": 1.5}, "unit_interior_min"),
+        ({"unit_containment_min": -0.1}, "unit_containment_min"),
+        ({"developer_catalog_ratio_min": 2.0}, "developer_catalog_ratio_min"),
+        ({"unit_rare_tokens_min": -1.0}, "unit_rare_tokens_min"),
+        ({"unit_rare_support_interior_min": 1.4}, "unit_rare_support_interior_min"),
+        ({"colive_overlap_days": -1.0}, "colive_overlap_days"),
+        ({"max_attr_contradictions": 0.0}, "max_attr_contradictions"),
     ],
 )
 def test_settings_reject_an_incoherent_sweep_row(overrides: dict[str, Any], field: str) -> None:
@@ -180,6 +191,34 @@ def test_settings_reject_an_incoherent_sweep_row(overrides: dict[str, Any], fiel
 
 def test_the_default_settings_row_validates() -> None:
     assert Settings() == Settings.from_dict(Settings().to_dict())
+
+
+def test_the_vocabulary_default_has_ONE_definition() -> None:
+    """`features.attribute_conflicts` is also called without a settings row (the judge digest),
+    so its fallback and the swept field must be the same tuple, not two that can drift."""
+    assert Settings().vocabulary_attr_keys == features.DEFAULT_VOCABULARY_ATTR_KEYS
+
+
+def test_the_w4c_rules_are_sweepable_and_survive_a_json_round_trip() -> None:
+    """E45/E46 and the K-A demotion are settings, not constants: the evaluation prices each one
+    by naming it in a sweep file, and JSON's lists must come back as tuples."""
+    swept = Settings.from_dict({
+        **json.loads(json.dumps(Settings().to_dict())),
+        "certificate_ka_enabled": True,
+        "unit_evidence_required": False,
+        "developer_signature_same_broker_only": True,
+        "developer_colive_guard": False,
+        "unit_rare_requires_support": True,
+        "colive_overlap_days": 7.0,
+        "vocabulary_attr_keys": ["price_unit"],
+    })
+    assert swept.certificate_ka_enabled is True
+    assert swept.unit_evidence_required is False
+    assert swept.developer_signature_same_broker_only is True
+    assert (swept.developer_colive_guard, swept.colive_overlap_days) == (False, 7.0)
+    assert swept.unit_rare_requires_support is True
+    assert swept.vocabulary_attr_keys == ("price_unit",)
+    assert Settings() == Settings.from_dict(json.loads(json.dumps(Settings().to_dict())))
 
 
 def test_the_image_sample_caps_are_sweepable() -> None:
