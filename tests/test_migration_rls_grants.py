@@ -358,6 +358,33 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "dedup_sim.candidate_inputs",
     "dedup_sim.candidate_generations",
     "dedup_sim.candidate_pairs",
+    # The autonomous dedup engine's own store (migration 528, schema autodedup):
+    # fingerprints, the blocking substrate, pair/cluster grain, the judge queue and the
+    # operator verdicts, the learning tables, and the operator-facing iteration log.
+    # Backend-only, NO `_public` view — the browser client is pinned to schema `public`,
+    # so the progress page and the validation UI read them through the admin-gated API.
+    # `autodedup.merges` is the reserved, EMPTY write ledger (the trial is shadow mode).
+    "autodedup.settings",
+    "autodedup.runs",
+    "autodedup.iterations",
+    "autodedup.listing_fp",
+    "autodedup.image_band",
+    "autodedup.phash_pop",
+    "autodedup.exploded_blocks",
+    "autodedup.pairs",
+    "autodedup.judgements",
+    "autodedup.must_not_link",
+    "autodedup.clusters",
+    "autodedup.cluster_members",
+    "autodedup.cluster_conflicts",
+    "autodedup.merges",
+    "autodedup.verdicts",
+    "autodedup.labels",
+    "autodedup.models",
+    "autodedup.eval_samples",
+    "autodedup.resolve_queue",
+    "autodedup.scan_cursor",
+    "autodedup.judge_queue",
 })
 
 _CREATE_GATED_OBJ = re.compile(

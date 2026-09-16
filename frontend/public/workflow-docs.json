@@ -303,7 +303,7 @@
       "inputs": [
         {
           "name": "mode",
-          "description": "Which lane mode to run (validated in Python). census = the read-only region census.",
+          "description": "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes.",
           "required": true,
           "type": "string",
           "default": "census",

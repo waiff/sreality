@@ -12,10 +12,21 @@ name: "AUTODEDUP: engine lane"
 #             in-block pair count under a COARSE block x category key - an upper bound on any
 #             finer blocking the engine adopts, not a figure comparable to a live lane. Prints
 #             a ranked table and writes out/census.json. This is how the trial region is
-#             chosen.
+#             chosen. It also runs four PROBES per shortlisted block - per-portal
+#             image/pHash/CLIP coverage, the same-source re-post base rate, address-level
+#             developer density and shared-image density - printed as a second table and
+#             attached to each block in census.json. `probes=0` turns them off.
+#
+#   probes  - READS ONLY. The corpus-wide measurements that do not belong to any one block
+#             and so are paid for once, not once per block: the ingest rate (listings first
+#             seen in the last 1 and 7 days, by source, the L every monthly cost number
+#             scales with) and one portal's location posture (granularity histogram plus pin
+#             coverage, `source=` picking the portal, default remax). Prints two small tables
+#             and writes out/probes.json.
 #
 # `args` is a free-form `k=v,k=v` string each mode parses for itself. census accepts
-# min_n, max_n, top, detail_top, timeout_s and pin_share_min.
+# min_n, max_n, top, detail_top, timeout_s, pin_share_min, probes and hash_share_min;
+# probes accepts timeout_s and source.
 #
 # Costs nothing but GitHub minutes and database time. out/ is uploaded on every outcome;
 # out/summary.json is written even when the run fails.
@@ -24,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes."
         required: true
         default: "census"
         type: string
