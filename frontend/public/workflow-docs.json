@@ -303,7 +303,7 @@
       "inputs": [
         {
           "name": "mode",
-          "description": "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row.",
+          "description": "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one.",
           "required": true,
           "type": "string",
           "default": "census",
@@ -311,7 +311,7 @@
         },
         {
           "name": "args",
-          "description": "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,tier=text,n=400,max_usd=5 or export_run=123,tier=oss,n=200,max_usd=3,pairs_from=gold.",
+          "description": "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,tier=text,n=400,max_usd=5 or export_run=123,tier=oss,n=200,max_usd=3,pairs_from=gold. A record correction is id=12,cost_usd=3.10,status=done.",
           "required": false,
           "type": "string",
           "default": "",

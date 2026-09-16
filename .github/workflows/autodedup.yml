@@ -161,6 +161,14 @@ name: "AUTODEDUP: engine lane"
 #             row from its arguments, for work that happened outside a lane run (a migration
 #             applied by apply_migration.yml, an operator review session, a wave that closed
 #             before the ledger existed) so the /autodedup/progress page is not missing it.
+#             `id=<n>` CORRECTS an existing row instead of filing a new one: only the fields
+#             named in the same args move (title, status, approach, tools, cost_usd, notes),
+#             everything else keeps what it had, and a status of done or failed re-stamps
+#             finished_at so a pass that died `running` stops reading as still in flight. It
+#             refuses to change `wave` - a row's wave is its identity on the progress page,
+#             so a mis-waved entry is a new row, not an edit - and refuses an id no row
+#             carries (exit 2, nothing written) rather than reporting a green run that
+#             changed nothing. This run does NOT add a ledger row of its own.
 #
 # Every other mode writes its own ledger row automatically - `running` when it starts, a
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
@@ -171,7 +179,10 @@ name: "AUTODEDUP: engine lane"
 # probes accepts timeout_s and source; export accepts blocks, timeout_s, phash_timeout_s,
 # batch, clip_model and negctl_max (block overrides are SPACE-separated, e.g.
 # `blocks=town:563510 quarter:490245`, because the comma already separates k=v pairs);
-# record accepts wave, title, status, approach, tools, notes, cost_usd and run_id; judge
+# record accepts wave, title, status, approach, tools, notes, cost_usd and run_id, or
+# id=<n> plus any of title, status, approach, tools, cost_usd and notes to correct that row
+# (`tools` is a SEMICOLON or SLASH list - the comma already separates k=v pairs and this
+# workflow's charset check rejects `;`, so a dispatched entry writes `a/b/c`); judge
 # accepts export_run, tier, n, max_usd (required), seed, workers, strata (SPACE-separated
 # stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
 # download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row) and,
@@ -191,12 +202,12 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one."
         required: true
         default: "census"
         type: string
       args:
-        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,tier=text,n=400,max_usd=5 or export_run=123,tier=oss,n=200,max_usd=3,pairs_from=gold."
+        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,tier=text,n=400,max_usd=5 or export_run=123,tier=oss,n=200,max_usd=3,pairs_from=gold. A record correction is id=12,cost_usd=3.10,status=done."
         required: false
         default: ""
         type: string
