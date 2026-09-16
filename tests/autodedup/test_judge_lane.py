@@ -1400,3 +1400,16 @@ def test_the_lane_scores_the_cohort_with_the_named_model(tmp_path, monkeypatch) 
     monkeypatch.setattr(score_lane, "MODELS_DIR", tmp_path)
     loaded = judge_lane.load_engine_model("m")
     assert loaded.feature_order == hand_initialised().feature_order
+
+
+def test_the_lane_resolves_a_settings_name_under_the_repo_settings_dir(tmp_path, monkeypatch) -> None:
+    """`settings=w4` must find autodedup/settings/w4.json the way the score lane does (run 35145938264
+    died on FileNotFoundError('w4') because the name went straight to the file loader)."""
+    from autodedup import score_lane
+    from autodedup.settings import Settings
+
+    assert judge_lane.load_engine_settings(None) == Settings()
+    (tmp_path / "w4.json").write_text(json.dumps(Settings(t_lo=0.2).to_dict()), encoding="utf-8")
+    monkeypatch.setattr(score_lane, "SETTINGS_DIR", tmp_path)
+    assert judge_lane.load_engine_settings("w4").t_lo == 0.2
+    assert judge_lane.load_engine_settings(str(tmp_path / "w4.json")).t_lo == 0.2

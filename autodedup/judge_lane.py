@@ -144,6 +144,19 @@ SUMMARY_FILE: str = "judge.json"
 
 _JUDGE: Any = None
 
+def load_engine_settings(raw: str | None) -> Settings:
+    """`settings=<name>` under autodedup/settings/ (or an existing file path); absent = defaults."""
+    if not raw:
+        return Settings()
+    from pathlib import Path
+
+    if Path(raw).is_file():
+        return Settings.from_json(raw)
+    from autodedup.score_lane import SETTINGS_DIR, repo_path
+
+    return Settings.from_json(str(repo_path(raw, SETTINGS_DIR)))
+
+
 def load_engine_model(raw: str | None) -> LogisticModel:
     """`model=<name>` under autodedup/models/ scores the cohort; absent = the hand prior."""
     if not raw:
@@ -879,7 +892,7 @@ def run_judge(
         raise SystemExit(f"no cohort artifact at {cohort_path}")
 
     dataset = load(cohort_path)
-    settings = Settings.from_json(parsed.settings) if parsed.settings else Settings()
+    settings = load_engine_settings(parsed.settings)
     engine = harness.run_engine(dataset, settings, load_engine_model(parsed.model), out_dir)
     (out_dir / RUN_FILE).write_text(
         json.dumps(engine, indent=2, sort_keys=True), encoding="utf-8"
