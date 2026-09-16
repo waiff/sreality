@@ -94,9 +94,6 @@ WITH base AS (
         l.area_m2                                     AS area_m2,
         l.floor                                       AS floor,
         l.broker_identity_id                          AS broker_identity_id,
-        -- substr makes the length test slice-friendly: 200 characters is all it needs, so
-        -- Postgres fetches the first TOAST chunk instead of decompressing every description
-        -- on a pass that otherwise touches only fixed-width columns.
         (l.source_url IS NOT NULL)                    AS has_source_url,
         -- Zero area is not an area anywhere else in this file (`with_area` filters
         -- `area_m2 > 0`), so a zero-area row with nothing else on it is just as unreachable
@@ -155,10 +152,7 @@ agg AS (
         count(*) FILTER (WHERE broker_identity_id IS NOT NULL)        AS with_broker,
         count(*) FILTER (WHERE at_street_grain)                       AS with_street,
         count(*) FILTER (WHERE is_address_grain)                      AS with_point,
-        count(*) FILTER (WHERE has_source_url)                        AS with_source_url,
-        -- THE RECALL CEILING: no area, no disposition, no broker and no usable text -
-        -- reachable by no probe except photos, so it bounds recall before any threshold.
-        count(*) FILTER (WHERE no_signal)                             AS no_signal_at_all
+        count(*) FILTER (WHERE has_source_url)                        AS with_source_url
     FROM base
     GROUP BY 1
 )
@@ -195,9 +189,6 @@ WITH base AS (
         l.area_m2                                     AS area_m2,
         l.floor                                       AS floor,
         l.broker_identity_id                          AS broker_identity_id,
-        -- substr makes the length test slice-friendly: 200 characters is all it needs, so
-        -- Postgres fetches the first TOAST chunk instead of decompressing every description
-        -- on a pass that otherwise touches only fixed-width columns.
         (l.source_url IS NOT NULL)                    AS has_source_url,
         -- Zero area is not an area anywhere else in this file (`with_area` filters
         -- `area_m2 > 0`), so a zero-area row with nothing else on it is just as unreachable
@@ -256,10 +247,7 @@ agg AS (
         count(*) FILTER (WHERE broker_identity_id IS NOT NULL)        AS with_broker,
         count(*) FILTER (WHERE at_street_grain)                       AS with_street,
         count(*) FILTER (WHERE is_address_grain)                      AS with_point,
-        count(*) FILTER (WHERE has_source_url)                        AS with_source_url,
-        -- THE RECALL CEILING: no area, no disposition, no broker and no usable text -
-        -- reachable by no probe except photos, so it bounds recall before any threshold.
-        count(*) FILTER (WHERE no_signal)                             AS no_signal_at_all
+        count(*) FILTER (WHERE has_source_url)                        AS with_source_url
     FROM base
     GROUP BY 1
 )
