@@ -480,8 +480,8 @@ One row per wave, appended as it closes. A wave is **closed** only when its gate
 |---|---|---|---|---|---|---|
 | W0 Census | 2026-09-16 | 2026-09-16 | yes | PR #1482 merged as `f236d2f7`; census run `35088558149` (job `lane` success); artifact `autodedup-census-35088558149`, 17,455 B | $0 | delta probes land in W0b |
 | W0b Doc + foundation | 2026-09-16 | 2026-09-16 | yes | PR #1484 merged as `8e237092`; migrations 527 + 528 applied live (receipts `35092747371` 1 object, `35092847735` 52 objects); probes run `35093138550` | $0 | migrations 527/528; B6 dropped (D7); receipt parser qualifies non-public indexes |
-| W1 Export + harness + progress page | 2026-09-16 | | | export mode, `autodedup.iterations` writer + `record` mode, `GET /autodedup/iterations|stats`, SPA `/autodedup/progress`, `autodedup.dataset` + `harness stats` | $0 | cohort D1: Jablonec 563510 · Turnov 577626 · Vysočany 490245 · negctl (Praha address groups) |
-| W2 Blocking + core features | | | | | | |
+| W1 Export + harness + progress page | 2026-09-16 | 2026-09-16 | yes | PR #1485 merged as `323239ba`; export run `35096363646` → `cohort.jsonl.gz` 80.7 MB (5,402 listings: Jablonec 2,541 · Turnov 720 · Vysočany 1,341 · negctl 800; 76,378 images, 75,294 CLIP, 10,903 snapshots); `harness stats` reads it locally; `/autodedup/progress` verified in production (headless admin session, 0 console errors) | $0 | phash-pop query 40 s; price history depth 1 for ~85 % of listings (corpus is 4.5 months old) |
+| W2 Blocking + core features | 2026-09-16 | 2026-09-16 | partly — engine runs, `b` measured; certificates K-A/K-B over-fire on developer units (pending W3 labels) | PR #1487 merged as `7b694eb0`; first cohort run: 43,175 pairs, merge 6,120 / band 2,572 / reject 34,483, certificates K-A 838 · K-B 920 · K-C 1,496, 1,310 clusters, 1,123 refused unions (813 floor_spread), 1,952 bridges; 28 s wall, 667 MB RSS | $0 | K-C looks right on inspection; K-A (negctl 529) and K-B (Vysočany 857) fire on all-catalog developer galleries with template text — the same_building_different_unit class W3 must measure |
 | W3 Ground truth | | | | | | |
 | W4 Model + thresholds | | | | | | |
 | W5 Validation UI | | | | | | |
@@ -493,14 +493,14 @@ One row per wave, appended as it closes. A wave is **closed** only when its gate
 | # | quantity | design assumption | measured | source | when |
 |---|---|---|---|---|---|
 | M1 | `L` new listings/month | 170,000 | **~180,000** (42,095 in 7 d ≈ 6,014/day; bazos 13.5k, idnes 10.4k, sreality 8.2k, ceskereality 5.2k, realitymix 2.9k per week) | probes run `35093138550` | W0b |
-| M2 | same-portal re-post base rate | unknown | | census B3 | W0b |
-| M3 | `ad_max_cluster_size` | 8 (provisional) | | census B3+B4 | W0b |
+| M2 | same-portal re-post base rate | unknown | Jablonec 25 pairs / 47 listings, Turnov 4, **Vysočany 861 pairs / 158 listings (developer re-listings, not re-posts)** | census probes runs `35097601668` + `35099351512` | W0b |
+| M3 | `ad_max_cluster_size` | 8 (provisional) | not yet settled — first run: 845 pairs, 293 triples, 120 quads, 52 of size 5–8, 308 unions refused by the size cap | W2 run 1 | W2 |
 | M4 | remax location reach | contradicted | **99.4 % with geom** (13,740 rows: obec 6,766 · quarter 6,292 · street 603 · unknown 79) — the 0 % figure is dead | probes run `35093138550` | W0b |
-| M5 | per-portal phash/CLIP coverage | unstated | | census B1 | W0b |
-| M6 | hard recall ceiling (`no_signal_at_all`) | unknown | | census block layer | W0b |
-| M7 | candidates/listing p50 / p99 | 12–25 / ≤60 | | W2 estimate mode | W2 |
-| M8 | band width `b` | 0.015 | | W2 on the real cohort | W2 |
-| M9 | `ad_catalog_df` | 8 | | W2 | W2 |
+| M5 | per-portal phash/CLIP coverage | unstated | ≥ 95 % on every portal incl. bazos (542/569 in Jablonec, 200/230 in Turnov) | census probes | W0b |
+| M6 | hard recall ceiling (`no_signal_at_all`) | unknown | Jablonec 27/2,541, Turnov 15/720, Vysočany 0/1,341 (≈ 1 %) | census probes | W0b |
+| M7 | candidates/listing p50 / p99 | 12–25 / ≤60 | **10 / 60** (mean 15; 244 listings at the cap, 234 with zero candidates, 609 in an exploded key) | W2 run 1 `run.json.blocking` | W2 |
+| M8 | band width `b` | 0.015 | **0.0596** under the hand-initialised prior (2,572 of 43,175) — to be re-read after the W4 fit | W2 run 1 | W2 |
+| M9 | `ad_catalog_df` | 8 | 8 kept; share of images with pop ≥ 8: Jablonec 9 %, Turnov 11 %, Vysočany 14 %, negctl 50 % | `harness stats` | W2 |
 | M10 | judge output tokens per verdict | 1,200–1,500 | | `llm_calls` | W3 |
 | M11 | $/pair T1 / T2 / gold | $0.00086 / $0.00284 / $0.018 | | `llm_calls` | W3 |
 | M12 | cheap-vs-gold agreement | ≥0.93 target | | W3/W4 | W4 |

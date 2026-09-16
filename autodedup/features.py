@@ -355,19 +355,41 @@ def price_path_event_match(
     return matched / len(small)
 
 
-def _attr_map(listing: Listing) -> dict[str, str]:
-    out: dict[str, str] = {}
+def _attr_raw(listing: Listing) -> dict[str, object]:
+    out: dict[str, object] = {}
     attrs = listing.attrs or {}
     for key in ATTR_KEYS:
         value = listing.subtype if key == "subtype" else attrs.get(key)
         if value is None:
             continue
-        out[key] = str(value).strip().lower()
+        out[key] = value
     for key in CONFLATED_ATTR_KEYS:
         value = attrs.get(key)
         if value is not None:
-            out[key] = str(value).strip().lower()
+            out[key] = value
     return out
+
+
+def _attr_map(listing: Listing) -> dict[str, str]:
+    return {key: str(value).strip().lower() for key, value in _attr_raw(listing).items()}
+
+
+def attribute_conflicts(la: Listing, lb: Listing) -> list[tuple[str, object, object]]:
+    """The slots behind the `attr_contradictions` COUNT, as `(field, value A, value B)`.
+
+    Same field set and same equality as the feature (normalised, case-folded), because a prompt
+    that named a conflict the model cannot see in the feature vector would be arguing with it —
+    the values are returned RAW so the digest can print `energy_rating A=B vs B=C` rather than
+    the lower-cased form the comparison runs on."""
+    raw_a = _attr_raw(la)
+    raw_b = _attr_raw(lb)
+    norm_a = _attr_map(la)
+    norm_b = _attr_map(lb)
+    return [
+        (key, raw_a[key], raw_b[key])
+        for key, value_a in norm_a.items()
+        if key in norm_b and norm_b[key] != value_a
+    ]
 
 
 def _numeral_agreement(

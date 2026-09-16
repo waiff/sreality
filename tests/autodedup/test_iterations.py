@@ -236,9 +236,9 @@ def test_record_mode_without_the_schema_reports_it(tmp_path: Path) -> None:
 
 
 def test_every_mode_is_registered() -> None:
-    assert set(lane.MODES) == {"census", "probes", "export", "record"}
+    assert set(lane.MODES) == {"census", "probes", "export", "judge", "record"}
     # `record` writes its own terminal row, so wrapping it would file the same iteration twice.
-    assert set(lane.ITERATION_META) == {"census", "probes", "export"}
+    assert set(lane.ITERATION_META) == {"census", "probes", "export", "judge"}
     for meta in lane.ITERATION_META.values():
         assert meta["wave"] and meta["title"] and meta["approach"] and meta["tools"]
 
