@@ -21,3 +21,8 @@ def test_index_on_public_table_stays_bare() -> None:
 def test_explicitly_qualified_index_name_is_kept() -> None:
     sql = "create index dedup_sim.x_idx on dedup_sim.t (a);"
     assert "dedup_sim.x_idx" in _relations(sql)
+
+
+def test_index_on_explicit_public_table_stays_bare() -> None:
+    sql = "create unique index if not exists foo_idx on public.foo (id);"
+    assert "foo_idx" in _relations(sql)

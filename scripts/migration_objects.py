@@ -191,8 +191,9 @@ def parse_objects(sql: str) -> list[MigrationObject]:
     for m in _RE_INDEX.finditer(body):
         name = _clean(m.group(1))
         target = _clean(m.group(2))
-        if "." not in name and "." in target:
-            name = f"{target.rsplit('.', 1)[0]}.{name}"
+        schema = target.rsplit(".", 1)[0] if "." in target else "public"
+        if "." not in name and schema != "public":
+            name = f"{schema}.{name}"
         add("relation", name)
     for m in _RE_FUNCTION.finditer(body):
         add("function", _clean(m.group(1)))

@@ -605,6 +605,11 @@ alter table autodedup.scan_cursor        enable row level security;
 alter table autodedup.judge_queue        enable row level security;
 
 revoke all on autodedup.settings           from anon, authenticated;
+revoke all on sequence autodedup.runs_id_seq from anon, authenticated;
+revoke all on sequence autodedup.iterations_id_seq from anon, authenticated;
+revoke all on sequence autodedup.cluster_conflicts_id_seq from anon, authenticated;
+revoke all on sequence autodedup.verdicts_id_seq from anon, authenticated;
+revoke all on sequence autodedup.eval_samples_id_seq from anon, authenticated;
 revoke all on autodedup.runs               from anon, authenticated;
 revoke all on autodedup.iterations         from anon, authenticated;
 revoke all on autodedup.listing_fp         from anon, authenticated;
