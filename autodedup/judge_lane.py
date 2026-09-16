@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -120,8 +121,10 @@ OSS_EST_S_PER_PAIR: float = 12.0
 
 # A 429 is the steady state at six workers pushing eight images a call, and it is not a verdict:
 # retry it before it shrinks the sample (or, on gold, silently downgrades the independent model
-# family to a gpt-5-mini self-consistency vote).
-RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 8.0)
+# family to a gpt-5-mini self-consistency vote). Three retries at 2/4/8s: a burst limit clears
+# inside fourteen seconds, and anything that does not is no longer the burst this sleep was
+# sized for — the gold tier takes its weaker fallback rather than hold a worker any longer.
+RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 4.0, 8.0)
 RETRY_SLEEP: Callable[[float], None] = time.sleep
 
 # The pod's meter: WALL clock, because that is what RunPod bills and what `oss_pod.PodHandle`
@@ -359,6 +362,10 @@ class PairJob:
     row: dict[str, Any]
     stratum: str
     votes: tuple[Vote, ...]
+    # Position in the DRAWN sample, stamped once at build. The number the summary publishes when
+    # an arm goes down mid-pass, so "it died at pair 598 of 2,240" is a fact about the draw and
+    # not about whichever of six workers happened to notice first.
+    index: int = 0
 
 
 def vote_plan(tier: str, oss_model: str = MODEL_OSS) -> tuple[Vote, ...]:
@@ -541,6 +548,141 @@ class PodBudget(Budget):
     def release(self, estimate: float) -> None:
         with self._lock:
             self.spent = self.pod_cost_usd()
+
+
+# --- provider errors: four kinds, three different answers --------------------------------
+
+ERROR_QUOTA: str = "quota"
+ERROR_RATE_LIMIT: str = "rate_limit"
+ERROR_FATAL: str = "fatal"
+ERROR_TRANSIENT: str = "transient"
+ERROR_UNKNOWN: str = "unknown"
+
+# Phrases that mean "this account is out of allowance" whatever status carries them. DashScope
+# answers an exhausted plan in OpenAI's own wording ("You exceeded your current quota, please
+# check your plan and billing details"), which `toolkit.vision_batch.FATAL_MARKERS` classes as
+# fatal — right for a single-provider image pass, fatal-to-the-wrong-thing for a three-vote gold
+# judge whose other model family is answering perfectly well.
+QUOTA_MARKERS: tuple[str, ...] = (
+    "exceeded your current quota",
+    "insufficient_quota",
+    "insufficient_user_quota",
+    "insufficient balance",
+    "no credits remaining",
+    "out of credits",
+    "allocated quota",
+    "arrearage",
+    "billing details",
+)
+# The same meaning, but only once the STATUS already says money: "quota" turns up in plain
+# rate-limit wording too ("quota exceeded for requests per minute"), and a burst limit must be
+# waited out, not written off for the rest of the run.
+QUOTA_BODY_MARKERS: tuple[str, ...] = (
+    "quota", "billing", "insufficient", "credit", "payment", "balance",
+)
+AUTH_MARKERS: tuple[str, ...] = (
+    "invalid_api_key", "invalid api key", "incorrect api key", "unauthorized",
+    "authentication", "api_key is not set", "api key is not set",
+    "model_not_found", "model not found", "unknown model",
+)
+RATE_LIMIT_MARKERS: tuple[str, ...] = (
+    "rate limit", "rate_limit", "too many requests", "throttl", "slow down",
+)
+TRANSIENT_MARKERS: tuple[str, ...] = (
+    "timeout", "timed out", "connection", "temporarily unavailable", "overloaded",
+    # `requests.raise_for_status()` wording, which carries no "HTTP nnn" for the regex to read.
+    "server error", "bad gateway", "service unavailable",
+)
+
+_HTTP_STATUS = re.compile(r"http[ _/]?(\d{3})")
+
+
+def http_status(message: str) -> int | None:
+    """The provider's status code, read out of the message the providers deliberately put it in
+    (`openai_compatible.complete`: `"{name} call failed: HTTP {status} {body}"`). A regex, not a
+    substring test — a body that happens to contain "429" is not a rate limit."""
+    match = _HTTP_STATUS.search(message.lower())
+    return int(match.group(1)) if match else None
+
+
+def classify_provider_error(exc: Exception | str) -> str:
+    """Which of four failures this is — the whole point being that they are NOT one thing.
+
+      quota       the account is out of allowance; every remaining call fails identically
+      rate_limit  a burst limit; the same call succeeds after a wait
+      fatal       a dead key or a model that does not exist; nothing here improves with time
+      transient   5xx, timeout, dropped connection
+
+    Only the caller knows what to do with each, because that depends on whether the arm that
+    failed has a fallback: the gold tier's third vote does, the primary model does not.
+    """
+    low = str(exc or "").lower()
+    status = http_status(low)
+    if any(marker in low for marker in QUOTA_MARKERS):
+        return ERROR_QUOTA
+    if status == 402:
+        return ERROR_QUOTA
+    if status in (403, 429) and any(marker in low for marker in QUOTA_BODY_MARKERS):
+        return ERROR_QUOTA
+    if status in (401, 403, 404) or any(marker in low for marker in AUTH_MARKERS):
+        return ERROR_FATAL
+    if status == 429 or any(marker in low for marker in RATE_LIMIT_MARKERS):
+        return ERROR_RATE_LIMIT
+    if status is not None and 500 <= status <= 599:
+        return ERROR_TRANSIENT
+    if any(marker in low for marker in TRANSIENT_MARKERS):
+        return ERROR_TRANSIENT
+    return ERROR_UNKNOWN
+
+
+# Worth another call after a sleep.
+RETRYABLE: frozenset[str] = frozenset({ERROR_RATE_LIMIT, ERROR_TRANSIENT})
+# Permanent for the REST OF THE RUN, not merely for this call: an arm that hits either of these
+# hits it again on every remaining pair, so the answer is a switch, not a retry.
+ARM_KILLING: frozenset[str] = frozenset({ERROR_QUOTA, ERROR_FATAL})
+
+
+class SecondaryArm:
+    """The gold tier's independent-family vote as a run-scoped switch.
+
+    Judge run 35146813906 stopped a 2,240-call gold pass after 598 verdicts because DashScope
+    answered "You exceeded your current quota" and the lane's fatal marker treats that as the
+    PROVIDER failing — while `gpt-5-mini` was answering every call and the tier already carried
+    a fallback vote (`GOLD_FALLBACK`) for precisely this. An exhausted account does not recover
+    inside one pass: the arm goes down ONCE, every remaining pair takes the weaker vote, and the
+    summary says so. Thread-safe because six workers hit the same 429 within the same second and
+    the pair index the operator wants is the FIRST one, not the last thread to notice.
+    """
+
+    def __init__(self, name: str, model: str) -> None:
+        self._lock = threading.Lock()
+        self.name = name
+        self.model = model
+        self.disabled = False
+        self.reason: str | None = None
+        self.at_pair: int | None = None
+
+    def is_disabled(self) -> bool:
+        with self._lock:
+            return self.disabled
+
+    def disable(self, reason: str, at_pair: int | None) -> bool:
+        """True only for the caller that actually put the arm down."""
+        with self._lock:
+            if self.disabled:
+                return False
+            self.disabled = True
+            self.reason = str(reason)[:200]
+            self.at_pair = at_pair
+            return True
+
+    def to_json(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                f"{self.name}_arm_disabled": self.disabled,
+                f"{self.name}_arm_disabled_reason": self.reason,
+                f"{self.name}_arm_disabled_at_pair": self.at_pair,
+            }
 
 
 # --- verdict -> row ----------------------------------------------------------------------
@@ -738,6 +880,9 @@ class Counters:
     errors: list[str] = field(default_factory=list)
     call_ids: list[int] = field(default_factory=list)
     gold_flagged: int = 0
+    # Fallback votes actually taken: how much of this pass's "independence" is really
+    # gpt-5-mini agreeing with itself. A gold run where this is not 0 is a weaker run.
+    weaker_votes: int = 0
     latency_s_total: float = 0.0
     latency_s_max: float = 0.0
     tokens_in: int = 0
@@ -762,6 +907,7 @@ class Counters:
             "calls": dict(sorted(self.calls.items())),
             "verdicts": dict(sorted(self.verdicts.items())),
             "gold_flagged": self.gold_flagged,
+            "weaker_votes": self.weaker_votes,
             "latency_s_mean": (
                 round(self.latency_s_total / self.done, 3) if self.done else None
             ),
@@ -934,6 +1080,10 @@ def run_judge(
     if parsed.tier == "smoke":
         selected = selected[:SMOKE_PAIRS]
     plan = vote_plan(parsed.tier, parsed.oss_model)
+    drawable = [
+        row for row in selected
+        if int(row["lo"]) in dataset.listings and int(row["hi"]) in dataset.listings
+    ]
     jobs = [
         PairJob(
             lo=int(row["lo"]),
@@ -941,12 +1091,15 @@ def run_judge(
             row=row,
             stratum=harness.judge_stratum(row),
             votes=plan,
+            index=index,
         )
-        for row in selected
-        if int(row["lo"]) in dataset.listings and int(row["hi"]) in dataset.listings
+        for index, row in enumerate(drawable)
     ]
 
     counters = Counters(drawn=len(jobs))
+    # Gold's third vote is the only arm in the lane with somewhere to fall back to, so it is the
+    # only one that can be switched off instead of stopping the pass.
+    arm = SecondaryArm("qwen", MODEL_GOLD_THIRD)
     summary: dict[str, Any] = {
         "tier": parsed.tier,
         "judge_version": judge_version,
@@ -994,6 +1147,7 @@ def run_judge(
 
     if parsed.dry_run:
         summary.update(counters.to_json())
+        summary.update(arm.to_json())
         summary["estimate"] = _estimate(judge, dataset, jobs, parsed, settings)
         summary["spent_usd"] = 0.0
         summary["budget_stopped"] = False
@@ -1078,7 +1232,7 @@ def run_judge(
                 margin_s=parsed.oss_s_per_pair,
                 started=pod_started,
             )
-        _dispatch(judge, dataset, jobs, parsed, judge_version, budget, counters,
+        _dispatch(judge, dataset, jobs, parsed, judge_version, budget, counters, arm,
                   conn_factory, out_dir, client_factory, settings)
     finally:
         if pod is not None:
@@ -1137,6 +1291,7 @@ def run_judge(
             )
 
     summary.update(counters.to_json())
+    summary.update(arm.to_json())
     summary["spent_usd"] = round(spent, 6)
     summary["spent_usd_in_process"] = round(budget.spent, 6)
     summary["budget_stopped"] = budget.stopped
@@ -1295,6 +1450,7 @@ def _dispatch(
     judge_version: str,
     budget: Budget,
     counters: Counters,
+    arm: SecondaryArm,
     conn_factory: Callable[[], Any],
     out_dir: Path,
     client_factory: Callable[[Any], Any] = None,  # type: ignore[assignment]
@@ -1329,7 +1485,7 @@ def _dispatch(
                     return
                 try:
                     _run_job(judge, dataset, job, parsed, judge_version, budget, counters,
-                             conn, client, r2, stats_lock, _emit, settings)
+                             arm, conn, client, r2, stats_lock, _emit, settings)
                 except Exception as exc:  # noqa: BLE001 — see below
                     # Everything outside the call itself lives here too: a digest, an image
                     # selection, a JSONL write. Unguarded, one malformed listing kills the
@@ -1367,6 +1523,7 @@ def _run_job(
     judge_version: str,
     budget: Budget,
     counters: Counters,
+    arm: SecondaryArm,
     conn: Any,
     client: Any,
     r2: Any,
@@ -1384,6 +1541,13 @@ def _run_job(
     while index < len(plan):
         vote = plan[index]
         index += 1
+        secondary = parsed.tier == "gold" and vote.model == arm.model
+        if secondary and arm.is_disabled():
+            # The arm is out for the rest of the pass: take the weaker vote straight away rather
+            # than launch a call whose only possible outcomes are another 429 and another line
+            # in `errors`. Budget is never reserved for a call that is not made.
+            plan.append(GOLD_FALLBACK)
+            continue
         if not budget.reserve(vote.est_usd):
             with lock:
                 # A refusal after `abort` is the provider stopping the run, not the budget;
@@ -1419,20 +1583,30 @@ def _run_job(
             with lock:
                 counters.failed += 1
                 counters.errors.append(message[:400])
-            if is_fatal(str(exc)):
+            kind = classify_provider_error(exc)
+            if secondary:
+                # The independence arm NEVER stops the run — it is the one vote in the lane with
+                # somewhere to fall back to. Whatever went wrong, this pair takes a third
+                # gpt-5-mini vote with a shuffled image order, FLAGGED as the weaker
+                # independence check (JUDGE SPEC §2). What differs is how long the damage lasts:
+                # a quota exhaustion or a dead key is permanent for the pass and puts the ARM
+                # down (run 35146813906 stopped 1,642 calls short on exactly this), while a rate
+                # limit or a 5xx — already waited out by `_call_with_retry` — costs this pair
+                # its independent vote and nothing more.
+                if kind in ARM_KILLING:
+                    arm.disable(f"{kind}: {exc}", job.index)
+                plan.append(GOLD_FALLBACK)
+                continue
+            if kind in ARM_KILLING or is_fatal(str(exc)):
+                # The PRIMARY model, which has no second family behind it: a dead key, a missing
+                # model or an exhausted account ends the pass rather than failing every
+                # remaining pair one expensive call at a time.
                 budget.abort(str(exc))
                 with lock:
                     counters.skipped_fatal += len(plan) - index
                 return
-            if (parsed.tier == "gold" and vote.model == MODEL_GOLD_THIRD
-                    and not is_transient(exc)):
-                # The genuinely different model family is unavailable (not merely rate-limited,
-                # which `_call_with_retry` has already waited out): fall back to a third
-                # gpt-5-mini vote with a shuffled image order and FLAG the pair as a weaker
-                # independence check (JUDGE SPEC §2).
-                plan.append(GOLD_FALLBACK)
             continue
-        # The MODEL's latency, not the lane's: `_call_with_retry` sleeps up to 10s backing off
+        # The MODEL's latency, not the lane's: `_call_with_retry` sleeps up to 14s backing off
         # a 429, which is the steady state on the paid tiers at six workers and unheard of on a
         # rented pod with no rate limit — charging that sleep to `latency_s` would bias the very
         # yardstick the oss arm is measured against. `duration_ms` is the call itself; the wall
@@ -1447,6 +1621,8 @@ def _run_job(
         budget.settle(vote.est_usd, cost)
         with lock:
             counters.done += 1
+            if vote.weaker:
+                counters.weaker_votes += 1
             counters.latency_s_total += latency_s
             counters.latency_s_max = max(counters.latency_s_max, latency_s)
             counters.tokens_in += int(getattr(response, "input_tokens", 0) or 0)
@@ -1518,16 +1694,6 @@ def _run_job(
     })
 
 
-def is_transient(exc: Exception) -> bool:
-    """The provider's own rate-limit / 5xx / timeout classifier, imported lazily so the lane
-    registry does not pull the HTTP providers in."""
-    try:
-        from api.providers.openai import _is_transient
-    except Exception:  # noqa: BLE001 — a missing provider module is not a transient failure
-        return False
-    return bool(_is_transient(exc))
-
-
 def _call_with_retry(
     judge: Any, dataset: Any, job: PairJob, la: Listing, lb: Listing,
     digests: Any, evidence: str, vote: Vote, r2: Any, client: Any,
@@ -1538,7 +1704,9 @@ def _call_with_retry(
             return _one_call(judge, dataset, job, la, lb, digests, evidence, vote, r2, client)
         except Exception as exc:  # noqa: BLE001 — classified, then re-raised or waited out
             last = attempt == len(RETRY_BACKOFF_S)
-            if last or is_fatal(str(exc)) or not is_transient(exc):
+            # A quota exhaustion is not a burst: retrying it buys three more identical 429s
+            # and fourteen seconds of a worker. Only rate limits and 5xx/timeouts earn the sleep.
+            if last or classify_provider_error(exc) not in RETRYABLE:
                 raise
             RETRY_SLEEP(RETRY_BACKOFF_S[attempt])
     raise RuntimeError("unreachable")
