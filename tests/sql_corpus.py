@@ -33,7 +33,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 # Every executed-SQL constant and execute() site lives under these (verified);
 # migrations/ is *.sql applied by CI, tests/ are fakes, frontend/ is TS.
-RUNTIME_DIRS = ("scraper", "toolkit", "api", "scripts", "location_data")
+RUNTIME_DIRS = ("scraper", "toolkit", "api", "scripts", "location_data", "autodedup")
 
 
 @dataclass(frozen=True)
