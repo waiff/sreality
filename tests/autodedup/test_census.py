@@ -203,19 +203,22 @@ def test_timeout_is_clamped_to_the_documented_ceiling() -> None:
 # --- probe layer -------------------------------------------------------------------------
 
 
-def test_block_layer_counts_the_three_added_signals() -> None:
+def test_block_layer_counts_source_url_and_the_detail_layer_the_text_signals() -> None:
+    """Description-based counters detoast every row, so they live in the per-block detail pass
+    (a corpus-wide pass timed out at 540 s the first time they rode in the block layer)."""
     for sql in census.BLOCK_SQL_BY_GRAIN.values():
-        for alias in ("with_desc200", "with_source_url", "no_signal_at_all"):
-            assert f"AS {alias}" in sql
+        assert "AS with_source_url" in sql
+        assert "with_desc200" not in sql and "no_signal_at_all" not in sql
+    for alias in ("with_desc200", "no_signal_at_all"):
+        assert f"AS {alias}" in census.CENSUS_DETAIL_SQL
 
 
 def test_no_signal_at_all_is_the_conjunction_of_every_missing_probe() -> None:
-    for sql in census.BLOCK_SQL_BY_GRAIN.values():
-        assert (
-            "(coalesce(l.area_m2, 0) <= 0 AND l.disposition IS NULL\n"
-            "         AND l.broker_identity_id IS NULL\n"
-            "         AND length(coalesce(substr(l.description, 1, 200), '')) < 200)"
-        ) in sql
+    assert (
+        "(coalesce(l.area_m2, 0) <= 0 AND l.disposition IS NULL\n"
+        "         AND l.broker_identity_id IS NULL\n"
+        "         AND length(coalesce(substr(l.description, 1, 200), '')) < 200)"
+    ) in census.CENSUS_DETAIL_SQL
 
 
 def test_zero_area_counts_as_absent_everywhere_in_the_block_layer() -> None:
@@ -228,8 +231,9 @@ def test_zero_area_counts_as_absent_everywhere_in_the_block_layer() -> None:
 def test_description_length_tests_are_slice_friendly() -> None:
     """length(substr(...)) lets Postgres fetch one TOAST chunk; length(whole column) cannot."""
     for sql in census.BLOCK_SQL_BY_GRAIN.values():
-        assert "length(coalesce(l.description, ''))" not in sql
-        assert sql.count("length(coalesce(substr(l.description, 1, 200), ''))") == 2
+        assert "description" not in sql
+    assert "length(coalesce(l.description, ''))" not in census.CENSUS_DETAIL_SQL
+    assert census.CENSUS_DETAIL_SQL.count("length(coalesce(substr(l.description, 1, 200), ''))") == 2
 
 
 def test_every_probe_has_a_unique_name_and_statement() -> None:
