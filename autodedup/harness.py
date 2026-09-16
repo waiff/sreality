@@ -6,6 +6,8 @@
     python3 -m autodedup.harness run out/cohort.jsonl.gz --out runs/r1 [--settings s.json]
     python3 -m autodedup.harness pair out/cohort.jsonl.gz 101 102
     python3 -m autodedup.harness judge-sample runs/r1 --zone merge --n 400
+    python3 -m autodedup.harness evaluate runs/r1 --judgements j.jsonl --out runs/r1/eval
+    python3 -m autodedup.harness fit runs/r1 --judgements j.jsonl --out runs/r1/fit
 
 No database, no network, no secrets: the artifact is the whole input. The artifact carries no
 PII by contract (PROGRAM.md E28), so everything here is safe to print and to paste into a PR.
@@ -37,6 +39,7 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
+from autodedup.evaluate import evaluate, fit_model, split_groups, write_report
 from autodedup.features import (
     MIN_RARE_BLOCK_DOCS,
     RARE_TOKEN_CAP,
@@ -45,12 +48,26 @@ from autodedup.features import (
     pair_features,
 )
 from autodedup.fingerprint import Fingerprint, build_all
+from autodedup.labels import (
+    TIER_PRECEDENCE,
+    Sample,
+    label_pairs,
+    labels_by_tier,
+    load_all_judgements,
+    load_sample,
+    sample_from_judgements,
+)
 from autodedup.model import LogisticModel, hand_initialised
 from autodedup.settings import Settings
 
 PAIRS_FILE: str = "pairs.jsonl.gz"
 RUN_FILE: str = "run.json"
 CLUSTERS_FILE: str = "clusters.json"
+SAMPLE_FILE: str = "sample.json"
+MODEL_FILE: str = "model.json"
+SPLIT_MAP_FILE: str = "split_map.json"
+EVAL_STEM: str = "eval"
+FIT_STEM: str = "fit"
 SAMPLE_SEED: int = 20260916
 STRATUM_FLOOR: int = 5
 JUDGE_STRATUM_FLOOR: int = 8
@@ -655,6 +672,142 @@ def cmd_judge_sample(args: argparse.Namespace, out: Any) -> int:
     return 0
 
 
+# --- W3: labels in, evaluation and a fitted model out ---------------------------------
+
+
+def run_settings(run_dir: Path, override: str | None) -> Settings:
+    """The settings the pairs were SCORED under, unless a sweep file overrides them.
+
+    Reading t_hi/t_lo off `run.json` matters: an evaluation run against today's defaults would
+    silently re-zone yesterday's pairs and report a precision for a decision nobody made."""
+    if override:
+        return Settings.from_json(override)
+    path = run_dir / RUN_FILE
+    if path.is_file():
+        payload = json.loads(path.read_text(encoding="utf-8")).get("settings")
+        if isinstance(payload, dict):
+            return Settings.from_dict(payload)
+    return Settings()
+
+
+def resolve_sample(paths: Sequence[str], explicit: str | None) -> tuple[Sample | None, str]:
+    """`--sample`, else the `sample.json` the lane wrote beside its judgements, else nothing.
+
+    Without one there are no per-stratum populations, so no number is cohort-level — the caller
+    prints the reason rather than quietly reporting sample rates as cohort rates. An EXPLICIT
+    sample that does not match its judgements is fatal; an auto-found one that does not match is
+    dropped with a warning, because picking the neighbouring file was this function's guess."""
+    if explicit:
+        return load_sample(explicit), explicit
+    for candidate in (Path(path).parent / SAMPLE_FILE for path in paths):
+        if not candidate.is_file():
+            continue
+        try:
+            return load_sample(candidate), str(candidate)
+        except ValueError as exc:
+            print(f"ignoring {candidate}: {exc}", file=sys.stderr)
+    return None, "(none: HT weights fall back to 1.0)"
+
+
+def load_labels(paths: Sequence[str], precedence: Sequence[str]) -> tuple[Any, Any, Any]:
+    judgements = load_all_judgements(paths)
+    return judgements, label_pairs(judgements, precedence=precedence), labels_by_tier(judgements)
+
+
+def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
+    run_dir = Path(args.run_dir)
+    if not (run_dir / PAIRS_FILE).is_file():
+        print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
+        return 1
+    missing = [path for path in args.judgements if not Path(path).is_file()]
+    if missing:
+        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+        return 1
+    judgements, labels, per_tier = load_labels(args.judgements, args.precedence)
+    if not labels:
+        print("no usable labels in the judgements given", file=sys.stderr)
+        return 1
+    try:
+        sample, sample_note = resolve_sample(args.judgements, args.sample)
+    except ValueError as exc:
+        print(f"unusable --sample: {exc}", file=sys.stderr)
+        return 1
+    if sample is None and judgements:
+        sample = sample_from_judgements(judgements)
+    settings = run_settings(run_dir, args.settings)
+    rows = read_pairs(run_dir)
+    report = evaluate(rows, labels, sample, settings, by_tier=per_tier,
+                      precedence=args.precedence, seed=args.seed)
+    json_path, markdown_path = write_report(report, Path(args.out) / EVAL_STEM)
+    print(f"evaluate {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
+    print("", file=out)
+    for line in report.headline():
+        print(line, file=out)
+    print(f"\nwrote {json_path} and {markdown_path}", file=out)
+    return 0
+
+
+def cmd_fit(args: argparse.Namespace, out: Any) -> int:
+    run_dir = Path(args.run_dir)
+    if not (run_dir / PAIRS_FILE).is_file():
+        print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
+        return 1
+    missing = [path for path in args.judgements if not Path(path).is_file()]
+    if missing:
+        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+        return 1
+    judgements, labels, _ = load_labels(args.judgements, args.precedence)
+    try:
+        sample, sample_note = resolve_sample(args.judgements, args.sample)
+    except ValueError as exc:
+        print(f"unusable --sample: {exc}", file=sys.stderr)
+        return 1
+    if sample is None and judgements:
+        sample = sample_from_judgements(judgements)
+    rows = read_pairs(run_dir)
+    if args.split_map:
+        groups = {int(key): int(value) for key, value
+                  in json.loads(Path(args.split_map).read_text(encoding="utf-8")).items()}
+    else:
+        groups = split_groups(rows, labels)
+    try:
+        model, report = fit_model(
+            rows, labels, sample=sample, seed=args.seed, version=args.version,
+            epochs=args.epochs, l2=args.l2, weight_cap=args.weight_cap, split_map=groups,
+        )
+    except ValueError as exc:
+        print(f"fit failed: {exc}", file=sys.stderr)
+        return 1
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model_path = out_dir / MODEL_FILE
+    model_path.write_text(
+        json.dumps(model.to_json(), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    # The split map is written beside the model so a challenger can be scored on THIS seal
+    # rather than on whatever components its own merge edges happen to form (§9's feedback loop).
+    (out_dir / SPLIT_MAP_FILE).write_text(
+        json.dumps({str(key): value for key, value in sorted(groups.items())}, sort_keys=True),
+        encoding="utf-8",
+    )
+    json_path, markdown_path = write_report(report, out_dir / FIT_STEM)
+    print(f"fit {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
+    print("", file=out)
+    for line in report.headline():
+        print(line, file=out)
+    print(f"\nwrote {model_path}, {out_dir / SPLIT_MAP_FILE}, {json_path} and {markdown_path}",
+          file=out)
+    print(f"  activate with: run <artifact> --model {model_path}", file=out)
+    if not report.sections["convergence"].get("converged_flag"):
+        print("fit did not converge: raise --epochs (or lower --l2) before trusting the weights",
+              file=sys.stderr)
+        if args.require_convergence:
+            return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="autodedup.harness", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -698,12 +851,49 @@ def build_parser() -> argparse.ArgumentParser:
                        help="restrict the sample to this zone; repeatable"
                             " (D3's precision sample is `--zone merge --n 400`)")
     judge.set_defaults(func=cmd_judge_sample)
+
+    for name, helptext, handler in (
+        ("evaluate", "score a run against judge labels (PROGRAM.md §9)", cmd_evaluate),
+        ("fit", "fit and calibrate a model from judge labels (PROGRAM.md §6)", cmd_fit),
+    ):
+        command = sub.add_parser(name, help=helptext)
+        command.add_argument("run_dir", help="a directory written by `run`")
+        command.add_argument("--judgements", action="append", required=True,
+                             help="judgements.jsonl from the judge lane; repeatable"
+                                  " (tiers are merged by --precedence)")
+        command.add_argument("--sample", default=None,
+                             help="sample.json carrying the per-stratum populations the"
+                                  " Horvitz-Thompson weights need; default: beside --judgements")
+        command.add_argument("--out", required=True, help="directory for the report files")
+        command.add_argument("--precedence", action="append", default=None,
+                             help="tier precedence, highest first; repeatable"
+                                  " (default: gold, vision, text)")
+        command.set_defaults(func=handler, precedence_default=TIER_PRECEDENCE)
+        command.add_argument("--seed", type=int, default=SAMPLE_SEED,
+                             help="deterministic 60/20/20 cluster-split seed")
+    fit = sub.choices["fit"]
+    fit.add_argument("--version", default=None, help="model version string to stamp")
+    fit.add_argument("--epochs", type=int, default=3000, help="gradient-descent epoch ceiling")
+    fit.add_argument("--l2", type=float, default=1e-3, help="L2 penalty on the weights")
+    fit.add_argument("--weight-cap", type=float, default=None,
+                     help="cap on label weight x stratum weight"
+                          " (default: 10x the median weight)")
+    fit.add_argument("--split-map", default=None,
+                     help="a split_map.json from an earlier fit, so a challenger is scored on"
+                          " the incumbent's sealed split")
+    fit.add_argument("--require-convergence", action="store_true",
+                     help="exit 1 when the fit hits the epoch ceiling short of tolerance")
+    evaluate_parser = sub.choices["evaluate"]
+    evaluate_parser.add_argument("--settings", default=None,
+                                 help="Settings JSON; default: the settings on run.json")
     return parser
 
 
 def main(argv: Sequence[str] | None = None, out: Any = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     stream = out if out is not None else sys.stdout
+    if getattr(args, "precedence", None) is None and hasattr(args, "precedence_default"):
+        args.precedence = list(args.precedence_default)
     artifact = getattr(args, "artifact", None)
     if artifact is not None and not Path(artifact).is_file():
         print(f"no such artifact: {artifact}", file=sys.stderr)
