@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from location_data import loader_db
-from location_data.resolver.normalize import strip_street_generic
+from location_data.resolver.normalize import STREET_LINE_SEPARATOR, strip_street_generic
 from scraper import street
 
 
@@ -640,33 +640,31 @@ def _address_part_street(value: str, arg: str) -> str | None:
 #  * It does not cut a street out of a longer line either. A whole title is claimed whole and
 #    SPLIT BY THE BINDER, inside the anchoring obec, fail-closed.
 #
-# What it does do is refuse the three things no register lookup can undo: a geo name typed as
-# a street (`reject_as_town`, which also covers digits-only, an `okres …` qualifier and a
-# `Town - Quarter` line), a value in a script this corpus does not write streets in, and
-# trailing sentence punctuation.
+# What it does do is refuse what a register lookup cannot undo on its own: a value in a script
+# this corpus does not write streets in, a digits-only token, an `okres …` qualifier and a
+# `Town - Quarter` form (`reject_as_town`, called with NO `geo_names` — so it does NOT refuse
+# "Praha" or "Brno", and is not meant to: whether a segment names the listing's own town is a
+# question only the anchoring obec can answer, and `composite._names_a_place` is where it is
+# asked). A value carrying a line separator skips even that: on "Kladno - Dubí, Ke Křížku" the
+# dash is a separator and `Ke Křížku` is the street, so the line is gated per SEGMENT instead.
 _STREET_TOKEN_TRIM_RE = re.compile(r"^[\s\-–—,;:/|]+|[\s\-–—,;:/|]+$")
 _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
-# What makes a value a LINE rather than a candidate street — the separators a portal writes a
-# composite address with. It decides which gate applies: `reject_as_town` judges ONE name and
-# refuses a `Town - Quarter` form outright, which is right for `/coords/street` and wrong for
-# "Kladno - Dubí, Ke Křížku", where the dash is the separator and `Ke Křížku` is the street.
-# A line is gated per SEGMENT by the binder instead, inside the anchoring obec.
-_STREET_LINE_SEPARATOR_RE = re.compile(r"[,;]|\s[-‐-―−]\s")
 
 
 @transform("street_token")
 def _street_token(value: str, arg: str) -> str | None:
     """A street as the portal wrote it, unwrapped and sanity-checked — never re-spelled."""
     token = _STREET_TOKEN_TRIM_RE.sub("", strip_street_generic(value))
-    # A trailing `.` is sentence punctuation UNLESS it belongs to the street itself
-    # (`Karla IV.`), so it goes only after a LOWERCASE letter: `Nádražní.` loses it,
-    # `Karla IV.` keeps it.
-    token = re.sub(r"(?<=[a-záčďéěíňóřšťúůýž])\.$", "", token).strip()
+    if not token:
+        # The generic word WAS the whole value ("Na Ulici", "V Ulici", "I. ulice"), and the
+        # register holds every one of those as a street. Keep what the portal wrote: the
+        # matcher carries the unfolded spelling as a key of its own, so these still bind.
+        token = _STREET_TOKEN_TRIM_RE.sub("", (value or "").strip())
     if not token or token.isdigit():
         return None
     if not _is_latin_script(token):
         return None
-    if not _STREET_LINE_SEPARATOR_RE.search(token) and street.reject_as_town(token):
+    if not STREET_LINE_SEPARATOR.search(token) and street.reject_as_town(token):
         return None
     return token
 

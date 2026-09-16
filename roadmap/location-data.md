@@ -929,61 +929,94 @@ component is slimmed twice — each wave rewrites one component and slims its st
   should be updated based on the street"*.
 
   **The measurement first.** bazos was the only portal of the nine with NO street claim:
-  129,871 located rows, every one obec-grain, 0 streets. Its parser has been mining a street
-  all along and keeping it as coordinate provenance — `raw_json.coords.street` is non-empty on
-  **50,523 of 146,990 rows (34 %)**, e.g. "ul. Jiráskova" on the operator's own ad — and folded
-  against the register of the same obec it binds EXACTLY for **65.4 %** of a 15 k sample. Its
-  titles are the weaker surface and the number says why: bazos hard-caps a title at **60
-  characters**, 21,930 sit exactly on that cap cut mid-word ("ul. Vršo", "ul. Bulhars"), which
-  alone costs 2,887 of the 20,909 cued titles. Of the cued titles that anchor to an obec,
+  129,871 located rows, every one obec-grain, 0 streets. The claim reads ONE surface —
+  `raw_json.title`, which is `h1.nadpisdetail` verbatim (`scraper/bazos_parser.py:485`) and
+  therefore the SELLER'S OWN HEADLINE. Of **20,909 cued titles**, 18,226 anchor to an obec and
   **14,659 (80.1 %) bind exactly**; **+215** bind only when the generic word is KEPT ("náměstí
-  Míru", "třída Václava Klementa" — RÚIAN spells it into the official name); 24 lines name two
-  streets inside one obec. All 15,339 bound listings are obec-grain today with an approximate
-  pin (4,782 live / 9,877 delisted, 722 obce). The description was measured and LEFT OUT: 93 %
-  of rows have one and 48 % carry a cue, but the first cue is usually prose and binds exactly
-  on only 19 % — W19's lever, with the number already taken.
+  Míru", "třída Václava Klementa"); **~4,300** cue-less titles carry a comma segment that folds
+  to a register street; 24 lines name two streets inside one obec and are refused. bazos
+  hard-caps a title at **60 characters** — 21,930 sit exactly on the cap, cut mid-word
+  ("ul. Vršo") — and a truncated stem never binds.
 
-  **bazos@7** therefore claims the street on the PAYLOAD lane, one entry, one reader, ordered
-  `locator.fallback`: `/coords/street` then `/title` (which IS `h1.nadpisdetail` verbatim,
-  `scraper/bazos_parser.py:485`). The `<head>` title is not declared — it is the same capped
-  string with the okres and " | Bazoš.cz" appended. The new shared transform `street_token`
-  strips ONLY the generic `ulice`/`ul.` wrapper (leading, with an optional `v`/`ve`/`na`, or
-  trailing), keeps `náměstí`/`třída`/`nábřeží`/`sídliště`, keeps a trailing house number (S1
-  turns it into a čp and R1 uses it), and declares NO morphology gate: `looks_like_czech_street`
-  is what refused the real `28. října`, and the REGISTER is the gate now. `Nový` is still
-  CLAIMED — a claim states what the portal wrote — and never published.
+  Three surfaces were measured and LEFT OUT. `raw_json.coords.street` looked like the better
+  one (non-empty on 50,523 of 146,990 rows) and is not subject-scoped: `extract_street` scans
+  the title AND the description and takes the FIRST cue match, so **29,697 of its 50,529
+  values (58.8 %) never appear in the title** — the head of that distribution is boilerplate
+  ("Energetická třída" ×527, "RK třída" ×556, "DPH třída" ×280) and the tail is proximity
+  prose that binds to REAL streets ("Kubánské náměstí" ten minutes away, "Fügnerova 450" where
+  450 is metres and R1 takes it for a house number). On a portal whose every pin is blurred,
+  each of those would have MOVED the published point with nothing marked disputed. The
+  `<head>` title is the same capped string plus the okres; the description is populated on
+  93 % of rows and carries a cue on 48 %, but its first cue binds exactly only **19 %** of the
+  time. All three come back when there is a subject-scoped reading, not before.
 
-  **Resolver v5.2**, two rules and one ladder. (1) A street reaches `listing_location` only when
-  it BINDS to `ruian_streets` in the anchoring obec; FILL no longer copies claim text into
-  `street_name`, so the 1,864 rows across seven portals carrying a name with `ulice_kod` NULL
-  fall back to their část obce or town — a deliberate quality choice, since such a name joins to
-  nothing. (2) A bound street has a POINT: the centroid of its valid address points with an
-  EXTENT of half their bounding diagonal (all 83,451 live streets have ≥1 live point, so every
-  one of them has a centroid; Jiráskova in 535419 is 63 points, centroid POINT(14.91365
-  50.42247), diagonal 1,727 m). The ladder is `registry address point > bound street point >
-  portal pin > FILL's unit point`, with the street beating the pin when the pin is absent,
-  DECLARED blurred, or farther than `max(REGISTRY_PIN_CONFLICT_M, extent)` from the centroid;
-  an EXACT pin that loses is stamped `disputed='pin_off_street'` and capped at `medium`, an
-  exact pin that agrees keeps the position. (3) **The grain follows the position**: a portal's
-  `precision_cap` is a statement about its own PIN, so it caps the granularity only while the
-  pin is the elected position — on a register-placed row the grain is the bind's own, the
-  radius is the register's, and the declaration is left to cap the CONFIDENCE. The first cut
-  of this wave capped both and produced a row disagreeing with itself (street + `ulice_kod`
-  published, position on the street centroid, `granularity='obec'` at 1 km). A street claim carrying a separator is a LINE and is
-  routed to `composite.resolve_street`, W9's binder one level down: split on the portals' own
-  separators, match each segment exactly inside the anchoring obec against BOTH folds of the
-  name, refuse a segment that names the obec or a část obce of it (76 register streets collide
-  that way across 20 obce), fail closed on two distinct streets, and never reach the trigram
-  rung — which is also why a 60-char-truncated stem binds nothing. No migration:
-  `listing_location.disputed` is constrained by a lower_snake REGEX, and
-  `ruian_ap_street_hn (street_id, …)` is the index the street point reads.
+  **bazos@7**: one entry, one reader, `/title`. The new shared transform `street_token` strips
+  ONLY the generic `ulice`/`ul.` wrapper (leading, with an optional `v`/`ve`/`na`, or
+  trailing), keeps `náměstí`/`třída`/`nábřeží`/`sídliště` (RÚIAN spells them into the official
+  name), keeps a trailing house number (S1 turns it into a čp and R1 uses it), and declares NO
+  morphology gate: `looks_like_czech_street` is what refused the real `28. října`. Where the
+  generic word IS the street — `Nová ulice` ×8, `V Ulici`, `Na Ulici`, `I. ulice`…`IX. ulice` —
+  the unfolded spelling survives as a match key of its own. `Nový` is still CLAIMED and never
+  published.
 
-  **Expected effect**: ≥15 k bazos listings gain a street from titles alone (4,782 of them live)
-  and up to ~30 k more from `coords.street`; each moves from the 1 km town pin to its street's
-  centroid at an extent-based radius (~300–900 m). The bump IS the corpus sweep
-  (`RESOLVER_VERSION` → `resolver:v5.2`, `location_resolve.yml mode=full-resolve`).
+  **Resolver v5.2**, four rules. (1) A street reaches `listing_location` only when it BINDS to
+  `ruian_streets` in the anchoring obec; FILL no longer copies claim text, so the 1,864 rows
+  across seven portals carrying a name with `ulice_kod` NULL fall back to their část obce or
+  town. (2) A bound street has a POINT — the centroid of its valid address points — and an
+  EXTENT that reaches the FARTHEST of them (Jiráskova in 535419: 63 points, centroid
+  POINT(14.91365 50.42247), farthest door 1,288 m. Half the bounding-box diagonal was the
+  first cut of that number and excluded a real address point on **65 %** of streets, so a door
+  of the street read as off it). All but 4 of the 83,451 live streets have at least one live
+  address point. (3) `place()` is one ladder — `registry address point > bound street point >
+  portal pin > FILL's unit point` — the street beating the pin when the pin is absent, DECLARED
+  blurred, or farther than `max(REGISTRY_PIN_CONFLICT_M, extent)` from the centroid; an EXACT
+  pin that loses is stamped `disputed='pin_off_street'` and capped at `medium`, a blurred one
+  is not (the portal told us it was approximate). A pin that loses the POSITION is not thrown
+  away as EVIDENCE: CHECK's containment tests read the elected coordinate CLAIM, so
+  `pin_outside_obec` / `pin_outside_cz` survive a register-placed row and outrank
+  `pin_off_street` — without that, bazos would have lost the flag on **3,421** rows the moment
+  a street bound. (4) **A portal's `precision_cap` caps only a grain the PIN established**
+  (R7/R8): a grain that came out of a register bind is never coarsened by a statement about the
+  portal's coordinate, whichever point was elected, and the declaration is left to cap the
+  CONFIDENCE. Keying that on the elected POSITION instead was wrong twice — it published a row
+  with `street_name` + `ulice_kod` at `granularity='obec'`, and it inverted the two labels that
+  are capped but not blurred (idnes `no_exact_address` 66,165 rows, sreality `not_address`
+  13,176), where a pin AGREEING with the bound street graded coarser than one contradicting it.
+
+  A street claim carrying a separator is a LINE and goes to W9's composite binder one level
+  down: split on the portals' own separators, match each segment against the register inside
+  the anchoring obec in **two tiers** — an EXACT full-name match wins outright, the
+  type-word-tolerant fold is consulted only when nothing matched exactly (45 keys across 32
+  obce collide once the type word is dropped: Kladno holds `náměstí Svobody` AND `Svobody`) —
+  refuse a segment that names the obec or a část obce of it (76 register streets collide that
+  way across 20 obce), fail closed on two distinct streets, and never reach the trigram rung.
+  The same two-tier matcher serves the single-name path, so R1/R2 and the line binder answer
+  "is this the same street" identically. No migration: `listing_location.disputed` is a
+  lower_snake REGEX and `ruian_ap_street_hn (street_id, …)` is the index the street point reads.
+
+  **DEPLOYMENT — two lanes, in this order.** (1) The street is a PAYLOAD entry, and a payload
+  entry is mined only by the listing scan: after merge run `location_claims_intake.yml`
+  `mode=full source=bazos chain=true` (2–4 chained runs). The contract bump also re-walks
+  **154,774 bazos bodies** for zero new claims — the page entries are unchanged — which is
+  wasted work, not a risk. (2) Then `location_resolve.yml mode=full-resolve`: the
+  `RESOLVER_VERSION` bump stales **~856k rows**, hours at the worker's ~60/s.
+
+  **BLAST RADIUS.** Inside bazos: ~19k listings gain a street (14.7k exact + ~4.3k cue-less
+  segment binds, ≈5k of them live), and their point moves from the ~1 km town pin to their
+  street's centroid at an extent-based radius. OUTSIDE bazos the v5.2 rules reach every portal:
+  **~39,700 rows already bound to a street but graded coarser today** (idnes 30,976, sreality
+  7,345, mmreality 926, realitymix 408, maxima 43, ceskereality 38) change grain and radius,
+  and where their pin is blurred or off-street their POINT moves too. That is the intended
+  effect of "a bound street decides the point", stated plainly rather than discovered.
+
+  **Known residual class, accepted and not fixed:** a colloquial district name that is also a
+  register street of the same town. "Ostrava - Slezská" binds the street `Slezská` while the ad
+  means Slezská Ostrava, and nothing in the line distinguishes them — `_names_a_place` refuses a
+  segment naming a ČástObce of the anchoring obec, and this one is neither a ČástObce nor a
+  MOMC under that spelling. The row still gets the right town.
 
   **Next**: the description surface (19 % exact today — needs cue RANKING, not the first cue);
+  a subject-scoped street reading in `bazos_parser` (which would bring `/coords/street` back);
   and Czech inflection ("Livornské ulici" is the locative of `Livornská`, deliberately not
   guessed at — the exact match fails and R3 is off for lines).
 

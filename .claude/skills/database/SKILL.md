@@ -424,8 +424,10 @@ So: wrap a gate that sits alongside a column predicate; a standalone gate is alr
   longer a location path. `scraper/street.py` still extracts a street from a portal page; that
   extraction is now a CLAIM the resolver arbitrates, not a column — and since W18
   (resolver v5.2) `ll.street_name` is **the REGISTER's or NULL**: a claim text that does not bind
-  to `ruian_streets` in the anchoring obec is not published, so `street_name IS NOT NULL` now
-  implies `ulice_kod IS NOT NULL` and a street filter may join on the code.
+  to `ruian_streets` in the anchoring obec is not published, so `street_name IS NOT NULL` implies
+  `ulice_kod IS NOT NULL` — but only on rows re-resolved at v5.2 or later, i.e. after the
+  `location_resolve.yml mode=full-resolve` sweep the bump triggers; check `resolver_version`
+  before relying on it.
 - **Location-data relations (`location_*`, `ruian_*`, `portal_contract*`; migs 380+) are
   service-role-only** — RLS on + explicit `anon`/`authenticated` REVOKEs on every table, sequence
   + function; the SPA reads a listing's place through the public views, never the store.

@@ -69,19 +69,17 @@ class MiniMirror:
 
     def street_point(self, street: Street) -> StreetPoint | None:
         """The same derivation `_STREET_POINT_SQL` makes, in python: the centroid of the
-        street's own address points and HALF the bounding diagonal of that set. Keyed on
-        `ulice_kod` here because the fixture points carry that and not a `street_id` —
+        street's own address points, and the distance from it to the FARTHEST of them. Keyed
+        on `ulice_kod` here because the fixture points carry that and not a `street_id` —
         the two are 1:1 on every row of the real mirror."""
         points = [p for p in self.points
                   if p.ulice_kod == street.code and p.lat is not None and p.lon is not None]
         if not points:
             return None
-        lats = [p.lat for p in points]
-        lons = [p.lon for p in points]
-        centre = (sum(lats) / len(lats), sum(lons) / len(lons))
-        diagonal = haversine_m(min(lats), min(lons), max(lats), max(lons))
-        return StreetPoint(lat=centre[0], lon=centre[1], extent_m=diagonal / 2.0,
-                           point_count=len(points))
+        lat = sum(p.lat for p in points) / len(points)
+        lon = sum(p.lon for p in points) / len(points)
+        extent = max(haversine_m(lat, lon, p.lat, p.lon) for p in points)
+        return StreetPoint(lat=lat, lon=lon, extent_m=extent, point_count=len(points))
 
     def admin_units_by_name(self, name_norm: str, *, levels: Sequence[str] = ()) -> list[AdminUnit]:
         return [
@@ -236,10 +234,13 @@ def default_mirror() -> MiniMirror:
         # The dropped-prefix class: the portal says `Budovatelů`, RÚIAN says `nám.
         # Budovatelů` — same street, and `name_norm` keeps the type word RÚIAN spells.
         Street(code=104, name="nám. Budovatelů", name_norm="nam budovatelu", obec_kod=599212),
-        # W18: a street with a SPREAD. The three points below are shaped so the derived
-        # centroid is the live one (POINT(14.91365 50.42247), measured over Jiráskova's 63
-        # address points on 2026-09-16) and the extent lands near the measured 863 m —
-        # which is the number that makes "far from the street" mean something.
+        # W18: a street with a SPREAD, and an ASYMMETRIC one. The three points below are
+        # shaped so the derived centroid is the live one (POINT(14.91365 50.42247), measured
+        # over Jiráskova's 63 address points on 2026-09-16) and its farthest door is the live
+        # 1,288 m away — while HALF THE BOUNDING DIAGONAL of the same set is only ~985 m. The
+        # asymmetry is the fixture's whole job: it is what makes a test able to tell the two
+        # definitions of `extent_m` apart, and a real door of the street falls outside the
+        # wrong one.
         Street(code=105, name="Jiráskova", name_norm="jiraskova", obec_kod=535419),
         # W18's line cases. `Ke Křížku` is the street a dash-split line ends on; `Sokolovská`
         # gives the same line a SECOND street, which is what fail-closed means. `Zábřeh` is a
@@ -251,6 +252,15 @@ def default_mirror() -> MiniMirror:
         Street(code=109, name="Zábřeh", name_norm="zabreh", obec_kod=554821),
         Street(code=110, name="28. října", name_norm="28 rijna", obec_kod=554821),
         Street(code=111, name="Livornská", name_norm="livornska", obec_kod=554782),
+        # The WIDENED-KEY COLLISION, as the register actually holds it: 45 keys across 32
+        # obce collide once the type word is dropped, and Kladno is one of them — both of
+        # these fold to `svobody`. It is why an exact full-name match has to win outright.
+        Street(code=112, name="náměstí Svobody", name_norm="namesti svobody", obec_kod=532053),
+        Street(code=113, name="Svobody", name_norm="svobody", obec_kod=532053),
+        # The register spelling the generic word INTO the name (`Nová ulice` ×8, `V Ulici`,
+        # `Na Ulici`, `I. ulice`…`IX. ulice`): folding it off leaves a key that can never bind.
+        Street(code=114, name="Nová ulice", name_norm="nova ulice", obec_kod=532053),
+        Street(code=115, name="Na Ulici", name_norm="na ulici", obec_kod=532053),
     ]
     points = [
         AddressPoint(
@@ -280,17 +290,17 @@ def default_mirror() -> MiniMirror:
         ),
         AddressPoint(
             kod_adm=55000001, obec_unit_id=32, obec_kod=535419, psc="29301",
-            lat=50.41470, lon=14.91200, ulice_kod=105,
+            lat=50.41090, lon=14.91200, ulice_kod=105,
             street_name_norm="jiraskova", street_name="Jiráskova", cislo_domovni=1,
         ),
         AddressPoint(
             kod_adm=55000002, obec_unit_id=32, obec_kod=535419, psc="29301",
-            lat=50.42247, lon=14.91365, ulice_kod=105,
+            lat=50.42800, lon=14.91400, ulice_kod=105,
             street_name_norm="jiraskova", street_name="Jiráskova", cislo_domovni=40,
         ),
         AddressPoint(
             kod_adm=55000003, obec_unit_id=32, obec_kod=535419, psc="29301",
-            lat=50.43024, lon=14.91530, ulice_kod=105,
+            lat=50.42851, lon=14.91495, ulice_kod=105,
             street_name_norm="jiraskova", street_name="Jiráskova", cislo_domovni=86,
         ),
     ]

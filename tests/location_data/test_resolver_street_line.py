@@ -140,7 +140,8 @@ def test_an_inflected_form_does_not_match_the_register_exactly():
     off and what is left is not the register's string, so the EXACT match fails. Czech
     inflection is out of scope for W18 and is deliberately not guessed at: R3 is off for
     lines, and a single inflected token can only ever reach it at `low` confidence."""
-    assert composite.street_keys("Livornské ulici") == frozenset({"livornske"})
+    assert composite.street_keys("Livornské ulici") == frozenset(
+        {"livornske", "livornske ulici"})
     assert _bind("Livornské ulici, Praha", (PRAHA,)).street is None
 
 
@@ -159,3 +160,63 @@ def test_a_line_with_no_anchoring_town_binds_no_street_at_all():
     ])
     assert resolution.street_name is None
     assert resolution.obec_kod is None
+
+
+# ------------------------------------------------- the two tiers, and what they are for
+
+def test_an_exact_full_name_match_wins_outright_over_the_tolerant_fold():
+    """Kladno holds `náměstí Svobody` AND `Svobody`, and both fold to `svobody`. On one flat
+    key set a correct exact claim reads as two candidates and fails closed; on two tiers it
+    reads as one. 45 register keys across 32 obce are this shape."""
+    assert _bind("náměstí Svobody, Kladno", (KLADNO,)).street.code == 112
+    assert _bind("Svobody, Kladno", (KLADNO,)).street.code == 113
+    # The ABBREVIATION matches neither exactly, so it reaches both rows through the tolerant
+    # fold and fails closed. That is the honest answer and not a gap to paper over: this lane
+    # does not hold a table saying `nám.` means `náměstí`, and inventing one to break a tie
+    # between two real streets of the same town is the guess W18 exists to refuse. Where the
+    # town holds only ONE of the pair the same abbreviation binds it (`nám. Míru` above).
+    ambiguous = _bind("nám. Svobody, Kladno", (KLADNO,))
+    assert ambiguous.street is None and ambiguous.reason == "ambiguous_streets"
+
+
+def test_the_same_two_tiers_serve_a_single_name_claim():
+    """The single-name path and the line path must answer "is this the same street"
+    identically — it is one matcher, and `/title` reaches both shapes."""
+    assert _line("náměstí Svobody", town="Kladno").ulice_kod == 112
+    assert _line("Svobody", town="Kladno").ulice_kod == 113
+    assert _line("nám. Svobody", town="Kladno").ulice_kod == 112
+
+
+def test_a_street_whose_name_IS_the_generic_word_still_binds():
+    """`Nová ulice`, `Na Ulici`, `I. ulice` — the register spells the generic word into the
+    name on those, so the UNFOLDED spelling is a match key of its own. Folding it off would
+    leave `Nová` / `Na`, which can never bind."""
+    assert _line("Nová ulice", town="Kladno").street_name == "Nová ulice"
+    assert _line("Na Ulici", town="Kladno").street_name == "Na Ulici"
+    assert _bind("Prodej bytu, Nová ulice, Kladno", (KLADNO,)).street.code == 114
+
+
+def test_the_street_index_is_the_same_answer_as_folding_each_row():
+    """The per-obec index is an ACCELERATOR and nothing else: `CachedRegistryView` memoizes it
+    per run so a four-segment Praha title stops re-folding ~10,000 street names four times
+    over, and a view that does not offer one builds the identical dict."""
+    mirror = mm.default_mirror()
+    built = composite.build_street_index(mirror.streets_in_obec(KLADNO))
+    assert composite.street_index(mirror, KLADNO) == built
+    assert set(built["svobody"]) == {
+        s for s in mirror.streets_in_obec(KLADNO) if s.code in (112, 113)}
+
+
+def test_a_line_number_never_attaches_to_a_street_bound_from_another_claim():
+    """The candidate carries its own number. A listing naming `Nad Bořislavkou` and, in a
+    SEPARATE claim, a line reading "Livornská 5" must not publish `Nad Bořislavkou 5`: the
+    number belongs to the segment that bound Livornská, and Livornská is not what won."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
+        mm.claim(3, "street_name", value_text="Prodej bytu 2+kk, Livornská 5, Praha"),
+    ])
+    assert resolution.street_name in ("Nad Bořislavkou", "Livornská")
+    if resolution.street_name == "Nad Bořislavkou":
+        assert resolution.house_number_cp is None
+        assert resolution.granularity == "street"

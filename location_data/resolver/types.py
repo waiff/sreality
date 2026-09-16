@@ -197,10 +197,12 @@ class StreetPoint:
     """Where a street IS, derived from the register rather than stored in it (W18).
 
     `ruian_streets` carries no geometry, so a street's position is the centroid of its own
-    valid address points and its `extent_m` is HALF the bounding diagonal of that set — the
-    radius of the smallest circle around the centroid that still contains the street. It is
-    a size, not an error bar: Jiráskova in Mladá Boleslav is 63 points spread over 1,727 m,
-    so a point 800 m from its centre is still ON it.
+    valid address points and its `extent_m` is the distance from that centroid to the
+    FARTHEST of them — the radius of the smallest circle around the published point that
+    contains every door of the street. It is a size, not an error bar: Jiráskova in Mladá
+    Boleslav is 63 points reaching 1,288 m from its centroid, so a pin 1 km away is still ON
+    it. Half the bounding-box diagonal was the first cut of this number and it excluded a
+    real address point on 65 % of streets, which made a door of the street read as off it.
     """
 
     lat: float
@@ -300,6 +302,12 @@ class Binding:
     # and never for a loser. `lat`/`lon` above carry the point; this carries its size, which
     # is what `place()` compares a pin against and what floors the published radius.
     street_extent_m: float | None = None
+    # A house number that belongs to THIS bind and to no other claim on the listing (W18).
+    # A street bound out of one line's segment carries that segment's number; nothing else on
+    # the row may lend it one, which is the defect this field exists to make impossible —
+    # `Nad Bořislavkou` + a different line's "Livornská 5" published "Nad Bořislavkou 5".
+    house_number_cp: str | None = None
+    house_number_co: str | None = None
     agreed: tuple[str, ...] = ()
     relaxations: tuple[str, ...] = ()
     ambiguous: bool = False

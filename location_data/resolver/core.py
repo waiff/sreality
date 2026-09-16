@@ -94,7 +94,7 @@ def resolve(
     # ---- 4. CHECK.
     verdict = step_check.check(
         ordered, normalized, binding, filled, position, graded.granularity,
-        registry=ctx.registry, rank=ctx.granularity_rank,
+        registry=ctx.registry, rank=ctx.granularity_rank, pin_claim=pin_claim,
     )
     granularity = verdict.granularity or graded.granularity
     czech = verdict.country_status == "cz"

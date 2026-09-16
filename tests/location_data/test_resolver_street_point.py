@@ -21,6 +21,7 @@ That number is the whole reason the threshold is `max(REGISTRY_PIN_CONFLICT_M, e
 from __future__ import annotations
 
 from location_data.resolver import bind as step_bind
+from location_data.resolver.geo import haversine_m
 from location_data.resolver import core
 from location_data.resolver import grade as step_grade
 from location_data.resolver import normalize as step_normalize
@@ -82,8 +83,34 @@ def test_a_street_the_register_holds_has_a_point_and_an_extent():
     street = next(s for s in mirror.streets if s.code == 105)
     point = mirror.street_point(street)
     assert (round(point.lat, 5), round(point.lon, 5)) == (STREET_LAT, STREET_LON)
-    assert 800.0 < point.extent_m < 950.0
     assert point.point_count == 3
+    # The extent reaches the FARTHEST door, which is what makes it a statement about the
+    # street rather than about a box drawn round it.
+    assert point.extent_m == max(
+        haversine_m(point.lat, point.lon, p.lat, p.lon)
+        for p in mirror.points if p.ulice_kod == 105)
+    assert 1250.0 < point.extent_m < 1350.0
+
+
+def test_every_door_of_the_street_is_inside_its_own_extent():
+    """THE regression. Half the bounding-box diagonal is the radius of a circle around the
+    BOX'S CENTRE, and the point published is the centroid — not that. On 65 % of streets a
+    real address point fell outside it, so an exact pin standing on one of the street's own
+    doors was judged off-street, moved to the centroid and stamped `pin_off_street`."""
+    mirror = mm.default_mirror()
+    street = next(s for s in mirror.streets if s.code == 105)
+    point = mirror.street_point(street)
+    doors = [p for p in mirror.points if p.ulice_kod == 105]
+    assert all(haversine_m(point.lat, point.lon, d.lat, d.lon) <= point.extent_m
+               for d in doors)
+    # ...and the fixture is asymmetric enough to tell the two definitions apart: the old one
+    # would have excluded a door of this very street.
+    lats = [d.lat for d in doors]
+    lons = [d.lon for d in doors]
+    half_diagonal = haversine_m(min(lats), min(lons), max(lats), max(lons)) / 2.0
+    assert half_diagonal < point.extent_m
+    assert any(haversine_m(point.lat, point.lon, d.lat, d.lon) > half_diagonal
+               for d in doors)
 
 
 def test_a_register_street_with_no_address_points_has_no_point():
@@ -143,7 +170,7 @@ def test_a_street_with_no_pin_at_all_is_placed_on_the_street():
     assert resolution.granularity == "street"
     # The radius reaches the far end of the street, not the level's 300 m constant.
     assert resolution.uncertainty_radius_m > step_grade.RADIUS_M["street"]
-    assert 800.0 < resolution.uncertainty_radius_m < 950.0
+    assert resolution.uncertainty_radius_m == _extent()
 
 
 def test_an_exact_pin_that_agrees_with_the_street_keeps_the_position():
@@ -191,8 +218,9 @@ def test_an_address_point_still_outranks_everything():
     resolution = _resolve(_bazos(street="ul. Jiráskova 40", pin=BLURRED_PIN,
                                  label="approximate_location"))
     assert resolution.ruian_adm_kod == 55000002
-    assert (resolution.lat, resolution.lon) == (50.42247, 14.91365)
+    assert (resolution.lat, resolution.lon) == (50.42800, 14.91400)
     assert resolution.house_number_cp == "40"
+    assert resolution.granularity == "address_point"
 
 
 # ------------------------------------------------------- what the register refuses to bind

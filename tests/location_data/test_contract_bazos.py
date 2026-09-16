@@ -518,21 +518,31 @@ def street_of(raw_json: dict) -> str | None:
     return streets[0] if streets else None
 
 
-def test_the_street_entry_reads_the_parsers_value_first_and_the_headline_behind_it():
-    """The measured order (2026-09-16). `/coords/street` is `scraper.bazos_parser`'s own
-    reading — non-empty on 50,523 of 146,990 rows and NOT subject to the portal's title cap.
-    `/title` is `h1.nadpisdetail` verbatim (`scraper/bazos_parser.py:485`) and bazos hard-caps
-    it at 60 characters, which alone costs 2,887 of the 20,909 cued titles — so it is the
-    weaker surface and it is second."""
+def test_the_street_entry_reads_the_sellers_headline_and_only_that():
+    """ONE surface, and the measurement is why (2026-09-16). `/title` IS `h1.nadpisdetail`
+    verbatim (`scraper/bazos_parser.py:485`) — the seller's own headline for THIS ad, which is
+    what makes it subject-scoped."""
     entry = ENTRIES[STREET_ENTRY]
     assert entry.claim_type == "street_name"
     assert entry.reader == "scalar"
     assert entry.extraction_method == "portal_structured_field"
     assert entry.transform == ("street_token",)
     assert entry.guards == ()
-    pointers = [entry.locator["json_pointer"]] + [
-        f["json_pointer"] for f in entry.locator["fallback"]]
-    assert pointers == ["/coords/street", "/title"]
+    assert entry.locator["json_pointer"] == "/title"
+    assert "fallback" not in entry.locator
+
+
+def test_the_parsers_own_street_field_is_deliberately_not_read():
+    """`scraper.bazos_parser.extract_street` scans the title AND THE DESCRIPTION and returns
+    the FIRST cue match, so its value is not the subject's: 29,697 of 50,529 (58.8 %) do not
+    appear in the title at all. The head of that distribution is boilerplate ("Energetická
+    třída" x527, "RK třída" x556, "DPH třída" x280) and the tail is proximity prose that binds
+    to REAL streets — "Kubánské náměstí" ten minutes away, "Fügnerova 450" where 450 is metres
+    and R1 would take it for a house number. Every bazos pin is declared blurred, so each of
+    those would MOVE the published point with nothing marked disputed."""
+    assert ENTRIES[STREET_ENTRY].locator["json_pointer"] != "/coords/street"
+    assert street_of({"id": "1", "coords": {"street": "Energetická třída"}}) is None
+    assert street_of({"id": "1", "coords": {"street": "ul. Jiráskova"}}) is None
 
 
 def test_the_head_title_and_the_description_are_deliberately_not_declared():
@@ -540,57 +550,50 @@ def test_the_head_title_and_the_description_are_deliberately_not_declared():
     okres and " | Bazoš.cz" appended; the description is populated on 93 % of rows and carries
     a cue on 48 %, but its FIRST cue is prose ("500 m od ulice …") and binds exactly on only
     19 %. Recorded here so the next wave starts from the number rather than the idea."""
-    declared = {ENTRIES[STREET_ENTRY].locator["json_pointer"]} | {
-        f["json_pointer"] for f in ENTRIES[STREET_ENTRY].locator["fallback"]}
-    assert "/description" not in declared
+    assert ENTRIES[STREET_ENTRY].locator["json_pointer"] == "/title"
     assert not any(e.locator.get("css") == "title" for e in ENTRIES.values())
-
-
-def test_the_parsers_own_street_is_claimed_unwrapped():
-    """The operator's ad states "ul. Jiráskova" here. Only the generic wrapper comes off —
-    the register is what decides whether what is left is a street."""
-    assert street_of({"id": "1", "coords": {"street": "ul. Jiráskova"}}) == "Jiráskova"
-    assert street_of({"id": "1", "coords": {"street": "ulici Jasná"}}) == "Jasná"
-    assert street_of({"id": "1", "coords": {"street": "Livornské ulici"}}) == "Livornské"
-
-
-def test_the_generic_word_comes_off_and_the_official_one_stays():
-    """`ulice`/`ul.` mean nothing and go. `náměstí`, `třída`, `nábřeží` and `sídliště` are part
-    of the OFFICIAL name — `ruian_streets.name_norm` keeps them — and 215 titles bind only
-    because the word survived."""
-    assert street_of({"id": "1", "coords": {"street": "náměstí Míru"}}) == "náměstí Míru"
-    assert street_of({"id": "1", "title": "třída Václava Klementa"}) == "třída Václava Klementa"
+    assert street_of({"id": "1", "description": "Byt v ulici Jasná."}) is None
 
 
 def test_the_headline_is_claimed_whole_and_split_by_the_binder():
     """A title is a LINE, and this layer does not cut a street out of it: it states what the
     portal wrote and the resolver splits it inside the anchoring obec. Cutting here would be
-    the string work the operator ruled out — and a cue-anchored regex would miss the 4.8 % of
+    the string work the operator ruled out — and a cue-anchored regex would miss the ~4,300
     cue-less titles whose comma segment is a register street."""
     assert street_of({"id": "1", "title": OPERATOR_TITLE}) == OPERATOR_TITLE
-    assert street_of({"id": "1", "coords": {"street": "Kladno - Dubí, Ke Křížku"}}) == (
-        "Kladno - Dubí, Ke Křížku")
+    assert street_of({"id": "1", "title": "Prodej bytu 3+1, Kladno - Dubí, Ke Křížku"}) == (
+        "Prodej bytu 3+1, Kladno - Dubí, Ke Křížku")
 
 
-def test_the_parsers_value_wins_over_the_capped_headline():
-    assert street_of({
-        "id": "1", "title": "Prodej bytu 3+1, ul. Vršo",
-        "coords": {"street": "ul. Jiráskova"},
-    }) == "Jiráskova"
+def test_a_bare_name_in_a_title_is_unwrapped_and_nothing_more():
+    """The whole normalisation, on the one shape that has no separator to split."""
+    assert street_of({"id": "1", "title": "ul. Jiráskova"}) == "Jiráskova"
+    assert street_of({"id": "1", "title": "Livornské ulici"}) == "Livornské"
 
 
-def test_a_row_with_neither_pointer_claims_no_street():
+def test_the_generic_word_comes_off_and_the_official_one_stays():
+    """`ulice`/`ul.` mean nothing and go — EXCEPT where the register spells them into the name
+    (`Nová ulice` x8, `V Ulici`, `Na Ulici`, `I. ulice`…`IX. ulice`), where the unfolded form
+    survives as a match key of its own. `náměstí`, `třída`, `nábřeží` and `sídliště` are part
+    of the official name and are never touched; 215 titles bind only because one survived."""
+    assert street_of({"id": "1", "title": "náměstí Míru"}) == "náměstí Míru"
+    assert street_of({"id": "1", "title": "třída Václava Klementa"}) == "třída Václava Klementa"
+    assert street_of({"id": "1", "title": "Na Ulici"}) == "Na Ulici"
+
+
+def test_a_row_with_no_title_claims_no_street():
     assert street_of({"id": "1", "coords": {"source": "link"}}) is None
-    assert street_of({"id": "1", "coords": {"street": None}, "title": ""}) is None
+    assert street_of({"id": "1", "title": ""}) is None
 
 
 def test_the_hallucinated_street_of_220870847_is_still_claimed_and_never_published():
-    """The division of labour, in one test. A CLAIM states what the portal wrote — `Nový` was
-    written, so `Nový` is claimed and the evidence stays auditable. PUBLICATION is the
-    register's call, and `Nový` is not a street of Hořice, so resolver v5.2 drops it. The old
-    fix was a morphology guess in the extractor, which is what refused the real `28. října`."""
-    assert street_of(fx.BAZOS_STREET_GEOCODE) == "Nový"
-    assert street_of(fx.BAZOS_LINK) == "Hurbanova"
+    """The division of labour, in one test. A CLAIM states what the portal wrote — so the
+    headline is claimed whole and the evidence stays auditable. PUBLICATION is the register's
+    call, and `Nový` is not a street of Hořice, so resolver v5.2 drops it. The old fix was a
+    morphology guess in the extractor, which is what refused the real `28. října`."""
+    assert street_of({"id": "220870847", "title": "Nový 2 pokojový byt"}) == (
+        "Nový 2 pokojový byt")
+    assert street_of(fx.BAZOS_STREET_GEOCODE) is None   # that fixture carries no title
 
 
 def test_a_geo_name_or_a_digit_string_is_refused_before_it_reaches_the_register():

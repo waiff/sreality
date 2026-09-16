@@ -74,11 +74,6 @@ DECLARED_CAP: dict[str, str] = {
 }
 
 
-# The positions the REGISTER supplies. A row placed on one of them is not standing on the
-# portal's pin, which is the whole of why the declared cap does not reach it (W18).
-REGISTRY_ORIGINS = frozenset({"registry_point", "street_point"})
-
-
 def grade(
     binding: Binding,
     position: Position,
@@ -86,23 +81,25 @@ def grade(
     declared: DeclaredPrecision,
     rank: GranularityRank,
 ) -> Grade:
-    """**THE DECLARED CAP IS A STATEMENT ABOUT THE PIN, so it caps the grain only while the
-    PIN is the position** (W18, correcting the first cut of this wave).
+    """**THE DECLARED CAP IS A STATEMENT ABOUT THE PIN, so it caps only a grain the PIN
+    ESTABLISHED** — BIND's two pin-derived rungs, R7 and R8 (W18).
 
     A portal declaring "Přibližná lokalita" is telling you its COORDINATE is fuzzy. It is not
     telling you the ad named no street, and it cannot un-tell you what RÚIAN says about the
-    street it named — so when `place()` elects a register point (an address point, or a bound
-    street's centroid) the verdict's grain is the BIND's own and the radius is the register's.
-    Left as it was, a bazos row published `street_name` + `ulice_kod`, sat on the street's
-    centroid and still graded `obec` at a 1 km radius: three fields of one row disagreeing
-    about how precisely the listing is known.
+    street the ad named. So a grain that came out of a REGISTER BIND — an address point, a
+    street, a named unit — is never coarsened by it, whichever point was elected.
+
+    Keying this on the POSITION instead (the first cut of W18) inverted two labels that are
+    capped but NOT blurred — idnes' `no_exact_address` (66,165 listings) and sreality's
+    `not_address` (13,176). A pin that AGREED with the bound street stayed the position and
+    was capped to `cast_obce_or_quarter` at 750 m, while a pin that CONTRADICTED it lost to
+    the street point and graded `street` at 300 m: the better-evidenced row graded coarser.
 
     What the declaration still does is lower CONFIDENCE — a blurred pin is a weak witness
-    however good the bind is, and `confidence` caps such a row at `medium` on every origin.
-    When the PIN is the elected position the ladder applies exactly as before.
+    however good the bind is, and `confidence` caps such a row at `medium`.
     """
     granularity = binding.granularity if binding.bound else "unknown"
-    if position.origin not in REGISTRY_ORIGINS:
+    if binding.pin_derived or not binding.bound:
         capped = DECLARED_CAP.get(declared.label or "")
         if capped is not None:
             granularity = rank.coarser_of(granularity, capped)
@@ -143,9 +140,9 @@ def radius_m(granularity: str, *, floor_m: float | None = None) -> float:
     """The level's constant, never smaller than what actually placed the row (W18).
 
     A street is not a point: when the row sits at the centroid of a street's address points,
-    the honest radius is the one that reaches the far end of it — 863 m for Jiráskova in
-    Mladá Boleslav, where the level constant says 300. The floor only ever RAISES the
-    number, so every other row keeps exactly the radius it had.
+    the honest radius is the one that reaches its FARTHEST door — 1,288 m for Jiráskova in
+    Mladá Boleslav, where the level constant says 300. The floor only ever RAISES the number,
+    so every other row keeps exactly the radius it had.
     """
     return max(RADIUS_M[granularity], floor_m or 0.0)
 

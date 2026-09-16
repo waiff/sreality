@@ -41,6 +41,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from location_data.resolver.normalize import (
+    STREET_LINE_SEPARATOR,
     normalize_match_key,
     split_street_and_number,
     split_street_type,
@@ -233,7 +234,7 @@ def _tokens(value: str) -> list[str]:
 #  3. NOT A PLACE. A segment naming the anchoring obec, or a část obce / MOMC inside it, is
 #     never a street candidate — 76 register streets across 20 obce are spelled exactly like a
 #     část obce of their own town, and on a line there is nothing to tell them apart.
-_STREET_SEPARATORS = re.compile(r"[,;]|\s[-‐-―−]\s")
+_STREET_SEPARATORS = STREET_LINE_SEPARATOR
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,21 +252,36 @@ class StreetBind:
         return self.street is not None
 
 
-def street_keys(value: str) -> frozenset[str]:
-    """The keys ONE segment may match: the name with its type word, and without it.
+def street_match_keys(value: str) -> tuple[frozenset[str], frozenset[str]]:
+    """-> (the EXACT keys, every key this name may match by).
 
-    `náměstí Míru` is how the register spells that street and `Míru` is what S1 makes of the
-    same claim, so neither form is the right one on its own. The portal's own abbreviation is
-    the third case and the reason both sides are folded rather than one: a claim saying
-    `nám. Míru` normalises to `nam miru`, which matches the register's `namesti miru` at
-    neither end — but both strip to `miru`.
+    The exact keys are the name as the portal wrote it and the same name minus the meaningless
+    `ulice`/`ul.` wrapper. Both are "as written": neither drops a word that can be part of an
+    official name, so either may claim an exact hit. The UNFOLDED form is in there for a
+    measured reason — the register holds `Nová ulice` ×8, `V Ulici`, `Na Ulici`, `Horní
+    Ulice`, `Husova ulice` and `I. ulice`…`IX. ulice`, and folding the generic word off those
+    leaves a key that can never bind.
+
+    The wider set adds the TYPE-word-stripped form, which is what lets a claim reach a
+    register row spelled the other way: `nám. Míru` normalises to `nam miru`, matches the
+    register's `namesti miru` at neither end, and both strip to `miru`.
+
+    The tiers are kept apart because collapsing them is wrong in a measurable way: 45 register
+    keys across 32 obce collide once the type word is dropped (Kladno holds `náměstí Svobody`
+    AND `Svobody`, Děčín `5. května` AND `Nám. 5. května`). On one flat set a correct exact
+    claim reads as two candidates; on two tiers it reads as one.
     """
-    base = strip_street_generic(value)
-    name, _ = split_street_and_number(base)
-    keys = {normalize_match_key(name)}
-    without_type, _ = split_street_type(name)
-    keys.add(normalize_match_key(without_type))
-    return frozenset(k for k in keys if k)
+    verbatim, _ = split_street_and_number((value or "").strip())
+    unwrapped, _ = split_street_and_number(strip_street_generic(value))
+    exact = {normalize_match_key(verbatim), normalize_match_key(unwrapped)}
+    without_type, _ = split_street_type(unwrapped or verbatim)
+    every = exact | {normalize_match_key(without_type)}
+    return (frozenset(k for k in exact if k), frozenset(k for k in every if k))
+
+
+def street_keys(value: str) -> frozenset[str]:
+    """Every key one name may match by — `street_match_keys` without the tier."""
+    return street_match_keys(value)[1]
 
 
 def register_street_keys(street: Street) -> frozenset[str]:
@@ -275,6 +291,59 @@ def register_street_keys(street: Street) -> frozenset[str]:
     re-normalising 83,451 rows in the loader for a question only the matcher asks."""
     stripped, _ = split_street_type(street.name)
     return frozenset(k for k in {street.name_norm, normalize_match_key(stripped)} if k)
+
+
+def build_street_index(streets: Sequence[Street]) -> dict[str, list[Street]]:
+    """`key -> the streets it reaches`, folded ONCE per obec instead of once per street per
+    segment. `register_street_keys` is two regex passes and Praha holds ~10,000 streets, so a
+    four-segment title paid for 40,000 of them before this existed."""
+    index: dict[str, list[Street]] = {}
+    for street in streets:
+        for key in register_street_keys(street):
+            index.setdefault(key, []).append(street)
+    return index
+
+
+def street_index(registry: RegistryView, obec_kod: int) -> dict[str, list[Street]]:
+    """The obec's index, from the view's own memo when it offers one.
+
+    `street_index` is an ACCELERATOR, not an eleventh protocol question: the answer is
+    identical either way (`build_street_index` over the same `streets_in_obec`), so a view
+    that does not offer it simply pays the fold per listing. `CachedRegistryView` does offer
+    it, which is what makes the fold once-per-obec-per-RUN in production.
+    """
+    memo = getattr(registry, "street_index", None)
+    if memo is not None:
+        return memo(obec_kod)
+    return build_street_index(registry.streets_in_obec(obec_kod))
+
+
+def match_streets(
+    value: str, obec_kods: Sequence[int], registry: RegistryView
+) -> tuple[list[Street], str]:
+    """-> (the register rows this ONE name reaches, which tier reached them).
+
+    TWO TIERS, and the order is the whole point. An EXACT full-name match — the claim's own
+    spelling equalling `ruian_streets.name_norm` — wins outright and is never weighed against
+    a type-word-tolerant one: without that, a Kladno claim of `náměstí Svobody` would reach
+    both `náměstí Svobody` and `Svobody` and fail closed on a correct answer. Only when
+    nothing matches exactly is the tolerant fold consulted, and only there can two rows be a
+    genuine ambiguity.
+    """
+    exact_keys, keys = street_match_keys(value)
+    exact: dict[int, Street] = {}
+    tolerant: dict[int, Street] = {}
+    for obec_kod in obec_kods:
+        index = street_index(registry, obec_kod)
+        for key in keys:
+            for street in index.get(key, ()):
+                if street.name_norm in exact_keys:
+                    exact.setdefault(street.code, street)
+                else:
+                    tolerant.setdefault(street.code, street)
+    if exact:
+        return [exact[c] for c in sorted(exact)], "exact"
+    return [tolerant[c] for c in sorted(tolerant)], "stripped"
 
 
 def resolve_street(
@@ -287,24 +356,31 @@ def resolve_street(
     listing's. Two SPELLINGS of one register row are one answer, which is why the set is keyed
     on the street's code.
     """
-    found: dict[int, tuple[Street, dict[str, object]]] = {}
+    tiers: dict[str, dict[int, tuple[Street, dict[str, object]]]] = {"exact": {}, "stripped": {}}
     for line in lines:
         for segment in _street_segments(line):
-            keys = street_keys(segment)
+            _, keys = street_match_keys(segment)
             if not keys:
                 continue
+            streets, tier = match_streets(segment, obec_kods, registry)
+            # The place test is asked AFTER the match and only about a segment that matched.
+            # Asked first it ran `admin_units_by_name` on every word of every title — prose
+            # keys, unique per listing, straight into a `RunCache` that CLEARS ITSELF at
+            # 250,000 entries and would have evicted the streets and chains the run lives on.
+            if not streets or _names_a_place(keys, {s.obec_kod for s in streets}, registry):
+                continue
             _, numbers = split_street_and_number(strip_street_generic(segment))
-            for obec_kod in obec_kods:
-                if _names_a_place(keys, obec_kod, registry):
-                    continue
-                for street in registry.streets_in_obec(obec_kod):
-                    if keys & register_street_keys(street):
-                        found.setdefault(street.code, (street, numbers))
+            for street in streets:
+                tiers[tier].setdefault(street.code, (street, numbers))
+    # The EXACT tier is consulted alone when it has anything at all, across every segment of
+    # every line: a title that names one street exactly and grazes another through the
+    # tolerant fold has named one street.
+    found = tiers["exact"] or tiers["stripped"]
     if not found:
         return StreetBind(reason="no_match")
     if len(found) > 1:
         return StreetBind(reason="ambiguous_streets")
-    street, numbers = found[next(iter(found))]
+    street, numbers = found[next(iter(sorted(found)))]
     return StreetBind(
         street=street,
         cislo_domovni=_as_int(numbers.get("cislo_domovni")),
@@ -319,17 +395,20 @@ def _street_segments(line: str) -> list[str]:
     return [seg for seg in (part.strip() for part in _STREET_SEPARATORS.split(line or "")) if seg]
 
 
-def _names_a_place(keys: frozenset[str], obec_kod: int, registry: RegistryView) -> bool:
+def _names_a_place(
+    keys: frozenset[str], obec_kods: set[int], registry: RegistryView
+) -> bool:
     """The town itself, or a part of it. `normalize.normalize_claim`'s `town_as_street` rule
     covers a claim that IS one name; a segment of a line never reaches it, and the collision
-    is real at part level too."""
+    is real at part level too (76 register streets across 20 obce are spelled exactly like a
+    část obce of their own town)."""
     for key in keys:
         for unit in registry.admin_units_by_name(key, levels=("obec", *PART_LEVELS)):
             # Through the CHAIN, not through `AdminUnit.obec_kod`: that column is filled off
             # the ltree path by the SQL view and is empty on any other `RegistryView`, so
             # reading it here would make the rail fire in production and nowhere else.
             town = _obec_of(unit, registry)
-            if town is not None and town.code == obec_kod:
+            if town is not None and town.code in obec_kods:
                 return True
     return False
 
