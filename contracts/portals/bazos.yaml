@@ -173,7 +173,13 @@ extractions:
     locator_kind: api_json
     extraction_method: portal_structured_field
     page_kind: detail
-    locator: {reader: scalar, json_pointer: "/title"}
+    # `claim_confidence: low` is not a hedge about THIS value — it is what KIND of field the
+    # title is: A HEADLINE, NOT AN ADDRESS FIELD. The resolver reads it and refuses to match
+    # such a claim by similarity (BIND's R3 trigram rung), because over prose that rung binds
+    # a street the ad never named: "Byt Slunečná" scores 1.0 against Slunečná while "Prodej
+    # domu Slunečná" scores 0.429 and binds nothing — coverage decided by title length. An
+    # exact register match is the only thing a headline may buy.
+    locator: {reader: scalar, json_pointer: "/title", claim_confidence: low}
     claim_type: street_name
     licence_class: portal
     blur_evidence: none

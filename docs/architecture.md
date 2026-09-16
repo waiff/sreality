@@ -2283,15 +2283,21 @@ portal's payload or its own page, and every other stamp is class E outright.
   register's own spelling. **A STREET STATED INSIDE A LINE IS BOUND THE SAME WAY** (`composite.resolve_street`,
   W18, operator ruling 2026-09-16): a portal states a street inside a line as readily as it states a
   quarter inside one — bazos' headline is "Prodej bytu 3+1, ul. Jiráskova, Mladá Bolesl" and its
-  parser's own reading is "Kladno - Dubí, Ke Křížku" — so a street claim carrying a separator is
-  routed away from R2/R3 and split on the portals' own separators instead, each segment matched
-  EXACTLY against `ruian_streets` inside the anchoring obec. Three rules the locality binder does not
+  parser's own reading is "Kladno - Dubí, Ke Křížku" — so EVERY street claim is split on the portals' own
+  separators — a value carrying none is simply one segment — and each segment is matched EXACTLY
+  against `ruian_streets` inside the anchoring obec. ONE binder and one answer: whether a claim reached
+  the exact matcher used to turn on whether the portal happened to write a comma, so a comma-less
+  headline fell through to the trigram rung and bound a street out of prose. Three rules the locality binder does not
   need: **both keys** (the register keeps `náměstí`/`třída`/`nábřeží` in `name_norm` while S1 parses
   them off, so claim and register are each folded both ways and matched on the pair — worth 215
-  titles that bind only with the generic word kept); **no trigram** (R3 is for one claimed name with a
-  typo in it, and over the segments of a title it would fuzzy-match "Prodej bytu" against a street —
-  which is also why a title cut at bazos' 60-character cap, 21,930 of them, simply fails: there is no
-  prefix matching anywhere in this lane); and **not a place** (a segment naming the anchoring obec or
+  titles that bind only with the generic word kept); **no trigram unless the CONTRACT calls the claim an
+  address field** (R3 is for one claimed name with a typo in it; over a headline it binds a street the
+  ad never named — "Byt Slunečná" scores 1.0 against Slunečná while "Prodej domu Slunečná" scores 0.429
+  and binds nothing, i.e. coverage decided by title length. The bazos title entry declares
+  `claim_confidence: low`, meaning *a headline, not an address field*, and the resolver obeys the
+  declaration — no rule names a portal. It is also why a title cut at bazos' 60-character cap, 21,930
+  of them, simply fails: there is no prefix matching anywhere in this lane. And a TIE is not a typo —
+  where the exact matcher fails closed on two register rows, R3 does not run either); and **not a place** (a segment naming the anchoring obec or
   a část obce inside it is never a street candidate — 76 register streets across 20 obce are spelled
   exactly like a část obce of their own town). It fails CLOSED on two distinct street codes across
   the segments, and a bound segment carrying a house number reaches R1 rather than stopping at R2.
@@ -2315,9 +2321,8 @@ portal's payload or its own page, and every other stamp is class E outright.
   with the bound entity (`exact` an address point the pin corroborates, `high` ≥ 2 fields, `medium`
   one, `low` a tie-break or nothing), and `uncertainty_radius_m` from a per-level constant dict
   carrying migration 383's own v1 numbers — floored by the STREET's extent when a street placed the
-  row (W18), so a radius can never understate the thing the position came off. The portal's declared
-  `DECLARED_CAP` is applied ONLY to a grain the PIN established (see the position ladder below); on a
-  register-bound row it reaches the confidence and never the grain.
+  row (W18), so a radius can never understate the thing the position came off. A portal's declared
+  precision reaches the confidence and never the grain (see the position ladder below).
 * **CHECK** (`check.py`) decides the country and whether the row disagrees with itself. `disputed` is
   ONE nullable text column whose value IS the reason: `pin_outside_obec` (the pin is kept, the
   granularity drops to the admin level; asked only when the town came from a CLAIM, since on BIND's
@@ -2351,18 +2356,18 @@ point — Jiráskova in Mladá Boleslav spans 1,727 m, and a flat 300 m rule wou
 disagreement. An EXACT pin that loses is the one case that IS a disagreement and is stamped
 `pin_off_street`; an exact pin that agrees keeps the position, as the finer of two true answers.
 
-**A PORTAL'S `precision_cap` CAPS ONLY A GRAIN THE PIN ESTABLISHED** — BIND's two pin-derived rungs,
-R7 and R8. A portal declaring "Přibližná lokalita" is saying its COORDINATE is fuzzy; it is not saying
-the ad named no street, and it cannot un-say what RÚIAN holds about the street the ad named. So a grain
-that came out of a register bind — an address point, a street, a named unit — is never coarsened by it,
-whichever point was elected, and the declaration is left to do the one thing it still honestly can: cap
-the CONFIDENCE, because a blurred pin stays a weak witness however good the bind is. Keying this on the
-elected POSITION instead (W18's first cut) was wrong twice over: it published a bazos row with
-`street_name` + `ulice_kod`, the position on the street's centroid and `granularity='obec'` at 1 km —
-and it INVERTED the two labels that are capped but not blurred (idnes' `no_exact_address`, 66,165
-listings; sreality's `not_address`, 13,176), because a pin AGREEING with the bound street stayed the
-position and was capped, while a pin CONTRADICTING it lost the position and was not: the
-better-evidenced row graded coarser.
+**THE GRANULARITY IS THE BIND'S, AND A PORTAL'S DECLARED PRECISION REACHES ONLY THE CONFIDENCE.** A
+portal declaring "Přibližná lokalita" is saying its COORDINATE is fuzzy; it is not saying the ad named
+no street, and it cannot un-say what RÚIAN holds about the street the ad named. W18 deleted the
+`DECLARED_CAP` ladder outright rather than narrowing it: keying the cap on the elected POSITION was
+wrong twice over (it published a bazos row with `street_name` + `ulice_kod`, the position on the
+street's centroid and `granularity='obec'` at 1 km, and it INVERTED the two labels that are capped but
+not blurred — idnes' `no_exact_address`, 66,165 listings, and sreality's `not_address`, 13,176 — because
+a pin AGREEING with the bound street stayed the position and was capped while one CONTRADICTING it lost
+the position and was not), and keying it on the PIN-DERIVED rungs instead was correct and INERT: R7/R8
+already grade `obec` and every cap value is at or coarser than that, so the table could not change an
+answer on any input. What a declaration still does is rank the pin against a blurred sibling and cap the
+confidence at `medium` — a blurred pin is a weak witness however good the bind is.
 
 It is a **pure function**: no wall clock, no network, no randomness, enforced by an AST scan, so a
 row replays byte-identically from its inputs and the three version ids stamped on it

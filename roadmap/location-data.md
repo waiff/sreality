@@ -950,13 +950,17 @@ component is slimmed twice — each wave rewrites one component and slims its st
   93 % of rows and carries a cue on 48 %, but its first cue binds exactly only **19 %** of the
   time. All three come back when there is a subject-scoped reading, not before.
 
-  **bazos@7**: one entry, one reader, `/title`. The new shared transform `street_token` strips
-  ONLY the generic `ulice`/`ul.` wrapper (leading, with an optional `v`/`ve`/`na`, or
-  trailing), keeps `náměstí`/`třída`/`nábřeží`/`sídliště` (RÚIAN spells them into the official
-  name), keeps a trailing house number (S1 turns it into a čp and R1 uses it), and declares NO
-  morphology gate: `looks_like_czech_street` is what refused the real `28. října`. Where the
-  generic word IS the street — `Nová ulice` ×8, `V Ulici`, `Na Ulici`, `I. ulice`…`IX. ulice` —
-  the unfolded spelling survives as a match key of its own. `Nový` is still CLAIMED and never
+  **bazos@7**: one entry, one reader, `/title`, declaring `claim_confidence: low` — which is
+  not a hedge about the value but a statement of what KIND of field a headline is, and which
+  the resolver obeys by refusing to match such a claim by SIMILARITY (see rule 5). The new
+  shared transform `street_token` strips ONLY the LEADING generic `ulice`/`ul.` wrapper (with
+  an optional `v`/`ve`/`na`), keeps `náměstí`/`třída`/`nábřeží`/`sídliště` (RÚIAN spells them
+  into the official name), keeps a trailing house number (S1 turns it into a čp and R1 uses
+  it), and declares NO morphology gate: `looks_like_czech_street` is what refused the real
+  `28. října`. The TRAILING generic word is kept too, and that is load-bearing: the register
+  holds `Nová ulice` ×8, `Husova ulice`, `V Ulici`, `Na Ulici` and `I. ulice`…`IX. ulice`, and
+  the matcher's exact key is taken from the stored value — folding `Nová ulice` down to `Nová`
+  at intake would destroy the only key it could ever bind by. `Nový` is still CLAIMED and never
   published.
 
   **Resolver v5.2**, four rules. (1) A street reaches `listing_location` only when it BINDS to
@@ -975,23 +979,35 @@ component is slimmed twice — each wave rewrites one component and slims its st
   away as EVIDENCE: CHECK's containment tests read the elected coordinate CLAIM, so
   `pin_outside_obec` / `pin_outside_cz` survive a register-placed row and outrank
   `pin_off_street` — without that, bazos would have lost the flag on **3,421** rows the moment
-  a street bound. (4) **A portal's `precision_cap` caps only a grain the PIN established**
-  (R7/R8): a grain that came out of a register bind is never coarsened by a statement about the
-  portal's coordinate, whichever point was elected, and the declaration is left to cap the
-  CONFIDENCE. Keying that on the elected POSITION instead was wrong twice — it published a row
-  with `street_name` + `ulice_kod` at `granularity='obec'`, and it inverted the two labels that
-  are capped but not blurred (idnes `no_exact_address` 66,165 rows, sreality `not_address`
-  13,176), where a pin AGREEING with the bound street graded coarser than one contradicting it.
+  a street bound. (4) **The granularity is the BIND's, and a portal's declared precision
+  reaches only the CONFIDENCE.** The `DECLARED_CAP` ladder is DELETED, not narrowed: keying it
+  on the elected POSITION was wrong twice — it published a row with `street_name` + `ulice_kod`
+  at `granularity='obec'`, and it inverted the two labels that are capped but not blurred
+  (idnes `no_exact_address` 66,165 rows, sreality `not_address` 13,176), where a pin AGREEING
+  with the bound street graded coarser than one contradicting it — and keying it on the
+  pin-derived rungs instead was correct and INERT, because R7/R8 already grade `obec` and every
+  cap value is at or coarser than that. Brute-forced over both reachable grains × every label:
+  zero answers move. A table that cannot change an output is a rail that reads as enforced and
+  is not. (5) **ONE binder for every street claim, and the similarity rung is contract-gated.**
+  A value with no separator is one segment, so whether a claim reaches the exact matcher no
+  longer turns on whether the portal wrote a comma — it used to, and a comma-less headline fell
+  through to R3 and bound a street out of prose ("Byt Slunečná" scores 1.0 against Slunečná;
+  "Prodej domu Slunečná" scores 0.429 and binds nothing, i.e. coverage decided by title
+  length). R3 now runs only for a claim the CONTRACT calls an address field, never for one
+  declared `claim_confidence: low`, and never over candidates the exact matcher just refused —
+  a tie is not a typo.
 
-  A street claim carrying a separator is a LINE and goes to W9's composite binder one level
+  Every street claim goes to W9's composite binder one level
   down: split on the portals' own separators, match each segment against the register inside
   the anchoring obec in **two tiers** — an EXACT full-name match wins outright, the
   type-word-tolerant fold is consulted only when nothing matched exactly (45 keys across 32
   obce collide once the type word is dropped: Kladno holds `náměstí Svobody` AND `Svobody`) —
   refuse a segment that names the obec or a část obce of it (76 register streets collide that
   way across 20 obce), fail closed on two distinct streets, and never reach the trigram rung.
-  The same two-tier matcher serves the single-name path, so R1/R2 and the line binder answer
-  "is this the same street" identically. No migration: `listing_location.disputed` is a
+  There is no separate single-name path any more: one matcher answers "is this the same
+  street" for every shape, including the refusal — an abbreviation that reaches two register
+  rows of one town (`nám. Svobody` in Kladno) binds nothing, where the single-name path used to
+  pick the lower `ulice_kod` and say nothing about it. No migration: `listing_location.disputed` is a
   lower_snake REGEX and `ruian_ap_street_hn (street_id, …)` is the index the street point reads.
 
   **DEPLOYMENT — two lanes, in this order.** (1) The street is a PAYLOAD entry, and a payload

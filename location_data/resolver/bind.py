@@ -39,11 +39,11 @@ from typing import Any
 
 from location_data.resolver.composite import (
     CompositeBind,
-    match_streets,
+    StreetBind,
     resolve_locality,
     resolve_street,
-    street_keys,
 )
+from location_data.resolver.normalize import STREET_LINE_SEPARATOR
 from location_data.resolver.geo import distance_between
 from location_data.resolver.normalize import normalize_match_key
 from location_data.resolver.types import (
@@ -100,11 +100,6 @@ PIP_SLIVER_TOLERANCE_M = 250.0
 # registry point stays the position and GRADE caps the confidence.
 REGISTRY_PIN_CONFLICT_M = 300.0
 
-# What makes a street claim a LINE rather than a name (W18). The same separators
-# `composite._STREET_SEPARATORS` splits on, asked here as a yes/no: a value carrying one is
-# routed to the segment binder and never to R2/R3, because fuzzy-matching "Prodej bytu" is
-# how a title would bind to a street it does not name.
-_STREET_LINE_RE = re.compile(r"[,;]|\s[-‐-―−]\s")
 
 # Portal-declared labels that mean "this pin is not address-grade". The portal contract maps
 # its own vocabulary onto these; a label we do not know is NOT treated as blurred (cap,
@@ -190,18 +185,14 @@ class Constraints:
     cast_obce_keys: tuple[str, ...] = ()
     katuz_keys: tuple[str, ...] = ()
     qualifiers: tuple[str, ...] = ()
+    # S1's match key, and the ONE input R3 (the trigram rung) is allowed to run on. It is set
+    # only for a claim that is one NAME and that the contract does not declare
+    # `claim_confidence: low` — see `street_lines` (W18).
     street_key: str | None = None
-    # Every register key the SINGLE-name street claim may match: the name as the portal wrote
-    # it and the name with its generic type word parsed off (W18). `ruian_streets.name_norm`
-    # keeps `náměstí`/`třída`/`nábřeží` and S1 strips them, so neither form alone is the key.
-    street_keys: tuple[str, ...] = ()
-    # The single-name claim as the PORTAL wrote it, kept so R1/R2 can run the SAME two-tier
-    # matcher the line path runs (`composite.match_streets`) rather than a second, weaker
-    # comparison against `name_norm` alone.
-    street_name_claimed: str | None = None
-    # Street claims that are a LINE rather than a name — a title, a "Kladno - Dubí, Ke Křížku"
-    # parser reading. They never reach R2/R3: `composite.resolve_street` splits them and binds
-    # exactly, inside the anchoring obec, fail-closed (W18).
+    # EVERY street claim, verbatim. `composite.resolve_street` splits each on the portals' own
+    # separators and binds the segments EXACTLY inside the anchoring obec, so a value that
+    # carries no separator is simply one segment and takes the identical path — one matcher,
+    # one answer, and no rung whose reach depends on whether the portal wrote a comma.
     street_lines: tuple[str, ...] = ()
     cislo_domovni: int | None = None
     cislo_orientacni: int | None = None
@@ -234,8 +225,7 @@ def collect_constraints(
     ids: dict[str, list[int]] = {}
     obec_lines: list[str] = []
     street_lines: list[str] = []
-    street_key_set: list[str] = []
-    street_key = street_name_claimed = None
+    street_key = None
     cp = co = kod_adm = None
     znak: str | None = None
     pin: tuple[float, float] | None = None
@@ -265,23 +255,27 @@ def collect_constraints(
                 note("psc", claim.id)
         elif t == "street_name" and not rejected:
             raw = str(claim.value_text or "")
-            if _STREET_LINE_RE.search(raw):
-                # A LINE. Its number slots belong to whatever segment ends the string
-                # ("…, Mladá Boleslav"), not to the street, so they are not read here — the
-                # binder takes them off the segment that actually bound (W18).
+            if raw.strip():
                 street_lines.append(raw)
                 note("street", claim.id)
+            if STREET_LINE_SEPARATOR.search(raw):
+                # A LINE's number slots belong to whatever segment ends the string
+                # ("…, Mladá Boleslav"), not to the street, so they are not read here — the
+                # binder takes them off the segment that actually bound (W18).
                 continue
-            if key:
-                street_key = street_key or key
-                street_key_set.extend(street_keys(raw))
-                street_name_claimed = street_name_claimed or raw
-                note("street", claim.id)
             if cp is None and slots.get("cislo_domovni"):
                 cp = _as_int(str(slots["cislo_domovni"]))
             if co is None and slots.get("cislo_orientacni"):
                 co = _as_int(str(slots["cislo_orientacni"]))
             znak = znak or _text_slot(slots, "znak_orientacniho")
+            if key and claim.claim_confidence != "low":
+                # R3's input. A claim the CONTRACT calls `low` is a headline, not an address
+                # field, and a trigram run over prose is how "Byt Slunečná" binds Slunečná
+                # while "Prodej domu Slunečná" (0.429 similarity) binds nothing — coverage
+                # decided by title length, and a wrong street whenever the prose happens to
+                # score. The contract declares the quality; the resolver obeys it, and no
+                # portal is named here.
+                street_key = street_key or key
         elif t == "house_number_cp":
             cp = cp if cp is not None else _as_int(str(slots.get("cislo_domovni") or ""))
             note("house_number_cp", claim.id)
@@ -331,8 +325,6 @@ def collect_constraints(
         katuz_keys=tuple(dict.fromkeys(buckets["katuz"])),
         qualifiers=tuple(dict.fromkeys(buckets["qualifier"])),
         street_key=street_key,
-        street_keys=tuple(dict.fromkeys(k for k in street_key_set if k)),
-        street_name_claimed=street_name_claimed,
         street_lines=tuple(dict.fromkeys(line for line in street_lines if line)),
         cislo_domovni=cp,
         cislo_orientacni=co,
@@ -590,88 +582,80 @@ def bind(
                 )
             )
 
-    # ---- The SINGLE-name street claim, resolved to register rows ONCE and shared by R1 and
-    # R2 (W18). It runs `composite.match_streets`, the same two-tier matcher the line path
-    # runs: an exact full-name match wins outright, the type-word-tolerant fold is consulted
-    # only when nothing matched exactly. Before this the single-name path compared claim keys
-    # against `name_norm` alone — so a claim of `nám. Míru`, `Míru` or `tř. Karla IV` reached
-    # the register through the WEAKER of the two matchers, and (since FILL stopped publishing
-    # unbound text) was dropped rather than merely ungraded: ~140 correct bazos binds.
-    named_streets: list[Street] = []
-    if constraining_obec_kods and constraints.street_name_claimed:
-        named_streets, _tier = match_streets(
-            constraints.street_name_claimed, constraining_obec_kods, registry)
-
-    # ---- R1: obec + street + čp/čo, addressed through the street the matcher landed on, so
-    # a claim spelled `nám. Budovatelů` and one spelled `Budovatelů` reach one address point.
-    if named_streets and (constraints.cislo_domovni or constraints.cislo_orientacni):
-        for matched in named_streets:
-            for point in registry.address_points_by_number(
-                obec_kod=matched.obec_kod,
-                street_name_norm=matched.name_norm,
-                cislo_domovni=constraints.cislo_domovni,
-                cislo_orientacni=constraints.cislo_orientacni,
-            ):
-                agreed = ["house_number", "street", "obec"]
-                if constraints.psc == point.psc:
-                    agreed.append("psc")
-                out.append(
-                    _point_candidate(
-                        point, rung="R1", agreed=tuple(agreed),
-                        claim_ids=_ids(constraints, "street", "house_number_cp",
-                                       "house_number_co"),
-                    )
-                )
-
-    # ---- W18: a street stated inside a LINE — a bazos headline, a parser reading like
-    # "Kladno - Dubí, Ke Křížku". Split on the portals' own separators and matched against the
-    # register INSIDE the anchoring obec, exactly, whole-string-first and fail-closed: two
-    # distinct streets across the segments bind nothing at all. It reaches the same two rungs a
-    # named street does — R1 when the segment carried a house number, R2 otherwise — because
-    # what bound is a register row either way, and the SHAPE of the string that pointed at it
-    # is not a grade.
-    if constraining_obec_kods and constraints.street_lines:
-        line = resolve_street(constraints.street_lines, constraining_obec_kods, registry)
-        if line.street is not None:
-            points = (
-                registry.address_points_by_number(
-                    obec_kod=line.street.obec_kod,
-                    street_name_norm=line.street.name_norm,
-                    cislo_domovni=line.cislo_domovni,
-                    cislo_orientacni=line.cislo_orientacni,
-                )
-                if line.cislo_domovni or line.cislo_orientacni
-                else []
+    # ---- R1 / R2: THE street claim, whatever shape the portal wrote it in (W18).
+    #
+    # One binder for all of them. `composite.resolve_street` splits every claim on the
+    # portals' own separators — a value with no separator is one segment — and matches each
+    # segment EXACTLY against the register inside the anchoring obec, in two tiers: a full-name
+    # match wins outright, the type-word-tolerant fold is consulted only when nothing matched
+    # exactly, and two distinct streets across the segments bind nothing at all.
+    #
+    # It was two paths for one round and that was the defect: whether a claim reached the
+    # segment binder or the single-name one turned on whether the portal happened to write a
+    # comma, so a comma-less headline ("Byt Slunečná") fell through to the trigram rung and
+    # bound a street out of prose, while a longer one ("Prodej domu Slunečná", similarity
+    # 0.429) bound nothing. Coverage decided by title length is not a rule.
+    #
+    # A bound street reaches R1 when there is a house number and R2 otherwise — what bound is a
+    # register row either way, and the SHAPE of the string that pointed at it is not a grade.
+    line = (
+        resolve_street(constraints.street_lines, constraining_obec_kods, registry)
+        if constraining_obec_kods and constraints.street_lines
+        else StreetBind()
+    )
+    if line.street is not None:
+        # The segment's own number first; a listing-wide `house_number_*` claim behind it
+        # (the portals that state the street and the číslo in separate fields). A LINE's
+        # number never reaches the constraints, so it cannot be lent to another claim.
+        cislo_domovni = line.cislo_domovni or constraints.cislo_domovni
+        cislo_orientacni = line.cislo_orientacni or constraints.cislo_orientacni
+        points = (
+            registry.address_points_by_number(
+                obec_kod=line.street.obec_kod,
+                street_name_norm=line.street.name_norm,
+                cislo_domovni=cislo_domovni,
+                cislo_orientacni=cislo_orientacni,
             )
-            for point in points:
-                agreed = ["house_number", "street", "obec"]
-                if constraints.psc == point.psc:
-                    agreed.append("psc")
-                out.append(
-                    _point_candidate(point, rung="R1", agreed=tuple(agreed),
-                                     claim_ids=_ids(constraints, "street")))
-            if not points:
-                out.append(_street_candidate(
-                    line.street, "R2", constraints,
-                    cislo_domovni=line.cislo_domovni,
-                    cislo_orientacni=line.cislo_orientacni,
-                    znak_orientacniho=line.znak_orientacniho))
+            if cislo_domovni or cislo_orientacni
+            else []
+        )
+        for point in points:
+            agreed = ["house_number", "street", "obec"]
+            if constraints.psc == point.psc:
+                agreed.append("psc")
+            out.append(
+                _point_candidate(
+                    point, rung="R1", agreed=tuple(agreed),
+                    claim_ids=_ids(constraints, "street", "house_number_cp",
+                                   "house_number_co")))
+        if not points:
+            out.append(_street_candidate(
+                line.street, "R2", constraints,
+                cislo_domovni=line.cislo_domovni,
+                cislo_orientacni=line.cislo_orientacni,
+                znak_orientacniho=line.znak_orientacniho))
 
-    # ---- R2 / R3: street inside the constraining obec, matched then typo-tolerant.
-    if constraining_obec_kods and constraints.street_keys:
-        exact_hits = len(named_streets)
+    # ---- R3: the typo-tolerant rung, and the ONE place a street may be bound by similarity
+    # rather than by identity. It runs only when nothing bound exactly AND the contract calls
+    # this claim an address field — `constraints.street_key` is set for no other kind. A
+    # trigram over a headline is how prose reaches a street it does not name.
+    bound_exactly = any(c.target_kind == "street" or c.rung in ("R0", "R1") for c in out)
+    if (
+        constraining_obec_kods
+        and constraints.street_key
+        and not bound_exactly
+        # A tie is not a typo. When the exact binder FAILED CLOSED on two register rows the
+        # claim could mean, letting the fuzzy rung pick one of the very candidates just
+        # refused would undo the refusal — so R3 runs only where nothing matched at all.
+        and line.reason != "ambiguous_streets"
+    ):
         fuzzy: list[tuple[float, Any]] = []
-        for matched in named_streets:
-            out.append(_street_candidate(matched, "R2", constraints))
-        for obec_kod in () if exact_hits else constraining_obec_kods:
-            streets = registry.streets_in_obec(obec_kod)
-            for street in streets:
-                # R3 stays on the ONE primary key and only for a named street: a trigram run
-                # over the segments of a title is how "Prodej bytu" reaches a street.
-                sim = trigram_similarity(constraints.street_key or "", street.name_norm)
+        for obec_kod in constraining_obec_kods:
+            for street in registry.streets_in_obec(obec_kod):
+                sim = trigram_similarity(constraints.street_key, street.name_norm)
                 if sim >= _TRGM_THRESHOLD:
                     fuzzy.append((sim, street))
-        if not exact_hits and fuzzy:
+        if fuzzy:
             fuzzy.sort(key=lambda t: (-t[0], t[1].name_norm))
             best = fuzzy[0][0]
             runner_up = fuzzy[1][0] if len(fuzzy) > 1 else 0.0

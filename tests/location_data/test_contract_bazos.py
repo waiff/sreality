@@ -565,10 +565,16 @@ def test_the_headline_is_claimed_whole_and_split_by_the_binder():
         "Prodej bytu 3+1, Kladno - Dubí, Ke Křížku")
 
 
-def test_a_bare_name_in_a_title_is_unwrapped_and_nothing_more():
-    """The whole normalisation, on the one shape that has no separator to split."""
+def test_a_bare_name_in_a_title_keeps_everything_but_the_leading_wrapper():
+    """The whole normalisation, on the shape that has no separator to split. Only the LEADING
+    `ulice`/`ul.` comes off: the register holds `Nová ulice` ×8, `Husova ulice`, `V Ulici` and
+    `I. ulice`…`IX. ulice`, and the matcher's exact key is taken from the STORED value, so
+    stripping a trailing generic word here would destroy the only key those can bind by. Both
+    ends are folded in the matcher, which keeps the unfolded form beside the stripped one."""
     assert street_of({"id": "1", "title": "ul. Jiráskova"}) == "Jiráskova"
-    assert street_of({"id": "1", "title": "Livornské ulici"}) == "Livornské"
+    assert street_of({"id": "1", "title": "v ulici Nádražní"}) == "Nádražní"
+    assert street_of({"id": "1", "title": "Livornské ulici"}) == "Livornské ulici"
+    assert street_of({"id": "1", "title": "Nová ulice"}) == "Nová ulice"
 
 
 def test_the_generic_word_comes_off_and_the_official_one_stays():
@@ -579,6 +585,7 @@ def test_the_generic_word_comes_off_and_the_official_one_stays():
     assert street_of({"id": "1", "title": "náměstí Míru"}) == "náměstí Míru"
     assert street_of({"id": "1", "title": "třída Václava Klementa"}) == "třída Václava Klementa"
     assert street_of({"id": "1", "title": "Na Ulici"}) == "Na Ulici"
+    assert street_of({"id": "1", "title": "Husova ulice"}) == "Husova ulice"
 
 
 def test_a_row_with_no_title_claims_no_street():

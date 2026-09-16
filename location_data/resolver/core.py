@@ -87,9 +87,7 @@ def resolve(
         position = step_fill.position(filled, binding)
 
     # ---- 3. GRADE.
-    graded = step_grade.grade(
-        binding, position, declared=declared, rank=ctx.granularity_rank
-    )
+    graded = step_grade.grade(binding, position, declared=declared)
 
     # ---- 4. CHECK.
     verdict = step_check.check(

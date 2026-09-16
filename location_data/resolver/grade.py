@@ -21,7 +21,7 @@ from location_data.resolver.bind import (
     REGISTRY_PIN_CONFLICT_M,
     DeclaredPrecision,
 )
-from location_data.resolver.types import Binding, Grade, GranularityRank, Position, cap_confidence
+from location_data.resolver.types import Binding, Grade, Position, cap_confidence
 
 # The v1 `location_uncertainty_policy` seeds (migrations 383 + 491), collapsed to one number
 # per LEVEL. UNCALIBRATED by design: these are geometric bounds, never `r95_empirical` —
@@ -43,70 +43,36 @@ RADIUS_M: dict[str, float] = {
     "unknown": 250_000.0,           # 383: the CZ-scale sentinel for a row with no position
 }
 
-# Every portal precision signal is an UPPER BOUND, never a certification: mmreality's one
-# `accurate: true` row in the corpus is wrong and its one correct row is `accurate: false`.
-# A label the contract does not map is NOT a cap — inventing one is as wrong as ignoring one.
-DECLARED_CAP: dict[str, str] = {
-    "gps": "address_point", "address": "address_point", "exact": "address_point",
-    "presna": "address_point", "rooftop": "building",
-    "street": "street", "approximate": "street", "priblizna": "street", "estimated": "street",
-    "ward": "cast_obce_or_quarter", "quarter": "cast_obce_or_quarter",
-    "citypart": "cast_obce_or_quarter", "area": "cast_obce_or_quarter",
-    "polygon": "cast_obce_or_quarter",
-    # idnes' "Na mapě nezobrazujeme přesnou adresu" disclaimer.
-    "no_exact_address": "cast_obce_or_quarter",
-    # sreality's LEGACY `locality.accuracy`, a two-value field: `address` is already capped
-    # above, and `not_address` rides with `map.type: geometry` on every row sampled — the
-    # pin is the centroid of a drawn quarter polygon, not a blurred address.
-    "not_address": "cast_obce_or_quarter",
-    "regional": "obec", "municipality": "obec", "obec": "obec",
-    # --- W1-c: the rest of what the nine slim contracts emit.
-    # bazos' maps anchor says "Přibližná lokalita" on every ad; the contract caps that pin at
-    # `granularity_max: obec` (bazos.yaml, bzs.det.blur_hint), which is the rung here.
-    "approximate_location": "obec",
-    # maxima draws its own imprecision as a SHAPE (maxima.yaml, mx.det.map_geometry): a line
-    # is a street's worth of it, a circle a quarter's. `point` is deliberately absent — an
-    # unmapped label certifies nothing, and a drawn point is the one shape whose grade the
-    # portal does not state (it is a marker, not a measurement). `accurate` is absent for the
-    # other reason: it is PRECISE, and a cap row would certify a rung the flag does not.
-    "linestring": "street",
-    "circle": "cast_obce_or_quarter",
-}
-
+# A portal's precision signal reaches the CONFIDENCE and nothing else (W18). It used to
+# reach the granularity too, through a `DECLARED_CAP` ladder, and that ladder is deleted
+# rather than merely bypassed: once the cap was restricted to a grain the PIN established —
+# BIND's R7/R8 rungs, whose grain is `obec`, plus the unbound `unknown` — every value in it
+# was at or coarser than the grain it could reach, so it changed no answer on any input.
+# Brute-forced over both reachable grains × every label × the blurred fallback: zero grains
+# move. A table that cannot change an output is a rail that reads as enforced and is not,
+# which is exactly the defect class this subsystem keeps paying for. What a declaration still
+# does is `confidence`, below: a blurred pin is a weak witness however good the bind is.
 
 def grade(
     binding: Binding,
     position: Position,
     *,
     declared: DeclaredPrecision,
-    rank: GranularityRank,
 ) -> Grade:
-    """**THE DECLARED CAP IS A STATEMENT ABOUT THE PIN, so it caps only a grain the PIN
-    ESTABLISHED** — BIND's two pin-derived rungs, R7 and R8 (W18).
+    """**THE GRANULARITY IS THE BIND'S, FULL STOP** (W18). A portal's declared precision is a
+    statement about its own COORDINATE: it does not say the ad named no street, and it cannot
+    un-say what RÚIAN holds about the street the ad named — so it reaches the CONFIDENCE (a
+    blurred pin is a weak witness however good the bind is) and never the grain.
 
-    A portal declaring "Přibližná lokalita" is telling you its COORDINATE is fuzzy. It is not
-    telling you the ad named no street, and it cannot un-tell you what RÚIAN says about the
-    street the ad named. So a grain that came out of a REGISTER BIND — an address point, a
-    street, a named unit — is never coarsened by it, whichever point was elected.
-
-    Keying this on the POSITION instead (the first cut of W18) inverted two labels that are
-    capped but NOT blurred — idnes' `no_exact_address` (66,165 listings) and sreality's
-    `not_address` (13,176). A pin that AGREED with the bound street stayed the position and
-    was capped to `cast_obce_or_quarter` at 750 m, while a pin that CONTRADICTED it lost to
-    the street point and graded `street` at 300 m: the better-evidenced row graded coarser.
-
-    What the declaration still does is lower CONFIDENCE — a blurred pin is a weak witness
-    however good the bind is, and `confidence` caps such a row at `medium`.
+    Two cuts of this rule were wrong before it came out. Keying it on the elected POSITION
+    inverted the two labels that are capped but NOT blurred — idnes' `no_exact_address`
+    (66,165 listings) and sreality's `not_address` (13,176): a pin that AGREED with the bound
+    street stayed the position and was capped to `cast_obce_or_quarter` at 750 m, while a pin
+    that CONTRADICTED it lost to the street point and graded `street` at 300 m, so the
+    better-evidenced row graded coarser. Keying it on the PIN-DERIVED rungs instead was
+    correct and inert — their grain is already `obec` — so the table went with the rule.
     """
     granularity = binding.granularity if binding.bound else "unknown"
-    if binding.pin_derived or not binding.bound:
-        capped = DECLARED_CAP.get(declared.label or "")
-        if capped is not None:
-            granularity = rank.coarser_of(granularity, capped)
-        elif declared.blurred:
-            # A blurred declaration whose label this ladder does not know still says "not
-            # address-grade": it takes the same generic fallback a bare blur_hint takes.
-            granularity = rank.coarser_of(granularity, "street")
     return Grade(
         granularity=granularity,
         match_confidence=confidence(binding, position, blurred=declared.blurred),

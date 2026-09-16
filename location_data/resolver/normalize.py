@@ -90,8 +90,16 @@ def split_glue(value: str) -> str:
     return _GLUE.sub(" ", value)
 
 
-def strip_street_generic(value: str) -> str:
-    """Drop the generic `ulice`/`ul.` wrapper from either end, and nothing else.
+def strip_street_generic(value: str, *, trailing: bool = True) -> str:
+    """Drop the generic `ulice`/`ul.` wrapper, and nothing else.
+
+    `trailing=False` drops only the LEADING one, and that is what the claim layer uses. A
+    claim is what the portal WROTE, and the register holds `Nová ulice` ×8, `Husova ulice`,
+    `V Ulici`, `Na Ulici` and `I. ulice`…`IX. ulice`: stripping the trailing word at the claim
+    layer destroys the only key those can ever bind by, because the matcher's unfolded key is
+    taken from the stored value. The matcher strips BOTH ends, and it keeps the unfolded form
+    beside the stripped one — which is how `Livornské ulici` and `Nová ulice` are both
+    answered from one stored string.
 
     THE one fold shared by the claim layer (`claims_common.street_token`, which is all a
     portal's street text is normalised by) and by the binder — two copies of it would be two
@@ -107,7 +115,9 @@ def strip_street_generic(value: str) -> str:
     generic word, because the trailing pattern needs the word to end the string.
     """
     trimmed = _SENTENCE_TAIL.sub("", value or "").strip()
-    stripped = _STREET_GENERIC_TRAIL.sub("", _STREET_GENERIC_LEAD.sub("", trimmed))
+    stripped = _STREET_GENERIC_LEAD.sub("", trimmed)
+    if trailing:
+        stripped = _STREET_GENERIC_TRAIL.sub("", stripped)
     return _WS.sub(" ", stripped).strip()
 
 

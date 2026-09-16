@@ -37,7 +37,7 @@
           "declared_precision_label": null,
           "declared_confidence": null,
           "declared_radius_m": null,
-          "claim_confidence": null,
+          "claim_confidence": "low",
           "blur_evidence": "none",
           "licence_class": "portal",
           "history_completeness": "locality_text_only",

@@ -37,15 +37,25 @@ from __future__ import annotations
 #      portal) that is <= the active one — instead of the active version only, so the hours
 #      between a bump and its re-mine no longer judge a listing with no claims at all. The
 #      bump re-queues the 595,816 rows the W9 sweep emptied.
-# v5.2 = W18 (operator ruling 2026-09-16, bazos 223293822): the street a listing NAMES is
-#      published only when it BINDS to `ruian_streets` in the anchoring obec — an unbound
-#      claim text is no longer copied onto the answer row (1,864 rows across seven portals
-#      lose a name that joined to nothing) — and a BOUND street now has a POINT of its own,
-#      the centroid of its valid address points, with an EXTENT (half the bounding diagonal).
-#      That point outranks the portal pin when the pin is absent, declared blurred, or
-#      farther from the street than the street is long; an exact pin that loses is stamped
-#      `disputed='pin_off_street'` and capped at `medium`. And the portal's DECLARED CAP is a
-#      statement about its own pin, so it caps the GRAIN only while the pin is the elected
-#      position: a row standing on a register point grades at the bind's own level and the
-#      declaration is left to cap the confidence. Every row re-resolves once.
+# v5.2 = W18 (operator ruling 2026-09-16, bazos 223293822). Five rules, and every one of them
+#      can move an answer, so the bump IS the corpus sweep:
+#      * a street is PUBLISHED only when it BINDS to `ruian_streets` in the anchoring obec —
+#        an unbound claim text is no longer copied onto the row (1,864 rows across seven
+#        portals lose a name that joined to nothing);
+#      * a bound street has a POINT (the centroid of its valid address points) and an EXTENT
+#        (the distance from it to the FARTHEST of them — half the bounding-box diagonal
+#        excluded a real door on 65 % of streets), and that point outranks the portal pin when
+#        the pin is absent, declared blurred, or farther away than the street reaches;
+#      * CHECK's containment tests read the elected coordinate CLAIM rather than the published
+#        position, so `pin_outside_obec` / `pin_outside_cz` survive a register-placed row and
+#        outrank the new `pin_off_street` (an EXACT pin overridden by the street, capped at
+#        `medium`);
+#      * a portal's declared precision no longer caps the GRANULARITY at all — the
+#        `DECLARED_CAP` ladder is deleted; the grain is the bind's and a declaration caps the
+#        CONFIDENCE;
+#      * every street claim is bound by ONE matcher: split on the portals' separators, matched
+#        exactly inside the anchoring obec in two tiers (full name first, type-word-tolerant
+#        only when nothing matched exactly), fail-closed on two distinct streets. The
+#        similarity rung (R3) runs only for a claim the CONTRACT calls an address field, never
+#        for one it declares `claim_confidence: low`.
 RESOLVER_VERSION = "resolver:v5.2"

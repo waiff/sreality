@@ -654,11 +654,15 @@ _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 @transform("street_token")
 def _street_token(value: str, arg: str) -> str | None:
     """A street as the portal wrote it, unwrapped and sanity-checked — never re-spelled."""
-    token = _STREET_TOKEN_TRIM_RE.sub("", strip_street_generic(value))
+    # LEADING wrapper only. `Nová ulice`, `Husova ulice`, `V Ulici` and `I. ulice`…`IX. ulice`
+    # are register rows, and the matcher's exact key is taken from the STORED value — so
+    # stripping the trailing generic word here would destroy the only key those can bind by.
+    # Both ends are folded where that is safe to do: in the matcher, which keeps the unfolded
+    # form beside the stripped one.
+    token = _STREET_TOKEN_TRIM_RE.sub("", strip_street_generic(value, trailing=False))
     if not token:
-        # The generic word WAS the whole value ("Na Ulici", "V Ulici", "I. ulice"), and the
-        # register holds every one of those as a street. Keep what the portal wrote: the
-        # matcher carries the unfolded spelling as a key of its own, so these still bind.
+        # The leading wrapper WAS the whole value ("ulice", "na ulici"). Keep what the portal
+        # wrote rather than claiming nothing; the register decides whether it means anything.
         token = _STREET_TOKEN_TRIM_RE.sub("", (value or "").strip())
     if not token or token.isdigit():
         return None

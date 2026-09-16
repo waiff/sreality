@@ -177,20 +177,28 @@ def test_an_exact_full_name_match_wins_outright_over_the_tolerant_fold():
     # town holds only ONE of the pair the same abbreviation binds it (`nám. Míru` above).
     ambiguous = _bind("nám. Svobody, Kladno", (KLADNO,))
     assert ambiguous.street is None and ambiguous.reason == "ambiguous_streets"
+    # ...and the refusal is not undone by the fuzzy rung: a TIE is not a typo, so R3 never
+    # runs over the candidates the exact binder just refused.
+    assert _line("nám. Svobody, Kladno", town="Kladno").street_name is None
 
 
-def test_the_same_two_tiers_serve_a_single_name_claim():
-    """The single-name path and the line path must answer "is this the same street"
-    identically — it is one matcher, and `/title` reaches both shapes."""
+def test_a_value_with_no_separator_takes_the_identical_path():
+    """There is ONE binder. A claim with no separator is one segment, so "is this the same
+    street" is answered the same way whether or not the portal happened to write a comma —
+    including the refusal: the abbreviation that reaches both Kladno rows binds nothing here
+    too, where the single-name path used to pick the lower ulice_kod and say nothing."""
     assert _line("náměstí Svobody", town="Kladno").ulice_kod == 112
     assert _line("Svobody", town="Kladno").ulice_kod == 113
-    assert _line("nám. Svobody", town="Kladno").ulice_kod == 112
+    assert _line("nám. Svobody", town="Kladno").street_name is None
+    assert _bind("nám. Svobody", (KLADNO,)).reason == "ambiguous_streets"
 
 
 def test_a_street_whose_name_IS_the_generic_word_still_binds():
     """`Nová ulice`, `Na Ulici`, `I. ulice` — the register spells the generic word into the
-    name on those, so the UNFOLDED spelling is a match key of its own. Folding it off would
-    leave `Nová` / `Na`, which can never bind."""
+    name on those, so the UNFOLDED spelling is a match key of its own. It is also why the
+    CLAIM layer strips only the LEADING wrapper: the exact key is taken from the stored value,
+    and `Nová ulice` folded down to `Nová` at intake can never bind afterwards."""
+    assert composite.street_keys("Nová ulice") == frozenset({"nova ulice", "nova"})
     assert _line("Nová ulice", town="Kladno").street_name == "Nová ulice"
     assert _line("Na Ulici", town="Kladno").street_name == "Na Ulici"
     assert _bind("Prodej bytu, Nová ulice, Kladno", (KLADNO,)).street.code == 114
@@ -208,15 +216,84 @@ def test_the_street_index_is_the_same_answer_as_folding_each_row():
 
 
 def test_a_line_number_never_attaches_to_a_street_bound_from_another_claim():
-    """The candidate carries its own number. A listing naming `Nad Bořislavkou` and, in a
-    SEPARATE claim, a line reading "Livornská 5" must not publish `Nad Bořislavkou 5`: the
-    number belongs to the segment that bound Livornská, and Livornská is not what won."""
+    """A listing naming `Nad Bořislavkou` and, in a SEPARATE claim, a line reading
+    "Livornská 5" published `Nad Bořislavkou 5` at `street_segment` grain, because the line's
+    number was written back onto the listing-wide constraints and then lent to whatever street
+    the ranking picked. A number belongs to the segment that bound ITS street.
+
+    Two claims naming two different streets is also two answers, so the binder refuses both —
+    and the number goes with them rather than surviving on a row with no street at all."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
         mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
         mm.claim(3, "street_name", value_text="Prodej bytu 2+kk, Livornská 5, Praha"),
     ])
-    assert resolution.street_name in ("Nad Bořislavkou", "Livornská")
-    if resolution.street_name == "Nad Bořislavkou":
-        assert resolution.house_number_cp is None
-        assert resolution.granularity == "street"
+    assert resolution.street_name is None
+    assert resolution.house_number_cp is None
+    assert resolution.obec_name == "Praha"
+
+
+def test_a_house_number_claimed_in_its_own_field_still_reaches_the_address_point():
+    """The other direction, and the one that must NOT be broken by the rule above: a portal
+    that states the street and the číslo in SEPARATE fields is stating both about the same
+    listing, so the number is the listing's and R1 uses it."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
+        mm.claim(3, "house_number_cp", value_text="487"),
+        mm.claim(4, "house_number_co", value_text="40"),
+    ])
+    assert resolution.ruian_adm_kod == 21690278
+    assert resolution.street_name == "Nad Bořislavkou"
+    assert resolution.house_number_cp == "487"
+
+
+# --------------------------------- the trigram rung, and the claims allowed to reach it
+
+def _headline(value: str, town: str = "Bílovec"):
+    """A bazos-shaped claim: the contract declares the title `claim_confidence: low`, meaning
+    *a headline, not an address field*."""
+    return _resolve([
+        mm.claim(1, "obec_name", source="bazos", value_text=town),
+        mm.claim(2, "street_name", source="bazos", value_text=value, claim_confidence="low"),
+    ])
+
+
+def _address_field(value: str, town: str = "Bílovec"):
+    """A structured street field from a portal that states one. No declaration — R3 as ever."""
+    return _resolve([
+        mm.claim(1, "obec_name", value_text=town),
+        mm.claim(2, "street_name", value_text=value, claim_confidence=None),
+    ])
+
+
+def test_a_headline_is_never_matched_by_similarity():
+    """THE defect this rule closes. A trigram run over prose binds a street the ad never
+    named: "Byt Slunečná" scores 1.0 against Slunečná, while "Prodej domu Slunečná" scores
+    0.429 and binds nothing — so coverage depended on how long the seller's title was, and a
+    title that happened to score bound a wrong street. A headline may buy an EXACT register
+    match and nothing else."""
+    assert _headline("Byt Slunečná").street_name is None
+    assert _headline("Prodej domu Slunečná").street_name is None
+    # ...while the exact path is untouched: the same headline naming the street outright binds.
+    assert _headline("Slunečná").street_name == "Slunečná"
+    assert _headline("Prodej bytu 2+kk, Slunečná, Bílovec").street_name == "Slunečná"
+
+
+def test_a_structured_street_field_keeps_the_trigram_rung():
+    """The other half: a portal that states a street IN A STREET FIELD gets R3 exactly as
+    before, because there the fuzziness is a typo and not prose. The contract declares the
+    quality; the resolver obeys it, and no rule names a portal."""
+    assert _address_field("Byt Slunečná").street_name == "Slunečná"
+    assert _address_field("Slunecna").street_name == "Slunečná"
+
+
+def test_the_operators_own_title_still_binds_with_the_fuzzy_rung_off():
+    """The ruling's own listing, through the low-confidence path end to end."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", source="bazos", value_text="Mladá Boleslav"),
+        mm.claim(2, "street_name", source="bazos", claim_confidence="low",
+                 value_text="Prodej bytu 3+1 s lodžií, 86 m2, ul. Jiráskova, Mladá Bolesl"),
+    ])
+    assert resolution.street_name == "Jiráskova"
+    assert resolution.ulice_kod == 105
