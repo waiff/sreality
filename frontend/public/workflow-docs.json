@@ -303,7 +303,7 @@
       "inputs": [
         {
           "name": "mode",
-          "description": "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; record = one retroactive progress-ledger row.",
+          "description": "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row.",
           "required": true,
           "type": "string",
           "default": "census",
@@ -311,7 +311,7 @@
         },
         {
           "name": "args",
-          "description": "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12.",
+          "description": "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12 or export_run=123,tier=text,n=400,max_usd=5.",
           "required": false,
           "type": "string",
           "default": "",
@@ -332,7 +332,7 @@
       "concurrencyGroup": "autodedup",
       "cancelInProgress": false,
       "timeoutMinutes": 300,
-      "permissions": "contents: read",
+      "permissions": "contents: read, actions: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/autodedup.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/autodedup.yml"
     },

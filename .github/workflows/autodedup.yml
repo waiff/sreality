@@ -49,6 +49,41 @@ name: "AUTODEDUP: engine lane"
 #             >= 5 distinct listings); that divergence is open and needs a ruling line in
 #             PROGRAM.md section 14 before W1 closes.
 #
+#   judge   - THE ONE PAID MODE. Downloads a finished `export` run's cohort artifact
+#             (`gh run download <export_run> -n autodedup-export-<export_run>`, which is why
+#             this job asks for `actions: read` and the step is handed GH_TOKEN), re-runs the
+#             whole engine over it in-process, draws a DETERMINISTIC stratified sample of
+#             pairs - zone x deciding layer (certificate or model) x cohort block x same/cross
+#             portal, with the catalogue-only pairs pulled out whole - and puts each pair to
+#             the LLM judge for a four-way verdict (same_property / different_property /
+#             same_building_different_unit / insufficient_evidence) through one forced tool.
+#             `tier` picks what is asked: smoke = 10 text + 10 vision calls, the first-live
+#             verification of paths this repo has never run; text = gpt-5.6-luna on the whole
+#             sample; vision = gpt-5-mini with 4+4 images at 768px; gold = three deep votes
+#             (two gpt-5-mini with different image selections, one qwen3-vl-30b-a3b-instruct
+#             for genuine model-family independence) aggregated into one label. NO personal
+#             data crosses the wire: only same_broker / same_firm booleans, and descriptions
+#             are re-scrubbed of Czech contact patterns and truncated before they are sent.
+#             `max_usd` is REQUIRED and the lane refuses to start without it; it must sit
+#             between one pair of the chosen tier and D2's $25 hard per-run cap, so neither a
+#             budget too small to launch a single call nor a fat-fingered extra zero starts a
+#             pass. The budget binds in the worker BEFORE each call (per CALL, not per pair)
+#             and HOLDS its estimate until that call settles, so the cap cannot be overshot by
+#             the calls already in flight. The summary reports done / failed / skipped_budget
+#             / skipped_fatal / billed_unparsed / persist_failed / spent_usd - a run that drew
+#             a sample and read nothing back, hit a dead key, or stored none of what it paid
+#             for EXITS NON-ZERO rather than looking green. A gold pair writes a row only when
+#             all three votes land (short plans count `gold_incomplete`; pairs a budget stop
+#             never reached count `gold_unstarted`, which is not money lost).
+#             MIND `n`: the per-stratum floor of 8 is honoured before the target, so a wide
+#             cohort DRAWS MORE than `n` - the first real pass turned n=30 into 354 pairs over
+#             47 strata. `sample_inflated_by_floor`, `est_cost_usd_for_draw` and
+#             `budget_covers_draw` say so at the top of the summary, before a call is made.
+#             `dry_run=1` builds every prompt,
+#             counts the tokens and images, prints the estimate and calls nothing. Verdicts
+#             land in `autodedup.judgements` and in out/judgements.jsonl; the sample, the
+#             engine run and the spend summary land beside them.
+#
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
 #             row from its arguments, for work that happened outside a lane run (a migration
 #             applied by apply_migration.yml, an operator review session, a wave that closed
@@ -63,21 +98,25 @@ name: "AUTODEDUP: engine lane"
 # probes accepts timeout_s and source; export accepts blocks, timeout_s, phash_timeout_s,
 # batch, clip_model and negctl_max (block overrides are SPACE-separated, e.g.
 # `blocks=town:563510 quarter:490245`, because the comma already separates k=v pairs);
-# record accepts wave, title, status, approach, tools, notes, cost_usd and run_id.
+# record accepts wave, title, status, approach, tools, notes, cost_usd and run_id; judge
+# accepts export_run, tier, n, max_usd (required), seed, workers, strata (SPACE-separated
+# stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
+# download) and dry_run.
 #
-# Costs nothing but GitHub minutes and database time. out/ is uploaded on every outcome;
-# out/summary.json is written even when the run fails.
+# Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
+# real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
+# is written even when the run fails.
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; record = one retroactive progress-ledger row."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row."
         required: true
         default: "census"
         type: string
       args:
-        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12."
+        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12 or export_run=123,tier=text,n=400,max_usd=5."
         required: false
         default: ""
         type: string
@@ -92,6 +131,8 @@ jobs:
     timeout-minutes: 300
     permissions:
       contents: read
+      # `judge` downloads a previous run's cohort artifact with `gh run download`.
+      actions: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -134,6 +175,7 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+          GH_TOKEN: ${{ github.token }}
           MODE: ${{ inputs.mode }}
           ARGS: ${{ inputs.args }}
         run: |

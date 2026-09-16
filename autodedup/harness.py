@@ -24,7 +24,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from autodedup.blocking import build_index, generate_pairs
 from autodedup.cluster import cluster_pairs, cluster_rows
@@ -53,6 +53,9 @@ RUN_FILE: str = "run.json"
 CLUSTERS_FILE: str = "clusters.json"
 SAMPLE_SEED: int = 20260916
 STRATUM_FLOOR: int = 5
+JUDGE_STRATUM_FLOOR: int = 8
+CATALOG_ONLY_STRATUM: str = "catalog-only"
+CATALOG_ONLY_MIN: float = 0.90
 SCORE_BUCKETS: int = 20
 
 SHARE_ROWS: tuple[tuple[str, str], ...] = (
@@ -509,23 +512,62 @@ def _stratum(row: dict[str, Any]) -> str:
     return f"{row.get('zone')}|{side}|{row.get('block') or '(none)'}"
 
 
+def _certificate_class(row: dict[str, Any]) -> str:
+    """Which layer decided the pair: a named certificate (E24), the model, or neither."""
+    certificate = row.get("certificate")
+    if certificate:
+        return str(certificate)
+    return "model" if row.get("zone") in ("merge", "band") else "none"
+
+
+def _feat(row: dict[str, Any], name: str) -> float | None:
+    """One `[value, present]` feature off a stored pair row — absent reads as None (E12)."""
+    entry = (row.get("feats") or {}).get(name)
+    if not isinstance(entry, (list, tuple)) or len(entry) < 2 or not entry[1]:
+        return None
+    try:
+        return float(entry[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def judge_stratum(row: dict[str, Any]) -> str:
+    """W3's judge strata: zone x deciding layer x cohort block x same/cross source.
+
+    Pairs whose image evidence is almost entirely catalogue stock are pulled out WHOLE rather
+    than split across that grid: they are the developer-project class the judge exists to
+    separate (PROGRAM.md §2), and proportional allocation over a four-way key would scatter
+    them too thin for the resulting agreement number to mean anything."""
+    ratio = _feat(row, "catalog_ratio_max")
+    if ratio is not None and ratio >= CATALOG_ONLY_MIN:
+        return CATALOG_ONLY_STRATUM
+    side = "cross" if row.get("cross_source") else "same"
+    return (f"{row.get('zone')}|{_certificate_class(row)}"
+            f"|{row.get('block') or '(none)'}|{side}")
+
+
 def _shuffle_key(seed: int, row: dict[str, Any]) -> str:
     payload = f"{seed}:{row.get('lo')}:{row.get('hi')}".encode("utf-8")
     return hashlib.blake2b(payload, digest_size=8).hexdigest()
 
 
 def stratified_sample(
-    rows: Sequence[dict[str, Any]], n: int, seed: int = SAMPLE_SEED
+    rows: Sequence[dict[str, Any]],
+    n: int,
+    seed: int = SAMPLE_SEED,
+    *,
+    key_fn: Callable[[dict[str, Any]], str] = _stratum,
+    floor: int = STRATUM_FLOOR,
 ) -> dict[str, Any]:
-    """Proportional allocation with a floor of `STRATUM_FLOOR` per stratum, deterministic order.
+    """Proportional allocation with a floor of `floor` per stratum, deterministic order.
 
     The floor is honoured first — a stratum too small to judge is exactly the one W3 must see —
     so the selection can exceed `n` only when the floors alone already do."""
     strata: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        strata.setdefault(_stratum(row), []).append(row)
+        strata.setdefault(key_fn(row), []).append(row)
     quotas: dict[str, int] = {
-        key: min(STRATUM_FLOOR, len(members)) for key, members in strata.items()
+        name: min(floor, len(members)) for name, members in strata.items()
     }
     remaining = max(0, n - sum(quotas.values()))
     headroom = {key: len(members) - quotas[key] for key, members in strata.items()}
@@ -560,9 +602,23 @@ def stratified_sample(
         "n_requested": n,
         "n_selected": len(selected),
         "n_strata": len(strata),
+        "stratum_floor": floor,
         "strata": report,
         "pairs": selected,
     }
+
+
+def sample_pairs(
+    rows: Sequence[dict[str, Any]], n: int, seed: int = SAMPLE_SEED
+) -> dict[str, Any]:
+    """The judge lane's sample (PROGRAM.md §9): `judge_stratum` at a floor of 8.
+
+    A pure function of (rows, n, seed), so the text and vision tiers of one seed judge the SAME
+    pairs — which is the only way tier-vs-tier agreement (metric 8) measures the tiers rather
+    than two different draws."""
+    return stratified_sample(
+        rows, n, seed, key_fn=judge_stratum, floor=JUDGE_STRATUM_FLOOR
+    )
 
 
 def read_pairs(run_dir: Path) -> list[dict[str, Any]]:
