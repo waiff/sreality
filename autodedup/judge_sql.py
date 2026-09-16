@@ -64,3 +64,28 @@ JUDGEMENT_COST_SQL = """
       from llm_calls
      where id = any(%(ids)s::bigint[])
 """
+
+# The `oss` tier's comparison set, when the operator asks for `pairs_from=gold`: the pairs a
+# gold pass has ALREADY paid three votes for. Restricting the draw to them is what makes the
+# free arm's agreement number maximal per dollar — a pair with no gold row can be judged for
+# nothing and compared against nothing.
+GOLD_PAIRS_SQL = """
+    select listing_lo, listing_hi
+      from autodedup.judgements
+     where judge_version = %(judge_version)s
+       and tier = 'gold'
+"""
+
+# A rented pod is billed by WALL CLOCK, so no single judgement has a cost until the pod is
+# terminated and the bill is divided by what it produced. The lane writes the `oss` rows with a
+# NULL cost while the pod runs — unknown, not zero — and settles them once, here.
+JUDGEMENT_POD_COST_SQL = """
+    update autodedup.judgements
+       set cost_usd = %(cost_usd)s::numeric
+     where judge_version = %(judge_version)s
+       and tier = %(tier)s
+       and (listing_lo, listing_hi) in (
+             select lo, hi
+               from unnest(%(los)s::bigint[], %(his)s::bigint[]) as pair(lo, hi)
+           )
+"""

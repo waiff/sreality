@@ -83,6 +83,51 @@ name: "AUTODEDUP: engine lane"
 #             counts the tokens and images, prints the estimate and calls nothing. Verdicts
 #             land in `autodedup.judgements` and in out/judgements.jsonl; the sample, the
 #             engine run and the spend summary land beside them.
+#             `tier=oss` is the SAME question put to an open-source vision model this program
+#             RENTS BY THE HOUR instead of buying by the token - the vision prompt to the
+#             character, the same 4+4 images, the same deterministic draw at the same seed, so
+#             the paid verdicts pay for themselves twice: once as the programme's labels and
+#             once as the yardstick the free arm is measured against. The lane launches a
+#             RunPod GPU pod (`oss_model`, default Qwen/Qwen2.5-VL-7B-Instruct; `oss_gpu` pins
+#             a GPU type, otherwise the pod module picks), waits for it to serve, smokes it,
+#             judges with `workers` in parallel and TERMINATES IT IN A FINALLY - on a clean
+#             pass, a budget stop, a dead provider or a crash alike - then VERIFIES the pod is
+#             gone with a second (idempotent) delete, so a teardown that failed reaches the
+#             summary as `pod_terminate_failed` instead of one ERROR line in this log. The one
+#             path a `finally` cannot cover is the job being killed from OUTSIDE - a cancel or
+#             the `timeout-minutes` cap - which leaves the pod billing until someone terminates
+#             it in the RunPod console (it is named `autodedup-oss-judge`). That is what the
+#             `if: always()` reap step is for: the lane writes out/pod.json the instant a pod
+#             exists and deletes it once the pod is CONFIRMED gone, so the step has something
+#             to terminate exactly when a `finally` did not run. `always()` covers a cancel, so
+#             the console is now the second line of defence, not the first. Needs migrations 530 (the tier vocabulary) and 531 (the
+#             `llm_calls` provider vocabulary - without it every oss call 23514s at the
+#             RECORDING step, after the GPU time is already paid for), plus RUNPOD_API_KEY; a
+#             GATED `oss_model` (meta-llama/...) additionally needs HF_TOKEN, which is passed
+#             through when set and is otherwise unused. The money is different in kind: a pod bills
+#             by WALL CLOCK, so `max_usd` caps the POD's bill (checked before every call, with
+#             one pair's margin, against the clock rather than a token estimate), each verdict
+#             is stored with a NULL cost while the pod runs - unknown, not free - and the bill
+#             is divided over what the pod actually produced once it is gone (`pod_cost_usd`,
+#             `cost_per_pair_usd`, `pod_hours`, `pod_wall_s_per_pair`, `usd_per_hr`, `pod_id`, `gpu` in
+#             the summary; `spent_usd_source` reads `pod`, never `llm_calls`, which records $0
+#             for a pod call because there is no per-token price to record).
+#             `pairs_from=gold` restricts the draw to pairs a gold pass has ALREADY ruled on,
+#             which is what makes the comparison set maximal per dollar - a pair with no gold
+#             row can be judged for nothing and compared against nothing.
+#             ONE oss MODEL PER judge_version. The store keys a judgement on (pair,
+#             judge_version, tier) and not on the model, so a second `oss_model` at the same
+#             version is skipped as cached (no pod rented, an EMPTY judgements.jsonl, exit 0)
+#             or, with `refresh=1`, OVERWRITES the first model's rows. To compare two open
+#             models, give the second its own version: `judge_version=<v>-<model-slug>`.
+#             `python3 -m autodedup.compare --gold <gold judgements.jsonl> --arm
+#             name=<judgements.jsonl> [--arm ...] --out <dir>` then reports, over the pairs
+#             gold saw, each arm's four-way and binary same/not-same agreement with gold (both
+#             with Cohen's kappa; insufficient_evidence is EXCLUDED from the binary score and
+#             counted, so a timid arm cannot buy agreement by abstaining), the confusion
+#             matrix, per-stratum agreement, mean confidence, cost per pair and latency, plus
+#             the agreement between the arms themselves - as compare.md and compare.json. It
+#             reads files only and costs nothing.
 #
 #   score   - READS the artifact, WRITES the engine's own schema. Downloads a finished
 #             `export` run's cohort artifact (same `gh run download` path as judge, which is
@@ -126,7 +171,13 @@ name: "AUTODEDUP: engine lane"
 # record accepts wave, title, status, approach, tools, notes, cost_usd and run_id; judge
 # accepts export_run, tier, n, max_usd (required), seed, workers, strata (SPACE-separated
 # stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
-# download) and dry_run; score accepts export_run, cohort, settings, model, generation
+# download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row) and,
+# for `tier=oss`, oss_model (the served model id, default Qwen/Qwen2.5-VL-7B-Instruct),
+# oss_gpu (a RunPod GPU type id, treated as a PIN - a pass fails rather than silently renting
+# a 6x dearer box) and oss_s_per_pair (the pre-flight seconds ONE CALL takes, which the
+# estimate divides by `workers`; calibrate it from the previous pass's `latency_s_mean`, NOT
+# from `pod_wall_s_per_pair`, which is the rental divided by the pairs and is about a
+# `workers`th of it); score accepts export_run, cohort, settings, model, generation
 # and store_floor.
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
@@ -142,7 +193,7 @@ on:
         default: "census"
         type: string
       args:
-        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12 or export_run=123,tier=text,n=400,max_usd=5."
+        description: "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,tier=text,n=400,max_usd=5 or export_run=123,tier=oss,n=200,max_usd=3,pairs_from=gold."
         required: false
         default: ""
         type: string
@@ -183,7 +234,7 @@ jobs:
             ''|*[!a-z0-9_-]*) echo "::error::mode must be lowercase letters, digits, _ or -"; exit 1 ;;
           esac
           case "${ARGS:-}" in
-            *[!a-zA-Z0-9_=,.:\ -]*) echo "::error::args may only contain letters digits _ = , . : - and space"; exit 1 ;;
+            *[!a-zA-Z0-9_=,.:/\ -]*) echo "::error::args may only contain letters digits _ = , . : / - and space"; exit 1 ;;
           esac
           echo "MODE_SLUG=${MODE:-census}" >> "$GITHUB_ENV"
 
@@ -197,6 +248,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           QWEN_API_KEY: ${{ secrets.QWEN_API_KEY }}
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -208,6 +260,12 @@ jobs:
           set -euo pipefail
           mkdir -p out
           python -m autodedup.lane --mode "${MODE:-census}" --args "${ARGS:-}" --out out/
+
+      - name: Reap a pod a killed job left behind
+        if: always()
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: python -m autodedup.oss_pod --reap out/pod.json
 
       - name: Upload report
         if: always()

@@ -49,25 +49,38 @@ from autodedup.features import (
     uncertainty_radius_m,
 )
 from autodedup.judge_sql import (
+    GOLD_PAIRS_SQL,
     JUDGEMENT_CACHED_SQL,
     JUDGEMENT_COST_SQL,
+    JUDGEMENT_POD_COST_SQL,
     JUDGEMENT_UPSERT_SQL,
 )
 from autodedup.model import hand_initialised
 from autodedup.settings import Settings
 from toolkit.vision_batch import is_fatal
 
-TIERS: tuple[str, ...] = ("smoke", "text", "vision", "gold")
+TIERS: tuple[str, ...] = ("smoke", "text", "vision", "gold", "oss")
 
 MODEL_TEXT: str = "gpt-5.6-luna"
 MODEL_VISION: str = "gpt-5-mini"
 MODEL_GOLD_THIRD: str = "qwen3-vl-30b-a3b-instruct"
+MODEL_OSS: str = "Qwen/Qwen2.5-VL-7B-Instruct"
 
+# The `oss` tier is the VISION prompt, unchanged, served by a model this program rents by the
+# hour instead of buying by the token — so it reuses migration 527's `autodedup_judge_vision`
+# rather than minting a fourth `called_for` value that would split the same question's spend
+# across two ledger keys. What tells the two arms apart is `judgements.model`, which carries
+# the `oss:` prefix, and the tier itself.
 CALLED_FOR: dict[str, str] = {
     "text": "autodedup_judge_text",
     "vision": "autodedup_judge_vision",
     "gold": "autodedup_judge_gold",
+    "oss": "autodedup_judge_vision",
 }
+
+OSS_PREFIX: str = "oss:"
+OSS_PROVIDER: str = "oss"
+OSS_BASE_URL_ENV: str = "OSS_LLM_BASE_URL"
 
 MAX_TOKENS: int = 4096
 IMAGES_VISION: int = 4
@@ -95,11 +108,26 @@ GOLD_PER_PAIR_USD: float = 0.018
 EST_TOKENS_PER_IMAGE: int = 1100
 EST_CHARS_PER_TOKEN: int = 4
 
+# The `oss` tier's money is WALL CLOCK on a rented GPU, not tokens, so none of the table above
+# applies to it. `OSS_MIN_USD` is the floor `max_usd` must clear: a pod that boots, loads
+# weights and answers one pair cannot be had for less, and a budget under it would rent the
+# machine and stop before the first verdict — E31 wearing a GPU.
+OSS_MIN_USD: float = 0.25
+# Pre-flight only, and per PAIR per WORKER: the look-ahead that decides whether `n` pairs fit
+# the budget, and the margin the in-run gate leaves so the pod is torn down BEFORE the cap
+# rather than one pair after it. Measured numbers replace it the moment the first pass lands.
+OSS_EST_S_PER_PAIR: float = 12.0
+
 # A 429 is the steady state at six workers pushing eight images a call, and it is not a verdict:
 # retry it before it shrinks the sample (or, on gold, silently downgrades the independent model
 # family to a gpt-5-mini self-consistency vote).
 RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 8.0)
 RETRY_SLEEP: Callable[[float], None] = time.sleep
+
+# The pod's meter: WALL clock, because that is what RunPod bills and what `oss_pod.PodHandle`
+# stamps itself with — a monotonic reading could not be compared against `started_at` at all.
+# A seam because every test about what a pass cost has to be able to move it.
+CLOCK: Callable[[], float] = time.time
 
 # Set on an exception that a BILLED response raised while being parsed.
 JUDGE_BILLED: str = "judge_billed"
@@ -143,6 +171,10 @@ class JudgeArgs:
     dry_run: bool
     refresh: bool
     cohort: str | None
+    oss_model: str
+    oss_gpu: str | None
+    oss_s_per_pair: float
+    pairs_from: str | None
 
 
 def _int_arg(args: dict[str, str], name: str, default: int) -> int:
@@ -157,6 +189,19 @@ def _int_arg(args: dict[str, str], name: str, default: int) -> int:
 
 def _flag(args: dict[str, str], name: str) -> bool:
     return (args.get(name) or "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _float_arg(args: dict[str, str], name: str, default: float) -> float:
+    raw = (args.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be a number, got {raw!r}") from exc
+    if value <= 0:
+        raise SystemExit(f"{name} must be positive, got {value}")
+    return value
 
 
 def parse_args(args: dict[str, str]) -> JudgeArgs:
@@ -203,6 +248,10 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
     if n < 1:
         raise SystemExit(f"n must be at least 1, got {n}")
 
+    pairs_from = (args.get("pairs_from") or "").strip() or None
+    if pairs_from not in (None, "gold"):
+        raise SystemExit(f"pairs_from accepts only 'gold', got {pairs_from!r}")
+
     return JudgeArgs(
         export_run=export_run,
         tier=tier,
@@ -215,6 +264,10 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         dry_run=_flag(args, "dry_run"),
         refresh=_flag(args, "refresh"),
         cohort=cohort,
+        oss_model=(args.get("oss_model") or "").strip() or MODEL_OSS,
+        oss_gpu=(args.get("oss_gpu") or "").strip() or None,
+        oss_s_per_pair=_float_arg(args, "oss_s_per_pair", OSS_EST_S_PER_PAIR),
+        pairs_from=pairs_from,
     )
 
 
@@ -259,6 +312,15 @@ class Vote:
     est_usd: float
     weaker: bool = False
     shuffle: bool = False
+    # Set only where the model id does not name its own backend: `oss:<repo>/<name>` is
+    # namespaced precisely so it cannot route by vendor prefix to that vendor's PAID API, and
+    # naming the provider outright keeps this lane right whatever `provider_for_model` does
+    # next. `api.providers.oss` strips the prefix before the id goes on the wire.
+    provider: str | None = None
+    # The tier whose PROMPT this vote sends, when it differs from the tier it is stored
+    # under. `oss` is the vision prompt to the character — `judge.TIERS` knows three tiers
+    # and this arm must not become a fourth prompt, or the comparison measures two changes.
+    prompt_tier: str | None = None
 
 
 @dataclass(slots=True)
@@ -270,7 +332,7 @@ class PairJob:
     votes: tuple[Vote, ...]
 
 
-def vote_plan(tier: str) -> tuple[Vote, ...]:
+def vote_plan(tier: str, oss_model: str = MODEL_OSS) -> tuple[Vote, ...]:
     """The tiers of E26 and the three gold votes of the JUDGE SPEC §2, as data."""
     text = Vote("text", MODEL_TEXT, CALLED_FOR["text"], 0, "matched_first",
                 EST_COST_USD["text"])
@@ -280,6 +342,13 @@ def vote_plan(tier: str) -> tuple[Vote, ...]:
         return (text,)
     if tier == "vision":
         return (vision,)
+    if tier == "oss":
+        # Byte-for-byte the vision vote — same prompt, same 4+4 image selection, same strategy.
+        # An arm that is measured against the paid judge and differs from it in ANY input but
+        # the model is measuring two things at once. `est_usd` is 0 because this tier's budget
+        # is the pod's wall clock, held by `PodBudget`, not a per-call estimate.
+        return (Vote("oss", f"{OSS_PREFIX}{oss_model}", CALLED_FOR["oss"], IMAGES_VISION,
+                     "matched_first", 0.0, provider=OSS_PROVIDER, prompt_tier="vision"),)
     if tier == "smoke":
         return (text, vision)
     return (
@@ -295,7 +364,16 @@ def vote_plan(tier: str) -> tuple[Vote, ...]:
 def min_budget_usd(tier: str) -> float:
     """One pair of this tier at the pre-flight estimate — the budget below which the lane can
     only draw a sample and refuse every call, which is the E31 failure spelled backwards."""
+    if tier == "oss":
+        return OSS_MIN_USD
     return sum(vote.est_usd for vote in vote_plan(tier))
+
+
+def oss_est_usd(usd_per_hr: float, pairs: int, workers: int, s_per_pair: float) -> float:
+    """What renting the pod for this draw should cost: `n` pairs spread over `workers`,
+    at `s_per_pair` each, billed by the hour. The pre-flight number AND the in-run margin."""
+    seconds = max(1.0, pairs) * max(0.1, s_per_pair) / max(1, workers)
+    return usd_per_hr * seconds / 3600.0
 
 
 # A third gpt-5-mini vote is self-consistency, not independence: it is taken only when the
@@ -393,6 +471,49 @@ class Budget:
                 self.fatal = message[:200]
 
 
+class PodBudget(Budget):
+    """The same gate for a machine billed by WALL CLOCK.
+
+    A rented pod costs the same whether it is answering or idle, so a per-call estimate is the
+    wrong meter entirely: `reserve` asks what the pod has cost SO FAR plus one more pair's
+    worth, and stops the pass while that still fits. `spent` is never an accumulation of call
+    prices — it is the clock, re-read on every settle, which is also why an `oss` judgement
+    carries no cost of its own until the pod is terminated and the bill can be divided."""
+
+    def __init__(self, max_usd: float, usd_per_hr: float, margin_s: float,
+                 started: float | None = None,
+                 clock: Callable[[], float] | None = None) -> None:
+        super().__init__(max_usd)
+        self.usd_per_hr = float(usd_per_hr)
+        self.margin_s = max(0.0, float(margin_s))
+        self._clock = clock or CLOCK
+        self.started = self._clock() if started is None else float(started)
+
+    def pod_hours(self) -> float:
+        return max(0.0, self._clock() - self.started) / 3600.0
+
+    def pod_cost_usd(self, extra_s: float = 0.0) -> float:
+        return (self.pod_hours() + max(0.0, extra_s) / 3600.0) * self.usd_per_hr
+
+    def reserve(self, estimate: float) -> bool:
+        with self._lock:
+            if self.stopped or self.fatal:
+                return False
+            if self.pod_cost_usd(self.margin_s) > self.max_usd:
+                self.stopped = True
+                return False
+            self.spent = self.pod_cost_usd()
+            return True
+
+    def settle(self, estimate: float, cost: float) -> None:
+        with self._lock:
+            self.spent = self.pod_cost_usd()
+
+    def release(self, estimate: float) -> None:
+        with self._lock:
+            self.spent = self.pod_cost_usd()
+
+
 # --- verdict -> row ----------------------------------------------------------------------
 
 
@@ -455,6 +576,104 @@ def llm_client(conn: Any) -> Any:
     return LLMClient(conn, providers={"openai": OpenAIProvider(), "qwen": QwenProvider()})
 
 
+def oss_llm_client(conn: Any) -> Any:
+    """The same `LLMClient`, plus the pod-backed provider. Constructed per worker and ALWAYS
+    after `OSS_BASE_URL_ENV` is set — the provider reads the base URL at construction, and a
+    client built before the pod exists would talk to nothing for the whole pass."""
+    from api.llm_client import LLMClient
+    from api.providers.oss import OssProvider
+
+    return LLMClient(conn, providers={OSS_PROVIDER: OssProvider()})
+
+
+def pod_module() -> Any:
+    """`autodedup.oss_pod`, imported on first use so nothing but an `oss` run needs RunPod."""
+    from autodedup import oss_pod as module
+
+    return module
+
+
+def runpod_client() -> Any:
+    from scripts.runpod_client import RunPodClient
+
+    key = os.environ.get("RUNPOD_API_KEY")
+    if not key:
+        raise SystemExit("RUNPOD_API_KEY must be set to rent a pod for tier oss")
+    return RunPodClient(key)
+
+
+def pod_start(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
+    """Rent the GPU, wait for it to SERVE, and prove it with one forced-tool vision call.
+
+    The smoke is not ceremony: a pod that boots but cannot turn a reply into a tool call fails
+    every pair identically, and finding that out after 400 of them costs the whole rental. A
+    failure anywhere in here tears the pod down ON THE WAY OUT — the lane's own `finally` only
+    knows about a pod this function returned."""
+    module = pod_module()
+    client = runpod_client()
+    # A NAMED gpu is a PIN, not a hint: an operator names a type for its price, and the
+    # widened fallback rung on a type that is out of capacity is a 6x change on an
+    # hourly-billed arm whose whole point is cost. Unpinned, the default preference stays a
+    # ranking and any eligible box is fine.
+    options: dict[str, Any] = (
+        {"gpu_preference": (gpu,), "strict_gpu": True} if gpu else {}
+    )
+    handle = module.launch_vllm_pod(client, model_id=model, **options)
+    if out_dir is not None:
+        # Before the wait, not after it: a job killed from OUTSIDE runs no `finally` at all,
+        # and the readiness wait is the longest window in the lane. The receipt is what the
+        # `if: always()` cleanup step reaps.
+        module.write_receipt(handle, Path(out_dir))
+    try:
+        module.wait_ready(handle, client=client)
+        module.smoke_chat(handle)
+    except BaseException:
+        # BaseException, not Exception: a Ctrl-C or an Actions cancellation inside the smoke
+        # window is not an `Exception`, and the lane's own `finally` only knows about a pod
+        # this function RETURNED — so an interrupt here would walk out past both guards and
+        # leave the pod billing. (`wait_ready` guards its own window the same way; a second
+        # terminate is a 404, which `terminate_pod` treats as success.)
+        module.terminate(handle, client=client)
+        raise
+    return handle
+
+
+def pod_stop(pod: Any, out_dir: Path | None = None) -> None:
+    """Terminate — the pod bills by the second until it is gone — and PROVE it did.
+
+    `oss_pod.terminate` never raises by design (a teardown error must not mask the error that
+    sent us here), so on its own it cannot tell this lane whether the machine actually died:
+    the leak would show as one ERROR line in the Actions log while summary.json reported a
+    clean pass. The second DELETE is the verification — `terminate_pod` treats an already-gone
+    pod as success (404), so it returns quietly when the teardown worked and RAISES when the
+    pod is still rented, which is the only way `pod_terminate_failed` reaches the artifact."""
+    client = runpod_client()
+    pod_module().terminate(pod, client=client)
+    if pod_field(pod, "dry_run", False):
+        return
+    client.terminate_pod(str(pod_field(pod, "pod_id", "")))
+    if out_dir is not None:
+        # Only after the verifying DELETE returned: a receipt left behind on a pod that is
+        # actually gone teaches the operator to ignore the reaper, which is the one signal
+        # that costs money to miss.
+        pod_module().clear_receipt(Path(out_dir))
+
+
+def openai_base_url(base_url: str) -> str:
+    """The pod handle carries the pod's HTTP ROOT (`…proxy.runpod.net`, which is where
+    `oss_pod.wait_ready` polls `/v1/models`); an OpenAI-compatible client posts to
+    `{base}/chat/completions` and therefore needs the API root. Normalising here — idempotent,
+    so a handle that already ends in `/v1` is left alone — keeps the two ends of the seam from
+    having to agree on which of them carries the suffix."""
+    trimmed = base_url.rstrip("/")
+    return trimmed if trimmed.endswith("/v1") else f"{trimmed}/v1"
+
+
+def pod_field(pod: Any, name: str, default: Any = None) -> Any:
+    value = pod.get(name) if isinstance(pod, dict) else getattr(pod, name, None)
+    return default if value is None else value
+
+
 def image_store() -> Any:
     from scraper import image_storage
 
@@ -490,6 +709,10 @@ class Counters:
     errors: list[str] = field(default_factory=list)
     call_ids: list[int] = field(default_factory=list)
     gold_flagged: int = 0
+    latency_s_total: float = 0.0
+    latency_s_max: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -510,6 +733,12 @@ class Counters:
             "calls": dict(sorted(self.calls.items())),
             "verdicts": dict(sorted(self.verdicts.items())),
             "gold_flagged": self.gold_flagged,
+            "latency_s_mean": (
+                round(self.latency_s_total / self.done, 3) if self.done else None
+            ),
+            "latency_s_max": round(self.latency_s_max, 3) or None,
+            "tokens_in": self.tokens_in or None,
+            "tokens_out": self.tokens_out or None,
             "errors": self.errors[:10],
             "errors_total": len(self.errors),
         }
@@ -526,6 +755,83 @@ def _cached_pairs(conn: Any, judge_version: str, tier: str,
     with conn.cursor() as cur:
         cur.execute(JUDGEMENT_CACHED_SQL, params)
         return {(int(lo), int(hi)) for lo, hi in cur.fetchall()}
+
+
+def _gold_pairs(conn: Any, judge_version: str) -> set[tuple[int, int]]:
+    with conn.cursor() as cur:
+        cur.execute(GOLD_PAIRS_SQL, {"judge_version": judge_version})
+        return {(int(lo), int(hi)) for lo, hi in cur.fetchall()}
+
+
+def _settle_pod_cost(conn: Any, judge_version: str, tier: str,
+                     pairs: list[tuple[int, int]], cost_usd: float) -> None:
+    with conn.cursor() as cur:
+        cur.execute(JUDGEMENT_POD_COST_SQL, {
+            "judge_version": judge_version,
+            "tier": tier,
+            "los": [lo for lo, _ in pairs],
+            "his": [hi for _, hi in pairs],
+            "cost_usd": round(cost_usd, 6),
+        })
+    commit = getattr(conn, "commit", None)
+    if callable(commit):
+        commit()
+
+
+def _settle_jsonl_cost(path: Path, tier: str, cost_usd: float) -> None:
+    """The artifact is what `autodedup.compare` reads, so the share has to land there too —
+    once, after the pod is gone. Rows written by other tiers are copied through untouched."""
+    if not path.is_file():
+        return
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("tier") == tier and row.get("cost_usd") is None:
+            row["cost_usd"] = round(cost_usd, 6)
+        rows.append(row)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _oss_pairs(path: Path) -> list[tuple[int, int]]:
+    if not path.is_file():
+        return []
+    pairs: list[tuple[int, int]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("tier") == "oss" and row.get("verdict"):
+            pairs.append((int(row["lo"]), int(row["hi"])))
+    return pairs
+
+
+def _settle_oss_costs(conn_factory: Callable[[], Any], counters: Counters,
+                      judge_version: str, out_dir: Path, share: float) -> None:
+    """Divide the pod's bill over what it produced, in the store and in the artifact."""
+    path = out_dir / JUDGEMENTS_FILE
+    pairs = _oss_pairs(path)
+    if pairs:
+        conn = conn_factory()
+        try:
+            _settle_pod_cost(conn, judge_version, "oss", pairs, share)
+        except Exception as exc:  # noqa: BLE001 — a cost settle must not lose the verdicts
+            counters.errors.append(f"pod cost settle: {type(exc).__name__}: {exc}"[:400])
+        finally:
+            _close(conn)
+    _settle_jsonl_cost(path, "oss", share)
 
 
 def _reconcile_cost(conn: Any, call_ids: list[int]) -> float | None:
@@ -563,6 +869,24 @@ def run_judge(
     )
 
     rows = harness.read_pairs(out_dir)
+    gold_restricted = 0
+    if parsed.pairs_from == "gold":
+        # The comparison set, maximal per dollar: a pair with no gold row can be judged for
+        # free and compared against nothing. Drawn BEFORE the sample, so the stratified floor
+        # spends its quota inside the set that already has ground truth.
+        conn = conn_factory()
+        try:
+            gold = _gold_pairs(conn, judge_version)
+        finally:
+            _close(conn)
+        before = len(rows)
+        rows = [row for row in rows if (int(row["lo"]), int(row["hi"])) in gold]
+        gold_restricted = before - len(rows)
+        if not rows:
+            raise SystemExit(
+                f"pairs_from=gold: none of this pass's {before} pair(s) carry a gold row at "
+                f"judge_version {judge_version} — run the gold tier first"
+            )
     if parsed.strata:
         rows = [
             row for row in rows
@@ -579,7 +903,7 @@ def run_judge(
     selected: list[dict[str, Any]] = list(sample["pairs"])
     if parsed.tier == "smoke":
         selected = selected[:SMOKE_PAIRS]
-    plan = vote_plan(parsed.tier)
+    plan = vote_plan(parsed.tier, parsed.oss_model)
     jobs = [
         PairJob(
             lo=int(row["lo"]),
@@ -616,6 +940,8 @@ def run_judge(
             len(jobs) * min_budget_usd(parsed.tier) <= parsed.max_usd
         ),
         "dry_run": parsed.dry_run,
+        "pairs_from": parsed.pairs_from,
+        "pairs_without_gold_dropped": gold_restricted,
         "sample_strata": sample["strata"],
         "engine": {
             key: engine[key]
@@ -624,6 +950,17 @@ def run_judge(
             if key in engine
         },
     }
+
+    if parsed.tier == "oss":
+        # Nothing about a rented machine can be priced before the GPU is picked, and a draw
+        # estimate of `n x $0.25` would be a fiction the operator reads as a quote. The real
+        # look-ahead happens once `usd_per_hr` is known, below, and is PUBLISHED there — it
+        # does not refuse: the pass starts and `PodBudget` stops it mid-flight on the clock.
+        summary["est_cost_usd_for_draw"] = None
+        summary["budget_covers_draw"] = None
+        summary["oss_model"] = parsed.oss_model
+        summary["oss_gpu_requested"] = parsed.oss_gpu
+        summary["oss_est_s_per_pair"] = parsed.oss_s_per_pair
 
     if parsed.dry_run:
         summary.update(counters.to_json())
@@ -646,13 +983,110 @@ def run_judge(
             counters.skipped_cached = sum(1 for job in jobs if (job.lo, job.hi) in cached)
             jobs = [job for job in jobs if (job.lo, job.hi) not in cached]
 
-    budget = Budget(parsed.max_usd)
-    _dispatch(judge, dataset, jobs, parsed, judge_version, budget, counters,
-              conn_factory, out_dir)
+    budget: Budget = Budget(parsed.max_usd)
+    client_factory = llm_client
+    pod: Any = None
+    pod_started = 0.0
+    pod_cost = 0.0
+    try:
+        if parsed.tier == "oss" and jobs:
+            boot_started = CLOCK()
+            try:
+                pod = pod_start(parsed.oss_model, parsed.oss_gpu, out_dir)
+            except (Exception, SystemExit) as exc:  # noqa: BLE001 — see below
+                # The one path in this lane that can burn 25 minutes of GPU rental and produce
+                # nothing: no capacity across the whole list, `wait_ready`'s deadline, a smoke
+                # that never turned a reply into a tool call. `pod` is still None, so the
+                # `finally` records nothing either — without this the operator gets a red run,
+                # a real bill and an `out/` holding only run.json. Same shape as `_rails`:
+                # write the artifact FIRST, raise second.
+                summary["pod_boot_failed"] = f"{type(exc).__name__}: {exc}"[:400]
+                summary["pod_boot_s"] = round(max(0.0, CLOCK() - boot_started), 2)
+                summary.update(counters.to_json())
+                summary["spent_usd"] = 0.0
+                summary["spent_usd_source"] = "pod (boot failed, bill unknown)"
+                summary["budget_stopped"] = False
+                summary["elapsed_s"] = round(time.monotonic() - started, 2)
+                (out_dir / SUMMARY_FILE).write_text(
+                    json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
+                )
+                raise
+            # The handle's own stamp, so the bill this lane publishes covers the same window
+            # the pod module prices: boot, idle and judged pairs alike.
+            pod_started = float(pod_field(pod, "started_at", CLOCK()))
+            usd_per_hr = float(pod_field(pod, "usd_per_hr", 0.0) or 0.0)
+            base_url = str(pod_field(pod, "base_url", "") or "")
+            if not base_url:
+                raise SystemExit("autodedup.oss_pod returned a handle with no base_url")
+            # BEFORE any client is constructed (the workers build theirs inside `_dispatch`):
+            # the provider reads its endpoint once, at construction.
+            os.environ[OSS_BASE_URL_ENV] = openai_base_url(base_url)
+            client_factory = oss_llm_client
+            summary["pod_id"] = pod_field(pod, "pod_id")
+            summary["gpu"] = pod_field(pod, "gpu") or pod_field(pod, "gpu_type_id")
+            summary["usd_per_hr"] = usd_per_hr
+            # The boot is ALREADY BILLED by the time this runs — `started_at` is stamped at
+            # launch and `pod_start` has since waited out a weights load that routinely takes
+            # 5-15 minutes, against a judging window of ~7 for a 200-pair draw. A look-ahead
+            # counting only the pairs publishes a third of the bill and calls a draw covered
+            # that the budget cannot cover; `pod_cost_usd` below prices the whole window, so
+            # the two numbers have to meter the same clock. The boot share is published apart
+            # so the first real pass can calibrate `oss_s_per_pair` against a measured judging
+            # rate rather than against a number with a cold start folded into it.
+            boot_s = max(0.0, CLOCK() - pod_started)
+            estimate = (oss_est_usd(usd_per_hr, len(jobs), parsed.workers,
+                                    parsed.oss_s_per_pair)
+                        + usd_per_hr * boot_s / 3600.0)
+            summary["pod_boot_s"] = round(boot_s, 2)
+            summary["est_cost_usd_for_draw"] = round(estimate, 4)
+            summary["budget_covers_draw"] = estimate <= parsed.max_usd
+            budget = PodBudget(
+                parsed.max_usd, usd_per_hr,
+                # The duration of the ONE call being admitted, not its share: with W workers
+                # judging in parallel, each call occupies `s_per_pair` of WALL clock, and a
+                # margin of a Wth of that admits a call only a Wth of which fits under the cap.
+                margin_s=parsed.oss_s_per_pair,
+                started=pod_started,
+            )
+        _dispatch(judge, dataset, jobs, parsed, judge_version, budget, counters,
+                  conn_factory, out_dir, client_factory)
+    finally:
+        if pod is not None:
+            try:
+                pod_stop(pod, out_dir)
+            except Exception as exc:  # noqa: BLE001 — a failed teardown must still be visible
+                counters.errors.append(f"pod terminate: {type(exc).__name__}: {exc}"[:400])
+                summary["pod_terminate_failed"] = True
+            pod_hours = max(0.0, CLOCK() - pod_started) / 3600.0
+            pod_cost = pod_hours * float(summary.get("usd_per_hr") or 0.0)
+            summary["pod_hours"] = round(pod_hours, 5)
+            summary["pod_cost_usd"] = round(pod_cost, 6)
+            # POD WALL clock per pair — the rental divided by what it produced, which with W
+            # workers is roughly a Wth of one call's duration plus the boot share. It is NOT
+            # the quantity `oss_s_per_pair` wants (that is ONE CALL's duration, which the
+            # estimate then divides by `workers`): feeding this number back would understate
+            # the next pass by about W times and make `budget_covers_draw` say yes to a draw
+            # the cap cannot pay for. The calibration input is `latency_s_mean`; the name says
+            # which clock this one is.
+            summary["pod_wall_s_per_pair"] = (
+                round(pod_hours * 3600.0 / counters.done, 2) if counters.done else None
+            )
 
     spent = budget.spent
     summary["spent_usd_source"] = "in_process"
-    if counters.call_ids:
+    if pod is not None:
+        # The bill is the clock, and the clock is the only source: `llm_calls` records $0 for
+        # every pod call (there is no per-token price to record), so reconciling against the
+        # ledger here would publish a free run.
+        spent = pod_cost
+        summary["spent_usd_source"] = "pod"
+        summary["cost_per_pair_usd"] = (
+            round(pod_cost / counters.done, 6) if counters.done else None
+        )
+        if counters.done:
+            _settle_oss_costs(conn_factory, counters, judge_version, out_dir,
+                              pod_cost / counters.done)
+    elif counters.call_ids:
         conn = conn_factory()
         try:
             ledger = _reconcile_cost(conn, counters.call_ids)
@@ -750,7 +1184,9 @@ def _estimate(judge: Any, dataset: Any, jobs: list[PairJob],
                     feats_of(job.row), vote.n_images, vote.strategy,
                 )
                 images += len(picked_a) + len(picked_b)
-            messages = judge.build_messages(job.row, digests, evidence, [], [], vote.tier)
+            messages = judge.build_messages(
+                job.row, digests, evidence, [], [], vote.prompt_tier or vote.tier
+            )
             # The system prompt and the tool schema ride on every call but are passed
             # separately at call time — omitted here, the token line understates each call by
             # ~500 and stops being a check on the flat cost table above.
@@ -824,7 +1260,9 @@ def _dispatch(
     counters: Counters,
     conn_factory: Callable[[], Any],
     out_dir: Path,
+    client_factory: Callable[[Any], Any] = None,  # type: ignore[assignment]
 ) -> None:
+    client_factory = client_factory or llm_client
     work: queue.Queue = queue.Queue()
     for job in jobs:
         work.put(job)
@@ -833,7 +1271,9 @@ def _dispatch(
     # Truncating, not appending: this file is the backstop for verdicts a failed DB write lost,
     # and a backstop holding two passes' rows interleaved is one nobody can reconcile.
     sink = (out_dir / JUDGEMENTS_FILE).open("w", encoding="utf-8")
-    r2 = image_store() if any(vote.n_images for vote in vote_plan(parsed.tier)) else None
+    r2 = (image_store()
+          if any(vote.n_images for vote in vote_plan(parsed.tier, parsed.oss_model))
+          else None)
 
     def _emit(record: dict[str, Any]) -> None:
         with write_lock:
@@ -843,7 +1283,7 @@ def _dispatch(
     def _worker() -> None:
         conn = conn_factory()
         try:
-            client = llm_client(conn)
+            client = client_factory(conn)
             while True:
                 try:
                     job = work.get_nowait()
@@ -917,6 +1357,7 @@ def _run_job(
         with lock:
             counters.attempted += 1
             counters.calls[vote.tier] = counters.calls.get(vote.tier, 0) + 1
+        call_started = time.monotonic()
         try:
             parsed_vote, response = _call_with_retry(
                 judge, dataset, job, la, lb, digests, evidence, vote, r2, client
@@ -952,11 +1393,25 @@ def _run_job(
                 # independence check (JUDGE SPEC §2).
                 plan.append(GOLD_FALLBACK)
             continue
+        # The MODEL's latency, not the lane's: `_call_with_retry` sleeps up to 10s backing off
+        # a 429, which is the steady state on the paid tiers at six workers and unheard of on a
+        # rented pod with no rate limit — charging that sleep to `latency_s` would bias the very
+        # yardstick the oss arm is measured against. `duration_ms` is the call itself; the wall
+        # span stays beside it so a pass full of retries is still visible.
+        latency_s = float(getattr(response, "duration_ms", 0) or 0) / 1000.0
+        pair_wall_s = time.monotonic() - call_started
         cost = float(getattr(response, "cost_usd", 0.0) or 0.0)
         call_id = getattr(response, "llm_call_id", None)
+        # A rented pod's call has no price of its own: the bill is the clock, divided once the
+        # pod is gone. NULL says "not yet known" where 0.0 would say "free".
+        stored_cost: float | None = None if vote.tier == "oss" else cost
         budget.settle(vote.est_usd, cost)
         with lock:
             counters.done += 1
+            counters.latency_s_total += latency_s
+            counters.latency_s_max = max(counters.latency_s_max, latency_s)
+            counters.tokens_in += int(getattr(response, "input_tokens", 0) or 0)
+            counters.tokens_out += int(getattr(response, "output_tokens", 0) or 0)
             name = str(getattr(parsed_vote, "verdict", "") or "?")
             counters.verdicts[name] = counters.verdicts.get(name, 0) + 1
             if call_id is not None:
@@ -966,13 +1421,16 @@ def _run_job(
         results.append({
             "lo": job.lo, "hi": job.hi, "stratum": job.stratum,
             "tier": vote.tier, "model": vote.model, "strategy": vote.strategy,
-            "weaker": vote.weaker, "cost_usd": cost, "llm_call_id": call_id,
+            "weaker": vote.weaker, "cost_usd": stored_cost, "llm_call_id": call_id,
+            "latency_s": round(latency_s, 3),
+            "pair_wall_s": round(pair_wall_s, 3),
             "verdict": _verdict_json(parsed_vote),
         })
         if parsed.tier != "gold":
             _persist(conn, judgement_params(
                 lo=job.lo, hi=job.hi, judge_version=judge_version, tier=vote.tier,
-                model=vote.model, verdict=parsed_vote, llm_call_id=call_id, cost_usd=cost,
+                model=vote.model, verdict=parsed_vote, llm_call_id=call_id,
+                cost_usd=stored_cost,
             ), counters, lock)
 
     for record in results:
@@ -1068,8 +1526,9 @@ def _one_call(
             blocks_a.reverse()
             blocks_b.reverse()
     messages = judge.build_messages(
-        job.row, digests, evidence, blocks_a, blocks_b, vote.tier
+        job.row, digests, evidence, blocks_a, blocks_b, vote.prompt_tier or vote.tier
     )
+    extra: dict[str, Any] = {"provider": vote.provider} if vote.provider else {}
     response = client.call(
         called_for=vote.called_for,
         model=vote.model,
@@ -1078,6 +1537,7 @@ def _one_call(
         tools=[judge.TOOL_SCHEMA],
         tool_choice=judge.TOOL_NAME,
         max_tokens=MAX_TOKENS,
+        **extra,
     )
     try:
         calls = list(getattr(response, "tool_calls", None) or [])

@@ -75,6 +75,7 @@ def _build_providers() -> dict[str, Any]:
     from api.providers.anthropic import AnthropicProvider
     from api.providers.gemini import GeminiProvider
     from api.providers.openai import OpenAIProvider
+    from api.providers.oss import OssProvider
     from api.providers.qwen import QwenProvider
     return {
         "anthropic": AnthropicProvider(),
@@ -90,6 +91,11 @@ def _build_providers() -> dict[str, Any]:
         # failure row, so a qwen misroute left ZERO llm_calls evidence and was invisible
         # to llm_errors, llm_burn_rate and llm_liveness alike. Lazy key (QWEN_API_KEY).
         "qwen":      QwenProvider(),
+        # Our own vLLM pod (autodedup/oss_pod.py), routed by the `oss:` id prefix. Its
+        # base_url is an EPHEMERAL pod URL read from OSS_LLM_BASE_URL, so constructing it
+        # here costs nothing and reaches nothing: with no pod up, the call — not the boot —
+        # fails, and does so inside the try/except that writes the llm_calls failure row.
+        "oss":       OssProvider(),
     }
 
 

@@ -140,6 +140,7 @@ class RunPodClient:
         volume_gb: int = 0,
         cloud_type: str = "COMMUNITY",
         env: dict[str, str] | None = None,
+        ports: list[str] | None = None,
     ) -> dict[str, Any]:
         """`env` becomes the pod process's environment. A real batch job needs
         credentials inside the pod (SUPABASE_DB_URL, R2_*, HF_TOKEN) and there is no
@@ -160,6 +161,12 @@ class RunPodClient:
         takes `env` as a JSON OBJECT — `{"KEY": "value"}` — not the `[{key, value}]`
         list the older GraphQL API used. Omitted entirely when empty so an env-less
         launch sends the exact body it always did. Never logged: values are secrets.
+
+        `ports` ("8000/http", "22/tcp") is what makes a SERVER pod reachable: RunPod
+        fronts an exposed HTTP port at https://{pod_id}-{port}.proxy.runpod.net, and a
+        community-cloud pod has no other ingress. Batch jobs need none, so it is omitted
+        from the body unless asked for — an omitted key sends the exact body this client
+        always sent.
         """
         body = {
             "name": name,
@@ -175,6 +182,8 @@ class RunPodClient:
         }
         if env:
             body["env"] = {str(k): str(v) for k, v in env.items()}
+        if ports:
+            body["ports"] = list(ports)
         resp = self._session.post(f"{REST_BASE}/pods", json=body, timeout=30)
         if resp.status_code >= 400:
             if _is_no_capacity(resp.text):
