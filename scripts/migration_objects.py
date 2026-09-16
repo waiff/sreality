@@ -198,8 +198,12 @@ def parse_objects(sql: str) -> list[MigrationObject]:
     for m in _RE_FUNCTION.finditer(body):
         add("function", _clean(m.group(1)))
     for m in _RE_ADD_COLUMN.finditer(body):
-        table = _clean(m.group(1)).split(".")[-1]
-        add("column", f"{table}.{_clean(m.group(2))}")
+        qualified = _clean(m.group(1))
+        schema, _, table = qualified.rpartition(".")
+        # information_schema.columns is probed per schema, so a column on a table
+        # outside `public` keeps its schema: `<schema>.<table>.<column>`.
+        prefix = f"{schema}.{table}" if schema and schema != "public" else table
+        add("column", f"{prefix}.{_clean(m.group(2))}")
     for m in _RE_ADD_CONSTRAINT.finditer(body):
         table = _clean(m.group(1)).split(".")[-1]
         add("constraint", f"{table}.{_clean(m.group(2))}")

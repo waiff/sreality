@@ -2199,9 +2199,11 @@ select o.kind, o.ident,
                array_length(string_to_array(o.ident, '.'), 1), 1)))
     when 'column' then exists (
       select 1 from information_schema.columns c
-       where c.table_schema = 'public'
-         and c.table_name = split_part(o.ident, '.', 1)
-         and c.column_name = split_part(o.ident, '.', 2))
+       where c.table_schema = case when array_length(string_to_array(o.ident, '.'), 1) = 3
+                                   then split_part(o.ident, '.', 1) else 'public' end
+         and c.table_name = case when array_length(string_to_array(o.ident, '.'), 1) = 3
+                                 then split_part(o.ident, '.', 2) else split_part(o.ident, '.', 1) end
+         and c.column_name = split_part(o.ident, '.', array_length(string_to_array(o.ident, '.'), 1)))
     when 'constraint' then exists (
       select 1 from pg_constraint k
         join pg_class rel on rel.oid = k.conrelid
@@ -2220,7 +2222,7 @@ from unnest(%(kinds)s::text[], %(idents)s::text[]) as o(kind, ident)
 
 # to_regclass raises on a malformed identifier rather than returning NULL, so an
 # ident that survived parsing but is not a plain dotted name never reaches SQL.
-_SAFE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*(?:\.[a-zA-Z_][a-zA-Z0-9_$]*)?$")
+_SAFE_IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_$]*(?:\.[a-zA-Z_][a-zA-Z0-9_$]*){0,2}$")
 
 
 def check_migration_drift(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
