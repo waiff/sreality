@@ -1,5 +1,5 @@
-/* The three external-map chips under the header map. Cheap surface, but the
-   parts that silently rot are the ones pinned here: that all three render, that
+/* The four external chips under the header map. Cheap surface, but the
+   parts that silently rot are the ones pinned here: that all four render, that
    each one opens in a new tab without leaking the referrer, and that the hrefs
    carry THIS listing's coordinate rather than a default view of Czechia. */
 
@@ -25,13 +25,20 @@ describe('<ExternalMapLinks>', () => {
       'https://ikatastr.cz/#kde=50.081234,14.428765,18&mapa=zakladni' +
         '&vrstvy=parcelybudovy&info=50.081234,14.428765',
     );
+    // The box maths is geoLinks' to test; here, that the chip carries it.
+    expect(screen.getByRole('link', { name: /Reas\.cz/ })).toHaveAttribute(
+      'href',
+      expect.stringMatching(
+        /^https:\/\/www\.reas\.cz\/prodane\/nemovitosti\?bounds=50\.0\d+,14\.4\d+,50\.0\d+,14\.4\d+$/,
+      ),
+    );
   });
 
   it('opens every link in a new tab, with the noopener/noreferrer pair', () => {
     render(<ExternalMapLinks lat={50} lng={14} />);
 
     const links = screen.getAllByRole('link');
-    expect(links).toHaveLength(3);
+    expect(links).toHaveLength(4);
     for (const a of links) {
       expect(a).toHaveAttribute('target', '_blank');
       expect(a.getAttribute('rel')).toBe('noopener noreferrer');

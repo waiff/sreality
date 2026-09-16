@@ -1,7 +1,8 @@
-/* The external-map row under the listing header map: Mapy.cz, Google Maps and
- * iKatastr, each opened at this listing's resolved point. Sits directly below
- * "Explore area" (our own market view) — that button explores the NEIGHBOURHOOD,
- * these three answer "where exactly is this, and on whose parcel".
+/* The external row under the listing header map: Mapy.cz, Google Maps and
+ * iKatastr opened at this listing's resolved point, and Reas.cz's sold prices
+ * for a box around it. Sits directly below "Explore area" (our own market view
+ * of the asking side) — the first three answer "where exactly is this, and on
+ * whose parcel", the fourth "what did the neighbourhood actually sell for".
  *
  * Rendered only where a coordinate exists (same gate as the map itself). The
  * point carries the resolver's precision and no more — see lib/geoLinks. */
@@ -16,8 +17,11 @@ export default function ExternalMapLinks({
   lng: number;
 }) {
   const links = externalMapLinks(lat, lng);
+  /* Four across from `sm` up (the lg map column is 400px); two by two on a
+   * phone, where four equal chips truncate the widest label ("Mapy.…" at
+   * 360px, measured). */
   return (
-    <div className="flex items-stretch gap-1.5">
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
       {links.map((l) => (
         <a
           key={l.key}
@@ -25,7 +29,7 @@ export default function ExternalMapLinks({
           target="_blank"
           rel="noopener noreferrer"
           title={l.title}
-          className="flex-1 min-w-0 inline-flex items-center justify-center gap-1 px-2 py-1 text-[0.7rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink-3)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"
+          className="min-w-0 inline-flex items-center justify-center gap-1 px-2 py-1 text-[0.7rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink-3)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"
         >
           <span className="truncate">{l.label}</span>
           <OutArrow />
