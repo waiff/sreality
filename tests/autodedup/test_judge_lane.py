@@ -80,6 +80,7 @@ class FakeLLM:
                  fail_models: tuple[str, ...] = (), fail_all: bool = False,
                  error: str = "provider says no",
                  transient_fails: dict[str, int] | None = None,
+                 fail_after: dict[str, int] | None = None,
                  duration_ms: int = 0) -> None:
         self.calls = calls
         self.cost = cost
@@ -87,15 +88,24 @@ class FakeLLM:
         self.fail_all = fail_all
         self.error = error
         self.transient_fails = dict(transient_fails or {})
+        # `{model: n}` — n calls answered, every call after that fails with `error` and stays
+        # failed. An account that runs out of quota mid-pass, which is not a state any
+        # always-fails switch can reproduce.
+        self.fail_after = dict(fail_after or {})
+        self.seen: dict[str, int] = {}
         self.duration_ms = duration_ms
 
     def call(self, **kwargs: Any) -> FakeResponse:
         self.calls.append(kwargs)
         model = kwargs["model"]
+        self.seen[model] = self.seen.get(model, 0) + 1
         left = self.transient_fails.get(model, 0)
         if left:
             self.transient_fails[model] = left - 1
             raise RuntimeError("openai call failed: HTTP 429 slow down")
+        budget = self.fail_after.get(model)
+        if budget is not None and self.seen[model] > budget:
+            raise RuntimeError(self.error)
         if self.fail_all or model in self.fail_models:
             raise RuntimeError(self.error)
         return FakeResponse(
@@ -603,16 +613,19 @@ def test_a_store_that_takes_nothing_fails_the_lane(lane, tmp_path: Path) -> None
 
 
 def test_a_short_gold_plan_writes_no_row_and_is_reported(lane, tmp_path: Path) -> None:
+    """The PRIMARY votes are the ones with nowhere to fall back to: a rate limit they never
+    survive leaves the pair one vote short, and gold — the program's ground truth — is never
+    written from a short plan. (The THIRD family's failures take `GOLD_FALLBACK` instead.)"""
     out = tmp_path / "out"
     lane.state["client"] = FakeLLM(
-        lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,),
+        lane.calls, fail_models=(judge_lane.MODEL_VISION,),
         error="openai call failed: HTTP 429 slow down",
     )
     summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
     assert summary["gold_incomplete"] == summary["drawn"]
     assert not _upserts(lane.executed)
     records = [row for row in _judgements(out) if row.get("incomplete")]
-    assert records and all(row["n_votes"] == 2 for row in records)
+    assert records and all(row["n_votes"] == 1 for row in records)
 
 
 def test_a_transient_failure_on_the_third_family_is_retried_not_downgraded(
@@ -631,6 +644,157 @@ def test_a_transient_failure_on_the_third_family_is_retried_not_downgraded(
     assert {row["model"] for row in _upserts(lane.executed)} == {
         f"{judge_lane.MODEL_VISION}+{judge_lane.MODEL_VISION}+{judge_lane.MODEL_GOLD_THIRD}"
     }
+
+
+QUOTA_429 = (
+    "qwen call failed: HTTP 429 {\"error\":{\"message\":\"You exceeded your current quota, "
+    "please check your plan and billing details.\",\"type\":\"insufficient_quota\"}}"
+)
+
+
+def test_provider_errors_are_classified_by_what_they_survive() -> None:
+    """The distinction the outage turned on: a 429 that says "quota" is the account being out
+    of allowance and will never clear; a 429 that says "slow down" clears in two seconds."""
+    cases = {
+        QUOTA_429: judge_lane.ERROR_QUOTA,
+        "qwen call failed: HTTP 429 quota exceeded for your plan": judge_lane.ERROR_QUOTA,
+        "openai call failed: HTTP 402 payment required": judge_lane.ERROR_QUOTA,
+        "qwen call failed: HTTP 403 {\"code\":\"Arrearage\"}": judge_lane.ERROR_QUOTA,
+        "openai call failed: no credits remaining": judge_lane.ERROR_QUOTA,
+        "openai call failed: HTTP 429 slow down": judge_lane.ERROR_RATE_LIMIT,
+        "HTTP 429 Too Many Requests": judge_lane.ERROR_RATE_LIMIT,
+        "openai call failed: HTTP 401 invalid_api_key": judge_lane.ERROR_FATAL,
+        "qwen call failed: HTTP 404 model_not_found": judge_lane.ERROR_FATAL,
+        "QWEN_API_KEY is not set; cannot call qwen": judge_lane.ERROR_FATAL,
+        "openai call failed: HTTP 503 upstream unavailable": judge_lane.ERROR_TRANSIENT,
+        "openai call failed: Read timed out": judge_lane.ERROR_TRANSIENT,
+        "no compare_listings tool call in the response": judge_lane.ERROR_UNKNOWN,
+    }
+    for message, expected in cases.items():
+        assert judge_lane.classify_provider_error(RuntimeError(message)) == expected, message
+    # Only the two that clear with time are worth another call; the two that do not put the
+    # arm down for the rest of the run.
+    assert judge_lane.RETRYABLE == {judge_lane.ERROR_RATE_LIMIT, judge_lane.ERROR_TRANSIENT}
+    assert judge_lane.ARM_KILLING == {judge_lane.ERROR_QUOTA, judge_lane.ERROR_FATAL}
+    # A body that merely CONTAINS the digits is not a status (`_is_transient`'s old test was a
+    # substring match, and a verdict quoting "429 m2" would have read as a rate limit).
+    assert judge_lane.http_status("the flat is 429 m2") is None
+
+
+def test_a_qwen_quota_exhaustion_disables_the_arm_instead_of_stopping_the_run(
+    lane, tmp_path: Path
+) -> None:
+    """Judge run 35146813906: DashScope answered "you exceeded your current quota" and the lane
+    stopped a gold pass 1,642 calls short — with `gpt-5-mini` answering every call and a
+    fallback vote sitting in the file for exactly this. The arm goes down, the pass finishes."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_after={judge_lane.MODEL_GOLD_THIRD: 3}, error=QUOTA_429,
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+
+    healthy = 3
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_reason"].startswith("quota:")
+    assert "exceeded your current quota" in summary["qwen_arm_disabled_reason"]
+    assert summary["qwen_arm_disabled_at_pair"] == healthy
+    # Every drawn pair was judged, and every one of them with three votes.
+    assert summary["pairs_processed"] == summary["drawn"] > healthy
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["fatal"] is None and summary["budget_stopped"] is False
+    # One call actually hit the quota; the arm was down before any of the rest launched.
+    assert summary["failed"] == 1
+    assert summary["weaker_votes"] == summary["drawn"] - healthy
+    qwen_calls = [call for call in lane.calls
+                  if call["model"] == judge_lane.MODEL_GOLD_THIRD]
+    assert len(qwen_calls) == healthy + 1
+    # Spend is the calls that were MADE: three votes a pair either way, plus the one that 429'd
+    # and bought nothing.
+    assert summary["spent_usd_in_process"] == pytest.approx(0.001 * summary["done"])
+    assert summary["spent_usd"] == pytest.approx(0.001 * summary["done"])
+
+    aggregates = [row for row in _judgements(out) if row.get("n_votes")]
+    assert len(aggregates) == summary["drawn"]
+    assert all(row["n_votes"] == 3 for row in aggregates)
+    assert [row["weaker"] for row in aggregates[:healthy]] == [False] * healthy
+    assert all(row["weaker"] is True for row in aggregates[healthy:])
+    assert all("(weaker)" in row["model"] for row in _upserts(lane.executed)[healthy:])
+    assert summary["gold_incomplete"] == summary["gold_unstarted"] == 0
+
+
+def test_a_rate_limited_third_family_is_retried_to_the_ladder_then_falls_back(
+    lane, tmp_path: Path
+) -> None:
+    """A 429 with no quota in it is a burst: back off 2/4/8s, and only then take the weaker
+    vote — the arm stays UP, because the next pair may well get through."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,),
+        error="qwen call failed: HTTP 429 Too Many Requests",
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert lane.state["sleeps"][:3] == list(judge_lane.RETRY_BACKOFF_S)
+    assert len(lane.state["sleeps"]) == 3 * summary["drawn"]
+    assert summary["qwen_arm_disabled"] is False
+    assert summary["qwen_arm_disabled_reason"] is None
+    assert summary["qwen_arm_disabled_at_pair"] is None
+    # Every pair paid the full ladder and still got its three votes, the third one weaker.
+    assert summary["failed"] == summary["drawn"]
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["weaker_votes"] == summary["drawn"]
+    aggregates = [row for row in _judgements(out) if row.get("n_votes")]
+    assert aggregates and all(row["weaker"] is True for row in aggregates)
+
+
+def test_a_dead_key_on_the_third_family_puts_the_arm_down_not_the_run(
+    lane, tmp_path: Path
+) -> None:
+    """An auth/config failure is permanent, but only for the arm that has it: the primary model
+    is still answering and the tier still has a vote to take."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,),
+        error="qwen call failed: HTTP 401 invalid_api_key",
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_reason"].startswith("fatal:")
+    assert summary["qwen_arm_disabled_at_pair"] == 0
+    assert summary["fatal"] is None
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["failed"] == 1
+
+
+def test_an_auth_fatal_on_the_primary_arm_still_stops_a_gold_pass(
+    lane, tmp_path: Path
+) -> None:
+    """The other half of the rule: `gpt-5-mini` has no second family behind it, so a dead key
+    there ends the pass rather than failing every remaining pair at full price."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_VISION,),
+        error="openai call failed: HTTP 401 invalid_api_key",
+    )
+    with pytest.raises(SystemExit) as exc:
+        lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
+    assert "failed fatally" in str(exc.value)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["fatal"] and "401" in written["fatal"]
+    assert written["qwen_arm_disabled"] is False
+    assert written["done"] == 0
+
+
+def test_a_quota_exhaustion_on_the_primary_arm_stops_the_run(lane, tmp_path: Path) -> None:
+    """Same rule, the other classification: there is no fallback for the primary, so an
+    exhausted account is the end of the pass and not 2,000 more identical 429s."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(lane.calls, fail_all=True, error=QUOTA_429)
+    with pytest.raises(SystemExit) as exc:
+        lane(out, export_run="1", tier="text", n=6, max_usd=5, workers=1)
+    assert "failed fatally" in str(exc.value)
+    written = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert written["skipped_fatal"] == written["drawn"] - 1
+    assert len(lane.calls) == 1
 
 
 def test_the_weaker_fallback_is_stamped_into_the_stored_model(lane, tmp_path: Path) -> None:
