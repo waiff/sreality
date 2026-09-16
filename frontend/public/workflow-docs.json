@@ -291,6 +291,52 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/apply_r2_unique_guards.yml"
     },
     {
+      "filename": "autodedup.yml",
+      "name": "AUTODEDUP: engine lane",
+      "description": "The lane for the autonomous dedup engine programme — one dispatch-only entry point (`python -m autodedup.lane`) whose `mode` input selects what it does. Isolated from the dedup_sim simulation lane: new package, new workflow, nothing shared. `mode` is validated in Python rather than as a YAML choice list, so adding a mode needs no workflow edit.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "mode",
+          "description": "Which lane mode to run (validated in Python). census = the read-only region census.",
+          "required": true,
+          "type": "string",
+          "default": "census",
+          "options": null
+        },
+        {
+          "name": "args",
+          "description": "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "OPENAI_API_KEY",
+        "QWEN_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "RUNPOD_API_KEY",
+        "SUPABASE_DB_SESSION_URL",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "autodedup",
+      "cancelInProgress": false,
+      "timeoutMinutes": 300,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/autodedup.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/autodedup.yml"
+    },
+    {
       "filename": "backfill_area_basis.yml",
       "name": "Backfill area_basis (the provenance stamp migration 423 never filled)",
       "description": "One-off, dispatch-only backfill for the per-m² measure program's open item 2. Migration 423 added `listings.area_basis` with no backfill, so it fills only as rows are detail-drained — 24.1% of the table, and ZERO rows anywhere carry `plot`, which leaves every gate written on `area_basis` alone inert and reading \"not land\" for every parcel in the database. This does NOT re-derive the headline area: `scraper.area.derive_headline_area` stays the single definition of the precedence and the token vocabulary, and the script CALLS it, feeding it the one measure the stored columns prove was the winner. Three inferences are exact — land (`plot` is a function of area_m2 alone), a NULL area (the function returned no basis), and the `usable_area` column on the six portals that store it un-collapsed, plus bazos whose only arm is `fallback`. idnes and ceskereality are DECLINED by design: both collapse usable/floor/total into that one column, so a match there would fabricate a provenance claim on ~183k rows. Writes nothing but `listings.area_basis`, which is out of every content hash — so NO snapshot, no value change, and neither trigger on `listings` fires. DML, not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; it waits for a read-model rebuild gap before starting, bounded, then proceeds anyway since the contention is I/O and never a lock conflict. Keyset-paginated over a narrow projection that detoasts nothing; idempotent without a marker, and `--after` resumes. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
