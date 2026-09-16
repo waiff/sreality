@@ -14,9 +14,18 @@ layer is one grouped pass over `listings JOIN listing_location` and nothing else
 layer joins images, pHash, CLIP embeddings and the shared-pin aggregate, and runs only for the
 handful of blocks the block layer shortlists.
 
-`census.json` is written incrementally — after coverage, after each grain's block pass, and
-again after the detail loop — and a detail statement that fails is recorded on its block
-(`detail_error`) rather than voiding the whole run.
+On top of those three sits a PROBE layer: the questions the block counts cannot answer. Four
+probes run per shortlisted block (per-portal image/pHash/CLIP coverage, the same-source re-post
+base rate, address-level developer density, and shared-image density) and are attached to the
+block under `probes`; two more are corpus-wide and block-independent (one portal's location
+posture, and the ingest rate every cost number scales with), so they live in their own lane
+mode (`python3 -m autodedup.lane --mode probes`) writing `probes.json`. A probe that fails is
+recorded on itself, never raised.
+
+`census.json` is written incrementally — after coverage, after each grain's block pass, after
+EVERY detailed block, and again after the detail loop — and a detail statement that fails is
+recorded on its block (`detail_error`) rather than voiding the whole run or skipping that
+block's probes.
 
 Cohort note: the census counts every listing that has a `listing_location` row carrying the
 grain's code. That is deliberately WIDER than the consumer serving rule
@@ -85,6 +94,19 @@ WITH base AS (
         l.area_m2                                     AS area_m2,
         l.floor                                       AS floor,
         l.broker_identity_id                          AS broker_identity_id,
+        -- substr makes the length test slice-friendly: 200 characters is all it needs, so
+        -- Postgres fetches the first TOAST chunk instead of decompressing every description
+        -- on a pass that otherwise touches only fixed-width columns.
+        (length(coalesce(substr(l.description, 1, 200), '')) >= 200)
+                                                      AS has_desc200,
+        (l.source_url IS NOT NULL)                    AS has_source_url,
+        -- Zero area is not an area anywhere else in this file (`with_area` filters
+        -- `area_m2 > 0`), so a zero-area row with nothing else on it is just as unreachable
+        -- as a NULL-area one and counts against the ceiling the same way.
+        (coalesce(l.area_m2, 0) <= 0 AND l.disposition IS NULL
+         AND l.broker_identity_id IS NULL
+         AND length(coalesce(substr(l.description, 1, 200), '')) < 200)
+                                                      AS no_signal,
         (ll.geom IS NOT NULL OR ll.country_status = 'foreign') AS served,
         gr.is_address_grain                           AS is_address_grain,
         gr.rank >= (SELECT r.rank FROM location_granularity_rank r
@@ -138,7 +160,12 @@ agg AS (
         count(*) FILTER (WHERE floor IS NOT NULL)                     AS with_floor,
         count(*) FILTER (WHERE broker_identity_id IS NOT NULL)        AS with_broker,
         count(*) FILTER (WHERE at_street_grain)                       AS with_street,
-        count(*) FILTER (WHERE is_address_grain)                      AS with_point
+        count(*) FILTER (WHERE is_address_grain)                      AS with_point,
+        count(*) FILTER (WHERE has_desc200)                           AS with_desc200,
+        count(*) FILTER (WHERE has_source_url)                        AS with_source_url,
+        -- THE RECALL CEILING: no area, no disposition, no broker and no usable text -
+        -- reachable by no probe except photos, so it bounds recall before any threshold.
+        count(*) FILTER (WHERE no_signal)                             AS no_signal_at_all
     FROM base
     GROUP BY 1
 )
@@ -175,6 +202,19 @@ WITH base AS (
         l.area_m2                                     AS area_m2,
         l.floor                                       AS floor,
         l.broker_identity_id                          AS broker_identity_id,
+        -- substr makes the length test slice-friendly: 200 characters is all it needs, so
+        -- Postgres fetches the first TOAST chunk instead of decompressing every description
+        -- on a pass that otherwise touches only fixed-width columns.
+        (length(coalesce(substr(l.description, 1, 200), '')) >= 200)
+                                                      AS has_desc200,
+        (l.source_url IS NOT NULL)                    AS has_source_url,
+        -- Zero area is not an area anywhere else in this file (`with_area` filters
+        -- `area_m2 > 0`), so a zero-area row with nothing else on it is just as unreachable
+        -- as a NULL-area one and counts against the ceiling the same way.
+        (coalesce(l.area_m2, 0) <= 0 AND l.disposition IS NULL
+         AND l.broker_identity_id IS NULL
+         AND length(coalesce(substr(l.description, 1, 200), '')) < 200)
+                                                      AS no_signal,
         (ll.geom IS NOT NULL OR ll.country_status = 'foreign') AS served,
         gr.is_address_grain                           AS is_address_grain,
         gr.rank >= (SELECT r.rank FROM location_granularity_rank r
@@ -228,7 +268,12 @@ agg AS (
         count(*) FILTER (WHERE floor IS NOT NULL)                     AS with_floor,
         count(*) FILTER (WHERE broker_identity_id IS NOT NULL)        AS with_broker,
         count(*) FILTER (WHERE at_street_grain)                       AS with_street,
-        count(*) FILTER (WHERE is_address_grain)                      AS with_point
+        count(*) FILTER (WHERE is_address_grain)                      AS with_point,
+        count(*) FILTER (WHERE has_desc200)                           AS with_desc200,
+        count(*) FILTER (WHERE has_source_url)                        AS with_source_url,
+        -- THE RECALL CEILING: no area, no disposition, no broker and no usable text -
+        -- reachable by no probe except photos, so it bounds recall before any threshold.
+        count(*) FILTER (WHERE no_signal)                             AS no_signal_at_all
     FROM base
     GROUP BY 1
 )
@@ -335,6 +380,271 @@ SELECT
       WHERE (ll.geom IS NOT NULL OR ll.country_status = 'foreign'))   AS n_served
 """
 
+# --- probes ---------------------------------------------------------------------------
+# The census answers "what is in this block"; the probes answer the four questions every
+# candidate design GUESSED at. Same nullable-grain-code binding as the detail statement, same
+# explicit `::bigint` on both codes (psycopg sends no type OID for a None, so an uncast NULL
+# fails Parse with 42P18).
+
+# B1. Per-portal signal coverage. Block-level image coverage hides that `images.phash` is
+# produced by `scraper.image_phash.compute_dhash` and that the only index touching it is keyed
+# on `sreality_id`, NULL for eight of the nine portals - so every image-lane reach claim is a
+# per-portal number or it is a guess.
+CENSUS_PROBE_PORTAL_SIGNAL_SQL = """
+WITH block AS (
+    SELECT l.id AS id, l.source AS source
+    FROM listings l
+    JOIN listing_location ll ON ll.listing_id = l.id
+    WHERE (%(obec_kod)s::bigint IS NULL OR ll.obec_kod = %(obec_kod)s::bigint)
+      AND (%(cast_obce_kod)s::bigint IS NULL OR ll.cast_obce_kod = %(cast_obce_kod)s::bigint)
+),
+stored_images AS (
+    SELECT
+        i.listing_id           AS listing_id,
+        (i.phash IS NOT NULL)  AS has_phash,
+        EXISTS (SELECT 1 FROM image_clip_embeddings e WHERE e.image_id = i.id) AS has_clip
+    FROM images i
+    JOIN block b ON b.id = i.listing_id
+    WHERE i.storage_path IS NOT NULL
+),
+per_listing AS (
+    SELECT
+        b.id                                        AS id,
+        b.source                                    AS source,
+        count(s.listing_id)                         AS n_images,
+        count(*) FILTER (WHERE s.has_phash)         AS n_phash,
+        count(*) FILTER (WHERE s.has_clip)          AS n_clip
+    FROM block b
+    LEFT JOIN stored_images s ON s.listing_id = b.id
+    GROUP BY 1, 2
+)
+SELECT
+    source                                                            AS source,
+    count(*)                                                          AS n_listings,
+    count(*) FILTER (WHERE n_images > 0)                              AS n_with_images,
+    count(*) FILTER (WHERE n_phash > 0)                               AS n_with_phash,
+    count(*) FILTER (WHERE n_clip > 0)                                AS n_with_clip,
+    round((percentile_cont(0.5)
+             WITHIN GROUP (ORDER BY n_images::double precision))::numeric, 2)::float8
+                                                                      AS median_images
+FROM per_listing
+GROUP BY 1
+ORDER BY 2 DESC
+"""
+
+# B3. Re-post base rate - the single largest unmeasured quantity in this program. Same source,
+# same broker identity, SAME category_main and category_type, equal disposition, area within
+# two percent, and DISJOINT lifetime windows, so a pair is a RE-POST rather than two units
+# advertised side by side. The category equality is not optional: sale != rent and flat !=
+# house are hard merge-compatibility rules (CLAUDE.md rule 15), so a prodej listing relisted
+# as pronajem is a pair the engine may never merge and must not inflate the base rate - it is
+# counted separately as `repost_pairs_cross_type`. The tolerance is measured against the
+# SMALLER area so the band does not depend on which row happens to carry the lower id, and is
+# spelled as a multiplication, never a literal percent sign: psycopg scans the whole statement
+# for placeholders. Phone-number identity is NOT a second arm here - normalisation lives in the
+# broker resolver and broker_identity_id is its output, so pairs whose broker never resolved go
+# uncounted and `repost_pairs` is a lower bound. Cost is bounded by the block (a few thousand
+# rows) and by the statement timeout.
+CENSUS_PROBE_REPOSTS_SQL = """
+WITH block AS (
+    SELECT
+        l.id                                AS id,
+        l.source                            AS source,
+        l.category_main                     AS category_main,
+        l.category_type                     AS category_type,
+        l.broker_identity_id                AS broker_identity_id,
+        l.disposition                       AS disposition,
+        l.area_m2                           AS area_m2,
+        l.first_seen_at                     AS first_seen_at,
+        coalesce(l.inactive_at, now())      AS ended_at
+    FROM listings l
+    JOIN listing_location ll ON ll.listing_id = l.id
+    WHERE (%(obec_kod)s::bigint IS NULL OR ll.obec_kod = %(obec_kod)s::bigint)
+      AND (%(cast_obce_kod)s::bigint IS NULL OR ll.cast_obce_kod = %(cast_obce_kod)s::bigint)
+      AND l.broker_identity_id IS NOT NULL
+      AND l.disposition IS NOT NULL
+      AND l.area_m2 > 0
+),
+candidate_pairs AS (
+    SELECT
+        a.id AS a_id,
+        b.id AS b_id,
+        (b.category_main IS NOT DISTINCT FROM a.category_main
+         AND b.category_type IS NOT DISTINCT FROM a.category_type)    AS same_category
+    FROM block a
+    JOIN block b
+      ON b.id > a.id
+     AND b.source = a.source
+     AND b.broker_identity_id = a.broker_identity_id
+     AND b.disposition = a.disposition
+     AND abs(b.area_m2 - a.area_m2) <= 0.02 * least(a.area_m2, b.area_m2)
+     AND (b.first_seen_at > a.ended_at OR a.first_seen_at > b.ended_at)
+),
+involved AS (
+    SELECT a_id AS id FROM candidate_pairs WHERE same_category
+    UNION
+    SELECT b_id AS id FROM candidate_pairs WHERE same_category
+)
+SELECT
+    (SELECT count(*) FROM candidate_pairs WHERE same_category)        AS repost_pairs,
+    (SELECT count(*) FROM candidate_pairs WHERE NOT same_category)    AS repost_pairs_cross_type,
+    (SELECT count(*) FROM involved)                                   AS repost_listings,
+    (SELECT count(*) FROM block)                                      AS repost_candidates
+"""
+
+# B4a. Developer-project density by address. `n_addr_3plus_multi_floor` reads ">= 3 listings at
+# distinct floors" loosely (>= 2 distinct floors), `n_addr_3plus_distinct_floors` strictly (>= 3);
+# both are reported because the spec's phrasing carries both readings and neither costs a pass.
+# The denominator travels with them: ruian_adm_kod coverage is portal-skewed (bezrealitky ~61%,
+# sreality ~27%, idnes ~1%, bazos 0%), so "12 dense addresses" means nothing until the reader
+# knows how many of the block's rows carried an address at all.
+CENSUS_PROBE_ADDRESS_DENSITY_SQL = """
+WITH block AS (
+    SELECT ll.ruian_adm_kod AS ruian_adm_kod, l.floor AS floor
+    FROM listings l
+    JOIN listing_location ll ON ll.listing_id = l.id
+    WHERE (%(obec_kod)s::bigint IS NULL OR ll.obec_kod = %(obec_kod)s::bigint)
+      AND (%(cast_obce_kod)s::bigint IS NULL OR ll.cast_obce_kod = %(cast_obce_kod)s::bigint)
+),
+per_addr AS (
+    SELECT
+        ruian_adm_kod            AS ruian_adm_kod,
+        count(*)                 AS n_listings,
+        count(DISTINCT floor)    AS n_floors
+    FROM block
+    WHERE ruian_adm_kod IS NOT NULL
+    GROUP BY 1
+)
+SELECT
+    (SELECT count(*) FROM block)                                      AS n_block_listings,
+    (SELECT count(*) FROM block WHERE ruian_adm_kod IS NOT NULL)      AS n_addressed_listings,
+    (SELECT count(*) FROM per_addr)                                   AS n_addresses,
+    (SELECT count(*) FROM per_addr WHERE n_listings >= 3)             AS n_addr_3plus,
+    (SELECT count(*) FROM per_addr WHERE n_listings >= 3 AND n_floors >= 2)
+                                                                      AS n_addr_3plus_multi_floor,
+    (SELECT count(*) FROM per_addr WHERE n_listings >= 3 AND n_floors >= 3)
+                                                                      AS n_addr_3plus_distinct_floors,
+    coalesce((SELECT sum(n_listings) FROM per_addr
+               WHERE n_listings >= 3 AND n_floors >= 2), 0)::bigint   AS n_addr_dense_listings,
+    coalesce((SELECT max(n_listings) FROM per_addr), 0)::bigint       AS largest_address_group
+"""
+
+# B4b. Shared-image density. `images.phash` holds a dHash (scraper/image_phash.py), so an exact
+# value shared across many listings is the developer-photoset negative class this program's
+# precision is decided on - and the seed for the assembled negative-control cohort.
+# CAVEAT the four scalars cannot express: a Hamming-0 dHash group is NOT automatically a shared
+# photoset. dHash collapses mostly-white documents, so floor plans and energy certificates hash
+# alike (docs/design/tag-annotation-matrix.md, docs/design/new-dedup/ENCODER-DECISION.md). The
+# top groups are therefore returned with a sample listing, so the operator can classify
+# photoset-vs-document BEFORE the negative-control cohort is assembled off this probe; a cheap
+# automatic filter, if one is wanted later, is excluding document-tagged images via
+# `image_tag_scores` (migration 490).
+CENSUS_PROBE_SHARED_HASH_SQL = """
+WITH block AS (
+    SELECT l.id AS id, l.source AS source
+    FROM listings l
+    JOIN listing_location ll ON ll.listing_id = l.id
+    WHERE (%(obec_kod)s::bigint IS NULL OR ll.obec_kod = %(obec_kod)s::bigint)
+      AND (%(cast_obce_kod)s::bigint IS NULL OR ll.cast_obce_kod = %(cast_obce_kod)s::bigint)
+),
+block_images AS (
+    SELECT i.phash AS phash, i.listing_id AS listing_id, b.source AS source
+    FROM images i
+    JOIN block b ON b.id = i.listing_id
+    WHERE i.phash IS NOT NULL AND i.storage_path IS NOT NULL
+),
+hashes AS (
+    SELECT
+        phash                        AS phash,
+        count(DISTINCT listing_id)   AS n_listings,
+        count(DISTINCT source)       AS n_sources,
+        min(listing_id)              AS sample_listing_id
+    FROM block_images
+    GROUP BY 1
+),
+top_groups AS (
+    SELECT phash, n_listings, n_sources, sample_listing_id
+    FROM hashes
+    WHERE n_listings >= %(hash_share_min)s::int
+    ORDER BY n_listings DESC, phash
+    LIMIT 10
+)
+SELECT
+    (SELECT count(*) FROM hashes)                                     AS n_distinct_hashes,
+    (SELECT count(*) FROM hashes WHERE n_listings >= %(hash_share_min)s::int)
+                                                                      AS n_shared_hashes,
+    coalesce((SELECT count(DISTINCT bi.listing_id)
+                FROM block_images bi
+                JOIN hashes h ON h.phash = bi.phash
+               WHERE h.n_listings >= %(hash_share_min)s::int), 0)::bigint
+                                                                      AS n_shared_hash_listings,
+    coalesce((SELECT max(n_listings) FROM hashes), 0)::bigint         AS largest_hash_group,
+    coalesce((SELECT jsonb_agg(jsonb_build_object(
+                         'phash', t.phash::text,
+                         'n_listings', t.n_listings,
+                         'n_sources', t.n_sources,
+                         'sample_listing_id', t.sample_listing_id)
+                       ORDER BY t.n_listings DESC, t.phash)
+                FROM top_groups t), '[]'::jsonb)                      AS top_hash_groups
+"""
+
+# B2. Corpus-wide, run once: one portal's location posture as a granularity histogram, because
+# remax was recorded at zero pin reach in this program's notes and the location track corrected
+# that afterwards. Granularity is reported as a label, never compared by enum order.
+CENSUS_PROBE_SOURCE_LOCATION_SQL = """
+SELECT
+    ll.granularity::text                                              AS granularity,
+    count(*)                                                          AS n_listings,
+    count(*) FILTER (WHERE ll.geom IS NOT NULL)                       AS n_with_geom,
+    count(*) FILTER (WHERE l.is_active)                               AS n_active,
+    count(*) FILTER (WHERE l.is_active AND ll.geom IS NOT NULL)       AS n_active_with_geom
+FROM listings l
+JOIN listing_location ll ON ll.listing_id = l.id
+WHERE l.source = %(source)s::text
+GROUP BY 1
+ORDER BY 2 DESC
+"""
+
+# B5. Corpus-wide, run once: the ingest rate L that every monthly cost number scales with,
+# measured instead of inferred from an images-per-day ratio. Totals are summed in Python.
+# NO listings(first_seen_at) index exists (every `create index ... on listings` in migrations/
+# is accounted for; the (first_seen_at, id) keyset index is on PROPERTIES, migration 198), so
+# the predicate shape is index-friendly but this is a seq scan of `listings` - bounded by the
+# statement timeout, and worth dispatching off-peak. Adding that index is out of scope: ruling
+# D8 keeps this program off DDL on the hot shared tables.
+CENSUS_PROBE_INGEST_SQL = """
+SELECT
+    l.source                                                          AS source,
+    count(*) FILTER (WHERE l.first_seen_at > now() - interval '1 day')   AS n_1d,
+    count(*) FILTER (WHERE l.first_seen_at > now() - interval '7 days')  AS n_7d
+FROM listings l
+WHERE l.first_seen_at > now() - interval '7 days'
+GROUP BY 1
+ORDER BY 3 DESC
+"""
+
+
+@dataclass(frozen=True)
+class Probe:
+    """One probe statement: its payload key, and whether it returns rows or one row."""
+
+    name: str
+    sql: str
+    many: bool
+
+
+BLOCK_PROBES: tuple[Probe, ...] = (
+    Probe("portal_signal", CENSUS_PROBE_PORTAL_SIGNAL_SQL, True),
+    Probe("reposts", CENSUS_PROBE_REPOSTS_SQL, False),
+    Probe("address_density", CENSUS_PROBE_ADDRESS_DENSITY_SQL, False),
+    Probe("shared_hash", CENSUS_PROBE_SHARED_HASH_SQL, False),
+)
+
+CORPUS_PROBES: tuple[Probe, ...] = (
+    Probe("source_location", CENSUS_PROBE_SOURCE_LOCATION_SQL, True),
+    Probe("ingest_rate", CENSUS_PROBE_INGEST_SQL, True),
+)
+
 BLOCK_SQL_BY_GRAIN: dict[str, str] = {
     "town": CENSUS_TOWNS_SQL,
     "quarter": CENSUS_QUARTERS_SQL,
@@ -350,14 +660,28 @@ def block_params(*, min_n: int, max_n: int, top: int) -> dict[str, int]:
     return {"min_n": min_n, "max_n": max_n, "top": top}
 
 
-def detail_params(*, grain: str, block_code: int, pin_share_min: int) -> dict[str, Any]:
+def _grain_codes(grain: str, block_code: int) -> dict[str, Any]:
     if grain not in GRAINS:
         raise ValueError(f"unknown grain {grain!r}; use one of {', '.join(GRAINS)}")
     return {
         "obec_kod": block_code if grain == "town" else None,
         "cast_obce_kod": block_code if grain == "quarter" else None,
-        "pin_share_min": pin_share_min,
     }
+
+
+def detail_params(*, grain: str, block_code: int, pin_share_min: int) -> dict[str, Any]:
+    return {**_grain_codes(grain, block_code), "pin_share_min": pin_share_min}
+
+
+def probe_params(*, grain: str, block_code: int, hash_share_min: int) -> dict[str, Any]:
+    """The superset every per-block probe binds from; psycopg looks up only the names the
+    statement names, so a probe that wants no threshold simply never reads it."""
+    return {**_grain_codes(grain, block_code), "hash_share_min": hash_share_min}
+
+
+def corpus_probe_params(probe: Probe, *, source: str) -> dict[str, Any]:
+    """Corpus probes take at most the portal name, so bind it only where it appears."""
+    return {"source": source} if "source" in sql_placeholders(probe.sql) else {}
 
 
 # --- selection score -------------------------------------------------------------------
@@ -495,15 +819,108 @@ def _cell(value: Any, width: int) -> str:
     return text.ljust(width)
 
 
-def render_table(rows: Sequence[dict[str, Any]]) -> str:
-    """Fixed-width ranked table, one line per block."""
-    header = " ".join(label.ljust(width) for _, label, width in TABLE_COLUMNS).rstrip()
+Columns = Sequence[tuple[str, str, int]]
+
+# The probes get their own table rather than more columns on the census table: nineteen columns
+# is already the width of a terminal, and the two readings are answers to different questions.
+PROBE_TABLE_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("grain", "grain", 7),
+    ("block_code", "code", 9),
+    ("block_name", "name", 22),
+    ("n_total", "total", 7),
+    ("with_desc200", "desc200", 7),
+    ("with_source_url", "srcurl", 7),
+    ("no_signal_at_all", "nosig", 7),
+    ("n_portals", "portal", 6),
+    ("repost_pairs", "repair", 7),
+    ("repost_pairs_cross_type", "repxt", 6),
+    ("repost_listings", "replist", 7),
+    ("n_addressed_listings", "addrok", 7),
+    ("n_addr_3plus_multi_floor", "addr3f", 7),
+    ("n_addr_dense_listings", "addrls", 7),
+    ("n_shared_hashes", "hashgr", 7),
+    ("n_shared_hash_listings", "hashls", 7),
+    ("largest_hash_group", "hashmx", 7),
+)
+
+PORTAL_SIGNAL_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("source", "source", 13),
+    ("n_listings", "listings", 9),
+    ("n_with_images", "imgs", 9),
+    ("n_with_phash", "phash", 9),
+    ("n_with_clip", "clip", 9),
+    ("median_images", "med_img", 9),
+)
+
+SOURCE_LOCATION_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("granularity", "granularity", 18),
+    ("n_listings", "listings", 10),
+    ("n_with_geom", "geom", 10),
+    ("n_active", "active", 10),
+    ("n_active_with_geom", "act_geom", 10),
+)
+
+INGEST_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("source", "source", 13),
+    ("n_1d", "1d", 9),
+    ("n_7d", "7d", 9),
+)
+
+
+def render_table(rows: Sequence[dict[str, Any]], columns: Columns = TABLE_COLUMNS) -> str:
+    """Fixed-width ranked table, one line per row."""
+    header = " ".join(label.ljust(width) for _, label, width in columns).rstrip()
     lines = [header, "-" * len(header)]
     for row in rows:
-        lines.append(
-            " ".join(_cell(row.get(key), width) for key, _, width in TABLE_COLUMNS).rstrip()
-        )
+        lines.append(" ".join(_cell(row.get(key), width) for key, _, width in columns).rstrip())
     return "\n".join(lines)
+
+
+def _section(probes: dict[str, Any], name: str) -> dict[str, Any]:
+    value = probes.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def probe_row(block: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one block's probe payload into a single printable line."""
+    probes = block.get("probes") or {}
+    portal = probes.get("portal_signal")
+    reposts = _section(probes, "reposts")
+    addresses = _section(probes, "address_density")
+    hashes = _section(probes, "shared_hash")
+    return {
+        "grain": block.get("grain"),
+        "block_code": block.get("block_code"),
+        "block_name": block.get("block_name"),
+        "n_total": block.get("n_total"),
+        "with_desc200": block.get("with_desc200"),
+        "with_source_url": block.get("with_source_url"),
+        "no_signal_at_all": block.get("no_signal_at_all"),
+        "n_portals": len(portal) if isinstance(portal, list) else None,
+        "repost_pairs": reposts.get("repost_pairs"),
+        "repost_pairs_cross_type": reposts.get("repost_pairs_cross_type"),
+        "repost_listings": reposts.get("repost_listings"),
+        "n_addressed_listings": addresses.get("n_addressed_listings"),
+        "n_addr_3plus_multi_floor": addresses.get("n_addr_3plus_multi_floor"),
+        "n_addr_dense_listings": addresses.get("n_addr_dense_listings"),
+        "n_shared_hashes": hashes.get("n_shared_hashes"),
+        "n_shared_hash_listings": hashes.get("n_shared_hash_listings"),
+        "largest_hash_group": hashes.get("largest_hash_group"),
+    }
+
+
+def render_corpus_probes(probes: dict[str, Any], *, source: str) -> str:
+    """The two corpus-wide probes as two small tables."""
+    ingest = probes.get("ingest_rate")
+    location = probes.get("source_location")
+    parts = [
+        "ingest rate (listings first seen, by source)",
+        render_table(ingest if isinstance(ingest, list) else [], INGEST_COLUMNS),
+        "",
+        f"location posture: {source}",
+        render_table(location if isinstance(location, list) else [], SOURCE_LOCATION_COLUMNS),
+    ]
+    return "\n".join(parts)
 
 
 # --- DB layer --------------------------------------------------------------------------
@@ -545,6 +962,29 @@ def fetch_detail(
     return rows[0] if rows else {}
 
 
+def _probe_payload(probe: Probe, rows: list[dict[str, Any]]) -> Any:
+    if probe.many:
+        return rows
+    return rows[0] if rows else {}
+
+
+def fetch_block_probes(
+    conn: Any, *, grain: str, block_code: int, hash_share_min: int, timeout_ms: int
+) -> dict[str, Any]:
+    """Run every per-block probe. One probe that times out is recorded on itself, never
+    thrown: a block with three of four probes still tells the operator more than a void run."""
+    params = probe_params(grain=grain, block_code=block_code, hash_share_min=hash_share_min)
+    out: dict[str, Any] = {}
+    for probe in BLOCK_PROBES:
+        try:
+            rows = _run(conn, probe.sql, params, timeout_ms)
+        except Exception as exc:  # noqa: BLE001 — one probe must not void the block
+            out[probe.name] = {"error": f"{type(exc).__name__}: {exc}"}
+            continue
+        out[probe.name] = _probe_payload(probe, rows)
+    return out
+
+
 # --- mode entry ------------------------------------------------------------------------
 
 TIMEOUT_S_MAX = 900
@@ -556,6 +996,15 @@ ARG_DEFAULTS: dict[str, int] = {
     "detail_top": 12,
     "timeout_s": 540,
     "pin_share_min": 10,
+    # The per-block probes are on by default: they are the numbers the region is chosen on.
+    # `probes=0` is the escape hatch for a census re-run that only needs the block layer.
+    "probes": 1,
+    "hash_share_min": 5,
+}
+
+PROBES_ARG_DEFAULTS: dict[str, Any] = {
+    "timeout_s": 540,
+    "source": "remax",
 }
 
 
@@ -577,11 +1026,103 @@ def parse_census_args(args: dict[str, str]) -> dict[str, int]:
     for key in ("top", "detail_top", "timeout_s"):
         if out[key] <= 0:
             raise ValueError(f"census arg {key} must be positive")
+    if out["probes"] not in (0, 1):
+        raise ValueError("census arg probes must be 0 or 1")
+    if out["hash_share_min"] < 2:
+        raise ValueError("census arg hash_share_min must be at least 2")
     # timeout_s is the one workflow-supplied value that reaches SQL as text (SET LOCAL takes no
     # parameter), so it is clamped here as well as coerced.
     if not 1 <= out["timeout_s"] <= TIMEOUT_S_MAX:
         raise ValueError(f"census arg timeout_s must be between 1 and {TIMEOUT_S_MAX}")
     return out
+
+
+def parse_probes_args(args: dict[str, str]) -> dict[str, Any]:
+    """Coerce the lane's k=v strings into the corpus-probe parameters. Unknown keys are fatal."""
+    unknown = sorted(set(args) - set(PROBES_ARG_DEFAULTS))
+    if unknown:
+        raise ValueError(
+            f"unknown probes arg(s) {', '.join(unknown)}; "
+            f"known: {', '.join(sorted(PROBES_ARG_DEFAULTS))}"
+        )
+    out: dict[str, Any] = dict(PROBES_ARG_DEFAULTS)
+    out.update(args)
+    try:
+        out["timeout_s"] = int(out["timeout_s"])
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"probes arg timeout_s must be an integer, got {out['timeout_s']!r}"
+        ) from None
+    if not 1 <= out["timeout_s"] <= TIMEOUT_S_MAX:
+        raise ValueError(f"probes arg timeout_s must be between 1 and {TIMEOUT_S_MAX}")
+    if out["source"] not in SOURCES:
+        raise ValueError(f"probes arg source must be one of {', '.join(SOURCES)}")
+    return out
+
+
+def run_probes(
+    conn_factory: Callable[[], Any], args: dict[str, str], out_dir: Any
+) -> dict[str, Any]:
+    """The corpus-wide probes (B2 location posture, B5 ingest rate). Block-independent, so they
+    run once in their own mode rather than once per censused block."""
+    params = parse_probes_args(args)
+    timeout_ms = int(params["timeout_s"]) * 1000
+    source = str(params["source"])
+    timings: dict[str, float] = {}
+    probes: dict[str, Any] = {}
+    errors: list[str] = []
+
+    out_path = Path(out_dir) / "probes.json"
+    payload: dict[str, Any] = {
+        "parameters": params,
+        "timings": timings,
+        "probes": probes,
+        "errors": errors,
+        "table": "",
+    }
+
+    def flush() -> None:
+        write_json(out_path, payload)
+
+    conn = conn_factory()
+    try:
+        for probe in CORPUS_PROBES:
+            started = time.monotonic()
+            try:
+                rows = _run(conn, probe.sql, corpus_probe_params(probe, source=source), timeout_ms)
+            except Exception as exc:  # noqa: BLE001 — one probe must not void the other
+                errors.append(f"{probe.name}: {type(exc).__name__}: {exc}")
+                flush()
+                continue
+            probes[probe.name] = _probe_payload(probe, rows)
+            timings[f"{probe.name}_s"] = round(time.monotonic() - started, 3)
+            flush()
+    finally:
+        close = getattr(conn, "close", None)
+        if callable(close):
+            close()
+
+    ingest = probes.get("ingest_rate")
+    ingest_rows = ingest if isinstance(ingest, list) else []
+    totals = {
+        "n_1d": sum(int(row.get("n_1d") or 0) for row in ingest_rows),
+        "n_7d": sum(int(row.get("n_7d") or 0) for row in ingest_rows),
+    }
+    probes["ingest_totals"] = totals
+
+    table = render_corpus_probes(probes, source=source)
+    print(table)
+    payload["table"] = table
+    flush()
+    return {
+        "source": source,
+        "ingest_1d": totals["n_1d"],
+        "ingest_7d": totals["n_7d"],
+        "granularities": len(probes.get("source_location") or []),
+        "errors": errors,
+        "timings": timings,
+        "probes_json": str(out_path),
+    }
 
 
 def run_census(
@@ -649,9 +1190,28 @@ def run_census(
                 except Exception as exc:  # noqa: BLE001 — one slow block must not void the rest
                     block["detail_error"] = f"{type(exc).__name__}: {exc}"
                     errors.append(f"detail {grain}/{block['block_code']}: {block['detail_error']}")
-                    continue
-                block.update(detail)
-                block["has_detail"] = bool(detail)
+                else:
+                    block.update(detail)
+                    block["has_detail"] = bool(detail)
+                # The probes do not read the detail result, and the detail statement is the
+                # heaviest one in this loop — so a detail timeout must not take down the four
+                # numbers the region is actually chosen on.
+                if params["probes"]:
+                    block["probes"] = fetch_block_probes(
+                        conn,
+                        grain=grain,
+                        block_code=block["block_code"],
+                        hash_share_min=params["hash_share_min"],
+                        timeout_ms=timeout_ms,
+                    )
+                    errors.extend(
+                        f"probe {name} {grain}/{block['block_code']}: {value['error']}"
+                        for name, value in block["probes"].items()
+                        if isinstance(value, dict) and "error" in value
+                    )
+                # Five statements per block now, each with the full budget: land every block
+                # as it completes so hitting the job's wall clock cannot discard the lot.
+                flush()
         timings["detail_s"] = round(time.monotonic() - detail_started, 3)
         flush()
     finally:
@@ -673,6 +1233,20 @@ def run_census(
     table = render_table(ranking)
     print(table)
 
+    # Ranked blocks first, then any probed block the detail statement dropped from the
+    # ranking — a probe-only line still answers the questions the probes were added for.
+    probed = [block for block in ranking if block.get("probes")]
+    seen_probed = {id(block) for block in probed}
+    for blocks in grains.values():
+        for block in blocks:
+            if block.get("probes") and id(block) not in seen_probed:
+                probed.append(block)
+    probe_rows = [probe_row(block) for block in probed]
+    probe_table = render_table(probe_rows, PROBE_TABLE_COLUMNS) if probe_rows else ""
+    if probe_table:
+        print()
+        print(probe_table)
+
     payload["ranking"] = [
         {
             "grain": b["grain"],
@@ -684,11 +1258,13 @@ def run_census(
         for b in ranking
     ]
     payload["table"] = table
+    payload["probe_table"] = probe_table
     flush()
     return {
         "blocks_town": len(grains.get("town", [])),
         "blocks_quarter": len(grains.get("quarter", [])),
         "detailed": len(ranking),
+        "probed": len(probe_rows),
         "errors": errors,
         "best": ranking[0]["block_name"] if ranking else None,
         "best_code": ranking[0]["block_code"] if ranking else None,

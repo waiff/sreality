@@ -46,7 +46,7 @@ _RE_VIEW = re.compile(
     re.IGNORECASE,
 )
 _RE_INDEX = re.compile(
-    rf"\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?({_QUALIFIED})\s+on\b",
+    rf"\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?({_QUALIFIED})\s+on\s+(?:only\s+)?({_QUALIFIED})",
     re.IGNORECASE,
 )
 _RE_FUNCTION = re.compile(
@@ -182,9 +182,19 @@ def parse_objects(sql: str) -> list[MigrationObject]:
             seen.add(key)
             found.append(MigrationObject(kind, ident))
 
-    for rx in (_RE_TABLE, _RE_VIEW, _RE_INDEX):
+    for rx in (_RE_TABLE, _RE_VIEW):
         for m in rx.finditer(body):
             add("relation", _clean(m.group(1)))
+    # An index always lives in its table's schema and CREATE INDEX cannot qualify
+    # the index name, so a bare name on a schema-qualified table is probed as
+    # `<schema>.<index>` — otherwise every index outside `public` reads ABSENT.
+    for m in _RE_INDEX.finditer(body):
+        name = _clean(m.group(1))
+        target = _clean(m.group(2))
+        schema = target.rsplit(".", 1)[0] if "." in target else "public"
+        if "." not in name and schema != "public":
+            name = f"{schema}.{name}"
+        add("relation", name)
     for m in _RE_FUNCTION.finditer(body):
         add("function", _clean(m.group(1)))
     for m in _RE_ADD_COLUMN.finditer(body):

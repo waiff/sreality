@@ -651,17 +651,17 @@ def test_every_created_object_is_revoked():
     # widened here: the `_public` views deliberately grant anon, and re-scoping this
     # gate over them is its own change.)
     for rel in re.findall(
-        r"create (?:table|view) (?:if not exists )?([a-z0-9_]+)", sql
+        r"create (?:table|view) (?:if not exists )?([a-z0-9_.]+)", sql
     ):
-        check(f"table/view {rel}", rf"revoke all on {rel}\b", relation_roles)
+        check(f"table/view {rel}", rf"revoke all on {re.escape(rel)}\b", relation_roles)
 
-    for m in re.finditer(r"create table (?:if not exists )?([a-z0-9_]+)\s*\(", sql):
+    for m in re.finditer(r"create table (?:if not exists )?([a-z0-9_.]+)\s*\(", sql):
         table = m.group(1)
         for col in _column_defs(_balanced(sql, m.end() - 1)):
             parts = col.split()
             if len(parts) >= 2 and parts[1] in ("bigserial", "serial"):
                 seq = f"{table}_{parts[0]}_seq"
-                check(f"sequence {seq}", rf"revoke all on sequence {seq}\b", relation_roles)
+                check(f"sequence {seq}", rf"revoke all on sequence {re.escape(seq)}\b", relation_roles)
 
     for m in re.finditer(r"create function ([a-z0-9_]+)\s*\(", sql):
         fn = m.group(1)

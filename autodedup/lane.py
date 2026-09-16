@@ -1,6 +1,10 @@
 """The autodedup lane: one dispatch-only entry point behind `.github/workflows/autodedup.yml`.
 
     python3 -m autodedup.lane --mode census --args "min_n=800,top=60" --out out/
+    python3 -m autodedup.lane --mode probes --args "source=remax" --out out/
+
+`probes` carries the corpus-wide measurements (ingest rate, one portal's location posture)
+that are block-independent, so the census never pays for them once per block.
 
 A mode is a callable registered in `MODES`; `--args` is a free-form `k=v,k=v` string each mode
 validates for itself, so a new mode needs no workflow edit. `out/summary.json` is written on
@@ -23,12 +27,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from autodedup.census import run_census, write_json
+from autodedup.census import run_census, run_probes, write_json
 
 Mode = Callable[[Callable[[], Any], dict[str, str], Path], dict[str, Any]]
 
 MODES: dict[str, Mode] = {
     "census": run_census,
+    "probes": run_probes,
 }
 
 
