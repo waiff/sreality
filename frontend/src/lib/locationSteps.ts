@@ -127,9 +127,9 @@ export const LOCATION_STEPS: Record<string, LocationStepWording> = {
     cs: 'mají údaj, který umí pravidlo porovnat',
     en: 'Has an attribute the rule can compare',
     note_cs:
-      'K obci navíc uvádějí dispozici, nebo plochu — jedno z toho, co pravidlo porovnává.',
+      'K obci navíc uvádějí dispozici, nebo plochu — jedno z toho, co pravidlo porovnává. U pozemku je plocha výměra parcely, jinde podlahová plocha; dispozici pozemek neuvádí nikdy, takže plocha je u něj jediná cesta.',
     note_en:
-      'On top of a town, the listing states a disposition (2+kk and the like) or a floor area — one of the two things the pairing rule compares. A listing with a town and neither attribute is counted in the missing-data table below.',
+      'On top of a town, the listing states a disposition (2+kk and the like) or an area — one of the two things the pairing rule compares. The area is the plot for land and the floor area for everything else. Land never states a disposition, so for a plot the area is not a fallback but the only route. The breakdown below splits this step’s loss by property type and by portal.',
     livesOn: 'candidates',
   },
   paired: {
