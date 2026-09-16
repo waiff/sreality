@@ -360,19 +360,31 @@ def test_every_bucket_builds_a_statement_with_the_same_placeholders() -> None:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("TEST_DATABASE_URL"),
+    not os.environ.get("TEST_DATABASE_URL") and os.environ.get("DB_RAILS_REQUIRED") != "1",
     reason="TEST_DATABASE_URL not set — the PREPARE sweep runs only in the CI DB job",
 )
 def test_every_bucket_prepares_against_the_real_schema() -> None:
     """The drill-down's statements are built by a FUNCTION, so `tests/sql_corpus.discover`
     (which reads module-level `*_SQL` constants) cannot see them. This is their equivalent
     of the schema sweep: every bucket must parse, name-resolve and type-check against the
-    live catalog — the layer a fake connection structurally cannot be."""
+    live catalog — the layer a fake connection structurally cannot be.
+
+    Skip posture matches the other DB rails: the migrations lane names this FILE in its
+    PREPARE step (.github/workflows/migrations.yml), so a lane that drops it or loses its
+    database fails here rather than skipping green — which is exactly how this test shipped
+    asserting nothing the first time.
+    """
+    db_url = os.environ.get("TEST_DATABASE_URL")
+    if not db_url:
+        pytest.fail(
+            "DB_RAILS_REQUIRED=1 but TEST_DATABASE_URL is not set — the migrations lane "
+            "is misconfigured and this rail would otherwise have skipped green."
+        )
     import psycopg
 
     from tests.sql_corpus import to_prepare_form
 
-    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as conn, conn.cursor() as cur:
+    with psycopg.connect(db_url) as conn, conn.cursor() as cur:
         for i, bucket in enumerate(sorted(sql.AUDIT_BUCKETS)):
             cur.execute(
                 f"PREPARE dd_{i} AS " + to_prepare_form(sql.audit_listings_statement(bucket))
