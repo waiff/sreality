@@ -130,10 +130,19 @@ export function CardFace({
             {/* listingRowPath is canonical-first (source + source_id_native from
                 properties_public), so the card links straight to the clean
                 /listing/{source}/{native} URL; it falls back to the legacy/property
-                route only for a representative with no natural key. */}
+                route only for a representative with no natural key.
+
+                Opens in a NEW TAB: the board is a triage surface the operator
+                works a column at a time, so following a card must not unload it.
+                No `state` seeding here — react-router hands a `target="_blank"`
+                link to the browser rather than navigating, so the new document
+                starts with no history state and ListingDetail resolves the
+                natural key itself (one round trip, the price of keeping the
+                board open). */}
             <Link
               to={listingRowPath(card)}
-              state={{ listingId: card.listing_id ?? undefined }}
+              target="_blank"
+              rel="noopener"
               title={inactive ? 'Neaktivní inzerát' : undefined}
               className={`font-mono tabular-nums text-sm hover:text-[var(--color-copper)] hover:underline underline-offset-2 ${priceColor}`}
             >
