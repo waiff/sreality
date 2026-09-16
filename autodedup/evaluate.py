@@ -50,7 +50,14 @@ from autodedup.labels import (
     Sample,
     pair_key,
 )
-from autodedup.model import LogisticModel, auc, expected_calibration_error, hand_initialised
+from autodedup.model import (
+    FIT_TOLERANCE,
+    IRLS_TOLERANCE,
+    LogisticModel,
+    auc,
+    expected_calibration_error,
+    hand_initialised,
+)
 from autodedup.settings import Settings
 
 Z_95: float = 1.96
@@ -73,6 +80,13 @@ WEIGHT_CAP_MEDIAN_MULTIPLE: float = 10.0
 
 BOOTSTRAP_DRAWS: int = 2000
 BOOTSTRAP_SEED: int = 20260916
+
+# Newton (IRLS) is the default optimiser: gradient descent needs thousands of epochs on ~100
+# correlated columns and still stops short, and a shrunk weight vector moves the calibrated
+# probability E21 reads its thresholds off. `gd` stays reachable — `--epochs` is how an
+# under-fit model is produced deliberately.
+FIT_METHODS: tuple[str, ...] = ("irls", "gd")
+FIT_MAX_ITER: int = 50
 
 SPLIT_SEED: int = 20260916
 TRAIN_SHARE: int = 60
@@ -1276,10 +1290,17 @@ def fit_model(
     weight_cap_multiple: float = WEIGHT_CAP_MEDIAN_MULTIPLE,
     l2: float = 1e-3,
     epochs: int = 3000,
+    method: str = "irls",
+    max_iter: int = FIT_MAX_ITER,
+    tol: float | None = None,
     version: str | None = None,
     split_map: Mapping[int, int] | None = None,
 ) -> tuple[LogisticModel, FitReport]:
     """Fit the §6 scorer on judged pairs, split 60/20/20 by component (never by pair).
+
+    `method` picks the optimiser: `irls` (the default) takes Newton steps and lands on the
+    penalised MLE in a handful of iterations; `gd` is the original full-batch gradient descent,
+    kept because `--epochs` is how a deliberately under-fit model is produced.
 
     Training weights ARE label credibility x design weight — a gold row should outvote a text
     row, and a thin stratum stands for more of the cohort. That product is capped at a multiple
@@ -1287,6 +1308,8 @@ def fit_model(
     the design, and the realised design effect is reported beside it."""
     if split != "cluster":
         raise ValueError(f"only the cluster split is implemented, got {split!r}")
+    if method not in FIT_METHODS:
+        raise ValueError(f"unknown fit method {method!r}, expected one of {sorted(FIT_METHODS)}")
     draw = sample if sample is not None else EMPTY_SAMPLE
     groups = dict(split_map) if split_map is not None else split_groups(run_pairs, labels)
 
@@ -1330,13 +1353,20 @@ def fit_model(
 
     prior = hand_initialised()
     model = hand_initialised()
-    model.fit(
-        [row["feats"] for row in train],
-        [row["y"] for row in train],
-        l2=l2,
-        epochs=epochs,
-        sample_weights=[row["weight"] for row in train],
-    )
+    feats_train = [row["feats"] for row in train]
+    ys_train = [row["y"] for row in train]
+    masses_train = [row["weight"] for row in train]
+    design_report: dict[str, Any] = {}
+    if method == "irls":
+        design_report = model.fit_irls(
+            feats_train, ys_train, l2=l2, max_iter=max_iter,
+            tol=IRLS_TOLERANCE if tol is None else tol, sample_weights=masses_train,
+        )
+    else:
+        model.fit(
+            feats_train, ys_train, l2=l2, epochs=epochs,
+            tol=FIT_TOLERANCE if tol is None else tol, sample_weights=masses_train,
+        )
 
     pre_ece = None
     if validation:
@@ -1364,7 +1394,9 @@ def fit_model(
     train_metrics = measured(train)
     validation_metrics = measured(validation)
     test_metrics = measured(test)
-    model.version = version or f"fit_{len(train)}_{seed}"
+    # The optimiser is part of the provenance: two methods on one split are two different
+    # coefficient vectors, and `model_version` is what reaches the scored rows in the DB.
+    model.version = version or f"fit_{method}_{len(train)}_{seed}"
 
     weights = sorted(
         ((name, model.weights.get(name, 0.0)) for name in model.feature_order),
@@ -1414,8 +1446,23 @@ def fit_model(
                 ),
                 "knots": [[edge, value] for edge, value in (model.calibration or [])],
             },
-            "convergence": {**dict(model.fit_report), "converged_flag": converged,
-                            "epochs": epochs, "l2": l2},
+            "convergence": {
+                **dict(model.fit_report), "converged_flag": converged, "method": method,
+                "l2": l2, "tol": (IRLS_TOLERANCE if method == "irls" else FIT_TOLERANCE)
+                if tol is None else tol,
+                # Only the ceiling that APPLIED: `epochs` beside a 10-step Newton fit reads as
+                # evidence about a knob that was never consulted.
+                **({"max_iter": max_iter} if method == "irls" else {"epochs": epochs}),
+            },
+            "design": {
+                "reported": method == "irls",
+                "n_terms": design_report.get("terms"),
+                "n_identified": design_report.get("terms_identified"),
+                "dropped_terms": design_report.get("dropped_terms", []),
+                "duplicate_groups": design_report.get("duplicate_groups", []),
+                "pinned_terms": design_report.get("pinned_terms", []),
+                "gradient_fallbacks": design_report.get("gradient_fallbacks", 0),
+            },
             "weights": [{"feature": name, "weight": value} for name, value in weights],
             "presence_weights": [
                 {"feature": name, "weight": model.presence_weights.get(name, 0.0)}
@@ -1660,14 +1707,43 @@ def _fit_headline(report: FitReport) -> list[str]:
     lines.append(f"abstentions skipped {split['n_abstain_skipped']}"
                  f"   unlabelled skipped {split['n_unlabelled_skipped']}")
     convergence = sections["convergence"]
+    method = convergence.get("method", "gd")
+    if method == "irls":
+        # More iterations do not rescue an unidentified design: with l2 at 0 over columns that
+        # duplicate the intercept the penalised MLE is at infinity, and RAISING l2 is the knob.
+        steps, residual, knob = (
+            convergence.get("iterations"),
+            f"max|delta| {convergence.get('max_abs_delta')}",
+            "--max-iter or raise --l2",
+        )
+    else:
+        steps, residual, knob = (
+            convergence.get("epochs_run"),
+            f"mean|grad| {convergence.get('mean_abs_grad')}",
+            "--epochs",
+        )
     if not convergence.get("converged_flag"):
         lines.append(
-            f"NOT CONVERGED         {convergence.get('epochs_run')} epochs at l2={convergence['l2']},"
-            f" mean|grad| {convergence.get('mean_abs_grad')}"
-            f" — raise --epochs before reading a threshold off this model"
+            f"NOT CONVERGED         {method}: {steps} iterations at l2={convergence['l2']},"
+            f" {residual}"
+            f" — raise {knob} before reading a threshold off this model"
         )
     else:
         lines.append(f"converged             {json.dumps(convergence, sort_keys=True)}")
+    design = sections.get("design") or {}
+    if design.get("reported"):
+        dropped = design.get("dropped_terms") or []
+        groups = design.get("duplicate_groups") or []
+        shown = ", ".join(dropped[:4]) + (f", +{len(dropped) - 4} more" if len(dropped) > 4 else "")
+        lines.append(
+            f"design                {design.get('n_terms')} terms ->"
+            f" {design.get('n_identified')} identified"
+            f"   dropped {len(dropped)} constant{f' ({shown})' if dropped else ''}"
+        )
+        for members in groups[:5]:
+            lines.append(f"  collinear             {' = '.join(members)}")
+        if len(groups) > 5:
+            lines.append(f"  collinear             +{len(groups) - 5} more groups")
     lines.append("top learned weights")
     for entry in sections["weights"][:10]:
         lines.append(f"  {entry['feature']:<26}{entry['weight']: .4f}")
@@ -1679,8 +1755,12 @@ def _fit_markdown(report: FitReport) -> str:
     lines = [f"# {report.title}", "", "## Headline", "", "```"]
     lines.extend(report.headline())
     lines.extend(["```", "", "## Split seal", "", "```",
-                  json.dumps(sections["split"], indent=2, sort_keys=True), "```", "",
-                  "## Learned weights", "", "| feature | weight | presence weight |",
+                  json.dumps(sections["split"], indent=2, sort_keys=True), "```"])
+    design = sections.get("design") or {}
+    if design.get("reported"):
+        lines.extend(["", "## Design (identified terms)", "", "```",
+                      json.dumps(design, indent=2, sort_keys=True), "```"])
+    lines.extend(["", "## Learned weights", "", "| feature | weight | presence weight |",
                   "| --- | ---: | ---: |"])
     presence = {entry["feature"]: entry["weight"] for entry in sections["presence_weights"]}
     for entry in sections["weights"]:

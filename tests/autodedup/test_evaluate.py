@@ -844,9 +844,45 @@ def test_validation_ece_is_labelled_in_sample_and_the_gate_reads_the_test_split(
 
 def test_a_fit_that_hits_the_epoch_ceiling_says_so_in_the_headline() -> None:
     rows, labels = planted_rows(n=120)
-    _, report = ev.fit_model(rows, labels, epochs=2)
+    _, report = ev.fit_model(rows, labels, method="gd", epochs=2)
     assert report.sections["convergence"]["converged_flag"] is False
-    assert "NOT CONVERGED" in "\n".join(report.headline())
+    headline = "\n".join(report.headline())
+    assert "NOT CONVERGED" in headline
+    assert "mean|grad|" in headline and "--epochs" in headline
+
+
+def test_a_newton_fit_that_hits_its_iteration_ceiling_says_so_in_its_own_terms() -> None:
+    rows, labels = planted_rows(n=120)
+    _, report = ev.fit_model(rows, labels, max_iter=1)
+    convergence = report.sections["convergence"]
+    assert convergence["converged_flag"] is False
+    assert convergence["method"] == "irls" and convergence["max_iter"] == 1
+    headline = "\n".join(report.headline())
+    assert "NOT CONVERGED" in headline
+    assert "max|delta|" in headline and "--max-iter" in headline
+
+
+def test_irls_is_the_default_and_converges_where_the_gradient_fit_stalls() -> None:
+    rows, labels = planted_rows(n=300)
+    newton, newton_report = ev.fit_model(rows, labels)
+    descent, descent_report = ev.fit_model(rows, labels, method="gd", epochs=3000)
+    convergence = newton_report.sections["convergence"]
+    assert convergence["method"] == "irls"
+    assert convergence["converged_flag"] is True
+    assert convergence["iterations"] < 30
+    assert set(convergence) >= {"iterations", "max_abs_delta", "log_loss", "converged"}
+    assert "converged  " in "\n".join(newton_report.headline())
+    # The whole point of the swap: the same penalised objective, reached rather than approached.
+    assert newton.fit_report["log_loss"] <= descent.fit_report["log_loss"] + 1e-9
+    assert newton_report.sections["test_metrics"]["auc"] >= (
+        descent_report.sections["test_metrics"]["auc"] - 0.02
+    )
+
+
+def test_fit_model_refuses_an_optimiser_it_does_not_implement() -> None:
+    rows, labels = planted_rows(n=20)
+    with pytest.raises(ValueError, match="newton-raphson"):
+        ev.fit_model(rows, labels, method="newton-raphson")
 
 
 def test_the_fit_cli_exposes_the_knobs_and_can_fail_on_a_short_fit(tmp_path: Path) -> None:
@@ -855,13 +891,15 @@ def test_the_fit_cli_exposes_the_knobs_and_can_fail_on_a_short_fit(tmp_path: Pat
     judgements = write_judgements(tmp_path / "j.jsonl", labels)
     out = io.StringIO()
     code = harness.main(
-        ["fit", str(run_dir), "--judgements", str(judgements), "--epochs", "2",
+        ["fit", str(run_dir), "--judgements", str(judgements),
+         "--method", "gd", "--epochs", "2",
          "--l2", "0.01", "--weight-cap", "3.0", "--require-convergence",
          "--out", str(tmp_path / "fit")], out=out
     )
     assert code == 1  # the model is still written; the exit code is the loud part
     fit_json = json.loads((tmp_path / "fit" / "fit.json").read_text(encoding="utf-8"))
     assert fit_json["convergence"]["epochs"] == 2 and fit_json["convergence"]["l2"] == 0.01
+    assert fit_json["convergence"]["method"] == "gd"
     assert fit_json["split"]["weight_cap"] == 3.0
     split_map = json.loads(
         (tmp_path / "fit" / harness.SPLIT_MAP_FILE).read_text(encoding="utf-8")
@@ -869,13 +907,147 @@ def test_the_fit_cli_exposes_the_knobs_and_can_fail_on_a_short_fit(tmp_path: Pat
     assert split_map
     out2 = io.StringIO()
     assert harness.main(
-        ["fit", str(run_dir), "--judgements", str(judgements), "--epochs", "2",
+        ["fit", str(run_dir), "--judgements", str(judgements), "--method", "gd", "--epochs", "2",
          "--split-map", str(tmp_path / "fit" / harness.SPLIT_MAP_FILE),
          "--out", str(tmp_path / "fit2")], out=out2
     ) == 0
     reused = json.loads((tmp_path / "fit2" / "fit.json").read_text(encoding="utf-8"))
     assert reused["split"]["seal"] == fit_json["split"]["seal"]
     assert reused["split"]["from_split_map"] is True
+
+
+def test_the_fit_cli_defaults_to_newton_and_can_fail_on_a_short_newton_fit(
+    tmp_path: Path,
+) -> None:
+    rows, labels = planted_rows(n=120)
+    run_dir = write_run(tmp_path, rows)
+    judgements = write_judgements(tmp_path / "j.jsonl", labels)
+    out = io.StringIO()
+    assert harness.main(
+        ["fit", str(run_dir), "--judgements", str(judgements), "--require-convergence",
+         "--out", str(tmp_path / "fit")], out=out
+    ) == 0
+    fit_json = json.loads((tmp_path / "fit" / "fit.json").read_text(encoding="utf-8"))
+    assert fit_json["convergence"]["method"] == "irls"
+    assert fit_json["convergence"]["converged_flag"] is True
+    assert fit_json["convergence"]["max_iter"] == ev.FIT_MAX_ITER
+    model = harness.load_model(str(tmp_path / "fit" / harness.MODEL_FILE))
+    assert model.fit_report["iterations"] >= 1.0
+    short = io.StringIO()
+    assert harness.main(
+        ["fit", str(run_dir), "--judgements", str(judgements), "--method", "irls",
+         "--max-iter", "1", "--require-convergence", "--out", str(tmp_path / "fit1")], out=short
+    ) == 1
+
+
+VISION_JUDGEMENTS = (
+    REAL_ARTIFACTS / "judge" / "35116313682" / "autodedup-judge-35116313682"
+    / "judgements.jsonl"
+)
+TEXT_JUDGEMENTS = (
+    REAL_ARTIFACTS / "judge" / "35115036274" / "autodedup-judge-35115036274"
+    / "judgements.jsonl"
+)
+
+
+@pytest.mark.skipif(
+    not (REAL_ARTIFACTS / "run1" / harness.PAIRS_FILE).is_file()
+    or not VISION_JUDGEMENTS.is_file()
+    or not TEXT_JUDGEMENTS.is_file(),
+    reason="the W4 run and judge artifacts are not in the scratchpad",
+)
+def test_smoke_newton_fit_over_the_real_run_and_both_judge_tiers(tmp_path: Path) -> None:
+    """The fit the W4b weights actually come from: both tiers, the real sample, Newton."""
+    out = io.StringIO()
+    code = harness.main(
+        ["fit", str(REAL_ARTIFACTS / "run1"),
+         "--judgements", str(VISION_JUDGEMENTS),
+         "--judgements", str(TEXT_JUDGEMENTS),
+         "--sample", str(VISION_JUDGEMENTS.parent / "sample.json"),
+         "--method", "irls", "--require-convergence",
+         "--out", str(tmp_path / "fit")], out=out
+    )
+    assert code == 0
+    payload = json.loads((tmp_path / "fit" / "fit.json").read_text(encoding="utf-8"))
+    convergence = payload["convergence"]
+    assert convergence["method"] == "irls"
+    assert convergence["converged_flag"] is True
+    assert convergence["iterations"] <= ev.FIT_MAX_ITER
+    assert payload["split"]["leakage_check"]["n_listings_in_multiple_splits"] == 0
+    assert payload["test_metrics"]["auc"] > 0.85
+    # The real cohort is where the unidentified columns actually live: always-on presence flags
+    # duplicate the intercept, and exactly-collinear presence groups share one effect.
+    design = payload["design"]
+    assert design["reported"] is True
+    assert design["dropped_terms"] and design["n_identified"] < design["n_terms"]
+    assert design["pinned_terms"] == []
+
+
+def test_the_convergence_section_carries_only_the_ceiling_that_applied() -> None:
+    """`epochs: 3000` beside a 10-step Newton fit is evidence about a knob nobody consulted."""
+    rows, labels = planted_rows(n=120)
+    _, newton = ev.fit_model(rows, labels)
+    _, descent = ev.fit_model(rows, labels, method="gd", epochs=50)
+    assert "max_iter" in newton.sections["convergence"]
+    assert "epochs" not in newton.sections["convergence"]
+    assert "epochs" in descent.sections["convergence"]
+    assert "max_iter" not in descent.sections["convergence"]
+    assert newton.sections["convergence"]["tol"] == pytest.approx(1e-8)
+    assert descent.sections["convergence"]["tol"] == pytest.approx(1e-6)
+
+
+def test_the_model_version_names_the_optimiser_that_produced_the_weights() -> None:
+    """`model_version` is what reaches the scored rows: two optimisers are two coefficient sets."""
+    rows, labels = planted_rows(n=120)
+    newton, newton_report = ev.fit_model(rows, labels)
+    descent, descent_report = ev.fit_model(rows, labels, method="gd", epochs=20)
+    assert newton.version.startswith("fit_irls_")
+    assert descent.version.startswith("fit_gd_")
+    assert newton.version != descent.version
+    assert newton_report.sections["model_version"] == newton.version
+    assert descent_report.sections["model_version"] == descent.version
+    assert ev.fit_model(rows, labels, version="pinned")[0].version == "pinned"
+
+
+def test_the_newton_fit_reports_the_terms_it_could_not_identify() -> None:
+    """A presence flag that is always 1 IS the intercept; the audit must not read it as evidence."""
+    rows, labels = planted_rows(n=150)
+    model, report = ev.fit_model(rows, labels)
+    design = report.sections["design"]
+    assert design["reported"] is True
+    assert design["n_terms"] > design["n_identified"]
+    assert "gap_days:present" in design["dropped_terms"]  # every planted row carries it
+    assert model.presence_weights["gap_days"] == 0.0
+    for name in design["dropped_terms"]:
+        feature = name.removesuffix(":present")
+        if name.endswith(":present"):
+            assert model.presence_weights.get(feature, 0.0) == 0.0, name
+        elif "*" not in name:
+            assert model.weights.get(feature, 0.0) == 0.0, name
+    headline = "\n".join(report.headline())
+    assert "design  " in headline and "identified" in headline
+    _, descent = ev.fit_model(rows, labels, method="gd", epochs=20)
+    assert descent.sections["design"]["reported"] is False
+
+
+def test_the_fit_cli_can_loosen_the_convergence_certificate(tmp_path: Path) -> None:
+    rows, labels = planted_rows(n=120)
+    run_dir = write_run(tmp_path, rows)
+    judgements = write_judgements(tmp_path / "j.jsonl", labels)
+    out = io.StringIO()
+    assert harness.main(
+        ["fit", str(run_dir), "--judgements", str(judgements), "--tol", "1e-2",
+         "--require-convergence", "--out", str(tmp_path / "loose")], out=out
+    ) == 0
+    loose = json.loads((tmp_path / "loose" / "fit.json").read_text(encoding="utf-8"))
+    assert loose["convergence"]["tol"] == 1e-2
+    tight = io.StringIO()
+    assert harness.main(
+        ["fit", str(run_dir), "--judgements", str(judgements),
+         "--out", str(tmp_path / "tight")], out=tight
+    ) == 0
+    strict = json.loads((tmp_path / "tight" / "fit.json").read_text(encoding="utf-8"))
+    assert loose["convergence"]["iterations"] <= strict["convergence"]["iterations"]
 
 
 def test_a_mismatched_neighbouring_sample_is_dropped_with_a_warning_not_used(

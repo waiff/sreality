@@ -8,6 +8,7 @@
     python3 -m autodedup.harness judge-sample runs/r1 --zone merge --n 400
     python3 -m autodedup.harness evaluate runs/r1 --judgements j.jsonl --out runs/r1/eval
     python3 -m autodedup.harness fit runs/r1 --judgements j.jsonl --out runs/r1/fit
+    python3 -m autodedup.harness errors runs/r1 --judgements j.jsonl --top 5
 
 No database, no network, no secrets: the artifact is the whole input. The artifact carries no
 PII by contract (PROGRAM.md E28), so everything here is safe to print and to paste into a PR.
@@ -39,7 +40,14 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
-from autodedup.evaluate import evaluate, fit_model, split_groups, write_report
+from autodedup.evaluate import (
+    FIT_MAX_ITER,
+    FIT_METHODS,
+    evaluate,
+    fit_model,
+    split_groups,
+    write_report,
+)
 from autodedup.features import (
     MIN_RARE_BLOCK_DOCS,
     RARE_TOKEN_CAP,
@@ -59,6 +67,7 @@ from autodedup.labels import (
 )
 from autodedup.model import LogisticModel, hand_initialised
 from autodedup.settings import Settings
+from autodedup.errors import DEFAULT_TOP, ERRORS_STEM, analyse
 
 PAIRS_FILE: str = "pairs.jsonl.gz"
 RUN_FILE: str = "run.json"
@@ -774,7 +783,8 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     try:
         model, report = fit_model(
             rows, labels, sample=sample, seed=args.seed, version=args.version,
-            epochs=args.epochs, l2=args.l2, weight_cap=args.weight_cap, split_map=groups,
+            epochs=args.epochs, method=args.method, max_iter=args.max_iter,
+            tol=args.tol, l2=args.l2, weight_cap=args.weight_cap, split_map=groups,
         )
     except ValueError as exc:
         print(f"fit failed: {exc}", file=sys.stderr)
@@ -801,8 +811,11 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
           file=out)
     print(f"  activate with: run <artifact> --model {model_path}", file=out)
     if not report.sections["convergence"].get("converged_flag"):
-        print("fit did not converge: raise --epochs (or lower --l2) before trusting the weights",
-              file=sys.stderr)
+        # The l2 advice points the OPPOSITE way per method: gradient descent stalls on a stiff
+        # penalty, Newton stalls when the penalty is too weak to identify the design at all.
+        knob = ("--max-iter (or raise --l2)" if args.method == "irls"
+                else "--epochs (or lower --l2)")
+        print(f"fit did not converge: raise {knob} before trusting the weights", file=sys.stderr)
         if args.require_convergence:
             return 1
     return 0
@@ -873,7 +886,15 @@ def build_parser() -> argparse.ArgumentParser:
                              help="deterministic 60/20/20 cluster-split seed")
     fit = sub.choices["fit"]
     fit.add_argument("--version", default=None, help="model version string to stamp")
-    fit.add_argument("--epochs", type=int, default=3000, help="gradient-descent epoch ceiling")
+    fit.add_argument("--method", choices=list(FIT_METHODS), default=FIT_METHODS[0],
+                     help="optimiser: irls (Newton, the default) or gd (gradient descent)")
+    fit.add_argument("--epochs", type=int, default=3000,
+                     help="gradient-descent epoch ceiling (--method gd)")
+    fit.add_argument("--max-iter", type=int, default=FIT_MAX_ITER,
+                     help="Newton iteration ceiling (--method irls)")
+    fit.add_argument("--tol", type=float, default=None,
+                     help="convergence tolerance: max|delta| for irls, mean|grad| for gd"
+                          " (default: the method's own)")
     fit.add_argument("--l2", type=float, default=1e-3, help="L2 penalty on the weights")
     fit.add_argument("--weight-cap", type=float, default=None,
                      help="cap on label weight x stratum weight"
@@ -882,11 +903,79 @@ def build_parser() -> argparse.ArgumentParser:
                      help="a split_map.json from an earlier fit, so a challenger is scored on"
                           " the incumbent's sealed split")
     fit.add_argument("--require-convergence", action="store_true",
-                     help="exit 1 when the fit hits the epoch ceiling short of tolerance")
+                     help="exit 1 when the fit hits its iteration ceiling short of tolerance")
     evaluate_parser = sub.choices["evaluate"]
     evaluate_parser.add_argument("--settings", default=None,
                                  help="Settings JSON; default: the settings on run.json")
+
+    # --- W4b: `errors` (autodedup/errors.py) -------------------------------------------
+    errors_parser = sub.add_parser(
+        "errors", help="false merges, false rejects and band composition, feature by feature"
+    )
+    errors_parser.add_argument("run_dir", help="a directory written by `run`")
+    errors_parser.add_argument("--judgements", action="append", required=True,
+                               help="judgements.jsonl from the judge lane; repeatable"
+                                    " (tiers are merged by --precedence)")
+    errors_parser.add_argument("--sample", default=None,
+                               help="sample.json carrying the per-stratum populations the"
+                                    " Horvitz-Thompson weights need; default: beside"
+                                    " --judgements")
+    errors_parser.add_argument("--out", default=None,
+                               help="directory for errors.json / errors.md (default: run_dir)")
+    errors_parser.add_argument("--top", type=int, default=DEFAULT_TOP,
+                               help="how many example pairs to list per error group")
+    errors_parser.add_argument("--precedence", action="append", default=None,
+                               help="tier precedence, highest first; repeatable"
+                                    " (default: gold, vision, text)")
+    errors_parser.add_argument("--threshold", action="append", type=float, default=None,
+                               help="score cut for the model-merge tables; repeatable"
+                                    " (default: the run's own t_hi and the rungs above it)")
+    errors_parser.set_defaults(func=cmd_errors, precedence_default=TIER_PRECEDENCE)
+
     return parser
+
+
+# --- W4b: the `errors` command (analysis lives in autodedup/errors.py) ---------------------
+
+
+def cmd_errors(args: argparse.Namespace, out: Any) -> int:
+    run_dir = Path(args.run_dir)
+    if not (run_dir / PAIRS_FILE).is_file():
+        print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
+        return 1
+    missing = [path for path in args.judgements if not Path(path).is_file()]
+    if missing:
+        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+        return 1
+    judgements, labels, _ = load_labels(args.judgements, args.precedence)
+    if not labels:
+        print("no usable labels in the judgements given", file=sys.stderr)
+        return 1
+    try:
+        sample, sample_note = resolve_sample(args.judgements, args.sample)
+    except ValueError as exc:
+        print(f"unusable --sample: {exc}", file=sys.stderr)
+        return 1
+    if sample is None and judgements:
+        sample = sample_from_judgements(judgements)
+    rows = read_pairs(run_dir)
+    # The score ladder is anchored on the cut the pairs were ZONED under, so no rung is a
+    # silent duplicate of the live merge set (see errors.threshold_ladder).
+    t_hi = run_settings(run_dir, None).t_hi
+    report = analyse(
+        rows, labels, judgements, sample,
+        top=args.top, t_hi=t_hi, thresholds=args.threshold,
+    )
+    out_dir = Path(args.out) if args.out else run_dir
+    json_path, markdown_path = write_report(report, out_dir / ERRORS_STEM)
+    print(f"errors {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}",
+          file=out)
+    print("", file=out)
+    for line in report.headline():
+        print(line, file=out)
+    print(f"\nwrote {json_path} and {markdown_path}", file=out)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None, out: Any = None) -> int:
