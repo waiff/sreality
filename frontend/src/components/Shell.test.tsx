@@ -8,7 +8,8 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
@@ -126,5 +127,61 @@ describe('<Shell> !AUDIT POLOH', () => {
     const link = await screen.findByRole('link', { name: '!AUDIT POLOH' });
     await waitFor(() => expect(link).toHaveAccessibleName('!AUDIT POLOH'));
     expect(link).toHaveAttribute('href', '/new-dedup/pin-audit');
+  });
+});
+
+/* THE BAR OVERFLOWED ITS OWN ROW. At 1440px the header measured 1555px and the
+ * last entries — Settings, and the account button after it — were clipped off
+ * the right edge. The height is load-bearing (three Browse panes pin themselves
+ * to 3.5rem), so the fix is to carry less: one "Admin" trigger with a section
+ * per program, and the admin-only links inside it.
+ *
+ * jsdom measures no widths, so what is pinned here is the STRUCTURE the fix
+ * rests on — one admin trigger, not four, and nothing lost on the way in.
+ */
+describe('<Shell> admin menu', () => {
+  it('carries the admin surfaces under one trigger instead of four', async () => {
+    const user = userEvent.setup();
+    renderShellWith(<p>page content</p>);
+    const nav = screen.getByRole('navigation');
+    for (const gone of ['NEW DEDUP', 'AUTODEDUP', 'Settings']) {
+      expect(within(nav).queryByRole('button', { name: new RegExp(`^${gone}`) })).toBeNull();
+    }
+    const trigger = within(nav).getByRole('button', { name: /^Admin/ });
+    await user.click(trigger);
+    /* Every section that used to be its own trigger, still reachable — and the
+     * three admin-only links that used to spend a slot in the row. */
+    for (const label of ['Broker Review', 'Datasets', 'Groups', 'Residual', 'Health']) {
+      expect(within(nav).getByRole('menuitem', { name: label })).toBeInTheDocument();
+    }
+    /* Paused, not removed: a surface switched off is a different fact from one
+     * that was deleted, so it stays visible and stays inert. */
+    expect(within(nav).getByText('Outreach')).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('lets the menu own its items through a labelled group, not a bare div', async () => {
+    const user = userEvent.setup();
+    renderShellWith(<p>page content</p>);
+    const nav = screen.getByRole('navigation');
+    await user.click(within(nav).getByRole('button', { name: /^Admin/ }));
+    const menu = within(nav).getByRole('menu');
+    /* A menu owns its menuitems directly or through a group. Sections went in to
+     * keep four programs legible under one trigger; a plain wrapper between the
+     * two would have bought that legibility with the menu's own structure. */
+    const sections = within(menu).getAllByRole('group');
+    expect(sections.length).toBeGreaterThan(1);
+    expect(within(sections[0]).getAllByRole('menuitem').length).toBeGreaterThan(0);
+    /* Each section is NAMED — and its visible heading is not read a second time. */
+    for (const section of sections) {
+      expect(section).toHaveAttribute('aria-label');
+    }
+  });
+
+  it('keeps the daily surfaces in the row itself', () => {
+    renderShellWith(<p>page content</p>);
+    const nav = screen.getByRole('navigation');
+    for (const label of ['Browse', 'Pipeline', 'Estimations', 'Collections']) {
+      expect(within(nav).getByRole('link', { name: label })).toBeInTheDocument();
+    }
   });
 });

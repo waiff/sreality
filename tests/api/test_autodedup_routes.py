@@ -44,6 +44,9 @@ _LABELS: dict[str, str] = {
     usql.CLUSTER_VERDICTS_SQL: "cluster_verdicts",
     usql.CLUSTER_CONFLICTS_SQL: "conflicts",
     usql.RESIDUAL_SQL: "residual",
+    usql.GROUPS_COUNT_SQL: "groups_count",
+    usql.RESIDUAL_COUNT_SQL: "residual_count",
+    usql.BLOCKS_SQL: "blocks",
     usql.LISTING_DETAIL_SQL: "listing_detail",
     usql.PAIR_ZONES_SQL: "zones",
     usql.CERTIFICATE_COUNTS_SQL: "certificates",
@@ -675,13 +678,169 @@ def test_group_filters_reach_the_statement_as_parameters(client, conn):
     assert params["limit"] == 11
 
 
+def test_the_block_grain_travels_with_the_block_code(client, conn):
+    """A block is a (code, grain) pair. `c490245` is a quarter and `o490245` a town, and
+    migration 529 added `block_grain` because the code alone silently conflated the two —
+    so the picker's two options must reach the statement as two different filters."""
+    client.get("/autodedup/groups", params={"block": 490245, "block_grain": "c"})
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["block_grain"] == "c"
+    # The headline count is the same cohort as the queue below it, grain included.
+    conn.canned = {"groups": [_cluster()], "groups_count": [(88,)]}
+    client.get("/autodedup/groups", params={"block": 490245, "block_grain": "c"})
+    assert _last_call(conn, usql.GROUPS_COUNT_SQL)["block_grain"] == "c"
+    assert "block_grain" in usql._CLUSTER_WHERE
+
+
+def test_a_block_grain_outside_the_vocabulary_is_refused(client, conn):
+    for surface in ("/autodedup/groups", "/autodedup/residual"):
+        assert client.get(surface, params={"block_grain": "x"}).status_code == 400
+
+
+def test_the_residual_block_filter_reads_the_store_the_block_comes_from(client, conn):
+    """`autodedup.listing_fp` is the lane's scratch copy of a location fact and no shipped
+    lane writes a row into it, so a block filter reading it emptied the queue for every
+    block on offer. The block of a pair is read where the engine reads it from."""
+    assert "listing_fp" not in usql.RESIDUAL_SQL
+    assert "listing_location" in usql.RESIDUAL_SQL
+    # `cast_obce_kod` when the town is split, else `obec_kod` — `fingerprint.block_key_of`.
+    assert "coalesce(ll.cast_obce_kod, ll.obec_kod)" in usql.RESIDUAL_SQL
+    # and the filter the count runs is the filter the page ran, joins included
+    assert usql._RESIDUAL_BLOCK in usql.RESIDUAL_COUNT_SQL
+    client.get("/autodedup/residual", params={"block": 490245, "block_grain": "c"})
+    assert _last_call(conn, usql.RESIDUAL_SQL)["block_grain"] == "c"
+
+
 def test_an_unset_group_filter_is_a_null_parameter_not_a_predicate(client, conn):
     client.get("/autodedup/groups")
     params = _last_call(conn, usql.GROUPS_WEAKEST_SQL)
-    for key in ("block", "source", "category_main", "category_type", "min_size", "max_size",
+    for key in ("block", "block_grain", "source", "category_main", "category_type",
+                "min_size", "max_size",
                 "min_score", "max_score", "verdict", "shared_photo", "has_judgement",
                 "after_score", "after_key", "after_ts", "after_size"):
         assert params[key] is None, key
+
+
+def test_the_first_page_carries_the_total_for_the_current_filter(client, conn):
+    """"20 of N". A keyset page cannot count itself, so the count is its own statement — and
+    it is the SAME filter: the route hands it the params dict the list read with."""
+    conn.canned = {"groups": [_cluster()], "groups_count": [(412,)]}
+    data = client.get("/autodedup/groups", params={"block": 500123}).json()["data"]
+    assert data["total"] == 412
+    assert _last_call(conn, usql.GROUPS_COUNT_SQL)["block"] == 500123
+
+
+def test_the_count_is_the_same_where_clause_as_the_page(client, conn):
+    """Two statements, one filter. Spelled as a text assertion because the fake connection
+    re-implements neither: a count that drifted from the list's predicate would hand the
+    operator a headline about a cohort the queue below it is not showing."""
+    assert usql._CLUSTER_WHERE in usql.GROUPS_COUNT_SQL
+    assert usql._CLUSTER_WHERE in usql.GROUPS_WEAKEST_SQL
+    assert usql._RESIDUAL_WHERE in usql.RESIDUAL_COUNT_SQL
+    assert usql._RESIDUAL_WHERE in usql.RESIDUAL_SQL
+    # The cursor is where the page is, not what the filter selects — the count carries none.
+    assert "after_score" not in usql.GROUPS_COUNT_SQL
+    assert "after_score" not in usql.RESIDUAL_COUNT_SQL
+    # Nor does it run the display-only cover LATERALs.
+    assert "images" not in usql.RESIDUAL_COUNT_SQL
+
+
+def test_a_continuation_page_does_not_recount(client, conn):
+    """Paging cannot change N, and counting again per page is pure cost on a statement that
+    already reads every matching row. `None` says "not counted here", never "zero"."""
+    conn.canned = {"groups": [_cluster()], "groups_count": [(412,)]}
+    data = client.get("/autodedup/groups", params={"after": "0.5|99"}).json()["data"]
+    assert data["total"] is None
+    assert all(sql != usql.GROUPS_COUNT_SQL for sql, _ in conn.calls)
+
+
+def test_the_residual_page_carries_its_own_total(client, conn):
+    conn.canned = {"residual": [_residual_row()], "residual_count": [(58,)]}
+    data = client.get("/autodedup/residual", params={"zone": "band"}).json()["data"]
+    assert data["total"] == 58
+    assert _last_call(conn, usql.RESIDUAL_COUNT_SQL)["zone"] == "band"
+
+
+def test_a_store_with_no_count_row_reports_no_total_not_zero(client, conn):
+    conn.canned = {"groups": [_cluster()]}
+    assert client.get("/autodedup/groups").json()["data"]["total"] is None
+
+
+# --------------------------------------------------------- the blocks of a generation
+
+
+def _block(key: int, grain: str = "o", **over: Any) -> tuple[Any, ...]:
+    values: dict[str, Any] = {
+        "block_key": key,
+        "block_grain": grain,
+        "name": "Jablonec nad Nisou",
+        "n_clusters": 412,
+        "n_listings": 907,
+    }
+    values.update(over)
+    return _tuple(usql.BLOCK_COLUMNS, **values)
+
+
+def test_blocks_are_offered_with_their_names_and_counts(client, conn):
+    """The BLOCK filter was a free-text field for a bigint RÚIAN code: typing a town name
+    silently dropped the parameter. This is the vocabulary that replaces it."""
+    conn.canned = {"blocks": [_block(563510), _block(490245, "c", name="Žižkov", n_clusters=88)]}
+    body = client.get("/autodedup/blocks", params={"generation": "g1"}).json()
+    assert body["store_ready"] is True
+    assert body["data"]["generation"] == "g1"
+    assert body["data"]["items"] == [
+        {
+            "block_key": 563510,
+            "block_grain": "o",
+            "name": "Jablonec nad Nisou",
+            "n_clusters": 412,
+            "n_listings": 907,
+        },
+        {
+            "block_key": 490245,
+            "block_grain": "c",
+            "name": "Žižkov",
+            "n_clusters": 88,
+            "n_listings": 907,
+        },
+    ]
+    assert _last_call(conn, usql.BLOCKS_SQL) == {"generation": "g1", "limit": 200}
+
+
+def test_a_block_with_no_resolved_name_is_still_offered(client, conn):
+    """A grain that predates migration 529 joins no name — the code is still a real filter
+    value, and a guessed name would be a town's number read as a quarter's."""
+    conn.canned = {"blocks": [_block(563510, grain=None, name=None)]}
+    item = client.get("/autodedup/blocks").json()["data"]["items"][0]
+    assert item["name"] is None
+    assert item["block_key"] == 563510
+
+
+def test_the_block_name_comes_from_the_resolved_location_store(client, conn):
+    """Names are never a portal's spelling and never a column of the autodedup schema: they
+    are read off `listing_location`, at the grain the block was keyed at."""
+    assert "listing_location" in usql.BLOCKS_SQL
+    assert "obec_name" in usql.BLOCKS_SQL and "cast_obce_name" in usql.BLOCKS_SQL
+    # The most frequent spelling wins, so a picker's label cannot flicker mid-resolve.
+    assert "ORDER BY grain, kod, n DESC" in usql.BLOCKS_SQL
+
+
+def test_the_blocks_vocabulary_is_bounded(client, conn):
+    """The busiest blocks first, capped: at corpus scale this is thousands of obce, which is
+    neither a payload worth sending nor a select anyone can use. A block outside the cap is
+    still a filter — the picker keeps whatever key a URL arrived with."""
+    assert "LIMIT %(limit)s::int" in usql.BLOCKS_SQL
+    assert "ORDER BY b.n_clusters DESC" in usql.BLOCKS_SQL
+    client.get("/autodedup/blocks")
+    assert _last_call(conn, usql.BLOCKS_SQL)["limit"] == 200
+
+
+def test_blocks_renders_when_the_store_does_not_exist(client, conn):
+    conn.ready = False
+    assert client.get("/autodedup/blocks").json() == {"data": None, "store_ready": False}
+
+
+def test_blocks_refuses_a_filter_outside_the_registry(client, conn):
+    assert client.get("/autodedup/blocks", params={"block": 1}).status_code == 400
 
 
 @pytest.mark.parametrize(
@@ -1255,6 +1414,7 @@ def test_stats_reports_what_the_engine_produced(client, conn):
         ("get", "/autodedup/groups/101", None),
         ("get", "/autodedup/residual", None),
         ("get", "/autodedup/pair/11/12", None),
+        ("get", "/autodedup/blocks", None),
     ],
 )
 def test_the_validation_routes_render_when_the_store_does_not_exist(
@@ -1306,6 +1466,7 @@ def test_a_verdict_against_a_store_that_does_not_exist_is_refused_not_accepted(
         ("get", "/autodedup/groups/101"),
         ("get", "/autodedup/residual"),
         ("get", "/autodedup/pair/11/12"),
+        ("get", "/autodedup/blocks"),
         ("post", "/autodedup/verdict"),
     ],
 )

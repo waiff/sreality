@@ -16,6 +16,7 @@
  * re-adds one.
  */
 
+import { useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 
@@ -310,7 +311,14 @@ function DigestPanel({ digest }: { digest: AutodedupDigest | null }) {
   );
 }
 
+/* THE EVIDENCE GRID IS THE POINT OF THIS PAGE, so a photo that will not load has
+ * to say so. `imageSrc` falls back to the portal's own CDN when the image was
+ * never copied into R2, and several portals refuse that request cross-origin
+ * (ERR_BLOCKED_BY_ORB) — which renders as an empty box. Judging a per-image
+ * Hamming delta against an empty box is exactly the wrong thing to ask of an
+ * operator: the tile below says "foto nedostupné" and the caption keeps the Δ. */
 function ImageSide({ title, images }: { title: string; images: AutodedupPairImage[] }) {
+  const [broken, setBroken] = useState<Record<string, boolean>>({});
   return (
     <div>
       <h3 className="font-mono text-[0.7rem] text-[var(--color-ink-3)]">{title}</h3>
@@ -318,22 +326,34 @@ function ImageSide({ title, images }: { title: string; images: AutodedupPairImag
         <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">No photo stored.</p>
       ) : (
         <ul className="mt-1 grid grid-cols-3 gap-2">
-          {images.map((img, i) => (
-            <li key={img.image_id ?? `${img.sequence}:${i}`}>
+          {images.map((img, i) => {
+            const key = String(img.image_id ?? `${img.sequence}:${i}`);
+            return (
+            <li key={key}>
               <div className="aspect-[4/3] overflow-hidden rounded-[var(--radius-xs)] bg-[var(--color-inset)]">
+                {broken[key] ? (
+                  <div className="h-full w-full flex items-center justify-center px-1 text-center">
+                    <span className="text-[0.58rem] text-[var(--color-ink-4)]">
+                      foto nedostupné
+                    </span>
+                  </div>
+                ) : (
                 <img
                   src={imageSrc(img)}
                   alt=""
                   loading="lazy"
+                  onError={() => setBroken((b) => ({ ...b, [key]: true }))}
                   className="h-full w-full object-cover"
                 />
+                )}
               </div>
               <p className="mt-0.5 font-mono text-[0.6rem] text-[var(--color-ink-4)] tabular-nums">
                 {img.best_hamming == null ? 'no match' : `Δ${img.best_hamming}`}
                 {img.best_match_image_id != null && ` → ${img.best_match_image_id}`}
               </p>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </div>
