@@ -457,7 +457,7 @@ def audit_listings_statement(bucket: str) -> str:
         " l.category_main, l.category_type, l.area_m2, l.floor, l.price_czk, l.is_active,"
         " l.first_seen_at, l.last_seen_at,"
         f" {identity_disposition_sql('l.')} AS disposition,"
-        " ll.display_label, ll.obec_kod, ll.granularity, ll.country_status,"
+        " location_display_label(ll.street_name, ll.house_number_cp, ll.house_number_co, ll.obec_name, ll.cast_obce_name, ll.country_code, ll.country_status) AS display_label, ll.obec_kod, ll.granularity, ll.country_status,"
         f" {_AUDIT_FLAGS['located']} AS located,"
         f" {_AUDIT_FLAGS['has_verdict']} AS has_verdict,"
         f" {_AUDIT_FLAGS['is_foreign']} AS is_foreign,"
