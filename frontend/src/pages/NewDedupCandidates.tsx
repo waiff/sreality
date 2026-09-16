@@ -292,6 +292,13 @@ export default function NewDedupCandidates() {
               </Card>
 
               <Card
+                title={`Nothing to compare — where “${stepLabel('eligible', 'en')}” lost its listings`}
+                lede={`These listings reached a town and then fell out because they stated neither of the two things the rule compares. The same listings are grouped twice: once by property type, because which attribute is even available differs by type — land never states a disposition, so its plot area is not a fallback but the only route — and once by portal, because a portal that omits an attribute its own property types depend on is a fix someone can actually make. Each row also carries how often that group states each attribute at all, so the note beside it is a reading rather than a claim.`}
+              >
+                <EligibilityLoss stats={stats} />
+              </Card>
+
+              <Card
                 title="Missing data — per portal, per property type"
                 lede="The chain and the attribute gaps again, one row per portal and property type, so a portal that systematically omits a field shows up as a column of low percentages rather than being averaged away. The first step columns are the same three questions the chain asks, in the same words. Click any column heading to sort by it."
               >
@@ -531,15 +538,15 @@ function missingRows(stats: NewDedupCandidateStats): MissingRow[] {
       basis: 'of all listings',
       basisCount: listings,
       explanation:
-        'The rule falls back to comparing floor areas for these — the fallback is on absence only, never on two dispositions that simply disagree.',
+        'The rule falls back to comparing areas for these — the fallback is on absence only, never on two dispositions that simply disagree. Land and commercial space are barely represented in the disposition count at all, which is why the breakdown above reads the fallback per property type.',
     },
     {
-      label: 'No floor area stated',
+      label: 'No area stated',
       count: listings - sum((r) => r.with_area),
       basis: 'of all listings',
       basisCount: listings,
       explanation:
-        'A zero area counts as missing here: a zero is a blank the parser wrote, not a measurement. For land, the area compared is the plot area.',
+        'One area column carries them all (W17): the plot for land, the floor area for everything else — so this row is comparable across property types. A zero counts as missing: a zero is a blank the parser wrote, not a measurement.',
     },
     {
       label: 'Apartments with no floor stated',
@@ -583,6 +590,211 @@ function MissingOverall({ stats }: { stats: NewDedupCandidateStats }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/* ------------------------------------------- nothing to compare, broken down */
+
+/* WHICH ATTRIBUTE EACH PROPERTY TYPE ACTUALLY NEEDS. The rule is one sentence for
+ * every type — a town, plus a disposition OR an area — but the two halves are not
+ * equally available, and which half is load-bearing differs by type. Land never
+ * carries a disposition, so its area is not a fallback at all: it is the only
+ * route. Saying that per type is the difference between "this listing is missing
+ * something" and "this listing is missing the thing that was ever going to work".
+ *
+ * `needs` names the route that realistically exists for the type; `note` says why,
+ * and what "area" means there — since W17 one polymorphic `area_m2` carries the
+ * plot for land and the floor area for everything else, so the word "area" is
+ * correct for every type while "floor area" is correct for only some.
+ *
+ * The share columns beside these notes come from the run, so "houses seldom state
+ * a disposition" is READ rather than asserted: if a portal starts publishing them,
+ * the note stays true and the number moves. */
+const ATTRIBUTE_NEED: Record<string, { needs: string; note: string }> = {
+  byt: {
+    needs: 'Disposition, or floor area',
+    note: 'Apartments are the one type where both halves of the rule really exist: nearly all state a disposition (2+kk and the like), and the floor area backs it up. A listing lost here stated neither.',
+  },
+  dum: {
+    needs: 'Floor area (disposition is rare)',
+    note: 'Houses seldom carry a disposition, so in practice the usable floor area is the route. The disposition column beside this row is what that looks like as a number.',
+  },
+  pozemek: {
+    needs: 'Plot area — the only route',
+    note: 'Land has no disposition to state, so the area is not a fallback here: it is the only way a plot becomes comparable. The area compared is the plot area, which since W17 reaches the same column every other type uses.',
+  },
+  komercni: {
+    needs: 'Floor area — the only route',
+    note: 'Commercial space almost never carries a disposition, so a missing area is fatal rather than inconvenient.',
+  },
+  ostatni: {
+    needs: 'Floor area — the only route',
+    note: 'A mixed bag (garages, cottages, and whatever a portal could not file elsewhere) that rarely states a disposition, so the area carries it.',
+  },
+};
+
+const UNKNOWN_TYPE_NEED = {
+  needs: 'Neither can be assumed',
+  note: 'The portal never stated a property type, so the rule cannot even say which attribute it should have been given.',
+};
+
+const attributeNeed = (cm: string | null) =>
+  cm == null ? UNKNOWN_TYPE_NEED : (ATTRIBUTE_NEED[cm] ?? UNKNOWN_TYPE_NEED);
+
+const UNKNOWN_KEY = ' unknown';
+
+interface LossGroup {
+  key: string;
+  label: string;
+  lost: number;
+  listings: number;
+  locatedTown: number;
+  withDisposition: number;
+  withArea: number;
+}
+
+/* One pass over the funnel rows, grouped by whichever key the caller asks for.
+ * The lane measured every column here; this only adds rows that are already
+ * disjoint (a funnel row is one source × type × deal, counted once). */
+function groupLoss(
+  rows: NewDedupCandidateFunnelRow[],
+  keyOf: (r: NewDedupCandidateFunnelRow) => string | null,
+  labelOf: (r: NewDedupCandidateFunnelRow) => string,
+): LossGroup[] {
+  const out = new Map<string, LossGroup>();
+  for (const r of rows) {
+    const key = keyOf(r) ?? UNKNOWN_KEY;
+    const g: LossGroup = out.get(key) ?? {
+      key,
+      label: labelOf(r),
+      lost: 0,
+      listings: 0,
+      locatedTown: 0,
+      withDisposition: 0,
+      withArea: 0,
+    };
+    g.lost += r.town_no_attribute ?? 0;
+    g.listings += r.listings ?? 0;
+    g.locatedTown += r.located_town ?? 0;
+    g.withDisposition += r.with_disposition ?? 0;
+    g.withArea += r.with_area ?? 0;
+    out.set(key, g);
+  }
+  return [...out.values()].sort((a, b) => b.lost - a.lost);
+}
+
+/* The eligibility step's loss, split the two ways that answer different
+ * questions. BY TYPE asks "which kind of property does the rule structurally
+ * struggle with"; BY PORTAL asks "who is not publishing it". They are the same
+ * listings counted twice, which the lede says out loud so the second table is
+ * never read as a further loss. */
+function EligibilityLoss({ stats }: { stats: NewDedupCandidateStats }) {
+  /* `stats.funnel ?? []` inline would mint a new array every render and defeat
+   * both memos below — the empty case has to be memoised too. */
+  const rows = useMemo(() => stats.funnel ?? [], [stats.funnel]);
+  const byType = useMemo(
+    () => groupLoss(rows, (r) => r.category_main, (r) => typeLabel(r.category_main)),
+    [rows],
+  );
+  const byPortal = useMemo(() => groupLoss(rows, (r) => r.source, (r) => dash(r.source)), [rows]);
+  const total = byType.reduce((acc, g) => acc + g.lost, 0);
+
+  if (!rows.length) {
+    return <p className="text-sm text-[var(--color-ink-3)]">This run counted no listings.</p>;
+  }
+  if (total === 0) {
+    return (
+      <p className="text-sm text-[var(--color-ink-3)]">
+        Every listing that reached a town also stated something the rule can compare, so this
+        step lost nothing. The tables appear when it does.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-[0.68rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)] font-medium">
+          By property type
+        </h3>
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={HEAD}>
+                <th className={TH}>Property type</th>
+                <th className={TH}>What the rule needs, and why</th>
+                <th className={`${TH} text-right`}>Lost here</th>
+                <th className={`${TH} text-right`}>Of the loss</th>
+                <th className={`${TH} text-right`}>Of its own towned listings</th>
+                <th className={`${TH} text-right`}>States a disposition</th>
+                <th className={`${TH} text-right`}>States an area</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byType.map((g) => {
+                const need = attributeNeed(g.key === UNKNOWN_KEY ? null : g.key);
+                return (
+                  <tr key={g.key} className={ROW} data-testid={`eligibility-type-${g.key}`}>
+                    <td className={`${TD} align-top whitespace-nowrap`}>{g.label}</td>
+                    <td className={`${TD} align-top`}>
+                      <div className="text-[var(--color-ink)]">{need.needs}</div>
+                      <p className="mt-0.5 text-[0.72rem] leading-relaxed text-[var(--color-ink-3)] max-w-[34rem]">
+                        {need.note}
+                      </p>
+                    </td>
+                    <td className={`${NUM} align-top`}>{fmtCount(g.lost)}</td>
+                    <td className={`${NUM} align-top`}>{fmtPct(share(g.lost, total))}</td>
+                    <td className={`${NUM} align-top`}>{fmtPct(share(g.lost, g.locatedTown))}</td>
+                    <td className={`${NUM} align-top`}>
+                      {fmtPct(share(g.withDisposition, g.listings))}
+                    </td>
+                    <td className={`${NUM} align-top`}>{fmtPct(share(g.withArea, g.listings))}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="text-[0.68rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)] font-medium">
+          By portal
+        </h3>
+        <p className="mt-1 text-[0.72rem] leading-relaxed text-[var(--color-ink-3)] max-w-[52rem]">
+          The same {fmtCount(total)} listings again, grouped by who published them. A portal near
+          the top of this table is not publishing an attribute its property types need — a
+          different problem, with a different fix, from a property type that has no attribute to
+          publish in the first place.
+        </p>
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className={HEAD}>
+                <th className={TH}>Portal</th>
+                <th className={`${TH} text-right`}>Lost here</th>
+                <th className={`${TH} text-right`}>Of the loss</th>
+                <th className={`${TH} text-right`}>Of its own towned listings</th>
+                <th className={`${TH} text-right`}>States a disposition</th>
+                <th className={`${TH} text-right`}>States an area</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byPortal.map((g) => (
+                <tr key={g.key} className={ROW} data-testid={`eligibility-portal-${g.key}`}>
+                  <td className={TD}>{g.label}</td>
+                  <td className={NUM}>{fmtCount(g.lost)}</td>
+                  <td className={NUM}>{fmtPct(share(g.lost, total))}</td>
+                  <td className={NUM}>{fmtPct(share(g.lost, g.locatedTown))}</td>
+                  <td className={NUM}>{fmtPct(share(g.withDisposition, g.listings))}</td>
+                  <td className={NUM}>{fmtPct(share(g.withArea, g.listings))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

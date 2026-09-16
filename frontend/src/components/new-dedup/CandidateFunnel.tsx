@@ -208,8 +208,9 @@ export default function CandidateFunnel({
         A <em>pair</em> is two listings the rule thinks might be the same property; a{' '}
         <em>rung</em> is which attributes it compared them on. Every pair sits on exactly one
         rung — C1 when both listings state a disposition, C3 when at least one does not and the
-        rule falls back to floor area. C1 checks the floor area too, but as a wide sanity check
-        rather than the match itself. Being a candidate is not a decision that they are the same
+        rule falls back to the area (the plot for land, the floor area otherwise). C1 checks the
+        area too, but as a wide sanity check rather than the match itself. Being a candidate is
+        not a decision that they are the same
         property; it is only the shortlist the later levels look at.
       </p>
     </div>

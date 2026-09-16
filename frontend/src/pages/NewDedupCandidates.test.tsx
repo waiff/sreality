@@ -326,11 +326,14 @@ describe('<NewDedupCandidates>', () => {
 
   it('sorts the per-portal table when a column heading is clicked', async () => {
     renderPage();
-    await screen.findByText('Missing data — per portal, per property type');
+    const heading = await screen.findByText('Missing data — per portal, per property type');
 
+    /* Scoped to THIS table's own <section>: the eligibility breakdown above it
+     * also prints a portal column, and an unscoped row sweep would read both
+     * tables as one and see every portal twice. */
+    const card = heading.closest('section')!;
     const portalCells = () =>
-      screen
-        .getAllByRole('row')
+      Array.from(card.querySelectorAll('tbody tr'))
         .map((r) => r.querySelector('td')?.textContent)
         .filter((t): t is string => t === 'sreality' || t === 'bazos');
 
@@ -338,6 +341,66 @@ describe('<NewDedupCandidates>', () => {
     expect(portalCells()).toEqual(['sreality', 'bazos']);
     fireEvent.click(screen.getByRole('button', { name: /Listings/ }));
     expect(portalCells()).toEqual(['bazos', 'sreality']);
+  });
+
+  /* The eligibility step's loss, split by property type and by portal. The two
+   * tables are the SAME 44 listings counted twice — 24 sreality apartments and 20
+   * bazos plots — so the assertions below pin both that each split sums to the
+   * step's own loss and that the per-type note names the attribute that type
+   * actually depends on. */
+  it('breaks the eligibility loss down by property type, largest first', async () => {
+    renderPage();
+    await screen.findByText(/where “.*” lost its listings/);
+
+    const byt = screen.getByTestId('eligibility-type-byt');
+    const pozemek = screen.getByTestId('eligibility-type-pozemek');
+
+    /* 24 of the 44 lost, and 24 of the 480 apartments that reached a town. */
+    expect(byt).toHaveTextContent('24');
+    expect(byt).toHaveTextContent('54,5 %');
+    expect(byt).toHaveTextContent('5,0 %');
+    /* Both halves of the rule exist for an apartment. */
+    expect(byt).toHaveTextContent('Disposition, or floor area');
+    /* Read from the run, not asserted: 420/600 state one, 450/600 state an area. */
+    expect(byt).toHaveTextContent('70,0 %');
+    expect(byt).toHaveTextContent('75,0 %');
+
+    /* Land: 20 of 44, and 20 of the 120 plots that reached a town. */
+    expect(pozemek).toHaveTextContent('20');
+    expect(pozemek).toHaveTextContent('45,5 %');
+    expect(pozemek).toHaveTextContent('16,7 %');
+    /* The note that makes this table worth having: for land the area is not a
+     * fallback, and the 0,0 % beside it is why. */
+    expect(pozemek).toHaveTextContent('Plot area — the only route');
+    expect(pozemek).toHaveTextContent('0,0 %');
+
+    /* Largest loss first, so the row that costs most is read first. */
+    const order = screen
+      .getAllByTestId(/^eligibility-type-/)
+      .map((el) => el.getAttribute('data-testid'));
+    expect(order).toEqual(['eligibility-type-byt', 'eligibility-type-pozemek']);
+  });
+
+  it('breaks the same eligibility loss down by portal', async () => {
+    renderPage();
+    await screen.findByText(/where “.*” lost its listings/);
+
+    expect(screen.getByTestId('eligibility-portal-sreality')).toHaveTextContent('24');
+    expect(screen.getByTestId('eligibility-portal-bazos')).toHaveTextContent('20');
+
+    /* The two splits are the same listings: each must sum to the step's own loss
+     * of 44, which is the one number the lane measured. */
+    const lostCell = (id: string) =>
+      Number(
+        screen
+          .getByTestId(id)
+          .querySelectorAll('td')
+          [id.includes('-type-') ? 2 : 1].textContent!.replace(/\D/g, ''),
+      );
+    expect(lostCell('eligibility-type-byt') + lostCell('eligibility-type-pozemek')).toBe(44);
+    expect(
+      lostCell('eligibility-portal-sreality') + lostCell('eligibility-portal-bazos'),
+    ).toBe(44);
   });
 
   it('renders the town statistics, showing an em dash where a name is missing', async () => {
