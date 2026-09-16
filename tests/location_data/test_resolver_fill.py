@@ -250,18 +250,31 @@ def test_a_town_bound_by_name_alone_is_placed_at_the_towns_own_point():
     assert resolution.disputed is None
 
 
-def test_a_street_with_no_pin_falls_back_to_its_towns_point():
-    """Case 2. `ruian_streets` carries no geometry in the mirror, so there is no street point
-    to fall back TO — the town's is the finest thing that exists. The row still grades
-    `street`: the address identity is what BIND matched, and the position is the half that is
-    coarser than the level, not the other way round."""
+def test_a_street_with_no_pin_is_placed_on_the_street_itself():
+    """Case 2, rewritten by W18. `ruian_streets` still carries no geometry, but the street's
+    own ADDRESS POINTS do: the row sits at their centroid instead of at the town's point,
+    which is a position the level actually justifies rather than one coarser than it."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Bílovec"),
         mm.claim(2, "street_name", value_text="Slunečná"),
     ])
     assert resolution.ulice_kod == 103
     assert resolution.granularity == "street"
-    assert (resolution.lat, resolution.lon) == (49.7573, 18.0158)
+    assert (resolution.lat, resolution.lon) == (49.7574, 18.0159)
+    assert (resolution.lat, resolution.lon) != (49.7573, 18.0158)  # not the town's point
+
+
+def test_a_street_the_register_holds_with_no_address_points_still_falls_back_to_the_town():
+    """The other half of case 2: `Bernáčkova` is a register street with no point of its own,
+    which is the pre-W18 behaviour and stays it. A street without address points has no
+    position — inventing one would be the town's point pretending to be the street's."""
+    resolution = _resolve(
+        [mm.claim(1, "obec_name", value_text="Brno"),
+         mm.claim(2, "street_name", value_text="Bernáčkova")],
+        mirror=mm.statutory_city_mirror(),
+    )
+    assert resolution.ulice_kod == 200
+    assert (resolution.lat, resolution.lon) == (49.1951, 16.6068)  # Brno's own point
 
 
 def test_an_address_point_with_no_pin_publishes_the_address_points_own_point():

@@ -86,7 +86,7 @@ def test_the_claim_read_takes_a_listings_newest_evidence_not_only_the_active_con
 def test_the_w11_rule_carries_its_own_resolver_version():
     """A rule that can change an output must move `RESOLVER_VERSION`, or the sweep's version
     arm never re-queues the rows the old rule got wrong — which here is 595,816 of them."""
-    assert RESOLVER_VERSION == "resolver:v5.1"
+    assert RESOLVER_VERSION == "resolver:v5.2"
 
 
 class _ClaimCursor:
@@ -94,10 +94,10 @@ class _ClaimCursor:
 
     It refuses a statement that does not carry them and then applies them to its own rows, so
     the tests below go red BOTH when a rail is dropped from the SQL and when the loader stops
-    using that SQL. `sreality` is at version 4 and `bazos` at 6 (the live 2026-09-14 heads).
+    using that SQL. `sreality` is at version 4 and `bazos` at 7 (W18's head).
     """
 
-    ACTIVE = {"sreality": 4, "bazos": 6}
+    ACTIVE = {"sreality": 4, "bazos": 7}
 
     #  id, listing_id, source, licence_class, contract version (None = no entry)
     ROWS = (

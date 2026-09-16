@@ -35,6 +35,29 @@ _STREET_TYPE = re.compile(
     r"nábřeží|nabrezi|nábř\.|sídliště|sidliste)\s+",
     re.IGNORECASE,
 )
+# The GENERIC wrapper a Czech ad puts round a street name, and the ONLY part of a street
+# string that means nothing: `ulice X`, `ul. X`, `v ulici X`, `na ulici X`, `X ulici`. It is
+# stripped at BOTH ends because the portals write both ("ul. Jiráskova", "Livornské ulici").
+#
+# `náměstí`, `třída`, `nábřeží` and `sídliště` are deliberately NOT here. RÚIAN spells them
+# INTO the official name — `ruian_streets.name_norm` is built by
+# `name_index.normalize_street_name`, which drops a leading `ulice`/`ul.` and nothing else —
+# so "náměstí Míru" is the register's own string and 215 bazos titles bind only because the
+# word survived. `split_street_type` below still parses them off for the OTHER match key;
+# the binder tries both forms and that is what makes the pair symmetric with the register.
+# What makes a street value a LINE rather than a name: the separators the portals write a
+# composite address with. ONE constant — the claim layer asks it to decide which gate applies
+# (`reject_as_town` judges a name, never a line), BIND asks it to route the claim away from
+# R2/R3, and the binder splits on it. Three copies of it were three answers waiting to drift.
+STREET_LINE_SEPARATOR = re.compile(r"[,;]|\s[-‐-―−]\s")
+
+_STREET_GENERIC_LEAD = re.compile(
+    r"^\s*(?:(?:v|ve|na)\s+)?(?:ulice|ulici|ul\.|ul\b)\s*", re.IGNORECASE)
+_STREET_GENERIC_TRAIL = re.compile(r"\s+(?:ulice|ulici|ul\.|ul)\s*$", re.IGNORECASE)
+# A trailing `.` is sentence punctuation UNLESS it belongs to the name itself (`Karla IV.`),
+# so it goes only after a LOWERCASE letter — and with any separator noise around it.
+_SENTENCE_TAIL = re.compile(r"(?<=[a-záčďéěíňóřšťúůýž])\.\s*$")
+
 # '28. října', '17. listopadu', '1. máje' — a LEADING ordinal is part of the street name,
 # never a house number (03 §3.3.1, named regression test).
 _NUMERIC_LEADING = re.compile(r"^\s*\d{1,3}\.\s*\S")
@@ -65,6 +88,37 @@ def case_fold(value: str) -> str:
 
 def split_glue(value: str) -> str:
     return _GLUE.sub(" ", value)
+
+
+def strip_street_generic(value: str, *, trailing: bool = True) -> str:
+    """Drop the generic `ulice`/`ul.` wrapper, and nothing else.
+
+    `trailing=False` drops only the LEADING one, and that is what the claim layer uses. A
+    claim is what the portal WROTE, and the register holds `Nová ulice` ×8, `Husova ulice`,
+    `V Ulici`, `Na Ulici` and `I. ulice`…`IX. ulice`: stripping the trailing word at the claim
+    layer destroys the only key those can ever bind by, because the matcher's unfolded key is
+    taken from the stored value. The matcher strips BOTH ends, and it keeps the unfolded form
+    beside the stripped one — which is how `Livornské ulici` and `Nová ulice` are both
+    answered from one stored string.
+
+    THE one fold shared by the claim layer (`claims_common.street_token`, which is all a
+    portal's street text is normalised by) and by the binder — two copies of it would be two
+    answers to "is this the same street", which is the question the whole wave turns on.
+
+    It returns "" when the wrapper IS the whole value ("Na Ulici", "ulice"), and both callers
+    treat that as "the fold found nothing to do" rather than as an empty name: the register
+    holds `Nová ulice` ×8, `V Ulici`, `Na Ulici`, `Horní Ulice`, `Husova ulice` and
+    `I. ulice`…`IX. ulice`, so the generic word is sometimes the street. The UNFOLDED form is
+    always a match key too (`composite.street_match_keys`), which is how those rows bind.
+
+    Sentence punctuation comes off FIRST: without that, `Vinohradská ulice.` keeps its
+    generic word, because the trailing pattern needs the word to end the string.
+    """
+    trimmed = _SENTENCE_TAIL.sub("", value or "").strip()
+    stripped = _STREET_GENERIC_LEAD.sub("", trimmed)
+    if trailing:
+        stripped = _STREET_GENERIC_TRAIL.sub("", stripped)
+    return _WS.sub(" ", stripped).strip()
 
 
 def split_street_type(value: str) -> tuple[str, str | None]:

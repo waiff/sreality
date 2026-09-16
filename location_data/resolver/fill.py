@@ -96,11 +96,16 @@ def fill(
         okres_name=values.get("okres_name"),      # type: ignore[arg-type]
         obec_name=values.get("obec_name"),        # type: ignore[arg-type]
         cast_obce_name=values.get("cast_obce_name"),  # type: ignore[arg-type]
-        street_name=(
-            operator.get("street_name") or binding.street_name or constraints.street_verbatim
-        ),
-        house_number_cp=operator.get("house_number_cp") or _cp(point, constraints),
-        house_number_co=operator.get("house_number_co") or _co(point, constraints),
+        # W18: the street is the REGISTER's or it is nothing. `binding.street_name` is set
+        # only on a row that bound one (R0/R1 off the address point, R2/R3 off
+        # `ruian_streets`), so an unbound claim text no longer reaches the answer row — the
+        # 1,864 rows that carried a street name with `ulice_kod` NULL fall back to their
+        # část obce or their town. One rule for all nine portals, and the deliberate cost of
+        # it is coverage: a real street the mirror does not hold is dropped rather than
+        # served as a name nothing can be joined to, filtered on, or de-duplicated by.
+        street_name=(operator.get("street_name") or binding.street_name),
+        house_number_cp=operator.get("house_number_cp") or _cp(point, constraints, binding),
+        house_number_co=operator.get("house_number_co") or _co(point, constraints, binding),
         psc=operator.get("psc")
         or (point.psc if point is not None and point.psc else constraints.psc),
         lat=lat,
@@ -164,16 +169,26 @@ def _registry_point(
     return None, None
 
 
-def _cp(point, constraints: Constraints) -> str | None:
+def _cp(point, constraints: Constraints, binding: Binding) -> str | None:
+    """The address point's, else the BIND's own, else the listing-wide claim.
+
+    The bind's own is the middle rung and it exists for one reason: a street bound out of one
+    segment of one line owns that segment's number and no other claim's (W18). Without it a
+    listing carrying `Nad Bořislavkou` and a separate line reading `Livornská 5` published
+    `Nad Bořislavkou 5` at `street_segment` grain."""
     if point is not None and point.cislo_domovni is not None:
         return str(point.cislo_domovni)
+    if binding.house_number_cp is not None:
+        return binding.house_number_cp
     return str(constraints.cislo_domovni) if constraints.cislo_domovni is not None else None
 
 
-def _co(point, constraints: Constraints) -> str | None:
+def _co(point, constraints: Constraints, binding: Binding) -> str | None:
     """The orientation number keeps its letter: `40a` is a different door from `40`."""
     if point is not None and point.cislo_orientacni is not None:
         return f"{point.cislo_orientacni}{point.znak_orientacniho or ''}"
+    if binding.house_number_co is not None:
+        return binding.house_number_co
     if constraints.cislo_orientacni is None:
         return None
     return f"{constraints.cislo_orientacni}{constraints.znak_orientacniho or ''}"

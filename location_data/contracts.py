@@ -237,11 +237,14 @@ class ReaderContract:
 # (`legacy_text_column`, `geom_column`, `coords_stamp_quality`): the `legacy_column`
 # surface is gone, so an entry naming one could not be declared at all.
 READER_CONTRACTS: dict[str, ReaderContract] = {
+    # `claim_confidence` says what KIND of field this is — an address field, or a headline
+    # the resolver may match only exactly (W18). It is read by the reader and stamped on the
+    # claim, so it is the contract's statement and never a rule that names a portal.
     "scalar": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer"}),
         consults_transforms=True,
-        optional_keys=frozenset({"value_kind", "fallback"})),
+        optional_keys=frozenset({"value_kind", "fallback", "claim_confidence"})),
     "namespaced_id": ReaderContract(
         substrates=_PAYLOAD_SURFACES, methods=_STRUCTURED,
         locator_keys=frozenset({"json_pointer", "namespace"}),
@@ -443,6 +446,12 @@ IMPLEMENTED_TRANSFORMS = frozenset({
     # idnes@4: the same `country` type off a STRUCTURED alpha-2 field instead of an address
     # tail — no name table to fall outside of, and CZ dropped rather than claimed.
     "foreign_country_code",
+    # W18: a street named in PROSE, where the contract's own cue-anchored pattern already
+    # did the selecting. It neither strips the cue (S1 owns that) nor asks whether the
+    # token looks Czech (the REGISTER owns that, and `looks_like_czech_street` refuses the
+    # real street `28. října`) — it refuses a geo name, a foreign script and trailing
+    # sentence punctuation, and nothing else.
+    "street_token",
 })
 IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
 

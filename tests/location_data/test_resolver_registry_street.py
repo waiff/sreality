@@ -85,12 +85,22 @@ def test_the_registry_still_fills_a_street_nobody_claimed():
     assert resolution.street_name == "nám. Budovatelů"
 
 
-def test_a_street_the_registry_cannot_bind_keeps_the_portals_spelling():
-    """Preserve-if-null: with no address point and no matching RÚIAN street there is nothing
-    to respell to, and dropping the value would be worse than keeping the portal's."""
+def test_a_street_the_registry_cannot_bind_is_not_published_at_all():
+    """W18 reversed this one, and the reversal is the wave's first rule: the street on an
+    answer row is the REGISTER's or it is nothing.
+
+    Until now an unbound claim text was copied through preserve-if-null, on the reasoning
+    that a name beats a NULL. It does not. A `street_name` with `ulice_kod` NULL cannot be
+    joined, filtered, compared across portals or de-duplicated on — and the 1,864 production
+    rows in that state included the class this wave exists to stop, a street the page never
+    stated. The row falls back to its část obce or its town, which is a true answer at a
+    coarser grain instead of a precise-looking one nothing can check."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
         mm.claim(2, "street_name", value_text="Neexistující 4"),
     ])
-    assert resolution.street_name == "Neexistující"
+    assert resolution.street_name is None
     assert resolution.ulice_kod is None
+    # The rest of the row is untouched: dropping a street is not dropping the listing.
+    assert resolution.obec_name == "Praha"
+    assert resolution.house_number_cp == "4"

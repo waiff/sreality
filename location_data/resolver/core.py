@@ -87,14 +87,12 @@ def resolve(
         position = step_fill.position(filled, binding)
 
     # ---- 3. GRADE.
-    graded = step_grade.grade(
-        binding, position, declared=declared, rank=ctx.granularity_rank
-    )
+    graded = step_grade.grade(binding, position, declared=declared)
 
     # ---- 4. CHECK.
     verdict = step_check.check(
         ordered, normalized, binding, filled, position, graded.granularity,
-        registry=ctx.registry, rank=ctx.granularity_rank,
+        registry=ctx.registry, rank=ctx.granularity_rank, pin_claim=pin_claim,
     )
     granularity = verdict.granularity or graded.granularity
     czech = verdict.country_status == "cz"
@@ -121,7 +119,7 @@ def resolve(
         ruian_adm_kod=filled.ruian_adm_kod if czech else None,
         match_confidence=("low" if not czech else graded.match_confidence),
         granularity=granularity,
-        uncertainty_radius_m=step_grade.radius_m(granularity),
+        uncertainty_radius_m=step_grade.radius_m(granularity, floor_m=position.extent_m),
         country_status=verdict.country_status,
         disputed=verdict.disputed,
         resolver_version=resolver_version,

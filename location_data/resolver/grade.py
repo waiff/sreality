@@ -21,7 +21,7 @@ from location_data.resolver.bind import (
     REGISTRY_PIN_CONFLICT_M,
     DeclaredPrecision,
 )
-from location_data.resolver.types import Binding, Grade, GranularityRank, Position, cap_confidence
+from location_data.resolver.types import Binding, Grade, Position, cap_confidence
 
 # The v1 `location_uncertainty_policy` seeds (migrations 383 + 491), collapsed to one number
 # per LEVEL. UNCALIBRATED by design: these are geometric bounds, never `r95_empirical` —
@@ -43,56 +43,40 @@ RADIUS_M: dict[str, float] = {
     "unknown": 250_000.0,           # 383: the CZ-scale sentinel for a row with no position
 }
 
-# Every portal precision signal is an UPPER BOUND, never a certification: mmreality's one
-# `accurate: true` row in the corpus is wrong and its one correct row is `accurate: false`.
-# A label the contract does not map is NOT a cap — inventing one is as wrong as ignoring one.
-DECLARED_CAP: dict[str, str] = {
-    "gps": "address_point", "address": "address_point", "exact": "address_point",
-    "presna": "address_point", "rooftop": "building",
-    "street": "street", "approximate": "street", "priblizna": "street", "estimated": "street",
-    "ward": "cast_obce_or_quarter", "quarter": "cast_obce_or_quarter",
-    "citypart": "cast_obce_or_quarter", "area": "cast_obce_or_quarter",
-    "polygon": "cast_obce_or_quarter",
-    # idnes' "Na mapě nezobrazujeme přesnou adresu" disclaimer.
-    "no_exact_address": "cast_obce_or_quarter",
-    # sreality's LEGACY `locality.accuracy`, a two-value field: `address` is already capped
-    # above, and `not_address` rides with `map.type: geometry` on every row sampled — the
-    # pin is the centroid of a drawn quarter polygon, not a blurred address.
-    "not_address": "cast_obce_or_quarter",
-    "regional": "obec", "municipality": "obec", "obec": "obec",
-    # --- W1-c: the rest of what the nine slim contracts emit.
-    # bazos' maps anchor says "Přibližná lokalita" on every ad; the contract caps that pin at
-    # `granularity_max: obec` (bazos.yaml, bzs.det.blur_hint), which is the rung here.
-    "approximate_location": "obec",
-    # maxima draws its own imprecision as a SHAPE (maxima.yaml, mx.det.map_geometry): a line
-    # is a street's worth of it, a circle a quarter's. `point` is deliberately absent — an
-    # unmapped label certifies nothing, and a drawn point is the one shape whose grade the
-    # portal does not state (it is a marker, not a measurement). `accurate` is absent for the
-    # other reason: it is PRECISE, and a cap row would certify a rung the flag does not.
-    "linestring": "street",
-    "circle": "cast_obce_or_quarter",
-}
-
+# A portal's precision signal reaches the CONFIDENCE and nothing else (W18). It used to
+# reach the granularity too, through a `DECLARED_CAP` ladder, and that ladder is deleted
+# rather than merely bypassed: once the cap was restricted to a grain the PIN established —
+# BIND's R7/R8 rungs, whose grain is `obec`, plus the unbound `unknown` — every value in it
+# was at or coarser than the grain it could reach, so it changed no answer on any input.
+# Brute-forced over both reachable grains × every label × the blurred fallback: zero grains
+# move. A table that cannot change an output is a rail that reads as enforced and is not,
+# which is exactly the defect class this subsystem keeps paying for. What a declaration still
+# does is `confidence`, below: a blurred pin is a weak witness however good the bind is.
 
 def grade(
     binding: Binding,
     position: Position,
     *,
     declared: DeclaredPrecision,
-    rank: GranularityRank,
 ) -> Grade:
+    """**THE GRANULARITY IS THE BIND'S, FULL STOP** (W18). A portal's declared precision is a
+    statement about its own COORDINATE: it does not say the ad named no street, and it cannot
+    un-say what RÚIAN holds about the street the ad named — so it reaches the CONFIDENCE (a
+    blurred pin is a weak witness however good the bind is) and never the grain.
+
+    Two cuts of this rule were wrong before it came out. Keying it on the elected POSITION
+    inverted the two labels that are capped but NOT blurred — idnes' `no_exact_address`
+    (66,165 listings) and sreality's `not_address` (13,176): a pin that AGREED with the bound
+    street stayed the position and was capped to `cast_obce_or_quarter` at 750 m, while a pin
+    that CONTRADICTED it lost to the street point and graded `street` at 300 m, so the
+    better-evidenced row graded coarser. Keying it on the PIN-DERIVED rungs instead was
+    correct and inert — their grain is already `obec` — so the table went with the rule.
+    """
     granularity = binding.granularity if binding.bound else "unknown"
-    capped = DECLARED_CAP.get(declared.label or "")
-    if capped is not None:
-        granularity = rank.coarser_of(granularity, capped)
-    elif declared.blurred:
-        # A blurred declaration whose label this ladder does not know still says "not
-        # address-grade": it takes the same generic fallback a bare blur_hint takes.
-        granularity = rank.coarser_of(granularity, "street")
     return Grade(
         granularity=granularity,
         match_confidence=confidence(binding, position, blurred=declared.blurred),
-        uncertainty_radius_m=radius_m(granularity),
+        uncertainty_radius_m=radius_m(granularity, floor_m=position.extent_m),
     )
 
 
@@ -111,13 +95,22 @@ def confidence(binding: Binding, position: Position, *, blurred: bool) -> str:
         value = "medium"
     else:
         value = "low"
-    if blurred or _pin_conflicts(position):
+    if blurred or _pin_conflicts(position) or position.pin_overridden:
+        # W18: an exact pin overridden by the street is the row disagreeing with itself —
+        # CHECK says so in `disputed`, and a disagreement may not be served above `medium`.
         value = cap_confidence(value, "medium")
     return value
 
 
-def radius_m(granularity: str) -> float:
-    return RADIUS_M[granularity]
+def radius_m(granularity: str, *, floor_m: float | None = None) -> float:
+    """The level's constant, never smaller than what actually placed the row (W18).
+
+    A street is not a point: when the row sits at the centroid of a street's address points,
+    the honest radius is the one that reaches its FARTHEST door — 1,288 m for Jiráskova in
+    Mladá Boleslav, where the level constant says 300. The floor only ever RAISES the number,
+    so every other row keeps exactly the radius it had.
+    """
+    return max(RADIUS_M[granularity], floor_m or 0.0)
 
 
 def _pin_corroborates(position: Position) -> bool:

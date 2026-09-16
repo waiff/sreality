@@ -35,9 +35,9 @@ from location_data.claims_intake import (
 from location_data.claims_common import SUBSTRATE_PAYLOAD
 from location_data.resolver.bind import (
     BLURRED_DECLARED_LABELS,
+    KNOWN_DECLARED_LABELS,
     PRECISE_DECLARED_LABELS,
 )
-from location_data.resolver.grade import DECLARED_CAP
 from scraper.mmreality_parser import PropertyMismatch, extract_property
 from tests.location_data import claim_intake_fixtures as fx
 
@@ -157,23 +157,22 @@ def test_the_coordinate_carries_its_cap_and_the_declaration_carries_its_blurred_
         "true": PRECISE_LABEL, "false": BLURRED_LABEL}
 
 
-def test_the_blurred_label_is_a_key_the_resolver_actually_caps_on():
-    """@1/@2 spelled the `accurate: false` label `not_accurate`, which is not a key in
-    `DECLARED_CAP` — so the obec ceiling the YAML documented was never applied, and since
-    2026-09-11 an unmapped blurred label takes the generic `blur_hint -> street` fallback,
-    i.e. LOOSER than the cap the file claimed. `regional` is the resolver's own key for
-    exactly this ceiling, so the declaration and the resolver now say the same thing."""
-    assert DECLARED_CAP[BLURRED_LABEL] == "obec"
+def test_the_blurred_label_is_a_key_the_resolver_actually_reads():
+    """@1/@2 spelled the `accurate: false` label `not_accurate`, which the resolver's own
+    vocabulary does not contain — so the declaration the YAML documented was never applied at
+    all. `regional` is a key the resolver reads, which is what makes the file and the runtime
+    say the same thing.
+
+    W18 narrowed what "applied" MEANS: a declared label no longer caps the granularity (that
+    ladder is deleted — it could not change an answer once the grain belonged to the register
+    bind). It ranks the pin against a blurred sibling and it caps the CONFIDENCE, and
+    `BLURRED_DECLARED_LABELS` is the membership both of those read."""
     assert BLURRED_LABEL in BLURRED_DECLARED_LABELS
-    # The `true` arm names the pin PRECISE without CAPPING it, and the two are different
-    # questions. `PRECISE_DECLARED_LABELS` decides which of two sibling declarations wins
-    # (`declared_for_coordinate` ranks it 0), which is exactly what a portal flag is for;
-    # a `DECLARED_CAP` row would additionally certify a granularity, and `accurate` does
-    # not predict correctness on this portal well enough to certify one. Unmapped there is
-    # identical to the `address_point` ceiling the entry documents — address_point is the
-    # finest rung, so capping at it coarsens nothing.
+    assert BLURRED_LABEL in KNOWN_DECLARED_LABELS
+    # The `true` arm names the pin PRECISE, which is a different question and the one a portal
+    # flag is actually for: `PRECISE_DECLARED_LABELS` decides which of two sibling
+    # declarations wins the pin (`declared_rank` returns 0).
     assert PRECISE_LABEL in PRECISE_DECLARED_LABELS
-    assert PRECISE_LABEL not in DECLARED_CAP
     assert PRECISE_LABEL not in BLURRED_DECLARED_LABELS
 
 

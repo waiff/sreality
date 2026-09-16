@@ -161,17 +161,80 @@ def test_a_clean_row_is_not_disputed():
 def test_a_pin_outside_the_resolved_obec_keeps_the_pin_and_drops_to_the_admin_level():
     """The pin says Bílovec, the name says Praha. Both are kept — the pin because it is the
     only position there is, the town because the name is the stronger claim — and the row
-    says so in one word."""
+    says so in one word.
+
+    NO street here, deliberately. W18 gave a bound street a point of its own, and a row that
+    has one no longer has "the pin because it is the only position there is" — it takes the
+    register's point and disputes `pin_off_street` instead (the test below). This rail is
+    about the rows that still have nothing else."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
-        mm.claim(3, "coordinate", lat=49.7573, lon=18.0158),
+        mm.claim(2, "coordinate", lat=49.7573, lon=18.0158),
     ])
     assert resolution.disputed == "pin_outside_obec"
     assert resolution.obec_kod == 554782
     assert (resolution.lat, resolution.lon) == (49.7573, 18.0158)
-    # BIND reached the street rung; the disagreement drops it back to the admin level.
     assert resolution.granularity == "obec"
+
+
+def test_a_pin_that_cannot_be_on_the_named_street_loses_to_the_street():
+    """W18. The same disagreement with a street on the row: the street BINDS to the register
+    and the pin cannot be anywhere near it, so the register places the listing and the pin is
+    the half that is called out. The granularity does NOT drop — the address identity is the
+    half that bound; the coordinate is the half that lost.
+
+    The pin is INSIDE Praha, deliberately: a pin in the wrong town is a coarser disagreement
+    and is reported instead (the test below)."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
+        mm.claim(3, "coordinate", lat=50.0600, lon=14.4200,
+                 declared_precision_label="gps"),
+    ])
+    assert resolution.disputed == "pin_off_street"
+    assert resolution.obec_kod == 554782
+    assert resolution.ulice_kod == 101
+    assert (resolution.lat, resolution.lon) != (50.0600, 14.4200)
+    assert resolution.granularity == "street"
+    # A disagreement is never served above `medium`, however many fields agreed.
+    assert resolution.match_confidence == "medium"
+
+
+def test_a_blurred_pin_outside_the_town_is_still_flagged_once_the_street_places_the_row():
+    """W18's own regression. bazos declares EVERY pin approximate, so once a street bound, the
+    pin stopped being the position on every bazos row — and the `pin_outside_obec` flag went
+    with it on 3,421 production rows, exactly where it says the obec or the bind is wrong.
+
+    CHECK reads the elected COORDINATE CLAIM, not the published position: a pin that lost the
+    position is still evidence about which town this is. The row keeps the street's own point
+    and the street grain — the address identity is the half that bound — and says so."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
+        mm.claim(2, "street_name", source="bazos", value_text="Nad Bořislavkou"),
+        mm.claim(3, "coordinate", source="bazos", lat=49.7573, lon=18.0158),
+        mm.claim(4, "precision_declaration", source="bazos",
+                 value_text="approximate_location",
+                 declared_precision_label="approximate_location", blur_evidence="declared"),
+    ])
+    assert resolution.disputed == "pin_outside_obec"
+    assert resolution.granularity == "street"
+    assert resolution.ulice_kod == 101
+    assert (resolution.lat, resolution.lon) != (49.7573, 18.0158)   # the street's centroid
+    assert 50.09 < resolution.lat < 50.11 and 14.34 < resolution.lon < 14.35
+
+
+def test_an_exact_pin_outside_the_town_outranks_the_off_street_reason():
+    """The precedence, stated: both are true of this row and the coarser one is reported. A
+    pin in the wrong TOWN says something about the row's identity; a pin merely off its street
+    says something about the coordinate alone."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
+        mm.claim(3, "coordinate", lat=49.7573, lon=18.0158,
+                 declared_precision_label="gps"),
+    ])
+    assert resolution.disputed == "pin_outside_obec"
+    assert resolution.granularity == "street"
 
 
 def test_a_pin_outside_czechia_with_a_czech_town_is_disputed_not_foreign():
@@ -200,13 +263,27 @@ def test_text_that_says_foreign_over_a_czech_town_is_a_conflict_never_a_silent_f
     assert resolution.disputed == "country_conflict"
 
 
-def test_a_registry_point_can_never_be_outside_its_own_town():
-    """Only a PORTAL PIN can fall outside the town the row names; a registry point is inside
-    by construction, so the comparison is not even made for it."""
+def test_the_containment_test_asks_about_the_pin_and_never_about_the_published_point():
+    """A registry point is inside its own town by construction, so it is never what the
+    containment test asks about — the ad's own PIN is, whether or not that pin became the
+    position (W18). Here the row keeps the address point it bound, keeps its grain, and still
+    reports that the ad's coordinate is 400 km from the town it names."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
         mm.claim(2, "street_name", value_text="Nad Bořislavkou 487/40"),
         mm.claim(3, "coordinate", lat=49.7573, lon=18.0158),
+    ])
+    assert resolution.ruian_adm_kod == 21690278
+    assert (resolution.lat, resolution.lon) == (50.101, 14.348)
+    assert resolution.granularity == "address_point"
+    assert resolution.disputed == "pin_outside_obec"
+
+
+def test_a_row_with_no_pin_at_all_disputes_nothing():
+    """The other side of the same read: no coordinate claim, no containment question."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou 487/40"),
     ])
     assert resolution.ruian_adm_kod == 21690278
     assert resolution.disputed is None

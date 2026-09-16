@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from location_data import loader_db
+from location_data.resolver.normalize import STREET_LINE_SEPARATOR, strip_street_generic
 from scraper import street
 
 
@@ -614,6 +615,71 @@ def _address_part_street(value: str, arg: str) -> str | None:
     if arg != "loose" and not street.looks_like_czech_street(cleaned):
         return None
     return cleaned
+
+
+# W18: the street a portal states as TEXT. bazos is the first carrier (`/coords/street`,
+# then the capped headline), and this is the only normalisation that text gets — it is
+# deliberately the THINNEST of the street transforms.
+#
+# What it does NOT do is the point.
+#
+#  * It strips the GENERIC wrapper and nothing else: `ul. Jiráskova` -> `Jiráskova`,
+#    `Livornské ulici` -> `Livornské`, `v ulici Nádražní` -> `Nádražní`. `náměstí`, `třída`,
+#    `nábřeží` and `sídliště` STAY, because RÚIAN spells them into the official name and 215
+#    bazos titles bind only because the word survived. The fold is
+#    `resolver.normalize.strip_street_generic`, shared with the binder so the claim layer and
+#    the register layer cannot disagree about what the same street is called.
+#  * It does not strip a trailing house number. S1's `split_street_and_number` turns
+#    `28. října 12` into a name plus a čp, and R1 uses that čp to reach an address point —
+#    dropping it here would cost the finest rung the claim can reach.
+#  * It applies NO morphology gate. `looks_like_czech_street` refuses the real street
+#    `28. října`, and what a Czech street looks like is not a question a regex gets to answer
+#    when a closed 83,451-row register is standing right there. THE REGISTER IS THE GATE — an
+#    unbound street text is not published at all (resolver v5.2), so `Nový` costs nothing
+#    (no street of that name in the anchoring obec) while `28. října` binds.
+#  * It does not cut a street out of a longer line either. A whole title is claimed whole and
+#    SPLIT BY THE BINDER, inside the anchoring obec, fail-closed.
+#
+# What it does do is refuse what a register lookup cannot undo on its own: a value in a script
+# this corpus does not write streets in, a digits-only token, an `okres …` qualifier and a
+# `Town - Quarter` form (`reject_as_town`, called with NO `geo_names` — so it does NOT refuse
+# "Praha" or "Brno", and is not meant to: whether a segment names the listing's own town is a
+# question only the anchoring obec can answer, and `composite._names_a_place` is where it is
+# asked). A value carrying a line separator skips even that: on "Kladno - Dubí, Ke Křížku" the
+# dash is a separator and `Ke Křížku` is the street, so the line is gated per SEGMENT instead.
+_STREET_TOKEN_TRIM_RE = re.compile(r"^[\s\-–—,;:/|]+|[\s\-–—,;:/|]+$")
+_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+
+
+@transform("street_token")
+def _street_token(value: str, arg: str) -> str | None:
+    """A street as the portal wrote it, unwrapped and sanity-checked — never re-spelled."""
+    # LEADING wrapper only. `Nová ulice`, `Husova ulice`, `V Ulici` and `I. ulice`…`IX. ulice`
+    # are register rows, and the matcher's exact key is taken from the STORED value — so
+    # stripping the trailing generic word here would destroy the only key those can bind by.
+    # Both ends are folded where that is safe to do: in the matcher, which keeps the unfolded
+    # form beside the stripped one.
+    token = _STREET_TOKEN_TRIM_RE.sub("", strip_street_generic(value, trailing=False))
+    if not token:
+        # The leading wrapper WAS the whole value ("ulice", "na ulici"). Keep what the portal
+        # wrote rather than claiming nothing; the register decides whether it means anything.
+        token = _STREET_TOKEN_TRIM_RE.sub("", (value or "").strip())
+    if not token or token.isdigit():
+        return None
+    if not _is_latin_script(token):
+        return None
+    if not STREET_LINE_SEPARATOR.search(token) and street.reject_as_town(token):
+        return None
+    return token
+
+
+def _is_latin_script(value: str) -> bool:
+    """Every LETTER folds to ASCII a-z. Czech diacritics do; Cyrillic and Greek do not, and
+    a street spelled in one of those is a foreign listing's, never a Czech register row's."""
+    letters = _LETTER_RE.findall(value)
+    if not letters:
+        return False
+    return all(_fold(ch).isascii() and _fold(ch).isalpha() for ch in letters)
 
 
 @transform("address_part_house_number")

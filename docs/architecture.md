@@ -143,7 +143,27 @@ serve delisted pages again), an off-database copy lives in R2 under
 `export_raw_pages_archive.yml`), and `tests/test_portal_raw_pages_guard.py` fails CI on
 any `DELETE`/`TRUNCATE`/`DROP` against the table. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
 (page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
-sreality.
+sreality. **bazos' STREET is text, and since W18 it is claimed** (`bazos@7`,
+`bzs.det.street_cue`): it was the only portal of the nine with no street claim at all —
+129,871 located rows, every one obec-grain — while the ad states a street on a third of them.
+The claim reads ONE surface: `raw_json.title`, which is
+`h1.nadpisdetail` verbatim (`scraper/bazos_parser.py:485`) and therefore the SELLER'S OWN
+HEADLINE for that ad. Of 20,909 cued titles, 18,226 anchor to an obec and 14,659 (80.1 %)
+bind exactly; ~4,300 more cue-less titles carry a comma segment that folds to a register
+street. bazos hard-caps a title at 60 characters — 21,930 sit exactly on the cap, cut
+mid-word — and a truncated stem never binds. Three other surfaces were measured and left out:
+`raw_json.coords.street` is NOT subject-scoped (`extract_street` scans the title *and the
+description* and takes the first cue match, so 29,697 of its 50,529 values never appear in
+the title — boilerplate like "Energetická třída" and proximity prose that binds to real
+streets, which on a portal whose every pin is blurred would silently MOVE the point); the
+`<head>` title is the same capped string plus the okres and " | Bazoš.cz"; and the
+description is populated on 93 % of rows and carries a cue on 48 %, but its FIRST cue is
+usually prose and binds exactly only 19 % of the time — W19's lever, with the number already
+taken. Nothing about the text is trusted on its own: the claim keeps
+whatever the portal wrote (only the generic `ulice`/`ul.` wrapper comes off, via
+`street_token`) and the RESOLVER decides, so `Nový` — hallucinated out of "Nový 2 pokojový
+byt" and once geocoded 130 km away — is claimed and never published, while the numeric-leading
+`28. října` that the old morphology guard refused binds.
 
 **Data source (bezrealitky.cz).** A scheduled scraper (`scraper/bezrealitky_client.py`,
 `bezrealitky_parser.py`, `bezrealitky_main.py`, workflow `scrape_bezrealitky.yml` — pilot,
@@ -2260,12 +2280,35 @@ portal's payload or its own page, and every other stamp is class E outright.
   binds nothing and the row stays unresolved. The readers no longer interpret a locality at all — the
   `statutory_city_obec` regex over eight hand-typed city names and its `address_part_cast_obce` mirror
   are deleted, the claim carries the portal's line verbatim, and both names on the answer row are the
-  register's own spelling.
+  register's own spelling. **A STREET STATED INSIDE A LINE IS BOUND THE SAME WAY** (`composite.resolve_street`,
+  W18, operator ruling 2026-09-16): a portal states a street inside a line as readily as it states a
+  quarter inside one — bazos' headline is "Prodej bytu 3+1, ul. Jiráskova, Mladá Bolesl" and its
+  parser's own reading is "Kladno - Dubí, Ke Křížku" — so EVERY street claim is split on the portals' own
+  separators — a value carrying none is simply one segment — and each segment is matched EXACTLY
+  against `ruian_streets` inside the anchoring obec. ONE binder and one answer: whether a claim reached
+  the exact matcher used to turn on whether the portal happened to write a comma, so a comma-less
+  headline fell through to the trigram rung and bound a street out of prose. Three rules the locality binder does not
+  need: **both keys** (the register keeps `náměstí`/`třída`/`nábřeží` in `name_norm` while S1 parses
+  them off, so claim and register are each folded both ways and matched on the pair — worth 215
+  titles that bind only with the generic word kept); **no trigram unless the CONTRACT calls the claim an
+  address field** (R3 is for one claimed name with a typo in it; over a headline it binds a street the
+  ad never named — "Byt Slunečná" scores 1.0 against Slunečná while "Prodej domu Slunečná" scores 0.429
+  and binds nothing, i.e. coverage decided by title length. The bazos title entry declares
+  `claim_confidence: low`, meaning *a headline, not an address field*, and the resolver obeys the
+  declaration — no rule names a portal. It is also why a title cut at bazos' 60-character cap, 21,930
+  of them, simply fails: there is no prefix matching anywhere in this lane. And a TIE is not a typo —
+  where the exact matcher fails closed on two register rows, R3 does not run either); and **not a place** (a segment naming the anchoring obec or
+  a část obce inside it is never a street candidate — 76 register streets across 20 obce are spelled
+  exactly like a část obce of their own town). It fails CLOSED on two distinct street codes across
+  the segments, and a bound segment carrying a house number reaches R1 rather than stopping at R2.
 * **FILL** (`fill.py`) joins the hierarchy off the bound ids: ONE `admin_chain` read returning the
   unit itself ahead of its ancestors. Administrative names and codes are ALWAYS the registry's own
-  spelling; only street / čp / čo / psč may fall back to a claim, preserve-if-null, and only an
-  operator correction outranks the registry. It also fills **the position: the portal pin when
-  admissible, else the finest bound unit's point on surface** — the boundary's stored
+  spelling; **the street is the REGISTER's or it is nothing** (W18) — an unbound claim text is no
+  longer copied through preserve-if-null, because a `street_name` with `ulice_kod` NULL cannot be
+  joined, filtered, compared across portals or de-duplicated on, and the 1,864 production rows in
+  that state included the hallucination class the rule exists to stop; čp / čo / psč still fall back
+  to a claim, preserve-if-null, and only an operator correction outranks the registry. It also fills
+  **the position: the portal pin when admissible, else the finest bound unit's point on surface** — the boundary's stored
   inscribed-circle centre, inside the polygon where `ST_Centroid` need not be, read off the same
   chain rather than as a tenth registry question. It WALKS that chain, because RÚIAN draws no polygon
   for a část obce or a městský obvod and `ruian_streets` carries no geometry at all, so the finest
@@ -2277,14 +2320,54 @@ portal's payload or its own page, and every other stamp is class E outright.
 * **GRADE** (`grade.py`) is two tables: `match_confidence` from how many INDEPENDENT fields agreed
   with the bound entity (`exact` an address point the pin corroborates, `high` ≥ 2 fields, `medium`
   one, `low` a tie-break or nothing), and `uncertainty_radius_m` from a per-level constant dict
-  carrying migration 383's own v1 numbers.
+  carrying migration 383's own v1 numbers — floored by the STREET's extent when a street placed the
+  row (W18), so a radius can never understate the thing the position came off. A portal's declared
+  precision reaches the confidence and never the grain (see the position ladder below).
 * **CHECK** (`check.py`) decides the country and whether the row disagrees with itself. `disputed` is
   ONE nullable text column whose value IS the reason: `pin_outside_obec` (the pin is kept, the
   granularity drops to the admin level; asked only when the town came from a CLAIM, since on BIND's
-  pin-derived rungs the comparison is circular), `pin_outside_cz`, `country_conflict`. A Czech admin
+  pin-derived rungs the comparison is circular), `pin_outside_cz`, `country_conflict`, and
+  `pin_off_street` (W18 — an EXACT pin overridden by the street it cannot be on; the granularity does
+  NOT drop, because the address identity is the half that bound to the register and the coordinate is
+  the half that lost, and GRADE caps such a row at `medium`). A Czech admin
   unit that BOUND at any level is itself a country determination, because the gazetteer it came out
   of is the Czech one. **Foreign is a determination, never a default** — nothing bound and no foreign
   signal is `undetermined`.
+
+**WHERE THE ROW IS PLACED IS ONE LADDER** (`bind.place`, W18), and every rung of it is the register's
+before it is a portal's:
+
+    registry ADDRESS POINT  >  bound STREET point  >  portal pin  >  FILL's unit point
+
+`ruian_streets` carries no geometry, so a bound street's point is DERIVED — the centroid of its valid
+address points, with an EXTENT that reaches the FARTHEST of them (all but 4 of the 83,451 live streets
+have at least one live address point; the other four simply have no point, which the code answers with
+`None` rather than a guess). Half the bounding-box diagonal was the first cut of that extent and it
+excluded a real address point on 65 % of streets — a door of the street reading as off it. The street beats the pin in
+exactly three states: there is no pin; the pin is DECLARED blurred or approximate (bazos stamps every
+one of its pins "Přibližná lokalita", so a street the ad NAMES is strictly better evidence than a
+coordinate the portal itself calls fuzzy); or the pin lies farther than `max(REGISTRY_PIN_CONFLICT_M,
+the street's extent)` from the centroid. **A pin that loses the position is not thrown away as
+evidence**: CHECK's containment tests read the elected coordinate CLAIM, so `pin_outside_obec` and
+`pin_outside_cz` survive a register-placed row — without that, bazos (every pin declared blurred) would
+have lost the flag on 3,421 rows the moment a street bound, exactly where it says the obec or the bind
+is wrong. The extent is in that threshold because a street is not a
+point — Jiráskova in Mladá Boleslav spans 1,727 m, and a flat 300 m rule would call half of its pins a
+disagreement. An EXACT pin that loses is the one case that IS a disagreement and is stamped
+`pin_off_street`; an exact pin that agrees keeps the position, as the finer of two true answers.
+
+**THE GRANULARITY IS THE BIND'S, AND A PORTAL'S DECLARED PRECISION REACHES ONLY THE CONFIDENCE.** A
+portal declaring "Přibližná lokalita" is saying its COORDINATE is fuzzy; it is not saying the ad named
+no street, and it cannot un-say what RÚIAN holds about the street the ad named. W18 deleted the
+`DECLARED_CAP` ladder outright rather than narrowing it: keying the cap on the elected POSITION was
+wrong twice over (it published a bazos row with `street_name` + `ulice_kod`, the position on the
+street's centroid and `granularity='obec'` at 1 km, and it INVERTED the two labels that are capped but
+not blurred — idnes' `no_exact_address`, 66,165 listings, and sreality's `not_address`, 13,176 — because
+a pin AGREEING with the bound street stayed the position and was capped while one CONTRADICTING it lost
+the position and was not), and keying it on the PIN-DERIVED rungs instead was correct and INERT: R7/R8
+already grade `obec` and every cap value is at or coarser than that, so the table could not change an
+answer on any input. What a declaration still does is rank the pin against a blurred sibling and cap the
+confidence at `medium` — a blurred pin is a weak witness however good the bind is.
 
 It is a **pure function**: no wall clock, no network, no randomness, enforced by an AST scan, so a
 row replays byte-identically from its inputs and the three version ids stamped on it

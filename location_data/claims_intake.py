@@ -284,13 +284,19 @@ def locator_reads(entry: Entry) -> list[LocatorRead]:
 
 @reader("scalar")
 def _read_scalar(entry: Entry, row: ListingRow) -> list[Claim]:
+    """`claim_confidence` is the CONTRACT's statement about what KIND of field this is, and
+    the resolver obeys it: a `low` claim is a headline rather than an address field, so the
+    binder will match it exactly and never fuzzily (W18, `bind`'s R3 rung). It is stamped
+    here rather than inferred anywhere downstream — no rule may name a portal."""
     for read in locator_reads(entry):
         value = _text(json_pointer(row.raw_json, str(read.locator["json_pointer"])))
         value = apply_transforms(value, read.transform)
         if value is None:
             continue
         number = _number(value) if entry.locator.get("value_kind") == "num" else None
-        return [_base(entry, row, value_text=value, value_num=number)]
+        confidence = entry.locator.get("claim_confidence")
+        return [_base(entry, row, value_text=value, value_num=number,
+                      claim_confidence=None if confidence is None else str(confidence))]
     return []
 
 

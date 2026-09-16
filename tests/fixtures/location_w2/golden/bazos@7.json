@@ -1,0 +1,143 @@
+{
+  "portal": "bazos",
+  "contract_version": 7,
+  "regression_listing_ids": [
+    "220059906",
+    "220870847"
+  ],
+  "listings_without_a_fixture_body": [],
+  "fixtures": [
+    {
+      "listing": "220059906",
+      "body": "claim_intake_fixtures.BAZOS_LINK",
+      "row": {
+        "lat": 48.8489,
+        "lon": 17.1325,
+        "listings.locality": null,
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [
+        {
+          "extractor_id": "bzs.det.street_cue",
+          "claim_type": "street_name",
+          "surface": "api_json",
+          "page_kind": "detail",
+          "extraction_method": "portal_structured_field",
+          "snapshot_anchor": "unanchored_latest_fetch",
+          "value_text": "Prodej bytu 2+1 Hodonín",
+          "value_norm": "prodej bytu 2 1 hodonin",
+          "value_num": null,
+          "value_geom_wkt": null,
+          "value_shape_wkt": null,
+          "value_jsonb": null,
+          "distance_m": null,
+          "travel_mode": null,
+          "target_text": null,
+          "declared_precision_label": null,
+          "declared_confidence": null,
+          "declared_radius_m": null,
+          "claim_confidence": "low",
+          "blur_evidence": "none",
+          "licence_class": "portal",
+          "history_completeness": "locality_text_only",
+          "subject_scoped": true,
+          "legacy_source_column": null,
+          "legacy_write_path_unknown": false
+        }
+      ],
+      "refusals": {}
+    },
+    {
+      "listing": "220870847",
+      "body": "claim_intake_fixtures.BAZOS_STREET_GEOCODE",
+      "row": {
+        "lat": 49.5,
+        "lon": 15.5,
+        "listings.locality": null,
+        "listings.street": null,
+        "listings.street_source": null
+      },
+      "claims": [],
+      "refusals": {}
+    }
+  ],
+  "archived_claims": [
+    {
+      "extractor_id": "bzs.det.blur_hint",
+      "claim_type": "precision_declaration",
+      "value_text": "approximate_location",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": "approximate_location",
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "declared",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "Přibližná lokalita",
+      "evidence_span_len": 18
+    },
+    {
+      "extractor_id": "bzs.det.link_pin",
+      "claim_type": "coordinate",
+      "value_text": "50.0925,14.4505",
+      "value_num": null,
+      "value_geom_wkt": "POINT(14.4505 50.0925)",
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": "portal_pin",
+      "evidence_quote": "<a href=\"/place/50.0925,14.4505,15z\" title=\"Přibližná lokalita\">mapa</a>",
+      "evidence_span_len": 72
+    },
+    {
+      "extractor_id": "bzs.det.obec_slug",
+      "claim_type": "obec_name",
+      "value_text": "praha",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "<a href=\"/inzeraty/praha-8/18600/\">Praha 8, 186 00</a>",
+      "evidence_span_len": 54
+    },
+    {
+      "extractor_id": "bzs.det.psc",
+      "claim_type": "psc",
+      "value_text": "18600",
+      "value_num": null,
+      "value_geom_wkt": null,
+      "value_shape_wkt": null,
+      "value_jsonb": null,
+      "declared_precision_label": null,
+      "declared_radius_m": null,
+      "surface": "archived_html",
+      "page_kind": "detail",
+      "licence_class": "portal",
+      "blur_evidence": "none",
+      "subject_scoped": true,
+      "position_branch": null,
+      "evidence_quote": "<a href=\"/inzeraty/praha-8/18600/\">Praha 8, 186 00</a>",
+      "evidence_span_len": 54
+    }
+  ]
+}
