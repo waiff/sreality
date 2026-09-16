@@ -43,3 +43,10 @@ def test_a_three_part_column_ident_is_probeable() -> None:
 
     assert _SAFE_IDENT.match("autodedup.clusters.block_grain")
     assert not _SAFE_IDENT.match("a.b.c.d")
+
+
+def test_constraint_on_a_non_public_table_keeps_its_schema() -> None:
+    sql = "alter table autodedup.judgements add constraint autodedup_judgements_tier_ck check (true);"
+    assert "autodedup.judgements.autodedup_judgements_tier_ck" in {
+        o.ident for o in parse_objects(sql) if o.kind == "constraint"
+    }

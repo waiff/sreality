@@ -12,8 +12,10 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,8 +23,10 @@ from PIL import Image as PILImage
 
 from autodedup import harness, judge, judge_lane
 from autodedup.judge_sql import (
+    GOLD_PAIRS_SQL,
     JUDGEMENT_CACHED_SQL,
     JUDGEMENT_COST_SQL,
+    JUDGEMENT_POD_COST_SQL,
     JUDGEMENT_UPSERT_SQL,
 )
 from tests.autodedup.test_engine_e2e import build_records
@@ -49,10 +53,12 @@ class FakeR2:
 
 
 class FakeResponse:
-    def __init__(self, tool_calls: list[dict[str, Any]], cost_usd: float, call_id: int) -> None:
+    def __init__(self, tool_calls: list[dict[str, Any]], cost_usd: float, call_id: int,
+                 duration_ms: int = 0) -> None:
         self.tool_calls = tool_calls
         self.cost_usd = cost_usd
         self.llm_call_id = call_id
+        self.duration_ms = duration_ms
         self.text = ""
 
 
@@ -73,13 +79,15 @@ class FakeLLM:
     def __init__(self, calls: list[dict[str, Any]], cost: float = 0.001,
                  fail_models: tuple[str, ...] = (), fail_all: bool = False,
                  error: str = "provider says no",
-                 transient_fails: dict[str, int] | None = None) -> None:
+                 transient_fails: dict[str, int] | None = None,
+                 duration_ms: int = 0) -> None:
         self.calls = calls
         self.cost = cost
         self.fail_models = fail_models
         self.fail_all = fail_all
         self.error = error
         self.transient_fails = dict(transient_fails or {})
+        self.duration_ms = duration_ms
 
     def call(self, **kwargs: Any) -> FakeResponse:
         self.calls.append(kwargs)
@@ -94,6 +102,7 @@ class FakeLLM:
             [{"id": "t1", "name": judge.TOOL_NAME, "input": dict(VERDICT_INPUT)}],
             self.cost,
             len(self.calls),
+            self.duration_ms,
         )
 
 
@@ -114,6 +123,8 @@ class FakeCursor:
             raise RuntimeError('relation "autodedup.judgements" does not exist')
         if sql is JUDGEMENT_CACHED_SQL:
             self._rows = list(self._conn.cached)
+        elif sql is GOLD_PAIRS_SQL:
+            self._rows = list(self._conn.gold)
         elif sql is JUDGEMENT_COST_SQL:
             self._rows = [self._conn.cost_row]
         else:
@@ -128,9 +139,11 @@ class FakeCursor:
 
 class FakeConn:
     def __init__(self, executed: list[tuple[str, Any]], cached: list[tuple[int, int]],
-                 cost_row: tuple[Any, Any], upserts_fail: bool = False) -> None:
+                 cost_row: tuple[Any, Any], upserts_fail: bool = False,
+                 gold: list[tuple[int, int]] | None = None) -> None:
         self.executed = executed
         self.cached = cached
+        self.gold = list(gold or [])
         self.cost_row = cost_row
         self.upserts_fail = upserts_fail
         self.closed = False
@@ -166,6 +179,20 @@ def lane(monkeypatch: pytest.MonkeyPatch, cohort: Path):
         "r2": FakeR2(),
         "downloads": [],
         "upserts_fail": False,
+        "gold": [],
+        "pod": SimpleNamespace(
+            base_url="https://pod-1-8000.proxy.runpod.net",
+            pod_id="pod-1",
+            gpu="NVIDIA L4",
+            usd_per_hr=0.44,
+            started_at=0.0,   # restamped at launch, exactly as PodHandle is
+            model_id=judge_lane.MODEL_OSS,
+            dry_run=False,
+        ),
+        "pod_starts": [],
+        "pod_stops": [],
+        "receipt_dirs": [],
+        "oss_base_urls": [],
     }
 
     def fake_download(export_run: str, dest: Path) -> Path:
@@ -181,9 +208,30 @@ def lane(monkeypatch: pytest.MonkeyPatch, cohort: Path):
     monkeypatch.setattr(judge_lane, "llm_client", lambda conn: state["client"])
     monkeypatch.setattr(judge_lane, "image_store", lambda: state["r2"])
 
+    def fake_pod_start(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
+        state["pod_starts"].append((model, gpu))
+        state["receipt_dirs"].append(out_dir)
+        pod = state["pod"]
+        pod.started_at = judge_lane.CLOCK()   # as `launch_vllm_pod` stamps a real handle
+        return pod
+
+    def fake_oss_client(conn: Any) -> Any:
+        # Recorded AT CONSTRUCTION: the provider reads its endpoint once, so a base URL set
+        # after this point would leave every worker talking to nothing.
+        state["oss_base_urls"].append(os.environ.get(judge_lane.OSS_BASE_URL_ENV))
+        return state["client"]
+
+    monkeypatch.setenv(judge_lane.OSS_BASE_URL_ENV, "")
+    monkeypatch.setattr(judge_lane, "pod_start", fake_pod_start)
+    monkeypatch.setattr(
+        judge_lane, "pod_stop",
+        lambda pod, out_dir=None: state["pod_stops"].append(pod),
+    )
+    monkeypatch.setattr(judge_lane, "oss_llm_client", fake_oss_client)
+
     def factory() -> FakeConn:
         return FakeConn(executed, state["cached"], state["cost_row"],
-                        bool(state.get("upserts_fail")))
+                        bool(state.get("upserts_fail")), state["gold"])
 
     def run(out: Path, **args: Any) -> dict[str, Any]:
         raw = {key: str(value) for key, value in args.items()}
@@ -832,3 +880,484 @@ def test_the_lane_measures_the_metres_only_when_both_pins_are_street_grain() -> 
     assert "distance not comparable" in coarse_evidence
     assert "(a municipality-grade pin on side B)" in coarse_evidence
     assert "- distance:" not in coarse_evidence
+
+
+# --- the oss tier: a model rented by the hour, judged on the SAME pairs ----------------------
+
+
+def _pairs_of(out: Path) -> list[tuple[int, int]]:
+    sample = json.loads((out / judge_lane.SAMPLE_FILE).read_text(encoding="utf-8"))
+    return [(int(row["lo"]), int(row["hi"])) for row in sample["pairs"]]
+
+
+def _ticking(step: float = 1.0):
+    state = {"now": 0.0}
+
+    def clock() -> float:
+        state["now"] += step
+        return state["now"]
+
+    return clock
+
+
+def test_oss_draws_exactly_the_pairs_the_vision_tier_would(lane, tmp_path: Path) -> None:
+    """Same seed, same draw — the comparison is worthless if the two arms answer different
+    questions, and a differently-seeded sample is a different question."""
+    vision = tmp_path / "vision"
+    oss = tmp_path / "oss"
+    lane(vision, export_run="1", tier="vision", n=6, max_usd=5, workers=1)
+    lane(oss, export_run="1", tier="oss", n=6, max_usd=5, workers=1)
+    assert _pairs_of(vision) == _pairs_of(oss)
+
+
+def test_oss_sends_the_vision_prompt_to_the_pod_model(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=4, max_usd=5, workers=1)
+    assert lane.state["pod_starts"] == [(judge_lane.MODEL_OSS, None)]
+    assert lane.calls
+    for call in lane.calls:
+        # The NAMESPACED id, which is what keeps `oss:Qwen/...` from routing to Alibaba's
+        # paid API on the vendor prefix, plus the VISION called_for and real images.
+        assert call["model"] == f"{judge_lane.OSS_PREFIX}{judge_lane.MODEL_OSS}"
+        assert call["provider"] == judge_lane.OSS_PROVIDER
+        assert call["called_for"] == judge_lane.CALLED_FOR["vision"]
+    assert lane.state["r2"].reads
+    assert summary["oss_model"] == judge_lane.MODEL_OSS
+    stored = {row["model"] for row in _upserts(lane.executed)}
+    assert stored == {f"{judge_lane.OSS_PREFIX}{judge_lane.MODEL_OSS}"}
+    assert {row["tier"] for row in _upserts(lane.executed)} == {"oss"}
+
+
+def test_the_prompt_is_the_vision_prompt_to_the_character(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "vision", export_run="1", tier="vision", n=3, max_usd=5, workers=1)
+    vision_messages = [call["messages"] for call in lane.calls]
+    lane.calls.clear()
+    lane(tmp_path / "oss", export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+    assert [call["messages"] for call in lane.calls] == vision_messages
+
+
+def test_the_base_url_is_set_before_a_client_exists(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    assert lane.state["oss_base_urls"] == [f"{lane.state['pod'].base_url}/v1"]
+
+
+@pytest.mark.parametrize("given, wanted", [
+    ("https://pod-1-8000.proxy.runpod.net", "https://pod-1-8000.proxy.runpod.net/v1"),
+    ("https://pod-1-8000.proxy.runpod.net/", "https://pod-1-8000.proxy.runpod.net/v1"),
+    ("https://pod-1-8000.proxy.runpod.net/v1", "https://pod-1-8000.proxy.runpod.net/v1"),
+])
+def test_the_pod_root_becomes_the_openai_api_root(given: str, wanted: str) -> None:
+    """The handle carries the HTTP root (`oss_pod.wait_ready` polls `/v1/models` off it); an
+    OpenAI-compatible client posts to `{base}/chat/completions`. Whoever adds the suffix, the
+    lane publishes the same URL."""
+    assert judge_lane.openai_base_url(given) == wanted
+
+
+def test_the_pod_bill_is_divided_over_what_it_produced(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(judge_lane, "CLOCK", _ticking(60.0))
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+
+    assert summary["spent_usd_source"] == "pod"
+    assert summary["pod_id"] == "pod-1" and summary["gpu"] == "NVIDIA L4"
+    assert summary["usd_per_hr"] == 0.44 and summary["pod_hours"] > 0
+    assert summary["pod_cost_usd"] == pytest.approx(summary["pod_hours"] * 0.44, abs=1e-5)
+    assert summary["spent_usd"] == pytest.approx(summary["pod_cost_usd"], abs=1e-6)
+    share = summary["cost_per_pair_usd"]
+    assert share == pytest.approx(summary["pod_cost_usd"] / summary["done"], abs=1e-6)
+    assert summary["pod_wall_s_per_pair"] and summary["latency_s_mean"] is not None
+    # Two different clocks, and the names have to keep them apart: `pod_wall_s_per_pair` is
+    # the rental over the pairs, `latency_s_mean` is one call's duration — the one that
+    # `oss_s_per_pair` is expressed in. A summary key spelled `s_per_pair` invites the operator
+    # to feed the wrong one back and cap the next pass `workers` times too low.
+    assert "s_per_pair" not in summary
+
+    # NULL while the pod runs (unknown, not free), settled once it is gone — in the store
+    # and in the artifact the comparison reads.
+    assert [row["cost_usd"] for row in _upserts(lane.executed)] == [None] * summary["done"]
+    settles = [params for sql, params in lane.executed if sql is JUDGEMENT_POD_COST_SQL]
+    assert len(settles) == 1
+    assert settles[0]["cost_usd"] == pytest.approx(share, abs=1e-6)
+    assert settles[0]["tier"] == "oss"
+    assert len(settles[0]["los"]) == summary["done"]
+    assert all(row["cost_usd"] == pytest.approx(share, abs=1e-6)
+               for row in _judgements(out))
+
+
+def test_the_preflight_estimate_counts_the_boot_it_has_already_paid_for(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bill starts at LAUNCH: by the time the estimate is computed, `pod_start` has waited
+    out a weights load that routinely runs longer than the judging window itself. A look-ahead
+    counting only the pairs publishes a fraction of the bill `pod_cost_usd` later prices."""
+    boot_s = 600.0
+    real_start = judge_lane.pod_start
+
+    def slow_boot(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
+        pod = real_start(model, gpu, out_dir)
+        pod.started_at -= boot_s   # as if the launch stamp were ten minutes old
+        return pod
+
+    monkeypatch.setattr(judge_lane, "pod_start", slow_boot)
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=2, max_usd=20, workers=1,
+                   oss_s_per_pair=10)
+    pairs_only = judge_lane.oss_est_usd(0.44, summary["drawn"], 1, 10.0)
+    assert summary["pod_boot_s"] == pytest.approx(boot_s, abs=5.0)
+    assert summary["est_cost_usd_for_draw"] > pairs_only
+    assert summary["est_cost_usd_for_draw"] == pytest.approx(
+        pairs_only + 0.44 * boot_s / 3600.0, abs=1e-3
+    )
+
+
+def test_the_budget_margin_is_one_whole_call_not_a_workers_share(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six workers judging in parallel each occupy `s_per_pair` of WALL clock, so admitting one
+    more pair costs a whole call's duration — a margin of a sixth of it lets the pod run past
+    `max_usd`, and a cap the run can exceed is a number nobody trusts twice."""
+    seen: list[float] = []
+    real = judge_lane.PodBudget
+
+    def record(*args: Any, **kwargs: Any) -> Any:
+        seen.append(float(kwargs["margin_s"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(judge_lane, "PodBudget", record)
+    lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=20, workers=6,
+         oss_s_per_pair=18)
+    assert seen == [18.0]
+
+
+def test_a_pod_that_never_boots_still_writes_the_summary(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one path that can burn 25 minutes of rental and produce no verdict. `_rails`' rule
+    holds here too: the artifact is the evidence, so it lands BEFORE the exception."""
+    def no_capacity(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
+        raise RuntimeError("no capacity for any eligible gpu")
+
+    monkeypatch.setattr(judge_lane, "pod_start", no_capacity)
+    out = tmp_path / "out"
+    with pytest.raises(RuntimeError):
+        lane(out, export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    summary = json.loads((out / judge_lane.SUMMARY_FILE).read_text(encoding="utf-8"))
+    assert "no capacity" in summary["pod_boot_failed"]
+    assert summary["pod_boot_s"] >= 0 and summary["done"] == 0
+    assert summary["spent_usd_source"].startswith("pod (boot failed")
+
+
+def test_the_pod_is_terminated_once_on_a_clean_pass(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    assert lane.state["pod_stops"] == [lane.state["pod"]]
+
+
+def test_the_pod_is_terminated_when_the_pass_dies(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the judge loop fell over")
+
+    monkeypatch.setattr(judge_lane, "_dispatch", explode)
+    with pytest.raises(RuntimeError):
+        lane(tmp_path / "out", export_run="1", tier="oss", n=2, max_usd=5, workers=1)
+    assert lane.state["pod_stops"] == [lane.state["pod"]]
+
+
+def test_no_pairs_left_to_judge_rents_no_pod(lane, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    lane(out, export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+    lane.state["cached"] = [(row["lo"], row["hi"]) for row in _judgements(out)]
+    lane.state["pod_starts"].clear()
+    lane.state["pod_stops"].clear()
+    again = lane(tmp_path / "out2", export_run="1", tier="oss", n=3, max_usd=5, workers=1)
+    assert again["skipped_cached"] == again["drawn"]
+    assert lane.state["pod_starts"] == [] and lane.state["pod_stops"] == []
+
+
+def test_the_pod_budget_stops_on_the_clock_not_on_the_call_count() -> None:
+    # $1 a second, so the numbers read straight off the clock.
+    clock = iter([0.0, 0.5, 1.5])
+    budget = judge_lane.PodBudget(
+        2.0, usd_per_hr=3600.0, margin_s=1.0, started=0.0, clock=lambda: next(clock)
+    )
+    assert budget.reserve(0.0) is True          # 0 s spent + 1 s margin = $1.00, fits
+    assert budget.spent == pytest.approx(0.5, rel=1e-3)
+    assert budget.reserve(0.0) is False         # 1.5 s spent + 1 s margin = $2.50, does not
+    assert budget.stopped is True
+
+
+def test_a_budget_that_cannot_pay_for_a_pod_is_refused(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="oss", n=2,
+             max_usd=judge_lane.OSS_MIN_USD / 2)
+    assert "oss" in str(exc.value)
+    assert lane.state["pod_starts"] == []
+
+
+def test_pairs_from_gold_restricts_the_draw_to_pairs_with_ground_truth(
+    lane, tmp_path: Path
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="oss", n=8, max_usd=5, workers=1)
+    every = _pairs_of(whole)
+    assert len(every) > 2
+    lane.state["gold"] = every[:2]
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=8, max_usd=5, workers=1,
+                   pairs_from="gold")
+    assert summary["pairs_from"] == "gold"
+    assert summary["pairs_without_gold_dropped"] > 0
+    assert set(_pairs_of(out)) <= set(every[:2])
+
+
+def test_pairs_from_gold_refuses_when_no_pair_has_a_gold_row(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="oss", n=4, max_usd=5,
+             pairs_from="gold")
+    assert "gold" in str(exc.value)
+    assert lane.state["pod_starts"] == []
+
+
+def test_pairs_from_only_accepts_gold(lane, tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        lane(tmp_path / "out", export_run="1", tier="oss", n=4, max_usd=5,
+             pairs_from="vision")
+
+
+# --- the adapter onto autodedup.oss_pod -----------------------------------------------------
+
+
+class FakeRunPod:
+    """Only what `pod_stop` needs: `terminate_pod` is idempotent on a live client (404 is
+    success) and raises when the pod is still rented."""
+
+    def __init__(self) -> None:
+        self.terminated: list[str] = []
+        self.fail_terminate = False
+
+    def terminate_pod(self, pod_id: str) -> None:
+        self.terminated.append(pod_id)
+        if self.fail_terminate:
+            raise RuntimeError("pod terminate failed (503)")
+
+
+class FakePodModule:
+    """`autodedup.oss_pod`'s four entry points, recorded. Pinning the CALL SHAPE here is the
+    point: the lane and the pod module are written apart, and a renamed keyword would only
+    surface against a real RunPod bill."""
+
+    def __init__(self, fail_on: str | None = None) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.fail_on = fail_on
+        self.client = FakeRunPod()
+        self.handle = SimpleNamespace(pod_id="pod-9", base_url="https://pod-9.example",
+                                      gpu="L4", usd_per_hr=0.4, started_at=1.0)
+
+    def _record(self, name: str, **kwargs: Any) -> None:
+        self.calls.append((name, kwargs))
+        if self.fail_on == name:
+            raise RuntimeError(f"{name} failed")
+
+    def launch_vllm_pod(self, client: Any, **kwargs: Any) -> Any:
+        self._record("launch", client=client, **kwargs)
+        return self.handle
+
+    def wait_ready(self, handle: Any, **kwargs: Any) -> float:
+        self._record("wait_ready", handle=handle, **kwargs)
+        return 1.0
+
+    def smoke_chat(self, handle: Any, **kwargs: Any) -> dict[str, Any]:
+        self._record("smoke_chat", handle=handle, **kwargs)
+        return {}
+
+    def terminate(self, handle: Any, **kwargs: Any) -> None:
+        self.calls.append(("terminate", {"handle": handle, **kwargs}))
+
+
+@pytest.fixture()
+def pod_module(monkeypatch: pytest.MonkeyPatch) -> FakePodModule:
+    module = FakePodModule()
+    monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
+    monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
+    return module
+
+
+def test_pod_start_launches_waits_and_smokes_before_a_pair_is_judged(
+    pod_module: FakePodModule,
+) -> None:
+    handle = judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+    assert handle is pod_module.handle
+    assert [name for name, _ in pod_module.calls] == ["launch", "wait_ready", "smoke_chat"]
+    assert pod_module.calls[0][1]["model_id"] == judge_lane.MODEL_OSS
+    assert "gpu_preference" not in pod_module.calls[0][1]
+    assert pod_module.calls[1][1]["client"] is pod_module.client
+
+
+def test_a_named_gpu_becomes_the_first_preference(pod_module: FakePodModule) -> None:
+    judge_lane.pod_start(judge_lane.MODEL_OSS, "NVIDIA L40S")
+    assert pod_module.calls[0][1]["gpu_preference"] == ("NVIDIA L40S",)
+
+
+def test_a_named_gpu_is_a_pin_not_a_ranking(pod_module: FakePodModule) -> None:
+    """`select_gpus` ranks by default and only FILTERS under `strict`. An operator names a
+    type for its price, so a silent fallback to the widened rung is the one substitution this
+    arm cannot afford; unpinned, the default preference must stay a ranking."""
+    judge_lane.pod_start(judge_lane.MODEL_OSS, "NVIDIA RTX A5000")
+    assert pod_module.calls[0][1]["strict_gpu"] is True
+    pod_module.calls.clear()
+    judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+    assert "strict_gpu" not in pod_module.calls[0][1]
+
+
+def test_a_cancelled_boot_still_terminates_the_pod(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Ctrl-C / Actions cancellation inside the smoke window is a BaseException, so an
+    `except Exception` here would let it past BOTH guards — `pod_start` has not returned, so
+    the lane's `finally` does not know the pod exists — and it would bill until noticed."""
+    module = FakePodModule()
+
+    def cancelled(handle: Any, **kwargs: Any) -> dict[str, Any]:
+        module.calls.append(("smoke_chat", {"handle": handle}))
+        raise KeyboardInterrupt
+
+    module.smoke_chat = cancelled  # type: ignore[method-assign]
+    monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
+    monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
+    with pytest.raises(KeyboardInterrupt):
+        judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+    assert pod_module_terminated(module) == [module.handle]
+
+
+@pytest.mark.parametrize("step", ["wait_ready", "smoke_chat"])
+def test_a_pod_that_never_served_is_torn_down_on_the_way_out(
+    monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    """The lane's own `finally` only knows about a pod `pod_start` RETURNED, so a rental that
+    dies before that has to clean up after itself or it bills until someone notices."""
+    module = FakePodModule(fail_on=step)
+    monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
+    monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
+    with pytest.raises(RuntimeError):
+        judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+    assert pod_module_terminated(module) == [module.handle]
+
+
+def pod_module_terminated(module: FakePodModule) -> list[Any]:
+    return [kwargs["handle"] for name, kwargs in module.calls if name == "terminate"]
+
+
+def test_pod_stop_hands_the_pod_module_a_client(pod_module: FakePodModule) -> None:
+    judge_lane.pod_stop(pod_module.handle)
+    assert pod_module.calls == [("terminate", {"handle": pod_module.handle,
+                                               "client": pod_module.client})]
+
+
+def test_pod_stop_verifies_the_pod_is_actually_gone(pod_module: FakePodModule) -> None:
+    """`oss_pod.terminate` never raises, so on its own it can report a leak only to the log.
+    The second (idempotent) delete is what makes the teardown a signal the lane can read."""
+    judge_lane.pod_stop(pod_module.handle)
+    assert pod_module.client.terminated == ["pod-9"]
+
+
+def test_a_pod_that_would_not_die_raises_out_of_pod_stop(
+    pod_module: FakePodModule,
+) -> None:
+    pod_module.client.fail_terminate = True
+    with pytest.raises(RuntimeError):
+        judge_lane.pod_stop(pod_module.handle)
+
+
+def test_the_real_pod_module_still_exposes_what_the_lane_calls() -> None:
+    from autodedup import oss_pod
+
+    for name in ("launch_vllm_pod", "wait_ready", "smoke_chat", "terminate"):
+        assert callable(getattr(oss_pod, name)), name
+    for field in ("pod_id", "base_url", "gpu", "usd_per_hr", "started_at"):
+        assert field in oss_pod.PodHandle.__dataclass_fields__, field
+
+
+def test_the_lane_and_the_provider_agree_on_the_oss_namespace() -> None:
+    """The lane restates the provider's prefix and name; a drift in either is discovered
+    AFTER a GPU has been rented (`served_model()` stops stripping, and the wire id
+    `oss/Qwen/...` is unknown to vLLM, so every pair fails at full price)."""
+    from api.providers import oss as oss_provider
+
+    assert judge_lane.OSS_PREFIX == oss_provider.MODEL_PREFIX
+    assert judge_lane.OSS_PROVIDER == oss_provider.OssProvider.name
+
+
+def test_latency_is_the_call_not_the_backoff(lane, tmp_path: Path) -> None:
+    """`_call_with_retry` sleeps out a 429 — the steady state at six workers on the paid tiers
+    and unheard of on a rented pod with no rate limit. Billing that sleep to `latency_s` would
+    bias the very yardstick the oss arm is measured against, so the reported number is the
+    provider's own `duration_ms`; the wall span stays beside it as `pair_wall_s`."""
+    lane.state["client"].duration_ms = 4200
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="text", n=2, max_usd=5, workers=1)
+    rows = _judgements(out)
+    assert rows and all(row["latency_s"] == pytest.approx(4.2) for row in rows)
+    # The fake provider returns instantly, so the wall span cannot reach the claimed duration:
+    # the two numbers are measuring different things, which is the point.
+    assert all(row["pair_wall_s"] < 4.2 for row in rows)
+    assert summary["latency_s_mean"] == pytest.approx(4.2)
+
+
+def test_the_experimental_arm_never_becomes_a_pairs_headline_verdict() -> None:
+    """Migration 530 admits a fourth tier into a table two consumers read WITHOUT filtering
+    tier, and the oss arm answers exactly the pairs gold already answered — on `created_at`
+    alone the rented 7B would replace ground truth as the review queue's headline and count
+    itself into `n_judged_edges`. Authority, not recency."""
+    from autodedup import score_sql, ui_sql
+
+    headline = ui_sql.RESIDUAL_SQL
+    assert "WHEN 'gold' THEN 0" in headline
+    assert headline.index("WHEN 'gold' THEN 0") < headline.index("ELSE 3 END")
+    assert "tier <> 'oss'" in score_sql.JUDGED_EDGES_SQL
+
+
+def test_the_oss_lane_gets_every_credential_its_pod_needs() -> None:
+    """A secret that is missing from the workflow env fails LATE and expensively: a gated
+    `oss_model` 401s on the weights inside the container, never binds, and is caught only by
+    `wait_ready`'s 25-minute deadline — a whole rental for a value that was sitting in the
+    repository's secrets. Cheap to assert here, not cheap to discover there."""
+    from pathlib import Path
+
+    body = (Path(__file__).resolve().parents[2] / ".github" / "workflows"
+            / "autodedup.yml").read_text(encoding="utf-8")
+    for secret in ("RUNPOD_API_KEY", "HF_TOKEN"):
+        assert f"{secret}: ${{{{ secrets.{secret} }}}}" in body, secret
+
+
+def test_the_lane_leaves_a_receipt_from_launch_until_the_pod_is_confirmed_gone(
+    tmp_path: Path, pod_module: FakePodModule,
+) -> None:
+    """The receipt has to exist across the whole rental — it is written BEFORE the readiness
+    wait, which is both the longest window and the likeliest one to be cancelled in — and it
+    has to be gone after the verifying DELETE, or the reaper cries leak on every clean run."""
+    written: list[Path] = []
+    cleared: list[Path] = []
+    pod_module.write_receipt = (  # type: ignore[method-assign]
+        lambda handle, out_dir: written.append(Path(out_dir)) or Path(out_dir) / "pod.json"
+    )
+    pod_module.clear_receipt = lambda out_dir: cleared.append(Path(out_dir))  # type: ignore[method-assign]
+
+    judge_lane.pod_start(judge_lane.MODEL_OSS, None, tmp_path)
+    assert written == [tmp_path]
+    # Written before the wait, not after: the order of the recorded calls is the assertion.
+    assert [name for name, _ in pod_module.calls] == ["launch", "wait_ready", "smoke_chat"]
+    assert cleared == []
+
+    judge_lane.pod_stop(pod_module.handle, tmp_path)
+    assert cleared == [tmp_path]
+
+
+def test_the_real_pod_module_exposes_the_receipt_the_lane_writes() -> None:
+    from autodedup import oss_pod
+
+    for name in ("write_receipt", "clear_receipt", "reap_receipt"):
+        assert callable(getattr(oss_pod, name)), name

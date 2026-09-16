@@ -407,12 +407,12 @@ LLM + maps (FastAPI service + scoring jobs):
   scoring, and the agent under `provider='anthropic'`.
 - `GEMINI_API_KEY` — Google AI Studio key; required for the agent under `provider='gemini'`.
   A request selecting an unconfigured provider returns 502; missing at boot is not fatal.
-- `OPENAI_API_KEY` — any `gpt-*` / `o*` model id (`provider='openai'`): the bazos
-  description enrichment lane. (Rule 25 deleted the location free-text lane; no claim
-  lane runs a model.)
-- `QWEN_API_KEY` — Alibaba DashScope, INTERNATIONAL (Singapore) endpoint; any `qwen*` model
-  id. Read lazily: needed only by a lane the operator points at a qwen model. Actions
-  secret for those workflows; Railway needs it only to call qwen from the API service.
+- `OPENAI_API_KEY` — any `gpt-*` / `o*` model id (`provider='openai'`): the bazos description
+  enrichment lane. (Rule 25 deleted the location free-text lane; no claim lane runs a model.)
+- `QWEN_API_KEY` — Alibaba DashScope, INTERNATIONAL (Singapore) endpoint; any `qwen*` model id.
+  Read lazily by a lane pointed at qwen: an Actions secret there, Railway only to call it here.
+- `OSS_LLM_BASE_URL` / `OSS_LLM_API_KEY` — a self-hosted vLLM pod (`oss:<hf id>` ids, `provider='oss'`):
+  an EPHEMERAL RunPod proxy root the autodedup judge lane exports per pass, re-read per call and never stored; the key defaults to `none` (vLLM serves unauthenticated).
 - `MAPY_GEOCODE_ENABLED` — **the Mapy kill switch, default OFF.** Mapy.com's terms prohibit
   storing/caching API results, so `scraper.geocoding.geocode()` raises unless this is
   explicitly `1`/`true`/`yes`. No caller stores a result any more: what is left is the

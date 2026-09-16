@@ -3712,7 +3712,7 @@ export interface AutodedupJudgementRow {
     | 'same_building_different_unit'
     | 'insufficient_evidence';
   confidence?: number | null;
-  tier?: 'text' | 'vision' | 'gold' | null;
+  tier?: 'text' | 'vision' | 'gold' | 'oss' | null;
   model?: string | null;
   judge_version?: string | null;
   listing_lo?: number;

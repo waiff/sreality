@@ -92,10 +92,16 @@ on conflict (listing_lo, listing_hi) do update set
 # Which of this generation's cluster edges already carry an LLM verdict. The two arrays are
 # zipped by `unnest`, not crossed: `lo = any(los) and hi = any(his)` would read back the whole
 # product of the edge list instead of the edges themselves (the shape judge_sql documents).
+#
+# Tier `oss` is EXCLUDED: it is the rented open-model arm, measured against the paid judge on
+# pairs the paid judge has already answered. Counting it here would let a free experiment
+# inflate `n_judged_edges` — "this cluster has been judged" — without a judgement this program
+# trusts ever having been bought.
 JUDGED_EDGES_SQL = """
 select listing_lo, listing_hi
   from autodedup.judgements
- where (listing_lo, listing_hi) in (
+ where tier <> 'oss'
+   and (listing_lo, listing_hi) in (
          select lo, hi
            from unnest(%(los)s::bigint[], %(his)s::bigint[]) as pair(lo, hi)
        )

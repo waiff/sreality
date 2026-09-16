@@ -518,7 +518,13 @@ LEFT JOIN LATERAL (
     SELECT jj.verdict, jj.confidence, jj.tier
       FROM autodedup.judgements jj
      WHERE jj.listing_lo = p.listing_lo AND jj.listing_hi = p.listing_hi
-     ORDER BY jj.created_at DESC
+     -- AUTHORITY, not recency. `oss` is the rented open-model ARM: it answers the same pairs
+     -- gold already answered, so on `created_at` alone an experimental 7B verdict would
+     -- silently replace ground truth as the pair's headline. Rank the tiers, and only fall
+     -- back to the clock within one of them.
+     ORDER BY CASE jj.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 WHEN 'text' THEN 2
+                           ELSE 3 END,
+              jj.created_at DESC
      LIMIT 1
 ) j ON true
 LEFT JOIN LATERAL (

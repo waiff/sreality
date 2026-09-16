@@ -311,7 +311,7 @@
         },
         {
           "name": "args",
-          "description": "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12 or export_run=123,tier=text,n=400,max_usd=5.",
+          "description": "Mode arguments as k=v,k=v — e.g. min_n=800,max_n=8000,top=60,detail_top=12, export_run=123,tier=text,n=400,max_usd=5 or export_run=123,tier=oss,n=200,max_usd=3,pairs_from=gold.",
           "required": false,
           "type": "string",
           "default": "",
@@ -319,6 +319,7 @@
         }
       ],
       "secrets": [
+        "HF_TOKEN",
         "OPENAI_API_KEY",
         "QWEN_API_KEY",
         "R2_ACCESS_KEY_ID",

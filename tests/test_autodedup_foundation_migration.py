@@ -145,3 +145,40 @@ def test_apply_contract_is_idempotent_with_a_plain_lock_timeout() -> None:
     assert "create table autodedup." not in code
     for m in re.finditer(r"create (?:unique )?index ([a-z0-9_]+) on ", code):
         raise AssertionError(f"index {m.group(1)} is not `if not exists`")
+
+
+# --- the tier vocabulary, widened by migration 530 -------------------------------------
+
+
+_TIER_MIGRATION = _ROOT / "migrations" / "530_autodedup_judge_tier_oss.sql"
+_TIER_TABLES = ("judgements", "judge_queue")
+
+
+def test_528_spelled_the_tier_domain_as_an_inline_check() -> None:
+    """The premise migration 530 rests on: an INLINE check, which Postgres names for you and
+    which a widening must therefore drop by that generated name."""
+    for table in _TIER_TABLES:
+        assert "tier" in _table(table)
+        assert "check (tier in ('text','vision','gold'))" in _table(table)
+
+
+def test_530_admits_the_oss_tier_on_both_tables() -> None:
+    body = _TIER_MIGRATION.read_text(encoding="utf-8")
+    for table in _TIER_TABLES:
+        assert f"alter table autodedup.{table}" in body
+    assert body.count("check (tier in ('text', 'vision', 'gold', 'oss'))") == len(_TIER_TABLES)
+    # The lane's tiers and the store's tiers are ONE vocabulary: a tier the lane can draw and
+    # the table rejects is a paid pass that stores nothing.
+    from autodedup import judge_lane
+
+    for tier in judge_lane.TIERS:
+        if tier == "smoke":       # two tiers in one pass; it stores under each, never as itself
+            continue
+        assert f"'{tier}'" in body
+
+
+def test_530_is_idempotent_and_takes_a_lock_timeout() -> None:
+    body = _TIER_MIGRATION.read_text(encoding="utf-8")
+    assert "set lock_timeout = '5s'" in body
+    assert body.count("drop constraint if exists") == 2 * len(_TIER_TABLES)
+    assert "create table" not in body and "drop table" not in body

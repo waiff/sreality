@@ -108,6 +108,10 @@ def provider_for_model(model: str) -> str:
     shape of every claude-* id.
     """
     m = (model or "").lower()
+    # Namespaced on purpose: an OSS id carries the upstream HF id (`Qwen/Qwen2.5-VL-7B-
+    # Instruct`), which would otherwise route by vendor prefix to that vendor's PAID API.
+    if m.startswith("oss:"):
+        return "oss"
     if m.startswith(("gpt-", "o1", "o3", "o4", "chatgpt")):
         return "openai"
     if m.startswith("qwen"):
