@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Any
 
 from location_data import loader_db
+from location_data.resolver.normalize import strip_street_generic
 from scraper import street
 
 
@@ -614,6 +615,69 @@ def _address_part_street(value: str, arg: str) -> str | None:
     if arg != "loose" and not street.looks_like_czech_street(cleaned):
         return None
     return cleaned
+
+
+# W18: the street a portal states as TEXT. bazos is the first carrier (`/coords/street`,
+# then the capped headline), and this is the only normalisation that text gets — it is
+# deliberately the THINNEST of the street transforms.
+#
+# What it does NOT do is the point.
+#
+#  * It strips the GENERIC wrapper and nothing else: `ul. Jiráskova` -> `Jiráskova`,
+#    `Livornské ulici` -> `Livornské`, `v ulici Nádražní` -> `Nádražní`. `náměstí`, `třída`,
+#    `nábřeží` and `sídliště` STAY, because RÚIAN spells them into the official name and 215
+#    bazos titles bind only because the word survived. The fold is
+#    `resolver.normalize.strip_street_generic`, shared with the binder so the claim layer and
+#    the register layer cannot disagree about what the same street is called.
+#  * It does not strip a trailing house number. S1's `split_street_and_number` turns
+#    `28. října 12` into a name plus a čp, and R1 uses that čp to reach an address point —
+#    dropping it here would cost the finest rung the claim can reach.
+#  * It applies NO morphology gate. `looks_like_czech_street` refuses the real street
+#    `28. října`, and what a Czech street looks like is not a question a regex gets to answer
+#    when a closed 83,451-row register is standing right there. THE REGISTER IS THE GATE — an
+#    unbound street text is not published at all (resolver v5.2), so `Nový` costs nothing
+#    (no street of that name in the anchoring obec) while `28. října` binds.
+#  * It does not cut a street out of a longer line either. A whole title is claimed whole and
+#    SPLIT BY THE BINDER, inside the anchoring obec, fail-closed.
+#
+# What it does do is refuse the three things no register lookup can undo: a geo name typed as
+# a street (`reject_as_town`, which also covers digits-only, an `okres …` qualifier and a
+# `Town - Quarter` line), a value in a script this corpus does not write streets in, and
+# trailing sentence punctuation.
+_STREET_TOKEN_TRIM_RE = re.compile(r"^[\s\-–—,;:/|]+|[\s\-–—,;:/|]+$")
+_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+# What makes a value a LINE rather than a candidate street — the separators a portal writes a
+# composite address with. It decides which gate applies: `reject_as_town` judges ONE name and
+# refuses a `Town - Quarter` form outright, which is right for `/coords/street` and wrong for
+# "Kladno - Dubí, Ke Křížku", where the dash is the separator and `Ke Křížku` is the street.
+# A line is gated per SEGMENT by the binder instead, inside the anchoring obec.
+_STREET_LINE_SEPARATOR_RE = re.compile(r"[,;]|\s[-‐-―−]\s")
+
+
+@transform("street_token")
+def _street_token(value: str, arg: str) -> str | None:
+    """A street as the portal wrote it, unwrapped and sanity-checked — never re-spelled."""
+    token = _STREET_TOKEN_TRIM_RE.sub("", strip_street_generic(value))
+    # A trailing `.` is sentence punctuation UNLESS it belongs to the street itself
+    # (`Karla IV.`), so it goes only after a LOWERCASE letter: `Nádražní.` loses it,
+    # `Karla IV.` keeps it.
+    token = re.sub(r"(?<=[a-záčďéěíňóřšťúůýž])\.$", "", token).strip()
+    if not token or token.isdigit():
+        return None
+    if not _is_latin_script(token):
+        return None
+    if not _STREET_LINE_SEPARATOR_RE.search(token) and street.reject_as_town(token):
+        return None
+    return token
+
+
+def _is_latin_script(value: str) -> bool:
+    """Every LETTER folds to ASCII a-z. Czech diacritics do; Cyrillic and Greek do not, and
+    a street spelled in one of those is a foreign listing's, never a Czech register row's."""
+    letters = _LETTER_RE.findall(value)
+    if not letters:
+        return False
+    return all(_fold(ch).isascii() and _fold(ch).isalpha() for ch in letters)
 
 
 @transform("address_part_house_number")

@@ -34,10 +34,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from location_data.resolver.composite import CompositeBind, resolve_locality
+from location_data.resolver.composite import (
+    CompositeBind,
+    resolve_locality,
+    resolve_street,
+    street_keys,
+)
 from location_data.resolver.geo import distance_between
 from location_data.resolver.normalize import normalize_match_key
 from location_data.resolver.types import (
@@ -49,6 +54,7 @@ from location_data.resolver.types import (
     Position,
     RegistryView,
     ResolverContext,
+    Street,
 )
 
 EPHEMERAL = "ephemeral_display_only"
@@ -92,6 +98,12 @@ PIP_SLIVER_TOLERANCE_M = 250.0
 # Beyond this the registry point and the portal pin are telling different stories: the
 # registry point stays the position and GRADE caps the confidence.
 REGISTRY_PIN_CONFLICT_M = 300.0
+
+# What makes a street claim a LINE rather than a name (W18). The same separators
+# `composite._STREET_SEPARATORS` splits on, asked here as a yes/no: a value carrying one is
+# routed to the segment binder and never to R2/R3, because fuzzy-matching "Prodej bytu" is
+# how a title would bind to a street it does not name.
+_STREET_LINE_RE = re.compile(r"[,;]|\s[-‐-―−]\s")
 
 # Portal-declared labels that mean "this pin is not address-grade". The portal contract maps
 # its own vocabulary onto these; a label we do not know is NOT treated as blurred (cap,
@@ -178,6 +190,14 @@ class Constraints:
     katuz_keys: tuple[str, ...] = ()
     qualifiers: tuple[str, ...] = ()
     street_key: str | None = None
+    # Every register key the SINGLE-name street claim may match: the name as the portal wrote
+    # it and the name with its generic type word parsed off (W18). `ruian_streets.name_norm`
+    # keeps `náměstí`/`třída`/`nábřeží` and S1 strips them, so neither form alone is the key.
+    street_keys: tuple[str, ...] = ()
+    # Street claims that are a LINE rather than a name — a title, a "Kladno - Dubí, Ke Křížku"
+    # parser reading. They never reach R2/R3: `composite.resolve_street` splits them and binds
+    # exactly, inside the anchoring obec, fail-closed (W18).
+    street_lines: tuple[str, ...] = ()
     street_verbatim: str | None = None
     cislo_domovni: int | None = None
     cislo_orientacni: int | None = None
@@ -209,6 +229,8 @@ def collect_constraints(
     }
     ids: dict[str, list[int]] = {}
     obec_lines: list[str] = []
+    street_lines: list[str] = []
+    street_key_set: list[str] = []
     street_key = street_verbatim = None
     cp = co = kod_adm = None
     znak: str | None = None
@@ -238,8 +260,17 @@ def collect_constraints(
                 psc = psc or value
                 note("psc", claim.id)
         elif t == "street_name" and not rejected:
+            raw = str(claim.value_text or "")
+            if _STREET_LINE_RE.search(raw):
+                # A LINE. Its number slots belong to whatever segment ends the string
+                # ("…, Mladá Boleslav"), not to the street, so they are not read here — the
+                # binder takes them off the segment that actually bound (W18).
+                street_lines.append(raw)
+                note("street", claim.id)
+                continue
             if key:
                 street_key = street_key or key
+                street_key_set.extend(street_keys(raw))
                 street_verbatim = street_verbatim or str(slots.get("street") or claim.value_text)
                 note("street", claim.id)
             if cp is None and slots.get("cislo_domovni"):
@@ -296,6 +327,8 @@ def collect_constraints(
         katuz_keys=tuple(dict.fromkeys(buckets["katuz"])),
         qualifiers=tuple(dict.fromkeys(buckets["qualifier"])),
         street_key=street_key,
+        street_keys=tuple(dict.fromkeys(k for k in street_key_set if k)),
+        street_lines=tuple(dict.fromkeys(line for line in street_lines if line)),
         street_verbatim=street_verbatim,
         cislo_domovni=cp,
         cislo_orientacni=co,
@@ -463,6 +496,10 @@ class _Candidate:
     lat: float | None = None
     lon: float | None = None
     cast_obce_unit_id: int | None = None
+    # The register row a street candidate came off, carried so the WINNER — and only the
+    # winner — can be asked where it is (W18). One round trip per listing that binds a
+    # street, never one per candidate.
+    street: Street | None = None
     agreed: tuple[str, ...] = ()
     relaxations: tuple[str, ...] = ()
     source_claim_ids: tuple[int, ...] = ()
@@ -543,41 +580,83 @@ def bind(
                 )
             )
 
-    # ---- R1: obec + street + čp/čo.
-    if constraining_obec_kods and constraints.street_key and (
+    # ---- R1: obec + street + čp/čo. Both register keys are tried (W18): a claim spelled
+    # `nám. Budovatelů` and one spelled `Budovatelů` are the same address point.
+    if constraining_obec_kods and constraints.street_keys and (
         constraints.cislo_domovni or constraints.cislo_orientacni
     ):
         for obec_kod in constraining_obec_kods:
-            for point in registry.address_points_by_number(
-                obec_kod=obec_kod,
-                street_name_norm=constraints.street_key,
-                cislo_domovni=constraints.cislo_domovni,
-                cislo_orientacni=constraints.cislo_orientacni,
-            ):
+            for key in constraints.street_keys:
+                for point in registry.address_points_by_number(
+                    obec_kod=obec_kod,
+                    street_name_norm=key,
+                    cislo_domovni=constraints.cislo_domovni,
+                    cislo_orientacni=constraints.cislo_orientacni,
+                ):
+                    agreed = ["house_number", "street", "obec"]
+                    if constraints.psc == point.psc:
+                        agreed.append("psc")
+                    out.append(
+                        _point_candidate(
+                            point, rung="R1", agreed=tuple(agreed),
+                            claim_ids=_ids(constraints, "street", "house_number_cp",
+                                           "house_number_co"),
+                        )
+                    )
+
+    # ---- W18: a street stated inside a LINE — a bazos headline, a parser reading like
+    # "Kladno - Dubí, Ke Křížku". Split on the portals' own separators and matched against the
+    # register INSIDE the anchoring obec, exactly, whole-string-first and fail-closed: two
+    # distinct streets across the segments bind nothing at all. It reaches the same two rungs a
+    # named street does — R1 when the segment carried a house number, R2 otherwise — because
+    # what bound is a register row either way, and the SHAPE of the string that pointed at it
+    # is not a grade.
+    if constraining_obec_kods and constraints.street_lines:
+        line = resolve_street(constraints.street_lines, constraining_obec_kods, registry)
+        if line.street is not None:
+            constraints = replace(
+                constraints,
+                cislo_domovni=constraints.cislo_domovni or line.cislo_domovni,
+                cislo_orientacni=constraints.cislo_orientacni or line.cislo_orientacni,
+                znak_orientacniho=constraints.znak_orientacniho or line.znak_orientacniho,
+                street_verbatim=constraints.street_verbatim or line.street.name,
+            )
+            points = (
+                registry.address_points_by_number(
+                    obec_kod=line.street.obec_kod,
+                    street_name_norm=line.street.name_norm,
+                    cislo_domovni=line.cislo_domovni,
+                    cislo_orientacni=line.cislo_orientacni,
+                )
+                if line.cislo_domovni or line.cislo_orientacni
+                else []
+            )
+            for point in points:
                 agreed = ["house_number", "street", "obec"]
                 if constraints.psc == point.psc:
                     agreed.append("psc")
                 out.append(
-                    _point_candidate(
-                        point, rung="R1", agreed=tuple(agreed),
-                        claim_ids=_ids(constraints, "street", "house_number_cp", "house_number_co"),
-                    )
-                )
+                    _point_candidate(point, rung="R1", agreed=tuple(agreed),
+                                     claim_ids=_ids(constraints, "street")))
+            if not points:
+                out.append(_street_candidate(line.street, "R2", constraints))
 
     # ---- R2 / R3: street inside the constraining obec, exact then typo-tolerant.
-    if constraining_obec_kods and constraints.street_key:
+    if constraining_obec_kods and constraints.street_keys:
         exact_hits = 0
         fuzzy: list[tuple[float, Any]] = []
         for obec_kod in constraining_obec_kods:
             streets = registry.streets_in_obec(obec_kod)
             for street in streets:
-                if street.name_norm == constraints.street_key:
+                if street.name_norm in constraints.street_keys:
                     out.append(_street_candidate(street, "R2", constraints))
                     exact_hits += 1
             if exact_hits:
                 continue
             for street in streets:
-                sim = trigram_similarity(constraints.street_key, street.name_norm)
+                # R3 stays on the ONE primary key and only for a named street: a trigram run
+                # over the segments of a title is how "Prodej bytu" reaches a street.
+                sim = trigram_similarity(constraints.street_key or "", street.name_norm)
                 if sim >= _TRGM_THRESHOLD:
                     fuzzy.append((sim, street))
         if not exact_hits and fuzzy:
@@ -682,6 +761,15 @@ def bind(
 
     ranked = _rank(out, ctx.granularity_rank)
     top = ranked[0]
+    # W18: a bound street gets a POSITION, off its own address points. Asked HERE, after the
+    # ranking, so the mirror answers it once per listing rather than once per candidate —
+    # `_street_candidate` carries the register row for exactly this. A street with no address
+    # points keeps the pre-W18 behaviour: a name, and no position of its own.
+    street_point = (
+        registry.street_point(top.street)
+        if top.target_kind == "street" and top.street is not None
+        else None
+    )
     # The margin compares LIKE WITH LIKE. Comparing the top candidate against the next row
     # whatever it is compared it against its own ANCESTOR: a quarter (45 + 5) ties the obec
     # that contains it (45 + 5 for the portal's own obec code), the gap is 0 and the answer
@@ -701,9 +789,10 @@ def bind(
             admin_unit_id=top.admin_unit_id,
             obec_kod=top.obec_kod,
             street_name=top.street_name,
-            lat=top.lat,
-            lon=top.lon,
+            lat=top.lat if street_point is None else street_point.lat,
+            lon=top.lon if street_point is None else street_point.lon,
             cast_obce_unit_id=top.cast_obce_unit_id,
+            street_extent_m=None if street_point is None else street_point.extent_m,
             agreed=top.agreed,
             relaxations=top.relaxations,
             ambiguous=ambiguous,
@@ -768,7 +857,7 @@ def _point_candidate(
 
 
 def _street_candidate(
-    street, rung: str, constraints: Constraints, *,
+    street: Street, rung: str, constraints: Constraints, *,
     similarity: float | None = None, relaxations: tuple[str, ...] = (),
 ) -> _Candidate:
     # A house-number claim we could not join to an address point still narrows the street to
@@ -778,7 +867,7 @@ def _street_candidate(
     return _Candidate(
         rung=rung, score=_RUNG_BASE_SCORE[rung] + (10.0 * similarity if similarity else 0.0),
         target_kind="street", granularity=granularity, ulice_kod=street.code,
-        obec_kod=street.obec_kod, street_name=street.name,
+        obec_kod=street.obec_kod, street_name=street.name, street=street,
         agreed=("street", "obec") if rung == "R2" else ("obec",),
         relaxations=relaxations, source_claim_ids=_ids(constraints, "street"),
     )
@@ -879,7 +968,27 @@ def elect_pin(claims: Sequence[Claim]) -> Claim | None:
 
 
 def place(binding: Binding, pin_claim: Claim | None, *, declared: DeclaredPrecision) -> Position:
-    """Precedence: registry point > portal pin > (FILL's unit point).
+    """The ONE precedence rule (W18), in order:
+
+        registry ADDRESS POINT  >  bound STREET point  >  portal pin  >  (FILL's unit point)
+
+    with the street beating the pin only when the pin cannot be trusted over it, which is
+    exactly three states:
+
+      * there is NO pin;
+      * the pin is DECLARED blurred or approximate — bazos stamps every one of its pins
+        "Přibližná lokalita", so a street the ad NAMES is strictly better evidence than a
+        coordinate the portal itself says is fuzzy;
+      * the pin lies farther than `max(REGISTRY_PIN_CONFLICT_M, the street's extent)` from
+        the street's centroid. The extent is in the threshold because a street is not a
+        point: Jiráskova in Mladá Boleslav spans 1,727 m, and a pin 800 m from its centre is
+        still on it.
+
+    An EXACT pin that loses to the street is the one case that is a DISAGREEMENT rather than
+    a precedence — the ad's two statements about where it is do not fit — so the position is
+    stamped `pin_overridden`, which CHECK turns into `disputed='pin_off_street'` and GRADE
+    reads as a ceiling of `medium`. An exact pin that AGREES with the street keeps the
+    position: the pin is the finer of two true answers.
 
     The registry-vs-pin cross-check FLAGS, it never silently picks: beyond
     `REGISTRY_PIN_CONFLICT_M` the registry point stays the position and GRADE caps the
@@ -898,6 +1007,25 @@ def place(binding: Binding, pin_claim: Claim | None, *, declared: DeclaredPrecis
             lat=binding.lat, lon=binding.lon, origin="registry_point",
             registry_pin_distance_m=distance_between((binding.lat, binding.lon), pin),
             source_claim_ids=binding.source_claim_ids,
+        )
+    if binding.target_kind == "street" and binding.lat is not None:
+        extent = binding.street_extent_m or 0.0
+        distance = distance_between((binding.lat, binding.lon), pin)
+        off_street = distance is not None and distance > max(REGISTRY_PIN_CONFLICT_M, extent)
+        if pin is None or declared.blurred or off_street:
+            return Position(
+                lat=binding.lat, lon=binding.lon, origin="street_point",
+                registry_pin_distance_m=distance, extent_m=binding.street_extent_m,
+                pin_overridden=bool(off_street and not declared.blurred),
+                source_claim_ids=binding.source_claim_ids,
+            )
+        # The pin AGREES with the street, so it stays the position — the finer of two true
+        # answers. It carries neither the distance nor the extent: both exist to describe a
+        # point the REGISTER placed, and grading a corroborated pin by them would cap a row
+        # at `medium` for sitting 400 m along a 1.7 km street.
+        return Position(
+            lat=pin[0], lon=pin[1], origin="portal_pin", blurred=declared.blurred,
+            source_claim_ids=(pin_claim.id,),  # type: ignore[union-attr]
         )
     if pin_claim is not None and pin is not None:
         return Position(

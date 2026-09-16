@@ -1,9 +1,61 @@
-# bazos — contract v5 (W1-c slim).
+# bazos — contract v7 (W18: the street the ad NAMES).
 # The detail page's Lokalita row: the town and the PSČ off the town anchor's href (its
 # visible text is the OKRES), plus the ad's own maps link beside it — blur marker and pin.
+#
+# v7 adds the ONE fact bazos publishes that no other locator on this page carries: the
+# STREET. It is the only portal of the nine with no street claim at all — 129,871 located
+# rows, every one of them obec-grain — while the ad states a street outright on a third of
+# them. The operator's ruling (2026-09-16, bazos 223293822): that street must reach the
+# store, and where it disagrees with the ad's pin, the STREET decides the point.
+#
+# WHICH SURFACE, and why in this order (measured 2026-09-16):
+#
+#  * `/coords/street` FIRST. `scraper.bazos_parser` already mines a street on every page it
+#    finds one on (`extract_street` + `_trailer_street_quarter`, kept since W4-c as the
+#    coordinate's provenance): 50,523 of 146,990 rows carry one — "ul. Jiráskova" on the
+#    operator's own ad. It is the parser's subject-scoped reading and it is NOT truncated,
+#    which the title is. Folded and bound against the register of the same obec it matches
+#    EXACTLY on 65.4 % of a 15k sample.
+#  * `/title` SECOND, and second because bazos HARD-CAPS a title at 60 characters — 21,930
+#    of them sit exactly on the cap, cut mid-word ("ul. Vršo", "ul. Bulhars"), which alone
+#    costs 2,887 of the 20,909 cued titles. Of the titles that survive the cap and anchor to
+#    an obec, 80.1 % (14,659) bind exactly. `/title` IS `h1.nadpisdetail`'s text
+#    (`scraper/bazos_parser.py:485`), so this is the headline surface, read on the lane that
+#    covers every row.
+#  * The `<head>` title is deliberately NOT declared: it is the same capped string with the
+#    OKRES and " | Bazoš.cz" appended, so it carries no street the headline lacks and would
+#    feed a region name into the line.
+#  * The DESCRIPTION is deliberately NOT declared either, and it is the next lever rather
+#    than an oversight: `listings.description` is populated on 93 % of rows and 48 % contain
+#    a cue, but the FIRST cue is usually prose ("500 m od ulice …", a broker's office
+#    address) and only 19 % bind exactly. Measured, not guessed — W19's problem.
+#
+# WHAT IS CLAIMED is the whole line the portal wrote, not a street this file tried to cut
+# out of it. `street_token` strips only the generic `ulice`/`ul.` wrapper (leading, with an
+# optional `v`/`ve`/`na`, or trailing) and refuses a geo name, a foreign script and
+# boilerplate. It keeps `náměstí`, `třída`, `nábřeží` and `sídliště` — those are part of
+# the OFFICIAL name ("náměstí Míru", "třída Václava Klementa"), and 215 titles bind only
+# because the word survives. It does not strip a trailing house number either: S1 turns
+# that into a čp and R1 uses it to reach an address point.
+#
+# WHY A TEXT STREET IS SAFE NOW, where `regressions:` below records two reasons it was not:
+#
+#  * `Nový` (220870847) was hallucinated out of "Nový 2 pokojový byt" and geocoded 130 km
+#    away. It is still CLAIMED — a claim states what the portal wrote — and resolver v5.2
+#    never PUBLISHES it: a street reaches the answer row only when it binds to
+#    `ruian_streets` inside the anchoring obec, and there is no Nový in Hořice.
+#  * `28. října` (220059906) was stated three times and stored NULL, because
+#    `looks_like_czech_street` refuses a numeric-leading name. So this entry declares NO
+#    morphology gate. THE REGISTER IS THE GATE, and it spells `28. října`.
+#
+# A multi-segment line ("Prodej bytu 3+1, ul. Jiráskova, Mladá Boleslav") is split and bound
+# SEGMENT BY SEGMENT inside the anchoring obec, whole-string-first and fail-closed, by the
+# same binder W9 built for composite localities — two distinct streets in one line bind
+# nothing. A title cut at the 60-char cap simply fails: a truncated stem is ambiguous by
+# nature and there is no prefix matching anywhere in this lane.
 
 portal: bazos
-contract_version: 6
+contract_version: 7
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -102,3 +154,25 @@ extractions:
     guards: [reject_outside_cz_bbox]
     subject_scope: {subject_scoped: true}
     notes: "The ad's own pin; both decimals sit in ONE attribute — silent until the reader widens."
+
+  - id: bzs.det.street_cue
+    locator_kind: api_json
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator:
+      reader: scalar
+      json_pointer: "/coords/street"
+      # ORDERED alternatives inside the ONE entry — a claim type has one carrier per portal,
+      # so the headline is a second PATH, never a second entry that would reach the resolver
+      # as a vote nothing asked for. `/coords/street` answers on a third of rows and is
+      # untruncated; `/title` is the 60-char-capped headline behind it.
+      fallback:
+        - {json_pointer: "/title"}
+    claim_type: street_name
+    licence_class: portal
+    blur_evidence: none
+    transform: ["street_token"]
+    subject_scope: {subject_scoped: true}
+    notes: "The street the ad states, as the portal wrote it — the parser's own reading
+      first, the capped headline behind it. Only the generic ulice/ul. wrapper is stripped;
+      the register decides what binds, and an unbound text is never published (v5.2)."

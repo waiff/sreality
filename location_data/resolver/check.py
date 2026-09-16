@@ -18,6 +18,12 @@ Three reasons ship:
 * `country_conflict` — text says another country, the registry says Czech. 3 of the 5
   corpus `foreign_suspect` rows were unambiguously Czech artifacts, so trusting either side
   unconditionally is wrong in both directions.
+* `pin_off_street` (W18) — the ad NAMES a street the register places, and its own EXACT pin
+  is farther from that street than the street is long. `place()` has already taken the
+  street's point (a named street beats a coordinate that cannot be on it), so this says the
+  half that lost: the row's two statements about where it is do not fit, and GRADE caps it
+  at `medium`. A BLURRED pin losing to the street is not this and is not a dispute — it is
+  the ordinary precedence, and nothing about the row contradicts anything else.
 
 **Foreign is a determination, never a default** (rule 25). A listing that bound no Czech
 admin unit at all and carries no foreign signal is `undetermined` at `unknown` granularity — the state that says "we have
@@ -235,6 +241,11 @@ def check(
         return Verdict("cz", "CZ", disputed="country_conflict", granularity=granularity)
     if in_cz is False:
         return Verdict("cz", "CZ", disputed="pin_outside_cz", granularity=granularity)
+    if position.pin_overridden:
+        # The street decided the point and an EXACT pin disagreed with it. The granularity
+        # stands: the street is the half that bound to the register, so the ADDRESS identity
+        # is not what is in doubt here — the coordinate is, and it is already gone.
+        return Verdict("cz", "CZ", disputed="pin_off_street", granularity=granularity)
     if pin is not None and has_town and not binding.pin_derived:
         covering = registry.containing_obec(*pin)
         if covering is None or covering.code != filled.obec_kod:

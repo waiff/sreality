@@ -37,4 +37,12 @@ from __future__ import annotations
 #      portal) that is <= the active one — instead of the active version only, so the hours
 #      between a bump and its re-mine no longer judge a listing with no claims at all. The
 #      bump re-queues the 595,816 rows the W9 sweep emptied.
-RESOLVER_VERSION = "resolver:v5.1"
+# v5.2 = W18 (operator ruling 2026-09-16, bazos 223293822): the street a listing NAMES is
+#      published only when it BINDS to `ruian_streets` in the anchoring obec — an unbound
+#      claim text is no longer copied onto the answer row (1,864 rows across seven portals
+#      lose a name that joined to nothing) — and a BOUND street now has a POINT of its own,
+#      the centroid of its valid address points, with an EXTENT (half the bounding diagonal).
+#      That point outranks the portal pin when the pin is absent, declared blurred, or
+#      farther from the street than the street is long; an exact pin that loses is stamped
+#      `disputed='pin_off_street'` and capped at `medium`. Every row re-resolves once.
+RESOLVER_VERSION = "resolver:v5.2"

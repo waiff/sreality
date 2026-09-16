@@ -92,7 +92,7 @@ def grade(
     return Grade(
         granularity=granularity,
         match_confidence=confidence(binding, position, blurred=declared.blurred),
-        uncertainty_radius_m=radius_m(granularity),
+        uncertainty_radius_m=radius_m(granularity, floor_m=position.extent_m),
     )
 
 
@@ -111,13 +111,22 @@ def confidence(binding: Binding, position: Position, *, blurred: bool) -> str:
         value = "medium"
     else:
         value = "low"
-    if blurred or _pin_conflicts(position):
+    if blurred or _pin_conflicts(position) or position.pin_overridden:
+        # W18: an exact pin overridden by the street is the row disagreeing with itself —
+        # CHECK says so in `disputed`, and a disagreement may not be served above `medium`.
         value = cap_confidence(value, "medium")
     return value
 
 
-def radius_m(granularity: str) -> float:
-    return RADIUS_M[granularity]
+def radius_m(granularity: str, *, floor_m: float | None = None) -> float:
+    """The level's constant, never smaller than what actually placed the row (W18).
+
+    A street is not a point: when the row sits at the centroid of a street's address points,
+    the honest radius is the one that reaches the far end of it — 863 m for Jiráskova in
+    Mladá Boleslav, where the level constant says 300. The floor only ever RAISES the
+    number, so every other row keeps exactly the radius it had.
+    """
+    return max(RADIUS_M[granularity], floor_m or 0.0)
 
 
 def _pin_corroborates(position: Position) -> bool:

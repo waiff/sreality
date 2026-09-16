@@ -35,6 +35,20 @@ _STREET_TYPE = re.compile(
     r"nábřeží|nabrezi|nábř\.|sídliště|sidliste)\s+",
     re.IGNORECASE,
 )
+# The GENERIC wrapper a Czech ad puts round a street name, and the ONLY part of a street
+# string that means nothing: `ulice X`, `ul. X`, `v ulici X`, `na ulici X`, `X ulici`. It is
+# stripped at BOTH ends because the portals write both ("ul. Jiráskova", "Livornské ulici").
+#
+# `náměstí`, `třída`, `nábřeží` and `sídliště` are deliberately NOT here. RÚIAN spells them
+# INTO the official name — `ruian_streets.name_norm` is built by
+# `name_index.normalize_street_name`, which drops a leading `ulice`/`ul.` and nothing else —
+# so "náměstí Míru" is the register's own string and 215 bazos titles bind only because the
+# word survived. `split_street_type` below still parses them off for the OTHER match key;
+# the binder tries both forms and that is what makes the pair symmetric with the register.
+_STREET_GENERIC_LEAD = re.compile(
+    r"^\s*(?:(?:v|ve|na)\s+)?(?:ulice|ulici|ul\.|ul\b)\s*", re.IGNORECASE)
+_STREET_GENERIC_TRAIL = re.compile(r"\s+(?:ulice|ulici|ul\.|ul)\s*$", re.IGNORECASE)
+
 # '28. října', '17. listopadu', '1. máje' — a LEADING ordinal is part of the street name,
 # never a house number (03 §3.3.1, named regression test).
 _NUMERIC_LEADING = re.compile(r"^\s*\d{1,3}\.\s*\S")
@@ -65,6 +79,17 @@ def case_fold(value: str) -> str:
 
 def split_glue(value: str) -> str:
     return _GLUE.sub(" ", value)
+
+
+def strip_street_generic(value: str) -> str:
+    """Drop the generic `ulice`/`ul.` wrapper from either end, and nothing else.
+
+    THE one fold shared by the claim layer (`claims_common.street_token`, which is all a
+    portal's street text is normalised by) and by the binder — two copies of it would be two
+    answers to "is this the same street", which is the question the whole wave turns on.
+    """
+    stripped = _STREET_GENERIC_TRAIL.sub("", _STREET_GENERIC_LEAD.sub("", value or ""))
+    return _WS.sub(" ", stripped).strip()
 
 
 def split_street_type(value: str) -> tuple[str, str | None]:

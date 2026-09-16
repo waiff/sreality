@@ -121,7 +121,7 @@ def resolve(
         ruian_adm_kod=filled.ruian_adm_kod if czech else None,
         match_confidence=("low" if not czech else graded.match_confidence),
         granularity=granularity,
-        uncertainty_radius_m=step_grade.radius_m(granularity),
+        uncertainty_radius_m=step_grade.radius_m(granularity, floor_m=position.extent_m),
         country_status=verdict.country_status,
         disputed=verdict.disputed,
         resolver_version=resolver_version,

@@ -161,17 +161,40 @@ def test_a_clean_row_is_not_disputed():
 def test_a_pin_outside_the_resolved_obec_keeps_the_pin_and_drops_to_the_admin_level():
     """The pin says Bílovec, the name says Praha. Both are kept — the pin because it is the
     only position there is, the town because the name is the stronger claim — and the row
-    says so in one word."""
+    says so in one word.
+
+    NO street here, deliberately. W18 gave a bound street a point of its own, and a row that
+    has one no longer has "the pin because it is the only position there is" — it takes the
+    register's point and disputes `pin_off_street` instead (the test below). This rail is
+    about the rows that still have nothing else."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
-        mm.claim(3, "coordinate", lat=49.7573, lon=18.0158),
+        mm.claim(2, "coordinate", lat=49.7573, lon=18.0158),
     ])
     assert resolution.disputed == "pin_outside_obec"
     assert resolution.obec_kod == 554782
     assert (resolution.lat, resolution.lon) == (49.7573, 18.0158)
-    # BIND reached the street rung; the disagreement drops it back to the admin level.
     assert resolution.granularity == "obec"
+
+
+def test_a_pin_that_cannot_be_on_the_named_street_loses_to_the_street():
+    """W18. The same disagreement with a street on the row: the street BINDS to the register
+    and the pin cannot be anywhere near it, so the register places the listing and the pin is
+    the half that is called out. The granularity does NOT drop — the address identity is the
+    half that bound; the coordinate is the half that lost."""
+    resolution = _resolve([
+        mm.claim(1, "obec_name", value_text="Praha"),
+        mm.claim(2, "street_name", value_text="Nad Bořislavkou"),
+        mm.claim(3, "coordinate", lat=49.7573, lon=18.0158,
+                 declared_precision_label="gps"),
+    ])
+    assert resolution.disputed == "pin_off_street"
+    assert resolution.obec_kod == 554782
+    assert resolution.ulice_kod == 101
+    assert (resolution.lat, resolution.lon) != (49.7573, 18.0158)
+    assert resolution.granularity == "street"
+    # A disagreement is never served above `medium`, however many fields agreed.
+    assert resolution.match_confidence == "medium"
 
 
 def test_a_pin_outside_czechia_with_a_czech_town_is_disputed_not_foreign():

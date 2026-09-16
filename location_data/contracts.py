@@ -443,6 +443,12 @@ IMPLEMENTED_TRANSFORMS = frozenset({
     # idnes@4: the same `country` type off a STRUCTURED alpha-2 field instead of an address
     # tail — no name table to fall outside of, and CZ dropped rather than claimed.
     "foreign_country_code",
+    # W18: a street named in PROSE, where the contract's own cue-anchored pattern already
+    # did the selecting. It neither strips the cue (S1 owns that) nor asks whether the
+    # token looks Czech (the REGISTER owns that, and `looks_like_czech_street` refuses the
+    # real street `28. října`) — it refuses a geo name, a foreign script and trailing
+    # sentence punctuation, and nothing else.
+    "street_token",
 })
 IMPLEMENTED_GUARDS = frozenset({"reject_outside_cz_bbox"})
 

@@ -40,8 +40,13 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from location_data.resolver.normalize import normalize_match_key
-from location_data.resolver.types import AdminUnit, RegistryView
+from location_data.resolver.normalize import (
+    normalize_match_key,
+    split_street_and_number,
+    split_street_type,
+    strip_street_generic,
+)
+from location_data.resolver.types import AdminUnit, RegistryView, Street
 
 # The levels a locality line may name BELOW the town, finest first.
 PART_LEVELS: tuple[str, ...] = ("cast_obce", "momc", "spravni_obvod")
@@ -202,3 +207,135 @@ def _lookup(registry: RegistryView, key: str, levels: Sequence[str]) -> list[Adm
 
 def _tokens(value: str) -> list[str]:
     return [token for token in (part.strip() for part in _SEPARATORS.split(value)) if token]
+
+
+# --------------------------------------------------------------------------- streets (W18)
+#
+# The SAME doctrine, one level down. A portal states a street inside a line as readily as it
+# states a quarter inside one — bazos' headline is "Prodej bytu 3+1, ul. Jiráskova, Mladá
+# Boleslav" and its parser's own reading is "Kladno - Dubí, Ke Křížku" — so the answer is the
+# one W9 already gave for localities: split on the separators the portals write, match each
+# segment against the REGISTER inside the anchoring town, and fail closed when more than one
+# thing matches.
+#
+# Three rules the locality binder does not need, and each is a measured one:
+#
+#  1. BOTH KEYS. `ruian_streets.name_norm` comes from `name_index.normalize_street_name`,
+#     which drops a leading `ulice`/`ul.` and nothing else — so the register says
+#     `namesti miru` while S1's `split_street_type` hands the resolver `miru`. Matching both
+#     forms is what makes the two sides symmetric without touching the loader, and it is
+#     worth 215 titles that bind only with the generic word kept.
+#  2. NO TRIGRAM. `bind`'s R3 exists for a single claimed name with a typo in it. Run over the
+#     segments of a whole title it would fuzzy-match "Prodej bytu" against a street, so a line
+#     binds EXACTLY or not at all. A title cut at bazos' 60-character cap ("ul. Vršo") is the
+#     same rule seen from the other side: a truncated stem is ambiguous by nature and there is
+#     no prefix matching here.
+#  3. NOT A PLACE. A segment naming the anchoring obec, or a část obce / MOMC inside it, is
+#     never a street candidate — 76 register streets across 20 obce are spelled exactly like a
+#     část obce of their own town, and on a line there is nothing to tell them apart.
+_STREET_SEPARATORS = re.compile(r"[,;]|\s[-‐-―−]\s")
+
+
+@dataclass(frozen=True, slots=True)
+class StreetBind:
+    """What a street LINE names inside the anchoring obec. `reason` is the diagnostic."""
+
+    street: Street | None = None
+    cislo_domovni: int | None = None
+    cislo_orientacni: int | None = None
+    znak_orientacniho: str | None = None
+    reason: str = "no_match"
+
+    @property
+    def bound(self) -> bool:
+        return self.street is not None
+
+
+def street_keys(value: str) -> frozenset[str]:
+    """The keys ONE segment may match: the name with its type word, and without it.
+
+    `náměstí Míru` is how the register spells that street and `Míru` is what S1 makes of the
+    same claim, so neither form is the right one on its own. The portal's own abbreviation is
+    the third case and the reason both sides are folded rather than one: a claim saying
+    `nám. Míru` normalises to `nam miru`, which matches the register's `namesti miru` at
+    neither end — but both strip to `miru`.
+    """
+    base = strip_street_generic(value)
+    name, _ = split_street_and_number(base)
+    keys = {normalize_match_key(name)}
+    without_type, _ = split_street_type(name)
+    keys.add(normalize_match_key(without_type))
+    return frozenset(k for k in keys if k)
+
+
+def register_street_keys(street: Street) -> frozenset[str]:
+    """The same pair, taken off the REGISTER row. `ruian_streets.name_norm` is built by
+    `name_index.normalize_street_name`, which drops a leading `ulice`/`ul.` and keeps
+    everything else — so the fold is made symmetric HERE, in the resolver, rather than by
+    re-normalising 83,451 rows in the loader for a question only the matcher asks."""
+    stripped, _ = split_street_type(street.name)
+    return frozenset(k for k in {street.name_norm, normalize_match_key(stripped)} if k)
+
+
+def resolve_street(
+    lines: Sequence[str], obec_kods: Sequence[int], registry: RegistryView
+) -> StreetBind:
+    """-> the ONE street the lines name inside the constraining obec, or nothing.
+
+    Distinct across every line and every segment, because a line that names two streets is a
+    line nobody can resolve: "Sokolovská, roh Křižíkovy" is two answers and neither is the
+    listing's. Two SPELLINGS of one register row are one answer, which is why the set is keyed
+    on the street's code.
+    """
+    found: dict[int, tuple[Street, dict[str, object]]] = {}
+    for line in lines:
+        for segment in _street_segments(line):
+            keys = street_keys(segment)
+            if not keys:
+                continue
+            _, numbers = split_street_and_number(strip_street_generic(segment))
+            for obec_kod in obec_kods:
+                if _names_a_place(keys, obec_kod, registry):
+                    continue
+                for street in registry.streets_in_obec(obec_kod):
+                    if keys & register_street_keys(street):
+                        found.setdefault(street.code, (street, numbers))
+    if not found:
+        return StreetBind(reason="no_match")
+    if len(found) > 1:
+        return StreetBind(reason="ambiguous_streets")
+    street, numbers = found[next(iter(found))]
+    return StreetBind(
+        street=street,
+        cislo_domovni=_as_int(numbers.get("cislo_domovni")),
+        cislo_orientacni=_as_int(numbers.get("cislo_orientacni")),
+        znak_orientacniho=(str(numbers["znak_orientacniho"])
+                           if numbers.get("znak_orientacniho") else None),
+        reason="segment_match",
+    )
+
+
+def _street_segments(line: str) -> list[str]:
+    return [seg for seg in (part.strip() for part in _STREET_SEPARATORS.split(line or "")) if seg]
+
+
+def _names_a_place(keys: frozenset[str], obec_kod: int, registry: RegistryView) -> bool:
+    """The town itself, or a part of it. `normalize.normalize_claim`'s `town_as_street` rule
+    covers a claim that IS one name; a segment of a line never reaches it, and the collision
+    is real at part level too."""
+    for key in keys:
+        for unit in registry.admin_units_by_name(key, levels=("obec", *PART_LEVELS)):
+            # Through the CHAIN, not through `AdminUnit.obec_kod`: that column is filled off
+            # the ltree path by the SQL view and is empty on any other `RegistryView`, so
+            # reading it here would make the rail fire in production and nowhere else.
+            town = _obec_of(unit, registry)
+            if town is not None and town.code == obec_kod:
+                return True
+    return False
+
+
+def _as_int(value: object) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None

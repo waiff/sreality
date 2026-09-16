@@ -185,6 +185,28 @@ class Street:
     name: str
     name_norm: str
     obec_kod: int
+    # The mirror's SURROGATE id (`ruian_streets.id`), which is what `ruian_address_points`
+    # foreign-keys and therefore the only key the street's own points can be found by —
+    # `ulice_kod` carries no index on that table. Defaulted so a fixture may spell a street
+    # without one; a street with no id simply has no point (W18).
+    id: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StreetPoint:
+    """Where a street IS, derived from the register rather than stored in it (W18).
+
+    `ruian_streets` carries no geometry, so a street's position is the centroid of its own
+    valid address points and its `extent_m` is HALF the bounding diagonal of that set — the
+    radius of the smallest circle around the centroid that still contains the street. It is
+    a size, not an error bar: Jiráskova in Mladá Boleslav is 63 points spread over 1,727 m,
+    so a point 800 m from its centre is still ON it.
+    """
+
+    lat: float
+    lon: float
+    extent_m: float
+    point_count: int
 
 
 class RegistryView(Protocol):
@@ -202,6 +224,10 @@ class RegistryView(Protocol):
     ) -> Sequence[AddressPoint]: ...
 
     def streets_in_obec(self, obec_kod: int) -> Sequence[Street]: ...
+
+    def street_point(self, street: Street) -> StreetPoint | None:
+        """Where a bound street sits, off its own address points. None when it has none —
+        `ruian_streets` holds the name, never the geometry."""
 
     def admin_units_by_name(
         self, name_norm: str, *, levels: Sequence[str] = ()
@@ -270,6 +296,10 @@ class Binding:
     lat: float | None = None
     lon: float | None = None
     cast_obce_unit_id: int | None = None
+    # The bound STREET's own point and how far it reaches (W18), read once for the WINNER
+    # and never for a loser. `lat`/`lon` above carry the point; this carries its size, which
+    # is what `place()` compares a pin against and what floors the published radius.
+    street_extent_m: float | None = None
     agreed: tuple[str, ...] = ()
     relaxations: tuple[str, ...] = ()
     ambiguous: bool = False
@@ -300,10 +330,20 @@ class Position:
     lat: float | None
     lon: float | None
     # `admin_centroid` is FILL's (W2-a3): BIND elects the pin, FILL places what the pin did
-    # not. A row keeps `none` only when nothing Czech bound at all.
-    origin: str  # registry_point | portal_pin | admin_centroid | none
+    # not. `street_point` is W18's: the centroid of a bound street's address points, which
+    # outranks a pin that is blurred, absent, or off the street. A row keeps `none` only
+    # when nothing Czech bound at all.
+    origin: str  # registry_point | street_point | portal_pin | admin_centroid | none
     blurred: bool = False
     registry_pin_distance_m: float | None = None
+    # The street reaches this far from `lat`/`lon` (W18) — the floor under the published
+    # uncertainty radius whenever the street is what placed the row.
+    extent_m: float | None = None
+    # An EXACT pin was overridden by the street point, i.e. the ad's two statements about
+    # where it is disagree. CHECK turns this into `disputed='pin_off_street'` and GRADE caps
+    # the confidence; a blurred pin losing to the register is not this — it is the ordinary
+    # precedence, and nothing about the row contradicts anything else.
+    pin_overridden: bool = False
     source_claim_ids: tuple[int, ...] = ()
 
     @property

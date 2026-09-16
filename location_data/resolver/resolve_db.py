@@ -57,6 +57,7 @@ from location_data.resolver.types import (
     AdminUnit,
     Claim,
     Street,
+    StreetPoint,
 )
 
 _CURRENT_REGISTRY_SQL = "SELECT id, label FROM registry_versions WHERE is_current LIMIT 1"
@@ -192,11 +193,31 @@ SELECT {_ADDRESS_POINT_COLUMNS}
 """
 
 _STREETS_IN_OBEC_SQL = """
-SELECT s.code, s.name, s.name_norm, u.code
+SELECT s.code, s.name, s.name_norm, u.code, s.id
   FROM ruian_streets s
   JOIN ruian_admin_units u ON u.id = s.obec_unit_id
  WHERE u.code = %s AND u.level = 'obec' AND s.valid_to IS NULL
  ORDER BY s.code
+"""
+
+# WHERE A STREET IS (W18). `ruian_streets` carries no geometry, so the answer is derived
+# from the street's own valid address points: the centroid of the set, and HALF the bounding
+# diagonal as its extent — the radius of the smallest circle around that centroid that still
+# contains the street. Measured on the live mirror: Jiráskova in obec 535419 is 63 points,
+# centroid POINT(14.91365 50.42247), diagonal 1,727 m.
+#
+# Keyed on `ap.street_id`, never on `ap.ulice_kod`: `ruian_ap_street_hn (street_id,
+# cislo_domovni, cislo_orientacni)` is exactly this lookup's index and `ulice_kod` has none,
+# so the kód form would plan a scan of three million rows for a question asked once per
+# listing that binds a street. `::geography` on the diagonal because the answer is METRES;
+# the centroid stays geometry (4326 degrees), which is what `ST_Y`/`ST_X` want.
+_STREET_POINT_SQL = """
+SELECT ST_Y(ST_Centroid(ST_Collect(ap.geom))),
+       ST_X(ST_Centroid(ST_Collect(ap.geom))),
+       ST_Length(ST_BoundingDiagonal(ST_Collect(ap.geom))::geography) / 2.0,
+       count(*)
+  FROM ruian_address_points ap
+ WHERE ap.street_id = %s AND ap.valid_to IS NULL AND ap.geom IS NOT NULL
 """
 
 # The unit column list `_admin_unit` unpacks positionally, over ONE point expression: the
@@ -583,9 +604,25 @@ class SqlRegistryView:
 
     def streets_in_obec(self, obec_kod: int) -> list[Street]:
         return [
-            Street(code=int(r[0]), name=str(r[1]), name_norm=str(r[2]), obec_kod=int(r[3]))
+            Street(code=int(r[0]), name=str(r[1]), name_norm=str(r[2]), obec_kod=int(r[3]),
+                   id=None if r[4] is None else int(r[4]))
             for r in self._rows("streets_in_obec", _STREETS_IN_OBEC_SQL, (obec_kod,))
         ]
+
+    def street_point(self, street: Street) -> StreetPoint | None:
+        """Asked for the WINNING street only (`bind._street_candidate` carries the row), so
+        this is one round trip per listing that binds a street — and the run cache makes it
+        one per STREET per run. A street with no valid address point has no position: the
+        aggregate comes back with a NULL centroid and a zero count."""
+        if street.id is None:
+            return None
+        rows = self._rows("street_point", _STREET_POINT_SQL, (street.id,))
+        if not rows or rows[0][0] is None or rows[0][1] is None:
+            return None
+        return StreetPoint(
+            lat=float(rows[0][0]), lon=float(rows[0][1]),
+            extent_m=float(rows[0][2] or 0.0), point_count=int(rows[0][3] or 0),
+        )
 
     def admin_units_by_name(self, name_norm: str, *, levels: Sequence[str] = ()) -> list[AdminUnit]:
         wanted = list(levels)
@@ -791,6 +828,15 @@ class CachedRegistryView:
     def streets_in_obec(self, obec_kod: int) -> Sequence[Street]:
         return self._cache.get(
             ("streets_in_obec", obec_kod), lambda: tuple(self._inner.streets_in_obec(obec_kod))
+        )
+
+    def street_point(self, street: Street) -> StreetPoint | None:
+        """Keyed on the street's own id: one listing per street is the common case in a
+        slice, but a whole town's worth of listings on one high street is the case that pays
+        for the memo."""
+        return self._cache.get(
+            ("street_point", street.id, street.code),
+            lambda: self._inner.street_point(street),
         )
 
     def admin_units_by_name(

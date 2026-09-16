@@ -96,9 +96,14 @@ def fill(
         okres_name=values.get("okres_name"),      # type: ignore[arg-type]
         obec_name=values.get("obec_name"),        # type: ignore[arg-type]
         cast_obce_name=values.get("cast_obce_name"),  # type: ignore[arg-type]
-        street_name=(
-            operator.get("street_name") or binding.street_name or constraints.street_verbatim
-        ),
+        # W18: the street is the REGISTER's or it is nothing. `binding.street_name` is set
+        # only on a row that bound one (R0/R1 off the address point, R2/R3 off
+        # `ruian_streets`), so an unbound claim text no longer reaches the answer row — the
+        # 1,864 rows that carried a street name with `ulice_kod` NULL fall back to their
+        # část obce or their town. One rule for all nine portals, and the deliberate cost of
+        # it is coverage: a real street the mirror does not hold is dropped rather than
+        # served as a name nothing can be joined to, filtered on, or de-duplicated by.
+        street_name=(operator.get("street_name") or binding.street_name),
         house_number_cp=operator.get("house_number_cp") or _cp(point, constraints),
         house_number_co=operator.get("house_number_co") or _co(point, constraints),
         psc=operator.get("psc")
