@@ -165,6 +165,34 @@ function KeyValues({
   );
 }
 
+/* ------------------------------------------------------------- artifact links */
+
+/* The jsonb key is the lane's own name for the thing; some of those names are
+ * machine keys ("run", "gh") that mean nothing on a page. A URL that points at
+ * an Actions run IS an Actions run whatever the key spells, so the label is read
+ * off the destination and the key is the fallback rather than the answer. */
+const ACTIONS_RUN_RE = /^https?:\/\/(www\.)?github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+/i;
+const ACTIONS_ARTIFACT_RE = /^https?:\/\/(www\.)?github\.com\/.*\/artifacts\/\d+/i;
+
+export function artifactLabel(key: string, url: string): string {
+  if (ACTIONS_ARTIFACT_RE.test(url)) return 'Artifact download';
+  if (ACTIONS_RUN_RE.test(url)) return 'Actions run';
+  return key;
+}
+
+/* Two jsonb blobs are "the same" when they carry the same keys with the same
+ * values — compared on SORTED keys, because the lane builds the two dicts in
+ * different places and a key order is not a difference. */
+export function sameBlob(
+  a: Record<string, unknown> | null | undefined,
+  b: Record<string, unknown> | null | undefined,
+): boolean {
+  const ea = Object.entries(a ?? {}).sort(([x], [y]) => x.localeCompare(y));
+  const eb = Object.entries(b ?? {}).sort(([x], [y]) => x.localeCompare(y));
+  if (ea.length === 0 || ea.length !== eb.length) return false;
+  return JSON.stringify(ea) === JSON.stringify(eb);
+}
+
 /* ------------------------------------------------------------------- a card */
 
 function IterationCard({ row }: { row: AutodedupIteration }) {
@@ -180,6 +208,7 @@ function IterationCard({ row }: { row: AutodedupIteration }) {
     (entry): entry is [string, string] =>
       typeof entry[1] === 'string' && /^https?:\/\//i.test(entry[1]),
   );
+  const identical = sameBlob(row.sample_stats, row.metrics);
 
   return (
     <li className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
@@ -231,9 +260,18 @@ function IterationCard({ row }: { row: AutodedupIteration }) {
           </ul>
         )}
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        {/* A lane that measured nothing new writes its sample back as its
+          * metrics; printing the same table twice reads as two findings. */}
+        <div className={`grid gap-4 ${identical ? '' : 'sm:grid-cols-2'}`}>
           <KeyValues title="Sample" blob={row.sample_stats} />
-          <KeyValues title="Metrics" blob={row.metrics} />
+          {identical ? (
+            <p className="text-[0.68rem] text-[var(--color-ink-3)]">
+              Metrics are identical to the sample — this iteration measured the cohort, not a
+              result.
+            </p>
+          ) : (
+            <KeyValues title="Metrics" blob={row.metrics} />
+          )}
         </div>
 
         {(artifacts.length > 0 || row.run_id != null) && (
@@ -251,7 +289,7 @@ function IterationCard({ row }: { row: AutodedupIteration }) {
                   rel="noopener noreferrer"
                   className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
                 >
-                  {name}
+                  {artifactLabel(name, url)}
                 </a>
               </li>
             ))}

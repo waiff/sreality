@@ -45,6 +45,9 @@ const NewDedupTaggingBakeoff = lazyChunk(() => import('./pages/NewDedupTaggingBa
 const LocationPinAudit = lazyChunk(() => import('./pages/LocationPinAudit'));
 const NewDedupTaxonomy = lazyChunk(() => import('./pages/NewDedupTaxonomy'));
 const AutodedupProgress = lazyChunk(() => import('./pages/AutodedupProgress'));
+const AutodedupGroups = lazyChunk(() => import('./pages/AutodedupGroups'));
+const AutodedupResidual = lazyChunk(() => import('./pages/AutodedupResidual'));
+const AutodedupPair = lazyChunk(() => import('./pages/AutodedupPair'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazyChunk(() => import('./pages/DevConfidencePreview'));
@@ -126,6 +129,9 @@ export const routes: RouteObject[] = [
       { path: ROUTES.newDedupTaggingBakeoff.childPath, element: <AdminPage><NewDedupTaggingBakeoff /></AdminPage>, handle: { title: 'NEW DEDUP · Tagging bake-off' } },
       { path: ROUTES.newDedupPinAudit.childPath, element: <AdminPage><LocationPinAudit /></AdminPage>, handle: { title: 'NEW DEDUP · Audit poloh' } },
       { path: ROUTES.autodedupProgress.childPath, element: <AdminPage><AutodedupProgress /></AdminPage>, handle: { title: 'AUTODEDUP · Progress' } },
+      { path: ROUTES.autodedupGroups.childPath, element: <AdminPage><AutodedupGroups /></AdminPage>, handle: { title: 'AUTODEDUP · Groups' } },
+      { path: ROUTES.autodedupResidual.childPath, element: <AdminPage><AutodedupResidual /></AdminPage>, handle: { title: 'AUTODEDUP · Residual' } },
+      { path: ROUTES.autodedupPair.childPath, element: <AdminPage><AutodedupPair /></AdminPage>, handle: { title: 'AUTODEDUP · Pair' } },
       { path: ROUTES.scrapers.childPath, element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: ROUTES.devConfidenceIndicator.childPath, element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },

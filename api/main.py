@@ -302,13 +302,18 @@ app.include_router(new_dedup_tags_router)
 # come from the generation lane (scripts/dedup_candidates_generate.py). See
 # toolkit/dedup_candidates.py and docs/design/new-dedup/PROGRAM.md (Wave 2).
 app.include_router(new_dedup_candidates_router)
-# /autodedup/* (the autonomous dedup engine's Progress page, migration 528) —
-# read-only, admin-gated: the program ledger `autodedup.iterations` one keyset page
-# at a time, and the spend/wave rollup the header strip shows. Cost is read from
-# `llm_calls` by the lane, never forecast here. Answers store_ready=false instead of
-# failing when the migration is not applied. The whole program is shadow mode: the
-# only writer is the lane (`python -m autodedup.lane`). See autodedup/progress_sql.py
-# and docs/design/autodedup/PROGRAM.md (Q11).
+# /autodedup/* (the autonomous dedup engine's Progress + validation pages, migration
+# 528) — admin-gated: the program ledger `autodedup.iterations` one keyset page at a
+# time, the spend/wave rollup the header strip shows, and W5's proposed groups /
+# residual pairs / one pair's evidence. Cost is read from `llm_calls` by the lane,
+# never forecast here. Answers store_ready=false instead of failing when the migration
+# is not applied. ONE write exception (W5): `POST /autodedup/verdict` records the
+# operator's decision in `autodedup.verdicts` and, for a negative pair verdict, the
+# permanent `autodedup.must_not_link` (retracted when that verdict is reversed). Both
+# tables live inside schema `autodedup`, so shadow mode (D4) is intact — no production
+# table is written, and `listings`/`images` are read for display only. Everything else
+# is written by the lane (`python -m autodedup.lane`). See autodedup/progress_sql.py,
+# autodedup/ui_sql.py and docs/design/autodedup/PROGRAM.md (Q11, §9, §12).
 app.include_router(autodedup_router)
 # /location/* (location-quality dashboard + operator corrections) — the consumer
 # of `listing_location`, the location program's one answer table (mig 501),

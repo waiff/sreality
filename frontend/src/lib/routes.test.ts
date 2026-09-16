@@ -24,6 +24,8 @@ const PARAM_FIXTURES: Record<string, string | number> = {
   source: 'bazos',
   nativeId: 'abc-123',
   sreality_id: -284913,
+  lo: 101,
+  hi: 202,
 };
 
 function paramNames(pattern: string): string[] {

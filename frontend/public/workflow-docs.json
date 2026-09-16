@@ -303,7 +303,7 @@
       "inputs": [
         {
           "name": "mode",
-          "description": "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row.",
+          "description": "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row.",
           "required": true,
           "type": "string",
           "default": "census",

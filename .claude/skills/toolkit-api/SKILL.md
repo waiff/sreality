@@ -95,6 +95,8 @@ it (`api/`). They do not apply to the scraper.
    override. Every mutating `/broker-review/*` route binds `require_admin`'s claims and threads
    `claims.get("email") or claims.get("sub")` into `undone_by` / `resolved_by` / `created_by` /
    `lifted_by`.
+   **AUTODEDUP's one write is `POST /autodedup/verdict`** (mig 528, same `decided_by` idiom): upserts
+   `autodedup.verdicts`; a negative PAIR verdict adds `autodedup.must_not_link` and reversing it DELETEs that row; cluster verdicts add none; both tables are inside schema `autodedup` (shadow mode holds) and an un-migrated store is a 503, not a `store_ready:false` 200.
 6. **Spatial queries measure in metres, so they cast.** A listing's point is
    `listing_location.geom`, a `geometry(Point,4326)`: always
    `ST_DWithin(ll.geom::geography, target, radius_m)`. Never compute distance in Python.

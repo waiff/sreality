@@ -18,6 +18,9 @@
  *   * a FAILED read shows the error and NOT "nothing has been recorded" — the
  *     page does not know, so it must not claim;
  *   * a fractional metric keeps its magnitude: 0.0004 is not "0";
+ *   * an artifact link is labelled by its DESTINATION ("Actions run"), not by
+ *     the lane's jsonb key, and a metrics blob that only repeats the sample is
+ *     hidden rather than printed twice as if it were a second finding;
  *   * no interactive control is nested inside another (the collapse buttons and
  *     the artifact links live in separate subtrees).
  */
@@ -268,6 +271,59 @@ describe('<AutodedupProgress>', () => {
      * one answer this page must not invent. */
     expect(within(card).getByText('ece').closest('tr')!).toHaveTextContent('0,0004');
     expect(within(card).getByText('bins').closest('tr')!).toHaveTextContent('10');
+  });
+
+  it('labels an Actions-run artifact by what it is, not by its jsonb key', async () => {
+    vi.mocked(api.getAutodedupIterations).mockResolvedValue(
+      page([
+        iteration({
+          id: 7,
+          title: 'Labelled artifact',
+          artifacts: {
+            /* The lane's own key is a machine name; the destination is what
+             * the reader needs. */
+            run: 'https://github.com/acme/repo/actions/runs/55501',
+            'cohort.tar.gz': 'https://example.invalid/cohort.tar.gz',
+          },
+        }),
+      ]),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('Labelled artifact')).closest('li')!;
+    await user.click(within(card).getByRole('button', { name: /Labelled artifact/ }));
+    expect(within(card).getByRole('link', { name: 'Actions run' })).toHaveAttribute(
+      'href',
+      'https://github.com/acme/repo/actions/runs/55501',
+    );
+    /* A key that already reads as a name is left alone. */
+    expect(within(card).getByRole('link', { name: 'cohort.tar.gz' })).toBeInTheDocument();
+  });
+
+  it('hides the metrics table when it only repeats the sample', async () => {
+    const blob = { cohort: 'jablonec', listings: 3120 };
+    vi.mocked(api.getAutodedupIterations).mockResolvedValue(
+      page([
+        iteration({ id: 6, title: 'Census', sample_stats: blob, metrics: { ...blob } }),
+        iteration({
+          id: 5,
+          title: 'Calibration',
+          sample_stats: blob,
+          metrics: { ece: 0.0004 },
+        }),
+      ]),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    const same = (await screen.findByText('Census')).closest('li')!;
+    await user.click(within(same).getByRole('button', { name: /Census/ }));
+    expect(within(same).queryByText('Metrics')).toBeNull();
+    expect(within(same).getByText(/identical to the sample/)).toBeInTheDocument();
+
+    /* A real measurement still gets its own table. */
+    const other = screen.getByText('Calibration').closest('li')!;
+    await user.click(within(other).getByRole('button', { name: /Calibration/ }));
+    expect(within(other).getByText('Metrics')).toBeInTheDocument();
   });
 
   it('drops an artifact value that is not an http(s) link', async () => {

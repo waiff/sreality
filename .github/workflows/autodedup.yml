@@ -84,6 +84,31 @@ name: "AUTODEDUP: engine lane"
 #             land in `autodedup.judgements` and in out/judgements.jsonl; the sample, the
 #             engine run and the spend summary land beside them.
 #
+#   score   - READS the artifact, WRITES the engine's own schema. Downloads a finished
+#             `export` run's cohort artifact (same `gh run download` path as judge, which is
+#             why the job asks for `actions: read`), runs the whole engine over it in-process
+#             and PERSISTS what it decided into schema autodedup - nothing in public.* is
+#             touched and nothing is merged (ruling D4, clusters land with status `proposed`
+#             and no property_id). One `autodedup.runs` row wraps the pass: `running` from
+#             BEFORE the engine starts - the long phase, and the one that dies - then
+#             `success` or `failed` plus the scrubbed error text at the end, with the settings
+#             + model + generation digest as its fingerprint. Needs migrations 528 and 529. Every pair at or above
+#             `store_floor`, plus every merge and band pair whatever it scored, is UPSERTed
+#             into autodedup.pairs (probes, evidence-family bitmask, the PRESENT features
+#             only, score, zone, the deciding reason, guard veto, cluster key); the
+#             generation's clusters, members and refused unions are then rebuilt WHOLE in ONE
+#             transaction - deleted and re-inserted - because union-find reassigns cluster
+#             identities every pass and an upsert alone would leave yesterday's members on
+#             today's clusters.
+#             Operator `must_not_link` rows are read back FIRST and bind this pass's
+#             clustering, so a "different" verdict sticks. args: export_run (the artifact run
+#             id), cohort (a local artifact path instead of a download), settings (a JSON
+#             file under autodedup/settings/), model (a model.json under autodedup/models/,
+#             default the hand prior), generation (the label the UI filters on, default g1)
+#             and store_floor (override the settings dial). Writes out/run.json (the full
+#             engine summary), out/pairs.jsonl.gz, out/clusters.json and out/score.json.
+#             It costs nothing but GitHub minutes and database time.
+#
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
 #             row from its arguments, for work that happened outside a lane run (a migration
 #             applied by apply_migration.yml, an operator review session, a wave that closed
@@ -101,7 +126,8 @@ name: "AUTODEDUP: engine lane"
 # record accepts wave, title, status, approach, tools, notes, cost_usd and run_id; judge
 # accepts export_run, tier, n, max_usd (required), seed, workers, strata (SPACE-separated
 # stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
-# download) and dry_run.
+# download) and dry_run; score accepts export_run, cohort, settings, model, generation
+# and store_floor.
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
@@ -111,7 +137,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row."
         required: true
         default: "census"
         type: string
