@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -200,6 +200,20 @@ describe('<AutodedupPair>', () => {
     renderPair();
     expect(await screen.findByText(/Δ4 → 77/)).toBeInTheDocument();
     expect(screen.getByText('no match')).toBeInTheDocument();
+  });
+
+  it('labels an evidence photo the portal refuses to serve, keeping its delta', async () => {
+    renderPair();
+    const caption = await screen.findByText(/Δ4 → 77/);
+    const cell = caption.closest('li')!;
+    const img = within(cell).getByRole('presentation', { hidden: true }) as HTMLImageElement;
+    /* The R2 copy can be missing and the portal CDN refuses the fallback request
+     * cross-origin (ERR_BLOCKED_BY_ORB) — an empty box. This grid is where a per
+     * image Hamming delta is judged, so the box has to say why it is empty. */
+    fireEvent.error(img);
+    expect(within(cell).getByText('foto nedostupné')).toBeInTheDocument();
+    expect(within(cell).queryByRole('presentation', { hidden: true })).toBeNull();
+    expect(cell).toHaveTextContent('Δ4 → 77');
   });
 
   it('shows the judge transcript with both evidence lists', async () => {

@@ -72,6 +72,10 @@ export interface PairCardProps {
   evidenceHref?: RoutePath | null;
   labels?: Record<AutodedupVerdictValue, string>;
   onlyDiffs?: boolean;
+  /* QUEUE GRAIN (see ListingMini). A residual row keeps the covers as 160px
+   * thumbnails so the attribute diff, the reason and the four answers are all
+   * on screen at once; the full-size photos are the pair page's job. */
+  dense?: boolean;
 }
 
 export default function PairCard({
@@ -92,6 +96,7 @@ export default function PairCard({
   evidenceHref,
   labels,
   onlyDiffs = false,
+  dense = false,
 }: PairCardProps) {
   const top = (contributions ?? []).slice(0, 5);
   /* The queue's judge summary carries no evidence lists; the pair page's full
@@ -120,8 +125,8 @@ export default function PairCard({
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <ListingMini member={lo} eager={eager} />
-        <ListingMini member={hi} eager={eager} />
+        <ListingMini member={lo} eager={eager} dense={dense} />
+        <ListingMini member={hi} eager={eager} dense={dense} />
       </div>
 
       <AttrDiffTable

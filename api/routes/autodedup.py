@@ -233,18 +233,24 @@ RESIDUAL_SORTS: dict[str, str] = {"score_desc": usql.RESIDUAL_SQL}
 
 GROUP_FILTER_KEYS: frozenset[str] = frozenset(
     {
-        "generation", "after", "limit", "block", "source", "category_main", "category_type",
-        "min_size", "max_size", "min_score", "max_score", "verdict", "shared_photo",
-        "has_judgement", "sort",
+        "generation", "after", "limit", "block", "block_grain", "source", "category_main",
+        "category_type", "min_size", "max_size", "min_score", "max_score", "verdict",
+        "shared_photo", "has_judgement", "sort",
     }
 )
 RESIDUAL_FILTER_KEYS: frozenset[str] = frozenset(
     {
-        "generation", "after", "limit", "block", "zone", "min_score", "source_pair",
-        "has_judgement", "verdict", "sort",
+        "generation", "after", "limit", "block", "block_grain", "zone", "min_score",
+        "source_pair", "has_judgement", "verdict", "sort",
     }
 )
 DETAIL_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
+BLOCK_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
+
+# How many blocks the picker is offered. A generation's vocabulary is the busiest blocks
+# first: a select with thousands of options is not a control anyone uses, and the page keeps
+# a key that arrived in a URL whether or not the cap listed it — so the cap costs no filter.
+BLOCKS_LIMIT = 200
 
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "autodedup" / "models"
 _MODEL_CACHE: dict[str, Any] = {}
@@ -661,6 +667,19 @@ def _best_matches(
     return out
 
 
+def _total(conn: Any, sql: str, params: dict[str, Any], after: str | None) -> int | None:
+    """How many rows the CURRENT filter selects, for "20 of N".
+
+    Asked on the FIRST page only: paging does not change the number, and counting again per
+    page is pure cost on a statement that already reads every matching row. `None` on a later
+    page is the honest answer — "not counted here", not "zero" — and the page keeps the count
+    the first read gave it."""
+    if after is not None:
+        return None
+    rows = _fetch(conn, sql, params)
+    return int(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else None
+
+
 def _engine_stats(conn: Any) -> dict[str, Any]:
     """What the engine has produced, for the header strip beside the program's spend."""
     zones = {
@@ -700,6 +719,7 @@ def groups(
     after: str | None = Query(None),
     limit: int = Query(GROUP_PAGE_SIZE, ge=1, le=GROUP_MAX_PAGE_SIZE),
     block: int | None = Query(None),
+    block_grain: str | None = Query(None),
     source: str | None = Query(None),
     category_main: str | None = Query(None),
     category_type: str | None = Query(None),
@@ -720,12 +740,17 @@ def groups(
     _reject_unknown_filters(request, GROUP_FILTER_KEYS)
     _one_of("sort", sort, tuple(GROUP_SORTS))
     _one_of("verdict", verdict, VERDICT_FILTER_VALUES)
+    _one_of("block_grain", block_grain, usql.BLOCK_GRAIN_VALUES)
     if not store_ready(conn):
         return _not_ready()
 
     params: dict[str, Any] = {
         "generation": generation,
         "block": block,
+        # The grain travels WITH the code, never instead of it: a cast-obce code and an obec
+        # code share one number space (migration 529), so `block` alone can name two blocks.
+        # Absent means "either" — which is what a link written before the grain existed says.
+        "block_grain": block_grain,
         "source": source,
         "category_main": category_main,
         "category_type": category_type,
@@ -759,6 +784,7 @@ def groups(
         has_more = len(rows) > limit
         rows = rows[:limit]
         keys = [row["cluster_key"] for row in rows]
+        total = _total(conn, usql.GROUPS_COUNT_SQL, params, after)
 
         members: dict[int, list[dict[str, Any]]] = {key: [] for key in keys}
         edges: dict[int, dict[str, Any]] = {}
@@ -805,6 +831,8 @@ def groups(
             "next_after": next_after,
             "generation": generation,
             "sort": sort,
+            # "20 of N". Null on a continuation page — the page keeps the first read's number.
+            "total": total,
         },
         "store_ready": True,
     }
@@ -899,6 +927,7 @@ def residual(
     after: str | None = Query(None),
     limit: int = Query(GROUP_PAGE_SIZE, ge=1, le=GROUP_MAX_PAGE_SIZE),
     block: int | None = Query(None),
+    block_grain: str | None = Query(None),
     zone: str | None = Query(None),
     min_score: float = Query(RESIDUAL_MIN_SCORE),
     source_pair: str | None = Query(None),
@@ -915,6 +944,7 @@ def residual(
     _one_of("sort", sort, tuple(RESIDUAL_SORTS))
     _one_of("zone", zone, ZONE_VALUES)
     _one_of("verdict", verdict, VERDICT_FILTER_VALUES)
+    _one_of("block_grain", block_grain, usql.BLOCK_GRAIN_VALUES)
     if not store_ready(conn):
         return _not_ready()
 
@@ -923,6 +953,7 @@ def residual(
         "min_score": min_score,
         "zone": zone,
         "block": block,
+        "block_grain": block_grain,
         "source_pair": source_pair,
         "has_judgement": _flag("has_judgement", has_judgement),
         "verdict": verdict,
@@ -939,6 +970,7 @@ def residual(
 
     try:
         rows = _rows(usql.RESIDUAL_COLUMNS, _fetch(conn, RESIDUAL_SORTS[sort], params))
+        total = _total(conn, usql.RESIDUAL_COUNT_SQL, params, after)
     except _MISSING_RELATION:
         return _not_ready()
     has_more = len(rows) > limit
@@ -999,7 +1031,53 @@ def residual(
             "next_after": next_after,
             "generation": generation,
             "min_score": min_score,
+            "total": total,
         },
+        "store_ready": True,
+    }
+
+
+# --------------------------------------------------------------- the blocks of a generation
+
+
+@router.get("/blocks")
+def blocks(
+    request: Request,
+    generation: str = Query(DEFAULT_GENERATION),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Every block this generation clustered, NAMED — what the BLOCK filter offers instead of
+    a free-text field for a RÚIAN code.
+
+    A block is a (code, grain) pair: `o563510` is a town, `c490245` a quarter (migration 529),
+    and the two vocabularies share their number space. `block_key` alone is what the list
+    statements filter on TOGETHER, so both are handed back and a picker sends both: the code
+    alone would re-create the conflation migration 529 exists to end. The name is read from
+    `listing_location`, the same store the engine derives the block key from.
+    A block whose grain predates migration 529 carries no name rather than a guessed one — a
+    town's number is a quarter's number somewhere else."""
+    _reject_unknown_filters(request, BLOCK_FILTER_KEYS)
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        rows = _rows(
+            usql.BLOCK_COLUMNS,
+            _fetch(conn, usql.BLOCKS_SQL, {"generation": generation, "limit": BLOCKS_LIMIT}),
+        )
+    except _MISSING_RELATION:
+        return _not_ready()
+    items = [
+        {
+            "block_key": row["block_key"],
+            "block_grain": row["block_grain"],
+            "name": row["name"],
+            "n_clusters": int(row["n_clusters"] or 0),
+            "n_listings": int(row["n_listings"] or 0),
+        }
+        for row in rows
+    ]
+    return {
+        "data": {"items": items, "generation": generation},
         "store_ready": True,
     }
 

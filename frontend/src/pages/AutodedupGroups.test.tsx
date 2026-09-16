@@ -18,10 +18,10 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import AutodedupGroups from './AutodedupGroups';
 import * as api from '@/lib/api';
@@ -34,6 +34,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     ...actual,
     getAutodedupGroups: vi.fn(),
     getAutodedupGroup: vi.fn(),
+    getAutodedupBlocks: vi.fn(),
     postAutodedupVerdict: vi.fn(),
   };
 });
@@ -101,19 +102,47 @@ const STORED: AutodedupVerdictRow = {
   decided_at: '2026-09-16T10:00:00Z',
 };
 
-function page(items: AutodedupGroup[], nextAfter: string | null = null) {
+function page(
+  items: AutodedupGroup[],
+  nextAfter: string | null = null,
+  total: number | null = null,
+) {
   return {
     store_ready: true,
-    data: { items, has_more: nextAfter != null, next_after: nextAfter },
+    data: { items, has_more: nextAfter != null, next_after: nextAfter, total },
   };
 }
 
-function renderPage() {
+const BLOCKS = {
+  store_ready: true,
+  data: {
+    generation: 'g1',
+    items: [
+      {
+        block_key: 563510,
+        block_grain: 'o',
+        name: 'Jablonec nad Nisou',
+        n_clusters: 412,
+        n_listings: 900,
+      },
+      { block_key: 490245, block_grain: 'c', name: 'Žižkov', n_clusters: 88, n_listings: 190 },
+    ],
+  },
+};
+
+/* MemoryRouter keeps its own history, so the shared url is read back from the
+ * router rather than from window.location (which a memory router never sets). */
+function LocationProbe() {
+  return <i data-testid="search">{useLocation().search}</i>;
+}
+
+function renderPage(entry = '/autodedup/groups') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
         <AutodedupGroups />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -198,6 +227,7 @@ describe('<AutodedupGroups>', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([group({ cluster_key: 7 })]));
+    vi.mocked(api.getAutodedupBlocks).mockResolvedValue(BLOCKS);
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({ store_ready: true, data: STORED, must_not_link: false });
   });
 
@@ -301,6 +331,149 @@ describe('<AutodedupGroups>', () => {
       ),
     );
     expect(await screen.findByText('#900')).toBeInTheDocument();
+  });
+
+
+  /* ---------------------------------------------------- the BLOCK filter */
+
+  it('offers the generation\'s blocks by name instead of a numeric text field', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('#7');
+    const select = screen.getByLabelText('Block');
+    /* A free-text field for a bigint RUIAN code: typing "Jablonec" produced NaN,
+     * the query layer dropped the param and the queue answered unfiltered. */
+    expect(select.tagName).toBe('SELECT');
+    await waitFor(() =>
+      expect(
+        within(select).getByRole('option', { name: /Jablonec nad Nisou \(563510\)/ }),
+      ).toBeInTheDocument(),
+    );
+    /* The count rides on the option, so the operator picks a block that has work. */
+    expect(within(select).getByRole('option', { name: /412 skupin/ })).toBeInTheDocument();
+    /* The option's VALUE is grain + code: a cast-obce code and an obec code share
+     * one number space (migration 529), so the code alone would let two options
+     * that mean two different blocks resolve to one query. */
+    await user.selectOptions(select, 'o563510');
+    await waitFor(() =>
+      expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+        expect.objectContaining({ block: 563510, block_grain: 'o', after: null }),
+      ),
+    );
+    expect(screen.getByTestId('search')).toHaveTextContent('block=o563510');
+  });
+
+  it('sends the quarter and the town as two different filters', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('#7');
+    const select = screen.getByLabelText('Block');
+    await waitFor(() =>
+      expect(within(select).getByRole('option', { name: /Žižkov/ })).toBeInTheDocument(),
+    );
+    await user.selectOptions(select, 'c490245');
+    await waitFor(() =>
+      expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+        expect.objectContaining({ block: 490245, block_grain: 'c' }),
+      ),
+    );
+  });
+
+  it('reads a link written before the grain existed as "either"', async () => {
+    renderPage('/autodedup/groups?block=563510');
+    await screen.findByText('#7');
+    /* A bare code still filters, grain-blind — the server reads a null grain as
+     * "either", which is exactly what that older link meant. */
+    expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+      expect.objectContaining({ block: 563510, block_grain: null }),
+    );
+  });
+
+  it('shows the queue rather than a banner when the url carries a stale verdict', async () => {
+    /* The server 400s an unknown verdict; a hand-edited or stale shared link must
+     * not turn the queue into a red banner. */
+    renderPage('/autodedup/groups?verdict=confirmed');
+    await screen.findByText('#7');
+    expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+      expect.objectContaining({ verdict: null }),
+    );
+  });
+
+  it('keeps the filter working when the block vocabulary cannot be read', async () => {
+    vi.mocked(api.getAutodedupBlocks).mockRejectedValue(new Error('nope'));
+    renderPage('/autodedup/groups?block=563510');
+    await screen.findByText('#7');
+    /* The names are gone; the filter the link carried is not. */
+    expect(screen.getByLabelText('Block')).toHaveValue('563510');
+    expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+      expect.objectContaining({ block: 563510 }),
+    );
+  });
+
+  /* ------------------------------------------------ the URL is the state */
+
+  it('reads its filters out of the query string', async () => {
+    renderPage('/autodedup/groups?generation=g2&verdict=same&sort=largest&min_size=3');
+    await screen.findByText('#7');
+    expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        generation: 'g2',
+        verdict: 'same',
+        sort: 'largest',
+        min_size: 3,
+      }),
+    );
+    /* And the controls show what the link said — a bar that sent one filter and
+     * displayed another would be worse than no url state at all. */
+    expect(screen.getByLabelText('Verdict')).toHaveValue('same');
+    expect(screen.getByLabelText('Sort')).toHaveValue('largest');
+  });
+
+  it('writes a changed filter into the url so the view can be shared', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('#7');
+    await user.selectOptions(screen.getByLabelText('Druh'), 'byt');
+    await waitFor(() =>
+      expect(screen.getByTestId('search')).toHaveTextContent('category_main=byt'),
+    );
+  });
+
+  it('falls back to the default sort rather than 400ing on a stale link', async () => {
+    renderPage('/autodedup/groups?sort=cheapest');
+    await screen.findByText('#7');
+    expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sort: 'weakest' }),
+    );
+  });
+
+  /* ------------------------------------------------------- how many rows */
+
+  it('says how much of the filtered queue is on screen', async () => {
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(
+      page([group({ cluster_key: 7 })], null, 412),
+    );
+    renderPage();
+    expect(await screen.findByText('1 of 412 groups')).toBeInTheDocument();
+  });
+
+  it('says what it loaded rather than inventing a total', async () => {
+    renderPage();
+    expect(await screen.findByText('1 group loaded')).toBeInTheDocument();
+  });
+
+  /* ------------------------------------------------------- broken covers */
+
+  it('labels a cover the portal refuses to serve instead of leaving a blank tile', async () => {
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    const img = within(card).getAllByRole('presentation', { hidden: true })[0] as HTMLImageElement;
+    /* The portal CDN can answer ERR_BLOCKED_BY_ORB cross-origin; the <img>
+     * fails with nothing for the page to style, so the tile takes over. */
+    fireEvent.error(img);
+    await waitFor(() =>
+      expect(within(card).getAllByText('foto nedostupné').length).toBeGreaterThan(0),
+    );
   });
 
   it('opens a group onto its members and its edges', async () => {

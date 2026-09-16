@@ -16,10 +16,10 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 
 import AutodedupResidual from './AutodedupResidual';
 import * as api from '@/lib/api';
@@ -31,6 +31,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return {
     ...actual,
     getAutodedupResidual: vi.fn(),
+    getAutodedupBlocks: vi.fn(),
     postAutodedupVerdict: vi.fn(),
   };
 });
@@ -111,19 +112,44 @@ const STORED: AutodedupVerdictRow = {
   decided_at: '2026-09-16T10:00:00Z',
 };
 
-function page(items: AutodedupResidualRow[], nextAfter: string | null = null) {
+function page(
+  items: AutodedupResidualRow[],
+  nextAfter: string | null = null,
+  total: number | null = null,
+) {
   return {
     store_ready: true,
-    data: { items, has_more: nextAfter != null, next_after: nextAfter },
+    data: { items, has_more: nextAfter != null, next_after: nextAfter, total },
   };
 }
 
-function renderPage() {
+const BLOCKS = {
+  store_ready: true,
+  data: {
+    generation: 'g1',
+    items: [
+      {
+        block_key: 563510,
+        block_grain: 'o',
+        name: 'Jablonec nad Nisou',
+        n_clusters: 412,
+        n_listings: 900,
+      },
+    ],
+  },
+};
+
+function LocationProbe() {
+  return <i data-testid="search">{useLocation().search}</i>;
+}
+
+function renderPage(entry = '/autodedup/residual') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
         <AutodedupResidual />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -133,6 +159,7 @@ describe('<AutodedupResidual>', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getAutodedupResidual).mockResolvedValue(page([ROW]));
+    vi.mocked(api.getAutodedupBlocks).mockResolvedValue(BLOCKS);
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({ store_ready: true, data: STORED, must_not_link: false });
   });
 
@@ -242,6 +269,121 @@ describe('<AutodedupResidual>', () => {
     renderPage();
     const link = await screen.findByRole('link', { name: 'Full evidence' });
     expect(link).toHaveAttribute('href', '/autodedup/pair/101/202?generation=g1');
+  });
+
+
+  /* ------------------------------------------------- the source PAIR filter */
+
+  it('composes the source pair from two portal selects, in the order the server compares', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    /* 45 unordered pairs is not a list anyone reads, and the old control was a
+     * text box whose placeholder ("bazos+sreality") read as a value. */
+    await user.selectOptions(screen.getByLabelText('Portál A'), 'sreality');
+    await user.selectOptions(screen.getByLabelText('Portál B'), 'bazos');
+    await waitFor(() =>
+      /* least() + greatest() server-side, so the pair is sorted here too. */
+      expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
+        expect.objectContaining({ source_pair: 'bazos+sreality', after: null }),
+      ),
+    );
+  });
+
+  it('says so rather than filtering silently when only one portal is chosen', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    await user.selectOptions(screen.getByLabelText('Portál A'), 'sreality');
+    expect(await screen.findByText(/Vyberte oba portály/)).toBeInTheDocument();
+    expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
+      expect.objectContaining({ source_pair: null }),
+    );
+  });
+
+  /* -------------------------------------------------- the URL is the state */
+
+  it('reads its filters out of the query string', async () => {
+    renderPage('/autodedup/residual?zone=reject&min_score=0.5&block=563510');
+    await screen.findByText(/Why it wasn't merged/);
+    expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        zone: 'reject',
+        min_score: 0.5,
+        block: 563510,
+        block_grain: null,
+      }),
+    );
+    expect(screen.getByLabelText('Zone')).toHaveValue('reject');
+  });
+
+  it('writes the display floor into the url when it is cleared', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    await user.clear(screen.getByLabelText('Score ≥'));
+    /* "no floor" is a filter; a url that dropped the key would restore 0.20 on
+     * the next reload — a different queue from the one that was shared. */
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('min_score='));
+    /* AND IT HAS TO REACH THE WIRE. `min_score` is the one parameter whose server
+     * default is not "no filter" (0.20), so an omitted parameter means the default
+     * floor: a cleared field that sent nothing would render empty, share a url that
+     * read empty, and still show the default queue. Zero is the floor that says none. */
+    await waitFor(() =>
+      expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
+        expect.objectContaining({ min_score: 0 }),
+      ),
+    );
+  });
+
+  it('offers the blocks by name', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    const select = screen.getByLabelText('Block');
+    expect(select.tagName).toBe('SELECT');
+    await waitFor(() =>
+      expect(
+        within(select).getByRole('option', { name: /Jablonec nad Nisou/ }),
+      ).toBeInTheDocument(),
+    );
+    /* The same vocabulary as the groups queue, and the same two parameters on the
+     * wire — this view's block predicate reads the resolved location store the
+     * engine derives a block key from, not the never-written fingerprint table. */
+    await user.selectOptions(select, 'o563510');
+    await waitFor(() =>
+      expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
+        expect.objectContaining({ block: 563510, block_grain: 'o' }),
+      ),
+    );
+  });
+
+  /* ------------------------------------------------------------ the rows */
+
+  it('says how much of the filtered queue is on screen', async () => {
+    vi.mocked(api.getAutodedupResidual).mockResolvedValue(page([ROW], null, 58));
+    renderPage();
+    expect(await screen.findByText('1 of 58 pairs')).toBeInTheDocument();
+  });
+
+  it('renders the covers as queue-grain thumbnails, not hero photos', async () => {
+    const { container } = renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    /* jsdom loads no CSS, so the grain is asserted where it is decided: the
+     * dense cover box (w-40 = 160px, 4:3). Without it two ~600px photos push
+     * the diff table, the reason and the four answers below the fold — the
+     * whole decision off screen. */
+    expect(container.querySelectorAll('.w-40.shrink-0').length).toBe(2);
+  });
+
+  it('labels a cover the portal refuses to serve', async () => {
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    const img = within(row).getAllByRole('presentation', { hidden: true })[0] as HTMLImageElement;
+    fireEvent.error(img);
+    await waitFor(() =>
+      expect(within(row).getAllByText('foto nedostupné').length).toBeGreaterThan(0),
+    );
   });
 
   it('renders the empty state on an un-migrated store', async () => {

@@ -36,6 +36,7 @@ import {
   type AutodedupVerdictValue,
 } from '@/lib/api';
 import { ROUTES, withQuery, type RoutePath } from '@/lib/routes';
+import { useUrlFilters } from '@/lib/useUrlFilters';
 import { imageSrc } from '@/lib/imageUrl';
 import { pushToast } from '@/lib/toast';
 import { fmtCount } from '@/lib/format';
@@ -48,6 +49,7 @@ import EvidenceChips, {
   EvidenceLegend,
   fmtScore,
 } from '@/components/autodedup/EvidenceChips';
+import BlockSelect, { parseBlockValue } from '@/components/autodedup/BlockSelect';
 import ListingMini, { memberAttrs, memberListingPath } from '@/components/autodedup/ListingMini';
 import VerdictButtons, { GROUP_LABELS } from '@/components/autodedup/VerdictButtons';
 import { JudgeChip } from '@/components/autodedup/PairCard';
@@ -107,11 +109,16 @@ const flag = (v: string): 0 | 1 | null => (v === '1' ? 1 : v === '0' ? 0 : null)
  * string: `lib/api`'s request() drops both, and spelling it here keeps the
  * query key stable so a cleared filter refetches the same page it started on. */
 export function toQuery(f: GroupFilterState, after: string | null): AutodedupGroupFilters {
+  /* ONE url key, TWO wire parameters: a block is a code and a grain (migration
+   * 529), and the code alone names two different blocks — a town and a quarter
+   * that happen to share a number. */
+  const block = parseBlockValue(f.block);
   return {
     generation: f.generation || DEFAULT_GENERATION,
     after,
     limit: PAGE_SIZE,
-    block: num(f.block),
+    block: block.block,
+    block_grain: block.block_grain,
     source: f.source || null,
     category_main: f.category_main || null,
     category_type: f.category_type || null,
@@ -154,7 +161,7 @@ export const SOURCES = [
   'maxima',
 ];
 
-export function FilterBar({
+export function FilterBar<T extends GroupFilterState>({
   value,
   onChange,
   children,
@@ -165,14 +172,16 @@ export function FilterBar({
   showSource = true,
   showCategory = true,
 }: {
-  value: GroupFilterState;
-  onChange: (next: GroupFilterState) => void;
+  /* Generic over the filter state so a surface with extra keys of its own (the
+   * residual view's zone + portal pair) keeps them through every edit made
+   * here — a non-generic bar would spread them away on the first keystroke. */
+  value: T;
+  onChange: (next: T) => void;
   children?: ReactNode;
   showSource?: boolean;
   showCategory?: boolean;
 }) {
-  const set = <K extends keyof GroupFilterState>(key: K, v: GroupFilterState[K]) =>
-    onChange({ ...value, [key]: v });
+  const set = <K extends keyof T>(key: K, v: T[K]) => onChange({ ...value, [key]: v });
   return (
     <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3">
       <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -184,15 +193,13 @@ export function FilterBar({
             onChange={(e) => set('generation', e.target.value)}
           />
         </label>
-        <label className="block">
-          <span className={FILTER_LABEL}>Block</span>
-          <input
-            className={FILTER_CONTROL}
-            inputMode="numeric"
-            value={value.block}
-            onChange={(e) => set('block', e.target.value)}
-          />
-        </label>
+        <BlockSelect
+          value={value.block}
+          onChange={(next) => set('block', next)}
+          generation={value.generation || DEFAULT_GENERATION}
+          labelClassName={FILTER_LABEL}
+          controlClassName={FILTER_CONTROL}
+        />
         {showSource && (
           <label className="block">
             <span className={FILTER_LABEL}>Portal</span>
@@ -260,6 +267,32 @@ export function FilterBar({
         {children}
       </div>
     </div>
+  );
+}
+
+/* HOW MUCH OF THE QUEUE IS ON SCREEN. A keyset page cannot count itself, so the
+ * total arrives with the first page and the loaded rows are counted here. When
+ * the server sent no count the loaded number is still said plainly — "20 groups
+ * loaded" — because a silent list gives no sense of the work left, and a
+ * fabricated total would be worse than none. The noun agrees with the number it
+ * follows: "1 groups loaded" is the kind of seam that makes a careful page read
+ * as a generated one. */
+const plural = (n: number, noun: string): string => (n === 1 ? noun.replace(/s$/, '') : noun);
+export function ResultCount({
+  shown,
+  total,
+  noun,
+}: {
+  shown: number;
+  total: number | null;
+  noun: string;
+}) {
+  return (
+    <p className="mt-4 text-[0.72rem] text-[var(--color-ink-3)] tabular-nums">
+      {total == null
+        ? `${fmtCount(shown)} ${plural(shown, noun)} loaded`
+        : `${fmtCount(shown)} of ${fmtCount(total)} ${plural(total, noun)}`}
+    </p>
   );
 }
 
@@ -332,10 +365,38 @@ export function useVerdictOverlay() {
 
 interface GroupsPage extends InfiniteListPage<AutodedupGroup> {
   store_ready: boolean;
+  /* The server counts the whole filtered set on the FIRST page only, which is
+   * the page `useInfiniteList` hands back as `firstPage` — so "20 of N" reads
+   * the number from where it was actually sent. */
+  total: number | null;
+}
+
+/* EVERY enumerated key arriving off the URL is checked here, not only the sort:
+ * the server 400s an unknown value, and a hand-edited or stale link should show
+ * the queue rather than replace it with a red banner. The two keys the server
+ * validates against a closed vocabulary are `sort` and `verdict`; the free ones
+ * (generation, block, the numbers) are already "no filter" when unparseable. */
+const SORTS: ReadonlyArray<GroupFilterState['sort']> = ['weakest', 'newest', 'largest'];
+export const VERDICTS: readonly string[] = [
+  '',
+  'unreviewed',
+  'same',
+  'different',
+  'same_building_different_unit',
+  'unsure',
+];
+
+export function sanitizeGroupFilters<T extends GroupFilterState>(raw: T): T {
+  const sort = SORTS.includes(raw.sort) ? raw.sort : 'weakest';
+  const verdict = VERDICTS.includes(raw.verdict) ? raw.verdict : '';
+  return sort === raw.sort && verdict === raw.verdict ? raw : { ...raw, sort, verdict };
 }
 
 export default function AutodedupGroups() {
-  const [filters, setFilters] = useState<GroupFilterState>(EMPTY_FILTERS);
+  /* The URL is the state. A filtered queue is bookmarkable, shareable and
+   * survives a reload — see lib/useUrlFilters. */
+  const [urlFilters, setFilters] = useUrlFilters<GroupFilterState>(EMPTY_FILTERS);
+  const filters = useMemo(() => sanitizeGroupFilters(urlFilters), [urlFilters]);
   const [openKey, setOpenKey] = useState<number | null>(null);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
 
@@ -347,6 +408,7 @@ export default function AutodedupGroups() {
         rows: res.data?.items ?? [],
         nextCursor: res.data?.next_after ?? undefined,
         store_ready: res.store_ready,
+        total: res.data?.total ?? null,
       };
     },
     pageSize: PAGE_SIZE,
@@ -355,6 +417,7 @@ export default function AutodedupGroups() {
 
   const storeReady = list.firstPage?.store_ready ?? null;
   const rows = list.rows;
+  const total = list.firstPage?.total ?? null;
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
@@ -469,7 +532,11 @@ export default function AutodedupGroups() {
       )}
 
       {rows.length > 0 && (
-        <ul className="mt-5 space-y-4">
+        <ResultCount shown={rows.length} total={total} noun="groups" />
+      )}
+
+      {rows.length > 0 && (
+        <ul className="mt-3 space-y-4">
           {rows.map((group, i) => (
             <GroupCard
               key={group.cluster_key}

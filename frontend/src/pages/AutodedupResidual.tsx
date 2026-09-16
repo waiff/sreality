@@ -15,7 +15,7 @@
  * means anything to the engine.
  */
 
-import { useState } from 'react';
+import { useMemo } from 'react';
 
 import {
   getAutodedupResidual,
@@ -28,24 +28,47 @@ import Spinner from '@/components/Spinner';
 import { EvidenceLegend } from '@/components/autodedup/EvidenceChips';
 import PairCard from '@/components/autodedup/PairCard';
 import { PAIR_LABELS } from '@/components/autodedup/VerdictButtons';
+import { parseBlockValue } from '@/components/autodedup/BlockSelect';
 import {
   EMPTY_FILTERS,
   FILTER_CONTROL,
   FILTER_LABEL,
   FilterBar,
+  ResultCount,
+  SOURCES,
+  sanitizeGroupFilters,
   pairHref,
   useVerdictOverlay,
   type GroupFilterState,
 } from './AutodedupGroups';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
+import { useUrlFilters } from '@/lib/useUrlFilters';
+import { portalLabel } from '@/lib/portals';
 
 const PAGE_SIZE = 20;
 const DEFAULT_GENERATION = 'g1';
 const DEFAULT_MIN_SCORE = '0.2';
 
+/* The residual view's own keys, carried in the SAME url state as the shared
+ * filters so one link restores the whole bar.
+ *
+ * TWO SELECTS, NOT ONE. The wire filter is an unordered source PAIR
+ * (`bazos+sreality`), and nine portals make 45 of them — a list nobody scans.
+ * The operator picks the two portals instead and the pair is composed below, in
+ * the one order the server's `least()/greatest()` predicate compares. */
 export interface ResidualExtras {
   zone: '' | AutodedupZone;
-  source_pair: string;
+  source_a: string;
+  source_b: string;
+}
+
+export type ResidualFilterState = GroupFilterState & ResidualExtras;
+
+/* Both portals or neither: a single portal cannot be expressed as a pair, and
+ * sending half of one would filter on a string no row carries. */
+export function sourcePair(a: string, b: string): string | null {
+  if (!a || !b) return null;
+  return [a, b].sort().join('+');
 }
 
 const num = (v: string): number | null => {
@@ -56,48 +79,73 @@ const num = (v: string): number | null => {
 const flag = (v: string): 0 | 1 | null => (v === '1' ? 1 : v === '0' ? 0 : null);
 
 export function toResidualQuery(
-  f: GroupFilterState,
-  extras: ResidualExtras,
+  f: ResidualFilterState,
   after: string | null,
 ): AutodedupResidualFilters {
+  const block = parseBlockValue(f.block);
   return {
     generation: f.generation || DEFAULT_GENERATION,
     after,
     limit: PAGE_SIZE,
-    block: num(f.block),
-    zone: extras.zone || null,
-    min_score: num(f.min_score),
-    source_pair: extras.source_pair || null,
+    block: block.block,
+    block_grain: block.block_grain,
+    zone: f.zone || null,
+    /* A CLEARED FLOOR IS ZERO, NOT AN ABSENT PARAMETER. `min_score` is the one
+     * filter the server defaults to a non-empty value (0.20), so omitting it
+     * says "0.20", not "no floor" — an emptied field would have rendered empty,
+     * shared a url that read empty, and shown the default queue anyway. A value
+     * that is not a number is a different thing: it constrains nothing, and the
+     * server's own default stands. */
+    min_score: f.min_score.trim() === '' ? 0 : num(f.min_score),
+    source_pair: sourcePair(f.source_a, f.source_b),
     has_judgement: flag(f.has_judgement),
     verdict: f.verdict || null,
     sort: 'score_desc',
   };
 }
 
+export const EMPTY_RESIDUAL_FILTERS: ResidualFilterState = {
+  ...EMPTY_FILTERS,
+  min_score: DEFAULT_MIN_SCORE,
+  zone: '',
+  source_a: '',
+  source_b: '',
+};
+
 interface ResidualPage extends InfiniteListPage<AutodedupResidualRow> {
   store_ready: boolean;
+  total: number | null;
 }
 
 const pairKey = (row: AutodedupResidualRow) => `${row.listing_lo}:${row.listing_hi}`;
 
+const ZONES: ReadonlyArray<ResidualExtras['zone']> = ['', 'band', 'reject', 'merge'];
+
+/* The shared keys are checked by the shared sanitiser (sort, verdict) and this
+ * view's own zone here, so a hand-edited link shows the queue rather than the
+ * server's 400 in a red banner. */
+export function sanitizeResidualFilters(raw: ResidualFilterState): ResidualFilterState {
+  const base = sanitizeGroupFilters(raw);
+  return ZONES.includes(base.zone) ? base : { ...base, zone: '' };
+}
+
 export default function AutodedupResidual() {
-  const [filters, setFilters] = useState<GroupFilterState>({
-    ...EMPTY_FILTERS,
-    min_score: DEFAULT_MIN_SCORE,
-  });
-  const [extras, setExtras] = useState<ResidualExtras>({ zone: '', source_pair: '' });
+  /* One url state for the whole bar — the shared filters and this view's own. */
+  const [urlFilters, setFilters] = useUrlFilters<ResidualFilterState>(EMPTY_RESIDUAL_FILTERS);
+  const filters = useMemo(() => sanitizeResidualFilters(urlFilters), [urlFilters]);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
 
   const list = useInfiniteList<AutodedupResidualRow, ResidualPage>({
-    queryKey: ['autodedup', 'residual', filters, extras],
+    queryKey: ['autodedup', 'residual', filters],
     queryFn: async (cursor) => {
       const res = await getAutodedupResidual(
-        toResidualQuery(filters, extras, (cursor as string | null) ?? null),
+        toResidualQuery(filters, (cursor as string | null) ?? null),
       );
       return {
         rows: res.data?.items ?? [],
         nextCursor: res.data?.next_after ?? undefined,
         store_ready: res.store_ready,
+        total: res.data?.total ?? null,
       };
     },
     pageSize: PAGE_SIZE,
@@ -106,6 +154,8 @@ export default function AutodedupResidual() {
 
   const storeReady = list.firstPage?.store_ready ?? null;
   const rows = list.rows;
+  const total = list.firstPage?.total ?? null;
+  const halfPair = Boolean(filters.source_a) !== Boolean(filters.source_b);
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
@@ -126,8 +176,10 @@ export default function AutodedupResidual() {
           <span className={FILTER_LABEL}>Zone</span>
           <select
             className={FILTER_CONTROL}
-            value={extras.zone}
-            onChange={(e) => setExtras({ ...extras, zone: e.target.value as ResidualExtras['zone'] })}
+            value={filters.zone}
+            onChange={(e) =>
+              setFilters({ ...filters, zone: e.target.value as ResidualExtras['zone'] })
+            }
           >
             <option value="">vše</option>
             <option value="band">band</option>
@@ -144,14 +196,37 @@ export default function AutodedupResidual() {
             onChange={(e) => setFilters({ ...filters, min_score: e.target.value })}
           />
         </label>
+        {/* Two portals, not a typed pair string: the wire filter is an unordered
+          * pair and the 45 of them are not a list anyone reads. */}
         <label className="block">
-          <span className={FILTER_LABEL}>Source pair</span>
-          <input
+          <span className={FILTER_LABEL}>Portál A</span>
+          <select
             className={FILTER_CONTROL}
-            placeholder="bazos+sreality"
-            value={extras.source_pair}
-            onChange={(e) => setExtras({ ...extras, source_pair: e.target.value })}
-          />
+            value={filters.source_a}
+            onChange={(e) => setFilters({ ...filters, source_a: e.target.value })}
+          >
+            <option value="">vše</option>
+            {SOURCES.map((s) => (
+              <option key={s} value={s}>
+                {portalLabel(s) ?? s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className={FILTER_LABEL}>Portál B</span>
+          <select
+            className={FILTER_CONTROL}
+            value={filters.source_b}
+            onChange={(e) => setFilters({ ...filters, source_b: e.target.value })}
+          >
+            <option value="">vše</option>
+            {SOURCES.map((s) => (
+              <option key={s} value={s}>
+                {portalLabel(s) ?? s}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="block">
           <span className={FILTER_LABEL}>Judged</span>
@@ -166,6 +241,15 @@ export default function AutodedupResidual() {
           </select>
         </label>
       </FilterBar>
+
+      {/* Said out loud rather than filtered silently: half a pair is not a
+        * filter the server can apply, and a control that quietly does nothing is
+        * the defect this bar was rebuilt to remove. */}
+      {halfPair && (
+        <p className="mt-2 text-[0.72rem] text-[var(--color-ink-3)]">
+          Vyberte oba portály — dvojice se filtruje jen jako pár (A + B).
+        </p>
+      )}
 
       {list.error && <ErrorBanner message={list.error.message} />}
 
@@ -188,11 +272,17 @@ export default function AutodedupResidual() {
         </p>
       )}
 
+      {rows.length > 0 && <ResultCount shown={rows.length} total={total} noun="pairs" />}
+
       {rows.length > 0 && (
-        <ul className="mt-5 space-y-4">
+        <ul className="mt-3 space-y-4">
           {rows.map((row, i) => (
             <li key={pairKey(row)}>
               <PairCard
+                /* A row is a QUEUE ENTRY: thumbnail-sized covers, so the diff
+                  * table, the reason and the four answers are all above the fold.
+                  * The hero photos live on the pair page, one click away. */
+                dense
                 lo={row.lo}
                 hi={row.hi}
                 score={row.score}

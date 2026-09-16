@@ -4053,6 +4053,10 @@ export interface AutodedupKeysetPage<T> {
   items: T[];
   has_more: boolean;
   next_after: string | null;
+  /* How many rows the CURRENT filter selects, for "20 of N". The server counts
+   * on the FIRST page only, so a continuation page carries null — "not counted
+   * here", never zero; the page keeps the number the first read gave it. */
+  total?: number | null;
 }
 
 export type AutodedupEnvelope<T> = { store_ready: boolean; data: T | null };
@@ -4061,9 +4065,13 @@ export interface AutodedupGroupFilters {
   generation?: string | null;
   after?: string | null;
   limit?: number | null;
-  /* `block` is the stored blocking key — an INT server-side, so a free-text
-   * control has to parse before it sends. */
+  /* A block is a CODE AND A GRAIN. `block` is the RUIAN code (an INT server-side)
+   * and `block_grain` says whose vocabulary it belongs to — `o` a town, `c` a
+   * quarter (migration 529). They share one number space, so the code alone can
+   * name two different blocks; a null grain means "either", which is what a link
+   * written before the grain existed says. */
   block?: number | null;
+  block_grain?: string | null;
   source?: string | null;
   category_main?: string | null;
   category_type?: string | null;
@@ -4082,6 +4090,7 @@ export interface AutodedupResidualFilters {
   after?: string | null;
   limit?: number | null;
   block?: number | null;
+  block_grain?: string | null;
   zone?: AutodedupZone | null;
   min_score?: number | null;
   source_pair?: string | null;
@@ -4089,6 +4098,39 @@ export interface AutodedupResidualFilters {
   verdict?: string | null;
   sort?: 'score_desc' | null;
 }
+
+/* One block of a generation: the stored blocking key, the grain it was keyed at
+ * (`o` = obec/town, `c` = cast obce/quarter — migration 529, and the two share
+ * their number space) and the RUIAN name resolved off `listing_location`. The
+ * name is NULL when the block's grain predates that migration: a code with no
+ * grain cannot be named without guessing whose vocabulary it belongs to.
+ *
+ * `n_clusters` / `n_listings` are what this generation's clusters say about the
+ * block. There is deliberately no pair count: `autodedup.pairs` carries no block
+ * column, and a number read off the unwritten fingerprint table would be a
+ * confident zero.
+ *
+ * The list is the busiest blocks first and CAPPED server-side — a select with
+ * thousands of options is not a control. A block outside the cap still filters:
+ * the picker keeps whatever key the URL arrived with. */
+export interface AutodedupBlock {
+  block_key: number;
+  block_grain: string | null;
+  name: string | null;
+  n_clusters: number;
+  n_listings: number;
+}
+
+/* The BLOCK filter's vocabulary. It replaces a free-text field for a numeric
+ * RUIAN code, where a typed town name silently dropped the parameter and the
+ * queue answered with the unfiltered list. */
+export const getAutodedupBlocks = async (
+  generation?: string | null,
+): Promise<AutodedupEnvelope<{ items: AutodedupBlock[]; generation: string }>> =>
+  request<AutodedupEnvelope<{ items: AutodedupBlock[]; generation: string }>>(
+    '/autodedup/blocks',
+    { query: { generation: generation ?? null }, jwt: true },
+  );
 
 /* Each read normalizes ONCE, here, so every page downstream sees one shape.
  * `store_ready: false` short-circuits with `data: null` — an un-migrated store

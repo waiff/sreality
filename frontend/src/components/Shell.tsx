@@ -37,20 +37,25 @@ const navItems: ReadonlyArray<NavItem> = [
   { to: ROUTES.watchdog.build(),    label: 'Watchdogs', agenda: 'watchdogs' },
   { to: ROUTES.notifications.build(), label: 'Notifications', agenda: 'notifications' },
   { to: ROUTES.brokers.build(),     label: 'Brokers', agenda: 'brokers' },
-  // The merge-review queue is a real admin surface (routes.tsx wraps it in
-  // AdminPage) that was only reachable from a conditional chip on /brokers —
-  // invisible whenever the queue happened to be empty.
-  { to: ROUTES.brokersReview.build(), label: 'Broker Review', admin: true },
-  { to: ROUTES.datasets.build(),    label: 'Datasets', admin: true },
-  { to: ROUTES.outreach.build(),    label: 'Outreach', disabled: true, admin: true,
-    title: 'Outreach is paused — not available yet.' },
   { to: ROUTES.collections.build(), label: 'Collections', agenda: 'collections' },
 ];
 
-type MenuItem = { to: string; label: string; end?: boolean };
+type MenuItem = { to: string; label: string; end?: boolean; disabled?: boolean; title?: string };
+type MenuGroup = { label: string; items: ReadonlyArray<MenuItem> };
 
-// Grouped under the "Settings" dropdown trigger — all admin-only, so the
-// whole group renders (or not) alongside the other admin-gated nav items.
+// THE BAR OVERFLOWED. At 1440px the header measured 1555px wide and the last
+// entries — Settings, and the account button after it — were clipped off the
+// right edge with no way to reach them. The bar's height is load-bearing for
+// three Browse panes (see the comment on the row below), so a second row was
+// never an option and tightening the gaps had already been spent. What was left
+// was to stop spending the row on surfaces the operator does not use hourly:
+// the three admin dropdowns collapse into ONE "Admin" trigger with a section
+// per program, and the three admin-only links (Broker Review, Datasets, the
+// paused Outreach) move inside it. The top row is now the daily surfaces plus
+// the audit queue, which fits with room to spare at 1280.
+//
+// Grouped under the "Settings" section of that menu — all admin-only, so the
+// whole group renders (or not) with the trigger.
 const settingsItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.health.build(),   label: 'Health' },
   { to: ROUTES.costs.build(),    label: 'LLM Costs' },
@@ -88,6 +93,28 @@ const autodedupItems: ReadonlyArray<MenuItem> = [
   // is deliberately not a menu entry — it has no meaning without a pair.
   { to: ROUTES.autodedupGroups.build(), label: 'Groups' },
   { to: ROUTES.autodedupResidual.build(), label: 'Residual' },
+];
+
+// The admin-only surfaces that used to sit in the top row, now the first
+// section of the one "Admin" menu. Outreach keeps its paused state here rather
+// than vanishing — a surface that exists and is switched off is a different
+// fact from one that was removed.
+const adminItems: ReadonlyArray<MenuItem> = [
+  // The merge-review queue is a real admin surface (routes.tsx wraps it in
+  // AdminPage) that was only reachable from a conditional chip on /brokers —
+  // invisible whenever the queue happened to be empty.
+  { to: ROUTES.brokersReview.build(), label: 'Broker Review' },
+  { to: ROUTES.datasets.build(), label: 'Datasets' },
+  { to: ROUTES.outreach.build(), label: 'Outreach', disabled: true,
+    title: 'Outreach is paused — not available yet.' },
+];
+
+// One trigger, four sections, in the order they are reached for.
+const adminGroups: ReadonlyArray<MenuGroup> = [
+  { label: 'Admin', items: adminItems },
+  { label: 'NEW DEDUP', items: newDedupItems },
+  { label: 'AUTODEDUP', items: autodedupItems },
+  { label: 'Settings', items: settingsItems },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {
@@ -192,16 +219,14 @@ function TopBar() {
     return true;
   });
   const ownerTo = activeNavTo(location.pathname, items.map((i) => i.to));
-  const settingsActive = settingsItems.some((s) => isPathActive(location.pathname, s.to));
   /* `end` is honoured here, not just on the NavLink: Dashboard's `to` is
    * `/new-dedup`, which prefix-matches every page in the program — including
-   * /new-dedup/pin-audit, now a top-level entry of its own. Without this the
+   * /new-dedup/pin-audit, a top-level entry of its own. Without this the
    * dropdown and !AUDIT POLOH would both light up on that path. */
-  const newDedupActive = newDedupItems.some((s) =>
-    s.end ? location.pathname === s.to : isPathActive(location.pathname, s.to),
-  );
-  const autodedupActive = autodedupItems.some((s) =>
-    s.end ? location.pathname === s.to : isPathActive(location.pathname, s.to),
+  const adminActive = adminGroups.some((group) =>
+    group.items.some((s) =>
+      s.end ? location.pathname === s.to : isPathActive(location.pathname, s.to),
+    ),
   );
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
@@ -209,14 +234,22 @@ function TopBar() {
         * pin themselves against that number in CSS (`top-14`,
         * `calc(100dvh-3.5rem)` in Filters.tsx and BrowseExperience.tsx), so a
         * header that grows a second row slides the sidebar heading under it and
-        * overflows the map pane. Room for the nav is bought by TIGHTENING —
-        * gap-8 → gap-4 between the bar's parts, gap-1 → gap-0.5 and px-3 →
-        * px-2.5 inside the nav — never by changing the height. Making the bar
+        * overflows the map pane. Room for the nav is bought by TIGHTENING and,
+        * once tightening ran out (the bar measured 1555px inside 1440 and
+        * clipped Settings and the account button), by CARRYING LESS: the three
+        * admin dropdowns are one "Admin" trigger and the admin-only links live
+        * inside it. Never by changing the height. Making the bar
         * variable-height needs `--header-h` published here and consumed at
-        * those three sites; that is a Browse change, not a nav change. */}
+        * those three sites; that is a Browse change, not a nav change.
+        *
+        * Horizontal scrolling was considered and rejected: `overflow-x: auto`
+        * forces `overflow-y` to auto as well, which clips the dropdown panels
+        * and the active underline that hangs below each label. */}
       <div className="px-6 h-14 flex items-center gap-4">
         <BrandMark />
-        <nav className="flex items-center gap-0.5">
+        {/* `min-w-0` + a non-shrinking account menu: whatever the nav's width
+          * does, the account button stays on screen and reachable. */}
+        <nav className="flex min-w-0 items-center gap-0.5">
           {items.map((item) => {
             if (item.disabled) {
               return (
@@ -224,7 +257,7 @@ function TopBar() {
                   key={item.to}
                   title={item.title}
                   aria-disabled="true"
-                  className="relative px-2.5 py-1.5 text-sm tracking-wide text-[var(--color-ink-4)] opacity-50 cursor-not-allowed select-none"
+                  className="relative px-2 xl:px-2.5 py-1.5 text-sm tracking-wide text-[var(--color-ink-4)] opacity-50 cursor-not-allowed select-none"
                 >
                   {item.label}
                 </span>
@@ -240,7 +273,7 @@ function TopBar() {
                 end={item.to !== ownerTo}
                 className={({ isActive }) =>
                   [
-                    'relative px-2.5 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
+                    'relative px-2 xl:px-2.5 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
                     isActive
                       ? 'text-[var(--color-ink)]'
                       : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
@@ -287,13 +320,11 @@ function TopBar() {
           {showAdmin && (
             <>
               <span className="mx-2 h-4 w-px bg-[var(--color-rule)]" aria-hidden />
-              <NavMenu label="NEW DEDUP" items={newDedupItems} active={newDedupActive} />
-              <NavMenu label="AUTODEDUP" items={autodedupItems} active={autodedupActive} />
-              <NavMenu label="Settings" items={settingsItems} active={settingsActive} />
+              <NavMenu label="Admin" groups={adminGroups} active={adminActive} />
             </>
           )}
         </nav>
-        <div className="ml-auto">
+        <div className="ml-auto shrink-0">
           <AccountMenu />
         </div>
       </div>
@@ -303,11 +334,14 @@ function TopBar() {
 
 function NavMenu({
   label,
-  items,
+  groups,
   active,
 }: {
   label: string;
-  items: ReadonlyArray<MenuItem>;
+  /* Sections, not one flat list: four programs under one trigger stay legible
+   * only if each keeps its own heading. A single-section menu renders no
+   * heading at all. */
+  groups: ReadonlyArray<MenuGroup>;
   active: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -330,7 +364,7 @@ function NavMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         className={[
-          'relative px-2.5 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
+          'relative px-2 xl:px-2.5 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
           active ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
         ].join(' ')}
       >
@@ -342,26 +376,56 @@ function NavMenu({
       {open ? (
         <div
           role="menu"
-          className="absolute right-0 top-[calc(100%+4px)] z-30 min-w-[11rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] py-1 shadow-lg"
+          className="absolute right-0 top-[calc(100%+4px)] z-30 min-w-[12rem] max-h-[calc(100dvh-5rem)] overflow-y-auto rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] py-1 shadow-lg"
         >
-          {items.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.end}
-              role="menuitem"
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                [
-                  'block px-3 py-1.5 text-[0.8rem]',
-                  isActive
-                    ? 'text-[var(--color-ink)] bg-[var(--color-paper-2)]'
-                    : 'text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-ink)]',
-                ].join(' ')
-              }
-            >
-              {item.label}
-            </NavLink>
+          {groups.map((group, gi) => (
+            /* `role="group"`, not a bare div: a menu owns its menuitems directly
+             * or through a group, and a plain element between the two breaks that
+             * ownership for a screen reader even though every item still computes
+             * as a menuitem on its own. The visual heading is the group's label,
+             * so it is named here and hidden there rather than read twice. */
+            <div key={group.label} role="group" aria-label={group.label}>
+              {groups.length > 1 && (
+                <p
+                  aria-hidden="true"
+                  className={`px-3 pb-0.5 text-[0.58rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] ${
+                    gi === 0 ? 'pt-1' : 'mt-1 pt-1.5 border-t border-[var(--color-rule-soft)]'
+                  }`}
+                >
+                  {group.label}
+                </p>
+              )}
+              {group.items.map((item) =>
+                item.disabled ? (
+                  <span
+                    key={item.to}
+                    title={item.title}
+                    aria-disabled="true"
+                    className="block px-3 py-1.5 text-[0.8rem] text-[var(--color-ink-4)] opacity-50 cursor-not-allowed select-none"
+                  >
+                    {item.label}
+                  </span>
+                ) : (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.end}
+                    role="menuitem"
+                    onClick={() => setOpen(false)}
+                    className={({ isActive }) =>
+                      [
+                        'block px-3 py-1.5 text-[0.8rem]',
+                        isActive
+                          ? 'text-[var(--color-ink)] bg-[var(--color-paper-2)]'
+                          : 'text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-ink)]',
+                      ].join(' ')
+                    }
+                  >
+                    {item.label}
+                  </NavLink>
+                ),
+              )}
+            </div>
           ))}
         </div>
       ) : null}
@@ -411,7 +475,9 @@ function BrandMark() {
         {wordmark}
       </span>
       {descriptor && (
-        <span className="text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        /* Hidden below xl: it is decoration, and the narrow row needs its
+          * ~70px more than the wordmark needs its second half. */
+        <span className="hidden xl:inline text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
           {descriptor}
         </span>
       )}

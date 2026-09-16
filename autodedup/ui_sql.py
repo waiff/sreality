@@ -62,14 +62,10 @@ CLUSTER_COLUMNS: tuple[str, ...] = (
     "verdict_decided_at",
 )
 
-_CLUSTER_SELECT = """
-SELECT
-    c.cluster_key, c.generation, c.size, c.block_key, c.cat_group, c.category_main,
-    c.category_type, c.area_min, c.area_max, c.sources, c.medoid_listing_id,
-    c.min_edge_score, c.mean_edge_score, c.n_judged_edges, c.n_certificate_edges,
-    c.evidence_families, c.max_gap_days, c.shared_photo_warning, c.status,
-    c.model_version, c.feature_version, c.first_built_at, c.last_changed_at,
-    v.verdict, v.note, v.decided_by, v.decided_at
+# The FROM is its own constant so the COUNT behind "20 of N" runs the SAME joins as the page
+# it counts. The verdict LATERAL is not decoration — `_CLUSTER_WHERE` filters on it — and a
+# count that dropped it would answer a different question from the list above it.
+_CLUSTER_FROM = """
 FROM autodedup.clusters c
 LEFT JOIN LATERAL (
     SELECT vv.verdict, vv.note, vv.decided_by, vv.decided_at
@@ -80,12 +76,30 @@ LEFT JOIN LATERAL (
 ) v ON true
 """
 
+_CLUSTER_SELECT = (
+    """
+SELECT
+    c.cluster_key, c.generation, c.size, c.block_key, c.cat_group, c.category_main,
+    c.category_type, c.area_min, c.area_max, c.sources, c.medoid_listing_id,
+    c.min_edge_score, c.mean_edge_score, c.n_judged_edges, c.n_certificate_edges,
+    c.evidence_families, c.max_gap_days, c.shared_photo_warning, c.status,
+    c.model_version, c.feature_version, c.first_built_at, c.last_changed_at,
+    v.verdict, v.note, v.decided_by, v.decided_at
+"""
+    + _CLUSTER_FROM
+)
+
 # `verdict = 'unreviewed'` is the ABSENCE of a row, which is why the verdict filter is one arm
 # of this predicate and not a join condition: filtering in the LATERAL would hand back every
 # cluster with its verdict blanked instead of the clusters that carry that verdict.
 _CLUSTER_WHERE = """
 WHERE c.generation = %(generation)s::text
   AND (%(block)s::bigint IS NULL OR c.block_key = %(block)s::bigint)
+  -- A BLOCK IS A CODE AND A GRAIN. `block_key` is a bigint and a cast-obce code shares its
+  -- number space with an obec code, so the code alone can name two different blocks —
+  -- exactly the conflation migration 529 added `block_grain` to end. This arm is the filter
+  -- half of that fix: without it the picker offers two options that mean one query.
+  AND (%(block_grain)s::text IS NULL OR c.block_grain = %(block_grain)s::text)
   AND (%(source)s::text IS NULL OR %(source)s::text = any(c.sources))
   AND (%(category_main)s::text IS NULL OR c.category_main = %(category_main)s::text)
   AND (%(category_type)s::text IS NULL OR c.category_type = %(category_type)s::text)
@@ -140,6 +154,12 @@ ORDER BY c.size DESC, c.cluster_key DESC
 LIMIT %(limit)s::int
 """
 )
+
+# "20 of N", and N is the whole filtered set — the one number a keyset page cannot report
+# about itself. Built from the SAME `_CLUSTER_WHERE` the page reads through, so the headline
+# and the queue can never describe different cohorts; the route asks for it on the FIRST page
+# only, because paging does not change it and counting again per page is pure cost.
+GROUPS_COUNT_SQL = "SELECT count(*)" + _CLUSTER_FROM + _CLUSTER_WHERE
 
 GROUP_ONE_SQL = (
     _CLUSTER_SELECT
@@ -483,37 +503,14 @@ RESIDUAL_COLUMNS: tuple[str, ...] = (
 # generation. The `NOT EXISTS` asks exactly that question of `cluster_members` rather than
 # trusting `pairs.cluster_key`: an edge can be stored with a null cluster key and still have
 # both its listings pulled into one cluster by other edges, and that pair is not a residual.
-RESIDUAL_SQL = """
-SELECT
-    p.listing_lo, p.listing_hi, p.score, p.zone, p.decision, p.guard_veto, p.families,
-    p.probes, p.features, p.feature_version, p.model_version, p.decided_at,
-    fa.block_key,
-    la.source, la.source_url, la.category_main, la.category_type, la.disposition,
-    la.area_m2, la.floor, la.total_floors, la.price_czk, la.first_seen_at, la.last_seen_at,
-    la.is_active, ca.storage_path, ca.sreality_url, coalesce(ga.n, 0),
-    lb.source, lb.source_url, lb.category_main, lb.category_type, lb.disposition,
-    lb.area_m2, lb.floor, lb.total_floors, lb.price_czk, lb.first_seen_at, lb.last_seen_at,
-    lb.is_active, cb.storage_path, cb.sreality_url, coalesce(gb.n, 0),
-    j.verdict, j.confidence, j.tier,
-    v.verdict, v.note, v.decided_by, v.decided_at
+#
+# Split into FROM / covers / WHERE for the same reason the cluster statement is: the count
+# behind "20 of N" reuses the filter text verbatim, and joins ONLY what the filters read.
+# The four cover/gallery LATERALs are display, so the count never runs them.
+_RESIDUAL_FROM = """
 FROM autodedup.pairs p
 JOIN listings la ON la.id = p.listing_lo
 JOIN listings lb ON lb.id = p.listing_hi
-LEFT JOIN autodedup.listing_fp fa ON fa.listing_id = p.listing_lo
-LEFT JOIN LATERAL (
-    SELECT i.storage_path, i.sreality_url FROM images i
-     WHERE i.listing_id = p.listing_lo ORDER BY i.sequence NULLS LAST, i.id LIMIT 1
-) ca ON true
-LEFT JOIN LATERAL (
-    SELECT count(*) AS n FROM images i WHERE i.listing_id = p.listing_lo
-) ga ON true
-LEFT JOIN LATERAL (
-    SELECT i.storage_path, i.sreality_url FROM images i
-     WHERE i.listing_id = p.listing_hi ORDER BY i.sequence NULLS LAST, i.id LIMIT 1
-) cb ON true
-LEFT JOIN LATERAL (
-    SELECT count(*) AS n FROM images i WHERE i.listing_id = p.listing_hi
-) gb ON true
 LEFT JOIN LATERAL (
     SELECT jj.verdict, jj.confidence, jj.tier
       FROM autodedup.judgements jj
@@ -535,9 +532,51 @@ LEFT JOIN LATERAL (
      ORDER BY vv.decided_at DESC, vv.id DESC
      LIMIT 1
 ) v ON true
+"""
+
+# The block a residual pair sits in, for the row's own label and for the BLOCK filter.
+#
+# READ FROM `listing_location`, NOT `autodedup.listing_fp`. The engine's block key IS a
+# location fact: `fingerprint.block_key_of` is `cast_obce_kod` when the town is split, else
+# `obec_kod`, and this LATERAL spells that same rule. `listing_fp` is the lane's own scratch
+# copy of it and NO shipped lane writes a row into it, so the predicate that read it matched
+# nothing for every block an operator could pick — a filter that silently empties the queue,
+# which is the defect the named picker exists to remove. `listing_location_pkey` is unique on
+# `listing_id`, so this is a primary-key lookup and cannot multiply a pair into two rows.
+_RESIDUAL_BLOCK = """
+LEFT JOIN LATERAL (
+    SELECT coalesce(ll.cast_obce_kod, ll.obec_kod) AS block_key,
+           CASE WHEN ll.cast_obce_kod IS NOT NULL THEN 'c'
+                WHEN ll.obec_kod IS NOT NULL THEN 'o' END AS block_grain
+      FROM listing_location ll
+     WHERE ll.listing_id = p.listing_lo
+) bl ON true
+"""
+
+_RESIDUAL_COVERS = """
+LEFT JOIN LATERAL (
+    SELECT i.storage_path, i.sreality_url FROM images i
+     WHERE i.listing_id = p.listing_lo ORDER BY i.sequence NULLS LAST, i.id LIMIT 1
+) ca ON true
+LEFT JOIN LATERAL (
+    SELECT count(*) AS n FROM images i WHERE i.listing_id = p.listing_lo
+) ga ON true
+LEFT JOIN LATERAL (
+    SELECT i.storage_path, i.sreality_url FROM images i
+     WHERE i.listing_id = p.listing_hi ORDER BY i.sequence NULLS LAST, i.id LIMIT 1
+) cb ON true
+LEFT JOIN LATERAL (
+    SELECT count(*) AS n FROM images i WHERE i.listing_id = p.listing_hi
+) gb ON true
+"""
+
+_RESIDUAL_WHERE = """
 WHERE p.score >= %(min_score)s::real
   AND (%(zone)s::text IS NULL OR p.zone = %(zone)s::text)
-  AND (%(block)s::bigint IS NULL OR fa.block_key = %(block)s::bigint)
+  AND (%(block)s::bigint IS NULL
+       OR (bl.block_key = %(block)s::bigint
+           AND (%(block_grain)s::text IS NULL
+                OR bl.block_grain = %(block_grain)s::text)))
   AND (%(source_pair)s::text IS NULL
        OR least(la.source, lb.source) || '+' || greatest(la.source, lb.source)
           = %(source_pair)s::text)
@@ -555,12 +594,117 @@ WHERE p.score >= %(min_score)s::real
           ON cl.cluster_key = ma.cluster_key AND cl.generation = %(generation)s::text
        WHERE ma.listing_id = p.listing_lo
   )
+"""
+
+_RESIDUAL_SELECT = """
+SELECT
+    p.listing_lo, p.listing_hi, p.score, p.zone, p.decision, p.guard_veto, p.families,
+    p.probes, p.features, p.feature_version, p.model_version, p.decided_at,
+    bl.block_key,
+    la.source, la.source_url, la.category_main, la.category_type, la.disposition,
+    la.area_m2, la.floor, la.total_floors, la.price_czk, la.first_seen_at, la.last_seen_at,
+    la.is_active, ca.storage_path, ca.sreality_url, coalesce(ga.n, 0),
+    lb.source, lb.source_url, lb.category_main, lb.category_type, lb.disposition,
+    lb.area_m2, lb.floor, lb.total_floors, lb.price_czk, lb.first_seen_at, lb.last_seen_at,
+    lb.is_active, cb.storage_path, cb.sreality_url, coalesce(gb.n, 0),
+    j.verdict, j.confidence, j.tier,
+    v.verdict, v.note, v.decided_by, v.decided_at
+"""
+
+RESIDUAL_SQL = (
+    _RESIDUAL_SELECT
+    + _RESIDUAL_FROM
+    + _RESIDUAL_BLOCK
+    + _RESIDUAL_COVERS
+    + _RESIDUAL_WHERE
+    + """
   AND (%(after_score)s::real IS NULL
        OR (p.score, p.listing_lo, p.listing_hi)
           < (%(after_score)s::real, %(after_lo)s::bigint, %(after_hi)s::bigint))
 ORDER BY p.score DESC, p.listing_lo DESC, p.listing_hi DESC
 LIMIT %(limit)s::int
 """
+)
+
+# The residual half of "20 of N". Same FROM minus the four display LATERALs, same WHERE minus
+# the cursor — the cursor is where the page is, not what the filter selects. The block
+# LATERAL is NOT display and stays: the WHERE reads it, and a count that dropped it would
+# answer a different question from the list above it.
+RESIDUAL_COUNT_SQL = "SELECT count(*)" + _RESIDUAL_FROM + _RESIDUAL_BLOCK + _RESIDUAL_WHERE
+
+# ---------------------------------------------------------------- the blocks of a generation
+
+BLOCK_COLUMNS: tuple[str, ...] = (
+    "block_key",
+    "block_grain",
+    "name",
+    "n_clusters",
+    "n_listings",
+)
+
+# What the BLOCK filter offers instead of a free-text numeric field: every block this
+# generation actually clustered, with the town/quarter NAME an operator recognises.
+#
+# The name is not a column of this schema. `listing_location` (migration 501) is the one
+# store of resolved admin names, and the key a cluster carries is a RÚIAN code at one of two
+# grains (migration 529: `c` = část obce, `o` = obec). So the name is the MOST FREQUENT
+# spelling among the located listings whose code equals the key — most frequent rather than
+# any, because two neighbouring rows can disagree while the resolver is mid-flight, and a
+# picker whose label flickers between revisions is worse than one that lags one of them.
+#
+# Bounded to the keys this generation uses: the name aggregate is a semi-join against the
+# block list, never a group-by over the whole location table.
+#
+# BOUNDED IN LENGTH TOO. `listing_location` carries no index on `cast_obce_kod`, so the
+# quarter arm is a scan; and at corpus scale the vocabulary is thousands of obce, which is a
+# payload nobody reads and a native select nobody can use. The busiest blocks first, capped
+# by the caller — a block outside the cap still filters, because the picker keeps whatever
+# key the URL arrived with.
+#
+# NO PAIR COUNT. `autodedup.pairs` carries no block column, and the only per-listing block
+# store (`autodedup.listing_fp`) is written by no shipped lane — a "pairs in this block"
+# number read off it would be a confident zero. The counts here are what the clusters
+# themselves say: how many groups sit in the block, and how many adverts those groups hold.
+BLOCKS_SQL = """
+WITH blocks AS (
+    SELECT c.block_key,
+           c.block_grain,
+           count(*)::bigint                  AS n_clusters,
+           coalesce(sum(c.size), 0)::bigint  AS n_listings
+      FROM autodedup.clusters c
+     WHERE c.generation = %(generation)s::text
+       AND c.block_key IS NOT NULL
+     GROUP BY c.block_key, c.block_grain
+),
+named AS (
+    -- `n` rides in the select list because DISTINCT ON is fussy about ordering by a column
+    -- it cannot see; the outer query reads the name only.
+    SELECT DISTINCT ON (grain, kod) grain, kod, name, n
+      FROM (
+          SELECT 'o'::text AS grain, l.obec_kod AS kod, l.obec_name AS name, count(*) AS n
+            FROM listing_location l
+           WHERE l.obec_name IS NOT NULL
+             AND l.obec_kod IN (SELECT b.block_key FROM blocks b WHERE b.block_grain = 'o')
+           GROUP BY 1, 2, 3
+          UNION ALL
+          SELECT 'c'::text, l.cast_obce_kod, l.cast_obce_name, count(*)
+            FROM listing_location l
+           WHERE l.cast_obce_name IS NOT NULL
+             AND l.cast_obce_kod IN (SELECT b.block_key FROM blocks b WHERE b.block_grain = 'c')
+           GROUP BY 1, 2, 3
+      ) counted
+     ORDER BY grain, kod, n DESC, name ASC
+)
+SELECT b.block_key, b.block_grain, nm.name, b.n_clusters, b.n_listings
+  FROM blocks b
+  LEFT JOIN named nm ON nm.grain = b.block_grain AND nm.kod = b.block_key
+ ORDER BY b.n_clusters DESC, b.block_key ASC
+ LIMIT %(limit)s::int
+"""
+
+# The two grains a block can be keyed at (migration 529), in ONE place: the route validates an
+# arriving `block_grain` against it, and both list statements filter on it.
+BLOCK_GRAIN_VALUES: tuple[str, ...] = ("o", "c")
 
 # ----------------------------------------------------------- the pair view's listing digests
 
