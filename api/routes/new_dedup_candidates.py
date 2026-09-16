@@ -185,3 +185,70 @@ def list_generations(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
         return {"data": dc.list_recent_generations(conn, "C", RECENT_LIMIT)}
     except _MISSING_RELATION:
         return {"data": []}
+
+
+# --------------------------------------------------------------------- the drill-down
+
+# The page's figures are counts; this is the listings behind one of them. Two rules govern it.
+#
+# BUCKET IS A KEY, NOT A PREDICATE. The wire carries `town_no_attribute`, never SQL; the key is
+# looked up in `sql.AUDIT_BUCKETS` and an unknown one is a 400. Nothing from the request reaches
+# the statement except through named placeholders.
+#
+# LIVE, AND SAID SO. The counts on the page were frozen when the run executed; this reads the
+# database now. A listing fixed since then has left its bucket, so the two are not expected to
+# tally and this route does not pretend otherwise — it returns no total at all. Inventing one
+# here would invite exactly the reconciliation the numbers cannot support.
+AUDIT_PAGE_SIZE = 100
+AUDIT_MAX_PAGE_SIZE = 200
+
+
+@router.get("/listings")
+def audit_listings(
+    bucket: str,
+    source: str | None = None,
+    category_main: str | None = None,
+    category_type: str | None = None,
+    active_only: bool = False,
+    after_id: int | None = None,
+    limit: int = AUDIT_PAGE_SIZE,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One keyset page of the listings behind a figure, newest listing id first.
+
+    `after_id` is the previous page's last `listing_id`; absent, the first page. The page is
+    `has_more` when it came back full — a cheaper and more honest answer than a count that
+    would have to scan the bucket to produce.
+    """
+    from toolkit import dedup_candidates_sql as sql
+
+    if bucket not in sql.AUDIT_BUCKETS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown bucket {bucket!r}; expected one of "
+                + ", ".join(sorted(sql.AUDIT_BUCKETS))
+            ),
+        )
+    size = max(1, min(int(limit), AUDIT_MAX_PAGE_SIZE))
+    params = {
+        "source": source,
+        "category_main": category_main,
+        "category_type": category_type,
+        "active_only": bool(active_only),
+        "after_id": after_id,
+        "limit": size,
+    }
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.audit_listings_statement(bucket), params)
+            cols = [d.name for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    except _MISSING_RELATION:
+        return {"store_ready": False, "data": [], "has_more": False, "next_after_id": None}
+    return {
+        "store_ready": True,
+        "data": rows,
+        "has_more": len(rows) == size,
+        "next_after_id": rows[-1]["listing_id"] if rows else None,
+    }

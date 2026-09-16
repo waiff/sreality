@@ -368,3 +368,114 @@ def test_new_dedup_candidates_require_admin(client, store):
     api_main.app.dependency_overrides.pop(deps.require_admin, None)
     assert client.get("/new-dedup/candidates/overview").status_code == 401
     assert client.get("/new-dedup/candidates/generations").status_code == 401
+
+
+# ---------------------------------------------------------------- the drill-down
+
+
+class _RecordingCursor:
+    """Captures the statement and params the route sends, and replays a fixed page."""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+        self.description = [
+            type("C", (), {"name": n})() for n in ("listing_id", "source", "category_main")
+        ]
+        self.sql: str | None = None
+        self.params: dict[str, Any] | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
+        self.sql, self.params = sql, params
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+
+class _DrillConn:
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.cursor_obj = _RecordingCursor(rows)
+
+    def cursor(self):
+        return self.cursor_obj
+
+
+@pytest.fixture
+def drill(client):
+    """Swaps the connection for one that records what the route asked the database."""
+
+    def _use(rows: list[tuple[Any, ...]]):
+        conn = _DrillConn(rows)
+        api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
+        return conn
+
+    yield _use
+
+
+def test_an_unknown_bucket_is_refused_rather_than_interpolated(client, drill):
+    """The wire carries a KEY. Anything else is a 400 and never reaches the statement —
+    the one place operator text could have become SQL."""
+    drill([])
+    r = client.get("/new-dedup/candidates/listings", params={"bucket": "'; drop table x; --"})
+    assert r.status_code == 400
+    assert "unknown bucket" in r.json()["detail"]
+
+
+def test_the_drilldown_passes_its_filters_as_bound_parameters(client, drill):
+    conn = drill([(41, "bazos", "pozemek")])
+    r = client.get(
+        "/new-dedup/candidates/listings",
+        params={
+            "bucket": "town_no_attribute",
+            "source": "bazos",
+            "category_main": "pozemek",
+            "active_only": "true",
+        },
+    )
+    assert r.status_code == 200
+    assert conn.cursor_obj.params["source"] == "bazos"
+    assert conn.cursor_obj.params["category_main"] == "pozemek"
+    assert conn.cursor_obj.params["active_only"] is True
+    # the filters are placeholders, never spliced text
+    assert "bazos" not in conn.cursor_obj.sql
+    assert r.json()["data"] == [{"listing_id": 41, "source": "bazos", "category_main": "pozemek"}]
+
+
+def test_a_full_page_reports_more_and_hands_back_its_own_cursor(client, drill):
+    drill([(n, "sreality", "byt") for n in range(3)])
+    r = client.get(
+        "/new-dedup/candidates/listings",
+        params={"bucket": "located_town", "limit": 3},
+    ).json()
+    assert r["has_more"] is True
+    assert r["next_after_id"] == 2
+
+
+def test_a_short_page_is_the_end_of_the_bucket(client, drill):
+    drill([(9, "sreality", "byt")])
+    r = client.get(
+        "/new-dedup/candidates/listings",
+        params={"bucket": "located_town", "limit": 50},
+    ).json()
+    assert r["has_more"] is False
+
+
+def test_the_page_size_is_capped(client, drill):
+    conn = drill([])
+    client.get(
+        "/new-dedup/candidates/listings",
+        params={"bucket": "all_listings", "limit": 100000},
+    )
+    assert conn.cursor_obj.params["limit"] == 200
+
+
+def test_the_drilldown_is_admin_gated(client, store):
+    api_main.app.dependency_overrides.pop(deps.require_admin, None)
+    assert client.get(
+        "/new-dedup/candidates/listings", params={"bucket": "all_listings"}
+    ).status_code == 401

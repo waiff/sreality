@@ -39,6 +39,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return {
     ...actual,
     getNewDedupCandidateOverview: vi.fn(),
+    getNewDedupCandidateListings: vi.fn(),
   };
 });
 
@@ -213,7 +214,29 @@ function renderPage(url = '/new-dedup/candidates') {
 describe('<NewDedupCandidates>', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    /* The collapse state is deliberately persistent (a folded section stays
+     * folded on the operator's next visit), so it leaks between cases unless
+     * each one starts from a clean slate. */
+    try {
+      localStorage.clear();
+    } catch {
+      /* jsdom always has it; a browser with storage disabled does not */
+    }
     vi.mocked(api.getNewDedupCandidateOverview).mockResolvedValue({ data: overview() });
+    vi.mocked(api.getNewDedupCandidateListings).mockResolvedValue({
+      store_ready: true,
+      data: [
+        {
+          listing_id: 8801, property_id: 5, sreality_id: -8801, source: 'bazos',
+          source_id_native: 'bz-8801', source_url: null, category_main: 'pozemek',
+          category_type: 'prodej', disposition: null, area_m2: null, floor: null,
+          price_czk: 1_200_000, is_active: true, first_seen_at: null, last_seen_at: null,
+          display_label: null, obec_kod: null, granularity: 'obec', country_status: 'cz',
+        },
+      ],
+      has_more: false,
+      next_after_id: null,
+    });
   });
 
   /* ------------------------------------------------------- empty states */
@@ -401,6 +424,84 @@ describe('<NewDedupCandidates>', () => {
     expect(
       lostCell('eligibility-portal-sreality') + lostCell('eligibility-portal-bazos'),
     ).toBe(44);
+  });
+
+  /* THE DRILL-DOWN. A figure is a link to its own rows; the request carries the
+   * BUCKET plus the slice the figure was counted over, which is the whole
+   * contract between the page and the route. */
+  it('asks for the listings behind the figure that was clicked, scoped to its row', async () => {
+    renderPage();
+    await screen.findByText(/where “.*” lost its listings/);
+
+    const pozemek = screen.getByTestId('eligibility-type-pozemek');
+    fireEvent.click(within(pozemek).getByRole('button', { name: '20' }));
+
+    await waitFor(() =>
+      expect(api.getNewDedupCandidateListings).toHaveBeenCalledWith(
+        expect.objectContaining({ bucket: 'town_no_attribute', category_main: 'pozemek' }),
+      ),
+    );
+    /* The row itself renders, and its listing links out by the natural key. */
+    expect(await screen.findByTestId('drill-row-8801')).toHaveTextContent('bz-8801');
+  });
+
+  it('scopes a per-portal figure to that portal, type and deal at once', async () => {
+    renderPage();
+    await screen.findByText('Missing data — per portal, per property type');
+
+    const card = screen.getByText('Missing data — per portal, per property type').closest('section')!;
+    const row = within(card).getByText('bazos').closest('tr')!;
+    /* bazos/pozemek: town_no_attribute is 20 in the fixture. */
+    fireEvent.click(within(row).getByRole('button', { name: '20' }));
+
+    await waitFor(() =>
+      expect(api.getNewDedupCandidateListings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bucket: 'town_no_attribute',
+          source: 'bazos',
+          category_main: 'pozemek',
+          category_type: 'prodej',
+        }),
+      ),
+    );
+  });
+
+  it('never makes a zero clickable — there is nothing behind it', async () => {
+    renderPage();
+    await screen.findByText('Missing data — per portal, per property type');
+    const card = screen.getByText('Missing data — per portal, per property type').closest('section')!;
+    const row = within(card).getByText('bazos').closest('tr')!;
+    /* bazos/pozemek states no disposition at all: c1_eligible is 0. */
+    expect(within(row).queryByRole('button', { name: '0' })).toBeNull();
+  });
+
+  it('says the list is live while the figures are frozen, so the two need not tally', async () => {
+    renderPage();
+    const card = (await screen.findByText('The listings behind a figure')).closest('section')!;
+    expect(card).toHaveTextContent(/frozen when the run executed/);
+    expect(card).toHaveTextContent(/reads the database as it is now/);
+  });
+
+  /* COLLAPSIBLE, with the shared mechanism. The lede stays readable when the
+   * body is folded — a section that hid its own explanation would be worse
+   * closed than absent. */
+  it('folds a section away while keeping its explanation on screen', async () => {
+    renderPage();
+    const heading = await screen.findByRole('button', { name: /Town statistics/ });
+    const card = heading.closest('section')!;
+    const body = card.querySelector('#card-body-town-stats') as HTMLElement;
+
+    expect(heading).toHaveAttribute('aria-expanded', 'true');
+    expect(body.hidden).toBe(false);
+
+    fireEvent.click(heading);
+    expect(heading).toHaveAttribute('aria-expanded', 'false');
+    expect(body.hidden).toBe(true);
+    /* The explanation is OUTSIDE the folded body, so it survives the fold.
+     * Asserted structurally: `toHaveTextContent` reads hidden nodes too, so a
+     * text assertion here would pass even if the paragraph were inside. */
+    const lede = within(card).getByText(/Path C compares two listings only when they sit/i);
+    expect(body.contains(lede)).toBe(false);
   });
 
   it('renders the town statistics, showing an em dash where a name is missing', async () => {
