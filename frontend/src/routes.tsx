@@ -44,6 +44,7 @@ const NewDedupExamReview = lazyChunk(() => import('./pages/NewDedupExamReview'))
 const NewDedupTaggingBakeoff = lazyChunk(() => import('./pages/NewDedupTaggingBakeoff'));
 const LocationPinAudit = lazyChunk(() => import('./pages/LocationPinAudit'));
 const NewDedupTaxonomy = lazyChunk(() => import('./pages/NewDedupTaxonomy'));
+const AutodedupProgress = lazyChunk(() => import('./pages/AutodedupProgress'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazyChunk(() => import('./pages/DevConfidencePreview'));
@@ -124,6 +125,7 @@ export const routes: RouteObject[] = [
       { path: ROUTES.newDedupExamReview.childPath, element: <AdminPage><NewDedupExamReview /></AdminPage>, handle: { title: 'NEW DEDUP · Exam review' } },
       { path: ROUTES.newDedupTaggingBakeoff.childPath, element: <AdminPage><NewDedupTaggingBakeoff /></AdminPage>, handle: { title: 'NEW DEDUP · Tagging bake-off' } },
       { path: ROUTES.newDedupPinAudit.childPath, element: <AdminPage><LocationPinAudit /></AdminPage>, handle: { title: 'NEW DEDUP · Audit poloh' } },
+      { path: ROUTES.autodedupProgress.childPath, element: <AdminPage><AutodedupProgress /></AdminPage>, handle: { title: 'AUTODEDUP · Progress' } },
       { path: ROUTES.scrapers.childPath, element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: ROUTES.devConfidenceIndicator.childPath, element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },

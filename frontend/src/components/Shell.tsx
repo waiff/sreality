@@ -75,6 +75,16 @@ const newDedupItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.newDedupTaggingBakeoff.build(), label: 'Tagging bake-off' },
 ];
 
+// The AUTONOMOUS dedup program's own group (docs/design/autodedup/PROGRAM.md) —
+// a different program from NEW DEDUP above, with its own schema, lane and
+// settings namespace, so it gets its own dropdown rather than a sub-entry that
+// would read as a page of that one. Progress is its first surface: the
+// iteration-by-iteration ledger that makes a long autonomous run legible while
+// it runs.
+const autodedupItems: ReadonlyArray<MenuItem> = [
+  { to: ROUTES.autodedupProgress.build(), label: 'Progress', end: true },
+];
+
 function isPathActive(pathname: string, to: string): boolean {
   return pathname === to || pathname.startsWith(`${to}/`);
 }
@@ -185,6 +195,9 @@ function TopBar() {
   const newDedupActive = newDedupItems.some((s) =>
     s.end ? location.pathname === s.to : isPathActive(location.pathname, s.to),
   );
+  const autodedupActive = autodedupItems.some((s) =>
+    s.end ? location.pathname === s.to : isPathActive(location.pathname, s.to),
+  );
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
       <div className="px-6 h-14 flex items-center gap-8">
@@ -261,6 +274,7 @@ function TopBar() {
             <>
               <span className="mx-2 h-4 w-px bg-[var(--color-rule)]" aria-hidden />
               <NavMenu label="NEW DEDUP" items={newDedupItems} active={newDedupActive} />
+              <NavMenu label="AUTODEDUP" items={autodedupItems} active={autodedupActive} />
               <NavMenu label="Settings" items={settingsItems} active={settingsActive} />
             </>
           )}

@@ -126,6 +126,11 @@ export const ROUTES = {
   newDedupTaggingBakeoff: def('/new-dedup/tagging-bakeoff'),
   // The set W5 hides from consumers until its location is resolved (mig 514).
   newDedupPinAudit: def('/new-dedup/pin-audit'),
+  // The AUTONOMOUS dedup program (docs/design/autodedup/PROGRAM.md) — a separate
+  // program from NEW DEDUP above, with its own schema, lane and settings
+  // namespace. Progress is its first surface (PROGRAM.md §12, W1); bare
+  // `/autodedup` is reserved for that section's W5 funnel view and stays free.
+  autodedupProgress: def('/autodedup/progress'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;

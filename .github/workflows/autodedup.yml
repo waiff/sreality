@@ -24,9 +24,46 @@ name: "AUTODEDUP: engine lane"
 #             coverage, `source=` picking the portal, default remax). Prints two small tables
 #             and writes out/probes.json.
 #
+#   export  - READS ONLY. Dumps the trial cohort - two district towns, one Praha quarter and
+#             the assembled negative control (Praha address points carrying at least three
+#             listings across more than one floor, whole groups largest-first up to
+#             negctl_max, 800 by default) - as ONE gzipped JSONL artifact,
+#             out/cohort.jsonl.gz: a meta line, then one record per listing (attributes,
+#             scrubbed description, location, hashed broker key, price-change path from the
+#             snapshots), then one per image (storage path, pHash with its corpus-wide
+#             population, the CLIP vector as base64 float16, room tags - the logical tag is
+#             a ROOM TYPE, its family comes from toolkit.room_taxonomy). No personal data
+#             leaves: broker names, phones and e-mails are never written, only a salted
+#             hash, and descriptions are scrubbed of Czech phone, e-mail and name patterns
+#             first. That artifact is what makes every later wave free - blocking, features,
+#             model fitting and clustering all run locally against the file instead of the
+#             database. The file is renamed onto its final name only after the stream closes
+#             cleanly, so a failed run uploads summary.json and no artifact rather than a
+#             plausible-looking partial one. The one statement that can blow its budget is
+#             the corpus-wide pHash population (no index on images.phash, and ruling D8
+#             forbids adding one): when it times out the run still ships, every `pop` is
+#             written null - UNKNOWN, not zero - and meta carries phash_pop_ok=false plus
+#             the error.
+#             NOTE the negative control here is the geographic draw this wave was built to,
+#             not ruling D1's verbatim label over blocks 1-3 (whose second arm is a dHash on
+#             >= 5 distinct listings); that divergence is open and needs a ruling line in
+#             PROGRAM.md section 14 before W1 closes.
+#
+#   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
+#             row from its arguments, for work that happened outside a lane run (a migration
+#             applied by apply_migration.yml, an operator review session, a wave that closed
+#             before the ledger existed) so the /autodedup/progress page is not missing it.
+#
+# Every other mode writes its own ledger row automatically - `running` when it starts, a
+# terminal status plus its summary, metrics and this run's URL when it ends. A database
+# without migration 528 costs the row, never the run.
+#
 # `args` is a free-form `k=v,k=v` string each mode parses for itself. census accepts
 # min_n, max_n, top, detail_top, timeout_s, pin_share_min, probes and hash_share_min;
-# probes accepts timeout_s and source.
+# probes accepts timeout_s and source; export accepts blocks, timeout_s, phash_timeout_s,
+# batch, clip_model and negctl_max (block overrides are SPACE-separated, e.g.
+# `blocks=town:563510 quarter:490245`, because the comma already separates k=v pairs);
+# record accepts wave, title, status, approach, tools, notes, cost_usd and run_id.
 #
 # Costs nothing but GitHub minutes and database time. out/ is uploaded on every outcome;
 # out/summary.json is written even when the run fails.
@@ -35,7 +72,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; record = one retroactive progress-ledger row."
         required: true
         default: "census"
         type: string

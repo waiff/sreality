@@ -479,8 +479,8 @@ One row per wave, appended as it closes. A wave is **closed** only when its gate
 | wave | opened | closed | gate met? | evidence (artifact / run id / query) | measured cost | notes |
 |---|---|---|---|---|---|---|
 | W0 Census | 2026-09-16 | 2026-09-16 | yes | PR #1482 merged as `f236d2f7`; census run `35088558149` (job `lane` success); artifact `autodedup-census-35088558149`, 17,455 B | $0 | delta probes land in W0b |
-| W0b Doc + foundation | 2026-09-16 | | | | $0 | migrations 527/528; B6 dropped (D7) |
-| W1 Export + harness + progress page | | | | | | |
+| W0b Doc + foundation | 2026-09-16 | 2026-09-16 | yes | PR #1484 merged as `8e237092`; migrations 527 + 528 applied live (receipts `35092747371` 1 object, `35092847735` 52 objects); probes run `35093138550` | $0 | migrations 527/528; B6 dropped (D7); receipt parser qualifies non-public indexes |
+| W1 Export + harness + progress page | 2026-09-16 | | | export mode, `autodedup.iterations` writer + `record` mode, `GET /autodedup/iterations|stats`, SPA `/autodedup/progress`, `autodedup.dataset` + `harness stats` | $0 | cohort D1: Jablonec 563510 · Turnov 577626 · Vysočany 490245 · negctl (Praha address groups) |
 | W2 Blocking + core features | | | | | | |
 | W3 Ground truth | | | | | | |
 | W4 Model + thresholds | | | | | | |
@@ -492,10 +492,10 @@ One row per wave, appended as it closes. A wave is **closed** only when its gate
 
 | # | quantity | design assumption | measured | source | when |
 |---|---|---|---|---|---|
-| M1 | `L` new listings/month | 170,000 | | census B5 | W0b |
+| M1 | `L` new listings/month | 170,000 | **~180,000** (42,095 in 7 d ≈ 6,014/day; bazos 13.5k, idnes 10.4k, sreality 8.2k, ceskereality 5.2k, realitymix 2.9k per week) | probes run `35093138550` | W0b |
 | M2 | same-portal re-post base rate | unknown | | census B3 | W0b |
 | M3 | `ad_max_cluster_size` | 8 (provisional) | | census B3+B4 | W0b |
-| M4 | remax location reach | contradicted | | census B2 | W0b |
+| M4 | remax location reach | contradicted | **99.4 % with geom** (13,740 rows: obec 6,766 · quarter 6,292 · street 603 · unknown 79) — the 0 % figure is dead | probes run `35093138550` | W0b |
 | M5 | per-portal phash/CLIP coverage | unstated | | census B1 | W0b |
 | M6 | hard recall ceiling (`no_signal_at_all`) | unknown | | census block layer | W0b |
 | M7 | candidates/listing p50 / p99 | 12–25 / ≤60 | | W2 estimate mode | W2 |
