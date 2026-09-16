@@ -903,6 +903,65 @@ export const getNewDedupCandidateOverview = (
     jwt: true,
   });
 
+/* THE DRILL-DOWN behind a figure on the Candidates page. `bucket` is a KEY the
+ * backend looks up (`toolkit.dedup_candidates_sql.AUDIT_BUCKETS`) — never a
+ * predicate — so an unknown one is a 400 rather than a query.
+ *
+ * LIVE, unlike every other number on that page. The funnel's counts were frozen
+ * when the run executed; this reads the database now, so the two are not
+ * expected to tally and the API returns no total to invite the comparison. The
+ * page says which is which. */
+export interface NewDedupCandidateAuditRow {
+  listing_id: number;
+  property_id: number | null;
+  sreality_id: number | null;
+  source: string;
+  source_id_native: string | null;
+  source_url: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  floor: number | null;
+  price_czk: number | null;
+  is_active: boolean;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  display_label: string | null;
+  obec_kod: string | null;
+  granularity: string | null;
+  country_status: string | null;
+}
+
+export interface NewDedupCandidateAuditPage {
+  store_ready: boolean;
+  data: NewDedupCandidateAuditRow[];
+  has_more: boolean;
+  next_after_id: number | null;
+}
+
+export const getNewDedupCandidateListings = (q: {
+  bucket: string;
+  source?: string | null;
+  category_main?: string | null;
+  category_type?: string | null;
+  active_only?: boolean;
+  after_id?: number | null;
+  limit?: number;
+}): Promise<NewDedupCandidateAuditPage> =>
+  request<NewDedupCandidateAuditPage>('/new-dedup/candidates/listings', {
+    query: {
+      bucket: q.bucket,
+      source: q.source ?? null,
+      category_main: q.category_main ?? null,
+      category_type: q.category_type ?? null,
+      active_only: q.active_only ? true : null,
+      after_id: q.after_id ?? null,
+      limit: q.limit ?? null,
+    },
+    jwt: true,
+  });
+
 export const listNewDedupCandidateGenerations = (): Promise<{
   data: NewDedupCandidateRecentGeneration[];
 }> =>

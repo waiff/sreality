@@ -375,3 +375,109 @@ def rung_params(inputs: dict[str, Any]) -> dict[str, Any]:
         ),
         "active_only": inputs.get("l0_candidate_scope", "all") == "active",
     }
+
+
+# --------------------------------------------------------------------- the audit drill-down
+
+# WHICH LISTINGS ARE BEHIND A FIGURE. Every count the candidates page prints is a filter over
+# the same base relation the funnel is cut from, so the drill-down is that base relation with
+# the same predicate applied and the listing columns selected instead of `count(*)`.
+#
+# IT IS BUILT FROM THE SAME HELPERS AS `FUNNEL_SQL`, deliberately. The page's whole W16 premise
+# is ONE step vocabulary; a hand-written copy of "has a town" in a view or a route would be the
+# second definition that wave removed. `ls.step_flags_sql()` and `ls.located_town_sql()` are the
+# only place these predicates exist, and both surfaces read them.
+#
+# LIVE, AND THAT IS THE POINT — but it means a drill-down can never be expected to tally with
+# the run's own count, which was frozen when the run executed. A listing fixed since then has
+# left the bucket. The page says so; the numbers are not reconciled here and must not be.
+#
+# NO MIGRATION. A view would have to inline these predicates in SQL, where nothing keeps it in
+# step with location_steps.py; served from Python the predicate is imported, not copied.
+
+_AUDIT_FLAGS = ls.step_flags_sql()
+
+# One bucket per clickable figure. The key is the wire contract the route accepts and the page
+# sends; the value is the predicate over the flags CTE, in the vocabulary above.
+AUDIT_BUCKETS: dict[str, str] = {
+    # THE CHAIN, under its own step keys and in the POSITIVE sense the page prints. A step's
+    # figure is how many listings REACHED it, so its drill-down is the listings that reached
+    # it — not the ones it lost. `ls.SHARED_STEP_KEYS` is the floor a test holds this to.
+    "all_listings": "true",
+    "with_verdict": "b.has_verdict",
+    "located": "b.located",
+    "located_foreign": "b.located AND COALESCE(b.is_foreign, false)",
+    "located_no_town": (
+        "b.located AND NOT COALESCE(b.is_foreign, false) AND NOT COALESCE(b.has_town, false)"
+    ),
+    "located_town": ls.located_town_sql("b"),
+    # The two losses the chain does NOT print as steps, for the "Lost at this step" figures.
+    "no_verdict": "NOT b.has_verdict",
+    "not_located": "NOT b.located",
+    # The eligibility step and its two rungs.
+    "eligible": f"({ls.located_town_sql('b')}) AND (b.has_disposition OR b.has_area)",
+    "c1_eligible": f"({ls.located_town_sql('b')}) AND b.has_disposition",
+    "c3_eligible": (
+        f"({ls.located_town_sql('b')}) AND NOT b.has_disposition AND COALESCE(b.has_area, false)"
+    ),
+    # THE ONE THE OPERATOR ASKED FOR FIRST: a town, and nothing to compare.
+    "town_no_attribute": (
+        f"({ls.located_town_sql('b')}) AND NOT b.has_disposition"
+        " AND NOT COALESCE(b.has_area, false)"
+    ),
+    # The missing-data rows, which are attribute facts and not steps — no town required.
+    "no_disposition": "NOT b.has_disposition",
+    "no_area": "NOT COALESCE(b.has_area, false)",
+    "byt_no_floor": "b.category_main = 'byt' AND b.floor IS NULL",
+}
+
+# The columns the list shows. `area_m2` is the ONE headline area (W17) — the plot on land, the
+# floor area elsewhere — so the list needs no per-type column and the operator reads one number.
+AUDIT_COLUMNS: tuple[str, ...] = (
+    "listing_id", "property_id", "sreality_id", "source", "source_id_native", "source_url",
+    "category_main", "category_type", "disposition", "area_m2", "floor",
+    "price_czk", "is_active", "first_seen_at", "last_seen_at",
+    "display_label", "obec_kod", "granularity", "country_status",
+)
+
+
+def audit_listings_statement(bucket: str) -> str:
+    """The keyset page behind one figure. Ordered by `l.id DESC` and cut by `%(after_id)s`:
+    the primary key walks backwards and Postgres stops as soon as the page is full, so a
+    bucket holding 2% of the corpus reads ~2% of the way into the index rather than scanning
+    it. Not offset paging — `OFFSET` re-reads every skipped row on every page.
+
+    `bucket` is a KEY, never operator text: it is looked up in `AUDIT_BUCKETS` and the caller
+    is refused if it is not there, so nothing from the wire reaches the statement.
+    """
+    predicate = AUDIT_BUCKETS[bucket]
+    return (
+        "WITH b AS ("
+        " SELECT l.id, l.property_id, l.sreality_id, l.source, l.source_id_native, l.source_url,"
+        " l.category_main, l.category_type, l.area_m2, l.floor, l.price_czk, l.is_active,"
+        " l.first_seen_at, l.last_seen_at,"
+        f" {identity_disposition_sql('l.')} AS disposition,"
+        " ll.display_label, ll.obec_kod, ll.granularity, ll.country_status,"
+        f" {_AUDIT_FLAGS['located']} AS located,"
+        f" {_AUDIT_FLAGS['has_verdict']} AS has_verdict,"
+        f" {_AUDIT_FLAGS['is_foreign']} AS is_foreign,"
+        f" {_AUDIT_FLAGS['has_town']} AS has_town,"
+        f" ({identity_disposition_sql('l.')} IS NOT NULL) AS has_disposition,"
+        " (l.area_m2 > 0) AS has_area"
+        " FROM listings l"
+        " LEFT JOIN listing_location ll ON ll.listing_id = l.id"
+        " LEFT JOIN location_granularity_rank gr ON gr.granularity = ll.granularity"
+        " WHERE (NOT %(active_only)s::boolean OR l.is_active)"
+        " AND (%(source)s::text IS NULL OR l.source = %(source)s::text)"
+        " AND (%(category_main)s::text IS NULL OR l.category_main = %(category_main)s::text)"
+        " AND (%(category_type)s::text IS NULL OR l.category_type = %(category_type)s::text)"
+        " AND (%(after_id)s::bigint IS NULL OR l.id < %(after_id)s::bigint)"
+        ")"
+        " SELECT b.id AS listing_id, b.property_id, b.sreality_id, b.source, b.source_id_native, b.source_url,"
+        " b.category_main, b.category_type, b.disposition, b.area_m2, b.floor,"
+        " b.price_czk, b.is_active, b.first_seen_at, b.last_seen_at,"
+        " b.display_label, b.obec_kod::text AS obec_kod, b.granularity::text AS granularity,"
+        " b.country_status::text AS country_status"
+        f" FROM b WHERE {predicate}"
+        " ORDER BY b.id DESC LIMIT %(limit)s::int"
+    )

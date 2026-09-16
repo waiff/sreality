@@ -29,12 +29,14 @@
  * Without the parameter the backend shows the newest SUCCESSFUL run.
  */
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 
 import {
+  getNewDedupCandidateListings,
   getNewDedupCandidateOverview,
+  type NewDedupCandidateAuditRow,
   type NewDedupCandidateFunnelRow,
   type NewDedupCandidateGeneration,
   type NewDedupCandidateMatrixRow,
@@ -45,10 +47,14 @@ import {
 import CandidateFunnel from '@/components/new-dedup/CandidateFunnel';
 import ProportionBar from '@/components/new-dedup/ProportionBar';
 import { stepLabel } from '@/lib/locationSteps';
+import { Chevron, useCollapsed } from '@/components/settings/SectionChrome';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import { categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
-import { fmtAbsolute, fmtCount, fmtPct } from '@/lib/format';
+import { fmtAbsolute, fmtArea, fmtCount, fmtCzk, fmtPct } from '@/lib/format';
+import { listingRowPath } from '@/lib/listingUrl';
+import { portalLabel } from '@/lib/portals';
+import { Link } from 'react-router-dom';
 
 /* ------------------------------------------------------------------ chrome */
 
@@ -58,19 +64,45 @@ const TD = 'py-1.5 pr-3';
 const NUM = 'py-1.5 pr-3 text-right font-mono tabular-nums';
 const ROW = 'border-t border-[var(--color-rule-soft)]';
 
+/* COLLAPSIBLE, with the settings pages' mechanism rather than a second one:
+ * `useCollapsed` owns both the state and its localStorage key, and `Chevron` is
+ * the one twisty glyph the app opens sections with. Only the CHROME differs —
+ * this page's card is a bordered panel with an uppercase eyebrow, not a folio-
+ * numbered settings section — so the look stays the page's own while the
+ * behaviour, the storage scheme and the keyboard affordance are shared.
+ *
+ * THE LEDE STAYS VISIBLE WHEN FOLDED. The settings pages' rule is that a
+ * description never lives only inside a collapsed body; on a page that is an
+ * ARGUMENT rather than a form, the paragraph is the part that says what the
+ * numbers mean, so folding hides the table and keeps the sentence. */
 function Card({
+  id,
   title,
   lede,
+  defaultOpen = true,
   children,
 }: {
+  id: string;
   title: string;
   lede: string;
+  defaultOpen?: boolean;
   children: ReactNode;
 }) {
+  const [open, toggle] = useCollapsed(`new-dedup-candidates.${id}`, defaultOpen);
+  const bodyId = `card-body-${id}`;
   return (
     <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
-      <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        {title}
+      <h2>
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          className="flex w-full items-center gap-2 text-left text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium hover:text-[var(--color-ink-2)]"
+        >
+          <Chevron open={open} />
+          {title}
+        </button>
       </h2>
       {/* Every section explains itself in one paragraph before it shows a
         * single number — the operator reads this page to make a decision, not
@@ -78,7 +110,9 @@ function Card({
       <p className="mt-2 text-[0.78rem] leading-relaxed text-[var(--color-ink-2)] max-w-[52rem]">
         {lede}
       </p>
-      <div className="mt-3">{children}</div>
+      <div id={bodyId} className="mt-3" hidden={!open}>
+        {children}
+      </div>
     </section>
   );
 }
@@ -150,6 +184,10 @@ function columnsFor(paths: NewDedupCandidatePath[]): Column[] {
 
 export default function NewDedupCandidates() {
   const [params, setParams] = useSearchParams();
+  /* Which figure's rows are showing. Page state, not the URL: the run is the
+   * thing worth keeping as a link (`?generation_id=`), while a drill-down is a
+   * glance the operator takes and drops. */
+  const [drill, setDrill] = useState<DrillTarget | null>(null);
   const raw = params.get('generation_id');
   /* Only a plain integer is a run id. Anything else is treated as absent, so a
    * hand-edited URL falls back to the newest successful run instead of asking
@@ -271,6 +309,7 @@ export default function NewDedupCandidates() {
           {stats && (
             <>
               <Card
+                id="funnel"
                 title="Funnel — from every listing to a candidate"
                 lede={`Each step is a smaller set than the one above it, and the gap between two steps is what was lost there — as the lane measured it, not as this page subtracted it. The indented rows under “${stepLabel('located', 'en')}” are not losses: abroad is an ANSWER the engine gave, and it leaves the chain only at the town step, together with the handful of Czech points that have no town. These are the same steps, in the same words, as the location audit page’s waterfall; the two differ only by scope and by when they were counted, both stated below.`}
               >
@@ -278,6 +317,7 @@ export default function NewDedupCandidates() {
               </Card>
 
               <Card
+                id="matrix"
                 title="Property type × path"
                 lede="Which pairs the run actually produced, split by what kind of property they are and by which path found them. A PATH is one way of looking for pairs: path C (built) starts from the town, path A would have started from a street or a radius in metres, path B will start from the photographs. Paths A and B keep their columns here and show an em dash, because a column that is missing hides the gap while an empty one names it."
               >
@@ -285,27 +325,39 @@ export default function NewDedupCandidates() {
               </Card>
 
               <Card
+                id="missing-overall"
                 title="Missing data — overall"
                 lede="What is ABSENT, where the chain above does not already say it: the attribute side, which no step measures. Every count is shown with the share it represents and the group that share is out of, because one of these rows has a different denominator — the floor row is a share of apartments, not of all listings."
               >
-                <MissingOverall stats={stats} />
+                <MissingOverall stats={stats} drill={drill} onPick={setDrill} />
               </Card>
 
               <Card
+                id="eligibility-loss"
                 title={`Nothing to compare — where “${stepLabel('eligible', 'en')}” lost its listings`}
                 lede={`These listings reached a town and then fell out because they stated neither of the two things the rule compares. The same listings are grouped twice: once by property type, because which attribute is even available differs by type — land never states a disposition, so its plot area is not a fallback but the only route — and once by portal, because a portal that omits an attribute its own property types depend on is a fix someone can actually make. Each row also carries how often that group states each attribute at all, so the note beside it is a reading rather than a claim.`}
               >
-                <EligibilityLoss stats={stats} />
+                <EligibilityLoss stats={stats} drill={drill} onPick={setDrill} />
               </Card>
 
               <Card
+                id="drill-listings"
+                title="The listings behind a figure"
+                lede="Click any underlined number on this page and its listings appear here — the same idiom as the location audit page, so the count and its rows stay on one screen. ONE READING MATTERS: every count above was frozen when the run executed, while this list reads the database as it is now. A listing fixed since the run has already left its bucket, so the two are not meant to tally and no total is shown here that would invite the comparison."
+              >
+                <DrillListings target={drill} onClear={() => setDrill(null)} />
+              </Card>
+
+              <Card
+                id="missing-per-portal"
                 title="Missing data — per portal, per property type"
                 lede="The chain and the attribute gaps again, one row per portal and property type, so a portal that systematically omits a field shows up as a column of low percentages rather than being averaged away. The first step columns are the same three questions the chain asks, in the same words. Click any column heading to sort by it."
               >
-                <MissingPerPortal rows={stats.funnel ?? []} />
+                <MissingPerPortal rows={stats.funnel ?? []} drill={drill} onPick={setDrill} />
               </Card>
 
               <Card
+                id="town-stats"
                 title="Town statistics"
                 lede="Path C compares two listings only when they sit in the same town, so the town is the unit where a 'candidate storm' — one place producing an unreasonable share of all pairs — would appear first. These four readouts are the town-level stand-in for the pin and clique statistics the design asked for."
               >
@@ -313,6 +365,7 @@ export default function NewDedupCandidates() {
               </Card>
 
               <Card
+                id="parameters"
                 title="The parameter set this run used"
                 lede="Every number above was computed under exactly these knobs. The fingerprint is a short hash of them: two runs with the same fingerprint are directly comparable, two with different fingerprints are not — they are answers to different questions."
               >
@@ -322,6 +375,7 @@ export default function NewDedupCandidates() {
           )}
 
           <Card
+            id="path-registry"
             title="What the paths are"
             lede="The vocabulary the rest of the page uses, straight from the program's own registry. A PATH is one way of looking for pairs; a RUNG is which attributes a pair was compared on. A pair sits on exactly one rung."
           >
@@ -508,6 +562,8 @@ function TypePathMatrix({
 /* --------------------------------------------------------- missing data */
 
 interface MissingRow {
+  /* The bucket this row's count is a filter over — what makes the figure a link. */
+  bucket: string;
   label: string;
   count: number;
   basis: string;
@@ -533,6 +589,7 @@ function missingRows(stats: NewDedupCandidateStats): MissingRow[] {
 
   return [
     {
+      bucket: 'no_disposition',
       label: 'No disposition stated',
       count: listings - sum((r) => r.with_disposition),
       basis: 'of all listings',
@@ -541,6 +598,7 @@ function missingRows(stats: NewDedupCandidateStats): MissingRow[] {
         'The rule falls back to comparing areas for these — the fallback is on absence only, never on two dispositions that simply disagree. Land and commercial space are barely represented in the disposition count at all, which is why the breakdown above reads the fallback per property type.',
     },
     {
+      bucket: 'no_area',
       label: 'No area stated',
       count: listings - sum((r) => r.with_area),
       basis: 'of all listings',
@@ -549,6 +607,7 @@ function missingRows(stats: NewDedupCandidateStats): MissingRow[] {
         'One area column carries them all (W17): the plot for land, the floor area for everything else — so this row is comparable across property types. A zero counts as missing: a zero is a blank the parser wrote, not a measurement.',
     },
     {
+      bucket: 'byt_no_floor',
       label: 'Apartments with no floor stated',
       count: byt - sum((r) => r.byt_with_floor),
       basis: 'of apartments',
@@ -559,7 +618,15 @@ function missingRows(stats: NewDedupCandidateStats): MissingRow[] {
   ];
 }
 
-function MissingOverall({ stats }: { stats: NewDedupCandidateStats }) {
+function MissingOverall({
+  stats,
+  drill,
+  onPick,
+}: {
+  stats: NewDedupCandidateStats;
+  drill: DrillTarget | null;
+  onPick: (t: DrillTarget) => void;
+}) {
   const rows = missingRows(stats);
   return (
     <div className="overflow-x-auto">
@@ -581,7 +648,14 @@ function MissingOverall({ stats }: { stats: NewDedupCandidateStats }) {
                   {r.explanation}
                 </p>
               </td>
-              <td className={`${NUM} align-top`}>{fmtCount(r.count)}</td>
+              <td className={`${NUM} align-top`}>
+                <DrillNumber
+                  value={r.count}
+                  target={{ bucket: r.bucket, label: r.label }}
+                  active={drillSame(drill, { bucket: r.bucket, label: r.label })}
+                  onPick={onPick}
+                />
+              </td>
               <td className={`${NUM} align-top`}>{fmtPct(share(r.count, r.basisCount))}</td>
               <td className={`${TD} align-top text-[0.72rem] text-[var(--color-ink-3)] whitespace-nowrap`}>
                 {r.basis} ({fmtCount(r.basisCount)})
@@ -689,7 +763,15 @@ function groupLoss(
  * struggle with"; BY PORTAL asks "who is not publishing it". They are the same
  * listings counted twice, which the lede says out loud so the second table is
  * never read as a further loss. */
-function EligibilityLoss({ stats }: { stats: NewDedupCandidateStats }) {
+function EligibilityLoss({
+  stats,
+  drill,
+  onPick,
+}: {
+  stats: NewDedupCandidateStats;
+  drill: DrillTarget | null;
+  onPick: (t: DrillTarget) => void;
+}) {
   /* `stats.funnel ?? []` inline would mint a new array every render and defeat
    * both memos below — the empty case has to be memoised too. */
   const rows = useMemo(() => stats.funnel ?? [], [stats.funnel]);
@@ -743,7 +825,23 @@ function EligibilityLoss({ stats }: { stats: NewDedupCandidateStats }) {
                         {need.note}
                       </p>
                     </td>
-                    <td className={`${NUM} align-top`}>{fmtCount(g.lost)}</td>
+                    <td className={`${NUM} align-top`}>
+                      {(() => {
+                        const t: DrillTarget = {
+                          bucket: 'town_no_attribute',
+                          label: 'A town, but nothing to compare',
+                          category_main: g.key === UNKNOWN_KEY ? null : g.key,
+                        };
+                        return (
+                          <DrillNumber
+                            value={g.lost}
+                            target={t}
+                            active={drillSame(drill, t)}
+                            onPick={onPick}
+                          />
+                        );
+                      })()}
+                    </td>
                     <td className={`${NUM} align-top`}>{fmtPct(share(g.lost, total))}</td>
                     <td className={`${NUM} align-top`}>{fmtPct(share(g.lost, g.locatedTown))}</td>
                     <td className={`${NUM} align-top`}>
@@ -784,7 +882,23 @@ function EligibilityLoss({ stats }: { stats: NewDedupCandidateStats }) {
               {byPortal.map((g) => (
                 <tr key={g.key} className={ROW} data-testid={`eligibility-portal-${g.key}`}>
                   <td className={TD}>{g.label}</td>
-                  <td className={NUM}>{fmtCount(g.lost)}</td>
+                  <td className={NUM}>
+                    {(() => {
+                      const t: DrillTarget = {
+                        bucket: 'town_no_attribute',
+                        label: 'A town, but nothing to compare',
+                        source: g.key === UNKNOWN_KEY ? null : g.key,
+                      };
+                      return (
+                        <DrillNumber
+                          value={g.lost}
+                          target={t}
+                          active={drillSame(drill, t)}
+                          onPick={onPick}
+                        />
+                      );
+                    })()}
+                  </td>
                   <td className={NUM}>{fmtPct(share(g.lost, total))}</td>
                   <td className={NUM}>{fmtPct(share(g.lost, g.locatedTown))}</td>
                   <td className={NUM}>{fmtPct(share(g.withDisposition, g.listings))}</td>
@@ -794,6 +908,218 @@ function EligibilityLoss({ stats }: { stats: NewDedupCandidateStats }) {
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------- the drill-down */
+
+/* WHAT A FIGURE IS A LINK TO. Every clickable number on this page names a
+ * BUCKET — a key the backend looks up in `AUDIT_BUCKETS` — plus the slice of it
+ * the figure was counted over. Clicking one sets this and the list card below
+ * reads it, which is the audit-poloh idiom: the number filters the list rather
+ * than navigating away, so the count and the rows stay on one screen.
+ *
+ * THE LIST IS LIVE AND THE FIGURES ARE NOT. Every count on this page was frozen
+ * when the run executed; the list reads the database now. A listing fixed since
+ * then has left its bucket, so the two are not expected to tally — the card says
+ * so, and the backend deliberately returns no total that would invite the
+ * comparison. */
+export interface DrillTarget {
+  bucket: string;
+  label: string;
+  source?: string | null;
+  category_main?: string | null;
+  category_type?: string | null;
+}
+
+const drillSame = (a: DrillTarget | null, b: DrillTarget): boolean =>
+  a != null &&
+  a.bucket === b.bucket &&
+  (a.source ?? null) === (b.source ?? null) &&
+  (a.category_main ?? null) === (b.category_main ?? null) &&
+  (a.category_type ?? null) === (b.category_type ?? null);
+
+/* A figure that is a link. The dotted underline is the audit page's own
+ * affordance for "this number opens its rows"; a figure with no bucket (a share,
+ * a pair count) stays plain text, so the underline means one thing. */
+function DrillNumber({
+  value,
+  target,
+  active,
+  onPick,
+}: {
+  value: number | null;
+  target: DrillTarget;
+  active: boolean;
+  onPick: (t: DrillTarget) => void;
+}) {
+  if (value == null) return <span className="text-[var(--color-ink-4)]">—</span>;
+  if (value === 0) return <span className="text-[var(--color-ink-4)]">{fmtCount(0)}</span>;
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      title={`Show the listings behind this number — ${target.label}`}
+      onClick={() => onPick(target)}
+      className={[
+        'underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper)]',
+        active ? 'text-[var(--color-copper)] font-medium' : '',
+      ].join(' ')}
+    >
+      {fmtCount(value)}
+    </button>
+  );
+}
+
+const AUDIT_PAGE = 100;
+
+/* The rows behind the figure the operator clicked — a keyset page at a time,
+ * newest listing first. */
+function DrillListings({ target, onClear }: { target: DrillTarget | null; onClear: () => void }) {
+  const [pages, setPages] = useState<NewDedupCandidateAuditRow[]>([]);
+  const [after, setAfter] = useState<number | null>(null);
+  const [more, setMore] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  /* A new target is a new list: the cursor and the accumulated rows both reset,
+   * or page 2 of the old bucket would land under the new one's heading. */
+  useEffect(() => {
+    setPages([]);
+    setAfter(null);
+    setMore(false);
+    setFailed(null);
+    if (!target) return;
+    let cancelled = false;
+    setBusy(true);
+    getNewDedupCandidateListings({ ...target, limit: AUDIT_PAGE })
+      .then((r) => {
+        if (cancelled) return;
+        setPages(r.data);
+        setMore(r.has_more);
+        setAfter(r.next_after_id);
+      })
+      .catch((e: unknown) => !cancelled && setFailed(String(e)))
+      .finally(() => !cancelled && setBusy(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [target]);
+
+  if (!target) {
+    return (
+      <p className="text-sm text-[var(--color-ink-3)]">
+        Click any underlined figure above to see the listings behind it.
+      </p>
+    );
+  }
+
+  const loadMore = () => {
+    if (!target || after == null) return;
+    setBusy(true);
+    getNewDedupCandidateListings({ ...target, after_id: after, limit: AUDIT_PAGE })
+      .then((r) => {
+        setPages((prev) => [...prev, ...r.data]);
+        setMore(r.has_more);
+        setAfter(r.next_after_id);
+      })
+      .catch((e: unknown) => setFailed(String(e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <p className="text-[0.8rem] text-[var(--color-ink)]">
+          {target.label}
+          {target.source ? ` · ${portalLabel(target.source) ?? target.source}` : ''}
+          {target.category_main ? ` · ${typeLabel(target.category_main)}` : ''}
+          {target.category_type ? ` · ${dealLabel(target.category_type)}` : ''}
+        </p>
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-[0.78rem] text-[var(--color-ink-3)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-ink)]"
+        >
+          Clear
+        </button>
+      </div>
+
+      {failed && <ErrorBanner message={failed} />}
+
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className={HEAD}>
+              <th className={TH}>Listing</th>
+              <th className={TH}>Portal</th>
+              <th className={TH}>Type</th>
+              <th className={TH}>Deal</th>
+              <th className={TH}>Disposition</th>
+              <th className={`${TH} text-right`}>Area</th>
+              <th className={`${TH} text-right`}>Price</th>
+              <th className={TH}>Place</th>
+              <th className={TH}>State</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pages.map((r) => {
+              const to = listingRowPath(r);
+              return (
+                <tr key={r.listing_id} className={ROW} data-testid={`drill-row-${r.listing_id}`}>
+                  <td className={TD}>
+                    {to ? (
+                      <Link
+                        to={to}
+                        className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-copper)]"
+                      >
+                        {dash(r.source_id_native) }
+                      </Link>
+                    ) : (
+                      dash(r.source_id_native)
+                    )}
+                  </td>
+                  <td className={TD}>{portalLabel(r.source) ?? r.source}</td>
+                  <td className={TD}>{typeLabel(r.category_main)}</td>
+                  <td className={`${TD} text-[var(--color-ink-2)]`}>{dealLabel(r.category_type)}</td>
+                  <td className={TD}>{dash(r.disposition)}</td>
+                  <td className={NUM}>{fmtArea(r.area_m2)}</td>
+                  <td className={NUM}>{fmtCzk(r.price_czk)}</td>
+                  {/* The ONE place string. NULL is the finding on most of these
+                    * buckets, not a defect — an em dash says so. */}
+                  <td className={`${TD} text-[var(--color-ink-2)]`}>{dash(r.display_label)}</td>
+                  <td className={`${TD} text-[0.72rem] text-[var(--color-ink-3)]`}>
+                    {r.is_active ? 'Live' : 'Delisted'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {!busy && pages.length === 0 && !failed && (
+        <p className="mt-2 text-sm text-[var(--color-ink-3)]">
+          Nothing matches this bucket in the database right now. The figure above was counted
+          when the run executed; a bucket can empty out between the two.
+        </p>
+      )}
+      <div className="mt-3 flex items-center gap-3">
+        {busy && <Spinner />}
+        {more && !busy && (
+          <button
+            type="button"
+            onClick={loadMore}
+            className="text-[0.78rem] text-[var(--color-ink-2)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-ink)]"
+          >
+            Load {AUDIT_PAGE} more
+          </button>
+        )}
+        <span className="text-[0.72rem] text-[var(--color-ink-3)]">
+          {fmtCount(pages.length)} shown{more ? ' so far' : ''}
+        </span>
       </div>
     </div>
   );
@@ -833,7 +1159,15 @@ const PORTAL_COLUMNS: { key: PortalSortKey; label: string; numeric: boolean; pct
   { key: 'town_no_attribute', label: 'Town, nothing to compare', numeric: true, pct: true },
 ];
 
-function MissingPerPortal({ rows }: { rows: NewDedupCandidateFunnelRow[] }) {
+function MissingPerPortal({
+  rows,
+  drill,
+  onPick,
+}: {
+  rows: NewDedupCandidateFunnelRow[];
+  drill: DrillTarget | null;
+  onPick: (t: DrillTarget) => void;
+}) {
   const [sort, setSort] = useState<{ key: PortalSortKey; desc: boolean }>({
     key: 'listings',
     desc: true,
@@ -896,20 +1230,60 @@ function MissingPerPortal({ rows }: { rows: NewDedupCandidateFunnelRow[] }) {
               <td className={TD}>{dash(r.source)}</td>
               <td className={TD}>{typeLabel(r.category_main)}</td>
               <td className={`${TD} text-[var(--color-ink-2)]`}>{dealLabel(r.category_type)}</td>
-              <td className={NUM}>{fmtCount(r.listings)}</td>
-              <Cell value={r.with_verdict ?? null} of={r.listings} />
-              <Cell value={r.located ?? null} of={r.listings} />
-              <Cell value={r.located_town ?? null} of={r.listings} />
+              <DrillCell row={r} col="listings" bucket="all_listings" drill={drill} onPick={onPick} />
+              <DrillCell row={r} col="with_verdict" bucket="with_verdict" drill={drill} onPick={onPick} />
+              <DrillCell row={r} col="located" bucket="located" drill={drill} onPick={onPick} />
+              <DrillCell row={r} col="located_town" bucket="located_town" drill={drill} onPick={onPick} />
               <Cell value={r.with_disposition} of={r.listings} />
               <Cell value={r.with_area} of={r.listings} />
-              <Cell value={r.c1_eligible} of={r.listings} />
-              <Cell value={r.c3_eligible} of={r.listings} />
-              <Cell value={r.town_no_attribute} of={r.listings} />
+              <DrillCell row={r} col="c1_eligible" bucket="c1_eligible" drill={drill} onPick={onPick} />
+              <DrillCell row={r} col="c3_eligible" bucket="c3_eligible" drill={drill} onPick={onPick} />
+              <DrillCell row={r} col="town_no_attribute" bucket="town_no_attribute" drill={drill} onPick={onPick} />
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/* The per-portal table's clickable twin of `Cell`: the same count-over-share
+ * shape, with the count as a link scoped to THAT row's portal, type and deal —
+ * which is the whole reason this table exists rather than an averaged one. */
+function DrillCell({
+  row,
+  col,
+  bucket,
+  drill,
+  onPick,
+}: {
+  row: NewDedupCandidateFunnelRow;
+  col: keyof NewDedupCandidateFunnelRow;
+  bucket: string;
+  drill: DrillTarget | null;
+  onPick: (t: DrillTarget) => void;
+}) {
+  const raw = row[col];
+  const value = typeof raw === 'number' ? raw : null;
+  const target: DrillTarget = {
+    bucket,
+    label: stepLabel(bucket, 'en'),
+    source: row.source,
+    category_main: row.category_main,
+    category_type: row.category_type,
+  };
+  return (
+    <td className={NUM}>
+      <DrillNumber
+        value={value}
+        target={target}
+        active={drillSame(drill, target)}
+        onPick={onPick}
+      />
+      <div className="text-[0.68rem] text-[var(--color-ink-3)]">
+        {fmtPct(share(value, row.listings))}
+      </div>
+    </td>
   );
 }
 

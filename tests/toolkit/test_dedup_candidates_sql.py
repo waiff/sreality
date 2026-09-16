@@ -7,6 +7,7 @@ themselves; the lane's `verify` mode holds them to the oracle on real towns."""
 from __future__ import annotations
 
 import math
+import os
 import re
 from pathlib import Path
 
@@ -311,3 +312,68 @@ def test_stale_sweep_is_scoped_to_one_parameter_set() -> None:
 def test_listings_with_candidates_groups_rather_than_distincts() -> None:
     assert "DISTINCT" not in sql.LISTINGS_WITH_CANDIDATES_SQL.upper()
     assert "GROUP BY id, category_main" in sql.LISTINGS_WITH_CANDIDATES_SQL
+
+
+# ------------------------------------------------------------------ the audit drill-down
+
+
+def test_every_clickable_figure_has_a_bucket() -> None:
+    """The page makes a figure clickable by naming its bucket; a figure whose bucket is not
+    here would be a dead link. The chain's own keys are the floor."""
+    from location_data import location_steps as ls
+
+    for key in ls.SHARED_STEP_KEYS:
+        assert key in sql.AUDIT_BUCKETS, key
+    assert "town_no_attribute" in sql.AUDIT_BUCKETS
+
+
+def test_the_drilldown_reads_the_shared_town_predicate_not_a_copy() -> None:
+    """The whole point of W16 is one vocabulary. Every towned bucket must be the string
+    `located_town_sql` produces — a hand-written 'obec_kod is not null' here would be the
+    second definition that wave removed."""
+    from location_data import location_steps as ls
+
+    shared = ls.located_town_sql("b")
+    for bucket in ("eligible", "c1_eligible", "c3_eligible", "town_no_attribute"):
+        assert shared in sql.AUDIT_BUCKETS[bucket], bucket
+
+
+def test_the_drilldown_is_keyset_and_never_offset() -> None:
+    stmt = sql.audit_listings_statement("town_no_attribute")
+    assert "OFFSET" not in stmt.upper()
+    assert "ORDER BY b.id DESC" in stmt
+    assert "%(after_id)s" in stmt and "%(limit)s" in stmt
+
+
+def test_the_drilldown_takes_no_operator_text_into_the_statement() -> None:
+    """`bucket` is a KEY. An unknown one must raise rather than interpolate."""
+    with pytest.raises(KeyError):
+        sql.audit_listings_statement("'; drop table listings; --")
+
+
+def test_every_bucket_builds_a_statement_with_the_same_placeholders() -> None:
+    expected = {"active_only", "source", "category_main", "category_type", "after_id", "limit"}
+    for bucket in sql.AUDIT_BUCKETS:
+        stmt = sql.audit_listings_statement(bucket)
+        found = set(re.findall(r"%\((\w+)\)s", stmt))
+        assert found == expected, bucket
+
+
+@pytest.mark.skipif(
+    not os.environ.get("TEST_DATABASE_URL"),
+    reason="TEST_DATABASE_URL not set — the PREPARE sweep runs only in the CI DB job",
+)
+def test_every_bucket_prepares_against_the_real_schema() -> None:
+    """The drill-down's statements are built by a FUNCTION, so `tests/sql_corpus.discover`
+    (which reads module-level `*_SQL` constants) cannot see them. This is their equivalent
+    of the schema sweep: every bucket must parse, name-resolve and type-check against the
+    live catalog — the layer a fake connection structurally cannot be."""
+    import psycopg
+
+    from tests.sql_corpus import to_prepare_form
+
+    with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as conn, conn.cursor() as cur:
+        for i, bucket in enumerate(sorted(sql.AUDIT_BUCKETS)):
+            cur.execute(
+                f"PREPARE dd_{i} AS " + to_prepare_form(sql.audit_listings_statement(bucket))
+            )
