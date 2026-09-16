@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from autodedup import lane
+from autodedup import iterations, lane
 
 
 def test_modes_registry_contains_census() -> None:
@@ -247,3 +247,102 @@ def test_scrub_redacts_credentials_and_dsn_shapes() -> None:
 def test_scrub_ignores_short_or_missing_values() -> None:
     assert lane.scrub("abc", env={"QWEN_API_KEY": "abc"}) == "abc"
     assert lane.scrub("abc", env={"QWEN_API_KEY": ""}) == "abc"
+
+
+# --- the record mode, from the lane's side ------------------------------------------------
+
+
+def _ledger_conn(seen: list[str], *, row: Any = (7,)) -> Any:
+    """A connection that answers the presence probe true and hands `row` back from every
+    ledger statement. `seen` collects the statements the lane really executed."""
+
+    class Cur:
+        def __init__(self) -> None:
+            self.row: Any = None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            if "statement_timeout" in sql:
+                return
+            seen.append(sql)
+            self.row = (True,) if sql is iterations.ITERATIONS_PRESENT_SQL else row
+
+        def fetchone(self) -> Any:
+            return self.row
+
+        def __enter__(self) -> "Cur":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    class Conn:
+        def cursor(self) -> Cur:
+            return Cur()
+
+        def transaction(self):
+            return _Noop()
+
+        def close(self) -> None:
+            return None
+
+    return Conn()
+
+
+def test_record_without_an_id_still_inserts(tmp_path: Path) -> None:
+    seen: list[str] = []
+    code = lane.run(
+        "record",
+        "wave=W0,title=Region census,tools=psql/GitHub Actions,cost_usd=0",
+        tmp_path,
+        conn_factory=lambda: _ledger_conn(seen),
+    )
+    assert code == 0
+    assert iterations.RECORD_ITERATION_SQL in seen
+    assert iterations.UPDATE_ITERATION_SQL not in seen
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["result"]["recorded"] is True
+    assert summary["result"]["tools"] == ["psql", "GitHub Actions"]
+
+
+def test_record_with_an_id_updates_and_files_no_new_row(tmp_path: Path) -> None:
+    """An `id=` run is a CORRECTION — it must not insert anything, neither the corrected
+    row again nor a wrapper row for the correction itself."""
+    seen: list[str] = []
+    code = lane.run(
+        "record",
+        "id=12,status=done,notes=billed after the pod was reaped",
+        tmp_path,
+        conn_factory=lambda: _ledger_conn(seen),
+    )
+    assert code == 0
+    assert seen.count(iterations.UPDATE_ITERATION_SQL) == 1
+    assert iterations.RECORD_ITERATION_SQL not in seen
+    assert iterations.START_ITERATION_SQL not in seen
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["result"]["updated"] is True
+    assert summary["result"]["updates"] == {
+        "status": "done", "notes": "billed after the pod was reaped"
+    }
+
+
+def test_record_with_an_unknown_id_exits_two(tmp_path: Path) -> None:
+    seen: list[str] = []
+    code = lane.run(
+        "record", "id=9999,cost_usd=1", tmp_path,
+        conn_factory=lambda: _ledger_conn(seen, row=None),
+    )
+    assert code == 2
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["ok"] is False
+    assert "9999" in summary["error"] and "no autodedup.iterations row" in summary["error"]
+
+
+def test_record_with_an_id_refuses_to_change_the_wave(tmp_path: Path) -> None:
+    seen: list[str] = []
+    code = lane.run(
+        "record", "id=12,wave=W9", tmp_path, conn_factory=lambda: _ledger_conn(seen)
+    )
+    assert code == 1
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert "wave" in summary["error"]
+    assert seen == []

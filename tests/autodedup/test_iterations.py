@@ -232,6 +232,136 @@ def test_record_mode_without_the_schema_reports_it(tmp_path: Path) -> None:
     assert result["iteration_id"] is None and result["recorded"] is False
 
 
+# --- record id=<n>: the correction path --------------------------------------------------
+
+
+def test_tools_split_on_slashes_as_well_as_semicolons() -> None:
+    """The workflow's charset check rejects `;`, so a DISPATCHED entry can only write its
+    tool list as `a/b/c` — both separators have to mean the same thing."""
+    slashed = iterations.parse_record_args(
+        {"wave": "W0", "title": "x", "tools": "autodedup.census/ GitHub Actions /psql"}
+    )
+    assert slashed["tools"] == ["autodedup.census", "GitHub Actions", "psql"]
+    patched = iterations.parse_record_args({"id": "12", "tools": "psql/GitHub Actions"})
+    assert patched["updates"]["tools"] == ["psql", "GitHub Actions"]
+
+
+def test_an_id_patches_only_the_named_fields() -> None:
+    params = iterations.parse_record_args({"id": "12", "cost_usd": "3.10"})
+    assert params["id"] == 12
+    assert params["updates"] == {"cost_usd": 3.10}
+    # `status` defaults to "done" on the INSERT path; an update that did not name it must
+    # not carry it, or every cost correction would silently stamp finished_at.
+    assert "status" not in params["updates"]
+
+
+def test_an_update_refuses_to_change_the_wave() -> None:
+    with pytest.raises(ValueError, match="wave"):
+        iterations.parse_record_args({"id": "12", "wave": "W9"})
+    with pytest.raises(ValueError, match="run_id"):
+        iterations.parse_record_args({"id": "12", "run_id": "42"})
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"id": "12"},                       # names no field to update
+        {"id": "0", "notes": "x"},          # not a row id
+        {"id": "twelve", "notes": "x"},
+        {"id": "12", "status": "halfway"},
+        {"id": "12", "cost_usd": "free"},
+        {"id": "12", "notes": ""},          # an update sets a value, it cannot clear one
+    ],
+)
+def test_parse_record_args_rejects_a_nonsense_update(args: dict[str, str]) -> None:
+    with pytest.raises(ValueError):
+        iterations.parse_record_args(args)
+
+
+def test_update_mode_sends_only_the_named_params(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+    result = iterations.run_record(
+        lambda: _conn(calls=calls),
+        {"id": "12", "cost_usd": "3.10", "notes": "billed after the pod was reaped"},
+        tmp_path,
+    )
+    assert result["iteration_id"] == 12 and result["updated"] is True
+    assert result["recorded"] is False
+    params = _params(calls, iterations.UPDATE_ITERATION_SQL)
+    assert params["id"] == 12
+    assert params["cost_usd"] == 3.10
+    assert params["notes"] == "billed after the pod was reaped"
+    # everything unnamed rides through as NULL, which the statement coalesces to the column
+    assert params["title"] is None and params["status"] is None
+    assert params["approach"] is None and params["tools"] is None
+    assert "wave" not in params
+    assert iterations.RECORD_ITERATION_SQL not in [sql for sql, _ in calls]
+
+
+def test_a_terminal_status_restamps_finished_at_and_a_running_one_does_not() -> None:
+    """One statement, so the rule lives in SQL: `finished_at` moves only when the status
+    this update sets is terminal. A correction to `running` must not stamp a finish."""
+    sql = iterations.UPDATE_ITERATION_SQL
+    assert "WHEN %(status)s::text IN ('done', 'failed') THEN now()" in sql
+    assert "ELSE finished_at" in sql
+    for column in ("title", "status", "approach", "tools", "cost_usd", "notes"):
+        assert f"coalesce(%({column})s::" in sql
+    # wave and artifacts are deliberately not updatable
+    assert "wave" not in sql and "artifacts" not in sql
+
+
+def test_an_unknown_id_is_a_hard_stop(tmp_path: Path) -> None:
+    class Missing:
+        """The UPDATE matched no row, so RETURNING hands back nothing."""
+
+        def cursor(self) -> Any:
+            return _MissingCur()
+
+        def transaction(self) -> _Noop:
+            return _Noop()
+
+        def close(self) -> None:
+            return None
+
+    class _MissingCur:
+        def __init__(self) -> None:
+            self.row: tuple[Any, ...] | None = None
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            self.row = (True,) if sql is iterations.ITERATIONS_PRESENT_SQL else None
+
+        def fetchone(self) -> tuple[Any, ...] | None:
+            return self.row
+
+        def __enter__(self) -> "_MissingCur":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+    with pytest.raises(SystemExit, match="9999"):
+        iterations.run_record(lambda: Missing(), {"id": "9999", "notes": "x"}, tmp_path)
+
+    # and the lane turns that into exit 2 with the message on the summary
+    code = lane.run("record", "id=9999,notes=x", tmp_path, conn_factory=lambda: Missing())
+    assert code == 2
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["ok"] is False and "no autodedup.iterations row" in summary["error"]
+
+
+def test_update_mode_without_the_schema_reports_it(tmp_path: Path) -> None:
+    result = iterations.run_record(
+        lambda: _conn(present=False), {"id": "12", "notes": "x"}, tmp_path
+    )
+    assert result["iteration_id"] is None and result["updated"] is False
+
+
+def test_update_iteration_refuses_an_unknown_status() -> None:
+    with pytest.raises(ValueError):
+        iterations.update_iteration(_conn(), 12, status="halfway")
+    assert iterations.update_iteration(None, 12, notes="x") is None
+
+
 # --- the lane wrapper --------------------------------------------------------------------
 
 
@@ -320,3 +450,17 @@ def test_record_mode_is_not_double_filed(tmp_path: Path) -> None:
     assert code == 0
     assert [sql for sql, _ in calls].count(iterations.RECORD_ITERATION_SQL) == 1
     assert iterations.START_ITERATION_SQL not in [sql for sql, _ in calls]
+
+
+def test_an_id_correction_adds_no_row_of_its_own(tmp_path: Path) -> None:
+    """The wrapper would otherwise append the very iteration the operator came to edit."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    conn = _conn(calls=calls)
+    code = lane.run("record", "id=12,cost_usd=3.10", tmp_path, conn_factory=lambda: conn)
+    assert code == 0
+    seen = [sql for sql, _ in calls]
+    assert seen.count(iterations.UPDATE_ITERATION_SQL) == 1
+    assert iterations.START_ITERATION_SQL not in seen
+    assert iterations.RECORD_ITERATION_SQL not in seen
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["ok"] is True and summary["result"]["updated"] is True

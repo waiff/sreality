@@ -5,6 +5,7 @@
     python3 -m autodedup.lane --mode export --args "blocks=town:563510 quarter:490245" --out out/
     python3 -m autodedup.lane --mode judge --args "export_run=123,tier=text,n=400,max_usd=5"
     python3 -m autodedup.lane --mode record --args "wave=W0,title=Region census,cost_usd=0"
+    python3 -m autodedup.lane --mode record --args "id=12,cost_usd=3.10,status=done"
 
 `probes` carries the corpus-wide measurements (ingest rate, one portal's location posture)
 that are block-independent, so the census never pays for them once per block. `export` dumps
@@ -16,7 +17,9 @@ what the `/autodedup/progress` page renders (PROGRAM.md section 12). The ledger 
 effort: a database without migration 528, or no database at all, costs the row, never the
 run. `record` is the one unwrapped mode: it writes its own finished row for work that
 happened outside a lane (a migration, an operator session, a wave that closed before the
-ledger existed), so wrapping it would file the same iteration twice.
+ledger existed), so wrapping it would file the same iteration twice. That holds doubly for
+its `id=<n>` form, which CORRECTS an existing row — a wrapper row there would append the very
+iteration the operator came to edit.
 
 A mode is a callable registered in `MODES`; `--args` is a free-form `k=v,k=v` string each mode
 validates for itself, so a new mode needs no workflow edit. `out/summary.json` is written on
@@ -59,7 +62,8 @@ MODES: dict[str, Mode] = {
 
 # What each mode's ledger row says: the wave it belongs to, the sentence the progress page
 # shows, and the "Tools used" chips PROGRAM.md section 14 lists per wave. A mode missing
-# from here runs unwrapped (`record`, which files its own row).
+# from here runs unwrapped — `record`, which files its own row on the way in and, with
+# `id=<n>`, edits one that already exists rather than adding another.
 ITERATION_META: dict[str, dict[str, Any]] = {
     "census": {
         "wave": "W0",
