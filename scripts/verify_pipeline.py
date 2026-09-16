@@ -2208,9 +2208,11 @@ select o.kind, o.ident,
       select 1 from pg_constraint k
         join pg_class rel on rel.oid = k.conrelid
         join pg_namespace n on n.oid = rel.relnamespace
-       where n.nspname = 'public'
-         and rel.relname = split_part(o.ident, '.', 1)
-         and k.conname = split_part(o.ident, '.', 2))
+       where n.nspname = case when array_length(string_to_array(o.ident, '.'), 1) = 3
+                              then split_part(o.ident, '.', 1) else 'public' end
+         and rel.relname = case when array_length(string_to_array(o.ident, '.'), 1) = 3
+                                then split_part(o.ident, '.', 2) else split_part(o.ident, '.', 1) end
+         and k.conname = split_part(o.ident, '.', array_length(string_to_array(o.ident, '.'), 1)))
     when 'policy' then exists (
       select 1 from pg_policies pl
        where pl.schemaname = 'public'

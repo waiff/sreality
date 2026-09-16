@@ -205,8 +205,10 @@ def parse_objects(sql: str) -> list[MigrationObject]:
         prefix = f"{schema}.{table}" if schema and schema != "public" else table
         add("column", f"{prefix}.{_clean(m.group(2))}")
     for m in _RE_ADD_CONSTRAINT.finditer(body):
-        table = _clean(m.group(1)).split(".")[-1]
-        add("constraint", f"{table}.{_clean(m.group(2))}")
+        qualified = _clean(m.group(1))
+        schema, _, table = qualified.rpartition(".")
+        prefix = f"{schema}.{table}" if schema and schema != "public" else table
+        add("constraint", f"{prefix}.{_clean(m.group(2))}")
     for m in _RE_POLICY.finditer(body):
         table = _clean(m.group(2)).split(".")[-1]
         add("policy", f"{table}.{_clean(m.group(1))}")
