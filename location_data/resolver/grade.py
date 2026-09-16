@@ -74,6 +74,11 @@ DECLARED_CAP: dict[str, str] = {
 }
 
 
+# The positions the REGISTER supplies. A row placed on one of them is not standing on the
+# portal's pin, which is the whole of why the declared cap does not reach it (W18).
+REGISTRY_ORIGINS = frozenset({"registry_point", "street_point"})
+
+
 def grade(
     binding: Binding,
     position: Position,
@@ -81,14 +86,30 @@ def grade(
     declared: DeclaredPrecision,
     rank: GranularityRank,
 ) -> Grade:
+    """**THE DECLARED CAP IS A STATEMENT ABOUT THE PIN, so it caps the grain only while the
+    PIN is the position** (W18, correcting the first cut of this wave).
+
+    A portal declaring "Přibližná lokalita" is telling you its COORDINATE is fuzzy. It is not
+    telling you the ad named no street, and it cannot un-tell you what RÚIAN says about the
+    street it named — so when `place()` elects a register point (an address point, or a bound
+    street's centroid) the verdict's grain is the BIND's own and the radius is the register's.
+    Left as it was, a bazos row published `street_name` + `ulice_kod`, sat on the street's
+    centroid and still graded `obec` at a 1 km radius: three fields of one row disagreeing
+    about how precisely the listing is known.
+
+    What the declaration still does is lower CONFIDENCE — a blurred pin is a weak witness
+    however good the bind is, and `confidence` caps such a row at `medium` on every origin.
+    When the PIN is the elected position the ladder applies exactly as before.
+    """
     granularity = binding.granularity if binding.bound else "unknown"
-    capped = DECLARED_CAP.get(declared.label or "")
-    if capped is not None:
-        granularity = rank.coarser_of(granularity, capped)
-    elif declared.blurred:
-        # A blurred declaration whose label this ladder does not know still says "not
-        # address-grade": it takes the same generic fallback a bare blur_hint takes.
-        granularity = rank.coarser_of(granularity, "street")
+    if position.origin not in REGISTRY_ORIGINS:
+        capped = DECLARED_CAP.get(declared.label or "")
+        if capped is not None:
+            granularity = rank.coarser_of(granularity, capped)
+        elif declared.blurred:
+            # A blurred declaration whose label this ladder does not know still says "not
+            # address-grade": it takes the same generic fallback a bare blur_hint takes.
+            granularity = rank.coarser_of(granularity, "street")
     return Grade(
         granularity=granularity,
         match_confidence=confidence(binding, position, blurred=declared.blurred),

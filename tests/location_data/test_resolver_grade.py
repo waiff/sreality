@@ -179,7 +179,11 @@ def test_a_w1c_declared_label_caps_the_pin_at_the_rung_its_contract_documents(
     `read_declared_precision` returns it rather than dropping it on the floor) and it caps at
     the rung the entry's own `precision_cap` documents. A label the ladder does not map takes
     the generic blur fallback, which on bazos is LOOSER than the obec ceiling its contract
-    declares and on maxima's circle TIGHTER than the quarter."""
+    declares and on maxima's circle TIGHTER than the quarter.
+
+    The cap is applied to a PIN-POSITIONED row, which since W18 is the only kind it reaches:
+    the declaration is a statement about the portal's coordinate, so it may not coarsen a row
+    the REGISTER placed (the test below is the other half of that rule)."""
     assert label in step_bind.KNOWN_DECLARED_LABELS, who
     assert (label in step_bind.BLURRED_DECLARED_LABELS) is blurred, who
     assert grade.DECLARED_CAP[label] == capped, who
@@ -193,13 +197,47 @@ def test_a_w1c_declared_label_caps_the_pin_at_the_rung_its_contract_documents(
     ]
     declared = step_bind.read_declared_precision(claims)
     assert declared.label == label and declared.blurred is blurred, who
-    # The address evidence reaches `address_point`; the declaration is a CEILING that
-    # coarsens it to exactly the rung the contract documents — not to the generic fallback.
+    # The address evidence reaches `address_point`; on a row standing on its PIN the
+    # declaration is a CEILING that coarsens it to exactly the rung the contract documents —
+    # not to the generic fallback.
+    graded = grade.grade(
+        _binding(target_kind="address_point", granularity="address_point",
+                 agreed=("house_number", "street", "obec")),
+        Position(50.10102, 14.34804, "portal_pin", blurred=blurred),
+        declared=declared, rank=RANK,
+    )
+    assert graded.granularity == capped, who
+
+    # And end to end, the rule the cap now lives under: the same declaration over the same
+    # claims leaves the grain alone, because `place()` stood the row on the REGISTRY's own
+    # address point rather than on the pin.
     resolution = core.resolve(
         claims, mm.context(), resolver_version=RESOLVER_VERSION,
         registry_version="ruian:2026-07-31",
     )
-    assert resolution.granularity == capped, who
+    assert resolution.granularity == "address_point", who
+    assert resolution.match_confidence == ("medium" if blurred else "exact"), who
+
+
+@pytest.mark.parametrize("origin", sorted(grade.REGISTRY_ORIGINS))
+def test_a_declared_cap_never_coarsens_a_row_the_register_placed(origin: str) -> None:
+    """W18's correction, as its own rail. A portal saying "Přibližná lokalita" is telling you
+    its COORDINATE is fuzzy; it is not telling you the ad named no street, and it cannot
+    un-tell you what RÚIAN says about the street it named. Left as it was, a bazos row
+    published `street_name` + `ulice_kod`, sat on the street's centroid and still graded
+    `obec` at a 1 km radius — three fields of one row disagreeing about how precisely the
+    listing is known."""
+    declared = DeclaredPrecision(label="approximate_location", blurred=True, claim_ids=(1,))
+    binding = _binding(target_kind="street", granularity="street", rung="R2",
+                       agreed=("street", "obec"))
+    graded = _graded(binding, Position(50.0, 14.0, origin), declared=declared)
+    assert graded.granularity == "street"
+    # What the declaration still does: a blurred pin is a weak witness on any origin.
+    assert graded.match_confidence == "medium"
+    # ...and on the pin itself the ladder is untouched.
+    pinned = _graded(binding, Position(50.0, 14.0, "portal_pin", blurred=True),
+                     declared=declared)
+    assert pinned.granularity == "obec"
 
 
 def test_mmrealitys_accurate_ranks_the_pin_without_certifying_a_granularity():

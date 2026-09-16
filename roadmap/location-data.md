@@ -964,7 +964,12 @@ component is slimmed twice — each wave rewrites one component and slims its st
   portal pin > FILL's unit point`, with the street beating the pin when the pin is absent,
   DECLARED blurred, or farther than `max(REGISTRY_PIN_CONFLICT_M, extent)` from the centroid;
   an EXACT pin that loses is stamped `disputed='pin_off_street'` and capped at `medium`, an
-  exact pin that agrees keeps the position. A street claim carrying a separator is a LINE and is
+  exact pin that agrees keeps the position. (3) **The grain follows the position**: a portal's
+  `precision_cap` is a statement about its own PIN, so it caps the granularity only while the
+  pin is the elected position — on a register-placed row the grain is the bind's own, the
+  radius is the register's, and the declaration is left to cap the CONFIDENCE. The first cut
+  of this wave capped both and produced a row disagreeing with itself (street + `ulice_kod`
+  published, position on the street centroid, `granularity='obec'` at 1 km). A street claim carrying a separator is a LINE and is
   routed to `composite.resolve_street`, W9's binder one level down: split on the portals' own
   separators, match each segment exactly inside the anchoring obec against BOTH folds of the
   name, refuse a segment that names the obec or a část obce of it (76 register streets collide
@@ -979,10 +984,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
   (`RESOLVER_VERSION` → `resolver:v5.2`, `location_resolve.yml mode=full-resolve`).
 
   **Next**: the description surface (19 % exact today — needs cue RANKING, not the first cue);
-  Czech inflection ("Livornské ulici" is the locative of `Livornská` and is deliberately not
-  guessed at); and the question W18 left standing — whether a portal's `precision_cap` should
-  cap the grain of a REGISTRY bind at all, or only the grain of that portal's own pin (today it
-  caps both, so a bazos row publishes its street while still grading `obec`).
+  and Czech inflection ("Livornské ulici" is the locative of `Livornská`, deliberately not
+  guessed at — the exact match fails and R3 is off for lines).
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

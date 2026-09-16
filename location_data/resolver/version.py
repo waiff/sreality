@@ -44,5 +44,8 @@ from __future__ import annotations
 #      the centroid of its valid address points, with an EXTENT (half the bounding diagonal).
 #      That point outranks the portal pin when the pin is absent, declared blurred, or
 #      farther from the street than the street is long; an exact pin that loses is stamped
-#      `disputed='pin_off_street'` and capped at `medium`. Every row re-resolves once.
+#      `disputed='pin_off_street'` and capped at `medium`. And the portal's DECLARED CAP is a
+#      statement about its own pin, so it caps the GRAIN only while the pin is the elected
+#      position: a row standing on a register point grades at the bind's own level and the
+#      declaration is left to cap the confidence. Every row re-resolves once.
 RESOLVER_VERSION = "resolver:v5.2"

@@ -2309,7 +2309,9 @@ portal's payload or its own page, and every other stamp is class E outright.
   with the bound entity (`exact` an address point the pin corroborates, `high` ≥ 2 fields, `medium`
   one, `low` a tie-break or nothing), and `uncertainty_radius_m` from a per-level constant dict
   carrying migration 383's own v1 numbers — floored by the STREET's extent when a street placed the
-  row (W18), so a radius can never understate the thing the position came off.
+  row (W18), so a radius can never understate the thing the position came off. The portal's declared
+  `DECLARED_CAP` is applied ONLY when the position is the portal pin (see the position ladder below);
+  on a register-placed row it reaches the confidence and never the grain.
 * **CHECK** (`check.py`) decides the country and whether the row disagrees with itself. `disputed` is
   ONE nullable text column whose value IS the reason: `pin_outside_obec` (the pin is kept, the
   granularity drops to the admin level; asked only when the town came from a CLAIM, since on BIND's
@@ -2335,9 +2337,18 @@ coordinate the portal itself calls fuzzy); or the pin lies farther than `max(REG
 the street's extent)` from the centroid. The extent is in that threshold because a street is not a
 point — Jiráskova in Mladá Boleslav spans 1,727 m, and a flat 300 m rule would call half of its pins a
 disagreement. An EXACT pin that loses is the one case that IS a disagreement and is stamped
-`pin_off_street`; an exact pin that agrees keeps the position, as the finer of two true answers. The
-portal's own `precision_cap` ladder is untouched by this: it is a statement about that portal's PIN,
-so a bazos row still grades `obec` while publishing its street and sitting on it.
+`pin_off_street`; an exact pin that agrees keeps the position, as the finer of two true answers.
+
+**THE GRAIN FOLLOWS THE POSITION, so a portal's `precision_cap` caps the grain only while the PIN is
+the position.** A portal declaring "Přibližná lokalita" is saying its COORDINATE is fuzzy; it is not
+saying the ad named no street, and it cannot un-say what RÚIAN holds about the street the ad named. So
+when `place()` elects a register point (`grade.REGISTRY_ORIGINS`), the verdict's granularity is the
+BIND's own — `address_point` / `street` / `street_segment` — and the radius is the register's, while
+the declaration is left to do the one thing it still honestly can: cap the CONFIDENCE, because a
+blurred pin stays a weak witness however good the bind is. When the pin IS the elected position the
+`DECLARED_CAP` ladder applies exactly as before. The first cut of W18 got this wrong and the result
+was a row disagreeing with itself: `street_name` + `ulice_kod` published, the position on the street's
+centroid, and `granularity='obec'` at a 1 km radius.
 
 It is a **pure function**: no wall clock, no network, no randomness, enforced by an AST scan, so a
 row replays byte-identically from its inputs and the three version ids stamped on it

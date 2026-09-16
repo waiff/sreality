@@ -990,6 +990,12 @@ def place(binding: Binding, pin_claim: Claim | None, *, declared: DeclaredPrecis
     reads as a ceiling of `medium`. An exact pin that AGREES with the street keeps the
     position: the pin is the finer of two true answers.
 
+    WHICH ORIGIN WINS HERE ALSO DECIDES THE GRAIN. A portal's declared precision is a
+    statement about its own COORDINATE, so `grade.grade` applies the `DECLARED_CAP` ladder
+    only while that coordinate IS the position: a row this function places on a register
+    point grades at the bind's own level (`grade.REGISTRY_ORIGINS`), and the declaration is
+    left to do the only thing it can still honestly do — cap the confidence.
+
     The registry-vs-pin cross-check FLAGS, it never silently picks: beyond
     `REGISTRY_PIN_CONFLICT_M` the registry point stays the position and GRADE caps the
     confidence. Reverse resolution (coordinate → street) is DERIVED, never a claim, so this

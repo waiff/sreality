@@ -34,6 +34,13 @@ NEAR_PIN = (50.42000, 14.91400)       # 276 m from the centroid — on the stree
 FAR_PIN = (50.44000, 14.91365)        # 1,949 m — cannot be on it
 
 
+def _extent() -> float:
+    """Jiráskova's own extent, off the mirror rather than typed twice."""
+    mirror = mm.default_mirror()
+    street = next(s for s in mirror.streets if s.code == 105)
+    return mirror.street_point(street).extent_m
+
+
 def _resolve(claims, *, mirror=None):
     return core.resolve(
         claims, mm.context(mirror), resolver_version=RESOLVER_VERSION,
@@ -100,13 +107,34 @@ def test_a_blurred_pin_loses_to_the_street_the_ad_names():
     assert resolution.ulice_kod == 105
     assert resolution.obec_name == "Mladá Boleslav"
     assert resolution.disputed is None
-    # The portal's own declaration still caps the GRAIN at obec (bazos.yaml's
-    # `precision_cap.granularity_max`), and W18 deliberately does not touch that ladder: it
-    # is a statement about this portal's pin, and the street is published beside it either
-    # way. What changes is the position — and the radius, which may never understate the
-    # street the row was placed on.
+    # THE GRAIN FOLLOWS THE POSITION. bazos declares its pin approximate and its contract caps
+    # that pin at `obec` — but the pin is not where this row stands: the REGISTER is. So the
+    # row grades at the bind's own level, carries the street's own radius, and the
+    # declaration is left to do the only thing it still honestly can, which is cap the
+    # confidence. Publishing `street_name` + `ulice_kod`, sitting on the street's centroid and
+    # grading `obec` at 1 km was three fields of one row disagreeing with each other.
+    assert resolution.granularity == "street"
+    assert resolution.uncertainty_radius_m == max(step_grade.RADIUS_M["street"], _extent())
+    assert resolution.match_confidence == "medium"
+
+    # The same row through the OTHER surface — the capped headline rather than the parser's
+    # own value — is the same answer: the line binder reaches the same register row.
+    from_title = _resolve(_bazos(
+        street="Prodej bytu 3+1 s lodžií, 86 m2, ul. Jiráskova, Mladá Bolesl",
+        pin=BLURRED_PIN, label="approximate_location"))
+    assert (from_title.ulice_kod, from_title.granularity) == (105, "street")
+    assert (round(from_title.lat, 5), round(from_title.lon, 5)) == (STREET_LAT, STREET_LON)
+
+
+def test_the_same_row_without_a_street_is_unchanged_by_w18():
+    """The control, and the other half of the rule: with nothing bound below the town the
+    pin IS the position, so bazos' declared cap applies exactly as it always has — obec, one
+    kilometre, the ad's own approximate pin."""
+    resolution = _resolve(_bazos(street=None, pin=BLURRED_PIN, label="approximate_location"))
     assert resolution.granularity == "obec"
     assert resolution.uncertainty_radius_m == step_grade.RADIUS_M["obec"]
+    assert (resolution.lat, resolution.lon) == BLURRED_PIN
+    assert resolution.street_name is None and resolution.ulice_kod is None
 
 
 def test_a_street_with_no_pin_at_all_is_placed_on_the_street():
