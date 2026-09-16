@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -23,7 +24,7 @@ MODEL_KIND: str = "autodedup.logistic"
 MODEL_FORMAT: int = 1
 
 # How many hex characters of the feature-order digest a stamp carries. Short enough to read in a
-# report, long enough that two different 45-name orders do not collide by accident.
+# report, long enough that two different 47-name orders do not collide by accident.
 FEATURE_DIGEST_CHARS: int = 16
 
 
@@ -943,6 +944,36 @@ class LogisticModel:
                 f"model {self.version!r} was fitted against feature order {stamped}, "
                 f"but this artifact carries {self.feature_digest()} "
                 f"({len(self.feature_order)} features) — refit before scoring"
+            )
+        self.check_feature_order()
+
+    def check_feature_order(self) -> None:
+        """Compare a FITTED artifact's vocabulary against the CODE's `features.FEATURE_ORDER`.
+
+        `check_provenance` above is tautological with respect to the code — it digests the order
+        the artifact itself carries, so a model fitted before a feature landed passes it and then
+        scores that feature at zero, silently. W4e is the first change to make that real:
+        `w4_gold` carries 45 names, `FEATURE_ORDER` now has 47. `score` looks weights up by NAME,
+        so the invariant is membership, not position: a name the code no longer knows is a
+        load-time error, and a name the code has that the model lacks is the refit debt and warns
+        by name. Only a model carrying a `feature_version` stamp (what a fit writes) is checked —
+        a hand-built model over a deliberate subset of features is exempt."""
+        if not (self.provenance.get("feature_version") or {}):
+            return
+        known = set(FEATURE_ORDER)
+        unknown = [name for name in self.feature_order if name not in known]
+        if unknown:
+            raise ValueError(
+                f"model {self.version!r} was fitted on features this code no longer defines: "
+                f"{', '.join(unknown)} — the vocabulary was renamed or removed, refit before scoring"
+            )
+        unscored = [name for name in FEATURE_ORDER if name not in set(self.feature_order)]
+        if unscored:
+            warnings.warn(
+                f"model {self.version!r} was fitted on {len(self.feature_order)} features and "
+                f"scores none of the {len(unscored)} it does not carry: {', '.join(unscored)}"
+                " — refit to let them pay",
+                stacklevel=2,
             )
 
     @staticmethod

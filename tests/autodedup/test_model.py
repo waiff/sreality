@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 import random
+import warnings
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,6 +20,9 @@ from autodedup.model import (
     hand_initialised,
     sigmoid,
 )
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def feats(**kwargs: float | tuple[float, bool]) -> dict[str, tuple[float, bool]]:
@@ -839,3 +844,55 @@ def test_the_feature_digest_moves_when_the_vocabulary_does() -> None:
     assert hand_initialised().feature_digest() == model_module.feature_order_digest(
         ft.FEATURE_ORDER
     )
+
+
+# --- the stamp is tautological; the CODE is the other half of the check ------------------------
+
+# The feature names `autodedup/models/w4_gold.json` was fitted WITHOUT and therefore scores at
+# zero. Empty is the goal: the next refit must shrink this tuple to () in the same commit that
+# reruns the fit, and this test is the place the debt is written down.
+W4_GOLD_UNSCORED: tuple[str, ...] = ("plot_area_rel_diff", "plot_area_exact")
+
+
+def test_the_shipped_model_names_the_features_it_cannot_score() -> None:
+    """`check_provenance` compares the artifact's stamp against the artifact's own feature_order,
+    so it is blind to a feature added to the CODE afterwards — a 45-name model loads silently
+    against 47-name code and scores the tail at zero. `check_feature_order` is the other half."""
+    body = json.loads((ROOT / "autodedup" / "models" / "w4_gold.json").read_text())
+    stored = tuple(body["feature_order"])
+    assert ft.FEATURE_ORDER[: len(stored)] == stored  # grows at the END only
+    assert ft.FEATURE_ORDER[len(stored) :] == W4_GOLD_UNSCORED
+    with pytest.warns(UserWarning, match="refit to let them pay") as warned:
+        LogisticModel.from_json(json.dumps(body))
+    assert all(name in str(warned[0].message) for name in W4_GOLD_UNSCORED)
+
+
+def test_a_renamed_feature_is_a_load_error_not_a_warning() -> None:
+    model = hand_initialised()
+    model.feature_order = ("area_rel_diff_OLD",) + ft.FEATURE_ORDER[1:]
+    model.provenance = {"feature_version": {"sha256_16": model.feature_digest()}}
+    with pytest.raises(ValueError, match="no longer defines"):
+        LogisticModel.from_json(json.dumps(model.to_json()))
+
+
+def test_a_model_fitted_on_the_current_order_warns_about_nothing() -> None:
+    model = hand_initialised()
+    model.provenance = {"feature_version": {"sha256_16": model.feature_digest()}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        LogisticModel.from_json(json.dumps(model.to_json()))
+
+
+def test_an_unstamped_hand_model_over_a_feature_subset_is_exempt() -> None:
+    """A fit stamps `feature_version`; a model built by hand over three features for a test or a
+    probe does not, and must not be nagged about the 44 it deliberately left out."""
+    order = ("area_rel_diff", "phash_match_ratio", "same_ruian_adm_kod")
+    model = LogisticModel(
+        feature_order=order,
+        weights={name: 0.0 for name in order},
+        presence_weights={name: 0.0 for name in order},
+        intercept=0.0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        LogisticModel.from_json(json.dumps(model.to_json()))

@@ -240,13 +240,15 @@ def test_the_stored_stamp_is_the_vocabularys_own_version_not_a_second_number() -
     from autodedup import score_lane
 
     assert score_lane.FEATURE_VERSION == ft.FEATURE_VERSION
-    assert ft.FEATURE_VERSION == 2 and len(ft.FEATURE_ORDER) == 45
+    assert ft.FEATURE_VERSION == 3 and len(ft.FEATURE_ORDER) == 47
 
 
 def test_a_shared_unit_number_is_its_own_feature() -> None:
     """E45's last arm: `normalize.numeric_facts` isolates the `unit` slot, and FEATURE_ORDER
-    grew at the END only (FEATURE_VERSION 2) so a stored v1 vector still reads."""
-    assert ft.FEATURE_ORDER[-1] == "unit_number_shared"
+    grew at the END only (v2 at index 44, the v3 plot slots after it) so a stored v1 vector
+    still reads."""
+    assert ft.FEATURE_ORDER[44] == "unit_number_shared"
+    assert ft.FEATURE_ORDER[45:] == ("plot_area_rel_diff", "plot_area_exact")
     assert ft.FEATURE_VERSION >= 2
     shared = compute(
         StubFingerprint(1, numerals={("unit", 705.0), ("m2", 64.0)}),
@@ -721,3 +723,179 @@ def test_the_clip_sample_is_taken_interior_first_not_cover_shot_first() -> None:
     gallery = ctx.clip_gallery(fa, images_a, SETTINGS)
     first = images_a[3].clip_vector()
     assert gallery[0][0] == first  # the interior photo leads the sample, whatever its sequence
+
+
+def test_the_plot_is_estate_area_and_on_land_the_headline_area() -> None:
+    """W4e: `estate_area` is the parcel on every category; on `pozemek` the headline area IS the
+    parcel (`estate_area == area_m2` on 177 of 177 cohort rows carrying both). `garden_area` is a
+    different fact — median 0.84 of the estate — and is never read as the plot."""
+    house = listing(1, source="sreality", category_main="dum", area_m2=200.0,
+                    attrs={"estate_area": 740.0, "garden_area": 661.0})
+    land = listing(2, source="sreality", category_main="pozemek", area_m2=1373.0, attrs={})
+    garden_only = listing(3, source="sreality", category_main="dum", area_m2=200.0,
+                          attrs={"garden_area": 661.0})
+    assert ft.plot_area(house) == 740.0
+    assert ft.plot_area(land) == 1373.0
+    assert ft.plot_area(garden_only) is None
+
+
+def test_a_truncating_portals_plot_is_absent_not_a_contradiction() -> None:
+    """ceskereality reads "5 870 m²" as 870 (its area regex has no thousands separator): 0 of its
+    208 estate values reach 1,000 and 40 appear in the advert text only as the SUFFIX of a bigger
+    number. Absence is never a mismatch (E12), so the carrier is dropped rather than compared."""
+    trusted = listing(1, source="sreality", category_main="dum", area_m2=696.0,
+                      attrs={"estate_area": 5870.0})
+    truncating = listing(2, source="ceskereality", category_main="dum", area_m2=696.0,
+                         attrs={"estate_area": 870.0})
+    assert ft.plot_area(truncating) is None
+    feats = compute(StubFingerprint(1, area_m2=696.0), StubFingerprint(2, area_m2=696.0),
+                    trusted, truncating)
+    assert feats["plot_area_rel_diff"] == ft.ABSENT
+    assert feats["plot_area_exact"] == ft.ABSENT
+    # realitymix truncates its LAND headline but not its estate slot — the table is per carrier.
+    assert ft.plot_area(listing(3, source="realitymix", category_main="pozemek",
+                                area_m2=310.0, attrs={})) is None
+    assert ft.plot_area(listing(4, source="realitymix", category_main="dum",
+                                area_m2=178.0, attrs={"estate_area": 682.0})) == 682.0
+
+
+def test_the_advert_convicts_its_own_truncated_plot() -> None:
+    """bazos is the LARGEST headline carrier (40 of the 70 rows the code reads through it) and
+    shares the defective regex (scraper/bazos_parser.py:76), but it DOES reach 1,000 on 13 of 40 —
+    the population has no signature, so the per-source table cannot convict it and gating the
+    whole source would cost 34 good values to remove 6 bad ones. The listing's own advert can:
+    "11 197 m²" stored as 197. 0 false flags over the 431 values on the clean carriers."""
+    cut = listing(5, source="bazos", category_main="pozemek", area_m2=197.0, attrs={},
+                  description="Prodam pozemek o vymere 11 197 m2 v obci.")
+    assert ft.plot_area(cut) is None
+    kept = listing(6, source="bazos", category_main="pozemek", area_m2=197.0, attrs={},
+                   description="Prodam pozemek o vymere 197 m2 v obci.")
+    assert ft.plot_area(kept) == 197.0
+    # the test is a three-digit TAIL of a SPACE-GROUPED number, nothing looser
+    assert ft.plot_truncated_in_text(870.0, "parcely o CP 5 870 m2")
+    assert not ft.plot_truncated_in_text(870.0, "parcely o CP 5870 m2")
+    assert not ft.plot_truncated_in_text(70.0, "parcely o CP 5 870 m2")  # not a whole group
+    assert not ft.plot_truncated_in_text(870.0, None)
+
+
+def test_an_implausibly_small_plot_never_reaches_the_comparison() -> None:
+    """36 cohort rows carry `estate_area = 1`. Left in, the truncation guard reads "551".endswith
+    ("1") as a cut number and turns two real disagreements into absence."""
+    assert ft.plot_area(listing(1, source="idnes", category_main="dum", area_m2=132.0,
+                                attrs={"estate_area": 1.0})) is None
+    assert ft.plot_area(listing(2, source="idnes", category_main="dum", area_m2=132.0,
+                                attrs={"estate_area": ft.PLOT_MIN_M2})) == ft.PLOT_MIN_M2
+    feats = compute(
+        StubFingerprint(1, category_main="dum", area_m2=132.0),
+        StubFingerprint(2, category_main="dum", area_m2=132.0),
+        listing(1, source="idnes", category_main="dum", area_m2=132.0,
+                attrs={"estate_area": 1.0}),
+        listing(2, source="sreality", category_main="dum", area_m2=132.0,
+                attrs={"estate_area": 551.0}),
+    )
+    assert feats["plot_area_rel_diff"] == ft.ABSENT
+
+
+def test_a_plot_that_is_the_last_three_digits_of_the_other_is_a_cut_number() -> None:
+    """The same artefact between two uncensused portals: 870 of 5,870 is a truncation, 1,328 vs
+    722 is a real disagreement."""
+    assert ft.thousands_truncation_suspect(5870.0, 870.0)
+    assert ft.thousands_truncation_suspect(3400.0, 400.0)
+    assert not ft.thousands_truncation_suspect(1328.0, 722.0)
+    assert not ft.thousands_truncation_suspect(12000.0, 2000.0)  # a cut leaves ONE group
+    assert not ft.thousands_truncation_suspect(740.0, 740.0)
+    # exactly three digits: a shorter residue is a coincidental digit tail, not a thousands cut
+    assert not ft.thousands_truncation_suspect(551.0, 51.0)
+    assert not ft.thousands_truncation_suspect(681.0, 81.0)
+    feats = compute(
+        StubFingerprint(1, category_main="dum", area_m2=200.0),
+        StubFingerprint(2, category_main="dum", area_m2=200.0),
+        listing(1, source="idnes", category_main="dum", area_m2=200.0,
+                attrs={"estate_area": 2239.0}),
+        listing(2, source="maxima", category_main="dum", area_m2=200.0,
+                attrs={"estate_area": 239.0}),
+    )
+    assert feats["plot_area_rel_diff"] == ft.ABSENT
+
+
+def test_plot_area_features_and_their_attr_evidence_rule() -> None:
+    exact = compute(
+        StubFingerprint(1, category_main="dum"), StubFingerprint(2, category_main="dum"),
+        listing(1, source="sreality", category_main="dum", attrs={"estate_area": 740.0}),
+        listing(2, source="idnes", category_main="dum", attrs={"estate_area": 745.0}),
+    )
+    assert exact["plot_area_rel_diff"][1] and exact["plot_area_rel_diff"][0] < ft.PLOT_EXACT_REL
+    assert exact["plot_area_exact"] == (1.0, True)
+    assert "ATTR" in ft.evidence_families(exact)
+    apart = compute(
+        StubFingerprint(3, category_main="dum"), StubFingerprint(4, category_main="dum"),
+        listing(3, source="sreality", category_main="dum", attrs={"estate_area": 722.0}),
+        listing(4, source="idnes", category_main="dum", attrs={"estate_area": 1328.0}),
+    )
+    assert apart["plot_area_exact"] == (0.0, True)
+    assert apart["plot_area_rel_diff"][0] == pytest.approx(0.4563, abs=1e-4)
+    assert "ATTR" not in ft.evidence_families(apart)
+
+
+def test_attribute_agreement_reads_canonical_vocabulary_not_portal_spelling() -> None:
+    """W4e: one fact, several spellings. `ve_vystavbe_(hruba_stavba)` (realitymix) is
+    `ve_vystavbe`, `zdeny` (bazos) is `cihla`, and `jina` (ceskereality, 123 rows) is ABSENT —
+    a portal saying "other" knows no more than one saying nothing."""
+    la = listing(1, source="realitymix",
+                 attrs={"condition": "ve_vystavbe_(hruba_stavba)", "building_type": "zdeny",
+                        "furnished": "ano", "ownership": "osobni"})
+    lb = listing(2, source="sreality",
+                 attrs={"condition": "ve_vystavbe", "building_type": "cihla",
+                        "furnished": "castecne", "ownership": "osobni"})
+    feats = compute(StubFingerprint(1), StubFingerprint(2), la, lb)
+    assert feats["attr_agreements"] == (4.0, True)
+    assert feats["attr_contradictions"] == (0.0, True)
+    assert ft.attribute_conflicts(la, lb) == []
+    unknown = compute(
+        StubFingerprint(3), StubFingerprint(4),
+        listing(3, source="ceskereality", attrs={"building_type": "jina"}),
+        listing(4, source="sreality", attrs={"building_type": "cihla"}),
+    )
+    assert unknown["attr_contradictions"] == ft.ABSENT
+    assert unknown["attr_agreements"] == ft.ABSENT
+
+
+def test_adjacent_condition_grades_are_one_token_but_the_real_grades_still_contradict() -> None:
+    """`dobry` vs `velmi_dobry` is 47 of the 75 condition contradictions on judged TRUE duplicates
+    — a subjective grade the portals spell either way. Collapsing it takes the positive
+    contradiction rate 16.2% -> 6.1% while the negatives only fall 25.7% -> 19.3%."""
+    same_grade = compute(
+        StubFingerprint(1), StubFingerprint(2),
+        listing(1, source="sreality", attrs={"condition": "velmi_dobry"}),
+        listing(2, source="ceskereality", attrs={"condition": "dobry"}),
+    )
+    assert same_grade["attr_agreements"] == (1.0, True)
+    real_conflict = compute(
+        StubFingerprint(3), StubFingerprint(4),
+        listing(3, source="sreality", attrs={"condition": "novostavba"}),
+        listing(4, source="idnes", attrs={"condition": "velmi_dobry"}),
+    )
+    assert real_conflict["attr_contradictions"] == (1.0, True)
+
+
+def test_a_false_from_a_portal_that_never_publishes_false_is_absence() -> None:
+    """A portal in `FALSE_BY_OMISSION` writes `true` or nothing (idnes: 336 cellar trues, zero
+    falses), so a `false` there is a parser default and may not contradict. A portal that DOES
+    publish the negative keeps contradicting — a sreality `cellar=false` is the discriminator on
+    34 judged non-duplicates against 2 true duplicates."""
+    default = compute(
+        StubFingerprint(1), StubFingerprint(2),
+        listing(1, source="idnes", attrs={"cellar": False}),
+        listing(2, source="sreality", attrs={"cellar": True}),
+    )
+    assert default["attr_contradictions"] == ft.ABSENT
+    published = compute(
+        StubFingerprint(3), StubFingerprint(4),
+        listing(3, source="sreality", attrs={"cellar": False}),
+        listing(4, source="idnes", attrs={"cellar": True}),
+    )
+    assert published["attr_contradictions"] == (1.0, True)
+    assert [key for key, _, _ in ft.attribute_conflicts(
+        listing(3, source="sreality", attrs={"cellar": False}),
+        listing(4, source="idnes", attrs={"cellar": True}),
+    )] == ["cellar"]
