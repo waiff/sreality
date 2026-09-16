@@ -265,6 +265,18 @@ describe('<Pipeline> board', () => {
     );
   });
 
+  /* The board is a triage surface worked a column at a time, so following a
+     card must not unload it — the property link opens in a NEW TAB. `rel` rides
+     along so the opened document can't reach back through `window.opener`. */
+  it('opens the property in a new tab', async () => {
+    renderBoard();
+    const price = await screen.findByText(/5\s*000\s*000/);
+    const link = price.closest('a');
+    expect(link).toHaveAttribute('href', '/listing/sreality/111');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
+  });
+
   /* The point of the split, pinned: with BOTH decoration reads hanging
      forever, the board is still fully rendered and interactive. Before the
      split this was six serialized round trips and a "Načítání…" string — a
