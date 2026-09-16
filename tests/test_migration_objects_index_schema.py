@@ -26,3 +26,20 @@ def test_explicitly_qualified_index_name_is_kept() -> None:
 def test_index_on_explicit_public_table_stays_bare() -> None:
     sql = "create unique index if not exists foo_idx on public.foo (id);"
     assert "foo_idx" in _relations(sql)
+
+
+def test_column_on_a_non_public_table_keeps_its_schema() -> None:
+    sql = "alter table autodedup.clusters add column if not exists block_grain text;"
+    assert "autodedup.clusters.block_grain" in {o.ident for o in parse_objects(sql) if o.kind == "column"}
+
+
+def test_column_on_a_public_table_stays_two_part() -> None:
+    sql = "ALTER TABLE public.listings ADD COLUMN IF NOT EXISTS discovered_at timestamptz;"
+    assert "listings.discovered_at" in {o.ident for o in parse_objects(sql) if o.kind == "column"}
+
+
+def test_a_three_part_column_ident_is_probeable() -> None:
+    from scripts.verify_pipeline import _SAFE_IDENT
+
+    assert _SAFE_IDENT.match("autodedup.clusters.block_grain")
+    assert not _SAFE_IDENT.match("a.b.c.d")

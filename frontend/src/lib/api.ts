@@ -149,6 +149,27 @@ async function authHeader(useJwt: boolean | undefined): Promise<Record<string, s
   return TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
 }
 
+/* FastAPI answers a 422 with `detail` as a LIST of {loc, msg, type} objects.
+ * String()-ing that array renders "[object Object]" in the error banner, which
+ * tells the operator nothing about which parameter was rejected. */
+function detailText(detail: unknown): string {
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      if (typeof item === 'string') return item;
+      if (item && typeof item === 'object') {
+        const rec = item as { loc?: unknown; msg?: unknown };
+        const loc = Array.isArray(rec.loc) ? rec.loc.join('.') : null;
+        const msg = typeof rec.msg === 'string' ? rec.msg : null;
+        if (msg) return loc ? `${loc}: ${msg}` : msg;
+      }
+      return JSON.stringify(item);
+    });
+    return parts.join('; ');
+  }
+  return String(detail);
+}
+
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   if (!BASE_URL) {
     throw new ApiError(
@@ -205,10 +226,12 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   if (!res.ok) {
-    const detail =
+    const raw =
       body && typeof body === 'object' && body !== null && 'detail' in body
-        ? String((body as { detail: unknown }).detail)
-        : res.statusText || `HTTP ${res.status}`;
+        ? (body as { detail: unknown }).detail
+        : null;
+    const detail =
+      raw == null ? res.statusText || `HTTP ${res.status}` : detailText(raw);
     throw new ApiError(detail, res.status, body);
   }
 
@@ -547,10 +570,12 @@ export const uploadBuildingAttachment = async (
     try { body = JSON.parse(text); } catch { body = text; }
   }
   if (!res.ok) {
-    const detail =
+    const raw =
       body && typeof body === 'object' && body !== null && 'detail' in body
-        ? String((body as { detail: unknown }).detail)
-        : res.statusText || `HTTP ${res.status}`;
+        ? (body as { detail: unknown }).detail
+        : null;
+    const detail =
+      raw == null ? res.statusText || `HTTP ${res.status}` : detailText(raw);
     throw new ApiError(detail, res.status, body);
   }
   return body as BuildingAttachment;
@@ -3453,11 +3478,75 @@ export interface AutodedupWaveRollup {
 
 /* The header strip. Every figure is summed from the same per-wave rollup the
  * `waves` list carries, so the headline and the breakdown cannot disagree. */
+/* One row of a `group by` rollup the engine half carries. Each is a count over
+ * a store table, not a derived rate, so the page can add them up itself. */
+export interface AutodedupGenerationRollup {
+  generation: string;
+  n_clusters: number;
+  n_members: number;
+  n_conflicted: number;
+  last_changed_at: string | null;
+}
+
+export interface AutodedupVerdictRollup {
+  kind: 'pair' | 'cluster';
+  verdict: AutodedupVerdictValue;
+  n: number;
+}
+
+export interface AutodedupJudgementRollup {
+  tier: string;
+  verdict: string;
+  n: number;
+}
+
+/* The `autodedup.runs` row of the latest SCORE pass. `cohort` is null while the
+ * run is still `running` — the lane writes it on the terminal UPDATE, because
+ * the block count is only knowable once the dataset has loaded. */
+export interface AutodedupScoreRun {
+  id: number;
+  status: string;
+  fingerprint: string | null;
+  cohort: Record<string, unknown> | null;
+  params: Record<string, unknown> | null;
+  stats: Record<string, unknown> | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/* The engine half of the strip, added with the validation views: what the store
+ * holds right now. Optional because the ledger half predates it and a database
+ * with no score run yet answers without it — a missing `engine` means "no score
+ * run", which the page prints as words rather than as zeros.
+ *
+ * The counts are keyed the way the store keys them: `pairs_by_zone` and
+ * `certificates` are maps because the server aggregates them into one, and the
+ * three rollups stay ARRAYS because each row is identified by a compound key
+ * (kind+verdict, tier+verdict) that no flat record can hold without inventing a
+ * separator. `latest_generation` is the first of `generations`, which the
+ * statement already returns newest-first. */
+export interface AutodedupEngineStats {
+  pairs_by_zone: Partial<Record<AutodedupZone, number>>;
+  n_pairs: number;
+  certificates: Record<string, number>;
+  generations: AutodedupGenerationRollup[];
+  latest_generation: string | null;
+  verdicts: AutodedupVerdictRollup[];
+  n_verdicts: number;
+  judgements: AutodedupJudgementRollup[];
+  n_judgements: number;
+  last_score_run: AutodedupScoreRun | null;
+}
+
 export interface AutodedupStats {
   n_iterations: number;
   total_cost_usd: number;
+  /* D2's spend gate travels with the spend, so the page never retypes the caps. */
+  run_cap_usd?: number;
+  program_cap_usd?: number;
   last_iteration_at: string | null;
   waves: AutodedupWaveRollup[];
+  engine?: AutodedupEngineStats | null;
 }
 
 export const getAutodedupIterations = (q?: {
@@ -3476,3 +3565,633 @@ export const getAutodedupStats = (): Promise<{
   request<{ store_ready: boolean; data: AutodedupStats | null }>('/autodedup/stats', {
     jwt: true,
   });
+
+/* ---------------------------------------------------------------------------
+ * AUTODEDUP · validation UI (PROGRAM.md §12, W5)
+ *
+ * Three read surfaces and one write, all admin-gated and all served by
+ * `api/routes/autodedup.py` — the `autodedup` schema is unreachable from the
+ * browser (the Supabase client is pinned to `public`), and `listings` is RLS
+ * deny-all, so there is no second path to this data.
+ *
+ * SHADOW MODE (D4). Nothing here applies a merge. A verdict is the operator's
+ * opinion recorded against a pair or a cluster; a negative PAIR verdict also
+ * writes a permanent must-not-link server-side. The UI never says "merged".
+ *
+ * Every filter below is a KEY the server validates against its own registry —
+ * these are the names, never a predicate.
+ * ------------------------------------------------------------------------- */
+
+export type AutodedupVerdictValue =
+  | 'same'
+  | 'different'
+  | 'same_building_different_unit'
+  | 'unsure';
+
+export type AutodedupZone = 'merge' | 'band' | 'reject';
+
+/* What `lib/imageUrl.imageSrc` needs, and nothing else. */
+export interface AutodedupImageRef {
+  storage_path: string | null;
+  sreality_url: string;
+}
+
+/* One listing as every validation surface shows it. `listing_id` is
+ * `listings.id`; `sreality_id` / `source_id_native` are what an in-app listing
+ * link is built from (lib/listingUrl) and are optional because a payload that
+ * omits them still renders — with the portal link only. */
+export interface AutodedupMember {
+  listing_id: number;
+  source: string;
+  source_url: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  floor: number | null;
+  price_czk: number | null;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  is_active: boolean | null;
+  cover: AutodedupImageRef | null;
+  n_images: number;
+  /* The residual queue and the pair digests carry the storey count; the group
+   * members' select list does not. Optional rather than nullable, so a surface
+   * that HAS it can show "2 / 5" — floor-within-building is a real unit
+   * discriminator — and one that does not simply shows the floor. */
+  total_floors?: number | null;
+  sreality_id?: number | null;
+  source_id_native?: string | null;
+}
+
+export interface AutodedupMemberImage extends AutodedupImageRef {
+  image_id?: number | null;
+  /* Which side of the pair this frame belongs to — the route selects images for
+   * both listings in one statement and stamps each row, so the client never has
+   * to infer it from which array it was found in. */
+  listing_id?: number | null;
+  sequence: number | null;
+  /* A 64-bit dHash: JSON cannot carry it as a safe integer, so a string is the
+   * honest wire shape and a number is accepted for the small ones. */
+  phash: string | number | null;
+}
+
+export interface AutodedupMemberDetail extends AutodedupMember {
+  images: AutodedupMemberImage[];
+}
+
+/* The per-image best match on the OTHER side of the pair (§12: "both image
+ * lists with per-image Hamming"). */
+export interface AutodedupPairImage extends AutodedupMemberImage {
+  best_hamming: number | null;
+  best_match_image_id: number | null;
+}
+
+/* `features` is the compact store shape: only the PRESENT features, each as
+ * [value, present]. A missing key means the feature could not be computed —
+ * which is a different statement from a zero. */
+export interface AutodedupPairRow {
+  listing_lo: number;
+  listing_hi: number;
+  score: number | null;
+  zone: AutodedupZone | null;
+  decision: string | null;
+  guard_veto: string | null;
+  certificate: string | null;
+  families: number;
+  probes: string[];
+  features?: Record<string, [number, boolean]> | null;
+  cluster_key?: number | null;
+  /* The provenance the row was stored with. Optional because the two QUEUE
+   * routes answer with a summary, while the group-detail pair table and the
+   * pair page carry the whole stored row — which is where "scored by which
+   * model, against which feature set, when" belongs. */
+  feature_version?: number | null;
+  model_version?: string | null;
+  decided_at?: string | null;
+  /* Decoded and worded by the server on the routes that send the whole row.
+   * Nullable as well as optional: the residual wire form spells an absent
+   * decode as null, and `decodeFamilies` reads both as "no families". */
+  family_names?: string[] | null;
+  why_not_merged?: string;
+}
+
+export interface AutodedupEdgeSummary {
+  n_edges: number;
+  min_score: number | null;
+  mean_score: number | null;
+  n_certificates: number;
+  n_judged?: number;
+  /* The union of the member pairs' evidence families, already decoded. */
+  family_names?: string[];
+}
+
+/* The stored operator verdict. The DETAIL routes return the whole row; the two
+ * QUEUE routes return only the four fields a badge needs — so everything the
+ * badge does not read is optional here rather than promised and absent. */
+export interface AutodedupVerdictRow {
+  verdict: AutodedupVerdictValue;
+  note: string | null;
+  decided_by: string;
+  decided_at: string;
+  id?: number;
+  kind?: 'pair' | 'cluster';
+  cluster_key?: number | null;
+  listing_lo?: number | null;
+  listing_hi?: number | null;
+  weight?: number | null;
+}
+
+/* The judge's ruling. Only the verdict is guaranteed: the residual queue carries
+ * a three-field summary (verdict, confidence, tier) and the pair page the whole
+ * transcript, and one type for both keeps the chip identical on every surface. */
+export interface AutodedupJudgementRow {
+  verdict:
+    | 'same_property'
+    | 'different_property'
+    | 'same_building_different_unit'
+    | 'insufficient_evidence';
+  confidence?: number | null;
+  tier?: 'text' | 'vision' | 'gold' | null;
+  model?: string | null;
+  judge_version?: string | null;
+  listing_lo?: number;
+  listing_hi?: number;
+  unit_discriminator?: string | null;
+  key_evidence?: string[] | null;
+  contradicting_evidence?: string[] | null;
+  developer_project_suspected?: boolean | null;
+  cost_usd?: number | null;
+  created_at?: string | null;
+}
+
+export interface AutodedupConflictRow {
+  id: number;
+  kind: 'invariant' | 'must_not_link' | 'oversize' | 'bridge';
+  cluster_key_a: number | null;
+  cluster_key_b: number | null;
+  listing_lo: number | null;
+  listing_hi: number | null;
+  invariant: string | null;
+  detail: Record<string, unknown> | null;
+  created_at: string;
+}
+
+/* One row of `autodedup.clusters`. `status` is never 'applied' in this program
+ * (D4) and `property_id` never set. */
+export interface AutodedupClusterRow {
+  cluster_key: number;
+  generation: string;
+  size: number;
+  block_key: number | null;
+  cat_group: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  area_min: number | null;
+  area_max: number | null;
+  sources: string[];
+  medoid_listing_id: number | null;
+  min_edge_score: number | null;
+  mean_edge_score: number | null;
+  n_judged_edges: number;
+  n_certificate_edges: number;
+  evidence_families?: number | null;
+  evidence_family_names?: string[] | null;
+  max_gap_days: number | null;
+  shared_photo_warning: boolean;
+  status: string;
+  property_id?: number | null;
+  model_version: string | null;
+  feature_version: number | null;
+  first_built_at?: string | null;
+  last_changed_at?: string | null;
+}
+
+/* The cluster as the page renders it: the row, flattened together with its
+ * members, its edge rollup and the operator's latest verdict. The server sends
+ * those as four sibling objects (`{cluster, members, edges, verdict}`); the
+ * flattening happens once, in `normalizeGroup` below, so no component has to
+ * know which of the two spellings it was handed. */
+export interface AutodedupGroup extends AutodedupClusterRow {
+  members: AutodedupMember[];
+  edges: AutodedupEdgeSummary | null;
+  verdict: AutodedupVerdictRow | null;
+  /* Decoded once — from the server's names when it sends them, from the bitmask
+   * otherwise. The chips read this and never the raw smallint. */
+  family_names: string[];
+}
+
+export interface AutodedupGroupDetail {
+  cluster: AutodedupGroup;
+  members: AutodedupMemberDetail[];
+  pairs: AutodedupPairRow[];
+  judgements: AutodedupJudgementRow[];
+  conflicts: AutodedupConflictRow[];
+  verdicts: AutodedupVerdictRow[];
+}
+
+/* What the wire actually carries for one queue item. Every field the server may
+ * spell two ways is optional here, and `normalizeGroup` picks. */
+interface WireGroupItem {
+  cluster?: AutodedupClusterRow;
+  members?: AutodedupMember[] | AutodedupMemberDetail[];
+  edges?: (AutodedupEdgeSummary & { families?: number | string[] | null }) | null;
+  verdict?: AutodedupVerdictRow | null;
+}
+
+/* Decode an evidence-family value that may arrive as the stored bitmask or as
+ * the server's already-decoded names. The bit table mirrors
+ * `autodedup/score_lane.py::FAMILY_BITS` and `api/routes/autodedup.py`. */
+const FAMILY_BITS: ReadonlyArray<readonly [number, string]> = [
+  [1, 'ATTR'],
+  [2, 'PRICE'],
+  [4, 'TXT'],
+  [8, 'BRK'],
+  [16, 'LOC'],
+  [32, 'IMG'],
+  [64, 'TIME'],
+];
+
+export function decodeFamilies(value: number | string[] | null | undefined): string[] {
+  if (Array.isArray(value)) return value;
+  if (value == null) return [];
+  return FAMILY_BITS.filter(([bit]) => (value & bit) !== 0).map(([, name]) => name);
+}
+
+export function normalizeGroup(item: WireGroupItem & Partial<AutodedupClusterRow>): AutodedupGroup {
+  const cluster = (item.cluster ?? (item as AutodedupClusterRow)) as AutodedupClusterRow;
+  const edges = item.edges ?? null;
+  return {
+    ...cluster,
+    members: item.members ?? [],
+    edges,
+    verdict: item.verdict ?? null,
+    family_names: decodeFamilies(
+      cluster.evidence_family_names ?? edges?.family_names ?? edges?.families ??
+        cluster.evidence_families,
+    ),
+  };
+}
+
+/* One log-odds contribution of the linear model, or — when the model exposes
+ * none — one present feature. `contribution` null means the second case. */
+export interface AutodedupContribution {
+  name: string;
+  value: number | null;
+  present: boolean;
+  contribution: number | null;
+}
+
+/* A pair the engine did NOT join into one cluster, above the display floor.
+ * `why_not_merged` is the precondition that failed, in words — §12's "that last
+ * field is what turns a review session into design feedback". */
+export interface AutodedupResidualRow extends AutodedupPairRow {
+  lo: AutodedupMember;
+  hi: AutodedupMember;
+  why_not_merged: string;
+  contributions: AutodedupContribution[];
+  judgement: AutodedupJudgementRow | null;
+  verdict: AutodedupVerdictRow | null;
+  family_names: string[];
+  block_key?: number | null;
+}
+
+/* The wire form: the two sides are `a`/`b`, the breakdown is `top_features` and
+ * the judge summary is `judge`. Both spellings are accepted so the page does not
+ * break on whichever one the server settles at. */
+interface WireResidualRow extends Omit<AutodedupPairRow, 'families'> {
+  families?: number | string[] | null;
+  family_names?: string[] | null;
+  block_key?: number | null;
+  why_not_merged: string;
+  a?: AutodedupMember;
+  b?: AutodedupMember;
+  lo?: AutodedupMember;
+  hi?: AutodedupMember;
+  top_features?: AutodedupContribution[] | null;
+  contributions?: AutodedupContribution[] | null;
+  judge?: AutodedupJudgementRow | null;
+  judgement?: AutodedupJudgementRow | null;
+  verdict?: AutodedupVerdictRow | null;
+}
+
+export function normalizeResidual(row: WireResidualRow): AutodedupResidualRow {
+  const lo = row.lo ?? row.a;
+  const hi = row.hi ?? row.b;
+  if (!lo || !hi) throw new Error(`residual pair ${row.listing_lo}/${row.listing_hi} has no sides`);
+  const families = row.family_names ?? row.families ?? null;
+  return {
+    ...row,
+    lo,
+    hi,
+    /* Kept as the numeric mask when that is what arrived, so a caller that wants
+     * the raw value still has it; the chips read `family_names`. */
+    families: typeof row.families === 'number' ? row.families : 0,
+    family_names: decodeFamilies(families),
+    contributions: row.contributions ?? row.top_features ?? [],
+    judgement: row.judgement ?? row.judge ?? null,
+    verdict: row.verdict ?? null,
+  };
+}
+
+/* The judge's own digest of a listing — PII-free by construction (no broker
+ * field of any kind, description scrubbed). `attributes` is a label→text map
+ * the extractor owns, so it is read as data and never keyed on here. */
+export interface AutodedupDigest {
+  listing_id: number;
+  portal: string | null;
+  deal: string | null;
+  category: string | null;
+  subtype: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  floor: number | null;
+  total_floors: number | null;
+  price: number | null;
+  price_unit: string | null;
+  /* `_digest` does not emit a price trail today (the route builds its response
+   * dict explicitly), so this is optional rather than promised-and-absent —
+   * a required key the wire never sends is a render-time TypeError. */
+  price_history?: Array<[string, number | null]> | null;
+  attributes: Record<string, string | null>;
+  first_seen: string | null;
+  last_seen: string | null;
+  active: boolean;
+  description: string | null;
+  description_truncated: boolean;
+  absent: string[];
+  /* The per-row portal URL captured at ingest — the digest DOES carry it, so
+   * the pair page has a link even without a listing summary. */
+  source_url?: string | null;
+}
+
+export interface AutodedupFeatureRow {
+  name: string;
+  value: number | null;
+  present: boolean;
+  contribution: number | null;
+}
+
+export interface AutodedupPairDetail {
+  pair: AutodedupPairRow | null;
+  listings: { lo: AutodedupMember | null; hi: AutodedupMember | null };
+  digests: { lo: AutodedupDigest | null; hi: AutodedupDigest | null };
+  images: { lo: AutodedupPairImage[]; hi: AutodedupPairImage[] };
+  features: AutodedupFeatureRow[];
+  judgements: AutodedupJudgementRow[];
+  verdicts: AutodedupVerdictRow[];
+  family_names: string[];
+}
+
+interface WireSided<T> {
+  lo?: T;
+  hi?: T;
+  a?: T;
+  b?: T;
+}
+
+interface WirePairDetail {
+  pair?: (AutodedupPairRow & { families?: number | string[] | null; family_names?: string[] }) | null;
+  listings?: WireSided<AutodedupMember | null>;
+  digests?: WireSided<AutodedupDigest | null>;
+  /* The route also reports how many frames it showed vs hashed, alongside the
+   * two sides; carried on the type so the literal payload checks. */
+  images?: WireSided<WirePairImage[]> & {
+    n_frames_shown?: Record<string, number>;
+    n_hashed_frames?: Record<string, number>;
+  };
+  /* The route sends {name, value, present} only — the log-odds breakdown
+   * arrives apart, in `top_features`, and is joined on the name below. */
+  features?: Array<Omit<AutodedupFeatureRow, 'contribution'> & { contribution?: number | null }>;
+  top_features?: AutodedupContribution[] | null;
+  judgements?: AutodedupJudgementRow[];
+  verdicts?: AutodedupVerdictRow[];
+}
+
+const side = <T,>(s: WireSided<T> | undefined, which: 'lo' | 'hi'): T | undefined =>
+  which === 'lo' ? (s?.lo ?? s?.a) : (s?.hi ?? s?.b);
+
+/* The route nests the per-frame answer as `best_match: {image_id, hamming} |
+ * null` (a NULL phash has no distance to anything, so there is no match rather
+ * than a fabricated zero). The UI wants it flat, and reading the nested shape
+ * as a flat one silently prints "no match" on every photo — evidence AGAINST a
+ * duplicate that nobody produced. Flattened once, here. */
+interface WirePairImage extends AutodedupMemberImage {
+  best_hamming?: number | null;
+  best_match_image_id?: number | null;
+  best_match?: { image_id: number | null; hamming: number | null } | null;
+}
+
+function flattenImages(images: WirePairImage[] | undefined): AutodedupPairImage[] {
+  return (images ?? []).map((img) => ({
+    ...img,
+    best_hamming: img.best_hamming ?? img.best_match?.hamming ?? null,
+    best_match_image_id: img.best_match_image_id ?? img.best_match?.image_id ?? null,
+  }));
+}
+
+/* A digest is not a listing row, but it carries every attribute the diff table
+ * compares — so when the payload has no listing summaries the diff is built from
+ * the digests rather than dropped. Nothing is invented: what the digest does not
+ * carry (the portal URL, the photo count) stays empty. */
+function memberFromDigest(d: AutodedupDigest | null | undefined): AutodedupMember | null {
+  if (!d) return null;
+  return {
+    listing_id: d.listing_id,
+    source: d.portal ?? '',
+    source_url: d.source_url ?? null,
+    category_main: d.category,
+    category_type: d.deal,
+    disposition: d.disposition,
+    area_m2: d.area_m2,
+    floor: d.floor,
+    total_floors: d.total_floors,
+    price_czk: d.price,
+    first_seen_at: d.first_seen,
+    last_seen_at: d.last_seen,
+    is_active: d.active,
+    cover: null,
+    n_images: 0,
+  };
+}
+
+export function normalizePairDetail(raw: WirePairDetail): AutodedupPairDetail {
+  const digests = {
+    lo: side(raw.digests, 'lo') ?? null,
+    hi: side(raw.digests, 'hi') ?? null,
+  };
+  /* The model's log-odds breakdown arrives apart from the feature list; joined
+   * on the name here so the table has one row per feature, not two lists. */
+  const byName = new Map((raw.top_features ?? []).map((c) => [c.name, c.contribution]));
+  const features = (raw.features ?? []).map((f) => ({
+    ...f,
+    contribution: f.contribution ?? byName.get(f.name) ?? null,
+  }));
+  const pair = raw.pair ?? null;
+  return {
+    pair,
+    listings: {
+      lo: side(raw.listings, 'lo') ?? memberFromDigest(digests.lo),
+      hi: side(raw.listings, 'hi') ?? memberFromDigest(digests.hi),
+    },
+    digests,
+    images: {
+      lo: flattenImages(side(raw.images, 'lo')),
+      hi: flattenImages(side(raw.images, 'hi')),
+    },
+    features,
+    judgements: raw.judgements ?? [],
+    verdicts: raw.verdicts ?? [],
+    family_names: decodeFamilies(pair?.family_names ?? pair?.families ?? null),
+  };
+}
+
+/* Keyset page. The cursor is opaque — `(min_edge_score, cluster_key)` for the
+ * groups list, `(score, lo, hi)` for the residual one — so nothing here reads
+ * it as a number. */
+export interface AutodedupKeysetPage<T> {
+  items: T[];
+  has_more: boolean;
+  next_after: string | null;
+}
+
+export type AutodedupEnvelope<T> = { store_ready: boolean; data: T | null };
+
+export interface AutodedupGroupFilters {
+  generation?: string | null;
+  after?: string | null;
+  limit?: number | null;
+  /* `block` is the stored blocking key — an INT server-side, so a free-text
+   * control has to parse before it sends. */
+  block?: number | null;
+  source?: string | null;
+  category_main?: string | null;
+  category_type?: string | null;
+  min_size?: number | null;
+  max_size?: number | null;
+  min_score?: number | null;
+  max_score?: number | null;
+  verdict?: string | null;
+  shared_photo?: 0 | 1 | null;
+  has_judgement?: 0 | 1 | null;
+  sort?: 'weakest' | 'newest' | 'largest' | null;
+}
+
+export interface AutodedupResidualFilters {
+  generation?: string | null;
+  after?: string | null;
+  limit?: number | null;
+  block?: number | null;
+  zone?: AutodedupZone | null;
+  min_score?: number | null;
+  source_pair?: string | null;
+  has_judgement?: 0 | 1 | null;
+  verdict?: string | null;
+  sort?: 'score_desc' | null;
+}
+
+/* Each read normalizes ONCE, here, so every page downstream sees one shape.
+ * `store_ready: false` short-circuits with `data: null` — an un-migrated store
+ * is an empty page, never an exception. */
+export const getAutodedupGroups = async (
+  f: AutodedupGroupFilters = {},
+): Promise<AutodedupEnvelope<AutodedupKeysetPage<AutodedupGroup>>> => {
+  const res = await request<AutodedupEnvelope<AutodedupKeysetPage<WireGroupItem>>>(
+    '/autodedup/groups',
+    { query: { ...f } as Record<string, QueryValue>, jwt: true },
+  );
+  if (!res.data) return { store_ready: res.store_ready, data: null };
+  return {
+    store_ready: res.store_ready,
+    data: { ...res.data, items: (res.data.items ?? []).map(normalizeGroup) },
+  };
+};
+
+export const getAutodedupGroup = async (
+  clusterKey: number,
+  generation?: string | null,
+): Promise<AutodedupEnvelope<AutodedupGroupDetail>> => {
+  const res = await request<
+    AutodedupEnvelope<Omit<AutodedupGroupDetail, 'cluster'> & WireGroupItem>
+  >(`/autodedup/groups/${encodeURIComponent(String(clusterKey))}`, {
+    query: { generation: generation ?? null },
+    jwt: true,
+  });
+  if (!res.data) return { store_ready: res.store_ready, data: null };
+  return {
+    store_ready: res.store_ready,
+    data: {
+      ...res.data,
+      cluster: normalizeGroup(res.data),
+      members: res.data.members ?? [],
+      pairs: res.data.pairs ?? [],
+      judgements: res.data.judgements ?? [],
+      conflicts: res.data.conflicts ?? [],
+      verdicts: res.data.verdicts ?? [],
+    } as AutodedupGroupDetail,
+  };
+};
+
+export const getAutodedupResidual = async (
+  f: AutodedupResidualFilters = {},
+): Promise<AutodedupEnvelope<AutodedupKeysetPage<AutodedupResidualRow>>> => {
+  const res = await request<AutodedupEnvelope<AutodedupKeysetPage<WireResidualRow>>>(
+    '/autodedup/residual',
+    { query: { ...f } as Record<string, QueryValue>, jwt: true },
+  );
+  if (!res.data) return { store_ready: res.store_ready, data: null };
+  return {
+    store_ready: res.store_ready,
+    data: { ...res.data, items: (res.data.items ?? []).map(normalizeResidual) },
+  };
+};
+
+export const getAutodedupPair = async (
+  lo: number,
+  hi: number,
+  generation?: string | null,
+): Promise<AutodedupEnvelope<AutodedupPairDetail>> => {
+  const res = await request<AutodedupEnvelope<WirePairDetail>>(
+    `/autodedup/pair/${encodeURIComponent(String(lo))}/${encodeURIComponent(String(hi))}`,
+    { query: { generation: generation ?? null }, jwt: true },
+  );
+  if (!res.data) return { store_ready: res.store_ready, data: null };
+  return { store_ready: res.store_ready, data: normalizePairDetail(res.data) };
+};
+
+/* The one write of the whole program, and it writes into `autodedup` only. A
+ * negative PAIR verdict also lands a permanent must-not-link server-side; a
+ * CLUSTER verdict flags the group and splits nothing (pair-level splits are
+ * made on the pair view). */
+export interface AutodedupVerdictInput {
+  kind: 'pair' | 'cluster';
+  verdict: AutodedupVerdictValue;
+  listing_lo?: number | null;
+  listing_hi?: number | null;
+  cluster_key?: number | null;
+  note?: string | null;
+}
+
+/* The route answers `{data: {verdict, must_not_link}}` — the stored row is
+ * NESTED, and taking `data` verbatim hands the badge an object where it expects
+ * a verdict string, so a SUCCESSFUL write un-presses the button it just set.
+ * Unwrapped once, here; `must_not_link` rides alongside so a caller can say
+ * that the pair is now permanently un-linkable. */
+export interface AutodedupVerdictResult {
+  verdict: AutodedupVerdictRow | null;
+  must_not_link: boolean;
+}
+
+export const postAutodedupVerdict = async (
+  body: AutodedupVerdictInput,
+): Promise<AutodedupEnvelope<AutodedupVerdictRow> & { must_not_link: boolean }> => {
+  const res = await request<AutodedupEnvelope<AutodedupVerdictResult>>(
+    '/autodedup/verdict',
+    { method: 'POST', json: body, jwt: true },
+  );
+  return {
+    store_ready: res.store_ready,
+    data: res.data?.verdict ?? null,
+    must_not_link: res.data?.must_not_link ?? false,
+  };
+};

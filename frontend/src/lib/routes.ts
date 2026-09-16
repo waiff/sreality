@@ -131,6 +131,12 @@ export const ROUTES = {
   // namespace. Progress is its first surface (PROGRAM.md §12, W1); bare
   // `/autodedup` is reserved for that section's W5 funnel view and stays free.
   autodedupProgress: def('/autodedup/progress'),
+  // The W5 validation views. `groups` is the proposed-cluster review queue,
+  // `residual` the pairs the engine did NOT join, and `pair` the full-evidence
+  // page both of them drill into. Nothing here applies a merge (ruling D4).
+  autodedupGroups: def('/autodedup/groups'),
+  autodedupResidual: def('/autodedup/residual'),
+  autodedupPair: def('/autodedup/pair/:lo/:hi'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;

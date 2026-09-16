@@ -44,6 +44,7 @@ from autodedup.census import run_census, run_probes, write_json
 from autodedup.export import run_export
 from autodedup.iterations import run_record
 from autodedup.judge_lane import run_judge
+from autodedup.score_lane import run_score
 
 Mode = Callable[[Callable[[], Any], dict[str, str], Path], dict[str, Any]]
 
@@ -52,6 +53,7 @@ MODES: dict[str, Mode] = {
     "probes": run_probes,
     "export": run_export,
     "judge": run_judge,
+    "score": run_score,
     "record": run_record,
 }
 
@@ -90,6 +92,20 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         "tools": [
             "autodedup.judge", "autodedup.judge_lane", "autodedup.lane", "api.llm_client",
             "Cloudflare R2", "GitHub Actions",
+        ],
+    },
+    "score": {
+        "wave": "W5",
+        "title": "Engine pass into the store",
+        "approach": (
+            "One engine pass over an exported cohort, persisted: every scored pair into "
+            "autodedup.pairs and the whole generation of clusters, members and refused "
+            "unions rebuilt under one autodedup.runs row — so the validation UI filters a "
+            "table instead of an artifact, and an operator verdict has a row to land on."
+        ),
+        "tools": [
+            "autodedup.score_lane", "autodedup.harness", "autodedup.lane", "GitHub Actions",
+            "Postgres (schema autodedup)",
         ],
     },
     "export": {

@@ -83,6 +83,11 @@ const newDedupItems: ReadonlyArray<MenuItem> = [
 // it runs.
 const autodedupItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.autodedupProgress.build(), label: 'Progress', end: true },
+  // The W5 validation views. Groups is the proposed-cluster queue, Residual the
+  // pairs the engine did NOT join; the pair page is drilled into from both and
+  // is deliberately not a menu entry — it has no meaning without a pair.
+  { to: ROUTES.autodedupGroups.build(), label: 'Groups' },
+  { to: ROUTES.autodedupResidual.build(), label: 'Residual' },
 ];
 
 function isPathActive(pathname: string, to: string): boolean {
@@ -200,9 +205,18 @@ function TopBar() {
   );
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
-      <div className="px-6 h-14 flex items-center gap-8">
+      {/* THE BAR IS EXACTLY 3.5rem TALL AND STAYS THAT WAY. Three Browse panes
+        * pin themselves against that number in CSS (`top-14`,
+        * `calc(100dvh-3.5rem)` in Filters.tsx and BrowseExperience.tsx), so a
+        * header that grows a second row slides the sidebar heading under it and
+        * overflows the map pane. Room for the nav is bought by TIGHTENING —
+        * gap-8 → gap-4 between the bar's parts, gap-1 → gap-0.5 and px-3 →
+        * px-2.5 inside the nav — never by changing the height. Making the bar
+        * variable-height needs `--header-h` published here and consumed at
+        * those three sites; that is a Browse change, not a nav change. */}
+      <div className="px-6 h-14 flex items-center gap-4">
         <BrandMark />
-        <nav className="flex items-center gap-1">
+        <nav className="flex items-center gap-0.5">
           {items.map((item) => {
             if (item.disabled) {
               return (
@@ -210,7 +224,7 @@ function TopBar() {
                   key={item.to}
                   title={item.title}
                   aria-disabled="true"
-                  className="relative px-3 py-1.5 text-sm tracking-wide text-[var(--color-ink-4)] opacity-50 cursor-not-allowed select-none"
+                  className="relative px-2.5 py-1.5 text-sm tracking-wide text-[var(--color-ink-4)] opacity-50 cursor-not-allowed select-none"
                 >
                   {item.label}
                 </span>
@@ -226,7 +240,7 @@ function TopBar() {
                 end={item.to !== ownerTo}
                 className={({ isActive }) =>
                   [
-                    'relative px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
+                    'relative px-2.5 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
                     isActive
                       ? 'text-[var(--color-ink)]'
                       : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
@@ -316,7 +330,7 @@ function NavMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         className={[
-          'relative px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
+          'relative px-2.5 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
           active ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
         ].join(' ')}
       >
