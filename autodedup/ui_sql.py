@@ -434,6 +434,23 @@ ORDER BY v.decided_at DESC, v.id DESC
 """
 )
 
+# Every operator verdict on a pair of listings drawn from ONE set — the members of a cluster.
+# `PAIR_VERDICTS_SQL` keys on the pairs the engine SCORED, which is the wrong question here: a
+# split rules on every member pair, including the ones that carry no edge at all, so a queue
+# card rehydrating its assignment from the store would miss exactly the pairs the operator
+# separated by hand.
+MEMBER_PAIR_VERDICTS_SQL = (
+    "SELECT"
+    + _VERDICT_SELECT_LIST
+    + """
+FROM autodedup.verdicts v
+WHERE v.kind = 'pair'
+  AND v.listing_lo = any(%(ids)s::bigint[])
+  AND v.listing_hi = any(%(ids)s::bigint[])
+ORDER BY v.decided_at DESC, v.id DESC
+"""
+)
+
 CLUSTER_VERDICTS_SQL = (
     "SELECT"
     + _VERDICT_SELECT_LIST
@@ -912,6 +929,15 @@ DELETE FROM autodedup.must_not_link
 WHERE listing_lo = %(listing_lo)s::bigint
   AND listing_hi = %(listing_hi)s::bigint
   AND source = 'operator'
+"""
+
+# Just the ids — the membership a whole-cluster ruling fans out over. `GROUP_MEMBERS_SQL`
+# answers the same question with three lateral joins and a gallery, which a write does not need.
+CLUSTER_MEMBER_IDS_SQL = """
+SELECT m.listing_id
+FROM autodedup.cluster_members m
+WHERE m.cluster_key = %(cluster_key)s::bigint
+ORDER BY m.listing_id
 """
 
 CLUSTER_EXISTS_SQL = """

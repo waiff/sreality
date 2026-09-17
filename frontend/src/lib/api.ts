@@ -3790,6 +3790,11 @@ export interface AutodedupGroup extends AutodedupClusterRow {
   members: AutodedupMember[];
   edges: AutodedupEdgeSummary | null;
   verdict: AutodedupVerdictRow | null;
+  /* The operator's own rulings on the members' PAIRS — what a stored split
+   * actually is. A card that cannot read them shows "A" over every member while
+   * the badge says the group was split, and the next save silently retracts the
+   * permanent must-not-links the first one wrote. */
+  member_verdicts: AutodedupVerdictRow[];
   /* Decoded once — from the server's names when it sends them, from the bitmask
    * otherwise. The chips read this and never the raw smallint. */
   family_names: string[];
@@ -3802,6 +3807,10 @@ export interface AutodedupGroupDetail {
   judgements: AutodedupJudgementRow[];
   conflicts: AutodedupConflictRow[];
   verdicts: AutodedupVerdictRow[];
+  /* The PAIR verdicts among the members, including the pairs the engine never
+   * scored — a split rules on those too, and keying the read on the scored
+   * edges would hide exactly the rulings the dialog has to show back. */
+  member_verdicts?: AutodedupVerdictRow[];
 }
 
 /* What the wire actually carries for one queue item. Every field the server may
@@ -3811,6 +3820,7 @@ interface WireGroupItem {
   members?: AutodedupMember[] | AutodedupMemberDetail[];
   edges?: (AutodedupEdgeSummary & { families?: number | string[] | null }) | null;
   verdict?: AutodedupVerdictRow | null;
+  member_verdicts?: AutodedupVerdictRow[] | null;
 }
 
 /* Decode an evidence-family value that may arrive as the stored bitmask or as
@@ -3840,6 +3850,7 @@ export function normalizeGroup(item: WireGroupItem & Partial<AutodedupClusterRow
     members: item.members ?? [],
     edges,
     verdict: item.verdict ?? null,
+    member_verdicts: item.member_verdicts ?? [],
     family_names: decodeFamilies(
       cluster.evidence_family_names ?? edges?.family_names ?? edges?.families ??
         cluster.evidence_families,
@@ -4236,11 +4247,19 @@ export interface AutodedupVerdictInput {
 export interface AutodedupVerdictResult {
   verdict: AutodedupVerdictRow | null;
   must_not_link: boolean;
+  /* Pairs whose operator veto this verdict dropped — a cluster `same` retracts
+   * every one inside the group, which is a thing the operator should be told. */
+  must_not_link_retracted?: number;
 }
 
 export const postAutodedupVerdict = async (
   body: AutodedupVerdictInput,
-): Promise<AutodedupEnvelope<AutodedupVerdictRow> & { must_not_link: boolean }> => {
+): Promise<
+  AutodedupEnvelope<AutodedupVerdictRow> & {
+    must_not_link: boolean;
+    must_not_link_retracted?: number;
+  }
+> => {
   const res = await request<AutodedupEnvelope<AutodedupVerdictResult>>(
     '/autodedup/verdict',
     { method: 'POST', json: body, jwt: true },
@@ -4249,6 +4268,7 @@ export const postAutodedupVerdict = async (
     store_ready: res.store_ready,
     data: res.data?.verdict ?? null,
     must_not_link: res.data?.must_not_link ?? false,
+    must_not_link_retracted: res.data?.must_not_link_retracted ?? 0,
   };
 };
 
@@ -4269,11 +4289,27 @@ export type AutodedupSplitRelation =
   | 'same_project_different_unit'
   | 'different';
 
+/* The relation between TWO units. One value for a whole split cannot describe
+ * the group the operator meets — A and B two units of one BUILDING, C a
+ * different building of the same development — and stamping either statement
+ * onto the other pair records a building the adverts do not share. Both land as
+ * permanent must-not-links and as calibration labels. */
+export interface AutodedupSplitRelationEntry {
+  unit_a: string;
+  unit_b: string;
+  relation: AutodedupSplitRelation;
+}
+
 export interface AutodedupSplitInput {
   cluster_key: number;
   generation: string;
   units: AutodedupSplitUnit[];
+  /* The fill for any unit pair `relations` does not name. */
   relation: AutodedupSplitRelation;
+  relations?: AutodedupSplitRelationEntry[];
+  /* A split that drops a veto the operator wrote earlier is refused with a 409
+   * until this says the operator meant it. */
+  confirm_retract?: boolean;
   note?: string | null;
 }
 
@@ -4286,6 +4322,9 @@ export interface AutodedupSplitResult {
   n_pairs_negative: number;
   must_not_link_written: number;
   must_not_link_retracted: number;
+  /* The pairs this save took back: the operator had ruled them negative and the
+   * split re-ruled them as one unit. */
+  reversed_pairs?: number[][];
 }
 
 export const postAutodedupSplitVerdict = (
