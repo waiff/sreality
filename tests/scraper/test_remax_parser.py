@@ -433,4 +433,30 @@ def test_the_real_capture_renders_its_thousands_group_with_an_nbsp():
             / "remax_detail.html").read_text(encoding="utf-8")
     params = _detail_params(HTMLParser(body))
     assert parse_area_text(params["plocha parcely"]) == 1063.0
+    # W20: and the number now REACHES the column. The parser read the parcel under
+    # "plocha pozemku" — a label no remax page carries (0 of 13,806 stored rows, against
+    # 4,339 under this one), so `estate_area` was NULL on the entire portal. The capture
+    # is a house: the parcel lands beside the dwelling's own headline, never as it.
+    listing = parse_detail(body, source_url="https://www.remax-czech.cz/reality/detail/445483/x")
+    assert listing.estate_area == 1063.0
+    assert (listing.area_m2, listing.area_basis) == (60.0, "usable")
+
+
+def test_a_land_page_takes_its_headline_from_the_parcel():
+    """On `pozemek` the parcel IS the headline (`scraper.area.derive_headline_area`), so the
+    key fix moves remax's land rows off the title fallback and onto their own measure — with
+    the basis stamped 'plot' rather than 'unknown'."""
+    row = '<div class="pd-detail-info__row"><div class="pd-detail-info__label">{}</div>' \
+          '<div class="pd-detail-info__value">{}</div></div>'
+    html = DETAIL_HTML.replace(
+        row.format("Užitná plocha:", "45 m²"),
+        row.format("Plocha parcely:", "2 480 m²"),
+    ).replace(
+        row.format("Typ nemovitosti:", "Byty"),
+        row.format("Typ nemovitosti:", "Pozemky"),
+    )
+    listing = parse_detail(html, source_url=_DETAIL_URL)
+    assert listing.category_main == "pozemek"
+    assert (listing.area_m2, listing.area_basis) == (2480.0, "plot")
+    assert listing.estate_area == 2480.0
 

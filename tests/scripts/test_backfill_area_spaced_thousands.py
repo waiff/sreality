@@ -278,10 +278,11 @@ def _world() -> _Conn:
                  area_m2=870.0, area_basis="plot", estate_area=870.0,
                  params={"plocha pozemku": f"5{NB}870 m²"},
                  title=f"Prodej pozemku 5{NB}870 m²"),
-        # remax: a parcel `area_m2` (numeric(7,1)) cannot store.
+        # remax: a parcel `area_m2` (numeric(7,1)) cannot store, under remax's OWN parcel
+        # label — "Plocha parcely", the only one its pages carry (W20).
         _listing(id=2, source="remax", property_id=22,
                  area_m2=800.0, area_basis="plot", estate_area=800.0,
-                 params={"plocha pozemku": f"16{NB}809{NB}800 m²"},
+                 params={"plocha parcely": f"16{NB}809{NB}800 m²"},
                  title=f"Prodej pozemku 16{NB}809{NB}800 m², Brno"),
         # no page fields at all: reported, never written.
         _listing(id=3, source="ceskereality", area_m2=41.0, area_basis="usable",

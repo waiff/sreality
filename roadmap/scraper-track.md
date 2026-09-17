@@ -50,6 +50,12 @@ Independent of the analytical, UI, and map tracks.
   every source's stop cursor is logged for the resume). **Expect it to surface seller-error
   outliers the truncation masked** — a 2+kk flat advertised as "3 060 m²" stops reading 60 and
   starts reading 3060, faithfully to the page.
+- **W20 (2026-09-17, done):** the same function was reading remax's parcel under
+  `plocha pozemku`, a label NO remax page carries (0 of 13,806 rows; the real one,
+  `plocha parcely`, carries 4,339) — so `estate_area` was NULL on the whole portal and its land
+  rows fell through to the title. One key, no dead fallback; the heal above
+  (`--sources remax`) calls this same `areas_from_params`, so it fills those 4,339 rows and
+  re-derives `area_m2` for land — no new script.
 
 ### sreality photos: the whole frame, and provenance on every stored row (2026-09-11, in progress)
 - **Shipped:** downloads moved off sreality's `res,749,562,3|shr,,20|jpg,90` (mode 3 = a 4:3 CROP;
