@@ -474,7 +474,7 @@
         },
         {
           "name": "batch_size",
-          "description": "Rows per keyset page — also the R2 fan-out and UPDATE width",
+          "description": "Rows per keyset page, and per UPDATE statement",
           "required": false,
           "type": "string",
           "default": "500",
@@ -514,10 +514,6 @@
         }
       ],
       "secrets": [
-        "R2_ACCESS_KEY_ID",
-        "R2_ACCOUNT_ID",
-        "R2_BUCKET_NAME",
-        "R2_SECRET_ACCESS_KEY",
         "SUPABASE_DB_URL"
       ],
       "concurrencyGroup": "backfill-area-spaced-thousands",

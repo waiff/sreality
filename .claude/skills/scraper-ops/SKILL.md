@@ -132,8 +132,8 @@ fatal — so **a broken archive looks like a healthy scrape**: `portal_raw_pages
 where page_kind = 'detail' group by 1;` is the backlog the lane's hash gate is working through.
 
 **One area grammar, one heal.** `scraper.area.parse_area_text` is the ONLY area regex — five parsers each held a copy and four read "5 870 m²" as 870.
-Re-parse stored rows from their archived bodies with `backfill_area_spaced_thousands.yml`: dispatch-only, dry-run default, R2 + ONE `--sources` per run.
-It skips a body older than the listing's newest snapshot (never revert a seller's edit) and never blanks a stored area.
+Each portal also owns ONE `areas_from_params` (bazos: `areas_from_text`) that its `parse_detail` and the heal both call — never a second copy of a key order.
+Heal stored rows from their OWN `raw_json` page fields with `backfill_area_spaced_thousands.yml`: dispatch-only, dry-run default, one `--sources` per run, no R2.
 
 ## How to manually trigger the scrapers
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from html import unescape
 from typing import Any
@@ -36,7 +37,7 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper import street
-from scraper.area import derive_headline_area, parse_area_text
+from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 
@@ -535,6 +536,42 @@ def _card_price(card: Node) -> str | None:
     return None
 
 
+def areas_from_params(
+    params: Mapping[str, str],
+    *,
+    title: str | None,
+    category_main: str | None,
+) -> PortalAreas:
+    """realitymix's area cells, in ITS precedence — spelled here once and nowhere else.
+
+    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
+    reads it off `raw_json['params']`, which is this parser's own latest reading of the
+    same page. realitymix renders its spec values UNSPACED, so the truncation this heal
+    repairs reached its rows through the title fallback below.
+    """
+    usable_area = parse_area_text(params.get("užitná plocha"))
+    estate_area = parse_area_text(
+        params.get("plocha parcely")
+        or params.get("plocha pozemku")
+        or params.get("výměra pozemku")
+    )
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=usable_area,
+        floor=parse_area_text(
+            params.get("celková podlahová plocha") or params.get("podlahová plocha")
+        ),
+        total=parse_area_text(params.get("plocha")),
+        plot=estate_area,
+        fallback=parse_area_text(title),
+    )
+    return PortalAreas(
+        area_m2=area_m2, area_basis=area_basis, usable_area=usable_area,
+        estate_area=estate_area,
+        garden_area=parse_area_text(params.get("plocha zahrady")),
+    )
+
+
 def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     tree = HTMLParser(html)
     source_id = _id_from_href(source_url) or ""
@@ -564,22 +601,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     # geocode them (the ~28% no-#print-map case) and so they have a display label.
     locality = full_address or obec or _fallback_locality(source_url, street_name)
 
-    usable_area = parse_area_text(params.get("užitná plocha"))
-    estate_area = parse_area_text(
-        params.get("plocha parcely")
-        or params.get("plocha pozemku")
-        or params.get("výměra pozemku")
-    )
-    area_m2, area_basis = derive_headline_area(
-        category_main=category_main,
-        usable=usable_area,
-        floor=parse_area_text(
-            params.get("celková podlahová plocha") or params.get("podlahová plocha")
-        ),
-        total=parse_area_text(params.get("plocha")),
-        plot=estate_area,
-        fallback=parse_area_text(title),
-    )
+    areas = areas_from_params(params, title=title, category_main=category_main)
     other = _strip_diacritics(params.get("ostatní", "")).lower()
 
     description = _text(
@@ -607,9 +629,9 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         category_type=category_type,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=area_m2,
-        area_basis=area_basis,
-        usable_area=usable_area,
+        area_m2=areas.area_m2,
+        area_basis=areas.area_basis,
+        usable_area=areas.usable_area,
         disposition=_parse_disposition(params.get("dispozice bytu") or params.get("dispozice"))
         or _parse_disposition(title),
         locality=locality,
@@ -631,8 +653,8 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         energy_rating=_energy_rating(
             params.get("energetická náročnost budovy") or params.get("energetická náročnost")
         ),
-        estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        estate_area=areas.estate_area,
+        garden_area=areas.garden_area,
         description=description,
         raw=raw,
     )
