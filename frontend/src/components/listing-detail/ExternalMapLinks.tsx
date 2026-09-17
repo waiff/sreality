@@ -1,27 +1,58 @@
-/* The external row under the listing header map: Mapy.cz, Google Maps and
- * iKatastr opened at this listing's resolved point, and Reas.cz's sold prices
- * for a box around it. Sits directly below "Explore area" (our own market view
- * of the asking side) — the first three answer "where exactly is this, and on
- * whose parcel", the fourth "what did the neighbourhood actually sell for".
+/* The external rows under the listing header map, in two questions. WHERE is
+ * this: Mapy.cz, Google Maps and iKatastr opened at the listing's resolved point.
+ * What does it SELL for: Reas.cz's sold prices for a box around it, and sreality's
+ * Cenová mapa for its street / part of town / town. Sits directly below "Explore
+ * area" (our own market view of the asking side).
  *
  * Rendered only where a coordinate exists (same gate as the map itself). The
- * point carries the resolver's precision and no more — see lib/geoLinks. */
+ * point carries the resolver's precision and no more — see lib/geoLinks. The
+ * Cenová mapa link is the one that needs a lookup (it addresses places by
+ * Seznam's ids); it renders at once with the national map and sharpens when the
+ * lookup answers, so a slow or failed lookup never costs the operator a link. */
 
-import { externalMapLinks } from '@/lib/geoLinks';
+import { useQuery } from '@tanstack/react-query';
+
+import {
+  externalMapLinks,
+  srealityPriceMapLink,
+  type ExternalMapLink,
+} from '@/lib/geoLinks';
+import { fetchSrealityPriceMap } from '@/lib/maps';
 
 export default function ExternalMapLinks({
   lat,
   lng,
+  label,
 }: {
   lat: number;
   lng: number;
+  /* The listing's display_label — what the Cenová mapa lookup searches for. */
+  label: string | null;
 }) {
-  const links = externalMapLinks(lat, lng);
-  /* Four across from `sm` up (the lg map column is 400px); two by two on a
-   * phone, where four equal chips truncate the widest label ("Mapy.…" at
-   * 360px, measured). */
+  const priceMapQ = useQuery({
+    queryKey: ['sreality-price-map', label, lat, lng],
+    queryFn: ({ signal }) => fetchSrealityPriceMap(label as string, lat, lng, signal),
+    enabled: !!label,
+    // Seznam's locality ids don't move; the server caches a day as well.
+    staleTime: Infinity,
+    retry: false,
+  });
+  const links = [...externalMapLinks(lat, lng), srealityPriceMapLink(priceMapQ.data)];
+  /* Two rows rather than one: five equal chips don't fit the 400px map column
+   * ("Mapy.cz" already truncated at four across on a 360px phone, measured), and
+   * the split is the one the operator reads in anyway. Literal class names, so
+   * Tailwind sees them. */
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+    <div className="space-y-1.5">
+      <ChipRow links={links.filter((l) => l.group === 'place')} className="grid-cols-3" />
+      <ChipRow links={links.filter((l) => l.group === 'price')} className="grid-cols-2" />
+    </div>
+  );
+}
+
+function ChipRow({ links, className }: { links: ExternalMapLink[]; className: string }) {
+  return (
+    <div className={`grid gap-1.5 ${className}`}>
       {links.map((l) => (
         <a
           key={l.key}

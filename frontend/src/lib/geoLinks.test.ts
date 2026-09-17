@@ -5,6 +5,8 @@ import {
   iKatastrPointUrl,
   mapyCzPointUrl,
   reasSoldUrl,
+  SREALITY_PRICE_MAP_URL,
+  srealityPriceMapLink,
 } from './geoLinks';
 
 /* Wenceslas Square, Prague — lat 50.08, lon 14.42. The two numbers are far
@@ -116,5 +118,36 @@ describe('externalMapLinks', () => {
     expect(katastr.url).toContain('50.081234,14.428765');
     // Reas gets a box, not the point — so the point is its centre.
     expect(reas.url).toBe(reasSoldUrl(LAT, LNG));
+  });
+});
+
+describe('srealityPriceMapLink', () => {
+  it('uses the looked-up place and names it in the hover text', () => {
+    const url =
+      'https://www.sreality.cz/cenova-mapa/hledani/byty/hlavni-mesto-praha-10/' +
+      'hlavni-mesto-praha-47/praha-3468?ulice=rasinovo-nabrezi-122977';
+    const link = srealityPriceMapLink({ url, name: 'ulice Rašínovo nábřeží' });
+    expect(link).toMatchObject({ key: 'cenova-mapa', group: 'price', label: 'Cenová mapa', url });
+    expect(link.title).toContain('ulice Rašínovo nábřeží');
+  });
+
+  /* Pending, failed and "nothing near the point" all land on the national map —
+     a working link, only less specific, and the title says so. */
+  it.each([undefined, { url: null, name: null }])('falls back to the national map (%j)', (place) => {
+    const link = srealityPriceMapLink(place);
+    expect(link.url).toBe(SREALITY_PRICE_MAP_URL);
+    expect(SREALITY_PRICE_MAP_URL).toBe('https://www.sreality.cz/cenova-mapa');
+    expect(link.title).toContain('national map');
+  });
+});
+
+describe('link groups', () => {
+  it('puts the three maps in the place row and Reas in the price row', () => {
+    expect(externalMapLinks(LAT, LNG).map((l) => [l.key, l.group])).toEqual([
+      ['mapy', 'place'],
+      ['google', 'place'],
+      ['katastr', 'place'],
+      ['reas', 'price'],
+    ]);
   });
 });

@@ -19,7 +19,9 @@
  * lon,lat — Google Maps, iKatastr and Reas take lat,lon. */
 
 export type ExternalMapLink = {
-  key: 'mapy' | 'google' | 'katastr' | 'reas';
+  key: 'mapy' | 'google' | 'katastr' | 'reas' | 'cenova-mapa';
+  /* Which row the chip sits in: where the place is, or what it sells for. */
+  group: 'place' | 'price';
   /* Chip text — short, because the footer shares a ~300px map column. */
   label: string;
   /* Hover text: the full service name + what it is good for here. */
@@ -86,27 +88,54 @@ export function externalMapLinks(lat: number, lng: number): ExternalMapLink[] {
   return [
     {
       key: 'mapy',
+      group: 'place',
       label: 'Mapy.cz',
       title: 'Open this point on Mapy.cz — street and aerial detail',
       url: mapyCzPointUrl(lat, lng),
     },
     {
       key: 'google',
+      group: 'place',
       label: 'Google',
       title: 'Open this point in Google Maps — Street View and surroundings',
       url: googleMapsPointUrl(lat, lng),
     },
     {
       key: 'katastr',
+      group: 'place',
       label: 'Katastr',
       title: 'Open this point on iKatastr.cz — cadastre parcel and building',
       url: iKatastrPointUrl(lat, lng),
     },
     {
       key: 'reas',
+      group: 'price',
       label: 'Reas.cz',
       title: 'Sold properties around this point on reas.cz — a ~2 km box, actual sale prices',
       url: reasSoldUrl(lat, lng),
     },
   ];
+}
+
+/* sreality's Cenová mapa — registered sale prices of apartments, by kraj → okres
+ * → obec → street. It addresses places by Seznam's own locality ids and never
+ * by a coordinate, so the precise URL comes from the API
+ * (`fetchSrealityPriceMap`); until it answers, or when nothing near the point
+ * matched, the chip opens the national map — it always works, it is only
+ * sometimes less specific. */
+export const SREALITY_PRICE_MAP_URL = 'https://www.sreality.cz/cenova-mapa';
+
+export function srealityPriceMapLink(
+  place: { url: string | null; name: string | null } | undefined,
+): ExternalMapLink {
+  const url = place?.url ?? null;
+  return {
+    key: 'cenova-mapa',
+    group: 'price',
+    label: 'Cenová mapa',
+    title: url
+      ? `Sreality price map — sold apartment prices for ${place?.name ?? 'this place'}`
+      : 'Sreality price map — sold apartment prices (opens the national map)',
+    url: url ?? SREALITY_PRICE_MAP_URL,
+  };
 }
