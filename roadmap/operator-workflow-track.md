@@ -80,6 +80,17 @@ pipeline (Phase U-PIPE) plugs into next.
   tag filter + CurationBlock + CollectionDetail operate on
   `property_id`. Design validated by adversarial red-team before build
   (CLAUDE.md rule #18, #16).
+- **Write-side invariant completed (2026-09-17).** `resolve_active_property_id`
+  now runs on the REMOVE/EDIT half of every property-anchored write too:
+  `remove_property_from_collection`, `detach_tag`, `update_note`, `delete_note`
+  (curation) + `remove_card` / `move_card` (pipeline). 426fa575 had hardened only
+  the INSERT half while claiming "every property-anchored write entry", so for
+  fourteen months a stale id could CREATE a membership it could never remove —
+  the DELETE matched nothing and answered a success-shaped `{"removed": false}`,
+  HTTP 200, which no client reads. Rail: `tests/api/test_property_anchored_write_census.py`,
+  an AST census over `api/` with a reasoned allowlist (it reproduces all six sites
+  on the pre-fix tree, so it is not vacuous). Prod held 0 orphaned curation /
+  pipeline rows against 105,513 merged-away properties, so no repair migration.
 
 ### Phase U-PIPE Phase 0: Deal pipeline — bookmark MVP (done)
 A Trello-style deal pipeline over properties. Phase 0 ships the schema + the

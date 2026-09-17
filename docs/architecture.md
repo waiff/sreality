@@ -1219,7 +1219,21 @@ renumber.** Navigate by area:
     property-anchored operator-state table — collections, tags, notes, AND `notification_dispatches`)
     re-points that state onto the survivor inside the `merge_properties` transaction (SET tables
     union with collision-collapse; APPEND tables move every row), so no operator-state row can
-    ever orphan onto a `merged_away` property — the invariant holds by construction. Adding a
+    ever orphan onto a `merged_away` property — the invariant holds by construction. **That
+    invariant has a second half, on the WRITE side: a caller-supplied `property_id` is resolved to
+    the active survivor (`toolkit.property_identity.resolve_active_property_id`) before EVERY
+    property-anchored write — the remove and edit halves included, not just the INSERT.** 426fa575
+    hardened only the INSERTs while claiming "every property-anchored write entry", and the five
+    UPDATE/DELETE twins kept the bug for fourteen months: the add half resolved and landed a row on
+    the survivor, the remove half kept the raw id, matched nothing, and answered a success-shaped
+    `{"removed": false}` (or a 404 "note not found" for a note alive and well on the survivor) — so
+    one cached id could create a membership it could then never remove. The two halves of one
+    affordance must resolve alike. A write that needs a real target 4xx's on an unresolvable id; a
+    remove falls through to the raw id and stays idempotent, because no caller reads the boolean.
+    Resolution is wrong in exactly two places, both enumerated in the rail: the merge route itself
+    (it CREATES survivors) and `properties.asset_id` (a column on the property row, not carried
+    state). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
+    commit message is not one. Adding a
     new property-anchored operator-state table = one registry line. Unmerge/split are deliberately
     **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
     side starts clean (the operator re-curates — nothing is destroyed, it is on the survivor).
