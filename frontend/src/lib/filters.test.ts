@@ -392,6 +392,29 @@ describe('broker scope URL codec', () => {
   });
 });
 
+/* Hidden is the default, so a URL (or preset) from before migration 537 means
+ * exactly what it does now: only the reveal is ever spelled out. */
+describe('dismissed reveal URL codec', () => {
+  it('spells only the reveal', () => {
+    expect(toSearchParams(DEFAULT_FILTERS).has('dismissed')).toBe(false);
+    const f: ListingFilters = { ...DEFAULT_FILTERS, showDismissed: true };
+    const sp = toSearchParams(f);
+    expect(sp.get('dismissed')).toBe('show');
+    expect(fromSearchParams(sp)).toEqual(f);
+  });
+
+  it('reads anything but `show` as hidden', () => {
+    expect(fromSearchParams(new URLSearchParams('dismissed=1')).showDismissed).toBe(false);
+    expect(fromSearchParams(new URLSearchParams()).showDismissed).toBe(false);
+  });
+
+  it('is reported to a watchdog rather than silently carried', () => {
+    const { unsupported } = filtersToWatchdogSpec({ ...DEFAULT_FILTERS, showDismissed: true });
+    expect(unsupported).toContain('dismissed properties');
+    expect(filtersToWatchdogSpec(DEFAULT_FILTERS).unsupported).not.toContain('dismissed properties');
+  });
+});
+
 describe('isDefault', () => {
   it('returns true for the canonical default state', () => {
     expect(isDefault(DEFAULT_FILTERS)).toBe(true);
@@ -730,6 +753,17 @@ describe('filter presets', () => {
         { ...saved, priceMax: 4_000_000, pipeline: { stage_ids: [] } },
         saved,
       ),
+    ).toBe(false);
+  });
+
+  it('treats the dismissed reveal as a lens: stripped from presets, never dirtying one', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 6_000_000, showDismissed: true };
+    expect(filtersForPreset(f, false).showDismissed).toBe(false);
+    expect(filtersForPreset(f, true).showDismissed).toBe(false);
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000 };
+    expect(filtersEqualForPreset({ ...saved, showDismissed: true }, saved)).toBe(true);
+    expect(
+      filtersEqualForPreset({ ...saved, priceMax: 4_000_000, showDismissed: true }, saved),
     ).toBe(false);
   });
 

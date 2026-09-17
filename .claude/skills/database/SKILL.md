@@ -267,6 +267,13 @@ nothing.) This retired the old `scripts/refresh_map_mv.py` GH Actions cron entir
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
+**Three functions depend on `browse_projection`'s row type** (migration 537:
+`browse_list_visible()`, `properties_map_visible()`, and `listing_feed_visible()` on
+`listing_feed_public`'s) — the SPA's default Browse sources, minus the caller's dismissed
+properties. A non-CASCADE `drop view browse_projection` now fails; drop and recreate them in
+the same migration. Keep them `language sql stable`, invoker, no `SET`: that is what lets the
+planner inline them, so PostgREST's filters/ORDER BY/LIMIT still reach `browse_list`'s index.
+
 **A single-value filter must reach `browse_list` as `=`, never as `= ANY`.** The serving
 index is `(category_main, category_type, first_seen_at DESC, property_id DESC)` and Browse's
 default sort is exactly its trailing pair — but a ScalarArrayOp ANYWHERE in the equality

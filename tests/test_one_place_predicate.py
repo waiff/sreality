@@ -7,8 +7,8 @@ rule, `<level>_id = any(codes)`, compiled by:
   * `api/location_filter.py`            — the API + the Watchdog matcher
   * `frontend/src/lib/districtCodes.ts` — the SPA (PostgREST string + the
                                           in-memory row predicate)
-  * `browse_stats_properties`           — migration 504, the Stats cohort
-  * `browse_map_cells`                  — migration 504, the map cohort
+  * `browse_stats_properties`           — migration 504 (537), the Stats cohort
+  * `browse_map_cells`                  — migration 504 (537), the map cohort
 
 This file holds the API half of the shared table (`tests/fixtures/
 district_chip_plan.json`, read by `districtCodes.test.ts` for the SPA half) plus
@@ -86,6 +86,9 @@ def test_the_ts_module_declares_the_same_levels_and_columns() -> None:
 # --- the two RPC bodies -----------------------------------------------------
 
 _W3_S3 = "504_location_w3_one_code_predicate.sql"
+# The latest definition of both RPCs. 537 carried 504's bodies forward verbatim
+# plus one `hide_dismissed` clause; re-read the chip arms when this moves again.
+_LATEST_RPC_DEFINITION = "537_browse_hides_dismissed.sql"
 
 
 def _latest_definition(func: str) -> Path:
@@ -143,7 +146,7 @@ def test_the_rpc_bodies_compile_the_same_level_map(func: str) -> None:
     """RED by: an RPC arm pointed at a different column than the API/SPA use, or
     a level served in one RPC and not the other — the Stats tab and the map
     would then answer for different cohorts under the same chips."""
-    assert _latest_definition(func).name == _W3_S3
+    assert _latest_definition(func).name == _LATEST_RPC_DEFINITION
     for arms in _chip_case_arms(func):
         # `locality` is compiled, not stored: a street pick filters at its obec.
         assert arms == {**LEVEL_COLUMN, "locality": LEVEL_COLUMN["obec"]}
@@ -181,18 +184,19 @@ def test_a_chip_without_a_code_matches_nothing_in_sql_too(func: str) -> None:
         assert re.search(r"else false", block, re.IGNORECASE)
 
 
-def test_the_rpc_signatures_did_not_change() -> None:
+def test_the_rpc_signatures_only_grew_hide_dismissed() -> None:
     """`create or replace function` cannot change a parameter list, and the SPA
     builds ONE argument object for both RPCs (tests/test_browse_map_read_
     contract.py). The chip parameters therefore stay exactly as they were — the
-    now-inert `districts_context_filter` included."""
+    now-inert `districts_context_filter` included. The one change since 436/439
+    is 537's trailing `hide_dismissed` (a DROP + CREATE, defaulted to false)."""
     for func, previous in (
         ("browse_stats_properties", "436_city_quality_obec_key.sql"),
         ("browse_map_cells", "439_browse_map_cells.sql"),
     ):
         new = _params_of(_latest_definition(func).read_text(encoding="utf-8"), func)
         old = _params_of((MIGRATIONS / previous).read_text(encoding="utf-8"), func)
-        assert new == old, f"{func}: parameter list changed"
+        assert new == [*old, "hide_dismissed"], f"{func}: parameter list changed"
         for chip_param in (
             "districts_filter", "districts_levels", "districts_ids",
             "districts_excluded_filter", "districts_context_filter",

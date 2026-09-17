@@ -284,11 +284,42 @@ const PORTAL_FEED_RELATION = 'listing_feed_public';
 const BROWSE_LIST_RELATION = 'browse_list';
 const MAP_RELATION = 'properties_map_mv';
 
-const listRelation = (f: ListingFilters): string =>
-  isListingGrain(f) ? PORTAL_FEED_RELATION : BROWSE_LIST_RELATION;
+/* Each relation's dismissal-aware twin (migration 537): the same rows minus the
+ * caller's dismissed properties, excluded server-side under the caller's RLS —
+ * a dismissed set grows without bound, so it can never ride in the GET URL. */
+const HIDING_DISMISSED: Record<string, string> = {
+  [BROWSE_LIST_RELATION]: 'browse_list_visible',
+  [MAP_RELATION]: 'properties_map_visible',
+  [PORTAL_FEED_RELATION]: 'listing_feed_visible',
+};
 
-const mapRelation = (f: ListingFilters): string =>
-  isListingGrain(f) ? PORTAL_FEED_RELATION : MAP_RELATION;
+interface CountOption {
+  count?: 'exact' | 'planned';
+  head?: boolean;
+}
+
+const selectFrom = (relation: string, columns: string, opts?: CountOption) =>
+  supabase.from(relation).select(columns, opts);
+
+/* THE start of every Browse cohort read, so the list, its count, the map pins
+ * and the no-price hint cannot disagree about which properties are hidden. */
+const readSource = (
+  relation: string,
+  f: ListingFilters,
+  columns: string,
+  opts: CountOption = {},
+): ReturnType<typeof selectFrom> =>
+  f.showDismissed
+    ? selectFrom(relation, columns, opts)
+    : (supabase
+        .rpc(HIDING_DISMISSED[relation], {}, { get: true, ...opts })
+        .select(columns) as unknown as ReturnType<typeof selectFrom>);
+
+const listSource = (f: ListingFilters, columns: string, opts?: CountOption) =>
+  readSource(isListingGrain(f) ? PORTAL_FEED_RELATION : BROWSE_LIST_RELATION, f, columns, opts);
+
+const mapSource = (f: ListingFilters, columns: string) =>
+  readSource(isListingGrain(f) ? PORTAL_FEED_RELATION : MAP_RELATION, f, columns);
 
 /* Keyset tiebreak — REQUIRED to differ per grain, not a stylistic choice.
  * `property_id` is not unique on the listing-grain feed: 7,951 properties hold
@@ -763,9 +794,7 @@ export const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
 export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return 0;
-  const base = supabase
-    .from(listRelation(f))
-    .select(keysetTiebreak(f), { count: 'exact', head: true });
+  const base = listSource(f, keysetTiebreak(f), { count: 'exact', head: true });
   // Strip the price bound (and the toggle) so the count is purely "no-price
   // rows in the rest of the cohort", then restrict to NULL price.
   const noPriceFilters: ListingFilters = {
@@ -831,9 +860,7 @@ const fetchMapPoints = async (
   f: ListingFilters,
   pre: BrowsePrefilters,
 ): Promise<MapRow[]> => {
-  const base = supabase
-    .from(mapRelation(f))
-    .select(MAP_COLS)
+  const base = mapSource(f, MAP_COLS)
     .not('lat', 'is', null)
     .not('lng', 'is', null);
   const scoped = applyPrefilters(applyFilters(base, f), pre);
@@ -1007,9 +1034,7 @@ export const fetchListingsForTable = async (
    * the mirror's sort key (portal_sort_key) is immutable after first write. */
   const s = effectiveSort(f, sort);
   const tiebreak = keysetTiebreak(f);
-  const base = supabase
-    .from(listRelation(f))
-    .select(withKeysetColumns(TABLE_COLS, s, tiebreak));
+  const base = listSource(f, withKeysetColumns(TABLE_COLS, s, tiebreak));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
     scoped as unknown as KeysetBuilder,
@@ -1064,12 +1089,7 @@ export const fetchBrowseCount = async (
   };
   const build = (mode: 'exact' | 'planned') =>
     applyPrefilters(
-      applyFilters(
-        supabase
-          .from(listRelation(f))
-          .select(keysetTiebreak(f), { count: mode, head: true }),
-        f,
-      ),
+      applyFilters(listSource(f, keysetTiebreak(f), { count: mode, head: true }), f),
       pre,
     ) as unknown as CountQuery;
   try {
@@ -1149,9 +1169,7 @@ export const fetchListingsForCards = async (
   if (pre.empty) return { rows: [], nextCursor: null };
   const s = effectiveSort(f, sort);
   const tiebreak = keysetTiebreak(f);
-  const base = supabase
-    .from(listRelation(f))
-    .select(withKeysetColumns(CARD_COLS, s, tiebreak));
+  const base = listSource(f, withKeysetColumns(CARD_COLS, s, tiebreak));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
   const keyed = applyKeyset(
     scoped as unknown as KeysetBuilder,
@@ -1350,6 +1368,8 @@ export const buildBrowseStatsArgs = (
     price_change_window_days:      f.priceChangeWindowDays,
     total_price_change_pct_filter: f.totalPriceChangePct,
     with_estimates:                f.withEstimates,
+    /* Migration 537 — the caller's dismissed properties, excluded server-side. */
+    hide_dismissed:                !f.showDismissed,
     building_condition_level_min:  f.buildingConditionLevelMin,
     building_condition_level_max:  f.buildingConditionLevelMax,
     apartment_condition_level_min: f.apartmentConditionLevelMin,
@@ -2373,6 +2393,20 @@ export const pipelineKeys = {
   board: ['pipeline', 'board'] as const,
   stages: ['pipeline', 'stages'] as const,
   members: ['pipeline', 'members'] as const,
+};
+
+export const dismissalKeys = {
+  count: ['dismissals', 'count'] as const,
+};
+
+/* How many properties the caller has dismissed (migration 536). Only a gate —
+ * a property two of the caller's accounts dismissed counts twice. */
+export const fetchDismissedCount = async (): Promise<number> => {
+  const { count, error } = await supabase
+    .from('property_dismissals_public')
+    .select('property_id', { count: 'exact', head: true });
+  if (error) throw error;
+  return count ?? 0;
 };
 
 /* Every pipeline card the caller's account holds, keyed by property_id — one

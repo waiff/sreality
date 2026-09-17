@@ -383,14 +383,16 @@ North star: a dismissal is ONE durable, account-scoped fact about a property
 (lift, never delete), enforced server-side once, rendered by one shared
 control. Not a special collection (collections are m2m groupings; see
 `docs/architecture.md` rule 18). The pipeline always wins over a dismissal.
-- **W1 — store, merge carry, API** (in progress): migration 536
+- **W1 — store, merge carry, API** (done, #1515): migration 536
   (`property_dismissals` + `property_dismissals_public`), `POST /dismissals`,
   `DELETE /dismissals/{property_id}` (lift), 409 for a piped property,
   `add_card` lifts, `toolkit/dismissal_identity.py` in `merge_properties`.
-- **W2 — Browse hides dismissed by default** (next): server-side exclusion on
-  cards/table/count/map/Stats (`browse_list` is blue-green rebuilt, so no view
-  or policy can sit on it), `?dismissed=show` to reveal, outside preset
-  identity, an "N hidden" affordance.
+- **W2 — Browse hides dismissed by default** (in progress): migration 537's
+  inlinable invoker twins (`browse_list_visible()` & co — functions because
+  `browse_list` is blue-green rebuilt) + `hide_dismissed` on the Stats/map
+  RPCs; `queries.ts:readSource` is the one SPA seam; `?dismissed=show`
+  reveals, outside preset identity; the sidebar counts what the cohort hides.
+  Merge mode shares the source (reveal to merge a dismissed duplicate).
 - **W3 — notification visibility** (next): feed, unread count, mark-all-seen
   and the outbox drain skip dismissed properties; detection is untouched (its
   cursors and the `reactivated` detector depend on every dispatch existing).

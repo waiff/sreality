@@ -263,6 +263,10 @@ export interface ListingFilters {
   /* Browse-only: restrict to properties with at least one successful
    * estimation run (property_estimates_public, migration 173). */
   withEstimates: boolean;
+  /* Browse-only. False (the default) hides the caller's dismissed properties,
+   * server-side (migration 537); true reveals them. A lens over the operator's
+   * own state, so it sits OUTSIDE preset identity (PRESET_EXCLUDED_KEYS). */
+  showDismissed: boolean;
   /* Browse-only deal-pipeline scope (rule #22). Null = off. Deliberately NOT
    * part of a saved preset's identity (see PRESET_EXCLUDED_KEYS): a preset
    * describes market criteria, the pipeline scope is a lens over the
@@ -364,6 +368,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   priceChangeWindowDays: null,
   totalPriceChangePct: null,
   withEstimates: false,
+  showDismissed: false,
   pipeline: null,
   brokerId: null,
   tags: [],
@@ -647,6 +652,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     priceChangeWindowDays: parsePriceChangeWindow(sp.get('changes_window')),
     totalPriceChangePct: parseFloatOrNull(sp.get('total_change_pct')),
     withEstimates: sp.get('with_est') === '1',
+    showDismissed: sp.get('dismissed') === 'show',
     pipeline: parsePipelineScope(sp.get('pipeline')),
     brokerId: parseIntOrNull(sp.get('broker')),
     tags: parseIntList(sp.get('tags')),
@@ -903,6 +909,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.priceChangeWindowDays != null) sp.set('changes_window', String(f.priceChangeWindowDays));
   if (f.totalPriceChangePct != null) sp.set('total_change_pct', String(f.totalPriceChangePct));
   if (f.withEstimates) sp.set('with_est', '1');
+  if (f.showDismissed) sp.set('dismissed', 'show');
   if (f.pipeline) {
     sp.set(
       'pipeline',
@@ -1198,18 +1205,18 @@ export const pipelineViewFilters = (): ListingFilters => ({
 /* Filter fields that ride ALONGSIDE a preset rather than inside it: they are
  * reset before persisting and ignored when deciding whether a loaded preset is
  * dirty. A preset describes MARKET CRITERIA ("2+kk, 60–90 m², Praha"); the
- * pipeline scope is a lens over the operator's own deal state, orthogonal to
- * every preset and combinable with all of them — so toggling it must never
- * offer to bake itself into the saved filters.
+ * pipeline scope and the dismissed reveal are lenses over the operator's own
+ * state, orthogonal to every preset and combinable with all of them — so
+ * toggling one must never offer to bake itself into the saved filters.
  *
  * `bounds` is deliberately NOT here: it is opt-in per save (the "include map
  * area" toggle), which is a different rule, expressed below. */
-const PRESET_EXCLUDED_KEYS = ['pipeline', 'brokerId'] as const satisfies ReadonlyArray<
-  keyof ListingFilters
->;
+const PRESET_EXCLUDED_KEYS = [
+  'pipeline', 'brokerId', 'showDismissed',
+] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 /* The same fields as URL params — the form preset equality is computed in. */
-const PRESET_EXCLUDED_PARAMS: readonly string[] = ['pipeline', 'broker'];
+const PRESET_EXCLUDED_PARAMS: readonly string[] = ['pipeline', 'broker', 'dismissed'];
 
 const stripPresetExcluded = (f: ListingFilters): ListingFilters => {
   const out = { ...f };
@@ -1358,6 +1365,7 @@ export const REGISTRY_KEY_MAP = {
   price_change_window_days: 'priceChangeWindowDays',
   total_price_change_pct: 'totalPriceChangePct',
   with_estimates: 'withEstimates',
+  show_dismissed: 'showDismissed',
   pipeline: 'pipeline',
   tags: 'tags',
   tom_days_min: 'tomDaysMin',
@@ -1561,6 +1569,8 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
   { test: (f) => f.tags.length > 0, label: 'tags' },
   { test: (f) => f.priceGrowthRules.length > 0, label: 'market growth (datasets)' },
   { test: (f) => f.withEstimates, label: 'with estimates' },
+  /* A watchdog never surfaces a dismissed property, whatever the spec says. */
+  { test: (f) => f.showDismissed, label: 'dismissed properties' },
   /* The pipeline is the operator's own state: a watchdog scoped to it would
    * only ever fire on properties they already put there — and "new listing"
    * events can't match a card that doesn't exist yet. */
