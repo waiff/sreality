@@ -1297,6 +1297,16 @@ renumber.** Navigate by area:
     reads the same source: to merge a dismissed duplicate, reveal it first. Measured on
     production with 20,000 dismissals stacked on the newest rows: card page 49 ms, exact count
     115 ms (31 ms baseline), Stats no slower, map clusters +95 ms.
+    **Notifications: a dismissal hides, it never un-detects.** The watchdog matcher, change
+    detector and collection monitor are untouched — `match_once` advances its cursor whether or
+    not it inserts, `:new:` dedupe keys are once-ever, and the `reactivated` detector keys off a
+    prior `inactive` dispatch, so suppressing an INSERT would lose the event for good on undo.
+    Instead every in-app read of `notification_dispatches` — the feed and its total, the unread
+    badge, mark-all-seen, each watchdog's dispatch count — carries one `_NOT_DISMISSED` predicate
+    (RLS-scoped, via the view), so the badge and the list cannot disagree; a dispatch stays
+    reachable by id. The outbox drain (service-role) skips a dispatch whose own account dismissed
+    its property, on both the new and the retry pass: it gets no `channel_sends` row and ages out
+    of the 7-day window unless the dismissal is lifted first.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

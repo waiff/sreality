@@ -387,15 +387,17 @@ control. Not a special collection (collections are m2m groupings; see
   (`property_dismissals` + `property_dismissals_public`), `POST /dismissals`,
   `DELETE /dismissals/{property_id}` (lift), 409 for a piped property,
   `add_card` lifts, `toolkit/dismissal_identity.py` in `merge_properties`.
-- **W2 — Browse hides dismissed by default** (in progress): migration 537's
+- **W2 — Browse hides dismissed by default** (done, #1516): migration 537's
   inlinable invoker twins (`browse_list_visible()` & co — functions because
   `browse_list` is blue-green rebuilt) + `hide_dismissed` on the Stats/map
   RPCs; `queries.ts:readSource` is the one SPA seam; `?dismissed=show`
   reveals, outside preset identity; the sidebar counts what the cohort hides.
   Merge mode shares the source (reveal to merge a dismissed duplicate).
-- **W3 — notification visibility** (next): feed, unread count, mark-all-seen
-  and the outbox drain skip dismissed properties; detection is untouched (its
-  cursors and the `reactivated` detector depend on every dispatch existing).
+- **W3 — notification visibility** (in progress): one `_NOT_DISMISSED`
+  predicate on every in-app read (feed + total, unread badge, mark-all-seen,
+  per-watchdog counts) and an account-scoped twin on both outbox passes;
+  detection is untouched (its cursors and the `reactivated` detector depend on
+  every dispatch existing), so an undo brings a hidden dispatch back intact.
 - **W4 — the shared control** (next): one dismiss button beside the pipeline
   funnel on the Browse card, table row and listing header; Undo toast.
 - **W5 — Chrome extension** (next): the same control in the panel, state
