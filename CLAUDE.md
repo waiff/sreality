@@ -49,14 +49,12 @@ in before starting. Deep per-territory rationale: `docs/architecture.md` § Terr
   — Python 3.12, stdlib-first, `psycopg` direct to Postgres, service-role (reads + writes
   anything). Runs in GitHub Actions + Railway. All architectural rules below apply.
 - **Frontend** (`frontend/`) — Vite + React 18 + TypeScript + Tailwind v4 SPA on Railway.
-  **Never a secret in browser code** — the anon key + (once logged in) a Supabase Auth user
-  JWT are the only credentials it holds; reads `*_public` views + `SECURITY INVOKER` RPCs.
-  App-data writes still go through the bearer-gated API by convention, not because the anon
-  key forbids them: migrations 290/292/294 grant `authenticated` direct RLS-scoped table
-  writes (curation + pipeline tables), so a logged-in session's JWT *could* write directly —
-  the frontend code simply doesn't use those grants yet (see the `database` skill's
-  Multi-tenancy section). Design tokens in `globals.css` `@theme` — never change without
-  operator approval. Backend rules below don't apply here.
+  **Never a secret in browser code** — the anon key + a Supabase Auth user JWT are the only
+  credentials it holds, and every data read runs as `authenticated` (`anon` is granted
+  nothing): `*_public` views + `SECURITY INVOKER` RPCs. App-data writes go through the
+  bearer-gated API by convention, not necessity — `authenticated` holds direct RLS-scoped
+  write grants the SPA doesn't use (the `database` skill). Design tokens in `globals.css`
+  `@theme` — never change without operator approval. Backend rules below don't apply here.
 - **Chrome extension** (`chrome-extension/`) — Manifest v3, **vanilla TS only** (no React /
   Tailwind), closed shadow-root panel. Every network call goes through the background worker
   (`chrome.runtime.sendMessage`), never a direct `fetch`. Build-time `VITE_API_*` inlined
@@ -280,12 +278,14 @@ secret (the frontend build must not see it). **Full env-var / secrets reference*
 notifications, scraper orchestration, frontend build-time): the `toolkit-api` skill.
 ## What is explicitly out of scope right now
 
-- **Auth / user management** — single-operator platform, one shared API token, no per-user identity.
-- **A public read API** — the bearer-gated FastAPI service is private (the Railway URL is the perimeter).
+- **Team accounts + user-admin surfaces** — per-user auth is LIVE, not out of scope (Supabase
+  Auth signup/login, per-user JWTs, `accounts` + RLS, plans + trial; doctrine: `database` skill).
+  Out: a 2nd member per account — `account_members.role` is written and read by nothing — and
+  any invite / role / remove surface; platform admins are still provisioned by hand in SQL.
+- **A public read API** — every route is gated and `anon` reads nothing: LOGIN is the perimeter.
 
-ClickUp is *not* out of scope (a supported API consumer; `'clickup'` is a reserved `estimation_runs.source`).
-A free email/Telegram notification channel is planned (tracked in ROADMAP, not here). Don't start anything
-out of scope without explicit direction in a new session.
+ClickUp is *not* out of scope (a supported API consumer; `'clickup'` is a reserved `estimation_runs.source`);
+nor are the email/Telegram channels (rule #16). Don't start out-of-scope work without explicit direction.
 ## Where the detail lives
 
 | Need | Load |
