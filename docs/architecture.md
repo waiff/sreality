@@ -1319,7 +1319,9 @@ renumber.** Navigate by area:
     since the dismissed set only grows. The control is absent while the property is in the
     caller's pipeline, and a pipeline write re-reads dismissal state (`add_card` lifts it). The
     cancel-snapshot-restore step is `lib/optimisticCache.holdQueries`, shared with
-    `lib/pipelineCache`.
+    `lib/pipelineCache`. The Chrome extension's panel carries the same verb ("Skrýt" / "Skryto",
+    ink not copper), its state riding on `POST /listings/lookup` as `dismissed` (RLS-only, like
+    the pipeline and collection state beside it) and its writes on the same `/dismissals` routes.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

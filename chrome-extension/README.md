@@ -32,6 +32,11 @@ maxima, remax, mmreality, ceskereality).
     membership (incl. the current `stage_id`) comes back on the
     `POST /listings/lookup` response and the stage list from `GET /pipeline/stages`.
     Hidden only while a freshly-scraped listing has no property yet (a few minutes).
+  - The **hide control** ("Skrýt" / "Skryto", migration 536) dismisses the
+    property from the app's discovery surfaces (Browse, notifications) and undoes
+    it, one click either way, through the same `POST/DELETE /dismissals` the SPA's
+    `DismissButton` uses; the state rides on `POST /listings/lookup` (`dismissed`).
+    Absent while the property is in the pipeline — adding a card lifts a dismissal.
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
   on-demand estimation by that card's own URL.

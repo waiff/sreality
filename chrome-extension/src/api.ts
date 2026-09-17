@@ -8,6 +8,7 @@ import type {
   ApiResult,
   BillingMe,
   CollectionWriteResult,
+  DismissalWriteResult,
   EstimationRun,
   ExtCollection,
   ExtNote,
@@ -169,6 +170,26 @@ export async function getEstimation(
   run_id: number,
 ): Promise<ApiResult<EstimationRun>> {
   return request<EstimationRun>(`/estimations/${run_id}`);
+}
+
+/* POST /dismissals / DELETE /dismissals/:property_id — hide the property from
+ * discovery and undo it (migration 536). The SAME bearer-gated endpoints the
+ * SPA's DismissButton writes through. */
+export async function dismissProperty(
+  property_id: number,
+): Promise<ApiResult<DismissalWriteResult>> {
+  return request<DismissalWriteResult>('/dismissals', {
+    method: 'POST',
+    body: JSON.stringify({ property_id }),
+  });
+}
+
+export async function undismissProperty(
+  property_id: number,
+): Promise<ApiResult<DismissalWriteResult>> {
+  return request<DismissalWriteResult>(`/dismissals/${property_id}`, {
+    method: 'DELETE',
+  });
 }
 
 /* POST /pipeline/cards — bookmark a property into the deal pipeline (rule #22),

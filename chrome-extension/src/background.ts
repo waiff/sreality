@@ -9,6 +9,7 @@ import {
   addToCollection,
   createEstimation,
   deleteNote,
+  dismissProperty,
   getBillingMe,
   getEstimation,
   listCollections,
@@ -19,6 +20,7 @@ import {
   patchScenario,
   removeFromCollection,
   removePipelineCard,
+  undismissProperty,
   updateNote,
 } from './api';
 import { getAuthState, refreshIfSignedIn, signInWithGoogle, signOut } from './auth';
@@ -107,6 +109,10 @@ async function handleMessage(
       return movePipelineCard(message.property_id, message.stage_id);
     case 'list_pipeline_stages':
       return listPipelineStages();
+    case 'dismiss_property':
+      return dismissProperty(message.property_id);
+    case 'undismiss_property':
+      return undismissProperty(message.property_id);
     case 'list_collections':
       return listCollections();
     case 'add_to_collection':

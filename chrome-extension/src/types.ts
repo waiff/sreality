@@ -110,6 +110,14 @@ export interface ExtCollection {
   is_system: boolean;
 }
 
+/* Response of POST /dismissals (`added`) and DELETE /dismissals/{id}
+ * (`removed`). Read only to confirm the write landed. */
+export interface DismissalWriteResult {
+  property_id: number;
+  added?: boolean;
+  removed?: boolean;
+}
+
 /* Response of the collection writes: POST /collections/{id}/properties (add)
  * returns `{added, skipped}`; DELETE /collections/{id}/properties/{property_id}
  * returns `{removed}`. We only read these to confirm the write landed. */
@@ -217,6 +225,10 @@ export interface PortalListing {
   /* Collection memberships of the listing's property (rule #18). Null when the
    * listing has no property yet (same posture as `pipeline`). */
   collection_ids: number[] | null;
+  /* Whether the caller dismissed the listing's property (migration 536). Null
+   * when there is no property yet; absent when the API predates the field —
+   * either way the panel shows no hide control. */
+  dismissed?: boolean | null;
 }
 
 export interface PortalLookupResponse {
@@ -250,6 +262,8 @@ export type ApiMessage =
   | { type: 'remove_pipeline_card'; property_id: number }
   | { type: 'move_pipeline_card'; property_id: number; stage_id: number }
   | { type: 'list_pipeline_stages' }
+  | { type: 'dismiss_property'; property_id: number }
+  | { type: 'undismiss_property'; property_id: number }
   | { type: 'list_collections' }
   | { type: 'add_to_collection'; collection_id: number; property_id: number }
   | { type: 'remove_from_collection'; collection_id: number; property_id: number }
