@@ -227,3 +227,42 @@ def test_532_drops_the_generated_check_by_lookup_and_re_adds_a_named_one() -> No
     assert "drop constraint %i" in body
     assert "add constraint autodedup_verdicts_verdict_ck" in body
     assert "create table" not in body and "drop table" not in body
+
+
+# --- the operator's REASONS, added by migration 533 ------------------------------------
+
+
+_REASONS_MIGRATION = _ROOT / "migrations" / "533_autodedup_verdict_reasons.sql"
+
+
+def test_533_adds_the_reasons_array_idempotently_and_takes_a_lock_timeout() -> None:
+    body = _REASONS_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "set lock_timeout = '5s'" in body
+    assert "add column if not exists reasons text[] not null default '{}'" in body
+    # ADDITIVE only: nothing here creates, drops or rewrites a table.
+    assert "create table" not in body and "drop table" not in body
+    assert "drop column" not in body and "update autodedup" not in body
+
+
+def test_533_puts_NO_check_constraint_on_the_reason_vocabulary() -> None:
+    """Unlike 532's `verdict` domain. The API is the only writer and validates every code, so
+    a check here would buy nothing and cost a migration each time the list grows."""
+    body = _REASONS_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "check (" not in body
+    assert "add constraint" not in body
+
+
+def test_the_reason_registry_is_a_closed_vocabulary_of_codes_with_czech_labels() -> None:
+    """The store keeps free-form text[] — which makes the API's registry the ONLY thing
+    keeping the histogram groupable. Codes are ascii and stable; labels are the operator's."""
+    from autodedup import verdict_reasons
+
+    codes = [code for code, _ in verdict_reasons.VERDICT_REASONS]
+    assert len(codes) == len(set(codes))
+    assert "floor_plan_differs" in codes and "other" in codes
+    for code, label in verdict_reasons.VERDICT_REASONS:
+        assert code.isascii() and code == code.lower() and " " not in code
+        assert label and label[0].isupper()
+    # Czech labels, with the diacritics: an ascii-folded label is a different word.
+    labels = "".join(label for _, label in verdict_reasons.VERDICT_REASONS)
+    assert not labels.isascii()

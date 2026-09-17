@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from api import dependencies as deps
 from autodedup import progress_sql as psql
 from autodedup import ui_sql as usql
+from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
 from autodedup.judge import listing_digest
 from autodedup.model import LogisticModel, hand_initialised
@@ -48,9 +49,13 @@ try:  # the two SQLSTATEs a missing store raises, if the catalog probe ever miss
     # Migration 532 widened the verdict domain. A store that predates it rejects the new
     # value with a CHECK violation, which is a MISSING MIGRATION and not a 500.
     _CHECK_VIOLATION: tuple[type[BaseException], ...] = (_pg_errors.CheckViolation,)
+    # Migration 533 added `autodedup.verdicts.reasons`. A store without it raises
+    # UndefinedColumn on every verdict write — the same class of answer, one migration on.
+    _UNDEFINED_COLUMN: tuple[type[BaseException], ...] = (_pg_errors.UndefinedColumn,)
 except Exception:  # noqa: BLE001 — psycopg absent (tests run on fake connections)
     _MISSING_RELATION = ()
     _CHECK_VIOLATION = ()
+    _UNDEFINED_COLUMN = ()
 
 router = APIRouter(
     prefix="/autodedup",
@@ -545,6 +550,25 @@ def _needs_migration_532() -> HTTPException:
     )
 
 
+def _needs_migration_533() -> HTTPException:
+    """The reasons column is younger than the route. Same treatment as 532's widening: name
+    the migration, because a bare 500 sends the operator to the logs — and the two are told
+    apart by the SQLSTATE, a rejected VALUE being a different fault from a missing COLUMN."""
+    return HTTPException(
+        status_code=503,
+        detail="this verdict needs migration 533 (autodedup.verdicts.reasons)",
+    )
+
+
+def _reasons(values: list[str] | None) -> list[str]:
+    """The registry is the vocabulary (§9). An unknown code is a 400 and not a silently
+    dropped chip: a reason the operator clicked and the store never kept is worse than none."""
+    try:
+        return reasons_registry.normalise(values)
+    except ValueError as exc:
+        raise _bad(str(exc)) from exc
+
+
 def _member_row(row: dict[str, Any]) -> dict[str, Any]:
     member = {
         key: row[key]
@@ -581,6 +605,7 @@ def _cluster_row(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | 
         {
             "verdict": row["verdict"],
             "note": row["verdict_note"],
+            "reasons": list(row["verdict_reasons"] or []),
             "decided_by": row["verdict_decided_by"],
             "decided_at": row["verdict_decided_at"],
         }
@@ -590,7 +615,8 @@ def _cluster_row(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | 
     cluster = {
         key: value
         for key, value in row.items()
-        if key not in ("verdict", "verdict_note", "verdict_decided_by", "verdict_decided_at")
+        if key not in ("verdict", "verdict_note", "verdict_reasons", "verdict_decided_by",
+                       "verdict_decided_at")
     }
     cluster["evidence_family_names"] = _families(cluster.get("evidence_families"))
     return cluster, verdict
@@ -768,6 +794,14 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
     generations = _rows(usql.GENERATION_COLUMNS, _fetch(conn, usql.GENERATION_COUNTS_SQL))
     verdicts = _rows(usql.VERDICT_COUNT_COLUMNS, _fetch(conn, usql.VERDICT_COUNTS_SQL))
     judgements = _rows(usql.JUDGEMENT_COUNT_COLUMNS, _fetch(conn, usql.JUDGEMENT_COUNTS_SQL))
+    # A READ degrades where a write refuses: the header strip must still render against a
+    # store that predates 533, so the histogram comes back empty rather than 500ing the page.
+    try:
+        verdict_reason_rows = _rows(
+            usql.REASON_COUNT_COLUMNS, _fetch(conn, usql.REASON_COUNTS_SQL)
+        )
+    except _UNDEFINED_COLUMN:
+        verdict_reason_rows = []
     run_rows = _fetch(conn, usql.LAST_SCORE_RUN_SQL, {"mode": "score"})
     last_run = _row(usql.SCORE_RUN_COLUMNS, run_rows[0]) if run_rows else None
     return {
@@ -778,6 +812,8 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
         "latest_generation": generations[0]["generation"] if generations else None,
         "verdicts": verdicts,
         "n_verdicts": sum(int(row["n"]) for row in verdicts),
+        # Per (kind, reason), never summed across the two grains — see REASON_COUNTS_SQL.
+        "verdict_reasons": verdict_reason_rows,
         "judgements": judgements,
         "n_judgements": sum(int(row["n"]) for row in judgements),
         "last_score_run": _json_safe(last_run) if last_run else None,
@@ -1100,6 +1136,7 @@ def residual(
                     {
                         "verdict": row["verdict"],
                         "note": row["verdict_note"],
+                        "reasons": list(row["verdict_reasons"] or []),
                         "decided_by": row["verdict_decided_by"],
                         "decided_at": row["verdict_decided_at"],
                     }
@@ -1269,6 +1306,19 @@ class VerdictIn(BaseModel):
     listing_hi: int | None = None
     cluster_key: int | None = None
     note: str | None = Field(default=None, max_length=2000)
+    # WHY the operator ruled this way (migration 533), validated against the registry.
+    reasons: list[str] = Field(default_factory=list,
+                               max_length=reasons_registry.MAX_REASONS)
+
+
+@router.get("/verdict-reasons")
+def verdict_reasons() -> dict[str, Any]:
+    """The reason vocabulary, served so the SPA hard-codes none of it (§9).
+
+    No `store_ready` and no connection: the registry is code, not data, so the chips render
+    against a database that has not been migrated at all — and a page that cannot reach the
+    list would silently offer the operator an empty one."""
+    return {"data": {"reasons": reasons_registry.registry()}}
 
 
 @router.post("/verdict")
@@ -1297,6 +1347,7 @@ def verdict(
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
     _one_of("verdict", body.verdict, VERDICT_VALUES)
+    reasons = _reasons(body.reasons)
     decided_by = claims.get("email") or claims.get("sub")
     if not decided_by:
         raise HTTPException(status_code=403, detail="the admin identity carries no email")
@@ -1325,11 +1376,14 @@ def verdict(
                     "listing_hi": body.listing_hi,
                     "verdict": body.verdict,
                     "note": body.note,
+                    "reasons": reasons,
                     "decided_by": str(decided_by),
                 },
             )
         except _CHECK_VIOLATION as exc:
             raise _needs_migration_532() from exc
+        except _UNDEFINED_COLUMN as exc:
+            raise _needs_migration_533() from exc
         must_not_link = body.verdict in NEGATIVE_VERDICTS
         retracted = 0
         if must_not_link:
@@ -1367,11 +1421,14 @@ def verdict(
                     "cluster_key": body.cluster_key,
                     "verdict": body.verdict,
                     "note": body.note,
+                    "reasons": reasons,
                     "decided_by": str(decided_by),
                 },
             )
         except _CHECK_VIOLATION as exc:
             raise _needs_migration_532() from exc
+        except _UNDEFINED_COLUMN as exc:
+            raise _needs_migration_533() from exc
         must_not_link = False
         retracted = 0
         if body.verdict == "same":
@@ -1429,6 +1486,11 @@ class SplitIn(BaseModel):
     # send: a blank-slate assignment must never silently retract a permanent must-not-link.
     confirm_retract: bool = False
     note: str | None = Field(default=None, max_length=2000)
+    # Stamped on EVERY pair verdict the split writes and on the cluster row (migration 533):
+    # a split is one ruling, so its reasons are one set — split per pair they would claim the
+    # operator said something about each edge that they never said.
+    reasons: list[str] = Field(default_factory=list,
+                               max_length=reasons_registry.MAX_REASONS)
 
 
 # How much two adverts have in common, weakest first. A split that says different things
@@ -1494,6 +1556,7 @@ def verdict_split(
     the assignment must cover every member exactly once and name nobody else.
     """
     _one_of("relation", body.relation, SPLIT_RELATIONS)
+    reasons = _reasons(body.reasons)
     decided_by = claims.get("email") or claims.get("sub")
     if not decided_by:
         raise HTTPException(status_code=403, detail="the admin identity carries no email")
@@ -1615,6 +1678,7 @@ def verdict_split(
                         "listing_hi": hi,
                         "verdict": relation,
                         "note": f"operator split: {summary}",
+                        "reasons": reasons,
                         "decided_by": str(decided_by),
                     },
                 )
@@ -1646,11 +1710,14 @@ def verdict_split(
                     "cluster_key": body.cluster_key,
                     "verdict": cluster_verdict,
                     "note": note,
+                    "reasons": reasons,
                     "decided_by": str(decided_by),
                 },
             )
     except _CHECK_VIOLATION as exc:
         raise _needs_migration_532() from exc
+    except _UNDEFINED_COLUMN as exc:
+        raise _needs_migration_533() from exc
 
     return {
         "data": {

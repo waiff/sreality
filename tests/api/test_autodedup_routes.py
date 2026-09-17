@@ -54,6 +54,7 @@ _LABELS: dict[str, str] = {
     usql.CERTIFICATE_COUNTS_SQL: "certificates",
     usql.GENERATION_COUNTS_SQL: "generations",
     usql.VERDICT_COUNTS_SQL: "verdict_counts",
+    usql.REASON_COUNTS_SQL: "reason_counts",
     usql.JUDGEMENT_COUNTS_SQL: "judgement_counts",
     usql.LAST_SCORE_RUN_SQL: "last_run",
     usql.VERDICT_PAIR_UPSERT_SQL: "verdict_write",
@@ -361,6 +362,7 @@ EMPTY_ENGINE: dict[str, Any] = {
     "latest_generation": None,
     "verdicts": [],
     "n_verdicts": 0,
+    "verdict_reasons": [],
     "judgements": [],
     "n_judgements": 0,
     "last_score_run": None,
@@ -671,6 +673,7 @@ def test_a_group_carries_the_operators_latest_verdict(client, conn):
     assert item["verdict"] == {
         "verdict": "same",
         "note": "obviously one flat",
+        "reasons": [],
         "decided_by": "operator@example.com",
         "decided_at": "2026-09-16T07:00:00+00:00",
     }
