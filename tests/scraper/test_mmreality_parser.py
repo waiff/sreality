@@ -13,6 +13,7 @@ import pytest
 
 import html as ihtml
 import json
+import pathlib
 from typing import Any
 
 from scraper.mmreality_parser import PropertyMismatch, declared_total, extract_property
@@ -218,19 +219,23 @@ def test_parse_detail_full_mapping():
     ]
 
 
-# A HOUSE, where mmreality's totalArea is the PLOT and usableArea the interior.
-# The byt fixture above sets both keys to "54", so it passes under either
-# precedence and proves nothing; this one is the discriminating case: across 3,311
-# active mmreality houses the stored area_m2 had a median of 905 m2 against 145-161
-# on every other portal, and a median Kc/m2 of 5,699 against ~46,000.
+# A HOUSE, the discriminating case: the byt fixture above sets totalArea and
+# usableArea to the same "54", so it passes under any precedence and proves nothing.
+# `parcelArea` is the page's "Plocha parcely" — the ONLY parcel measure mmreality
+# publishes — and `totalArea` is the page's own `parcelArea + usableArea` SUM, which
+# the pre-W21 parser stored as the plot (1,178 active houses, 44-50% too large) and
+# before W1 as the headline (1,515 more, still carrying it).
 HOUSE = {
     **ESTATE,
     "id": "944446",
     "title": "Prodej, Dům rodinný, 130 m², Pacov",
     "group": {"id": "12", "name": "Dům"},
     "type": {"id": "60", "name": "Dům 5+1"},
-    "totalArea": "905",
+    "builtUpArea": "120",
+    "gardenArea": "655",
+    "parcelArea": "775",
     "usableArea": "130",
+    "totalArea": "905",
 }
 
 
@@ -242,34 +247,57 @@ def test_house_headline_area_is_the_interior_not_the_plot():
     assert listing.area_m2 == 130.0
     assert listing.area_basis == "usable"
     assert listing.usable_area == 130.0
-    # And the plot is RELOCATED, not discarded: mmreality states no landArea /
-    # plotArea on any observed page and its estate_area column is empty on all
-    # 3,601 active houses, so totalArea is the only parcel figure there is.
-    assert listing.estate_area == 905.0
+    assert listing.garden_area == 655.0
+
+
+def test_house_plot_is_parcel_area_never_the_total_sum():
+    # W21. `totalArea` (905) is parcelArea + usableArea, a figure the PAGE derives;
+    # the parcel is `parcelArea` (775). Storing the sum inflated every mmreality
+    # house's plot by exactly its own floor area.
+    listing = parse_detail(
+        _detail_html(HOUSE), source_url="https://www.mmreality.cz/nemovitosti/944446/"
+    )
+    assert listing.estate_area == 775.0
+    assert listing.estate_area != float(HOUSE["totalArea"])
+
+
+def test_the_phantom_parcel_keys_are_not_consulted():
+    # `landArea` / `plotArea` are keys mmreality declares and never fills: a value
+    # on ZERO of 14,417 stored rows. Reading them first was what made `totalArea`
+    # the de-facto parcel. A page that DID fill them must not win over the one cell
+    # the portal actually labels "Plocha parcely".
+    house = {**HOUSE, "id": "944449", "landArea": "9999", "plotArea": "8888"}
+    listing = parse_detail(
+        _detail_html(house), source_url="https://www.mmreality.cz/nemovitosti/944449/"
+    )
+    assert listing.estate_area == 775.0
 
 
 def test_house_without_an_interior_measure_is_null_not_a_plot():
-    # 13 of 3,601 active mmreality houses carry no usableArea. Handing totalArea
-    # to the generic `total` slot would stamp a PARCEL as an interior 'total' —
-    # a confident wrong label is worse than the missing value it replaces, so the
-    # headline goes NULL and the number lands in estate_area instead.
-    house = {**HOUSE, "id": "944448", "usableArea": None}
+    # 11 mmreality rows corpus-wide state no usableArea AND no parcelArea. Handing
+    # `totalArea` to the generic `total` slot would stamp a derived sum as an
+    # interior measure — a confident wrong label is worse than the missing value it
+    # replaces, so the headline goes NULL.
+    house = {**HOUSE, "id": "944448", "usableArea": None, "parcelArea": None}
     listing = parse_detail(
         _detail_html(house), source_url="https://www.mmreality.cz/nemovitosti/944448/"
     )
     assert listing.category_main == "dum"
     assert listing.area_m2 is None
     assert listing.area_basis is None
-    assert listing.estate_area == 905.0
+    assert listing.estate_area is None
 
 
-def test_land_headline_area_is_still_the_plot():
-    # Option A: for a pozemek the headline IS the parcel, and its value is
-    # untouched — only the basis label changes.
+def test_land_headline_area_is_the_parcel_cell():
+    # Option A: for a pozemek the headline IS the parcel. On land mmreality's
+    # `totalArea` equals `parcelArea` exactly (0 of 4,568 stored land rows disagree,
+    # because a parcel has no interior to add) — so reading the labelled cell instead
+    # of the sum changes no land value and stops relying on that coincidence.
     land = {
         **ESTATE,
         "id": "944447",
         "group": {"id": "13", "name": "Pozemek"},
+        "parcelArea": "905",
         "totalArea": "905",
         "usableArea": None,
     }
@@ -279,6 +307,37 @@ def test_land_headline_area_is_still_the_plot():
     assert listing.category_main == "pozemek"
     assert listing.area_m2 == 905.0
     assert listing.area_basis == "plot"
+    assert listing.estate_area == 905.0
+
+
+def test_real_capture_house_areas():
+    """The archived mmreality detail page, not a hand-authored dict.
+
+    A hand-written fixture can only assert back the keys the test itself planted, so
+    it is structurally blind to the shape question this wave turned on — WHICH key the
+    page calls the parcel. This capture states all five: builtUpArea 150 +
+    gardenArea 300 = parcelArea 450, and parcelArea 450 + usableArea 200 =
+    totalArea 650. Both identities hold on the live page, which is the evidence that
+    `totalArea` is a sum and `parcelArea` is the measurement.
+    """
+    html = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "fixtures" / "portal_html" / "mmreality_detail.html"
+    ).read_text(encoding="utf-8")
+
+    listing = parse_detail(
+        html, source_url="https://www.mmreality.cz/nemovitosti/951845/"
+    )
+
+    assert listing.category_main == "dum"
+    assert (listing.area_m2, listing.area_basis) == (200.0, "usable")
+    assert listing.usable_area == 200.0
+    assert listing.estate_area == 450.0
+    assert listing.garden_area == 300.0
+    # The two identities the fix rests on, read off the same stored object.
+    raw = listing.raw
+    assert raw["parcelArea"] == raw["builtUpArea"] + raw["gardenArea"]
+    assert raw["totalArea"] == raw["parcelArea"] + raw["usableArea"]
 
 
 def test_parse_detail_rent_price_unit():

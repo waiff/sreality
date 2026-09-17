@@ -200,6 +200,13 @@ Every wave = one PR = one purpose. Migration numbers are claimed at merge time i
 
 ### W2 — Heal the stored damage
 **Scope test: T3.** No migration. **Runs after W1 merges + one drain cycle.**
+> **RETIRED BY W21 (2026-09-17).** `scripts/backfill_mmreality_areas.py`, its workflow and its
+> tests are DELETED. It re-spelled the parser's `landArea or plotArea or totalArea` chain, and
+> W21 established that `landArea`/`plotArea` are never filled and `totalArea` is a figure the
+> page DERIVES — so the script was a second, wrong copy of the key order. The heal is now
+> `scripts/backfill_area_spaced_thousands.py --sources mmreality`, which CALLS
+> `mmreality.areas_from_params` instead of restating it. Read the paragraph below as history.
+
 **Files:** **new** `scripts/backfill_mmreality_areas.py` and `scripts/backfill_unit_price_masquerade.py`, both cloned from `scripts/backfill_idnes_areas.py` (the working precedent: re-parses staged state, writes **no** snapshot — "correcting our own mis-parse of the SAME staged state is a data-quality fix" — idempotent via a `raw_json.area_reparse_v2` marker, resumable). mmreality can read `raw_json` directly (`dict(obj)` at `:435`), so it needs no `portal_raw_pages` read. Then `select recompute_property_stats(...)` over affected `property_id`s.
 **Proves it correct:** `tests/scripts/test_backfill_mmreality_areas.py` at `derive()` level (shape: `tests/scripts/test_backfill_portal_streets.py`); mandatory `--dry-run` count printed and recorded in the PR body before the write run.
 **Parallel with W3.** Strictly after W1.

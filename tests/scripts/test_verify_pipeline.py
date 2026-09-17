@@ -1132,6 +1132,9 @@ def _cell(
         # scoring the axis it is actually about.
         "n_area_valued": 1000.0, "n_ppm2_valued": 1000.0, "n_active_7d": 200.0,
         "measure_input_gap_share": 0.0, "measure_input_gap_share_7d": 0.0,
+        # W21's derived-sum arm. The default is a cell with no three-area rows, so a
+        # test that says nothing about it leaves that arm unscored rather than clean.
+        "n_estate_triples": 0.0, "estate_sum_share": None,
     }
     base.update(kw)
     return base
@@ -1236,10 +1239,66 @@ def test_area_divergence_catches_the_mmreality_plot_area_defect() -> None:
     res = _divergence(_LIVE_DUM_CELLS)
     assert res["status"] == "fail"
     assert res["value"] == 100.0  # the 7d arm: 113 of 113 pairs
+    # Arm 1 decided the status, so arm 1's number is the headline.
+    assert res["details"]["value_arm"] == "area_vs_usable"
     named = " ".join(res["details"]["offenders"])
     assert "mmreality/dum/prodej" in named
     for clean in ("sreality", "idnes", "bazos"):
         assert clean not in named
+
+
+def test_the_derived_sum_arm_catches_a_side_column_that_is_not_a_measurement() -> None:
+    """W21. mmreality's parser read the page's `totalArea` as the parcel for years, and
+    `totalArea` is `parcelArea + usableArea` — a SUM the page computes. The headline was
+    already the interior, so arm 1 saw nothing; the column was populated, so the
+    null-check saw nothing; and the plot came out 44-50% too large. This arm states the
+    invariant instead of the portal."""
+    cells = [
+        _cell("mmreality", "dum", "prodej", n_active=2693.0,
+              n_area_pairs=2638.0, area_divergence_share=0.0,
+              n_area_pairs_7d=150.0, area_divergence_share_7d=0.0,
+              n_estate_triples=1123.0, estate_sum_share=0.62),
+        _clean_scored(),
+    ]
+    res = _divergence(cells)
+    assert res["status"] == "fail"
+    named = " ".join(res["details"]["estate_sum_offenders"])
+    assert "mmreality/dum/prodej" in named and "sreality" not in named
+    # The tile reports THE FAILING ARM. Arm 1 is clean here, so a `value` of 0.0
+    # beside a `fail` status would be a check contradicting itself — and the two
+    # numbers are not the same scale of evidence, so they are never merged either.
+    assert res["message"].startswith("1 portal/category cell(s) carry a DERIVED SUM")
+    assert res["value"] == 62.0
+    assert res["details"]["value_arm"] == "estate_sum"
+    assert res["details"]["estate_sum_worst_share"] == 0.62
+    assert res["details"]["worst_share"] == 0.0        # arm 1, still published
+
+
+def test_the_derived_sum_arm_tolerates_the_live_coincidence_rate() -> None:
+    """Live 2026-09-17 the relation is a WEAK fingerprint: mmreality dum/prodej is the
+    worst SCORED cell at 2.6% of 1 123 triples and no other cell exceeds 1.4%, because
+    the sum only coincides where a parcel happens to equal its interior. Amber must not
+    fire on that, or the operator learns to dismiss the tile."""
+    res = _divergence([
+        _cell("mmreality", "dum", "prodej", n_estate_triples=1123.0,
+              estate_sum_share=0.0258,
+              n_area_pairs=2638.0, area_divergence_share=0.0,
+              n_area_pairs_7d=150.0, area_divergence_share_7d=0.0),
+        _clean_scored(),
+    ])
+    assert res["status"] == "ok" and res["details"]["estate_sum_offenders"] == []
+
+
+def test_the_derived_sum_arm_skips_a_cell_below_the_row_floor() -> None:
+    """mmreality dum/pronajem reads 5.5% live — over the warn tier, on 55 rows. A
+    55-row share is noise; scoring it would amber a healthy portal for ever."""
+    res = _divergence([
+        _cell("mmreality", "dum", "pronajem", n_estate_triples=55.0,
+              estate_sum_share=0.0545),
+        _clean_scored(),
+    ])
+    assert res["status"] == "ok"
+    assert res["details"]["estate_sum_arms_scored"] == 0
 
 
 def test_area_divergence_is_silent_on_a_portal_publishing_only_one_area() -> None:

@@ -428,8 +428,8 @@
     },
     {
       "filename": "backfill_area_spaced_thousands.yml",
-      "name": "Backfill areas truncated on a spaced thousands group (W19)",
-      "description": "One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax, maxima and bazos parsers each carried a private copy of the naive area regex: it matched the FIRST bare digit run before an `m²`, so the Czech thousands format every one of them renders (\"5 870 m²\", \"1 063 m²\" with a no-break space) parsed from INSIDE the number and stored 870 / 63. Measured on production 2026-09-17:",
+      "name": "Backfill portal areas from the row's own page fields (W19 + W21)",
+      "description": "One-off, dispatch-only heal, in two generations.",
       "portal": null,
       "manual": true,
       "schedules": [],
@@ -450,7 +450,7 @@
         },
         {
           "name": "sources",
-          "description": "Comma-separated portals to heal, walked one at a time (blank = all five)",
+          "description": "Comma-separated portals to heal, walked one at a time. Blank = the default set (mmreality, ceskereality, realitymix, remax, maxima, bazos — mmreality first). `idnes` is wired but never walked by default; name it explicitly to run it.",
           "required": false,
           "type": "string",
           "default": "",
@@ -771,63 +771,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_land_headline_area.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_land_headline_area.yml"
-    },
-    {
-      "filename": "backfill_mmreality_areas.yml",
-      "name": "Backfill mmreality areas (plot stored as the headline)",
-      "description": "One-off, dispatch-only backfill for the per-m² measure program's W2 heal. Before W1, mmreality's own `or` chain read `totalArea or usableArea`, and for a HOUSE mmreality's `totalArea` is the PARCEL — so thousands of active `dum` rows carry a ~905 m² plot in `area_m2` with the real ~130 m² floor area sitting unused in `usableArea`, yielding a median ~5,700 Kč/m² against ~48,000 on every other portal. Re-derives the area columns from the source object ALREADY staged in `raw_json` (NO re-fetch of mmreality) by re-running the fixed parser's own decision, and stamps `area_basis` on every processed row. All four area columns are in the content hash but this writes NO snapshot — correcting our own mis-parse of the SAME staged state is a data-quality fix, and each healed row appends exactly one genuine snapshot on its next successful detail refetch. Idempotent + resumable (each row stamped `raw_json.area_reparse_v2`); rerun until \"pending=0\". Healed rows enqueue their property so the */5 incremental recompute propagates the corrected denominator into properties + the map matview. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "write",
-          "description": "Actually write. Left false, this only reports what would change.",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "limit",
-          "description": "Max listings processed this run",
-          "required": false,
-          "type": "string",
-          "default": "20000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "verbose",
-          "description": "Log every individual heal (DEBUG)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-mmreality-areas",
-      "cancelInProgress": false,
-      "timeoutMinutes": 90,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_mmreality_areas.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_mmreality_areas.yml"
     },
     {
       "filename": "backfill_render_score.yml",

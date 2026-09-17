@@ -24,12 +24,13 @@ import html as ihtml
 import json
 import re
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area
+from scraper.area import PortalAreas, derive_headline_area
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street, street_from_locality
 
@@ -474,6 +475,67 @@ def index_price(text: str | None) -> int | None:
     return _to_int(text)
 
 
+# The estate-object keys `areas_from_params` below reads. EXPORTED so the W19 heal can
+# project exactly these out of `raw_json` without respelling them (rule 21): a heal that
+# names its own key list is a second copy of the key order, one field at a time.
+# `tests/scripts/test_backfill_area_spaced_thousands.py` proves the set is sufficient —
+# an object carrying only these keys still yields every area column.
+AREA_OBJECT_KEYS: tuple[str, ...] = ("usableArea", "parcelArea", "gardenArea")
+
+
+def areas_from_params(
+    obj: Mapping[str, Any],
+    *,
+    category_main: str | None,
+) -> PortalAreas:
+    """mmreality's area keys, in ITS precedence — spelled here once and nowhere else.
+
+    `obj` is the embedded `:property` estate object, which `parse_detail` stores whole
+    under `listings.raw_json` (`raw = dict(obj)`), so these are TOP-LEVEL raw_json keys
+    rather than the `params` spec-cell map the HTML portals carry. `parse_detail` reads it
+    off a live page and `scripts/backfill_area_spaced_thousands` off that stored reading of
+    the same page — one key order, read twice (rule 21).
+
+    THE PARCEL IS `parcelArea` ("Plocha parcely"), and that is the whole of W21 here. The
+    chain this replaced read `landArea or plotArea or totalArea`: on 14,417 stored rows
+    `landArea` and `plotArea` carry a value on EXACTLY ZERO of them — they are keys the
+    page declares and never fills — so `estate_area` was always `totalArea`, and
+    `totalArea` is not a measure at all. It is a figure the page DERIVES, and what it sums
+    depends on the category: `parcelArea + usableArea` on a dum (verified on three captures
+    and on 4,133 stored rows carrying all three, just as `parcelArea = builtUpArea +
+    gardenArea`), `== usableArea` on komerční / ostatní, which state no parcel, and
+    `== parcelArea` on a pozemek, which has no interior to add. Writing it into
+    `estate_area` inflated 1,178 active houses' plots by 44-50 %, and before W1 the same
+    number was the HEADLINE on 1,515 more. `parcelArea` is stated on every one of the
+    3,653 active land rows and 2,693 active houses, and on land it equals `totalArea`
+    exactly (0 rows disagree), so dropping the derived figure costs nothing there and stops
+    the parser inventing a measure the portal never published.
+
+    `totalArea` is therefore not offered to the resolver in ANY slot: a derived figure
+    stamped 'total' would be a confident wrong label, which is worse than the missing value
+    it replaces. That costs a headline on 19 rows corpus-wide whose page states neither
+    input (5 byt, 2 komerční, 11 dum, 1 inactive pozemek); their parcel, when they have
+    one, is in `estate_area`.
+
+    `estate_area` IS filled here, on land too — from `parcelArea`, a cell the page itself
+    labels "Plocha parcely". That is the rule for every writer: fill `estate_area` only
+    from a LABELLED parcel, never by synthesising one from `area_m2`. What no writer may
+    do is manufacture the column for a portal whose land pages carry no parcel label —
+    `public.plot_area_m2` (migration 534) is what makes those rows reachable.
+    """
+    plot = _to_float(obj.get("parcelArea"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_to_float(obj.get("usableArea")),
+        plot=plot,
+    )
+    return PortalAreas(
+        area_m2=area_m2, area_basis=area_basis,
+        usable_area=_to_float(obj.get("usableArea")), estate_area=plot,
+        garden_area=_to_float(obj.get("gardenArea")),
+    )
+
+
 def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     """Parse one mmreality listing page into a ScrapedListing.
 
@@ -506,24 +568,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         else None
     )
 
-    # For a HOUSE mmreality's `totalArea` is the PLOT (median 905 m2 against
-    # 149-163 on every other portal), so it is not offered to the resolver as a
-    # `total` at all: a house with no `usableArea` (13 of 3,601 active) must land
-    # NULL rather than a parcel stamped 'total'. It is not thrown away either —
-    # it is routed to estate_area below, the column mmreality has never filled.
-    is_house = category_main == "dum"
-    total_area = _to_float(obj.get("totalArea"))
-    estate_area = (
-        _to_float(obj.get("landArea"))
-        or _to_float(obj.get("plotArea"))
-        or (total_area if is_house else None)
-    )
-    area_m2, area_basis = derive_headline_area(
-        category_main=category_main,
-        usable=_to_float(obj.get("usableArea")),
-        total=None if is_house else total_area,
-        plot=estate_area,
-    )
+    areas = areas_from_params(obj, category_main=category_main)
 
     image_urls = _image_urls(obj)
     raw = dict(obj)
@@ -538,9 +583,9 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         category_type=category_type,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=area_m2,
-        area_basis=area_basis,
-        usable_area=_to_float(obj.get("usableArea")),
+        area_m2=areas.area_m2,
+        area_basis=areas.area_basis,
+        usable_area=areas.usable_area,
         disposition=_disposition((obj.get("type") or {}).get("name"), obj.get("title")),
         locality=locality,
         district=district,
@@ -566,8 +611,8 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         garage=_has_any(accessories, "garaz"),
         has_parking=(True if parking_lots else _has_any(accessories, "parkov", "garaz")),
         parking_lots=parking_lots,
-        estate_area=estate_area,
-        garden_area=_to_float(obj.get("gardenArea")),
+        estate_area=areas.estate_area,
+        garden_area=areas.garden_area,
         description=obj.get("description") or None,
         raw=raw,
     )

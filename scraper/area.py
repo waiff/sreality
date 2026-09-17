@@ -103,6 +103,16 @@ class PortalAreas:
     columns from `listings.raw_json`, which holds that parser's own latest reading of the
     live page. Two copies of a key order is the same defect as two copies of the number
     grammar, one level up (rule 21).
+
+    CONSTRUCTION IS ALSO THE VALIDITY BOUND FOR THE THREE SIDE COLUMNS, and it has to be,
+    because it is the last point BEFORE the content hash. `derive_headline_area` already
+    declines an out-of-range `area_m2` for exactly that reason (see the module docstring);
+    `usable_area` / `estate_area` / `garden_area` had no such gate, so a value at or beyond
+    `numeric(9,1)`'s ceiling — or a 0 m² form placeholder — was hashed as itself and then
+    NULLed at the write boundary by `scraper.db.sane_listing_numerics`, leaving `listings`
+    permanently disagreeing with its own newest snapshot (rules 2/8). Bounding here makes
+    the row and its snapshot agree by construction; `sane_listing_numerics` stays the last
+    guard for the parsers that do not build a `PortalAreas` (sreality, bezrealitky).
     """
 
     area_m2: float | None = None
@@ -110,6 +120,12 @@ class PortalAreas:
     usable_area: float | None = None
     estate_area: float | None = None
     garden_area: float | None = None
+
+    def __post_init__(self) -> None:
+        for column in ("usable_area", "estate_area", "garden_area"):
+            value = getattr(self, column)
+            if value is not None and not 0.0 < value < MAX_SIDE_AREA_M2:
+                object.__setattr__(self, column, None)
 
 
 AREA_BASES: frozenset[str] = frozenset({"usable", "floor", "total", "plot", "unknown"})
@@ -128,6 +144,12 @@ MIN_AREA_M2 = 5.0
 # never drift; spelled here rather than imported because this module is
 # stdlib-only and must not pull in psycopg.
 MAX_AREA_M2 = 1_000_000.0
+
+# The same idea for the three SIDE columns, which are `numeric(9,1)`. Kept equal
+# to `scraper.db._NUMERIC_ABS_MAX["estate_area"]` (= usable_area = garden_area)
+# by `tests/scraper/test_area.py`, and applied in `PortalAreas.__post_init__` —
+# see the class docstring for why the bound has to sit BEFORE the hash.
+MAX_SIDE_AREA_M2 = 100_000_000.0
 
 
 def derive_headline_area(

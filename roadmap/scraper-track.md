@@ -56,6 +56,78 @@ Independent of the analytical, UI, and map tracks.
   rows fell through to the title. One key, no dead fallback; the heal above
   (`--sources remax`) calls this same `areas_from_params`, so it fills those 4,339 rows and
   re-derives `area_m2` for land — no new script.
+- **W21 (2026-09-17, done) — one rule per area COLUMN, not just per headline.** W19/W20 governed
+  `area_m2`; three defects lived underneath it in the side columns, each invisible to every health
+  check we had.
+  - **mmreality's parcel is `parcelArea`.** The parser read `landArea or plotArea or totalArea`:
+    the first two are keys the page declares and NEVER fills (a value on **0 of 14,417** stored
+    rows), and `totalArea` is not a measure — the page DERIVES it, and what it sums depends on
+    the CATEGORY: `parcelArea + usableArea` on a dum (4,133 rows carry all three and agree;
+    `parcelArea` is itself `builtUpArea + gardenArea`), `== usableArea` on komerční/ostatní,
+    `== parcelArea` on land.
+    Live: **1,178 active houses** with a plot **44–50 % too large**, **1,515 more** still carrying
+    that sum as their HEADLINE (the pre-W1 shape, never re-derived), and `parcelArea` unmapped on
+    all **3,653 active land rows** + 755 komerční. Now one
+    `mmreality.areas_from_params(obj, category_main=)`; `totalArea` is offered in NO slot, which
+    costs a headline on **19 rows corpus-wide** (5 byt, 2 komerční, 11 dum, 1 inactive pozemek)
+    whose page states neither input, and nothing on land (`parcelArea == totalArea` on all
+    4,568 land rows). The writer rule this settles: fill `estate_area` only from a cell the
+    page LABELS as the parcel — never synthesise one from `area_m2`.
+  - **`usable_area` is the "užitná plocha" label only** (idnes, ceskereality). Both chains ended
+    on a broader label, so a page stating only a floor/total area wrote it into the column
+    consumers read as the interior measure. Those labels still reach the headline under their own
+    basis. Contract change, **1-row live footprint** — and the heal cannot clear even that one
+    (it never blanks a stored value).
+  - **The side columns are bounded before the content hash.** A `numeric(9,1)`-overflowing or
+    0 m² value was hashed as itself and NULLed at the write boundary, leaving `listings`
+    disagreeing with its own newest snapshot for ever (rules 2/8). `PortalAreas.__post_init__`
+    bounds all three at `MAX_SIDE_AREA_M2`; bezrealitky's `_num` also refuses a `bool` before
+    `float` (`float(True)` is 1.0 — a 1.0 m² garden).
+  - **idnes joined the shared shape** (`areas_from_params`, its private `_clamp` /
+    `_AREA_M2_MAX` / `_AREA_LARGE_MAX` gone) and both idnes and mmreality joined the W19 heal's
+    dispatch — so W21 needed no heal of its own. mmreality's arm walks the portal WHOLE: its
+    numbers are typed JSON with no truncation fingerprint, and 3,443 of its rows match neither
+    fingerprint arm. It is **first** in the default set (the only portal wrong today, and the
+    smallest corpus, so a budget-limited run still finishes it); **idnes is wired but not
+    walked by default** — the užitná narrowing is forward-only, so a default walk would read
+    ~206k `raw_json` blobs to change ~nothing. `scripts/backfill_mmreality_areas.py` + its
+    workflow are DELETED (they re-spelled the phantom chain), and the surviving workflow's
+    header now names the portals it walks and says W21 SHRINKS values by design.
+  - **"Plot area" is now a MEASURE** — `plot_area_m2(category_main, area_m2, estate_area)`
+    (migration 534, `IMMUTABLE PARALLEL SAFE`, Python face in `toolkit.measures`). Reading
+    `estate_area` directly is right for a house and silently wrong for land, where the plot IS
+    the headline: **32,626 of 101,021 active land rows (32.3 %)** carry no `estate_area` (bazos
+    15,846 / realitymix 11,470 / mmreality 3,653 / remax 1,649), so `min_estate_area` dropped a
+    third of the land inventory without a word. Moved: comparables (+ velocity + transit
+    corridor) and the watchdog matcher, which call the function over `listings`. **Review
+    caught the SPA half** (migration 535): the first cut set the registry's `pg_column` to
+    `None`, and `registryQueryBuilder` skips exactly that — so Browse's "Lot area" inputs went
+    from "drops land" to a SILENT NO-OP, CI green, rule 16 broken the other way. The measure is
+    now a published COLUMN on all three relations Browse filters against (`browse_projection`
+    → `browse_list`, `properties_map_mv`, `listing_feed_public`) and `pg_column` points at it;
+    `browse_list` gets the column + a backfill in the same file and the map matview is rebuilt
+    in it, so neither answers 400 while pg_cron catches up. The drift test now FAILS on a
+    browse filter with a null `pg_column` unless it is declared hand-coded or recorded in the
+    new `BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY` — which is how we learned `tom_days_min/max`
+    reach the Stats RPC and no list predicate at all (pre-existing; named, not fixed). NOT
+    moved, named: `browse_stats_properties` / `browse_list`'s RPCs / `browse_map_cells` still
+    compare `l.estate_area` — inert from the SPA today and worth its own wave, since it means
+    re-creating three large `SECURITY DEFINER` bodies.
+  - **The verify rail gained the arm that would have caught the sum**: `estate_sum_share`
+    (`estate_area ≈ area_m2 + usable_area` within 1 %), appended to
+    `measure_plausibility_by_source`; warn 5 % / fail 10 % over a ≤1.4 % background, with
+    mmreality the top two cells (5.5 % of 55 rows, 2.6 % of 1,123) — a forward guard, read
+    honestly. Same wave RE-MEASURED `area_vs_usable_divergence`, whose tiers were sized on
+    pre-W1 numbers: the only non-zero cell is mmreality dum/prodej at **57.1 %** of 2,638 pairs
+    with a **0.0 % 7d arm** (the live parser has been right since W1; the 1,515 legacy rows are
+    what remain), and realitymix byt — the 10.5 % cell the 20 % warn tier spared — now reads
+    0.0 %. Tiers left alone until the heal runs.
+- **Next (W21):** the operator dispatches the heal for `mmreality` FIRST, then `ceskereality`
+  (dry-run, then `--write`, one `--sources` at a time; `idnes` only if wanted — forward-only) — that is what clears the 57.1 % divergence
+  cell. **Out of scope, for the operator to decide:** six portals publish a **built-up area**
+  ("zastavěná plocha" / mmreality's `builtUpArea`) with no column to hold it — a schema question,
+  not a parser fix; bazos gains no side columns (its free text carries no labelled parcel); and
+  the unverified-key census across the nine portals is still unwritten.
 
 ### sreality photos: the whole frame, and provenance on every stored row (2026-09-11, in progress)
 - **Shipped:** downloads moved off sreality's `res,749,562,3|shr,,20|jpg,90` (mode 3 = a 4:3 CROP;

@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { FILTER_REGISTRY } from './filterRegistry.generated';
 import { DEFAULT_FILTERS, REGISTRY_KEY_MAP } from './filters';
 import {
+  BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY,
   HAND_CODED_BROWSE_FILTERS,
   applyRegistryFilters,
   isAutoDispatchable,
@@ -66,6 +67,50 @@ describe('drift guard', () => {
         `queries.ts:applyFilters) or extend isAutoDispatchable + ` +
         `applyRegistryFilters in registryQueryBuilder.ts.`,
       );
+    }
+  });
+
+  it('a browse filter with no pg_column must be declared hand-coded', () => {
+    /* THE HOLE THIS CLOSES (W21). `applyRegistryFilters` skips any filter whose
+     * `pg_column` is null — that is how a filter becomes a PostgREST predicate —
+     * and the drift guard above skipped the same filters, so "no pg_column" was
+     * indistinguishable from "handled elsewhere". Setting `pg_column: null` on
+     * min/max_estate_area turned the Lot-area inputs into a SILENT NO-OP with CI
+     * green: the UI still offered them, the query no longer applied them.
+     *
+     * A null pg_column is now a CLAIM that queries.ts:applyFilters handles the
+     * filter by hand, and the claim has to be registered. */
+    const undeclared: string[] = [];
+    for (const filter of FILTER_REGISTRY.filters) {
+      if (!filter.agendas.includes('browse')) continue;
+      if (filter.pg_column != null) continue;
+      if (HAND_CODED_BROWSE_FILTERS.has(filter.id)) continue;
+      if (BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY.has(filter.id)) continue;
+      undeclared.push(filter.id);
+    }
+    if (undeclared.length) {
+      throw new Error(
+        `Browse filters with pg_column: null that nothing applies:\n  ` +
+        undeclared.join('\n  ') +
+        `\nEither give the filter a column the read model PUBLISHES (see ` +
+        `migration 535 — a derived measure can be a projection column), or ` +
+        `hand-code it in queries.ts:applyFilters and list it in ` +
+        `HAND_CODED_BROWSE_FILTERS, or — if it genuinely reaches no list ` +
+        `predicate — record it in BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY with ` +
+        `the reason. Do NOT use HAND_CODED_BROWSE_FILTERS for the last case: ` +
+        `that set is a claim that something applies the filter.`,
+      );
+    }
+  });
+
+  it('the plot-area filters read the published measure, not the raw column', () => {
+    /* Rule 16 + rule 23: `area_m2` IS the parcel for pozemek, so `estate_area`
+     * alone drops ~32k active land rows. Browse must filter the same definition
+     * the watchdog matcher and comparables call (toolkit.measures.plot_area_sql). */
+    for (const id of ['min_estate_area', 'max_estate_area']) {
+      const f = FILTER_REGISTRY.filters.find((x) => x.id === id);
+      expect(f, `${id} missing from the registry`).toBeTruthy();
+      expect(f!.pg_column).toBe('plot_area_m2');
     }
   });
 

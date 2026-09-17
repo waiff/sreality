@@ -572,21 +572,30 @@ def areas_from_params(
 
     `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
     reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. The collapsed `area_text` chain is what `usable_area` has always carried;
-    the headline goes through the shared resolver on SEPARATE measures.
+    same page. The headline goes through the shared resolver on SEPARATE measures.
+
+    `usable_area` IS THE "PLOCHA UŽITNÁ" CELL AND NOTHING ELSE (W21). It used to end
+    `... or params.get("plocha")`, so a page carrying only the bare "Plocha" — the total —
+    wrote that number into the column every consumer reads as the užitná measure: the same
+    collapse the headline resolver exists to prevent, one column over. "Plocha" still
+    reaches the headline through its own `total` slot, stamped `'total'`; what it no longer
+    does is impersonate a užitná in a side column. (The two spellings that DO stay are one
+    label: ceskereality renders it "Plocha užitná" on some templates and "Užitná plocha" on
+    others.)
     """
-    area_text = params.get("plocha užitná") or params.get("užitná plocha") or params.get("plocha")
+    usable = parse_area_text(
+        params.get("plocha užitná") or params.get("užitná plocha"))
     estate_area = parse_area_text(params.get("plocha pozemku"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        usable=parse_area_text(params.get("plocha užitná") or params.get("užitná plocha")),
+        usable=usable,
         total=parse_area_text(params.get("plocha")),
         plot=estate_area,
         fallback=parse_area_text(title),
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
-        usable_area=parse_area_text(area_text), estate_area=estate_area,
+        usable_area=usable, estate_area=estate_area,
         garden_area=parse_area_text(params.get("plocha zahrady")),
     )
 

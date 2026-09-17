@@ -422,12 +422,16 @@ def test_mmreality_is_wired_end_to_end_for_broker_attribution():
 
 
 def test_mmreality_real_house_page_does_not_call_its_plot_an_interior_area():
-    """The captured page is a `dum` with `totalArea: 1164` and NO `usableArea` —
-    the shape 13 of 3,601 active mmreality houses have, and the one the hermetic
-    fixtures cannot show (they set both keys). mmreality's `totalArea` on a house
-    is the PARCEL (median 905 m2 against 149-163 on every other portal), so it
-    must not become the headline under an interior basis: `area_m2` goes NULL and
-    the number lands in `estate_area`, a column mmreality had never filled."""
+    """The captured page is a `dum` with `totalArea: 1164` and NO `usableArea`, NO
+    `parcelArea` — the shape 11 mmreality rows corpus-wide have, and the one the
+    hermetic fixtures cannot show (they set the keys the test itself planted).
+
+    `totalArea` is not a measure at all: the page derives it as
+    `parcelArea + usableArea` (W21, verified on this very capture for listing 951845).
+    With neither input stated, the honest output is NOTHING — no headline, no basis,
+    no plot. The pre-W21 parser instead called that sum the parcel and wrote it into
+    `estate_area`, which is how 1,178 active houses ended up with a plot 44-50% too
+    large."""
     from scraper.mmreality_parser import parse_detail
 
     html = (_FIXTURES / "mmreality_detail.html").read_text(encoding="utf-8")
@@ -443,4 +447,4 @@ def test_mmreality_real_house_page_does_not_call_its_plot_an_interior_area():
     assert listing.usable_area is None
     assert listing.area_m2 is None
     assert listing.area_basis is None
-    assert listing.estate_area == 1164.0
+    assert listing.estate_area is None

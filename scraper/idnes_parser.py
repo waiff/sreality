@@ -16,7 +16,7 @@ normalised to the same canonical labels the sreality parser emits (e.g.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 
 import re
 from dataclasses import dataclass, field
@@ -25,7 +25,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area, parse_area_text
+from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.broker_idnes import parse_idnes_broker
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
@@ -141,12 +141,6 @@ _DETAIL_PATH_RE = re.compile(r"/detail/([^/?#]+)/([^/?#]+)/")
 # &nbsp;/&zwj; between groups). Stops at the first non-space, non-digit char.
 _PRICE_RUN_RE = re.compile(r"\d[\d\s\u00a0\u200b\u200c\u200d\u2060]*")
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
-# Column maxes for the numeric area fields. A parsed area larger than its column
-# can hold (a million-m\u00b2 title-number garble, a developer-project "1234567 m\u00b2"
-# rendered without thousand separators) gets dropped to NULL rather than
-# crashing the drain. Matches the schema in `listings`.
-_AREA_M2_MAX = 999_999.9            # listings.area_m2 is numeric(7,1)
-_AREA_LARGE_MAX = 99_999_999.9      # usable_area / estate_area / garden_area are numeric(9,1)
 # Map config: "center":[lon, lat]. CZ lat/lon ranges don't overlap, so a swap is
 # caught by the bbox guard rather than producing a bogus point.
 _CENTER_RE = re.compile(r'"center"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\]')
@@ -337,13 +331,6 @@ def _parse_disposition(text: str | None) -> str | None:
     if not m:
         return None
     return f"{m.group(1)}+{m.group(2).lower()}"
-
-
-def _clamp(value: float | None, ceiling: float) -> float | None:
-    """Drop an area that would overflow its numeric column rather than crash the
-    drain. A real apartment/house area can never exceed millions of m²; a value
-    that does is either a parse artifact or genuinely unstorable in the schema."""
-    return None if value is None or value > ceiling else value
 
 
 def _parse_int(text: str | None) -> int | None:
@@ -580,6 +567,52 @@ def _gallery_urls(tree: HTMLParser) -> list[str]:
     return urls
 
 
+def areas_from_params(
+    params: Mapping[str, str | None],
+    *,
+    title: str | None,
+    category_main: str | None,
+) -> PortalAreas:
+    """idnes's area cells, in ITS precedence — spelled here once and nowhere else.
+
+    Keys are the lowercased spec-`<dl>` labels `_detail_params` produces, which is also how
+    `parse_detail` stores them in `raw_json['params']`: the live parse reads this off the
+    page and `scripts/backfill_area_spaced_thousands` off that stored reading of the same
+    page. Two copies of a key order is the same defect as two copies of the number grammar,
+    one level up (rule 21).
+
+    `usable_area` IS THE "UŽITNÁ PLOCHA" CELL AND NOTHING ELSE (W21). It used to be
+    `užitná or podlahová or plocha` — the same collapse the headline resolver exists to
+    prevent, one column over: a page stating only "Podlahová plocha" or a bare "Plocha"
+    wrote that number into the column every consumer reads as the užitná measure. Those two
+    labels still reach the headline through their own typed slots, carrying their own basis;
+    what they no longer do is impersonate a third label in a side column.
+
+    "Plocha pozemku" is the parcel: it reaches the resolver as `plot` (before W17 it went
+    only to `estate_area`, so 5,292 land rows whose title states no area carried no headline
+    at all) and stays in `estate_area` beside the dwelling's own area.
+
+    No private clamps any more: `derive_headline_area` declines a headline at or beyond
+    `MAX_AREA_M2` and `PortalAreas` bounds the three side columns at `MAX_SIDE_AREA_M2` —
+    both BEFORE the content hash, which is the whole point (rules 2/8).
+    """
+    usable = parse_area_text(params.get("užitná plocha"))
+    estate_area = parse_area_text(params.get("plocha pozemku"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=usable,
+        floor=parse_area_text(params.get("podlahová plocha")),
+        total=parse_area_text(params.get("plocha")),
+        plot=estate_area,
+        fallback=parse_area_text(title),
+    )
+    return PortalAreas(
+        area_m2=area_m2, area_basis=area_basis,
+        usable_area=usable, estate_area=estate_area,
+        garden_area=parse_area_text(params.get("plocha zahrady")),
+    )
+
+
 def parse_detail(
     html: str,
     *,
@@ -614,26 +647,13 @@ def parse_detail(
     locality = _text(tree.css_first(".b-detail__info"))
     lat, lon, coord_provenance = _resolve_coords(html)
 
-    # The three labels reach the shared resolver as SEPARATE typed measures —
-    # collapsing them first is exactly what destroys the basis. `area_text` stays
-    # the collapsed value the usable_area column has always carried.
-    area_text = (
-        _text(params.get("užitná plocha"))
-        or _text(params.get("podlahová plocha"))
-        or _text(params.get("plocha"))
-    )
-    # "Plocha pozemku" is the parcel and reaches the resolver as `plot` — before
-    # W17 it went only to `estate_area`, so 5,292 land rows whose title states no
-    # area carried no headline at all.
-    estate_area = _clamp(parse_area_text(_text(params.get("plocha pozemku"))), _AREA_LARGE_MAX)
-    area_m2, area_basis = derive_headline_area(
-        category_main=category_main,
-        usable=_clamp(parse_area_text(_text(params.get("užitná plocha"))), _AREA_M2_MAX),
-        floor=_clamp(parse_area_text(_text(params.get("podlahová plocha"))), _AREA_M2_MAX),
-        total=_clamp(parse_area_text(_text(params.get("plocha"))), _AREA_M2_MAX),
-        plot=estate_area,
-        fallback=_clamp(parse_area_text(title), _AREA_M2_MAX),
-    )
+    # The spec cells as TEXT — the shape `raw_json['params']` stores and the shape
+    # `areas_from_params` reads, so the live parse and the heal read one map.
+    params_text = {k: _text(v) for k, v in params.items()}
+    if params_text.get("cena"):
+        params_text["cena"] = _strip_mortgage_cta(params_text["cena"])
+
+    areas = areas_from_params(params_text, title=title, category_main=category_main)
 
     # Amenities: each row is a check icon OR free text (size / orientation /
     # parking kind), so everything goes through _truthy_field. idnes has no
@@ -652,10 +672,6 @@ def parse_detail(
     )
 
     image_urls = _gallery_urls(tree)
-
-    params_text = {k: _text(v) for k, v in params.items()}
-    if params_text.get("cena"):
-        params_text["cena"] = _strip_mortgage_cta(params_text["cena"])
 
     raw: dict[str, Any] = {
         "id": source_id,
@@ -681,9 +697,9 @@ def parse_detail(
         subtype=subtype_from_title(f"{og_title} {title}", category_main),
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=area_m2,
-        area_basis=area_basis,
-        usable_area=_clamp(parse_area_text(area_text), _AREA_LARGE_MAX),
+        area_m2=areas.area_m2,
+        area_basis=areas.area_basis,
+        usable_area=areas.usable_area,
         disposition=_parse_disposition(title) or _parse_disposition(_text(params.get("dispozice"))),
         locality=locality,
         district=None,
@@ -722,8 +738,8 @@ def parse_detail(
             (parking_lots > 0) if parking_lots is not None else None,
         ),
         parking_lots=parking_lots,
-        estate_area=estate_area,
-        garden_area=_clamp(parse_area_text(_text(params.get("plocha zahrady"))), _AREA_LARGE_MAX),
+        estate_area=areas.estate_area,
+        garden_area=areas.garden_area,
         description=description,
         raw=raw,
     )

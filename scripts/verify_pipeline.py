@@ -269,15 +269,35 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "location_payload_shape_drift_min_rows": 30,
     "location_payload_shape_drift_window_hours": 48,
     # Area divergence: share of rows carrying BOTH areas whose values differ by more
-    # than the view's 10% material band. Live, mmreality dum/prodej is 99.7% (100.0%
-    # over the trailing week) while every other portal's dum/prodej is 0.0%. The one
-    # cell in between is realitymix byt at 10.5% — a genuine but far milder field
-    # convention, decaying legacy stock post-W1 — so warn sits at 20% to leave it
-    # green rather than amber it forever, and fail at 40% still catches a whole-cell
-    # basis flip an order of magnitude before it gets there.
+    # than the view's 10% material band. RE-MEASURED 2026-09-17 (W21), because the
+    # numbers this was sized against were taken before W1 and both had moved: the
+    # ONLY non-zero cell in the whole corpus is now mmreality dum/prodej at 57.1% of
+    # 2 638 pairs, and its 7d arm is 0.0% of 150 — the live parser has been right
+    # since W1 and what remains is 1 515 legacy rows still carrying the plot as their
+    # headline, which the W21 heal clears. realitymix byt, the 10.5% cell the 20%
+    # warn tier was chosen to leave green, now reads 0.0%; every other cell is 0.0%.
+    # The tiers are NOT tightened onto that floor while the one real offender is still
+    # pending a heal — a threshold moved to fit a corpus mid-repair calibrates on the
+    # repair, not on the noise. Revisit after the heal runs: with every cell at 0.0%
+    # there is room to go to 5%/20%.
     "area_divergence_share_warn": 0.20,
     "area_divergence_share_fail": 0.40,
     "area_divergence_min_rows": 100,
+    # Derived-sum side column (W21, migration 534): the share of rows carrying all
+    # three areas whose `estate_area` equals `area_m2 + usable_area` within 1%. A side
+    # column holding a SUM the page computed is not a measurement — mmreality shipped
+    # exactly that for years by reading `totalArea` (= parcelArea + usableArea) as the
+    # parcel, and neither a null-check nor the divergence arm above can see it (the
+    # column is populated, and the headline was already the interior). Live 2026-09-17,
+    # mmreality is the top two cells — dum/pronajem 5.5% of 55 rows (below the floor)
+    # and dum/prodej 2.6% of 1 123, the worst SCORED cell — over a background where no
+    # other cell exceeds 1.4%. Those are coincidences (the relation only bites where a
+    # parcel happens to equal its interior), so read the tiers as a FORWARD guard sized
+    # on a real ranking: warn at 5% is ~2x the worst scored cell and ~3.5x the
+    # background, fail at 10% is a cell that cannot be coincidence.
+    "estate_sum_share_warn": 0.05,
+    "estate_sum_share_fail": 0.10,
+    "estate_sum_min_rows": 100,
     # Coverage: the share of a cell's active rows the measure has NO INPUT for (no
     # price, or no positive area). Severity is a property of the ARM, not of the
     # number. The stock arm can only WARN: the live offenders were the four sreality
@@ -685,6 +705,15 @@ def _cell_key(cell: dict[str, Any]) -> str:
     return (
         f"{cell['source']}/{cell['category_main'] or '?'}/{cell['category_type'] or '?'}"
     )
+
+
+_STATUS_SEVERITY: dict[str, int] = {"ok": 0, "warn": 1, "fail": 2}
+
+
+def _worst_status(*statuses: str) -> str:
+    """The most severe of several arms' statuses. A check reports the worst thing it
+    saw, never an average — an `ok` arm beside a `fail` one certifies nothing."""
+    return max(statuses, key=lambda st: _STATUS_SEVERITY.get(st, 0))
 
 
 def _status_for_share(
@@ -1656,6 +1685,8 @@ _PLAUSIBILITY_COLS = (
     "n_area_pairs", "area_divergence_share", "n_area_pairs_7d", "area_divergence_share_7d",
     "n_area_valued", "n_ppm2_valued", "n_active_7d",
     "measure_input_gap_share", "measure_input_gap_share_7d",
+    # W21 (migration 534), appended to the view in that order.
+    "n_estate_triples", "estate_sum_share",
 )
 
 _MEASURE_PLAUSIBILITY_SQL = f"""
@@ -1779,14 +1810,31 @@ def check_ppm2_basis_floor_share(conn: Any, thresholds: dict[str, Any]) -> dict[
 
 
 def check_area_vs_usable_divergence(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Watch `area_m2` against `usable_area` on rows that carry both. This is the direct
-    detector for the mmreality defect: a portal writing the PLOT area into the headline
-    floor-area column, which no presence check can see because the column is populated on
-    every row. Measured only over rows carrying both areas (a portal that publishes one
-    field is not divergent, it is silent) and only above the view's 10% material band
-    (rounding and balcony conventions are not a basis error). `pozemek` is skipped by
-    name: under Option A `area_m2` IS the plot for land, so divergence there is the
-    correct answer, not a defect."""
+    """Watch the two ways an area column can be populated and still be the wrong number.
+
+    ARM 1 — `area_m2` against `usable_area` on rows that carry both. The direct detector
+    for a portal writing the PLOT into the headline floor-area column, which no presence
+    check can see because the column is populated on every row. Measured only over rows
+    carrying both areas (a portal that publishes one field is not divergent, it is silent)
+    and only above the view's 10% material band (rounding and balcony conventions are not
+    a basis error). `pozemek` is skipped by name: under Option A `area_m2` IS the plot for
+    land, so divergence there is the correct answer, not a defect.
+
+    ARM 2 (W21, migration 534) — `estate_area` against `area_m2 + usable_area`. A SIDE
+    column can be wrong in a way arm 1 structurally cannot see: mmreality's parser read
+    the page's own `totalArea` as the parcel for years, and `totalArea` is
+    `parcelArea + usableArea` — a derived sum, not a measurement. The headline was already
+    the interior, so arm 1 said nothing; the column was populated, so the null-check said
+    nothing; and the plot came out 44-50% too large on 1 178 active houses. This arm states
+    the invariant instead of the portal: a side column must not BE the sum of the other
+    two. Land is skipped here too — `estate_area` is NULL on most land by design, so the
+    arm has nothing to score there.
+
+    The two arms carry separate thresholds and are reported separately, because 57% of
+    divergence and 2.6% of sum-shaped rows are not the same scale of evidence and one
+    `worst` over both would mislabel whichever number won. `value` is THE FAILING ARM's
+    number: a tile whose headline figure comes from the clean arm while the status comes
+    from the other one is a check reporting a fact it did not fail on."""
     cells, unavailable = _plausibility_cells(conn)
     if not cells:
         return _inert_measure_check("area_vs_usable_divergence", unavailable)
@@ -1801,7 +1849,17 @@ def check_area_vs_usable_divergence(conn: Any, thresholds: dict[str, Any]) -> di
         min_rows=min_rows,
         skip_category_main=frozenset({"pozemek"}),
     )
-    if not scored:
+    sum_warn = float(thresholds["estate_sum_share_warn"])
+    sum_fail = float(thresholds["estate_sum_share_fail"])
+    sum_min_rows = int(thresholds["estate_sum_min_rows"])
+    sum_status, sum_offenders, sum_worst, sum_scored = _status_for_share(
+        cells,
+        [("of three-area rows whose estate_area IS area_m2 + usable_area",
+          "estate_sum_share", "n_estate_triples", sum_warn, sum_fail)],
+        min_rows=sum_min_rows,
+        skip_category_main=frozenset({"pozemek"}),
+    )
+    if not scored and not sum_scored:
         return _unmeasured_check(
             "area_vs_usable_divergence", len(cells),
             f"{min_rows}+ non-land rows carrying BOTH area_m2 and usable_area")
@@ -1814,13 +1872,44 @@ def check_area_vs_usable_divergence(conn: Any, thresholds: dict[str, Any]) -> di
         else f"area_m2 agrees with usable_area (worst {worst:.1%} of both-area rows "
              f"across {scored} scored portal/category arm(s))."
     )
+    if sum_offenders:
+        # Lead with the failing arm when it is the one that decided the status.
+        if _STATUS_SEVERITY[sum_status] > _STATUS_SEVERITY[status]:
+            message = (
+                f"{len(sum_offenders)} portal/category cell(s) carry a DERIVED SUM in "
+                f"estate_area (worst {sum_worst:.1%}): " + "; ".join(sum_offenders[:6])
+                + " — that portal's parser is reading a page-computed total as the "
+                "parcel; check its areas_from_params against the page's own parcel "
+                f"label. (area_m2 vs usable_area is clean at worst {worst:.1%}.)"
+            )
+        else:
+            message += (
+                f" Also {len(sum_offenders)} cell(s) carry a DERIVED SUM in estate_area "
+                f"(worst {sum_worst:.1%}): " + "; ".join(sum_offenders[:3])
+                + " — that portal's parser is reading a page-computed total as the "
+                "parcel; check its areas_from_params against the page's own parcel label."
+            )
+    # The headline number follows the SEVERITY, not the arm order: when only the
+    # derived-sum arm is in trouble, reporting arm 1's clean 0.0% beside a `fail`
+    # status is a tile that contradicts itself.
+    overall = _worst_status(status, sum_status)
+    value = (sum_worst if _STATUS_SEVERITY[sum_status] > _STATUS_SEVERITY[status]
+             else worst)
     return {
         "check_key": "area_vs_usable_divergence",
-        "status": status,
-        "value": round(worst * 100, 2),
+        "status": overall,
+        "value": round(value * 100, 2),
         "details": {"worst_share": round(worst, 4), "warn": warn, "fail": fail,
+                    "value_arm": ("estate_sum"
+                                  if _STATUS_SEVERITY[sum_status] > _STATUS_SEVERITY[status]
+                                  else "area_vs_usable"),
                     "min_rows": min_rows, "offenders": offenders,
                     "cells_read": len(cells), "arms_scored": scored,
+                    "estate_sum_worst_share": round(sum_worst, 4),
+                    "estate_sum_warn": sum_warn, "estate_sum_fail": sum_fail,
+                    "estate_sum_min_rows": sum_min_rows,
+                    "estate_sum_offenders": sum_offenders,
+                    "estate_sum_arms_scored": sum_scored,
                     "skipped_category_main": ["pozemek"]},
         "message": message,
     }

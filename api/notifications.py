@@ -54,6 +54,7 @@ from api.location_filter import (
 )
 from location_data.claims_common import served_location_predicate
 from scraper import db as scraper_db
+from toolkit.measures import plot_area_sql
 
 if TYPE_CHECKING:
     import psycopg
@@ -376,11 +377,14 @@ def _build_match_clauses(
     if spec.max_usable_area is not None:
         where.append("l.usable_area <= %(max_usable_area)s")
         params["max_usable_area"] = spec.max_usable_area
+    # THE plot-area measure, never the bare column (migration 534) — the watchdog and
+    # Browse share one definition of "matches" (rule 16), and for `pozemek` the plot is
+    # `area_m2`, not `estate_area`.
     if spec.min_estate_area is not None:
-        where.append("l.estate_area >= %(min_estate_area)s")
+        where.append(f"{plot_area_sql('l')} >= %(min_estate_area)s")
         params["min_estate_area"] = spec.min_estate_area
     if spec.max_estate_area is not None:
-        where.append("l.estate_area <= %(max_estate_area)s")
+        where.append(f"{plot_area_sql('l')} <= %(max_estate_area)s")
         params["max_estate_area"] = spec.max_estate_area
 
     if spec.has_balcony is not None:
