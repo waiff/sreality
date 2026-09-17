@@ -116,6 +116,11 @@ class _Cursor:
             raise self._conn.raises[sql]
         if "to_regclass" in sql:
             self._rows = [(self._conn.ready,)]
+        elif sql == usql.LATEST_GENERATION_SQL:
+            # WHICH pass a view opens on is now a read, not a constant — so the fake answers
+            # it like the store does, and a store with no clustering yet answers nothing.
+            latest = self._conn.latest_generation
+            self._rows = [] if latest is None else [(latest,)]
         elif "per_wave" in sql:
             self._rows = list(self._conn.wave_rows)
         elif sql == psql.AUTODEDUP_ITERATIONS_SQL:
@@ -168,6 +173,9 @@ class _Tx:
 class _FakeConn:
     def __init__(self) -> None:
         self.ready: bool = True
+        # The newest generation `autodedup.clusters` holds. `g3` and not `g1`: the queue that
+        # opened on the first pass forever is the defect these routes were fixed for.
+        self.latest_generation: str | None = "g3"
         self.iteration_rows: list[tuple[Any, ...]] = []
         self.wave_rows: list[tuple[Any, ...]] = []
         self.canned: dict[str, list[tuple[Any, ...]]] = {}
@@ -642,7 +650,8 @@ def test_groups_renders_a_cluster_with_members_and_edge_evidence(client, conn):
     assert set(body) == {"data", "store_ready"}
     assert body["store_ready"] is True
     data = body["data"]
-    assert (data["has_more"], data["next_after"], data["generation"]) == (False, None, "g1")
+    # The generation is the store's newest pass, echoed back — never the one the URL omitted.
+    assert (data["has_more"], data["next_after"], data["generation"]) == (False, None, "g3")
     item = data["items"][0]
     assert item["cluster"]["cluster_key"] == 101
     assert item["cluster"]["sources"] == ["sreality", "bazos"]
@@ -878,6 +887,99 @@ def test_blocks_renders_when_the_store_does_not_exist(client, conn):
 
 def test_blocks_refuses_a_filter_outside_the_registry(client, conn):
     assert client.get("/autodedup/blocks", params={"block": 1}).status_code == 400
+
+
+# ------------------------------------------------- which generation a validation view opens on
+
+
+def _generation(name: str, **over: Any) -> tuple[Any, ...]:
+    values: dict[str, Any] = {
+        "generation": name,
+        "n_clusters": 9,
+        "n_members": 21,
+        "n_conflicted": 1,
+        "last_changed_at": datetime(2026, 9, 16, 8, 0, tzinfo=timezone.utc),
+    }
+    values.update(over)
+    return _tuple(usql.GENERATION_COLUMNS, **values)
+
+
+def test_a_queue_with_no_generation_named_reads_the_newest_pass(client, conn):
+    """THE DEFECT. Every validation view defaulted to `g1` — the first hand-prior pass, which
+    over-merged developer units and was superseded twice — so the operator reviewed
+    certificate edges the current engine never proposed, against a queue that looked current.
+    A generation the caller did not name is now resolved against the store."""
+    conn.canned = {"groups": [_cluster(generation="g3")]}
+    body = client.get("/autodedup/groups").json()
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == "g3"
+    assert body["data"]["generation"] == "g3"
+
+
+def test_a_named_generation_is_read_as_asked_and_costs_no_extra_statement(client, conn):
+    """An older pass stays readable — that is how a past review is re-examined — and naming it
+    skips the resolving read entirely."""
+    client.get("/autodedup/groups", params={"generation": "g1"})
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] == "g1"
+    assert all(sql != usql.LATEST_GENERATION_SQL for sql, _ in conn.calls)
+
+
+def test_the_residual_scroll_opens_on_the_newest_pass(client, conn):
+    """The residual view asks "which scored pair did this clustering NOT join?" — against the
+    wrong generation it answers about a clustering nobody is validating."""
+    client.get("/autodedup/residual")
+    assert _last_call(conn, usql.RESIDUAL_SQL)["generation"] == "g3"
+
+
+def test_the_block_vocabulary_is_the_newest_passs_blocks(client, conn):
+    """The picker lists the blocks a generation clustered: read against `g1` it offers a
+    vocabulary that filters the queue down to nothing."""
+    body = client.get("/autodedup/blocks").json()
+    assert _last_call(conn, usql.BLOCKS_SQL) == {"generation": "g3", "limit": 200}
+    assert body["data"]["generation"] == "g3"
+
+
+def test_the_pair_view_echoes_the_pass_it_was_validated_against(client, conn):
+    """`autodedup.pairs` is generation-free, but the echo is what a link written from this page
+    carries — so it names a real pass instead of repeating a missing parameter."""
+    conn.canned = {"pair_one": [_pair_row()]}
+    body = client.get("/autodedup/pair/11/12").json()
+    assert body["data"]["generation"] == "g3"
+
+
+def test_a_store_with_no_clustering_yet_resolves_to_no_generation(client, conn):
+    """Nothing persisted is not `g1`: the queue is empty and says so, rather than filtering on
+    a generation name the store never wrote."""
+    conn.latest_generation = None
+    body = client.get("/autodedup/groups").json()
+    assert body["store_ready"] is True
+    assert body["data"]["generation"] is None
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["generation"] is None
+
+
+def test_the_generations_route_lists_every_pass_newest_first(client, conn):
+    """The picker's vocabulary, and the one place the page learns which pass is current — so a
+    view of an older generation can say so instead of looking like the live queue."""
+    conn.canned = {"generations": [_generation("g3"), _generation("g1", n_clusters=4)]}
+    body = client.get("/autodedup/generations").json()
+    assert body["store_ready"] is True
+    assert body["data"]["latest"] == "g3"
+    assert [row["generation"] for row in body["data"]["items"]] == ["g3", "g1"]
+    assert body["data"]["items"][0] == {
+        "generation": "g3",
+        "n_clusters": 9,
+        "n_members": 21,
+        "n_conflicted": 1,
+        "last_changed_at": "2026-09-16T08:00:00+00:00",
+    }
+
+
+def test_the_generations_route_renders_when_the_store_does_not_exist(client, conn):
+    conn.ready = False
+    assert client.get("/autodedup/generations").json() == {"data": None, "store_ready": False}
+
+
+def test_the_generations_route_refuses_a_filter_it_does_not_serve(client, conn):
+    assert client.get("/autodedup/generations", params={"generation": "g1"}).status_code == 400
 
 
 @pytest.mark.parametrize(

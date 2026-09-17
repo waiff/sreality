@@ -31,6 +31,10 @@ import { PAIR_LABELS } from '@/components/autodedup/VerdictButtons';
 import { annotationInput, useVerdictAnnotations } from '@/components/autodedup/VerdictNotes';
 import { parseBlockValue } from '@/components/autodedup/BlockSelect';
 import {
+  GenerationNotice,
+  useAutodedupGenerations,
+} from '@/components/autodedup/GenerationSelect';
+import {
   EMPTY_FILTERS,
   FILTER_CONTROL,
   FILTER_LABEL,
@@ -47,7 +51,6 @@ import { useUrlFilters } from '@/lib/useUrlFilters';
 import { portalLabel } from '@/lib/portals';
 
 const PAGE_SIZE = 20;
-const DEFAULT_GENERATION = 'g1';
 const DEFAULT_MIN_SCORE = '0.2';
 
 /* The residual view's own keys, carried in the SAME url state as the shared
@@ -85,7 +88,10 @@ export function toResidualQuery(
 ): AutodedupResidualFilters {
   const block = parseBlockValue(f.block);
   return {
-    generation: f.generation || DEFAULT_GENERATION,
+    /* Omitted, never defaulted to a generation name: this scroll asks which
+     * scored pairs a clustering did NOT join, and against a superseded pass it
+     * answers about a clustering nobody is validating. */
+    generation: f.generation || null,
     after,
     limit: PAGE_SIZE,
     block: block.block,
@@ -115,6 +121,8 @@ export const EMPTY_RESIDUAL_FILTERS: ResidualFilterState = {
 
 interface ResidualPage extends InfiniteListPage<AutodedupResidualRow> {
   store_ready: boolean;
+  /* The pass the server read — see AutodedupGroups' GroupsPage. */
+  generation: string | null;
   total: number | null;
 }
 
@@ -136,6 +144,7 @@ export default function AutodedupResidual() {
   const filters = useMemo(() => sanitizeResidualFilters(urlFilters), [urlFilters]);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
   const notes = useVerdictAnnotations();
+  const { latest } = useAutodedupGenerations();
 
   const list = useInfiniteList<AutodedupResidualRow, ResidualPage>({
     queryKey: ['autodedup', 'residual', filters],
@@ -147,6 +156,7 @@ export default function AutodedupResidual() {
         rows: res.data?.items ?? [],
         nextCursor: res.data?.next_after ?? undefined,
         store_ready: res.store_ready,
+        generation: res.data?.generation ?? null,
         total: res.data?.total ?? null,
       };
     },
@@ -157,6 +167,7 @@ export default function AutodedupResidual() {
   const storeReady = list.firstPage?.store_ready ?? null;
   const rows = list.rows;
   const total = list.firstPage?.total ?? null;
+  const generation = filters.generation || list.firstPage?.generation || null;
   const halfPair = Boolean(filters.source_a) !== Boolean(filters.source_b);
 
   return (
@@ -244,6 +255,12 @@ export default function AutodedupResidual() {
         </label>
       </FilterBar>
 
+      <GenerationNotice
+        generation={generation}
+        latest={latest}
+        onLatest={() => setFilters({ ...filters, generation: '' })}
+      />
+
       {/* Said out loud rather than filtered silently: half a pair is not a
         * filter the server can apply, and a control that quietly does nothing is
         * the defect this bar was rebuilt to remove. */}
@@ -302,7 +319,7 @@ export default function AutodedupResidual() {
                 pending={pendingKey === key}
                 eager={i < 2}
                 labels={PAIR_LABELS}
-                evidenceHref={pairHref(row.listing_lo, row.listing_hi, filters.generation)}
+                evidenceHref={pairHref(row.listing_lo, row.listing_hi, generation ?? '')}
                 annotation={notes.annotationOf(key, stored)}
                 onAnnotationChange={(next) => notes.setAnnotation(key, next)}
                 annotationDirty={notes.isDirty(key, stored)}

@@ -39,6 +39,10 @@ import VerdictNotes, {
 } from '@/components/autodedup/VerdictNotes';
 import { JudgeChip } from '@/components/autodedup/PairCard';
 import { useVerdictOverlay } from './AutodedupGroups';
+import {
+  GenerationNotice,
+  useAutodedupGenerations,
+} from '@/components/autodedup/GenerationSelect';
 
 const TH = 'py-1 pr-3 text-left font-medium whitespace-nowrap align-top';
 const TD = 'py-1 pr-3 align-top';
@@ -56,12 +60,13 @@ function asId(raw: string | undefined): number | null {
 
 export default function AutodedupPair() {
   const { lo: loRaw, hi: hiRaw } = useParams<{ lo: string; hi: string }>();
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const generation = params.get('generation');
   const lo = asId(loRaw);
   const hi = asId(hiRaw);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
   const notes = useVerdictAnnotations();
+  const { latest } = useAutodedupGenerations();
 
   const q = useQuery({
     queryKey: ['autodedup', 'pair', lo, hi, generation],
@@ -97,6 +102,18 @@ export default function AutodedupPair() {
           un-linkable, which is why it takes a second click.
         </p>
       </header>
+
+      {/* An evidence page reached from a queue of a superseded pass is itself a
+        * view of that pass; dropping the parameter puts it back on the newest. */}
+      <GenerationNotice
+        generation={data?.generation ?? generation}
+        latest={latest}
+        onLatest={() => {
+          const next = new URLSearchParams(params);
+          next.delete('generation');
+          setParams(next, { replace: true });
+        }}
+      />
 
       {q.isPending && (
         <p className="mt-6 flex items-center gap-2 text-sm text-[var(--color-ink-3)]">

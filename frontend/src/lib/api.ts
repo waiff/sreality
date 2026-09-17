@@ -3984,6 +3984,9 @@ export interface AutodedupPairDetail {
   judgements: AutodedupJudgementRow[];
   verdicts: AutodedupVerdictRow[];
   family_names: string[];
+  /* The clustering pass this evidence was opened against, as the server
+   * resolved it — a link that named none still lands on a real one. */
+  generation: string | null;
 }
 
 interface WireSided<T> {
@@ -4009,6 +4012,7 @@ interface WirePairDetail {
   top_features?: AutodedupContribution[] | null;
   judgements?: AutodedupJudgementRow[];
   verdicts?: AutodedupVerdictRow[];
+  generation?: string | null;
 }
 
 const side = <T,>(s: WireSided<T> | undefined, which: 'lo' | 'hi'): T | undefined =>
@@ -4086,6 +4090,7 @@ export function normalizePairDetail(raw: WirePairDetail): AutodedupPairDetail {
     judgements: raw.judgements ?? [],
     verdicts: raw.verdicts ?? [],
     family_names: decodeFamilies(pair?.family_names ?? pair?.families ?? null),
+    generation: raw.generation ?? null,
   };
 }
 
@@ -4100,6 +4105,10 @@ export interface AutodedupKeysetPage<T> {
    * on the FIRST page only, so a continuation page carries null — "not counted
    * here", never zero; the page keeps the number the first read gave it. */
   total?: number | null;
+  /* WHICH clustering pass the rows are from. The request may name none — "the
+   * newest", resolved against the store — so the reply is the only place the
+   * page learns which generation it is actually reviewing. */
+  generation?: string | null;
 }
 
 export type AutodedupEnvelope<T> = { store_ready: boolean; data: T | null };
@@ -4163,6 +4172,20 @@ export interface AutodedupBlock {
   n_clusters: number;
   n_listings: number;
 }
+
+/* Every clustering pass the store holds, newest first, with the current one
+ * named. The validation views used to default to `g1` — the first hand-prior
+ * pass, over-merging developer units, superseded twice — so the operator
+ * reviewed proposals the live engine had already stopped making. The default is
+ * now the server's answer and this is where the page learns which pass that is,
+ * so it can say out loud when it is showing an older one. */
+export const getAutodedupGenerations = async (): Promise<
+  AutodedupEnvelope<{ items: AutodedupGenerationRollup[]; latest: string | null }>
+> =>
+  request<AutodedupEnvelope<{ items: AutodedupGenerationRollup[]; latest: string | null }>>(
+    '/autodedup/generations',
+    { jwt: true },
+  );
 
 /* The BLOCK filter's vocabulary. It replaces a free-text field for a numeric
  * RUIAN code, where a typed town name silently dropped the parameter and the

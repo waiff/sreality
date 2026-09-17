@@ -76,6 +76,10 @@ import EvidenceChips, {
   fmtScore,
 } from '@/components/autodedup/EvidenceChips';
 import BlockSelect, { parseBlockValue } from '@/components/autodedup/BlockSelect';
+import GenerationSelect, {
+  GenerationNotice,
+  useAutodedupGenerations,
+} from '@/components/autodedup/GenerationSelect';
 import ListingMini, {
   MissingPhotoTile,
   memberAttrs,
@@ -93,7 +97,6 @@ import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 
 const NOT_YET = 'not yet';
 const PAGE_SIZE = 20;
-const DEFAULT_GENERATION = 'g1';
 /* Four members fit one row at every width the shell allows; the rest are
  * counted rather than cropped, so the card never lies about the group size. */
 const VISIBLE_MEMBERS = 4;
@@ -115,7 +118,11 @@ export interface GroupFilterState {
 }
 
 export const EMPTY_FILTERS: GroupFilterState = {
-  generation: DEFAULT_GENERATION,
+  /* NOT a generation name. The empty value means "the newest pass", which the
+   * server resolves off `autodedup.clusters`: a constant here (`g1`) is what
+   * kept the queue on a superseded pass long after the engine moved on, and it
+   * would go stale again the next time the lane writes a generation. */
+  generation: '',
   block: '',
   source: '',
   category_main: '',
@@ -150,7 +157,8 @@ export function toQuery(f: GroupFilterState, after: string | null): AutodedupGro
    * that happen to share a number. */
   const block = parseBlockValue(f.block);
   return {
-    generation: f.generation || DEFAULT_GENERATION,
+    /* Omitted, never defaulted — the server answers with the pass it read. */
+    generation: f.generation || null,
     after,
     limit: PAGE_SIZE,
     block: block.block,
@@ -221,18 +229,18 @@ export function FilterBar<T extends GroupFilterState>({
   return (
     <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3">
       <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <label className="block">
-          <span className={FILTER_LABEL}>Generation</span>
-          <input
-            className={FILTER_CONTROL}
-            value={value.generation}
-            onChange={(e) => set('generation', e.target.value)}
-          />
-        </label>
+        <GenerationSelect
+          value={value.generation}
+          onChange={(next) => set('generation', next as T['generation'])}
+          labelClassName={FILTER_LABEL}
+          controlClassName={FILTER_CONTROL}
+        />
         <BlockSelect
           value={value.block}
           onChange={(next) => set('block', next)}
-          generation={value.generation || DEFAULT_GENERATION}
+          /* '' resolves server-side to the newest pass — the same answer the
+           * queue itself gets, so the vocabulary can never be another pass's. */
+          generation={value.generation || null}
           labelClassName={FILTER_LABEL}
           controlClassName={FILTER_CONTROL}
         />
@@ -915,6 +923,10 @@ export function receiptRelations(input: AutodedupSplitInput): string {
 
 interface GroupsPage extends InfiniteListPage<AutodedupGroup> {
   store_ready: boolean;
+  /* WHICH PASS this queue actually is — the server's answer, not the request's:
+   * with no generation named the page asks for "the newest" and only the reply
+   * says which one that was. */
+  generation: string | null;
   /* The server counts the whole filtered set on the FIRST page only, which is
    * the page `useInfiniteList` hands back as `firstPage` — so "20 of N" reads
    * the number from where it was actually sent. */
@@ -958,7 +970,9 @@ export default function AutodedupGroups() {
    * decision, and a dialog that started from a blank slate would silently throw
    * away the letters the operator had already set on the card. */
   const [splits, setSplits] = useState<Record<number, SplitState>>({});
-  const generation = filters.generation || DEFAULT_GENERATION;
+  /* What passes exist, and which is current — the picker's vocabulary, and the
+   * one fact that lets this page notice it is showing a superseded queue. */
+  const { latest } = useAutodedupGenerations();
 
   const list = useInfiniteList<AutodedupGroup, GroupsPage>({
     queryKey: ['autodedup', 'groups', filters],
@@ -968,6 +982,7 @@ export default function AutodedupGroups() {
         rows: res.data?.items ?? [],
         nextCursor: res.data?.next_after ?? undefined,
         store_ready: res.store_ready,
+        generation: res.data?.generation ?? null,
         total: res.data?.total ?? null,
       };
     },
@@ -978,6 +993,15 @@ export default function AutodedupGroups() {
   const storeReady = list.firstPage?.store_ready ?? null;
   const rows = list.rows;
   const total = list.firstPage?.total ?? null;
+  /* The pass the QUEUE read: what the URL named, else what the server answered
+   * with. Null only before the first page lands. */
+  const generation = filters.generation || list.firstPage?.generation || null;
+
+  /* Per-row actions name the pass the ROW came from, never the queue's: a split
+   * is stored against one clustering, and the evidence link must open the same
+   * one the card was drawn from. */
+  const generationOf = (clusterKey: number): string =>
+    rows.find((row) => row.cluster_key === clusterKey)?.generation ?? generation ?? '';
 
   /* The ruling that is STORED, per cluster, read back off the members' pair
    * verdicts — so an assignment the operator made yesterday is on screen before
@@ -1012,7 +1036,7 @@ export default function AutodedupGroups() {
           key,
           splitInput(
             clusterKey,
-            generation,
+            generationOf(clusterKey),
             members,
             base,
             confirmRetract,
@@ -1119,6 +1143,12 @@ export default function AutodedupGroups() {
         </label>
       </FilterBar>
 
+      <GenerationNotice
+        generation={generation}
+        latest={latest}
+        onLatest={() => setFilters({ ...filters, generation: '' })}
+      />
+
       {list.error && <ErrorBanner message={list.error.message} />}
 
       {list.isLoading && (
@@ -1174,7 +1204,7 @@ export default function AutodedupGroups() {
               }
               onOpen={() => setOpenKey(group.cluster_key)}
               split={splitControls(group.cluster_key)}
-              generation={generation}
+              generation={group.generation}
             />
           ))}
         </ul>
@@ -1196,7 +1226,7 @@ export default function AutodedupGroups() {
       {openKey != null && (
         <GroupDialog
           clusterKey={openKey}
-          generation={generation}
+          generation={generationOf(openKey)}
           split={splitControls(openKey)}
           onClose={() => setOpenKey(null)}
         />

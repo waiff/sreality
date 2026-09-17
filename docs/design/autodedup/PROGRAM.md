@@ -37,7 +37,7 @@ The only primitive is `resolve(conn, listing_id)`. The trial and (beyond this pr
 
 ## 1. Rule index — the engine in one page
 
-Every rule is stated **once**, here or in the section that owns it, and referenced by number everywhere else. **Never renumber E1–E53** — the numbers are cited by code, tests and the other program docs. A rule that changes meaning gets a new number and the old one is marked superseded.
+Every rule is stated **once**, here or in the section that owns it, and referenced by number everywhere else. **Never renumber E1–E54** — the numbers are cited by code, tests and the other program docs. A rule that changes meaning gets a new number and the old one is marked superseded.
 
 **Identity and guards**
 - **E1** A duplicate is the *same physical unit* (dwelling, parcel, commercial space) under the same deal type. Not the same building, not the same project, not the same floor plan.
@@ -402,8 +402,9 @@ The operator asked for a **top-line menu entry** that shows how the program is a
 
 **Filters on both verdict views:** town/quarter, source pair, `category_main`, `category_type`, cluster size, score range, evidence family, verdict state (unreviewed/confirmed/rejected), `decided_by`, `has_llm_verdict`, `shared_photo_warning`, `project_suspected`, date range.
 
-Three properties of that bar, learned from the first production pass over it:
+Four properties of that bar, learned from the first production passes over it:
 
+- **E54** **WHICH GENERATION a validation view reads is resolved against the store, never defaulted in code.** Every view — `/autodedup/groups`, `/autodedup/residual`, `/autodedup/blocks`, `/autodedup/pair`, and the SPA's own filter state — defaulted to `g1`, the first hand-prior pass: it over-merged developer units and was superseded by `g2` and `g3`, so the queue kept serving proposals the live engine no longer makes and the operator reviewed six certificate edges of a group `g3` never proposed. A verdict is not cheap feedback — it lands as a permanent must-not-link and as a calibration label — so reviewing a retired pass is worse than reviewing nothing. The generation parameter is now **optional everywhere**: omitted, the route resolves the newest pass off `autodedup.clusters` (`LATEST_GENERATION_SQL`, the first row of the rollup `GET /autodedup/generations` serves, so the picker and the default cannot disagree) and **echoes it back**, which is the only place the page learns which pass it is showing. A store with no clustering yet resolves to **no generation at all** — an empty queue — never to a fabricated name. An older pass stays readable (that is how a past review is re-examined) but the view says so in words and offers the newest in one click, and every per-row action — the evidence drill-down, the split — names the pass **its own row** came from rather than the queue's.
 - **Every control offers a vocabulary, never a code.** "Town/quarter" is the block key — a RÚIAN bigint — and shipping it as a text field meant typing a town name produced NaN, which the query layer drops: the filter silently did nothing. It is now a select of the blocks *this generation clustered*, named off `listing_location` and carrying each block's group count (`GET /autodedup/blocks`, busiest first and capped). A block is a **code and a grain** — `o563510` is a town, `c490245` a quarter, and migration 529 exists because the two vocabularies share one number space — so the option value carries both and the query sends `block` + `block_grain`; a bare code (a link written before the grain existed) still filters grain-blind. The residual view's block predicate reads `listing_location` too, the same store `fingerprint.block_key_of` derives a block key from: it used to read `autodedup.listing_fp`, which no shipped lane writes, so every block on offer emptied the queue. The source pair is likewise two portal selects rather than a typed `a+b` string, composed in the order the server's `least()/greatest()` predicate compares.
 - **The URL is the filter state** (`lib/useUrlFilters`), so a filtered queue is bookmarkable, shareable and survives a reload; a key present in the query string wins, an absent one means the default, and a value CLEARED against a non-empty default is written as an empty key because "no floor" and "never set" are different filters. The keyset cursor is deliberately not in the URL — a link means "this filter", never "this page of it".
 - **Both lists report "20 of N"**, counted by the same `WHERE` fragment the page reads through, on the first page only (paging cannot change N). `null` means *not counted here*, and the page says what it loaded rather than inventing a total.
@@ -412,10 +413,11 @@ Three properties of that bar, learned from the first production pass over it:
 
 - `GET /autodedup/iterations` — the progress page (W1)
 - `GET /autodedup/stats`
+- `GET /autodedup/generations` — every clustering pass the store holds, newest first, with `latest` named: the generation picker's vocabulary and the fact a view needs to notice it is showing a superseded queue (E54)
 - `GET /autodedup/groups?after=&limit=&…` — keyset by `(min_edge_score asc, cluster_key desc)`; each item carries `member_verdicts`, the operator's own rulings on its members' pairs, so a card can show the split that is stored (E50)
 - `GET /autodedup/groups/{cluster_key}` — members, per-edge evidence, judge rationale, the "what would move" report, and `member_verdicts` at MEMBER grain (the pairs the engine never scored included)
 - `GET /autodedup/residual?after=&limit=&…`
-- `GET /autodedup/blocks?generation=` — the block filter's vocabulary: every block this generation clustered, with its grain (`o` obec / `c` část obce, migration 529), its name from `listing_location` and its cluster/listing counts; busiest blocks first, capped, since at corpus scale this is thousands of obce
+- `GET /autodedup/blocks?generation=` — the block filter's vocabulary: every block this generation clustered (`generation` optional here as on every view — omitted means the newest pass, E54), with its grain (`o` obec / `c` část obce, migration 529), its name from `listing_location` and its cluster/listing counts; busiest blocks first, capped, since at corpus scale this is thousands of obce
 - `GET /autodedup/pair/{lo}/{hi}` — full evidence: every feature with value and presence flag, both digests, both image lists with per-image Hamming/cosine, the judge transcript, the score decomposition
 - `GET /autodedup/verdict-reasons` — the reason registry (§9), served so the SPA hard-codes no vocabulary; no store read, so it answers against an un-migrated database
 - `POST /autodedup/verdict` `{kind, cluster_key|lo+hi, verdict, note, reasons}` — a cluster `same` also retracts every operator veto inside the group (E52)
@@ -607,7 +609,7 @@ D1–D10 ruled on **2026-09-16**, **ruled by: program lead (operator delegated)*
 
 ## 16. Standing notes
 
-- **Numbers are cited by code and tests — never renumber E1–E53.** A rule that changes meaning gets a new number and the old one is marked superseded.
+- **Numbers are cited by code and tests — never renumber E1–E54.** A rule that changes meaning gets a new number and the old one is marked superseded.
 - **A merge is not a deploy, and a merged PR is not an applied migration.** Migrations apply via `apply_migration.yml` *before* the PR merges; Railway rollout is confirmed via `gh api repos/{owner}/{repo}/commits/<sha>/status`.
 - **Shadow is the mode.** If any document, comment or code path in this program implies a production write, it is wrong (D4).
 - **This document is the program's source of truth.** If a PR changes behaviour described here, it updates this file in the same PR.

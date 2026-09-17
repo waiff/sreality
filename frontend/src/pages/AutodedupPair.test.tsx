@@ -31,6 +31,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return {
     ...actual,
     getAutodedupPair: vi.fn(),
+    getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
     getAutodedupVerdictReasons: vi.fn(),
   };
@@ -122,6 +123,7 @@ const DETAIL: AutodedupPairDetail = {
     { name: 'area_rel_diff', value: 0.01, present: true, contribution: 0.8 },
     { name: 'street_equal', value: null, present: false, contribution: null },
   ],
+  generation: 'g3',
   judgements: [
     {
       listing_lo: 101,
@@ -161,6 +163,21 @@ describe('<AutodedupPair>', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getAutodedupPair).mockResolvedValue({ store_ready: true, data: DETAIL });
+    vi.mocked(api.getAutodedupGenerations).mockResolvedValue({
+      store_ready: true,
+      data: {
+        latest: 'g3',
+        items: [
+          {
+            generation: 'g3',
+            n_clusters: 1204,
+            n_members: 2600,
+            n_conflicted: 3,
+            last_changed_at: '2026-09-17T06:00:00Z',
+          },
+        ],
+      },
+    });
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({
       store_ready: true,
       data: {
