@@ -1353,15 +1353,24 @@ def _build_registry() -> dict[str, FilterDef]:
             unit="m²",
             aliases=("area_max", "areaMax"),
         ),
+        # THE plot area is a MEASURE, not a column (migration 534): for `pozemek`
+        # it is `area_m2` — the headline is polymorphic by design (rule 23) and for
+        # a parcel it IS the parcel — and `estate_area` for every other category.
+        # `pg_column=None` because no single listings column answers this filter;
+        # every reader calls `plot_area_m2(category_main, area_m2, estate_area)`
+        # (toolkit.measures.plot_area_sql). Reading the bare column dropped 32 626
+        # of 101 021 active land rows (2026-09-17).
         FilterDef(
             id="min_estate_area",
             type=FilterType.FLOAT,
-            pg_column="estate_area",
+            pg_column=None,
             default=None,
             description=(
-                "Lower bound on plot area in m². Mostly relevant for "
-                "`category_main='dum'` (houses) and `pozemek` (land) — "
-                "apartments usually have null estate_area."
+                "Lower bound on PLOT area in m², for houses (`dum`) and land "
+                "(`pozemek`) alike. Reads the `plot_area_m2` measure, which is "
+                "`area_m2` for land and `estate_area` otherwise — not the "
+                "`estate_area` column, which four portals leave null on land. "
+                "Apartments usually have no plot at all."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
@@ -1373,9 +1382,9 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="max_estate_area",
             type=FilterType.FLOAT,
-            pg_column="estate_area",
+            pg_column=None,
             default=None,
-            description="Upper bound on plot area in m². See `min_estate_area`.",
+            description="Upper bound on PLOT area in m². See `min_estate_area`.",
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,

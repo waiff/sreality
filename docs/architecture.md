@@ -1779,6 +1779,115 @@ renumber.** Navigate by area:
     outliers the truncation masked: a 2+kk flat advertised as "3 060 m²" stops reading 60
     and starts reading 3060 — the portal's number, faithfully.
 
+    **The SIDE columns get one rule each too, and one of them was a SUM** (the scraper
+    track's W21, 2026-09-17). `usable_area`, `estate_area` and `garden_area` sit beside the
+    headline, and the wave above only ever governed the headline — so three defects lived on
+    underneath it, each invisible to every health check the platform had.
+
+    *mmreality's parcel is `parcelArea` ("Plocha parcely").* The parser read
+    `landArea or plotArea or totalArea`. `landArea` and `plotArea` are keys the page declares
+    and **never fills** — a value on ZERO of 14,417 stored rows — so `estate_area` was always
+    `totalArea`, and `totalArea` is not a measure at all: the page derives it as
+    `parcelArea + usableArea` (4,133 stored rows carry all three and agree; `parcelArea` is
+    itself `builtUpArea + gardenArea`). Live before the fix: **1,178 active houses** carried a
+    plot 44–50 % too large, **1,515 more** still carried that same sum as their HEADLINE (the
+    pre-W1 shape, never re-derived because nothing refetched them), and `parcelArea` was
+    unmapped on all **3,653 active land rows** and 755 komerní. The fix is one
+    `mmreality.areas_from_params(obj, category_main=)` — usable ← `usableArea`, plot and
+    `estate_area` ← `parcelArea`, garden ← `gardenArea` — and `totalArea` is offered to the
+    resolver in NO slot: a derived sum stamped `'total'` would be a confident wrong label,
+    which is worse than the missing value it replaces. That costs a headline on exactly **18
+    rows corpus-wide** (5 byt, 2 komerní, 11 dum) whose page states neither input, and nothing
+    on land, where `parcelArea` equals `totalArea` on every one of 4,568 rows because a parcel
+    has no interior to add. mmreality is a JSON-object portal, so its function takes the estate
+    object (`raw_json` IS that object) rather than a `params` map and no title; it exports
+    `AREA_OBJECT_KEYS` so the heal projects exactly the keys the parser reads instead of
+    respelling them.
+
+    *`usable_area` is the "užitná plocha" label and nothing else.* idnes
+    (`užitná or podlahová or plocha`) and ceskereality (`plocha užitná or užitná plocha or
+    plocha`) both ended their chain on a broader label, which is the same pre-collapse the
+    headline resolver exists to prevent, one column over: a page stating only a floor or total
+    area wrote that number into the field every consumer reads as the interior measure. Those
+    labels still reach the headline through their own typed slots under their own basis; they
+    no longer impersonate a third label. **This is a contract change with a 1-row live
+    footprint** — both portals state the užitná label whenever they state any area (measured
+    2026-09-17: one idnes row corpus-wide carries a `usable_area` its own `area_basis` says came
+    from the fallback) — and the heal cannot undo even that one, because it never blanks a
+    stored value (see (1) above). Fixed forward, residue named.
+
+    *A side column's validity bound has to sit before the content hash.* `usable_area` /
+    `estate_area` / `garden_area` are `numeric(9,1)`; a value at or beyond that ceiling, or a
+    0 m² form placeholder, was HASHED as itself and then NULLed at the write boundary by
+    `scraper.db.sane_listing_numerics` — leaving `listings` permanently disagreeing with its own
+    newest snapshot (rules 2/8), the hazard `derive_headline_area` already closed for `area_m2`
+    alone. `PortalAreas.__post_init__` now bounds all three at `MAX_SIDE_AREA_M2`, pinned to
+    `scraper.db._NUMERIC_ABS_MAX` by test; `sane_listing_numerics` stays the last guard for the
+    two parsers that build no `PortalAreas` (sreality, bezrealitky). bezrealitky's `_num` also
+    refuses a `bool` before `float` — `float(True)` is 1.0, and its advert carries boolean flags
+    beside its measures, so one key flipping from a size to a flag would have written a 1.0 m²
+    garden. (`frontGarden` there is a FRONT YARD, the strip in front of a ground-floor flat.)
+
+    idnes joined the shared shape in the same wave: `idnes.areas_from_params` replaces its
+    private `_AREA_M2_MAX` / `_AREA_LARGE_MAX` / `_clamp` with the shared bounds, and both it
+    and mmreality joined `backfill_area_spaced_thousands`'s dispatch — which is why W21 needed
+    no heal of its own. mmreality's arm of that heal walks the portal WHOLE rather than by the
+    truncation fingerprint: its numbers are typed JSON that never met a regex, and a land row
+    carrying the sum as its headline with NULL in every other area column satisfies neither
+    fingerprint arm (3,443 of 14,417 rows). `scripts/backfill_mmreality_areas.py` and its
+    workflow are DELETED — they re-spelled the phantom chain, so keeping them meant keeping a
+    second, wrong copy of the key order.
+
+    **"Plot area" is a MEASURE, not a column** (migration 534). `plot_area_m2(category_main,
+    area_m2, estate_area)` = `area_m2` for `pozemek`, `estate_area` otherwise — the same
+    declaration style as `measure_price_per_m2` (single expression, `IMMUTABLE PARALLEL SAFE`,
+    no `SET search_path` so the planner inlines it), with a Python face in `toolkit.measures`
+    (`plot_area_sql` / `plot_area_m2`). It exists because the polymorphism above cuts both ways:
+    every reader of "the plot area" spelled it `estate_area`, which is right for a house and
+    silently wrong for land, where the plot IS the headline. Measured 2026-09-17 over active
+    `pozemek`: **32,626 of 101,021 rows (32.3 %) carry no `estate_area`** — bazos 15,846,
+    realitymix 11,470, mmreality 3,653, remax 1,649 — and 31,613 of them carry the parcel in
+    `area_m2`. So `min_estate_area = 500` dropped a third of the country's land inventory
+    without a word. The fix is the name, **not** a writer change: filling `estate_area` for land
+    would duplicate `area_m2` into a second column on 32k rows and leave every future portal to
+    remember the rule, so the five portals that DO publish a parcel cell on a land page keep
+    publishing it and the rest stay faithful to their pages. Live readers moved:
+    `toolkit.comparables._shared_filter_where` (comparables + velocity + the transit corridor)
+    and the watchdog matcher `api/notifications._build_match_clauses` — rule 16's two sites, and
+    here the SQL is textually identical because neither relation publishes a plot column — plus
+    the filter registry's `min/max_estate_area`, whose `pg_column` is now `None` (no single
+    column answers them) with the measure named in the description the agents read. **Known
+    residue, named:** `browse_stats_properties`, `browse_list` and `browse_map_cells` still
+    compare `l.estate_area` directly. They are inert from the SPA today — `frontend/src/lib/
+    queries.ts` sends no `estate_area_min_filter`, so the Browse UI's "Lot area" input reaches
+    the API path but not those RPCs — and moving them means re-creating three large
+    `SECURITY DEFINER` bodies, which is its own wave with its own drift hazard (migrations
+    371/376).
+
+    **The plausibility view gained the arm that would have caught the sum** (migration 534
+    appends two columns to `measure_plausibility_by_source`). `estate_sum_share` is the share of
+    rows carrying all three areas whose `estate_area` equals `area_m2 + usable_area` within 1 %
+    — a side column holding a figure the page COMPUTED rather than measured. Neither existing
+    detector can see that class: `data_quality_by_source` tests presence and the column was
+    populated on every row, and `area_vs_usable_divergence` watches the HEADLINE, which on
+    mmreality was already the interior. Read the calibration honestly — the relation is a WEAK
+    fingerprint of mmreality's live shape (its `estate_area` was `parcelArea + usableArea` while
+    its headline was `usableArea`, so the two coincide only where a parcel happens to equal its
+    interior): mmreality is the top TWO cells at 5.5 % of 55 rows and 2.6 % of 1,123 over a
+    background where nothing exceeds 1.4 %, so warn 5 % / fail 10 % is a forward guard sized on
+    a real ranking rather than a smoking gun. The same wave RE-MEASURED
+    `area_vs_usable_divergence`, whose thresholds were sized on pre-W1 numbers: its only
+    non-zero cell today is mmreality dum/prodej at **57.1 % of 2,638 pairs** with a **0.0 % 7d
+    arm** — the live parser has been right since W1 and what remains is the 1,515 legacy rows
+    the heal clears — while realitymix byt, the 10.5 % cell the 20 % warn tier was chosen to
+    spare, now reads 0.0 %. The tiers are deliberately NOT tightened onto that floor while the
+    one real offender is still pending a heal: a threshold moved to fit a corpus mid-repair
+    calibrates on the repair.
+
+    **Still open, deliberately.** Six portals publish a **built-up area** ("zastavěná plocha" /
+    mmreality's `builtUpArea`) with no column to put it in — a schema decision for the operator,
+    not a parser fix. bazos has no labelled parcel in its free text, so it gains no side columns.
+
     **`area_m2` is what every consumer reads — the dedup rule included.** NEW DEDUP path C used
     to spell its own choice (`estate_area` for pozemek, else `usable_area`), a second answer to
     "which area is this listing's area" that disagreed with the headline on every one of those

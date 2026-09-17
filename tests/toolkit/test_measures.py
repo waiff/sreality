@@ -31,6 +31,8 @@ from toolkit.measures import (
     measure_backed,
     per_m2_basis_sql,
     per_m2_sql,
+    plot_area_m2,
+    plot_area_sql,
     ppm2_basis,
     price_floor_czk,
     require_scalable_basis,
@@ -58,6 +60,49 @@ def _sql_basis(category_main: str | None, category_type: str | None) -> str | No
     if category_type in ("prodej", "drazba", "podil"):
         return "sale_capital_czk_m2"
     return None
+
+
+_PLOT_MIGRATION = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "migrations" / "534_plot_area_m2.sql"
+)
+
+
+# ---- the plot measure (W21, migration 534) --------------------------------
+
+
+@pytest.mark.parametrize("category_main", _CATEGORY_MAINS)
+def test_plot_area_mirrors_the_sql_case_for_every_category(
+    category_main: str | None,
+) -> None:
+    """`area_m2` for land, `estate_area` otherwise — the whole CASE, both ways round,
+    so the mirror cannot drift into "coalesce the two", which would hand a house's
+    floor area to a plot filter whenever its page states no lot."""
+    expected = 5000.0 if category_main == "pozemek" else 450.0
+    assert plot_area_m2(category_main, 5000.0, 450.0) == expected
+
+
+def test_plot_area_is_a_visible_gap_when_the_row_states_no_plot() -> None:
+    # A flat has no lot: NULL, never the interior area standing in for one.
+    assert plot_area_m2("byt", 68.0, None) is None
+    # ... and a land row with no headline has no plot either, even with an
+    # estate_area beside it — on land the headline IS the parcel (rule 23).
+    assert plot_area_m2("pozemek", None, 900.0) is None
+
+
+def test_the_plot_measure_sql_matches_its_migration() -> None:
+    """Two statements of one rule drift silently (the 425 precedent)."""
+    sql = _PLOT_MIGRATION.read_text(encoding="utf-8")
+    head, body = sql.split("create or replace function public.plot_area_m2(", 1)
+    decl, body = body.split("$function$", 1)
+    body = body.split("$function$")[0]
+    assert "WHEN p_category_main = 'pozemek' THEN p_area_m2" in body
+    assert "ELSE p_estate_area" in body
+    # Inlinable, like measure_price_per_m2: a SET clause would turn every predicate
+    # on the measure into a per-row function call. Read off the DECLARATION, not the
+    # file — the comment above it names the clause in order to forbid it.
+    assert "IMMUTABLE PARALLEL SAFE" in decl and "SET search_path" not in decl
+    assert plot_area_sql("l").startswith("plot_area_m2(")
 
 
 # ---- the row mirror -------------------------------------------------------

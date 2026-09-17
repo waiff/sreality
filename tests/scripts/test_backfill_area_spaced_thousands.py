@@ -55,6 +55,7 @@ class _Cursor:
     def __init__(self, conn: "_Conn") -> None:
         self._conn = conn
         self._rows: list[tuple] = []
+        self._one: tuple | None = None
         self.rowcount = 0
 
     def __enter__(self) -> "_Cursor":
@@ -68,18 +69,21 @@ class _Cursor:
         self._conn.executed.append(sql)
         if sql == mod._STATEMENT_TIMEOUT_SQL:
             self._conn.armed_statement_timeout = True
-        elif "GROUP BY source" in sql:
-            self._rows = [(s, 1, 1, 1) for s in sorted(
-                {r["source"] for r in self._conn.listings})]
+        elif sql.strip().startswith("SELECT count(*)"):
+            n = sum(1 for r in self._conn.listings
+                    if r["source"] == params["source"])
+            self._one = (n, n, n)
         elif sql.strip().startswith("SELECT id"):
             rows = sorted((r for r in self._conn.listings
                            if r["id"] > params["after"]
                            and r["source"] == params["source"]),
                           key=lambda r: r["id"])
             text_lane = "description AS ad_text" in sql
+            object_lane = "jsonb_build_object(" in sql
             self._rows = [
                 tuple(None if (c == "ad_text" and not text_lane)
                       else None if (c == "params" and text_lane)
+                      else None if (c == "title" and object_lane)
                       else r[c] for c in _PROJECTION)
                 for r in rows[:params["page"]]]
         elif sql.startswith("SET LOCAL "):
@@ -102,6 +106,9 @@ class _Cursor:
 
     def fetchall(self) -> list[tuple]:
         return list(self._rows)
+
+    def fetchone(self) -> tuple | None:
+        return self._one
 
 
 class _Tx:
@@ -164,13 +171,20 @@ def test_the_substrate_is_the_rows_own_page_fields_not_an_archived_body() -> Non
     for gone in ("portal_raw_payloads", "load_bodies", "open_store", "body_stale",
                  "listing_snapshots", "R2_", "download_bytes"):
         assert gone not in code, gone
-    assert "raw_json->'params'" in mod._SELECT_SQL
-    assert "raw_json->>'title'" in mod._SELECT_SQL
+    spec = mod._select_sql("ceskereality")
+    assert "raw_json->'params'" in spec
+    assert "raw_json->>'title'" in spec
     # bazos has no spec table: the ad body is its substrate, on its own statement so the
-    # other four never detoast `description` for nothing.
-    assert "description AS ad_text" in mod._SELECT_TEXT_SQL
-    assert "description" not in mod._SELECT_SQL
+    # other portals never detoast `description` for nothing.
+    assert "description AS ad_text" in mod._select_sql("bazos")
+    assert "description" not in spec
     assert mod.TEXT_SOURCES == frozenset({"bazos"})
+    # mmreality's substrate is the estate object itself (`raw = dict(obj)`), so its
+    # measures are TOP-LEVEL raw_json keys — projected narrowly, never as the whole blob.
+    obj = mod._select_sql("mmreality")
+    assert "raw_json->'parcelArea'" in obj and "raw_json->'usableArea'" in obj
+    assert "raw_json->'params'" not in obj
+    assert mod.OBJECT_SOURCES == frozenset({"mmreality"})
 
 
 def test_the_portals_own_key_precedence_is_called_never_recopied() -> None:
@@ -179,15 +193,18 @@ def test_the_portals_own_key_precedence_is_called_never_recopied() -> None:
     `parse_detail` calls, and the heal calls exactly that."""
     from scraper.bazos_parser import areas_from_text
     from scraper.ceskereality_parser import areas_from_params as ck
+    from scraper.idnes_parser import areas_from_params as idn
     from scraper.maxima_parser import areas_from_params as mx
+    from scraper.mmreality_parser import areas_from_params as mm
     from scraper.realitymix_parser import areas_from_params as rmix
     from scraper.remax_parser import areas_from_params as rmax
 
-    assert all(callable(f) for f in (ck, rmix, rmax, mx, areas_from_text))
+    assert all(callable(f) for f in (ck, rmix, rmax, mx, idn, mm, areas_from_text))
     # CODE only — the module docstring quotes a key or two as illustration.
     code = _module_code()
     for key in ("plocha pozemku", "užitná plocha", "plocha parcely",
-                "celkova plocha", "plocha zahrady"):
+                "celkova plocha", "plocha zahrady", "podlahová plocha",
+                "parcelArea", "usableArea", "gardenArea"):
         assert key not in code, f"{key!r} is the parser's to spell, not the heal's"
 
 
@@ -195,8 +212,9 @@ def test_the_portals_own_key_precedence_is_called_never_recopied() -> None:
 
 
 def test_the_suspect_predicate_is_spelled_once_and_used_everywhere() -> None:
-    assert mod._SUSPECT in mod._COUNT_BY_SOURCE_SQL
-    assert mod._SUSPECT in mod._SELECT_SQL and mod._SUSPECT in mod._SELECT_TEXT_SQL
+    for source in ("ceskereality", "bazos", "idnes"):
+        assert mod._SUSPECT in mod._count_sql(source)
+        assert mod._SUSPECT in mod._select_sql(source)
     # a truncation leaves the last three digits ...
     for col in mod._AREA_COLS:
         assert f"{col} < 1000" in mod._SUSPECT
@@ -204,22 +222,34 @@ def test_the_suspect_predicate_is_spelled_once_and_used_everywhere() -> None:
     assert "area_m2 IS NULL AND usable_area IS NULL" in " ".join(mod._SUSPECT.split())
 
 
+def test_mmreality_is_walked_whole_because_it_carries_no_fingerprint() -> None:
+    """Its numbers are typed JSON and never met a regex: the defect is a wrong KEY, so the
+    `< 1000` arm asks the wrong question AND misses the population — a land row carrying
+    the sum as its headline and NULL in every other area column satisfies neither arm
+    (3,443 of 14,417 rows). A 14k corpus needs no fingerprint; `_changed` decides."""
+    assert mod._suspect_sql("mmreality") == mod._SUSPECT_ALL == "true"
+    assert mod._SUSPECT not in mod._select_sql("mmreality")
+    assert mod._SUSPECT not in mod._count_sql("mmreality")
+    # and the count and the page read agree about which rows the run owns.
+    assert mod._suspect_sql("mmreality") in mod._count_sql("mmreality")
+
+
 def test_no_predicate_ever_touches_a_wide_column() -> None:
     """`raw_json` is PROJECTED per page, which is a fine read; a predicate over it would
     detoast every candidate row, the cost that killed `backfill_mmreality_areas`'s first
     live dispatch on a 120 s statement_timeout."""
     assert "raw_json" not in mod._SUSPECT and "description" not in mod._SUSPECT
-    for sql in (mod._SELECT_SQL, mod._SELECT_TEXT_SQL):
-        where = sql.split("WHERE", 1)[1]
+    for source in mod.DEFAULT_SOURCES:
+        where = mod._select_sql(source).split("WHERE", 1)[1]
         assert "raw_json" not in where and "description" not in where
-    assert "raw_json" not in mod._COUNT_BY_SOURCE_SQL
+        assert "raw_json" not in mod._count_sql(source)
 
 
 def test_the_page_read_is_one_source_at_a_time() -> None:
     """The paging SELECT measured 40.5 s against the cluster's 120 s default. A page that
     filtered `source = ANY(...)` stepped over every other portal's rows to find its own."""
-    for sql in (mod._SELECT_SQL, mod._SELECT_TEXT_SQL):
-        flat = " ".join(sql.split())
+    for source in mod.DEFAULT_SOURCES:
+        flat = " ".join(mod._select_sql(source).split())
         assert "source = %(source)s" in flat and "ANY(%(sources)s" not in flat
         assert "id > %(after)s::bigint" in flat and "ORDER BY id" in flat
         assert "property_id" in flat.split("FROM")[0]  # rule 20
@@ -239,11 +269,16 @@ def test_the_write_touches_areas_only_and_enqueues_in_the_same_statement() -> No
     assert all(g.startswith("SET LOCAL ") for g in mod._BATCH_GUARDS)
 
 
-def test_bazos_is_in_the_healed_population() -> None:
-    """8.4 % of the newest 8,000 bazos rows carry the exact truncation fingerprint, and its
-    parser now shares the grammar — so the same re-derive applies, off its ad text."""
+def test_the_healed_population_is_every_portal_with_a_derivation_wired() -> None:
+    """W19's five carried the naive grammar; W21's two carried a wrong KEY. One job either
+    way, because the fix lands inside the function `parse_detail` and the heal share."""
     assert set(mod.DEFAULT_SOURCES) == {
-        "ceskereality", "realitymix", "remax", "maxima", "bazos"}
+        "ceskereality", "realitymix", "remax", "maxima", "bazos", "idnes", "mmreality"}
+    # It doubles as the allowlist `--sources` is validated against, so an unwired portal
+    # exits 2 rather than raising mid-page with rows already written.
+    for source in mod.DEFAULT_SOURCES:
+        assert mod._areas_for(source, params={}, title=None, ad_text=None,
+                              category_main=None) is None
 
 
 def test_the_budget_defaults_under_the_runner_timeout() -> None:
@@ -354,6 +389,89 @@ def test_bazos_reads_its_ad_text(monkeypatch: pytest.MonkeyPatch) -> None:
     assert conn.listings[0]["area_m2"] == 1500.0
     # bazos yields no typed measures, and the never-blank rule keeps the row's own.
     assert conn.listings[0]["estate_area"] is None
+
+
+def test_mmreality_re_keys_the_plot_off_the_parcel_cell(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The W21 heal for the 1,178 active houses whose `estate_area` is the page's
+    `parcelArea + usableArea` sum, and the 1,515 that still carry that sum as their
+    HEADLINE (the pre-W1 shape, never re-derived). Both re-derive off the SAME stored
+    object the live parser reads, through the same function — the heal projects only the
+    keys `scraper.mmreality_parser.AREA_OBJECT_KEYS` names, so `totalArea` is not even
+    fetched."""
+    conn = _Conn([
+        # the sum stored as the plot: 450 + 200 = 650.
+        _listing(id=31, source="mmreality", category_main="dum", property_id=311,
+                 area_m2=200.0, area_basis="usable", usable_area=200.0,
+                 estate_area=650.0, garden_area=300.0,
+                 params={"usableArea": 200, "parcelArea": 450, "gardenArea": 300}),
+        # the pre-W1 shape: the sum as the headline, no plot at all.
+        _listing(id=32, source="mmreality", category_main="dum", property_id=322,
+                 area_m2=650.0, area_basis="usable", usable_area=200.0,
+                 params={"usableArea": 200, "parcelArea": 450, "gardenArea": 300}),
+        # land: the parcel IS the headline (rule 23), and 5,000 > 1000 — the row the
+        # W19 fingerprint would never have selected.
+        _listing(id=33, source="mmreality", category_main="pozemek", property_id=333,
+                 area_m2=5000.0, area_basis="plot",
+                 params={"parcelArea": 5000}),
+    ])
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild", "--sources", "mmreality")
+
+    house, legacy, land = conn.listings
+    assert (house["area_m2"], house["area_basis"]) == (200.0, "usable")
+    assert house["estate_area"] == 450.0
+    assert (legacy["area_m2"], legacy["area_basis"]) == (200.0, "usable")
+    assert legacy["estate_area"] == 450.0
+    assert (land["area_m2"], land["area_basis"]) == (5000.0, "plot")
+    assert land["estate_area"] == 5000.0
+    assert conn.dirty == {311, 322, 333}
+
+
+def test_the_mmreality_key_export_is_sufficient_on_its_own() -> None:
+    """The heal projects EXACTLY `AREA_OBJECT_KEYS` out of raw_json, so if the parser ever
+    reads a key the export omits, the heal silently re-derives from a narrower page than
+    the live parse does. An object carrying only the exported keys must still produce
+    every area column."""
+    from scraper.mmreality_parser import AREA_OBJECT_KEYS, areas_from_params
+
+    obj = dict.fromkeys(AREA_OBJECT_KEYS, 100)
+    areas = areas_from_params(obj, category_main="dum")
+    assert areas.area_m2 and areas.usable_area
+    assert areas.estate_area and areas.garden_area
+
+
+def test_idnes_heals_its_areas_but_never_blanks_a_stale_usable_area(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """idnes joins the heal, and the never-blank rule bounds what that can fix.
+
+    W21 narrowed idnes's `usable_area` to the "užitná plocha" cell alone (it was
+    `užitná or podlahová or plocha`, so a page stating only a floor area wrote that
+    number into the column every consumer reads as the užitná measure). The heal cannot
+    UNDO the stale write: a column the re-derive produces no value for is carried over
+    from the row, because writing NULL over a stored area is indistinguishable from a
+    shape drift. The contract is fixed forward; the residue is 1 row corpus-wide
+    (measured 2026-09-17: idnes + ceskereality rows carrying a usable_area their own
+    headline basis says came from the fallback).
+
+    What the heal DOES fix for idnes is every area the grammar or the parcel slot can
+    still move — here a title-only land row whose parcel cell the old private clamps and
+    the pre-W17 mapping left unread.
+    """
+    conn = _Conn([
+        _listing(id=41, source="idnes", category_main="byt", property_id=411,
+                 area_m2=75.0, area_basis="floor", usable_area=75.0,
+                 params={"podlahová plocha": "75 m²"}, title="Prodej bytu 3+1 75 m²"),
+        _listing(id=42, source="idnes", category_main="pozemek", property_id=422,
+                 area_m2=None, area_basis=None,
+                 params={"plocha pozemku": f"1{NB}074 m²"}, title="Prodej pozemku"),
+    ])
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild", "--sources", "idnes")
+
+    floor_only, land = conn.listings
+    assert (floor_only["area_m2"], floor_only["area_basis"]) == (75.0, "floor")
+    assert floor_only["usable_area"] == 75.0   # never blanked — see the docstring
+    assert (land["area_m2"], land["area_basis"]) == (1074.0, "plot")
+    assert land["estate_area"] == 1074.0
 
 
 def test_a_two_decimal_area_does_not_rewrite_itself_every_pass(

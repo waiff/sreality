@@ -1,4 +1,7 @@
-"""PREPARE the six per-m² statements the automatic SQL corpus cannot reach.
+"""PREPARE the six named-measure statements the automatic SQL corpus cannot reach.
+
+(Six per-m² call sites since W5; W21 added the PLOT measure to two of them, which
+has the same coverage problem for the same reason — see below.)
 
 THE GAP THIS CLOSES, verified rather than assumed. Five of the six are assembled
 by in-function concatenation into a local variable, which the AST layer cannot
@@ -67,6 +70,12 @@ def _statements() -> list[tuple[str, str]]:
         max_price_per_m2=200_000,
         min_price_czk=1_000_000,
         max_price_czk=20_000_000,
+        # W21: the PLOT bounds render `plot_area_m2(...)` (migration 534), which has
+        # exactly the same coverage problem the per-m² measure had — assembled into a
+        # local, invisible to both corpus layers, and a 42883 if the function is not
+        # applied. Same gate, same reason.
+        min_estate_area=200,
+        max_estate_area=5_000,
         category_main="byt",
         category_type="prodej",
         lifecycle="active",
@@ -94,7 +103,8 @@ def _statements() -> list[tuple[str, str]]:
     # aliased `l` — api/notifications.py:1311) so the ppm² bound is resolved
     # against the same view in the test as in production.
     where, _ = _build_match_clauses(
-        WatchdogFilterSpec(min_price_per_m2=50_000, max_price_per_m2=200_000)
+        WatchdogFilterSpec(min_price_per_m2=50_000, max_price_per_m2=200_000,
+                           min_estate_area=200, max_estate_area=5_000)
     )
     out.append((
         "notifications._build_match_clauses",
@@ -135,6 +145,11 @@ def test_every_per_m2_statement_prepares_against_the_schema(_conn):
     indeterminate: list[str] = []
     for i, (name, sql) in enumerate(statements):
         # The whole reason this file exists: prove the measure resolves.
+        if name in ("comparables.build_query",
+                    "notifications._build_match_clauses"):
+            assert "plot_area_m2(" in sql, (
+                f"{name} no longer names the plot measure (migration 534)"
+            )
         if name != "notifications._build_match_clauses":
             assert "measure_price_per_m2" in sql, (
                 f"{name} no longer names the measure"

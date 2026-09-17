@@ -137,6 +137,22 @@ def per_m2_basis_sql(alias: str) -> str:
     )
 
 
+def plot_area_sql(alias: str) -> str:
+    """THE plot-area measure over a `listings`-shaped alias (migration 534).
+
+    Never `{alias}.estate_area`: `area_m2` is polymorphic (rule 23) and for
+    `pozemek` it IS the parcel, so the bare column drops every land row whose
+    portal states the plot only as the headline — 32 626 of 101 021 active land
+    rows on 2026-09-17 (bazos, realitymix, mmreality, remax publish no separate
+    parcel cell on a land page). Same reason `per_m2_sql` exists: one definition,
+    called, never respelled.
+    """
+    return (
+        f"plot_area_m2({alias}.category_main, {alias}.area_m2::numeric, "
+        f"{alias}.estate_area::numeric)"
+    )
+
+
 # --- the Python mirror ----------------------------------------------------
 
 
@@ -189,6 +205,23 @@ def spec_ppm2_basis(
             return LAND_CAPITAL_CZK_M2
         return SALE_CAPITAL_CZK_M2
     return None
+
+
+def plot_area_m2(
+    category_main: str | None,
+    area_m2: float | None,
+    estate_area: float | None,
+) -> float | None:
+    """Mirror of `public.plot_area_m2`, for rows that never touched Postgres.
+
+    ROW-LEVEL ONLY, like `ppm2_basis`: `category_main` is one row's concrete
+    value, where None means "this row has no category" and therefore has no plot
+    beyond whatever `estate_area` states. A filter SPEC's None means the opposite
+    (unconstrained) and must never be handed here.
+    """
+    if category_main == LAND_CATEGORY_MAIN:
+        return area_m2
+    return estate_area
 
 
 def price_floor_czk(basis: str | None) -> float | None:
@@ -496,17 +529,6 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         why="A one-shot repair of the denominator (idnes areas parsed as 403 "
         "instead of 2403). The literal is the docstring stating what the "
         "defect did to every per-m² figure computed from those rows.",
-    ),
-    RegisteredSite(
-        path="scripts/backfill_mmreality_areas.py",
-        arm="unit",
-        hits=1,
-        measure="ppm2",
-        kind=KIND_GUARDS,
-        why="The W2 write pass for mmreality's totalArea-over-usableArea "
-        "headline. NOT YET RUN against production (the operator runs it), so "
-        "mmreality dum still reads ~5 700 CZK per m² on a 905 m² median area. The "
-        "literal is the docstring quantifying that.",
     ),
     RegisteredSite(
         path="scripts/verify_pipeline.py",

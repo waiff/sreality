@@ -3,6 +3,8 @@
 from scraper.area import (
     AREA_BASES,
     MAX_AREA_M2,
+    MAX_SIDE_AREA_M2,
+    PortalAreas,
     MIN_AREA_M2,
     derive_headline_area,
     parse_area_text,
@@ -209,6 +211,36 @@ def test_the_ceiling_is_the_column_bound_the_write_boundary_enforces():
     from scraper.db import _NUMERIC_ABS_MAX
 
     assert MAX_AREA_M2 == float(_NUMERIC_ABS_MAX["area_m2"])
+    # W21: the same pinning for the three SIDE columns, which are numeric(9,1).
+    for column in ("estate_area", "usable_area", "garden_area"):
+        assert MAX_SIDE_AREA_M2 == float(_NUMERIC_ABS_MAX[column])
+
+
+def test_the_side_columns_are_bounded_before_the_content_hash():
+    """rules 2/8. `derive_headline_area` already declines an unstorable `area_m2`; the
+    three side columns had no gate, so a value at the numeric(9,1) ceiling — or a 0 m²
+    form placeholder — was HASHED as itself and then NULLed at the write boundary by
+    `sane_listing_numerics`, leaving `listings` permanently disagreeing with its own
+    newest snapshot. `PortalAreas` is the last point before the hash, so it is where the
+    bound belongs."""
+    areas = PortalAreas(usable_area=MAX_SIDE_AREA_M2, estate_area=0.0,
+                        garden_area=MAX_SIDE_AREA_M2 - 1)
+    assert areas.usable_area is None      # at the ceiling: the column cannot hold it
+    assert areas.estate_area is None      # a 0 m² placeholder is never a measurement
+    assert areas.garden_area == MAX_SIDE_AREA_M2 - 1   # the last value it CAN hold
+
+
+def test_the_side_bound_agrees_with_the_write_boundary_it_replaces():
+    """Whatever `PortalAreas` keeps, `sane_listing_numerics` must also keep — otherwise
+    the hash and the row disagree again, in the other direction."""
+    from scraper.db import sane_listing_numerics
+
+    for value in (0.0, 1.0, 999.5, MAX_SIDE_AREA_M2 - 1, MAX_SIDE_AREA_M2,
+                  MAX_SIDE_AREA_M2 + 1):
+        kept = PortalAreas(estate_area=value).estate_area
+        obj = {"estate_area": value}
+        sane_listing_numerics(obj)
+        assert kept == obj["estate_area"], value
 
 
 def test_every_emitted_basis_is_in_the_declared_vocabulary():

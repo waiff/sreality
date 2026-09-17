@@ -131,9 +131,9 @@ fatal — so **a broken archive looks like a healthy scrape**: `portal_raw_pages
 `select source, count(*) filter (where contract_version is null) from portal_raw_payloads
 where page_kind = 'detail' group by 1;` is the backlog the lane's hash gate is working through.
 
-**One area grammar, one heal.** `scraper.area.parse_area_text` is the ONLY area regex — five parsers each held a copy and four read "5 870 m²" as 870.
-Each portal also owns ONE `areas_from_params` (bazos: `areas_from_text`) that its `parse_detail` and the heal both call — never a second copy of a key order.
-Heal stored rows from their OWN `raw_json` page fields with `backfill_area_spaced_thousands.yml`: dispatch-only, dry-run default, one `--sources` per run, no R2.
+**One area rule per column (W19/W21).** `scraper.area.parse_area_text` is the ONLY area regex; ONE `areas_from_params` per portal (bazos `areas_from_text`; mmreality takes the estate OBJECT + exports `AREA_OBJECT_KEYS`) that `parse_detail` AND the heal call — never a second copy of a key order.
+mmreality's parcel is `parcelArea` (`landArea`/`plotArea` are never filled; `totalArea` is the page's `parcelArea + usableArea` SUM — never read it). `usable_area` = the "užitná plocha" label ONLY (idnes/ceskereality). Plot area for a READER is `plot_area_m2()`, never `estate_area` (land's plot is `area_m2`; mig 534).
+Heal stored rows from their OWN `raw_json` page fields with `backfill_area_spaced_thousands.yml` (all 7 portals): dispatch-only, dry-run default, one `--sources` per run, no R2. It NEVER blanks a stored value, so a stale `usable_area` it cannot produce is carried over, not cleared.
 
 ## How to manually trigger the scrapers
 

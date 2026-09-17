@@ -32,7 +32,7 @@ from toolkit.comparables import (
     _shared_filter_where,
     build_query,
 )
-from toolkit.measures import per_m2_sql
+from toolkit.measures import per_m2_sql, plot_area_sql
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -74,6 +74,51 @@ def test_comparables_calls_the_named_measure_over_the_listings_table():
     # `listings` has no price_per_m2 column: the published-column spelling would
     # PREPARE-fail here, which is precisely why the two sites differ textually.
     assert all("l.price_per_m2 " not in c for c in clauses)
+
+
+def _plot_clauses(where: list[str]) -> list[str]:
+    return [c for c in where if "estate_area" in c or "plot_area_m2" in c]
+
+
+def test_the_plot_bound_is_one_measure_on_both_sites():
+    """W21, rule 16 for the OTHER polymorphic area. `area_m2` is the parcel for
+    `pozemek` (rule 23), so `estate_area >= x` drops every land row whose portal states
+    the plot only as the headline — 32 626 of 101 021 active land rows on 2026-09-17.
+    Both sites call `plot_area_m2`, and here the spelling IS identical: neither relation
+    publishes a plot column, so both must name the function."""
+    watchdog, _ = _build_match_clauses(
+        WatchdogFilterSpec(min_estate_area=200, max_estate_area=5000))
+    comparables, _ = _shared_filter_where(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(min_estate_area=200, max_estate_area=5000),
+    )
+    expected = [
+        f"{plot_area_sql('l')} >= %(min_estate_area)s",
+        f"{plot_area_sql('l')} <= %(max_estate_area)s",
+    ]
+    assert _plot_clauses(watchdog) == expected
+    assert _plot_clauses(comparables) == expected
+
+
+def test_neither_site_reads_the_bare_plot_column():
+    """The source-text guard, the sibling of the per-m² one below: a reader that goes
+    back to `estate_area` silently re-drops a third of the land inventory, and nothing
+    else in the system would say so."""
+    bare = re.compile(r"\bl\.estate_area\s*[<>]=?", re.I)
+    for rel in ("api/notifications.py", "toolkit/comparables.py"):
+        code = "\n".join(
+            line for line in (_ROOT / rel).read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        assert not bare.search(code), (
+            f"{rel} bounds the bare estate_area column; call plot_area_m2 instead"
+        )
+
+
+def test_plot_area_sql_names_the_one_measure():
+    assert plot_area_sql("l").startswith("plot_area_m2(")
+    for part in ("l.category_main", "l.area_m2::numeric", "l.estate_area::numeric"):
+        assert part in plot_area_sql("l")
 
 
 def test_per_m2_sql_names_the_one_measure():

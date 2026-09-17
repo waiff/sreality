@@ -370,6 +370,11 @@ def test_bare_plocha_alone_is_a_total_not_an_uzitna():
         html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
     )
     assert (listing.area_m2, listing.area_basis) == (58.0, "total")
+    # W21: and it does not reach `usable_area` either. That column used to end
+    # `... or params.get("plocha")`, which is the same collapse one column over — the
+    # bare total impersonating a užitná in the field every consumer reads as the
+    # interior measure. It reaches the HEADLINE under its own basis; nothing else.
+    assert listing.usable_area is None
 
 
 def _with_cena(cell_text: str) -> str:

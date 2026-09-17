@@ -36,6 +36,7 @@ from toolkit.measures import (
     measure_backed,
     per_m2_basis_sql,
     per_m2_sql,
+    plot_area_sql,
     spec_ppm2_basis,
 )
 
@@ -485,11 +486,14 @@ def _shared_filter_where(
         where.append("l.garage = %(garage)s")
         params["garage"] = filters.garage
 
+    # THE plot-area measure, never the bare column: `area_m2` is polymorphic and for
+    # `pozemek` it IS the parcel, so `l.estate_area` alone drops every land row whose
+    # portal states the plot only as the headline (migration 534).
     if filters.min_estate_area is not None:
-        where.append("l.estate_area >= %(min_estate_area)s")
+        where.append(f"{plot_area_sql('l')} >= %(min_estate_area)s")
         params["min_estate_area"] = filters.min_estate_area
     if filters.max_estate_area is not None:
-        where.append("l.estate_area <= %(max_estate_area)s")
+        where.append(f"{plot_area_sql('l')} <= %(max_estate_area)s")
         params["max_estate_area"] = filters.max_estate_area
     if filters.min_usable_area is not None:
         where.append("l.usable_area >= %(min_usable_area)s")

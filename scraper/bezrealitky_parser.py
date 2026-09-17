@@ -89,13 +89,21 @@ def _disposition(value: str | None) -> str | None:
 
 
 def _num(value: Any) -> float | None:
-    if value is None:
+    """A number from the GraphQL advert, or None.
+
+    `bool` is refused BEFORE `float`: `float(True)` is 1.0, and bezrealitky's advert
+    object carries boolean flags beside its measures, so one renamed key ("frontGarden"
+    the size becoming "frontGarden" the flag) would have written a 1.0 m² garden into
+    `garden_area` — a plausible-looking measurement, which is the worst kind of wrong.
+    A 0 is bezrealitky's empty sentinel, never a measurement.
+    """
+    if value is None or isinstance(value, bool):
         return None
     try:
         f = float(value)
     except (TypeError, ValueError):
         return None
-    return f or None  # treat 0 as "not specified" (bezrealitky's empty sentinel)
+    return f or None
 
 
 def _int(value: Any) -> int | None:
@@ -212,6 +220,10 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         energy_rating=_energy(advert.get("penb")),
         estate_area=surface_land,
         usable_area=_num(advert.get("surface")),
+        # `frontGarden` is bezrealitky's FRONT YARD ("předzahrádka"), the strip in
+        # front of a ground-floor flat — not a house's garden. It is the only
+        # garden-shaped measure the advert publishes, so it is what garden_area
+        # carries here; read it as that, not as a parcel (rule 23's side columns).
         garden_area=_num(advert.get("frontGarden")),
         category_sub_cb=None,
         furnished=FURNISHED.get(advert.get("equipped")),

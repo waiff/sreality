@@ -293,6 +293,11 @@ def test_parse_detail_clamps_area_to_column_max():
     )
     assert listing.area_m2 is None        # would have been 1_234_567 → numeric(7,1) overflow
     assert listing.price_czk == 5_000_000
+    # W21: the SHARED bounds do this now — `derive_headline_area`'s MAX_AREA_M2 for the
+    # headline, `PortalAreas`'s MAX_SIDE_AREA_M2 for the side columns — so idnes no
+    # longer carries its own `_clamp` and its own two ceilings. numeric(9,1) holds
+    # 1 234 567, so the side column keeps the page's number.
+    assert listing.usable_area == 1_234_567.0
 
 
 def test_parse_detail_price_on_request_is_none_for_rent():
@@ -504,6 +509,40 @@ def test_uzitna_beats_podlahova_and_says_so():
         html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
     )
     assert (listing.area_m2, listing.area_basis) == (69.0, "usable")
+    assert listing.usable_area == 69.0
+
+
+def test_podlahova_alone_is_a_floor_area_and_never_a_uzitna():
+    """W21. `usable_area` used to be `užitná or podlahová or plocha`, so a page stating
+    only "Podlahová plocha" wrote that number into the column every consumer reads as
+    the užitná measure. The label still reaches the HEADLINE through its own typed slot,
+    carrying its own basis; what it no longer does is impersonate a third label."""
+    html = DETAIL_HTML.replace(
+        "<dt>Užitná plocha</dt><dd>69 m<sup>2</sup></dd>",
+        "<dt>Podlahová plocha</dt><dd>75 m<sup>2</sup></dd>",
+    )
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert (listing.area_m2, listing.area_basis) == (75.0, "floor")
+    assert listing.usable_area is None
+
+
+def test_the_area_derivation_is_one_function_both_callers_share():
+    """`parse_detail` and the W19 heal must read ONE key order (rule 21): the heal calls
+    `areas_from_params` over `raw_json['params']`, which is what `parse_detail` stores."""
+    from scraper.idnes_parser import areas_from_params
+
+    listing = parse_detail(
+        HOUSE_DETAIL_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/dum/horni-lhota/6a18deadbeefdeadbeef0011/",
+        category_main="dum", category_type="prodej",
+    )
+    replay = areas_from_params(
+        listing.raw["params"], title=listing.raw["title"], category_main="dum")
+    assert (replay.area_m2, replay.area_basis) == (listing.area_m2, listing.area_basis)
+    assert replay.usable_area == listing.usable_area
+    assert replay.estate_area == listing.estate_area
 
 
 # --- the confirmed-empty signal ----------------------------------------------

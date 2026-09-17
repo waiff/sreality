@@ -497,8 +497,14 @@ def test_estate_and_usable_area_bands_and_min_parking_lots():
             min_parking_lots=2,
         ),
     )
-    assert "l.estate_area >= %(min_estate_area)s" in sql
-    assert "l.estate_area <= %(max_estate_area)s" in sql
+    # W21: the plot bound reads THE plot measure, never the bare column — for
+    # `pozemek` the plot is `area_m2`, and `estate_area` is NULL on 32 626 of
+    # 101 021 active land rows (migration 534).
+    plot = ("plot_area_m2(l.category_main, l.area_m2::numeric, "
+            "l.estate_area::numeric)")
+    assert f"{plot} >= %(min_estate_area)s" in sql
+    assert f"{plot} <= %(max_estate_area)s" in sql
+    assert "l.estate_area >= %(min_estate_area)s" not in sql
     assert "l.usable_area >= %(min_usable_area)s" in sql
     assert "l.usable_area <= %(max_usable_area)s" in sql
     assert "l.parking_lots >= %(min_parking_lots)s" in sql

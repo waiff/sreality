@@ -166,6 +166,18 @@ def test_zero_surface_is_none_sentinel():
     assert listing.total_floors is None
 
 
+def test_a_boolean_is_never_read_as_a_measurement():
+    """`float(True)` is 1.0. bezrealitky's advert carries boolean flags beside its
+    measures, so one key that flips from a size to a flag would have written a
+    1.0 m² garden — a plausible-looking number, which is the worst kind of wrong."""
+    from scraper.bezrealitky_parser import _num
+
+    assert _num(True) is None and _num(False) is None
+    listing = parse_advert(_advert(frontGarden=True, surfaceLand=True))
+    assert listing.garden_area is None
+    assert listing.estate_area is None
+
+
 def test_missing_gps_yields_none_coords():
     listing = parse_advert(_advert(gps=None))
     assert listing.lat is None and listing.lon is None

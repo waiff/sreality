@@ -1,4 +1,19 @@
-"""One-off heal: re-derive the areas five portals truncated on a spaced thousands group.
+"""One-off heal: re-derive each portal's area columns from its OWN stored page fields.
+
+W19 built it for the five portals that truncated a spaced thousands group; W21 added the
+two whose defect is a WRONG KEY rather than a wrong grammar. One job, because the mechanism
+is identical either way: call the portal's own `areas_from_params` over
+`listings.raw_json` and write what it returns.
+
+    idnes      `usable_area` used to be `užitná or podlahová or plocha`, so a page stating
+               only one of the other two labels wrote that number into the column every
+               consumer reads as the užitná measure.
+    mmreality  the parcel was read from `landArea` / `plotArea` — keys carrying a value on
+               ZERO of 14,417 stored rows — falling back to `totalArea`, which is the
+               page's own `parcelArea + usableArea` SUM. That inflated 1,178 active
+               houses' plots by 44-50 %, and 1,515 more houses still carry the pre-W1
+               shape (the same sum as their HEADLINE, estate_area NULL) because nothing
+               ever re-derived them.
 
 Until W19, `ceskereality`, `realitymix`, `remax`, `maxima` and `bazos` each carried a
 private copy of the naive area regex — it matched the FIRST bare digit run before an `m²`,
@@ -36,10 +51,12 @@ IS the heal. Three properties fall out of the substrate rather than being engine
     lag: it is rewritten by the same transaction that writes the areas.
   * **No staleness gate at all.** There is no older-page-versus-newer-row question to ask.
   * **The portal's own key precedence, spelled once.** Each parser exposes
-    `areas_from_params(params, title=, category_main=)` (bazos: `areas_from_text`), the
+    `areas_from_params(params, title=, category_main=)` (bazos: `areas_from_text`;
+    mmreality: `areas_from_params(obj, category_main=)` over the estate object itself), the
     SAME function its `parse_detail` calls, returning `scraper.area.PortalAreas`. The heal
-    calls it with the stored params. A second copy of a key order is the same defect as a
-    second copy of the number grammar, one level up (rule 21).
+    calls it with the stored page fields. A second copy of a key order is the same defect as
+    a second copy of the number grammar, one level up (rule 21). That is also why the W21
+    portals need no new job: the key changed inside the function both callers share.
 
 **Selection is complete by construction, and carries no `raw_json` predicate.** A
 truncation keeps the last three digits, so the stored value is ALWAYS under 1000 — unless
@@ -55,8 +72,15 @@ CAN-BE-WRONG set, not a will-change set: it matches ~99 % of these portals' rows
 flat is legitimately under 1000) while only a minority actually move — the per-source
 report says both. `raw_json` is PROJECTED per page (500 rows at a time, which is a fine
 read) and never appears in a WHERE: a predicate over it would detoast every candidate row,
-the cost that killed the first live dispatch of `backfill_mmreality_areas` on the cluster's
-120 s statement_timeout.
+the cost that killed the first live dispatch of the retired `backfill_mmreality_areas` on
+the cluster's 120 s statement_timeout.
+
+**The fingerprint is the WRONG QUESTION for mmreality, so it does not ask it.** Its numbers
+are typed JSON that never met a regex; its defect is a wrong KEY. A land row carrying the
+sum as its headline and NULL in every other area column satisfies neither arm — 3,443 of
+its 14,417 rows, most of them exactly the rows to re-key. A 14k-row corpus does not need a
+fingerprint: `_suspect_sql` walks all of it and lets `_changed` decide, which is complete by
+construction rather than by argument.
 
 **The page read is per source, and it arms its own statement timeout.** The paging SELECT
 measured 40.5 s and the count 13.6 s against that same 120 s default, so `db.connect()` is
@@ -77,8 +101,14 @@ is never touched.
 and is not written: a shape drift must never turn an area into NULL. One consequence is
 deliberate — a parcel beyond `area_m2`'s `numeric(7,1)` ceiling leaves the row's existing
 headline exactly where it was (the one rule declines to stamp a basis for a value the
-column cannot hold), while `estate_area` (numeric(9,1)) is healed beside it. The live
-simulation over 6,000 rows agrees: every change grows or fills a value, none shrinks one.
+column cannot hold), while `estate_area` (numeric(9,1)) is healed beside it. On W19's five
+portals every change grew or filled a value and none shrank one, because a truncation can
+only lose digits. **W21's two shrink on purpose** and the sentence above is why that is
+safe rather than lossy: mmreality's `estate_area` falls from `parcelArea + usableArea` to
+`parcelArea` (1,178 active houses, 44-50 % too large) and 1,515 more houses' `area_m2`
+falls from that same sum to the interior. The 18 mmreality rows corpus-wide whose page
+states NO measure at all (5 byt, 2 komercni, 11 dum: no `usableArea` and no `parcelArea`)
+keep the headline they have — the never-blank rule, doing its job.
 
 **W17's land heal is subsumed, not repeated.** `backfill_land_headline_area` copied
 `estate_area` into `area_m2` for land rows — and on these portals `estate_area` was itself
@@ -100,7 +130,7 @@ DML, never DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer. A WRITING
 waits for a `rebuild_%` gap first, bounded, then proceeds anyway.
 
 Usage:  python -m scripts.backfill_area_spaced_thousands --dry-run
-        python -m scripts.backfill_area_spaced_thousands --write --sources ceskereality
+        python -m scripts.backfill_area_spaced_thousands --write --sources mmreality
 Required: SUPABASE_DB_URL. Nothing else — no R2, no network.
 """
 
@@ -125,11 +155,18 @@ from scripts.backfill_support import (
 
 LOG = logging.getLogger("backfill_area_spaced_thousands")
 
-# The five portals that carried the naive copy. idnes was healed in 2026-08 by
-# `backfill_idnes_areas`; sreality / bezrealitky / mmreality take typed numbers off a JSON
-# API and never ran the regex at all.
+# Every portal with an area derivation wired below — the allowlist `--sources` is checked
+# against, and the default set a bare run walks. The first five are W19's (the naive
+# grammar), the last two W21's (a wrong key); the module docstring says what each was.
+# sreality and bezrealitky are not here: nothing about their area mapping changed.
 DEFAULT_SOURCES: tuple[str, ...] = (
-    "ceskereality", "realitymix", "remax", "maxima", "bazos")
+    "ceskereality", "realitymix", "remax", "maxima", "bazos", "idnes", "mmreality")
+
+# mmreality publishes no spec table either, but for the opposite reason to bazos: its whole
+# source object IS `raw_json` (`raw = dict(obj)` in the parser), so its measures are
+# TOP-LEVEL raw_json keys and its `areas_from_params` takes that object, not a `params` map
+# and no title. Projected as a narrow jsonb so a page never detoasts for the other keys.
+OBJECT_SOURCES: frozenset[str] = frozenset({"mmreality"})
 
 # bazos publishes no spec table: its areas live in the ad's free text, so its page fields
 # are the title plus `listings.description` rather than `raw_json['params']`.
@@ -153,45 +190,82 @@ _SUSPECT = """(
          AND estate_area IS NULL AND garden_area IS NULL)
     )"""
 
-_COUNT_BY_SOURCE_SQL = f"""
-    SELECT source,
-           count(*) AS total,
-           count(*) FILTER (WHERE {_SUSPECT}) AS suspects,
-           count(*) FILTER (WHERE {_SUSPECT} AND is_active) AS suspects_active
+# mmreality's rows carry NO truncation fingerprint — its numbers are typed JSON and never
+# met a regex — so the `< 1000` arm above is the wrong question there and MISSES the
+# population: a 5,000 m2 parcel row (area_m2 set from the sum, every other area column
+# NULL) satisfies neither arm, which is 3,443 of its 14,417 rows, most of them the land
+# rows this heal exists to re-key. A portal whose whole corpus is 14k rows does not need a
+# fingerprint: walk all of it and let `_changed` decide, which is complete by construction.
+_SUSPECT_ALL = "true"
+
+
+def _suspect_sql(source: str) -> str:
+    return _SUSPECT_ALL if source in OBJECT_SOURCES else _SUSPECT
+
+# ONE source per read, and the suspect arm is the source's own — so the count and the
+# paging read can never disagree about which rows this run owns.
+_COUNT_SQL_TEMPLATE = """
+    SELECT count(*) AS total,
+           count(*) FILTER (WHERE {suspect}) AS suspects,
+           count(*) FILTER (WHERE {suspect} AND is_active) AS suspects_active
     FROM listings
-    WHERE source = ANY(%(sources)s::text[])
-    GROUP BY source ORDER BY suspects DESC, source
+    WHERE source = %(source)s
 """
 
-# ONE source per read, keyset on id: the page never pays for the other portals' rows. The
-# page fields ARE projected (that is the substrate) but never predicated on — `_SUSPECT`
-# touches only the four narrow numeric columns, so the planner never detoasts a row it is
-# about to reject.
-_SELECT_SQL = f"""
+# The page fields ARE projected (that is the substrate) but never predicated on — the
+# `< 1000` arm touches only the four narrow numeric columns, so the planner never detoasts
+# a row it is about to reject.
+_SELECT_SQL_TEMPLATE = """
     SELECT id, property_id, category_main,
            area_m2, usable_area, estate_area, garden_area, area_basis,
-           raw_json->'params' AS params, raw_json->>'title' AS title,
-           NULL::text AS ad_text
+           {fields}
     FROM listings
     WHERE source = %(source)s
       AND id > %(after)s::bigint
-      AND {_SUSPECT}
+      AND {suspect}
     ORDER BY id LIMIT %(page)s::int
 """
 
-# bazos's half: the ad body instead of a spec table. Spelled as its own statement rather
-# than projected for everyone, so four portals never detoast `description` for nothing.
-_SELECT_TEXT_SQL = f"""
-    SELECT id, property_id, category_main,
-           area_m2, usable_area, estate_area, garden_area, area_basis,
-           NULL::jsonb AS params, raw_json->>'title' AS title,
-           description AS ad_text
-    FROM listings
-    WHERE source = %(source)s
-      AND id > %(after)s::bigint
-      AND {_SUSPECT}
-    ORDER BY id LIMIT %(page)s::int
-"""
+# The three page-field shapes, one per substrate. Spelled apart rather than projected for
+# everyone, so a spec-table portal never detoasts `description` and mmreality's object
+# read never pulls its whole 17 kB blob.
+_FIELDS_PARAMS = ("raw_json->'params' AS params, raw_json->>'title' AS title,\n"
+                  "           NULL::text AS ad_text")
+_FIELDS_TEXT = ("NULL::jsonb AS params, raw_json->>'title' AS title,\n"
+                "           description AS ad_text")
+
+
+def _object_fields_sql() -> str:
+    """The object lane's projection, built from the PARSER's own exported key set.
+
+    Naming the keys here would be a second copy of the key order, one field at a time —
+    the defect rule 21 forbids, and the one a heal is most likely to drift into: the
+    parser gains a key, the heal keeps projecting the old three, and the re-derive
+    quietly reads a narrower page than the live parse does.
+    """
+    from scraper.mmreality_parser import AREA_OBJECT_KEYS
+
+    pairs = ",\n             ".join(
+        f"'{k}', raw_json->'{k}'" for k in AREA_OBJECT_KEYS)
+    return (f"jsonb_build_object(\n             {pairs}) AS params,\n"
+            "           NULL::text AS title, NULL::text AS ad_text")
+
+
+def _fields_sql(source: str) -> str:
+    if source in TEXT_SOURCES:
+        return _FIELDS_TEXT
+    if source in OBJECT_SOURCES:
+        return _object_fields_sql()
+    return _FIELDS_PARAMS
+
+
+def _count_sql(source: str) -> str:
+    return _COUNT_SQL_TEMPLATE.format(suspect=_suspect_sql(source))
+
+
+def _select_sql(source: str) -> str:
+    return _SELECT_SQL_TEMPLATE.format(
+        fields=_fields_sql(source), suspect=_suspect_sql(source))
 
 # ONE statement per page: the areas and the property enqueue in a single CTE, so the dirty
 # mark cannot survive a rolled-back write (rule 20 — `db.mark_properties_dirty` documents
@@ -247,6 +321,18 @@ def _areas_for(source: str, *, params: Any, title: str | None,
         return areas_from_text(ad_haystack(title, ad_text),
                                category_main=category_main)
 
+    if source in OBJECT_SOURCES:
+        from scraper.mmreality_parser import areas_from_params as mmreality_areas
+
+        # Numbers, not strings: mmreality's measures are JSON scalars on the estate
+        # object, so the str-only filter the spec-table portals need would drop all
+        # of them. Its function takes no title — the object carries every measure.
+        keys = {str(k): v for k, v in params.items()
+                if v is not None} if isinstance(params, dict) else {}
+        if not keys:
+            return None
+        return mmreality_areas(keys, category_main=category_main)
+
     cells = {str(k): v for k, v in params.items()
              if isinstance(v, str)} if isinstance(params, dict) else {}
     if not cells and not title:
@@ -259,6 +345,8 @@ def _areas_for(source: str, *, params: Any, title: str | None,
         from scraper.remax_parser import areas_from_params
     elif source == "maxima":
         from scraper.maxima_parser import areas_from_params
+    elif source == "idnes":
+        from scraper.idnes_parser import areas_from_params
     else:
         raise ValueError(f"no area derivation wired for source {source!r}")
     return areas_from_params(cells, title=title, category_main=category_main)
@@ -382,8 +470,9 @@ def main() -> int:
                 wait_for_rebuild_gap(conn, args.rebuild_wait_seconds)
 
             with conn.cursor() as cur:
-                cur.execute(_COUNT_BY_SOURCE_SQL, {"sources": sources})
-                for source, total, suspects, suspects_active in cur.fetchall():
+                for source in sources:
+                    cur.execute(_count_sql(source), {"source": source})
+                    total, suspects, suspects_active = cur.fetchone()
                     LOG.info("BACKFILL pending %-14s %7d suspects of %d rows (%d active)",
                              source, suspects, total, suspects_active)
             LOG.info("BACKFILL 'suspects' is the CAN-BE-WRONG set, not the will-change "
@@ -395,7 +484,7 @@ def main() -> int:
             for source in sources:
                 if budget_spent:
                     break
-                select_sql = (_SELECT_TEXT_SQL if source in TEXT_SOURCES else _SELECT_SQL)
+                select_sql = _select_sql(source)
                 while True:
                     page = args.batch_size
                     if args.limit is not None:
