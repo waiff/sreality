@@ -682,10 +682,11 @@ def _fill_order(images: Sequence[Image], chosen: set[int]) -> list[Image]:
 
 
 def room_tag(image: Image) -> str | None:
-    """The image's own top tag — the room, not the family: `bathroom`, not `interior`."""
-    if not image.tags:
-        return None
-    return max(image.tags, key=lambda entry: (entry[1] or 0.0))[0]
+    """The image's own top tag — the room, not the family: `bathroom`, not `interior`.
+
+    The definition lives on `dataset.Image` so the v4 room-paired features read the same tag the
+    prompt's frame selection reads; this stays as the name the judge code and its tests use."""
+    return image.room_tag()
 
 
 def _diverse_fill(
