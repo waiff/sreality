@@ -34,7 +34,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area
+from scraper.area import AREA_TEXT_RE, derive_headline_area, parse_area_text
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -161,7 +161,6 @@ _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
 _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 _ID_RE = re.compile(r"/reality/detail/(\d+)")
-_AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:2|²|\s*2)\b", re.IGNORECASE)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(-?\d+)")
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
@@ -397,13 +396,6 @@ def _parse_disposition(text: str | None) -> str | None:
     return f"{m.group(1)}+{m.group(2).lower()}"
 
 
-def _parse_area(text: str | None) -> float | None:
-    if not text:
-        return None
-    m = _AREA_RE.search(text)
-    return float(m.group(1).replace(",", ".")) if m else None
-
-
 def _parse_int(text: str | None) -> int | None:
     if not text:
         return None
@@ -607,7 +599,7 @@ def _h1_locality(title: str | None) -> tuple[str | None, str | None]:
         return None, None
     tail = title.split(",")[-1].strip()
     tail = re.sub(r"\s*\(ID\b.*$", "", tail).strip()
-    if not tail or _AREA_RE.search(tail):
+    if not tail or AREA_TEXT_RE.search(tail):
         return None, None
     district = tail.split(" - ")[-1].strip() if " - " in tail else None
     return tail, district
@@ -706,13 +698,13 @@ def parse_detail(
 
     usable_text = params.get("uzitna plocha")
     total_text = params.get("celkova plocha") or params.get("plocha")
-    estate_area = _parse_area(params.get("plocha pozemku"))
+    estate_area = parse_area_text(params.get("plocha pozemku"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        usable=_parse_area(usable_text),
-        total=_parse_area(total_text),
+        usable=parse_area_text(usable_text),
+        total=parse_area_text(total_text),
         plot=estate_area,
-        fallback=_parse_area(title),
+        fallback=parse_area_text(title),
     )
 
     image_urls = _detail_images(html, source_id)
@@ -744,7 +736,7 @@ def parse_detail(
         price_unit=price_unit,
         area_m2=area_m2,
         area_basis=area_basis,
-        usable_area=_parse_area(usable_text),
+        usable_area=parse_area_text(usable_text),
         disposition=_parse_disposition(params.get("dispozice")) or _parse_disposition(title),
         locality=locality,
         district=district,
@@ -768,7 +760,7 @@ def parse_detail(
         has_parking=_yes_no(params.get("parkovani")) or _yes_no(params.get("garaz")),
         furnished=_norm_furnished(params.get("vybaveno")),
         estate_area=estate_area,
-        garden_area=_parse_area(params.get("plocha zahrady")),
+        garden_area=parse_area_text(params.get("plocha zahrady")),
         description=_description(tree),
         raw=raw,
     )

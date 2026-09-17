@@ -369,3 +369,24 @@ def test_uzitna_beats_celkova_podlahova_and_says_so():
     listing = parse_detail(html, source_url=_BYT_URL)
     assert (listing.area_m2, listing.area_basis) == (62.0, "usable")
     assert listing.usable_area == 62.0
+
+
+def test_spaced_thousands_in_the_title_fallback_is_one_number():
+    """W19: realitymix's spec cells are unspaced ("3028 m²" in the archived capture)
+    but its TITLES carry the Czech thousands group, and the title is the resolver's
+    fallback — which is where 13,164 rows took a truncated area (stored = title area
+    mod 1000). With no spec area at all the fallback is the whole story."""
+    html = (DUM_HTML
+            .replace("<h1>Prodej rodinného domu 214 m²</h1>",
+                     "<h1>Prodej pozemku 5 870 m²</h1>")
+            .replace('<li class="detail-information__data-item"><span>Užitná plocha:</span><span>214 m²</span></li>', "")
+            .replace('<li class="detail-information__data-item"><span>Plocha parcely:</span><span>3028 m²</span></li>', ""))
+    listing = parse_detail(html, source_url=_DUM_URL)
+    assert (listing.area_m2, listing.area_basis) == (5870.0, "unknown")
+
+
+def test_spaced_thousands_in_a_spec_cell_is_one_number():
+    """The same grammar on the parcel cell, whichever way realitymix renders it."""
+    html = DUM_HTML.replace("<span>3028 m²</span>", "<span>3 028 m²</span>")
+    listing = parse_detail(html, source_url=_DUM_URL)
+    assert listing.estate_area == 3028.0

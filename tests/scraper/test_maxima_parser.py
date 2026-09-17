@@ -266,3 +266,16 @@ def test_uzitna_beats_podlahova_and_says_so():
     )
     listing = parse_detail(html, source_url=_DETAIL_URL)
     assert (listing.area_m2, listing.area_basis) == (96.0, "usable")
+
+
+def test_spaced_thousands_in_a_spec_cell_is_one_number():
+    """W19: maxima renders its spec values with an NBSP before the unit, and a
+    four-digit figure groups the same way ("1 114 m<sup>2</sup>"). The naive
+    regex read 114 — which is why not one of maxima's 87 land rows exceeded 987 m²."""
+    html = DETAIL_HTML.replace(
+        '<td class="text-right slider_value">114&nbsp;m<sup>2</sup></td>',
+        '<td class="text-right slider_value">1&nbsp;114&nbsp;m<sup>2</sup></td>',
+    )
+    listing = parse_detail(html, source_url=_DETAIL_URL,
+                           category_main="byt", category_type="prodej")
+    assert listing.area_m2 == 1114.0

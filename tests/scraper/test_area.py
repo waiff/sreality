@@ -1,6 +1,71 @@
-"""The one headline-area precedence, shared by all nine portals."""
+"""The one area grammar and the one headline-area precedence, shared by all nine portals."""
 
-from scraper.area import AREA_BASES, MAX_AREA_M2, MIN_AREA_M2, derive_headline_area
+from scraper.area import (
+    AREA_BASES,
+    MAX_AREA_M2,
+    MIN_AREA_M2,
+    derive_headline_area,
+    parse_area_text,
+)
+
+
+# ---------------------------------------------------------------------------
+# The grammar (W19). It was five private copies before, four of them the naive
+# form that matched the first bare digit run and read "5 870 m²" as 870 —
+# 17,207 ceskereality + 13,164 realitymix rows in production. The cases below
+# came from idnes's own 2026-08 truncation incident and now guard every portal.
+# ---------------------------------------------------------------------------
+
+
+def test_spaced_thousands_are_one_number():
+    assert parse_area_text("5 870 m²") == 5870.0
+    assert parse_area_text("1 200,5 m2") == 1200.5
+    assert parse_area_text("plocha 12 345 m²") == 12_345.0
+    assert parse_area_text("Prodej pole 2 403 m²") == 2403.0
+    assert parse_area_text("Prodej pozemku 10 000 m²") == 10_000.0
+    assert parse_area_text("Prodej louky 1 074,5 m²") == 1074.5
+
+
+def test_every_separator_a_portal_renders():
+    # remax + ceskereality serve NBSP, realitymix a narrow NBSP, some pages a thin
+    # space; idnes emits zero-width joiners inside a rendered figure.
+    assert parse_area_text("1\u00a0063 m²") == 1063.0
+    assert parse_area_text("12\u202f345 m²") == 12_345.0
+    assert parse_area_text("9\u2009800 m²") == 9800.0
+    assert parse_area_text("5\u200b870 m²") == 5870.0
+
+
+def test_plain_numbers_are_unchanged():
+    assert parse_area_text("80 m2") == 80.0
+    assert parse_area_text("48,5 m²") == 48.5
+    assert parse_area_text("Prodej stavební parcely 720 m2") == 720.0
+    # The dl text variant "m 2" (from "m<sup>2</sup>") still parses.
+    assert parse_area_text("1074 m 2") == 1074.0
+    # A decimal is never re-entered mid-number ("1,5 m²" is not "5 m²").
+    assert parse_area_text("1,5 m²") == 1.5
+
+
+def test_a_disposition_digit_is_never_swallowed():
+    assert parse_area_text("3+1 174 m²") == 174.0
+    assert parse_area_text("Prodej bytu 3+1 174 m²") == 174.0
+
+
+def test_the_first_complete_token_wins_not_a_fragment():
+    assert parse_area_text("pozemky 350 a 1 200 m²") == 1200.0
+
+
+def test_a_per_m2_price_is_not_an_area():
+    # The digits sit AFTER the unit, so there is no area token at all here.
+    assert parse_area_text("Cena za m2: 7 759 CZK") is None
+    assert parse_area_text("4 990 000 Kč (4 008 Kč/m²)") is None
+    # ... and a per-m² note beside a real area must not displace it.
+    assert parse_area_text("80 m2, cena 50 000 Kč/m2") == 80.0
+
+
+def test_no_area_at_all():
+    assert parse_area_text(None) is None
+    assert parse_area_text("") is None
+    assert parse_area_text("Prodej bytu 3+1, Praha 5") is None
 
 
 def test_usable_wins_when_present():

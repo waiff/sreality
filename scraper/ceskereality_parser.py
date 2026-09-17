@@ -33,7 +33,7 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper import street
-from scraper.area import derive_headline_area
+from scraper.area import derive_headline_area, parse_area_text
 from scraper.price_text import is_per_area_price
 from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
@@ -86,7 +86,6 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The numeric listing id is the trailing "-1234567.html" of the detail URL.
 _ID_RE = re.compile(r"-(\d{4,})\.html\b")
-_AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:2|²|\s*2)\b", re.IGNORECASE)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(-?\d+)")
 _ENERGY_RE = re.compile(r"\b([A-G])\b")
@@ -225,15 +224,6 @@ def _parse_disposition(text: str | None) -> str | None:
     if not m:
         return None
     return f"{m.group(1)}+{m.group(2).lower()}"
-
-
-def _parse_area(text: str | None) -> float | None:
-    if not text:
-        return None
-    m = _AREA_RE.search(text)
-    if not m:
-        return None
-    return float(m.group(1).replace(",", "."))
 
 
 def _parse_int(text: str | None) -> int | None:
@@ -620,14 +610,14 @@ def parse_detail(
     # `area_text` keeps the collapsed value the usable_area column has always
     # carried; the headline goes through the shared resolver on SEPARATE measures.
     area_text = params.get("plocha užitná") or params.get("užitná plocha") or params.get("plocha")
-    usable_area = _parse_area(area_text)
-    estate_area = _parse_area(params.get("plocha pozemku"))
+    usable_area = parse_area_text(area_text)
+    estate_area = parse_area_text(params.get("plocha pozemku"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        usable=_parse_area(params.get("plocha užitná") or params.get("užitná plocha")),
-        total=_parse_area(params.get("plocha")),
+        usable=parse_area_text(params.get("plocha užitná") or params.get("užitná plocha")),
+        total=parse_area_text(params.get("plocha")),
         plot=estate_area,
-        fallback=_parse_area(title),
+        fallback=parse_area_text(title),
     )
 
     description = unescape(ld.get("description") or "") or _text(
@@ -690,7 +680,7 @@ def parse_detail(
             params.get("energetická náročnost") or params.get("penb")
         ),
         estate_area=estate_area,
-        garden_area=_parse_area(params.get("plocha zahrady")),
+        garden_area=parse_area_text(params.get("plocha zahrady")),
         description=description,
         # "Datum vložení" — the portal's own insertion date ("10. února 2026"),
         # the cleanest publish signal any HTML portal exposes.

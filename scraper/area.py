@@ -38,9 +38,59 @@ headline.
 BOTH bounds live HERE, not at the write boundary, because a refused measure has
 to reach the content hash — a value dropped after hashing would leave `listings`
 disagreeing with its own newest snapshot forever (rule 2/8).
+
+`parse_area_text` is the other half of the same idea, one level down: the ONE
+grammar that turns a portal's area text into a number. It lives beside the
+precedence because both are the same rule — what an area IS — and five parsers
+each owning a private copy is exactly what rule 21 forbids. It was five copies
+until W19, four of them the naive form that matched the first bare digit run before
+an `m²` and so
+read "5 870 m²" as 870. The fixed grammar is idnes's — proven in production since its
+own truncation incident — WIDENED here to the separators the other portals emit: the
+narrow no-break space and the thin space idnes never had to handle.
 """
 
 from __future__ import annotations
+
+import re
+
+# The separators a Czech portal renders between a number's digit groups: ordinary
+# space, NBSP, narrow NBSP, thin space, and the zero-width joiners idnes emits
+# inside a rendered figure. One class, because there is one grammar (rule 21).
+AREA_THOUSANDS_SEPS = "\u0020\u00a0\u202f\u2009\u200b\u200c\u200d\u2060"
+
+# An area token immediately before "m2" / "m²" / "m 2". The FIRST alternative is the
+# whole point: it accepts the Czech spaced-thousands form ("5 870 m²") that every
+# portal renders, and without it `search` starts INSIDE the number and truncates
+# 5870 -> 870 (idnes 8k+ rows in 2026-08; ceskereality 17,207 + realitymix 13,164 in
+# W19's measurement). The lookbehind keeps the grouped form from swallowing the digit
+# in front of it — a disposition ("3+1 174 m²" stays 174, never 1174), another
+# number, or a decimal tail — while still allowing a match to START at a real
+# number's first digit.
+AREA_TEXT_RE = re.compile(
+    rf"(?<![\d+.,])"
+    rf"(\d{{1,3}}(?:[{AREA_THOUSANDS_SEPS}]\d{{3}})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)"
+    rf"\s*m(?:2|²|\s*2)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_area_text(text: str | None) -> float | None:
+    """The first area figure in `text`, in m² — or None when it carries none.
+
+    Requires the unit, so a per-m² price ("Cena za m2: 7 759 CZK") reads as no area
+    at all rather than as its own number: the digits sit AFTER the unit there.
+    """
+    if not text:
+        return None
+    match = AREA_TEXT_RE.search(text)
+    if not match:
+        return None
+    token = match.group(1)
+    for sep in AREA_THOUSANDS_SEPS:
+        token = token.replace(sep, "")
+    return float(token.replace(",", "."))
+
 
 AREA_BASES: frozenset[str] = frozenset({"usable", "floor", "total", "plot", "unknown"})
 

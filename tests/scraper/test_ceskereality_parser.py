@@ -491,3 +491,20 @@ def test_the_walk_no_longer_reaches_the_facet_scraper():
     assert "extract_facet_slugs" not in src
     assert "extract_facet_slugs" in inspect.getsource(
         ceskereality_main.CeskerealityPortal._descend_slice)
+
+
+def test_spaced_thousands_in_a_spec_cell_is_one_number():
+    """W19: ceskereality renders a four-digit area as "5 870 m²". The naive
+    per-portal regex matched the FIRST digit run before the unit and stored 870 —
+    17,207 rows carried the truncation fingerprint (stored = title area mod 1000),
+    and NOT ONE of its 19,088 land rows had an area_m2 of 1000 or more. One grammar
+    in `scraper.area` now reads the whole number."""
+    html = DETAIL_HTML.replace(
+        '<span class="i-info__value"> 41 m² </span>',
+        '<span class="i-info__value"> 5 870 m² </span>',
+    ).replace("Prodej bytu 1+1 41 m²", "Prodej bytu 1+1 5 870 m²")
+    listing = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert listing.usable_area == 5870.0
+    assert (listing.area_m2, listing.area_basis) == (5870.0, "usable")
