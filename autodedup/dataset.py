@@ -297,6 +297,12 @@ class Image:
         self._clip_vector = None
         self._clip_norm = None
 
+    def room_tag(self) -> str | None:
+        """The image's own top tag — the ROOM, not the family: `bathroom`, not `interior`."""
+        if not self.tags:
+            return None
+        return max(self.tags, key=lambda entry: (entry[1] or 0.0))[0]
+
     def pop_is_measured(self) -> bool:
         """A phash-bearing image appears on at least its own listing, so `pop == 0` cannot be
         a real population — it means the exporter's population probe did not run."""

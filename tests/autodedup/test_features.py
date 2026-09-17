@@ -240,7 +240,7 @@ def test_the_stored_stamp_is_the_vocabularys_own_version_not_a_second_number() -
     from autodedup import score_lane
 
     assert score_lane.FEATURE_VERSION == ft.FEATURE_VERSION
-    assert ft.FEATURE_VERSION == 3 and len(ft.FEATURE_ORDER) == 47
+    assert ft.FEATURE_VERSION == 4 and len(ft.FEATURE_ORDER) == 59
 
 
 def test_a_shared_unit_number_is_its_own_feature() -> None:
@@ -248,7 +248,8 @@ def test_a_shared_unit_number_is_its_own_feature() -> None:
     grew at the END only (v2 at index 44, the v3 plot slots after it) so a stored v1 vector
     still reads."""
     assert ft.FEATURE_ORDER[44] == "unit_number_shared"
-    assert ft.FEATURE_ORDER[45:] == ("plot_area_rel_diff", "plot_area_exact")
+    assert ft.FEATURE_ORDER[45:47] == ("plot_area_rel_diff", "plot_area_exact")
+    assert ft.FEATURE_ORDER[47:] == ft.TAG_FEATURE_NAMES + ("floor_stated_conflict",)
     assert ft.FEATURE_VERSION >= 2
     shared = compute(
         StubFingerprint(1, numerals={("unit", 705.0), ("m2", 64.0)}),
@@ -899,3 +900,144 @@ def test_a_false_from_a_portal_that_never_publishes_false_is_absence() -> None:
         listing(3, source="sreality", attrs={"cellar": False}),
         listing(4, source="idnes", attrs={"cellar": True}),
     )] == ["cellar"]
+
+
+# --- v4: room-tag-paired image evidence (W5) --------------------------------------------------
+
+
+def tagged(listing_id: int, image_id: int, tag: str, seed: float, phash: int, **kwargs: Any) -> ds.Image:
+    return image(listing_id, image_id, tags=[(tag, 0.9)], clip=clip_b64(seed), phash=phash, **kwargs)
+
+
+def test_only_same_room_frames_are_ever_compared() -> None:
+    """The whole point of v4: `clip_max_cos` pairs whatever two frames look most alike, which in a
+    development is the facade on both sides. A kitchen may only meet a kitchen."""
+    a = [tagged(1, 10, "kitchen", 0.1, 0), tagged(1, 11, "bathroom", 5.0, 1 << 40)]
+    b = [tagged(2, 20, "kitchen", 0.1, 0), tagged(2, 21, "bathroom", 5.0, 1 << 40)]
+    rows = ft._tag_room_stats(
+        {"kitchen": [ft.TagFrame(0, a[0].clip_vector(), a[0].clip_norm())],
+         "bathroom": [ft.TagFrame(1 << 40, a[1].clip_vector(), a[1].clip_norm())]},
+        {"kitchen": [ft.TagFrame(0, b[0].clip_vector(), b[0].clip_norm())],
+         "bathroom": [ft.TagFrame(1 << 40, b[1].clip_vector(), b[1].clip_norm())]},
+    )
+    assert [tag for tag, _, _ in rows] == ["bathroom", "kitchen"]
+    assert all(hamming == 0 for _, hamming, _ in rows)
+    # a kitchen never meets the OTHER side's bathroom, however alike they look
+    crossed = ft._tag_room_stats(
+        {"kitchen": [ft.TagFrame(0, a[0].clip_vector(), a[0].clip_norm())]},
+        {"bathroom": [ft.TagFrame(0, b[1].clip_vector(), b[1].clip_norm())]},
+    )
+    assert crossed == []
+
+
+def test_a_side_with_no_tagged_frame_leaves_every_v4_slot_absent() -> None:
+    """E12: missing data is its own signal, never a mismatch."""
+    feats = compute(
+        StubFingerprint(1), StubFingerprint(2), listing(1), listing(2),
+        [image(1, 10, phash=0)], [],
+    )
+    for name in ft.TAG_FEATURE_NAMES:
+        assert feats[name] == ft.ABSENT, name
+
+
+def test_the_weakest_private_room_is_the_developer_unit_discriminator() -> None:
+    """Two units of one project share a facade, a hallway and a fit-out style and differ in a
+    bedroom, so `tag_room_clip_min` reads the rooms a unit OWNS — `hallway` is the tagger's
+    catch-all (24% of the cohort's top tags) and is deliberately not one of them."""
+    assert ft.PRIVATE_ROOM_TAGS == frozenset(
+        {"bathroom", "bedroom", "kitchen", "living_room", "toilet"}
+    )
+    assert "hallway" not in ft.PRIVATE_ROOM_TAGS
+    same = [tagged(1, 10, "kitchen", 0.1, 0), tagged(1, 11, "bedroom", 0.2, 3),
+            tagged(1, 12, "hallway", 9.0, 7)]
+    other = [tagged(2, 20, "kitchen", 0.1, 0), tagged(2, 21, "bedroom", 4.0, (1 << 60) - 1),
+             tagged(2, 22, "hallway", 9.0, 7)]
+    feats = compute(StubFingerprint(1), StubFingerprint(2), listing(1), listing(2), same, other)
+    assert feats["tag_rooms_both"] == (3.0, True)
+    assert feats["tag_rooms_private"] == (2.0, True)
+    # the matching kitchen must not hide the contradicting bedroom
+    assert feats["tag_room_clip_min"][1] and feats["tag_room_clip_min"][0] < 0.99
+    assert feats["tag_clip_mean"][0] > feats["tag_room_clip_min"][0]
+
+
+def test_one_odd_frame_on_a_true_duplicate_does_not_read_as_a_contradiction() -> None:
+    """`tag_room_clip_min2` is the second-weakest room: the operator's own duplicate (94020 x
+    140903) re-shot its kitchen and its garden, so a per-room requirement on the MINIMUM would
+    have refused a pair with seven rooms of literally the same photographs."""
+    a = [tagged(1, 10, "kitchen", 3.0, 0), tagged(1, 11, "bedroom", 0.2, 0),
+         tagged(1, 12, "bathroom", 0.3, 0)]
+    b = [tagged(2, 20, "kitchen", 9.0, (1 << 64) - 1), tagged(2, 21, "bedroom", 0.2, 0),
+         tagged(2, 22, "bathroom", 0.3, 0)]
+    feats = compute(StubFingerprint(1), StubFingerprint(2), listing(1), listing(2), a, b)
+    assert feats["tag_room_clip_min"][0] < feats["tag_room_clip_min2"][0]
+    assert feats["tag_room_clip_min2"][0] > 0.99
+    assert feats["tag_tight_matches"] == (2.0, True)
+
+
+def test_a_lookalike_room_is_not_a_shared_photograph() -> None:
+    """The developer-unit fingerprint: every shared room LOOKS the same and no room IS the same
+    file. 1.00 on eight of the operator's nine false edges, 0.11 on the true one."""
+    a = [tagged(1, 10, "kitchen", 0.1, 0), tagged(1, 11, "bedroom", 0.2, 0)]
+    b = [tagged(2, 20, "kitchen", 0.1, (1 << 64) - 1), tagged(2, 21, "bedroom", 0.2, (1 << 64) - 1)]
+    feats = compute(StubFingerprint(1), StubFingerprint(2), listing(1), listing(2), a, b)
+    assert feats["tag_lookalike_share"] == (1.0, True)
+    assert feats["tag_tight_matches"] == (0.0, True)
+    assert feats["tag_dhash_min"] == (64.0, True)
+
+
+def test_the_floor_plan_slots_read_the_unit_drawing_not_the_site_plan() -> None:
+    """`site_plan` and `property_document` are also `plan` family and are BUILDING material."""
+    assert ft.FLOOR_PLAN_TAG == "floor_plan"
+    a = [tagged(1, 10, "floor_plan", 0.1, 0), tagged(1, 11, "site_plan", 0.4, 0)]
+    b = [tagged(2, 20, "floor_plan", 0.9, (1 << 64) - 1), tagged(2, 21, "site_plan", 0.4, 0)]
+    feats = compute(StubFingerprint(1), StubFingerprint(2), listing(1), listing(2), a, b)
+    assert feats["floorplan_conflict"] == (1.0, True)
+    assert feats["floorplan_tight_match"] == (0.0, True)
+    no_plan = compute(
+        StubFingerprint(1), StubFingerprint(2), listing(1), listing(2),
+        [tagged(1, 10, "site_plan", 0.4, 0)], [tagged(2, 20, "site_plan", 0.4, 0)],
+    )
+    assert no_plan["floorplan_conflict"] == ft.ABSENT
+    assert no_plan["floorplan_tight_match"] == ft.ABSENT
+
+
+def test_catalogue_frames_are_subtracted_before_a_room_is_paired() -> None:
+    """E9 first, exactly as `phash_gallery` does it: a catalogue kitchen is stock, not this
+    unit's kitchen, and pairing it room-to-room would make stock look like evidence."""
+    a = [tagged(1, 10, "kitchen", 0.1, 0, pop=SETTINGS.catalog_df)]
+    b = [tagged(2, 20, "kitchen", 0.1, 0, pop=SETTINGS.catalog_df)]
+    feats = compute(StubFingerprint(1), StubFingerprint(2), listing(1), listing(2), a, b)
+    for name in ft.TAG_FEATURE_NAMES:
+        assert feats[name] == ft.ABSENT, name
+
+
+def test_at_most_three_frames_of_one_room_are_paired() -> None:
+    """A fourth bathroom carries no evidence the second one did not, and the cross-product is
+    quadratic — the same argument as `judge.ROOM_TAG_CAP`, one slot wider because a pairing is a
+    popcount, not a paid vision token."""
+    assert ft.TAG_FRAME_CAP == 3
+    ctx = context({1: StubFingerprint(1), 2: StubFingerprint(2)})
+    gallery = ctx.tag_gallery(1, [tagged(1, 10 + n, "kitchen", 0.1, n) for n in range(6)], SETTINGS)
+    assert len(gallery["kitchen"]) == ft.TAG_FRAME_CAP
+
+
+def test_a_one_floor_gap_is_a_fact_within_a_portal_and_noise_across_two() -> None:
+    """Measured on the 2,703 labelled pairs: same portal + floor_diff == 1 fires on 2.0% of
+    positives against 15.5% of negatives; across portals the same gap fires on 38.7% of positives
+    against 30.1% of negatives — the portals disagreeing about prizemi. A linear model on
+    `floor_diff` and `same_source` cannot form the product for itself."""
+    same_portal = compute(
+        StubFingerprint(1, source="sreality", floor=2),
+        StubFingerprint(2, source="sreality", floor=3), listing(1), listing(2),
+    )
+    assert same_portal["floor_stated_conflict"] == (1.0, True)
+    cross_portal = compute(
+        StubFingerprint(1, source="sreality", floor=2),
+        StubFingerprint(2, source="bezrealitky", floor=3), listing(1), listing(2),
+    )
+    assert cross_portal["floor_stated_conflict"] == (0.0, True)
+    unknown_floor = compute(
+        StubFingerprint(1, source="sreality"), StubFingerprint(2, source="sreality"),
+        listing(1), listing(2),
+    )
+    assert unknown_floor["floor_stated_conflict"] == ft.ABSENT

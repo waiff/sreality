@@ -848,10 +848,13 @@ def test_the_feature_digest_moves_when_the_vocabulary_does() -> None:
 
 # --- the stamp is tautological; the CODE is the other half of the check ------------------------
 
+# The v4 tail (W5): twelve room-paired slots no shipped model is fitted on.
+W5_TAIL: tuple[str, ...] = ft.FEATURE_ORDER[47:]
+
 # The feature names `autodedup/models/w4_gold.json` was fitted WITHOUT and therefore scores at
 # zero. Empty is the goal: the next refit must shrink this tuple to () in the same commit that
 # reruns the fit, and this test is the place the debt is written down.
-W4_GOLD_UNSCORED: tuple[str, ...] = ("plot_area_rel_diff", "plot_area_exact")
+W4_GOLD_UNSCORED: tuple[str, ...] = ("plot_area_rel_diff", "plot_area_exact") + W5_TAIL
 
 
 def test_the_shipped_model_names_the_features_it_cannot_score() -> None:
@@ -899,14 +902,18 @@ def test_an_unstamped_hand_model_over_a_feature_subset_is_exempt() -> None:
 
 
 def test_the_w4f_refit_pays_the_debt_the_w4_model_still_carries() -> None:
-    """W4e wrote the debt down; W4f is the refit that clears it. `w4f_gold` is fitted on the whole
-    of `features.FEATURE_ORDER`, so it loads with no warning at all — and if a 48th feature lands,
-    this test is what fails in the commit that adds it."""
+    """W4e wrote the debt down; W4f is the refit that cleared it FOR V3. W5 adds the twelve
+    room-paired slots and the shipped model is NOT refit onto them (the refit measured worse on
+    every precision column — see PROGRAM.md M27-M31), so `w4f_gold` now carries the SAME kind of
+    debt `w4_gold` does and warns by name. What still holds is the shape: the order grew at the
+    END only, so the shipped weights all still land on the features they were fitted on."""
     body = json.loads((ROOT / "autodedup" / "models" / "w4f_gold.json").read_text())
-    assert tuple(body["feature_order"]) == ft.FEATURE_ORDER
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    stored = tuple(body["feature_order"])
+    assert ft.FEATURE_ORDER[: len(stored)] == stored
+    assert ft.FEATURE_ORDER[len(stored):] == W5_TAIL
+    with pytest.warns(UserWarning, match="refit to let them pay") as warned:
         model = LogisticModel.from_json(json.dumps(body))
+    assert all(name in str(warned[0].message) for name in W5_TAIL)
     assert model.version == "w4f_gold"
     # the two features W4e added carry a learned weight now, not a structural zero
     assert model.weights["plot_area_exact"] != 0.0
