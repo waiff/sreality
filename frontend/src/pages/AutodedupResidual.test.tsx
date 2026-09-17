@@ -11,6 +11,9 @@
  *     never evidence against a duplicate;
  *   * a negative PAIR verdict takes two clicks, because it writes a permanent
  *     must-not-link; the positive one does not;
+ *   * the reason picker is COLLAPSED on a queue row — an open picker per row
+ *     pushes the next pair off the screen, which is the one thing a review
+ *     queue may not do — and the chips reach the POST once it is opened;
  *   * a zone filter sends a key and restarts the keyset;
  *   * no interactive control is nested inside another.
  */
@@ -33,6 +36,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupResidual: vi.fn(),
     getAutodedupBlocks: vi.fn(),
     postAutodedupVerdict: vi.fn(),
+    getAutodedupVerdictReasons: vi.fn(),
   };
 });
 
@@ -161,6 +165,10 @@ describe('<AutodedupResidual>', () => {
     vi.mocked(api.getAutodedupResidual).mockResolvedValue(page([ROW]));
     vi.mocked(api.getAutodedupBlocks).mockResolvedValue(BLOCKS);
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({ store_ready: true, data: STORED, must_not_link: false });
+    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
+      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
+      { code: 'identical_photos', label: 'Stejné fotky' },
+    ]);
   });
 
   it('asks for the display floor of 0.20 on the first read', async () => {
@@ -392,5 +400,70 @@ describe('<AutodedupResidual>', () => {
     vi.mocked(api.getAutodedupResidual).mockResolvedValue({ store_ready: false, data: null });
     renderPage();
     expect(await screen.findByText(/Schema not migrated yet/)).toBeInTheDocument();
+  });
+
+  /* ------------------------------------------------- the operator's reasons (mig 533) */
+
+  it('keeps the reason picker collapsed until the operator asks for it', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    /* Nothing but the toggle: a queue is a scroll. */
+    expect(within(row).queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
+    expect(within(row).queryByLabelText('Poznámka')).toBeNull();
+    await user.click(within(row).getByRole('button', { name: '+ důvod / poznámka' }));
+    expect(within(row).getByRole('button', { name: 'Jiný půdorys' })).toBeInTheDocument();
+    expect(within(row).getByLabelText('Poznámka')).toBeInTheDocument();
+  });
+
+  it('sends the chips and the note with the verdict', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    await user.click(within(row).getByRole('button', { name: '+ důvod / poznámka' }));
+    const chip = within(row).getByRole('button', { name: 'Jiný půdorys' });
+    expect(chip).toHaveAttribute('aria-pressed', 'false');
+    await user.click(chip);
+    await waitFor(() => expect(chip).toHaveAttribute('aria-pressed', 'true'));
+    await user.type(within(row).getByLabelText('Poznámka'), 'jiny byt');
+    await user.click(within(row).getByRole('button', { name: 'This IS a duplicate' }));
+    expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
+      kind: 'pair',
+      listing_lo: 101,
+      listing_hi: 202,
+      verdict: 'same',
+      reasons: ['floor_plan_differs'],
+      note: 'jiny byt',
+    });
+  });
+
+  it('hydrates the chips from a stored verdict and arms the save button on an edit', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAutodedupResidual).mockResolvedValue(
+      page([{ ...ROW, verdict: { ...STORED, reasons: ['identical_photos'], note: 'stejny byt' } }]),
+    );
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    /* An annotated row opens itself — hiding the operator's own evidence behind
+     * a toggle is the write-only failure one level down. */
+    const stored = await within(row).findByRole('button', { name: 'Stejné fotky' });
+    expect(stored).toHaveAttribute('aria-pressed', 'true');
+    expect(within(row).getByLabelText('Poznámka')).toHaveValue('stejny byt');
+    /* Not dirty yet: nothing was edited, so there is nothing to save. */
+    expect(within(row).queryByRole('button', { name: 'Uložit poznámku' })).toBeNull();
+
+    await user.click(within(row).getByRole('button', { name: 'Jiný půdorys' }));
+    const save = await within(row).findByRole('button', { name: 'Uložit poznámku' });
+    await user.click(save);
+    /* The SAME verdict, re-posted with the new annotation — one endpoint, one
+     * overlay, and no second vocabulary for "just the note". */
+    expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
+      kind: 'pair',
+      listing_lo: 101,
+      listing_hi: 202,
+      verdict: 'different',
+      reasons: ['identical_photos', 'floor_plan_differs'],
+      note: 'stejny byt',
+    });
   });
 });

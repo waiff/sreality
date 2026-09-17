@@ -32,6 +32,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     ...actual,
     getAutodedupPair: vi.fn(),
     postAutodedupVerdict: vi.fn(),
+    getAutodedupVerdictReasons: vi.fn(),
   };
 });
 
@@ -174,6 +175,37 @@ describe('<AutodedupPair>', () => {
         decided_at: '2026-09-16T10:00:00Z',
       },
       must_not_link: true,
+    });
+    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
+      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
+      { code: 'unit_number', label: 'Číslo jednotky' },
+    ]);
+  });
+
+  /* ------------------------------------------------- the operator's reasons (mig 533) */
+
+  it('offers the reason picker OPEN — one pair is the whole page', async () => {
+    renderPair();
+    await screen.findByText('area_rel_diff');
+    expect(await screen.findByRole('button', { name: 'Jiný půdorys' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Poznámka')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '+ důvod / poznámka' })).toBeNull();
+  });
+
+  it('carries the chips and the note into the verdict it posts', async () => {
+    const user = userEvent.setup();
+    renderPair();
+    await screen.findByText('area_rel_diff');
+    await user.click(await screen.findByRole('button', { name: 'Číslo jednotky' }));
+    await user.type(screen.getByLabelText('Poznámka'), 'byt 4 vs byt 7');
+    await user.click(screen.getByRole('button', { name: 'This IS a duplicate' }));
+    expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
+      kind: 'pair',
+      listing_lo: 101,
+      listing_hi: 202,
+      verdict: 'same',
+      reasons: ['unit_number'],
+      note: 'byt 4 vs byt 7',
     });
   });
 

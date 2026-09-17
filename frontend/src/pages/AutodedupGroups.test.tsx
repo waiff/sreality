@@ -46,6 +46,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupBlocks: vi.fn(),
     postAutodedupVerdict: vi.fn(),
     postAutodedupSplitVerdict: vi.fn(),
+    getAutodedupVerdictReasons: vi.fn(),
   };
 });
 
@@ -266,6 +267,45 @@ describe('<AutodedupGroups>', () => {
         must_not_link_retracted: 0,
       },
     });
+    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
+      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
+      { code: 'same_project', label: 'Stejný projekt' },
+    ]);
+  });
+
+  /* ------------------------------------------------- the operator's reasons (mig 533) */
+
+  it('sends the chips and the note with a cluster verdict', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    /* Collapsed on a queue card, like the residual rows. */
+    await user.click(within(card).getAllByRole('button', { name: '+ důvod / poznámka' })[0]);
+    await user.click(within(card).getByRole('button', { name: 'Stejný projekt' }));
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }));
+    expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
+      kind: 'cluster',
+      cluster_key: 7,
+      verdict: 'same',
+      reasons: ['same_project'],
+      note: null,
+    });
+  });
+
+  it('stamps ONE reason set on the split it sends', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    /* The split row has a picker of its OWN: what the operator saw when they
+      * separated the group is not what they saw when they confirmed it. */
+    const pickers = within(card).getAllByRole('button', { name: '+ důvod / poznámka' });
+    await user.click(pickers[0]);
+    await user.click(within(card).getByRole('button', { name: 'Jiný půdorys' }));
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    const sent = vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0];
+    expect(sent.reasons).toEqual(['floor_plan_differs']);
+    expect(sent.note).toBeNull();
   });
 
   it('says nothing has been merged', async () => {
