@@ -79,7 +79,9 @@ export default function BlockSelect({
   /* The block key as it travels in the URL and on the query — '' means "all". */
   value: string;
   onChange: (next: string) => void;
-  generation: string;
+  /* Null means "the pass the server resolves", the same answer the queue gets —
+   * never a generation name this component picked for itself. */
+  generation: string | null;
   label?: string;
   labelClassName?: string;
   controlClassName?: string;

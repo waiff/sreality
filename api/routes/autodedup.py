@@ -211,7 +211,11 @@ def stats(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
 
 # ============================================================ the validation UI (W5, §12)
 
-DEFAULT_GENERATION = "g1"
+# There is NO default generation. `g1` was one — the first hand-prior pass, which over-merged
+# developer units and was superseded twice — and every validation view opened on it long after
+# the engine had moved on: the operator reviewed certificate edges that the current pass never
+# proposed. An unnamed generation is resolved against the store instead (`_resolve_generation`),
+# and the answer is echoed back so the page can say which pass it is showing.
 GROUP_PAGE_SIZE = 25
 GROUP_MAX_PAGE_SIZE = 100
 RESIDUAL_MIN_SCORE = 0.20
@@ -337,6 +341,18 @@ def _json_safe(value: Any) -> Any:
 
 def _rows(columns: tuple[str, ...], rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
     return [_row(columns, r) for r in rows]
+
+
+def _resolve_generation(conn: Any, generation: str | None) -> str | None:
+    """The pass a view reads: the one the caller named, else the newest one persisted.
+
+    None comes back only from a store that holds no cluster at all — an empty queue is then
+    the honest answer, where a fabricated generation name would be an empty queue that looks
+    like a filter result."""
+    if generation:
+        return generation
+    rows = _fetch(conn, usql.LATEST_GENERATION_SQL)
+    return str(rows[0][0]) if rows and rows[0] and rows[0][0] is not None else None
 
 
 def _families(mask: Any) -> list[str]:
@@ -827,13 +843,41 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
     }
 
 
+# ------------------------------------------------------------------ the generations on record
+
+
+@router.get("/generations")
+def generations(
+    request: Request,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Every clustering pass the store holds, newest first — the picker's vocabulary.
+
+    A free-text field for a generation name is how a superseded pass stays on screen: `g1`
+    reads like a valid answer forever. This is the rollup the Progress header already shows,
+    read here so the queue's picker and that header cannot disagree about what exists."""
+    _reject_unknown_filters(request, frozenset())
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        items = _json_safe(
+            _rows(usql.GENERATION_COLUMNS, _fetch(conn, usql.GENERATION_COUNTS_SQL))
+        )
+    except _STORE_BEHIND:
+        return _not_ready()
+    return {
+        "data": {"items": items, "latest": items[0]["generation"] if items else None},
+        "store_ready": True,
+    }
+
+
 # --------------------------------------------------------------------------- proposed groups
 
 
 @router.get("/groups")
 def groups(
     request: Request,
-    generation: str = Query(DEFAULT_GENERATION),
+    generation: str | None = Query(None),
     after: str | None = Query(None),
     limit: int = Query(GROUP_PAGE_SIZE, ge=1, le=GROUP_MAX_PAGE_SIZE),
     block: int | None = Query(None),
@@ -898,6 +942,10 @@ def groups(
     # The guard covers EVERY statement of the route, not the first: `drop schema autodedup
     # cascade` is one statement in this program, and it can land between any two reads.
     try:
+        # Resolved here rather than as a Query default: the newest pass is a fact of the
+        # store, and it is read under the same guard as every other statement.
+        generation = _resolve_generation(conn, generation)
+        params["generation"] = generation
         rows = _rows(usql.CLUSTER_COLUMNS, _fetch(conn, GROUP_SORTS[sort], params))
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -1056,7 +1104,7 @@ def group_detail(
 @router.get("/residual")
 def residual(
     request: Request,
-    generation: str = Query(DEFAULT_GENERATION),
+    generation: str | None = Query(None),
     after: str | None = Query(None),
     limit: int = Query(GROUP_PAGE_SIZE, ge=1, le=GROUP_MAX_PAGE_SIZE),
     block: int | None = Query(None),
@@ -1102,6 +1150,8 @@ def residual(
         params["after_hi"] = _as_int(parts[2])
 
     try:
+        generation = _resolve_generation(conn, generation)
+        params["generation"] = generation
         rows = _rows(usql.RESIDUAL_COLUMNS, _fetch(conn, RESIDUAL_SORTS[sort], params))
         total = _total(conn, usql.RESIDUAL_COUNT_SQL, params, after)
     except _STORE_BEHIND:
@@ -1177,7 +1227,7 @@ def residual(
 @router.get("/blocks")
 def blocks(
     request: Request,
-    generation: str = Query(DEFAULT_GENERATION),
+    generation: str | None = Query(None),
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """Every block this generation clustered, NAMED — what the BLOCK filter offers instead of
@@ -1194,6 +1244,7 @@ def blocks(
     if not store_ready(conn):
         return _not_ready()
     try:
+        generation = _resolve_generation(conn, generation)
         rows = _rows(
             usql.BLOCK_COLUMNS,
             _fetch(conn, usql.BLOCKS_SQL, {"generation": generation, "limit": BLOCKS_LIMIT}),
@@ -1236,6 +1287,10 @@ def pair(
     if not store_ready(conn):
         return _not_ready()
     try:
+        # The pair itself is generation-free — `autodedup.pairs` is one scored edge, not a
+        # clustering. The echo still names the pass the caller is validating against, so a
+        # link written from this page cannot silently mean a superseded one.
+        generation = _resolve_generation(conn, generation)
         rows = _fetch(
             conn, usql.PAIR_ONE_SQL, {"listing_lo": listing_lo, "listing_hi": listing_hi}
         )

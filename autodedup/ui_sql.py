@@ -853,6 +853,18 @@ GROUP BY c.generation
 ORDER BY max(c.last_changed_at) DESC
 """
 
+# WHICH pass a validation view reads when the caller names none. The first row of
+# GENERATION_COUNTS_SQL by construction — the generation whose clusters changed most recently —
+# because the list the picker offers and the default the queue opens on must never disagree
+# about which pass is current. A hard-coded default is what put a superseded generation's
+# proposals in front of the operator; the store names the newest pass, so the store is asked.
+LATEST_GENERATION_SQL = """
+SELECT c.generation
+FROM autodedup.clusters c
+ORDER BY c.last_changed_at DESC
+LIMIT 1
+"""
+
 VERDICT_COUNT_COLUMNS: tuple[str, ...] = ("kind", "verdict", "n")
 
 VERDICT_COUNTS_SQL = """

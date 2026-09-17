@@ -44,6 +44,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupGroups: vi.fn(),
     getAutodedupGroup: vi.fn(),
     getAutodedupBlocks: vi.fn(),
+    getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
     postAutodedupSplitVerdict: vi.fn(),
     getAutodedupVerdictReasons: vi.fn(),
@@ -137,9 +138,34 @@ function page(
 ) {
   return {
     store_ready: true,
-    data: { items, has_more: nextAfter != null, next_after: nextAfter, total },
+    /* `generation` is the server's ANSWER: the queue asks for "the newest pass"
+     * by sending no generation at all, and only the reply says which it was. */
+    data: { items, has_more: nextAfter != null, next_after: nextAfter, total, generation: 'g3' },
   };
 }
+
+const GENERATIONS = {
+  store_ready: true,
+  data: {
+    latest: 'g3',
+    items: [
+      {
+        generation: 'g3',
+        n_clusters: 1204,
+        n_members: 2600,
+        n_conflicted: 3,
+        last_changed_at: '2026-09-17T06:00:00Z',
+      },
+      {
+        generation: 'g1',
+        n_clusters: 9,
+        n_members: 21,
+        n_conflicted: 1,
+        last_changed_at: '2026-08-20T06:00:00Z',
+      },
+    ],
+  },
+};
 
 const BLOCKS = {
   store_ready: true,
@@ -256,6 +282,7 @@ describe('<AutodedupGroups>', () => {
     vi.clearAllMocks();
     vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([group({ cluster_key: 7 })]));
     vi.mocked(api.getAutodedupBlocks).mockResolvedValue(BLOCKS);
+    vi.mocked(api.getAutodedupGenerations).mockResolvedValue(GENERATIONS);
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({ store_ready: true, data: STORED, must_not_link: false });
     vi.mocked(api.postAutodedupSplitVerdict).mockResolvedValue({
       store_ready: true,
@@ -428,6 +455,73 @@ describe('<AutodedupGroups>', () => {
     expect(await screen.findByText('#900')).toBeInTheDocument();
   });
 
+
+  /* ----------------------------------------------- WHICH GENERATION */
+
+  it('opens on the newest pass instead of a hard-coded generation', async () => {
+    /* THE DEFECT. The page and the API both defaulted to `g1` — the first
+     * hand-prior pass, which over-merged developer units and was superseded by
+     * `g2` and `g3` — so the queue served proposals the live engine no longer
+     * makes, and nothing on screen said so. The parameter is now omitted and the
+     * server answers with the pass it read. */
+    renderPage();
+    await screen.findByText('#7');
+    expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+      expect.objectContaining({ generation: null }),
+    );
+    expect(screen.getByLabelText('Generation')).toHaveValue('');
+    await waitFor(() =>
+      expect(
+        within(screen.getByLabelText('Generation')).getByRole('option', {
+          name: 'nejnovější (g3)',
+        }),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it('offers the passes that exist instead of a free-text generation field', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('#7');
+    const select = screen.getByLabelText('Generation');
+    expect(select.tagName).toBe('SELECT');
+    await waitFor(() =>
+      expect(within(select).getByRole('option', { name: 'g1 · 9 skupin' })).toBeInTheDocument(),
+    );
+    /* An older pass stays readable — that is how a past review is re-examined —
+     * and the choice lands in the url so the view can be shared. */
+    await user.selectOptions(select, 'g1');
+    await waitFor(() =>
+      expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+        expect.objectContaining({ generation: 'g1', after: null }),
+      ),
+    );
+    expect(screen.getByTestId('search')).toHaveTextContent('generation=g1');
+  });
+
+  it('says so when the queue is an older pass, and returns in one click', async () => {
+    const user = userEvent.setup();
+    renderPage('/autodedup/groups?generation=g1');
+    await screen.findByText('#7');
+    const notice = await screen.findByRole('status');
+    expect(notice).toHaveTextContent('starší generaci');
+    expect(notice).toHaveTextContent('g1');
+    expect(notice).toHaveTextContent('g3');
+    await user.click(within(notice).getByRole('button', { name: 'Zobrazit nejnovější (g3)' }));
+    await waitFor(() =>
+      expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+        expect.objectContaining({ generation: null }),
+      ),
+    );
+    expect(screen.getByTestId('search')).not.toHaveTextContent('generation=');
+  });
+
+  it('keeps quiet while the queue is the current pass', async () => {
+    renderPage();
+    await screen.findByText('#7');
+    await waitFor(() => expect(api.getAutodedupGenerations).toHaveBeenCalled());
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
 
   /* ---------------------------------------------------- the BLOCK filter */
 

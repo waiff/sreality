@@ -35,6 +35,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     ...actual,
     getAutodedupResidual: vi.fn(),
     getAutodedupBlocks: vi.fn(),
+    getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
     getAutodedupVerdictReasons: vi.fn(),
   };
@@ -123,9 +124,34 @@ function page(
 ) {
   return {
     store_ready: true,
-    data: { items, has_more: nextAfter != null, next_after: nextAfter, total },
+    /* `generation` is the server's ANSWER: the scroll asks for "the newest pass"
+     * by sending no generation at all, and the reply says which one that was. */
+    data: { items, has_more: nextAfter != null, next_after: nextAfter, total, generation: 'g3' },
   };
 }
+
+const GENERATIONS = {
+  store_ready: true,
+  data: {
+    latest: 'g3',
+    items: [
+      {
+        generation: 'g3',
+        n_clusters: 1204,
+        n_members: 2600,
+        n_conflicted: 3,
+        last_changed_at: '2026-09-17T06:00:00Z',
+      },
+      {
+        generation: 'g1',
+        n_clusters: 9,
+        n_members: 21,
+        n_conflicted: 1,
+        last_changed_at: '2026-08-20T06:00:00Z',
+      },
+    ],
+  },
+};
 
 const BLOCKS = {
   store_ready: true,
@@ -164,6 +190,7 @@ describe('<AutodedupResidual>', () => {
     vi.clearAllMocks();
     vi.mocked(api.getAutodedupResidual).mockResolvedValue(page([ROW]));
     vi.mocked(api.getAutodedupBlocks).mockResolvedValue(BLOCKS);
+    vi.mocked(api.getAutodedupGenerations).mockResolvedValue(GENERATIONS);
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({ store_ready: true, data: STORED, must_not_link: false });
     vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
       { code: 'floor_plan_differs', label: 'Jiný půdorys' },
@@ -275,10 +302,23 @@ describe('<AutodedupResidual>', () => {
     );
   });
 
-  it('links each pair to its full-evidence page', async () => {
+  it('opens on the newest pass instead of a hard-coded generation', async () => {
+    /* The scroll asks which scored pairs a clustering did NOT join; against the
+     * superseded `g1` it answered about a clustering nobody is validating. */
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
+      expect.objectContaining({ generation: null }),
+    );
+    expect(screen.getByLabelText('Generation')).toHaveValue('');
+  });
+
+  it('links each pair to the evidence of the pass the scroll actually read', async () => {
+    /* The link used to carry the page's hard-coded `g1` whatever the queue was
+     * showing — a drill-down into a pass nobody asked for. */
     renderPage();
     const link = await screen.findByRole('link', { name: 'Full evidence' });
-    expect(link).toHaveAttribute('href', '/autodedup/pair/101/202?generation=g1');
+    expect(link).toHaveAttribute('href', '/autodedup/pair/101/202?generation=g3');
   });
 
 
