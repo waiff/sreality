@@ -58,6 +58,7 @@ CLUSTER_COLUMNS: tuple[str, ...] = (
     "last_changed_at",
     "verdict",
     "verdict_note",
+    "verdict_reasons",
     "verdict_decided_by",
     "verdict_decided_at",
 )
@@ -68,7 +69,7 @@ CLUSTER_COLUMNS: tuple[str, ...] = (
 _CLUSTER_FROM = """
 FROM autodedup.clusters c
 LEFT JOIN LATERAL (
-    SELECT vv.verdict, vv.note, vv.decided_by, vv.decided_at
+    SELECT vv.verdict, vv.note, vv.reasons, vv.decided_by, vv.decided_at
       FROM autodedup.verdicts vv
      WHERE vv.kind = 'cluster' AND vv.cluster_key = c.cluster_key
      ORDER BY vv.decided_at DESC, vv.id DESC
@@ -84,7 +85,7 @@ SELECT
     c.min_edge_score, c.mean_edge_score, c.n_judged_edges, c.n_certificate_edges,
     c.evidence_families, c.max_gap_days, c.shared_photo_warning, c.status,
     c.model_version, c.feature_version, c.first_built_at, c.last_changed_at,
-    v.verdict, v.note, v.decided_by, v.decided_at
+    v.verdict, v.note, v.reasons, v.decided_by, v.decided_at
 """
     + _CLUSTER_FROM
 )
@@ -412,13 +413,16 @@ VERDICT_COLUMNS: tuple[str, ...] = (
     "verdict",
     "weight",
     "note",
+    # Migration 533. The structured half of "why" — `note` is the prose half, and the two are
+    # written and read together everywhere a verdict is.
+    "reasons",
     "decided_by",
     "decided_at",
 )
 
 _VERDICT_SELECT_LIST = """
     v.id, v.kind, v.cluster_key, v.listing_lo, v.listing_hi, v.verdict, v.weight, v.note,
-    v.decided_by, v.decided_at
+    v.reasons, v.decided_by, v.decided_at
 """
 
 PAIR_VERDICTS_SQL = (
@@ -539,6 +543,7 @@ RESIDUAL_COLUMNS: tuple[str, ...] = (
     "judge_tier",
     "verdict",
     "verdict_note",
+    "verdict_reasons",
     "verdict_decided_by",
     "verdict_decided_at",
 )
@@ -569,7 +574,7 @@ LEFT JOIN LATERAL (
      LIMIT 1
 ) j ON true
 LEFT JOIN LATERAL (
-    SELECT vv.verdict, vv.note, vv.decided_by, vv.decided_at
+    SELECT vv.verdict, vv.note, vv.reasons, vv.decided_by, vv.decided_at
       FROM autodedup.verdicts vv
      WHERE vv.kind = 'pair'
        AND vv.listing_lo = p.listing_lo AND vv.listing_hi = p.listing_hi
@@ -652,7 +657,7 @@ SELECT
     lb.area_m2, lb.floor, lb.total_floors, lb.price_czk, lb.first_seen_at, lb.last_seen_at,
     lb.is_active, cb.storage_path, cb.sreality_url, coalesce(gb.n, 0),
     j.verdict, j.confidence, j.tier,
-    v.verdict, v.note, v.decided_by, v.decided_at
+    v.verdict, v.note, v.reasons, v.decided_by, v.decided_at
 """
 
 RESIDUAL_SQL = (
@@ -857,6 +862,21 @@ GROUP BY 1, 2
 ORDER BY 1, 2
 """
 
+# The reason histogram (migration 533): WHAT the operator saw, counted per grain. Pair and
+# cluster stay separate columns on the page because they answer different questions — a chip
+# on a pair names the discriminator one edge missed, the same chip on a cluster names why a
+# whole proposal was wrong — and summing them would hide both. `unnest` is a LATERAL over the
+# array, so a verdict with no reason contributes no row at all rather than a null bucket.
+REASON_COUNT_COLUMNS: tuple[str, ...] = ("kind", "reason", "n")
+
+REASON_COUNTS_SQL = """
+SELECT v.kind, r.reason, count(*) AS n
+FROM autodedup.verdicts v
+CROSS JOIN LATERAL unnest(v.reasons) AS r(reason)
+GROUP BY 1, 2
+ORDER BY 1, 2
+"""
+
 JUDGEMENT_COUNT_COLUMNS: tuple[str, ...] = ("tier", "verdict", "n")
 
 JUDGEMENT_COUNTS_SQL = """
@@ -891,22 +911,25 @@ LIMIT 1
 # `WHERE kind = …` on the conflict target is how a PARTIAL unique index is inferred — without
 # it Postgres cannot match the index and raises 42P10.
 VERDICT_PAIR_UPSERT_SQL = """
-INSERT INTO autodedup.verdicts (kind, listing_lo, listing_hi, verdict, note, decided_by)
+INSERT INTO autodedup.verdicts (kind, listing_lo, listing_hi, verdict, note, reasons,
+                                decided_by)
 VALUES ('pair', %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(verdict)s::text,
-        %(note)s::text, %(decided_by)s::text)
+        %(note)s::text, %(reasons)s::text[], %(decided_by)s::text)
 ON CONFLICT (kind, listing_lo, listing_hi, decided_by) WHERE kind = 'pair'
-DO UPDATE SET verdict = excluded.verdict, note = excluded.note, decided_at = now()
-RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note,
+DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
+              reasons = excluded.reasons, decided_at = now()
+RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
           decided_by, decided_at
 """
 
 VERDICT_CLUSTER_UPSERT_SQL = """
-INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, note, decided_by)
+INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, note, reasons, decided_by)
 VALUES ('cluster', %(cluster_key)s::bigint, %(verdict)s::text, %(note)s::text,
-        %(decided_by)s::text)
+        %(reasons)s::text[], %(decided_by)s::text)
 ON CONFLICT (kind, cluster_key, decided_by) WHERE kind = 'cluster'
-DO UPDATE SET verdict = excluded.verdict, note = excluded.note, decided_at = now()
-RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note,
+DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
+              reasons = excluded.reasons, decided_at = now()
+RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
           decided_by, decided_at
 """
 

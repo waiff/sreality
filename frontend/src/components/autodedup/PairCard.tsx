@@ -29,6 +29,7 @@ import AttrDiffTable, { memberDiffRows } from './AttrDiffTable';
 import EvidenceChips, { Chip, fmtScore } from './EvidenceChips';
 import ListingMini from './ListingMini';
 import VerdictButtons from './VerdictButtons';
+import VerdictNotes, { EMPTY_ANNOTATION, type VerdictAnnotation } from './VerdictNotes';
 
 /* The judge's four verdicts, in the operator's words. `insufficient_evidence`
  * is an answer, not a failure — it is what the judge says when the digests
@@ -64,8 +65,19 @@ export interface PairCardProps {
   contributions?: AutodedupContribution[];
   judgement?: AutodedupJudgementRow | null;
   verdict?: AutodedupVerdictRow | null;
-  onVerdict?: (value: AutodedupVerdictValue) => void;
+  onVerdict?: (
+    value: AutodedupVerdictValue,
+    annotation: { reasons: string[]; note: string | null },
+  ) => void;
   pending?: boolean;
+  /* WHY the operator is about to rule (or ruled), edited in place. Absent on a
+   * card that is not a verdict surface; collapsed by default here, because a
+   * residual queue is a scroll and an open picker per row pushes the next pair
+   * off the screen. */
+  annotation?: VerdictAnnotation;
+  onAnnotationChange?: (next: VerdictAnnotation) => void;
+  annotationDirty?: boolean;
+  onSaveAnnotation?: () => void;
   /* Cover photos above the fold are decoded eagerly — see ListingMini. */
   eager?: boolean;
   /* The full-evidence page for this pair, when the surface is not already it. */
@@ -97,6 +109,10 @@ export default function PairCard({
   labels,
   onlyDiffs = false,
   dense = false,
+  annotation,
+  onAnnotationChange,
+  annotationDirty = false,
+  onSaveAnnotation,
 }: PairCardProps) {
   const top = (contributions ?? []).slice(0, 5);
   /* The queue's judge summary carries no evidence lists; the pair page's full
@@ -189,13 +205,25 @@ export default function PairCard({
       )}
 
       {onVerdict && (
-        <VerdictButtons
-          kind="pair"
-          verdict={verdict ?? null}
-          onVerdict={onVerdict}
-          pending={pending}
-          labels={labels}
-        />
+        <div className="space-y-2">
+          <VerdictButtons
+            kind="pair"
+            verdict={verdict ?? null}
+            onVerdict={onVerdict}
+            pending={pending}
+            labels={labels}
+            annotation={annotation}
+          />
+          {onAnnotationChange && (
+            <VerdictNotes
+              value={annotation ?? EMPTY_ANNOTATION}
+              onChange={onAnnotationChange}
+              dirty={annotationDirty}
+              pending={pending}
+              onSave={onSaveAnnotation}
+            />
+          )}
+        </div>
       )}
     </div>
   );

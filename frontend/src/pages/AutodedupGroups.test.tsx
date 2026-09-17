@@ -46,6 +46,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupBlocks: vi.fn(),
     postAutodedupVerdict: vi.fn(),
     postAutodedupSplitVerdict: vi.fn(),
+    getAutodedupVerdictReasons: vi.fn(),
   };
 });
 
@@ -266,6 +267,59 @@ describe('<AutodedupGroups>', () => {
         must_not_link_retracted: 0,
       },
     });
+    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue([
+      { code: 'floor_plan_differs', label: 'Jiný půdorys' },
+      { code: 'same_project', label: 'Stejný projekt' },
+    ]);
+  });
+
+  /* ------------------------------------------------- the operator's reasons (mig 533) */
+
+  it('sends the chips and the note with a cluster verdict', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    /* Collapsed on a queue card, like the residual rows. */
+    await user.click(within(card).getByRole('button', { name: '+ důvod verdiktu' }));
+    await user.click(within(card).getByRole('button', { name: 'Stejný projekt' }));
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }));
+    expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
+      kind: 'cluster',
+      cluster_key: 7,
+      verdict: 'same',
+      reasons: ['same_project'],
+      note: null,
+    });
+  });
+
+  it('stamps ONE reason set on the split it sends', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    /* The split row has a picker of its OWN: what the operator saw when they
+      * separated the group is not what they saw when they confirmed it. The two
+      * are told apart by NAME, not by position — an index would pin the very
+      * ambiguity that loses the operator's chips. */
+    await user.click(within(card).getByRole('button', { name: '+ důvod rozdělení' }));
+    await user.click(within(card).getByRole('button', { name: 'Jiný půdorys' }));
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    const sent = vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0];
+    expect(sent.reasons).toEqual(['floor_plan_differs']);
+    expect(sent.note).toBeNull();
+  });
+
+  it('names the split picker and the verdict picker apart', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    /* Two drafts, two destinations: chips ticked in one are NOT sent by the
+     * other, so the toggles must say which ruling they belong to. */
+    const toggles = within(card)
+      .getAllByRole('button', { name: /^\+ důvod/ })
+      .map((el) => el.textContent);
+    expect(toggles).toEqual(['+ důvod rozdělení', '+ důvod verdiktu']);
   });
 
   it('says nothing has been merged', async () => {
@@ -325,6 +379,10 @@ describe('<AutodedupGroups>', () => {
       kind: 'cluster',
       cluster_key: 7,
       verdict: 'same',
+      /* The annotation rides with every verdict — empty when the operator gave
+        * none, never absent, so the stored row is the click's whole statement. */
+      reasons: [],
+      note: null,
     });
     await waitFor(() => expect(confirm).toHaveAttribute('aria-pressed', 'true'));
     expect(within(card).getByText(/operator@example.invalid/)).toBeInTheDocument();
@@ -588,6 +646,8 @@ describe('<AutodedupGroups>', () => {
       relations: [
         { unit_a: 'A', unit_b: 'B', relation: 'same_project_different_unit' },
       ],
+      reasons: [],
+      note: null,
     });
     /* The stored cluster verdict lands on the badge, like any other verdict. */
     await waitFor(() =>

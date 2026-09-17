@@ -54,6 +54,7 @@ _LABELS: dict[str, str] = {
     usql.CERTIFICATE_COUNTS_SQL: "certificates",
     usql.GENERATION_COUNTS_SQL: "generations",
     usql.VERDICT_COUNTS_SQL: "verdict_counts",
+    usql.REASON_COUNTS_SQL: "reason_counts",
     usql.JUDGEMENT_COUNTS_SQL: "judgement_counts",
     usql.LAST_SCORE_RUN_SQL: "last_run",
     usql.VERDICT_PAIR_UPSERT_SQL: "verdict_write",
@@ -361,6 +362,7 @@ EMPTY_ENGINE: dict[str, Any] = {
     "latest_generation": None,
     "verdicts": [],
     "n_verdicts": 0,
+    "verdict_reasons": [],
     "judgements": [],
     "n_judgements": 0,
     "last_score_run": None,
@@ -454,6 +456,7 @@ def _cluster(cluster_key: int = 101, **over: Any) -> tuple[Any, ...]:
         "last_changed_at": datetime(2026, 9, 16, 6, 0, tzinfo=timezone.utc),
         "verdict": None,
         "verdict_note": None,
+        "verdict_reasons": None,
         "verdict_decided_by": None,
         "verdict_decided_at": None,
     }
@@ -526,6 +529,7 @@ def _residual_row(lo: int = 21, hi: int = 22, **over: Any) -> tuple[Any, ...]:
         "judge_tier": "text",
         "verdict": None,
         "verdict_note": None,
+        "verdict_reasons": None,
         "verdict_decided_by": None,
         "verdict_decided_at": None,
     }
@@ -671,6 +675,7 @@ def test_a_group_carries_the_operators_latest_verdict(client, conn):
     assert item["verdict"] == {
         "verdict": "same",
         "note": "obviously one flat",
+        "reasons": [],
         "decided_by": "operator@example.com",
         "decided_at": "2026-09-16T07:00:00+00:00",
     }
@@ -1981,3 +1986,214 @@ def test_a_group_detail_reads_the_verdicts_of_UNSCORED_member_pairs_too(client, 
 def test_the_new_verdict_filters_the_group_queue(client, conn):
     client.get("/autodedup/groups", params={"verdict": "same_project_different_unit"})
     assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["verdict"] == "same_project_different_unit"
+
+
+# ------------------------------------------------- the operator's REASONS (migration 533)
+
+
+def test_the_reason_registry_is_served_so_the_page_hard_codes_nothing(client):
+    """No connection, no `store_ready`: the vocabulary is code, and the chips have to render
+    against a database that has not been migrated at all."""
+    body = client.get("/autodedup/verdict-reasons").json()
+    codes = [r["code"] for r in body["data"]["reasons"]]
+    assert "floor_plan_differs" in codes and codes[-1] == "other"
+    assert all(r["label"] for r in body["data"]["reasons"])
+
+
+def test_a_pair_verdict_stores_its_reasons_and_its_note(admin_client, conn):
+    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    resp = admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different",
+              "reasons": ["floor_plan_differs", "unit_number"], "note": "different layout"},
+    )
+    assert resp.status_code == 200
+    written = _last_call(conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    assert written["reasons"] == ["floor_plan_differs", "unit_number"]
+    assert written["note"] == "different layout"
+
+
+def test_a_cluster_verdict_stores_its_reasons(admin_client, conn):
+    conn.canned = {"cluster_exists": [(1,)],
+                   "verdict_write": [_verdict_row(kind="cluster", cluster_key=101,
+                                                  listing_lo=None, listing_hi=None)]}
+    admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "cluster", "cluster_key": 101, "verdict": "same",
+              "reasons": ["identical_photos"]},
+    )
+    assert _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["reasons"] == ["identical_photos"]
+
+
+def test_reasons_are_de_duplicated_and_keep_the_click_order(admin_client, conn):
+    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same",
+              "reasons": ["broker", "identical_photos", "broker"]},
+    )
+    assert _last_call(conn, usql.VERDICT_PAIR_UPSERT_SQL)["reasons"] == [
+        "broker", "identical_photos"
+    ]
+
+
+def test_an_unknown_reason_is_refused_and_nothing_is_written(admin_client, conn):
+    """A chip the operator clicked and the store never kept is worse than no chip at all —
+    so an unknown code is the client error it is, before any statement runs."""
+    conn.canned = {"pair_exists": [(1,)], "verdict_write": [_verdict_row()]}
+    resp = admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same",
+              "reasons": ["the_curtains"]},
+    )
+    assert resp.status_code == 400
+    assert "the_curtains" in resp.json()["detail"]
+    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in conn.calls)
+
+
+def test_an_unknown_reason_on_a_split_is_refused_too(admin_client, split_conn):
+    resp = admin_client.post(
+        "/autodedup/verdict/split", json=_split(reasons=["nope"])
+    )
+    assert resp.status_code == 400
+    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+
+
+def test_a_split_stamps_its_reasons_on_the_cluster_row_ONLY(admin_client, split_conn):
+    """A split is ONE ruling, and it lands on the cluster row. Per-pair reasons would claim
+    the operator said something about each edge that they never said — and worse, one click
+    on a 6-member group would post 15 rows into the pair histogram, which would then measure
+    cluster size rather than evidence and stop being comparable with the judge."""
+    admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(reasons=["floor_plan_differs", "same_project"], note="two buildings"),
+    )
+    pair_writes = _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    assert len(pair_writes) == 3
+    assert all(p["reasons"] == [] for p in pair_writes)
+    # The fan-out rows still say where they came from, in their machine note.
+    assert all(p["note"].startswith("operator split:") for p in pair_writes)
+    cluster = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    assert cluster["reasons"] == ["floor_plan_differs", "same_project"]
+    # The operator's note still leads the assignment string, as it did before 533.
+    assert cluster["note"].startswith("two buildings · A: 11,12 | B: 13")
+
+
+def test_re_deciding_a_verdict_overwrites_the_reasons_it_carried(admin_client, conn):
+    """The upsert is the re-decision path: a DO UPDATE that left `reasons` behind would keep
+    yesterday's evidence under today's verdict."""
+    assert "reasons = excluded.reasons" in usql.VERDICT_PAIR_UPSERT_SQL
+    assert "reasons = excluded.reasons" in usql.VERDICT_CLUSTER_UPSERT_SQL
+
+
+def test_the_reason_histogram_is_counted_per_grain(client, conn):
+    conn.canned = {
+        "reason_counts": [
+            _tuple(usql.REASON_COUNT_COLUMNS, kind="pair", reason="floor_plan_differs", n=7),
+            _tuple(usql.REASON_COUNT_COLUMNS, kind="cluster", reason="same_project", n=2),
+        ],
+    }
+    engine = client.get("/autodedup/stats").json()["data"]["engine"]
+    assert engine["verdict_reasons"] == [
+        {"kind": "pair", "reason": "floor_plan_differs", "n": 7},
+        {"kind": "cluster", "reason": "same_project", "n": 2},
+    ]
+
+
+def test_the_reason_histogram_unnests_the_array_rather_than_grouping_on_it(client, conn):
+    """Grouping on the whole array would count `{a,b}` as its own bucket — a histogram of
+    combinations, not of reasons."""
+    assert "unnest(v.reasons)" in usql.REASON_COUNTS_SQL
+    assert "GROUP BY 1, 2" in usql.REASON_COUNTS_SQL
+
+
+def test_a_verdict_against_a_store_without_533_names_that_migration(admin_client, conn):
+    """The 532 guard's sibling. A missing COLUMN is a different SQLSTATE from a rejected
+    VALUE, so the two are told apart and each names its own migration."""
+    psycopg_errors = pytest.importorskip("psycopg.errors")
+    conn.canned = {"pair_exists": [(1,)]}
+    conn.raises[usql.VERDICT_PAIR_UPSERT_SQL] = psycopg_errors.UndefinedColumn(
+        'column "reasons" of relation "verdicts" does not exist'
+    )
+    resp = admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "different"},
+    )
+    assert resp.status_code == 503
+    assert "533" in resp.json()["detail"]
+    assert all(sql != usql.MUST_NOT_LINK_UPSERT_SQL for sql, _ in conn.calls)
+
+
+def test_a_split_against_a_store_without_533_names_that_migration(admin_client, split_conn):
+    psycopg_errors = pytest.importorskip("psycopg.errors")
+    split_conn.raises[usql.VERDICT_PAIR_UPSERT_SQL] = psycopg_errors.UndefinedColumn(
+        'column "reasons" of relation "verdicts" does not exist'
+    )
+    resp = admin_client.post("/autodedup/verdict/split", json=_split())
+    assert resp.status_code == 503
+    assert "533" in resp.json()["detail"]
+
+
+def test_the_stats_page_still_renders_against_a_store_without_533(client, conn):
+    """A READ degrades where a write refuses: the header strip is not the place to learn
+    that a migration is missing."""
+    psycopg_errors = pytest.importorskip("psycopg.errors")
+    conn.raises[usql.REASON_COUNTS_SQL] = psycopg_errors.UndefinedColumn(
+        'column v.reasons does not exist'
+    )
+    body = client.get("/autodedup/stats").json()
+    assert body["data"]["engine"]["verdict_reasons"] == []
+
+
+@pytest.mark.parametrize(
+    "path,statement",
+    [
+        ("/autodedup/groups", usql.GROUPS_WEAKEST_SQL),
+        ("/autodedup/groups/7", usql.GROUP_ONE_SQL),
+        ("/autodedup/residual", usql.RESIDUAL_SQL),
+        ("/autodedup/pair/11/12", usql.PAIR_ONE_SQL),
+    ],
+)
+def test_a_review_page_against_a_store_without_533_renders_instead_of_500ing(
+    client, conn, path: str, statement: str
+):
+    """`store_ready` asks the catalog for the RELATION, so a store with 528 and not 533
+    passes it and then raises UndefinedColumn on the `v.reasons` EVERY review statement
+    selects. The write refuses with 503; the read degrades, or one un-applied additive
+    migration takes the whole UI down rather than the one new column."""
+    psycopg_errors = pytest.importorskip("psycopg.errors")
+    conn.raises[statement] = psycopg_errors.UndefinedColumn(
+        'column v.reasons does not exist'
+    )
+    resp = client.get(path)
+    assert resp.status_code == 200
+    assert resp.json() == {"data": None, "store_ready": False}
+
+
+def test_a_stored_reason_reaches_every_surface_that_shows_a_verdict(client, conn):
+    """The chips are rendered beside the badge on the queue rows too, so the list statements
+    carry `reasons` — not only the detail reads."""
+    conn.canned = {
+        "groups": [
+            _cluster(verdict="different", verdict_note="two buildings",
+                     verdict_reasons=["same_project"],
+                     verdict_decided_by="operator@example.com",
+                     verdict_decided_at=datetime(2026, 9, 17, tzinfo=timezone.utc))
+        ],
+    }
+    item = client.get("/autodedup/groups").json()["data"]["items"][0]
+    assert item["verdict"]["reasons"] == ["same_project"]
+    assert "verdict_reasons" not in item["cluster"]
+
+
+def test_a_residual_row_carries_the_reasons_of_its_stored_verdict(client, conn):
+    conn.canned = {
+        "residual": [
+            _residual_row(verdict="same", verdict_note="same flat",
+                          verdict_reasons=["identical_photos", "price_history"],
+                          verdict_decided_by="operator@example.com",
+                          verdict_decided_at=datetime(2026, 9, 17, tzinfo=timezone.utc))
+        ],
+    }
+    row = client.get("/autodedup/residual").json()["data"]["items"][0]
+    assert row["verdict"]["reasons"] == ["identical_photos", "price_history"]

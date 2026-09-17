@@ -13,6 +13,12 @@
  * building wider — a different house of one development. Folding either into
  * "different" would destroy exactly the signal the trial needs.
  *
+ * THE ANNOTATION TRAVELS WITH THE CLICK. The chips and the note live one level
+ * up (a page-level draft, beside the verdict overlay), because the same
+ * annotation has to reach the POST this component fires AND the "Uložit
+ * poznámku" re-post that `VerdictNotes` fires — two writers of one value. So
+ * this component only carries it through: `onVerdict(value, annotation)`.
+ *
  * TWO-STEP ON A NEGATIVE PAIR VERDICT. A negative verdict on a PAIR writes a
  * permanent must-not-link server-side — it outlives every recalibration — so it
  * takes a second, deliberate click. A cluster verdict records an opinion about
@@ -22,6 +28,7 @@
 import { useEffect, useState } from 'react';
 
 import type { AutodedupVerdictRow, AutodedupVerdictValue } from '@/lib/api';
+import { ReasonChips, annotationInput, EMPTY_ANNOTATION, type VerdictAnnotation } from './VerdictNotes';
 
 export const VERDICT_VALUES: ReadonlyArray<AutodedupVerdictValue> = [
   'same',
@@ -80,13 +87,19 @@ export default function VerdictButtons({
   onVerdict,
   pending = false,
   labels,
+  annotation = EMPTY_ANNOTATION,
 }: {
   kind: 'pair' | 'cluster';
   /* The stored verdict, or null when nobody has ruled yet. */
   verdict: AutodedupVerdictRow | null;
-  onVerdict: (value: AutodedupVerdictValue) => void;
+  onVerdict: (
+    value: AutodedupVerdictValue,
+    annotation: { reasons: string[]; note: string | null },
+  ) => void;
   pending?: boolean;
   labels?: Record<AutodedupVerdictValue, string>;
+  /* The chips and the note as they stand on screen, sent with the verdict. */
+  annotation?: VerdictAnnotation;
 }) {
   const words = labels ?? (kind === 'cluster' ? GROUP_LABELS : PAIR_LABELS);
   const [armed, setArmed] = useState<AutodedupVerdictValue | null>(null);
@@ -104,7 +117,7 @@ export default function VerdictButtons({
       return;
     }
     setArmed(null);
-    onVerdict(value);
+    onVerdict(value, annotationInput(annotation));
   };
 
   return (
@@ -136,10 +149,13 @@ export default function VerdictButtons({
         );
       })}
       {verdict && (
-        <span className="text-[0.65rem] text-[var(--color-ink-3)]">
+        <span className="flex flex-wrap items-center gap-1 text-[0.65rem] text-[var(--color-ink-3)]">
           {/* Who ruled and when — the session's own audit trail, and the thing
             * that tells a second reviewer the group was already seen. */}
           {words[verdict.verdict] ?? verdict.verdict} · {verdict.decided_by}
+          {/* WHAT THEY SAW, beside what they decided: a badge without its
+            * evidence sends the next reviewer back to the photos. */}
+          <ReasonChips codes={verdict.reasons} />
         </span>
       )}
     </div>

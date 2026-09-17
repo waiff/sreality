@@ -28,6 +28,7 @@ import Spinner from '@/components/Spinner';
 import { EvidenceLegend } from '@/components/autodedup/EvidenceChips';
 import PairCard from '@/components/autodedup/PairCard';
 import { PAIR_LABELS } from '@/components/autodedup/VerdictButtons';
+import { annotationInput, useVerdictAnnotations } from '@/components/autodedup/VerdictNotes';
 import { parseBlockValue } from '@/components/autodedup/BlockSelect';
 import {
   EMPTY_FILTERS,
@@ -134,6 +135,7 @@ export default function AutodedupResidual() {
   const [urlFilters, setFilters] = useUrlFilters<ResidualFilterState>(EMPTY_RESIDUAL_FILTERS);
   const filters = useMemo(() => sanitizeResidualFilters(urlFilters), [urlFilters]);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
+  const notes = useVerdictAnnotations();
 
   const list = useInfiniteList<AutodedupResidualRow, ResidualPage>({
     queryKey: ['autodedup', 'residual', filters],
@@ -276,8 +278,11 @@ export default function AutodedupResidual() {
 
       {rows.length > 0 && (
         <ul className="mt-3 space-y-4">
-          {rows.map((row, i) => (
-            <li key={pairKey(row)}>
+          {rows.map((row, i) => {
+            const key = pairKey(row);
+            const stored = overlay[key] ?? row.verdict;
+            return (
+            <li key={key}>
               <PairCard
                 /* A row is a QUEUE ENTRY: thumbnail-sized covers, so the diff
                   * table, the reason and the four answers are all above the fold.
@@ -293,22 +298,37 @@ export default function AutodedupResidual() {
                 whyNotMerged={row.why_not_merged}
                 contributions={row.contributions}
                 judgement={row.judgement}
-                verdict={overlay[pairKey(row)] ?? row.verdict}
-                pending={pendingKey === pairKey(row)}
+                verdict={stored}
+                pending={pendingKey === key}
                 eager={i < 2}
                 labels={PAIR_LABELS}
                 evidenceHref={pairHref(row.listing_lo, row.listing_hi, filters.generation)}
-                onVerdict={(value) =>
-                  submit(pairKey(row), {
+                annotation={notes.annotationOf(key, stored)}
+                onAnnotationChange={(next) => notes.setAnnotation(key, next)}
+                annotationDirty={notes.isDirty(key, stored)}
+                onSaveAnnotation={() =>
+                  stored &&
+                  submit(key, {
+                    kind: 'pair',
+                    listing_lo: row.listing_lo,
+                    listing_hi: row.listing_hi,
+                    verdict: stored.verdict,
+                    ...annotationInput(notes.annotationOf(key, stored)),
+                  })
+                }
+                onVerdict={(value, annotation) =>
+                  submit(key, {
                     kind: 'pair',
                     listing_lo: row.listing_lo,
                     listing_hi: row.listing_hi,
                     verdict: value,
+                    ...annotation,
                   })
                 }
               />
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
 
