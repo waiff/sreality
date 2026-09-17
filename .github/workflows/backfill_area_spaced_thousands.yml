@@ -1,8 +1,8 @@
 name: Backfill areas truncated on a spaced thousands group (W19)
 
-# One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax and maxima
-# parsers each carried a private copy of the naive area regex: it matched the FIRST bare
-# digit run before an `m²`, so the Czech thousands format every one of them renders
+# One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax, maxima and
+# bazos parsers each carried a private copy of the naive area regex: it matched the FIRST
+# bare digit run before an `m²`, so the Czech thousands format every one of them renders
 # ("5 870 m²", "1 063 m²" with a no-break space) parsed from INSIDE the number and stored
 # 870 / 63. Measured on production 2026-09-17:
 #
@@ -14,6 +14,7 @@ name: Backfill areas truncated on a spaced thousands group (W19)
 #   remax         13,797 rows  not fingerprintable from titles — but the archived capture
 #                              proves its spec cells do it ("Plocha parcely: 1 063 m²")
 #   maxima           540 rows  87 land rows, max 987 m² — the same signature
+#   bazos        ~12,400 rows  8.4 % of the newest 8,000 rows carry the exact fingerprint
 #
 # The corruption reaches every consumer: the per-m² measure (rule 23), Browse filters and
 # sort, comparables and estimates, dedup's area rung, and W17's land heal (which copied a
@@ -28,15 +29,29 @@ name: Backfill areas truncated on a spaced thousands group (W19)
 # listing, whose body lives in R2 above a 2 KB threshold. R2_* is therefore REQUIRED — a
 # run without a store would find essentially every payload spilled and report coverage over
 # nothing, so the script refuses up front rather than mining the database-resident rump.
-# One bad object costs one listing, never the batch.
+# One bad object costs one listing, never the batch. `LOCATION_BODY_FETCH_WORKERS` widens
+# the GET fan-out: this run reads ~193k bodies, not an hourly tick's few hundred.
+#
+# THE ARCHIVE CAN LAG THE LIVE ROW. The payload writer holds a 7-day per-listing floor, so
+# a body that changed inside the window is discarded and ~3.2 % of rows (≈6k) have a
+# `listing_snapshots` row newer than their newest archived body. Any such listing is
+# counted `body_stale` and skipped, so the heal can never revert a seller's edit to a
+# week-old page. It likewise never writes NULL over a stored area: a column the re-parse
+# cannot produce is not a change and is not written.
 #
 # Selection is complete by construction and touches no wide column: a truncation keeps the
 # last three digits, so the stored value is always under 1000 — unless those digits were
 # "000", in which case the write boundary NULLed the 0 and the row carries no area at all.
-# Hence "any area non-NULL and < 1000, OR all four NULL". The `raw_json->>'title'` probe
-# the idnes backfill used is deliberately absent: it covers nothing that predicate misses
-# and detoasts every candidate row (the cost that killed `backfill_mmreality_areas`'s first
-# live dispatch on a 120 s statement_timeout).
+# Hence "any area non-NULL and < 1000, OR all four NULL". That is a CAN-BE-WRONG set, not a
+# will-change set: it matches ~99 % of these portals' rows while ~18 % actually move, and
+# the per-source report counts both. The `raw_json->>'title'` probe the idnes backfill used
+# is deliberately absent: it covers nothing that predicate misses and detoasts every
+# candidate row (the cost that killed `backfill_mmreality_areas`'s first live dispatch on a
+# 120 s statement_timeout). The paging SELECT measured 40.5 s and the count 13.6 s against
+# the same 120 s default, so the run arms `SET statement_timeout = '600s'` on connect and
+# walks the sources ONE AT A TIME with the keyset on id — no page pays for another portal's
+# rows. ~193k bodies do not fit one job, so `--max-seconds` defaults to 9000 (under the
+# 180-minute job timeout) and every source's stop cursor is logged for the resume.
 #
 # Writes NO `listing_snapshots` row. The area columns ARE hashed, but correcting our own
 # mis-parse of the SAME stored page is the sanctioned rule-2 exception (the
@@ -45,21 +60,27 @@ name: Backfill areas truncated on a spaced thousands group (W19)
 # normal cadence. An inactive row is never refetched, so the heal is the only write it
 # gets. Price is never rewritten — a staged body can lag the live row.
 #
-# Idempotent: a healed row re-parses to the same values and writes nothing. There is no
-# `raw_json` marker on purpose (stamping one would rewrite the widest TOAST column on the
-# hottest table for every row examined), so a re-run re-reads the bodies it already
-# examined — that is what `--after` and `--max-seconds` are for. Batched by `listings.id`,
-# one `UPDATE ... FROM unnest(...)` per page inside its own transaction with
-# `SET LOCAL statement_timeout` (120 s) + `lock_timeout` (30 s), replayed through the
-# shared lock-retry rail whose window is sized for the ~90 s of row locks the hourly
+# Idempotent: every value is rounded to its column's scale (all five area columns are
+# numeric(*,1)) before it is compared AND before it is written, so a page reading
+# "86,19 m²" does not rewrite 86.2 as 86.19 on every pass. There is no `raw_json` marker on
+# purpose (stamping one would rewrite the widest TOAST column on the hottest table for
+# every row examined), so a re-run re-reads bodies it already examined — that is what
+# `--after` (per source) and `--max-seconds` are for. One statement per page updates the
+# rows and enqueues their properties into `dirty_properties` in the same CTE (rule 20 —
+# the mark cannot survive a rolled-back write), inside a transaction with
+# `SET LOCAL statement_timeout` (120 s) + `lock_timeout` (30 s) and a replay through the
+# shared lock-retry rail, whose window is sized for the ~90 s of row locks the hourly
 # MF-yield recompute holds on `listings`. DML, never DDL: no ACCESS EXCLUSIVE, so it cannot
 # head-block a writer; a WRITING pass waits for a read-model rebuild gap first, bounded,
-# then proceeds anyway (a dry run never waits). Healed listings are enqueued into
-# `dirty_properties` so the singleton `properties` area mirror is recomputed (rule 20).
-# NOT a portal ingest workflow, so it carries no `# portal:` tag.
+# then proceeds anyway (a dry run never waits). NOT a portal ingest workflow, so it carries
+# no `# portal:` tag.
 #
-# The script DEFAULTS TO DRY-RUN: it reports per-portal suspects / would-change /
-# unchanged / body-missing / parse-errors and exits unless `write` is true.
+# EXPECT OUTLIERS THE TRUNCATION MASKED. A seller's own error becomes visible once the
+# number is read whole — a 2+kk flat advertised as "3 060 m²" stops reading 60 and starts
+# reading 3060, faithfully to the page. That is the portal's number, not a heal defect.
+#
+# The script DEFAULTS TO DRY-RUN: it reports per-portal examined / would-change /
+# unchanged / body-missing / body-stale / parse-errors and exits unless `write` is true.
 #
 # Required GitHub secrets: SUPABASE_DB_URL, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
 # R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME.
@@ -76,7 +97,7 @@ on:
           - "false"
           - "true"
       sources:
-        description: Comma-separated portals to heal (blank = all four)
+        description: Comma-separated portals to heal, walked one at a time (blank = all five)
         required: false
         default: ""
         type: string
@@ -86,7 +107,7 @@ on:
         default: ""
         type: string
       after:
-        description: Resume from this listings.id cursor (exclusive)
+        description: Resume from this listings.id cursor (exclusive) — PER SOURCE, so pass one portal in `sources`
         required: false
         default: "0"
         type: string
@@ -96,7 +117,7 @@ on:
         default: "500"
         type: string
       max_seconds:
-        description: Wall-clock budget in seconds (blank = no budget)
+        description: Wall-clock budget in seconds (blank = the script's 9000 s default)
         required: false
         default: ""
         type: string
@@ -132,6 +153,9 @@ jobs:
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      # The run is ~193k R2 GETs; the claim lane's own fan-out width (its default is far
+      # narrower, sized for an hourly tick that reads a few hundred bodies).
+      LOCATION_BODY_FETCH_WORKERS: "32"
     steps:
       - uses: actions/checkout@v6
 

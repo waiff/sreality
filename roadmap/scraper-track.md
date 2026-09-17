@@ -6,33 +6,44 @@ Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
 ### One area grammar for every portal — spaced thousands no longer truncate (2026-09-17, done)
-- **The defect:** four parsers (`ceskereality`, `realitymix`, `remax`, `maxima`) shared a naive
-  area regex that matched the FIRST bare digit run before an `m²`, so the Czech spaced-thousands
-  form every portal renders ("5 870 m²", "1 063 m²" with a no-break space) parsed from INSIDE
-  the number and stored 870 / 63. bazos held a fifth copy; idnes had been fixed after its own
-  2026-08 incident. Measured on production: **ceskereality 17,207** of 98,126 rows carried the
-  truncation fingerprint (stored area = title area mod 1000) and NOT ONE of its 19,088 land rows
-  had an `area_m2` ≥ 1000 (max 999); **realitymix 13,164** of 83,051 (1,828 correct — its spec
-  cells are unspaced, so only the title fallback truncates); remax (13,797 rows) and maxima (540;
-  87 land rows, max 987 m²) were not fingerprintable from titles, but remax's archived capture
-  renders "Plocha parcely: 1 063 m²" with an NBSP. It reached the per-m² measure (rule 23),
-  Browse filters/sort, comparables, dedup's area rung, and W17's land heal (which copied the
-  truncated `estate_area` into `area_m2` on exactly these portals).
-- **Shipped:** ONE grammar, `scraper.area.parse_area_text` (rule 21) — idnes's proven pattern,
-  widened to every separator a portal emits (space, NBSP, narrow NBSP, thin space, zero-width
+- **The defect:** five parsers (`ceskereality`, `realitymix`, `remax`, `maxima`, `bazos`) each
+  held a private copy of a naive area regex that matched the FIRST bare digit run before an
+  `m²`, so the Czech spaced-thousands form every portal renders ("5 870 m²", "1 063 m²" with a
+  no-break space) parsed from INSIDE the number and stored 870 / 63; idnes had been fixed after
+  its own 2026-08 incident. Measured on production: **ceskereality 17,207** of 98,126 rows
+  carried the truncation fingerprint (stored area = title area mod 1000) and NOT ONE of its
+  19,088 land rows had an `area_m2` ≥ 1000 (max 999); **realitymix 13,164** of 83,051 (1,828
+  correct — its spec cells are unspaced, so only the title fallback truncates); **bazos
+  ~12,400** (8.4 % of its newest 8,000 rows); remax (13,797 rows) and maxima (540; 87 land rows,
+  max 987 m²) were not fingerprintable from titles, but remax's archived capture renders
+  "Plocha parcely: 1 063 m²" with an NBSP. It reached the per-m² measure (rule 23), Browse
+  filters/sort, comparables, dedup's area rung, and W17's land heal (which copied the truncated
+  `estate_area` into `area_m2` on exactly these portals).
+- **Shipped:** ONE grammar, `scraper.area.parse_area_text` (rule 21) — idnes's proven pattern
+  WIDENED to every separator a portal emits (space, NBSP, narrow NBSP, thin space, zero-width
   joiners), with the negative lookbehind that keeps "3+1 174 m²" at 174 and a per-m² price from
   reading as an area. All six parsers call it; the five private copies are gone. The remax
-  hand-authored fixture now renders its thousands group the way the real capture does, so the test
-  stopped asserting back a string it had planted. The heal,
+  hand-authored fixture now renders its thousands group the way the real capture does, so the
+  test stopped asserting back a string it had planted. The heal,
   `scripts/backfill_area_spaced_thousands.py` + its dispatch-only workflow (dry-run default),
   re-parses each listing's OWN archived detail body — latest successful `detail`
   `portal_raw_payloads` row, bytes from R2 via `page_readers.load_bodies` — and writes back the
-  area columns only: no snapshot (the sanctioned rule-2 exception), no price, idempotent, batched
-  through the shared lock-retry rail, `dirty_properties` enqueued. Because it fixes `area_m2` and
-  `estate_area` together, W17's land heal needs no re-run on these portals.
-- **Next:** the operator dispatches the heal — dry-run per portal first, then `--write`. bazos is
-  deliberately outside the healed population (free-text areas, an unmeasured corpus); measure it
-  before adding it to `--sources`.
+  area columns only: no snapshot (the sanctioned rule-2 exception), no price, and one statement
+  per page that also enqueues `dirty_properties` in the same CTE (rule 20). Four rails, each with
+  a test that fails without it: a listing whose newest `listing_snapshots` row post-dates the
+  archived body is skipped as `body_stale` (the payload writer's 7-day floor leaves ~3.2 % of
+  rows, ≈6k, lagging — re-parsing one would revert a seller's edit); a column the re-parse
+  cannot produce is never written, so a shape drift can never blank an area; every value is
+  rounded to its `numeric(*,1)` column scale before compare AND write, so "86,19 m²" does not
+  rewrite 86.2 for ever; and the run arms `statement_timeout = 600s` and walks the sources one
+  at a time on an id keyset (the paging SELECT measured 40.5 s against a 120 s default).
+  Because it fixes `area_m2` and `estate_area` together, W17's land heal needs no re-run on
+  these portals.
+- **Next:** the operator dispatches the heal — dry-run per portal first, then `--write`, one
+  `--sources` at a time (~193k bodies; `--max-seconds` defaults to 9000 under the 180-minute job
+  timeout, and every source's stop cursor is logged for the resume). **Expect it to surface
+  seller-error outliers the truncation masked** — a 2+kk flat advertised as "3 060 m²" stops
+  reading 60 and starts reading 3060, faithfully to the page.
 
 ### sreality photos: the whole frame, and provenance on every stored row (2026-09-11, in progress)
 - **Shipped:** downloads moved off sreality's `res,749,562,3|shr,,20|jpg,90` (mode 3 = a 4:3 CROP;

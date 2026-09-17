@@ -429,7 +429,7 @@
     {
       "filename": "backfill_area_spaced_thousands.yml",
       "name": "Backfill areas truncated on a spaced thousands group (W19)",
-      "description": "One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax and maxima parsers each carried a private copy of the naive area regex: it matched the FIRST bare digit run before an `m²`, so the Czech thousands format every one of them renders (\"5 870 m²\", \"1 063 m²\" with a no-break space) parsed from INSIDE the number and stored 870 / 63. Measured on production 2026-09-17:",
+      "description": "One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax, maxima and bazos parsers each carried a private copy of the naive area regex: it matched the FIRST bare digit run before an `m²`, so the Czech thousands format every one of them renders (\"5 870 m²\", \"1 063 m²\" with a no-break space) parsed from INSIDE the number and stored 870 / 63. Measured on production 2026-09-17:",
       "portal": null,
       "manual": true,
       "schedules": [],
@@ -450,7 +450,7 @@
         },
         {
           "name": "sources",
-          "description": "Comma-separated portals to heal (blank = all four)",
+          "description": "Comma-separated portals to heal, walked one at a time (blank = all five)",
           "required": false,
           "type": "string",
           "default": "",
@@ -466,7 +466,7 @@
         },
         {
           "name": "after",
-          "description": "Resume from this listings.id cursor (exclusive)",
+          "description": "Resume from this listings.id cursor (exclusive) — PER SOURCE, so pass one portal in `sources`",
           "required": false,
           "type": "string",
           "default": "0",
@@ -482,7 +482,7 @@
         },
         {
           "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
+          "description": "Wall-clock budget in seconds (blank = the script's 9000 s default)",
           "required": false,
           "type": "string",
           "default": "",

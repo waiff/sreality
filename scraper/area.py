@@ -45,8 +45,9 @@ precedence because both are the same rule — what an area IS — and five parse
 each owning a private copy is exactly what rule 21 forbids. It was five copies
 until W19, four of them the naive form that matched the first bare digit run before
 an `m²` and so
-read "5 870 m²" as 870; the fixed grammar is idnes's, proven in production since
-its own truncation incident.
+read "5 870 m²" as 870. The fixed grammar is idnes's — proven in production since its
+own truncation incident — WIDENED here to the separators the other portals emit: the
+narrow no-break space and the thin space idnes never had to handle.
 """
 
 from __future__ import annotations
