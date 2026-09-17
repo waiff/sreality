@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Dataset, Image, Listing, cosine_norm, hamming64
 from autodedup.normalize import canonical_attr
+from toolkit.room_taxonomy import ROOM_FAMILIES
 
 if TYPE_CHECKING:  # the sibling modules are imported for their types only, never at runtime
     from autodedup.fingerprint import Fingerprint
@@ -43,9 +44,10 @@ RADIUS_BY_RANK: tuple[tuple[int, float], ...] = (
 DIST_FLOOR_M: float = 25.0
 
 # `FEATURE_ORDER` is a closed vocabulary; this is its version, bumped whenever the tuple changes
-# shape. v2 appends `unit_number_shared` (E45); v3 appends the two plot-area slots (W4e). The
-# lane's `score_lane.FEATURE_VERSION` stamp on `autodedup.pairs` must follow this number.
-FEATURE_VERSION: int = 3
+# shape. v2 appends `unit_number_shared` (E45); v3 appends the two plot-area slots (W4e); v4
+# appends the room-tag-paired image slots plus `floor_stated_conflict` (W5). The lane's
+# `score_lane.FEATURE_VERSION` stamp on `autodedup.pairs` must follow this number.
+FEATURE_VERSION: int = 4
 
 # Comparable attribute slots: `attrs` keys (autodedup/export_sql.ATTR_COLUMNS) that carry a
 # categorical value, plus the listing-level subtype. Numeric side-areas and timestamps are not
@@ -186,6 +188,32 @@ NUMERAL_TOLERANCE: dict[str, float] = {
 CLIP_SAMPLE: int = 8
 PHASH_SAMPLE: int = 30
 
+# --- v4: room-tag pairing (W5) ------------------------------------------------------------
+# `clip_max_cos` above compares every frame against every frame, so its best pair is whatever two
+# photographs happen to look most alike — in a new development that is the facade, on both sides.
+# The v4 slots pair a frame ONLY against a frame the tagger gave the same top tag, which is what
+# lets the WEAKEST shared room speak: two units of one project share a facade, a hallway and a
+# fit-out style, and differ in a bedroom.
+#
+# Frames per tag per side. Three, for the same reason `judge.ROOM_TAG_CAP` is two: a third
+# bathroom carries no evidence the first two did not, and the cross-product is quadratic. One
+# more than the judge's cap because a pairing is a popcount and a dot product, not a paid token.
+TAG_FRAME_CAP: int = 3
+# "Looks the same, is not the same file" — the developer-unit fingerprint (W5 §4).
+TAG_LOOKALIKE_COS: float = 0.80
+# The rooms a unit owns. `hallway` is the tagger's catch-all (18,235 of 75,294 top tags on the
+# W4 cohort, 24%) and it is the room two units of one project are most likely to share in style,
+# so it is excluded from the "private room" slots and kept only in the all-tag ones. Measured on
+# the 2,703 labelled pairs: the weakest shared room's cosine runs AUC 0.949 with `hallway` in and
+# 0.958 with it out; in the hazard cell (one address point, zero shared photo files) 0.683 with it
+# in and 0.764 out — the exclusion is what lifts the cell off chance.
+PRIVATE_ROOM_TAGS: frozenset[str] = frozenset(
+    tag for tag, family in ROOM_FAMILIES.items() if family == "interior"
+) - frozenset({"hallway"})
+# The unit's own layout drawing. `site_plan` and `property_document` are also `plan` family and
+# are BUILDING material — a shared site plan says nothing about a unit (E10).
+FLOOR_PLAN_TAG: str = "floor_plan"
+
 # E20's "rare" means df <= rare_token_df in a corpus big enough for that to mean anything: in a
 # two-document block every shared boilerplate token is rare. Below this many in-block documents
 # the feature is ABSENT, and the overlap is capped so one long shared template cannot outvote
@@ -273,6 +301,21 @@ FEATURE_ORDER: tuple[str, ...] = (
     # `garden_area` are numeric, so they sit outside ATTR_KEYS and nothing looked at them.
     "plot_area_rel_diff",
     "plot_area_exact",
+    # v4 append-only tail (W5): frames compared ROOM TO ROOM, and the one floor fact a linear
+    # model cannot form for itself. Chosen by measurement over the 2,703 labelled pairs — see
+    # `_tag_features` for each slot's AUC and for the four candidates the measurement refused.
+    "tag_rooms_both",
+    "tag_rooms_private",
+    "tag_tight_matches",
+    "tag_dhash_min",
+    "tag_clip_mean",
+    "tag_clip_min",
+    "tag_room_clip_min",
+    "tag_room_clip_min2",
+    "tag_lookalike_share",
+    "floorplan_tight_match",
+    "floorplan_conflict",
+    "floor_stated_conflict",
 )
 
 FAMILY_OF: dict[str, str] = {
@@ -323,6 +366,18 @@ FAMILY_OF: dict[str, str] = {
     "unit_number_shared": "TXT",
     "plot_area_rel_diff": "ATTR",
     "plot_area_exact": "ATTR",
+    "tag_rooms_both": "IMG",
+    "tag_rooms_private": "IMG",
+    "tag_tight_matches": "IMG",
+    "tag_dhash_min": "IMG",
+    "tag_clip_mean": "IMG",
+    "tag_clip_min": "IMG",
+    "tag_room_clip_min": "IMG",
+    "tag_room_clip_min2": "IMG",
+    "tag_lookalike_share": "IMG",
+    "floorplan_tight_match": "IMG",
+    "floorplan_conflict": "IMG",
+    "floor_stated_conflict": "ATTR",
 }
 
 # E11 counts corroboration over five families only; PRICE and TIME are scored, never counted as
@@ -654,6 +709,15 @@ def unit_number_shared(
 
 
 @dataclass(slots=True)
+class TagFrame:
+    """One tagged, non-catalogue frame, reduced to what a room-to-room comparison needs."""
+
+    phash: int | None
+    vector: "array[float] | None"
+    norm: float | None
+
+
+@dataclass(slots=True)
 class FeatureContext:
     """Per-run, per-listing precomputation: everything a pair should never recompute."""
 
@@ -672,6 +736,7 @@ class FeatureContext:
     _clip: dict[tuple[int, int], list[tuple["array[float]", float]]] = field(default_factory=dict)
     _phash: dict[tuple[int, int], list[tuple[int, int, int]]] = field(default_factory=dict)
     _live: dict[tuple[int, int], int] = field(default_factory=dict)
+    _tags: dict[tuple[int, int], dict[str, list["TagFrame"]]] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -820,6 +885,40 @@ class FeatureContext:
         return gallery
 
 
+    def tag_gallery(
+        self,
+        listing_id: int,
+        images: Sequence[Image],
+        settings: "Settings | None" = None,
+    ) -> dict[str, list["TagFrame"]]:
+        """Room tag -> up to `TAG_FRAME_CAP` non-catalogue frames of that room, in gallery order.
+
+        E9 subtraction first, exactly as `phash_gallery` does it: a catalogue kitchen is stock,
+        not this unit's kitchen, and pairing it room-to-room would only make the stock look like
+        evidence. Frames with neither a pHash nor a CLIP vector are dropped — they can carry no
+        comparison — so an empty dict means "this side has nothing taggable to compare"."""
+        active = settings or self.settings
+        key = (listing_id, int(active.catalog_df))
+        cached = self._tags.get(key)
+        if cached is not None:
+            return cached
+        gallery: dict[str, list[TagFrame]] = {}
+        for image in images:
+            tag = image.room_tag()
+            if tag is None or image.is_catalog_candidate(active.catalog_df):
+                continue
+            frames = gallery.setdefault(tag, [])
+            if len(frames) >= TAG_FRAME_CAP:
+                continue
+            vector = image.clip_vector()
+            norm = image.clip_norm()
+            if image.phash is None and (vector is None or not norm):
+                continue
+            frames.append(TagFrame(image.phash, vector, norm))
+        self._tags[key] = gallery
+        return gallery
+
+
 def _block_of(fp: "Fingerprint") -> str:
     return str(fp.block_key) if fp.block_key is not None else "(none)"
 
@@ -918,6 +1017,151 @@ def _clip_features(
     scores.sort(reverse=True)
     top = scores[:3]
     return (scores[0], True), (sum(top) / len(top), True)
+
+
+TAG_FEATURE_NAMES: tuple[str, ...] = (
+    "tag_rooms_both",
+    "tag_rooms_private",
+    "tag_tight_matches",
+    "tag_dhash_min",
+    "tag_clip_mean",
+    "tag_clip_min",
+    "tag_room_clip_min",
+    "tag_room_clip_min2",
+    "tag_lookalike_share",
+    "floorplan_tight_match",
+    "floorplan_conflict",
+)
+
+
+def _tag_room_stats(
+    gallery_a: Mapping[str, Sequence[TagFrame]],
+    gallery_b: Mapping[str, Sequence[TagFrame]],
+) -> list[tuple[str, int | None, float | None]]:
+    """Per SHARED room tag, the best (smallest) Hamming and the best (largest) cosine.
+
+    Only same-tag frames are ever compared, which is the whole point: `clip_max_cos` pairs a
+    kitchen against a facade when the facade happens to be the closest thing in the gallery."""
+    rows: list[tuple[str, int | None, float | None]] = []
+    for tag in sorted(set(gallery_a) & set(gallery_b)):
+        best_hamming: int | None = None
+        best_cosine: float | None = None
+        for frame_a in gallery_a[tag]:
+            for frame_b in gallery_b[tag]:
+                if frame_a.phash is not None and frame_b.phash is not None:
+                    distance = hamming64(frame_a.phash, frame_b.phash)
+                    if best_hamming is None or distance < best_hamming:
+                        best_hamming = distance
+                if (
+                    frame_a.vector is not None
+                    and frame_b.vector is not None
+                    and frame_a.norm
+                    and frame_b.norm
+                ):
+                    cosine = cosine_norm(
+                        frame_a.vector, frame_b.vector, frame_a.norm, frame_b.norm
+                    )
+                    if best_cosine is None or cosine > best_cosine:
+                        best_cosine = cosine
+        if best_hamming is None and best_cosine is None:
+            continue
+        rows.append((tag, best_hamming, best_cosine))
+    return rows
+
+
+def _tag_features(
+    gallery_a: Mapping[str, Sequence[TagFrame]],
+    gallery_b: Mapping[str, Sequence[TagFrame]],
+    settings: "Settings",
+) -> Feats:
+    """The v4 room-paired slots. Every number below is an AUC over the 2,703 labelled pairs, read
+    in three nested cells: ALL / same exact pin / the HAZARD cell (same pin AND zero pHash tight
+    matches — one address point, no shared photo file, which is the developer-unit shape).
+
+        tag_clip_mean         0.947 / 0.850 / 0.624
+        tag_clip_min          0.931 / 0.834 / 0.601
+        tag_room_clip_min     0.958 / 0.892 / 0.764   <- the hazard cell's first real feature
+        tag_room_clip_min2    0.960 / 0.900 / 0.820   <- and its best
+        tag_tight_matches     0.855 / 0.767 / 0.500
+        tag_dhash_min         0.067 / 0.166 / 0.395   (negative direction)
+        tag_lookalike_share   0.150 / 0.189 / 0.475   (negative direction)
+        floorplan_tight_match 0.866 / 0.765 / 0.500
+        floorplan_conflict    0.134 / 0.295 / 0.474   (negative direction)
+        tag_rooms_both        0.605 / 0.657 / 0.480
+
+    REFUSED by the same measurement, and named so nobody re-proposes them: `catalogue_only_overlap`
+    (0.533 / 0.507 / 0.500 — at chance in all three cells); `kitchen_conflict` and
+    `bathroom_conflict` (0.078 / 0.146 / 0.429 and 0.059 / 0.132 / 0.500 — strong overall but only
+    because they restate "no shared photo file", and flat in the cell they were proposed for);
+    `tag_cos_max_unmatched` (0.742 overall on 197 positives against 1,418 negatives — its PRESENCE
+    is the signal, which `tag_lookalike_share` already carries without the artefact).
+
+    The operator's suggestion — compare kitchen to kitchen — is right about where to look and, as
+    a MERGE-supporting signal, wrong about the direction: a room-matched cosine reaches 0.977
+    between two different BUILDINGS of one project. It pays as the weakest room, downward."""
+    if not gallery_a or not gallery_b:
+        return {name: ABSENT for name in TAG_FEATURE_NAMES}
+    rows = _tag_room_stats(gallery_a, gallery_b)
+    feats: Feats = {"tag_rooms_both": (float(len(rows)), True)}
+    private = [row for row in rows if row[0] in PRIVATE_ROOM_TAGS]
+    feats["tag_rooms_private"] = (float(len(private)), True)
+    if not rows:
+        for name in TAG_FEATURE_NAMES[2:]:
+            feats[name] = ABSENT
+        return feats
+
+    hammings = [hamming for _, hamming, _ in rows if hamming is not None]
+    if hammings:
+        feats["tag_tight_matches"] = (
+            float(sum(1 for value in hammings if value <= settings.phash_tight)), True
+        )
+        feats["tag_dhash_min"] = (float(min(hammings)), True)
+    else:
+        feats["tag_tight_matches"] = ABSENT
+        feats["tag_dhash_min"] = ABSENT
+
+    cosines = [cosine for _, _, cosine in rows if cosine is not None]
+    if cosines:
+        feats["tag_clip_mean"] = (sum(cosines) / len(cosines), True)
+        feats["tag_clip_min"] = (min(cosines), True)
+    else:
+        feats["tag_clip_mean"] = ABSENT
+        feats["tag_clip_min"] = ABSENT
+
+    room_cosines = sorted(cosine for _, _, cosine in private if cosine is not None)
+    if room_cosines:
+        feats["tag_room_clip_min"] = (room_cosines[0], True)
+        # The second-weakest room, which is the weakest when only one is shared: one odd frame
+        # (a re-shot kitchen on a true duplicate) must not read as a contradiction on its own.
+        feats["tag_room_clip_min2"] = (
+            room_cosines[1] if len(room_cosines) > 1 else room_cosines[0], True
+        )
+    else:
+        feats["tag_room_clip_min"] = ABSENT
+        feats["tag_room_clip_min2"] = ABSENT
+
+    lookalike = sum(
+        1
+        for _, hamming, cosine in rows
+        if cosine is not None
+        and cosine >= TAG_LOOKALIKE_COS
+        and (hamming is None or hamming > settings.phash_loose)
+    )
+    feats["tag_lookalike_share"] = (lookalike / len(rows), True)
+
+    plan = next((row for row in rows if row[0] == FLOOR_PLAN_TAG), None)
+    if plan is None:
+        feats["floorplan_tight_match"] = ABSENT
+        feats["floorplan_conflict"] = ABSENT
+    else:
+        _, hamming, _ = plan
+        feats["floorplan_tight_match"] = (
+            1.0 if hamming is not None and hamming <= settings.phash_tight else 0.0, True
+        )
+        feats["floorplan_conflict"] = (
+            1.0 if hamming is None or hamming > settings.phash_loose else 0.0, True
+        )
+    return feats
 
 
 def _window(listing: Listing) -> tuple[float | None, float | None]:
@@ -1191,6 +1435,26 @@ def pair_features(
         feats["overlap_days"] = ABSENT
     feats["both_active"] = (1.0 if (la.is_active and lb.is_active) else 0.0, True)
     feats["same_source"] = _eq(fa.source, fb.source)
+
+    # --- v4 room-paired IMG (W5) ------------------------------------------------------
+    feats.update(_tag_features(
+        ctx.tag_gallery(la.id, images_a, settings),
+        ctx.tag_gallery(lb.id, images_b, settings),
+        settings,
+    ))
+    # A one-floor gap means two different things on the two sides of a portal boundary, and a
+    # linear model cannot form the product for itself. Measured on the labelled pairs: SAME
+    # portal, floor_diff == 1 fires on 2.0% of positives against 15.5% of negatives (at one
+    # address point 2.4% vs 25.8%; in the hazard cell 5.4% vs 29.8%) — a stated fact. ACROSS
+    # portals the same gap fires on 38.7% of positives against 30.1% of negatives — it is the
+    # portals disagreeing about prizemi, and carries nothing.
+    floor_gap, floor_known = feats["floor_diff"]
+    same_source, source_known = feats["same_source"]
+    feats["floor_stated_conflict"] = (
+        (1.0 if (same_source == 1.0 and floor_gap == 1.0) else 0.0, True)
+        if (floor_known and source_known)
+        else ABSENT
+    )
     return feats
 
 
