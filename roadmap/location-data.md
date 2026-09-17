@@ -839,7 +839,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
   all and Browse fell from ~350,000 active rows to 45,810. The read now takes a listing's NEWEST
   EVIDENCE: per (listing, portal) the highest contract version present that is `<= the active` one,
   `max(pc.version) OVER (PARTITION BY listing_id, source)` — one version per listing, never a mix
-  (11 ms / 1.2 k buffers per 250-listing slice on prod, index-driven). `RESOLVER_VERSION` →
+  (11 ms / 1.2 k buffers per 250-listing slice on prod, index-driven). **W18-b re-spelled that
+  partition per CLAIM TYPE** after a per-portal one blanked 29,545 live bazos listings — see below. `RESOLVER_VERSION` →
   `resolver:v5.1` re-queues the corpus once. `location_claims_retire.py` gains the matching rail: it
   refuses (exit 3, no `--force`) while any portal still has a served listing with no claim under its
   ACTIVE contract, because those older rows are that listing's evidence until the re-mine lands.
@@ -1035,6 +1036,35 @@ component is slimmed twice — each wave rewrites one component and slims its st
   a subject-scoped street reading in `bazos_parser` (which would bring `/coords/street` back);
   and Czech inflection ("Livornské ulici" is the locative of `Livornská`, deliberately not
   guessed at — the exact match fails and R3 is off for lines).
+
+- **W18-b — the claims read is per CLAIM TYPE, so a partial re-mine cannot blank a listing
+  (incident 2026-09-17 00:50Z)** (shipped, resolver v5.3): W18 bumped the bazos contract 6 → 7 for
+  ONE payload-lane entry (`street_name` off `raw_json` /title). The payload lane mined that entry
+  across all 147k bazos listings in a single hop, while the SAME run's bodies pass — which re-mines
+  the four page entries (`obec_name`, `psc`, `precision_declaration`, `coordinate`) — is bounded and
+  covered 56,905 of ~155k bodies before the chain yielded. W11's claim read partitions per (listing,
+  PORTAL), so for ~90k listings the newest version present was 7 and carried the STREET ALONE: the
+  town, the PSČ and the pin sat unread at version 6 and the listing resolved `undetermined` with no
+  geom, hidden from every consumer under W5. Measured on prod at the time of the fix: **29,545 of
+  50,598 live bazos listings undetermined**, **61,396 bazos rows at granularity `unknown`**.
+
+  **The rule.** The claim read is per (listing, portal, CLAIM TYPE): for each claim type the portal's
+  ACTIVE contract declares an entry for, the listing's claims come from the newest contract version
+  `<= active` that carries a claim OF THAT TYPE —
+  `max(pc.version) OVER (PARTITION BY c.listing_id, c.source, c.claim_type)`. Each type keeps its
+  best evidence and a re-mine upgrades them one at a time, while the supersession the version rail
+  exists for is untouched (a re-mined type never reads the old version's answer beside the new one).
+  A claim type the active contract **no longer declares is not read at all** — an `EXISTS` over the
+  active contract's entries, not a join (the same type may be declared on several surfaces) — so a
+  deliberately dropped entry stops being evidence when it is dropped instead of lingering at its last
+  version, and `scripts/location_claims_retire.py` stays the only DELETER (its refuse-while-it-is-a
+  listing's-only-evidence rail is unchanged; only its wording moves). Operator claims
+  (`contract_entry_id IS NULL` + `licence_class 'operator'`) are exactly as before. One SQL, in
+  `_claims_sql`; no migration, no new column, no per-portal branch.
+
+  `RESOLVER_VERSION` → `resolver:v5.3`, which re-queues the corpus so the blanked rows resolve on
+  the evidence they always had. The re-mine of the bazos bodies runs in parallel and is no longer
+  load-bearing for correctness — it only upgrades those types to version 7.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM

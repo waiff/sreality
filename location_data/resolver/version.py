@@ -58,4 +58,15 @@ from __future__ import annotations
 #        only when nothing matched exactly), fail-closed on two distinct streets. The
 #        similarity rung (R3) runs only for a claim the CONTRACT calls an address field, never
 #        for one it declares `claim_confidence: low`.
-RESOLVER_VERSION = "resolver:v5.2"
+# v5.3 = W18-b (incident 2026-09-17 00:50Z). W11 read a listing's newest evidence per
+#      (listing, PORTAL); the rail is now per (listing, portal, CLAIM TYPE). W18 bumped the
+#      bazos contract 6 -> 7 for ONE payload entry (`street_name`), the payload lane mined it
+#      across all 147 k listings in one hop, and the same run's bounded BODIES pass reached
+#      only 56,905 of ~155 k pages — so for ~90 k listings the newest version present carried
+#      the STREET alone and the per-portal partition hid the obec, the PSČ and the pin still
+#      sitting at version 6: 29,545 of 50,598 live bazos listings `undetermined` with no
+#      geom, 61,396 rows at granularity `unknown`. Per claim type, each type keeps the newest
+#      version that actually carries it, so a PARTIAL re-mine can never blank a listing
+#      again; a claim type the ACTIVE contract no longer declares is not read at all. The
+#      bump re-queues the corpus so the blanked rows resolve on their real evidence.
+RESOLVER_VERSION = "resolver:v5.3"
