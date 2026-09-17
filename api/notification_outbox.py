@@ -146,6 +146,16 @@ def _resolve_recipient(conn: "psycopg.Connection", channel: str) -> str | None:
     return val.strip() if isinstance(val, str) and val.strip() else None
 
 
+# A dispatch about a property its account dismissed (migration 536) is never
+# delivered: it gets no channel_sends row, so it ages out of the window unless
+# the dismissal is lifted first. Service-role connection, so the account is
+# named explicitly (tenancy doctrine, shape 3).
+_NOT_DISMISSED = (
+    "NOT EXISTS (SELECT 1 FROM property_dismissals pd "
+    "WHERE pd.property_id = d.property_id AND pd.account_id = d.account_id "
+    "AND pd.lifted_at IS NULL)"
+)
+
 _NEW_COLS = (
     "d.id::text, d.source_kind, d.change_kind, d.sreality_id, "
     "d.subscription_id::text, d.collection_id, "
@@ -193,6 +203,7 @@ def drain_once(
             "WHERE cs.id IS NULL "
             "  AND ch = ANY(%(channels)s) "
             "  AND d.dispatched_at > now() - %(win)s::interval "
+            f"  AND {_NOT_DISMISSED} "
             "ORDER BY d.dispatched_at "
             "LIMIT %(limit)s",
             {"channels": configured, "win": f"{_WINDOW_DAYS} days", "limit": limit},
@@ -243,6 +254,7 @@ def drain_once(
             "WHERE cs.status = 'failed' AND cs.attempts < %(max_attempts)s "
             "  AND cs.channel = ANY(%(channels)s) "
             "  AND (cs.next_attempt_at IS NULL OR cs.next_attempt_at <= now()) "
+            f"  AND {_NOT_DISMISSED} "
             # No consumer allowlist. It used to read IN ('watchdog','collection_monitor'),
             # which silently gave ops alerts ONE delivery attempt where a price-drop gets
             # five — the entire delta between "ops alerting exists" and "ops alerting is

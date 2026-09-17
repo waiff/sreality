@@ -567,6 +567,17 @@ def unresolved_places(
     return district_code_plan(chips).unresolved
 
 
+# Every in-app read and count of `notification_dispatches d` hides a dispatch
+# about a property the caller dismissed (migration 536). Detection still writes
+# it — the matcher's cursor and the `reactivated` detector depend on every row
+# existing — so an undo brings it back intact. RLS-scoped: the view is the
+# caller's own; a system_health row (property_id NULL) never matches.
+_NOT_DISMISSED = (
+    "NOT EXISTS (SELECT 1 FROM property_dismissals_public pd "
+    "WHERE pd.property_id = d.property_id)"
+)
+
+
 def list_subscriptions(
     conn: "psycopg.Connection",
     *,
@@ -575,8 +586,9 @@ def list_subscriptions(
     where = "" if include_inactive else "WHERE is_active = true"
     sql = (
         f"SELECT {_SUB_COLS}, "
-        "  (SELECT count(*) FROM notification_dispatches "
-        "     WHERE subscription_id = notification_subscriptions.id) AS dispatch_count "
+        "  (SELECT count(*) FROM notification_dispatches d "
+        "     WHERE d.subscription_id = notification_subscriptions.id "
+        f"    AND {_NOT_DISMISSED}) AS dispatch_count "
         "FROM notification_subscriptions "
         f"{where} "
         "ORDER BY created_at DESC"
@@ -598,8 +610,8 @@ def get_subscription(
     with conn.cursor() as cur:
         cur.execute(
             f"SELECT {_SUB_COLS}, "
-            "  (SELECT count(*) FROM notification_dispatches "
-            "     WHERE subscription_id = %s) AS dispatch_count "
+            "  (SELECT count(*) FROM notification_dispatches d "
+            f"    WHERE d.subscription_id = %s AND {_NOT_DISMISSED}) AS dispatch_count "
             "FROM notification_subscriptions WHERE id = %s",
             (subscription_id, subscription_id),
         )
@@ -778,7 +790,7 @@ def list_dispatches(
     shift as new dispatches prepend). `id` is a uuid — fine as a
     deterministic tiebreaker. `total` is computed once, on the first page.
     """
-    where: list[str] = []
+    where: list[str] = [_NOT_DISMISSED]
     params: dict[str, Any] = {}
     if subscription_id is not None:
         where.append("d.subscription_id = %(subscription_id)s")
@@ -793,7 +805,7 @@ def list_dispatches(
         where.append("d.seen_at IS NOT NULL")
     elif seen == "unseen":
         where.append("d.seen_at IS NULL")
-    filter_sql = "WHERE " + " AND ".join(where) if where else ""
+    filter_sql = "WHERE " + " AND ".join(where)
 
     page_where = list(where)
     if cursor is not None:
@@ -803,7 +815,7 @@ def list_dispatches(
         )
         params["c_ts"] = c_ts
         params["c_id"] = c_id
-    page_where_sql = "WHERE " + " AND ".join(page_where) if page_where else ""
+    page_where_sql = "WHERE " + " AND ".join(page_where)
 
     sql = (
         f"SELECT {_DISPATCH_SELECT} "
@@ -907,8 +919,8 @@ def get_unread_count(
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT source_kind, count(*) FROM notification_dispatches "
-            "WHERE seen_at IS NULL GROUP BY source_kind"
+            "SELECT d.source_kind, count(*) FROM notification_dispatches d "
+            f"WHERE d.seen_at IS NULL AND {_NOT_DISMISSED} GROUP BY d.source_kind"
         )
         counts = {r[0]: int(r[1]) for r in cur.fetchall()}
     # total sums EVERY source_kind (incl. system_health + any future kind), not a
@@ -929,19 +941,20 @@ def mark_all_seen(
     *,
     source_kind: Literal["watchdog", "collection_monitor", "system_health", "all"] = "all",
 ) -> int:
-    """Mark every unseen dispatch (optionally scoped to a source) as seen."""
+    """Mark every visible unseen dispatch (optionally scoped to a source) as seen.
+
+    A dismissed property's dispatches are not visible, so they keep their unseen
+    state for when the dismissal is undone.
+    """
+    sql = (
+        "UPDATE notification_dispatches d SET seen_at = now() "
+        f"WHERE d.seen_at IS NULL AND {_NOT_DISMISSED}"
+    )
     with conn.cursor() as cur:
         if source_kind == "all":
-            cur.execute(
-                "UPDATE notification_dispatches SET seen_at = now() "
-                "WHERE seen_at IS NULL"
-            )
+            cur.execute(sql)
         else:
-            cur.execute(
-                "UPDATE notification_dispatches SET seen_at = now() "
-                "WHERE seen_at IS NULL AND source_kind = %s",
-                (source_kind,),
-            )
+            cur.execute(sql + " AND d.source_kind = %s", (source_kind,))
         return cur.rowcount or 0
 
 

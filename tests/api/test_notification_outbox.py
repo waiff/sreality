@@ -249,3 +249,20 @@ def test_system_health_is_a_declared_consumer() -> None:
     from api.channel_client import Consumer
 
     assert "system_health" in get_args(Consumer)
+
+
+def test_neither_pass_delivers_a_dismissed_property() -> None:
+    """Migration 536. The drain runs service-role, so the dismissal it honours is
+    the DISPATCH's own account's, named explicitly — never "anyone's"."""
+    client = _FakeClient(configured={"email"})
+    conn = _Conn(recipient="op@example.cz", new_rows=[], retry_rows=[])
+    ob.drain_once(conn, client)  # type: ignore[arg-type]
+    passes = [s for s in conn.executed if "FROM notification_dispatches d" in s
+              or "FROM channel_sends cs JOIN" in s]
+    assert len(passes) == 2
+    for sql in passes:
+        assert (
+            "NOT EXISTS (SELECT 1 FROM property_dismissals pd "
+            "WHERE pd.property_id = d.property_id AND pd.account_id = d.account_id "
+            "AND pd.lifted_at IS NULL)"
+        ) in sql

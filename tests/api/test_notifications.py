@@ -833,7 +833,7 @@ def test_collection_monitor_gates_every_detector_on_monitor_since() -> None:
 def test_get_unread_count_breaks_down_by_source() -> None:
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (
-            lambda s: "GROUP BY source_kind" in s,
+            lambda s: "GROUP BY d.source_kind" in s,
             [("watchdog", 4), ("collection_monitor", 3)],
             0,
         ),
@@ -853,7 +853,7 @@ def test_get_unread_count_sums_system_health_into_total() -> None:
     # that previously dropped system_health alerts from the nav badge.
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (
-            lambda s: "GROUP BY source_kind" in s,
+            lambda s: "GROUP BY d.source_kind" in s,
             [("watchdog", 4), ("collection_monitor", 3), ("system_health", 2)],
             0,
         ),
@@ -897,7 +897,7 @@ def test_dispatch_feed_reads_listings_through_the_public_view() -> None:
 
 def test_mark_all_seen_scoped_filters_by_source() -> None:
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
-        (lambda s: "UPDATE notification_dispatches SET seen_at" in s, [], 5),
+        (lambda s: "UPDATE notification_dispatches d SET seen_at" in s, [], 5),
     ]
     conn = _FakeConn(script)
     assert mark_all_seen(conn) == 5  # type: ignore[arg-type]
@@ -905,7 +905,59 @@ def test_mark_all_seen_scoped_filters_by_source() -> None:
     scoped_sql = [
         s for s, _ in conn.executed if "UPDATE notification_dispatches" in s
     ][-1]
-    assert "AND source_kind = %s" in scoped_sql
+    assert "AND d.source_kind = %s" in scoped_sql
+
+
+# --- dismissed properties are invisible, never undetected (migration 536) ---
+
+_HIDDEN = (
+    "NOT EXISTS (SELECT 1 FROM property_dismissals_public pd "
+    "WHERE pd.property_id = d.property_id)"
+)
+
+
+def test_every_in_app_read_and_count_hides_dismissed_properties() -> None:
+    """The badge, the feed, its total, mark-all-seen and each watchdog's dispatch
+    count must agree on what is visible — a count that includes rows the list
+    hides is the badge-vs-list divergence migrations 351/378 exist to close."""
+    from api.notifications import get_subscription, list_dispatches, list_subscriptions
+
+    conn = _FakeConn([])
+    get_unread_count(conn)  # type: ignore[arg-type]
+    mark_all_seen(conn)  # type: ignore[arg-type]
+    mark_all_seen(conn, source_kind="watchdog")  # type: ignore[arg-type]
+    list_dispatches(conn)  # type: ignore[arg-type]
+    list_dispatches(conn, subscription_id="s-1", seen="unseen")  # type: ignore[arg-type]
+    get_subscription(conn, "s-1")  # type: ignore[arg-type]
+    list_subscriptions(conn)  # type: ignore[arg-type]
+    reads = [s for s, _ in conn.executed if "notification_dispatches" in s]
+    assert len(reads) == 9
+    for sql in reads:
+        assert _HIDDEN in sql, sql
+    totals = [s for s in reads if s.startswith("SELECT count(*) FROM notification_dispatches d")]
+    assert len(totals) == 2
+
+
+def test_a_dispatch_is_still_reachable_by_id() -> None:
+    """Detail-by-id stays reachable (a deep link from an already-sent message)."""
+    from api.notifications import mark_dispatch_seen
+
+    conn = _FakeConn([])
+    mark_dispatch_seen(conn, "d-1")  # type: ignore[arg-type]
+    assert all("property_dismissals" not in s for s, _ in conn.executed)
+
+
+def test_detection_never_consults_dismissals() -> None:
+    """Suppressing an INSERT would lose the event for good on undo: the matcher's
+    cursor advances regardless, `:new:` dedupe keys are once-ever, and the
+    `reactivated` detector keys off a prior `inactive` dispatch."""
+    import inspect
+
+    from api import notifications as nf
+
+    for fn in (nf.match_once, nf.match_changes_once, nf.match_monitored_collections_once):
+        assert "dismiss" not in inspect.getsource(fn), fn.__name__
+    assert "dismiss" not in nf._MONITORED_CTE
 
 
 def test_match_once_skips_subscription_with_no_listings() -> None:
