@@ -918,3 +918,21 @@ def test_the_w4f_refit_pays_the_debt_the_w4_model_still_carries() -> None:
     # the two features W4e added carry a learned weight now, not a structural zero
     assert model.weights["plot_area_exact"] != 0.0
     assert model.weights["plot_area_rel_diff"] != 0.0
+
+
+def test_w5_gold_is_the_v4_refit_and_pays_the_room_paired_slots() -> None:
+    """W5d promoted the v4 refit on the healed cohort (PROGRAM.md D16, generation g4). Unlike
+    `w4f_gold` this model was fitted on all 59 slots, so it must load with NO debt warning and
+    every room-paired slot must carry a learned weight rather than a structural zero."""
+    body = json.loads((ROOT / "autodedup" / "models" / "w5_gold.json").read_text())
+    assert tuple(body["feature_order"]) == ft.FEATURE_ORDER
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model = LogisticModel.from_json(json.dumps(body))
+    assert model.version == "w5_gold"
+    assert all(model.weights[name] != 0.0 for name in W5_TAIL)
+    # The seal is the W4f split map's: the fit reused it rather than re-randomising the holdout.
+    assert body["provenance"]["seal"]["sha256"].startswith("ab2bd7eee78d")
+    # `w5_gold` is a MEASUREMENT-only-gold artifact: the boundary draw it was judged against must
+    # never appear in the fit corpus (a fit on labels picked from its own errors is adaptive).
+    assert "35205840437" not in body["provenance"]["w5d"]["judgement_runs"]

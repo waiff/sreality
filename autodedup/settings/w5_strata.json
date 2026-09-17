@@ -1,0 +1,1208 @@
+{
+ "baseline_w4f_same_labels": {
+  "band_share_of_scored": 0.1524699435675145,
+  "band_share_of_stored": 0.4535060512072006,
+  "merge_judged": 425,
+  "merge_positive": 425,
+  "merge_precision_unweighted": 1.0,
+  "merge_precision_wilson_lb": 0.9910419138441794,
+  "n_band": 7457,
+  "recall_merge": 0.3797261996526342,
+  "recall_merge_band": 0.9468057362455304,
+  "sealed_at_settings": {
+   "bootstrap": {
+    "design_effect": 1.2811145242016553,
+    "draws": 2000,
+    "estimate": 1.0,
+    "lb": 1.0,
+    "n": 92,
+    "n_effective": 71.81247129902856,
+    "n_singleton_strata": 1,
+    "n_strata": 14,
+    "ub": 1.0,
+    "weight_max": 13.748166259168704,
+    "weight_min": 1.0
+   },
+   "chosen_by": "the settings row in force, not the threshold search",
+   "clopper_pearson_lb": 0.9606967122604146,
+   "clopper_pearson_ub": 1.0,
+   "measured_on": "test (sealed)",
+   "min_sampler_stratum_precision": 1.0,
+   "min_stratum_precision": 1.0,
+   "missed_share_at_t_lo": 0.03924534069027166,
+   "n": 422,
+   "n_merge": 92,
+   "n_positive": 92,
+   "n_sealed": 422,
+   "per_sampler_stratum_precision": {
+    "catalog-only": {
+     "n": 27,
+     "n_positive": 27,
+     "precision": 1.0,
+     "wilson_lb": 0.8754409628553641
+    },
+    "merge|K-A|jablonec|cross": {
+     "n": 3,
+     "n_positive": 3,
+     "precision": 1.0,
+     "wilson_lb": 0.43849391955098227
+    },
+    "merge|K-A|vysocany|cross": {
+     "n": 1,
+     "n_positive": 1,
+     "precision": 1.0,
+     "wilson_lb": 0.20654329147389294
+    },
+    "merge|K-B|jablonec|same": {
+     "n": 4,
+     "n_positive": 4,
+     "precision": 1.0,
+     "wilson_lb": 0.5100999795960008
+    },
+    "merge|K-B|negctl|same": {
+     "n": 6,
+     "n_positive": 6,
+     "precision": 1.0,
+     "wilson_lb": 0.6096569663469354
+    },
+    "merge|K-B|turnov|same": {
+     "n": 2,
+     "n_positive": 2,
+     "precision": 1.0,
+     "wilson_lb": 0.34237195288961925
+    },
+    "merge|K-B|vysocany|same": {
+     "n": 4,
+     "n_positive": 4,
+     "precision": 1.0,
+     "wilson_lb": 0.5100999795960008
+    },
+    "merge|K-C|jablonec|cross": {
+     "n": 17,
+     "n_positive": 17,
+     "precision": 1.0,
+     "wilson_lb": 0.8156763396284354
+    },
+    "merge|K-C|negctl|cross": {
+     "n": 3,
+     "n_positive": 3,
+     "precision": 1.0,
+     "wilson_lb": 0.43849391955098227
+    },
+    "merge|K-C|turnov|cross": {
+     "n": 5,
+     "n_positive": 5,
+     "precision": 1.0,
+     "wilson_lb": 0.5655085052479191
+    },
+    "merge|K-C|vysocany|cross": {
+     "n": 6,
+     "n_positive": 6,
+     "precision": 1.0,
+     "wilson_lb": 0.6096569663469354
+    },
+    "merge|model|jablonec|cross": {
+     "n": 9,
+     "n_positive": 9,
+     "precision": 1.0,
+     "wilson_lb": 0.7008472464490407
+    },
+    "merge|model|turnov|cross": {
+     "n": 2,
+     "n_positive": 2,
+     "precision": 1.0,
+     "wilson_lb": 0.34237195288961925
+    },
+    "merge|model|vysocany|cross": {
+     "n": 3,
+     "n_positive": 3,
+     "precision": 1.0,
+     "wilson_lb": 0.43849391955098227
+    }
+   },
+   "per_stratum_precision": {
+    "K-B|same": {
+     "n": 43,
+     "n_positive": 43,
+     "precision": 1.0,
+     "wilson_lb": 0.9179874299767729
+    },
+    "K-C|cross": {
+     "n": 34,
+     "n_positive": 34,
+     "precision": 1.0,
+     "wilson_lb": 0.8984820937803899
+    },
+    "model|cross": {
+     "n": 15,
+     "n_positive": 15,
+     "precision": 1.0,
+     "wilson_lb": 0.7961107336956521
+    }
+   },
+   "per_stratum_precision_basis": "deciding cell (certificate|side) \u2014 D3's floor",
+   "precision": 1.0,
+   "stratum_floor": 0.97,
+   "stratum_floor_ok": true,
+   "stratum_t_hi_applied": {
+    "K-A|cross": null,
+    "K-A|same": null,
+    "K-C|same": null,
+    "model|cross": 0.9863,
+    "model|same": null
+   },
+   "t_hi": 1.0,
+   "t_hi_by_stratum": {
+    "K-A|cross": null,
+    "K-A|same": null,
+    "K-C|same": null,
+    "model|cross": 0.9863,
+    "model|same": null
+   },
+   "t_lo": 0.09585876256714153,
+   "weighted_precision": 1.0,
+   "wilson_lb": 0.9599171967079014
+  }
+ },
+ "basis": "cuts CHOSEN on the dev split (train+validation) of the fit's own split map and MEASURED on the sealed test split; labels are the seven fit files plus the gold merge-boundary run 35205840437, which supersedes the cheap verdicts on the 60 pairs it re-judged (precedence gold > vision > text, newest lane run id wins)",
+ "cut_curves": {
+  "K-B|same": [
+   {
+    "cut": 1.0,
+    "dev_k": 107,
+    "dev_lb": 0.9653415324210404,
+    "dev_n": 107,
+    "dev_p": 1.0,
+    "sealed_k": 43,
+    "sealed_n": 43,
+    "sealed_p": 1.0
+   }
+  ],
+  "K-C|cross": [
+   {
+    "cut": 1.0,
+    "dev_k": 161,
+    "dev_lb": 0.9766952031526023,
+    "dev_n": 161,
+    "dev_p": 1.0,
+    "sealed_k": 34,
+    "sealed_n": 34,
+    "sealed_p": 1.0
+   }
+  ],
+  "K-C|same": [
+   {
+    "cut": 1.0,
+    "dev_k": 28,
+    "dev_lb": 0.8282410893529976,
+    "dev_n": 29,
+    "dev_p": 0.9655172413793104,
+    "sealed_k": 9,
+    "sealed_n": 10,
+    "sealed_p": 0.9
+   }
+  ],
+  "model|cross": [
+   {
+    "cut": 1.0,
+    "dev_k": 0,
+    "dev_lb": null,
+    "dev_n": 0,
+    "dev_p": null,
+    "sealed_k": 0,
+    "sealed_n": 0,
+    "sealed_p": null
+   },
+   {
+    "cut": 0.9999,
+    "dev_k": 100,
+    "dev_lb": 0.9630051925239981,
+    "dev_n": 100,
+    "dev_p": 1.0,
+    "sealed_k": 32,
+    "sealed_n": 32,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9932,
+    "dev_k": 101,
+    "dev_lb": 0.9633580563440465,
+    "dev_n": 101,
+    "dev_p": 1.0,
+    "sealed_k": 32,
+    "sealed_n": 32,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9931,
+    "dev_k": 102,
+    "dev_lb": 0.9637042523922542,
+    "dev_n": 102,
+    "dev_p": 1.0,
+    "sealed_k": 32,
+    "sealed_n": 32,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9913,
+    "dev_k": 103,
+    "dev_lb": 0.9640439678926562,
+    "dev_n": 103,
+    "dev_p": 1.0,
+    "sealed_k": 32,
+    "sealed_n": 32,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9912,
+    "dev_k": 104,
+    "dev_lb": 0.9643773831248793,
+    "dev_n": 104,
+    "dev_p": 1.0,
+    "sealed_k": 32,
+    "sealed_n": 32,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9836,
+    "dev_k": 105,
+    "dev_lb": 0.9647046717431569,
+    "dev_n": 105,
+    "dev_p": 1.0,
+    "sealed_k": 32,
+    "sealed_n": 32,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9813,
+    "dev_k": 106,
+    "dev_lb": 0.9650260010779157,
+    "dev_n": 106,
+    "dev_p": 1.0,
+    "sealed_k": 32,
+    "sealed_n": 32,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9788,
+    "dev_k": 120,
+    "dev_lb": 0.9689797289440706,
+    "dev_n": 120,
+    "dev_p": 1.0,
+    "sealed_k": 34,
+    "sealed_n": 34,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9545,
+    "dev_k": 200,
+    "dev_lb": 0.9646240521522094,
+    "dev_n": 202,
+    "dev_p": 0.9900990099009901,
+    "sealed_k": 49,
+    "sealed_n": 50,
+    "sealed_p": 0.98
+   },
+   {
+    "cut": 0.5744,
+    "dev_k": 202,
+    "dev_lb": 0.9649639309360403,
+    "dev_n": 204,
+    "dev_p": 0.9901960784313726,
+    "sealed_k": 49,
+    "sealed_n": 50,
+    "sealed_p": 0.98
+   },
+   {
+    "cut": 0.5705,
+    "dev_k": 202,
+    "dev_lb": 0.9578643909600811,
+    "dev_n": 205,
+    "dev_p": 0.9853658536585366,
+    "sealed_k": 49,
+    "sealed_n": 50,
+    "sealed_p": 0.98
+   },
+   {
+    "cut": 0.562,
+    "dev_k": 203,
+    "dev_lb": 0.9580646852533728,
+    "dev_n": 206,
+    "dev_p": 0.9854368932038835,
+    "sealed_k": 49,
+    "sealed_n": 51,
+    "sealed_p": 0.9607843137254902
+   }
+  ],
+  "model|same": [
+   {
+    "cut": 1.0,
+    "dev_k": 0,
+    "dev_lb": null,
+    "dev_n": 0,
+    "dev_p": null,
+    "sealed_k": 0,
+    "sealed_n": 0,
+    "sealed_p": null
+   },
+   {
+    "cut": 0.9999,
+    "dev_k": 71,
+    "dev_lb": 0.9254321971571302,
+    "dev_n": 72,
+    "dev_p": 0.9861111111111112,
+    "sealed_k": 16,
+    "sealed_n": 16,
+    "sealed_p": 1.0
+   },
+   {
+    "cut": 0.9833,
+    "dev_k": 71,
+    "dev_lb": 0.9254321971571302,
+    "dev_n": 72,
+    "dev_p": 0.9861111111111112,
+    "sealed_k": 16,
+    "sealed_n": 17,
+    "sealed_p": 0.9411764705882353
+   },
+   {
+    "cut": 0.9807,
+    "dev_k": 72,
+    "dev_lb": 0.9264008673087267,
+    "dev_n": 73,
+    "dev_p": 0.9863013698630136,
+    "sealed_k": 16,
+    "sealed_n": 17,
+    "sealed_p": 0.9411764705882353
+   },
+   {
+    "cut": 0.9788,
+    "dev_k": 76,
+    "dev_lb": 0.9300363315482386,
+    "dev_n": 77,
+    "dev_p": 0.987012987012987,
+    "sealed_k": 17,
+    "sealed_n": 18,
+    "sealed_p": 0.9444444444444444
+   },
+   {
+    "cut": 0.9545,
+    "dev_k": 87,
+    "dev_lb": 0.9384035699273238,
+    "dev_n": 88,
+    "dev_p": 0.9886363636363636,
+    "sealed_k": 27,
+    "sealed_n": 29,
+    "sealed_p": 0.9310344827586207
+   },
+   {
+    "cut": 0.1823,
+    "dev_k": 88,
+    "dev_lb": 0.9390660617800944,
+    "dev_n": 89,
+    "dev_p": 0.9887640449438202,
+    "sealed_k": 27,
+    "sealed_n": 29,
+    "sealed_p": 0.9310344827586207
+   }
+  ]
+ },
+ "export_run": "35200225251",
+ "generation": "g4",
+ "model": "autodedup/models/w5_gold.json",
+ "per_cell_evidence": {
+  "K-B|same": {
+   "dev_k": 107,
+   "dev_n": 107,
+   "kind": "certificate-only",
+   "note": "no table entry: the certificate merges at every cut; sealed 43/43",
+   "sealed_k": 43,
+   "sealed_n": 43,
+   "ships": true,
+   "t_hi": null
+  },
+  "K-C|cross": {
+   "dev_k": 161,
+   "dev_n": 161,
+   "kind": "certificate-only",
+   "note": "no table entry; sealed 34/34 (was 33/34 before the gold re-judge)",
+   "sealed_k": 34,
+   "sealed_n": 34,
+   "ships": true,
+   "t_hi": null
+  },
+  "K-C|same": {
+   "dev_k": 28,
+   "dev_n": 29,
+   "kind": "certificate-only",
+   "note": "propose-only, unchanged from W4f: sealed 9/10 = 90% is under the 0.97 floor",
+   "refused_by": "precision",
+   "sealed_k": 9,
+   "sealed_n": 10,
+   "ships": false,
+   "t_hi": null
+  },
+  "model|cross": {
+   "cut": 0.9788,
+   "dev_k": 120,
+   "dev_n": 120,
+   "dev_search_answer": 0.9788,
+   "dev_wilson_lb": 0.969,
+   "kind": "score-governed",
+   "note": "0.9788 IS the dev point-gate answer (the smallest expressible cut whose dev merge set clears 0.995) and the sealed split does not veto it \u2014 34/34. No cut was raised to meet the holdout, so nothing here is fitted to the sealed rows. The next cut down, 0.9546, adds 80 dev merges at 200/202 = 99.01%, under the point gate. The Wilson LB 0.99 bar stays unreachable at this n (D11): 381 flawless merges are needed and the cell has 120.",
+   "sealed_k": 34,
+   "sealed_n": 34,
+   "sealed_precision": 1.0,
+   "ships": true,
+   "vetoed_by_sealed": false
+  },
+  "model|same": {
+   "cut": null,
+   "dev_best": {
+    "cut": 0.9999,
+    "dev_k": 71,
+    "dev_n": 72,
+    "precision": 0.9861
+   },
+   "kind": "score-governed",
+   "note": "NOT promoted out of propose-only, and the reason CHANGED with the gold re-judge: 28071 x 18661514 (sreality|sreality) scores 1.000000 and gold run 35205840437 calls it different_property, so NO cut in the cell clears the 0.995 point gate \u2014 the best is 71/72 = 98.61% at 0.9999. Before the re-judge the cell read 72/72 and only the sealed split refused it, at a cut 3e-5 above a sealed negative; that cut would have been fitted to the holdout. The bar this wave was given (>= 30 judged merges at >= 0.97) is met on the count \u2014 89 judged merges at 98.9% \u2014 and the cell is refused anyway, on the point gate the program already runs.",
+   "refused_by": "precision",
+   "ships": false
+  }
+ },
+ "settings": "autodedup/settings/w5.json",
+ "shipped_row": {
+  "band_share_of_scored": 0.1096139690848123,
+  "band_share_of_stored": 0.33810544904137235,
+  "merge_judged": 499,
+  "merge_positive": 499,
+  "merge_precision_ht": 1.0,
+  "merge_precision_unweighted": 1.0,
+  "merge_precision_wilson_lb": 0.9923602184067507,
+  "n_band": 5361,
+  "recall_band": 0.4647914709018703,
+  "recall_merge": 0.47153778754874065,
+  "recall_merge_band": 0.9363292584506109,
+  "sealed_at_settings": {
+   "bootstrap": {
+    "design_effect": 1.2376243383071426,
+    "draws": 2000,
+    "estimate": 1.0,
+    "lb": 1.0,
+    "n": 111,
+    "n_effective": 89.68795826351389,
+    "n_singleton_strata": 1,
+    "n_strata": 17,
+    "ub": 1.0,
+    "weight_max": 17.46808510638298,
+    "weight_min": 1.0
+   },
+   "chosen_by": "the settings row in force, not the threshold search",
+   "clopper_pearson_lb": 0.9673130059759387,
+   "clopper_pearson_ub": 1.0,
+   "measured_on": "test (sealed)",
+   "min_sampler_stratum_precision": 1.0,
+   "min_stratum_precision": 1.0,
+   "missed_share_at_t_lo": 0.06568673195422184,
+   "n": 416,
+   "n_merge": 111,
+   "n_positive": 111,
+   "n_sealed": 416,
+   "per_sampler_stratum_precision": {
+    "band|model|jablonec|cross": {
+     "n": 4,
+     "n_positive": 4,
+     "precision": 1.0,
+     "wilson_lb": 0.5100999795960008
+    },
+    "band|model|turnov|cross": {
+     "n": 2,
+     "n_positive": 2,
+     "precision": 1.0,
+     "wilson_lb": 0.34237195288961925
+    },
+    "band|model|vysocany|cross": {
+     "n": 2,
+     "n_positive": 2,
+     "precision": 1.0,
+     "wilson_lb": 0.34237195288961925
+    },
+    "catalog-only": {
+     "n": 27,
+     "n_positive": 27,
+     "precision": 1.0,
+     "wilson_lb": 0.8754409628553641
+    },
+    "merge|K-A|jablonec|cross": {
+     "n": 3,
+     "n_positive": 3,
+     "precision": 1.0,
+     "wilson_lb": 0.43849391955098227
+    },
+    "merge|K-A|vysocany|cross": {
+     "n": 1,
+     "n_positive": 1,
+     "precision": 1.0,
+     "wilson_lb": 0.20654329147389294
+    },
+    "merge|K-B|jablonec|same": {
+     "n": 4,
+     "n_positive": 4,
+     "precision": 1.0,
+     "wilson_lb": 0.5100999795960008
+    },
+    "merge|K-B|negctl|same": {
+     "n": 6,
+     "n_positive": 6,
+     "precision": 1.0,
+     "wilson_lb": 0.6096569663469354
+    },
+    "merge|K-B|turnov|same": {
+     "n": 2,
+     "n_positive": 2,
+     "precision": 1.0,
+     "wilson_lb": 0.34237195288961925
+    },
+    "merge|K-B|vysocany|same": {
+     "n": 4,
+     "n_positive": 4,
+     "precision": 1.0,
+     "wilson_lb": 0.5100999795960008
+    },
+    "merge|K-C|jablonec|cross": {
+     "n": 17,
+     "n_positive": 17,
+     "precision": 1.0,
+     "wilson_lb": 0.8156763396284354
+    },
+    "merge|K-C|negctl|cross": {
+     "n": 3,
+     "n_positive": 3,
+     "precision": 1.0,
+     "wilson_lb": 0.43849391955098227
+    },
+    "merge|K-C|turnov|cross": {
+     "n": 5,
+     "n_positive": 5,
+     "precision": 1.0,
+     "wilson_lb": 0.5655085052479191
+    },
+    "merge|K-C|vysocany|cross": {
+     "n": 6,
+     "n_positive": 6,
+     "precision": 1.0,
+     "wilson_lb": 0.6096569663469354
+    },
+    "merge|model|jablonec|cross": {
+     "n": 14,
+     "n_positive": 14,
+     "precision": 1.0,
+     "wilson_lb": 0.7846829880728186
+    },
+    "merge|model|turnov|cross": {
+     "n": 8,
+     "n_positive": 8,
+     "precision": 1.0,
+     "wilson_lb": 0.6755843804891231
+    },
+    "merge|model|vysocany|cross": {
+     "n": 3,
+     "n_positive": 3,
+     "precision": 1.0,
+     "wilson_lb": 0.43849391955098227
+    }
+   },
+   "per_stratum_precision": {
+    "K-B|same": {
+     "n": 43,
+     "n_positive": 43,
+     "precision": 1.0,
+     "wilson_lb": 0.9179874299767729
+    },
+    "K-C|cross": {
+     "n": 34,
+     "n_positive": 34,
+     "precision": 1.0,
+     "wilson_lb": 0.8984820937803899
+    },
+    "model|cross": {
+     "n": 34,
+     "n_positive": 34,
+     "precision": 1.0,
+     "wilson_lb": 0.8984820937803899
+    }
+   },
+   "per_stratum_precision_basis": "deciding cell (certificate|side) \u2014 D3's floor",
+   "precision": 1.0,
+   "stratum_floor": 0.97,
+   "stratum_floor_ok": true,
+   "stratum_t_hi_applied": {
+    "K-A|cross": null,
+    "K-A|same": null,
+    "K-C|same": null,
+    "model|cross": 0.9788,
+    "model|same": null
+   },
+   "t_hi": 1.0,
+   "t_hi_by_stratum": {
+    "K-A|cross": null,
+    "K-A|same": null,
+    "K-C|same": null,
+    "model|cross": 0.9788,
+    "model|same": null
+   },
+   "t_lo": 0.1823495333100157,
+   "weighted_precision": 1.0,
+   "wilson_lb": 0.9665487070887205
+  },
+  "t_hi_by_stratum": {
+   "K-A|cross": null,
+   "K-A|same": null,
+   "K-C|same": null,
+   "model|cross": 0.9788,
+   "model|same": null
+  },
+  "t_lo": 0.1823495333100157
+ },
+ "stratum_thresholds": {
+  "auto_merge_strata": [],
+  "criteria": {
+   "cut_resolution": 0.0001,
+   "gate_basis": "unweighted judged counts (Wilson LB); HT rate reported alongside",
+   "min_n": 30,
+   "precision_lb": 0.99,
+   "precision_point": 0.995,
+   "stratum_floor": 0.97
+  },
+  "fitted_on": "train+validation",
+  "key": "certificate|side",
+  "labels_needed_for_lb": 381,
+  "measured_on": "test (sealed)",
+  "n_auto_merge_strata": 0,
+  "n_strata": 5,
+  "propose_only": [
+   "K-B|same",
+   "K-C|cross",
+   "K-C|same",
+   "model|cross",
+   "model|same"
+  ],
+  "strata": {
+   "K-B|same": {
+    "labels_needed_for_lb": 381,
+    "measured_at": "relaxed_t_hi (diagnostic)",
+    "min_n": 30,
+    "n_at_relaxed": 107,
+    "n_at_t_hi": 0,
+    "n_certificate_merges": 107,
+    "n_dev": 107,
+    "n_dev_positive": 107,
+    "precision_at_relaxed": 1.0,
+    "precision_at_t_hi": null,
+    "precision_certificate_merges": 1.0,
+    "propose_only": true,
+    "propose_only_reason": "sample",
+    "relaxed_insufficient_n": false,
+    "relaxed_t_hi": 1.0,
+    "sample_sufficient": false,
+    "sealed_design": {
+     "design_effect": 1.3614537625593464,
+     "n": 43,
+     "n_effective": 31.583885683466693,
+     "weight_max": 13.748166259168704,
+     "weight_min": 1.0
+    },
+    "sealed_floor_ok": true,
+    "sealed_n": 43,
+    "sealed_n_merge": 43,
+    "sealed_n_positive": 43,
+    "sealed_precision": 1.0,
+    "sealed_weighted_precision": 1.0,
+    "sealed_wilson_lb": 0.9179874299767729,
+    "t_hi": null,
+    "wilson_lb_at_relaxed": 0.9653415324210404,
+    "wilson_lb_at_t_hi": null,
+    "wilson_lb_certificate_merges": 0.9653415324210404
+   },
+   "K-C|cross": {
+    "labels_needed_for_lb": 381,
+    "measured_at": "relaxed_t_hi (diagnostic)",
+    "min_n": 30,
+    "n_at_relaxed": 161,
+    "n_at_t_hi": 0,
+    "n_certificate_merges": 161,
+    "n_dev": 186,
+    "n_dev_positive": 178,
+    "precision_at_relaxed": 1.0,
+    "precision_at_t_hi": null,
+    "precision_certificate_merges": 1.0,
+    "propose_only": true,
+    "propose_only_reason": "sample",
+    "relaxed_insufficient_n": false,
+    "relaxed_t_hi": 1.0,
+    "sample_sufficient": false,
+    "sealed_design": {
+     "design_effect": 1.1397759710232287,
+     "n": 34,
+     "n_effective": 29.83042357830781,
+     "weight_max": 8.798507462686567,
+     "weight_min": 1.0
+    },
+    "sealed_floor_ok": true,
+    "sealed_n": 41,
+    "sealed_n_merge": 34,
+    "sealed_n_positive": 34,
+    "sealed_precision": 1.0,
+    "sealed_weighted_precision": 1.0,
+    "sealed_wilson_lb": 0.8984820937803899,
+    "t_hi": null,
+    "wilson_lb_at_relaxed": 0.9766952031526023,
+    "wilson_lb_at_t_hi": null,
+    "wilson_lb_certificate_merges": 0.9766952031526023
+   },
+   "K-C|same": {
+    "labels_needed_for_lb": 381,
+    "measured_at": "certificates only (no reachable cut)",
+    "min_n": 30,
+    "n_at_relaxed": 0,
+    "n_at_t_hi": 0,
+    "n_certificate_merges": 0,
+    "n_dev": 33,
+    "n_dev_positive": 29,
+    "precision_at_relaxed": null,
+    "precision_at_t_hi": null,
+    "precision_certificate_merges": null,
+    "propose_only": true,
+    "propose_only_reason": "sample",
+    "relaxed_insufficient_n": false,
+    "relaxed_t_hi": null,
+    "sample_sufficient": false,
+    "sealed_design": {
+     "design_effect": null,
+     "n": 0,
+     "n_effective": 0.0,
+     "weight_max": null,
+     "weight_min": null
+    },
+    "sealed_floor_ok": null,
+    "sealed_n": 11,
+    "sealed_n_merge": 0,
+    "sealed_n_positive": 0,
+    "sealed_precision": null,
+    "sealed_weighted_precision": null,
+    "sealed_wilson_lb": null,
+    "t_hi": null,
+    "wilson_lb_at_relaxed": null,
+    "wilson_lb_at_t_hi": null,
+    "wilson_lb_certificate_merges": null
+   },
+   "model|cross": {
+    "labels_needed_for_lb": 381,
+    "measured_at": "relaxed_t_hi (diagnostic)",
+    "min_n": 30,
+    "n_at_relaxed": 120,
+    "n_at_t_hi": 0,
+    "n_certificate_merges": 0,
+    "n_dev": 500,
+    "n_dev_positive": 319,
+    "precision_at_relaxed": 1.0,
+    "precision_at_t_hi": null,
+    "precision_certificate_merges": null,
+    "propose_only": true,
+    "propose_only_reason": "sample",
+    "relaxed_insufficient_n": false,
+    "relaxed_t_hi": 0.9546,
+    "sample_sufficient": false,
+    "sealed_design": {
+     "design_effect": 1.0548995946361353,
+     "n": 34,
+     "n_effective": 32.230555564605716,
+     "weight_max": 17.46808510638298,
+     "weight_min": 4.625
+    },
+    "sealed_floor_ok": true,
+    "sealed_n": 202,
+    "sealed_n_merge": 34,
+    "sealed_n_positive": 34,
+    "sealed_precision": 1.0,
+    "sealed_weighted_precision": 1.0,
+    "sealed_wilson_lb": 0.8984820937803899,
+    "t_hi": null,
+    "wilson_lb_at_relaxed": 0.9689797289440706,
+    "wilson_lb_at_t_hi": null,
+    "wilson_lb_certificate_merges": null
+   },
+   "model|same": {
+    "labels_needed_for_lb": 381,
+    "measured_at": "certificates only (no reachable cut)",
+    "min_n": 30,
+    "n_at_relaxed": 0,
+    "n_at_t_hi": 0,
+    "n_certificate_merges": 0,
+    "n_dev": 269,
+    "n_dev_positive": 150,
+    "precision_at_relaxed": null,
+    "precision_at_t_hi": null,
+    "precision_certificate_merges": null,
+    "propose_only": true,
+    "propose_only_reason": "sample",
+    "relaxed_insufficient_n": false,
+    "relaxed_t_hi": null,
+    "sample_sufficient": false,
+    "sealed_design": {
+     "design_effect": null,
+     "n": 0,
+     "n_effective": 0.0,
+     "weight_max": null,
+     "weight_min": null
+    },
+    "sealed_floor_ok": null,
+    "sealed_n": 119,
+    "sealed_n_merge": 0,
+    "sealed_n_positive": 0,
+    "sealed_precision": null,
+    "sealed_weighted_precision": null,
+    "sealed_wilson_lb": null,
+    "t_hi": null,
+    "wilson_lb_at_relaxed": null,
+    "wilson_lb_at_t_hi": null,
+    "wilson_lb_certificate_merges": null
+   }
+  },
+  "t_hi_by_stratum": {
+   "K-B|same": null,
+   "K-C|cross": null,
+   "K-C|same": null,
+   "model|cross": null,
+   "model|same": null
+  }
+ },
+ "t_lo_dial": {
+  "L_new_listings_per_month": 180000,
+  "basis": "band share on the SCORED denominator (48,908), the zone decide_pair returned, over EVERY judged positive with the unstored ones as off_run \u2014 the same basis as M20",
+  "candidates_per_listing_production": 15.026286560533135,
+  "candidates_per_listing_trial": 8.59996483207315,
+  "price_per_band_pair_usd": 0.0017048,
+  "rows": [
+   {
+    "band_share_of_scored": 0.21564979144516236,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 994.36688131652,
+    "monthly_usd_trial_c": 569.1040281343415,
+    "n_band": 10547,
+    "recall_band": 0.4899870706275187,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9615248581762593,
+    "t_lo": 0.02
+   },
+   {
+    "band_share_of_scored": 0.2150977345219596,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 991.82133226982,
+    "monthly_usd_trial_c": 567.6471390891508,
+    "n_band": 10520,
+    "recall_band": 0.4899870706275187,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9615248581762593,
+    "t_lo": 0.05
+   },
+   {
+    "band_share_of_scored": 0.21438210517706716,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 988.521546468542,
+    "monthly_usd_trial_c": 565.7585792157553,
+    "n_band": 10485,
+    "recall_band": 0.4899870706275187,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9615248581762593,
+    "t_lo": 0.09585876256714153
+   },
+   {
+    "band_share_of_scored": 0.21405496033368773,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 987.0130729593864,
+    "monthly_usd_trial_c": 564.8952375593459,
+    "n_band": 10469,
+    "recall_band": 0.4899870706275187,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9615248581762593,
+    "t_lo": 0.12
+   },
+   {
+    "band_share_of_scored": 0.11926474196450479,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 549.9328736815456,
+    "monthly_usd_trial_c": 314.74199261473535,
+    "n_band": 5833,
+    "recall_band": 0.4703246736057631,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9418624611545037,
+    "t_lo": 0.15
+   },
+   {
+    "band_share_of_scored": 0.1096139690848123,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 505.43290516145476,
+    "monthly_usd_trial_c": 289.2734137506594,
+    "n_band": 5361,
+    "recall_band": 0.4647914709018703,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9363292584506109,
+    "t_lo": 0.1823495333100157
+   },
+   {
+    "band_share_of_scored": 0.09127341130285434,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 420.8641090544179,
+    "monthly_usd_trial_c": 240.87232213821,
+    "n_band": 4464,
+    "recall_band": 0.44764393778681605,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9191817253355568,
+    "t_lo": 0.25
+   },
+   {
+    "band_share_of_scored": 0.0905782285106731,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 417.65860284746213,
+    "monthly_usd_trial_c": 239.03772111834007,
+    "n_band": 4430,
+    "recall_band": 0.44404364977656585,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9155814373253065,
+    "t_lo": 0.35
+   },
+   {
+    "band_share_of_scored": 0.08984215261306944,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 414.26453745186205,
+    "monthly_usd_trial_c": 237.09520239141906,
+    "n_band": 4394,
+    "recall_band": 0.44296551475478607,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9145033023035267,
+    "t_lo": 0.45
+   },
+   {
+    "band_share_of_scored": 0.08937188190071153,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 412.0961067824508,
+    "monthly_usd_trial_c": 235.8541487603306,
+    "n_band": 4371,
+    "recall_band": 0.44147686542089676,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.9130146529696375,
+    "t_lo": 0.55
+   },
+   {
+    "band_share_of_scored": 0.06765764292140346,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 311.9711776122466,
+    "monthly_usd_trial_c": 178.5498463161597,
+    "n_band": 3309,
+    "recall_band": 0.39923310812853696,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.8707708956772776,
+    "t_lo": 0.65
+   },
+   {
+    "band_share_of_scored": 0.06755541015784738,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 311.49977964063544,
+    "monthly_usd_trial_c": 178.28005204853176,
+    "n_band": 3304,
+    "recall_band": 0.39923310812853696,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.8707708956772776,
+    "t_lo": 0.75
+   },
+   {
+    "band_share_of_scored": 0.06745317739429132,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 311.0283816690244,
+    "monthly_usd_trial_c": 178.01025778090383,
+    "n_band": 3299,
+    "recall_band": 0.39923310812853696,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.8707708956772776,
+    "t_lo": 0.85
+   },
+   {
+    "band_share_of_scored": 0.06739183773615769,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 310.74554288605765,
+    "monthly_usd_trial_c": 177.8483812203271,
+    "n_band": 3296,
+    "recall_band": 0.39923310812853696,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.8707708956772776,
+    "t_lo": 0.9
+   },
+   {
+    "band_share_of_scored": 0.06728960497260161,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 310.2741449144465,
+    "monthly_usd_trial_c": 177.57858695269914,
+    "n_band": 3291,
+    "recall_band": 0.39923310812853696,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.8707708956772776,
+    "t_lo": 0.94634736
+   },
+   {
+    "band_share_of_scored": 0.015580273165944222,
+    "merge_n": 499,
+    "merge_precision": 1.0,
+    "monthly_usd_production_c": 71.84105087353639,
+    "monthly_usd_trial_c": 41.11664638649552,
+    "n_band": 762,
+    "recall_band": 0.1338249189616052,
+    "recall_merge": 0.47153778754874065,
+    "recall_merge_band": 0.6053627065103458,
+    "t_lo": 0.96
+   }
+  ]
+ },
+ "threshold_report": {
+  "band_denominator_n": 15856,
+  "band_width": 0.3679364278506559,
+  "band_width_population": 0.3679364278506559,
+  "band_width_source": "population",
+  "band_width_weighted_sample": 0.40913836265609177,
+  "bootstrap_at_t_hi": {
+   "design_effect": 1.1610633567704665,
+   "draws": 2000,
+   "estimate": 1.0,
+   "lb": 1.0,
+   "n": 388,
+   "n_effective": 334.1764234806565,
+   "n_singleton_strata": 3,
+   "n_strata": 23,
+   "ub": 1.0,
+   "weight_max": 15.22365988909427,
+   "weight_min": 1.0
+  },
+  "clopper_pearson_lb_at_t_hi": 0.9905376313649867,
+  "criteria": {
+   "max_missed": 0.03,
+   "precision_lb": 0.99,
+   "precision_point": 0.995,
+   "store_floor": 0.02,
+   "stratum_floor": 0.97
+  },
+  "min_stratum_precision": 1.0,
+  "missed_share_at_t_lo": 0.02980154545843267,
+  "n": 1095,
+  "n_at_t_hi": 388,
+  "n_certificate_in_merge_set": 268,
+  "n_positive": 783,
+  "per_stratum_precision_at_t_hi": {
+   "K-B|same": {
+    "n": 107,
+    "n_positive": 107,
+    "precision": 1.0,
+    "wilson_lb": 0.9653415324210404
+   },
+   "K-C|cross": {
+    "n": 161,
+    "n_positive": 161,
+    "precision": 1.0,
+    "wilson_lb": 0.9766952031526023
+   },
+   "model|cross": {
+    "n": 120,
+    "n_positive": 120,
+    "precision": 1.0,
+    "wilson_lb": 0.9689797289440706
+   }
+  },
+  "per_stratum_precision_basis": "deciding cell (certificate|side) \u2014 D3's floor",
+  "per_stratum_t_hi": {
+   "band|K-C|jablonec|cross": null,
+   "band|K-C|jablonec|same": null,
+   "band|K-C|negctl|cross": null,
+   "band|K-C|negctl|same": null,
+   "band|K-C|turnov|cross": null,
+   "band|K-C|turnov|same": null,
+   "band|K-C|vysocany|cross": null,
+   "band|K-C|vysocany|same": null,
+   "band|model|(cross-block)|cross": null,
+   "band|model|(cross-block)|same": null,
+   "band|model|jablonec|cross": null,
+   "band|model|jablonec|same": null,
+   "band|model|negctl|cross": null,
+   "band|model|negctl|same": null,
+   "band|model|turnov|cross": null,
+   "band|model|turnov|same": null,
+   "band|model|vysocany|cross": null,
+   "band|model|vysocany|same": null,
+   "catalog-only": null,
+   "merge|K-A|jablonec|cross": null,
+   "merge|K-A|jablonec|same": null,
+   "merge|K-A|negctl|cross": null,
+   "merge|K-A|negctl|same": null,
+   "merge|K-A|turnov|same": null,
+   "merge|K-A|vysocany|cross": null,
+   "merge|K-A|vysocany|same": null,
+   "merge|K-B|jablonec|same": null,
+   "merge|K-B|negctl|same": null,
+   "merge|K-B|turnov|same": null,
+   "merge|K-B|vysocany|same": null,
+   "merge|K-C|jablonec|cross": null,
+   "merge|K-C|jablonec|same": null,
+   "merge|K-C|negctl|cross": null,
+   "merge|K-C|turnov|cross": null,
+   "merge|K-C|turnov|same": null,
+   "merge|K-C|vysocany|cross": null,
+   "merge|K-C|vysocany|same": null,
+   "merge|model|jablonec|cross": null,
+   "merge|model|jablonec|same": null,
+   "merge|model|negctl|cross": null,
+   "merge|model|negctl|same": null,
+   "merge|model|turnov|cross": null,
+   "merge|model|turnov|same": null,
+   "merge|model|vysocany|cross": null,
+   "merge|model|vysocany|same": null,
+   "reject|none|(cross-block)|cross": null,
+   "reject|none|(cross-block)|same": null,
+   "reject|none|jablonec|cross": null,
+   "reject|none|jablonec|same": null,
+   "reject|none|negctl|cross": null,
+   "reject|none|negctl|same": null,
+   "reject|none|turnov|cross": null,
+   "reject|none|turnov|same": null,
+   "reject|none|vysocany|cross": null,
+   "reject|none|vysocany|same": null
+  },
+  "precision_at_t_hi": 1.0,
+  "precision_lb_at_t_hi": 0.9901960383991899,
+  "settings_loadable": true,
+  "settings_reason": null,
+  "stratum_floor_ok": true,
+  "t_hi": 0.9546,
+  "t_hi_score_cut_only": null,
+  "t_lo": 0.18234956782886955,
+  "t_lo_clamped_to": null,
+  "t_lo_raw": 0.18234956782886955,
+  "weight_positive": 7576.929806608604,
+  "weight_positive_unavoidable": 0,
+  "weighted_precision_at_t_hi": 1.0,
+  "weighted_precision_gate_ok": true,
+  "zone_rule": true
+ }
+}
