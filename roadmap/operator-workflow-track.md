@@ -393,13 +393,16 @@ control. Not a special collection (collections are m2m groupings; see
   RPCs; `queries.ts:readSource` is the one SPA seam; `?dismissed=show`
   reveals, outside preset identity; the sidebar counts what the cohort hides.
   Merge mode shares the source (reveal to merge a dismissed duplicate).
-- **W3 — notification visibility** (in progress): one `_NOT_DISMISSED`
+- **W3 — notification visibility** (done, #1517): one `_NOT_DISMISSED`
   predicate on every in-app read (feed + total, unread badge, mark-all-seen,
   per-watchdog counts) and an account-scoped twin on both outbox passes;
   detection is untouched (its cursors and the `reactivated` detector depend on
   every dispatch existing), so an undo brings a hidden dispatch back intact.
-- **W4 — the shared control** (next): one dismiss button beside the pipeline
-  funnel on the Browse card, table row and listing header; Undo toast.
+- **W4 — the shared control** (in progress): `<DismissButton>` beside the
+  funnel on the Browse card, Table row and listing header over
+  `lib/useDismissal` (list-aware optimistic hide, one sticky "Vrátit" toast,
+  batched per-property state reads); `lib/optimisticCache.holdQueries` now
+  shared with the pipeline cache; absent while the property is piped.
 - **W5 — Chrome extension** (next): the same control in the panel, state
   carried on `POST /listings/lookup`.
 

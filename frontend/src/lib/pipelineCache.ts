@@ -18,47 +18,20 @@
  * duplication of what `members` already held for that property, and the two
  * had already drifted out of sync once on which columns they selected.)
  *
- * Each patcher returns a rollback closure instead of taking an `onError`
- * handler, because React Query's global MutationCache.onError (main.tsx) — the
- * app's only "the write failed" feedback — deliberately stays silent for any
- * mutation that defines its own `onError`. Callers therefore roll back from
- * `onSettled`, where the error is also in hand, and the toast still fires:
- *
- *   onMutate:  () => placeCard(qc, id, stage),
- *   onSettled: (_d, err, _v, rollback) => { if (err) rollback?.(); revalidate(qc); },
+ * Patchers follow lib/optimisticCache's shape: hold, patch, return the rollback.
  */
 
 import type { QueryClient } from '@tanstack/react-query';
 
-import { pipelineKeys, type PipelineMembers } from '@/lib/queries';
+import { dismissalKeys, pipelineKeys, type PipelineMembers } from '@/lib/queries';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
+import { holdQueries, type Rollback } from '@/lib/optimisticCache';
 import type { PipelineBoardCard, PipelineStage } from '@/lib/types';
 
-export type PipelineRollback = () => void;
-
-/* Returned when the optimistic patch was skipped (the stage list has not
- * loaded, so there is nothing to paint) — the write still runs and the
- * revalidation paints the result. A real closure rather than `undefined`
- * keeps every mutation's context one type. */
-export const NO_ROLLBACK: PipelineRollback = () => {};
-
-/* Snapshot the two caches and hand back the restore. */
-function snapshot(qc: QueryClient): PipelineRollback {
-  const members = qc.getQueryData<PipelineMembers>(pipelineKeys.members);
-  const board = qc.getQueryData<PipelineBoardCard[]>(pipelineKeys.board);
-  return () => {
-    qc.setQueryData(pipelineKeys.members, members);
-    qc.setQueryData(pipelineKeys.board, board);
-  };
-}
-
-/* In-flight reads would otherwise land after the patch and undo it. */
-async function quiesce(qc: QueryClient): Promise<void> {
-  await Promise.all([
-    qc.cancelQueries({ queryKey: pipelineKeys.members }),
-    qc.cancelQueries({ queryKey: pipelineKeys.board }),
-  ]);
-}
+const PIPELINE_CACHES = [
+  { queryKey: pipelineKeys.members },
+  { queryKey: pipelineKeys.board },
+];
 
 /* Show the property as sitting at `stage` — used for both "bookmarked into the
  * entry stage" and "moved to another stage".
@@ -71,9 +44,8 @@ export async function placeCard(
   qc: QueryClient,
   property_id: number,
   stage: PipelineStage,
-): Promise<PipelineRollback> {
-  await quiesce(qc);
-  const rollback = snapshot(qc);
+): Promise<Rollback> {
+  const rollback = await holdQueries(qc, PIPELINE_CACHES);
 
   qc.setQueryData<PipelineMembers>(pipelineKeys.members, (prev) => {
     if (!prev) return prev;
@@ -100,9 +72,8 @@ export async function placeCard(
 export async function dropCard(
   qc: QueryClient,
   property_id: number,
-): Promise<PipelineRollback> {
-  await quiesce(qc);
-  const rollback = snapshot(qc);
+): Promise<Rollback> {
+  const rollback = await holdQueries(qc, PIPELINE_CACHES);
 
   qc.setQueryData<PipelineMembers>(pipelineKeys.members, (prev) => {
     if (!prev) return prev;
@@ -123,13 +94,15 @@ export async function dropCard(
  * pipeline, membership IS the cohort — un-bookmarking must drop the row from
  * the list — so the Browse read surfaces have to refetch too. With the scope
  * off, membership changes nothing about which properties match, and refetching
- * map + every loaded card page + count + stats on a funnel click is pure waste. */
+ * map + every loaded card page + count + stats on a funnel click is pure waste.
+ * Dismissals are re-read too: adding a card lifts the caller's dismissal. */
 export function revalidatePipeline(
   qc: QueryClient,
   { cohortScoped = false }: { cohortScoped?: boolean } = {},
 ): void {
   qc.invalidateQueries({ queryKey: pipelineKeys.members });
   qc.invalidateQueries({ queryKey: pipelineKeys.board });
+  qc.invalidateQueries({ queryKey: dismissalKeys.all });
   if (cohortScoped) invalidateBrowseQueries(qc);
 }
 

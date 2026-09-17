@@ -1307,6 +1307,19 @@ renumber.** Navigate by area:
     reachable by id. The outbox drain (service-role) skips a dispatch whose own account dismissed
     its property, on both the new and the retry pass: it gets no `channel_sends` row and ages out
     of the 7-day window unless the dismissal is lifted first.
+    **One control.** `<DismissButton>` (`overlay` on the Browse card, `inline` in the Table's
+    action cell beside the funnel, `header` on the listing page) over one hook,
+    `lib/useDismissal`. A click hides with no confirm — nothing is destroyed — and a single
+    sticky "Vrátit" toast (each new dismissal replaces the last) restores; it keeps working after
+    the dismissed card has unmounted. The dismissal leaves every cached Browse list that hides
+    dismissed properties at once and those lists are NOT refetched (a triage run must not re-read
+    every loaded page per click); counts, Stats and the map re-read, and a restore re-reads the
+    lists. State is one query per property filled by `fetchIsDismissed`, which answers every call
+    made in the same task with ONE read of the view (≤ 200 ids per URL) — never a whole-set read,
+    since the dismissed set only grows. The control is absent while the property is in the
+    caller's pipeline, and a pipeline write re-reads dismissal state (`add_card` lifts it). The
+    cancel-snapshot-restore step is `lib/optimisticCache.holdQueries`, shared with
+    `lib/pipelineCache`.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

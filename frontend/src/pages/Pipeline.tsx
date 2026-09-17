@@ -25,10 +25,10 @@ import {
   matchesDistricts,
   pipelineKeys,
 } from '@/lib/queries';
+import { NO_ROLLBACK } from '@/lib/optimisticCache';
 import {
   cachedStage,
   dropCard,
-  NO_ROLLBACK,
   placeCard,
   revalidatePipeline,
 } from '@/lib/pipelineCache';

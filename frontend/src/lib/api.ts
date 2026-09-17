@@ -2661,6 +2661,26 @@ export const deletePropertyNote = (
     jwt: true,
   });
 
+/* Dismissals (migration 536) — "never show me this property again", and its
+ * undo. State is read via property_dismissals_public. */
+
+export const dismissProperty = (
+  property_id: number,
+): Promise<{ property_id: number; added: boolean }> =>
+  request<{ property_id: number; added: boolean }>('/dismissals', {
+    method: 'POST',
+    json: { property_id },
+    jwt: true,
+  });
+
+export const undismissProperty = (
+  property_id: number,
+): Promise<{ property_id: number; removed: boolean }> =>
+  request<{ property_id: number; removed: boolean }>(`/dismissals/${property_id}`, {
+    method: 'DELETE',
+    jwt: true,
+  });
+
 /* Deal pipeline (migration 205) — bookmark a property into the pipeline
  * (entry stage) / remove it. Membership is read via property_pipeline_public. */
 

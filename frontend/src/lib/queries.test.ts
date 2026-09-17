@@ -17,6 +17,7 @@ import {
   applyPrefilters,
   buildBrowseStatsArgs,
   fetchBrowseCount,
+  fetchIsDismissed,
   fetchListingsForCards,
   fetchListingsForMap,
   fetchListingsForTable,
@@ -560,5 +561,43 @@ describe('dismissed properties are hidden at the source', () => {
     const resolved = { obec_ids_filter: null, property_ids_filter: null };
     expect(buildBrowseStatsArgs(DEFAULT_FILTERS, resolved).hide_dismissed).toBe(true);
     expect(buildBrowseStatsArgs(revealed, resolved).hide_dismissed).toBe(false);
+  });
+});
+
+/* A page of cards asks per property; the view is read once per batch. */
+describe('fetchIsDismissed batches per task', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const readsReturning = (result: { data: unknown; error: unknown }) => {
+    const inCalls: number[][] = [];
+    const chain = {
+      select: () => chain,
+      in: (_col: string, ids: number[]) => {
+        inCalls.push(ids);
+        return Promise.resolve(result);
+      },
+    };
+    vi.spyOn(supabase, 'from').mockImplementation(() => chain as never);
+    return inCalls;
+  };
+
+  it('answers every call made in one task with one read', async () => {
+    const inCalls = readsReturning({ data: [{ property_id: 2 }], error: null });
+    const answers = await Promise.all([1, 2, 3, 2].map((id) => fetchIsDismissed(id)));
+    expect(answers).toEqual([false, true, false, true]);
+    expect(inCalls).toEqual([[1, 2, 3]]);
+    expect(supabase.from).toHaveBeenCalledWith('property_dismissals_public');
+  });
+
+  it('never sends more than 200 ids in one URL', async () => {
+    const inCalls = readsReturning({ data: [], error: null });
+    await Promise.all(Array.from({ length: 450 }, (_, i) => fetchIsDismissed(i + 1)));
+    expect(inCalls.map((c) => c.length)).toEqual([200, 200, 50]);
+  });
+
+  it('fails every waiter of a failed read', async () => {
+    readsReturning({ data: null, error: new Error('boom') });
+    const outcomes = await Promise.allSettled([fetchIsDismissed(1), fetchIsDismissed(2)]);
+    expect(outcomes.map((o) => o.status)).toEqual(['rejected', 'rejected']);
   });
 });

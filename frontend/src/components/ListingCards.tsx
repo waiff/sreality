@@ -17,6 +17,7 @@ import CollectionSaveMenu, {
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
+import DismissButton from '@/components/DismissButton';
 import PipelineFunnelButton from '@/components/PipelineFunnelButton';
 import PriceDelta from '@/components/PriceDelta';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
@@ -493,6 +494,7 @@ function Card({
               cohortScoped={pipelineScoped}
             />
             <CollectionSaveButton property_id={r.property_id} collectionMembers={collectionMembers} />
+            <DismissButton property_id={r.property_id} />
           </div>
         )}
         {/* Metadata margin: two file-tab badges down the right edge of

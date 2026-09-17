@@ -41,6 +41,35 @@ export function FunnelIcon({
   );
 }
 
+/* The "dismissed" mark — a struck-through eye: hidden from discovery, not
+ * deleted. `filled` = the property is dismissed; outline = the offer to. */
+export function EyeOffIcon({
+  filled = false,
+  className = 'h-4 w-4',
+  strokeWidth = 1.75,
+}: IconProps & { filled?: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      aria-hidden
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path
+        d="M2.5 12 C5 7.5 8.3 5.5 12 5.5 S19 7.5 21.5 12 C19 16.5 15.7 18.5 12 18.5 S5 16.5 2.5 12 Z"
+        fill={filled ? 'currentColor' : 'none'}
+        fillOpacity={filled ? 0.25 : undefined}
+      />
+      <circle cx="12" cy="12" r="3" />
+      <line x1="4" y1="20" x2="20" y2="4" />
+    </svg>
+  );
+}
+
 export function PencilIcon({ className = 'h-4 w-4', strokeWidth = 1 }: IconProps) {
   return (
     <svg
