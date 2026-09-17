@@ -38,6 +38,16 @@ toolkit work.
   `/<obec>-<RÚIAN obec kód>` path form, because `listings_public` carries no RÚIAN codes and a box is
   the neighbourhood across municipal borders; ±1 km because ±500 m showed nothing around a small-town
   listing. The row is a 2×2 grid below `sm` (four equal chips truncated "Mapy.cz" at 360px).
+- **+ sreality Cenová mapa (2026-09-17):** a fifth chip, and the row splits in two — WHERE (Mapy.cz,
+  Google, Katastr) over what it SELLS for (Reas.cz, Cenová mapa). The price map addresses places by
+  Seznam's own locality ids (`/cenova-mapa/hledani/byty/<kraj>-<id>/<okres>-<id>/<obec>-<id>`,
+  `?ulice=` for a street, a path segment for a part of town) and never by a coordinate, so
+  `GET /maps/sreality-price-map` (`api/sreality_price_map.py`) looks the listing's `display_label` up in
+  sreality's locality suggest (no CORS upstream, hence the proxy): house number cut (with it, nothing
+  matches), "street-or-part, obec" then "obec", the candidate NEAREST the listing's point inside a
+  per-level cap (street 3 km, part 5 km, town 25 km) — "Nová Ves" alone is five towns. The chip renders
+  at once with the national map and sharpens when the lookup answers; a failed or empty lookup keeps
+  the national map. Only `byty` exists as a price-map category (`domy`/`pozemky` 404).
 
 ### Portal links read the stored URL — reconstruction deleted (2026-09-11, W2 of the URL contract)
 - Operator-reported: the listing page's Sreality chip 404'd (`rodinny-dum` vs sreality's `rodinny`).

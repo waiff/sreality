@@ -445,12 +445,16 @@ export default function ListingDetail() {
           </div>
         }
         mapFooter={
-          /* Under the header map: our own market view first, then the three
-             external maps for the exact-location / cadastre check. */
+          /* Under the header map: our own market view first, then the external
+             links — where exactly is this, and what does it sell for. */
           <div className="space-y-1.5">
             <ExploreAreaButton listing={listing} images={images} />
             {listing.lat != null && listing.lng != null && (
-              <ExternalMapLinks lat={listing.lat} lng={listing.lng} />
+              <ExternalMapLinks
+                lat={listing.lat}
+                lng={listing.lng}
+                label={listing.display_label}
+              />
             )}
           </div>
         }

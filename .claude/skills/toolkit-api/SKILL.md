@@ -419,7 +419,7 @@ LLM + maps (FastAPI service + scoring jobs):
   on-demand URL parse and `scripts/seed_curated_cities.py`. Display-only Mapy use
   (`/maps/suggest`, tiles) is NOT gated — the prohibition is on persistence, not display.
   Do not enable without an operator decision recorded against the Mapy remediation plan.
-- `MAPY_CZ_API_KEY` — Mapy.cz REST key; geocodes locality strings and powers `/maps/*`.
+- `MAPY_CZ_API_KEY` — Mapy.cz REST key; geocodes locality strings and powers `/maps/*` (not `/maps/sreality-price-map`: key-free sreality suggest proxy, no CORS upstream).
 - `MAPY2_CZ_API_KEY` (optional backup) — a second Mapy.cz key. `scraper.geocoding` and the
   `/maps/suggest` proxy fail over to it automatically **only** when the primary is rejected
   (401/403) or rate-limited (429); a Mapy outage (5xx) does not trigger failover. Set it in

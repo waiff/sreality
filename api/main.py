@@ -24,6 +24,7 @@ from api import price_stats as price_stats_module
 from api import manual_estimates as me
 from api import dependencies as deps
 from api import maps
+from api import sreality_price_map
 from api import tenant_pool
 from api import schemas as s
 from api import skills as skills_module
@@ -346,6 +347,19 @@ def get_maps_suggest(
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return maps.suggest(query, limit=limit, lang=lang)
+
+
+@app.get("/maps/sreality-price-map")
+def get_maps_sreality_price_map(
+    label: str = Query(..., min_length=1, max_length=300),
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """The listing's place on sreality's Cenová mapa: `{url, level, name}`,
+    `url` null when nothing near the point matches (the SPA then links the bare
+    national map). A stateless proxy — sreality's suggest sends no CORS header."""
+    return sreality_price_map.resolve(label, lat, lng)
 
 
 @app.post("/maps/resolve")
