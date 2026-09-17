@@ -606,3 +606,19 @@ def test_the_block_grain_is_stored_beside_the_code_not_dropped() -> None:
 def test_the_feature_reader_is_the_harness_definition() -> None:
     assert score_lane.feature_value({"feats": {"gap_days": [3.0, True]}}, "gap_days") == 3.0
     assert score_lane.feature_value({"feats": {"gap_days": [3.0, False]}}, "gap_days") is None
+
+
+def test_the_shipped_w5_row_loads_and_keeps_model_same_propose_only() -> None:
+    """Generation g4's row (PROGRAM.md D16). `model|same` stays propose-only: once
+    `28071 x 18661514` is judged at gold no cut in that cell clears the 0.995 point gate, and
+    `w5_strata.json` is EVIDENCE, not a settings row — it must not be loadable as one."""
+    from autodedup.settings import Settings
+
+    row = Settings.from_json(score_lane.repo_path("w5", score_lane.SETTINGS_DIR))
+    assert row.t_hi_by_stratum["model|cross"] == 0.9788
+    assert row.t_hi_by_stratum["model|same"] is None
+    assert row.t_hi_by_stratum["K-C|same"] is None
+    assert row.store_floor == 0.02 and row.t_hi == 1.0
+    assert 0.18 < row.t_lo < 0.19
+    with pytest.raises(ValueError, match="unknown settings keys"):
+        Settings.from_json(score_lane.repo_path("w5_strata", score_lane.SETTINGS_DIR))
