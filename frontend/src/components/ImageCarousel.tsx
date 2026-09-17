@@ -32,6 +32,10 @@ interface Props {
   /* Chevrons fade in on parent `.group` hover (cards) rather than always
    * showing (a panel with no hover-group wrapper). */
   fadeChevrons?: boolean;
+  /* Decode the first frame immediately. The first screenful of a review queue is
+   * the whole point of that page, so its photos are not lazy; everything below
+   * the fold stays lazy, which is the default. */
+  eager?: boolean;
   children?: ReactNode;
 }
 
@@ -42,6 +46,7 @@ export default function ImageCarousel({
   imgClassName = '',
   hoverZoom = false,
   fadeChevrons = false,
+  eager = false,
   children,
 }: Props) {
   const [index, setIndex] = useState(0);
@@ -73,7 +78,7 @@ export default function ImageCarousel({
         <img
           src={current.url}
           alt=""
-          loading="lazy"
+          loading={eager ? 'eager' : 'lazy'}
           className={[
             'w-full h-full object-cover transition-transform duration-200',
             hoverZoom ? 'group-hover:scale-[1.02]' : '',

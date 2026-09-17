@@ -26,6 +26,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import type { AutodedupMember } from '@/lib/api';
+import ImageCarousel from '@/components/ImageCarousel';
 import { imageSrc } from '@/lib/imageUrl';
 import { listingRowPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
@@ -95,6 +96,52 @@ export function Cover({
   );
 }
 
+/* THE PHOTOS, NOT THE PHOTO. A cover is the weakest evidence a portal offers —
+ * two adverts for one flat often share nothing but the floor plan, and two
+ * different flats in one development share the cover and nothing else. So the
+ * card pages the frames the list statement ships (12), with the same carousel
+ * the dialog uses; the album's remaining frames are COUNTED, and the dialog is
+ * where they are. A member whose payload carries no gallery (a surface that
+ * selects the cover only) falls back to the labelled cover tile rather than
+ * rendering an empty box. */
+export function MemberGallery({
+  member,
+  eager,
+  className = '',
+}: {
+  member: AutodedupMember;
+  eager?: boolean;
+  className?: string;
+}) {
+  const frames = member.images ?? [];
+  if (frames.length === 0) {
+    return <Cover member={member} eager={eager} className={className} />;
+  }
+  const rest = (member.n_images ?? frames.length) - frames.length;
+  return (
+    <div className={`relative ${className}`}>
+      <ImageCarousel
+        images={frames.map((img) => ({
+          url: imageSrc(img),
+          /* No CLIP tag on this surface: both decorations are explicitly null
+           * rather than faked into a badge that means nothing. */
+          tag: null,
+          confidence: null,
+          renderScore: null,
+        }))}
+        aspect="aspect-[4/3]"
+        eager={eager}
+      >
+        {rest > 0 && (
+          <span className="absolute top-1 left-1 z-[1] rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-3)]/85 px-1.5 py-0.5 text-[0.58rem] tabular-nums text-[var(--color-ink-2)] backdrop-blur-sm">
+            +{rest} fotek v detailu
+          </span>
+        )}
+      </ImageCarousel>
+    </div>
+  );
+}
+
 export default function ListingMini({
   member,
   eager = false,
@@ -122,7 +169,7 @@ export default function ListingMini({
         dense ? 'flex items-stretch' : ''
       } ${className}`}
     >
-      <Cover
+      <MemberGallery
         member={member}
         eager={eager}
         /* `self-start`, because a flex child stretches to the row's height by

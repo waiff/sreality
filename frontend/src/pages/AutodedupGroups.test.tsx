@@ -14,6 +14,10 @@
  *   * an un-migrated store renders the empty state instead of failing, and a
  *     FAILED read never claims the queue is empty;
  *   * "Load more" pages by the cursor the previous page returned;
+ *   * a card PAGES each member's photos rather than judging it on one cover;
+ *   * the split row appears only once two units are actually chosen, and Save
+ *     sends EVERY member of the group — including the ones the card counted
+ *     rather than showed;
  *   * no interactive control is nested inside another.
  */
 
@@ -36,6 +40,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupGroup: vi.fn(),
     getAutodedupBlocks: vi.fn(),
     postAutodedupVerdict: vi.fn(),
+    postAutodedupSplitVerdict: vi.fn(),
   };
 });
 
@@ -229,6 +234,16 @@ describe('<AutodedupGroups>', () => {
     vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([group({ cluster_key: 7 })]));
     vi.mocked(api.getAutodedupBlocks).mockResolvedValue(BLOCKS);
     vi.mocked(api.postAutodedupVerdict).mockResolvedValue({ store_ready: true, data: STORED, must_not_link: false });
+    vi.mocked(api.postAutodedupSplitVerdict).mockResolvedValue({
+      store_ready: true,
+      data: {
+        cluster_verdict: { ...STORED, verdict: 'same_project_different_unit', note: 'A: 101 · B: 202' },
+        n_pairs_same: 0,
+        n_pairs_negative: 1,
+        must_not_link_written: 1,
+        must_not_link_retracted: 0,
+      },
+    });
   });
 
   it('says nothing has been merged', async () => {
@@ -474,6 +489,151 @@ describe('<AutodedupGroups>', () => {
     await waitFor(() =>
       expect(within(card).getAllByText('foto nedostupné').length).toBeGreaterThan(0),
     );
+  });
+
+
+  /* ------------------------------------------- the card gallery (12 frames) */
+
+  const FRAMES = [
+    { image_id: 1, storage_path: null, sreality_url: 'https://img.example.invalid/1.jpg', sequence: 1 },
+    { image_id: 2, storage_path: null, sreality_url: 'https://img.example.invalid/2.jpg', sequence: 2 },
+  ];
+
+  it('pages a member\'s photos on the card itself', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(
+      page([
+        group({
+          cluster_key: 7,
+          members: [
+            member({ listing_id: 101, images: FRAMES, n_images: 30 }),
+            member({ listing_id: 202, source: 'bazos' }),
+          ],
+        }),
+      ]),
+    );
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    expect(within(card).getByText('1 / 2')).toBeInTheDocument();
+    /* The album is bigger than the card's gallery, and the card says so rather
+     * than implying the advert has two photos. */
+    expect(within(card).getByText('+28 fotek v detailu')).toBeInTheDocument();
+    await user.click(within(card).getByRole('button', { name: 'Next photo' }));
+    expect(within(card).getByText('2 / 2')).toBeInTheDocument();
+    expectNoNestedInteractive(card);
+  });
+
+  it('falls back to the cover when the payload carries no gallery', async () => {
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    /* No carousel: nothing to page, so no chevrons and no counter. */
+    expect(within(card).queryByRole('button', { name: 'Next photo' })).toBeNull();
+  });
+
+  /* ------------------------------------------------------- the unit split */
+
+  it('offers the split only once two units are actually chosen', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    /* Every member starts in unit A — which is precisely what the engine
+     * proposed, so there is nothing to split yet. */
+    expect(within(card).queryByRole('button', { name: 'Save split' })).toBeNull();
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    expect(within(card).getByRole('button', { name: 'Save split' })).toBeInTheDocument();
+    expect(within(card).getByText(/A: 101 · B: 202/)).toBeInTheDocument();
+  });
+
+  it('posts the assignment, the relation and every member', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    expect(api.postAutodedupSplitVerdict).toHaveBeenCalledWith({
+      cluster_key: 7,
+      generation: 'g1',
+      units: [
+        { listing_id: 101, unit: 'A' },
+        { listing_id: 202, unit: 'B' },
+      ],
+      /* The default is the shape this was built for: one development, several
+       * buildings. The other two relations are one select away. */
+      relation: 'same_project_different_unit',
+    });
+    /* The stored cluster verdict lands on the badge, like any other verdict. */
+    await waitFor(() =>
+      expect(
+        within(card).getByRole('button', { name: 'Same project, different unit' }),
+      ).toHaveAttribute('aria-pressed', 'true'),
+    );
+    expect(within(card).getByText(/1 oddělených/)).toBeInTheDocument();
+  });
+
+  it('sends the members the card counted rather than showed', async () => {
+    const user = userEvent.setup();
+    const many = group({
+      cluster_key: 8,
+      size: 6,
+      members: [101, 202, 303, 404, 505, 606].map((id) => member({ listing_id: id })),
+    });
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([many]));
+    renderPage();
+    const card = (await screen.findByText('#8')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    const sent = vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0];
+    /* The server refuses an assignment that does not name the whole cluster —
+     * rightly: the two hidden members would otherwise be ruled on by omission. */
+    expect(sent.units.map((u) => u.listing_id)).toEqual([101, 202, 303, 404, 505, 606]);
+    expect(sent.units.filter((u) => u.unit === 'A')).toHaveLength(5);
+  });
+
+  it('sends the relation the operator picked', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    await user.selectOptions(within(card).getByLabelText('Vztah mezi jednotkami'), 'different');
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    expect(vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0].relation).toBe('different');
+  });
+
+  it('keeps the operator\'s letters when the split is refused', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.postAutodedupSplitVerdict).mockRejectedValue(new Error('migration 532'));
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    expect(await within(card).findByText(/migration 532/)).toBeInTheDocument();
+    /* The work is not thrown away: the assignment is still on screen to correct. */
+    expect(within(card).getByLabelText('Jednotka #202')).toHaveValue('B');
+    expect(within(card).getByRole('button', { name: 'Save split' })).toBeInTheDocument();
+  });
+
+  it('carries the card\'s assignment into the dialog', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAutodedupGroup).mockResolvedValue({
+      store_ready: true,
+      data: {
+        cluster: group({ cluster_key: 7 }),
+        members: [101, 202].map((id) => ({ ...member({ listing_id: id }), images: FRAMES })),
+        pairs: [],
+        judgements: [],
+        conflicts: [],
+        verdicts: [],
+      },
+    });
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    await user.click(within(card).getByRole('button', { name: 'Open' }));
+    const dialog = await screen.findByRole('dialog');
+    /* ONE assignment, two views of it: a dialog that started blank would throw
+     * away the letters the operator had already set. */
+    expect(await within(dialog).findByLabelText('Jednotka #202')).toHaveValue('B');
+    expect(within(dialog).getByRole('button', { name: 'Save split' })).toBeInTheDocument();
   });
 
   it('opens a group onto its members and its edges', async () => {

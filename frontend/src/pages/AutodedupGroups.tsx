@@ -14,6 +14,14 @@
  * server validates against its own registry; nothing here composes SQL, and an
  * unknown value is the server's 400 rather than this page's problem.
  *
+ * A GROUP IS NOT ALWAYS ONE ANSWER. The engine proposes a set, and the operator
+ * regularly finds two of its adverts are one flat, a third is the house next
+ * door and a fourth is a different unit of the same development. The four
+ * whole-group buttons cannot say that, so every member carries a UNIT LABEL:
+ * members sharing a letter are one property, members in different letters are
+ * the chosen relation — and every pair across letters becomes a permanent
+ * must-not-link, which is why the relation is named rather than assumed.
+ *
  * "NOT YET" IS A REAL ANSWER. Before migration 528 and before the first score
  * run there is nothing to show, and the page says so in words. A zero would read
  * as "the engine found no duplicates", which is the one wrong answer.
@@ -26,11 +34,15 @@ import { Link } from 'react-router-dom';
 import {
   getAutodedupGroup,
   getAutodedupGroups,
+  postAutodedupSplitVerdict,
   postAutodedupVerdict,
   type AutodedupGroup,
   type AutodedupGroupFilters,
   type AutodedupJudgementRow,
   type AutodedupMemberDetail,
+  type AutodedupSplitInput,
+  type AutodedupSplitRelation,
+  type AutodedupSplitResult,
   type AutodedupVerdictInput,
   type AutodedupVerdictRow,
   type AutodedupVerdictValue,
@@ -261,6 +273,7 @@ export function FilterBar<T extends GroupFilterState>({
             <option value="same">same</option>
             <option value="different">different</option>
             <option value="same_building_different_unit">same building</option>
+            <option value="same_project_different_unit">same project</option>
             <option value="unsure">unsure</option>
           </select>
         </label>
@@ -315,6 +328,89 @@ function optimisticVerdict(
   };
 }
 
+/* ------------------------------------------------------------ the unit split
+ *
+ * A unit is a LETTER, not a free-text label: the operator is partitioning the
+ * members of one small group, and a typed name would only add a way to spell the
+ * same unit two ways. The map is keyed by `listings.id` and lives at page level
+ * so the card and the dialog edit ONE assignment — a dialog opened over a card
+ * that already separated two adverts must not start from a blank slate. */
+export type UnitMap = Record<number, string>;
+
+export const UNIT_LETTERS: readonly string[] = Array.from({ length: 26 }, (_, i) =>
+  String.fromCharCode(65 + i),
+);
+
+export interface SplitState {
+  units: UnitMap;
+  relation: AutodedupSplitRelation;
+}
+
+/* The wording the operator reads is the relation BETWEEN two units, which is why
+ * "same" is not on offer: two different units are never one property. */
+export const SPLIT_RELATIONS: ReadonlyArray<AutodedupSplitRelation> = [
+  'same_building_different_unit',
+  'same_project_different_unit',
+  'different',
+];
+
+export const SPLIT_RELATION_LABELS: Record<AutodedupSplitRelation, string> = {
+  same_building_different_unit: 'stejná budova, jiné jednotky',
+  same_project_different_unit: 'stejný projekt, jiné jednotky',
+  different: 'nesouvisí',
+};
+
+/* The default is the SHAPE THIS FEATURE WAS BUILT FOR: the operator's group was
+ * one development with several buildings. The other two are one click away. */
+export const DEFAULT_RELATION: AutodedupSplitRelation = 'same_project_different_unit';
+
+export const EMPTY_SPLIT: SplitState = { units: {}, relation: DEFAULT_RELATION };
+
+/* An unassigned member is in unit A — the whole group is one property until the
+ * operator says otherwise, which is exactly what the engine proposed. */
+export const unitOf = (units: UnitMap, listingId: number): string => units[listingId] ?? 'A';
+
+export function distinctUnits(
+  members: ReadonlyArray<{ listing_id: number }>,
+  units: UnitMap,
+): string[] {
+  return Array.from(new Set(members.map((m) => unitOf(units, m.listing_id)))).sort();
+}
+
+/* `A: 101,202 · B: 303` — the assignment in one line, so the card says what it is
+ * about to store rather than leaving it to be read off four selects. */
+export function splitSummary(
+  members: ReadonlyArray<{ listing_id: number }>,
+  units: UnitMap,
+): string {
+  const byUnit = new Map<string, number[]>();
+  for (const m of members) {
+    const unit = unitOf(units, m.listing_id);
+    byUnit.set(unit, [...(byUnit.get(unit) ?? []), m.listing_id]);
+  }
+  return [...byUnit.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([unit, ids]) => `${unit}: ${ids.join(',')}`)
+    .join(' · ');
+}
+
+/* EVERY member travels, including the ones the card counted rather than showed:
+ * the server requires the assignment to name the whole cluster, and a card that
+ * sent only its four visible members would be refused — rightly. */
+export function splitInput(
+  clusterKey: number,
+  generation: string,
+  members: ReadonlyArray<{ listing_id: number }>,
+  state: SplitState,
+): AutodedupSplitInput {
+  return {
+    cluster_key: clusterKey,
+    generation,
+    units: members.map((m) => ({ listing_id: m.listing_id, unit: unitOf(state.units, m.listing_id) })),
+    relation: state.relation,
+  };
+}
+
 /* The verdict write, shared by both queue pages: optimistic overlay keyed by a
  * caller-chosen string, rolled back on failure. The LIST IS NEVER INVALIDATED —
  * the review-grid lesson: a queue that reorders under a correcting hand causes
@@ -360,7 +456,174 @@ export function useVerdictOverlay() {
     (key: string, input: AutodedupVerdictInput) => mutation.mutate({ key, input }),
     [mutation],
   );
-  return { overlay, submit, pendingKey: inFlight };
+
+  /* The SPLIT write rides the same overlay, because what it stores about the
+   * group is a cluster verdict: the badge has to flip to it exactly as it does
+   * for the whole-group buttons. What it does NOT share is the failure
+   * treatment — a rejected split must leave the operator's letters on screen to
+   * correct, so the error is kept per cluster and shown in place. */
+  const [splitErrors, setSplitErrors] = useState<Record<string, string>>({});
+  const [splitResults, setSplitResults] = useState<Record<string, AutodedupSplitResult>>({});
+  const splitMutation = useMutation({
+    mutationFn: (vars: { key: string; input: AutodedupSplitInput }) =>
+      postAutodedupSplitVerdict(vars.input),
+    onMutate: (vars) => {
+      const previous = overlay[vars.key];
+      setInFlight(vars.key);
+      setSplitErrors((e) => {
+        const next = { ...e };
+        delete next[vars.key];
+        return next;
+      });
+      const units = new Set(vars.input.units.map((u) => u.unit));
+      setOverlay((o) => ({
+        ...o,
+        [vars.key]: optimisticVerdict(
+          {
+            kind: 'cluster',
+            cluster_key: vars.input.cluster_key,
+            verdict: units.size === 1 ? 'same' : vars.input.relation,
+          },
+          'ukládám…',
+        ),
+      }));
+      return { previous };
+    },
+    onSuccess: (res, vars) => {
+      const stored = res.data?.cluster_verdict ?? null;
+      if (stored) setOverlay((o) => ({ ...o, [vars.key]: stored }));
+      if (res.data) setSplitResults((r) => ({ ...r, [vars.key]: res.data as AutodedupSplitResult }));
+      pushToast(
+        'ok',
+        `Split recorded — ${res.data?.n_pairs_negative ?? 0} pair(s) permanently un-linkable.`,
+      );
+    },
+    onError: (err: Error, vars, ctx) => {
+      setOverlay((o) => {
+        const next = { ...o };
+        if (ctx?.previous) next[vars.key] = ctx.previous;
+        else delete next[vars.key];
+        return next;
+      });
+      setSplitErrors((e) => ({ ...e, [vars.key]: err.message }));
+    },
+    onSettled: () => setInFlight(null),
+  });
+  const submitSplit = useCallback(
+    (key: string, input: AutodedupSplitInput) => splitMutation.mutate({ key, input }),
+    [splitMutation],
+  );
+
+  return { overlay, submit, submitSplit, pendingKey: inFlight, splitErrors, splitResults };
+}
+
+/* What a card or the dialog needs to edit ONE group's assignment. Bundled rather
+ * than passed as seven props, because both surfaces take exactly the same set and
+ * a split edited in the dialog has to be the split the card is holding. */
+export interface SplitControls {
+  state: SplitState;
+  setUnit: (listingId: number, unit: string) => void;
+  setRelation: (relation: AutodedupSplitRelation) => void;
+  save: (members: ReadonlyArray<{ listing_id: number }>) => void;
+  pending: boolean;
+  error?: string;
+  result?: AutodedupSplitResult;
+}
+
+/* One member's unit. Letters up to the member count: a group of three cannot
+ * hold four units, and offering 26 where 3 are possible is a control that mostly
+ * misleads. */
+export function UnitSelect({
+  listingId,
+  units,
+  count,
+  onChange,
+}: {
+  listingId: number;
+  units: UnitMap;
+  count: number;
+  onChange: (unit: string) => void;
+}) {
+  const letters = UNIT_LETTERS.slice(0, Math.min(Math.max(count, 2), UNIT_LETTERS.length));
+  return (
+    <label className="flex items-center gap-1.5 text-[0.62rem] text-[var(--color-ink-3)]">
+      <span>Jednotka #{listingId}</span>
+      <select
+        className="rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-1.5 py-0.5 text-[0.68rem] text-[var(--color-ink)]"
+        value={unitOf(units, listingId)}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {letters.map((letter) => (
+          <option key={letter} value={letter}>
+            {letter}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/* The split itself, and it appears ONLY once the operator has actually separated
+ * something: a relation select over a group nobody has split is a question with
+ * no subject. Every pair across two units becomes a permanent must-not-link, so
+ * the row says so in words before the click rather than in a toast after it. */
+export function SplitRow({
+  members,
+  split,
+  generation,
+}: {
+  members: ReadonlyArray<{ listing_id: number }>;
+  split: SplitControls;
+  generation: string;
+}) {
+  const units = distinctUnits(members, split.state.units);
+  if (units.length < 2) return null;
+  return (
+    <div className="rounded-[var(--radius-sm)] border border-dashed border-[var(--color-rule-strong)] bg-[var(--color-paper)] px-3 py-2 space-y-2">
+      <p className="text-[0.7rem] text-[var(--color-ink-2)]">
+        Rozdělit na {units.length} jednotky — <span className="font-mono">{splitSummary(members, split.state.units)}</span>.
+        Každá dvojice napříč jednotkami dostane trvalý zákaz spojení.
+      </p>
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="block">
+          <span className={FILTER_LABEL}>Vztah mezi jednotkami</span>
+          <select
+            className={`${FILTER_CONTROL} w-auto`}
+            value={split.state.relation}
+            onChange={(e) => split.setRelation(e.target.value as AutodedupSplitRelation)}
+          >
+            {SPLIT_RELATIONS.map((relation) => (
+              <option key={relation} value={relation}>
+                {SPLIT_RELATION_LABELS[relation]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          /* Not disabled while in flight — the review-queue rule: disabling the
+           * button that was just clicked drops focus onto <body>. */
+          aria-busy={split.pending}
+          onClick={() => split.save(members)}
+          className={`rounded-[var(--radius-sm)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)] px-3 py-1.5 text-[0.72rem] text-[var(--color-ink)] hover:bg-[var(--color-paper-3)] ${
+            split.pending ? 'opacity-60' : ''
+          }`}
+        >
+          {split.pending ? 'Ukládám…' : 'Save split'}
+        </button>
+        <span className="text-[0.62rem] text-[var(--color-ink-4)]">generace {generation}</span>
+      </div>
+      {split.result && (
+        <p className="text-[0.68rem] text-[var(--color-ink-2)]">
+          Uloženo: {SPLIT_RELATION_LABELS[split.state.relation]} ·{' '}
+          {split.result.n_pairs_same} dvojic jako stejná jednotka,{' '}
+          {split.result.n_pairs_negative} oddělených ·{' '}
+          <span className="font-mono">{splitSummary(members, split.state.units)}</span>
+        </p>
+      )}
+      {split.error && <ErrorBanner message={split.error} />}
+    </div>
+  );
 }
 
 interface GroupsPage extends InfiniteListPage<AutodedupGroup> {
@@ -383,6 +646,7 @@ export const VERDICTS: readonly string[] = [
   'same',
   'different',
   'same_building_different_unit',
+  'same_project_different_unit',
   'unsure',
 ];
 
@@ -398,7 +662,37 @@ export default function AutodedupGroups() {
   const [urlFilters, setFilters] = useUrlFilters<GroupFilterState>(EMPTY_FILTERS);
   const filters = useMemo(() => sanitizeGroupFilters(urlFilters), [urlFilters]);
   const [openKey, setOpenKey] = useState<number | null>(null);
-  const { overlay, submit, pendingKey } = useVerdictOverlay();
+  const { overlay, submit, submitSplit, pendingKey, splitErrors, splitResults } =
+    useVerdictOverlay();
+  /* The assignments, at PAGE level: the card and the dialog are two views of one
+   * decision, and a dialog that started from a blank slate would silently throw
+   * away the letters the operator had already set on the card. */
+  const [splits, setSplits] = useState<Record<number, SplitState>>({});
+  const generation = filters.generation || DEFAULT_GENERATION;
+  const splitControls = (clusterKey: number): SplitControls => {
+    const key = String(clusterKey);
+    return {
+      state: splits[clusterKey] ?? EMPTY_SPLIT,
+      setUnit: (listingId, unit) =>
+        setSplits((all) => {
+          const current = all[clusterKey] ?? EMPTY_SPLIT;
+          return {
+            ...all,
+            [clusterKey]: { ...current, units: { ...current.units, [listingId]: unit } },
+          };
+        }),
+      setRelation: (relation) =>
+        setSplits((all) => ({ ...all, [clusterKey]: { ...(all[clusterKey] ?? EMPTY_SPLIT), relation } })),
+      save: (members) =>
+        submitSplit(
+          key,
+          splitInput(clusterKey, generation, members, splits[clusterKey] ?? EMPTY_SPLIT),
+        ),
+      pending: pendingKey === key,
+      error: splitErrors[key],
+      result: splitResults[key],
+    };
+  };
 
   const list = useInfiniteList<AutodedupGroup, GroupsPage>({
     queryKey: ['autodedup', 'groups', filters],
@@ -552,6 +846,8 @@ export default function AutodedupGroups() {
                 })
               }
               onOpen={() => setOpenKey(group.cluster_key)}
+              split={splitControls(group.cluster_key)}
+              generation={generation}
             />
           ))}
         </ul>
@@ -573,7 +869,8 @@ export default function AutodedupGroups() {
       {openKey != null && (
         <GroupDialog
           clusterKey={openKey}
-          generation={filters.generation || DEFAULT_GENERATION}
+          generation={generation}
+          split={splitControls(openKey)}
           onClose={() => setOpenKey(null)}
         />
       )}
@@ -588,6 +885,8 @@ function GroupCard({
   onOpen,
   pending,
   eager,
+  split,
+  generation,
 }: {
   group: AutodedupGroup;
   verdict: AutodedupVerdictRow | null;
@@ -595,6 +894,8 @@ function GroupCard({
   onOpen: () => void;
   pending: boolean;
   eager: boolean;
+  split: SplitControls;
+  generation: string;
 }) {
   const shown = group.members.slice(0, VISIBLE_MEMBERS);
   const hidden = group.members.length - shown.length;
@@ -630,14 +931,26 @@ function GroupCard({
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {shown.map((m) => (
-          <ListingMini key={m.listing_id} member={m} eager={eager} />
+          <div key={m.listing_id} className="space-y-1">
+            <ListingMini member={m} eager={eager} />
+            <UnitSelect
+              listingId={m.listing_id}
+              units={split.state.units}
+              count={group.members.length}
+              onChange={(unit) => split.setUnit(m.listing_id, unit)}
+            />
+          </div>
         ))}
       </div>
       {hidden > 0 && (
         <p className="text-[0.7rem] text-[var(--color-ink-3)]">
-          +{hidden} further advert{hidden === 1 ? '' : 's'} in this group — open it to see them.
+          +{hidden} further advert{hidden === 1 ? '' : 's'} in this group — open it to see them
+          {/* They still travel with a split, in unit A until the dialog says otherwise. */}
+          {' '}and to set their unit.
         </p>
       )}
+
+      <SplitRow members={group.members} split={split} generation={generation} />
 
       <VerdictButtons
         kind="cluster"
@@ -656,10 +969,12 @@ const TD = 'py-1 pr-3 align-top';
 function GroupDialog({
   clusterKey,
   generation,
+  split,
   onClose,
 }: {
   clusterKey: number;
   generation: string;
+  split: SplitControls;
   onClose: () => void;
 }) {
   const detail = useQuery({
@@ -690,9 +1005,19 @@ function GroupDialog({
         <div className="mt-4 space-y-5">
           <ul className="space-y-3">
             {data.members.map((m) => (
-              <MemberRow key={m.listing_id} member={m} />
+              <MemberRow
+                key={m.listing_id}
+                member={m}
+                split={split}
+                count={data.members.length}
+              />
             ))}
           </ul>
+
+          {/* The dialog is where a group too large for one card row is split:
+            * every member is on screen here, so the assignment can be completed
+            * rather than left half-set. */}
+          <SplitRow members={data.members} split={split} generation={generation} />
 
           <section>
             <h3 className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
@@ -772,7 +1097,15 @@ function GroupDialog({
   );
 }
 
-function MemberRow({ member }: { member: AutodedupMemberDetail }) {
+function MemberRow({
+  member,
+  split,
+  count,
+}: {
+  member: AutodedupMemberDetail;
+  split: SplitControls;
+  count: number;
+}) {
   /* The carousel wants render-ready urls; these photos carry no CLIP tag on
    * this surface, so both decorations are explicitly null rather than faked.
    * The drawer shows ALL the photos, which is why it renders the carousel and
@@ -800,6 +1133,12 @@ function MemberRow({ member }: { member: AutodedupMemberDetail }) {
             </div>
           ))}
         </dl>
+        <UnitSelect
+          listingId={member.listing_id}
+          units={split.state.units}
+          count={count}
+          onChange={(unit) => split.setUnit(member.listing_id, unit)}
+        />
         <p className="flex items-center gap-3 text-[0.7rem]">
           {inApp && (
             <Link
