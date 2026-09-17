@@ -45,8 +45,12 @@ try:  # the two SQLSTATEs a missing store raises, if the catalog probe ever miss
         _pg_errors.UndefinedTable,
         _pg_errors.InvalidSchemaName,
     )
+    # Migration 532 widened the verdict domain. A store that predates it rejects the new
+    # value with a CHECK violation, which is a MISSING MIGRATION and not a 500.
+    _CHECK_VIOLATION: tuple[type[BaseException], ...] = (_pg_errors.CheckViolation,)
 except Exception:  # noqa: BLE001 — psycopg absent (tests run on fake connections)
     _MISSING_RELATION = ()
+    _CHECK_VIOLATION = ()
 
 router = APIRouter(
     prefix="/autodedup",
@@ -200,6 +204,9 @@ GROUP_PAGE_SIZE = 25
 GROUP_MAX_PAGE_SIZE = 100
 RESIDUAL_MIN_SCORE = 0.20
 IMAGES_PER_LISTING = 30
+# The card gallery (§12): enough frames to page a member on the queue card itself, far
+# short of the album the dialog opens — a group card renders four members at once.
+GROUP_CARD_IMAGES = 12
 TOP_FEATURES = 5
 
 # The pair-level evidence bitmask, mirroring `autodedup.score_lane.FAMILY_BITS` — the lane
@@ -214,9 +221,30 @@ FAMILY_BITS: tuple[tuple[str, int], ...] = (
     ("TIME", 64),
 )
 
-VERDICT_VALUES: tuple[str, ...] = ("same", "different", "same_building_different_unit", "unsure")
+VERDICT_VALUES: tuple[str, ...] = (
+    "same",
+    "different",
+    "same_building_different_unit",
+    # E49, migration 532: a DIFFERENT BUILDING of the same development project. `different`
+    # throws the project away, `same_building_different_unit` claims a building the adverts do
+    # not share — and both would lose the one fact the operator actually established.
+    "same_project_different_unit",
+    "unsure",
+)
 # A negative verdict is what writes the permanent must-not-link (§9): "unsure" is not one.
-NEGATIVE_VERDICTS: frozenset[str] = frozenset({"different", "same_building_different_unit"})
+NEGATIVE_VERDICTS: frozenset[str] = frozenset(
+    {"different", "same_building_different_unit", "same_project_different_unit"}
+)
+# What a whole-cluster SPLIT may say about two members the operator put in different units.
+# "same" is not offered: two different units are never one property (E1).
+SPLIT_RELATIONS: tuple[str, ...] = (
+    "same_building_different_unit",
+    "same_project_different_unit",
+    "different",
+)
+# A unit per letter of the alphabet. Past that the operator is not splitting a group, they are
+# rejecting it — and the whole-cluster `different` verdict says that in one click.
+MAX_SPLIT_UNITS = 26
 VERDICT_FILTER_VALUES: tuple[str, ...] = ("unreviewed", *VERDICT_VALUES)
 ZONE_VALUES: tuple[str, ...] = ("merge", "band", "reject")
 VERDICT_KINDS: tuple[str, ...] = ("pair", "cluster")
@@ -487,6 +515,9 @@ def _member_row(row: dict[str, Any]) -> dict[str, Any]:
         )
     }
     member["cover"] = _cover(row["cover_storage_path"], row["cover_sreality_url"])
+    # The card gallery, `images[0]` being the very frame `cover` names. The DETAIL route
+    # replaces it with the full 30-frame album — same key, more frames, one client shape.
+    member["images"] = _json_safe(row.get("images") or [])
     return member
 
 
@@ -794,7 +825,12 @@ def groups(
         edges: dict[int, dict[str, Any]] = {}
         if keys:
             for row in _rows(
-                usql.MEMBER_COLUMNS, _fetch(conn, usql.GROUP_MEMBERS_SQL, {"keys": keys})
+                usql.MEMBER_COLUMNS,
+                _fetch(
+                    conn,
+                    usql.GROUP_MEMBERS_SQL,
+                    {"keys": keys, "card_frames": GROUP_CARD_IMAGES},
+                ),
             ):
                 members.setdefault(row["cluster_key"], []).append(_member_row(row))
             for row in _rows(
@@ -865,7 +901,12 @@ def group_detail(
         cluster, cluster_verdict = _cluster_row(_row(usql.CLUSTER_COLUMNS, rows[0]))
 
         member_rows = _rows(
-            usql.MEMBER_COLUMNS, _fetch(conn, usql.GROUP_MEMBERS_SQL, {"keys": [cluster_key]})
+            usql.MEMBER_COLUMNS,
+            _fetch(
+                conn,
+                usql.GROUP_MEMBERS_SQL,
+                {"keys": [cluster_key], "card_frames": GROUP_CARD_IMAGES},
+            ),
         )
         ids = [row["listing_id"] for row in member_rows]
         galleries = _images_by_listing(conn, ids)
@@ -1278,6 +1319,168 @@ def verdict(
         "data": {
             "verdict": _row(usql.VERDICT_COLUMNS, stored[0]) if stored else None,
             "must_not_link": must_not_link,
+        },
+        "store_ready": True,
+    }
+
+
+class SplitUnitIn(BaseModel):
+    listing_id: int
+    unit: str = Field(max_length=40)
+
+
+class SplitIn(BaseModel):
+    cluster_key: int
+    generation: str
+    units: list[SplitUnitIn]
+    relation: str
+    note: str | None = Field(default=None, max_length=2000)
+
+
+def _split_summary(assignment: dict[int, str]) -> str:
+    """`A: 94020,140903 | B: 94492` — the assignment as one line, stored as the cluster
+    verdict's note so the ruling is readable without re-deriving it from the pair rows."""
+    units: dict[str, list[int]] = {}
+    for listing_id, unit in assignment.items():
+        units.setdefault(unit, []).append(listing_id)
+    return " | ".join(
+        f"{unit}: {','.join(str(i) for i in sorted(ids))}"
+        for unit, ids in sorted(units.items())
+    )
+
+
+@router.post("/verdict/split")
+def verdict_split(
+    body: SplitIn,
+    claims: dict = Depends(deps.require_admin),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """A proposed group, ruled on unit by unit — the answer a whole-cluster verdict cannot give.
+
+    The operator assigns every member a UNIT LABEL. Two members in the same unit are one
+    property (`same`, and any must-not-link the operator wrote earlier is retracted); two in
+    different units are `relation` — the same building, the same development project, or
+    unrelated — and each such pair takes a permanent `must_not_link`, because a unit the
+    operator has separated must never come back as a merge proposal. The cluster itself is
+    stored as `same` when one unit was used and as `relation` otherwise, with the assignment
+    as its note. Everything lands in ONE transaction: a half-applied split would leave the pair
+    rows and the cluster row saying different things.
+
+    THE PAIR NEED NOT EXIST IN `autodedup.pairs`, which is why this route does not check it:
+    a cluster is the union of the edges the engine accepted, so two members can sit in one
+    cluster with no scored edge between them at all. CLUSTER MEMBERSHIP is the validation, and
+    the assignment must cover every member exactly once and name nobody else.
+    """
+    _one_of("relation", body.relation, SPLIT_RELATIONS)
+    decided_by = claims.get("email") or claims.get("sub")
+    if not decided_by:
+        raise HTTPException(status_code=403, detail="the admin identity carries no email")
+    if not store_ready(conn):
+        raise HTTPException(status_code=503, detail="the autodedup store is not created yet")
+
+    if not _fetch(
+        conn,
+        usql.GROUP_ONE_SQL,
+        {"cluster_key": body.cluster_key, "generation": body.generation},
+    ):
+        raise HTTPException(status_code=404, detail="no such cluster in this generation")
+
+    members = _rows(
+        usql.MEMBER_COLUMNS,
+        _fetch(
+            conn,
+            usql.GROUP_MEMBERS_SQL,
+            {"keys": [body.cluster_key], "card_frames": GROUP_CARD_IMAGES},
+        ),
+    )
+    member_ids = sorted({int(row["listing_id"]) for row in members})
+    if not member_ids:
+        raise _bad("the cluster has no members to split")
+
+    assignment: dict[int, str] = {}
+    for entry in body.units:
+        unit = entry.unit.strip()
+        if not unit:
+            raise _bad("a unit label cannot be empty")
+        if entry.listing_id in assignment:
+            raise _bad(f"listing {entry.listing_id} is assigned to two units")
+        assignment[entry.listing_id] = unit
+    if set(assignment) != set(member_ids):
+        raise _bad("the unit assignment must name every member of the cluster, and only them")
+    distinct = sorted(set(assignment.values()))
+    if len(distinct) > MAX_SPLIT_UNITS:
+        raise _bad(f"a split names at most {MAX_SPLIT_UNITS} units")
+
+    summary = _split_summary(assignment)
+    cluster_verdict = "same" if len(distinct) == 1 else body.relation
+    note = f"{body.note} · {summary}" if body.note else summary
+
+    n_pairs_same = 0
+    n_pairs_negative = 0
+    try:
+        with conn.transaction():
+            for index, lo in enumerate(member_ids):
+                for hi in member_ids[index + 1:]:
+                    same_unit = assignment[lo] == assignment[hi]
+                    _execute(
+                        conn,
+                        usql.VERDICT_PAIR_UPSERT_SQL,
+                        {
+                            "listing_lo": lo,
+                            "listing_hi": hi,
+                            "verdict": "same" if same_unit else body.relation,
+                            "note": f"operator split: {summary}",
+                            "decided_by": str(decided_by),
+                        },
+                    )
+                    if same_unit:
+                        n_pairs_same += 1
+                        # The correction half of the loop (§9): re-ruling a pair as one unit
+                        # has to drop the veto an earlier ruling wrote, or `guards.py` keeps
+                        # refusing a pair this page now shows as confirmed.
+                        _execute(
+                            conn,
+                            usql.MUST_NOT_LINK_RETRACT_SQL,
+                            {"listing_lo": lo, "listing_hi": hi},
+                        )
+                    else:
+                        n_pairs_negative += 1
+                        _execute(
+                            conn,
+                            usql.MUST_NOT_LINK_UPSERT_SQL,
+                            {
+                                "listing_lo": lo,
+                                "listing_hi": hi,
+                                "reason": f"operator split: {body.relation}",
+                            },
+                        )
+            stored = _fetch(
+                conn,
+                usql.VERDICT_CLUSTER_UPSERT_SQL,
+                {
+                    "cluster_key": body.cluster_key,
+                    "verdict": cluster_verdict,
+                    "note": note,
+                    "decided_by": str(decided_by),
+                },
+            )
+    except _CHECK_VIOLATION as exc:
+        # The store predates migration 532 and does not know the value being written. Naming
+        # the migration is the whole point: a bare 500 sends the operator to the logs.
+        raise HTTPException(
+            status_code=503,
+            detail="this verdict needs migration 532 (autodedup.verdicts vocabulary)",
+        ) from exc
+
+    return {
+        "data": {
+            "cluster_verdict": _row(usql.VERDICT_COLUMNS, stored[0]) if stored else None,
+            "n_pairs_same": n_pairs_same,
+            "n_pairs_negative": n_pairs_negative,
+            "must_not_link_written": n_pairs_negative,
+            # Counted per same-unit pair: the DELETE is keyed on the pair and is a no-op where
+            # no operator veto stood, so this is "pairs whose veto was dropped or never was".
+            "must_not_link_retracted": n_pairs_same,
         },
         "store_ready": True,
     }

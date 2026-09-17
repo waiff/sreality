@@ -188,18 +188,26 @@ MEMBER_COLUMNS: tuple[str, ...] = (
     "cover_storage_path",
     "cover_sreality_url",
     "n_images",
+    "images",
 )
 
 # The cover is the FIRST image by gallery position — `sequence NULLS LAST, id` is the order
 # every other reader of `images` in this repo uses, so the card and the carousel open on the
 # same frame. A member whose listing row is gone (a shadow-mode cluster outlives nothing, but
 # a listing can be pruned) still renders, hence the LEFT JOIN rather than an inner one.
+# The QUEUE gallery: the first `card_frames` frames of each member, so a card can be paged
+# rather than judged on one cover — the operator's own request. Ordered exactly like the cover
+# above, which makes `images[0]` and `cover` the same frame by construction; `n_images` still
+# reports the WHOLE album, so a card can say how many frames the dialog would add. Capped IN
+# THE STATEMENT (the LISTING_IMAGES_SQL lesson): trimming after the fetch still drags a
+# 120-frame album across the wire for every member of every cluster on the page.
 GROUP_MEMBERS_SQL = """
 SELECT
     m.cluster_key, m.listing_id,
     l.source, l.source_url, l.category_main, l.category_type, l.disposition,
     l.area_m2, l.floor, l.price_czk, l.first_seen_at, l.last_seen_at, l.is_active,
-    cover.storage_path, cover.sreality_url, coalesce(gallery.n, 0)
+    cover.storage_path, cover.sreality_url, coalesce(gallery.n, 0),
+    coalesce(frames.images, '[]'::json)
 FROM autodedup.cluster_members m
 LEFT JOIN listings l ON l.id = m.listing_id
 LEFT JOIN LATERAL (
@@ -212,6 +220,25 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT count(*) AS n FROM images i WHERE i.listing_id = m.listing_id
 ) gallery ON true
+LEFT JOIN LATERAL (
+    SELECT json_agg(
+               json_build_object(
+                   'image_id', f.id,
+                   'storage_path', f.storage_path,
+                   'sreality_url', f.sreality_url,
+                   'sequence', f.sequence
+               )
+               ORDER BY f.rn
+           ) AS images
+      FROM (
+          SELECT i.id, i.storage_path, i.sreality_url, i.sequence,
+                 row_number() OVER (ORDER BY i.sequence NULLS LAST, i.id) AS rn
+            FROM images i
+           WHERE i.listing_id = m.listing_id
+           ORDER BY i.sequence NULLS LAST, i.id
+           LIMIT %(card_frames)s::int
+      ) f
+) frames ON true
 WHERE m.cluster_key = any(%(keys)s::bigint[])
 ORDER BY m.cluster_key, m.listing_id
 """
