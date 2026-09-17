@@ -38,6 +38,7 @@ import inspect
 import json
 import math
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
@@ -50,6 +51,7 @@ from autodedup.labels import (
     Label,
     PairKey,
     Sample,
+    Stratum,
     pair_key,
 )
 from autodedup.model import (
@@ -71,9 +73,15 @@ MERGE_ZONE: str = "merge"
 BAND_ZONE: str = "band"
 REJECT_ZONE: str = "reject"
 DECIDED_ZONES: tuple[str, ...] = (MERGE_ZONE, REJECT_ZONE)
+# Not a zone `decide_pair` can return: the pairs the run never stored, which a recall denominator
+# built from the run's own rows silently drops.
+OFF_RUN_ZONE: str = "off_run"
 
 # D3's per-stratum floor: a pooled 0.99 that hides a 0.90 stratum is not a passing gate.
 STRATUM_FLOOR: float = 0.97
+# The grid a shipped T_hi is chosen on. Finer than this a cut stops being a probability and
+# becomes a rank: see `expressible_cuts`.
+CUT_RESOLUTION: float = 1e-4
 # No stratum earns a cut of its own off a handful of rows: under this many judged merges the
 # search is describing noise, and a published cut invites someone to run it.
 MIN_STRATUM_N: int = 30
@@ -385,6 +393,190 @@ def _table(
     }
 
 
+# --- several draws, one design ---------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class PooledSample(Sample):
+    """Several judge draws collapsed into ONE design, with the frame behind every weight named.
+
+    A pooled draw differs from a single `sample.json` in two ways a reader has to be able to see.
+    Its per-pair stratum map is AUTHORITATIVE — each drawn pair is attributed to exactly one
+    stratum (the one the newest draw that drew it used), so a pair cannot sit in two denominators
+    while its single verdict feeds only one numerator. And its populations come from frames that
+    do not agree: the draws were stamped against different engine runs, so `frame_conflicts`
+    carries every stratum where the frames disagreed, what was chosen, and what that did to the
+    weight."""
+
+    draws: tuple[dict[str, Any], ...] = ()
+    order_source: str = ""
+    frame_conflicts: tuple[dict[str, Any], ...] = ()
+
+    def weight_for(self, key: PairKey, stratum: str | None = None,
+                   default: float = 1.0) -> float:
+        """The POOLED attribution wins over the judgement row's stamp.
+
+        The stamp names the cell the pair was drawn in *by one draw*; the pooled design re-cut the
+        cells across all of them, and using the stamp here would put the numerator in one cell and
+        the denominator in another."""
+        name = self.pair_stratum.get(key)
+        return self.weight_for_name(name if name is not None else stratum, default)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            **super().to_json(),
+            "pooled_draws": list(self.draws),
+            "population_frame_order": self.order_source,
+            "n_frame_conflicts": len(self.frame_conflicts),
+            "frame_conflicts": list(self.frame_conflicts),
+        }
+
+
+def stratum_of_pair(draw: Sample, key: PairKey, stamped: str | None) -> str:
+    """The design cell one judged pair belongs to, under whatever sample is in force.
+
+    A POOLED draw has already attributed every pair it holds, and that attribution is the one the
+    denominators were counted under. A single draw has not: there the judgement row's own stamp is
+    the sampler's word and the file's per-pair map is only the fallback."""
+    if isinstance(draw, PooledSample):
+        name = draw.pair_stratum.get(key)
+        if name is not None:
+            return name
+    return stamped or draw.stratum_of(key) or "(none)"
+
+
+_DRAW_ID = re.compile(r"(\d{6,})")
+
+
+def draw_id(draw: Sample) -> int | None:
+    """The draw's own recency key, read off the lane artifact id its path carries.
+
+    Never the order the caller happened to pass them in: which frame a stratum's population comes
+    from decides every HT weight, and `--judgements A B` and `--judgements B A` must not be
+    different estimates."""
+    found = _DRAW_ID.findall(str(draw.path or ""))
+    return int(found[-1]) if found else None
+
+
+def pooled_sample(draws: Sequence[Sample]) -> Sample:
+    """Several judge draws collapsed into ONE set of Horvitz-Thompson weights (W4f).
+
+    Each `sample.json` describes the draw it came from, and a stratum's rate is a property of
+    that draw, not of its name: `merge|K-C|jablonec|cross` was drawn 87 of 1,178 in the seed-1
+    vision sample and 47 of 1,175 in the seed-2 one. Weighting a pooled label set by whichever
+    file happened to be passed first therefore inflates every pair the other draws contributed —
+    the label store holds one verdict per pair, but the design behind it is the UNION of the
+    draws.
+
+    The union is what is weighted here, and it is an equal-probability sample within a stratum:
+    independent draws of `n_1, n_2, ...` from one stratum of `N` include every member with the
+    same probability `1 - prod(1 - n_d/N)`, so the pooled rate is simply DISTINCT drawn pairs
+    over the population — which is also what makes a sub-draw free (gold-600 is 600 of the same
+    1,500 pairs the vision draw judged, and contributes no new denominator). Each pair is counted
+    ONCE, in the stratum the newest draw that drew it used, so a pair whose zone moved between two
+    runs cannot inflate a cell that has no verdict to put in the numerator.
+
+    Populations come from the newest frame that names the stratum, ordered by `draw_id` — the lane
+    artifact id, not the argument order. Where the newest frame cannot hold the pairs actually
+    drawn the stratum is a FRAME CONFLICT, not a rounding problem: the widest frame that named it
+    is used (a stratum may not stand for less of the cohort than another frame says it holds), and
+    every such stratum is recorded on `frame_conflicts` with the weight it ended up with, because
+    silently taking the drawn count would set that cell's inflation factor to 1.0."""
+    usable = [draw for draw in draws if draw is not None]
+    if not usable:
+        return EMPTY_SAMPLE
+    if len(usable) == 1:
+        return usable[0]
+    seen_populations: dict[str, dict[int, int]] = {}
+    for index, draw in enumerate(usable):
+        for name, stratum in draw.strata.items():
+            if stratum.n_total:
+                seen_populations.setdefault(name, {})[index] = stratum.n_total
+    disagreeing = sorted(
+        name for name, by_draw in seen_populations.items() if len(set(by_draw.values())) > 1
+    )
+    ids = [draw_id(draw) for draw in usable]
+    if all(value is not None for value in ids):
+        order = sorted(range(len(usable)), key=lambda index: (ids[index], index))
+        order_source = "draw id (the lane artifact id on the sample path)"
+    elif not disagreeing:
+        order = list(range(len(usable)))
+        order_source = "declaration order (immaterial: no stratum's population disagrees)"
+    else:
+        unnamed = [str(usable[i].path) for i, value in enumerate(ids) if value is None]
+        raise ValueError(
+            f"cannot pool these draws: {len(disagreeing)} strata have disagreeing populations "
+            f"and {unnamed} carry no draw id, so which frame wins would be decided by the order "
+            f"they were passed in. Pass the lane's own sample.json paths (they carry the run id)."
+        )
+
+    drawn: dict[str, set[PairKey]] = {}
+    pair_stratum: dict[PairKey, str] = {}
+    # Newest first: the first draw that names a pair owns it, and every other name that draw set
+    # keeps only the pairs no newer draw claimed.
+    for index in reversed(order):
+        for key, name in usable[index].pair_stratum.items():
+            if key in pair_stratum:
+                continue
+            pair_stratum[key] = name
+            drawn.setdefault(name, set()).add(key)
+
+    strata: dict[str, Stratum] = {}
+    conflicts: list[dict[str, Any]] = []
+    for name in sorted(set(seen_populations) | set(drawn)):
+        selected = len(drawn.get(name, ()))
+        by_draw = seen_populations.get(name, {})
+        newest = next((by_draw[index] for index in reversed(order) if index in by_draw), 0)
+        total = newest
+        if selected and total < selected:
+            widest = max(by_draw.values(), default=0)
+            total = max(widest, selected)
+            conflicts.append({
+                "stratum": name,
+                "n_selected_pooled": selected,
+                "population_newest_frame": newest,
+                "population_by_draw": {
+                    str(usable[index].path or index): by_draw[index]
+                    for index in order if index in by_draw
+                },
+                "population_used": total,
+                "weight_used": (total / selected) if selected else 0.0,
+                "weight_under_newest_frame": (newest / selected) if selected else 0.0,
+                "resolution": ("widest frame" if total == widest and widest >= selected
+                               else "collapsed to the drawn count (weight 1.0)"),
+            })
+        strata[name] = Stratum(name, selected, max(total, selected))
+
+    note = f"pooled({len(usable)} draws; frames by {order_source}"
+    if disagreeing:
+        note += f"; {len(disagreeing)} strata with disagreeing populations, newest frame wins"
+    if conflicts:
+        note += f"; {len(conflicts)} FRAME CONFLICTS (see frame_conflicts)"
+    note += ")"
+    return PooledSample(
+        strata=strata,
+        pair_stratum=pair_stratum,
+        seed=None,
+        tier="+".join(sorted({draw.tier for draw in usable if draw.tier})) or None,
+        judge_version=next(
+            (draw.judge_version for draw in usable if draw.judge_version), None
+        ),
+        n_requested=sum(draw.n_requested or 0 for draw in usable),
+        n_selected=len(pair_stratum),
+        path="; ".join(str(draw.path) for draw in usable if draw.path),
+        stratum_fn=note,
+        draws=tuple(
+            {"path": str(usable[index].path), "draw_id": ids[index],
+             "seed": usable[index].seed, "tier": usable[index].tier,
+             "n_selected": len(usable[index].pair_stratum),
+             "n_cohort": usable[index].n_cohort}
+            for index in order
+        ),
+        order_source=order_source,
+        frame_conflicts=tuple(conflicts),
+    )
+
+
 def certificate_class(row: Mapping[str, Any]) -> str:
     certificate = row.get("certificate")
     return str(certificate) if certificate else "model"
@@ -613,12 +805,25 @@ class ScoredRow:
         """The pairs a score cut actually decides: no certificate, not blocked, diverse."""
         return (not self.blocked) and self.diverse and self.certificate is None
 
-    def merged_at(self, t: float, *, zone_rule: bool) -> bool:
+    def merged_at(
+        self,
+        t: float,
+        *,
+        zone_rule: bool,
+        stratum_t_hi: Mapping[str, float | None] | None = None,
+    ) -> bool:
+        """`stratum_t_hi` is E48's table, read exactly as `decide.stratum_t_hi` reads it: this
+        pair's own cell's cut when it has one, `None` meaning PROPOSE-ONLY — which holds back the
+        certificates too, because `decide_pair` consults the table before it consults them."""
+        cut: float | None = t
+        if stratum_t_hi is not None and self.cell in stratum_t_hi:
+            value = stratum_t_hi[self.cell]
+            cut = None if value is None else float(value)
         if not zone_rule:
-            return self.score >= t
-        if self.blocked or not self.diverse:
+            return cut is not None and self.score >= cut
+        if self.blocked or not self.diverse or cut is None:
             return False
-        return self.certificate is not None or self.score >= t
+        return self.certificate is not None or self.score >= cut
 
 
 def _normalise_scored(rows: Iterable[Any]) -> list[ScoredRow]:
@@ -653,19 +858,47 @@ def _gates(k: int, n: int, precision_lb: float, precision_point: float) -> bool:
     return bool(n) and k / n >= precision_point and wilson_lower(k, n) >= precision_lb
 
 
+def expressible_cuts(
+    scores: Iterable[float], resolution: float | None = CUT_RESOLUTION
+) -> list[float]:
+    """Candidate cuts a shipped settings row can state as a PROBABILITY, descending.
+
+    A calibration map is flat over long runs and near-vertical between them, so hundreds of pairs
+    can share a probability interval 1e-9 wide. A search over every distinct score will happily
+    stop inside such an interval — and then the published cut is not "merge above 98.6 %", it is
+    "merge these 81 pairs and not those nine", chosen at a resolution no operator can read and no
+    later run can reproduce. Measured on W4f's own cell: 0.98625585 merges 29 sealed pairs with 2
+    errors and 0.9862558542015111 merges 20 with none, a 4e-10 apart.
+
+    Quantising to `resolution` gives each score two candidates — the grid point just below it
+    (which admits it) and the one just above (which does not) — so every cut the search can
+    return is a real number of decimals. `None` restores the raw per-score search."""
+    values = [float(score) for score in scores]
+    if resolution is None or resolution <= 0.0:
+        return sorted({value for value in values}, reverse=True)
+    out: set[float] = set()
+    for value in values:
+        steps = value / resolution
+        out.add(round(math.floor(steps) * resolution, 12))
+        out.add(round(math.ceil(steps) * resolution, 12))
+    return sorted(out, reverse=True)
+
+
 def _t_hi_search(
     rows: Sequence[ScoredRow],
     precision_lb: float,
     precision_point: float,
     *,
     zone_rule: bool = True,
+    resolution: float | None = CUT_RESOLUTION,
 ) -> tuple[float | None, int, int]:
-    """Smallest cut whose SIMULATED merge set clears both gates; returns (t, k, n) there.
+    """Smallest EXPRESSIBLE cut whose SIMULATED merge set clears both gates; (t, k, n) there.
 
     Simulated, not `score >= t`: certificate pairs sit in the merge set at every cut and blocked
     or single-family pairs sit outside it at every cut, so the cut only ever moves the
-    score-governed pairs in and out. Precision is not monotone in t, so every distinct governed
-    score is tried and the smallest winner kept."""
+    score-governed pairs in and out. Precision is not monotone in t, so every candidate cut is
+    tried and the smallest winner kept — over the grid `expressible_cuts` returns, never over the
+    raw scores, which is how a threshold ends up fitted to individual holdout pairs."""
     if zone_rule:
         fixed = [row for row in rows if row.merged_regardless]
         movable = [row for row in rows if row.score_governed]
@@ -679,25 +912,41 @@ def _t_hi_search(
     ) else (None, 0, 0)
     ordered = sorted(movable, key=lambda row: -row.score)
     index = 0
-    while index < len(ordered):
-        score = ordered[index].score
-        while index < len(ordered) and ordered[index].score == score:
+    for cut in expressible_cuts((row.score for row in movable), resolution):
+        while index < len(ordered) and ordered[index].score >= cut:
             k += ordered[index].y
             n += 1
             index += 1
         if _gates(k, n, precision_lb, precision_point):
-            best = (score, k, n)
+            best = (cut, k, n)
     return best
 
 
-def merge_set(rows: Sequence[ScoredRow], t: float, *, zone_rule: bool = True) -> list[ScoredRow]:
-    return [row for row in rows if row.merged_at(t, zone_rule=zone_rule)]
+def merge_set(
+    rows: Sequence[ScoredRow],
+    t: float,
+    *,
+    zone_rule: bool = True,
+    stratum_t_hi: Mapping[str, float | None] | None = None,
+) -> list[ScoredRow]:
+    return [
+        row for row in rows
+        if row.merged_at(t, zone_rule=zone_rule, stratum_t_hi=stratum_t_hi)
+    ]
 
 
-def _per_stratum_precision(rows: Sequence[ScoredRow]) -> dict[str, dict[str, Any]]:
+def _per_stratum_precision(
+    rows: Sequence[ScoredRow], *, by: str = "cell"
+) -> dict[str, dict[str, Any]]:
+    """Precision per group, keyed on the DECIDING CELL by default.
+
+    D3's floor ("no stratum below 0.97") is a statement about `K-C|cross`, `model|same` — the
+    cells E48 ships or holds back — not about the sampler's `merge|K-C|vysocany|cross`, which is a
+    design cell that nothing in the shipped package is read at. Both are published; only the cell
+    grain answers the gate."""
     grouped: dict[str, list[ScoredRow]] = {}
     for row in rows:
-        grouped.setdefault(row.stratum, []).append(row)
+        grouped.setdefault(row.cell if by == "cell" else row.stratum, []).append(row)
     out: dict[str, dict[str, Any]] = {}
     for name in sorted(grouped):
         members = grouped[name]
@@ -719,6 +968,7 @@ def measure_thresholds(
     zone_rule: bool = True,
     stratum_floor: float = STRATUM_FLOOR,
     draws: int = BOOTSTRAP_DRAWS,
+    stratum_t_hi: Mapping[str, float | None] | None = None,
 ) -> dict[str, Any]:
     """Score a FIXED (T_hi, T_lo) over rows that had no say in choosing it — §6's sealed split.
 
@@ -731,14 +981,20 @@ def measure_thresholds(
     # still do, and the recall the band has to carry is still a number the sealed split can report.
     # An infinite cut is exactly that rule, so the arithmetic below stays one code path.
     cut = math.inf if t_hi is None else t_hi
-    merged = merge_set(scored, cut, zone_rule=zone_rule)
+    merged = merge_set(scored, cut, zone_rule=zone_rule, stratum_t_hi=stratum_t_hi)
     k, n = sum(row.y for row in merged), len(merged)
     per_stratum = _per_stratum_precision(merged)
+    per_sampler_stratum = _per_stratum_precision(merged, by="stratum")
     floors = [body["precision"] for body in per_stratum.values() if body["precision"] is not None]
+    sampler_floors = [
+        body["precision"] for body in per_sampler_stratum.values()
+        if body["precision"] is not None
+    ]
     weight_positive = sum(row.weight for row in scored if row.y == 1)
     missed = sum(
         row.weight for row in scored
-        if row.y == 1 and not row.merged_at(cut, zone_rule=zone_rule)
+        if row.y == 1
+        and not row.merged_at(cut, zone_rule=zone_rule, stratum_t_hi=stratum_t_hi)
         and (row.score <= t_lo or (zone_rule and row.discarded))
     )
     return {
@@ -758,9 +1014,15 @@ def measure_thresholds(
             [(row.stratum, row.y, row.weight) for row in merged], draws=draws
         ),
         "per_stratum_precision": per_stratum,
+        "per_stratum_precision_basis": "deciding cell (certificate|side) — D3's floor",
+        "per_sampler_stratum_precision": per_sampler_stratum,
         "min_stratum_precision": min(floors) if floors else None,
+        "min_sampler_stratum_precision": min(sampler_floors) if sampler_floors else None,
         "stratum_floor": stratum_floor,
         "stratum_floor_ok": (min(floors) >= stratum_floor) if floors else None,
+        "stratum_t_hi_applied": (
+            None if stratum_t_hi is None else dict(sorted(stratum_t_hi.items()))
+        ),
         "missed_share_at_t_lo": (missed / weight_positive) if weight_positive > 0 else None,
     }
 
@@ -822,6 +1084,7 @@ class ThresholdReport:
             "weight_positive_unavoidable": self.weight_positive_unavoidable,
             "per_stratum_t_hi": dict(sorted(self.per_stratum_t_hi.items())),
             "per_stratum_precision_at_t_hi": self.per_stratum_precision_at_t_hi,
+            "per_stratum_precision_basis": "deciding cell (certificate|side) — D3's floor",
             "min_stratum_precision": self.min_stratum_precision,
             "stratum_floor_ok": self.stratum_floor_ok,
             "band_width_source": self.band_width_source,
@@ -1007,6 +1270,7 @@ def stratum_thresholds(
     min_n: int = MIN_STRATUM_N,
     fitted_on: str = "train+validation",
     allow_overrides: bool = True,
+    resolution: float | None = CUT_RESOLUTION,
 ) -> dict[str, Any]:
     """A T_hi per deciding stratum, CHOSEN on dev and MEASURED on the sealed split (D3/E22-E25).
 
@@ -1036,10 +1300,10 @@ def stratum_thresholds(
     for cell in sorted(set(by_cell) | set(sealed_by_cell)):
         members = by_cell.get(cell, [])
         t_hi, k_hi, n_hi = _t_hi_search(
-            members, precision_lb, precision_point, zone_rule=zone_rule
+            members, precision_lb, precision_point, zone_rule=zone_rule, resolution=resolution
         )
         relaxed_t, relaxed_k, relaxed_n = _t_hi_search(
-            members, 0.0, precision_point, zone_rule=zone_rule
+            members, 0.0, precision_point, zone_rule=zone_rule, resolution=resolution
         )
         sealed = sealed_by_cell.get(cell, [])
         at = t_hi if t_hi is not None else relaxed_t
@@ -1126,6 +1390,7 @@ def stratum_thresholds(
             # the target it is compared against is a cohort rate. `sealed_weighted_precision` and
             # `sealed_design` beside it are what say whether the two agree on this cell.
             "gate_basis": "unweighted judged counts (Wilson LB); HT rate reported alongside",
+            "cut_resolution": resolution,
         },
         "key": "certificate|side",
         "fitted_on": fitted_on,
@@ -1225,12 +1490,10 @@ def evaluate(
         n_rows += 1
         zone = str(row.get("zone") or "?")
         label = labels.get(key)
-        # The judgement row carries the stratum the SAMPLER stamped on it; recomputing one is a
-        # second opinion about the design and is only the fallback (see labels.load_sample).
-        stratum = (label.stratum if label and label.stratum else draw.stratum_of(key)) or "(none)"
-        weight = draw.weight_for_name(stratum) if (
-            label is not None and label.stratum
-        ) else draw.weight_of(key)
+        # The judgement row carries the stratum the SAMPLER stamped on it; a POOLED draw has
+        # re-cut the cells across every draw and its attribution wins (see `stratum_of_pair`).
+        stratum = stratum_of_pair(draw, key, label.stratum if label else None)
+        weight = draw.weight_for_name(stratum)
         zones.setdefault(zone, Cell()).add(label, weight, stratum)
         if label is not None:
             n_labelled += 1
@@ -1293,6 +1556,30 @@ def evaluate(
                 counter[0] += agreed
                 counter[1] += 1
 
+    # A labelled pair this run never STORED is still a labelled pair, and a positive among them
+    # is a missed duplicate — one the engine cannot even propose. Leaving them out of the recall
+    # denominator (the W4f defect) makes a calibration that pushes pairs under `store_floor` look
+    # like it improved recall: run3pre left 102 labels off the run, the isotonic_pav row 1,159.
+    # They are a FOURTH zone, not a footnote, and they cannot be split into "below the floor" and
+    # "never a candidate" from the run alone, so the zone says both.
+    weight_positive_on_run = weight_positive_total
+    off_run = sorted(set(labels) - seen)
+    off_run_judged = off_run_positive = 0
+    for key in off_run:
+        label = labels[key]
+        stratum = stratum_of_pair(draw, key, label.stratum)
+        weight = draw.weight_for_name(stratum)
+        zones.setdefault(OFF_RUN_ZONE, Cell()).add(label, weight, stratum)
+        if label.y is None:
+            continue
+        off_run_judged += 1
+        if label.y == 1:
+            off_run_positive += 1
+            weight_positive_total += weight
+            weight_positive_by_zone[OFF_RUN_ZONE] = (
+                weight_positive_by_zone.get(OFF_RUN_ZONE, 0.0) + weight
+            )
+
     merge_pooled = Cell()
     for cell in merge_by_certificate.values():
         merge_pooled.absorb(cell)
@@ -1312,7 +1599,8 @@ def evaluate(
     # now. They are different questions and a report that answers only the first cannot say what
     # the settings file in force would do on rows it never saw.
     holdout_at_settings = measure_thresholds(
-        sealed, settings.t_hi, settings.t_lo, draws=draws
+        sealed, settings.t_hi, settings.t_lo, draws=draws,
+        stratum_t_hi=(dict(settings.t_hi_by_stratum) or None),
     )
     # No dev split is not a licence to select on the sealed rows: the cuts below would then be
     # fitted and measured on the same pairs, and publishing them under "measured on the holdout"
@@ -1342,8 +1630,10 @@ def evaluate(
             "counts": {
                 "run_pairs": n_rows,
                 "labelled_pairs": n_labelled,
-                "labels_off_run": sorted(set(labels) - seen)[:20],
-                "n_labels_off_run": len(set(labels) - seen),
+                "labels_off_run": off_run[:20],
+                "n_labels_off_run": len(off_run),
+                "n_labels_off_run_judged": off_run_judged,
+                "n_labels_off_run_positive": off_run_positive,
                 "developer_project_suspected": developer_suspected,
                 "weighted": weighted,
                 "n_labelled_without_sample_weight": n_defaulted_weight,
@@ -1410,38 +1700,43 @@ def evaluate(
                 ),
                 "merge_precision_unweighted": merge_pooled.rate,
                 "weight_positive_total": weight_positive_total,
+                "weight_positive_on_run": weight_positive_on_run,
+                "weight_positive_off_run": weight_positive_total - weight_positive_on_run,
+                "score_line_basis": "shares below divide by the ON-RUN positive weight: a pair the"
+                                    " run never stored has no score to compare against T_lo",
                 "weight_positive_below_t_lo": weight_positive_below_t_lo,
             "weight_positive_discarded": weight_positive_discarded,
             "positives_discarded_share": (
-                weight_positive_discarded / weight_positive_total
-                if weight_positive_total > 0 else None
+                weight_positive_discarded / weight_positive_on_run
+                if weight_positive_on_run > 0 else None
             ),
             "weight_positive_gated_to_band": weight_positive_gated,
             "positives_gated_to_band_share": (
-                weight_positive_gated / weight_positive_total
-                if weight_positive_total > 0 else None
+                weight_positive_gated / weight_positive_on_run
+                if weight_positive_on_run > 0 else None
             ),
                 "positives_below_t_lo_share": (
-                    weight_positive_below_t_lo / weight_positive_total
-                    if weight_positive_total > 0 else None
+                    weight_positive_below_t_lo / weight_positive_on_run
+                    if weight_positive_on_run > 0 else None
                 ),
                 "weight_positive_in_band": weight_positive_in_band,
                 "positives_in_band_share": (
-                    weight_positive_in_band / weight_positive_total
-                    if weight_positive_total > 0 else None
+                    weight_positive_in_band / weight_positive_on_run
+                    if weight_positive_on_run > 0 else None
                 ),
                 # Recall as the engine decided it, not as the score would have. The two lines
                 # above are functions of `t_lo`/`t_hi` alone; these are functions of the whole
                 # rule floor, and they are the ones a W4 verdict may quote.
                 "zone_recall": {
-                    "basis": "the zone decide_pair returned, gates and certificates included",
+                    "basis": "the zone decide_pair returned, gates and certificates included,"
+                             " over EVERY judged positive — the unstored ones as `off_run`",
                     "weight_positive_by_zone": dict(sorted(weight_positive_by_zone.items())),
                     **{
                         f"positives_in_{name}_zone_share": (
                             weight_positive_by_zone.get(name, 0.0) / weight_positive_total
                             if weight_positive_total > 0 else None
                         )
-                        for name in ("merge", "band", "reject", "veto")
+                        for name in ("merge", "band", "reject", "veto", OFF_RUN_ZONE)
                     },
                 },
             },
@@ -1466,6 +1761,7 @@ def evaluate(
                 "n_sealed": len(sealed),
                 "measured_on": "test (sealed)",
                 "chosen_by": "the settings row in force, not the threshold search",
+                "t_hi_by_stratum": dict(sorted(settings.t_hi_by_stratum.items())),
                 **holdout_at_settings,
             },
         }
@@ -2260,7 +2556,16 @@ def _eval_headline(report: EvalReport) -> list[str]:
                  f"   band {_pct(zone_recall['positives_in_band_zone_share'])}"
                  f"   reject {_pct(zone_recall['positives_in_reject_zone_share'])}"
                  f"   veto {_pct(zone_recall['positives_in_veto_zone_share'])}"
+                 f"   off-run {_pct(zone_recall['positives_in_off_run_zone_share'])}"
                  f"   [ZONE-based: what the engine actually did]" + marker)
+    merge_band = (zone_recall["positives_in_merge_zone_share"] or 0.0) + (
+        zone_recall["positives_in_band_zone_share"] or 0.0
+    )
+    lines.append(
+        f"                      merge+band {_pct(merge_band)} of ALL judged positives"
+        f" ({counts['n_labels_off_run_positive']} judged positives are off-run:"
+        f" the run never stored them, so no threshold can reach them)"
+    )
     t_hi = thresholds_json["t_hi"]
     lines.append(
         f"thresholds (dev)      T_hi {'unattainable' if t_hi is None else f'{t_hi:.12g}'}"
@@ -2276,6 +2581,20 @@ def _eval_headline(report: EvalReport) -> list[str]:
         f"  precision {_pct(holdout.get('precision'))}"
         f"  CP LB {_pct(holdout.get('clopper_pearson_lb'))}"
         f"  min stratum {_pct(holdout.get('min_stratum_precision'))}"
+        f"   [the SEARCHED cut, not the shipped table]"
+    )
+    in_force = sections["holdout_at_settings"]
+    propose_only = sorted(
+        key for key, value in (in_force.get("t_hi_by_stratum") or {}).items() if value is None
+    )
+    lines.append(
+        f"holdout at the settings in force   n {in_force['n_sealed']}"
+        f"  merge set {in_force.get('n_merge', 0)}"
+        f"  precision {_pct(in_force.get('precision'))}"
+        f"  CP LB {_pct(in_force.get('clopper_pearson_lb'))}"
+        f"  min cell {_pct(in_force.get('min_stratum_precision'))}"
+        f"  floor ok {in_force.get('stratum_floor_ok')}"
+        f"   [E48 table applied; propose-only: {', '.join(propose_only) or 'none'}]"
     )
     fidelity = sections["fidelity"]["pooled"]
     lines.append(f"judge fidelity        cheap-vs-gold {_pct(fidelity['agreement'])}"
@@ -2285,6 +2604,20 @@ def _eval_headline(report: EvalReport) -> list[str]:
     lines.append(f"judge-vs-engine       {'   '.join(parts) or '-'}")
     nonresponse = sections["sample"]["nonresponse"]
     design = sections["sample"]["design"]
+    conflicts = sections["sample"].get("frame_conflicts") or []
+    if conflicts:
+        lines.append(
+            f"frame conflicts       {len(conflicts)} strata whose newest frame cannot hold the"
+            f" pairs drawn in it — population taken from the widest frame that named them:"
+        )
+        for body in conflicts[:6]:
+            lines.append(
+                f"                        {body['stratum']}  drawn {body['n_selected_pooled']}"
+                f"  newest frame {body['population_newest_frame']}"
+                f"  used {body['population_used']}"
+                f"  weight {body['weight_used']:.2f}"
+                f" (newest frame would give {body['weight_under_newest_frame']:.2f})"
+            )
     lines.append(
         f"design                weights {design.get('weight_min')}-{design.get('weight_max')}"
         f"  effective n {design.get('n_effective', 0.0):.1f} of {design.get('n', 0)}"
