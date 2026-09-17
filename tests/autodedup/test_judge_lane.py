@@ -200,6 +200,7 @@ def lane(monkeypatch: pytest.MonkeyPatch, cohort: Path):
             dry_run=False,
         ),
         "pod_starts": [],
+        "pod_args": [],
         "pod_stops": [],
         "receipt_dirs": [],
         "oss_base_urls": [],
@@ -218,8 +219,9 @@ def lane(monkeypatch: pytest.MonkeyPatch, cohort: Path):
     monkeypatch.setattr(judge_lane, "llm_client", lambda conn: state["client"])
     monkeypatch.setattr(judge_lane, "image_store", lambda: state["r2"])
 
-    def fake_pod_start(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
-        state["pod_starts"].append((model, gpu))
+    def fake_pod_start(parsed: Any, out_dir: Path | None = None) -> Any:
+        state["pod_starts"].append((parsed.oss_model, parsed.oss_gpu))
+        state["pod_args"].append(parsed)
         state["receipt_dirs"].append(out_dir)
         pod = state["pod"]
         pod.started_at = judge_lane.CLOCK()   # as `launch_vllm_pod` stamps a real handle
@@ -1077,7 +1079,7 @@ def test_oss_draws_exactly_the_pairs_the_vision_tier_would(lane, tmp_path: Path)
 def test_oss_sends_the_vision_prompt_to_the_pod_model(lane, tmp_path: Path) -> None:
     out = tmp_path / "out"
     summary = lane(out, export_run="1", tier="oss", n=4, max_usd=5, workers=1)
-    assert lane.state["pod_starts"] == [(judge_lane.MODEL_OSS, None)]
+    assert lane.state["pod_starts"] == [(judge_lane.MODEL_OSS, ())]
     assert lane.calls
     for call in lane.calls:
         # The NAMESPACED id, which is what keeps `oss:Qwen/...` from routing to Alibaba's
@@ -1159,8 +1161,8 @@ def test_the_preflight_estimate_counts_the_boot_it_has_already_paid_for(
     boot_s = 600.0
     real_start = judge_lane.pod_start
 
-    def slow_boot(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
-        pod = real_start(model, gpu, out_dir)
+    def slow_boot(parsed: Any, out_dir: Path | None = None) -> Any:
+        pod = real_start(parsed, out_dir)
         pod.started_at -= boot_s   # as if the launch stamp were ten minutes old
         return pod
 
@@ -1200,7 +1202,7 @@ def test_a_pod_that_never_boots_still_writes_the_summary(
 ) -> None:
     """The one path that can burn 25 minutes of rental and produce no verdict. `_rails`' rule
     holds here too: the artifact is the evidence, so it lands BEFORE the exception."""
-    def no_capacity(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
+    def no_capacity(parsed: Any, out_dir: Path | None = None) -> Any:
         raise RuntimeError("no capacity for any eligible gpu")
 
     monkeypatch.setattr(judge_lane, "pod_start", no_capacity)
@@ -1342,6 +1344,13 @@ class FakePodModule:
         self.calls.append(("terminate", {"handle": handle, **kwargs}))
 
 
+def oss_args(**overrides: Any) -> judge_lane.JudgeArgs:
+    """The parsed args a pod boot reads, built the way the lane builds them."""
+    args = {"export_run": "1", "tier": "oss", "max_usd": "5"}
+    args.update({key: str(value) for key, value in overrides.items()})
+    return judge_lane.parse_args(args)
+
+
 @pytest.fixture()
 def pod_module(monkeypatch: pytest.MonkeyPatch) -> FakePodModule:
     module = FakePodModule()
@@ -1353,7 +1362,7 @@ def pod_module(monkeypatch: pytest.MonkeyPatch) -> FakePodModule:
 def test_pod_start_launches_waits_and_smokes_before_a_pair_is_judged(
     pod_module: FakePodModule,
 ) -> None:
-    handle = judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+    handle = judge_lane.pod_start(oss_args())
     assert handle is pod_module.handle
     assert [name for name, _ in pod_module.calls] == ["launch", "wait_ready", "smoke_chat"]
     assert pod_module.calls[0][1]["model_id"] == judge_lane.MODEL_OSS
@@ -1362,18 +1371,57 @@ def test_pod_start_launches_waits_and_smokes_before_a_pair_is_judged(
 
 
 def test_a_named_gpu_becomes_the_first_preference(pod_module: FakePodModule) -> None:
-    judge_lane.pod_start(judge_lane.MODEL_OSS, "NVIDIA L40S")
-    assert pod_module.calls[0][1]["gpu_preference"] == ("NVIDIA L40S",)
+    judge_lane.pod_start(oss_args(oss_gpu="L40S"))
+    assert pod_module.calls[0][1]["gpu_preference"] == ("L40S",)
+
+
+def test_the_gpu_list_and_the_cloud_order_reach_the_launch_verbatim(
+    pod_module: FakePodModule,
+) -> None:
+    """One `k=v` holds the whole preference list (`args` splits on commas, so the list is
+    space-separated), and the clouds are walked in the order asked for: the big cards a 30B
+    model needs are mostly in SECURE, the cheap ones in COMMUNITY."""
+    judge_lane.pod_start(oss_args(
+        oss_gpu="H100_80GB A100_80GB L40S A6000 A40",
+        oss_cloud="secure community",
+        oss_model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        oss_image="vllm/vllm-openai:v0.11.0",
+        oss_disk_gb="150",
+        oss_max_model_len="32768",
+        oss_max_usd_hr="3.5",
+        oss_tool_parser="hermes",
+    ))
+    launch = pod_module.calls[0][1]
+    assert launch["gpu_preference"] == (
+        "H100_80GB", "A100_80GB", "L40S", "A6000", "A40"
+    )
+    assert launch["cloud_types"] == ("SECURE", "COMMUNITY")
+    assert launch["model_id"] == "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
+    assert launch["image"] == "vllm/vllm-openai:v0.11.0"
+    assert launch["container_disk_gb"] == 150
+    assert launch["max_model_len"] == 32768
+    assert launch["max_price_per_hr"] == 3.5
+    assert launch["tool_call_parser"] == "hermes"
+
+
+def test_an_unnamed_pod_knob_is_left_to_the_pod_module(pod_module: FakePodModule) -> None:
+    """A default spelled out twice is a default that drifts: anything the args do not name is
+    absent from the call, so `oss_pod` stays the one place the 7B numbers live."""
+    judge_lane.pod_start(oss_args())
+    launch = pod_module.calls[0][1]
+    for key in ("cloud_types", "image", "container_disk_gb", "max_model_len",
+                "max_price_per_hr", "tool_call_parser"):
+        assert key not in launch
 
 
 def test_a_named_gpu_is_a_pin_not_a_ranking(pod_module: FakePodModule) -> None:
     """`select_gpus` ranks by default and only FILTERS under `strict`. An operator names a
     type for its price, so a silent fallback to the widened rung is the one substitution this
     arm cannot afford; unpinned, the default preference must stay a ranking."""
-    judge_lane.pod_start(judge_lane.MODEL_OSS, "NVIDIA RTX A5000")
+    judge_lane.pod_start(oss_args(oss_gpu="A5000"))
     assert pod_module.calls[0][1]["strict_gpu"] is True
     pod_module.calls.clear()
-    judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+    judge_lane.pod_start(oss_args())
     assert "strict_gpu" not in pod_module.calls[0][1]
 
 
@@ -1393,7 +1441,7 @@ def test_a_cancelled_boot_still_terminates_the_pod(
     monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
     monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
     with pytest.raises(KeyboardInterrupt):
-        judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+        judge_lane.pod_start(oss_args())
     assert pod_module_terminated(module) == [module.handle]
 
 
@@ -1407,7 +1455,7 @@ def test_a_pod_that_never_served_is_torn_down_on_the_way_out(
     monkeypatch.setattr(judge_lane, "pod_module", lambda: module)
     monkeypatch.setattr(judge_lane, "runpod_client", lambda: module.client)
     with pytest.raises(RuntimeError):
-        judge_lane.pod_start(judge_lane.MODEL_OSS, None)
+        judge_lane.pod_start(oss_args())
     assert pod_module_terminated(module) == [module.handle]
 
 
@@ -1510,7 +1558,7 @@ def test_the_lane_leaves_a_receipt_from_launch_until_the_pod_is_confirmed_gone(
     )
     pod_module.clear_receipt = lambda out_dir: cleared.append(Path(out_dir))  # type: ignore[method-assign]
 
-    judge_lane.pod_start(judge_lane.MODEL_OSS, None, tmp_path)
+    judge_lane.pod_start(oss_args(), tmp_path)
     assert written == [tmp_path]
     # Written before the wait, not after: the order of the recorded calls is the assertion.
     assert [name for name, _ in pod_module.calls] == ["launch", "wait_ready", "smoke_chat"]

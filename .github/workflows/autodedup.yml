@@ -89,7 +89,8 @@ name: "AUTODEDUP: engine lane"
 #             the paid verdicts pay for themselves twice: once as the programme's labels and
 #             once as the yardstick the free arm is measured against. The lane launches a
 #             RunPod GPU pod (`oss_model`, default Qwen/Qwen2.5-VL-7B-Instruct; `oss_gpu` pins
-#             a GPU type, otherwise the pod module picks), waits for it to serve, smokes it,
+#             an ordered list of GPU types and `oss_cloud` the clouds to walk, otherwise the
+#             pod module picks community boxes at its own default cap), waits for it to serve, smokes it,
 #             judges with `workers` in parallel and TERMINATES IT IN A FINALLY - on a clean
 #             pass, a budget stop, a dead provider or a crash alike - then VERIFIES the pod is
 #             gone with a second (idempotent) delete, so a teardown that failed reaches the
@@ -114,7 +115,10 @@ name: "AUTODEDUP: engine lane"
 #             for a pod call because there is no per-token price to record).
 #             `pairs_from=gold` restricts the draw to pairs a gold pass has ALREADY ruled on,
 #             which is what makes the comparison set maximal per dollar - a pair with no gold
-#             row can be judged for nothing and compared against nothing.
+#             row can be judged for nothing and compared against nothing. The gold rows are
+#             read at this run's own `judge_version` unless `gold_version=` names another:
+#             a NEW presentation (j2) is measured against the labels an OLD one produced,
+#             because the label belongs to the pair and not to the prompt.
 #             ONE oss MODEL PER judge_version. The store keys a judgement on (pair,
 #             judge_version, tier) and not on the model, so a second `oss_model` at the same
 #             `settings=<name>` / `model=<name>` pick a row under autodedup/settings/ and a fitted
@@ -187,8 +191,17 @@ name: "AUTODEDUP: engine lane"
 # stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
 # download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row) and,
 # for `tier=oss`, oss_model (the served model id, default Qwen/Qwen2.5-VL-7B-Instruct),
-# oss_gpu (a RunPod GPU type id, treated as a PIN - a pass fails rather than silently renting
-# a 6x dearer box) and oss_s_per_pair (the pre-flight seconds ONE CALL takes, which the
+# oss_gpu (SPACE-separated RunPod GPU types in preference order, e.g. `H100_80GB A100_80GB
+# L40S A6000 A40`, treated as a PIN - a pass fails rather than silently renting a 6x dearer
+# box - and matched against both the catalog id and the display name with `_` read as a
+# space), oss_cloud (SPACE-separated cloud types walked in order, `secure community`;
+# default community only, which is where the cheap cards are and where the 80 GB ones are
+# not), oss_max_usd_hr (lifts the $1.00/hr default cap, without which no 80 GB card is even
+# eligible), oss_image (the vLLM image tag - a model architecture newer than the image is a
+# rental that boots into a failure), oss_disk_gb (container disk; the weights AND the image
+# land on it, so re-do the sum for a bigger model), oss_max_model_len, oss_tool_parser (vLLM
+# `--tool-call-parser`; the forced tool call is how a verdict comes back at all) and
+# oss_s_per_pair (the pre-flight seconds ONE CALL takes, which the
 # estimate divides by `workers`; calibrate it from the previous pass's `latency_s_mean`, NOT
 # from `pod_wall_s_per_pair`, which is the rental divided by the pairs and is about a
 # `workers`th of it); score accepts export_run, cohort, settings, model, generation

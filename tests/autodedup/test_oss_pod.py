@@ -15,15 +15,25 @@ import pytest
 import requests
 
 from autodedup import oss_pod
-from scripts.runpod_client import GpuOption, NoCapacityError
+from dataclasses import replace
+
+from scripts.runpod_client import (
+    GpuOption,
+    NoCapacityError,
+    RunPodError,
+)
 
 
 # --- fakes -------------------------------------------------------------------------------
 
 
-def gpu(gpu_id: str, memory_gb: float, price: float) -> GpuOption:
+def gpu(
+    gpu_id: str, memory_gb: float, price: float, secure: float | None = None
+) -> GpuOption:
     return GpuOption(
-        id=gpu_id, display_name=gpu_id, memory_gb=memory_gb, community_price_per_hr=price
+        id=gpu_id, display_name=gpu_id, memory_gb=memory_gb, community_price_per_hr=price,
+        secure_price_per_hr=price * 1.5 if secure is None else secure,
+        community_cloud=True, secure_cloud=True,
     )
 
 
@@ -47,10 +57,13 @@ class FakeRunPod:
         self.launches: list[dict[str, Any]] = []
         self.terminated: list[str] = []
 
-    def eligible_gpus(self, *, max_price_per_hr: float | None = None) -> list[GpuOption]:
-        options = [g for g in self._catalog
-                   if max_price_per_hr is None or g.community_price_per_hr <= max_price_per_hr]
-        return sorted(options, key=lambda g: g.community_price_per_hr)
+    def eligible_gpus(
+        self, *, max_price_per_hr: float | None = None, cloud_type: str = "COMMUNITY"
+    ) -> list[GpuOption]:
+        options = [g for g in self._catalog if g.offered_in(cloud_type)]
+        options = [g for g in options
+                   if max_price_per_hr is None or g.price_per_hr(cloud_type) <= max_price_per_hr]
+        return sorted(options, key=lambda g: g.price_per_hr(cloud_type))
 
     def launch_pod(self, **kwargs: Any) -> dict[str, Any]:
         self.launches.append(kwargs)
@@ -459,3 +472,77 @@ def test_the_reap_cli_is_silent_success_without_a_runpod_key(tmp_path, monkeypat
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
     assert oss_pod.main(["--reap", str(tmp_path / "pod.json")]) == 0
     assert "nothing to reap" in capsys.readouterr().out
+
+
+# --- the cloud walk ---------------------------------------------------------------------
+
+
+def test_select_gpus_prices_and_ranks_in_the_cloud_it_is_asked_for() -> None:
+    client = FakeRunPod(catalog=[gpu("NVIDIA A40", 48, 0.35, secure=0.49)])
+    community = oss_pod.select_gpus(client, ("a40",), cloud_type="COMMUNITY")
+    secure = oss_pod.select_gpus(client, ("a40",), cloud_type="SECURE")
+    assert community[0].price_per_hr("COMMUNITY") == 0.35
+    assert secure[0].price_per_hr("SECURE") == 0.49
+
+
+def test_select_gpus_lets_the_caller_lift_the_price_cap_for_a_bigger_card() -> None:
+    """The 7B default cap of $1/hr excludes every 80 GB card, which is the whole rung a 30B
+    model needs — so the cap is an argument, not a constant the operator cannot reach."""
+    catalog = [gpu("NVIDIA A100 80GB PCIe", 80, 1.19, secure=1.59)]
+    client = FakeRunPod(catalog=catalog)
+    with pytest.raises(RunPodError):
+        oss_pod.select_gpus(client, ("a100",), cloud_type="COMMUNITY")
+    options = oss_pod.select_gpus(
+        client, ("a100",), cloud_type="COMMUNITY", max_price_per_hr=2.0
+    )
+    assert [g.id for g in options] == ["NVIDIA A100 80GB PCIe"]
+
+
+def test_a_gpu_pattern_written_with_underscores_still_matches_the_catalog() -> None:
+    """RunPod writes the same card both ways — `H100_80GB` in the console, `NVIDIA H100 80GB
+    HBM3` in the catalog — and a pin that silently matches nothing is a pin that does not
+    protect the price it was written for."""
+    client = FakeRunPod(catalog=[gpu("NVIDIA H100 80GB HBM3", 80, 2.69, secure=3.49)])
+    options = oss_pod.select_gpus(
+        client, ("H100_80GB",), strict=True, cloud_type="COMMUNITY", max_price_per_hr=3.0
+    )
+    assert [g.id for g in options] == ["NVIDIA H100 80GB HBM3"]
+
+
+def test_launch_walks_the_clouds_in_the_order_given() -> None:
+    client = FakeRunPod(
+        catalog=[gpu("NVIDIA A40", 48, 0.35, secure=0.49)],
+        no_capacity=("NVIDIA A40",),
+    )
+    with pytest.raises(NoCapacityError):
+        oss_pod.launch_vllm_pod(
+            client, gpu_preference=("a40",), cloud_types=("SECURE", "COMMUNITY")
+        )
+    assert [call["cloud_type"] for call in client.launches] == ["SECURE", "COMMUNITY"]
+
+
+def test_launch_stamps_the_cloud_it_actually_rented_in() -> None:
+    client = FakeRunPod(catalog=[gpu("NVIDIA A40", 48, 0.35, secure=0.49)])
+    handle = oss_pod.launch_vllm_pod(
+        client, gpu_preference=("a40",), cloud_types=("SECURE",), container_disk_gb=150,
+    )
+    assert handle.cloud_type == "SECURE"
+    assert client.launches[0]["container_disk_gb"] == 150
+
+
+def test_launch_keeps_looking_when_a_cloud_lists_nothing_big_enough() -> None:
+    """A cloud with no eligible listing is not a capacity miss, and it must not end a search
+    another cloud can still answer."""
+    small = gpu("NVIDIA A40", 48, 0.35, secure=0.49)
+    client = FakeRunPod(catalog=[replace(small, secure_cloud=False)])
+    handle = oss_pod.launch_vllm_pod(
+        client, gpu_preference=("a40",), cloud_types=("SECURE", "COMMUNITY")
+    )
+    assert handle.cloud_type == "COMMUNITY"
+
+
+def test_an_unknown_cloud_type_is_refused_before_anything_is_rented() -> None:
+    client = FakeRunPod()
+    with pytest.raises(RunPodError):
+        oss_pod.launch_vllm_pod(client, cloud_types=("HYBRID",))
+    assert client.launches == []

@@ -46,7 +46,7 @@ from typing import Any, Callable, Iterator, Sequence
 
 import requests
 
-from scripts.runpod_client import GpuOption, NoCapacityError, RunPodError
+from scripts.runpod_client import CLOUD_TYPES, GpuOption, NoCapacityError, RunPodError
 
 LOG = logging.getLogger(__name__)
 
@@ -60,6 +60,10 @@ DEFAULT_GPU_PREFERENCE: tuple[str, ...] = ("a5000", "3090", "a40", "a6000")
 EXCLUDED_GPU_PATTERNS: tuple[str, ...] = ("4090",)
 MIN_GPU_MEMORY_GB: float = 24.0
 MAX_PRICE_PER_HR: float = 1.00
+# Where to look, in order. COMMUNITY alone is what this lane shipped with; the big cards a
+# 30B VL model needs (H100, A100 80GB) sit mostly in SECURE, so the cloud is now a LIST the
+# caller orders — availability first or price first, its choice, never a silent substitution.
+DEFAULT_CLOUD_TYPES: tuple[str, ...] = ("COMMUNITY",)
 
 HTTP_PORT: int = 8000
 # RunPod fronts an exposed HTTP port at this host; there is no other way in (no public IP on
@@ -123,6 +127,7 @@ class PodHandle:
     started_at: float
     model_id: str = DEFAULT_MODEL_ID
     dry_run: bool = False
+    cloud_type: str = "COMMUNITY"
 
 
 def build_vllm_args(
@@ -171,6 +176,9 @@ def select_gpus(
     preference: Sequence[str] = DEFAULT_GPU_PREFERENCE,
     *,
     strict: bool = False,
+    cloud_type: str = "COMMUNITY",
+    max_price_per_hr: float = MAX_PRICE_PER_HR,
+    min_memory_gb: float = MIN_GPU_MEMORY_GB,
 ) -> list[GpuOption]:
     """24 GB+ community boxes, preferred types first and cheapest-first inside each rung.
 
@@ -183,33 +191,40 @@ def select_gpus(
     ($0.16/hr A5000 out of capacity -> $0.98/hr on the widened rung), so a pin that cannot be
     filled fails loudly instead."""
     options = [
-        g for g in client.eligible_gpus(max_price_per_hr=MAX_PRICE_PER_HR)
-        if g.memory_gb >= MIN_GPU_MEMORY_GB and not _matches(g, EXCLUDED_GPU_PATTERNS)
+        g for g in client.eligible_gpus(
+            max_price_per_hr=max_price_per_hr, cloud_type=cloud_type
+        )
+        if g.memory_gb >= min_memory_gb and not _matches(g, EXCLUDED_GPU_PATTERNS)
     ]
     if strict and preference:
         options = [g for g in options if _matches(g, preference)]
         if not options:
             raise RunPodError(
-                f"no eligible GPU matches the pinned preference {list(preference)} "
-                f"(strict); drop the pin to allow any >={MIN_GPU_MEMORY_GB:.0f} GB box"
+                f"no eligible {cloud_type} GPU matches the pinned preference "
+                f"{list(preference)} (strict); drop the pin to allow any "
+                f">={min_memory_gb:.0f} GB box"
             )
     if not options:
         raise RunPodError(
-            f"no community GPU with >={MIN_GPU_MEMORY_GB:.0f} GB under "
-            f"${MAX_PRICE_PER_HR:.2f}/hr is listed right now"
+            f"no {cloud_type} GPU with >={min_memory_gb:.0f} GB under "
+            f"${max_price_per_hr:.2f}/hr is listed right now"
         )
     ranks = {pattern.lower(): i for i, pattern in enumerate(preference)}
 
     def rank(gpu: GpuOption) -> tuple[int, float]:
         hits = [ranks[p] for p in ranks if _matches(gpu, (p,))]
-        return (min(hits) if hits else len(ranks), gpu.community_price_per_hr)
+        return (min(hits) if hits else len(ranks), gpu.price_per_hr(cloud_type))
 
     return sorted(options, key=rank)
 
 
 def _matches(gpu: GpuOption, patterns: Sequence[str]) -> bool:
+    """Substring match over id AND display name, with `_` read as a space: RunPod's own GPU
+    ids are written both ways ("H100_80GB" in the console, "NVIDIA H100 80GB HBM3" in the
+    catalog), and an operator who types one and silently matches nothing gets the default
+    rung at the default price."""
     haystack = f"{gpu.id} {gpu.display_name}".lower()
-    return any(p.lower() in haystack for p in patterns)
+    return any(p.lower().replace("_", " ") in haystack for p in patterns)
 
 
 def build_launch_request(
@@ -219,6 +234,8 @@ def build_launch_request(
     gpu_type_id_preference: Sequence[str],
     start_cmd: list[str],
     env_keys: Sequence[str] = (),
+    cloud_types: Sequence[str] = DEFAULT_CLOUD_TYPES,
+    container_disk_gb: int = CONTAINER_DISK_GB,
 ) -> dict[str, Any]:
     """What `launch_pod` will send, minus the secret VALUES — for the dry run and the log
     line. Env names only ever appear here; values never do.
@@ -231,8 +248,9 @@ def build_launch_request(
         "name": name,
         "image": image,
         "gpu_type_id_preference": list(gpu_type_id_preference),
+        "cloud_types": list(cloud_types),
         "ports": [f"{HTTP_PORT}/http"],
-        "container_disk_gb": CONTAINER_DISK_GB,
+        "container_disk_gb": container_disk_gb,
         "volume_gb": VOLUME_GB,
         "start_cmd": start_cmd,
         "env_keys": list(env_keys),
@@ -245,9 +263,13 @@ def launch_vllm_pod(
     model_id: str = DEFAULT_MODEL_ID,
     gpu_preference: Sequence[str] = DEFAULT_GPU_PREFERENCE,
     strict_gpu: bool = False,
+    cloud_types: Sequence[str] = DEFAULT_CLOUD_TYPES,
+    max_price_per_hr: float = MAX_PRICE_PER_HR,
     image: str = DEFAULT_IMAGE,
     max_model_len: int = DEFAULT_MAX_MODEL_LEN,
     max_images: int = DEFAULT_MAX_IMAGES,
+    tool_call_parser: str = DEFAULT_TOOL_CALL_PARSER,
+    container_disk_gb: int = CONTAINER_DISK_GB,
     hf_token: str | None = None,
     dry_run: bool = False,
     name: str = "autodedup-oss-judge",
@@ -255,6 +277,11 @@ def launch_vllm_pod(
     now: Callable[[], float] = time.time,
 ) -> PodHandle:
     """Rent one pod serving `model_id`, cheapest eligible GPU with capacity first.
+
+    `cloud_types` is walked in the order given, the whole GPU list inside each: community
+    supply is peer-hosted and the big cards a 30B model needs are usually only in secure, so
+    "secure, then community" and "community, then secure" are both legitimate orders and the
+    caller states which it wants. Capacity is the only thing that advances a rung.
 
     Only `NoCapacityError` advances to the next GPU type; anything else (bad image, auth, a
     balance too low to rent) is not GPU-specific and fails the launch immediately rather than
@@ -270,8 +297,13 @@ def launch_vllm_pod(
         model_id=model_id,
         max_model_len=max_model_len,
         max_images=max_images,
+        tool_call_parser=tool_call_parser,
         command_prefix=command_prefix,
     )
+    clouds = tuple(c.upper() for c in cloud_types) or DEFAULT_CLOUD_TYPES
+    for cloud in clouds:
+        if cloud not in CLOUD_TYPES:
+            raise RunPodError(f"unknown cloud type {cloud!r}; expected {CLOUD_TYPES}")
     token = hf_token or os.environ.get("HF_TOKEN") or ""
     env = {"HF_TOKEN": token} if token else None
 
@@ -279,42 +311,61 @@ def launch_vllm_pod(
         request = build_launch_request(
             name=name, image=image, gpu_type_id_preference=gpu_preference,
             start_cmd=start_cmd, env_keys=sorted(env or ()),
+            cloud_types=clouds, container_disk_gb=container_disk_gb,
         )
         LOG.info("DRY RUN launch request: %s", json.dumps(request, sort_keys=True))
         return PodHandle(
             pod_id="dry-run", base_url="https://dry-run.invalid", gpu="dry-run",
             usd_per_hr=0.0, started_at=0.0, model_id=model_id, dry_run=True,
+            cloud_type=clouds[0],
         )
 
-    last_error: NoCapacityError | None = None
-    for gpu in select_gpus(client, gpu_preference, strict=strict_gpu):
-        LOG.info("launching %s on %s ($%.3f/hr)", model_id, gpu.id, gpu.community_price_per_hr)
+    last_error: BaseException | None = None
+    for cloud in clouds:
         try:
-            pod = client.launch_pod(
-                name=name,
-                image=image,
-                gpu_type_id=gpu.id,
-                start_cmd=start_cmd,
-                container_disk_gb=CONTAINER_DISK_GB,
-                volume_gb=VOLUME_GB,
-                env=env,
-                ports=[f"{HTTP_PORT}/http"],
+            options = select_gpus(
+                client, gpu_preference, strict=strict_gpu, cloud_type=cloud,
+                max_price_per_hr=max_price_per_hr,
             )
-        except NoCapacityError as exc:
-            LOG.warning("no capacity for %s, trying the next option: %s", gpu.id, exc)
+        except RunPodError as exc:
+            # Nothing of this size is even LISTED in this cloud: not a capacity miss, but it
+            # must not end the search while another cloud is still to try.
+            LOG.warning("no eligible GPU listed in %s: %s", cloud, exc)
             last_error = exc
             continue
-        pod_id = str(pod["id"])
-        handle = PodHandle(
-            pod_id=pod_id,
-            base_url=PROXY_HOST_TEMPLATE.format(pod_id=pod_id, port=HTTP_PORT),
-            gpu=gpu.id,
-            usd_per_hr=float(pod.get("costPerHr") or gpu.community_price_per_hr),
-            started_at=now(),
-            model_id=model_id,
-        )
-        LOG.info("pod %s up at %s ($%.3f/hr)", handle.pod_id, handle.base_url, handle.usd_per_hr)
-        return handle
+        for gpu in options:
+            price = gpu.price_per_hr(cloud)
+            LOG.info("launching %s on %s/%s ($%.3f/hr)", model_id, cloud, gpu.id, price)
+            try:
+                pod = client.launch_pod(
+                    name=name,
+                    image=image,
+                    gpu_type_id=gpu.id,
+                    start_cmd=start_cmd,
+                    container_disk_gb=container_disk_gb,
+                    volume_gb=VOLUME_GB,
+                    cloud_type=cloud,
+                    env=env,
+                    ports=[f"{HTTP_PORT}/http"],
+                )
+            except NoCapacityError as exc:
+                LOG.warning("no capacity for %s/%s, trying the next option: %s",
+                            cloud, gpu.id, exc)
+                last_error = exc
+                continue
+            pod_id = str(pod["id"])
+            handle = PodHandle(
+                pod_id=pod_id,
+                base_url=PROXY_HOST_TEMPLATE.format(pod_id=pod_id, port=HTTP_PORT),
+                gpu=gpu.id,
+                usd_per_hr=float(pod.get("costPerHr") or price),
+                started_at=now(),
+                model_id=model_id,
+                cloud_type=cloud,
+            )
+            LOG.info("pod %s up at %s ($%.3f/hr, %s)",
+                     handle.pod_id, handle.base_url, handle.usd_per_hr, cloud)
+            return handle
     assert last_error is not None
     raise last_error
 
@@ -500,6 +551,7 @@ def write_receipt(handle: PodHandle, out_dir: Path) -> Path:
         "usd_per_hr": handle.usd_per_hr,
         "base_url": handle.base_url,
         "model_id": handle.model_id,
+        "cloud_type": handle.cloud_type,
         "started_at": handle.started_at,
     }, indent=2, sort_keys=True), encoding="utf-8")
     return path
