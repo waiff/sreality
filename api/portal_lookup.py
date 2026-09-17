@@ -19,7 +19,9 @@ pipeline is property-grain, so membership is read off `l.property_id`. It
 likewise returns the property's **collection memberships** (`collection_ids`,
 rule #18) so the panel's one-click monitoring toggle knows whether the property
 is already in the monitoring collection, writing through the existing
-bearer-gated `POST/DELETE /collections/{id}/properties`.
+bearer-gated `POST/DELETE /collections/{id}/properties`. And whether the caller
+has **dismissed** the property (`dismissed`, migration 536), for the panel's
+hide toggle, which writes through `POST/DELETE /dismissals`.
 
 Rows come back keyed by column name (dict_row) — no positional index math, so
 projecting one more column is a one-line change that can't silently misalign.
@@ -138,7 +140,9 @@ SELECT
     pc.color AS pipeline_stage_color,
     (SELECT coalesce(array_agg(cp.collection_id ORDER BY cp.collection_id), array[]::bigint[])
        FROM collection_properties cp
-      WHERE cp.property_id = tgt.property_id) AS collection_ids
+      WHERE cp.property_id = tgt.property_id) AS collection_ids,
+    EXISTS (SELECT 1 FROM property_dismissals_public pd
+             WHERE pd.property_id = tgt.property_id) AS dismissed
 FROM tgt
 -- A LATERAL, not a plain join: RLS is PLURAL (current_account_ids() returns every
 -- account the caller belongs to), so a multi-membership caller could match more
@@ -300,11 +304,16 @@ def lookup_portal_listings(
         entry["collection_ids"] = (
             list(acct.get("collection_ids") or []) if row["property_id"] is not None else None
         )
+        # Dismissal (migration 536) is property-grain too: the panel's hide toggle.
+        entry["dismissed"] = (
+            bool(acct.get("dismissed")) if row["property_id"] is not None else None
+        )
         by_key[(row["source"], row["source_id"])] = entry
 
     fallback = lambda it: {  # noqa: E731 — tiny shape for the (rare) missing row
         "source": it.source, "source_id": it.source_id, "found": False,
         "latest_estimation": None, "pipeline": None, "collection_ids": None,
+        "dismissed": None,
         "fond_per_m2_czk_default": DEFAULT_FOND_CZK_PER_M2,
     }
     return {"data": [by_key.get((it.source, it.source_id), fallback(it)) for it in items]}

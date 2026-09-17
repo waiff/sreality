@@ -20,6 +20,7 @@ import type {
   AuthState,
   BillingMe,
   CollectionWriteResult,
+  DismissalWriteResult,
   EstimationRun,
   ExtCollection,
   ExtNote,
@@ -152,6 +153,8 @@ interface PanelState {
   collections: ExtCollection[] | null;
   /* True while a collection add/remove is in flight (disables the control). */
   collectionBusy: boolean;
+  /* True while a dismiss / undo is in flight (disables the control). */
+  dismissBusy: boolean;
   /* The property's operator notes (null = not loaded). Per-property, not cached. */
   notes: ExtNote[] | null;
   /* True while a note save is in flight (disables the add box). */
@@ -320,6 +323,20 @@ function bellIconSvg(filled: boolean): string {
     'stroke-linejoin="round" aria-hidden="true">' +
     `<path d="M6 9 a6 6 0 0 1 12 0 c0 5 1.5 6.5 2.5 7.5 H3.5 C4.5 15.5 6 14 6 9 Z" fill="${f}"/>` +
     '<path d="M10 20 a2 2 0 0 0 4 0"/></svg>'
+  );
+}
+
+/* The SPA's <EyeOffIcon> (icons.tsx) hand-reproduced — the extension can't
+ * import the SPA's React component. `filled` = dismissed. */
+function eyeOffIconSvg(filled: boolean): string {
+  const fill = filled ? ' fill="currentColor" fill-opacity="0.25"' : '';
+  return (
+    '<svg class="collection-icon" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M2.5 12 C5 7.5 8.3 5.5 12 5.5 S19 7.5 21.5 12 C19 16.5 15.7 18.5 12 18.5 ' +
+    `S5 16.5 2.5 12 Z"${fill}/>` +
+    '<circle cx="12" cy="12" r="3"/><line x1="4" y1="20" x2="20" y2="4"/></svg>'
   );
 }
 
@@ -840,6 +857,7 @@ function mountPanel(): {
     row.className = 'actions-bar';
     renderPipelineToggle(row, state);       // the funnel — sole pipeline affordance (rule #22)
     renderMonitoringToggle(row, state);     // separate, adjacent collections/monitoring control
+    renderDismissToggle(row, state);        // hide from discovery (migration 536)
     renderAppLink(row, state);
     if (row.childElementCount > 0) body.appendChild(row);
   }
@@ -1027,6 +1045,29 @@ function mountPanel(): {
     pill.appendChild(remove);
 
     container.appendChild(pill);
+  }
+
+  /* Dismiss control for the listing's property (migration 536) — the SPA's
+   * DismissButton, one click either way (hiding destroys nothing). Absent when
+   * there is no property, when the API predates the field, and while the
+   * property is in the pipeline (the two are mutually exclusive server-side). */
+  function renderDismissToggle(container: HTMLElement, state: PanelState): void {
+    const l = state.listing;
+    if (l == null || !l.found || l.property_id == null) return;
+    if (l.dismissed == null || l.pipeline?.in_pipeline) return;
+    const on = l.dismissed;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dismiss-toggle' + (on ? ' dismiss-toggle--on' : '');
+    btn.disabled = state.dismissBusy;
+    btn.setAttribute('aria-pressed', String(on));
+    btn.title = on ? 'Skryto — znovu zobrazit' : 'Skrýt nemovitost';
+    btn.innerHTML = eyeOffIconSvg(on);
+    const label = document.createElement('span');
+    label.textContent = on ? 'Skryto' : 'Skrýt';
+    btn.appendChild(label);
+    btn.onclick = () => { void onToggleDismiss(); };
+    container.appendChild(btn);
   }
 
   /* Operator notes for the listing's property (rule #18) — shown for ANY listing
@@ -1729,6 +1770,52 @@ async function onTogglePipeline(): Promise<void> {
         },
     { pipelineBusy: false, pipelineConfirmRemove: false },
   ));
+  // Adding a card lifts the caller's dismissal server-side (the pipeline wins).
+  if (!wasIn) setState(applyDismissedIf(propertyId, false, {}));
+}
+
+/* Apply a dismissal update only if the panel STILL represents the property the
+ * write was started for — the same identity guard as the two toggles above. */
+function applyDismissedIf(
+  propertyId: number, dismissed: boolean, patch: Partial<PanelState>,
+): (prev: PanelState) => PanelState {
+  return (prev) =>
+    prev.listing?.property_id === propertyId
+      ? {
+          ...prev,
+          ...patch,
+          listing: prev.listing.dismissed == null
+            ? prev.listing
+            : { ...prev.listing, dismissed },
+        }
+      : prev;
+}
+
+/* Hide / restore the listing's property. Optimistic flip → reconcile; revert +
+ * surface the reason on failure. Writes through the SAME /dismissals routes as
+ * the SPA. */
+async function onToggleDismiss(): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null || l.dismissed == null) return;
+  const propertyId = l.property_id;
+  const wasOn = l.dismissed;
+
+  setState(applyDismissedIf(propertyId, !wasOn, { dismissBusy: true, errorMessage: null }));
+
+  const res = await call<DismissalWriteResult>({
+    type: wasOn ? 'undismiss_property' : 'dismiss_property',
+    property_id: propertyId,
+  });
+
+  if (!res.ok) {
+    setState(applyDismissedIf(propertyId, wasOn, {
+      dismissBusy: false,
+      errorMessage: `Skrytí se nepodařilo uložit: ${friendlyDetail(res.detail)}`,
+    }));
+    return;
+  }
+
+  setState(applyDismissedIf(propertyId, !wasOn, { dismissBusy: false }));
 }
 
 /* Apply a collection-membership update only if the panel STILL represents the
@@ -2093,7 +2180,7 @@ export async function openPanel(
     renovationTouched: false,
     rent: null, costPerM2: null, price: null, renovation: null, busy: false,
     pipelineBusy: false, pipelineConfirmRemove: false, stages: cachedStages,
-    collections: cachedCollections, collectionBusy: false,
+    collections: cachedCollections, collectionBusy: false, dismissBusy: false,
     notes: null, noteBusy: false, quota: null, errorMessage: null,
     noteEditingId: null, noteConfirmDeleteId: null, noteRowBusy: false,
   };

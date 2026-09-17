@@ -910,3 +910,30 @@
 .panel--muted .p-head { background: var(--bg); }
 .panel--muted .p-tick { background: var(--ink-4); }
 .panel--muted .p-word { color: var(--ink-4); }
+
+/* ---- dismiss toggle (migration 536) ------------------------------------ */
+/* Same geometry as .collection-toggle, in ink rather than copper: hiding a
+   property is triage, not an action on the deal. */
+
+.dismiss-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.55rem;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  color: var(--ink-3);
+  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.dismiss-toggle:hover { color: var(--ink); border-color: var(--ink-3); }
+
+.dismiss-toggle--on { color: var(--ink); background: var(--bg-sunk); border-color: var(--ink-3); }
+
+.dismiss-toggle:disabled { opacity: 0.55; cursor: wait; }

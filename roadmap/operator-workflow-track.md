@@ -403,8 +403,10 @@ control. Not a special collection (collections are m2m groupings; see
   `lib/useDismissal` (list-aware optimistic hide, one sticky "Vrátit" toast,
   batched per-property state reads); `lib/optimisticCache.holdQueries` now
   shared with the pipeline cache; absent while the property is piped.
-- **W5 — Chrome extension** (next): the same control in the panel, state
-  carried on `POST /listings/lookup`.
+- **W5 — Chrome extension** (in progress): the panel's "Skrýt" / "Skryto"
+  toggle beside the monitoring bell, state as `dismissed` on
+  `POST /listings/lookup`, writes on `/dismissals`; the panel mirrors the
+  lift when a card is added.
 
 ### Phase U-ME: Manual rental estimates (next)
 
