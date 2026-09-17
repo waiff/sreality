@@ -69,6 +69,9 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   // (property_pipeline_public), resolved in queries.ts:resolvePipelinePrefilter
   // — there is no pipeline column on the browse read model to narrow on.
   'pipeline',
+  // Dismissed properties are excluded by the SOURCE, not a predicate:
+  // queries.ts:readSource reads the *_visible() twin unless it is set (mig 537).
+  'show_dismissed',
   // Price bounds are hand-coded (not the plain `.gte`/`.lte` auto-path) so they
   // can branch on `include_no_price`: when that toggle is on AND a bound is set,
   // the clause becomes `.or((price>=lo,price<=hi),price.is.null)` to keep

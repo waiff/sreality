@@ -8,12 +8,18 @@
  * we want pinned against accidental edits.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_FILTERS } from './filters';
+import { supabase } from './supabase';
 import {
   BROWSE_SELECT_COLUMNS,
   applyPrefilters,
+  buildBrowseStatsArgs,
+  fetchBrowseCount,
+  fetchListingsForCards,
+  fetchListingsForMap,
+  fetchListingsForTable,
   districtsFilterClause,
   effectiveBbox,
   effectiveSort,
@@ -485,5 +491,74 @@ describe('Browse select-lists carry the measure with its published basis', () =>
       expect(c, `${lane}: category_main`).toContain('category_main');
       expect(c, `${lane}: category_type`).toContain('category_type');
     }
+  });
+});
+
+/* Migration 537. Every Browse cohort read starts from ONE source: the
+ * relation's dismissal-aware twin by default (the exclusion happens
+ * server-side, under the caller's RLS — a dismissed set never rides in the
+ * URL), the plain relation only when the operator reveals dismissed ones. */
+describe('dismissed properties are hidden at the source', () => {
+  /* A PostgREST builder stand-in: every method chains, awaiting resolves. */
+  const builder = (): unknown => {
+    const p: unknown = new Proxy(() => {}, {
+      get: (_t, prop) =>
+        prop === 'then'
+          ? (resolve: (v: unknown) => void) => resolve({ data: [], error: null, count: 0 })
+          : () => p,
+    });
+    return p;
+  };
+  const spy = () => ({
+    rpc: vi.spyOn(supabase, 'rpc').mockImplementation(() => builder() as never),
+    from: vi.spyOn(supabase, 'from').mockImplementation(() => builder() as never),
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const revealed = { ...DEFAULT_FILTERS, showDismissed: true };
+  const mirror = { ...DEFAULT_FILTERS, portals: ['bazos'] };
+
+  it('reads the visible twins by default, for cards, table and count', async () => {
+    const s = spy();
+    await fetchListingsForCards(DEFAULT_FILTERS, DEFAULT_SORT, null);
+    await fetchListingsForTable(DEFAULT_FILTERS, DEFAULT_SORT, null);
+    await fetchBrowseCount(DEFAULT_FILTERS);
+    expect(s.rpc.mock.calls.map((c) => c[0])).toEqual([
+      'browse_list_visible', 'browse_list_visible', 'browse_list_visible',
+    ]);
+    expect(s.rpc.mock.calls[0].slice(1)).toEqual([{}, { get: true }]);
+    expect(s.rpc.mock.calls[2].slice(1)).toEqual([{}, { get: true, count: 'exact', head: true }]);
+    expect(s.from).not.toHaveBeenCalled();
+  });
+
+  it('reads the plain relation only when dismissed properties are revealed', async () => {
+    const s = spy();
+    await fetchListingsForCards(revealed, DEFAULT_SORT, null);
+    await fetchBrowseCount(revealed);
+    expect(s.from.mock.calls.map((c) => c[0])).toEqual(['browse_list', 'browse_list']);
+    expect(s.rpc).not.toHaveBeenCalled();
+  });
+
+  it('hides them on the listing-grain feed too', async () => {
+    const s = spy();
+    await fetchListingsForCards(mirror, DEFAULT_SORT, null);
+    expect(s.rpc.mock.calls.map((c) => c[0])).toEqual(['listing_feed_visible']);
+    await fetchListingsForCards({ ...mirror, showDismissed: true }, DEFAULT_SORT, null);
+    expect(s.from.mock.calls.map((c) => c[0])).toEqual(['listing_feed_public']);
+  });
+
+  it('tells the map cells and reads the map pins through the same twin', async () => {
+    const s = spy();
+    await fetchListingsForMap(DEFAULT_FILTERS);
+    const [cells, pins] = s.rpc.mock.calls;
+    expect(cells[0]).toBe('browse_map_cells');
+    expect((cells[1] as Record<string, unknown>).hide_dismissed).toBe(true);
+    expect(pins[0]).toBe('properties_map_visible');
+  });
+
+  it('puts the flag on the one Stats/map argument object', () => {
+    const resolved = { obec_ids_filter: null, property_ids_filter: null };
+    expect(buildBrowseStatsArgs(DEFAULT_FILTERS, resolved).hide_dismissed).toBe(true);
+    expect(buildBrowseStatsArgs(revealed, resolved).hide_dismissed).toBe(false);
   });
 });

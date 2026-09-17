@@ -1281,6 +1281,22 @@ renumber.** Navigate by area:
     a merge after the pipeline reconciler: a colliding active row is lifted (`merge`), every row
     re-points, and a survivor holding that account's pipeline card lifts the dismissal
     (`pipeline`). Unmerge is best-effort, as for the registry tables.
+    **Browse hides dismissed properties by default, server-side (migration 537).** Every other
+    Browse prefilter is an id ALLOWLIST sent as `.in(...)` in the GET URL; a dismissed set is an
+    exclusion that grows without bound, so it never leaves the database. Each Browse relation has
+    a dismissal-aware twin — `browse_list_visible()`, `properties_map_visible()`,
+    `listing_feed_visible()` — an inlinable SECURITY INVOKER SQL function (`NOT EXISTS` against
+    `property_dismissals_public`); functions rather than views because `browse_list` and
+    `properties_map_mv` are blue-green rebuilt (a view or policy on them would block the DROP or
+    vanish with it), and they return `browse_projection`'s row type, never the rebuilt
+    relation's. `browse_stats_properties` / `browse_map_cells` take one trailing
+    `hide_dismissed` flag (default false). The SPA's `queries.ts:readSource` is the one seam:
+    every cohort read starts from the twin unless `?dismissed=show` reveals them — a lens outside
+    preset identity, like the pipeline scope — and the sidebar says how many the cohort hides
+    (the difference of two cached totals, fetched only once something is dismissed). Merge mode
+    reads the same source: to merge a dismissed duplicate, reveal it first. Measured on
+    production with 20,000 dismissals stacked on the newest rows: card page 49 ms, exact count
+    115 ms (31 ms baseline), Stats no slower, map clusters +95 ms.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

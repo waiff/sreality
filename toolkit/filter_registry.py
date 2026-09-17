@@ -1521,6 +1521,23 @@ def _build_registry() -> dict[str, FilterDef]:
             agendas=frozenset({Agenda.BROWSE}),
             aliases=("withEstimates",),
         ),
+        FilterDef(
+            id="show_dismissed",
+            type=FilterType.BOOL,
+            pg_column=None,  # server-side: *_visible() sources + hide_dismissed (mig 537)
+            default=False,
+            description=(
+                "When false (the default), Browse hides every property the "
+                "caller has dismissed (property_dismissals_public, migration "
+                "536); true reveals them. BROWSE-only: a watchdog never "
+                "surfaces a dismissed property, and the estimation agent must "
+                "never see an operator's taste."
+            ),
+            category=CATEGORY_CURATION,
+            ui_control=UiControl.BOOLEAN,
+            agendas=frozenset({Agenda.BROWSE}),
+            aliases=("showDismissed",),
+        ),
 
         # --- city quality (BROWSE / WATCHDOG only — by design, the
         # --- estimation agent / comparables tool do not see these) -------

@@ -197,7 +197,7 @@ def test_the_map_rpc_carries_all_three_prefilter_id_spaces() -> None:
 def test_every_listing_grain_scope_takes_the_point_lane() -> None:
     """A listing-grain scope must never be aggregated by the property-grain RPC.
 
-    The relation swap (`listRelation` / `mapRelation` / `keysetTiebreak`) and the map's
+    The relation swap (`listSource` / `mapSource` / `keysetTiebreak`) and the map's
     lane choice both key on ONE predicate, `isListingGrain` — the single portal mirror
     and the broker scope. browse_map_cells aggregates the property-grain projection and
     matches `listing_ids_filter` against the REPRESENTATIVE listing, so routing a broker
@@ -214,7 +214,7 @@ def test_every_listing_grain_scope_takes_the_point_lane() -> None:
         "fetchListingsForMap's point-lane guard is no longer `isListingGrain(f)` "
         "— a listing-grain scope can reach the property-grain browse_map_cells lane."
     )
-    for fn in ("listRelation", "mapRelation", "keysetTiebreak"):
+    for fn in ("listSource", "mapSource", "keysetTiebreak"):
         decl = src[src.index(f"const {fn} = "):]
         decl = decl[: decl.index(";")]
         assert "isListingGrain(f)" in decl, (

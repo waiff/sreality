@@ -2146,6 +2146,26 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "nullable": false
     },
     {
+      "id": "show_dismissed",
+      "type": "bool",
+      "pg_column": null,
+      "default": false,
+      "description": "When false (the default), Browse hides every property the caller has dismissed (property_dismissals_public, migration 536); true reveals them. BROWSE-only: a watchdog never surfaces a dismissed property, and the estimation agent must never see an operator's taste.",
+      "category": "Curation",
+      "ui_control": "boolean",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": null,
+      "unit": null,
+      "basis": null,
+      "enum_values": null,
+      "aliases": [
+        "showDismissed"
+      ],
+      "nullable": false
+    },
+    {
       "id": "city_index_rules",
       "type": "city_index_rule_list",
       "pg_column": null,

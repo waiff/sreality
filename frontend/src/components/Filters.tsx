@@ -13,7 +13,12 @@ import type { MapySuggestion } from '@/lib/maps';
 import { CollapsibleGroup, ControlGroup, PickButton, Section } from '@/components/controls';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
-import { fetchNoPriceCount } from '@/lib/queries';
+import {
+  dismissalKeys,
+  fetchBrowseCount,
+  fetchDismissedCount,
+  fetchNoPriceCount,
+} from '@/lib/queries';
 import { FilterForm } from '@/components/FilterForm';
 import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
@@ -79,7 +84,7 @@ const FEATURES_KEYS = [
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const CURATION_KEYS = [
-  'pipeline', 'tags', 'withEstimates',
+  'pipeline', 'tags', 'withEstimates', 'showDismissed',
   'cityIndexRules', 'minCityPopulation', 'maxCityPopulation',
   'nearCityProximity',
   'nearPop5kmMin', 'nearPop15kmMin', 'nearJobs5kmMin', 'nearJobs15kmMin',
@@ -170,6 +175,68 @@ function IncludeNoPriceToggle({
             : on
               ? `Keeping ${fmt(count)} listing${count === 1 ? '' : 's'} with no listed price.`
               : `${fmt(count)} listing${count === 1 ? '' : 's'} with no listed price ${count === 1 ? 'is' : 'are'} hidden.`}
+      </p>
+    </div>
+  );
+}
+
+/* Curation "show dismissed" toggle (migration 537). Dismissed properties are
+ * hidden by default; the hint says how many the CURRENT cohort is hiding — the
+ * difference of the two cohort totals, one of which is the header's own cached
+ * count. Nothing extra is fetched until the caller has dismissed something, and
+ * an approximate total yields no number rather than a wrong one. */
+function ShowDismissedToggle({
+  filters,
+  onChange,
+}: {
+  filters: ListingFilters;
+  onChange: (next: ListingFilters) => void;
+}) {
+  const on = filters.showDismissed;
+  const anyQ = useQuery({
+    queryKey: dismissalKeys.count,
+    queryFn: fetchDismissedCount,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const hasAny = (anyQ.data ?? 0) > 0;
+  const totalWith = (showDismissed: boolean) => {
+    const f = { ...filters, showDismissed };
+    return {
+      queryKey: ['browse-count', f],
+      queryFn: () => fetchBrowseCount(f),
+      enabled: hasAny,
+      placeholderData: <T,>(prev: T) => prev,
+      staleTime: 60_000,
+    };
+  };
+  const hiddenQ = useQuery(totalWith(false));
+  const shownQ = useQuery(totalWith(true));
+  const count =
+    hiddenQ.data?.precise && shownQ.data?.precise
+      ? shownQ.data.value - hiddenQ.data.value
+      : null;
+  const fmt = (n: number) => n.toLocaleString('cs-CZ');
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm text-[var(--color-ink-2)]">Show dismissed properties</span>
+        <PickButton
+          on={on}
+          ariaLabel="Show dismissed properties"
+          onClick={() => onChange({ ...filters, showDismissed: !on })}
+        >
+          {on ? 'on' : 'off'}
+        </PickButton>
+      </div>
+      <p className="text-[11px] leading-snug text-[var(--color-ink-3)]">
+        {!hasAny
+          ? 'Nothing dismissed yet.'
+          : count == null
+            ? ' '
+            : on
+              ? `Showing ${fmt(count)} dismissed ${count === 1 ? 'property' : 'properties'}.`
+              : `${fmt(count)} dismissed ${count === 1 ? 'property is' : 'properties are'} hidden.`}
       </p>
     </div>
   );
@@ -517,6 +584,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               customWidgets={customWidgets}
               flat
             />
+            <ShowDismissedToggle filters={filters} onChange={onChange} />
           </ControlGroup>
 
           <ControlGroup title="City quality" bordered={false} layout="grid">
