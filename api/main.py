@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api import curation
+from api import dismissals as dismissals_module
 from api import pipeline as pipeline_module
 from api import price_stats as price_stats_module
 from api import manual_estimates as me
@@ -1658,6 +1659,29 @@ def delete_pipeline_card(
     account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
 ) -> dict[str, Any]:
     return pipeline_module.remove_card(conn, property_id, account_id=account_id)
+
+
+# --- dismissals (migration 536) ---------------------------------------------
+# "Never show me this property again." Reads go through
+# property_dismissals_public; a dismissal names the one account it is written for.
+
+@app.post("/dismissals")
+def post_dismissal(
+    body: s.DismissPropertyIn,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+    account_id: uuid.UUID = Depends(tenant_pool.require_account_id),
+) -> dict[str, Any]:
+    return dismissals_module.dismiss(conn, body, account_id=account_id)
+
+
+@app.delete("/dismissals/{property_id}")
+def delete_dismissal(
+    property_id: int,
+    conn: Any = Depends(tenant_pool.tenant_conn),
+) -> dict[str, Any]:
+    """RLS-only: "dismissed" is read under the plural current_account_ids(), so
+    undo lifts every active row the caller can see, not one account's."""
+    return dismissals_module.undismiss(conn, property_id)
 
 
 # --- Skill refinements (Phase AI slice C) ---------------------------------

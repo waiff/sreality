@@ -242,6 +242,30 @@ def test_merge_reconciles_pipeline_stage():
     assert idx_pipeline < idx_retire
 
 
+def test_merge_carries_dismissals_after_the_pipeline():
+    # Dismissals follow the survivor in the same transaction, AFTER the pipeline
+    # reconciler (a card that landed on the survivor lifts that account's
+    # dismissal) and before the loser is soft-retired.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
+    ])
+
+    merge_properties(
+        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+    )
+
+    def idx(needle: str) -> int:
+        return next(i for i, e in enumerate(conn.executed) if needle in e[0])
+
+    repoint = idx("UPDATE property_dismissals SET property_id =")
+    assert conn.executed[repoint][1] == {"r": 20, "s": 10}
+    assert idx("DELETE FROM property_pipeline WHERE property_id =") < repoint
+    assert repoint < idx("status = 'merged_away'")
+    assert _find(conn.executed, "DELETE FROM property_dismissals") is None
+
+
 # --- unmerge_group --------------------------------------------------------
 
 

@@ -9,9 +9,9 @@ architecture rule #1, so older migrations are never rewritten):
 
   1. No migration grants a WRITE privilege (INSERT/UPDATE/DELETE/TRUNCATE/ALL) to
      `anon` — anon is dark after Phase 0 (migration 299).
-  2. No migration grants a WRITE privilege to `authenticated` EXCEPT on the 19
+  2. No migration grants a WRITE privilege to `authenticated` EXCEPT on the 20
      user-state TENANT tables, whose per-account DML is deliberate and RLS-scoped
-     (migrations 290-294,298). This registry MIRRORS tests/test_tenant_isolation_
+     (migrations 290-294,298,536). This registry MIRRORS tests/test_tenant_isolation_
      live.py::_TENANT_TABLES — add a new tenant table to BOTH.
   3. Every new base table ships with `enable row level security` in the same
      migration (Supabase's default ACL would otherwise make an RLS-off public
@@ -52,7 +52,7 @@ _TENANT_TABLES = frozenset({
     "property_tags", "notification_dispatches", "estimation_cohort_entries",
     "estimation_trace_payloads", "estimation_feedback", "building_run_attachments",
     "estimation_runs", "building_runs", "property_pipeline", "pipeline_stages",
-    "property_pipeline_events", "entitlements",
+    "property_pipeline_events", "entitlements", "property_dismissals",
 })
 
 # Amendment A6: these broker-directory PII surfaces stay dark to browser roles;
@@ -473,7 +473,7 @@ def test_no_write_grants_to_browser_roles():
     assert not offenders, (
         "Migration(s) grant a WRITE privilege to anon, or to authenticated on a "
         "non-tenant table — browser roles get SELECT only; shared-market writes go "
-        "through the bearer-gated API, tenant writes are RLS-scoped on the 19 "
+        "through the bearer-gated API, tenant writes are RLS-scoped on the 20 "
         "registry tables (mirror tests/test_tenant_isolation_live.py):\n"
         + "\n".join(offenders)
     )

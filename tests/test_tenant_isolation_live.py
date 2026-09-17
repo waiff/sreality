@@ -52,6 +52,7 @@ _TENANT_VIEWS: list[str] = [
     # kind that breaks silently when an inner view is later re-created.
     "pipeline_board_public",
     "pipeline_stages_public",
+    "property_dismissals_public",
     "property_notes_public",
     "property_pipeline_public",
     "property_tags_public",
@@ -214,7 +215,8 @@ _ADMIN_GATE_ALLOWLIST: list[str] = [
     "llm_cost_hour_union",
 ]
 
-# The 19 user-state tables migrations 290-294 (+ entitlements, 298) scope per account.
+# The 20 user-state tables migrations 290-294 (+ entitlements 298, property_dismissals
+# 536) scope per account.
 _TENANT_TABLES: list[str] = [
     "collections",
     "tags",
@@ -235,6 +237,7 @@ _TENANT_TABLES: list[str] = [
     "pipeline_stages",
     "property_pipeline_events",
     "entitlements",
+    "property_dismissals",
 ]
 
 # Amendment A6 (Phase 0): the broker-directory PII surfaces stay dark to BOTH
@@ -812,6 +815,13 @@ def seeded_tenant_rows(
         )
         cleanup.insert(0, ("DELETE FROM collection_properties WHERE collection_id = %s", (coll,)))
         where["collection_properties_public"] = ("collection_id = %s", (coll,))
+
+        cur.execute(
+            "INSERT INTO property_dismissals (account_id, property_id) VALUES (%s, %s)",
+            (a_acc, prop),
+        )
+        cleanup.insert(0, ("DELETE FROM property_dismissals WHERE property_id = %s", (prop,)))
+        where["property_dismissals_public"] = ("property_id = %s", (prop,))
 
         # A fresh account has no stages; a lone non-entry/non-terminal stage trivially
         # satisfies both the app-layer rule and the DB CHECK (migration 357) that a

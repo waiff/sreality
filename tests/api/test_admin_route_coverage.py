@@ -248,6 +248,11 @@ _RLS_ONLY_ALLOWLIST: dict[str, str] = {
         "pure display read; `pipeline.list_stages` took no account as of W3 — migration "
         "294's policy on `pipeline_stages` is the scope"
     ),
+    "DELETE /dismissals/{property_id}": (
+        "UPDATE (lift) of the caller's own active rows — migration 536's USING clause is "
+        "the row set, and it must stay plural: `property_dismissals_public` hides a "
+        "property if ANY of the caller's accounts dismissed it, so undo has to lift them all"
+    ),
     "GET /billing/me": (
         "read that deliberately resolves a NULLABLE account by hand, because no account "
         "must yield the default plan rather than a 400 (see test_account_scope_census.py)"
