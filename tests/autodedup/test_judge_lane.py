@@ -1294,6 +1294,87 @@ def test_pairs_from_only_accepts_gold(lane, tmp_path: Path) -> None:
              pairs_from="vision")
 
 
+def _write_pair_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                     pairs: list[list[int]]) -> str:
+    directory = tmp_path / "pairs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "targeted.json").write_text(json.dumps(pairs), encoding="utf-8")
+    monkeypatch.setattr(judge_lane, "PAIRS_DIR", directory)
+    return "targeted"
+
+
+def test_pairs_file_narrows_the_draw_to_the_named_pairs(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="oss", n=8, max_usd=5, workers=1)
+    every = _pairs_of(whole)
+    assert len(every) > 2
+    name = _write_pair_list(tmp_path, monkeypatch, [list(pair) for pair in every[:2]])
+
+    out = tmp_path / "out"
+    summary = lane(out, export_run="1", tier="oss", n=8, max_usd=5, workers=1,
+                   pairs_file=name)
+    assert summary["pairs_file"] == name
+    assert summary["pairs_file_requested"] == 2
+    assert summary["pairs_file_missing"] == []
+    assert set(_pairs_of(out)) == set(every[:2])
+
+
+def test_pairs_file_reports_a_pair_the_engine_never_stored(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    whole = tmp_path / "whole"
+    lane(whole, export_run="1", tier="oss", n=8, max_usd=5, workers=1)
+    every = _pairs_of(whole)
+    name = _write_pair_list(
+        tmp_path, monkeypatch, [list(every[0]), [999_000_001, 999_000_002]]
+    )
+
+    summary = lane(tmp_path / "out", export_run="1", tier="oss", n=8, max_usd=5,
+                   workers=1, pairs_file=name)
+    assert summary["pairs_file_requested"] == 2
+    assert summary["pairs_file_missing"] == [[999_000_001, 999_000_002]]
+    assert set(_pairs_of(tmp_path / "out")) == {every[0]}
+
+
+def test_pairs_file_refuses_when_the_pass_stored_none_of_them(
+    lane, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_list(tmp_path, monkeypatch, [[999_000_001, 999_000_002]])
+    with pytest.raises(SystemExit) as exc:
+        lane(tmp_path / "out", export_run="1", tier="oss", n=4, max_usd=5,
+             pairs_file=name)
+    assert "pairs_file" in str(exc.value)
+    assert lane.state["pod_starts"] == []
+
+
+def test_load_pair_list_orders_every_pair_lo_first_and_drops_repeats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = _write_pair_list(tmp_path, monkeypatch, [[9, 4], [4, 9], [1, 2]])
+    assert judge_lane.load_pair_list(name) == ((4, 9), (1, 2))
+
+
+@pytest.mark.parametrize("payload", ["{}", "[]", "[[1]]", "[[1, \"x\"]]", "not json"])
+def test_load_pair_list_refuses_a_malformed_file(
+    payload: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "pairs"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "bad.json").write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(judge_lane, "PAIRS_DIR", directory)
+    with pytest.raises(SystemExit):
+        judge_lane.load_pair_list("bad")
+
+
+def test_every_committed_pair_list_is_a_well_formed_lo_first_list() -> None:
+    for path in sorted(judge_lane.PAIRS_DIR.glob("*.json")):
+        pairs = judge_lane.load_pair_list(path.stem)
+        assert pairs, path
+        assert all(lo < hi for lo, hi in pairs), path
+
+
 # --- the adapter onto autodedup.oss_pod -----------------------------------------------------
 
 

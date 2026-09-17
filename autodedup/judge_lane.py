@@ -145,6 +145,8 @@ RUN_FILE: str = "run.json"
 JUDGEMENTS_FILE: str = "judgements.jsonl"
 SUMMARY_FILE: str = "judge.json"
 
+PAIRS_DIR: Path = Path(__file__).resolve().parent / "pairs"
+
 _JUDGE: Any = None
 
 def load_engine_settings(raw: str | None) -> Settings:
@@ -169,6 +171,31 @@ def load_engine_model(raw: str | None) -> LogisticModel:
     path = repo_path(raw, MODELS_DIR)
     return LogisticModel.from_json(json.loads(path.read_text(encoding="utf-8")))
 
+
+
+def load_pair_list(raw: str) -> tuple[tuple[int, int], ...]:
+    """`pairs_file=<name>` under autodedup/pairs/ — a JSON list of `[lo, hi]`, order-free."""
+    from autodedup.score_lane import repo_path
+
+    path = repo_path(raw, PAIRS_DIR)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise SystemExit(f"pairs_file {raw!r} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, list) or not payload:
+        raise SystemExit(f"pairs_file {raw!r} must be a non-empty JSON list of [lo, hi]")
+    pairs: list[tuple[int, int]] = []
+    for entry in payload:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            raise SystemExit(f"pairs_file {raw!r}: {entry!r} is not a [lo, hi] pair")
+        try:
+            lo, hi = int(entry[0]), int(entry[1])
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"pairs_file {raw!r}: {entry!r} is not two integers") from exc
+        # The store keys pairs lo-first; a list written the other way round would silently
+        # match nothing, which reads in the summary exactly like a drifted engine.
+        pairs.append((lo, hi) if lo <= hi else (hi, lo))
+    return tuple(dict.fromkeys(pairs))
 
 
 def judge_module() -> Any:
@@ -215,6 +242,11 @@ class JudgeArgs:
     # version, and must be set explicitly to compare a NEW presentation against the gold labels
     # a previous one produced: the labels are a property of the PAIR, not of the prompt.
     gold_version: str | None
+    # A NAMED pair list under autodedup/pairs/, drawn instead of the stratified sample's own
+    # population: the way a targeted pass buys labels for one cell (E48's propose-only strata
+    # are starved of judged merges, and a stratified draw spends its quota everywhere else).
+    # Committed, not inline, so the pass is reproducible from the run id alone.
+    pairs_file: str | None
     # The engine row the lane scores AND digests with. One row, or the prompt describes a
     # different engine than the one that drew the sample.
     settings: str | None
@@ -322,6 +354,7 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         oss_min_gpu_gb=_float_arg(args, "oss_min_gpu_gb", 0.0),
         oss_s_per_pair=_float_arg(args, "oss_s_per_pair", OSS_EST_S_PER_PAIR),
         pairs_from=pairs_from,
+        pairs_file=(args.get("pairs_file") or "").strip() or None,
         gold_version=(args.get("gold_version") or "").strip() or None,
         settings=(args.get("settings") or "").strip() or None,
         model=(args.get("model") or "").strip() or None,
@@ -1109,6 +1142,25 @@ def run_judge(
                 f"judge_version {parsed.gold_version or judge_version} — run the gold tier "
                 "first, or name the version that holds the labels with gold_version="
             )
+    pairs_file_requested = 0
+    pairs_file_missing: list[list[int]] = []
+    if parsed.pairs_file:
+        # A named list narrows the POPULATION, not the sample: `n` stays the cost dial and the
+        # stratified draw still runs over what is left, so a list longer than the budget is cut
+        # the same way every other draw is. A pair the engine did not store cannot be judged —
+        # it is reported by id rather than silently shrinking the pass, because "the cohort
+        # drifted under this list" and "the list is wrong" look identical in a count.
+        wanted = load_pair_list(parsed.pairs_file)
+        pairs_file_requested = len(wanted)
+        present = {(int(row["lo"]), int(row["hi"])) for row in rows}
+        pairs_file_missing = [[lo, hi] for lo, hi in wanted if (lo, hi) not in present]
+        keep = set(wanted)
+        rows = [row for row in rows if (int(row["lo"]), int(row["hi"])) in keep]
+        if not rows:
+            raise SystemExit(
+                f"pairs_file={parsed.pairs_file}: none of its {pairs_file_requested} pair(s) "
+                "are stored by this pass — name the settings/model the list was drawn under"
+            )
     if parsed.strata:
         rows = [
             row for row in rows
@@ -1170,6 +1222,9 @@ def run_judge(
         ),
         "dry_run": parsed.dry_run,
         "pairs_from": parsed.pairs_from,
+        "pairs_file": parsed.pairs_file,
+        "pairs_file_requested": pairs_file_requested,
+        "pairs_file_missing": pairs_file_missing,
         "gold_version": parsed.gold_version,
         "pairs_without_gold_dropped": gold_restricted,
         "sample_strata": sample["strata"],
