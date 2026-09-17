@@ -119,6 +119,12 @@ name: "AUTODEDUP: engine lane"
 #             read at this run's own `judge_version` unless `gold_version=` names another:
 #             a NEW presentation (j2) is measured against the labels an OLD one produced,
 #             because the label belongs to the pair and not to the prompt.
+#             `pairs_file=<name>` narrows the draw to an EXPLICIT list committed under
+#             autodedup/pairs/<name>.json (a JSON list of `[lo, hi]`) - how a targeted pass
+#             buys labels for one starved cell, which a stratified draw spends everywhere but.
+#             It narrows the POPULATION, not the sample: `n` is still the cost dial. Pairs the
+#             engine did not store are reported by id in `pairs_file_missing` rather than
+#             quietly shrinking the pass.
 #             ONE oss MODEL PER judge_version. The store keys a judgement on (pair,
 #             judge_version, tier) and not on the model, so a second `oss_model` at the same
 #             `settings=<name>` / `model=<name>` pick a row under autodedup/settings/ and a fitted
@@ -189,7 +195,8 @@ name: "AUTODEDUP: engine lane"
 # workflow's charset check rejects `;`, so a dispatched entry writes `a/b/c`); judge
 # accepts export_run, tier, n, max_usd (required), seed, workers, strata (SPACE-separated
 # stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
-# download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row) and,
+# download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row),
+# pairs_file (an explicit `[lo, hi]` list under autodedup/pairs/) and,
 # for `tier=oss`, oss_model (the served model id, default Qwen/Qwen2.5-VL-7B-Instruct),
 # oss_gpu (SPACE-separated RunPod GPU types in preference order, e.g. `H100_80GB A100_80GB
 # L40S A6000 A40`, treated as a PIN - a pass fails rather than silently renting a 6x dearer
