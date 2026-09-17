@@ -315,6 +315,42 @@ def test_move_card_to_new_stage_logs_event_and_stamps_entered():
     assert out["stage_key"] == "offer"
 
 
+def test_remove_card_redirects_merged_away_to_survivor():
+    """The remove half of <PipelineMark> resolves the same stale id the add half
+    does — otherwise one cached id can bookmark a property it can never un-bookmark,
+    and the ledger event is stamped with a retired property forever."""
+    conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),  # 99 merged into active 42
+        (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(3,)]),
+    ])
+    assert pipeline_module.remove_card(conn, 99, account_id=_ACCT) == {"removed": True}
+    dels = [p for q, p in conn.executed if "DELETE FROM property_pipeline" in q]
+    assert dels and dels[0] == (42, _ACCT)
+    evs = [p for q, p in conn.executed if "INSERT INTO property_pipeline_events" in q]
+    assert evs and evs[0][0] == 42  # the ledger row carries the survivor
+
+
+def test_remove_card_unresolvable_id_stays_idempotent():
+    conn = _FakeConn([(lambda q: "RECURSIVE chain" in q, [])])
+    assert pipeline_module.remove_card(conn, 7, account_id=_ACCT) == {"removed": False}
+    reads = [p for q, p in conn.executed if "SELECT stage_id FROM property_pipeline" in q]
+    assert reads and reads[0] == (7, _ACCT)  # raw id, still looked up
+
+
+def test_move_card_redirects_merged_away_to_survivor():
+    conn = _FakeConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+        (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(1,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
+         [(42, 3, "offer", "Nabídka", 2, None, None, None, "3", "teal")]),
+    ])
+    pipeline_module.move_card(conn, 99, s.MoveCardIn(stage_id=3), account_id=_ACCT)
+    locks = [p for q, p in conn.executed if "FOR UPDATE" in q]
+    assert locks and locks[0] == (42, _ACCT)
+    evs = [p for q, p in conn.executed if "INSERT INTO property_pipeline_events" in q]
+    assert evs and evs[0][0] == 42
+
+
 def test_move_card_reorder_only_logs_no_event():
     conn = _FakeConn([
         (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(1,)]),

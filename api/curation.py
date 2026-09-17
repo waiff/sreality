@@ -283,7 +283,12 @@ def remove_property_from_collection(
         "WHERE collection_id = %s AND property_id = %s"
     )
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute(sql, (collection_id, property_id))
+        # Merge re-points the membership row onto the survivor (rule #18), so a
+        # stale id has to follow it or this DELETE matches nothing and reports
+        # success-shaped failure. Unresolvable ids fall through unchanged: a
+        # remove stays idempotent where an INSERT 4xx's.
+        pid = resolve_active_property_id(conn, property_id) or property_id
+        cur.execute(sql, (collection_id, pid))
         removed = cur.rowcount > 0
         if removed:
             cur.execute(
@@ -372,6 +377,9 @@ def update_note(
 ) -> dict[str, Any]:
     """Edit a note's body in place. Scoped by (id, property_id) — belt-and-braces
     on top of RLS so a note can never be edited via the wrong property's route."""
+    # The note itself was re-pointed onto the survivor at merge, so a stale
+    # property_id makes that pair unsatisfiable and a live note reads as 404.
+    property_id = resolve_active_property_id(conn, property_id) or property_id
     if body.body is None:
         row = _fetch_note(conn, property_id, note_id)
         if row is None:
@@ -394,6 +402,7 @@ def delete_note(
     conn: "psycopg.Connection", property_id: int, note_id: int,
 ) -> dict[str, Any]:
     sql = "DELETE FROM property_notes WHERE id = %s AND property_id = %s"
+    property_id = resolve_active_property_id(conn, property_id) or property_id
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(sql, (note_id, property_id))
         if cur.rowcount == 0:
@@ -516,7 +525,8 @@ def detach_tag(
         "DELETE FROM property_tags WHERE property_id = %s AND tag_id = %s"
     )
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute(sql, (property_id, tag_id))
+        pid = resolve_active_property_id(conn, property_id) or property_id
+        cur.execute(sql, (pid, tag_id))
         detached = cur.rowcount > 0
     return {"detached": detached}
 

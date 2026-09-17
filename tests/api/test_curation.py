@@ -765,6 +765,74 @@ def test_add_properties_redirects_merged_away_to_survivor():
     assert ins and ins[0][1] == [42]  # survivor id inserted, not 99
 
 
+# --- the REMOVE half of each affordance resolves too -----------------------
+# 426fa575 hardened only the add half, so the same cached id could create a
+# membership it could then never remove: merge re-points the row onto the
+# survivor, the DELETE keyed on the retired id matched nothing, and the handler
+# reported {"removed": false} with HTTP 200. Enforced tree-wide by
+# tests/api/test_property_anchored_write_census.py.
+
+
+def test_remove_property_from_collection_redirects_merged_away_to_survivor():
+    conn = _ScriptConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),  # 99 merged into active 42
+        (lambda q: "DELETE FROM collection_properties" in q, [(1,)]),  # rowcount 1
+        (lambda q: "UPDATE collections SET updated_at" in q, []),
+    ])
+    assert curation.remove_property_from_collection(conn, 1, 99) == {"removed": True}
+    dels = [p for q, p in conn.executed if "DELETE FROM collection_properties" in q]
+    assert dels and dels[0] == (1, 42)  # the survivor's row, not 99's phantom
+    # the bump is still gated on a real removal
+    assert any("UPDATE collections SET updated_at" in q for q, _ in conn.executed)
+
+
+def test_remove_property_from_collection_unresolvable_id_stays_idempotent():
+    """An id with no active survivor must NOT become a 404.
+
+    A DELETE stays forgiving where an INSERT 4xx's — no caller reads the boolean
+    (CollectionSaveMenu only invalidates), so a new 4xx would be a contract change
+    for a case that already means "nothing to remove".
+    """
+    conn = _ScriptConn([(lambda q: "RECURSIVE chain" in q, [])])
+    assert curation.remove_property_from_collection(conn, 1, 7) == {"removed": False}
+    dels = [p for q, p in conn.executed if "DELETE FROM collection_properties" in q]
+    assert dels and dels[0] == (1, 7)  # falls through to the raw id, still runs
+
+
+def test_detach_tag_redirects_merged_away_to_survivor():
+    conn = _ScriptConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+        (lambda q: "DELETE FROM property_tags" in q, [(1,)]),
+    ])
+    assert curation.detach_tag(conn, 99, 3) == {"detached": True}
+    dels = [p for q, p in conn.executed if "DELETE FROM property_tags" in q]
+    assert dels and dels[0] == (42, 3)
+
+
+def test_update_note_redirects_merged_away_to_survivor():
+    conn = _ScriptConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+        (lambda q: "UPDATE property_notes" in q,
+         [(5, 42, "edited", None, datetime(2026, 1, 1), datetime(2026, 1, 2))]),
+    ])
+    out = curation.update_note(conn, 99, 5, _s.UpdateNoteIn(body="edited"))
+    assert out["property_id"] == 42
+    ups = [p for q, p in conn.executed if "UPDATE property_notes" in q]
+    assert ups and ups[0] == ("edited", 5, 42)
+
+
+def test_delete_note_redirects_merged_away_to_survivor():
+    """The 404 this used to raise was the misleading kind: the note was alive on
+    the survivor, and only the (id, property_id) pair was unsatisfiable."""
+    conn = _ScriptConn([
+        (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+        (lambda q: "DELETE FROM property_notes" in q, [(1,)]),
+    ])
+    assert curation.delete_note(conn, 99, 5) == {"deleted": True}
+    dels = [p for q, p in conn.executed if "DELETE FROM property_notes" in q]
+    assert dels and dels[0] == (5, 42)
+
+
 def test_get_collection_properties_repr_join_uses_the_surrogate(monkeypatch):
     # Pre-Gate-2 hardening (mirrors #873's Browse fix): the repr listing must be
     # joined on repr_listing_ref_id (listings.id), not the legacy sreality_id

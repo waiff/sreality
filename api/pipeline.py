@@ -296,8 +296,14 @@ def remove_card(
     conn: "psycopg.Connection", property_id: int, *,
     account_id: uuid.UUID,
 ) -> dict[str, Any]:
-    """Un-bookmark: drop the card, logging its prior stage to the ledger."""
+    """Un-bookmark: drop the card, logging its prior stage to the ledger.
+
+    Resolves the same stale property_id `add_card` does — the two halves of one
+    <PipelineMark> toggle (rule #22) must agree on which property they mean, and
+    the ledger event below would otherwise be stamped with a retired id.
+    """
     with conn.transaction(), conn.cursor() as cur:
+        property_id = resolve_active_property_id(conn, property_id) or property_id
         cur.execute(
             "SELECT stage_id FROM property_pipeline "
             "WHERE property_id = %s AND account_id = %s",
@@ -332,6 +338,7 @@ def move_card(
     nothing.
     """
     with conn.transaction(), conn.cursor() as cur:
+        property_id = resolve_active_property_id(conn, property_id) or property_id
         cur.execute(
             "SELECT stage_id FROM property_pipeline WHERE property_id = %s "
             "AND account_id = %s FOR UPDATE",
