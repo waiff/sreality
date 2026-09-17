@@ -33,6 +33,10 @@ import Spinner from '@/components/Spinner';
 import AttrDiffTable, { memberDiffRows } from '@/components/autodedup/AttrDiffTable';
 import EvidenceChips, { Chip, fmtScore } from '@/components/autodedup/EvidenceChips';
 import VerdictButtons, { PAIR_LABELS } from '@/components/autodedup/VerdictButtons';
+import VerdictNotes, {
+  annotationInput,
+  useVerdictAnnotations,
+} from '@/components/autodedup/VerdictNotes';
 import { JudgeChip } from '@/components/autodedup/PairCard';
 import { useVerdictOverlay } from './AutodedupGroups';
 
@@ -57,6 +61,7 @@ export default function AutodedupPair() {
   const lo = asId(loRaw);
   const hi = asId(hiRaw);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
+  const notes = useVerdictAnnotations();
 
   const q = useQuery({
     queryKey: ['autodedup', 'pair', lo, hi, generation],
@@ -128,14 +133,41 @@ export default function AutodedupPair() {
             ))}
           </div>
 
-          <div className="mt-3">
+          <div className="mt-3 space-y-2">
             <VerdictButtons
               kind="pair"
               verdict={stored}
               pending={pendingKey === key}
               labels={PAIR_LABELS}
-              onVerdict={(value) =>
-                submit(key, { kind: 'pair', listing_lo: lo, listing_hi: hi, verdict: value })
+              annotation={notes.annotationOf(key, stored)}
+              onVerdict={(value, annotation) =>
+                submit(key, {
+                  kind: 'pair',
+                  listing_lo: lo,
+                  listing_hi: hi,
+                  verdict: value,
+                  ...annotation,
+                })
+              }
+            />
+            {/* OPEN BY DEFAULT here: one pair is the whole page, so there is
+              * nothing for the picker to push off the screen — unlike a queue
+              * row, where it is collapsed. */}
+            <VerdictNotes
+              defaultOpen
+              value={notes.annotationOf(key, stored)}
+              onChange={(next) => notes.setAnnotation(key, next)}
+              dirty={notes.isDirty(key, stored)}
+              pending={pendingKey === key}
+              onSave={() =>
+                stored &&
+                submit(key, {
+                  kind: 'pair',
+                  listing_lo: lo,
+                  listing_hi: hi,
+                  verdict: stored.verdict,
+                  ...annotationInput(notes.annotationOf(key, stored)),
+                })
               }
             />
           </div>

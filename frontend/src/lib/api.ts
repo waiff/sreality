@@ -3525,6 +3525,17 @@ export interface AutodedupScoreRun {
  * (kind+verdict, tier+verdict) that no flat record can hold without inventing a
  * separator. `latest_generation` is the first of `generations`, which the
  * statement already returns newest-first. */
+/* One bucket of the reason histogram (migration 533): how often the operator
+ * picked one reason code, at one verdict grain. Pair and cluster are separate
+ * rows because they answer different questions — a chip on a pair names the
+ * discriminator one edge missed, the same chip on a cluster names why a whole
+ * proposal was wrong — so the page never sums them. */
+export interface AutodedupReasonRollup {
+  kind: 'pair' | 'cluster';
+  reason: string;
+  n: number;
+}
+
 export interface AutodedupEngineStats {
   pairs_by_zone: Partial<Record<AutodedupZone, number>>;
   n_pairs: number;
@@ -3533,6 +3544,9 @@ export interface AutodedupEngineStats {
   latest_generation: string | null;
   verdicts: AutodedupVerdictRollup[];
   n_verdicts: number;
+  /* Absent against a store that predates 533 — the read degrades, it does not
+   * 500 — so the table above it says "not yet" rather than "none". */
+  verdict_reasons?: AutodedupReasonRollup[];
   judgements: AutodedupJudgementRollup[];
   n_judgements: number;
   last_score_run: AutodedupScoreRun | null;
@@ -3706,6 +3720,10 @@ export interface AutodedupEdgeSummary {
 export interface AutodedupVerdictRow {
   verdict: AutodedupVerdictValue;
   note: string | null;
+  /* WHY, in the registry's codes (migration 533). Optional only because a row
+   * read back from a store without the column carries none; `[]` and absent
+   * mean the same thing to every reader. */
+  reasons?: string[] | null;
   decided_by: string;
   decided_at: string;
   id?: number;
@@ -4237,6 +4255,9 @@ export interface AutodedupVerdictInput {
   listing_hi?: number | null;
   cluster_key?: number | null;
   note?: string | null;
+  /* Reason CODES, never labels: the label is the registry's rendering of the
+   * code and changing one must not change what a past verdict recorded. */
+  reasons?: string[];
 }
 
 /* The route answers `{data: {verdict, must_not_link}}` — the stored row is
@@ -4251,6 +4272,21 @@ export interface AutodedupVerdictResult {
    * every one inside the group, which is a thing the operator should be told. */
   must_not_link_retracted?: number;
 }
+
+/* THE REASON VOCABULARY, SERVED (PROGRAM.md §9). The codes live in
+ * `autodedup/verdict_reasons.py` and the SPA hard-codes NONE of them: a chip
+ * list copied into the browser is a second vocabulary that drifts the first
+ * time a review session names a shape. No `store_ready` — the registry is code,
+ * so it answers against a database that has not been migrated at all. */
+export interface AutodedupVerdictReason {
+  code: string;
+  label: string;
+}
+
+export const getAutodedupVerdictReasons = (): Promise<AutodedupVerdictReason[]> =>
+  request<{ data: { reasons: AutodedupVerdictReason[] } }>('/autodedup/verdict-reasons', {
+    jwt: true,
+  }).then((res) => res.data?.reasons ?? []);
 
 export const postAutodedupVerdict = async (
   body: AutodedupVerdictInput,
@@ -4311,6 +4347,9 @@ export interface AutodedupSplitInput {
    * until this says the operator meant it. */
   confirm_retract?: boolean;
   note?: string | null;
+  /* ONE set for the whole split — it is one ruling — stamped on every pair row
+   * it writes and on the cluster row. */
+  reasons?: string[];
 }
 
 /* What the one write reports back: the stored CLUSTER verdict (`same` when the

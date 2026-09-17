@@ -243,6 +243,8 @@ describe('<AutodedupPair>', () => {
       listing_lo: 101,
       listing_hi: 202,
       verdict: 'different',
+      reasons: [],
+      note: null,
     });
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Correctly separate' })).toHaveAttribute(

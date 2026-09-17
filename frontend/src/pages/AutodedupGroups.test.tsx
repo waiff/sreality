@@ -325,6 +325,10 @@ describe('<AutodedupGroups>', () => {
       kind: 'cluster',
       cluster_key: 7,
       verdict: 'same',
+      /* The annotation rides with every verdict — empty when the operator gave
+        * none, never absent, so the stored row is the click's whole statement. */
+      reasons: [],
+      note: null,
     });
     await waitFor(() => expect(confirm).toHaveAttribute('aria-pressed', 'true'));
     expect(within(card).getByText(/operator@example.invalid/)).toBeInTheDocument();
@@ -588,6 +592,8 @@ describe('<AutodedupGroups>', () => {
       relations: [
         { unit_a: 'A', unit_b: 'B', relation: 'same_project_different_unit' },
       ],
+      reasons: [],
+      note: null,
     });
     /* The stored cluster verdict lands on the badge, like any other verdict. */
     await waitFor(() =>

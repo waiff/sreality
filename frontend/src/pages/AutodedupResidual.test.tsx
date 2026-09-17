@@ -231,6 +231,8 @@ describe('<AutodedupResidual>', () => {
     await user.click(armed);
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'pair',
+      reasons: [],
+      note: null,
       listing_lo: 101,
       listing_hi: 202,
       verdict: 'different',

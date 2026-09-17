@@ -82,6 +82,12 @@ import ListingMini, {
   memberListingPath,
 } from '@/components/autodedup/ListingMini';
 import VerdictButtons, { GROUP_LABELS } from '@/components/autodedup/VerdictButtons';
+import VerdictNotes, {
+  EMPTY_ANNOTATION,
+  annotationInput,
+  useVerdictAnnotations,
+  type VerdictAnnotation,
+} from '@/components/autodedup/VerdictNotes';
 import { JudgeChip } from '@/components/autodedup/PairCard';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 
@@ -531,6 +537,7 @@ export function splitInput(
   members: ReadonlyArray<{ listing_id: number }>,
   state: SplitState,
   confirmRetract = false,
+  annotation: VerdictAnnotation = EMPTY_ANNOTATION,
 ): AutodedupSplitInput {
   const units = distinctUnits(members, state.units);
   return {
@@ -544,6 +551,9 @@ export function splitInput(
       relation: relationOf(state, unit_a, unit_b),
     })),
     ...(confirmRetract ? { confirm_retract: true } : {}),
+    /* ONE set for the whole split: it is one ruling, and the server stamps it on
+     * every pair row and on the cluster row. */
+    ...annotationInput(annotation),
   };
 }
 
@@ -716,6 +726,13 @@ export interface SplitControls {
   setRelation: (unitA: string, unitB: string, relation: AutodedupSplitRelation) => void;
   save: (members: ReadonlyArray<{ listing_id: number }>, confirmRetract?: boolean) => void;
   pending: boolean;
+  /* WHY this split — the chips and the note, sent with the save. NOT hydrated
+   * from the stored cluster verdict the way a plain verdict's is: the server
+   * writes the ASSIGNMENT into that note (`A: 11,12 | B: 13`), with the
+   * operator's own words merely in front of it, so reading it back into the
+   * input and re-posting would store the summary twice. */
+  annotation: VerdictAnnotation;
+  setAnnotation: (next: VerdictAnnotation) => void;
   error?: SplitError;
   receipt?: SplitReceipt;
   /* The ruling that is STORED, derived from the group's pair verdicts. Present
@@ -773,10 +790,14 @@ export function SplitRow({
   members,
   split,
   generation,
+  notesOpen = false,
 }: {
   members: ReadonlyArray<{ listing_id: number }>;
   split: SplitControls;
   generation: string;
+  /* Open where one group is the whole screen (the dialog); collapsed on a queue
+   * card, which is a scroll. */
+  notesOpen?: boolean;
 }) {
   const units = distinctUnits(members, split.state.units);
   const one = units.length < 2;
@@ -854,6 +875,15 @@ export function SplitRow({
         </button>
         <span className="text-[0.62rem] text-[var(--color-ink-4)]">generace {generation}</span>
       </div>
+      {/* The split's own reasons — one set for the whole ruling. There is no
+        * "Uložit poznámku" here: the split IS the save button above, and a
+        * second one would write a second, different ruling. */}
+      <VerdictNotes
+        defaultOpen={notesOpen}
+        value={split.annotation}
+        onChange={split.setAnnotation}
+        pending={split.pending}
+      />
       {split.receipt && (
         <p className="text-[0.68rem] text-[var(--color-ink-2)]">
           Uloženo: {receiptRelations(split.receipt.input)} ·{' '}
@@ -917,6 +947,9 @@ export default function AutodedupGroups() {
   const [openKey, setOpenKey] = useState<number | null>(null);
   const { overlay, submit, submitSplit, pendingKey, splitErrors, splitResults } =
     useVerdictOverlay();
+  /* The reason chips and the note, at page level for the same reason the
+   * assignments are: the card and the dialog edit one decision. */
+  const notes = useVerdictAnnotations();
   /* The assignments, at PAGE level: the card and the dialog are two views of one
    * decision, and a dialog that started from a blank slate would silently throw
    * away the letters the operator had already set on the card. */
@@ -955,6 +988,10 @@ export default function AutodedupGroups() {
     const key = String(clusterKey);
     const stored = storedSplits[clusterKey] ?? null;
     const base = splits[clusterKey] ?? stored ?? EMPTY_SPLIT;
+    /* Keyed apart from the cluster verdict's own annotation (`split:` prefix):
+     * the two are different statements about the same group, and one draft
+     * serving both would carry the reasons of a click into the next save. */
+    const splitNoteKey = `split:${clusterKey}`;
     const edit = (patch: (current: SplitState) => SplitState) =>
       setSplits((all) => ({ ...all, [clusterKey]: patch(all[clusterKey] ?? stored ?? EMPTY_SPLIT) }));
     return {
@@ -967,8 +1004,20 @@ export default function AutodedupGroups() {
           relations: { ...current.relations, [unitPairKey(unitA, unitB)]: relation },
         })),
       save: (members, confirmRetract = false) =>
-        submitSplit(key, splitInput(clusterKey, generation, members, base, confirmRetract)),
+        submitSplit(
+          key,
+          splitInput(
+            clusterKey,
+            generation,
+            members,
+            base,
+            confirmRetract,
+            notes.annotationOf(splitNoteKey, null),
+          ),
+        ),
       pending: pendingKey === key,
+      annotation: notes.annotationOf(splitNoteKey, null),
+      setAnnotation: (next) => notes.setAnnotation(splitNoteKey, next),
       error: splitErrors[key],
       receipt: splitResults[key],
       stored,
@@ -1100,11 +1149,23 @@ export default function AutodedupGroups() {
               eager={i < 2}
               verdict={overlay[String(group.cluster_key)] ?? group.verdict}
               pending={pendingKey === String(group.cluster_key)}
-              onVerdict={(value) =>
+              notes={notes}
+              onVerdict={(value, annotation) =>
                 submit(String(group.cluster_key), {
                   kind: 'cluster',
                   cluster_key: group.cluster_key,
                   verdict: value,
+                  ...annotation,
+                })
+              }
+              onSaveNote={(stored) =>
+                submit(String(group.cluster_key), {
+                  kind: 'cluster',
+                  cluster_key: group.cluster_key,
+                  verdict: stored.verdict,
+                  ...annotationInput(
+                    notes.annotationOf(String(group.cluster_key), stored),
+                  ),
                 })
               }
               onOpen={() => setOpenKey(group.cluster_key)}
@@ -1144,23 +1205,33 @@ function GroupCard({
   group,
   verdict,
   onVerdict,
+  onSaveNote,
   onOpen,
   pending,
   eager,
   split,
   generation,
+  notes,
 }: {
   group: AutodedupGroup;
   verdict: AutodedupVerdictRow | null;
-  onVerdict: (value: AutodedupVerdictValue) => void;
+  onVerdict: (
+    value: AutodedupVerdictValue,
+    annotation: { reasons: string[]; note: string | null },
+  ) => void;
+  /* Re-post the STORED verdict with an edited annotation — the same endpoint and
+   * the same overlay, which is why it takes the stored row rather than a value. */
+  onSaveNote: (stored: AutodedupVerdictRow) => void;
   onOpen: () => void;
   pending: boolean;
   eager: boolean;
   split: SplitControls;
   generation: string;
+  notes: ReturnType<typeof useVerdictAnnotations>;
 }) {
   const shown = group.members.slice(0, VISIBLE_MEMBERS);
   const hidden = group.members.length - shown.length;
+  const noteKey = String(group.cluster_key);
   return (
     <li className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -1237,6 +1308,14 @@ function GroupCard({
         onVerdict={onVerdict}
         pending={pending}
         labels={GROUP_LABELS}
+        annotation={notes.annotationOf(noteKey, verdict)}
+      />
+      <VerdictNotes
+        value={notes.annotationOf(noteKey, verdict)}
+        onChange={(next) => notes.setAnnotation(noteKey, next)}
+        dirty={notes.isDirty(noteKey, verdict)}
+        pending={pending}
+        onSave={() => verdict && onSaveNote(verdict)}
       />
     </li>
   );
@@ -1296,7 +1375,7 @@ function GroupDialog({
           {/* The dialog is where a group too large for one card row is split:
             * every member is on screen here, so the assignment can be completed
             * rather than left half-set. */}
-          <SplitRow members={data.members} split={split} generation={generation} />
+          <SplitRow members={data.members} split={split} generation={generation} notesOpen />
 
           <section>
             <h3 className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
