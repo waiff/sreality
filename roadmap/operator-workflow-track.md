@@ -393,7 +393,7 @@ control. Not a special collection (collections are m2m groupings; see
   RPCs; `queries.ts:readSource` is the one SPA seam; `?dismissed=show`
   reveals, outside preset identity; the sidebar counts what the cohort hides.
   Merge mode shares the source (reveal to merge a dismissed duplicate).
-- **W3 — notification visibility** (in progress): one `_NOT_DISMISSED`
+- **W3 — notification visibility** (done, #1517): one `_NOT_DISMISSED`
   predicate on every in-app read (feed + total, unread badge, mark-all-seen,
   per-watchdog counts) and an account-scoped twin on both outbox passes;
   detection is untouched (its cursors and the `reactivated` detector depend on
