@@ -28,7 +28,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area
+from scraper.area import derive_headline_area, parse_area_text
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -86,7 +86,6 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 _ID_RE = re.compile(r"/nemovitosti/([a-z]\d+)/?(?:[?#]|$)")
 _LISTING_HREF_RE = re.compile(r"/nemovitosti/[a-z]\d+/?$")
 _PAGE_RE = re.compile(r"/page/(\d+)/?")
-_AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:2|²|\s*2)\b", re.IGNORECASE)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(\d+)")
 # Price runs are Czech "18 878 000" (groups split by ordinary / no-break / thin /
@@ -251,15 +250,6 @@ def _parse_disposition(text: str | None) -> str | None:
     if not m:
         return None
     return f"{m.group(1)}+{m.group(2).lower()}"
-
-
-def _parse_area(text: str | None) -> float | None:
-    if not text:
-        return None
-    m = _AREA_RE.search(text)
-    if not m:
-        return None
-    return float(m.group(1).replace(",", "."))
 
 
 def _parse_int(text: str | None) -> int | None:
@@ -430,13 +420,13 @@ def parse_detail(
 
     usable_text = params.get("plocha užitná") or params.get("užitná plocha")
     floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
-    estate_area = _parse_area(params.get("plocha pozemku"))
+    estate_area = parse_area_text(params.get("plocha pozemku"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        usable=_parse_area(usable_text),
-        floor=_parse_area(floor_text),
+        usable=parse_area_text(usable_text),
+        floor=parse_area_text(floor_text),
         plot=estate_area,
-        fallback=_parse_area(title),
+        fallback=parse_area_text(title),
     )
     floor, total_floors = _parse_floors(params.get("podlaží"))
 
@@ -478,7 +468,7 @@ def parse_detail(
         price_unit=price_unit,
         area_m2=area_m2,
         area_basis=area_basis,
-        usable_area=_parse_area(usable_text),
+        usable_area=parse_area_text(usable_text),
         disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
         locality=locality,
         district=None,
@@ -507,7 +497,7 @@ def parse_detail(
         garage=_yes_no(params.get("garáž")),
         has_parking=_yes_no(params.get("parkovací stání")) or _yes_no(params.get("garáž")),
         estate_area=estate_area,
-        garden_area=_parse_area(params.get("plocha zahrady")),
+        garden_area=parse_area_text(params.get("plocha zahrady")),
         description=description,
         raw=raw,
     )

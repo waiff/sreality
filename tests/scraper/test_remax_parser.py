@@ -140,7 +140,7 @@ NAJEMNI_DUM_HTML = """
 <div class="pd-price-box"><span class="pd-price" data-advert-price="32500000">32 500 000 Kč</span></div>
 <div class="pd-detail-info">
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Typ nemovitosti:</div><div class="pd-detail-info__value">Nájemní domy</div></div>
-  <div class="pd-detail-info__row"><div class="pd-detail-info__label">Celková plocha:</div><div class="pd-detail-info__value">1250 m²</div></div>
+  <div class="pd-detail-info__row"><div class="pd-detail-info__label">Celková plocha:</div><div class="pd-detail-info__value">1 250 m²</div></div>
 </div>
 </body></html>
 """
@@ -414,3 +414,23 @@ def test_a_pin_found_only_outside_the_subject_map_is_kept_but_never_stamped():
     listing = parse_detail(body, source_url=_DETAIL_URL)
     assert listing.lat is not None
     assert "coords" not in listing.raw
+
+
+def test_the_real_capture_renders_its_thousands_group_with_an_nbsp():
+    """W19, on the ARCHIVED body (445483, Úvaly) rather than a planted string: remax
+    writes every spec value's thousands group with a no-break space, so
+    "Plocha parcely: 1\u00a0063 m²" read as 63 under the naive per-portal regex. A
+    hand-authored fixture could only assert back what the test itself planted — which
+    is why this one reads the capture."""
+    import pathlib as _pathlib
+
+    from selectolax.parser import HTMLParser
+
+    from scraper.area import parse_area_text
+    from scraper.remax_parser import _detail_params
+
+    body = (_pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "portal_html"
+            / "remax_detail.html").read_text(encoding="utf-8")
+    params = _detail_params(HTMLParser(body))
+    assert parse_area_text(params["plocha parcely"]) == 1063.0
+

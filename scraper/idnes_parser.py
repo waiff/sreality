@@ -25,7 +25,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area
+from scraper.area import derive_headline_area, parse_area_text
 from scraper.broker_idnes import parse_idnes_broker
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
@@ -131,17 +131,6 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The detail-URL hash is the source_id_native (24 hex chars today; >=16 to be safe).
 _ID_RE = re.compile(r"/detail/[^?#]*?/([0-9a-f]{16,})/?(?:[?#]|$)")
-# An area token before "m²". The first alternative accepts the Czech spaced
-# thousands format idnes titles render ("Prodej pole 2 403 m²") — without it
-# the match started INSIDE the number and truncated 2403 -> 403 (8k+ corrupted
-# area_m2 rows in production, every Kč/m² figure computed from them wrong).
-# The lookbehind keeps the grouped form from swallowing a preceding digit
-# ("3+1 174 m²" stays 174, never 1174).
-_AREA_SEPS = "\u0020\u00a0\u200b\u200c\u200d\u2060"
-_AREA_RE = re.compile(
-    rf"(?<![\d+.,])(\d{{1,3}}(?:[{_AREA_SEPS}]\d{{3}})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)\s*m(?:2|²|\s*2)\b",
-    re.IGNORECASE,
-)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(\d+)")
 _ENERGY_RE = re.compile(r"\b([A-G])\b")
@@ -348,18 +337,6 @@ def _parse_disposition(text: str | None) -> str | None:
     if not m:
         return None
     return f"{m.group(1)}+{m.group(2).lower()}"
-
-
-def _parse_area(text: str | None) -> float | None:
-    if not text:
-        return None
-    m = _AREA_RE.search(text)
-    if not m:
-        return None
-    token = m.group(1)
-    for sep in _AREA_SEPS:
-        token = token.replace(sep, "")
-    return float(token.replace(",", "."))
 
 
 def _clamp(value: float | None, ceiling: float) -> float | None:
@@ -648,14 +625,14 @@ def parse_detail(
     # "Plocha pozemku" is the parcel and reaches the resolver as `plot` — before
     # W17 it went only to `estate_area`, so 5,292 land rows whose title states no
     # area carried no headline at all.
-    estate_area = _clamp(_parse_area(_text(params.get("plocha pozemku"))), _AREA_LARGE_MAX)
+    estate_area = _clamp(parse_area_text(_text(params.get("plocha pozemku"))), _AREA_LARGE_MAX)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
-        usable=_clamp(_parse_area(_text(params.get("užitná plocha"))), _AREA_M2_MAX),
-        floor=_clamp(_parse_area(_text(params.get("podlahová plocha"))), _AREA_M2_MAX),
-        total=_clamp(_parse_area(_text(params.get("plocha"))), _AREA_M2_MAX),
+        usable=_clamp(parse_area_text(_text(params.get("užitná plocha"))), _AREA_M2_MAX),
+        floor=_clamp(parse_area_text(_text(params.get("podlahová plocha"))), _AREA_M2_MAX),
+        total=_clamp(parse_area_text(_text(params.get("plocha"))), _AREA_M2_MAX),
         plot=estate_area,
-        fallback=_clamp(_parse_area(title), _AREA_M2_MAX),
+        fallback=_clamp(parse_area_text(title), _AREA_M2_MAX),
     )
 
     # Amenities: each row is a check icon OR free text (size / orientation /
@@ -706,7 +683,7 @@ def parse_detail(
         price_unit=price_unit,
         area_m2=area_m2,
         area_basis=area_basis,
-        usable_area=_clamp(_parse_area(area_text), _AREA_LARGE_MAX),
+        usable_area=_clamp(parse_area_text(area_text), _AREA_LARGE_MAX),
         disposition=_parse_disposition(title) or _parse_disposition(_text(params.get("dispozice"))),
         locality=locality,
         district=None,
@@ -746,7 +723,7 @@ def parse_detail(
         ),
         parking_lots=parking_lots,
         estate_area=estate_area,
-        garden_area=_clamp(_parse_area(_text(params.get("plocha zahrady"))), _AREA_LARGE_MAX),
+        garden_area=_clamp(parse_area_text(_text(params.get("plocha zahrady"))), _AREA_LARGE_MAX),
         description=description,
         raw=raw,
     )

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from scraper.idnes_parser import (
     _norm_ownership,
-    _parse_area,
     category_from_url,
     index_price,
     parse_detail,
@@ -451,20 +450,6 @@ def test_price_per_m2_never_masquerades_as_absolute():
     # Monthly rent and a trailing per-m² NOTE are not unit prices.
     assert index_price("14 160 Kč/měsíc") == 14_160
     assert index_price("4 990 000 Kč (4 008 Kč/m² )") == 4_990_000
-
-
-def test_parse_area_spaced_thousands():
-    assert _parse_area("Prodej pole 2 403 m²") == 2403.0
-    assert _parse_area("Prodej pozemku 10 000 m²") == 10_000.0
-    assert _parse_area("Prodej louky 1 074,5 m²") == 1074.5
-    assert _parse_area("Prodej stavební parcely 720 m2") == 720.0
-    assert _parse_area("48,5 m²") == 48.5
-    # The dl text variant "m 2" (from "m<sup>2</sup>") still parses.
-    assert _parse_area("1074 m 2") == 1074.0
-    # A disposition digit must not be swallowed into the thousands group.
-    assert _parse_area("Prodej bytu 3+1 174 m²") == 174.0
-    # Two areas: the first complete token wins, not a mid-number fragment.
-    assert _parse_area("pozemky 350 a 1 200 m²") == 1200.0
 
 
 def test_norm_ownership_canonical_only():

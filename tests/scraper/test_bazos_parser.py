@@ -549,3 +549,15 @@ def test_lokalita_trailer_quarter_is_validated():
     assert t("Lokalita: Praha 9, výborná dostupnost MHD", "Praha 9") == (None, None)
     # The row's own town never duplicates into the district facet.
     assert t("Lokalita: Nádražní, Ostrava", "Ostrava") == ("Nádražní", None)
+
+
+def test_spaced_thousands_in_the_ad_text_is_one_number():
+    """W19: bazos held a sixth private copy of the same naive grammar, over FREE TEXT —
+    the one substrate where a parcel is always written "1 500 m2". It reads the whole
+    number now, through the one `scraper.area` grammar every portal shares (rule 21)."""
+    from scraper.area import parse_area_text
+
+    assert parse_area_text("Prodám pozemek 1 500 m2 v obci") == 1500.0
+    assert parse_area_text("Prodám pozemek 1 500 m2 v obci") == 1500.0
+    # The disposition in an ad's own prose is still never swallowed.
+    assert parse_area_text("Byt 3+1 o velikosti 73 m²") == 73.0

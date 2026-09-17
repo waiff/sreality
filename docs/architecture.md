@@ -1707,6 +1707,37 @@ renumber.** Navigate by area:
     declines the measure rather than stamping a basis for a value the row cannot store, which
     is also what keeps the heal's first batch from aborting on a 22003.
 
+    **The area NUMBER has one grammar too** (the scraper track's W19, 2026-09-17 — not
+    the location program's). Picking the right measure is
+    only half the rule; reading the figure is the other half, and it was **five private
+    copies** of a regex until now — four of them the naive form that matched the first bare
+    digit run before an `m²`. On the Czech spaced-thousands format every portal renders
+    ("5 870 m²", "1 063 m²" with a no-break space) that match starts INSIDE the number, so
+    5870 stored as 870. idnes had already been fixed after its own 2026-08 incident (8k+ rows);
+    this wave moved that proven grammar into `scraper/area.parse_area_text` and deleted every copy —
+    ceskereality, realitymix, remax, maxima and bazos now call it, so the grammar can no longer
+    diverge per portal (rule 21). It accepts the separators the portals actually emit (space,
+    NBSP, narrow NBSP, thin space, idnes's zero-width joiners) and carries a negative lookbehind
+    so a disposition is never swallowed ("3+1 174 m²" stays 174, never 1174) and a per-m² price
+    is never read as an area. Measured on production 2026-09-17: **ceskereality 17,207 rows** of
+    98,126 carried the truncation fingerprint (stored area = title area mod 1000) and not one of
+    its 19,088 land rows had an `area_m2` of 1000 or more; **realitymix 13,164** of 83,051 (its
+    spec cells are unspaced — only the title fallback truncates); remax (13,797 rows) and maxima
+    (540, of which 87 land rows max out at 987 m²) could not be fingerprinted from titles, but
+    remax's archived capture renders "Plocha parcely: 1 063 m²" with an NBSP.
+    `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) heals them by
+    **re-parsing each listing's own archived detail body** — the latest successful `detail`
+    `portal_raw_payloads` row, whose bytes live in R2, read through
+    `location_data.page_readers.load_bodies` exactly as the claim lane reads them — and writing
+    back the area columns only. Same rule-2 posture as the heals above, and it **subsumes the
+    W17 land heal on these portals**: that one copied `estate_area` into `area_m2`, and on these
+    four `estate_area` was itself truncated, so the re-parse fixes both columns from the same
+    page in one UPDATE. Its selection is complete without touching a wide column — a truncation
+    always leaves a value under 1000, or a "000" tail the write boundary NULLed — so it needs no
+    `raw_json` predicate (which would detoast every candidate row). bazos shares the grammar
+    from here on but is NOT in the healed population: its area comes from free ad text, a corpus
+    nobody has measured.
+
     **`area_m2` is what every consumer reads — the dedup rule included.** NEW DEDUP path C used
     to spell its own choice (`estate_area` for pozemek, else `usable_area`), a second answer to
     "which area is this listing's area" that disagreed with the headline on every one of those

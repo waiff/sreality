@@ -131,6 +131,10 @@ fatal — so **a broken archive looks like a healthy scrape**: `portal_raw_pages
 `select source, count(*) filter (where contract_version is null) from portal_raw_payloads
 where page_kind = 'detail' group by 1;` is the backlog the lane's hash gate is working through.
 
+**One area grammar, one heal.** `scraper.area.parse_area_text` is the ONLY area regex — five
+parsers each held a copy and four read "5 870 m²" as 870. Heal stored rows by re-parsing their
+archived bodies: `backfill_area_spaced_thousands.yml` (dispatch-only, dry-run default, R2 required).
+
 ## How to manually trigger the scrapers
 
 The sreality pipeline is **split by cadence (Phase 2)**: `index_walk.yml` ("Scraping: Sreality

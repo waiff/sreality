@@ -21,7 +21,7 @@ from typing import Any
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area
+from scraper.area import derive_headline_area, parse_area_text
 from scraper.floor import floor_from_text
 from scraper.price_text import is_per_area_price
 from scraper.published import bazos_posted_date
@@ -70,7 +70,6 @@ _ID_RE = re.compile(r"/inzerat/(\d+)/")
 _PSC_RE = re.compile(r"\b(\d{3})\s?(\d{2})\b")
 _MAP_LABEL_RE = re.compile(r"(?i)\bzobrazit na map[ěe]\b")
 _COORD_RE = re.compile(r"(-?\d{1,3}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})")
-_AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:2|²)\b", re.IGNORECASE)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 # bazos serves /img/N/ (full ~1200px) and /img/Nt/ (thumbnail ~340px) for the same
 # photo; a detail page shows the full cover plus the whole thumbnail strip.
@@ -195,13 +194,6 @@ def _parse_disposition(text: str) -> str | None:
     if not m:
         return None
     return f"{m.group(1)}+{m.group(2).lower()}"
-
-
-def _parse_area(text: str) -> float | None:
-    m = _AREA_RE.search(text)
-    if not m:
-        return None
-    return float(m.group(1).replace(",", "."))
 
 
 def _parse_coords(href: str | None) -> tuple[float | None, float | None]:
@@ -535,7 +527,7 @@ def parse_detail(
     # resolver's untyped fallback arm is the whole story here (on land it stamps
     # that free-text number 'plot', which is what it is on a parcel ad).
     area_m2, area_basis = derive_headline_area(
-        category_main=category_main, plot=None, fallback=_parse_area(haystack),
+        category_main=category_main, plot=None, fallback=parse_area_text(haystack),
     )
 
     raw = {

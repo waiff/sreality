@@ -427,6 +427,107 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_area_basis.yml"
     },
     {
+      "filename": "backfill_area_spaced_thousands.yml",
+      "name": "Backfill areas truncated on a spaced thousands group (W19)",
+      "description": "One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax and maxima parsers each carried a private copy of the naive area regex: it matched the FIRST bare digit run before an `m²`, so the Czech thousands format every one of them renders (\"5 870 m²\", \"1 063 m²\" with a no-break space) parsed from INSIDE the number and stored 870 / 63. Measured on production 2026-09-17:",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "write",
+          "description": "Actually write. Left false, this only reports what would change.",
+          "required": false,
+          "type": "choice",
+          "default": "false",
+          "options": [
+            "false",
+            "true"
+          ]
+        },
+        {
+          "name": "sources",
+          "description": "Comma-separated portals to heal (blank = all four)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "limit",
+          "description": "Max listings EXAMINED this run (blank = all of them)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "after",
+          "description": "Resume from this listings.id cursor (exclusive)",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "Rows per keyset page — also the R2 fan-out and UPDATE width",
+          "required": false,
+          "type": "string",
+          "default": "500",
+          "options": null
+        },
+        {
+          "name": "max_seconds",
+          "description": "Wall-clock budget in seconds (blank = no budget)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "rebuild_wait_seconds",
+          "description": "How long a WRITING pass waits for a read-model rebuild gap before starting anyway",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "ignore_rebuild",
+          "description": "Start immediately, without waiting for a rebuild gap at all",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "verbose",
+          "description": "Log every healed row's before/after areas (DEBUG)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "R2_ACCESS_KEY_ID",
+        "R2_ACCOUNT_ID",
+        "R2_BUCKET_NAME",
+        "R2_SECRET_ACCESS_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "backfill-area-spaced-thousands",
+      "cancelInProgress": false,
+      "timeoutMinutes": 180,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_area_spaced_thousands.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_area_spaced_thousands.yml"
+    },
+    {
       "filename": "backfill_child_listing_ids.yml",
       "name": "Backfill child listing_id (R2)",
       "description": "One-off, dispatch-only backfill for the R2 leg of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 2 A4). Fills the surrogate listings.id onto the 22 carrier tables migrations 320-325 added columns to, for rows written BEFORE dual-write shipped. No re-fetch, no LLM, no snapshots.",
