@@ -21,7 +21,7 @@ from typing import Any
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area, parse_area_text
+from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.floor import floor_from_text
 from scraper.price_text import is_per_area_price
 from scraper.published import bazos_posted_date
@@ -457,6 +457,31 @@ def _subtype_from_breadcrumb(tree: HTMLParser) -> str | None:
     return None
 
 
+def ad_haystack(title: str | None, description: str | None) -> str:
+    """The text every free-text field is mined from: the ad's title plus its body.
+
+    Composed HERE so the W19 heal can rebuild exactly the same string from
+    `raw_json->>'title'` + `listings.description` without a second copy of the rule.
+    """
+    return f"{title or ''}\n{description or ''}"
+
+
+def areas_from_text(haystack: str | None, *, category_main: str | None) -> PortalAreas:
+    """bazos's area, such as it is — spelled here once and nowhere else.
+
+    bazos has no structured area field at all: no interior measure and no
+    "plocha pozemku", so `plot` is genuinely absent rather than unread, and the
+    resolver's untyped fallback arm is the whole story here (on land it stamps that
+    free-text number 'plot', which is what it is on a parcel ad). Free prose is also the
+    one substrate where a parcel is always written "1 500 m2", which is why the naive
+    grammar cost ~12,400 of these rows their thousands digit.
+    """
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main, plot=None, fallback=parse_area_text(haystack),
+    )
+    return PortalAreas(area_m2=area_m2, area_basis=area_basis)
+
+
 def parse_detail(
     html: str,
     *,
@@ -476,7 +501,7 @@ def parse_detail(
 
     title = _text(tree.css_first("h1.nadpisdetail")) or ""
     description = _text(tree.css_first("div.popisdetail"))
-    haystack = f"{title}\n{description or ''}"
+    haystack = ad_haystack(title, description)
     # Deterministic floor (ground=0, like idnes + the LLM rubric) from the same
     # haystack area/disposition come from; the LLM enrichment fills only what this
     # high-precision pass leaves NULL (ambiguous/word-ordinal/mezonet cases).
@@ -522,13 +547,7 @@ def parse_detail(
 
     posted_text = _text(tree.css_first("span.velikost10"))
 
-    # bazos has no structured area field at all — no interior measure and no
-    # "plocha pozemku", so `plot` is genuinely absent rather than unread, and the
-    # resolver's untyped fallback arm is the whole story here (on land it stamps
-    # that free-text number 'plot', which is what it is on a parcel ad).
-    area_m2, area_basis = derive_headline_area(
-        category_main=category_main, plot=None, fallback=parse_area_text(haystack),
-    )
+    areas = areas_from_text(haystack, category_main=category_main)
 
     raw = {
         "id": source_id,
@@ -551,8 +570,8 @@ def parse_detail(
         subtype=subtype,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=area_m2,
-        area_basis=area_basis,
+        area_m2=areas.area_m2,
+        area_basis=areas.area_basis,
         disposition=_parse_disposition(haystack),
         floor=floor,
         total_floors=total_floors,

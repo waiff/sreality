@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from html import unescape
 from typing import Any
@@ -33,7 +34,7 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper import street
-from scraper.area import derive_headline_area, parse_area_text
+from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.price_text import is_per_area_price
 from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
@@ -561,6 +562,35 @@ def _next_page(tree: HTMLParser) -> int | None:
     return None
 
 
+def areas_from_params(
+    params: Mapping[str, str],
+    *,
+    title: str | None,
+    category_main: str | None,
+) -> PortalAreas:
+    """ceskereality's area cells, in ITS precedence — spelled here once and nowhere else.
+
+    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
+    reads it off `raw_json['params']`, which is this parser's own latest reading of the
+    same page. The collapsed `area_text` chain is what `usable_area` has always carried;
+    the headline goes through the shared resolver on SEPARATE measures.
+    """
+    area_text = params.get("plocha užitná") or params.get("užitná plocha") or params.get("plocha")
+    estate_area = parse_area_text(params.get("plocha pozemku"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=parse_area_text(params.get("plocha užitná") or params.get("užitná plocha")),
+        total=parse_area_text(params.get("plocha")),
+        plot=estate_area,
+        fallback=parse_area_text(title),
+    )
+    return PortalAreas(
+        area_m2=area_m2, area_basis=area_basis,
+        usable_area=parse_area_text(area_text), estate_area=estate_area,
+        garden_area=parse_area_text(params.get("plocha zahrady")),
+    )
+
+
 def parse_detail(
     html: str,
     *,
@@ -607,18 +637,7 @@ def parse_detail(
         title_street=title_street,
     )
 
-    # `area_text` keeps the collapsed value the usable_area column has always
-    # carried; the headline goes through the shared resolver on SEPARATE measures.
-    area_text = params.get("plocha užitná") or params.get("užitná plocha") or params.get("plocha")
-    usable_area = parse_area_text(area_text)
-    estate_area = parse_area_text(params.get("plocha pozemku"))
-    area_m2, area_basis = derive_headline_area(
-        category_main=category_main,
-        usable=parse_area_text(params.get("plocha užitná") or params.get("užitná plocha")),
-        total=parse_area_text(params.get("plocha")),
-        plot=estate_area,
-        fallback=parse_area_text(title),
-    )
+    areas = areas_from_params(params, title=title, category_main=category_main)
 
     description = unescape(ld.get("description") or "") or _text(
         tree.css_first("div.popisdetail")
@@ -655,9 +674,9 @@ def parse_detail(
         category_type=category_type,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=area_m2,
-        area_basis=area_basis,
-        usable_area=usable_area,
+        area_m2=areas.area_m2,
+        area_basis=areas.area_basis,
+        usable_area=areas.usable_area,
         disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
         locality=locality,
         # The <title>'s ", okres X" segment (W0 0j) — matches the "okres ..."
@@ -679,8 +698,8 @@ def parse_detail(
         energy_rating=_energy_rating(
             params.get("energetická náročnost") or params.get("penb")
         ),
-        estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        estate_area=areas.estate_area,
+        garden_area=areas.garden_area,
         description=description,
         # "Datum vložení" — the portal's own insertion date ("10. února 2026"),
         # the cleanest publish signal any HTML portal exposes.

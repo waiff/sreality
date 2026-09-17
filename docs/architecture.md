@@ -1724,38 +1724,53 @@ renumber.** Navigate by area:
     `area_m2` of 1000 or more; **realitymix 13,164** of 83,051 (its spec cells are unspaced —
     only the title fallback truncates); **bazos ~12,400** (8.4 % of its newest 8,000 rows);
     remax (13,797 rows) and maxima (540, of which 87 land rows max out at 987 m²) could not be
-    fingerprinted from titles, but remax's archived capture renders "Plocha parcely: 1 063 m²"
-    with an NBSP.
+    fingerprinted from titles, but remax's spec cells render "Plocha parcely: 1 063 m²" with
+    an NBSP.
 
-    `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) heals them by
-    **re-parsing each listing's own archived detail body** — the latest successful `detail`
-    `portal_raw_payloads` row, whose bytes live in R2, read through
-    `location_data.page_readers.load_bodies` exactly as the claim lane reads them — and writing
-    back the area columns only. Same rule-2 posture as the heals above, and it **subsumes the
-    W17 land heal on these portals**: that one copied `estate_area` into `area_m2`, and on these
-    portals `estate_area` was itself truncated, so the re-parse fixes both columns from the same
-    page in one statement (which also enqueues `dirty_properties` in the same CTE, so the mark
-    cannot survive a rolled-back write). Four properties are load-bearing and each has a test
-    that fails without it. (1) **The archive can LAG the live row** — the payload writer's
-    7-day per-listing floor discards a changed body inside the window, so ~3.2 % of rows (≈6k)
-    have a `listing_snapshots` row newer than their newest archived body; any such listing is
-    counted `body_stale` and skipped, so the heal can never revert a seller's edit to a
-    week-old page. (2) **It never writes NULL over a stored area** — a column the re-parse
-    cannot produce is not a change and is not written, because a parser shape drift is
-    indistinguishable from a genuinely absent measure; one consequence is deliberate, in that a
-    parcel beyond `area_m2`'s ceiling leaves the row's existing headline where it was while
-    `estate_area` is healed beside it. (3) **Every value is rounded to its column's scale**
-    (all five area columns are `numeric(*,1)`) before being compared AND before being written,
-    or a page reading "86,19 m²" rewrites the stored 86.2 on every pass for ever. (4) **The
-    selection is complete without touching a wide column** — a truncation always leaves a value
-    under 1000, or a "000" tail the write boundary NULLed — so it needs no `raw_json` predicate
-    (which would detoast every candidate row); that makes it a CAN-BE-WRONG set matching ~99 %
-    of these portals' rows while ~18 % actually move, and the per-source report says both. The
-    paging SELECT measured 40.5 s and the count 13.6 s against the cluster's 120 s default, so
-    the run arms `SET statement_timeout = '600s'` on connect and walks the sources ONE AT A TIME
-    with the keyset on `id`. Expect the heal to SURFACE seller-error outliers the truncation
-    masked: a 2+kk flat advertised as "3 060 m²" stops reading 60 and starts reading 3060 —
-    the portal's number, faithfully.
+    **The key precedence is one rule too, one level up.** A portal decides WHICH of its spec
+    cells is the usable measure and which is the parcel, in what order — and a second copy of
+    that order is the same defect as a second copy of the grammar. So each parser exposes
+    `areas_from_params(params, title=, category_main=)` (bazos, which has no spec table:
+    `areas_from_text`) returning `scraper.area.PortalAreas`, and its own `parse_detail` calls
+    it. That is what makes the heal possible without a second implementation.
+
+    `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) heals the
+    stored rows **from `listings.raw_json` — the parser's own latest reading of the live
+    page**. Each of these parsers stores the detail page's spec cells verbatim under
+    `raw_json['params']` plus `raw_json['title']`; bazos keeps its ad body in
+    `listings.description`. Those are exactly the strings the naive regex mis-read, so
+    re-reading them with the fixed grammar IS the heal — no fetch, no object store, no R2.
+    **That substrate was chosen the hard way.** The first cut re-parsed the ARCHIVED body out
+    of `portal_raw_payloads` + the bucket and, because the payload writer holds a 7-day
+    per-listing floor, the archive lags the live row; a gate that refused to apply a stale
+    body skipped **89 % of the population** on the first production dry run (examined=3000,
+    would change=85, body_stale=2672), and the heal was very nearly a no-op. `raw_json`
+    cannot lag: it is rewritten by the same transaction that writes the areas, so the
+    staleness question does not arise. Same rule-2 posture as the heals above, and it
+    **subsumes the W17 land heal on these portals**: that one copied `estate_area` into
+    `area_m2`, and on these portals `estate_area` was itself truncated, so the re-derive fixes
+    both columns from the same fields in one statement (which also enqueues
+    `dirty_properties` in the same CTE, so the mark cannot survive a rolled-back write).
+    Three further properties are load-bearing and each has a test that fails without it.
+    (1) **It never writes NULL over a stored area** — a column the re-derive cannot produce
+    is not a change and is not written, because a shape drift is indistinguishable from a
+    genuinely absent measure; one consequence is deliberate, in that a parcel beyond
+    `area_m2`'s ceiling leaves the row's existing headline where it was while `estate_area`
+    is healed beside it. The live simulation over 6,000 rows agrees: every change grows or
+    fills a value, none shrinks one. (2) **Every value is rounded to its column's scale**
+    (all five area columns are `numeric(*,1)`) before being compared AND before being
+    written, HALF-UP like Postgres's own numeric rounding, or a cell reading "86,19 m²"
+    rewrites the stored 86.2 on every pass for ever. (3) **The selection carries no
+    `raw_json` predicate** — a truncation always leaves a value under 1000, or a "000" tail
+    the write boundary NULLed, so the four narrow numeric columns answer it completely; the
+    page fields are PROJECTED per page (500 rows) and never predicated on, since a predicate
+    over `raw_json` detoasts every candidate row. That makes it a CAN-BE-WRONG set matching
+    ~99 % of these portals' rows while a minority actually move, and the per-source report
+    says both. The paging SELECT measured 40.5 s and the count 13.6 s against the cluster's
+    120 s default, so the run arms `SET statement_timeout = '600s'` on connect and walks the
+    sources ONE AT A TIME with the keyset on `id`. Expect the heal to SURFACE seller-error
+    outliers the truncation masked: a 2+kk flat advertised as "3 060 m²" stops reading 60
+    and starts reading 3060 — the portal's number, faithfully.
 
     **`area_m2` is what every consumer reads — the dedup rule included.** NEW DEDUP path C used
     to spell its own choice (`estate_area` for pozemek, else `usable_area`), a second answer to

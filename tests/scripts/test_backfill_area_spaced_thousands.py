@@ -1,13 +1,20 @@
-"""The spaced-thousands heal: the same page, re-read correctly, and nothing else written.
+"""The spaced-thousands heal: the row's own page fields, re-read correctly, nothing else.
 
-This job re-parses a listing's own ARCHIVED detail body with the fixed grammar and writes
-back the area columns. What has to hold: the selection covers every row a truncation could
-have touched and no wide column (a `raw_json` predicate detoasts every candidate — the cost
-that killed `backfill_mmreality_areas`'s first dispatch); the write touches areas only,
-never price and never a snapshot; the numeric ceiling is applied by the SAME guard the
-ingest path uses, so an unstorable parcel becomes NULL instead of a 22003 that aborts the
-page; a dry run writes nothing; and a healed row re-parses to itself, so a second pass is a
-no-op.
+This job re-derives a listing's areas from `listings.raw_json` — the parser's own latest
+reading of the live page — with the fixed grammar, and writes back the area columns. What
+has to hold: it reads the PORTAL's own key precedence rather than a second copy of it; the
+selection covers every row a truncation could have touched and carries no `raw_json`
+predicate (one over it detoasts every candidate — the cost that killed
+`backfill_mmreality_areas`'s first dispatch); the write touches areas only, never price and
+never a snapshot; the numeric ceiling is applied by the SAME guard the ingest path uses, so
+an unstorable parcel becomes NULL instead of a 22003 that aborts the page; a dry run writes
+nothing; and a healed row re-derives to itself, so a second pass is a no-op.
+
+The substrate matters and is asserted: an earlier cut re-parsed the ARCHIVED body out of
+`portal_raw_payloads` + R2, which lags the live row by up to the payload writer's 7-day
+floor — a gate that refused to apply a stale body skipped 89 % of the population on the
+first production dry run. `raw_json` cannot lag; it is rewritten by the same transaction
+that writes the areas.
 
 The fake connection below is a small in-memory `listings`, so the write is actually applied
 and the idempotence claim is exercised rather than asserted.
@@ -15,7 +22,6 @@ and the idempotence claim is exercised rather than asserted.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -25,33 +31,8 @@ from scripts import backfill_area_spaced_thousands as mod
 
 NB = " "
 
-_CK_URL = "https://www.ceskereality.cz/prodej/pozemky/praha/prodej-pozemku-1234567.html"
-_RM_URL = "https://www.remax-czech.cz/reality/detail/445483/prodej-pozemku"
 
-# ceskereality: a parcel its own page renders with a thousands group. The naive grammar
-# read 870 and stored it as the headline — which is why NOT ONE of its 19,088 land rows
-# had an area_m2 of 1000 or more.
-CK_BODY = (
-    f"<html><body><h1>Prodej pozemku 5{NB}870 m²</h1>"
-    '<dl class="g-info"><div class="i-info">'
-    '<span class="i-info__title">Plocha pozemku</span>'
-    f'<span class="i-info__value">5{NB}870 m²</span></div></dl>'
-    "</body></html>"
-).encode("utf-8")
-
-# remax: a parcel `area_m2` (numeric(7,1)) cannot store. The headline must come out NULL —
-# declined by the one rule — while `estate_area` (numeric(9,1)) keeps it.
-RM_BODY = (
-    '<html><head><title>t</title></head><body>'
-    f'<h1 class="pd-header__title">Prodej pozemku 16{NB}809{NB}800 m², Brno</h1>'
-    '<div class="pd-detail-info"><div class="pd-detail-info__row">'
-    '<div class="pd-detail-info__label">Plocha pozemku:</div>'
-    f'<div class="pd-detail-info__value">16{NB}809{NB}800 m²</div></div></div>'
-    "</body></html>"
-).encode("utf-8")
-
-
-# --- a tiny in-memory listings + payload archive ------------------------------
+# --- a tiny in-memory listings ------------------------------------------------
 
 
 class _Row(dict):
@@ -59,27 +40,15 @@ class _Row(dict):
 
 
 def _listing(**kw: Any) -> _Row:
-    row = _Row(id=0, source="ceskereality", source_id_native="x", source_url=_CK_URL,
-               category_main="pozemek", category_type="prodej", property_id=None,
+    row = _Row(id=0, source="ceskereality", property_id=None, category_main="pozemek",
                area_m2=None, usable_area=None, estate_area=None, garden_area=None,
-               area_basis=None, is_active=True)
+               area_basis=None, params=None, title=None, ad_text=None, is_active=True)
     row.update(kw)
     return row
 
 
-_PROJECTION = ("id", "source", "source_id_native", "source_url", "category_main",
-               "category_type", "property_id", "area_m2", "usable_area",
-               "estate_area", "garden_area", "area_basis")
-
-
-class _Store:
-    def __init__(self, objects: dict[str, bytes]) -> None:
-        self.objects = objects
-        self.reads: list[str] = []
-
-    def download_bytes(self, key: str) -> bytes:
-        self.reads.append(key)
-        return self.objects[key]
+_PROJECTION = ("id", "property_id", "category_main", "area_m2", "usable_area",
+               "estate_area", "garden_area", "area_basis", "params", "title", "ad_text")
 
 
 class _Cursor:
@@ -102,26 +71,17 @@ class _Cursor:
         elif "GROUP BY source" in sql:
             self._rows = [(s, 1, 1, 1) for s in sorted(
                 {r["source"] for r in self._conn.listings})]
-        elif "portal_raw_payloads p" in sql:
-            self._rows = [(s, n, pid, self._conn.observed_at.get(pid))
-                          for (s, n), pid in sorted(self._conn.payloads.items())
-                          if n in params["natives"] and s == params["source"]]
-        elif "FROM portal_raw_payloads" in sql:
-            # `page_readers.load_bodies` own statement: id, body, body_r2_key, encoding.
-            self._rows = [(pid, None, key, "identity")
-                          for pid, key in sorted(self._conn.bodies.items())
-                          if pid in params["ids"]]
-        elif "FROM listing_snapshots" in sql:
-            self._rows = [(lid, at) for lid, at
-                          in sorted(self._conn.snapshot_at.items())
-                          if lid in params["ids"]]
         elif sql.strip().startswith("SELECT id"):
             rows = sorted((r for r in self._conn.listings
                            if r["id"] > params["after"]
                            and r["source"] == params["source"]),
                           key=lambda r: r["id"])
-            self._rows = [tuple(r[c] for c in _PROJECTION)
-                          for r in rows[:params["page"]]]
+            text_lane = "description AS ad_text" in sql
+            self._rows = [
+                tuple(None if (c == "ad_text" and not text_lane)
+                      else None if (c == "params" and text_lane)
+                      else r[c] for c in _PROJECTION)
+                for r in rows[:params["page"]]]
         elif sql.startswith("SET LOCAL "):
             self._conn.guards.append(sql)
         elif "UPDATE listings" in sql and "dirty_properties" in sql:
@@ -157,15 +117,8 @@ class _Tx:
 
 
 class _Conn:
-    def __init__(self, listings: list[_Row], payloads: dict[tuple[str, str], int],
-                 bodies: dict[int, str], *,
-                 observed_at: dict[int, Any] | None = None,
-                 snapshot_at: dict[int, Any] | None = None) -> None:
+    def __init__(self, listings: list[_Row]) -> None:
         self.listings = listings
-        self.payloads = payloads
-        self.bodies = bodies
-        self.observed_at = observed_at or {}
-        self.snapshot_at = snapshot_at or {}
         self.executed: list[str] = []
         self.updates: list[dict[str, Any]] = []
         self.guards: list[str] = []
@@ -186,18 +139,56 @@ class _Conn:
         return None
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, conn: _Conn, store: _Store,
-         *argv: str) -> None:
-    from location_data import payloads as payloads_mod
-
+def _run(monkeypatch: pytest.MonkeyPatch, conn: _Conn, *argv: str) -> None:
     monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://fake")
     monkeypatch.setattr(mod.db, "connect", lambda *a, **k: conn)
-    monkeypatch.setattr(mod.db, "mark_properties_dirty",
-                        lambda _c, ids: len(list(ids)))
-    monkeypatch.setattr(payloads_mod, "open_store", lambda: store)
-    monkeypatch.setattr("sys.argv",
-                        ["backfill_area_spaced_thousands", *argv])
+    monkeypatch.setattr("sys.argv", ["backfill_area_spaced_thousands", *argv])
     assert mod.main() == 0
+
+
+def _module_code() -> str:
+    """The heal's source with its module docstring removed — what it DOES, not what it says."""
+    source = open(mod.__file__, encoding="utf-8").read()
+    return source.split('"""', 2)[2]
+
+
+# --- the substrate ------------------------------------------------------------
+
+
+def test_the_substrate_is_the_rows_own_page_fields_not_an_archived_body() -> None:
+    """The archive lags the live row by up to the payload writer's 7-day per-listing floor,
+    and a gate that refused to apply a stale body skipped 89 % of the population on the
+    first production dry run (examined=3000, would change=85, body_stale=2672). `raw_json`
+    is rewritten by the same transaction that writes the areas, so it cannot lag."""
+    code = _module_code()
+    for gone in ("portal_raw_payloads", "load_bodies", "open_store", "body_stale",
+                 "listing_snapshots", "R2_", "download_bytes"):
+        assert gone not in code, gone
+    assert "raw_json->'params'" in mod._SELECT_SQL
+    assert "raw_json->>'title'" in mod._SELECT_SQL
+    # bazos has no spec table: the ad body is its substrate, on its own statement so the
+    # other four never detoast `description` for nothing.
+    assert "description AS ad_text" in mod._SELECT_TEXT_SQL
+    assert "description" not in mod._SELECT_SQL
+    assert mod.TEXT_SOURCES == frozenset({"bazos"})
+
+
+def test_the_portals_own_key_precedence_is_called_never_recopied() -> None:
+    """A second copy of a key order is the same defect as a second copy of the number
+    grammar, one level up (rule 21). Each parser exposes the function its own
+    `parse_detail` calls, and the heal calls exactly that."""
+    from scraper.bazos_parser import areas_from_text
+    from scraper.ceskereality_parser import areas_from_params as ck
+    from scraper.maxima_parser import areas_from_params as mx
+    from scraper.realitymix_parser import areas_from_params as rmix
+    from scraper.remax_parser import areas_from_params as rmax
+
+    assert all(callable(f) for f in (ck, rmix, rmax, mx, areas_from_text))
+    # CODE only — the module docstring quotes a key or two as illustration.
+    code = _module_code()
+    for key in ("plocha pozemku", "užitná plocha", "plocha parcely",
+                "celkova plocha", "plocha zahrady"):
+        assert key not in code, f"{key!r} is the parser's to spell, not the heal's"
 
 
 # --- the selection ------------------------------------------------------------
@@ -205,7 +196,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, conn: _Conn, store: _Store,
 
 def test_the_suspect_predicate_is_spelled_once_and_used_everywhere() -> None:
     assert mod._SUSPECT in mod._COUNT_BY_SOURCE_SQL
-    assert mod._SUSPECT in mod._SELECT_SQL
+    assert mod._SUSPECT in mod._SELECT_SQL and mod._SUSPECT in mod._SELECT_TEXT_SQL
     # a truncation leaves the last three digits ...
     for col in mod._AREA_COLS:
         assert f"{col} < 1000" in mod._SUSPECT
@@ -213,33 +204,25 @@ def test_the_suspect_predicate_is_spelled_once_and_used_everywhere() -> None:
     assert "area_m2 IS NULL AND usable_area IS NULL" in " ".join(mod._SUSPECT.split())
 
 
-def test_the_selection_touches_no_wide_column() -> None:
-    """A `raw_json->>'title'` arm would detoast every candidate row — the cost that killed
-    `backfill_mmreality_areas`'s first live dispatch on a 120 s statement_timeout — and it
-    covers nothing the all-NULL arm does not."""
-    for statement in (mod._SUSPECT, mod._SELECT_SQL, mod._COUNT_BY_SOURCE_SQL):
-        assert "raw_json" not in statement and "description" not in statement
-    assert "property_id" in mod._SELECT_SQL.split("FROM")[0]  # rule 20
+def test_no_predicate_ever_touches_a_wide_column() -> None:
+    """`raw_json` is PROJECTED per page, which is a fine read; a predicate over it would
+    detoast every candidate row, the cost that killed `backfill_mmreality_areas`'s first
+    live dispatch on a 120 s statement_timeout."""
+    assert "raw_json" not in mod._SUSPECT and "description" not in mod._SUSPECT
+    for sql in (mod._SELECT_SQL, mod._SELECT_TEXT_SQL):
+        where = sql.split("WHERE", 1)[1]
+        assert "raw_json" not in where and "description" not in where
+    assert "raw_json" not in mod._COUNT_BY_SOURCE_SQL
 
 
 def test_the_page_read_is_one_source_at_a_time() -> None:
     """The paging SELECT measured 40.5 s against the cluster's 120 s default. A page that
     filtered `source = ANY(...)` stepped over every other portal's rows to find its own."""
-    sql = " ".join(mod._SELECT_SQL.split())
-    assert "source = %(source)s" in sql and "ANY(%(sources)s" not in sql
-    assert "id > %(after)s::bigint" in sql and "ORDER BY id" in sql
-    assert "source = %(source)s" in " ".join(mod._PAYLOADS_SQL.split())
-
-
-def test_the_payload_read_takes_the_latest_successful_detail_body() -> None:
-    sql = " ".join(mod._PAYLOADS_SQL.split())
-    assert "DISTINCT ON (p.source, p.source_id_native)" in sql
-    assert "p.page_kind = 'detail'" in sql
-    assert "p.version_seq DESC NULLS LAST" in sql
-    # NULL ranks as successful, exactly as location_data.payloads ranks it.
-    assert "p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299" in sql
-    # and it carries the clock the staleness gate compares against.
-    assert "p.last_observed_at" in mod._PAYLOADS_SQL.split("FROM")[0]
+    for sql in (mod._SELECT_SQL, mod._SELECT_TEXT_SQL):
+        flat = " ".join(sql.split())
+        assert "source = %(source)s" in flat and "ANY(%(sources)s" not in flat
+        assert "id > %(after)s::bigint" in flat and "ORDER BY id" in flat
+        assert "property_id" in flat.split("FROM")[0]  # rule 20
 
 
 def test_the_write_touches_areas_only_and_enqueues_in_the_same_statement() -> None:
@@ -258,67 +241,73 @@ def test_the_write_touches_areas_only_and_enqueues_in_the_same_statement() -> No
 
 def test_bazos_is_in_the_healed_population() -> None:
     """8.4 % of the newest 8,000 bazos rows carry the exact truncation fingerprint, and its
-    parser now shares the grammar — so the same re-parse applies."""
+    parser now shares the grammar — so the same re-derive applies, off its ad text."""
     assert set(mod.DEFAULT_SOURCES) == {
         "ceskereality", "realitymix", "remax", "maxima", "bazos"}
-    assert mod._parser_for("bazos") is not None
 
 
 def test_the_budget_defaults_under_the_runner_timeout() -> None:
-    """~193k bodies do not fit one job, and a run cancelled by the runner's timeout stamps
-    no resumable stop — so the budget is a default, not something the dispatcher has to
-    remember. It must stay under the workflow's `timeout-minutes: 180`."""
+    """A run cancelled by the runner's timeout stamps no resumable stop, so the budget is a
+    default rather than something the dispatcher has to remember."""
     defaults = {a.dest: a.default for a in mod._build_parser()._actions}
     assert defaults["max_seconds"] == 9000.0
     assert defaults["max_seconds"] < 180 * 60
     assert defaults["dry_run"] is True
 
 
+def test_the_column_scale_rounds_the_way_postgres_does() -> None:
+    """`round()` is banker's; numeric is half-up. On an exact .x5 area the two disagree, and
+    a value the column then rounds differently re-diffs on the very next pass."""
+    from decimal import Decimal
+
+    assert mod._at_column_scale(86.25) == 86.3      # round(86.25, 1) is 86.2
+    assert mod._at_column_scale(86.19) == 86.2
+    assert mod._at_column_scale(None) is None
+    assert mod._at_column_scale(Decimal("86.2")) == 86.2
+
+
 # --- end to end ---------------------------------------------------------------
 
 
-_NOW = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
-
-
-def _world() -> tuple[_Conn, _Store]:
-    listings = [
-        _listing(id=1, source="ceskereality", source_id_native="1234567",
-                 source_url=_CK_URL, area_m2=870.0, area_basis="plot",
-                 estate_area=870.0, property_id=11),
-        _listing(id=2, source="remax", source_id_native="445483", source_url=_RM_URL,
-                 area_m2=800.0, area_basis="plot", estate_area=800.0, property_id=22),
-        # no archived body: reported, never written.
-        _listing(id=3, source="ceskereality", source_id_native="9999999",
-                 source_url=_CK_URL, area_m2=41.0, area_basis="usable"),
-    ]
-    conn = _Conn(listings,
-                 payloads={("ceskereality", "1234567"): 101, ("remax", "445483"): 102},
-                 bodies={101: "k/ck", 102: "k/rm"},
-                 observed_at={101: _NOW, 102: _NOW})
-    return conn, _Store({"k/ck": CK_BODY, "k/rm": RM_BODY})
+def _world() -> _Conn:
+    return _Conn([
+        # ceskereality: the parcel its page renders with a thousands group. The naive
+        # grammar read 870 — which is why NOT ONE of its 19,088 land rows had an area_m2
+        # of 1000 or more.
+        _listing(id=1, source="ceskereality", property_id=11,
+                 area_m2=870.0, area_basis="plot", estate_area=870.0,
+                 params={"plocha pozemku": f"5{NB}870 m²"},
+                 title=f"Prodej pozemku 5{NB}870 m²"),
+        # remax: a parcel `area_m2` (numeric(7,1)) cannot store.
+        _listing(id=2, source="remax", property_id=22,
+                 area_m2=800.0, area_basis="plot", estate_area=800.0,
+                 params={"plocha pozemku": f"16{NB}809{NB}800 m²"},
+                 title=f"Prodej pozemku 16{NB}809{NB}800 m², Brno"),
+        # no page fields at all: reported, never written.
+        _listing(id=3, source="ceskereality", area_m2=41.0, area_basis="usable",
+                 params=None, title=None),
+    ])
 
 
 def test_a_dry_run_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn, store = _world()
-    _run(monkeypatch, conn, store, "--dry-run")
+    conn = _world()
+    _run(monkeypatch, conn, "--dry-run")
     assert conn.updates == []
     assert conn.listings[0]["area_m2"] == 870.0
-    # it still READ the bodies — the report is what it would change, not a guess.
-    assert sorted(store.reads) == ["k/ck", "k/rm"]
 
 
 def test_the_run_arms_its_own_statement_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """The paging SELECT measured 40.5 s and the count 13.6 s against the cluster's 120 s
     default — too close to it to run unguarded, as the sibling backfills already knew."""
-    conn, store = _world()
-    _run(monkeypatch, conn, store, "--dry-run")
+    conn = _world()
+    _run(monkeypatch, conn, "--dry-run")
     assert conn.armed_statement_timeout
     assert conn.executed[0] == mod._STATEMENT_TIMEOUT_SQL
 
 
 def test_the_write_heals_the_truncated_parcel(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn, store = _world()
-    _run(monkeypatch, conn, store, "--write", "--ignore-rebuild")
+    conn = _world()
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild")
     healed = conn.listings[0]
     assert (healed["area_m2"], healed["area_basis"]) == (5870.0, "plot")
     assert healed["estate_area"] == 5870.0
@@ -334,91 +323,58 @@ def test_a_parcel_over_the_ceiling_never_blanks_the_stored_headline(
     """`area_m2` is numeric(7,1): 16,809,800 m2 cannot be stored, so the one rule declines
     the measure rather than stamping a basis for a value the row will not hold. The heal
     then leaves the headline the row already carried — writing NULL over a stored area is
-    indistinguishable from a parser shape drift, and must never happen — while
-    `estate_area` (numeric(9,1)) is healed beside it."""
-    conn, store = _world()
-    _run(monkeypatch, conn, store, "--write", "--ignore-rebuild")
+    indistinguishable from a shape drift, and must never happen — while `estate_area`
+    (numeric(9,1)) is healed beside it."""
+    conn = _world()
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild")
     row = conn.listings[1]
     assert row["estate_area"] == 16_809_800.0
     assert row["estate_area"] > MAX_AREA_M2  # numeric(9,1) holds what (7,1) cannot
     assert row["area_m2"] == 800.0 and row["area_basis"] == "plot"
 
 
-def test_a_missing_body_is_reported_never_written(
+def test_a_row_with_no_page_fields_is_reported_never_written(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    conn, store = _world()
-    _run(monkeypatch, conn, store, "--write", "--ignore-rebuild")
+    conn = _world()
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild")
     assert conn.listings[2]["area_m2"] == 41.0
     assert all(3 not in u["ids"] for u in conn.updates)
 
 
-def test_a_body_older_than_the_listings_newest_snapshot_is_skipped(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    """The payload writer discards a CHANGED body inside its 7-day per-listing floor, so
-    ~3.2 % of rows (≈6k) have a snapshot newer than their newest archived body. Re-parsing
-    one would revert the seller's edit to a week-old page."""
-    conn, store = _world()
-    conn.snapshot_at = {1: _NOW + timedelta(days=1)}
-    _run(monkeypatch, conn, store, "--write", "--ignore-rebuild")
-    assert conn.listings[0]["area_m2"] == 870.0     # untouched
-    assert all(1 not in u["ids"] for u in conn.updates)
-    # a snapshot OLDER than the body is not a reason to skip.
-    conn2, store2 = _world()
-    conn2.snapshot_at = {1: _NOW - timedelta(days=1)}
-    _run(monkeypatch, conn2, store2, "--write", "--ignore-rebuild")
-    assert conn2.listings[0]["area_m2"] == 5870.0
+def test_bazos_reads_its_ad_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """bazos publishes no spec table: the parcel lives in the ad's prose, which is the one
+    substrate where it is always written "1 500 m2"."""
+    conn = _Conn([
+        _listing(id=7, source="bazos", category_main="pozemek", property_id=77,
+                 area_m2=500.0, area_basis="plot",
+                 title="Prodam pozemek", ad_text=f"Krasny pozemek 1{NB}500 m2 v obci."),
+    ])
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild", "--sources", "bazos")
+    assert conn.listings[0]["area_m2"] == 1500.0
+    # bazos yields no typed measures, and the never-blank rule keeps the row's own.
+    assert conn.listings[0]["estate_area"] is None
 
 
 def test_a_two_decimal_area_does_not_rewrite_itself_every_pass(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """Every area column is numeric(*,1), so the row reads back rounded. Comparing the
     fresh 86.19 against the stored 86.2 made the heal rewrite live rows for ever."""
-    listings = [_listing(id=9, source="ceskereality", source_id_native="1234567",
-                         source_url=_CK_URL, category_main="byt", area_m2=86.2,
-                         area_basis="usable", usable_area=86.2, property_id=99)]
-    conn = _Conn(listings, payloads={("ceskereality", "1234567"): 101},
-                 bodies={101: "k/ck"}, observed_at={101: _NOW})
-    body = (
-        "<html><body><h1>Prodej bytu 2+kk 86,19 m\u00b2</h1>"
-        '<dl class="g-info"><div class="i-info">'
-        '<span class="i-info__title">Plocha u\u017eitn\u00e1</span>'
-        '<span class="i-info__value">86,19 m\u00b2</span></div></dl></body></html>'
-    ).encode("utf-8")
-    _run(monkeypatch, conn, _Store({"k/ck": body}), "--write", "--ignore-rebuild")
+    conn = _Conn([
+        _listing(id=9, source="ceskereality", category_main="byt", property_id=99,
+                 area_m2=86.2, area_basis="usable", usable_area=86.2,
+                 params={"plocha užitná": "86,19 m²"},
+                 title="Prodej bytu 2+kk 86,19 m²"),
+    ])
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild")
     assert conn.updates == []
     assert conn.listings[0]["area_m2"] == 86.2
 
 
-def test_the_column_scale_rounds_the_way_postgres_does() -> None:
-    """`round()` is banker's; numeric is half-up. On an exact .x5 area the two disagree, and
-    a value the column then rounds differently re-diffs on the very next pass."""
-    assert mod._at_column_scale(86.25) == 86.3      # round(86.25, 1) is 86.2
-    assert mod._at_column_scale(86.19) == 86.2
-    assert mod._at_column_scale(None) is None
-    from decimal import Decimal
-
-    assert mod._at_column_scale(Decimal("86.2")) == 86.2
-
-
 def test_a_second_pass_changes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    conn, store = _world()
-    _run(monkeypatch, conn, store, "--write", "--ignore-rebuild")
+    conn = _world()
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild")
     first = [dict(r) for r in conn.listings]
     conn.updates.clear()
-    _run(monkeypatch, conn, store, "--write", "--ignore-rebuild")
+    _run(monkeypatch, conn, "--write", "--ignore-rebuild")
     assert conn.updates == []
     assert [dict(r) for r in conn.listings] == first
-
-
-def test_an_unset_r2_store_refuses_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bodies live in the bucket (threshold 2 KB since migration 406). A run without a
-    store would find essentially every payload spilled and report coverage over nothing."""
-    from location_data import payloads as payloads_mod
-
-    conn, _store = _world()
-    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://fake")
-    monkeypatch.setattr(mod.db, "connect", lambda *a, **k: conn)
-    monkeypatch.setattr(payloads_mod, "open_store", lambda: None)
-    monkeypatch.setattr("sys.argv", ["backfill_area_spaced_thousands", "--dry-run"])
-    assert mod.main() == 2
-    assert conn.updates == []

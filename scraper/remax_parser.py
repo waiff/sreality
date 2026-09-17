@@ -27,6 +27,7 @@ filters agree.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from html import unescape
 from typing import Any
@@ -34,7 +35,12 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import AREA_TEXT_RE, derive_headline_area, parse_area_text
+from scraper.area import (
+    AREA_TEXT_RE,
+    PortalAreas,
+    derive_headline_area,
+    parse_area_text,
+)
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -605,6 +611,37 @@ def _h1_locality(title: str | None) -> tuple[str | None, str | None]:
     return tail, district
 
 
+def areas_from_params(
+    params: Mapping[str, str],
+    *,
+    title: str | None,
+    category_main: str | None,
+) -> PortalAreas:
+    """remax's area cells, in ITS precedence — spelled here once and nowhere else.
+
+    Keys are diacritics-stripped by `_norm_key`, which is also how they are stored in
+    `raw_json['params']`: `parse_detail` reads this off a live page, and
+    `scripts/backfill_area_spaced_thousands` reads it off that stored reading of the same
+    page. remax renders every spec value's thousands group with a no-break space, which is
+    what the naive grammar truncated.
+    """
+    usable_text = params.get("uzitna plocha")
+    total_text = params.get("celkova plocha") or params.get("plocha")
+    estate_area = parse_area_text(params.get("plocha pozemku"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=parse_area_text(usable_text),
+        total=parse_area_text(total_text),
+        plot=estate_area,
+        fallback=parse_area_text(title),
+    )
+    return PortalAreas(
+        area_m2=area_m2, area_basis=area_basis,
+        usable_area=parse_area_text(usable_text), estate_area=estate_area,
+        garden_area=parse_area_text(params.get("plocha zahrady")),
+    )
+
+
 def parse_detail(
     html: str,
     *,
@@ -696,16 +733,7 @@ def parse_detail(
         unescape(addr_match.group(1)).strip(" ,") or None if addr_match else None
     )
 
-    usable_text = params.get("uzitna plocha")
-    total_text = params.get("celkova plocha") or params.get("plocha")
-    estate_area = parse_area_text(params.get("plocha pozemku"))
-    area_m2, area_basis = derive_headline_area(
-        category_main=category_main,
-        usable=parse_area_text(usable_text),
-        total=parse_area_text(total_text),
-        plot=estate_area,
-        fallback=parse_area_text(title),
-    )
+    areas = areas_from_params(params, title=title, category_main=category_main)
 
     image_urls = _detail_images(html, source_id)
 
@@ -734,9 +762,9 @@ def parse_detail(
         subtype=subtype_of(params.get("typ nemovitosti"), source_url),
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=area_m2,
-        area_basis=area_basis,
-        usable_area=parse_area_text(usable_text),
+        area_m2=areas.area_m2,
+        area_basis=areas.area_basis,
+        usable_area=areas.usable_area,
         disposition=_parse_disposition(params.get("dispozice")) or _parse_disposition(title),
         locality=locality,
         district=district,
@@ -759,8 +787,8 @@ def parse_detail(
         garage=_yes_no(params.get("garaz")),
         has_parking=_yes_no(params.get("parkovani")) or _yes_no(params.get("garaz")),
         furnished=_norm_furnished(params.get("vybaveno")),
-        estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        estate_area=areas.estate_area,
+        garden_area=areas.garden_area,
         description=_description(tree),
         raw=raw,
     )
