@@ -15,35 +15,41 @@ Independent of the analytical, UI, and map tracks.
   19,088 land rows had an `area_m2` ≥ 1000 (max 999); **realitymix 13,164** of 83,051 (1,828
   correct — its spec cells are unspaced, so only the title fallback truncates); **bazos
   ~12,400** (8.4 % of its newest 8,000 rows); remax (13,797 rows) and maxima (540; 87 land rows,
-  max 987 m²) were not fingerprintable from titles, but remax's archived capture renders
+  max 987 m²) were not fingerprintable from titles, but remax's spec cells render
   "Plocha parcely: 1 063 m²" with an NBSP. It reached the per-m² measure (rule 23), Browse
   filters/sort, comparables, dedup's area rung, and W17's land heal (which copied the truncated
   `estate_area` into `area_m2` on exactly these portals).
 - **Shipped:** ONE grammar, `scraper.area.parse_area_text` (rule 21) — idnes's proven pattern
   WIDENED to every separator a portal emits (space, NBSP, narrow NBSP, thin space, zero-width
   joiners), with the negative lookbehind that keeps "3+1 174 m²" at 174 and a per-m² price from
-  reading as an area. All six parsers call it; the five private copies are gone. The remax
+  reading as an area. All six parsers call it; the five private copies are gone. The key
+  PRECEDENCE is one rule too, one level up: each parser exposes the `areas_from_params` /
+  `areas_from_text` its own `parse_detail` runs, returning `scraper.area.PortalAreas`. The remax
   hand-authored fixture now renders its thousands group the way the real capture does, so the
-  test stopped asserting back a string it had planted. The heal,
-  `scripts/backfill_area_spaced_thousands.py` + its dispatch-only workflow (dry-run default),
-  re-parses each listing's OWN archived detail body — latest successful `detail`
-  `portal_raw_payloads` row, bytes from R2 via `page_readers.load_bodies` — and writes back the
-  area columns only: no snapshot (the sanctioned rule-2 exception), no price, and one statement
-  per page that also enqueues `dirty_properties` in the same CTE (rule 20). Four rails, each with
-  a test that fails without it: a listing whose newest `listing_snapshots` row post-dates the
-  archived body is skipped as `body_stale` (the payload writer's 7-day floor leaves ~3.2 % of
-  rows, ≈6k, lagging — re-parsing one would revert a seller's edit); a column the re-parse
-  cannot produce is never written, so a shape drift can never blank an area; every value is
-  rounded to its `numeric(*,1)` column scale before compare AND write, so "86,19 m²" does not
-  rewrite 86.2 for ever; and the run arms `statement_timeout = 600s` and walks the sources one
-  at a time on an id keyset (the paging SELECT measured 40.5 s against a 120 s default).
-  Because it fixes `area_m2` and `estate_area` together, W17's land heal needs no re-run on
-  these portals.
+  test stopped asserting back a string it had planted.
+- **The heal** (`scripts/backfill_area_spaced_thousands.py` + a dispatch-only workflow, dry-run
+  default) re-derives the areas from **`listings.raw_json`** — the parser's own latest reading of
+  the live page (spec cells under `raw_json['params']`, the title, and for bazos
+  `listings.description`) — by CALLING each portal's own function. No fetch, no R2, no staleness
+  question. That substrate was chosen the hard way: the first cut re-parsed the ARCHIVED body out
+  of `portal_raw_payloads` + the bucket, and since the payload writer holds a 7-day per-listing
+  floor the archive lags the live row — the gate that refused a stale body skipped **89 %** of the
+  population on the first production dry run (examined=3000, would change=85, body_stale=2672).
+  Writes the area columns only: no snapshot (the sanctioned rule-2 exception), no price, and one
+  statement per page that also enqueues `dirty_properties` in the same CTE (rule 20). Three rails,
+  each with a test that fails without it: a column the re-derive cannot produce is never written,
+  so a shape drift can never blank an area (the 6,000-row live simulation agrees — every change
+  grows or fills, none shrinks); every value is rounded to its `numeric(*,1)` column scale
+  HALF-UP before compare AND write, so "86,19 m²" does not rewrite 86.2 for ever; and the run arms
+  `statement_timeout = 600s` and walks the sources one at a time on an id keyset (the paging
+  SELECT measured 40.5 s against a 120 s default), with `raw_json` projected per page and never
+  predicated on. Because it fixes `area_m2` and `estate_area` together, W17's land heal needs no
+  re-run on these portals.
 - **Next:** the operator dispatches the heal — dry-run per portal first, then `--write`, one
-  `--sources` at a time (~193k bodies; `--max-seconds` defaults to 9000 under the 180-minute job
-  timeout, and every source's stop cursor is logged for the resume). **Expect it to surface
-  seller-error outliers the truncation masked** — a 2+kk flat advertised as "3 060 m²" stops
-  reading 60 and starts reading 3060, faithfully to the page.
+  `--sources` at a time (`--max-seconds` defaults to 9000 under the 180-minute job timeout, and
+  every source's stop cursor is logged for the resume). **Expect it to surface seller-error
+  outliers the truncation masked** — a 2+kk flat advertised as "3 060 m²" stops reading 60 and
+  starts reading 3060, faithfully to the page.
 
 ### sreality photos: the whole frame, and provenance on every stored row (2026-09-11, in progress)
 - **Shipped:** downloads moved off sreality's `res,749,562,3|shr,,20|jpg,90` (mode 3 = a 4:3 CROP;

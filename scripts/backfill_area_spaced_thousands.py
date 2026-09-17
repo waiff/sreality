@@ -1,4 +1,4 @@
-"""One-off heal: re-parse the areas five portals truncated on a spaced thousands group.
+"""One-off heal: re-derive the areas five portals truncated on a spaced thousands group.
 
 Until W19, `ceskereality`, `realitymix`, `remax`, `maxima` and `bazos` each carried a
 private copy of the naive area regex — it matched the FIRST bare digit run before an `m²`,
@@ -12,83 +12,85 @@ no-break space) parsed from INSIDE the number and stored 870 / 63. Measured on p
     realitymix     83,051 rows   13,164 fingerprints, 1,828 correct (its spec cells are
                                  unspaced, so only the TITLE fallback truncates)
     remax          13,797 rows   not fingerprintable from titles (they carry no spaced
-                                 number) — but the archived capture proves its spec cells
-                                 DO ("Plocha parcely: 1 063 m²", NBSP)
+                                 number) — but its spec cells render an NBSP thousands
+                                 group ("Plocha parcely: 1 063 m²")
     maxima            540 rows   87 land rows, max 987 m² — the same signature
     bazos          ~12,400 rows  8.4 % of the newest 8,000 rows carry the exact
                                  fingerprint; its land rows show the same signature
 
 `scraper.area.parse_area_text` fixes every future write. This fixes the rows already
-stored, by re-parsing each listing's own archived detail body with the fixed parser —
-the same page, read correctly — and writing back only the area columns.
+stored — from the row's OWN page fields, without fetching or reading anything else.
 
-**THE SUBSTRATE IS `portal_raw_payloads`, NOT `portal_raw_pages`.** The
-`backfill_idnes_areas` precedent read the latest-wins staging table; since migration 382
-the append-on-change archive is where a listing's body actually lives, and since 406 the
-bytes are in R2 with the metadata row in Postgres. So the read is: latest successful
-`detail` payload per (source, source_id_native) → `location_data.page_readers.load_bodies`
-→ `payloads.decode_body`, exactly the path the hourly claim lane takes. A spilled row with
-no store configured is an ERROR (`IntakeRefused`), never a skipped page: mining only the
-database-resident rows would report coverage over a corpus that is almost entirely in the
-bucket. One bad object costs one listing, never the batch.
+**THE SUBSTRATE IS `listings.raw_json`, THE PARSER'S LATEST READING OF THE LIVE PAGE.**
+Each of these parsers stores the detail page's spec cells verbatim under
+`raw_json['params']` ("plocha pozemku" -> "5 870 m²") plus `raw_json['title']`; bazos, which
+has no spec table, stores the ad title and keeps its body in `listings.description`. Those
+are exactly the strings the naive regex mis-read, so re-reading them with the fixed grammar
+IS the heal. Three properties fall out of the substrate rather than being engineered:
 
-**THE ARCHIVE CAN LAG THE LIVE ROW, so a stale body is skipped, not applied.** The payload
-writer holds a per-listing TIME FLOOR (`LOCATION_PAYLOAD_MIN_APPEND_INTERVAL_DAYS`, 7 by
-default): a body that CHANGED inside that window is discarded, so ~3.2 % of rows (≈6k)
-have a `listing_snapshots` row newer than their newest archived body. Re-parsing one of
-those would revert a seller's edit to a week-old page. Any listing whose newest snapshot
-post-dates the body's `last_observed_at` is therefore counted `body_stale` and left alone.
+  * **No fetch, no object store, no R2.** An earlier cut re-parsed the archived body out of
+    `portal_raw_payloads` + the bucket. It worked, and it was wrong in one decisive way: the
+    payload writer holds a 7-day per-listing floor, so the archive lags the live row, and a
+    gate that refused to apply a stale body skipped **89 % of the population** on the first
+    production dry run (examined=3000, would change=85, body_stale=2672). `raw_json` cannot
+    lag: it is rewritten by the same transaction that writes the areas.
+  * **No staleness gate at all.** There is no older-page-versus-newer-row question to ask.
+  * **The portal's own key precedence, spelled once.** Each parser exposes
+    `areas_from_params(params, title=, category_main=)` (bazos: `areas_from_text`), the
+    SAME function its `parse_detail` calls, returning `scraper.area.PortalAreas`. The heal
+    calls it with the stored params. A second copy of a key order is the same defect as a
+    second copy of the number grammar, one level up (rule 21).
 
-**Selection is complete by construction, and touches no wide column.** A truncation keeps
-the last three digits, so the stored value is ALWAYS under 1000 — unless those digits are
-"000" ("10 000 m²" → 0), in which case `scraper.db.sane_listing_numerics` NULLed the
-placeholder at the write boundary and the row carries no area at all. Hence three arms:
+**Selection is complete by construction, and carries no `raw_json` predicate.** A
+truncation keeps the last three digits, so the stored value is ALWAYS under 1000 — unless
+those digits are "000" ("10 000 m²" → 0), in which case `scraper.db.sane_listing_numerics`
+NULLed the placeholder at the write boundary and the row carries no area at all. Hence
+three arms:
 
     any of area_m2 / estate_area / usable_area / garden_area is non-NULL and < 1000
     OR all four are NULL
 
 A row whose every stored area is >= 1000 cannot be a truncation and is skipped. That is a
 CAN-BE-WRONG set, not a will-change set: it matches ~99 % of these portals' rows (a 60 m²
-flat is legitimately under 1000) while only ~18 % actually move — the per-source report
-says both. The `raw_json->>'title'` spaced-number probe the idnes backfill used is
-deliberately NOT an arm: it adds nothing the third arm does not already cover, and a
-predicate over `raw_json` detoasts every candidate row — the cost that killed the first
-live dispatch of `backfill_mmreality_areas` on the cluster's 120 s statement_timeout.
+flat is legitimately under 1000) while only a minority actually move — the per-source
+report says both. `raw_json` is PROJECTED per page (500 rows at a time, which is a fine
+read) and never appears in a WHERE: a predicate over it would detoast every candidate row,
+the cost that killed the first live dispatch of `backfill_mmreality_areas` on the cluster's
+120 s statement_timeout.
 
 **The page read is per source, and it arms its own statement timeout.** The paging SELECT
-measured 40.5 s for the first page and the count 13.6 s against the cluster's 120 s
-default — close enough to it that a slower day is a cancelled run, so `db.connect()` is
+measured 40.5 s and the count 13.6 s against that same 120 s default, so `db.connect()` is
 followed by `backfill_support._STATEMENT_TIMEOUT_SQL` (600 s) exactly as the sibling
-backfills do. Sources are then walked ONE AT A TIME with the keyset on `id`, so a page
+backfills do, and the sources are walked ONE AT A TIME with the keyset on `id`, so a page
 never pays for the other portals' rows.
 
 **It writes NO `listing_snapshots` row.** The area columns ARE in a `ScrapedListing`'s
 content hash, so this is the sanctioned exception rule 2 already recognises (the
 `backfill_idnes_areas` / `backfill_land_headline_area` precedent): correcting OUR OWN
-mis-parse of the SAME stored page is a data-quality fix, not a change the portal
-published. What follows is bounded and correct — each healed LIVE row's next successful
-detail fetch computes a hash differing from its latest snapshot and appends exactly ONE
-genuine snapshot, spread over the normal cadence. An inactive row is never refetched, so
-the heal is the only write it gets. Price is never touched: a staged body can lag the live
-row, and a price discrepancy is not this job's call.
+mis-parse of the SAME page we already read is a data-quality fix, not a change the portal
+published. Each healed LIVE row's next successful detail fetch computes a hash differing
+from its latest snapshot and appends exactly ONE genuine snapshot, spread over the normal
+cadence; an inactive row is never refetched, so the heal is the only write it gets. Price
+is never touched.
 
-**It never blanks a stored value.** A column the re-parse cannot produce is not a change
-and is not written: a parser shape drift must never turn an area into NULL. One
-consequence is deliberate — a parcel beyond `area_m2`'s `numeric(7,1)` ceiling leaves the
-row's existing headline exactly where it was (the one rule declines to stamp a basis for a
-value the column cannot hold), while `estate_area` (numeric(9,1)) is healed beside it.
+**It never blanks a stored value.** A column the re-derive cannot produce is not a change
+and is not written: a shape drift must never turn an area into NULL. One consequence is
+deliberate — a parcel beyond `area_m2`'s `numeric(7,1)` ceiling leaves the row's existing
+headline exactly where it was (the one rule declines to stamp a basis for a value the
+column cannot hold), while `estate_area` (numeric(9,1)) is healed beside it. The live
+simulation over 6,000 rows agrees: every change grows or fills a value, none shrinks one.
 
 **W17's land heal is subsumed, not repeated.** `backfill_land_headline_area` copied
 `estate_area` into `area_m2` for land rows — and on these portals `estate_area` was itself
-truncated, so the copy propagated the wrong number. Re-parsing fixes both columns from the
-same page in the same statement; there is no separate step.
+truncated, so the copy propagated the wrong number. The re-derive fixes both columns from
+the same fields in the same statement; there is no separate step.
 
 Idempotent: every value is rounded to its column's scale (all five area columns are
-`numeric(*,1)`) BEFORE it is compared and before it is written, so a page reading
-"86,19 m²" does not rewrite 86.2 as 86.19 on every pass. A healed row may stay in the
-selection — a 60 m² flat's `usable_area` is legitimately under 1000 — which is why
-`--after` exists rather than a `raw_json` marker; stamping one would rewrite the widest
-TOAST column on the hottest table for every row examined.
+`numeric(*,1)`) BEFORE it is compared and before it is written, HALF-UP like Postgres's own
+numeric rounding, so a cell reading "86,19 m²" does not rewrite 86.2 on every pass. A healed
+row may stay in the selection — a 60 m² flat's `usable_area` is legitimately under 1000 —
+which is why `--after` exists rather than a `raw_json` marker; stamping one would rewrite
+the widest TOAST column on the hottest table for every row examined.
 
 Batched by `listings.id`: each page is a keyset read, and ONE statement per page updates
 the rows and enqueues their properties into `dirty_properties` in the same CTE — inside a
@@ -99,7 +101,7 @@ waits for a `rebuild_%` gap first, bounded, then proceeds anyway.
 
 Usage:  python -m scripts.backfill_area_spaced_thousands --dry-run
         python -m scripts.backfill_area_spaced_thousands --write --sources ceskereality
-Required: SUPABASE_DB_URL, plus the R2_* vars (the bodies live in the bucket).
+Required: SUPABASE_DB_URL. Nothing else — no R2, no network.
 """
 
 from __future__ import annotations
@@ -111,10 +113,10 @@ import sys
 import time
 from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Callable
+from typing import Any
 
 from scraper import db
-from scraper.scraped_listing import ScrapedListing
+from scraper.area import PortalAreas
 from scripts.backfill_support import (
     _STATEMENT_TIMEOUT_SQL,
     execute_with_lock_retry,
@@ -129,12 +131,16 @@ LOG = logging.getLogger("backfill_area_spaced_thousands")
 DEFAULT_SOURCES: tuple[str, ...] = (
     "ceskereality", "realitymix", "remax", "maxima", "bazos")
 
+# bazos publishes no spec table: its areas live in the ad's free text, so its page fields
+# are the title plus `listings.description` rather than `raw_json['params']`.
+TEXT_SOURCES: frozenset[str] = frozenset({"bazos"})
+
 # The area columns this job owns. `area_basis` rides along because it is the provenance
 # stamp for `area_m2` and must never describe a value the row no longer holds.
 _AREA_COLS: tuple[str, ...] = ("area_m2", "usable_area", "estate_area", "garden_area")
 
 # Every area column is `numeric(*,1)` — area_m2 (7,1), the other three (9,1) — so the
-# database rounds on the way in. Round HERE too, or a page reading "86,19 m2" compares its
+# database rounds on the way in. Round HERE too, or a cell reading "86,19 m2" compares its
 # 86.19 against the stored 86.2 and rewrites the row on every single pass.
 _AREA_SCALE = 1
 
@@ -157,51 +163,42 @@ _COUNT_BY_SOURCE_SQL = f"""
     GROUP BY source ORDER BY suspects DESC, source
 """
 
-# ONE source per read, keyset on id: the page never pays for the other portals' rows.
-# Narrow on purpose — a cheap primary-key walk that detoasts nothing. `raw_json` is NOT
-# projected: the parser is handed the archived body, not our stored derivative.
+# ONE source per read, keyset on id: the page never pays for the other portals' rows. The
+# page fields ARE projected (that is the substrate) but never predicated on — `_SUSPECT`
+# touches only the four narrow numeric columns, so the planner never detoasts a row it is
+# about to reject.
 _SELECT_SQL = f"""
-    SELECT id, source, source_id_native, source_url, category_main, category_type,
-           property_id, area_m2, usable_area, estate_area, garden_area, area_basis
+    SELECT id, property_id, category_main,
+           area_m2, usable_area, estate_area, garden_area, area_basis,
+           raw_json->'params' AS params, raw_json->>'title' AS title,
+           NULL::text AS ad_text
     FROM listings
     WHERE source = %(source)s
       AND id > %(after)s::bigint
-      AND source_id_native IS NOT NULL
       AND {_SUSPECT}
     ORDER BY id LIMIT %(page)s::int
 """
 
-# The latest SUCCESSFUL detail body per listing, with the clock the staleness gate reads.
-# `http_status IS NULL` ranks as successful exactly as `location_data.payloads` ranks it —
-# rows written before migration 403 added the column carry no status and are not failures.
-_PAYLOADS_SQL = """
-    SELECT DISTINCT ON (p.source, p.source_id_native)
-           p.source, p.source_id_native, p.id, p.last_observed_at
-    FROM portal_raw_payloads p
-    WHERE p.page_kind = 'detail'
-      AND p.source = %(source)s
-      AND p.source_id_native = ANY(%(natives)s::text[])
-      AND (p.http_status IS NULL OR p.http_status BETWEEN 200 AND 299)
-    ORDER BY p.source, p.source_id_native, p.version_seq DESC NULLS LAST,
-             p.last_observed_at DESC, p.id DESC
-"""
-
-# The newest genuine content change we recorded for each listing on the page. Keyed on the
-# REKEYED identity (`listing_id`, migration 320) — the same key the live snapshot read uses
-# since 333, whose index serves this — not the legacy `sreality_id`, which is NULL on whole
-# portals since the identity refactor.
-_SNAPSHOTS_SQL = """
-    SELECT listing_id, max(scraped_at) FROM listing_snapshots
-    WHERE listing_id = ANY(%(ids)s::bigint[])
-    GROUP BY listing_id
+# bazos's half: the ad body instead of a spec table. Spelled as its own statement rather
+# than projected for everyone, so four portals never detoast `description` for nothing.
+_SELECT_TEXT_SQL = f"""
+    SELECT id, property_id, category_main,
+           area_m2, usable_area, estate_area, garden_area, area_basis,
+           NULL::jsonb AS params, raw_json->>'title' AS title,
+           description AS ad_text
+    FROM listings
+    WHERE source = %(source)s
+      AND id > %(after)s::bigint
+      AND {_SUSPECT}
+    ORDER BY id LIMIT %(page)s::int
 """
 
 # ONE statement per page: the areas and the property enqueue in a single CTE, so the dirty
 # mark cannot survive a rolled-back write (rule 20 — `db.mark_properties_dirty` documents
 # that it nests in the caller's transaction, and the lock-retry rail owns this one).
-# Every column is set from the SAME re-parse of the SAME body, with a value the re-parse
-# could not produce carried over from the row itself — this never writes NULL over a
-# stored area. Only rows where at least one area NUMBER moved are in the arrays at all.
+# Every column is set from the SAME re-derive, with a value the re-derive could not produce
+# carried over from the row itself — this never writes NULL over a stored area. Only rows
+# where at least one area NUMBER moved are in the arrays at all.
 _UPDATE_SQL = """
     WITH fresh AS (
         SELECT * FROM unnest(
@@ -234,40 +231,37 @@ _BATCH_GUARDS: tuple[str, ...] = (
 )
 
 
-def _parser_for(source: str) -> Callable[..., ScrapedListing]:
-    """The portal's own `parse_detail`, imported lazily so one bad portal is one portal."""
+def _areas_for(source: str, *, params: Any, title: str | None,
+               ad_text: str | None, category_main: str | None) -> PortalAreas | None:
+    """The portal's OWN area derivation over the row's stored page fields.
+
+    Imported lazily and called, never re-implemented: each of these is the same function
+    the portal's `parse_detail` runs on a live page. None means the row carries no page
+    fields to read at all.
+    """
+    if source in TEXT_SOURCES:
+        from scraper.bazos_parser import ad_haystack, areas_from_text
+
+        if not title and not ad_text:
+            return None
+        return areas_from_text(ad_haystack(title, ad_text),
+                               category_main=category_main)
+
+    cells = {str(k): v for k, v in params.items()
+             if isinstance(v, str)} if isinstance(params, dict) else {}
+    if not cells and not title:
+        return None
     if source == "ceskereality":
-        from scraper.ceskereality_parser import parse_detail
+        from scraper.ceskereality_parser import areas_from_params
     elif source == "realitymix":
-        from scraper.realitymix_parser import parse_detail
+        from scraper.realitymix_parser import areas_from_params
     elif source == "remax":
-        from scraper.remax_parser import parse_detail
+        from scraper.remax_parser import areas_from_params
     elif source == "maxima":
-        from scraper.maxima_parser import parse_detail
-    elif source == "bazos":
-        from scraper.bazos_parser import parse_detail
+        from scraper.maxima_parser import areas_from_params
     else:
-        raise ValueError(f"no detail parser wired for source {source!r}")
-    return parse_detail
-
-
-def _parse(source: str, html: str, *, source_url: str | None,
-           category_main: str | None, category_type: str | None) -> ScrapedListing:
-    """Re-parse one archived body. realitymix resolves its own category from the page."""
-    parse_detail = _parser_for(source)
-    url = source_url or ""
-    if source == "realitymix":
-        return parse_detail(html, source_url=url)
-    return parse_detail(html, source_url=url, category_main=category_main,
-                        category_type=category_type)
-
-
-def _decode_html(body: bytes) -> str:
-    """Bytes to text, the way `location_data.html_scope` does it — never raising."""
-    try:
-        return body.decode("utf-8")
-    except UnicodeDecodeError:
-        return body.decode("utf-8", "replace")
+        raise ValueError(f"no area derivation wired for source {source!r}")
+    return areas_from_params(cells, title=title, category_main=category_main)
 
 
 def _at_column_scale(value: Any) -> float | None:
@@ -283,16 +277,16 @@ def _at_column_scale(value: Any) -> float | None:
         Decimal(f"1e-{_AREA_SCALE}"), rounding=ROUND_HALF_UP))
 
 
-def _reparsed_areas(listing: ScrapedListing, stored: dict[str, Any]) -> dict[str, Any]:
-    """The five area values this job would write, at column scale, never blanking a row.
+def _merged(areas: PortalAreas, stored: dict[str, Any]) -> dict[str, Any]:
+    """The five values this job would write, at column scale, never blanking a row.
 
     `sane_listing_numerics` is the SAME function the ingest path runs, so a parcel the
     column cannot hold becomes NULL here exactly as it would on a live detail write —
-    never a 22003 that aborts the batch. A column the re-parse leaves NULL then falls back
-    to what the row already holds: a shape drift must not delete an area, and the `plot`
-    over `area_m2`'s ceiling must not blank the headline the row was carrying.
+    never a 22003 that aborts the batch. A column the re-derive leaves NULL then falls back
+    to what the row already holds: a shape drift must not delete an area, and a `plot` over
+    `area_m2`'s ceiling must not blank the headline the row was carrying.
     """
-    obj: dict[str, Any] = {col: getattr(listing, col) for col in _AREA_COLS}
+    obj: dict[str, Any] = {col: getattr(areas, col) for col in _AREA_COLS}
     db.sane_listing_numerics(obj)
     fresh: dict[str, Any] = {col: _at_column_scale(obj[col]) for col in _AREA_COLS}
     produced_headline = fresh["area_m2"] is not None
@@ -301,7 +295,7 @@ def _reparsed_areas(listing: ScrapedListing, stored: dict[str, Any]) -> dict[str
             fresh[col] = _at_column_scale(stored[col])
     # The stamp follows the value: keep the row's own basis whenever its own headline is
     # what survives, so a declined measure never restamps a number it did not produce.
-    fresh["area_basis"] = listing.area_basis if produced_headline else stored["area_basis"]
+    fresh["area_basis"] = areas.area_basis if produced_headline else stored["area_basis"]
     return fresh
 
 
@@ -310,7 +304,7 @@ def _changed(stored: dict[str, Any], fresh: dict[str, Any]) -> bool:
 
     A bare `area_basis` stamp is not this job's work (`scripts/backfill_area_basis.py`
     owns that) and must not churn a write of its own; and because `fresh` already carries
-    the stored value wherever the re-parse produced none, a column the parser could not
+    the stored value wherever the re-derive produced none, a column the parser could not
     read is never a change either.
     """
     return any(_at_column_scale(stored[col]) != fresh[col] for col in _AREA_COLS)
@@ -320,17 +314,9 @@ def _report(counts: dict[str, Counter], *, dry_run: bool) -> None:
     verb = "would change" if dry_run else "changed"
     for source in sorted(counts):
         c = counts[source]
-        LOG.info("BACKFILL %-14s examined=%d %s=%d unchanged=%d body_missing=%d "
-                 "body_stale=%d parse_errors=%d", source, c["examined"], verb,
-                 c["changed"], c["unchanged"], c["body_missing"], c["body_stale"],
-                 c["parse_errors"])
-
-
-def _load_bodies(cur: Any, payload_ids: list[int], store: Any) -> dict[int, bytes]:
-    from location_data.page_readers import load_bodies
-
-    bodies, _from_r2 = load_bodies(cur, payload_ids, store=store)
-    return bodies
+        LOG.info("BACKFILL %-14s examined=%d %s=%d unchanged=%d no_fields=%d",
+                 source, c["examined"], verb, c["changed"], c["unchanged"],
+                 c["no_fields"])
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -340,14 +326,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--limit", type=int, default=None,
                         help="Max listings EXAMINED this run. Default: all of them.")
     parser.add_argument("--batch-size", type=int, default=500,
-                        help="Rows per keyset page — also the R2 fan-out and UPDATE width.")
+                        help="Rows per keyset page, and per UPDATE statement.")
     parser.add_argument("--after", type=int, default=0,
                         help="Resume from this listings.id cursor (exclusive). Per source, "
                              "so pass it with a single --sources.")
     parser.add_argument("--max-seconds", type=float, default=9000.0,
                         help="Wall-clock budget; stop at a page boundary and exit cleanly. "
-                             "Defaults under the runner's job timeout, because the full "
-                             "corpus is ~193k bodies and does not fit one run.")
+                             "Defaults under the runner's job timeout.")
     parser.add_argument("--dry-run", action="store_true", default=True,
                         help="Report what would change; write nothing (the default).")
     parser.add_argument("--write", dest="dry_run", action="store_false",
@@ -376,18 +361,7 @@ def main() -> int:
     sources = [s.strip() for s in args.sources.split(",") if s.strip()]
     unknown = [s for s in sources if s not in DEFAULT_SOURCES]
     if unknown:
-        print(f"ERROR: no detail parser wired for {unknown}.", file=sys.stderr)
-        return 2
-
-    from location_data import payloads
-
-    store = payloads.open_store()
-    if store is None:
-        # The bodies live in R2 (threshold 2 KB since migration 406): a run without a
-        # store would find essentially every payload spilled and report coverage over
-        # nothing. `load_bodies` raises on the first such row; say so up front instead.
-        print("ERROR: R2 is not configured (R2_* env vars unset) — the archived bodies "
-              "this heal re-parses live in the bucket.", file=sys.stderr)
+        print(f"ERROR: no area derivation wired for {unknown}.", file=sys.stderr)
         return 2
 
     start = time.monotonic()
@@ -414,13 +388,14 @@ def main() -> int:
                              source, suspects, total, suspects_active)
             LOG.info("BACKFILL 'suspects' is the CAN-BE-WRONG set, not the will-change "
                      "set: it matches ~99%% of these portals' rows (a 60 m2 flat is "
-                     "legitimately under 1000) while ~18%% actually move. The per-source "
-                     "report below counts both.")
+                     "legitimately under 1000) while a minority actually move. The "
+                     "per-source report below counts both.")
 
             budget_spent = False
             for source in sources:
                 if budget_spent:
                     break
+                select_sql = (_SELECT_TEXT_SQL if source in TEXT_SOURCES else _SELECT_SQL)
                 while True:
                     page = args.batch_size
                     if args.limit is not None:
@@ -431,57 +406,26 @@ def main() -> int:
                         page = min(page, remaining)
 
                     with conn.cursor() as cur:
-                        cur.execute(_SELECT_SQL, {"source": source,
-                                                  "after": cursors[source], "page": page})
+                        cur.execute(select_sql, {"source": source,
+                                                 "after": cursors[source], "page": page})
                         rows = cur.fetchall()
                     if not rows:
                         done.add(source)
                         break
 
-                    natives = sorted({str(r[2]) for r in rows})
                     ids = [int(r[0]) for r in rows]
-                    with conn.cursor() as cur:
-                        cur.execute(_PAYLOADS_SQL,
-                                    {"source": source, "natives": natives})
-                        payload_rows = cur.fetchall()
-                        payload_by_native = {str(n): (int(pid), seen)
-                                             for _s, n, pid, seen in payload_rows}
-                        cur.execute(_SNAPSHOTS_SQL, {"ids": ids})
-                        newest_snapshot = {int(lid): at for lid, at in cur.fetchall()}
-                        bodies = _load_bodies(
-                            cur, sorted(pid for pid, _ in payload_by_native.values()),
-                            store)
-
                     updates: list[tuple[int, dict[str, Any]]] = []
                     counter = counts[source]
-                    for row in rows:
-                        (lid, _source, native, url, cmain, ctype, _prop_id,
-                         *area_values) = row
+                    for (lid, _prop_id, category_main, *rest) in rows:
+                        area_values, (params, title, ad_text) = rest[:5], rest[5:]
                         stored = dict(zip((*_AREA_COLS, "area_basis"), area_values))
                         counter["examined"] += 1
-                        payload = payload_by_native.get(str(native))
-                        body = bodies.get(payload[0]) if payload else None
-                        if body is None:
-                            counter["body_missing"] += 1
+                        areas = _areas_for(source, params=params, title=title,
+                                           ad_text=ad_text, category_main=category_main)
+                        if areas is None:
+                            counter["no_fields"] += 1
                             continue
-                        snapshot_at = newest_snapshot.get(int(lid))
-                        if snapshot_at is not None and payload[1] is not None \
-                                and snapshot_at > payload[1]:
-                            # The portal changed this listing after the newest body we
-                            # archived (the writer's 7-day per-listing floor discards a
-                            # changed body inside the window). Re-parsing it would revert
-                            # the seller's edit to a week-old page.
-                            counter["body_stale"] += 1
-                            continue
-                        try:
-                            listing = _parse(source, _decode_html(body), source_url=url,
-                                             category_main=cmain, category_type=ctype)
-                        except Exception as exc:  # noqa: BLE001 - one bad page, not the run
-                            LOG.warning("BACKFILL parse error id=%s source=%s: %s",
-                                        lid, source, exc)
-                            counter["parse_errors"] += 1
-                            continue
-                        fresh = _reparsed_areas(listing, stored)
+                        fresh = _merged(areas, stored)
                         if not _changed(stored, fresh):
                             counter["unchanged"] += 1
                             continue
@@ -492,14 +436,14 @@ def main() -> int:
                         updates.append((int(lid), fresh))
 
                     if updates and not args.dry_run:
-                        params: dict[str, Any] = {"ids": [i for i, _ in updates]}
+                        params_out: dict[str, Any] = {"ids": [i for i, _ in updates]}
                         for col in (*_AREA_COLS, "area_basis"):
-                            params[col] = [f[col] for _, f in updates]
+                            params_out[col] = [f[col] for _, f in updates]
                         try:
                             # The rail's rowcount is the dirty-enqueue arm's; the heal
                             # count is the array it was handed.
                             enqueued = execute_with_lock_retry(
-                                conn, _UPDATE_SQL, params,
+                                conn, _UPDATE_SQL, params_out,
                                 label="BACKFILL area spaced thousands",
                                 setup=_BATCH_GUARDS,
                             )

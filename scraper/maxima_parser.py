@@ -22,13 +22,14 @@ normalised to the same canonical labels the sreality parser emits (e.g.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper.area import derive_headline_area, parse_area_text
+from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -392,6 +393,36 @@ def _detail_params(tree: HTMLParser) -> dict[str, str]:
     return rows
 
 
+def areas_from_params(
+    params: Mapping[str, str],
+    *,
+    title: str | None,
+    category_main: str | None,
+) -> PortalAreas:
+    """maxima's area cells, in ITS precedence — spelled here once and nowhere else.
+
+    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
+    reads it off `raw_json['params']`, which is this parser's own latest reading of the
+    same page. maxima renders a no-break space around its unit and inside a thousands
+    group alike, which is what the naive grammar truncated.
+    """
+    usable_text = params.get("plocha užitná") or params.get("užitná plocha")
+    floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
+    estate_area = parse_area_text(params.get("plocha pozemku"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=parse_area_text(usable_text),
+        floor=parse_area_text(floor_text),
+        plot=estate_area,
+        fallback=parse_area_text(title),
+    )
+    return PortalAreas(
+        area_m2=area_m2, area_basis=area_basis,
+        usable_area=parse_area_text(usable_text), estate_area=estate_area,
+        garden_area=parse_area_text(params.get("plocha zahrady")),
+    )
+
+
 def parse_detail(
     html: str,
     *,
@@ -418,16 +449,7 @@ def parse_detail(
     locality = _text(tree.css_first("div.locality"))
     lat, lon, coord_provenance = _resolve_coords(html)
 
-    usable_text = params.get("plocha užitná") or params.get("užitná plocha")
-    floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
-    estate_area = parse_area_text(params.get("plocha pozemku"))
-    area_m2, area_basis = derive_headline_area(
-        category_main=category_main,
-        usable=parse_area_text(usable_text),
-        floor=parse_area_text(floor_text),
-        plot=estate_area,
-        fallback=parse_area_text(title),
-    )
+    areas = areas_from_params(params, title=title, category_main=category_main)
     floor, total_floors = _parse_floors(params.get("podlaží"))
 
     source_id_upper = source_id.upper()
@@ -466,9 +488,9 @@ def parse_detail(
         category_type=category_type,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=area_m2,
-        area_basis=area_basis,
-        usable_area=parse_area_text(usable_text),
+        area_m2=areas.area_m2,
+        area_basis=areas.area_basis,
+        usable_area=areas.usable_area,
         disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
         locality=locality,
         district=None,
@@ -496,8 +518,8 @@ def parse_detail(
         terrace=_yes_no(params.get("terasa")),
         garage=_yes_no(params.get("garáž")),
         has_parking=_yes_no(params.get("parkovací stání")) or _yes_no(params.get("garáž")),
-        estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        estate_area=areas.estate_area,
+        garden_area=areas.garden_area,
         description=description,
         raw=raw,
     )

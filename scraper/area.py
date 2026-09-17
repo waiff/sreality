@@ -53,6 +53,7 @@ narrow no-break space and the thin space idnes never had to handle.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 # The separators a Czech portal renders between a number's digit groups: ordinary
 # space, NBSP, narrow NBSP, thin space, and the zero-width joiners idnes emits
@@ -90,6 +91,25 @@ def parse_area_text(text: str | None) -> float | None:
     for sep in AREA_THOUSANDS_SEPS:
         token = token.replace(sep, "")
     return float(token.replace(",", "."))
+
+
+@dataclass(frozen=True, slots=True)
+class PortalAreas:
+    """Every area column one detail page yields, plus the headline the rule picked.
+
+    ONE shape for every portal, so a portal's key precedence — WHICH of its spec cells is
+    the usable measure, which is the parcel, in what order — can be spelled once and read
+    twice: by `parse_detail` on a live fetch, and by the W19 heal re-deriving the same
+    columns from `listings.raw_json`, which holds that parser's own latest reading of the
+    live page. Two copies of a key order is the same defect as two copies of the number
+    grammar, one level up (rule 21).
+    """
+
+    area_m2: float | None = None
+    area_basis: str | None = None
+    usable_area: float | None = None
+    estate_area: float | None = None
+    garden_area: float | None = None
 
 
 AREA_BASES: frozenset[str] = frozenset({"usable", "floor", "total", "plot", "unknown"})
