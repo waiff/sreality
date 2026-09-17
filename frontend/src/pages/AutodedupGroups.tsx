@@ -877,12 +877,16 @@ export function SplitRow({
       </div>
       {/* The split's own reasons — one set for the whole ruling. There is no
         * "Uložit poznámku" here: the split IS the save button above, and a
-        * second one would write a second, different ruling. */}
+        * second one would write a second, different ruling. The toggle NAMES its
+        * destination: a card can show this picker and the cluster verdict's at
+        * once, and two identical labels over two different drafts silently drop
+        * whichever set the operator did not then save. */}
       <VerdictNotes
         defaultOpen={notesOpen}
         value={split.annotation}
         onChange={split.setAnnotation}
         pending={split.pending}
+        label="důvod rozdělení"
       />
       {split.receipt && (
         <p className="text-[0.68rem] text-[var(--color-ink-2)]">
@@ -1316,6 +1320,7 @@ function GroupCard({
         dirty={notes.isDirty(noteKey, verdict)}
         pending={pending}
         onSave={() => verdict && onSaveNote(verdict)}
+        label="důvod verdiktu"
       />
     </li>
   );

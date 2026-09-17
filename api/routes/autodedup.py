@@ -57,6 +57,13 @@ except Exception:  # noqa: BLE001 — psycopg absent (tests run on fake connecti
     _CHECK_VIOLATION = ()
     _UNDEFINED_COLUMN = ()
 
+# What a READ answers when the store is behind the code. `store_ready` asks the catalog for
+# the RELATION only, so a database that has 528 but not 533 passes it and then raises
+# UndefinedColumn on `v.reasons` — which every review statement now selects. A write refuses
+# loudly (503 naming the migration); a read must degrade to "not ready" instead, or one
+# un-applied additive migration takes the whole review UI down rather than the new column.
+_STORE_BEHIND: tuple[type[BaseException], ...] = _MISSING_RELATION + _UNDEFINED_COLUMN
+
 router = APIRouter(
     prefix="/autodedup",
     tags=["autodedup"],
@@ -128,7 +135,7 @@ def iterations(
             psql.AUTODEDUP_ITERATIONS_SQL,
             {"after_id": after, "limit": limit + 1},
         )
-    except _MISSING_RELATION:
+    except _STORE_BEHIND:
         return _not_ready()
     has_more = len(rows) > limit
     items = [_row(psql.ITERATION_COLUMNS, r) for r in rows[:limit]]
@@ -158,7 +165,7 @@ def stats(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
     try:
         rows = _fetch(conn, psql.AUTODEDUP_STATS_SQL)
         engine = _engine_stats(conn)
-    except _MISSING_RELATION:
+    except _STORE_BEHIND:
         return _not_ready()
     waves: list[dict[str, Any]] = []
     n_iterations = 0
@@ -916,7 +923,7 @@ def groups(
                 row["family_names"] = _families(row.pop("families"))
                 edges[row.pop("cluster_key")] = row
             member_verdicts = _member_verdicts(conn, members)
-    except _MISSING_RELATION:
+    except _STORE_BEHIND:
         return _not_ready()
 
     items: list[dict[str, Any]] = []
@@ -1025,7 +1032,7 @@ def group_detail(
             usql.CONFLICT_COLUMNS,
             _fetch(conn, usql.CLUSTER_CONFLICTS_SQL, {"cluster_key": cluster_key, "ids": ids}),
         )
-    except _MISSING_RELATION:
+    except _STORE_BEHIND:
         return _not_ready()
 
     return {
@@ -1097,7 +1104,7 @@ def residual(
     try:
         rows = _rows(usql.RESIDUAL_COLUMNS, _fetch(conn, RESIDUAL_SORTS[sort], params))
         total = _total(conn, usql.RESIDUAL_COUNT_SQL, params, after)
-    except _MISSING_RELATION:
+    except _STORE_BEHIND:
         return _not_ready()
     has_more = len(rows) > limit
     rows = rows[:limit]
@@ -1191,7 +1198,7 @@ def blocks(
             usql.BLOCK_COLUMNS,
             _fetch(conn, usql.BLOCKS_SQL, {"generation": generation, "limit": BLOCKS_LIMIT}),
         )
-    except _MISSING_RELATION:
+    except _STORE_BEHIND:
         return _not_ready()
     items = [
         {
@@ -1262,7 +1269,7 @@ def pair(
             usql.VERDICT_COLUMNS,
             _fetch(conn, usql.PAIR_VERDICTS_SQL, {"los": [listing_lo], "his": [listing_hi]}),
         )
-    except _MISSING_RELATION:
+    except _STORE_BEHIND:
         return _not_ready()
 
     return {
@@ -1678,7 +1685,12 @@ def verdict_split(
                         "listing_hi": hi,
                         "verdict": relation,
                         "note": f"operator split: {summary}",
-                        "reasons": reasons,
+                        # The reasons ride on the CLUSTER row alone. A split is ONE ruling;
+                        # stamping it on the fan-out would post C(n,2) rows from a single
+                        # click, so the pair histogram would measure cluster size instead of
+                        # operator evidence and stop being comparable with the judge's
+                        # per-pair `unit_discriminator` — the readout's whole purpose (§9).
+                        "reasons": [],
                         "decided_by": str(decided_by),
                     },
                 )

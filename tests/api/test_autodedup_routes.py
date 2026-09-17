@@ -2059,17 +2059,20 @@ def test_an_unknown_reason_on_a_split_is_refused_too(admin_client, split_conn):
     assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
 
 
-def test_a_split_stamps_ONE_reason_set_on_every_row_it_writes(admin_client, split_conn):
-    """A split is one ruling. Per-pair reasons would claim the operator said something about
-    each edge that they never said — so the same set lands on all three pair rows and on the
-    cluster row."""
+def test_a_split_stamps_its_reasons_on_the_cluster_row_ONLY(admin_client, split_conn):
+    """A split is ONE ruling, and it lands on the cluster row. Per-pair reasons would claim
+    the operator said something about each edge that they never said — and worse, one click
+    on a 6-member group would post 15 rows into the pair histogram, which would then measure
+    cluster size rather than evidence and stop being comparable with the judge."""
     admin_client.post(
         "/autodedup/verdict/split",
         json=_split(reasons=["floor_plan_differs", "same_project"], note="two buildings"),
     )
     pair_writes = _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
     assert len(pair_writes) == 3
-    assert all(p["reasons"] == ["floor_plan_differs", "same_project"] for p in pair_writes)
+    assert all(p["reasons"] == [] for p in pair_writes)
+    # The fan-out rows still say where they came from, in their machine note.
+    assert all(p["note"].startswith("operator split:") for p in pair_writes)
     cluster = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
     assert cluster["reasons"] == ["floor_plan_differs", "same_project"]
     # The operator's note still leads the assignment string, as it did before 533.
@@ -2140,6 +2143,31 @@ def test_the_stats_page_still_renders_against_a_store_without_533(client, conn):
     )
     body = client.get("/autodedup/stats").json()
     assert body["data"]["engine"]["verdict_reasons"] == []
+
+
+@pytest.mark.parametrize(
+    "path,statement",
+    [
+        ("/autodedup/groups", usql.GROUPS_WEAKEST_SQL),
+        ("/autodedup/groups/7", usql.GROUP_ONE_SQL),
+        ("/autodedup/residual", usql.RESIDUAL_SQL),
+        ("/autodedup/pair/11/12", usql.PAIR_ONE_SQL),
+    ],
+)
+def test_a_review_page_against_a_store_without_533_renders_instead_of_500ing(
+    client, conn, path: str, statement: str
+):
+    """`store_ready` asks the catalog for the RELATION, so a store with 528 and not 533
+    passes it and then raises UndefinedColumn on the `v.reasons` EVERY review statement
+    selects. The write refuses with 503; the read degrades, or one un-applied additive
+    migration takes the whole UI down rather than the one new column."""
+    psycopg_errors = pytest.importorskip("psycopg.errors")
+    conn.raises[statement] = psycopg_errors.UndefinedColumn(
+        'column v.reasons does not exist'
+    )
+    resp = client.get(path)
+    assert resp.status_code == 200
+    assert resp.json() == {"data": None, "store_ready": False}
 
 
 def test_a_stored_reason_reaches_every_surface_that_shows_a_verdict(client, conn):
