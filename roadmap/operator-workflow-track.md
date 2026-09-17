@@ -398,8 +398,11 @@ control. Not a special collection (collections are m2m groupings; see
   per-watchdog counts) and an account-scoped twin on both outbox passes;
   detection is untouched (its cursors and the `reactivated` detector depend on
   every dispatch existing), so an undo brings a hidden dispatch back intact.
-- **W4 — the shared control** (next): one dismiss button beside the pipeline
-  funnel on the Browse card, table row and listing header; Undo toast.
+- **W4 — the shared control** (in progress): `<DismissButton>` beside the
+  funnel on the Browse card, Table row and listing header over
+  `lib/useDismissal` (list-aware optimistic hide, one sticky "Vrátit" toast,
+  batched per-property state reads); `lib/optimisticCache.holdQueries` now
+  shared with the pipeline cache; absent while the property is piped.
 - **W5 — Chrome extension** (next): the same control in the panel, state
   carried on `POST /listings/lookup`.
 

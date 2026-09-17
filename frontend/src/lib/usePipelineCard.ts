@@ -12,20 +12,19 @@
  * Every write is optimistic. A funnel click has to repaint before the round
  * trip to Frankfurt or the menu closes onto a stale badge; on failure the
  * rollback fires from `onSettled` (not `onError`, which would silence the app's
- * global error toast — see pipelineCache's header) and the revalidation
+ * global error toast — see lib/optimisticCache's header) and the revalidation
  * reconciles with the server either way.
  */
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import { addPipelineCard, movePipelineCard, removePipelineCard } from '@/lib/api';
+import { NO_ROLLBACK, type Rollback } from '@/lib/optimisticCache';
 import {
   cachedStage,
   dropCard,
-  NO_ROLLBACK,
   placeCard,
   revalidatePipeline,
-  type PipelineRollback,
 } from '@/lib/pipelineCache';
 
 export interface UsePipelineCardOptions {
@@ -46,7 +45,7 @@ export function usePipelineCard(
     _data: unknown,
     error: unknown,
     _vars: V,
-    rollback: PipelineRollback | undefined,
+    rollback: Rollback | undefined,
   ) => {
     if (error) rollback?.();
     revalidatePipeline(qc, { cohortScoped });

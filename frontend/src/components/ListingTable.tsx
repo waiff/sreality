@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
+import DismissButton from '@/components/DismissButton';
 import PipelineFunnelButton from '@/components/PipelineFunnelButton';
 import PriceDelta from '@/components/PriceDelta';
 import {
@@ -27,12 +28,12 @@ interface Column {
 }
 
 const COLUMNS: ReadonlyArray<Column> = [
-  /* The deal-pipeline funnel (rule #22 — the affordance belongs on EVERY
-     surface a property appears on; the Table was the one that never got it).
-     Not sortable: membership is operator state, not a listing attribute, and
-     the cohort-level way to see only pipeline rows is the Pipeline scope. */
+  /* The triage verbs — the deal-pipeline funnel (rule #22 — the affordance
+     belongs on EVERY surface a property appears on) and the dismiss control.
+     Not sortable: both are operator state, not listing attributes; the
+     cohort-level views are the Pipeline scope and the dismissed reveal. */
   { field: 'pipeline',      label: '',            align: 'left',  sortable: false,
-    srLabel: 'Pipeline' },
+    srLabel: 'Pipeline a skrytí' },
   /* Not sortable: sreality_id mixes real positive ids with synthetic negative
    * ones (non-sreality portals), so ordering by it is meaningless. */
   { field: 'sreality_id',   label: 'ID',          align: 'left',  sortable: false },
@@ -234,11 +235,14 @@ function Row({
       ].join(' ')}
     >
       <td className="pl-3 pr-1 py-2.5 align-middle">
-        <PipelineFunnelButton
-          property_id={row.property_id}
-          cohortScoped={pipelineScoped}
-          variant="inline"
-        />
+        <div className="flex items-center gap-1">
+          <PipelineFunnelButton
+            property_id={row.property_id}
+            cohortScoped={pipelineScoped}
+            variant="inline"
+          />
+          <DismissButton property_id={row.property_id} variant="inline" />
+        </div>
       </td>
       <td className="px-4 py-2.5 align-middle">
         <Link

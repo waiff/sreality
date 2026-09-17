@@ -2396,8 +2396,51 @@ export const pipelineKeys = {
 };
 
 export const dismissalKeys = {
+  all: ['dismissals'] as const,
   count: ['dismissals', 'count'] as const,
+  state: (property_id: number) => ['dismissals', 'state', property_id] as const,
 };
+
+/* Is this property dismissed by the caller? One entry per property, but never
+ * one request per property: every call made in the same task (a page of cards
+ * mounting, say) is answered by ONE read of the view per DISMISSAL_BATCH ids.
+ * Never a whole-set read — the dismissed set only grows. */
+const DISMISSAL_BATCH = 200;
+type DismissalWaiter = { resolve: (dismissed: boolean) => void; reject: (e: unknown) => void };
+let dismissalWaiters: Map<number, DismissalWaiter[]> | null = null;
+
+async function flushDismissalBatch(): Promise<void> {
+  const batch = dismissalWaiters ?? new Map<number, DismissalWaiter[]>();
+  dismissalWaiters = null;
+  const ids = [...batch.keys()];
+  for (let i = 0; i < ids.length; i += DISMISSAL_BATCH) {
+    const chunk = ids.slice(i, i + DISMISSAL_BATCH);
+    const settle = (fn: (w: DismissalWaiter, id: number) => void) =>
+      chunk.forEach((id) => batch.get(id)?.forEach((w) => fn(w, id)));
+    try {
+      const { data, error } = await supabase
+        .from('property_dismissals_public')
+        .select('property_id')
+        .in('property_id', chunk);
+      if (error) throw error;
+      const hit = new Set((data ?? []).map((r) => (r as { property_id: number }).property_id));
+      settle((w, id) => w.resolve(hit.has(id)));
+    } catch (e) {
+      settle((w) => w.reject(e));
+    }
+  }
+}
+
+export const fetchIsDismissed = (property_id: number): Promise<boolean> =>
+  new Promise((resolve, reject) => {
+    if (dismissalWaiters == null) {
+      dismissalWaiters = new Map();
+      setTimeout(() => void flushDismissalBatch(), 0);
+    }
+    const waiters = dismissalWaiters.get(property_id) ?? [];
+    waiters.push({ resolve, reject });
+    dismissalWaiters.set(property_id, waiters);
+  });
 
 /* How many properties the caller has dismissed (migration 536). Only a gate —
  * a property two of the caller's accounts dismissed counts twice. */

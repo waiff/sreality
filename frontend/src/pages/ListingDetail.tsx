@@ -58,6 +58,7 @@ import ErrorBoundary from '@/components/ErrorBoundary';
 import Skeleton from '@/components/Skeleton';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import PipelineToggle from '@/components/listing-detail/PipelineToggle';
+import DismissButton from '@/components/DismissButton';
 import CollectionSaveToggle from '@/components/listing-detail/CollectionSaveToggle';
 import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
@@ -419,14 +420,15 @@ export default function ListingDetail() {
         <Crumb />
         {/* The page-level verbs, grouped top-right, in the same order as the
             controls on a Browse card: track this deal in the pipeline, save the
-            property to a collection (monitoring rides on the collection), then
-            run a new estimation. Both curation controls are property-grain
+            property to a collection (monitoring rides on the collection), dismiss
+            it, then run a new estimation. The curation controls are property-grain
             (rule #18) and need the property_id — which since W9b comes off the
             listing row itself, so they appear with the header rather than a
             round trip after it. */}
         <div className="flex items-center gap-2">
           {propPid != null && <PipelineToggle property_id={propPid} />}
           {propPid != null && <CollectionSaveToggle property_id={propPid} />}
+          {propPid != null && <DismissButton property_id={propPid} variant="header" />}
           <NewEstimationButton prefill={newEstimationPrefill} />
         </div>
       </div>
