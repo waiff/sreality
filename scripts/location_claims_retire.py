@@ -50,9 +50,12 @@ startup into a list of `portal_contract_entries.id`, and the batch predicate is
 (`location_data/operator_corrections.py`), and NULL is never `= ANY` of anything, so the
 operator's own corrections cannot be reached by this module even by mistake.
 
-AND IT WAITS FOR THE RE-MINE (W11, re-aimed in W15). Since the 2026-09-14 blackout the
-resolver reads a listing's NEWEST EVIDENCE, so a retired version's rows are live data until
-the page has been re-mined under the active one. The rail measures exactly what this delete
+AND IT WAITS FOR THE RE-MINE (W11, re-aimed in W15, re-spelled in W18-b). Since the
+2026-09-14 blackout the resolver reads a listing's NEWEST EVIDENCE, and since W18-b it reads
+it PER CLAIM TYPE — the newest version `<= active` that carries a claim of that type — so a
+retired version's rows are live data, type by type, until the page has been re-mined under
+the active one. That makes this script the ONLY thing that can take them away: the resolver
+stops reading a type when the active contract stops DECLARING it, but the rows stay. The rail measures exactly what this delete
 would destroy, over EVERY listing: per portal, the listings carrying a claim under one of
 the doomed entries, and how many of those have NO claim under that portal's active contract
 — i.e. would be left with no evidence at all. Any non-zero number refuses the run (exit 3)
@@ -93,11 +96,13 @@ _RETIRED_ENTRIES_SQL = """
      ORDER BY pc.source, pc.version, pce.id
 """
 
-# THE RE-MINE RAIL (W11, incident 2026-09-14; re-aimed W15). A retired version's claims are
-# NOT dead weight while the portal's pages have not been re-mined under the ACTIVE version:
-# since W11 the resolver reads a listing's NEWEST EVIDENCE (the highest contract version
-# present for that listing that is <= the active one), so an old version's rows are what
-# keeps a half-re-mined listing on the map. Deleting them mid-re-mine is exactly the blackout
+# THE RE-MINE RAIL (W11, incident 2026-09-14; re-aimed W15; re-spelled W18-b). A retired
+# version's claims are NOT dead weight while the portal's pages have not been re-mined under
+# the ACTIVE version: the resolver reads a listing's NEWEST EVIDENCE per (listing, portal,
+# CLAIM TYPE) — the highest contract version present that is <= the active one and carries a
+# claim of that type — so an old version's rows are what keeps a half-re-mined listing on the
+# map, one type at a time (W18-b, 2026-09-17: reading that per PORTAL instead of per type
+# left 29,545 live bazos listings with a version-7 street and no town, PSČ or pin). Deleting them mid-re-mine is exactly the blackout
 # W11 fixed, spelled as a DELETE instead of a SELECT — and this one would not self-heal.
 #
 # IT MEASURES THE DAMAGE, NOT A COHORT. W11 asked the question of `l.is_active` listings,

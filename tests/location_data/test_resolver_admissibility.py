@@ -62,31 +62,43 @@ def test_the_licence_gate_is_in_the_claim_read_not_only_in_the_code():
         assert "c.licence_class in ('portal', 'operator')" in " ".join(sql.split()).lower()
 
 
-def test_the_claim_read_takes_a_listings_newest_evidence_not_only_the_active_contract():
-    """W11, incident 2026-09-14. W1-c spelled the version rail `pc.is_active`, so the hours
-    between a contract BUMP and its re-mine judged a listing with no claims at all: 595,816
-    rows came out `unknown/undetermined/low` and Browse fell to 45,810 of ~350,000.
+def test_the_claim_read_takes_a_listings_newest_evidence_per_claim_type():
+    """W11 (incident 2026-09-14) + W18-b (incident 2026-09-17).
 
-    The rail now reads the highest contract version PRESENT for that (listing, portal) that
-    is `<= the active one`, which is the active version's claims the moment they exist."""
+    W1-c spelled the version rail `pc.is_active`, so the hours between a contract BUMP and
+    its re-mine judged a listing with no claims at all: 595,816 rows came out
+    `unknown/undetermined/low` and Browse fell to 45,810 of ~350,000. W11 made the rail read
+    the highest contract version PRESENT that is `<= the active one` — but per (listing,
+    PORTAL), and a portal's entries are not re-mined in one hop. W18's bazos 6 -> 7 mined the
+    one payload entry across 147 k listings while the bounded bodies pass reached 56,905 of
+    ~155 k pages, so ~90 k listings had a version-7 STREET and nothing else: the obec, the
+    PSČ and the pin sat unread at version 6 and 29,545 of 50,598 live bazos listings went
+    `undetermined` with no geom.
+
+    So the newest version is asked PER CLAIM TYPE, and only for the types the ACTIVE contract
+    still declares."""
     for sql in (resolve_db._CLAIMS_SQL, resolve_db._CLAIMS_BULK_SQL):
         flat = " ".join(sql.split()).lower()
         assert "join portal_contracts pc on pc.id = pce.contract_id" in flat, flat
         assert "join portal_contracts act on act.source = pc.source and act.is_active" in flat
         assert "pc.version <= act.version" in flat, flat
-        # ONE version per listing per portal, never a mix of two contracts' halves.
-        assert ("max(pc.version) over (partition by c.listing_id, c.source) "
+        # PER TYPE — a partial re-mine upgrades one type and blanks none.
+        assert ("max(pc.version) over (partition by c.listing_id, c.source, c.claim_type) "
                 "as newest_version") in flat, flat
         assert "contract_version is null or contract_version = newest_version" in flat, flat
+        # A type the active contract no longer declares is not read at all — an EXISTS, not
+        # a join: the active contract may declare one type on several surfaces.
+        assert ("exists (select 1 from portal_contract_entries ace where ace.contract_id = "
+                "act.id and ace.claim_type = c.claim_type)") in flat, flat
         # Operator claims carry no entry by construction and are named EXPLICITLY — a
         # NULL-tolerant join would also admit a portal claim that lost its entry id.
         assert "c.contract_entry_id is null and c.licence_class = 'operator'" in flat, flat
 
 
-def test_the_w11_rule_carries_its_own_resolver_version():
+def test_the_w18b_rule_carries_its_own_resolver_version():
     """A rule that can change an output must move `RESOLVER_VERSION`, or the sweep's version
-    arm never re-queues the rows the old rule got wrong — which here is 595,816 of them."""
-    assert RESOLVER_VERSION == "resolver:v5.2"
+    arm never re-queues the rows the old rule got wrong — 29,545 live bazos listings here."""
+    assert RESOLVER_VERSION == "resolver:v5.3"
 
 
 class _ClaimCursor:
@@ -99,21 +111,41 @@ class _ClaimCursor:
 
     ACTIVE = {"sreality": 4, "bazos": 7}
 
-    #  id, listing_id, source, licence_class, contract version (None = no entry)
+    # What the ACTIVE contract DECLARES an entry for. bazos@7 is the real shape: the four
+    # page entries plus the `street_name` payload entry W18 added.
+    DECLARED = {
+        "sreality": ("obec_name", "coordinate"),
+        "bazos": ("obec_name", "psc", "precision_declaration", "coordinate", "street_name"),
+    }
+
+    #  id, listing_id, source, claim_type, licence_class, contract version (None = no entry)
     ROWS = (
-        (1, 77, "sreality", "portal", 4),    # the active version's claim
-        (2, 77, "sreality", "portal", 3),    # the SAME fact, from the superseded version
-        (3, 77, "operator", "operator", None),  # an operator correction, no entry at all
-        (4, 77, "sreality", "ephemeral_display_only", 4),  # a Mapy coordinate
-        (5, 77, "sreality", "portal", None),  # a portal claim that lost its entry id
-        # A LISTING THE BUMP OUTRAN: nothing under bazos@6 yet, so @5 is its newest
+        (1, 77, "sreality", "obec_name", "portal", 4),    # the active version's claim
+        (2, 77, "sreality", "obec_name", "portal", 3),    # the SAME fact, superseded
+        (3, 77, "operator", "obec_name", "operator", None),  # an operator correction
+        (4, 77, "sreality", "coordinate", "ephemeral_display_only", 4),  # a Mapy coordinate
+        (5, 77, "sreality", "obec_name", "portal", None),  # a portal claim with no entry id
+        # A LISTING THE BUMP OUTRAN: nothing under bazos@7 yet, so @5 is its newest
         # evidence — and @4 beside it must NOT be mixed in.
-        (6, 88, "bazos", "portal", 5),
-        (7, 88, "bazos", "portal", 4),
-        (8, 88, "operator", "operator", None),
+        (6, 88, "bazos", "obec_name", "portal", 5),
+        (7, 88, "bazos", "obec_name", "portal", 4),
+        (8, 88, "operator", "obec_name", "operator", None),
+        # W18-b: HALF re-mined. The payload entry reached @7; the four page entries the
+        # bounded bodies pass never got to are still at @6, and are still this listing's
+        # only evidence for their types.
+        (10, 99, "bazos", "street_name", "portal", 7),
+        (11, 99, "bazos", "obec_name", "portal", 6),
+        (12, 99, "bazos", "psc", "portal", 6),
+        (13, 99, "bazos", "precision_declaration", "portal", 6),
+        (14, 99, "bazos", "coordinate", "portal", 6),
+        # The re-mine FINISHED here: every type carries an @7 claim.
+        (20, 111, "bazos", "street_name", "portal", 7),
+        (21, 111, "bazos", "obec_name", "portal", 7),
+        (22, 111, "bazos", "obec_name", "portal", 6),  # superseded — never beside @7
     )
 
-    def __init__(self) -> None:
+    def __init__(self, declared: dict | None = None) -> None:
+        self.declared = dict(self.DECLARED if declared is None else declared)
         self.result: list[tuple] = []
 
     def __enter__(self):
@@ -126,22 +158,31 @@ class _ClaimCursor:
         flat = " ".join(sql.split()).lower()
         assert "c.licence_class in ('portal', 'operator')" in flat, "licence rail missing"
         assert "pc.version <= act.version" in flat, "active-version ceiling missing"
-        assert "newest_version" in flat, "newest-evidence rail missing"
+        assert "partition by c.listing_id, c.source, c.claim_type" in flat, "per-type rail"
+        assert "ace.claim_type = c.claim_type" in flat, "active-contract type gate missing"
         assert "c.contract_entry_id is null and c.licence_class = 'operator'" in flat
-        admissible = [
-            r for r in self.ROWS
-            if r[3] in ("portal", "operator")
-            and ((r[4] is None and r[3] == "operator")
-                 or (r[4] is not None and r[4] <= self.ACTIVE[r[2]]))
-        ]
-        newest = {}
-        for _, listing, source, _, version in admissible:
+        admissible = []
+        for row in self.ROWS:
+            _, _, source, claim_type, licence, version = row
+            if licence not in ("portal", "operator"):
+                continue
+            if version is None:
+                if licence != "operator":
+                    continue  # a portal claim that lost its entry id
+            elif version > self.ACTIVE.get(source, -1):
+                continue
+            elif claim_type not in self.declared.get(source, ()):
+                continue  # the active contract no longer declares this type
+            admissible.append(row)
+        newest: dict[tuple, int] = {}
+        for _, listing, source, claim_type, _, version in admissible:
             if version is not None:
-                newest[(listing, source)] = max(newest.get((listing, source), 0), version)
+                key = (listing, source, claim_type)
+                newest[key] = max(newest.get(key, 0), version)
         self.result = [
-            _row(r[0], r[1], r[2])
+            _row(r[0], r[1], r[2], r[3])
             for r in admissible
-            if r[4] is None or r[4] == newest[(r[1], r[2])]
+            if r[5] is None or r[5] == newest[(r[1], r[2], r[3])]
         ]
         self.result.sort(key=lambda row: (row[1], row[0]))
 
@@ -149,15 +190,16 @@ class _ClaimCursor:
         return self.result
 
 
-def _row(claim_id: int, listing_id: int, source: str = "sreality") -> tuple:
-    return (claim_id, listing_id, source, "obec_name", "api_json",
+def _row(claim_id: int, listing_id: int, source: str = "sreality",
+         claim_type: str = "obec_name") -> tuple:
+    return (claim_id, listing_id, source, claim_type, "api_json",
             "portal_structured_field", "portal", mm._T0, "Praha", None, None, None,
             {}, None, None, "none", "high", True)
 
 
 class _ClaimConn:
-    def __init__(self) -> None:
-        self.cur = _ClaimCursor()
+    def __init__(self, declared: dict | None = None) -> None:
+        self.cur = _ClaimCursor(declared)
 
     def cursor(self):
         return self.cur
@@ -170,10 +212,38 @@ def test_a_superseded_versions_claim_is_never_loaded_beside_the_active_ones():
 
 
 def test_a_listing_the_bump_outran_still_reads_its_newest_earlier_version():
-    """bazos@6 is active and this listing has nothing under it yet. It reads @5 — its newest
+    """bazos@7 is active and this listing has nothing under it yet. It reads @5 — its newest
     evidence — and never @4 beside it, so the answer is one contract's, not two halves."""
     loaded = resolve_db.load_claims_bulk(_ClaimConn(), [88])
     assert [c.id for c in loaded[88]] == [6, 8]
+
+
+def test_a_half_re_mined_listing_reads_every_type_its_evidence_carries():
+    """W18-b, the whole point. One entry is at the active version and four are a version
+    behind; reading only the newest VERSION served the street alone and hid the town, the
+    PSČ and the pin — 29,545 live bazos listings `undetermined` with no geom."""
+    loaded = resolve_db.load_claims_bulk(_ClaimConn(), [99])
+    assert [c.id for c in loaded[99]] == [10, 11, 12, 13, 14]
+    assert sorted(c.claim_type for c in loaded[99]) == [
+        "coordinate", "obec_name", "precision_declaration", "psc", "street_name",
+    ]
+
+
+def test_a_type_the_active_contract_no_longer_declares_is_not_read():
+    """A deliberately dropped entry stops being evidence the moment it is dropped instead of
+    lingering forever at its last version. DELETING those rows stays the retire script's."""
+    declared = dict(_ClaimCursor.DECLARED)
+    declared["bazos"] = tuple(t for t in declared["bazos"] if t != "psc")
+    loaded = resolve_db.load_claims_bulk(_ClaimConn(declared), [99])
+    assert [c.id for c in loaded[99]] == [10, 11, 13, 14]
+    assert "psc" not in {c.claim_type for c in loaded[99]}
+
+
+def test_a_fully_re_mined_listing_reads_exactly_what_it_read_before():
+    """When the newest version carries every type the per-type rail is a no-op: the
+    superseded row is still never loaded beside the active one."""
+    loaded = resolve_db.load_claims_bulk(_ClaimConn(), [111])
+    assert [c.id for c in loaded[111]] == [20, 21]
 
 
 # --------------------------------------------------------------- the carousel street

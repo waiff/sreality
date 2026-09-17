@@ -2221,7 +2221,8 @@ foreign is a determination, never a default.
 its fingerprint hashes `extractor_version`, so a bump inserts new rows beside the old ones, and the
 superseded row has the LOWER id, which wins every "first admissible claim of this type" tie. So the
 resolver's claim projection (`_claims_sql`) admits a claim only when its `contract_entry_id`
-belongs to a contract version that is a listing's NEWEST EVIDENCE, plus operator claims, which carry
+belongs to a contract version that is a listing's NEWEST EVIDENCE **for that claim type**, plus
+operator claims, which carry
 no entry by construction (`contract_entry_id IS NULL` + `licence_class = 'operator'` — named explicitly, so a
 portal claim that lost its entry id is NOT let through). Filtering at READ is what made deleting the
 superseded rows a cleanup rather than a correctness step, and **W6-a took it**: a claim under a
@@ -2233,18 +2234,34 @@ read these rows, so no verdict can move — which is the whole difference from `
 --retract`, the mechanism that withdraws a version's evidence BECAUSE it was wrong and must
 re-resolve every listing it touched. Re-dispatch the workflow after any future retirement.
 
-**A CONTRACT BUMP NEVER BLACKS OUT (W11, 2026-09-14).** W1-c spelled that rail `pc.is_active`, and
-the resolver then read the ACTIVE version's claims or nothing — so in the 6–8 h a re-mine takes, a
-bumped portal's listings were judged with NO evidence at all. On 2026-09-14 a W9 bump of eight
-contracts at 05:58Z met a full-resolve sweep at 06:42Z and 595,816 rows came out
-`unknown/undetermined/low`; under W5 Browse fell from ~350,000 active rows to 45,810. The rail now
-reads **a listing's newest evidence**: per (listing, portal) the claims of the highest contract
-version present that is `<= the active version` — the active one the moment its rows exist, the most
-recent earlier one until then, and `max(pc.version) OVER (PARTITION BY listing_id, source)` makes
-that ONE version per listing per portal rather than a mix of two contracts' halves (measured on prod
-over a 250-listing slice: 11 ms / 1.2 k buffers, index-driven). `claim_set_hash` fingerprints the
-CONSUMED set including claim ids, so the re-mine's new rows change the hash and the listing
-re-resolves normally. **Retirement waits for the re-mine**: those older rows are live data until the
+**A CONTRACT BUMP NEVER BLACKS OUT (W11, 2026-09-14), AND A PARTIAL RE-MINE NEVER BLANKS A LISTING
+(W18-b, 2026-09-17).** W1-c spelled that rail `pc.is_active`, and the resolver then read the ACTIVE
+version's claims or nothing — so in the 6–8 h a re-mine takes, a bumped portal's listings were judged
+with NO evidence at all. On 2026-09-14 a W9 bump of eight contracts at 05:58Z met a full-resolve
+sweep at 06:42Z and 595,816 rows came out `unknown/undetermined/low`; under W5 Browse fell from
+~350,000 active rows to 45,810. W11 made the rail read **a listing's newest evidence** — the highest
+contract version present that is `<= the active version` — but partitioned per (listing, PORTAL), and
+**a portal's entries are not re-mined in one hop**. W18 bumped bazos 6 → 7 for ONE payload entry
+(`street_name` off `raw_json` /title): the payload lane mined it across all 147k listings in a single
+hop while the same run's BODIES pass (the four PAGE entries — `obec_name`, `psc`,
+`precision_declaration`, `coordinate`) is bounded and reached 56,905 of ~155k pages before the chain
+yielded. For ~90k listings the newest version present was therefore 7 and carried the street ALONE:
+the town, the PSČ and the pin sat unread at version 6, and 29,545 of 50,598 live bazos listings went
+`undetermined` with no geom (61,396 rows at granularity `unknown`).
+
+So the rail is **PER CLAIM TYPE**: for each claim type the portal's ACTIVE contract declares an entry
+for, a listing's claims come from the newest version `<= active` that carries a claim OF THAT TYPE —
+`max(pc.version) OVER (PARTITION BY listing_id, source, claim_type)`, so each type keeps its best
+evidence and a re-mine upgrades them one at a time, while the supersession the rail exists for is
+unchanged (a re-mined type never reads the old version's answer beside the new one). A claim type the
+active contract **no longer declares is not read at all** (an `EXISTS` over the active contract's
+entries — not a join, because the same type may be declared on several surfaces), so a deliberately
+dropped entry stops being evidence when it is dropped rather than lingering forever at its last
+version, and `location_claims_retire.py` stays the only thing that DELETES those rows. Measured on
+prod over a 250-listing slice the W11 shape was 11 ms / 1.2k buffers, index-driven; the per-type
+partition adds a semi-join against one contract's entries. `claim_set_hash` fingerprints the CONSUMED
+set including claim ids, so the re-mine's new rows change the hash and the listing re-resolves
+normally. **Retirement waits for the re-mine**: those older rows are live data until the
 page has been re-mined, so `location_claims_retire.py` refuses (exit 3) while any portal still has a
 SERVED listing carrying no claim under its ACTIVE contract, and names the number. There is no
 `--force` — the answer is to wait for the intake lanes. **Licence
@@ -2592,6 +2609,11 @@ per-listing statement gets, and cancelling it threw the whole batch away.
 * **A contract bump must never outrun its re-mine** (W11, 2026-09-14) — reading only the ACTIVE
   version's claims meant the 6–8 h between a bump and the re-mine judged 595,816 listings with no
   evidence and emptied Browse to 45,810 rows; the resolver reads a listing's NEWEST evidence instead.
+* **…and "newest evidence" is PER CLAIM TYPE** (W18-b, 2026-09-17) — a bump's entries are not
+  re-mined in one hop (bazos 6 → 7 mined the one payload entry across 147k listings while the bounded
+  bodies pass reached 56,905 of ~155k pages), so a per-PORTAL partition served the new version's
+  street alone and hid the town, PSČ and pin still sitting at the old one: 29,545 of 50,598 live
+  bazos listings `undetermined` with no geom. Per type, a partial re-mine costs a listing nothing.
 * **An enqueue that no-ops loses the listing** — the 07:13Z contract bump re-mined ~60k listings
   already queued from a ~540k sweep; every enqueue no-opped, the drain resolved them from the OLD
   claims and deleted the rows, and 384,500 answer rows with 135 towns had nothing that could

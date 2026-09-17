@@ -70,7 +70,8 @@ _CURRENT_REGISTRY_SQL = "SELECT id, label FROM registry_versions WHERE is_curren
 # coordinate is not refused at write time, it is never READ.
 _ADMISSIBLE_LICENCE_CLASSES = "('portal', 'operator')"
 
-# AND SO DOES THE CONTRACT-VERSION RAIL — BUT A BUMP MUST NEVER BLACK A LISTING OUT (W11).
+# AND SO DOES THE CONTRACT-VERSION RAIL — BUT A BUMP MUST NEVER BLACK A LISTING OUT (W11),
+# AND A HALF-FINISHED RE-MINE MUST NEVER BLANK ONE (W18-b).
 # `location_claims` is append-only and its fingerprint hashes `extractor_version`, so a
 # contract BUMP does not supersede the old version's rows — it inserts new ones beside them.
 # The superseded row has the LOWER id, so it would win every "first admissible claim of this
@@ -83,13 +84,36 @@ _ADMISSIBLE_LICENCE_CLASSES = "('portal', 'operator')"
 # re-judged with NO admissible claim at all and came out `unknown/undetermined/low`, and under
 # W5 (consumers serve only resolved locations) Browse fell from ~350 k rows to 45,810.
 #
-# So the rail reads a listing's NEWEST EVIDENCE instead of only the newest CONTRACT: per
-# (listing, portal) the resolver takes the claims of the highest contract version present
-# that is `<= the active version` — the active version's claims the moment they exist, the
-# most recent earlier version's until then. `max(...) OVER (PARTITION BY listing_id, source)`
-# is one version per listing per portal and NEVER a mix, so a half-re-mined listing still
-# reads one contract's answer rather than two contracts' halves. A bump is then what it
-# always should have been: invisible until the evidence arrives.
+# So the rail reads a listing's NEWEST EVIDENCE instead of only the newest CONTRACT: the
+# resolver takes the claims of the highest contract version present that is `<= the active
+# version` — the active version's claims the moment they exist, the most recent earlier
+# version's until then. A bump is then what it always should have been: invisible until the
+# evidence arrives.
+#
+# W11 SPELLED "NEWEST EVIDENCE" PER (LISTING, PORTAL), AND ON 2026-09-17 THAT COST 29,545
+# LISTINGS THEIR LOCATION (W18-b). W18 bumped the bazos contract 6 -> 7 for ONE payload-lane
+# entry (`street_name` off `raw_json` /title). The payload lane re-mined that entry across
+# all 147 k bazos listings in a single hop, while the same run's BODIES pass — which re-mines
+# the four PAGE entries (`obec_name`, `psc`, `precision_declaration`, `coordinate`) — is
+# bounded and reached 56,905 of ~155 k bodies before the chain yielded. For ~90 k listings
+# the newest version present was therefore 7 and carried the STREET alone: the per-portal
+# partition read that one claim and hid the town, the PSČ and the pin, which were sitting
+# right there at version 6. 29,545 of 50,598 live bazos listings went `undetermined` with no
+# geom, 61,396 rows to granularity `unknown`.
+#
+# So the rail is PER CLAIM TYPE (v5.3): for each claim type the portal's ACTIVE contract
+# declares an entry for, the listing's claims come from the newest version `<= active` that
+# carries a claim OF THAT TYPE. A partial re-mine now costs a listing nothing — each type
+# keeps its best evidence and the new version's types upgrade one at a time — while the
+# supersession the version rail exists for is unchanged: a type re-mined under the new
+# version never reads the old version's answer beside it.
+#
+# A claim type the ACTIVE contract no longer declares is not read AT ALL (the `EXISTS` over
+# the active contract's entries): a deliberately dropped entry stops being evidence the
+# moment it is dropped, instead of lingering forever at its last version, and
+# `scripts/location_claims_retire.py` stays the only thing that DELETES those rows. It is an
+# `EXISTS` and not a join because the active contract may declare the same claim type on
+# several surfaces, and a join would then multiply the claim rows.
 #
 # `contract_version` is NULL for an operator claim (no entry by construction), which `max()`
 # ignores and the outer filter keeps — operator corrections are unchanged.
@@ -100,7 +124,10 @@ _ADMISSIBLE_LICENCE_CLASSES = "('portal', 'operator')"
 # LEFT JOIN — a portal claim that somehow lost its entry id must NOT be admitted.
 _ADMISSIBLE_CONTRACT = """
        (c.contract_entry_id IS NULL AND c.licence_class = 'operator'
-        OR pc.id IS NOT NULL AND pc.version <= act.version)"""
+        OR pc.id IS NOT NULL AND pc.version <= act.version
+           AND EXISTS (SELECT 1 FROM portal_contract_entries ace
+                        WHERE ace.contract_id = act.id
+                          AND ace.claim_type = c.claim_type))"""
 
 # ONE projection, ONE admissibility predicate — the row unpacking in `_claim` is positional,
 # so a second hand-written column list is a silent mis-mapping waiting to happen
@@ -121,11 +148,16 @@ def _claims_sql(listing_filter: str, order_by: str) -> str:
     (PARTITION BY ...)` would then be computed over the whole table before the listing was
     picked. Measured on prod over a 250-listing slice, the shape below is 11 ms / 1.2 k
     buffers against 152 ms / 75 k for the same rule written as a correlated anti-join.
+
+    The partition carries `c.claim_type` (W18-b): the newest version is asked PER TYPE, so a
+    re-mine that has reached one entry and not the others upgrades that entry alone instead
+    of blanking every type the new version has not reached yet.
     """
     return f"""
 WITH evidence AS (
 SELECT c.*, pc.version AS contract_version,
-       max(pc.version) OVER (PARTITION BY c.listing_id, c.source) AS newest_version
+       max(pc.version) OVER (PARTITION BY c.listing_id, c.source, c.claim_type)
+         AS newest_version
   FROM location_claims c
   LEFT JOIN portal_contract_entries pce ON pce.id = c.contract_entry_id
   LEFT JOIN portal_contracts pc ON pc.id = pce.contract_id
