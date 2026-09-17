@@ -624,10 +624,15 @@ def areas_from_params(
     `scripts/backfill_area_spaced_thousands` reads it off that stored reading of the same
     page. remax renders every spec value's thousands group with a no-break space, which is
     what the naive grammar truncated.
+
+    remax spells the parcel "Plocha parcely" — not the "plocha pozemku" the other portals
+    use, which appears on NO remax page (0 of 13,806 stored rows; the parcel label carries
+    4,339 of them), so the plot arrived NULL on every listing and land got its headline from
+    the title instead of its own measure. One key, no dead fallback (W20).
     """
     usable_text = params.get("uzitna plocha")
     total_text = params.get("celkova plocha") or params.get("plocha")
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    estate_area = parse_area_text(params.get("plocha parcely"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=parse_area_text(usable_text),

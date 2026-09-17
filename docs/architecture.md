@@ -313,7 +313,14 @@ coordinates in `data-gps` (DMS, e.g. `50°05'26.1"N,14°29'33.4"E` — parsed to
 decimal, CZ-bbox-guarded, no geocoding step) + a `mlsf.remax-czech.cz/data//zs/{id}/`
 gallery (the `_th350` thumbnail strips to the full-resolution original). Typed
 fields are normalised to the SAME canonical labels sreality/idnes emit
-(`Cihlová→cihla`, `Velmi dobrý→velmi_dobry`, `Osobní→osobni`, `2+kk`). Like maxima,
+(`Cihlová→cihla`, `Velmi dobrý→velmi_dobry`, `Osobní→osobni`, `2+kk`). **remax spells the
+parcel "Plocha parcely"** — `areas_from_params` read `plocha pozemku`, the label the other
+portals use and that NO remax page carries (0 of 13,806 stored rows, against 4,339 under
+the real one), so `estate_area` was NULL portal-wide and land rows took their headline from
+the title fallback instead of their own measure. Fixed in the scraper track's W20
+(2026-09-17): one key, no dead fallback, and the plot reaches `derive_headline_area(plot=)`
+as on every other portal — a dwelling keeps its own headline with the parcel beside it in
+`estate_area`, land stamps `area_basis='plot'`. Like maxima,
 the index is TWO mixed indexes — sale (`?sale=1` prodej) and rent (`?sale=2`
 pronájem), `?stranka=N` paging (21/page) — with no per-category URL; each config
 descriptor pairs a category with its offer-type flag and `walk_category` walks (or
