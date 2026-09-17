@@ -34,6 +34,7 @@ credential this lane is handed before they are written.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -326,9 +327,25 @@ def run(
             except Exception:  # noqa: BLE001 — a closed-connection error is not a result
                 pass
     summary["finished_at"] = _now()
+    if summary["result"] is None:
+        # A mode that failed may ALREADY have written this file with everything that prices the
+        # failure — which GPU was rented, how long it booted, what the run had spent. Writing
+        # over it leaves the operator an exception string and nothing else, which is the exact
+        # shape `judge_lane`'s boot-failure path exists to prevent (it writes the artifact
+        # first, then raises). So what it wrote is carried, never dropped.
+        partial = _read_json(out_path)
+        if partial is not None:
+            summary["partial_result"] = partial
     write_json(out_path, summary)
     print(out_path.read_text(encoding="utf-8"))
     return code
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:

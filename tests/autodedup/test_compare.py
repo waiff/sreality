@@ -301,3 +301,300 @@ def test_the_cost_column_survives_the_rounding(tmp_path: Path) -> None:
 
 def test_a_priceless_arm_still_renders_a_cell() -> None:
     assert compare._usd(None) == "–"
+
+
+# --- gold votes -------------------------------------------------------------------------
+#
+# One synthetic gold file, five pairs, every number below computed by hand from it.
+#
+#   pair   primary v1  primary v2  third vote                 aggregate
+#   (1,2)  same        same        qwen same                  same
+#   (3,4)  diff        diff        qwen insufficient (raw diff) diff
+#   (5,6)  same        diff        qwen same                  same        <- primary split
+#   (7,8)  same        same        weaker gpt-5-mini same     same        <- fallback, no qwen
+#   (9,10) diff        diff        qwen same                  diff
+#
+# Covered (two primary votes AND a secondary vote): (1,2) (3,4) (5,6) (9,10).
+# Unanimous within that: (1,2) (3,4) (9,10).
+
+QWEN = "qwen-vl"
+MINI = "gpt-5-mini"
+MISSING = compare.MISSING_DISCRIMINATOR
+
+
+def _vote(lo: int, hi: int, model: str, strategy: str, verdict: str, *,
+          weaker: bool = False, downgraded_from: str | None = None,
+          discriminator: str | None = "floor 2 vs floor 8",
+          cost: float = 0.004, confidence: float = 0.9) -> dict[str, Any]:
+    return {
+        "lo": lo, "hi": hi, "tier": "gold", "model": model, "strategy": strategy,
+        "stratum": "s1", "weaker": weaker, "cost_usd": cost, "llm_call_id": lo * 100 + hi,
+        "verdict": {
+            "verdict": verdict, "confidence": confidence,
+            "downgraded_from": downgraded_from,
+            "unit_discriminator": discriminator,
+        },
+    }
+
+
+def _consensus(lo: int, hi: int, verdict: str, models: str, *,
+               cost: float = 0.010, weaker: bool = False) -> dict[str, Any]:
+    return {
+        "lo": lo, "hi": hi, "tier": "gold", "model": models, "stratum": "s1",
+        "n_votes": 3, "cost_usd": cost, "weaker": weaker,
+        "verdict": {"verdict": verdict, "confidence": 1.0},
+    }
+
+
+THREE = f"{MINI}+{MINI}+{QWEN}"
+WEAKER_MODELS = f"{MINI}+{MINI}+{MINI} (weaker)"
+
+
+def _gold_vote_rows() -> list[dict[str, Any]]:
+    return [
+        _vote(1, 2, MINI, "matched_first", SAME),
+        _vote(1, 2, MINI, "sequence_first", SAME),
+        _vote(1, 2, QWEN, "matched_first", SAME, cost=0.002),
+        _consensus(1, 2, SAME, THREE),
+
+        _vote(3, 4, MINI, "matched_first", DIFF),
+        _vote(3, 4, MINI, "sequence_first", DIFF),
+        # The arm judged, then E27 rewrote it: a non-same verdict that named no discriminator.
+        _vote(3, 4, QWEN, "matched_first", NONE, downgraded_from=DIFF,
+              discriminator=MISSING, cost=0.002),
+        _consensus(3, 4, DIFF, THREE),
+
+        _vote(5, 6, MINI, "matched_first", SAME),
+        _vote(5, 6, MINI, "sequence_first", DIFF),
+        _vote(5, 6, QWEN, "matched_first", SAME, cost=0.002),
+        _consensus(5, 6, SAME, THREE),
+
+        _vote(7, 8, MINI, "matched_first", SAME),
+        _vote(7, 8, MINI, "sequence_first", SAME),
+        _vote(7, 8, MINI, "sequence_first", SAME, weaker=True),
+        _consensus(7, 8, SAME, WEAKER_MODELS, weaker=True),
+
+        _vote(9, 10, MINI, "matched_first", DIFF),
+        _vote(9, 10, MINI, "sequence_first", DIFF),
+        _vote(9, 10, QWEN, "matched_first", SAME, cost=0.002),
+        _consensus(9, 10, DIFF, THREE),
+    ]
+
+
+def _gold_votes_report(tmp_path: Path, rows: list[dict[str, Any]] | None = None,
+                       summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    path = _write(tmp_path / "judgements.jsonl", rows if rows is not None
+                  else _gold_vote_rows())
+    if summary is not None:
+        (tmp_path / compare.SUMMARY_NAME).write_text(
+            json.dumps({"result": summary}), encoding="utf-8"
+        )
+    pairs = compare.load_gold_pairs(path)
+    return compare.build_gold_votes_report(
+        [(path, pairs, compare.load_run_summary(path))]
+    )
+
+
+def test_gold_votes_load_splits_the_aggregate_from_the_votes(tmp_path: Path) -> None:
+    pairs = compare.load_gold_pairs(_write(tmp_path / "g.jsonl", _gold_vote_rows()))
+    by_key = {(pair.lo, pair.hi): pair for pair in pairs}
+    assert len(pairs) == 5
+    assert by_key[(1, 2)].aggregate == SAME
+    assert [vote.model for vote in by_key[(1, 2)].votes] == [MINI, MINI, QWEN]
+    # Plan order is kept, so vote 1 is the matched-first vote.
+    assert by_key[(1, 2)].votes[0].strategy == "matched_first"
+
+
+def test_the_raw_verdict_is_what_the_model_said_before_the_downgrade(tmp_path: Path) -> None:
+    pairs = compare.load_gold_pairs(_write(tmp_path / "g.jsonl", _gold_vote_rows()))
+    arm = [v for p in pairs if (p.lo, p.hi) == (3, 4) for v in p.votes if v.model == QWEN][0]
+    assert arm.verdict == NONE
+    assert arm.raw_verdict == DIFF
+    assert arm.downgraded_from == DIFF
+    assert arm.no_discriminator is True
+
+
+def test_the_primary_arm_is_the_one_that_votes_twice(tmp_path: Path) -> None:
+    pairs = compare.load_gold_pairs(_write(tmp_path / "g.jsonl", _gold_vote_rows()))
+    assert compare.resolve_arms(pairs) == (MINI, [QWEN])
+
+
+def test_a_pair_without_a_secondary_vote_is_not_compared(tmp_path: Path) -> None:
+    report = _gold_votes_report(tmp_path)
+    assert report["totals"]["n_pairs"] == 5
+    # (7,8) took the weaker fallback: there is no independent arm on it to score.
+    assert report["totals"]["n_with_secondary"] == 4
+    assert report["totals"]["n_fallback_pairs"] == 1
+    assert report["f_fallback"]["fallback"]["rate"] == pytest.approx(0.2)
+
+
+def test_stored_and_raw_agreement_are_both_reported(tmp_path: Path) -> None:
+    report = _gold_votes_report(tmp_path)
+    stored = (report["views"]["stored"]["a_secondary_vs_primary_majority"]
+              ["primary_unanimous"])
+    raw = report["views"]["raw"]["a_secondary_vs_primary_majority"]["primary_unanimous"]
+    # Three unanimous pairs; stored the arm matches only (1,2), raw it also matches (3,4).
+    assert stored["four_way"]["n"] == raw["four_way"]["n"] == 3
+    assert stored["four_way"]["agreement"] == pytest.approx(1 / 3, abs=5e-5)
+    assert raw["four_way"]["agreement"] == pytest.approx(2 / 3, abs=5e-5)
+    # po = 1/3; pe = (1/3)(2/3) = 2/9; kappa = (1/3 - 2/9) / (1 - 2/9) = 1/7.
+    assert stored["four_way"]["kappa"] == pytest.approx(1 / 7, abs=5e-5)
+
+
+def test_the_binary_score_drops_the_downgraded_abstention_and_counts_it(
+    tmp_path: Path,
+) -> None:
+    stored = (_gold_votes_report(tmp_path)["views"]["stored"]
+              ["a_secondary_vs_primary_majority"]["primary_unanimous"]["binary"])
+    # (3,4) is excluded as an abstention; (1,2) agrees and (9,10) does not.
+    assert stored["n"] == 2
+    assert stored["excluded_insufficient"] == 1
+    assert stored["agreement"] == pytest.approx(0.5)
+
+
+def test_a_wilson_interval_is_attached_to_every_rate(tmp_path: Path) -> None:
+    entry = (_gold_votes_report(tmp_path)["views"]["stored"]
+             ["a_secondary_vs_primary_majority"]["primary_unanimous"]["four_way"])
+    low, high = entry["ci95"]
+    assert 0.0 < low < entry["agreement"] < high < 1.0
+
+
+def test_the_secondary_arms_same_property_calls_are_scored_both_ways(
+    tmp_path: Path,
+) -> None:
+    """Precision is the merge-safety number and recall the duplicates left behind; an arm that
+    abstains its way to a clean precision has to show the recall beside it."""
+    block = (_gold_votes_report(tmp_path)["views"]["stored"]
+             ["a_secondary_vs_primary_majority"]["secondary_same_property"])
+    # The arm called same_property on (1,2) — right — and on (9,10) — wrong.
+    assert block["precision"]["k"] == 1 and block["precision"]["n"] == 2
+    # The paid pair agreed on same_property once, on (1,2), and the arm found it.
+    assert block["recall"]["k"] == 1 and block["recall"]["n"] == 1
+
+
+def test_a_split_primary_pair_is_reported_apart_from_the_agreement(tmp_path: Path) -> None:
+    split = (_gold_votes_report(tmp_path)["views"]["stored"]
+             ["a_secondary_vs_primary_majority"]["primary_split"])
+    assert split["n"] == 1
+    assert split["secondary_matched_one_vote"]["k"] == 1
+
+
+def test_the_inter_rater_baseline_is_the_primary_against_itself(tmp_path: Path) -> None:
+    block = _gold_votes_report(tmp_path)["views"]["stored"]["c_primary_vs_primary"]
+    assert block["all_pairs"]["four_way"]["n"] == 5
+    assert block["all_pairs"]["four_way"]["agreement"] == pytest.approx(0.8)
+    # The shared subset drops the fallback pair, which the secondary arm never saw.
+    assert block["shared_subset"]["four_way"]["n"] == 4
+    assert block["shared_subset"]["four_way"]["agreement"] == pytest.approx(0.75)
+
+
+def test_agreement_with_the_aggregate_is_flagged_as_self_inclusive(tmp_path: Path) -> None:
+    block = _gold_votes_report(tmp_path)["views"]["stored"]["b_secondary_vs_aggregate"]
+    assert block["four_way"]["n"] == 4
+    assert block["four_way"]["agreement"] == pytest.approx(0.5)
+    assert "contains this vote" in block["note"]
+
+
+def test_what_the_third_vote_actually_changed_is_counted(tmp_path: Path) -> None:
+    influence = _gold_votes_report(tmp_path)["b2_aggregate_influence"]
+    # Only (5,6): the paid votes split, so on their own they would have called it no-majority.
+    assert influence["changed"]["k"] == 1 and influence["changed"]["n"] == 4
+    assert influence["transitions"] == {f"{NONE} -> {SAME}": 1}
+
+
+def test_the_downgrade_rate_is_reported_per_model(tmp_path: Path) -> None:
+    downgrades = _gold_votes_report(tmp_path)["downgrades"]
+    assert downgrades[MINI]["downgraded"]["k"] == 0
+    assert downgrades[QWEN]["votes"] == 4
+    assert downgrades[QWEN]["downgraded"]["k"] == 1
+    assert downgrades[QWEN]["no_unit_discriminator"]["k"] == 1
+    assert downgrades[QWEN]["transitions"] == {f"{DIFF} -> {NONE}": 1}
+
+
+def test_the_paired_lean_counts_only_the_discordant_pairs(tmp_path: Path) -> None:
+    mix = _gold_votes_report(tmp_path)["views"]["stored"]["d_verdict_mix"]
+    same_bias = mix["paired_same_bias"]
+    # (9,10): the arm says same where the unanimous paid pair says different; never the reverse.
+    assert same_bias["arm_only"] == 1 and same_bias["reference_only"] == 0
+    assert same_bias["share_arm"] == pytest.approx(1.0)
+
+
+def test_cost_is_per_vote_and_the_ratio_is_arm_over_paid(tmp_path: Path) -> None:
+    cost = _gold_votes_report(tmp_path)["e_cost"]
+    assert cost["per_model"][MINI]["votes"] == 11
+    assert cost["per_model"][MINI]["weaker_votes"] == 1
+    assert cost["per_model"][QWEN]["votes"] == 4
+    assert cost["per_model"][MINI]["cost_usd"]["mean"] == pytest.approx(0.004)
+    assert cost["per_model"][QWEN]["cost_usd"]["mean"] == pytest.approx(0.002)
+    assert cost["ratio_secondary_over_primary"] == pytest.approx(0.5)
+
+
+def test_a_call_that_was_billed_and_never_parsed_is_charged_to_the_arm(
+    tmp_path: Path,
+) -> None:
+    """Those calls leave NO row in the jsonl, so the per-vote mean flatters the arm. The
+    effective price divides what was spent by the votes that came back usable."""
+    cost = _gold_votes_report(
+        tmp_path, summary={"billed_unparsed": 4, "errors_total": 4}
+    )["e_cost"]
+    assert cost["billed_unparsed_calls"] == 4
+    # 4 usable votes at $0.002, 4 more paid for and lost: $0.016 / 4.
+    assert cost["effective_per_usable_secondary_vote_usd"] == pytest.approx(0.004)
+
+
+def test_the_fallback_reasons_come_from_the_run_summary(tmp_path: Path) -> None:
+    report = _gold_votes_report(tmp_path, summary={
+        "errors_total": 352,
+        "billed_unparsed": 351,
+        "errors": [
+            f"1060x18754086 gold/{QWEN}: JudgeParseError: key_evidence must be a list",
+            f"318x140923 gold/{QWEN}: JudgeParseError: key_evidence must be a list",
+        ],
+    })
+    reasons = report["f_fallback"]["reasons_listed"]
+    assert reasons[0]["model"] == QWEN
+    assert reasons[0]["kind"] == "JudgeParseError"
+    assert reasons[0]["n_listed"] == 2
+    # The lane caps the stored list: the run's own total is the number that counts.
+    assert report["files"][0]["errors_total"] == 352
+
+
+def test_the_gold_votes_cli_writes_both_reports(tmp_path: Path) -> None:
+    path = _write(tmp_path / "judgements.jsonl", _gold_vote_rows())
+    out = tmp_path / "out"
+    code = compare.run(["--gold-votes", "--gold", str(path), "--out", str(out)])
+    assert code == 0
+    report = json.loads((out / compare.GOLD_VOTES_JSON).read_text())
+    markdown = (out / compare.GOLD_VOTES_MD).read_text()
+    assert report["arms"] == {"primary": MINI, "secondary": [QWEN]}
+    assert "Gold votes" in markdown and "stored" in markdown and "raw" in markdown
+
+
+def test_gold_votes_pools_several_runs(tmp_path: Path) -> None:
+    first = _write(tmp_path / "a.jsonl", _gold_vote_rows())
+    second = _write(tmp_path / "b.jsonl", _gold_vote_rows())
+    out = tmp_path / "out"
+    assert compare.run([
+        "--gold-votes", "--gold", str(first), "--gold", str(second), "--out", str(out)
+    ]) == 0
+    report = json.loads((out / compare.GOLD_VOTES_JSON).read_text())
+    assert report["totals"]["n_pairs"] == 10
+    assert [row["n_pairs"] for row in report["files"]] == [5, 5]
+
+
+def test_a_gold_file_with_one_arm_only_exits_non_zero(tmp_path: Path) -> None:
+    rows = [row for row in _gold_vote_rows() if row.get("model") != QWEN]
+    path = _write(tmp_path / "judgements.jsonl", rows)
+    assert compare.run([
+        "--gold-votes", "--gold", str(path), "--out", str(tmp_path / "out")
+    ]) == 1
+
+
+def test_arm_comparison_still_takes_exactly_one_gold(tmp_path: Path) -> None:
+    gold = _write(tmp_path / "gold.jsonl", [_gold(1, 2, SAME)])
+    arm = _write(tmp_path / "arm.jsonl", [_row(1, 2, SAME)])
+    with pytest.raises(SystemExit):
+        compare.run(["--gold", str(gold), "--gold", str(gold), "--arm", f"a={arm}",
+                     "--out", str(tmp_path / "out")])
+    with pytest.raises(SystemExit):
+        compare.run(["--gold", str(gold), "--out", str(tmp_path / "out")])

@@ -54,12 +54,31 @@ class NoCapacityError(RunPodError):
     GPU type instead of failing the whole job."""
 
 
+CLOUD_TYPES: tuple[str, ...] = ("COMMUNITY", "SECURE")
+
+
 @dataclass(frozen=True)
 class GpuOption:
     id: str
     display_name: str
     memory_gb: float
     community_price_per_hr: float
+    # The same card in RunPod's datacenter cloud: a different price AND a different supply
+    # pool, which is the whole reason to ask for it — the big cards (H100, A100 80GB) are
+    # routinely at zero community capacity while secure has them.
+    secure_price_per_hr: float = 0.0
+    community_cloud: bool = True
+    secure_cloud: bool = False
+
+    def price_per_hr(self, cloud_type: str = "COMMUNITY") -> float:
+        return (
+            self.secure_price_per_hr
+            if cloud_type.upper() == "SECURE"
+            else self.community_price_per_hr
+        )
+
+    def offered_in(self, cloud_type: str = "COMMUNITY") -> bool:
+        return self.secure_cloud if cloud_type.upper() == "SECURE" else self.community_cloud
 
 
 @dataclass(frozen=True)
@@ -91,7 +110,9 @@ class RunPodClient:
         self._session = session or requests.Session()
         self._session.headers["Authorization"] = f"Bearer {api_key}"
 
-    def eligible_gpus(self, *, max_price_per_hr: float | None = None) -> list[GpuOption]:
+    def eligible_gpus(
+        self, *, max_price_per_hr: float | None = None, cloud_type: str = "COMMUNITY"
+    ) -> list[GpuOption]:
         """GPU types under `max_price_per_hr`, cheapest first. Queries live rather
         than hardcoding IDs — RunPod's catalog and pricing both shift with supply/
         demand. `communityPrice <= 0` is excluded, not just `None` — a real live
@@ -102,29 +123,43 @@ class RunPodClient:
         cheapest type can be at zero community capacity right now (also observed
         live, same session) — callers needing resilience to that should try
         several via `run_job_with_fallback`, not just the first result."""
+        cloud = cloud_type.upper()
+        if cloud not in CLOUD_TYPES:
+            raise RunPodError(f"unknown cloud_type {cloud_type!r}; expected {CLOUD_TYPES}")
         query = (
-            "query { gpuTypes { id displayName memoryInGb communityPrice } }"
+            "query { gpuTypes { id displayName memoryInGb communityPrice securePrice "
+            "communityCloud secureCloud } }"
         )
         resp = self._session.post(GRAPHQL_URL, json={"query": query}, timeout=30)
         resp.raise_for_status()
         body = resp.json()
         if body.get("errors"):
             raise RunPodError(f"gpuTypes query failed: {body['errors']}")
+        price_key = "securePrice" if cloud == "SECURE" else "communityPrice"
         options = [
             GpuOption(
                 id=g["id"],
                 display_name=g["displayName"],
                 memory_gb=g["memoryInGb"],
-                community_price_per_hr=g["communityPrice"],
+                community_price_per_hr=g.get("communityPrice") or 0.0,
+                secure_price_per_hr=g.get("securePrice") or 0.0,
+                community_cloud=bool(g.get("communityCloud", True)),
+                secure_cloud=bool(g.get("secureCloud", False)),
             )
             for g in body["data"]["gpuTypes"]
-            if (g.get("communityPrice") or 0) > 0
+            if (g.get(price_key) or 0) > 0
         ]
+        # `secureCloud`/`communityCloud` say where the type is offered AT ALL: a listing with
+        # a price for a cloud it is not offered in (MI300X, community) is a launch that can
+        # only fail, and burning a rung of the fallback list on it costs the next rung's supply.
+        options = [o for o in options if o.offered_in(cloud)]
         if max_price_per_hr is not None:
-            options = [o for o in options if o.community_price_per_hr <= max_price_per_hr]
+            options = [o for o in options if o.price_per_hr(cloud) <= max_price_per_hr]
         if not options:
-            raise RunPodError("no GPU type available under the given price cap")
-        return sorted(options, key=lambda o: o.community_price_per_hr)
+            raise RunPodError(
+                f"no {cloud} GPU type available under the given price cap"
+            )
+        return sorted(options, key=lambda o: o.price_per_hr(cloud))
 
     def cheapest_gpu(self, *, max_price_per_hr: float | None = None) -> GpuOption:
         return self.eligible_gpus(max_price_per_hr=max_price_per_hr)[0]

@@ -198,9 +198,23 @@ class JudgeArgs:
     refresh: bool
     cohort: str | None
     oss_model: str
-    oss_gpu: str | None
+    # Space-separated so one `k=v` arg can hold a whole preference list (`args` splits on
+    # commas). Empty = the module's own default ranking.
+    oss_gpu: tuple[str, ...]
+    oss_cloud: tuple[str, ...]
+    oss_image: str | None
+    oss_tool_parser: str | None
+    oss_dtype: str | None
+    oss_disk_gb: int
+    oss_max_model_len: int
+    oss_max_usd_hr: float
+    oss_min_gpu_gb: float
     oss_s_per_pair: float
     pairs_from: str | None
+    # Which judge_version's gold rows `pairs_from=gold` reads. Defaults to the run's own
+    # version, and must be set explicitly to compare a NEW presentation against the gold labels
+    # a previous one produced: the labels are a property of the PAIR, not of the prompt.
+    gold_version: str | None
     # The engine row the lane scores AND digests with. One row, or the prompt describes a
     # different engine than the one that drew the sample.
     settings: str | None
@@ -295,9 +309,20 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         refresh=_flag(args, "refresh"),
         cohort=cohort,
         oss_model=(args.get("oss_model") or "").strip() or MODEL_OSS,
-        oss_gpu=(args.get("oss_gpu") or "").strip() or None,
+        oss_gpu=tuple(part for part in (args.get("oss_gpu") or "").split() if part),
+        oss_cloud=tuple(
+            part.upper() for part in (args.get("oss_cloud") or "").split() if part
+        ),
+        oss_image=(args.get("oss_image") or "").strip() or None,
+        oss_tool_parser=(args.get("oss_tool_parser") or "").strip() or None,
+        oss_dtype=(args.get("oss_dtype") or "").strip() or None,
+        oss_disk_gb=_int_arg(args, "oss_disk_gb", 0),
+        oss_max_model_len=_int_arg(args, "oss_max_model_len", 0),
+        oss_max_usd_hr=_float_arg(args, "oss_max_usd_hr", 0.0),
+        oss_min_gpu_gb=_float_arg(args, "oss_min_gpu_gb", 0.0),
         oss_s_per_pair=_float_arg(args, "oss_s_per_pair", OSS_EST_S_PER_PAIR),
         pairs_from=pairs_from,
+        gold_version=(args.get("gold_version") or "").strip() or None,
         settings=(args.get("settings") or "").strip() or None,
         model=(args.get("model") or "").strip() or None,
     )
@@ -773,23 +798,43 @@ def runpod_client() -> Any:
     return RunPodClient(key)
 
 
-def pod_start(model: str, gpu: str | None, out_dir: Path | None = None) -> Any:
+def pod_start(parsed: JudgeArgs, out_dir: Path | None = None) -> Any:
     """Rent the GPU, wait for it to SERVE, and prove it with one forced-tool vision call.
 
     The smoke is not ceremony: a pod that boots but cannot turn a reply into a tool call fails
     every pair identically, and finding that out after 400 of them costs the whole rental. A
     failure anywhere in here tears the pod down ON THE WAY OUT — the lane's own `finally` only
-    knows about a pod this function returned."""
+    knows about a pod this function returned.
+
+    Everything the model changes travels with it: a 30B model needs a bigger card, a bigger
+    container disk for its weights and a vLLM image new enough to know its architecture, and
+    each of those left at the 7B default is a rental that boots into a failure."""
     module = pod_module()
     client = runpod_client()
-    # A NAMED gpu is a PIN, not a hint: an operator names a type for its price, and the
-    # widened fallback rung on a type that is out of capacity is a 6x change on an
-    # hourly-billed arm whose whole point is cost. Unpinned, the default preference stays a
-    # ranking and any eligible box is fine.
+    # NAMED gpus are a PIN, not a hint: an operator names types for their price and their
+    # memory, and the widened fallback rung on a type that is out of capacity is a 6x change
+    # on an hourly-billed arm whose whole point is cost. Unpinned, the default preference
+    # stays a ranking and any eligible box is fine.
     options: dict[str, Any] = (
-        {"gpu_preference": (gpu,), "strict_gpu": True} if gpu else {}
+        {"gpu_preference": parsed.oss_gpu, "strict_gpu": True} if parsed.oss_gpu else {}
     )
-    handle = module.launch_vllm_pod(client, model_id=model, **options)
+    if parsed.oss_cloud:
+        options["cloud_types"] = parsed.oss_cloud
+    if parsed.oss_image:
+        options["image"] = parsed.oss_image
+    if parsed.oss_tool_parser:
+        options["tool_call_parser"] = parsed.oss_tool_parser
+    if parsed.oss_dtype:
+        options["dtype"] = parsed.oss_dtype
+    if parsed.oss_disk_gb:
+        options["container_disk_gb"] = parsed.oss_disk_gb
+    if parsed.oss_max_model_len:
+        options["max_model_len"] = parsed.oss_max_model_len
+    if parsed.oss_max_usd_hr:
+        options["max_price_per_hr"] = parsed.oss_max_usd_hr
+    if parsed.oss_min_gpu_gb:
+        options["min_memory_gb"] = parsed.oss_min_gpu_gb
+    handle = module.launch_vllm_pod(client, model_id=parsed.oss_model, **options)
     if out_dir is not None:
         # Before the wait, not after it: a job killed from OUTSIDE runs no `finally` at all,
         # and the readiness wait is the longest window in the lane. The receipt is what the
@@ -1052,7 +1097,7 @@ def run_judge(
         # spends its quota inside the set that already has ground truth.
         conn = conn_factory()
         try:
-            gold = _gold_pairs(conn, judge_version)
+            gold = _gold_pairs(conn, parsed.gold_version or judge_version)
         finally:
             _close(conn)
         before = len(rows)
@@ -1061,7 +1106,8 @@ def run_judge(
         if not rows:
             raise SystemExit(
                 f"pairs_from=gold: none of this pass's {before} pair(s) carry a gold row at "
-                f"judge_version {judge_version} — run the gold tier first"
+                f"judge_version {parsed.gold_version or judge_version} — run the gold tier "
+                "first, or name the version that holds the labels with gold_version="
             )
     if parsed.strata:
         rows = [
@@ -1124,6 +1170,7 @@ def run_judge(
         ),
         "dry_run": parsed.dry_run,
         "pairs_from": parsed.pairs_from,
+        "gold_version": parsed.gold_version,
         "pairs_without_gold_dropped": gold_restricted,
         "sample_strata": sample["strata"],
         "engine": {
@@ -1142,7 +1189,9 @@ def run_judge(
         summary["est_cost_usd_for_draw"] = None
         summary["budget_covers_draw"] = None
         summary["oss_model"] = parsed.oss_model
-        summary["oss_gpu_requested"] = parsed.oss_gpu
+        summary["oss_gpu_requested"] = list(parsed.oss_gpu)
+        summary["oss_cloud_requested"] = list(parsed.oss_cloud)
+        summary["oss_image"] = parsed.oss_image
         summary["oss_est_s_per_pair"] = parsed.oss_s_per_pair
 
     if parsed.dry_run:
@@ -1176,7 +1225,7 @@ def run_judge(
         if parsed.tier == "oss" and jobs:
             boot_started = CLOCK()
             try:
-                pod = pod_start(parsed.oss_model, parsed.oss_gpu, out_dir)
+                pod = pod_start(parsed, out_dir)
             except (Exception, SystemExit) as exc:  # noqa: BLE001 — see below
                 # The one path in this lane that can burn 25 minutes of GPU rental and produce
                 # nothing: no capacity across the whole list, `wait_ready`'s deadline, a smoke
@@ -1208,6 +1257,7 @@ def run_judge(
             client_factory = oss_llm_client
             summary["pod_id"] = pod_field(pod, "pod_id")
             summary["gpu"] = pod_field(pod, "gpu") or pod_field(pod, "gpu_type_id")
+            summary["cloud_type"] = pod_field(pod, "cloud_type")
             summary["usd_per_hr"] = usd_per_hr
             # The boot is ALREADY BILLED by the time this runs — `started_at` is stamped at
             # launch and `pod_start` has since waited out a weights load that routinely takes
@@ -1712,6 +1762,12 @@ def _call_with_retry(
     raise RuntimeError("unreachable")
 
 
+def _reversed_halves(blocks: list[Any], split: int) -> list[Any]:
+    """Reverse the paired head and the unpaired tail separately — the presentation order
+    changes, the pairing does not."""
+    return blocks[:split][::-1] + blocks[split:][::-1]
+
+
 def _one_call(
     judge: Any, dataset: Any, job: PairJob, la: Listing, lb: Listing,
     digests: Any, evidence: str, vote: Vote, r2: Any, client: Any,
@@ -1720,6 +1776,7 @@ def _one_call(
 
     blocks_a: list[tuple[str, dict[str, Any]]] = []
     blocks_b: list[tuple[str, dict[str, Any]]] = []
+    paired = 0
     if vote.n_images:
         if r2 is None:
             raise RuntimeError("R2 is not configured; the vision tiers cannot read images")
@@ -1729,11 +1786,16 @@ def _one_call(
         )
         blocks_a = captioned_blocks(judge, r2, picked_a, "A", COMPARISON_MAX_EDGE)
         blocks_b = captioned_blocks(judge, r2, picked_b, "B", COMPARISON_MAX_EDGE)
+        paired = judge.paired_prefix(picked_a, picked_b)
         if vote.shuffle:
-            blocks_a.reverse()
-            blocks_b.reverse()
+            # Reversed WITHIN the paired block and within the tail, not across them: a plain
+            # reverse would move the room pairs to the end and silently unpair the j2
+            # presentation, so the weaker vote would differ from G1 in two things at once.
+            blocks_a = _reversed_halves(blocks_a, paired)
+            blocks_b = _reversed_halves(blocks_b, paired)
     messages = judge.build_messages(
-        job.row, digests, evidence, blocks_a, blocks_b, vote.prompt_tier or vote.tier
+        job.row, digests, evidence, blocks_a, blocks_b, vote.prompt_tier or vote.tier,
+        paired,
     )
     extra: dict[str, Any] = {"provider": vote.provider} if vote.provider else {}
     response = client.call(

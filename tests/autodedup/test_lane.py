@@ -346,3 +346,37 @@ def test_record_with_an_id_refuses_to_change_the_wave(tmp_path: Path) -> None:
     summary = json.loads((tmp_path / "summary.json").read_text())
     assert "wave" in summary["error"]
     assert seen == []
+
+
+def test_a_failed_mode_keeps_the_summary_it_wrote_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The judge lane writes its artifact BEFORE raising, because a rented GPU that never
+    served is the one failure whose price is only in that file. The wrapper's own summary must
+    carry it, not overwrite it with an exception string."""
+    def boom(factory: Any, args: dict[str, str], out_dir: Path) -> dict[str, Any]:
+        lane.write_json(Path(out_dir) / "summary.json", {
+            "pod_boot_failed": "PodBootstrapError: never served",
+            "pod_boot_s": 1510.0,
+            "gpu": "NVIDIA L40S",
+            "usd_per_hr": 1.09,
+        })
+        raise RuntimeError("never served")
+
+    monkeypatch.setitem(lane.MODES, "judge", boom)
+    code = lane.run("judge", "", tmp_path, conn_factory=lambda: _ledger_conn([]))
+    assert code == 1
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["ok"] is False and summary["result"] is None
+    assert summary["partial_result"]["gpu"] == "NVIDIA L40S"
+    assert summary["partial_result"]["pod_boot_s"] == 1510.0
+
+
+def test_a_clean_run_carries_no_partial_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(lane.MODES, "judge", lambda factory, args, out_dir: {"done": 1})
+    code = lane.run("judge", "", tmp_path, conn_factory=lambda: _ledger_conn([]))
+    assert code == 0
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert "partial_result" not in summary and summary["result"] == {"done": 1}

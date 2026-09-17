@@ -50,6 +50,14 @@ def _collapse() -> dict[str, str]:
 _COLLAPSE: dict[str, str] = _collapse()
 
 
+def logical_tag(tag: str | None) -> str | None:
+    """A fine CLIP anchor collapsed to the tagger's logical room (`situation_plan` ->
+    `site_plan`); an unknown tag is returned as itself, never invented and never dropped."""
+    if not tag:
+        return None
+    return _COLLAPSE.get(tag, tag)
+
+
 def tag_family(tag: str | None) -> str:
     """E10's family for a logical tag or a fine anchor; anything unknown is `other`."""
     if not tag:

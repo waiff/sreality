@@ -128,6 +128,36 @@ TASK_INSTRUCTION: str = (
     "template facts, treat absent fields as unknown, and call record_pair_verdict once."
 )
 
+# --- j2: photographs paired by room ---------------------------------------------------------
+# The j1 presentation showed each advert's four frames as a block, so the model chose what to
+# compare with what — and inside a developer project it compared whatever looked alike, which
+# is the facade. j2 hands it the comparison instead: same room, side by side, best match first.
+PAIRED_HEADER: str = "===== PHOTOGRAPHS, PAIRED BY ROOM ====="
+PAIRED_INTRO: str = """\
+The photographs below are PAIRED. A-n and the B-n directly after it show the same KIND of room
+(the caption names it), one frame from each advert, picked as the closest-matching frames of
+that room in the two galleries. Compare each pair against its own partner, in order, and say
+which pair decided you.
+- A pair of floor plans is the strongest evidence here: a different layout, a different room
+  count or arrangement, a different unit number or a different stated area on the two plans
+  proves DIFFERENT UNITS.
+- A pair of kitchens is the next strongest, and a differing kitchen between paired frames is
+  strong evidence of a different unit. One project fits every unit from the same catalogue, so
+  weigh what is unit-specific — the window positions and the view out of them, the exact run of
+  cabinets and the worktop joins, appliances, tiling, sockets, radiators, floor laying — and not
+  the style, the colour scheme or the brand.
+- A matching exterior, facade, garden, common staircase, site plan or marketing/catalogue frame
+  is NOT evidence that the unit is the same. Every unit in the building shares those, so they
+  can support only a verdict about the BUILDING.
+- A room only one advert photographed is not paired and is not shown as one: a room missing on
+  one side is unknown, never a conflict.
+- Two frames of one room that cannot be reconciled — different windows, a different wall layout,
+  a mirrored plan — are a discriminator. Name it in unit_discriminator."""
+UNPAIRED_NOTE: str = (
+    "The frames below are NOT paired: they are extra views one advert has and the other does "
+    "not. Read them as context for that side only, never as a comparison."
+)
+
 ABSENT_TOKEN: str = "absent (unknown, not a conflict)"
 NOT_MEASURED: str = "not measured (absent on at least one side)"
 NOT_MEASURED_SHORT: str = "unknown"
