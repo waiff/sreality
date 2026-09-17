@@ -24,6 +24,7 @@ from psycopg.types.json import Jsonb
 
 from scripts.recompute_property_stats import recompute_mf_one, recompute_one
 from toolkit.browse_read_model import sync_browse_list
+from toolkit.dismissal_identity import reconcile_dismissals_on_merge
 from toolkit.operator_state import carry_operator_state_on_merge
 from toolkit.pipeline_identity import (
     reconcile_pipeline_on_merge,
@@ -180,6 +181,11 @@ def merge_properties(
             reconcile_pipeline_on_merge(
                 cur, retired_id=retired_id, survivor_id=survivor_id,
                 merge_group_id=group,
+            )
+            # After the pipeline: a card that landed on the survivor lifts that
+            # account's dismissal of it.
+            reconcile_dismissals_on_merge(
+                cur, retired_id=retired_id, survivor_id=survivor_id,
             )
             cur.execute(
                 """

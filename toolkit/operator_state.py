@@ -27,6 +27,8 @@ import psycopg
 # (table, dedup_cols, shape). dedup_cols + property_id is the natural key for a
 # "set" table; "append" tables have none. The names here are code-controlled
 # (never user input), so f-string interpolation into the SQL is safe.
+# property_dismissals is deliberately absent: a "set" collision DELETEs, and a
+# dismissal is history (toolkit.dismissal_identity carries it instead).
 OPERATOR_STATE_TABLES: list[tuple[str, list[str], str]] = [
     ("collection_properties", ["collection_id"], "set"),
     ("property_tags", ["tag_id"], "set"),

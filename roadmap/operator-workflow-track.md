@@ -376,6 +376,29 @@ vitest — the numbers below come from Playwright against live data).
   read), NOT part of the URL view state: a shared link carries which deals to
   look at, not how this browser likes its photos.
 
+### Phase U-DISMISS: Dismiss a property (in progress)
+North star: a dismissal is ONE durable, account-scoped fact about a property
+("reviewed, never show it again") with one meaning everywhere — discovery
+(Browse, notification feed + delivery) hides it by default, non-destructively
+(lift, never delete), enforced server-side once, rendered by one shared
+control. Not a special collection (collections are m2m groupings; see
+`docs/architecture.md` rule 18). The pipeline always wins over a dismissal.
+- **W1 — store, merge carry, API** (in progress): migration 536
+  (`property_dismissals` + `property_dismissals_public`), `POST /dismissals`,
+  `DELETE /dismissals/{property_id}` (lift), 409 for a piped property,
+  `add_card` lifts, `toolkit/dismissal_identity.py` in `merge_properties`.
+- **W2 — Browse hides dismissed by default** (next): server-side exclusion on
+  cards/table/count/map/Stats (`browse_list` is blue-green rebuilt, so no view
+  or policy can sit on it), `?dismissed=show` to reveal, outside preset
+  identity, an "N hidden" affordance.
+- **W3 — notification visibility** (next): feed, unread count, mark-all-seen
+  and the outbox drain skip dismissed properties; detection is untouched (its
+  cursors and the `reactivated` detector depend on every dispatch existing).
+- **W4 — the shared control** (next): one dismiss button beside the pipeline
+  funnel on the Browse card, table row and listing header; Undo toast.
+- **W5 — Chrome extension** (next): the same control in the panel, state
+  carried on `POST /listings/lookup`.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

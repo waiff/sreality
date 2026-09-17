@@ -66,6 +66,13 @@ their parent lookups see every row.
   flags this as unsafe once signup is public (non-operator) — the "first signup wins"
   assumption only holds while signup is effectively single-operator.
 
+**Migration 536 — `property_dismissals`**, `account_id` on the row directly (the route
+names it, shape 2 below). Append-only: `grant select, insert` plus a COLUMN-scoped
+`grant update (lifted_at, lift_reason)` and no DELETE, so a tenant can lift a dismissal but
+never rewrite or remove one. One active row per (property, account) is a PARTIAL unique
+index (`where lifted_at is null`), so an idempotent insert spells its conflict target with
+the predicate: `ON CONFLICT (property_id, account_id) WHERE lifted_at IS NULL`.
+
 ## Composite PK: `property_pipeline` (migration 295)
 
 The **only** table where the primary key itself changed, not just an added/scoped

@@ -597,6 +597,10 @@ class AddPipelineCardIn(BaseModel):
     property_id: int
 
 
+class DismissPropertyIn(BaseModel):
+    property_id: int
+
+
 class MoveCardIn(BaseModel):
     # Move to another stage and/or reorder within a stage. Both optional; an
     # empty body is a no-op that returns the current card.

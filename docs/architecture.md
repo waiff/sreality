@@ -1263,6 +1263,24 @@ renumber.** Navigate by area:
     `jwt: true` (`frontend/src/lib/api.ts`), because `verify_jwt` no longer accepts the static
     token as a synthetic identity. `tests/api/test_auth.py::_jwt_gated_calls` is the test-side
     twin of this rule — a route moving back to `_gated_calls` is the regression to catch.
+    **Dismissal (migration 536) is the fourth curation fact: "I reviewed this property and never
+    want to see it again."** It is NOT a special collection — collections are many-to-many
+    groupings, a dismissal is one boolean per property, and a pseudo-collection would need a
+    magic-id lookup in every consumer plus hiding from every collection picker.
+    `property_dismissals` follows migration 401's suppression shape: ACTIVE = `lifted_at IS
+    NULL` (a partial unique index keeps one active row per property per account), undo LIFTS
+    the row (`lift_reason` `operator` | `pipeline` | `merge`, so an undo rate stays measurable),
+    and nothing deletes one — the table is its own history. `property_dismissals_public`
+    (security_invoker, active rows only) is the ONE read definition of "dismissed for the
+    caller"; it is plural under RLS, so `DELETE /dismissals/{property_id}` is RLS-only and lifts
+    every row the caller can see, while `POST /dismissals` names its one account. Dismissal and
+    the deal pipeline are mutually exclusive: `POST /dismissals` answers 409 for a property in
+    the caller's pipeline, and `add_card` lifts the caller's dismissal (the pipeline always
+    wins). The row is deliberately absent from `OPERATOR_STATE_TABLES` — a SET collision there
+    DELETEs, which would destroy history — so `toolkit/dismissal_identity.py` carries it across
+    a merge after the pipeline reconciler: a colliding active row is lifted (`merge`), every row
+    re-points, and a survivor holding that account's pipeline card lifts the dismissal
+    (`pipeline`). Unmerge is best-effort, as for the registry tables.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

@@ -202,8 +202,9 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     keyed on `property_id`; migration 202). `toolkit/operator_state.py` (`OPERATOR_STATE_TABLES` registry —
     including `notification_dispatches`) re-points state onto the survivor inside the `merge_properties`
     transaction, so no row orphans onto a `merged_away` property; unmerge/split are best-effort. Collections
-    carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API; a new
-    property-anchored table = one registry line.
+    carry monitoring (`monitoring_enabled` + `notify_channels`). Writes go through the API; a new table =
+    one registry line — unless append-only (a SET collision DELETEs): **dismissals** (`property_dismissals`,
+    mig 536: lift, never delete; the pipeline wins) carry via `toolkit/dismissal_identity.py`.
 19. **The scrape is cadence-split: a fast index-walk feeds an async batched detail-drain via
     `listing_detail_queue`** (migration 105). Index-walk (`--index-only`) walks the full index,
     `touch_listings` + end-gated nomination (rule #3), and enqueues; detail-drain (`--drain-only`) claims

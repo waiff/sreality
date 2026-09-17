@@ -270,6 +270,28 @@ def test_add_card_locks_entry_stage_before_computing_board_position():
     assert lock_params == (1,)  # the resolved entry stage id, not the property id
 
 
+def test_add_card_lifts_the_callers_dismissal_even_when_already_carded():
+    # The pipeline always wins over a dismissal (migration 536). The lift is
+    # RLS-scoped (no account predicate) and lands on the resolved survivor, in the
+    # same transaction as the card — also on the idempotent path, so a card that
+    # predates the rule still clears a stale dismissal.
+    for inserted in ([(42,)], []):
+        conn = _FakeConn([
+            (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
+            (lambda q: "WHERE is_entry" in q, [(1,)]),
+            (lambda q: "max(board_position)" in q, [(5,)]),
+            (lambda q: "INSERT INTO property_pipeline (" in q, inserted),
+            (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q, [_CARD_ROW]),
+        ])
+        pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=99), account_id=_ACCT)
+        lifts = [(q, p) for q, p in conn.executed if "UPDATE property_dismissals" in q]
+        assert lifts == [(
+            "UPDATE property_dismissals SET lifted_at = now(), lift_reason = %s "
+            "WHERE property_id = %s AND lifted_at IS NULL",
+            ("pipeline", 42),
+        )]
+
+
 def test_add_card_no_active_survivor_is_422():
     conn = _FakeConn([(lambda q: "RECURSIVE chain" in q, [])])  # missing / broken chain
     with pytest.raises(fastapi.HTTPException) as ei:

@@ -31,6 +31,7 @@ import psycopg
 from fastapi import HTTPException
 
 from api import schemas as s
+from api.dismissals import lift_dismissals
 from toolkit.property_identity import resolve_active_property_id
 
 
@@ -224,6 +225,8 @@ def add_card(
 ) -> dict[str, Any]:
     """Bookmark a property: insert a card at the entry stage. Idempotent.
 
+    Lifts the caller's dismissal of the property — the pipeline always wins.
+
     A stale property_id (cached by the extension, or from the 5-min browse_list)
     may have been merged away since; resolve it to the live survivor so the card
     never orphans onto a retired property.
@@ -275,6 +278,7 @@ def add_card(
                     "VALUES (%s, %s, 'operator', %s)",
                     (pid, entry_stage_id, account_id),
                 )
+            lift_dismissals(cur, pid, reason="pipeline")
     except psycopg.errors.ForeignKeyViolation:
         # Reachable only from the property_pipeline INSERT's property/account FK
         # (a stale/merged-away property, or an unknown account) — genuinely
