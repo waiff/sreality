@@ -186,8 +186,10 @@ _PAYLOADS_SQL = """
              p.last_observed_at DESC, p.id DESC
 """
 
-# The newest genuine content change we recorded for each listing on the page. Served by
-# `listing_snapshots_listing_id_scraped_at_idx` (migration 333).
+# The newest genuine content change we recorded for each listing on the page. Keyed on the
+# REKEYED identity (`listing_id`, migration 320) — the same key the live snapshot read uses
+# since 333, whose index serves this — not the legacy `sreality_id`, which is NULL on whole
+# portals since the identity refactor.
 _SNAPSHOTS_SQL = """
     SELECT listing_id, max(scraped_at) FROM listing_snapshots
     WHERE listing_id = ANY(%(ids)s::bigint[])
