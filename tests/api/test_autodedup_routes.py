@@ -41,6 +41,8 @@ _LABELS: dict[str, str] = {
     usql.PAIR_ONE_SQL: "pair_one",
     usql.JUDGEMENTS_LATEST_SQL: "judgements",
     usql.PAIR_VERDICTS_SQL: "pair_verdicts",
+    usql.MEMBER_PAIR_VERDICTS_SQL: "member_verdicts",
+    usql.CLUSTER_MEMBER_IDS_SQL: "cluster_member_ids",
     usql.CLUSTER_VERDICTS_SQL: "cluster_verdicts",
     usql.CLUSTER_CONFLICTS_SQL: "conflicts",
     usql.RESIDUAL_SQL: "residual",
@@ -107,6 +109,10 @@ class _Cursor:
 
     def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
         self._conn.calls.append((sql, params))
+        if self._conn.open_tx:
+            self._conn.tx_calls.append((sql, params))
+        if sql in self._conn.raises:
+            raise self._conn.raises[sql]
         if "to_regclass" in sql:
             self._rows = [(self._conn.ready,)]
         elif "per_wave" in sql:
@@ -140,6 +146,24 @@ class _Cursor:
         return list(self._rows)
 
 
+class _Tx:
+    """`conn.transaction()` — psycopg's own context manager, faked. A route that writes
+    several rows as one ruling has to open it, so the fake counts the opens rather than
+    quietly tolerating writes that would land half-applied in production."""
+
+    def __init__(self, conn: "_FakeConn") -> None:
+        self._conn = conn
+
+    def __enter__(self) -> "_Tx":
+        self._conn.open_tx += 1
+        self._conn.transactions += 1
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        self._conn.open_tx -= 1
+        return False
+
+
 class _FakeConn:
     def __init__(self) -> None:
         self.ready: bool = True
@@ -147,9 +171,17 @@ class _FakeConn:
         self.wave_rows: list[tuple[Any, ...]] = []
         self.canned: dict[str, list[tuple[Any, ...]]] = {}
         self.calls: list[tuple[str, dict[str, Any] | None]] = []
+        # Statement -> the exception executing it raises (the un-migrated-value path).
+        self.raises: dict[str, BaseException] = {}
+        self.transactions: int = 0
+        self.open_tx: int = 0
+        self.tx_calls: list[tuple[str, dict[str, Any] | None]] = []
 
     def cursor(self) -> _Cursor:
         return _Cursor(self)
+
+    def transaction(self) -> _Tx:
+        return _Tx(self)
 
 
 @pytest.fixture()
@@ -1488,3 +1520,464 @@ def test_the_validation_routes_require_admin(client, conn, method, path):
     assert getattr(client, method)(path).status_code == 401
     api_main.app.dependency_overrides[deps.verify_jwt] = lambda: {"app_metadata": {}}
     assert getattr(client, method)(path).status_code == 403
+
+
+# ------------------------------------------------------- the card gallery (12 frames/member)
+
+
+def test_a_group_member_carries_its_first_frames_not_only_the_cover(client, conn):
+    """The queue card pages the photos itself, so the list statement ships a bounded gallery
+    per member. `images[0]` IS the cover — the two read the same order — and `n_images` still
+    reports the whole album, which is how the card can offer "12 of 30"."""
+    frames = [
+        {"image_id": 1, "storage_path": "listings/11/1.jpg",
+         "sreality_url": "https://img.sreality.cz/1.jpg", "sequence": 1},
+        {"image_id": 2, "storage_path": "listings/11/2.jpg",
+         "sreality_url": "https://img.sreality.cz/2.jpg", "sequence": 2},
+    ]
+    conn.canned = {
+        "groups": [_cluster()],
+        "members": [_member(101, 11, images=frames), _member(101, 12)],
+    }
+    members = client.get("/autodedup/groups").json()["data"]["items"][0]["members"]
+    assert [f["image_id"] for f in members[0]["images"]] == [1, 2]
+    assert members[0]["images"][0]["sreality_url"] == members[0]["cover"]["sreality_url"]
+    assert members[0]["n_images"] == 12
+    # A member whose lateral found nothing is an EMPTY gallery, never a missing key: the page
+    # would otherwise have to tell `undefined` from "this advert has no photos".
+    assert members[1]["images"] == []
+    assert _last_call(conn, usql.GROUP_MEMBERS_SQL)["card_frames"] == routes.GROUP_CARD_IMAGES
+
+
+def test_the_card_gallery_is_capped_in_the_statement(client, conn):
+    """A cap applied after the fetch still drags a 120-frame album across the wire for every
+    member of every cluster on the page."""
+    assert "LIMIT %(card_frames)s::int" in usql.GROUP_MEMBERS_SQL
+    assert usql.MEMBER_COLUMNS[-1] == "images"
+
+
+# ----------------------------------------------------------------- the unit split (E49)
+
+
+def _calls(conn: _FakeConn, sql: str) -> list[dict[str, Any]]:
+    return [params or {} for text, params in conn.calls if text == sql]
+
+
+def _split(**over: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "cluster_key": 101,
+        "generation": "g1",
+        "units": [
+            {"listing_id": 11, "unit": "A"},
+            {"listing_id": 12, "unit": "A"},
+            {"listing_id": 13, "unit": "B"},
+        ],
+        "relation": "same_project_different_unit",
+    }
+    body.update(over)
+    return body
+
+
+@pytest.fixture()
+def split_conn(conn: _FakeConn) -> _FakeConn:
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12), _member(101, 13)],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="same_project_different_unit")],
+    }
+    return conn
+
+
+def test_a_split_rules_on_every_member_pair(admin_client, split_conn):
+    body = admin_client.post("/autodedup/verdict/split", json=_split()).json()
+    data = body["data"]
+    assert body["store_ready"] is True
+    # three members -> three pairs: one inside unit A, two across A|B
+    assert (data["n_pairs_same"], data["n_pairs_negative"]) == (1, 2)
+    assert data["must_not_link_written"] == 2
+    assert data["must_not_link_retracted"] == 1
+    pairs = {
+        (p["listing_lo"], p["listing_hi"]): p["verdict"]
+        for p in _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    }
+    assert pairs == {
+        (11, 12): "same",
+        (11, 13): "same_project_different_unit",
+        (12, 13): "same_project_different_unit",
+    }
+    vetoes = {(p["listing_lo"], p["listing_hi"]): p["reason"]
+              for p in _calls(split_conn, usql.MUST_NOT_LINK_UPSERT_SQL)}
+    assert vetoes == {
+        (11, 13): "operator split: same_project_different_unit",
+        (12, 13): "operator split: same_project_different_unit",
+    }
+    # the same-unit pair has its earlier veto (if any) dropped, never left vetoing
+    assert [(p["listing_lo"], p["listing_hi"])
+            for p in _calls(split_conn, usql.MUST_NOT_LINK_RETRACT_SQL)] == [(11, 12)]
+
+
+def test_a_split_stores_the_cluster_verdict_with_the_assignment_as_its_note(
+    admin_client, split_conn
+):
+    body = admin_client.post("/autodedup/verdict/split", json=_split()).json()
+    assert body["data"]["cluster_verdict"]["kind"] == "cluster"
+    written = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    assert written["verdict"] == "same_project_different_unit"
+    assert written["note"] == "A: 11,12 | B: 13"
+    assert written["decided_by"] == "operator@example.com"
+
+
+def test_an_operator_note_is_kept_beside_the_assignment(admin_client, split_conn):
+    admin_client.post("/autodedup/verdict/split", json=_split(note="one developer, two houses"))
+    assert _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["note"] == (
+        "one developer, two houses · A: 11,12 | B: 13"
+    )
+
+
+def test_one_unit_means_the_whole_cluster_is_the_same_property(admin_client, split_conn):
+    body = admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(units=[{"listing_id": i, "unit": "A"} for i in (11, 12, 13)]),
+    ).json()
+    assert (body["data"]["n_pairs_same"], body["data"]["n_pairs_negative"]) == (3, 0)
+    assert _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["verdict"] == "same"
+    assert all(sql != usql.MUST_NOT_LINK_UPSERT_SQL for sql, _ in split_conn.calls)
+
+
+def test_a_split_lands_in_one_transaction(admin_client, split_conn):
+    """A half-applied split would leave the pair rows and the cluster row saying different
+    things about the same group."""
+    admin_client.post("/autodedup/verdict/split", json=_split())
+    assert split_conn.transactions == 1
+    written = [sql for sql, _ in split_conn.tx_calls]
+    assert written.count(usql.VERDICT_PAIR_UPSERT_SQL) == 3
+    assert usql.VERDICT_CLUSTER_UPSERT_SQL in written
+
+
+def test_a_split_never_asks_whether_the_pair_was_scored(admin_client, split_conn):
+    """A cluster is the UNION of accepted edges, so two members can share a cluster with no
+    scored edge between them. Membership is the validation; `autodedup.pairs` is not."""
+    admin_client.post("/autodedup/verdict/split", json=_split())
+    assert all(sql != usql.PAIR_EXISTS_SQL for sql, _ in split_conn.calls)
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        # a member left out of the assignment
+        {"units": [{"listing_id": 11, "unit": "A"}, {"listing_id": 12, "unit": "A"}]},
+        # a listing that is not in the cluster
+        {"units": [{"listing_id": i, "unit": "A"} for i in (11, 12, 13)]
+         + [{"listing_id": 99, "unit": "B"}]},
+        # the same member twice
+        {"units": [{"listing_id": 11, "unit": "A"}, {"listing_id": 11, "unit": "B"},
+                   {"listing_id": 12, "unit": "A"}, {"listing_id": 13, "unit": "B"}]},
+        # an empty label is not a unit
+        {"units": [{"listing_id": 11, "unit": " "}, {"listing_id": 12, "unit": "A"},
+                   {"listing_id": 13, "unit": "B"}]},
+        # `same` is not a relation between two DIFFERENT units
+        {"relation": "same"},
+        {"relation": "unsure"},
+    ],
+)
+def test_a_malformed_split_is_refused(admin_client, split_conn, over):
+    resp = admin_client.post("/autodedup/verdict/split", json=_split(**over))
+    assert resp.status_code == 400
+    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+
+
+def test_more_units_than_letters_is_refused(admin_client, conn):
+    ids = list(range(1, 30))
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, i) for i in ids],
+    }
+    resp = admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(units=[{"listing_id": i, "unit": f"U{i}"} for i in ids]),
+    )
+    assert resp.status_code == 400
+
+
+def test_a_split_of_a_cluster_that_is_not_in_that_generation_is_a_404(admin_client, conn):
+    conn.canned = {"group_one": [], "members": [_member(101, 11)]}
+    assert admin_client.post(
+        "/autodedup/verdict/split", json=_split(generation="g9")
+    ).status_code == 404
+
+
+def test_a_split_against_a_store_that_does_not_exist_is_refused(admin_client, conn):
+    conn.ready = False
+    resp = admin_client.post("/autodedup/verdict/split", json=_split())
+    assert resp.status_code == 503
+    assert len(conn.calls) == 1
+
+
+def test_a_split_nothing_can_be_attributed_to_is_refused(conn):
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
+    api_main.app.dependency_overrides[deps.require_admin] = lambda: {"is_admin": True}
+    try:
+        assert TestClient(api_main.app).post(
+            "/autodedup/verdict/split", json=_split()
+        ).status_code == 403
+    finally:
+        api_main.app.dependency_overrides.clear()
+
+
+def test_a_vocabulary_the_store_predates_names_the_migration_instead_of_500ing(
+    admin_client, split_conn
+):
+    """Migration 532 widened `autodedup.verdicts.verdict`. Against a store without it the
+    write raises a CHECK violation, and a bare 500 would send the operator to the logs."""
+    psycopg_errors = pytest.importorskip("psycopg.errors")
+    split_conn.raises[usql.VERDICT_PAIR_UPSERT_SQL] = psycopg_errors.CheckViolation(
+        'new row violates check constraint "verdicts_verdict_check"'
+    )
+    resp = admin_client.post("/autodedup/verdict/split", json=_split())
+    assert resp.status_code == 503
+    assert "532" in resp.json()["detail"]
+
+
+def test_the_new_verdict_is_negative_everywhere_it_is_read(admin_client, conn):
+    """E49: `same_project_different_unit` writes the permanent must-not-link exactly like
+    `different` — an operator who says "different unit" must never see the pair merged."""
+    assert "same_project_different_unit" in routes.VERDICT_VALUES
+    assert "same_project_different_unit" in routes.NEGATIVE_VERDICTS
+    assert "same_project_different_unit" in routes.VERDICT_FILTER_VALUES
+    conn.canned = {"pair_exists": [(1,)],
+                   "verdict_write": [_verdict_row(verdict="same_project_different_unit")]}
+    body = admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "pair", "listing_lo": 11, "listing_hi": 12,
+              "verdict": "same_project_different_unit"},
+    ).json()
+    assert body["data"]["must_not_link"] is True
+    assert _last_call(conn, usql.MUST_NOT_LINK_UPSERT_SQL)["reason"] == (
+        "operator: same_project_different_unit"
+    )
+
+
+def test_a_cluster_confirmed_as_one_property_retracts_every_veto_in_it(admin_client, conn):
+    """E50. "All of these are one property" and a standing must-not-link between two of them
+    are a contradiction: `guards.py` would keep refusing the union while the card showed a
+    green badge — the very state MUST_NOT_LINK_RETRACT_SQL exists to prevent."""
+    conn.canned = {
+        "cluster_exists": [(1,)],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="same")],
+        "cluster_member_ids": [(11,), (12,), (13,)],
+    }
+    body = admin_client.post(
+        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 101, "verdict": "same"}
+    ).json()
+    assert body["data"]["must_not_link_retracted"] == 3
+    assert [(p["listing_lo"], p["listing_hi"])
+            for p in _calls(conn, usql.MUST_NOT_LINK_RETRACT_SQL)] == [(11, 12), (11, 13), (12, 13)]
+
+
+@pytest.mark.parametrize("verdict", ["different", "same_project_different_unit", "unsure"])
+def test_a_cluster_verdict_that_is_not_same_retracts_nothing(admin_client, conn, verdict):
+    """Flagging a group is not the same statement as un-forbidding each of its pairs."""
+    conn.canned = {"cluster_exists": [(1,)],
+                   "verdict_write": [_verdict_row(kind="cluster", cluster_key=101,
+                                                  listing_lo=None, listing_hi=None)]}
+    body = admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "cluster", "cluster_key": 101, "verdict": verdict},
+    ).json()
+    assert body["data"]["must_not_link_retracted"] == 0
+    assert all(sql != usql.MUST_NOT_LINK_RETRACT_SQL for sql, _ in conn.calls)
+
+
+@pytest.mark.parametrize(
+    ("payload", "statement"),
+    [
+        ({"kind": "pair", "listing_lo": 11, "listing_hi": 12,
+          "verdict": "same_project_different_unit"}, usql.VERDICT_PAIR_UPSERT_SQL),
+        ({"kind": "cluster", "cluster_key": 101,
+          "verdict": "same_project_different_unit"}, usql.VERDICT_CLUSTER_UPSERT_SQL),
+    ],
+)
+def test_the_plain_verdict_route_names_the_migration_instead_of_500ing(
+    admin_client, conn, payload, statement
+):
+    """The split route already does this. The same click on the same new value, one button
+    over, must not answer with a bare 500 that sends the operator to the logs."""
+    psycopg_errors = pytest.importorskip("psycopg.errors")
+    conn.canned = {"pair_exists": [(1,)], "cluster_exists": [(1,)]}
+    conn.raises[statement] = psycopg_errors.CheckViolation(
+        'new row violates check constraint "verdicts_verdict_check"'
+    )
+    resp = admin_client.post("/autodedup/verdict", json=payload)
+    assert resp.status_code == 503
+    assert "532" in resp.json()["detail"]
+    # Nothing permanent was written off a rejected verdict.
+    assert all(sql != usql.MUST_NOT_LINK_UPSERT_SQL for sql, _ in conn.calls)
+
+
+def test_a_split_can_name_a_relation_PER_UNIT_PAIR(admin_client, conn):
+    """One relation for a whole split stamps a building onto adverts that do not share one.
+    A and B are two units of one building; C is a different building of that development."""
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12), _member(101, 13)],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="same_project_different_unit")],
+    }
+    body = admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(
+            units=[{"listing_id": 11, "unit": "A"}, {"listing_id": 12, "unit": "B"},
+                   {"listing_id": 13, "unit": "C"}],
+            relations=[
+                {"unit_a": "A", "unit_b": "B", "relation": "same_building_different_unit"},
+                {"unit_a": "B", "unit_b": "C", "relation": "same_project_different_unit"},
+            ],
+        ),
+    ).json()
+    pairs = {(p["listing_lo"], p["listing_hi"]): p["verdict"]
+             for p in _calls(conn, usql.VERDICT_PAIR_UPSERT_SQL)}
+    assert pairs == {
+        (11, 12): "same_building_different_unit",
+        (12, 13): "same_project_different_unit",
+        # unnamed: the body's single `relation` is the fill, never a guess at the others
+        (11, 13): "same_project_different_unit",
+    }
+    assert body["data"]["n_pairs_negative"] == 3
+    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    # The cluster carries the WEAKEST claim — the only one true of the whole group — and the
+    # note says which pair got which, because the single value cannot.
+    assert written["verdict"] == "same_project_different_unit"
+    assert written["note"] == (
+        "A: 11 | B: 12 | C: 13 · A-B: same_building_different_unit · "
+        "A-C: same_project_different_unit · B-C: same_project_different_unit"
+    )
+
+
+def test_the_cluster_takes_the_weakest_relation_the_split_used(admin_client, conn):
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12), _member(101, 13)],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="different")],
+    }
+    admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(
+            units=[{"listing_id": 11, "unit": "A"}, {"listing_id": 12, "unit": "B"},
+                   {"listing_id": 13, "unit": "C"}],
+            relations=[{"unit_a": "A", "unit_b": "B", "relation": "different"}],
+        ),
+    )
+    assert _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["verdict"] == "different"
+
+
+@pytest.mark.parametrize(
+    "relations",
+    [
+        [{"unit_a": "A", "unit_b": "A", "relation": "different"}],
+        [{"unit_a": "A", "unit_b": "Z", "relation": "different"}],
+        [{"unit_a": "A", "unit_b": "B", "relation": "same"}],
+        [{"unit_a": "A", "unit_b": "B", "relation": "different"},
+         {"unit_a": "B", "unit_b": "A", "relation": "same_project_different_unit"}],
+    ],
+)
+def test_a_malformed_relation_is_refused(admin_client, split_conn, relations):
+    resp = admin_client.post("/autodedup/verdict/split", json=_split(relations=relations))
+    assert resp.status_code == 400
+    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+
+
+def test_a_split_that_takes_back_an_earlier_veto_asks_first(admin_client, split_conn):
+    """The assignment defaults every unnamed member into one unit, so a blank-slate save over
+    a group that was already split would reverse the earlier ruling — permanently, and with
+    nothing on any surface to show it. It takes a second, deliberate send."""
+    split_conn.canned["member_verdicts"] = [
+        _verdict_row(listing_lo=11, listing_hi=12, verdict="different")
+    ]
+    resp = admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(units=[{"listing_id": i, "unit": "A"} for i in (11, 12, 13)]),
+    )
+    assert resp.status_code == 409
+    assert "11-12" in resp.json()["detail"]
+    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in split_conn.calls)
+    assert all(sql != usql.MUST_NOT_LINK_RETRACT_SQL for sql, _ in split_conn.calls)
+
+
+def test_the_confirmed_split_goes_through_and_names_what_it_took_back(
+    admin_client, split_conn
+):
+    split_conn.canned["member_verdicts"] = [
+        _verdict_row(listing_lo=11, listing_hi=12, verdict="different")
+    ]
+    body = admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(units=[{"listing_id": i, "unit": "A"} for i in (11, 12, 13)],
+                    confirm_retract=True),
+    ).json()
+    assert body["data"]["reversed_pairs"] == [[11, 12]]
+    assert body["data"]["n_pairs_same"] == 3
+
+
+def test_a_split_that_agrees_with_what_is_stored_asks_nothing(admin_client, split_conn):
+    """Only the destructive direction arms: re-asserting a separation retracts no veto."""
+    split_conn.canned["member_verdicts"] = [
+        _verdict_row(listing_lo=11, listing_hi=13, verdict="same_project_different_unit"),
+        _verdict_row(listing_lo=12, listing_hi=13, verdict="same_project_different_unit"),
+    ]
+    resp = admin_client.post("/autodedup/verdict/split", json=_split())
+    assert resp.status_code == 200
+    assert resp.json()["data"]["reversed_pairs"] == []
+
+
+def test_another_operators_veto_is_not_mine_to_take_back(admin_client, split_conn):
+    """The upsert conflicts on `decided_by`: a split rewrites MY rulings, never theirs, so
+    theirs cannot be the thing this confirmation is about."""
+    split_conn.canned["member_verdicts"] = [
+        _verdict_row(listing_lo=11, listing_hi=12, verdict="different",
+                     decided_by="someone.else@example.com")
+    ]
+    resp = admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(units=[{"listing_id": i, "unit": "A"} for i in (11, 12, 13)]),
+    )
+    assert resp.status_code == 200
+
+
+def test_a_group_card_carries_the_operators_rulings_on_its_members(client, conn):
+    """A split that is stored only in the server is a write-only record: the card would show
+    "A" over every member and the next save would silently retract its must-not-links."""
+    conn.canned = {
+        "groups": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12)],
+        "member_verdicts": [
+            _verdict_row(listing_lo=11, listing_hi=12,
+                         verdict="same_project_different_unit"),
+        ],
+    }
+    item = client.get("/autodedup/groups").json()["data"]["items"][0]
+    assert [(v["listing_lo"], v["listing_hi"], v["verdict"]) for v in item["member_verdicts"]] == [
+        (11, 12, "same_project_different_unit")
+    ]
+    assert _last_call(conn, usql.MEMBER_PAIR_VERDICTS_SQL)["ids"] == [11, 12]
+
+
+def test_a_group_detail_reads_the_verdicts_of_UNSCORED_member_pairs_too(client, conn):
+    """A cluster is a union of edges, so a split rules on pairs `autodedup.pairs` never held.
+    Keying the read on the scored edges would hide exactly those rulings."""
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12)],
+        "cluster_pairs": [],
+        "member_verdicts": [_verdict_row(listing_lo=11, listing_hi=12, verdict="same")],
+    }
+    data = client.get("/autodedup/groups/101").json()["data"]
+    assert [v["verdict"] for v in data["member_verdicts"]] == ["same"]
+    assert all(sql != usql.PAIR_VERDICTS_SQL for sql, _ in conn.calls)
+
+
+def test_the_new_verdict_filters_the_group_queue(client, conn):
+    client.get("/autodedup/groups", params={"verdict": "same_project_different_unit"})
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["verdict"] == "same_project_different_unit"

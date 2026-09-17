@@ -3586,6 +3586,11 @@ export type AutodedupVerdictValue =
   | 'same'
   | 'different'
   | 'same_building_different_unit'
+  /* E49 (migration 532): a different BUILDING of the same development project.
+   * `different` throws the project away and `same_building_different_unit`
+   * claims a building the adverts do not share — both lose the one fact the
+   * operator established. Like them, it is a permanent must-not-link. */
+  | 'same_project_different_unit'
   | 'unsure';
 
 export type AutodedupZone = 'merge' | 'band' | 'reject';
@@ -3622,6 +3627,12 @@ export interface AutodedupMember {
   total_floors?: number | null;
   sreality_id?: number | null;
   source_id_native?: string | null;
+  /* The first frames of the album, in the SAME order the cover is picked from —
+   * so `images[0]` IS `cover`. The groups list ships 12 per member so a card can
+   * be paged; `n_images` still counts the whole album, which is how the card
+   * says how many more the dialog would show. Absent on a surface that selects
+   * only the cover, which is why the card falls back rather than assuming. */
+  images?: AutodedupMemberImage[];
 }
 
 export interface AutodedupMemberImage extends AutodedupImageRef {
@@ -3632,8 +3643,11 @@ export interface AutodedupMemberImage extends AutodedupImageRef {
   listing_id?: number | null;
   sequence: number | null;
   /* A 64-bit dHash: JSON cannot carry it as a safe integer, so a string is the
-   * honest wire shape and a number is accepted for the small ones. */
-  phash: string | number | null;
+   * honest wire shape and a number is accepted for the small ones. Optional: the
+   * QUEUE gallery (12 frames on a group card) selects no hash — nothing on that
+   * card computes a distance, and shipping one per frame per member would cost
+   * the page a column it never reads. */
+  phash?: string | number | null;
 }
 
 export interface AutodedupMemberDetail extends AutodedupMember {
@@ -3776,6 +3790,11 @@ export interface AutodedupGroup extends AutodedupClusterRow {
   members: AutodedupMember[];
   edges: AutodedupEdgeSummary | null;
   verdict: AutodedupVerdictRow | null;
+  /* The operator's own rulings on the members' PAIRS — what a stored split
+   * actually is. A card that cannot read them shows "A" over every member while
+   * the badge says the group was split, and the next save silently retracts the
+   * permanent must-not-links the first one wrote. */
+  member_verdicts: AutodedupVerdictRow[];
   /* Decoded once — from the server's names when it sends them, from the bitmask
    * otherwise. The chips read this and never the raw smallint. */
   family_names: string[];
@@ -3788,6 +3807,10 @@ export interface AutodedupGroupDetail {
   judgements: AutodedupJudgementRow[];
   conflicts: AutodedupConflictRow[];
   verdicts: AutodedupVerdictRow[];
+  /* The PAIR verdicts among the members, including the pairs the engine never
+   * scored — a split rules on those too, and keying the read on the scored
+   * edges would hide exactly the rulings the dialog has to show back. */
+  member_verdicts?: AutodedupVerdictRow[];
 }
 
 /* What the wire actually carries for one queue item. Every field the server may
@@ -3797,6 +3820,7 @@ interface WireGroupItem {
   members?: AutodedupMember[] | AutodedupMemberDetail[];
   edges?: (AutodedupEdgeSummary & { families?: number | string[] | null }) | null;
   verdict?: AutodedupVerdictRow | null;
+  member_verdicts?: AutodedupVerdictRow[] | null;
 }
 
 /* Decode an evidence-family value that may arrive as the stored bitmask or as
@@ -3826,6 +3850,7 @@ export function normalizeGroup(item: WireGroupItem & Partial<AutodedupClusterRow
     members: item.members ?? [],
     edges,
     verdict: item.verdict ?? null,
+    member_verdicts: item.member_verdicts ?? [],
     family_names: decodeFamilies(
       cluster.evidence_family_names ?? edges?.family_names ?? edges?.families ??
         cluster.evidence_families,
@@ -4222,11 +4247,19 @@ export interface AutodedupVerdictInput {
 export interface AutodedupVerdictResult {
   verdict: AutodedupVerdictRow | null;
   must_not_link: boolean;
+  /* Pairs whose operator veto this verdict dropped — a cluster `same` retracts
+   * every one inside the group, which is a thing the operator should be told. */
+  must_not_link_retracted?: number;
 }
 
 export const postAutodedupVerdict = async (
   body: AutodedupVerdictInput,
-): Promise<AutodedupEnvelope<AutodedupVerdictRow> & { must_not_link: boolean }> => {
+): Promise<
+  AutodedupEnvelope<AutodedupVerdictRow> & {
+    must_not_link: boolean;
+    must_not_link_retracted?: number;
+  }
+> => {
   const res = await request<AutodedupEnvelope<AutodedupVerdictResult>>(
     '/autodedup/verdict',
     { method: 'POST', json: body, jwt: true },
@@ -4235,5 +4268,70 @@ export const postAutodedupVerdict = async (
     store_ready: res.store_ready,
     data: res.data?.verdict ?? null,
     must_not_link: res.data?.must_not_link ?? false,
+    must_not_link_retracted: res.data?.must_not_link_retracted ?? 0,
   };
 };
+
+/* THE UNIT SPLIT (E49). One proposed group, ruled unit by unit: every member
+ * carries a unit label, members sharing a label are one property, and members
+ * in different labels are `relation` — the same building, the same development
+ * project, or unrelated — each pair of them taking a PERMANENT must-not-link.
+ * The assignment must name every member of the cluster exactly once; the server
+ * validates against cluster MEMBERSHIP, not against the scored pairs (a cluster
+ * is a union of edges, so two members can share one with no edge between them). */
+export interface AutodedupSplitUnit {
+  listing_id: number;
+  unit: string;
+}
+
+export type AutodedupSplitRelation =
+  | 'same_building_different_unit'
+  | 'same_project_different_unit'
+  | 'different';
+
+/* The relation between TWO units. One value for a whole split cannot describe
+ * the group the operator meets — A and B two units of one BUILDING, C a
+ * different building of the same development — and stamping either statement
+ * onto the other pair records a building the adverts do not share. Both land as
+ * permanent must-not-links and as calibration labels. */
+export interface AutodedupSplitRelationEntry {
+  unit_a: string;
+  unit_b: string;
+  relation: AutodedupSplitRelation;
+}
+
+export interface AutodedupSplitInput {
+  cluster_key: number;
+  generation: string;
+  units: AutodedupSplitUnit[];
+  /* The fill for any unit pair `relations` does not name. */
+  relation: AutodedupSplitRelation;
+  relations?: AutodedupSplitRelationEntry[];
+  /* A split that drops a veto the operator wrote earlier is refused with a 409
+   * until this says the operator meant it. */
+  confirm_retract?: boolean;
+  note?: string | null;
+}
+
+/* What the one write reports back: the stored CLUSTER verdict (`same` when the
+ * operator used one unit, the relation otherwise) and the fan-out counts, so the
+ * page can say "3 pairs separated" rather than "saved". */
+export interface AutodedupSplitResult {
+  cluster_verdict: AutodedupVerdictRow | null;
+  n_pairs_same: number;
+  n_pairs_negative: number;
+  must_not_link_written: number;
+  must_not_link_retracted: number;
+  /* The pairs this save took back: the operator had ruled them negative and the
+   * split re-ruled them as one unit. */
+  reversed_pairs?: number[][];
+}
+
+export const postAutodedupSplitVerdict = (
+  body: AutodedupSplitInput,
+): Promise<AutodedupEnvelope<AutodedupSplitResult>> =>
+  request<AutodedupEnvelope<AutodedupSplitResult>>('/autodedup/verdict/split', {
+    method: 'POST',
+    json: body,
+    jwt: true,
+  });

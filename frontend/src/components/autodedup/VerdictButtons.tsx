@@ -1,15 +1,17 @@
 /* AUTODEDUP · the operator's verdict, on a pair or on a group.
  *
- * FOUR ANSWERS, ALWAYS THE SAME FOUR (§12). "Same", "different", "same
- * building, different unit" and "unsure" are the stored vocabulary; only the
- * WORDING changes per surface, because "Confirm" reads right over a proposed
- * group and "This IS a duplicate" reads right over a pair the engine rejected.
- * The stored value never changes with the wording — that is why the labels are
- * a prop and the values are not.
+ * FIVE ANSWERS, ALWAYS THE SAME FIVE (§12). "Same", "different", "same
+ * building, different unit", "same project, different unit" and "unsure" are the
+ * stored vocabulary; only the WORDING changes per surface, because "Confirm"
+ * reads right over a proposed group and "This IS a duplicate" reads right over a
+ * pair the engine rejected. The stored value never changes with the wording —
+ * that is why the labels are a prop and the values are not.
  *
- * THE THIRD ANSWER IS NOT A SOFTER "DIFFERENT". `same_building_different_unit`
- * is the negative control this whole program is calibrated against, and folding
- * it into "different" would destroy exactly the signal the trial needs.
+ * THE MIDDLE ANSWERS ARE NOT A SOFTER "DIFFERENT". `same_building_different_unit`
+ * is the negative control this whole program is calibrated against, and
+ * `same_project_different_unit` (E49, migration 532) is the same statement one
+ * building wider — a different house of one development. Folding either into
+ * "different" would destroy exactly the signal the trial needs.
  *
  * TWO-STEP ON A NEGATIVE PAIR VERDICT. A negative verdict on a PAIR writes a
  * permanent must-not-link server-side — it outlives every recalibration — so it
@@ -25,19 +27,22 @@ export const VERDICT_VALUES: ReadonlyArray<AutodedupVerdictValue> = [
   'same',
   'different',
   'same_building_different_unit',
+  'same_project_different_unit',
   'unsure',
 ];
 
-/* The permanent ones — the two that also mean "never link these again". */
+/* The permanent ones — the three that also mean "never link these again". */
 export const NEGATIVE_VERDICTS: ReadonlyArray<AutodedupVerdictValue> = [
   'different',
   'same_building_different_unit',
+  'same_project_different_unit',
 ];
 
 export const GROUP_LABELS: Record<AutodedupVerdictValue, string> = {
   same: 'Confirm',
   different: 'Not the same',
   same_building_different_unit: 'Same building, different unit',
+  same_project_different_unit: 'Same project, different unit',
   unsure: 'Unsure',
 };
 
@@ -45,6 +50,7 @@ export const PAIR_LABELS: Record<AutodedupVerdictValue, string> = {
   same: 'This IS a duplicate',
   different: 'Correctly separate',
   same_building_different_unit: 'Same building, different unit',
+  same_project_different_unit: 'Same project, different unit',
   unsure: 'Unsure',
 };
 
@@ -53,6 +59,10 @@ const TONE: Record<AutodedupVerdictValue, string> = {
   different: 'border-[var(--color-brick)] text-[var(--color-brick)] hover:bg-[var(--color-brick-soft)]',
   same_building_different_unit:
     'border-[var(--color-ochre)] text-[var(--color-ochre)] hover:bg-[var(--color-ochre-soft)]',
+  /* One shade of the same statement: the project verdict is the building verdict
+   * one building wider, so it shares the ochre "related, not identical" tone. */
+  same_project_different_unit:
+    'border-[var(--color-ochre)] text-[var(--color-ochre)] hover:bg-[var(--color-ochre-soft)]',
   unsure: 'border-[var(--color-rule-strong)] text-[var(--color-ink-3)] hover:bg-[var(--color-paper)]',
 };
 
@@ -60,6 +70,7 @@ const SELECTED: Record<AutodedupVerdictValue, string> = {
   same: 'bg-[var(--color-sage-soft)]',
   different: 'bg-[var(--color-brick-soft)]',
   same_building_different_unit: 'bg-[var(--color-ochre-soft)]',
+  same_project_different_unit: 'bg-[var(--color-ochre-soft)]',
   unsure: 'bg-[var(--color-paper)]',
 };
 

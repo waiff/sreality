@@ -188,18 +188,26 @@ MEMBER_COLUMNS: tuple[str, ...] = (
     "cover_storage_path",
     "cover_sreality_url",
     "n_images",
+    "images",
 )
 
 # The cover is the FIRST image by gallery position — `sequence NULLS LAST, id` is the order
 # every other reader of `images` in this repo uses, so the card and the carousel open on the
 # same frame. A member whose listing row is gone (a shadow-mode cluster outlives nothing, but
 # a listing can be pruned) still renders, hence the LEFT JOIN rather than an inner one.
+# The QUEUE gallery: the first `card_frames` frames of each member, so a card can be paged
+# rather than judged on one cover — the operator's own request. Ordered exactly like the cover
+# above, which makes `images[0]` and `cover` the same frame by construction; `n_images` still
+# reports the WHOLE album, so a card can say how many frames the dialog would add. Capped IN
+# THE STATEMENT (the LISTING_IMAGES_SQL lesson): trimming after the fetch still drags a
+# 120-frame album across the wire for every member of every cluster on the page.
 GROUP_MEMBERS_SQL = """
 SELECT
     m.cluster_key, m.listing_id,
     l.source, l.source_url, l.category_main, l.category_type, l.disposition,
     l.area_m2, l.floor, l.price_czk, l.first_seen_at, l.last_seen_at, l.is_active,
-    cover.storage_path, cover.sreality_url, coalesce(gallery.n, 0)
+    cover.storage_path, cover.sreality_url, coalesce(gallery.n, 0),
+    coalesce(frames.images, '[]'::json)
 FROM autodedup.cluster_members m
 LEFT JOIN listings l ON l.id = m.listing_id
 LEFT JOIN LATERAL (
@@ -212,6 +220,25 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT count(*) AS n FROM images i WHERE i.listing_id = m.listing_id
 ) gallery ON true
+LEFT JOIN LATERAL (
+    SELECT json_agg(
+               json_build_object(
+                   'image_id', f.id,
+                   'storage_path', f.storage_path,
+                   'sreality_url', f.sreality_url,
+                   'sequence', f.sequence
+               )
+               ORDER BY f.rn
+           ) AS images
+      FROM (
+          SELECT i.id, i.storage_path, i.sreality_url, i.sequence,
+                 row_number() OVER (ORDER BY i.sequence NULLS LAST, i.id) AS rn
+            FROM images i
+           WHERE i.listing_id = m.listing_id
+           ORDER BY i.sequence NULLS LAST, i.id
+           LIMIT %(card_frames)s::int
+      ) f
+) frames ON true
 WHERE m.cluster_key = any(%(keys)s::bigint[])
 ORDER BY m.cluster_key, m.listing_id
 """
@@ -403,6 +430,23 @@ WHERE v.kind = 'pair'
   AND (v.listing_lo, v.listing_hi) IN (
       SELECT lo, hi FROM unnest(%(los)s::bigint[], %(his)s::bigint[]) AS pair(lo, hi)
   )
+ORDER BY v.decided_at DESC, v.id DESC
+"""
+)
+
+# Every operator verdict on a pair of listings drawn from ONE set — the members of a cluster.
+# `PAIR_VERDICTS_SQL` keys on the pairs the engine SCORED, which is the wrong question here: a
+# split rules on every member pair, including the ones that carry no edge at all, so a queue
+# card rehydrating its assignment from the store would miss exactly the pairs the operator
+# separated by hand.
+MEMBER_PAIR_VERDICTS_SQL = (
+    "SELECT"
+    + _VERDICT_SELECT_LIST
+    + """
+FROM autodedup.verdicts v
+WHERE v.kind = 'pair'
+  AND v.listing_lo = any(%(ids)s::bigint[])
+  AND v.listing_hi = any(%(ids)s::bigint[])
 ORDER BY v.decided_at DESC, v.id DESC
 """
 )
@@ -885,6 +929,15 @@ DELETE FROM autodedup.must_not_link
 WHERE listing_lo = %(listing_lo)s::bigint
   AND listing_hi = %(listing_hi)s::bigint
   AND source = 'operator'
+"""
+
+# Just the ids — the membership a whole-cluster ruling fans out over. `GROUP_MEMBERS_SQL`
+# answers the same question with three lateral joins and a gallery, which a write does not need.
+CLUSTER_MEMBER_IDS_SQL = """
+SELECT m.listing_id
+FROM autodedup.cluster_members m
+WHERE m.cluster_key = %(cluster_key)s::bigint
+ORDER BY m.listing_id
 """
 
 CLUSTER_EXISTS_SQL = """

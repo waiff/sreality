@@ -32,6 +32,16 @@ interface Props {
   /* Chevrons fade in on parent `.group` hover (cards) rather than always
    * showing (a panel with no hover-group wrapper). */
   fadeChevrons?: boolean;
+  /* Decode the first frame immediately. The first screenful of a review queue is
+   * the whole point of that page, so its photos are not lazy; everything below
+   * the fold stays lazy, which is the default. */
+  eager?: boolean;
+  /* What to render IN PLACE OF a frame the browser could not load. A portal CDN
+   * refuses a cross-origin request for a photo R2 has no copy of yet (idnes
+   * answers ERR_BLOCKED_BY_ORB), and on a surface where the operator is judging
+   * adverts BY their photos a blank box reads as "this advert has no photos" —
+   * a different fact. A caller holding a labelled tile passes it here. */
+  fallback?: ReactNode;
   children?: ReactNode;
 }
 
@@ -42,9 +52,17 @@ export default function ImageCarousel({
   imgClassName = '',
   hoverZoom = false,
   fadeChevrons = false,
+  eager = false,
+  fallback,
   children,
 }: Props) {
   const [index, setIndex] = useState(0);
+  /* The broken frame is tracked BY URL in state, never as an inline style on the
+   * <img>. React re-renders `src` and leaves an imperatively-set
+   * `visibility:hidden` exactly where it was, so one unloadable frame used to
+   * blank every frame the operator paged to afterwards — under a counter still
+   * cheerfully reading "3 / 12". */
+  const [broken, setBroken] = useState<Record<string, true>>({});
   const safeIndex = images.length === 0 ? 0 : Math.min(index, images.length - 1);
   const hasMany = images.length > 1;
   const current = images[safeIndex];
@@ -69,24 +87,25 @@ export default function ImageCarousel({
 
   return (
     <div className={`${aspect} bg-[var(--color-inset)] overflow-hidden relative ${className}`}>
-      {images.length > 0 ? (
+      {images.length > 0 && !broken[current.url] ? (
         <img
+          key={current.url}
           src={current.url}
           alt=""
-          loading="lazy"
+          loading={eager ? 'eager' : 'lazy'}
           className={[
             'w-full h-full object-cover transition-transform duration-200',
             hoverZoom ? 'group-hover:scale-[1.02]' : '',
             imgClassName,
           ].join(' ')}
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
-          }}
+          onError={() => setBroken((b) => ({ ...b, [current.url]: true }))}
         />
       ) : (
-        <div className="w-full h-full flex items-center justify-center text-[0.6rem] tracking-wider uppercase text-[var(--color-ink-4)]">
-          no image
-        </div>
+        fallback ?? (
+          <div className="w-full h-full flex items-center justify-center text-[0.6rem] tracking-wider uppercase text-[var(--color-ink-4)]">
+            no image
+          </div>
+        )
       )}
 
       {children}

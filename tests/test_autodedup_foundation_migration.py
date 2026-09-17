@@ -15,6 +15,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parent.parent
 _MIGRATION = _ROOT / "migrations" / "528_autodedup_foundation.sql"
 
@@ -181,4 +183,47 @@ def test_530_is_idempotent_and_takes_a_lock_timeout() -> None:
     body = _TIER_MIGRATION.read_text(encoding="utf-8")
     assert "set lock_timeout = '5s'" in body
     assert body.count("drop constraint if exists") == 2 * len(_TIER_TABLES)
+    assert "create table" not in body and "drop table" not in body
+
+
+# --- the operator verdict vocabulary, widened by migration 532 -------------------------
+
+
+_VERDICT_MIGRATION = _ROOT / "migrations" / "532_autodedup_verdict_same_project.sql"
+_VERDICT_VALUES = (
+    "same",
+    "different",
+    "same_building_different_unit",
+    "same_project_different_unit",
+    "unsure",
+)
+
+
+def test_528_spelled_the_verdict_domain_as_an_inline_check() -> None:
+    """The premise migration 532 rests on: an INLINE check, whose name Postgres generates —
+    which is why the widening looks the name up in pg_constraint instead of guessing it."""
+    body = _table("verdicts")
+    assert "check (verdict in" in body
+    assert "constraint autodedup_verdicts_verdict" not in body
+
+
+def test_532_admits_same_project_different_unit_and_keeps_the_other_four() -> None:
+    body = _VERDICT_MIGRATION.read_text(encoding="utf-8")
+    for value in _VERDICT_VALUES:
+        assert f"'{value}'" in body, value
+    # The API's vocabulary and the store's are ONE: a value the route accepts and the table
+    # rejects is a verdict the operator watches vanish.
+    pytest.importorskip("fastapi")
+    from api.routes import autodedup as routes
+
+    assert set(routes.VERDICT_VALUES) == set(_VERDICT_VALUES)
+
+
+def test_532_drops_the_generated_check_by_lookup_and_re_adds_a_named_one() -> None:
+    body = _VERDICT_MIGRATION.read_text(encoding="utf-8").lower()
+    assert "set lock_timeout = '5s'" in body
+    # The idempotence mechanism: whatever check covers `verdict` is dropped, named or not.
+    assert "from pg_constraint" in body and "contype = 'c'" in body
+    assert "drop constraint %i" in body
+    assert "add constraint autodedup_verdicts_verdict_ck" in body
     assert "create table" not in body and "drop table" not in body

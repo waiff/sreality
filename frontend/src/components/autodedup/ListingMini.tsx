@@ -26,6 +26,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import type { AutodedupMember } from '@/lib/api';
+import ImageCarousel from '@/components/ImageCarousel';
 import { imageSrc } from '@/lib/imageUrl';
 import { listingRowPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
@@ -54,6 +55,28 @@ export function memberAttrs(m: AutodedupMember): Array<[string, string]> {
   ];
 }
 
+/* The labelled tile itself, in one place: a photo that will not load says WHICH
+ * PORTAL would not show it. Both the single cover and every frame of the card
+ * gallery fall back to this — a blank inset box reads as "this advert has no
+ * photos", which on a surface built to judge adverts by their photos is a
+ * different fact, and the wrong one. */
+export function MissingPhotoTile({
+  source,
+  reason,
+}: {
+  source: string;
+  reason: 'foto nedostupné' | 'bez fota';
+}) {
+  return (
+    <div className="h-full w-full flex flex-col items-center justify-center gap-0.5 px-1 text-center">
+      <span className="text-[0.6rem] tracking-[0.08em] uppercase text-[var(--color-ink-3)]">
+        {portalLabel(source) ?? source}
+      </span>
+      <span className="text-[0.58rem] text-[var(--color-ink-4)]">{reason}</span>
+    </div>
+  );
+}
+
 /* The cover, or a tile that says why there isn't one. Both states are token
  * colours on the same 4:3 box, so a row of cards never jumps when one photo
  * fails to load. */
@@ -67,19 +90,14 @@ export function Cover({
   className?: string;
 }) {
   const [broken, setBroken] = useState(false);
-  const portal = portalLabel(member.source) ?? member.source;
   const missing = !member.cover || broken;
   return (
     <div className={`aspect-[4/3] bg-[var(--color-inset)] overflow-hidden ${className}`}>
       {missing ? (
-        <div className="h-full w-full flex flex-col items-center justify-center gap-0.5 px-1 text-center">
-          <span className="text-[0.6rem] tracking-[0.08em] uppercase text-[var(--color-ink-3)]">
-            {portal}
-          </span>
-          <span className="text-[0.58rem] text-[var(--color-ink-4)]">
-            {member.cover ? 'foto nedostupné' : 'bez fota'}
-          </span>
-        </div>
+        <MissingPhotoTile
+          source={member.source}
+          reason={member.cover ? 'foto nedostupné' : 'bez fota'}
+        />
       ) : (
         <img
           src={imageSrc(member.cover!)}
@@ -91,6 +109,54 @@ export function Cover({
           className="h-full w-full object-cover"
         />
       )}
+    </div>
+  );
+}
+
+/* THE PHOTOS, NOT THE PHOTO. A cover is the weakest evidence a portal offers —
+ * two adverts for one flat often share nothing but the floor plan, and two
+ * different flats in one development share the cover and nothing else. So the
+ * card pages the frames the list statement ships (12), with the same carousel
+ * the dialog uses; the album's remaining frames are COUNTED, and the dialog is
+ * where they are. A member whose payload carries no gallery (a surface that
+ * selects the cover only) falls back to the labelled cover tile rather than
+ * rendering an empty box — and so does any single FRAME the portal refuses,
+ * which is why the carousel is handed the same tile as its fallback. */
+export function MemberGallery({
+  member,
+  eager,
+  className = '',
+}: {
+  member: AutodedupMember;
+  eager?: boolean;
+  className?: string;
+}) {
+  const frames = member.images ?? [];
+  if (frames.length === 0) {
+    return <Cover member={member} eager={eager} className={className} />;
+  }
+  const rest = (member.n_images ?? frames.length) - frames.length;
+  return (
+    <div className={`relative ${className}`}>
+      <ImageCarousel
+        images={frames.map((img) => ({
+          url: imageSrc(img),
+          /* No CLIP tag on this surface: both decorations are explicitly null
+           * rather than faked into a badge that means nothing. */
+          tag: null,
+          confidence: null,
+          renderScore: null,
+        }))}
+        aspect="aspect-[4/3]"
+        eager={eager}
+        fallback={<MissingPhotoTile source={member.source} reason="foto nedostupné" />}
+      >
+        {rest > 0 && (
+          <span className="absolute top-1 left-1 z-[1] rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-3)]/85 px-1.5 py-0.5 text-[0.58rem] tabular-nums text-[var(--color-ink-2)] backdrop-blur-sm">
+            +{rest} fotek v detailu
+          </span>
+        )}
+      </ImageCarousel>
     </div>
   );
 }
@@ -122,7 +188,7 @@ export default function ListingMini({
         dense ? 'flex items-stretch' : ''
       } ${className}`}
     >
-      <Cover
+      <MemberGallery
         member={member}
         eager={eager}
         /* `self-start`, because a flex child stretches to the row's height by
