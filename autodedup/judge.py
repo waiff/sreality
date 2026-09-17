@@ -31,9 +31,9 @@ from autodedup import judge_prompts as prompts
 from autodedup.dataset import CATALOG_POP_MIN, Image, Listing, cosine_norm
 from autodedup.export import NAME_TOKEN, scrub_description
 from autodedup.features import STREET_GRAIN_RANK
-from autodedup.fingerprint import dominant_family, family_scores
+from autodedup.fingerprint import dominant_family, family_scores, logical_tag
 
-JUDGE_VERSION: str = "j1"
+JUDGE_VERSION: str = "j2"
 TOOL_NAME: str = "record_pair_verdict"
 SYSTEM_PROMPT: str = prompts.SYSTEM_PROMPT
 
@@ -59,6 +59,19 @@ PIN_POP_WARN_COUNT: float = 5.0
 # At most this many frames of one room per side: slot three onwards of the same bathroom is a
 # paid image that carries no evidence the first two did not (E10 / spec 3c).
 ROOM_TAG_CAP: int = 2
+# j2: which rooms are worth a PAIRED slot, best first. A floor plan decides a unit outright (a
+# different layout or a different unit number is not a matter of taste), a kitchen carries the
+# most unit-specific detail of any room, and the facade is here only so that a gallery with
+# nothing else still pairs — it can never prove the unit. Rooms outside this list follow, most
+# alike first.
+ROOM_PAIR_PRIORITY: tuple[str, ...] = (
+    "floor_plan",
+    "kitchen",
+    "bathroom",
+    "living_room",
+    "bedroom",
+    "exterior_facade",
+)
 
 # `location_granularity` in words, for the one line that has to explain why two coordinates
 # cannot be subtracted. Unlisted rungs (street and finer) never reach this map.
@@ -726,6 +739,112 @@ def _diverse_fill(
             counts[tag] = counts.get(tag, 0) + 1
 
 
+def room_key(image: Image) -> str | None:
+    """The image's room, collapsed to the tagger's LOGICAL vocabulary: `situation_plan` and
+    `cadastral_map` both pair as `site_plan`, so a fine-anchor difference cannot split a pair
+    the two frames obviously belong to."""
+    tag = room_tag(image)
+    return logical_tag(tag) if tag else None
+
+
+def _same_room_key(a: Image, b: Image) -> str | None:
+    key = room_key(a)
+    return key if key is not None and key == room_key(b) else None
+
+
+def _similarity_key(a: Image, b: Image) -> tuple[float, int, tuple[int, int], tuple[int, int]]:
+    """How close two frames are, most-alike first — CLIP before pHash because a re-shoot of one
+    kitchen is near in CLIP and far in pHash, and it is precisely the re-shoots the judge has
+    to separate. Absent signals sort last rather than winning by default."""
+    vector_a, norm_a = a.clip_vector(), a.clip_norm()
+    vector_b, norm_b = b.clip_vector(), b.clip_norm()
+    similarity = (
+        cosine_norm(vector_a, vector_b, norm_a, norm_b)
+        if vector_a is not None and vector_b is not None and norm_a and norm_b
+        else -1.0
+    )
+    distance = _hamming(a.phash, b.phash) if a.phash is not None and b.phash is not None else 65
+    return (-similarity, distance, _order_key(a), _order_key(b))
+
+
+def _best_same_room_pair(
+    left: Sequence[Image], right: Sequence[Image]
+) -> tuple[Image, Image] | None:
+    best: tuple[Any, Image, Image] | None = None
+    for a in left:
+        for b in right:
+            candidate = (_similarity_key(a, b), a, b)
+            if best is None or candidate[0] < best[0]:
+                best = candidate
+    return (best[1], best[2]) if best else None
+
+
+def _room_rank(key: str) -> int:
+    try:
+        return ROOM_PAIR_PRIORITY.index(key)
+    except ValueError:
+        return len(ROOM_PAIR_PRIORITY)
+
+
+def pair_images_by_tag(
+    left: Sequence[Image],
+    right: Sequence[Image],
+    n_pairs: int,
+    lead: tuple[Image, Image] | None = None,
+) -> list[tuple[Image, Image]]:
+    """One pair per room the two galleries BOTH photographed, in ROOM_PAIR_PRIORITY order —
+    the frame budget spent on comparisons the judge can actually make (j2).
+
+    Inside a room the closest-matching frames are chosen, not the first ones: a judge asked
+    "same unit?" needs the two most confusable kitchens, because a difference that survives
+    the best match is a real difference. Unlisted rooms follow in that same closeness order."""
+    used_a = {lead[0].image_id} if lead else set()
+    used_b = {lead[1].image_id} if lead else set()
+    groups: dict[str, tuple[list[Image], list[Image]]] = {}
+    for images, index in ((left, 0), (right, 1)):
+        for image in images:
+            key = room_key(image)
+            if key is None:
+                continue
+            if image.image_id in (used_a if index == 0 else used_b):
+                continue
+            groups.setdefault(key, ([], []))[index].append(image)
+
+    shared = {
+        key: pair for key, pair in groups.items() if pair[0] and pair[1]
+    }
+    if lead is not None:
+        shared.pop(_same_room_key(*lead) or "", None)
+
+    best: dict[str, tuple[Image, Image]] = {}
+    for key, (side_a, side_b) in shared.items():
+        chosen = _best_same_room_pair(side_a, side_b)
+        if chosen is not None:
+            best[key] = chosen
+
+    ordered = sorted(
+        best, key=lambda key: (_room_rank(key), _similarity_key(*best[key]), key)
+    )
+    pairs: list[tuple[Image, Image]] = [lead] if lead else []
+    for key in ordered:
+        if len(pairs) >= n_pairs:
+            break
+        pairs.append(best[key])
+    return pairs[:n_pairs]
+
+
+def paired_prefix(picked_a: Sequence[Image], picked_b: Sequence[Image]) -> int:
+    """How many LEADING positions of the two selections are the same room — what
+    `build_messages` may present as pairs. Derived from the frames themselves, never passed
+    along as a promise, so a shuffled or short side can only shorten it, never make it lie."""
+    count = 0
+    for a, b in zip(picked_a, picked_b):
+        if _same_room_key(a, b) is None:
+            break
+        count += 1
+    return count
+
+
 def select_images(
     listing_a: Listing,
     images_a: Sequence[Image],
@@ -737,9 +856,9 @@ def select_images(
     *,
     catalog_pop_min: int = CATALOG_POP_MIN,
 ) -> tuple[list[Image], list[Image]]:
-    """Deterministic, evidence-driven selection (spec 3c). `feats` is part of the contract and
-    deliberately unused: the two selections must be reproducible from the galleries alone, so a
-    re-judge at a different feature version picks the same frames."""
+    """Deterministic, evidence-driven selection (spec 3c, j2 room pairing). `feats` is part of
+    the contract and deliberately unused: the two selections must be reproducible from the
+    galleries alone, so a re-judge at a different feature version picks the same frames."""
     del feats, listing_a, listing_b
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}; expected one of {STRATEGIES}")
@@ -761,36 +880,35 @@ def select_images(
     chosen_a: set[int] = set()
     chosen_b: set[int] = set()
 
-    def take(a: Image | None, b: Image | None) -> None:
-        if a is not None and a.image_id not in chosen_a and len(picked_a) < n_per_side:
-            picked_a.append(a)
-            chosen_a.add(a.image_id)
-        if b is not None and b.image_id not in chosen_b and len(picked_b) < n_per_side:
-            picked_b.append(b)
-            chosen_b.add(b.image_id)
+    def take_pair(a: Image, b: Image) -> None:
+        """Both frames or neither: one side taken alone would shift every later position and
+        turn the presented pairs into two frames of different rooms labelled as one."""
+        if a.image_id in chosen_a or b.image_id in chosen_b:
+            return
+        if len(picked_a) >= n_per_side or len(picked_b) >= n_per_side:
+            return
+        picked_a.append(a)
+        chosen_a.add(a.image_id)
+        picked_b.append(b)
+        chosen_b.add(b.image_id)
 
-    phash_pair = _best_phash_pair(left, right)
-    if phash_pair:
-        take(*phash_pair)
-    clip_pair = _best_clip_pair(
-        [img for img in left if img.image_id not in chosen_a],
-        [img for img in right if img.image_id not in chosen_b],
-    )
-    if clip_pair:
-        take(*clip_pair)
-
-    unmatched_a = sorted(
-        (img for img in left if img.image_id not in chosen_a),
-        key=lambda img: (-_interior_score(img), _order_key(img)),
-    )
-    unmatched_b = sorted(
-        (img for img in right if img.image_id not in chosen_b),
-        key=lambda img: (-_interior_score(img), _order_key(img)),
-    )
-    take(
-        unmatched_a[0] if unmatched_a and _interior_score(unmatched_a[0]) >= 0.0 else None,
-        unmatched_b[0] if unmatched_b and _interior_score(unmatched_b[0]) >= 0.0 else None,
-    )
+    matched = _best_phash_pair(left, right)
+    lead = matched if matched is not None and _same_room_key(*matched) else None
+    # A tight pHash match whose two frames are tagged as DIFFERENT rooms is still the strongest
+    # identity evidence in the gallery, so it keeps a slot — but at the END, where it cannot
+    # masquerade as a room pair.
+    tail = matched if matched is not None and lead is None else None
+    budget = n_per_side - 1 if tail is not None else n_per_side
+    for pair in pair_images_by_tag(left, right, max(budget, 0), lead):
+        take_pair(*pair)
+    if tail is not None:
+        take_pair(*tail)
+    elif not picked_a:
+        # No room is photographed on both sides and no pHash match: the untagged galleries.
+        # The j1 cross-room CLIP match is the only pair left, and one pair beats none.
+        fallback = _best_clip_pair(left, right)
+        if fallback is not None:
+            take_pair(*fallback)
 
     for side, picked, chosen in ((left, picked_a, chosen_a), (right, picked_b, chosen_b)):
         cover = next((img for img in side if img.seq == 0), None)
@@ -832,10 +950,10 @@ def image_captions(images: Sequence[Image], side: str) -> list[str]:
 
 
 def _blocks_with_captions(
-    entries: Sequence[Any], side: str
+    entries: Sequence[Any], side: str, start: int = 1
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for index, entry in enumerate(entries, start=1):
+    for index, entry in enumerate(entries, start=start):
         if isinstance(entry, tuple):
             caption, block = entry
             # The lane may reorder the blocks (the shuffled gold vote), so the index is stamped
@@ -855,6 +973,7 @@ def build_messages(
     image_blocks_a: Sequence[Any] = (),
     image_blocks_b: Sequence[Any] = (),
     tier: str = "text",
+    paired: int = 0,
 ) -> list[dict[str, Any]]:
     """One user message in the legacy dict shape `LLMClient.call` accepts; the system prompt
     travels separately as `system=SYSTEM_PROMPT`.
@@ -862,13 +981,21 @@ def build_messages(
     A text-tier call with images raises rather than silently dropping them: paid image work
     that never reaches the model is the failure shape E31 exists to prevent. A vision-tier call
     with NO images says so in words: the all-catalogue developer pairs are exactly the class the
-    judge has to separate, and an unexplained absence reads as "there were no photos"."""
+    judge has to separate, and an unexplained absence reads as "there were no photos".
+
+    `paired` (j2) is how many LEADING blocks of the two sides are the same room: those are
+    presented A-n, B-n adjacent under one instruction, after both digests, so the model compares
+    kitchen to kitchen rather than choosing what to compare. It is clamped to what actually
+    arrived — a caller that promises more pairs than it sent gets fewer, never a mislabel."""
     if tier not in TIERS:
         raise ValueError(f"unknown tier {tier!r}; expected one of {TIERS}")
     if tier == "text" and (image_blocks_a or image_blocks_b):
         raise ValueError("tier 'text' takes no images")
 
     left, right = digests
+    pairs = 0 if tier == "text" else max(
+        0, min(paired, len(image_blocks_a), len(image_blocks_b))
+    )
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -881,7 +1008,8 @@ def build_messages(
             + (left if isinstance(left, str) else render_digest(left)),
         },
     ]
-    content.extend(_blocks_with_captions(image_blocks_a, "A"))
+    if not pairs:
+        content.extend(_blocks_with_captions(image_blocks_a, "A"))
     if tier != "text" and not image_blocks_a:
         content.append({"type": "text", "text": prompts.NO_IMAGES_NOTE.format(side="A")})
     content.append(
@@ -892,9 +1020,25 @@ def build_messages(
             + (right if isinstance(right, str) else render_digest(right)),
         }
     )
-    content.extend(_blocks_with_captions(image_blocks_b, "B"))
+    if not pairs:
+        content.extend(_blocks_with_captions(image_blocks_b, "B"))
     if tier != "text" and not image_blocks_b:
         content.append({"type": "text", "text": prompts.NO_IMAGES_NOTE.format(side="B")})
+    if pairs:
+        content.append(
+            {"type": "text", "text": prompts.PAIRED_HEADER + "\n" + prompts.PAIRED_INTRO}
+        )
+        rendered_a = _blocks_with_captions(image_blocks_a, "A")
+        rendered_b = _blocks_with_captions(image_blocks_b, "B")
+        for index in range(pairs):
+            content.extend(rendered_a[index * 2 : index * 2 + 2])
+            content.extend(rendered_b[index * 2 : index * 2 + 2])
+        tail_a = _blocks_with_captions(image_blocks_a[pairs:], "A", start=pairs + 1)
+        tail_b = _blocks_with_captions(image_blocks_b[pairs:], "B", start=pairs + 1)
+        if tail_a or tail_b:
+            content.append({"type": "text", "text": prompts.UNPAIRED_NOTE})
+            content.extend(tail_a)
+            content.extend(tail_b)
     content.append({"type": "text", "text": prompts.EVIDENCE_HEADER + "\n" + evidence})
     coda = prompts.TIER_CODA.get(tier)
     if coda:

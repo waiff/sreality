@@ -201,6 +201,10 @@ class JudgeArgs:
     oss_gpu: str | None
     oss_s_per_pair: float
     pairs_from: str | None
+    # Which judge_version's gold rows `pairs_from=gold` reads. Defaults to the run's own
+    # version, and must be set explicitly to compare a NEW presentation against the gold labels
+    # a previous one produced: the labels are a property of the PAIR, not of the prompt.
+    gold_version: str | None
     # The engine row the lane scores AND digests with. One row, or the prompt describes a
     # different engine than the one that drew the sample.
     settings: str | None
@@ -298,6 +302,7 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         oss_gpu=(args.get("oss_gpu") or "").strip() or None,
         oss_s_per_pair=_float_arg(args, "oss_s_per_pair", OSS_EST_S_PER_PAIR),
         pairs_from=pairs_from,
+        gold_version=(args.get("gold_version") or "").strip() or None,
         settings=(args.get("settings") or "").strip() or None,
         model=(args.get("model") or "").strip() or None,
     )
@@ -1052,7 +1057,7 @@ def run_judge(
         # spends its quota inside the set that already has ground truth.
         conn = conn_factory()
         try:
-            gold = _gold_pairs(conn, judge_version)
+            gold = _gold_pairs(conn, parsed.gold_version or judge_version)
         finally:
             _close(conn)
         before = len(rows)
@@ -1061,7 +1066,8 @@ def run_judge(
         if not rows:
             raise SystemExit(
                 f"pairs_from=gold: none of this pass's {before} pair(s) carry a gold row at "
-                f"judge_version {judge_version} — run the gold tier first"
+                f"judge_version {parsed.gold_version or judge_version} — run the gold tier "
+                "first, or name the version that holds the labels with gold_version="
             )
     if parsed.strata:
         rows = [
@@ -1124,6 +1130,7 @@ def run_judge(
         ),
         "dry_run": parsed.dry_run,
         "pairs_from": parsed.pairs_from,
+        "gold_version": parsed.gold_version,
         "pairs_without_gold_dropped": gold_restricted,
         "sample_strata": sample["strata"],
         "engine": {
@@ -1712,6 +1719,12 @@ def _call_with_retry(
     raise RuntimeError("unreachable")
 
 
+def _reversed_halves(blocks: list[Any], split: int) -> list[Any]:
+    """Reverse the paired head and the unpaired tail separately — the presentation order
+    changes, the pairing does not."""
+    return blocks[:split][::-1] + blocks[split:][::-1]
+
+
 def _one_call(
     judge: Any, dataset: Any, job: PairJob, la: Listing, lb: Listing,
     digests: Any, evidence: str, vote: Vote, r2: Any, client: Any,
@@ -1720,6 +1733,7 @@ def _one_call(
 
     blocks_a: list[tuple[str, dict[str, Any]]] = []
     blocks_b: list[tuple[str, dict[str, Any]]] = []
+    paired = 0
     if vote.n_images:
         if r2 is None:
             raise RuntimeError("R2 is not configured; the vision tiers cannot read images")
@@ -1729,11 +1743,16 @@ def _one_call(
         )
         blocks_a = captioned_blocks(judge, r2, picked_a, "A", COMPARISON_MAX_EDGE)
         blocks_b = captioned_blocks(judge, r2, picked_b, "B", COMPARISON_MAX_EDGE)
+        paired = judge.paired_prefix(picked_a, picked_b)
         if vote.shuffle:
-            blocks_a.reverse()
-            blocks_b.reverse()
+            # Reversed WITHIN the paired block and within the tail, not across them: a plain
+            # reverse would move the room pairs to the end and silently unpair the j2
+            # presentation, so the weaker vote would differ from G1 in two things at once.
+            blocks_a = _reversed_halves(blocks_a, paired)
+            blocks_b = _reversed_halves(blocks_b, paired)
     messages = judge.build_messages(
-        job.row, digests, evidence, blocks_a, blocks_b, vote.prompt_tier or vote.tier
+        job.row, digests, evidence, blocks_a, blocks_b, vote.prompt_tier or vote.tier,
+        paired,
     )
     extra: dict[str, Any] = {"provider": vote.provider} if vote.provider else {}
     response = client.call(

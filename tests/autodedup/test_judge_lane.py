@@ -1577,3 +1577,26 @@ def test_the_lane_resolves_a_settings_name_under_the_repo_settings_dir(tmp_path,
     monkeypatch.setattr(score_lane, "SETTINGS_DIR", tmp_path)
     assert judge_lane.load_engine_settings("w4").t_lo == 0.2
     assert judge_lane.load_engine_settings(str(tmp_path / "w4.json")).t_lo == 0.2
+
+
+def test_reversed_halves_shuffles_inside_the_pairs_not_across_them() -> None:
+    """The weaker gold vote differs from G1 in presentation ORDER only: a plain reverse would
+    also unpair the j2 room pairs, making the two votes differ in two things at once."""
+    blocks = ["p1", "p2", "t1", "t2"]
+    assert judge_lane._reversed_halves(blocks, 2) == ["p2", "p1", "t2", "t1"]
+    assert judge_lane._reversed_halves(blocks, 0) == ["t2", "t1", "p2", "p1"]
+    assert judge_lane._reversed_halves(blocks, 4) == ["t2", "t1", "p2", "p1"]
+    assert judge_lane._reversed_halves([], 0) == []
+
+
+def test_parse_args_takes_the_gold_version_the_labels_live_under() -> None:
+    """A new presentation is compared against the gold labels an OLD one produced: the labels
+    belong to the pair, so the gold lookup must not be pinned to the run's own version."""
+    parsed = judge_lane.parse_args({
+        "export_run": "1", "tier": "vision", "max_usd": "4",
+        "judge_version": "j2", "pairs_from": "gold", "gold_version": "j1",
+    })
+    assert parsed.gold_version == "j1" and parsed.judge_version == "j2"
+    assert judge_lane.parse_args({
+        "export_run": "1", "tier": "vision", "max_usd": "4",
+    }).gold_version is None

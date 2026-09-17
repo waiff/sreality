@@ -795,3 +795,141 @@ def test_area_attributes_carry_their_unit() -> None:
     assert "plot area: 420 m²" in rendered
     assert "usable area: 136.0" not in rendered
     assert "garden area" in digest.absent
+
+
+# --- j2: room pairing -------------------------------------------------------------------------
+
+
+def test_judge_version_is_j2_so_j1_verdicts_stay_cached() -> None:
+    assert judge.JUDGE_VERSION == "j2"
+
+
+def test_select_images_pairs_the_same_room_in_priority_order() -> None:
+    """The slot budget buys comparisons, not frames: plan against plan, kitchen against kitchen,
+    bathroom against bathroom — and the facade only once the rooms have run out."""
+    rooms = ["exterior_facade", "bathroom", "kitchen", "floor_plan"]
+    images_a = [make_image(i + 1, 1, seq=i, tags=[(rooms[i], 0.9)]) for i in range(4)]
+    images_b = [make_image(11 + i, 2, seq=i, tags=[(rooms[i], 0.9)]) for i in range(4)]
+    left, right = judge.select_images(
+        make_listing(id=1), images_a, make_listing(id=2), images_b, {}, n_per_side=3
+    )
+    assert [judge.room_key(img) for img in left] == ["floor_plan", "kitchen", "bathroom"]
+    assert [judge.room_key(img) for img in right] == ["floor_plan", "kitchen", "bathroom"]
+    assert judge.paired_prefix(left, right) == 3
+
+
+def test_select_images_pairs_the_fine_anchors_of_one_logical_room() -> None:
+    images_a = [make_image(1, 1, seq=0, tags=[("situation_plan", 0.9)])]
+    images_b = [make_image(11, 2, seq=0, tags=[("cadastral_map", 0.9)])]
+    left, right = judge.select_images(
+        make_listing(id=1), images_a, make_listing(id=2), images_b, {}, n_per_side=4
+    )
+    assert judge.paired_prefix(left, right) == 1
+
+
+def test_select_images_keeps_an_unpaired_room_out_while_a_pair_is_available() -> None:
+    images_a = [
+        make_image(1, 1, seq=0, tags=[("hallway", 0.9)]),
+        make_image(2, 1, seq=1, tags=[("kitchen", 0.9)]),
+    ]
+    images_b = [
+        make_image(11, 2, seq=0, tags=[("garden", 0.9)]),
+        make_image(12, 2, seq=1, tags=[("kitchen", 0.9)]),
+    ]
+    left, right = judge.select_images(
+        make_listing(id=1), images_a, make_listing(id=2), images_b, {}, n_per_side=2
+    )
+    assert [img.image_id for img in left] == [2, 1]
+    assert [img.image_id for img in right] == [12, 11]
+    assert judge.paired_prefix(left, right) == 1
+
+
+def test_select_images_pairs_the_closest_frame_of_the_room_not_the_first() -> None:
+    """Two kitchens on each side: the pair the judge has to separate is the most alike one."""
+    near = 0x1234_5678_9ABC_DEF0
+    images_a = [
+        make_image(1, 1, seq=0, phash=0xFFFF_0000_FFFF_0000, tags=[("kitchen", 0.9)]),
+        make_image(2, 1, seq=1, phash=near, tags=[("kitchen", 0.9)]),
+    ]
+    images_b = [
+        make_image(11, 2, seq=0, phash=0x0000_FFFF_0000_FFFF, tags=[("kitchen", 0.9)]),
+        make_image(12, 2, seq=1, phash=near ^ 0b111, tags=[("kitchen", 0.9)]),
+    ]
+    left, right = judge.select_images(
+        make_listing(id=1), images_a, make_listing(id=2), images_b, {}, n_per_side=1
+    )
+    assert [img.image_id for img in left] == [2]
+    assert [img.image_id for img in right] == [12]
+
+
+def test_select_images_keeps_a_cross_room_phash_match_at_the_end() -> None:
+    """A tight match tagged as two different rooms is still the strongest identity evidence in
+    the gallery — but it is not a room pair and must not be presented as one."""
+    shared = 0x1234_5678_9ABC_DEF0
+    images_a = [
+        make_image(1, 1, seq=0, phash=shared, tags=[("living_room", 0.9)]),
+        make_image(2, 1, seq=1, tags=[("kitchen", 0.9)]),
+    ]
+    images_b = [
+        make_image(11, 2, seq=0, phash=shared, tags=[("bedroom", 0.9)]),
+        make_image(12, 2, seq=1, tags=[("kitchen", 0.9)]),
+    ]
+    left, right = judge.select_images(
+        make_listing(id=1), images_a, make_listing(id=2), images_b, {}, n_per_side=2
+    )
+    assert [img.image_id for img in left] == [2, 1]
+    assert [img.image_id for img in right] == [12, 11]
+    assert judge.paired_prefix(left, right) == 1
+
+
+def test_paired_prefix_stops_at_the_first_mismatch_and_at_an_untagged_frame() -> None:
+    kitchen_a = make_image(1, 1, tags=[("kitchen", 0.9)])
+    kitchen_b = make_image(11, 2, tags=[("kitchen", 0.9)])
+    bath_b = make_image(12, 2, tags=[("bathroom", 0.9)])
+    untagged_a = make_image(2, 1)
+    untagged_b = make_image(13, 2)
+    assert judge.paired_prefix([kitchen_a], [bath_b]) == 0
+    assert judge.paired_prefix([untagged_a], [untagged_b]) == 0
+    assert judge.paired_prefix([kitchen_a, untagged_a], [kitchen_b, untagged_b]) == 1
+    assert judge.paired_prefix([kitchen_a], []) == 0
+
+
+def test_build_messages_presents_the_pairs_adjacently_after_both_digests() -> None:
+    blocks_a = [("interior photo (kitchen)", _block(1)), ("interior photo (bedroom)", _block(2))]
+    blocks_b = [("interior photo (kitchen)", _block(3)), ("interior photo (hallway)", _block(4))]
+    messages = judge.build_messages(
+        {"lo": 1, "hi": 2}, _digests(), "EVIDENCE", blocks_a, blocks_b, "vision", paired=1
+    )
+    content = messages[0]["content"]
+    texts = [block["text"] for block in content if block["type"] == "text"]
+    assert judge_prompts.PAIRED_HEADER in "\n".join(texts)
+    assert judge_prompts.UNPAIRED_NOTE in texts
+    order = [
+        block["text"] for block in content
+        if block["type"] == "text" and block["text"][:2] in ("A-", "B-")
+    ]
+    assert [text.split()[0] for text in order] == ["A-1", "B-1", "A-2", "B-2"]
+    # Both digests come before the first photograph: the pairs are a section, not a side.
+    first_image = next(i for i, block in enumerate(content) if block["type"] == "image")
+    joined = "\n".join(
+        block["text"] for block in content[:first_image] if block["type"] == "text"
+    )
+    assert "LISTING A" in joined and "LISTING B" in joined
+
+
+def test_build_messages_pairs_nothing_when_the_caller_promises_more_than_it_sent() -> None:
+    messages = judge.build_messages(
+        {"lo": 1, "hi": 2}, _digests(), "E",
+        [("interior photo (kitchen)", _block(1))], [], "vision", paired=4,
+    )
+    texts = [block["text"] for block in messages[0]["content"] if block["type"] == "text"]
+    assert judge_prompts.PAIRED_HEADER not in "\n".join(texts)
+    assert judge_prompts.NO_IMAGES_NOTE.format(side="B") in texts
+
+
+def test_paired_prompt_names_the_pairing_and_what_a_shared_facade_is_worth() -> None:
+    text = judge_prompts.PAIRED_INTRO
+    assert "PAIRED" in text
+    for needle in ("floor plan", "kitchen", "facade", "catalogue", "BUILDING"):
+        assert needle in text
+    assert "unit_discriminator" in text
