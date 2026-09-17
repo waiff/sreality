@@ -577,8 +577,9 @@ def test_smoke_evaluate_over_the_real_run_and_judgements(tmp_path: Path) -> None
     assert payload["merge_precision"]["pooled"]["n_judged"] > 0
     assert payload["sample"]["n_cohort"] > 0
     assert math.isfinite(float(payload["thresholds"]["t_lo"]))
-    # the real lane sample resolves through the sampler's own key and really inflates
-    assert payload["sample"]["stratum_fn"] == "judge_stratum"
+    # two judgements files are two draws, and each one's own sample.json is pooled into one
+    # design (W4f) — a single draw would still read "judge_stratum"
+    assert payload["sample"]["stratum_fn"].startswith("pooled(2 draws")
     assert payload["sample"]["is_weighted"] is True and payload["counts"]["weighted"] is True
     assert payload["sample"]["design"]["weight_max"] > 10
     assert payload["cohort"]["merge_precision_bootstrap"]["lb"] is not None
@@ -781,7 +782,13 @@ def test_measure_thresholds_scores_a_fixed_cut() -> None:
                                  0.5, 0.2, draws=50)
     assert body["n_merge"] == 2 and body["n_positive"] == 1
     assert body["precision"] == pytest.approx(0.5)
-    assert body["min_stratum_precision"] == 0.0 and body["stratum_floor_ok"] is False
+    # D3's floor is read on the DECIDING CELL; bare tuples carry none, so both merges land in
+    # one "(none)" cell. The sampler grain rides alongside as a diagnostic, never as the gate.
+    assert body["min_stratum_precision"] == pytest.approx(0.5)
+    assert body["stratum_floor_ok"] is False
+    assert body["min_sampler_stratum_precision"] == 0.0
+    assert set(body["per_sampler_stratum_precision"]) == {"a", "b"}
+    assert "deciding cell" in body["per_stratum_precision_basis"]
     assert body["missed_share_at_t_lo"] == pytest.approx(0.5)
     assert ev.measure_thresholds([(0.9, 1)], None, 0.2)["precision"] is None
 
@@ -1568,12 +1575,14 @@ def test_a_certificate_cell_that_merges_wrong_pairs_says_precision_not_sample() 
     assert body["K-C|same"]["propose_only_reason"] == "precision"
 
 
-def test_a_published_cut_is_printed_at_a_precision_that_can_be_re_entered() -> None:
+def test_a_published_cut_is_a_probability_not_a_rank() -> None:
+    """Two score clusters 3e-8 apart: a search over raw scores would stop BETWEEN them and publish
+    a cut no operator can read and no rerun can reproduce. The grid `expressible_cuts` returns is
+    the coarsest thing a settings row may state, and the markdown prints it re-enterably."""
     rows: list[dict[str, Any]] = []
     labels: dict[Any, Label] = {}
     for index in range(400):
         lo, hi = 2 * index + 1, 2 * index + 2
-        # two cuts that differ in the ninth decimal — 4 decimals would print them identically
         score = 0.953125003065951 if index % 2 else 0.953125030633085
         rows.append(pair_row(lo, hi, zone="merge", score=score, cross=bool(index % 2)))
         labels[(lo, hi)] = label(lo, hi, 1)
@@ -1582,7 +1591,16 @@ def test_a_published_cut_is_printed_at_a_precision_that_can_be_re_entered() -> N
     for cut in report.sections["thresholds_by_stratum"]["strata"].values():
         if cut["relaxed_t_hi"] is not None:
             assert f"{cut['relaxed_t_hi']:.12g}" in markdown
-    assert "0.9531250" in markdown
+            # on the 1e-4 grid the two clusters are one cut, so neither can be singled out
+            assert cut["relaxed_t_hi"] in (0.9531, 0.9532)
+    assert report.sections["thresholds_by_stratum"]["criteria"]["cut_resolution"] == 1e-4
+
+
+def test_the_cut_grid_gives_each_score_a_neighbour_on_either_side() -> None:
+    cuts = ev.expressible_cuts([0.98625585, 0.9862558542015111])
+    assert cuts == [0.9863, 0.9862]
+    # 0.9862 admits both pairs, 0.9863 admits neither — and there is nothing in between to fit to
+    assert ev.expressible_cuts([0.5], resolution=None) == [0.5]
 
 
 def test_the_sealed_split_is_also_measured_at_the_settings_actually_loaded() -> None:
@@ -1633,3 +1651,195 @@ def test_the_report_carries_zone_recall_beside_the_score_based_line() -> None:
     # The score-based line sees only one of the three as missed, which is the understatement.
     assert body["positives_in_band_share"] == pytest.approx(0.0)
     assert body["positives_below_t_lo_share"] == pytest.approx(1 / 3)
+
+
+def test_a_judged_positive_the_run_never_stored_is_still_a_missed_duplicate() -> None:
+    """The recall denominator is built from the run's own rows, so a labelled pair the run did not
+    store — below `store_floor`, or never a candidate — silently left the denominator. A
+    calibration that pushes pairs under the floor then reads as a recall IMPROVEMENT."""
+    rows = [
+        pair_row(1, 2, zone="merge", score=0.99),
+        pair_row(3, 4, zone="band", score=0.5),
+        pair_row(5, 6, zone="reject", score=0.01),
+    ]
+    labels = {
+        (1, 2): label(1, 2, 1), (3, 4): label(3, 4, 1), (5, 6): label(5, 6, 1),
+        (7, 8): label(7, 8, 1),  # judged a duplicate; the run never stored it
+        (9, 10): label(9, 10, 0),
+    }
+    report = ev.evaluate(rows, labels, None, Settings(), draws=20)
+    counts = report.sections["counts"]
+    assert counts["n_labels_off_run"] == 2
+    assert counts["n_labels_off_run_judged"] == 2
+    assert counts["n_labels_off_run_positive"] == 1
+    body = report.sections["cohort"]
+    zone_recall = body["zone_recall"]
+    assert zone_recall["positives_in_off_run_zone_share"] == pytest.approx(0.25)
+    assert zone_recall["positives_in_merge_zone_share"] == pytest.approx(0.25)
+    # merge+band is 50%, not the 66.7% the run-only denominator would have printed
+    assert (zone_recall["positives_in_merge_zone_share"]
+            + zone_recall["positives_in_band_zone_share"]) == pytest.approx(0.5)
+    # The SCORE line still divides by the on-run positives: an unstored pair has no score.
+    assert body["weight_positive_on_run"] == pytest.approx(3.0)
+    assert body["weight_positive_off_run"] == pytest.approx(1.0)
+    assert body["positives_below_t_lo_share"] == pytest.approx(1 / 3)
+    assert "off-run" in "\n".join(report.headline())
+
+
+def test_the_settings_holdout_reads_the_per_stratum_table_it_names() -> None:
+    """`holdout_at_settings` says it measures the row in force; E48's table IS that row. Measuring
+    it through the global `t_hi` alone reports a certificates-only merge set and calls it the
+    shipped table — exactly the cell W4f newly switched on would be missing."""
+    rows: list[dict[str, Any]] = []
+    labels: dict[Any, Label] = {}
+    for index in range(300):
+        lo, hi = 2 * index + 1, 2 * index + 2
+        cross = index % 2 == 0
+        rows.append(pair_row(lo, hi, zone="merge", score=0.99, cross=cross))
+        labels[(lo, hi)] = label(lo, hi, 1)
+    loaded = Settings(t_hi=1.0, t_hi_by_stratum={"model|cross": 0.96, "model|same": None})
+    in_force = ev.evaluate(rows, labels, None, loaded, draws=20
+                           ).sections["holdout_at_settings"]
+    assert in_force["t_hi_by_stratum"] == {"model|cross": 0.96, "model|same": None}
+    merged = in_force["n_merge"]
+    assert merged > 0  # the global 1.0 alone would merge nothing
+    assert set(in_force["per_stratum_precision"]) == {"model|cross"}  # `model|same` is held back
+    assert in_force["stratum_t_hi_applied"] == {"model|cross": 0.96, "model|same": None}
+
+
+def test_a_propose_only_cell_merges_nothing_even_with_a_certificate() -> None:
+    """`decide_pair` consults E48's table BEFORE the certificates, so `None` holds those back too."""
+    rows = [
+        ev.ScoredRow(score=0.99, y=1, certificate="K-C", cell="K-C|same"),
+        ev.ScoredRow(score=0.99, y=1, certificate="K-C", cell="K-C|cross"),
+    ]
+    body = ev.measure_thresholds(rows, 1.0, 0.1, draws=20,
+                                 stratum_t_hi={"K-C|same": None})
+    assert body["n_merge"] == 1
+    assert set(body["per_stratum_precision"]) == {"K-C|cross"}
+
+
+# --- several draws, one design (W4f) -----------------------------------------------------------
+
+
+def draw_of(
+    name: str, pairs: Sequence[tuple[int, int]], selected: int, population: int, **kwargs: Any
+) -> Sample:
+    return Sample(
+        strata={name: Stratum(name, selected, population)},
+        pair_stratum={ev.pair_key(*pair): name for pair in pairs},
+        **kwargs,
+    )
+
+
+def test_pooled_sample_counts_distinct_drawn_pairs_not_the_first_file() -> None:
+    """Two draws at different rates: the union's rate is what weights the pooled label set.
+
+    Taking either file's own `n_selected` (2 of 100, or 4 of 100) would inflate every pair the
+    other draw contributed — the label store holds one verdict per pair, the design behind it is
+    the union of the draws."""
+    first = draw_of("cell", [(1, 2), (3, 4)], selected=2, population=100)
+    second = draw_of("cell", [(3, 4), (5, 6), (7, 8), (9, 10)], selected=4, population=100)
+    pooled = ev.pooled_sample([first, second])
+    assert pooled.strata["cell"].n_selected == 5  # (3,4) is drawn twice, counted once
+    assert pooled.strata["cell"].n_total == 100
+    assert pooled.weight_for_name("cell") == pytest.approx(20.0)
+    assert first.weight_for_name("cell") == pytest.approx(50.0)
+    assert pooled.is_weighted is True
+    assert pooled.stratum_fn.startswith("pooled(2 draws")
+
+
+def test_pooled_sample_orders_frames_by_draw_id_not_by_argument_order() -> None:
+    """The draws are stamped against different engine runs, so their populations differ and the
+    newest frame is the one closest to the run being evaluated. Which one that is comes off the
+    lane artifact id on the sample path — reversing `--judgements` must not move an HT weight."""
+    old = draw_of("cell", [(1, 2)], selected=1, population=50,
+                  path="/j/35100000001/autodedup-judge-35100000001/sample.json")
+    new = draw_of("cell", [(3, 4)], selected=1, population=80,
+                  path="/j/35100000002/autodedup-judge-35100000002/sample.json")
+    for order in ([old, new], [new, old]):
+        pooled = ev.pooled_sample(order)
+        assert pooled.strata["cell"].n_total == 80
+        assert "newest frame wins" in pooled.stratum_fn
+        assert pooled.order_source.startswith("draw id")
+
+
+def test_pooled_sample_refuses_to_let_argv_pick_the_frame() -> None:
+    """No draw id and populations that disagree is the one case where the order of the arguments
+    would decide the estimate. That is a refusal, not a default."""
+    old = draw_of("cell", [(1, 2)], selected=1, population=50)
+    new = draw_of("cell", [(3, 4)], selected=1, population=80)
+    with pytest.raises(ValueError, match="carry no draw id"):
+        ev.pooled_sample([old, new])
+    # Frames that agree make the order immaterial, so the same call is fine.
+    same = draw_of("cell", [(3, 4)], selected=1, population=50)
+    assert ev.pooled_sample([old, same]).strata["cell"].n_total == 50
+
+
+def test_pooled_sample_reports_a_frame_conflict_instead_of_collapsing_the_weight() -> None:
+    """A frame that moved can report a population under the pairs actually drawn (3 in the newest
+    draw, 21 across all of them). Taking the drawn count as the population would set that cell's
+    inflation factor to 1.0 — silently, and in the negative-control merge cells, which are the
+    ones that most need it. The widest frame that named the stratum is used and the conflict is
+    on the record."""
+    old = draw_of("cell", [(1, 2), (3, 4), (5, 6)], selected=3, population=40,
+                  path="/j/35100000001/autodedup-judge-35100000001/sample.json")
+    new = draw_of("cell", [(7, 8)], selected=1, population=1,
+                  path="/j/35100000002/autodedup-judge-35100000002/sample.json")
+    pooled = ev.pooled_sample([old, new])
+    assert pooled.strata["cell"].n_selected == 4
+    assert pooled.strata["cell"].n_total == 40
+    assert pooled.weight_for_name("cell") == pytest.approx(10.0)
+    conflict = pooled.frame_conflicts[0]
+    assert conflict["stratum"] == "cell"
+    assert conflict["population_newest_frame"] == 1
+    assert conflict["population_used"] == 40
+    assert conflict["weight_under_newest_frame"] == pytest.approx(0.25)
+    assert "FRAME CONFLICTS" in pooled.stratum_fn
+
+
+def test_pooled_sample_counts_a_pair_drawn_under_two_names_once() -> None:
+    """A pair whose zone moved between the two runs the draws were stamped against carries ONE
+    verdict. Putting it in both denominators inflates the cell that has no numerator to match, so
+    it is attributed to the newest draw's name and the pooled map — not the judgement stamp — is
+    what the weight is read on."""
+    first = draw_of("reject|x", [(1, 2)], selected=1, population=10,
+                    path="/j/35100000001/autodedup-judge-35100000001/sample.json")
+    second = draw_of("band|x", [(1, 2)], selected=1, population=10,
+                     path="/j/35100000002/autodedup-judge-35100000002/sample.json")
+    pooled = ev.pooled_sample([first, second])
+    assert pooled.strata["reject|x"].n_selected == 0
+    assert pooled.strata["band|x"].n_selected == 1
+    assert pooled.stratum_of((1, 2)) == "band|x"
+    # The stamp on the judgement row says `reject|x`; the pooled design overrules it.
+    assert pooled.weight_for((1, 2), "reject|x") == pytest.approx(10.0)
+    assert ev.stratum_of_pair(pooled, (1, 2), "reject|x") == "band|x"
+
+
+def test_pooled_sample_of_one_draw_is_that_draw() -> None:
+    only = draw_of("cell", [(1, 2)], selected=1, population=10, stratum_fn="judge_stratum")
+    assert ev.pooled_sample([only]) is only
+    assert ev.pooled_sample([]) is ev.EMPTY_SAMPLE
+
+
+def test_resolve_sample_pairs_one_draw_with_each_judgements_file(tmp_path: Path) -> None:
+    """`--sample` repeated is positional against `--judgements`; one covers them all; a count
+    that is neither is a refusal rather than a silent mis-pairing."""
+    def write(name: str, selected: int, population: int, pairs: Sequence[tuple[int, int]]) -> Path:
+        path = tmp_path / name
+        path.write_text(json.dumps({
+            "strata": {"cell": {"selected": selected, "population": population}},
+            "pairs": [{"lo": lo, "hi": hi, "stratum": "cell"} for lo, hi in pairs],
+        }), encoding="utf-8")
+        return path
+
+    first, second = write("s1.json", 2, 100, [(1, 2), (3, 4)]), write("s2.json", 3, 100,
+                                                                     [(5, 6), (7, 8), (9, 10)])
+    judgements = [str(tmp_path / "a.jsonl"), str(tmp_path / "b.jsonl")]
+    pooled, note = harness.resolve_sample(judgements, [str(first), str(second)])
+    assert pooled is not None and pooled.strata["cell"].n_selected == 5
+    assert "2 draws pooled" in note
+    one, _ = harness.resolve_sample(judgements, [str(first)])
+    assert one.strata["cell"].n_selected == 2
+    with pytest.raises(ValueError, match="pass one per"):
+        harness.resolve_sample(judgements + [str(tmp_path / "c.jsonl")], [str(first), str(second)])

@@ -896,3 +896,18 @@ def test_an_unstamped_hand_model_over_a_feature_subset_is_exempt() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         LogisticModel.from_json(json.dumps(model.to_json()))
+
+
+def test_the_w4f_refit_pays_the_debt_the_w4_model_still_carries() -> None:
+    """W4e wrote the debt down; W4f is the refit that clears it. `w4f_gold` is fitted on the whole
+    of `features.FEATURE_ORDER`, so it loads with no warning at all — and if a 48th feature lands,
+    this test is what fails in the commit that adds it."""
+    body = json.loads((ROOT / "autodedup" / "models" / "w4f_gold.json").read_text())
+    assert tuple(body["feature_order"]) == ft.FEATURE_ORDER
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model = LogisticModel.from_json(json.dumps(body))
+    assert model.version == "w4f_gold"
+    # the two features W4e added carry a learned weight now, not a structural zero
+    assert model.weights["plot_area_exact"] != 0.0
+    assert model.weights["plot_area_rel_diff"] != 0.0

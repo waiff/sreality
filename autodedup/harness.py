@@ -47,6 +47,7 @@ from autodedup.evaluate import (
     L2_GRID,
     evaluate,
     fit_model,
+    pooled_sample,
     rescore_rows,
     split_groups,
     write_report,
@@ -702,23 +703,56 @@ def run_settings(run_dir: Path, override: str | None) -> Settings:
     return Settings()
 
 
-def resolve_sample(paths: Sequence[str], explicit: str | None) -> tuple[Sample | None, str]:
-    """`--sample`, else the `sample.json` the lane wrote beside its judgements, else nothing.
+def resolve_sample(
+    paths: Sequence[str], explicit: Sequence[str] | str | None
+) -> tuple[Sample | None, str]:
+    """ONE DRAW PER JUDGEMENTS FILE — `--sample` repeated in the same order, else the
+    `sample.json` the lane wrote beside each file — pooled into one design.
 
-    Without one there are no per-stratum populations, so no number is cohort-level — the caller
+    Several judgement files are several draws, and a stratum's sampling rate belongs to the draw
+    rather than to its name (`merge|K-C|jablonec|cross` was drawn 87 of 1,178 in the seed-1
+    vision sample and 47 of 1,175 in the seed-2 one). Weighting them all by whichever file was
+    passed first inflates every pair the other draws contributed, so the draws are pooled by
+    `evaluate.pooled_sample`. A single `--sample` still covers every file — the pre-W4f
+    behaviour — and passing several requires one per `--judgements`.
+
+    Without any there are no per-stratum populations, so no number is cohort-level — the caller
     prints the reason rather than quietly reporting sample rates as cohort rates. An EXPLICIT
     sample that does not match its judgements is fatal; an auto-found one that does not match is
     dropped with a warning, because picking the neighbouring file was this function's guess."""
-    if explicit:
-        return load_sample(explicit), explicit
-    for candidate in (Path(path).parent / SAMPLE_FILE for path in paths):
+    given = [explicit] if isinstance(explicit, str) else list(explicit or ())
+    if given and len(given) not in (1, len(paths)):
+        raise ValueError(
+            f"--sample given {len(given)} times for {len(paths)} --judgements: pass one per "
+            f"judgements file, or exactly one for all of them"
+        )
+    overrides = (given * len(paths)) if len(given) == 1 else (given or [None] * len(paths))
+    draws: list[Sample] = []
+    notes: list[str] = []
+    seen: set[str] = set()
+    for path, override in zip(paths, overrides):
+        candidate = Path(override) if override else Path(path).parent / SAMPLE_FILE
+        if str(candidate) in seen:
+            continue
         if not candidate.is_file():
+            if override:
+                raise ValueError(f"no such sample: {candidate}")
             continue
         try:
-            return load_sample(candidate), str(candidate)
+            draws.append(load_sample(candidate))
         except ValueError as exc:
+            if override:
+                raise
             print(f"ignoring {candidate}: {exc}", file=sys.stderr)
-    return None, "(none: HT weights fall back to 1.0)"
+            continue
+        seen.add(str(candidate))
+        notes.append(str(candidate))
+    if not draws:
+        return None, "(none: HT weights fall back to 1.0)"
+    if len(draws) == 1:
+        return draws[0], notes[0]
+    pooled = pooled_sample(draws)
+    return pooled, f"{len(draws)} draws pooled [{pooled.stratum_fn}]: " + "; ".join(notes)
 
 
 def load_labels(paths: Sequence[str], precedence: Sequence[str]) -> tuple[Any, Any, Any]:
@@ -927,9 +961,12 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--judgements", action="append", required=True,
                              help="judgements.jsonl from the judge lane; repeatable"
                                   " (tiers are merged by --precedence)")
-        command.add_argument("--sample", default=None,
+        command.add_argument("--sample", action="append", default=None,
                              help="sample.json carrying the per-stratum populations the"
-                                  " Horvitz-Thompson weights need; default: beside --judgements")
+                                  " Horvitz-Thompson weights need; repeatable, ONE PER"
+                                  " --judgements in the same order (several files are several"
+                                  " draws at different rates); one covers them all; default:"
+                                  " the sample.json beside each --judgements")
         command.add_argument("--out", required=True, help="directory for the report files")
         command.add_argument("--precedence", action="append", default=None,
                              help="tier precedence, highest first; repeatable"
@@ -984,9 +1021,10 @@ def build_parser() -> argparse.ArgumentParser:
     errors_parser.add_argument("--judgements", action="append", required=True,
                                help="judgements.jsonl from the judge lane; repeatable"
                                     " (tiers are merged by --precedence)")
-    errors_parser.add_argument("--sample", default=None,
+    errors_parser.add_argument("--sample", action="append", default=None,
                                help="sample.json carrying the per-stratum populations the"
-                                    " Horvitz-Thompson weights need; default: beside"
+                                    " Horvitz-Thompson weights need; repeatable, one per"
+                                    " --judgements in the same order; default: beside"
                                     " --judgements")
     errors_parser.add_argument("--out", default=None,
                                help="directory for errors.json / errors.md (default: run_dir)")
