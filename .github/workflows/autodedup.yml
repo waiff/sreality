@@ -201,7 +201,9 @@ name: "AUTODEDUP: engine lane"
 # smaller variant of the same card cannot rent one too small for the weights),
 # oss_image (the vLLM image tag - a model architecture newer than the image is a
 # rental that boots into a failure), oss_disk_gb (container disk; the weights AND the image
-# land on it, so re-do the sum for a bigger model), oss_max_model_len, oss_tool_parser (vLLM
+# land on it, so re-do the sum for a bigger model), oss_max_model_len, oss_dtype (`auto` for
+# a pre-quantized FP8/AWQ repo, which carries its own compute dtype - forcing bfloat16
+# there is a 25-minute rental spent on a refusal), oss_tool_parser (vLLM
 # `--tool-call-parser`; the forced tool call is how a verdict comes back at all) and
 # oss_s_per_pair (the pre-flight seconds ONE CALL takes, which the
 # estimate divides by `workers`; calibrate it from the previous pass's `latency_s_mean`, NOT

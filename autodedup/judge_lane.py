@@ -204,6 +204,7 @@ class JudgeArgs:
     oss_cloud: tuple[str, ...]
     oss_image: str | None
     oss_tool_parser: str | None
+    oss_dtype: str | None
     oss_disk_gb: int
     oss_max_model_len: int
     oss_max_usd_hr: float
@@ -314,6 +315,7 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         ),
         oss_image=(args.get("oss_image") or "").strip() or None,
         oss_tool_parser=(args.get("oss_tool_parser") or "").strip() or None,
+        oss_dtype=(args.get("oss_dtype") or "").strip() or None,
         oss_disk_gb=_int_arg(args, "oss_disk_gb", 0),
         oss_max_model_len=_int_arg(args, "oss_max_model_len", 0),
         oss_max_usd_hr=_float_arg(args, "oss_max_usd_hr", 0.0),
@@ -822,6 +824,8 @@ def pod_start(parsed: JudgeArgs, out_dir: Path | None = None) -> Any:
         options["image"] = parsed.oss_image
     if parsed.oss_tool_parser:
         options["tool_call_parser"] = parsed.oss_tool_parser
+    if parsed.oss_dtype:
+        options["dtype"] = parsed.oss_dtype
     if parsed.oss_disk_gb:
         options["container_disk_gb"] = parsed.oss_disk_gb
     if parsed.oss_max_model_len:

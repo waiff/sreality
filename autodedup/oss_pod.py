@@ -90,6 +90,9 @@ RECEIPT_FILE: str = "pod.json"
 DEFAULT_MAX_MODEL_LEN: int = 12288
 DEFAULT_MAX_IMAGES: int = 8
 DEFAULT_GPU_MEMORY_UTILIZATION: float = 0.92
+# bfloat16 is right for an unquantized checkpoint and WRONG for a pre-quantized one: an FP8
+# or AWQ repo carries its own compute dtype, and forcing one is at best a warning and at worst
+# a refusal to load — 25 minutes of rental to find out. Quantized model, `dtype=auto`.
 DEFAULT_DTYPE: str = "bfloat16"
 # vLLM's parser for Qwen's Hermes-style tool-call tags; `--enable-auto-tool-choice` is what
 # turns the parser on at all (docs.vllm.ai/en/latest/features/tool_calling: "Hermes Models
@@ -270,6 +273,7 @@ def launch_vllm_pod(
     max_model_len: int = DEFAULT_MAX_MODEL_LEN,
     max_images: int = DEFAULT_MAX_IMAGES,
     tool_call_parser: str = DEFAULT_TOOL_CALL_PARSER,
+    dtype: str = DEFAULT_DTYPE,
     container_disk_gb: int = CONTAINER_DISK_GB,
     hf_token: str | None = None,
     dry_run: bool = False,
@@ -299,6 +303,7 @@ def launch_vllm_pod(
         max_model_len=max_model_len,
         max_images=max_images,
         tool_call_parser=tool_call_parser,
+        dtype=dtype,
         command_prefix=command_prefix,
     )
     clouds = tuple(c.upper() for c in cloud_types) or DEFAULT_CLOUD_TYPES
