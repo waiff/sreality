@@ -376,7 +376,7 @@ vitest — the numbers below come from Playwright against live data).
   read), NOT part of the URL view state: a shared link carries which deals to
   look at, not how this browser likes its photos.
 
-### Phase U-DISMISS: Dismiss a property (in progress)
+### Phase U-DISMISS: Dismiss a property (done)
 North star: a dismissal is ONE durable, account-scoped fact about a property
 ("reviewed, never show it again") with one meaning everywhere — discovery
 (Browse, notification feed + delivery) hides it by default, non-destructively
@@ -398,15 +398,19 @@ control. Not a special collection (collections are m2m groupings; see
   per-watchdog counts) and an account-scoped twin on both outbox passes;
   detection is untouched (its cursors and the `reactivated` detector depend on
   every dispatch existing), so an undo brings a hidden dispatch back intact.
-- **W4 — the shared control** (in progress): `<DismissButton>` beside the
+- **W4 — the shared control** (done, #1518): `<DismissButton>` beside the
   funnel on the Browse card, Table row and listing header over
   `lib/useDismissal` (list-aware optimistic hide, one sticky "Vrátit" toast,
   batched per-property state reads); `lib/optimisticCache.holdQueries` now
   shared with the pipeline cache; absent while the property is piped.
-- **W5 — Chrome extension** (in progress): the panel's "Skrýt" / "Skryto"
+- **W5 — Chrome extension** (done): the panel's "Skrýt" / "Skryto"
   toggle beside the monitoring bell, state as `dismissed` on
   `POST /listings/lookup`, writes on `/dismissals`; the panel mirrors the
   lift when a card is added.
+- **Next (not built):** a dismissal *reason* (a small operator taxonomy — the
+  label set a future ranking/scoring model would learn from; `property_notes`
+  covers free text today), and an "only dismissed" review lens if the reveal
+  proves too coarse for reviewing the pile.
 
 ### Phase U-ME: Manual rental estimates (next)
 
