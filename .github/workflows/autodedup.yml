@@ -197,7 +197,9 @@ name: "AUTODEDUP: engine lane"
 # space), oss_cloud (SPACE-separated cloud types walked in order, `secure community`;
 # default community only, which is where the cheap cards are and where the 80 GB ones are
 # not), oss_max_usd_hr (lifts the $1.00/hr default cap, without which no 80 GB card is even
-# eligible), oss_image (the vLLM image tag - a model architecture newer than the image is a
+# eligible), oss_min_gpu_gb (raises the 24 GB floor, so a pattern that also matches a
+# smaller variant of the same card cannot rent one too small for the weights),
+# oss_image (the vLLM image tag - a model architecture newer than the image is a
 # rental that boots into a failure), oss_disk_gb (container disk; the weights AND the image
 # land on it, so re-do the sum for a bigger model), oss_max_model_len, oss_tool_parser (vLLM
 # `--tool-call-parser`; the forced tool call is how a verdict comes back at all) and

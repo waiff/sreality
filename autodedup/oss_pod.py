@@ -265,6 +265,7 @@ def launch_vllm_pod(
     strict_gpu: bool = False,
     cloud_types: Sequence[str] = DEFAULT_CLOUD_TYPES,
     max_price_per_hr: float = MAX_PRICE_PER_HR,
+    min_memory_gb: float = MIN_GPU_MEMORY_GB,
     image: str = DEFAULT_IMAGE,
     max_model_len: int = DEFAULT_MAX_MODEL_LEN,
     max_images: int = DEFAULT_MAX_IMAGES,
@@ -325,7 +326,7 @@ def launch_vllm_pod(
         try:
             options = select_gpus(
                 client, gpu_preference, strict=strict_gpu, cloud_type=cloud,
-                max_price_per_hr=max_price_per_hr,
+                max_price_per_hr=max_price_per_hr, min_memory_gb=min_memory_gb,
             )
         except RunPodError as exc:
             # Nothing of this size is even LISTED in this cloud: not a capacity miss, but it

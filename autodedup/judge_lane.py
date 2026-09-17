@@ -207,6 +207,7 @@ class JudgeArgs:
     oss_disk_gb: int
     oss_max_model_len: int
     oss_max_usd_hr: float
+    oss_min_gpu_gb: float
     oss_s_per_pair: float
     pairs_from: str | None
     # Which judge_version's gold rows `pairs_from=gold` reads. Defaults to the run's own
@@ -316,6 +317,7 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         oss_disk_gb=_int_arg(args, "oss_disk_gb", 0),
         oss_max_model_len=_int_arg(args, "oss_max_model_len", 0),
         oss_max_usd_hr=_float_arg(args, "oss_max_usd_hr", 0.0),
+        oss_min_gpu_gb=_float_arg(args, "oss_min_gpu_gb", 0.0),
         oss_s_per_pair=_float_arg(args, "oss_s_per_pair", OSS_EST_S_PER_PAIR),
         pairs_from=pairs_from,
         gold_version=(args.get("gold_version") or "").strip() or None,
@@ -826,6 +828,8 @@ def pod_start(parsed: JudgeArgs, out_dir: Path | None = None) -> Any:
         options["max_model_len"] = parsed.oss_max_model_len
     if parsed.oss_max_usd_hr:
         options["max_price_per_hr"] = parsed.oss_max_usd_hr
+    if parsed.oss_min_gpu_gb:
+        options["min_memory_gb"] = parsed.oss_min_gpu_gb
     handle = module.launch_vllm_pod(client, model_id=parsed.oss_model, **options)
     if out_dir is not None:
         # Before the wait, not after it: a job killed from OUTSIDE runs no `finally` at all,

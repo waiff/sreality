@@ -1389,6 +1389,7 @@ def test_the_gpu_list_and_the_cloud_order_reach_the_launch_verbatim(
         oss_disk_gb="150",
         oss_max_model_len="32768",
         oss_max_usd_hr="3.5",
+        oss_min_gpu_gb="44",
         oss_tool_parser="hermes",
     ))
     launch = pod_module.calls[0][1]
@@ -1401,6 +1402,7 @@ def test_the_gpu_list_and_the_cloud_order_reach_the_launch_verbatim(
     assert launch["container_disk_gb"] == 150
     assert launch["max_model_len"] == 32768
     assert launch["max_price_per_hr"] == 3.5
+    assert launch["min_memory_gb"] == 44
     assert launch["tool_call_parser"] == "hermes"
 
 
@@ -1410,7 +1412,7 @@ def test_an_unnamed_pod_knob_is_left_to_the_pod_module(pod_module: FakePodModule
     judge_lane.pod_start(oss_args())
     launch = pod_module.calls[0][1]
     for key in ("cloud_types", "image", "container_disk_gb", "max_model_len",
-                "max_price_per_hr", "tool_call_parser"):
+                "max_price_per_hr", "min_memory_gb", "tool_call_parser"):
         assert key not in launch
 
 
