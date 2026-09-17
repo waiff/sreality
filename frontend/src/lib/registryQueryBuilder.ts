@@ -79,6 +79,33 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   // The toggle itself is a modifier on the price bound, not a column predicate
   // (pg_column=None); applyRegistryFilters skips it anyway.
   'include_no_price',
+  // The composite location filter: chips are RUIAN code equality per level
+  // (districtCodes.districtsFilterClause), the map box is a lat/lng band and
+  // center+radius is an ST_DWithin prefilter. Three predicates, no one column.
+  'location',
+  // Retired (W5): the rules are resolved SERVER-side to an obec allowlist
+  // (curated_cities_matching -> obec_ids_filter) before the query is built, so
+  // queries.ts sends `city_index_rules: null` deliberately.
+  'city_index_rules',
+]);
+
+/* Browse-agenda filters that reach some OTHER surface but are NOT applied to
+ * the Browse LIST query at all. Not the same claim as HAND_CODED_BROWSE_FILTERS,
+ * and deliberately a separate set: that one says "queries.ts applies this by
+ * hand", and blessing a filter with it that nothing applies is exactly the
+ * defect the W21 drift test exists to catch. Each entry is a KNOWN GAP with a
+ * named owner, not a design. */
+export const BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY: ReadonlySet<string> = new Set([
+  /* KNOWN GAP (found by the W21 drift test, pre-existing, NOT introduced by it).
+   * `tomDaysMin/Max` are sent to the Stats RPC (`browse_stats_properties`,
+   * queries.ts ~1301) and to NOTHING else — the cards/table/map cohort ignores
+   * them, so the Stats panel and the list it sits above can disagree about the
+   * cohort. `tom_days` IS a browse_projection column, so the fix is the same one
+   * migration 535 applied to the plot measure: point `pg_column` at it. Left
+   * alone here because it changes what saved presets return and belongs to
+   * whoever owns the Browse cohort, not to the area wave. */
+  'tom_days_min',
+  'tom_days_max',
 ]);
 
 /* Minimal PostgREST builder shape we need to call into. The real

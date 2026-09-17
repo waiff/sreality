@@ -1353,17 +1353,25 @@ def _build_registry() -> dict[str, FilterDef]:
             unit="m²",
             aliases=("area_max", "areaMax"),
         ),
-        # THE plot area is a MEASURE, not a column (migration 534): for `pozemek`
-        # it is `area_m2` — the headline is polymorphic by design (rule 23) and for
-        # a parcel it IS the parcel — and `estate_area` for every other category.
-        # `pg_column=None` because no single listings column answers this filter;
-        # every reader calls `plot_area_m2(category_main, area_m2, estate_area)`
-        # (toolkit.measures.plot_area_sql). Reading the bare column dropped 32 626
-        # of 101 021 active land rows (2026-09-17).
+        # THE plot area is a MEASURE, not a raw column (migration 534): for
+        # `pozemek` it is `area_m2` — the headline is polymorphic by design
+        # (rule 23) and for a parcel it IS the parcel — and `estate_area` for
+        # every other category. Reading the bare column dropped 32 626 of
+        # 101 021 active land rows (2026-09-17).
+        #
+        # `pg_column` NAMES THE MEASURE'S PUBLISHED COLUMN, and must never be
+        # None: the SPA's `registryQueryBuilder.applyRegistryFilters` skips any
+        # browse filter whose `pg_column` is null, so a None here is not a note
+        # about how the filter is applied — it is the filter silently not being
+        # applied at all. Migration 535 publishes `plot_area_m2` on all three
+        # Browse relations (browse_projection -> browse_list, properties_map_mv,
+        # listing_feed_public) precisely so this can point at a column; the
+        # API-side readers call `toolkit.measures.plot_area_sql` over `listings`,
+        # which has no such column. One definition, two spellings, same answer.
         FilterDef(
             id="min_estate_area",
             type=FilterType.FLOAT,
-            pg_column=None,
+            pg_column="plot_area_m2",
             default=None,
             description=(
                 "Lower bound on PLOT area in m², for houses (`dum`) and land "
@@ -1382,7 +1390,7 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="max_estate_area",
             type=FilterType.FLOAT,
-            pg_column=None,
+            pg_column="plot_area_m2",
             default=None,
             description="Upper bound on PLOT area in m². See `min_estate_area`.",
             category=CATEGORY_PROPERTY,

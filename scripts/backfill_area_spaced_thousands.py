@@ -7,13 +7,22 @@ is identical either way: call the portal's own `areas_from_params` over
 
     idnes      `usable_area` used to be `užitná or podlahová or plocha`, so a page stating
                only one of the other two labels wrote that number into the column every
-               consumer reads as the užitná measure.
+               consumer reads as the užitná measure. That narrowing is FORWARD-ONLY and
+               idnes is NOT in `DEFAULT_SOURCES` because of it: this job never blanks a
+               stored value, so it cannot retract the wider reading — and there is
+               essentially nothing to retract (the label is present on 100 % of a 10k-row
+               sample; ONE row corpus-wide carries a usable_area its own `area_basis` says
+               came from the fallback). `--sources idnes` still runs, for the areas the
+               grammar and the parcel slot CAN still move.
     mmreality  the parcel was read from `landArea` / `plotArea` — keys carrying a value on
-               ZERO of 14,417 stored rows — falling back to `totalArea`, which is the
-               page's own `parcelArea + usableArea` SUM. That inflated 1,178 active
-               houses' plots by 44-50 %, and 1,515 more houses still carry the pre-W1
-               shape (the same sum as their HEADLINE, estate_area NULL) because nothing
-               ever re-derived them.
+               ZERO of 14,417 stored rows — falling back to `totalArea`, which the page
+               DERIVES rather than measures. The arithmetic differs by category —
+               `parcelArea + usableArea` on a dum, `== usableArea` on komerční/ostatní,
+               `== parcelArea` on land — but the conclusion does not: it is never the
+               parcel. That inflated 1,178 active houses' plots by 44-50 %, and 1,515 more
+               houses still carry the pre-W1 shape (the same derived figure as their
+               HEADLINE, estate_area NULL) because nothing ever re-derived them. This is
+               the portal a bare run walks FIRST.
 
 Until W19, `ceskereality`, `realitymix`, `remax`, `maxima` and `bazos` each carried a
 private copy of the naive area regex — it matched the FIRST bare digit run before an `m²`,
@@ -106,9 +115,10 @@ portals every change grew or filled a value and none shrank one, because a trunc
 only lose digits. **W21's two shrink on purpose** and the sentence above is why that is
 safe rather than lossy: mmreality's `estate_area` falls from `parcelArea + usableArea` to
 `parcelArea` (1,178 active houses, 44-50 % too large) and 1,515 more houses' `area_m2`
-falls from that same sum to the interior. The 18 mmreality rows corpus-wide whose page
-states NO measure at all (5 byt, 2 komercni, 11 dum: no `usableArea` and no `parcelArea`)
-keep the headline they have — the never-blank rule, doing its job.
+falls from that same derived figure to the interior. The 19 mmreality rows corpus-wide
+whose page states NO measure at all (5 byt, 2 komerční, 11 dum and 1 inactive pozemek:
+no `usableArea` and no `parcelArea`) keep the headline they have — the never-blank rule,
+doing its job.
 
 **W17's land heal is subsumed, not repeated.** `backfill_land_headline_area` copied
 `estate_area` into `area_m2` for land rows — and on these portals `estate_area` was itself
@@ -155,17 +165,34 @@ from scripts.backfill_support import (
 
 LOG = logging.getLogger("backfill_area_spaced_thousands")
 
-# Every portal with an area derivation wired below — the allowlist `--sources` is checked
-# against, and the default set a bare run walks. The first five are W19's (the naive
-# grammar), the last two W21's (a wrong key); the module docstring says what each was.
-# sreality and bezrealitky are not here: nothing about their area mapping changed.
+# The portals a BARE run walks, in order. mmreality leads because it is the only one
+# with rows that are wrong TODAY and it is the smallest corpus (14,417 rows), so a run
+# that spends its `--max-seconds` budget still finishes the portal that needed it; the
+# five behind it are W19's, each a big corpus with a decaying tail.
 DEFAULT_SOURCES: tuple[str, ...] = (
-    "ceskereality", "realitymix", "remax", "maxima", "bazos", "idnes", "mmreality")
+    "mmreality", "ceskereality", "realitymix", "remax", "maxima", "bazos")
+
+# Wired, but NOT walked by default — `--sources idnes` still runs it. W21 narrowed
+# idnes's `usable_area` to its own interior-area label alone (the parser names it; this
+# file does not), and that narrowing is FORWARD-ONLY: the heal never blanks a stored
+# value, so it cannot retract the wider reading, and there is almost nothing to retract
+# anyway — the label is present on 100 % of a 10k-row sample, and ONE row corpus-wide
+# carries a usable_area its own area_basis says came from the fallback. A default idnes
+# walk would therefore read ~206k `raw_json` blobs to change ~nothing while starving the
+# portals that do move. See the module docstring.
+EXTRA_SOURCES: tuple[str, ...] = ("idnes",)
+
+# The allowlist `--sources` is validated against: every portal with a derivation wired
+# in `_areas_for`. sreality and bezrealitky are absent — nothing about their area
+# mapping changed, and neither ever ran the naive grammar.
+WIRED_SOURCES: tuple[str, ...] = DEFAULT_SOURCES + EXTRA_SOURCES
 
 # mmreality publishes no spec table either, but for the opposite reason to bazos: its whole
 # source object IS `raw_json` (`raw = dict(obj)` in the parser), so its measures are
 # TOP-LEVEL raw_json keys and its `areas_from_params` takes that object, not a `params` map
-# and no title. Projected as a narrow jsonb so a page never detoasts for the other keys.
+# and no title. Projected as a narrow jsonb: the row's `raw_json` is detoasted either
+# way (the keys live inside it), but only three values cross the wire instead of a
+# ~17 kB object per row, 500 rows to a page.
 OBJECT_SOURCES: frozenset[str] = frozenset({"mmreality"})
 
 # bazos publishes no spec table: its areas live in the ad's free text, so its page fields
@@ -227,8 +254,9 @@ _SELECT_SQL_TEMPLATE = """
 """
 
 # The three page-field shapes, one per substrate. Spelled apart rather than projected for
-# everyone, so a spec-table portal never detoasts `description` and mmreality's object
-# read never pulls its whole 17 kB blob.
+# everyone: a spec-table portal never touches `description` at all (an unreferenced
+# column is not read), and mmreality's lane TRANSFERS three values rather than its
+# whole ~17 kB object — the detoast of `raw_json` itself is unavoidable there.
 _FIELDS_PARAMS = ("raw_json->'params' AS params, raw_json->>'title' AS title,\n"
                   "           NULL::text AS ad_text")
 _FIELDS_TEXT = ("NULL::jsonb AS params, raw_json->>'title' AS title,\n"
@@ -410,7 +438,9 @@ def _report(counts: dict[str, Counter], *, dry_run: bool) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sources", default=",".join(DEFAULT_SOURCES),
-                        help="Comma-separated portals to heal, walked one at a time.")
+                        help="Comma-separated portals to heal, walked one at a time. "
+                             f"Default: {','.join(DEFAULT_SOURCES)}. Also wired but not "
+                             f"walked by default: {','.join(EXTRA_SOURCES)}.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Max listings EXAMINED this run. Default: all of them.")
     parser.add_argument("--batch-size", type=int, default=500,
@@ -447,7 +477,7 @@ def main() -> int:
         return 2
 
     sources = [s.strip() for s in args.sources.split(",") if s.strip()]
-    unknown = [s for s in sources if s not in DEFAULT_SOURCES]
+    unknown = [s for s in sources if s not in WIRED_SOURCES]
     if unknown:
         print(f"ERROR: no area derivation wired for {unknown}.", file=sys.stderr)
         return 2

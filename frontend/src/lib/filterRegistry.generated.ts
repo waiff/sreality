@@ -1915,7 +1915,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     {
       "id": "min_estate_area",
       "type": "float",
-      "pg_column": null,
+      "pg_column": "plot_area_m2",
       "default": null,
       "description": "Lower bound on PLOT area in m², for houses (`dum`) and land (`pozemek`) alike. Reads the `plot_area_m2` measure, which is `area_m2` for land and `estate_area` otherwise — not the `estate_area` column, which four portals leave null on land. Apartments usually have no plot at all.",
       "category": "Property",
@@ -1945,7 +1945,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     {
       "id": "max_estate_area",
       "type": "float",
-      "pg_column": null,
+      "pg_column": "plot_area_m2",
       "default": null,
       "description": "Upper bound on PLOT area in m². See `min_estate_area`.",
       "category": "Property",

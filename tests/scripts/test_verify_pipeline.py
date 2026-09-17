@@ -1239,6 +1239,8 @@ def test_area_divergence_catches_the_mmreality_plot_area_defect() -> None:
     res = _divergence(_LIVE_DUM_CELLS)
     assert res["status"] == "fail"
     assert res["value"] == 100.0  # the 7d arm: 113 of 113 pairs
+    # Arm 1 decided the status, so arm 1's number is the headline.
+    assert res["details"]["value_arm"] == "area_vs_usable"
     named = " ".join(res["details"]["offenders"])
     assert "mmreality/dum/prodej" in named
     for clean in ("sreality", "idnes", "bazos"):
@@ -1262,11 +1264,14 @@ def test_the_derived_sum_arm_catches_a_side_column_that_is_not_a_measurement() -
     assert res["status"] == "fail"
     named = " ".join(res["details"]["estate_sum_offenders"])
     assert "mmreality/dum/prodej" in named and "sreality" not in named
-    assert "DERIVED SUM" in res["message"]
-    # arm 1 is clean here, and its own number is what `value` reports — the two are
-    # not the same scale of evidence and must not be averaged into one figure.
-    assert res["value"] == 0.0
+    # The tile reports THE FAILING ARM. Arm 1 is clean here, so a `value` of 0.0
+    # beside a `fail` status would be a check contradicting itself — and the two
+    # numbers are not the same scale of evidence, so they are never merged either.
+    assert res["message"].startswith("1 portal/category cell(s) carry a DERIVED SUM")
+    assert res["value"] == 62.0
+    assert res["details"]["value_arm"] == "estate_sum"
     assert res["details"]["estate_sum_worst_share"] == 0.62
+    assert res["details"]["worst_share"] == 0.0        # arm 1, still published
 
 
 def test_the_derived_sum_arm_tolerates_the_live_coincidence_rate() -> None:

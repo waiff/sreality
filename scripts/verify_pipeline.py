@@ -1832,7 +1832,9 @@ def check_area_vs_usable_divergence(conn: Any, thresholds: dict[str, Any]) -> di
 
     The two arms carry separate thresholds and are reported separately, because 57% of
     divergence and 2.6% of sum-shaped rows are not the same scale of evidence and one
-    `worst` over both would mislabel whichever number won."""
+    `worst` over both would mislabel whichever number won. `value` is THE FAILING ARM's
+    number: a tile whose headline figure comes from the clean arm while the status comes
+    from the other one is a check reporting a fact it did not fail on."""
     cells, unavailable = _plausibility_cells(conn)
     if not cells:
         return _inert_measure_check("area_vs_usable_divergence", unavailable)
@@ -1871,17 +1873,36 @@ def check_area_vs_usable_divergence(conn: Any, thresholds: dict[str, Any]) -> di
              f"across {scored} scored portal/category arm(s))."
     )
     if sum_offenders:
-        message += (
-            f" Also {len(sum_offenders)} cell(s) carry a DERIVED SUM in estate_area "
-            f"(worst {sum_worst:.1%}): " + "; ".join(sum_offenders[:3])
-            + " — that portal's parser is reading a page-computed total as the parcel; "
-            "check its areas_from_params against the page's own parcel label."
-        )
+        # Lead with the failing arm when it is the one that decided the status.
+        if _STATUS_SEVERITY[sum_status] > _STATUS_SEVERITY[status]:
+            message = (
+                f"{len(sum_offenders)} portal/category cell(s) carry a DERIVED SUM in "
+                f"estate_area (worst {sum_worst:.1%}): " + "; ".join(sum_offenders[:6])
+                + " — that portal's parser is reading a page-computed total as the "
+                "parcel; check its areas_from_params against the page's own parcel "
+                f"label. (area_m2 vs usable_area is clean at worst {worst:.1%}.)"
+            )
+        else:
+            message += (
+                f" Also {len(sum_offenders)} cell(s) carry a DERIVED SUM in estate_area "
+                f"(worst {sum_worst:.1%}): " + "; ".join(sum_offenders[:3])
+                + " — that portal's parser is reading a page-computed total as the "
+                "parcel; check its areas_from_params against the page's own parcel label."
+            )
+    # The headline number follows the SEVERITY, not the arm order: when only the
+    # derived-sum arm is in trouble, reporting arm 1's clean 0.0% beside a `fail`
+    # status is a tile that contradicts itself.
+    overall = _worst_status(status, sum_status)
+    value = (sum_worst if _STATUS_SEVERITY[sum_status] > _STATUS_SEVERITY[status]
+             else worst)
     return {
         "check_key": "area_vs_usable_divergence",
-        "status": _worst_status(status, sum_status),
-        "value": round(worst * 100, 2),
+        "status": overall,
+        "value": round(value * 100, 2),
         "details": {"worst_share": round(worst, 4), "warn": warn, "fail": fail,
+                    "value_arm": ("estate_sum"
+                                  if _STATUS_SEVERITY[sum_status] > _STATUS_SEVERITY[status]
+                                  else "area_vs_usable"),
                     "min_rows": min_rows, "offenders": offenders,
                     "cells_read": len(cells), "arms_scored": scored,
                     "estate_sum_worst_share": round(sum_worst, 4),

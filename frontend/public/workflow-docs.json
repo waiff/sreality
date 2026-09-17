@@ -428,8 +428,8 @@
     },
     {
       "filename": "backfill_area_spaced_thousands.yml",
-      "name": "Backfill areas truncated on a spaced thousands group (W19)",
-      "description": "One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax, maxima and bazos parsers each carried a private copy of the naive area regex: it matched the FIRST bare digit run before an `m²`, so the Czech thousands format every one of them renders (\"5 870 m²\", \"1 063 m²\" with a no-break space) parsed from INSIDE the number and stored 870 / 63. Measured on production 2026-09-17:",
+      "name": "Backfill portal areas from the row's own page fields (W19 + W21)",
+      "description": "One-off, dispatch-only heal, in two generations.",
       "portal": null,
       "manual": true,
       "schedules": [],
@@ -450,7 +450,7 @@
         },
         {
           "name": "sources",
-          "description": "Comma-separated portals to heal, walked one at a time (blank = all five)",
+          "description": "Comma-separated portals to heal, walked one at a time. Blank = the default set (mmreality, ceskereality, realitymix, remax, maxima, bazos — mmreality first). `idnes` is wired but never walked by default; name it explicitly to run it.",
           "required": false,
           "type": "string",
           "default": "",

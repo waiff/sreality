@@ -500,18 +500,28 @@ def areas_from_params(
     chain this replaced read `landArea or plotArea or totalArea`: on 14,417 stored rows
     `landArea` and `plotArea` carry a value on EXACTLY ZERO of them — they are keys the
     page declares and never fills — so `estate_area` was always `totalArea`, and
-    `totalArea` is not a measure at all. It is a SUM the page derives:
-    `totalArea = parcelArea + usableArea` (verified on three captures and on 4,133 stored
-    rows carrying all three), just as `parcelArea = builtUpArea + gardenArea`. Writing it
-    into `estate_area` inflated 1,178 active houses' plots by 44-50 %, and before W1 the
-    same number was the HEADLINE on 1,515 more. `parcelArea` is stated on every one of the
+    `totalArea` is not a measure at all. It is a figure the page DERIVES, and what it sums
+    depends on the category: `parcelArea + usableArea` on a dum (verified on three captures
+    and on 4,133 stored rows carrying all three, just as `parcelArea = builtUpArea +
+    gardenArea`), `== usableArea` on komerční / ostatní, which state no parcel, and
+    `== parcelArea` on a pozemek, which has no interior to add. Writing it into
+    `estate_area` inflated 1,178 active houses' plots by 44-50 %, and before W1 the same
+    number was the HEADLINE on 1,515 more. `parcelArea` is stated on every one of the
     3,653 active land rows and 2,693 active houses, and on land it equals `totalArea`
-    exactly (0 rows disagree), so dropping the sum costs nothing and stops the parser
-    inventing a measure the portal never published.
+    exactly (0 rows disagree), so dropping the derived figure costs nothing there and stops
+    the parser inventing a measure the portal never published.
 
-    `totalArea` is therefore not offered to the resolver in ANY slot: a derived sum stamped
-    'total' would be a confident wrong label, which is worse than the missing value it
-    replaces. A house with no `usableArea` lands NULL, and its parcel is in `estate_area`.
+    `totalArea` is therefore not offered to the resolver in ANY slot: a derived figure
+    stamped 'total' would be a confident wrong label, which is worse than the missing value
+    it replaces. That costs a headline on 19 rows corpus-wide whose page states neither
+    input (5 byt, 2 komerční, 11 dum, 1 inactive pozemek); their parcel, when they have
+    one, is in `estate_area`.
+
+    `estate_area` IS filled here, on land too — from `parcelArea`, a cell the page itself
+    labels "Plocha parcely". That is the rule for every writer: fill `estate_area` only
+    from a LABELLED parcel, never by synthesising one from `area_m2`. What no writer may
+    do is manufacture the column for a portal whose land pages carry no parcel label —
+    `public.plot_area_m2` (migration 534) is what makes those rows reachable.
     """
     plot = _to_float(obj.get("parcelArea"))
     area_m2, area_basis = derive_headline_area(

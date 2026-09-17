@@ -1787,19 +1787,22 @@ renumber.** Navigate by area:
     *mmreality's parcel is `parcelArea` ("Plocha parcely").* The parser read
     `landArea or plotArea or totalArea`. `landArea` and `plotArea` are keys the page declares
     and **never fills** — a value on ZERO of 14,417 stored rows — so `estate_area` was always
-    `totalArea`, and `totalArea` is not a measure at all: the page derives it as
-    `parcelArea + usableArea` (4,133 stored rows carry all three and agree; `parcelArea` is
-    itself `builtUpArea + gardenArea`). Live before the fix: **1,178 active houses** carried a
-    plot 44–50 % too large, **1,515 more** still carried that same sum as their HEADLINE (the
-    pre-W1 shape, never re-derived because nothing refetched them), and `parcelArea` was
-    unmapped on all **3,653 active land rows** and 755 komerní. The fix is one
+    `totalArea`, and `totalArea` is not a measure at all: the page DERIVES it, and **what it sums depends on
+    the category** — `parcelArea + usableArea` on a dum (4,133 stored rows carry all three and
+    agree; `parcelArea` is itself `builtUpArea + gardenArea`), `== usableArea` on
+    komerční / ostatní, which state no parcel, and `== parcelArea` on a pozemek, which has no
+    interior to add. The arithmetic differs by category; the conclusion does not. Live before
+    the fix: **1,178 active houses** carried a plot 44–50 % too large, **1,515 more** still
+    carried that same derived figure as their HEADLINE (the pre-W1 shape, never re-derived
+    because nothing refetched them), and `parcelArea` was unmapped on all **3,653 active land
+    rows** and 755 komerční. The fix is one
     `mmreality.areas_from_params(obj, category_main=)` — usable ← `usableArea`, plot and
     `estate_area` ← `parcelArea`, garden ← `gardenArea` — and `totalArea` is offered to the
-    resolver in NO slot: a derived sum stamped `'total'` would be a confident wrong label,
-    which is worse than the missing value it replaces. That costs a headline on exactly **18
-    rows corpus-wide** (5 byt, 2 komerní, 11 dum) whose page states neither input, and nothing
-    on land, where `parcelArea` equals `totalArea` on every one of 4,568 rows because a parcel
-    has no interior to add. mmreality is a JSON-object portal, so its function takes the estate
+    resolver in NO slot: a derived figure stamped `'total'` would be a confident wrong label,
+    which is worse than the missing value it replaces. That costs a headline on exactly **19
+    rows corpus-wide** (5 byt, 2 komerční, 11 dum and one inactive pozemek) whose page states
+    neither input, and nothing on land, where `parcelArea` equals `totalArea` on every one of
+    4,568 rows. mmreality is a JSON-object portal, so its function takes the estate
     object (`raw_json` IS that object) rather than a `params` map and no title; it exports
     `AREA_OBJECT_KEYS` so the heal projects exactly the keys the parser reads instead of
     respelling them.
@@ -1834,9 +1837,14 @@ renumber.** Navigate by area:
     no heal of its own. mmreality's arm of that heal walks the portal WHOLE rather than by the
     truncation fingerprint: its numbers are typed JSON that never met a regex, and a land row
     carrying the sum as its headline with NULL in every other area column satisfies neither
-    fingerprint arm (3,443 of 14,417 rows). `scripts/backfill_mmreality_areas.py` and its
-    workflow are DELETED — they re-spelled the phantom chain, so keeping them meant keeping a
-    second, wrong copy of the key order.
+    fingerprint arm (3,443 of 14,417 rows). It is also FIRST in the default set — the only
+    portal with rows that are wrong today, and the smallest corpus, so a run that spends its
+    `--max-seconds` budget still finishes it. **idnes is wired but NOT walked by default:** the
+    užitná narrowing is forward-only (the heal never blanks a stored value, and there is one
+    row corpus-wide to retract), so a default idnes walk would read ~206k `raw_json` blobs to
+    change ~nothing while starving the portals that do move; `--sources idnes` still runs it.
+    `scripts/backfill_mmreality_areas.py` and its workflow are DELETED — they re-spelled the
+    phantom chain, so keeping them meant keeping a second, wrong copy of the key order.
 
     **"Plot area" is a MEASURE, not a column** (migration 534). `plot_area_m2(category_main,
     area_m2, estate_area)` = `area_m2` for `pozemek`, `estate_area` otherwise — the same
@@ -1848,21 +1856,51 @@ renumber.** Navigate by area:
     `pozemek`: **32,626 of 101,021 rows (32.3 %) carry no `estate_area`** — bazos 15,846,
     realitymix 11,470, mmreality 3,653, remax 1,649 — and 31,613 of them carry the parcel in
     `area_m2`. So `min_estate_area = 500` dropped a third of the country's land inventory
-    without a word. The fix is the name, **not** a writer change: filling `estate_area` for land
-    would duplicate `area_m2` into a second column on 32k rows and leave every future portal to
-    remember the rule, so the five portals that DO publish a parcel cell on a land page keep
-    publishing it and the rest stay faithful to their pages. Live readers moved:
+    without a word. The fix is the name, **not** a writer change. **The writer rule, stated once:** a
+    parser fills `estate_area` ONLY from a parcel cell the page itself LABELS — sreality,
+    bezrealitky, idnes, ceskereality, maxima and (from W21) mmreality all do, land rows
+    included, and that is faithful reporting rather than duplication. What no parser may do is
+    SYNTHESISE the column from `area_m2` for the four portals whose land pages carry no parcel
+    label: that would copy the headline into a second column on 32k rows, leave every future
+    portal to remember the rule, and make the data lie in order to spare the reader a function
+    call. Live readers moved:
     `toolkit.comparables._shared_filter_where` (comparables + velocity + the transit corridor)
-    and the watchdog matcher `api/notifications._build_match_clauses` — rule 16's two sites, and
-    here the SQL is textually identical because neither relation publishes a plot column — plus
-    the filter registry's `min/max_estate_area`, whose `pg_column` is now `None` (no single
-    column answers them) with the measure named in the description the agents read. **Known
-    residue, named:** `browse_stats_properties`, `browse_list` and `browse_map_cells` still
-    compare `l.estate_area` directly. They are inert from the SPA today — `frontend/src/lib/
-    queries.ts` sends no `estate_area_min_filter`, so the Browse UI's "Lot area" input reaches
-    the API path but not those RPCs — and moving them means re-creating three large
-    `SECURITY DEFINER` bodies, which is its own wave with its own drift hazard (migrations
-    371/376).
+    and the watchdog matcher `api/notifications._build_match_clauses` — rule 16's two sites,
+    and there the SQL is textually identical, because neither relation publishes a plot column.
+
+    **On the SPA the same measure has to BE a column, and getting that wrong is a silent
+    no-op** (migration 535, caught in review). `registryQueryBuilder.applyRegistryFilters` is
+    how a browse-agenda filter becomes a PostgREST predicate, and it SKIPS any filter whose
+    `pg_column` is null — so the first cut, which set `pg_column = None` because no `listings`
+    column answers these filters, turned the Browse "Lot area" inputs from "applies a
+    predicate that drops land" into "applies nothing at all": the UI still offered them, the
+    query no longer used them, and CI stayed green because the drift test skipped null
+    `pg_column` too. It also broke rule 16 the other way round — the watchdog matching on the
+    measure while Browse matched on nothing. So `plot_area_m2` is now a COLUMN of the read
+    model, computed by the same function inside `browse_projection` (→ `browse_list`,
+    `properties_map_mv`) and `listing_feed_public` — the three relations Browse filters
+    against — and `pg_column` points at it. One definition, two spellings: a function call
+    over `listings`, a published column over the read model.
+    `test_frontend_read_contract_subset_of_projection` already demands the projection publish
+    every browse filter's `pg_column`, so the two ends cannot drift apart again, and a null
+    `pg_column` on a browse filter is now itself a test failure unless it is declared in
+    `HAND_CODED_BROWSE_FILTERS` (something applies it by hand) or in the new
+    `BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY` (nothing does, and the reason is recorded). That
+    second set exists because the hardened test found `tom_days_min/max` already in that
+    state: they reach the Stats RPC and no list predicate at all, so Browse's Stats panel and
+    the list beneath it can disagree about the cohort — a pre-existing gap this wave found,
+    named, and deliberately did not fix.
+
+    **Known residue, named.** Browse's table still SELECTS and SORTS the raw `estate_area`
+    column while it now FILTERS the measure, so a bazos/realitymix/mmreality/remax land row can
+    match "plots ≥ 5,000 m²" and render an EMPTY Lot-area cell — the fix is three lines but
+    `estate_area` is a `SortField`, so a saved `?sort=estate_area` would silently fall back to
+    the default sort, which makes it a Browse-cohort decision rather than an area one. And
+    `browse_stats_properties`, `browse_list`'s own RPCs and
+    `browse_map_cells` still compare `l.estate_area` in SQL. They are inert from the SPA today
+    (`frontend/src/lib/queries.ts` sends them no `estate_area_min_filter`), and moving them
+    means re-creating three large `SECURITY DEFINER` bodies — its own wave, with its own drift
+    hazard (migrations 371/376).
 
     **The plausibility view gained the arm that would have caught the sum** (migration 534
     appends two columns to `measure_plausibility_by_source`). `estate_sum_share` is the share of

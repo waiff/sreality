@@ -1,6 +1,31 @@
-name: Backfill areas truncated on a spaced thousands group (W19)
+name: Backfill portal areas from the row's own page fields (W19 + W21)
 
-# One-off, dispatch-only heal. Until W19 the ceskereality, realitymix, remax, maxima and
+# One-off, dispatch-only heal, in two generations.
+#
+# W21 (2026-09-17) — mmreality, and the reason a bare run walks it FIRST. Its parser read
+# the parcel from `landArea` / `plotArea`, keys the page declares and NEVER fills (a value
+# on ZERO of 14,417 stored rows), falling back to `totalArea` — a figure the page DERIVES
+# (`parcelArea + usableArea` on a dum; `== usableArea` on komerční/ostatní; `== parcelArea`
+# on land) and never a measurement. The real parcel is `parcelArea`, the page's own
+# "Plocha parcely". Live: 1,178 active houses with a plot 44-50 % too large, 1,515 more
+# still carrying that derived figure as their HEADLINE, and `parcelArea` unmapped on all
+# 3,653 active land rows.
+#
+#   ** THIS GENERATION SHRINKS VALUES, ON PURPOSE. ** W19's five portals could only ever
+#   GAIN digits (a truncation loses them), and the note below still says so for them. For
+#   mmreality the correction goes the other way: `estate_area` falls from the derived sum
+#   to the parcel on 1,178 active houses, and `area_m2` falls from that same figure to the
+#   interior on 1,515 more. A shrinking area on mmreality is the fix working, not a
+#   regression. 19 rows corpus-wide state neither `usableArea` nor `parcelArea` and keep
+#   whatever headline they already have (the never-blank rule).
+#
+# idnes is WIRED but NOT in the default set: W21 also narrowed its `usable_area` to the
+# "užitná plocha" cell alone, and that narrowing is forward-only (this job never blanks a
+# stored value, and the label is present on 100 % of a 10k-row sample). `--sources idnes`
+# still runs it, for the areas the grammar and the parcel slot can still move; a DEFAULT
+# idnes walk would read ~206k raw_json blobs to change ~nothing.
+#
+# W19 — until then the ceskereality, realitymix, remax, maxima and
 # bazos parsers each carried a private copy of the naive area regex: it matched the FIRST
 # bare digit run before an `m²`, so the Czech thousands format every one of them renders
 # ("5 870 m²", "1 063 m²" with a no-break space) parsed from INSIDE the number and stored
@@ -51,8 +76,10 @@ name: Backfill areas truncated on a spaced thousands group (W19)
 # stop cursor is logged for the resume.
 #
 # It never writes NULL over a stored area: a column the re-derive cannot produce is not a
-# change and is not written, so a shape drift can never blank a row. The live simulation over
-# 6,000 rows agrees — every change grows or fills a value, none shrinks one.
+# change and is not written, so a shape drift can never blank a row. On W19's five portals
+# the live simulation over 6,000 rows agrees that every change grows or fills a value and
+# none shrinks one — a truncation can only lose digits. That is NOT true of W21's
+# mmreality arm, which shrinks by design; see the top of this file.
 #
 # Writes NO `listing_snapshots` row. The area columns ARE hashed, but correcting our own
 # mis-parse of the SAME page we already read is the sanctioned rule-2 exception (the
@@ -96,7 +123,10 @@ on:
           - "false"
           - "true"
       sources:
-        description: Comma-separated portals to heal, walked one at a time (blank = all five)
+        description: >-
+          Comma-separated portals to heal, walked one at a time. Blank = the default set
+          (mmreality, ceskereality, realitymix, remax, maxima, bazos — mmreality first).
+          `idnes` is wired but never walked by default; name it explicitly to run it.
         required: false
         default: ""
         type: string

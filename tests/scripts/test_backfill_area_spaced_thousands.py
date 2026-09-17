@@ -239,7 +239,7 @@ def test_no_predicate_ever_touches_a_wide_column() -> None:
     detoast every candidate row, the cost that killed `backfill_mmreality_areas`'s first
     live dispatch on a 120 s statement_timeout."""
     assert "raw_json" not in mod._SUSPECT and "description" not in mod._SUSPECT
-    for source in mod.DEFAULT_SOURCES:
+    for source in mod.WIRED_SOURCES:
         where = mod._select_sql(source).split("WHERE", 1)[1]
         assert "raw_json" not in where and "description" not in where
         assert "raw_json" not in mod._count_sql(source)
@@ -248,7 +248,7 @@ def test_no_predicate_ever_touches_a_wide_column() -> None:
 def test_the_page_read_is_one_source_at_a_time() -> None:
     """The paging SELECT measured 40.5 s against the cluster's 120 s default. A page that
     filtered `source = ANY(...)` stepped over every other portal's rows to find its own."""
-    for source in mod.DEFAULT_SOURCES:
+    for source in mod.WIRED_SOURCES:
         flat = " ".join(mod._select_sql(source).split())
         assert "source = %(source)s" in flat and "ANY(%(sources)s" not in flat
         assert "id > %(after)s::bigint" in flat and "ORDER BY id" in flat
@@ -271,12 +271,24 @@ def test_the_write_touches_areas_only_and_enqueues_in_the_same_statement() -> No
 
 def test_the_healed_population_is_every_portal_with_a_derivation_wired() -> None:
     """W19's five carried the naive grammar; W21's two carried a wrong KEY. One job either
-    way, because the fix lands inside the function `parse_detail` and the heal share."""
-    assert set(mod.DEFAULT_SOURCES) == {
+    way, because the fix lands inside the function `parse_detail` and the heal share.
+
+    WIRED and WALKED-BY-DEFAULT are deliberately different sets. idnes is wired — it has
+    the shared shape and `--sources idnes` runs it — but a bare run skips it: its W21
+    change is forward-only (this job never blanks a stored value, and one row corpus-wide
+    has anything to retract), so walking its ~206k rows by default would spend the whole
+    budget changing ~nothing.
+    """
+    assert set(mod.WIRED_SOURCES) == {
         "ceskereality", "realitymix", "remax", "maxima", "bazos", "idnes", "mmreality"}
-    # It doubles as the allowlist `--sources` is validated against, so an unwired portal
-    # exits 2 rather than raising mid-page with rows already written.
-    for source in mod.DEFAULT_SOURCES:
+    assert set(mod.DEFAULT_SOURCES) == set(mod.WIRED_SOURCES) - {"idnes"}
+    assert mod.EXTRA_SOURCES == ("idnes",)
+    # mmreality leads: the only portal whose stored rows are wrong TODAY, and the
+    # smallest corpus, so a run that spends `--max-seconds` still finishes it.
+    assert mod.DEFAULT_SOURCES[0] == "mmreality"
+    # The tuple doubles as the allowlist `--sources` is validated against, so an unwired
+    # portal exits 2 rather than raising mid-page with rows already written.
+    for source in mod.WIRED_SOURCES:
         assert mod._areas_for(source, params={}, title=None, ad_text=None,
                               category_main=None) is None
 
