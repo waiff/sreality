@@ -894,10 +894,16 @@ ORDER BY m.cluster_key, m.listing_id
 # deliberately NOT a hash of the rows: the point is to avoid reading them.
 CANDIDATE_FINGERPRINT_COLUMNS: tuple[str, ...] = ("n_pairs", "decided_at", "n_locks")
 
+# DELIBERATELY UNFILTERED by the display floor, unlike the cohort it fingerprints. The score
+# index is PARTIAL (`where zone = 'band'`, migration 528), so a `score >= …` predicate cannot
+# use it and would make both halves a filtered scan on EVERY page; `max(decided_at)` over the
+# whole table is a one-row index scan on `autodedup_pairs_decided_idx`, and counting every pair
+# is a strict superset of counting the cohort — a superset invalidates more often, never less,
+# which is the safe direction for a cache.
 CANDIDATE_FINGERPRINT_SQL = """
 SELECT
-    (SELECT count(*) FROM autodedup.pairs p WHERE p.score >= %(min_score)s::real),
-    (SELECT max(p.decided_at) FROM autodedup.pairs p WHERE p.score >= %(min_score)s::real),
+    (SELECT count(*) FROM autodedup.pairs),
+    (SELECT max(p.decided_at) FROM autodedup.pairs p),
     (SELECT count(*)
        FROM autodedup.cluster_members m
        JOIN autodedup.clusters c ON c.cluster_key = m.cluster_key

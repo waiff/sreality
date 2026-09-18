@@ -2891,6 +2891,57 @@ def _fan_out_store(conn: _FakeConn) -> _FakeConn:
     return conn
 
 
+def _select_heads(sql: str) -> list[str]:
+    """The top-level items of a statement's SELECT list, commas inside parens ignored."""
+    body = sql[sql.index("SELECT") + len("SELECT"):]
+    body = body[: body.index("FROM")]
+    depth, parts, current = 0, [], ""
+    for char in body:
+        if char == "(":
+            depth += 1
+        if char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += char
+    parts.append(current.strip())
+    return [part for part in parts if part]
+
+
+@pytest.mark.parametrize(
+    "sql,columns",
+    [
+        (usql.LISTING_CARDS_SQL, usql.LISTING_CARD_COLUMNS),
+        (usql.CANDIDATE_PAIRS_SQL, usql.CANDIDATE_PAIR_COLUMNS),
+        (usql.CANDIDATE_CLUSTER_MEMBERS_SQL, usql.CANDIDATE_CLUSTER_MEMBER_COLUMNS),
+        (usql.OPERATOR_PAIR_VERDICTS_SQL, usql.CANDIDATE_VERDICT_COLUMNS),
+    ],
+)
+def test_the_new_select_lists_are_their_column_tuples(sql, columns):
+    """Rows are zipped onto these names and `zip` never raises: a column added to one and not
+    the other silently mislabels every column after it."""
+    assert len(_select_heads(sql)) == len(columns)
+
+
+def test_the_fingerprint_is_three_scalars_in_the_order_it_is_read(client, conn):
+    """It has no select list over a table — three scalar subqueries — so its contract is the
+    COUNT of them and the order the route zips onto."""
+    assert usql.CANDIDATE_FINGERPRINT_SQL.count("(SELECT ") == len(
+        usql.CANDIDATE_FINGERPRINT_COLUMNS
+    )
+
+
+def test_the_card_statement_selects_the_same_columns_as_the_group_card(client, conn):
+    """One member shape, two statements. `_member_row` reads NAMES, so the day the two select
+    lists disagree the candidate card renders a listing id in the price column."""
+    assert usql.LISTING_CARD_COLUMNS == usql.MEMBER_COLUMNS[1:]
+    # …and no broker column reached either of them (E28).
+    for column in ("broker", "description", "raw_json"):
+        assert column not in usql.LISTING_CARDS_SQL
+
+
 def test_candidates_render_when_the_store_does_not_exist(client, conn):
     conn.ready = False
     resp = client.get("/autodedup/candidates")

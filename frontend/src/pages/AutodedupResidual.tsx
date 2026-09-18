@@ -390,10 +390,14 @@ export default function AutodedupResidual() {
     };
   };
 
+  /* A shortcut sets the LETTERS and nothing else: the relations the operator
+   * named — or the ones read back off the store — are kept, because rewriting
+   * them to the default fill would silently change what the save is about to
+   * write as permanent must-not-links. */
   const setCandidateUnits = (key: string, units: UnitMap) =>
     setCandidateSplits((all) => ({
       ...all,
-      [key]: { ...(all[key] ?? EMPTY_SPLIT), units },
+      [key]: { ...(all[key] ?? storedSplits[key] ?? EMPTY_SPLIT), units },
     }));
 
   return (
