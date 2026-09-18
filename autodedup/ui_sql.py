@@ -576,6 +576,8 @@ RESIDUAL_COLUMNS: tuple[str, ...] = (
     "a_cover_storage_path",
     "a_cover_sreality_url",
     "a_n_images",
+    # The pageable gallery, `a_images[0]` being the very frame `a_cover_*` names.
+    "a_images",
     "b_source",
     "b_source_url",
     "b_category_main",
@@ -591,6 +593,7 @@ RESIDUAL_COLUMNS: tuple[str, ...] = (
     "b_cover_storage_path",
     "b_cover_sreality_url",
     "b_n_images",
+    "b_images",
     "judge_verdict",
     "judge_confidence",
     "judge_tier",
@@ -608,7 +611,7 @@ RESIDUAL_COLUMNS: tuple[str, ...] = (
 #
 # Split into FROM / covers / WHERE for the same reason the cluster statement is: the count
 # behind "20 of N" reuses the filter text verbatim, and joins ONLY what the filters read.
-# The four cover/gallery LATERALs are display, so the count never runs them.
+# The per-side photo LATERALs are display, so the count never runs them.
 _RESIDUAL_FROM = """
 FROM autodedup.pairs p
 JOIN listings la ON la.id = p.listing_lo
@@ -655,22 +658,46 @@ LEFT JOIN LATERAL (
 ) bl ON true
 """
 
-_RESIDUAL_COVERS = """
+# ONE SIDE'S PHOTOS, spelled once and applied to both — the cover, the whole-album count, and
+# the first `card_frames` frames. A residual row shows the SAME gallery a group card shows
+# (the operator's own request: "click through the images on the residual page, same way I'm on
+# the groups page"), so the frame order is `GROUP_MEMBERS_SQL`'s to the letter — a second
+# spelling of it would open the carousel on a photo the cover does not name. Capped IN THE
+# STATEMENT for the reason the group card is: trimming after the fetch still drags a 120-frame
+# album across the wire for both sides of all 20 rows. Three bounded LATERALs per side, none
+# of them per-image, and the count statement runs none of them — this fragment is display.
+def _residual_photos(side: str, listing: str) -> str:
+    return f"""
 LEFT JOIN LATERAL (
     SELECT i.storage_path, i.sreality_url FROM images i
-     WHERE i.listing_id = p.listing_lo ORDER BY i.sequence NULLS LAST, i.id LIMIT 1
-) ca ON true
+     WHERE i.listing_id = p.{listing} ORDER BY i.sequence NULLS LAST, i.id LIMIT 1
+) c{side} ON true
 LEFT JOIN LATERAL (
-    SELECT count(*) AS n FROM images i WHERE i.listing_id = p.listing_lo
-) ga ON true
+    SELECT count(*) AS n FROM images i WHERE i.listing_id = p.{listing}
+) g{side} ON true
 LEFT JOIN LATERAL (
-    SELECT i.storage_path, i.sreality_url FROM images i
-     WHERE i.listing_id = p.listing_hi ORDER BY i.sequence NULLS LAST, i.id LIMIT 1
-) cb ON true
-LEFT JOIN LATERAL (
-    SELECT count(*) AS n FROM images i WHERE i.listing_id = p.listing_hi
-) gb ON true
+    SELECT json_agg(
+               json_build_object(
+                   'image_id', f.id,
+                   'storage_path', f.storage_path,
+                   'sreality_url', f.sreality_url,
+                   'sequence', f.sequence
+               )
+               ORDER BY f.rn
+           ) AS images
+      FROM (
+          SELECT i.id, i.storage_path, i.sreality_url, i.sequence,
+                 row_number() OVER (ORDER BY i.sequence NULLS LAST, i.id) AS rn
+            FROM images i
+           WHERE i.listing_id = p.{listing}
+           ORDER BY i.sequence NULLS LAST, i.id
+           LIMIT %(card_frames)s::int
+      ) f
+) f{side} ON true
 """
+
+
+_RESIDUAL_PHOTOS = _residual_photos("a", "listing_lo") + _residual_photos("b", "listing_hi")
 
 _RESIDUAL_FILTERS = """
 WHERE p.score >= %(min_score)s::real
@@ -713,9 +740,11 @@ SELECT
     la.source, la.source_url, la.category_main, la.category_type, la.disposition,
     la.area_m2, la.floor, la.total_floors, la.price_czk, la.first_seen_at, la.last_seen_at,
     la.is_active, ca.storage_path, ca.sreality_url, coalesce(ga.n, 0),
+    coalesce(fa.images, '[]'::json),
     lb.source, lb.source_url, lb.category_main, lb.category_type, lb.disposition,
     lb.area_m2, lb.floor, lb.total_floors, lb.price_czk, lb.first_seen_at, lb.last_seen_at,
     lb.is_active, cb.storage_path, cb.sreality_url, coalesce(gb.n, 0),
+    coalesce(fb.images, '[]'::json),
     j.verdict, j.confidence, j.tier,
     v.verdict, v.note, v.reasons, v.decided_by, v.decided_at
 """
@@ -724,7 +753,7 @@ RESIDUAL_SQL = (
     _RESIDUAL_SELECT
     + _RESIDUAL_FROM
     + _RESIDUAL_BLOCK
-    + _RESIDUAL_COVERS
+    + _RESIDUAL_PHOTOS
     + _RESIDUAL_WHERE
     + """
   AND (%(after_score)s::real IS NULL
@@ -743,7 +772,7 @@ RESIDUAL_RANDOM_SQL = (
     _RESIDUAL_SELECT
     + _RESIDUAL_FROM
     + _RESIDUAL_BLOCK
-    + _RESIDUAL_COVERS
+    + _RESIDUAL_PHOTOS
     + _RESIDUAL_WHERE
     + """
   AND (%(after_hash)s::text IS NULL
@@ -756,7 +785,7 @@ LIMIT %(limit)s::int
 """
 )
 
-# The residual half of "20 of N". Same FROM minus the four display LATERALs, same WHERE minus
+# The residual half of "20 of N". Same FROM minus the display photo LATERALs, same WHERE minus
 # the cursor — the cursor is where the page is, not what the filter selects. The block
 # LATERAL is NOT display and stays: the WHERE reads it, and a count that dropped it would
 # answer a different question from the list above it.

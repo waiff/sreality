@@ -227,8 +227,10 @@ GROUP_PAGE_SIZE = 25
 GROUP_MAX_PAGE_SIZE = 100
 RESIDUAL_MIN_SCORE = 0.20
 IMAGES_PER_LISTING = 30
-# The card gallery (§12): enough frames to page a member on the queue card itself, far
-# short of the album the dialog opens — a group card renders four members at once.
+# The card gallery (§12): enough frames to page an advert on the queue card itself, far
+# short of the album the dialog opens — a group card renders four members at once. BOTH
+# queues read this one cap: a residual row pages its two sides exactly like a group card
+# pages its members, so a second number would make "+K fotek v detailu" mean two things.
 GROUP_CARD_IMAGES = 12
 TOP_FEATURES = 5
 
@@ -722,6 +724,10 @@ def _side(row: dict[str, Any], prefix: str, listing_id: int) -> dict[str, Any]:
     }
     side["listing_id"] = listing_id
     side["cover"] = _cover(row[f"{prefix}cover_storage_path"], row[f"{prefix}cover_sreality_url"])
+    # The SAME pageable gallery a group card's member carries, `images[0]` being the frame
+    # `cover` names. A side whose lateral found nothing is an EMPTY list, never a missing key:
+    # the page would otherwise have to tell `undefined` from "this advert has no photos".
+    side["images"] = _json_safe(row.get(f"{prefix}images") or [])
     return side
 
 
@@ -1274,6 +1280,9 @@ def residual(
         "verdict": verdict,
         "limit": limit + 1,
         "seed": sample_seed,
+        # The per-side gallery cap. Unused by `RESIDUAL_COUNT_SQL`, which runs no photo
+        # LATERAL — psycopg binds the names a statement spells, so one params dict serves both.
+        "card_frames": GROUP_CARD_IMAGES,
         "after_score": None,
         "after_hash": None,
         "after_lo": None,

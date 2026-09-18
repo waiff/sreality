@@ -2060,6 +2060,86 @@ def test_the_card_gallery_is_capped_in_the_statement(client, conn):
     assert usql.MEMBER_COLUMNS[-1] == "images"
 
 
+def _frames(listing_id: int, *sequences: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "image_id": listing_id * 100 + seq,
+            "storage_path": f"listings/{listing_id}/{seq}.jpg",
+            "sreality_url": f"https://img.example.invalid/{listing_id}/{seq}.jpg",
+            "sequence": seq,
+        }
+        for seq in sequences
+    ]
+
+
+def test_both_sides_of_a_residual_row_carry_their_first_frames(client, conn):
+    """The operator's request, pinned: a residual row pages its photos exactly like a group
+    card. Both sides ship a bounded gallery in the cover's own order, so `images[0]` IS
+    `cover` — a second frame order would open the carousel on a photo the tile does not name.
+    `n_images` still reports the whole album, which is how the row says "+K in the detail"."""
+    a_frames, b_frames = _frames(21, 1, 2, 3), _frames(22, 1, 2)
+    conn.canned = {
+        "residual": [
+            _residual_row(
+                a_images=a_frames,
+                b_images=b_frames,
+                # The statement reads the cover off the SAME `sequence NULLS LAST, id` order,
+                # so the row Postgres hands back always agrees with itself — the fixture says
+                # so too, or the assertion below would only be testing the fixture.
+                a_cover_storage_path=a_frames[0]["storage_path"],
+                a_cover_sreality_url=a_frames[0]["sreality_url"],
+                b_cover_storage_path=b_frames[0]["storage_path"],
+                b_cover_sreality_url=b_frames[0]["sreality_url"],
+            )
+        ]
+    }
+    item = client.get("/autodedup/residual").json()["data"]["items"][0]
+    assert [f["sequence"] for f in item["a"]["images"]] == [1, 2, 3]
+    assert [f["sequence"] for f in item["b"]["images"]] == [1, 2]
+    for side in ("a", "b"):
+        assert item[side]["images"][0]["sreality_url"] == item[side]["cover"]["sreality_url"]
+        # The whole album, not the shipped slice — the "+K fotek v detailu" hint.
+        assert item[side]["n_images"] == 8
+    # ONE cap for both queues: two numbers would make that hint mean two things.
+    assert _last_call(conn, usql.RESIDUAL_SQL)["card_frames"] == routes.GROUP_CARD_IMAGES
+
+
+def test_a_residual_side_with_no_photos_is_an_empty_gallery_not_a_missing_key(client, conn):
+    """The page would otherwise have to tell `undefined` from "this advert has no photos" —
+    and it falls back to the labelled cover tile on exactly this shape."""
+    conn.canned = {"residual": [_residual_row()]}
+    item = client.get("/autodedup/residual").json()["data"]["items"][0]
+    assert item["a"]["images"] == [] and item["b"]["images"] == []
+
+
+def test_the_residual_gallery_is_capped_in_the_statement_in_one_spelling(client, conn):
+    """Capped where the group card's is (a post-fetch trim still drags both albums of all 20
+    rows across the wire), and spelled ONCE: the two residual orders share the fragment, so
+    the random sample can never page a different set of frames from the working queue."""
+    for statement in (usql.RESIDUAL_SQL, usql.RESIDUAL_RANDOM_SQL):
+        assert usql._RESIDUAL_PHOTOS in statement
+        assert statement.count("LIMIT %(card_frames)s::int") == 2
+    # Display only: the headline count runs no photo LATERAL, gallery or cover.
+    assert "card_frames" not in usql.RESIDUAL_COUNT_SQL
+    # The names are the select list's ORDER, so a gallery inserted in the wrong slot would
+    # hand the page one side's photos under the other side's cover.
+    for side in ("a", "b"):
+        at = usql.RESIDUAL_COLUMNS.index(f"{side}_n_images")
+        assert usql.RESIDUAL_COLUMNS[at + 1] == f"{side}_images"
+
+
+def test_the_residual_queue_carries_no_advert_text_even_now_it_carries_photos(client, conn):
+    """The cost + PII posture is unchanged by the gallery (E28): photos are engine evidence,
+    a TOASTed description per side of 20 rows is not, and no broker column was added."""
+    conn.canned = {"residual": [_residual_row(a_images=_frames(21, 1, 2))]}
+    item = client.get("/autodedup/residual").json()["data"]["items"][0]
+    for side in ("a", "b"):
+        assert "description" not in item[side] and "title" not in item[side]
+    assert all(sql != usql.MEMBER_TEXT_SQL for sql, _ in conn.calls)
+    for column in ("description", "broker", "raw_json", "title"):
+        assert column not in usql._RESIDUAL_SELECT
+
+
 # ----------------------------------------------------------------- the unit split (E49)
 
 

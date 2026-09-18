@@ -89,9 +89,10 @@ export interface PairCardProps {
    * a pair nobody has judged. The two are different facts, and silently
    * conflating them would teach the operator that blind rows are unjudged. */
   blind?: boolean;
-  /* QUEUE GRAIN (see ListingMini). A residual row keeps the covers as 160px
-   * thumbnails so the attribute diff, the reason and the four answers are all
-   * on screen at once; the full-size photos are the pair page's job. */
+  /* QUEUE GRAIN (see ListingMini). A residual row keeps the two galleries at
+   * 160px so the attribute diff, the reason and the four answers are all on
+   * screen at once — pageable at that size, because one cover is the weakest
+   * evidence a portal offers; the full-size photos are the pair page's job. */
   dense?: boolean;
 }
 
