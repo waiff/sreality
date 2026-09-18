@@ -85,6 +85,7 @@ import ListingMini, {
   memberAttrs,
   memberListingPath,
 } from '@/components/autodedup/ListingMini';
+import MemberText from '@/components/autodedup/MemberText';
 import VerdictButtons, { GROUP_LABELS } from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   EMPTY_ANNOTATION,
@@ -1532,6 +1533,15 @@ function MemberRow({
             </div>
           ))}
         </dl>
+        {/* THE POINT OF THE DIALOG for a developer project: five units share the
+          * photos above and the attribute row above that, and differ only in what
+          * the advert says. The text sits under the facts and over the controls,
+          * because it is read last and decides. */}
+        <MemberText
+          title={member.title}
+          text={member.description}
+          label={`#${member.listing_id}`}
+        />
         <UnitSelect
           listingId={member.listing_id}
           units={split.state.units}

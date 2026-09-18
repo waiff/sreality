@@ -3686,6 +3686,17 @@ export interface AutodedupMemberImage extends AutodedupImageRef {
 
 export interface AutodedupMemberDetail extends AutodedupMember {
   images: AutodedupMemberImage[];
+  /* THE ADVERT'S OWN WORDS, detail route only. A developer project's units share
+   * the photos and the attribute row and differ only in what the text says — so
+   * the dialog carries it and the 20-card queue does not (it would drag a TOASTed
+   * description per member of per card across the wire). Both fields arrive
+   * PII-scrubbed (E28) and the description is NOT cut at the judge's token cap:
+   * `description_truncated` is there so one component renders this text and the
+   * judge digest, which IS cut. */
+  title?: string | null;
+  description?: string | null;
+  description_truncated?: boolean;
+  description_chars?: number;
 }
 
 /* The per-image best match on the OTHER side of the pair (§12: "both image

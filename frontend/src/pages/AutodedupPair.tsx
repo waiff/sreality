@@ -32,6 +32,7 @@ import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import AttrDiffTable, { memberDiffRows } from '@/components/autodedup/AttrDiffTable';
 import EvidenceChips, { Chip, fmtScore } from '@/components/autodedup/EvidenceChips';
+import MemberText from '@/components/autodedup/MemberText';
 import VerdictButtons, { PAIR_LABELS } from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
@@ -345,11 +346,14 @@ function DigestPanel({ digest }: { digest: AutodedupDigest | null }) {
           ))}
         </dl>
       )}
-      {digest.description && (
-        <p className="mt-2 text-[0.7rem] leading-relaxed text-[var(--color-ink-2)]">
-          {digest.description}
-          {digest.description_truncated && <span className="text-[var(--color-ink-4)]"> …</span>}
-        </p>
+      {/* THE SAME component the group dialog uses, so the advert reads the same on
+        * both surfaces and the unit tokens are marked the same way. The route now
+        * sends the WHOLE scrubbed text here (the cap is the judge's token budget,
+        * not this page's), so `description_truncated` is false — the ellipsis stays
+        * for the day some other caller sends a capped digest. */}
+      <MemberText text={digest.description} headingLevel={4} label={`#${digest.listing_id}`} />
+      {digest.description_truncated && (
+        <p className="text-[0.65rem] text-[var(--color-ink-4)]">popis je zkrácen…</p>
       )}
       {digest.absent.length > 0 && (
         <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)]">
