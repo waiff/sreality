@@ -27,6 +27,8 @@ developer units apart is as often in the last paragraph as the first.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -36,6 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
+from autodedup import agreement as agreement_math
 from autodedup import progress_sql as psql
 from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
@@ -276,24 +279,56 @@ GROUP_SORTS: dict[str, str] = {
     "weakest": usql.GROUPS_WEAKEST_SQL,
     "newest": usql.GROUPS_NEWEST_SQL,
     "largest": usql.GROUPS_LARGEST_SQL,
+    # The unbiased order (D6): a seeded hash, so the sample is stable across pages and reloads.
+    "random": usql.GROUPS_RANDOM_SQL,
 }
-RESIDUAL_SORTS: dict[str, str] = {"score_desc": usql.RESIDUAL_SQL}
+RESIDUAL_SORTS: dict[str, str] = {
+    "score_desc": usql.RESIDUAL_SQL,
+    "random": usql.RESIDUAL_RANDOM_SQL,
+}
+# The sorts whose cursor's first part is the seeded hash rather than a number or a timestamp.
+RANDOM_SORT = "random"
 
 GROUP_FILTER_KEYS: frozenset[str] = frozenset(
     {
         "generation", "after", "limit", "block", "block_grain", "source", "category_main",
         "category_type", "min_size", "max_size", "min_score", "max_score", "verdict",
-        "shared_photo", "has_judgement", "sort",
+        "shared_photo", "has_judgement", "sort", "seed",
     }
 )
 RESIDUAL_FILTER_KEYS: frozenset[str] = frozenset(
     {
         "generation", "after", "limit", "block", "block_grain", "zone", "min_score",
-        "source_pair", "has_judgement", "verdict", "sort",
+        "source_pair", "has_judgement", "verdict", "sort", "seed",
     }
 )
 DETAIL_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
 BLOCK_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
+PROGRESS_FILTER_KEYS: frozenset[str] = frozenset(
+    {"generation", "seed", "surface", "min_score"}
+)
+AGREEMENT_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
+
+# THE SEED IS A NAME, NOT A PREDICATE. It reaches SQL as a parameter of `md5(key || seed)`, so
+# it could not inject anything — but it is also the IDENTITY of a sample, and a sample nobody
+# can retype is a sample nobody can reproduce. Lower-case alphanumerics, 16 characters, one
+# default: `v1` is the first session's sample and it stays that unless the operator says
+# otherwise (a rotating default would silently re-draw the sample every reload).
+DEFAULT_SEED = "v1"
+SEED_RE = re.compile(r"^[a-z0-9]{1,16}$")
+# 32 hex characters — the shape `md5()` returns, validated here so an edited cursor is a 400
+# rather than a predicate.
+HASH_RE = re.compile(r"^[0-9a-f]{32}$")
+
+# THE SAMPLE IS THE FIRST 100 OF THE SEEDED ORDER. Two of these (one per surface) is the
+# ~200-pair session D6 names; the counter counts against exactly that.
+VALIDATION_SAMPLE_SIZE = 100
+VALIDATION_SURFACES: tuple[str, ...] = ("groups", "residual")
+
+# How big a confirmed cluster may be before the agreement read stops expanding it into pairs
+# (n members imply n(n-1)/2 of them). 12 is far above the trial's group sizes and bounds the
+# implied set at 66 pairs per group; what it skipped is reported, never dropped silently.
+AGREEMENT_MAX_CLUSTER_SIZE = 12
 
 # How many blocks the picker is offered. A generation's vocabulary is the busiest blocks
 # first: a select with thousands of options is not a control anyone uses, and the page keeps
@@ -498,6 +533,16 @@ def _cursor(*parts: Any) -> str:
     return "|".join("" if part is None else str(part) for part in parts)
 
 
+def _seeded_hash(key: str, seed: str) -> str:
+    """Postgres' `md5(key || seed)`, computed here for the NEXT cursor.
+
+    Not a security hash — a stable shuffle (D6's unbiased sample). It must agree with the
+    statement's own `md5()` exactly or the next page would start in the wrong place, which is
+    why the key is spelled the same way on both sides (`cluster_key::text`, `lo:hi`) and both
+    hash UTF-8 bytes."""
+    return hashlib.md5((key + seed).encode("utf-8")).hexdigest()
+
+
 def _split_cursor(raw: str | None, arity: int) -> list[str] | None:
     if raw is None:
         return None
@@ -519,6 +564,27 @@ def _as_int(text: str) -> int:
         return int(text)
     except ValueError as exc:
         raise _bad("after is not a cursor from this endpoint") from exc
+
+
+def _seed(value: str | None) -> str:
+    """The sample's name, validated against a closed charset (400 otherwise).
+
+    Absent means the default seed — NOT a fresh one: a sample that re-draws itself whenever a
+    caller forgets the parameter is not a sample anybody can finish."""
+    if value is None or value == "":
+        return DEFAULT_SEED
+    if not SEED_RE.match(value):
+        raise _bad("seed must be 1-16 characters of a-z0-9")
+    return value
+
+
+def _as_hash(text: str) -> str:
+    """The md5 half of a seeded cursor. Validated here for the same reason `_as_stamp` is: an
+    arbitrary string reaching `%(after_hash)s::text` is not a 500, it is worse — it silently
+    compares as itself and pages from somewhere nobody asked for."""
+    if not HASH_RE.match(text):
+        raise _bad("after is not a cursor from this endpoint")
+    return text
 
 
 def _as_stamp(text: str) -> str:
@@ -933,14 +999,19 @@ def groups(
     shared_photo: int | None = Query(None),
     has_judgement: int | None = Query(None),
     sort: str = Query("weakest"),
+    seed: str | None = Query(None),
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """One keyset page of proposed clusters, weakest edge first (§12: that is where errors live).
+
+    `sort=random` is the other order this queue serves: the seeded, unbiased sample D6 is
+    measured on, stable across pages and reloads for one seed.
 
     Shadow mode: nothing on this page has been applied to production, and nothing on it can be.
     """
     _reject_unknown_filters(request, GROUP_FILTER_KEYS)
     _one_of("sort", sort, tuple(GROUP_SORTS))
+    sample_seed = _seed(seed)
     _one_of("verdict", verdict, VERDICT_FILTER_VALUES)
     _one_of("block_grain", block_grain, usql.BLOCK_GRAIN_VALUES)
     if not store_ready(conn):
@@ -964,9 +1035,11 @@ def groups(
         "shared_photo": _flag("shared_photo", shared_photo),
         "has_judgement": _flag("has_judgement", has_judgement),
         "limit": limit + 1,
+        "seed": sample_seed,
         "after_score": None,
         "after_ts": None,
         "after_size": None,
+        "after_hash": None,
         "after_key": None,
     }
     parts = _split_cursor(after, 2)
@@ -976,6 +1049,8 @@ def groups(
             params["after_score"] = _as_float(parts[0])
         elif sort == "largest":
             params["after_size"] = _as_int(parts[0])
+        elif sort == RANDOM_SORT:
+            params["after_hash"] = _as_hash(parts[0])
         else:
             params["after_ts"] = _as_stamp(parts[0])
 
@@ -1037,6 +1112,10 @@ def groups(
             next_after = _cursor(-1.0 if score is None else score, last["cluster_key"])
         elif sort == "largest":
             next_after = _cursor(last["size"], last["cluster_key"])
+        elif sort == RANDOM_SORT:
+            next_after = _cursor(
+                _seeded_hash(str(last["cluster_key"]), sample_seed), last["cluster_key"]
+            )
         else:
             next_after = _cursor(last["last_changed_at"], last["cluster_key"])
 
@@ -1047,6 +1126,9 @@ def groups(
             "next_after": next_after,
             "generation": generation,
             "sort": sort,
+            # Echoed like the generation is: the seed NAMES the sample, and a page that does
+            # not say which one it drew cannot be resumed tomorrow.
+            "seed": sample_seed,
             # "20 of N". Null on a continuation page — the page keeps the first read's number.
             "total": total,
         },
@@ -1164,14 +1246,17 @@ def residual(
     has_judgement: int | None = Query(None),
     verdict: str | None = Query(None),
     sort: str = Query("score_desc"),
+    seed: str | None = Query(None),
     conn: Any = Depends(deps.get_db_conn),
 ) -> dict[str, Any]:
     """Pairs the engine scored but did NOT join into one cluster, richest first.
 
     The scroll is ordered by expected yield (§12), and every row carries the one field that
-    turns a review session into design feedback: why it was not merged."""
+    turns a review session into design feedback: why it was not merged. `sort=random` swaps
+    that working order for the seeded, unbiased one the D6 session is measured on."""
     _reject_unknown_filters(request, RESIDUAL_FILTER_KEYS)
     _one_of("sort", sort, tuple(RESIDUAL_SORTS))
+    sample_seed = _seed(seed)
     _one_of("zone", zone, ZONE_VALUES)
     _one_of("verdict", verdict, VERDICT_FILTER_VALUES)
     _one_of("block_grain", block_grain, usql.BLOCK_GRAIN_VALUES)
@@ -1188,13 +1273,18 @@ def residual(
         "has_judgement": _flag("has_judgement", has_judgement),
         "verdict": verdict,
         "limit": limit + 1,
+        "seed": sample_seed,
         "after_score": None,
+        "after_hash": None,
         "after_lo": None,
         "after_hi": None,
     }
     parts = _split_cursor(after, 3)
     if parts is not None:
-        params["after_score"] = _as_float(parts[0])
+        if sort == RANDOM_SORT:
+            params["after_hash"] = _as_hash(parts[0])
+        else:
+            params["after_score"] = _as_float(parts[0])
         params["after_lo"] = _as_int(parts[1])
         params["after_hi"] = _as_int(parts[2])
 
@@ -1255,7 +1345,12 @@ def residual(
     next_after = None
     if items and has_more:
         last = items[-1]
-        next_after = _cursor(last["score"], last["listing_lo"], last["listing_hi"])
+        head = (
+            _seeded_hash(f"{last['listing_lo']}:{last['listing_hi']}", sample_seed)
+            if sort == RANDOM_SORT
+            else last["score"]
+        )
+        next_after = _cursor(head, last["listing_lo"], last["listing_hi"])
 
     return {
         "data": {
@@ -1264,6 +1359,8 @@ def residual(
             "next_after": next_after,
             "generation": generation,
             "min_score": min_score,
+            "sort": sort,
+            "seed": sample_seed,
             "total": total,
         },
         "store_ready": True,
@@ -1312,6 +1409,124 @@ def blocks(
     ]
     return {
         "data": {"items": items, "generation": generation},
+        "store_ready": True,
+    }
+
+
+# ------------------------------------------------------- the validation session (D6) — where am I?
+
+
+@router.get("/validation-progress")
+def validation_progress(
+    request: Request,
+    generation: str | None = Query(None),
+    seed: str | None = Query(None),
+    surface: str = Query("groups"),
+    min_score: float = Query(RESIDUAL_MIN_SCORE),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """"How many do I need to do?" — in two numbers, for the surface that asked.
+
+    `total` is the whole generation: how much of the queue carries a ruling at all. `sample` is
+    the first 100 of the SEEDED order (D6's unbiased draw), which is the number that gates the
+    program — an error rate measured on the weakest-edge queue is an error rate about the
+    weakest edges. The sample is deliberately NOT narrowed by the filter bar: a sample that
+    moved with the filters would mean something different on every page of the same session.
+    """
+    _reject_unknown_filters(request, PROGRESS_FILTER_KEYS)
+    _one_of("surface", surface, VALIDATION_SURFACES)
+    sample_seed = _seed(seed)
+    if not store_ready(conn):
+        return _not_ready()
+
+    groups = surface == "groups"
+    params = {
+        "generation": generation,
+        "seed": sample_seed,
+        "sample_size": VALIDATION_SAMPLE_SIZE,
+        "min_score": min_score,
+    }
+    try:
+        generation = _resolve_generation(conn, generation)
+        params["generation"] = generation
+        sample = _counts(
+            conn,
+            usql.VALIDATION_GROUPS_SAMPLE_SQL if groups else usql.VALIDATION_RESIDUAL_SAMPLE_SQL,
+            params,
+        )
+        total = _counts(
+            conn,
+            usql.VALIDATION_GROUPS_TOTAL_SQL if groups else usql.VALIDATION_RESIDUAL_TOTAL_SQL,
+            params,
+        )
+    except _STORE_BEHIND:
+        return _not_ready()
+
+    return {
+        "data": {
+            "generation": generation,
+            "surface": surface,
+            "seed": sample_seed,
+            "sample_size": VALIDATION_SAMPLE_SIZE,
+            # The grain each number is counted at, said out loud: a cluster verdict and a pair
+            # verdict are not the same unit of work and must never be added up on a page.
+            "grain": "cluster" if groups else "pair",
+            "sample": sample,
+            "total": total,
+        },
+        "store_ready": True,
+    }
+
+
+def _counts(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, int]:
+    """One row of `VALIDATION_COUNT_COLUMNS`, as ints. An empty answer is three zeros — the
+    statement is an aggregate, so it always returns a row; this is the fake-connection floor."""
+    rows = _fetch(conn, sql, params)
+    if not rows:
+        return {name: 0 for name in usql.VALIDATION_COUNT_COLUMNS}
+    row = _row(usql.VALIDATION_COUNT_COLUMNS, rows[0])
+    return {name: int(row[name] or 0) for name in usql.VALIDATION_COUNT_COLUMNS}
+
+
+# ----------------------------------------------------------- operator vs judge (the D6 gate)
+
+
+@router.get("/agreement")
+def agreement(
+    request: Request,
+    generation: str | None = Query(None),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """How often the operator and the LLM judge say the same thing about one pair (D6).
+
+    The operator's label set is explicit pair verdicts UNION the pairs IMPLIED by confirmed
+    clusters; the judge's is the best tier per pair (gold > vision > text, `oss` excluded).
+    `insufficient_evidence` is counted, never scored. The arithmetic — the binary mapping and
+    the Wilson interval — is `autodedup/agreement.py`, so it can be checked by hand."""
+    _reject_unknown_filters(request, AGREEMENT_FILTER_KEYS)
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        generation = _resolve_generation(conn, generation)
+        params = {
+            "generation": generation,
+            "max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE,
+        }
+        rows = _rows(usql.AGREEMENT_COLUMNS, _fetch(conn, usql.AGREEMENT_PAIRS_SQL, params))
+        oversize_rows = _fetch(conn, usql.AGREEMENT_OVERSIZE_SQL, params)
+    except _STORE_BEHIND:
+        return _not_ready()
+
+    summary = agreement_math.summarize(rows)
+    n_oversize = int(oversize_rows[0][0] or 0) if oversize_rows and oversize_rows[0] else 0
+    return {
+        "data": {
+            "generation": generation,
+            **summary,
+            # The bound of the implied half, reported rather than assumed away.
+            "max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE,
+            "n_clusters_over_cap": n_oversize,
+        },
         "store_ready": True,
     }
 

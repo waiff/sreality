@@ -84,6 +84,11 @@ export interface PairCardProps {
   evidenceHref?: RoutePath | null;
   labels?: Record<AutodedupVerdictValue, string>;
   onlyDiffs?: boolean;
+  /* BLIND (D6). The caller withholds `judgement` itself — one gate, not four —
+   * and sets this so the card can SAY the judge is hidden rather than look like
+   * a pair nobody has judged. The two are different facts, and silently
+   * conflating them would teach the operator that blind rows are unjudged. */
+  blind?: boolean;
   /* QUEUE GRAIN (see ListingMini). A residual row keeps the covers as 160px
    * thumbnails so the attribute diff, the reason and the four answers are all
    * on screen at once; the full-size photos are the pair page's job. */
@@ -109,6 +114,7 @@ export default function PairCard({
   labels,
   onlyDiffs = false,
   dense = false,
+  blind = false,
   annotation,
   onAnnotationChange,
   annotationDirty = false,
@@ -130,6 +136,11 @@ export default function PairCard({
           guardVeto={guardVeto}
         />
         {judgement && <JudgeChip judgement={judgement} />}
+        {blind && (
+          <Chip title="Blind review: the judge's verdict appears once you have recorded yours">
+            soudce skryt
+          </Chip>
+        )}
         {evidenceHref && (
           <Link
             to={evidenceHref}

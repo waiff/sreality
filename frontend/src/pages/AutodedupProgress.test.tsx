@@ -42,8 +42,85 @@ vi.mock('@/lib/api', async (importOriginal) => {
     ...actual,
     getAutodedupIterations: vi.fn(),
     getAutodedupStats: vi.fn(),
+    getAutodedupAgreement: vi.fn(),
   };
 });
+
+/* The D6 panel's read. 8 of 9 gold pairs agree — deliberately short of the
+ * 200-pair session, because that is the state the program is actually in and
+ * the panel has to say so rather than paint a colour on it. */
+const AGREEMENT = {
+  store_ready: true,
+  data: {
+    generation: 'g3',
+    overall: {
+      n: 12,
+      n_agree: 11,
+      agreement: 11 / 12,
+      ci_low: 0.6473,
+      ci_high: 0.9862,
+      n_judge_different_operator_same: 1,
+      n_judge_same_operator_different: 0,
+      n_explicit: 4,
+      n_implied: 8,
+    },
+    tiers: [
+      {
+        tier: 'gold',
+        n: 9,
+        n_agree: 8,
+        agreement: 8 / 9,
+        ci_low: 0.5175,
+        ci_high: 0.9943,
+        n_judge_different_operator_same: 1,
+        n_judge_same_operator_different: 0,
+        n_explicit: 3,
+        n_implied: 6,
+      },
+      {
+        tier: 'vision',
+        n: 3,
+        n_agree: 3,
+        agreement: 1,
+        ci_low: 0.4385,
+        ci_high: 1,
+        n_judge_different_operator_same: 0,
+        n_judge_same_operator_different: 0,
+        n_explicit: 1,
+        n_implied: 2,
+      },
+      {
+        tier: 'text',
+        n: 0,
+        n_agree: 0,
+        agreement: null,
+        ci_low: null,
+        ci_high: null,
+        n_judge_different_operator_same: 0,
+        n_judge_same_operator_different: 0,
+        n_explicit: 0,
+        n_implied: 0,
+      },
+    ],
+    n_insufficient_evidence: 5,
+    insufficient_by_tier: { vision: 5 },
+    disagreements: [
+      {
+        listing_lo: 101,
+        listing_hi: 202,
+        operator_verdict: 'same' as const,
+        operator_source: 'implied' as const,
+        judge_verdict: 'different_property' as const,
+        judge_tier: 'gold',
+        judge_model: 'gpt-5.6-luna',
+      },
+    ],
+    n_disagreements: 1,
+    gate: { tier: 'gold', bar: 0.95, target_n: 200 },
+    max_cluster_size: 12,
+    n_clusters_over_cap: 2,
+  },
+};
 
 /* The page's own page size — the keyset hook stops on a short page, so a test
  * that wants a second page has to hand it a full first one. */
@@ -124,6 +201,41 @@ describe('<AutodedupProgress>', () => {
     vi.clearAllMocks();
     vi.mocked(api.getAutodedupStats).mockResolvedValue({ store_ready: true, data: STATS });
     vi.mocked(api.getAutodedupIterations).mockResolvedValue(page([NEWEST, OLDER]));
+    vi.mocked(api.getAutodedupAgreement).mockResolvedValue(AGREEMENT);
+  });
+
+  /* ------------------------------------------- operator vs judge (the D6 gate) */
+
+  it('reports the agreement, its interval, the D6 bar and the two error directions', async () => {
+    renderPage();
+    const panel = (await screen.findByText('Shoda operátor × soudce')).closest('section')!;
+    /* 11/12 = 91,7 %, cs-CZ, and the interval beside it rather than a bare
+     * point estimate. */
+    expect(await within(panel).findByText('91,7 %')).toBeInTheDocument();
+    expect(within(panel).getByText(/64,7 % – 98,6 %/)).toBeInTheDocument();
+    /* The bar, and how far the session is from being able to decide it. */
+    expect(panel).toHaveTextContent(/Hranice D6/);
+    expect(panel).toHaveTextContent(/9 \/ 200/);
+    expect(panel).toHaveTextContent(/vzorek ještě nestačí na rozhodnutí/);
+    /* Explicit vs implied is printed, because the number is only honest with
+     * it: the implied pairs come from confirmed groups. */
+    expect(panel).toHaveTextContent(/3 \/ 6/);
+    /* Abstentions are counted, not scored. */
+    expect(panel).toHaveTextContent(/nedostatek důkazů“: 5/);
+    /* And the bound of the implied expansion is stated. */
+    expect(panel).toHaveTextContent(/2 potvrzených skupin je větších/);
+    expectNoNestedInteractive(panel);
+  });
+
+  it('lists the disagreeing pairs with a link to the evidence', async () => {
+    renderPage();
+    const panel = (await screen.findByText('Shoda operátor × soudce')).closest('section')!;
+    expect(await within(panel).findByText('101 · 202')).toBeInTheDocument();
+    expect(within(panel).getByText('odvozeno ze skupiny')).toBeInTheDocument();
+    expect(within(panel).getByRole('link', { name: 'Důkazy' })).toHaveAttribute(
+      'href',
+      '/autodedup/pair/101/202?generation=g3',
+    );
   });
 
   /* The block names live in the cohort module and in each iteration's
@@ -140,6 +252,10 @@ describe('<AutodedupProgress>', () => {
   it('prints the caps even before the store answers', async () => {
     vi.mocked(api.getAutodedupStats).mockResolvedValue({ store_ready: false, data: null });
     vi.mocked(api.getAutodedupIterations).mockResolvedValue({ store_ready: false, data: null });
+    /* An un-migrated store answers every read the same way, the agreement panel
+     * included — it renders its heading and nothing that could read as a
+     * measurement. */
+    vi.mocked(api.getAutodedupAgreement).mockResolvedValue({ store_ready: false, data: null });
     renderPage();
     expect(await screen.findByText(/Schema not migrated yet/)).toBeInTheDocument();
     expect(tile('Spent so far')).toHaveTextContent('$25.00 is the hard cap');
@@ -163,6 +279,10 @@ describe('<AutodedupProgress>', () => {
   it('says "not yet" in every tile when the store is not migrated', async () => {
     vi.mocked(api.getAutodedupStats).mockResolvedValue({ store_ready: false, data: null });
     vi.mocked(api.getAutodedupIterations).mockResolvedValue({ store_ready: false, data: null });
+    /* An un-migrated store answers every read the same way, the agreement panel
+     * included — it renders its heading and nothing that could read as a
+     * measurement. */
+    vi.mocked(api.getAutodedupAgreement).mockResolvedValue({ store_ready: false, data: null });
     renderPage();
     expect(await screen.findByText(/Schema not migrated yet/)).toBeInTheDocument();
     /* Four tiles, four gaps — never a fabricated zero. */

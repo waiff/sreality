@@ -199,6 +199,28 @@ describe('<AutodedupPair>', () => {
     ]);
   });
 
+  it('arrives blind from a blind queue and un-blinds on the operator\'s own verdict', async () => {
+    const user = userEvent.setup();
+    /* The drill-down is where a blinding leaks: one click on exactly the pair
+     * being ruled on, and the transcript is the biggest thing on the screen. */
+    renderPair(`${ROUTES.autodedupPair.build({ lo: 101, hi: 202 })}?blind=1`);
+    await screen.findByText('Judgements');
+    expect(screen.queryByText(/judge: same property/)).toBeNull();
+    expect(screen.queryByText(/same kitchen tiles/)).toBeNull();
+    expect(screen.queryByText(/Unit discriminator/)).toBeNull();
+    expect(screen.getByText(/verdikt soudce je skrytý/)).toBeInTheDocument();
+    /* The ENGINE's record is untouched — it is not what is being validated. */
+    expect(screen.getByText('area_rel_diff')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'This IS a duplicate' }));
+    await waitFor(() => expect(screen.getByText(/judge: same property/)).toBeInTheDocument());
+  });
+
+  it('shows the judge with no blind parameter at all', async () => {
+    renderPair();
+    expect(await screen.findByText(/judge: same property/)).toBeInTheDocument();
+  });
+
   /* ------------------------------------------------- the operator's reasons (mig 533) */
 
   it('offers the reason picker OPEN — one pair is the whole page', async () => {

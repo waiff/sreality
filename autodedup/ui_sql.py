@@ -157,6 +157,30 @@ LIMIT %(limit)s::int
 """
 )
 
+# THE UNBIASED SAMPLE ORDER (D6, §9). Every other sort here is a working order — weakest edge
+# first puts the errors on top, which is what a review session wants and exactly what an ERROR
+# RATE may not be measured on. A seeded hash of the key is a total order that correlates with
+# nothing the engine did: `md5(cluster_key || seed)` is deterministic, so the same seed serves
+# the same sample to the same operator across pages, reloads and days, and a NEW seed draws a
+# fresh sample without a schema of its own.
+#
+# The cursor is the ORDER KEY, as everywhere else on this page: `(md5(…), cluster_key)`, with
+# the hash recomputed by the statement rather than trusted from the wire (the route validates
+# it as 32 hex characters, so an edited cursor is a 400 and never a predicate). Both sides of
+# the comparison are the same expression under the same collation, which is what makes the
+# page boundary exact instead of approximately right.
+GROUPS_RANDOM_SQL = (
+    _CLUSTER_SELECT
+    + _CLUSTER_WHERE
+    + """
+  AND (%(after_hash)s::text IS NULL
+       OR (md5(c.cluster_key::text || %(seed)s::text), c.cluster_key)
+          > (%(after_hash)s::text, %(after_key)s::bigint))
+ORDER BY md5(c.cluster_key::text || %(seed)s::text) ASC, c.cluster_key ASC
+LIMIT %(limit)s::int
+"""
+)
+
 # "20 of N", and N is the whole filtered set — the one number a keyset page cannot report
 # about itself. Built from the SAME `_CLUSTER_WHERE` the page reads through, so the headline
 # and the queue can never describe different cohorts; the route asks for it on the FIRST page
@@ -648,7 +672,7 @@ LEFT JOIN LATERAL (
 ) gb ON true
 """
 
-_RESIDUAL_WHERE = """
+_RESIDUAL_FILTERS = """
 WHERE p.score >= %(min_score)s::real
   AND (%(zone)s::text IS NULL OR p.zone = %(zone)s::text)
   AND (%(block)s::bigint IS NULL
@@ -663,7 +687,12 @@ WHERE p.score >= %(min_score)s::real
   AND (%(verdict)s::text IS NULL
        OR (%(verdict)s::text = 'unreviewed' AND v.verdict IS NULL)
        OR v.verdict = %(verdict)s::text)
-  AND NOT EXISTS (
+"""
+
+# WHAT MAKES A PAIR RESIDUAL, in one place: the two listings are not in ONE cluster of this
+# generation. Its own constant because the validation-progress sample below asks the identical
+# question — a second spelling of it would let the counter count a cohort the queue does not show.
+_RESIDUAL_UNCLUSTERED = """  AND NOT EXISTS (
       SELECT 1
         FROM autodedup.cluster_members ma
         JOIN autodedup.cluster_members mb
@@ -673,6 +702,8 @@ WHERE p.score >= %(min_score)s::real
        WHERE ma.listing_id = p.listing_lo
   )
 """
+
+_RESIDUAL_WHERE = _RESIDUAL_FILTERS + _RESIDUAL_UNCLUSTERED
 
 _RESIDUAL_SELECT = """
 SELECT
@@ -700,6 +731,27 @@ RESIDUAL_SQL = (
        OR (p.score, p.listing_lo, p.listing_hi)
           < (%(after_score)s::real, %(after_lo)s::bigint, %(after_hi)s::bigint))
 ORDER BY p.score DESC, p.listing_lo DESC, p.listing_hi DESC
+LIMIT %(limit)s::int
+"""
+)
+
+# The residual view's own unbiased order — the same device as `GROUPS_RANDOM_SQL`, keyed on the
+# PAIR (`lo:hi`, with a separator so `1:23` and `12:3` are different strings rather than one).
+# Score-descending is the working order and puts the likeliest duplicates on top; an agreement
+# number measured on it would be an agreement number about the top of the queue.
+RESIDUAL_RANDOM_SQL = (
+    _RESIDUAL_SELECT
+    + _RESIDUAL_FROM
+    + _RESIDUAL_BLOCK
+    + _RESIDUAL_COVERS
+    + _RESIDUAL_WHERE
+    + """
+  AND (%(after_hash)s::text IS NULL
+       OR (md5(p.listing_lo::text || ':' || p.listing_hi::text || %(seed)s::text),
+           p.listing_lo, p.listing_hi)
+          > (%(after_hash)s::text, %(after_lo)s::bigint, %(after_hi)s::bigint))
+ORDER BY md5(p.listing_lo::text || ':' || p.listing_hi::text || %(seed)s::text) ASC,
+         p.listing_lo ASC, p.listing_hi ASC
 LIMIT %(limit)s::int
 """
 )
@@ -1011,4 +1063,210 @@ SELECT 1 FROM autodedup.clusters WHERE cluster_key = %(cluster_key)s::bigint
 PAIR_EXISTS_SQL = """
 SELECT 1 FROM autodedup.pairs
 WHERE listing_lo = %(listing_lo)s::bigint AND listing_hi = %(listing_hi)s::bigint
+"""
+
+# ------------------------------------------------- the validation session (D6): how far in?
+#
+# "How many do I need to do?" is the question these four statements answer, and the honest
+# answer has two halves. The WHOLE-GENERATION half says how much of the queue carries a ruling
+# at all. The SAMPLE half says how far through the first N of the seeded random order the
+# operator is — which is the number that matters, because an error rate measured on the
+# weakest-edge order is an error rate about the weakest edges, not about the engine.
+#
+# THE SAMPLE IS DELIBERATELY UNFILTERED (beyond the generation, and the residual view's display
+# floor). A sample that moved with the filter bar would be a different sample per page, and
+# "37 of 100" would mean nothing across two of them. The page says so in words next to it.
+
+VALIDATION_COUNT_COLUMNS: tuple[str, ...] = ("n", "n_reviewed", "n_not_same")
+
+# The verdict LATERAL is the SAME "latest wins" read the queue's own statement makes (one row
+# per cluster, newest first) — a count that summed `autodedup.verdicts` directly would count a
+# re-decided group twice and report more reviewed groups than the generation holds.
+_CLUSTER_VERDICT_LATERAL = """
+LEFT JOIN LATERAL (
+    SELECT vv.verdict
+      FROM autodedup.verdicts vv
+     WHERE vv.kind = 'cluster' AND vv.cluster_key = s.cluster_key
+     ORDER BY vv.decided_at DESC, vv.id DESC
+     LIMIT 1
+) v ON true
+"""
+
+_PAIR_VERDICT_LATERAL = """
+LEFT JOIN LATERAL (
+    SELECT vv.verdict
+      FROM autodedup.verdicts vv
+     WHERE vv.kind = 'pair'
+       AND vv.listing_lo = s.listing_lo AND vv.listing_hi = s.listing_hi
+     ORDER BY vv.decided_at DESC, vv.id DESC
+     LIMIT 1
+) v ON true
+"""
+
+_VALIDATION_COUNTS = """
+SELECT
+    count(*)                                                        AS n,
+    count(v.verdict)                                                AS n_reviewed,
+    count(*) FILTER (WHERE v.verdict IS NOT NULL AND v.verdict <> 'same') AS n_not_same
+"""
+
+VALIDATION_GROUPS_SAMPLE_SQL = (
+    """
+WITH s AS (
+    SELECT c.cluster_key
+      FROM autodedup.clusters c
+     WHERE c.generation = %(generation)s::text
+     ORDER BY md5(c.cluster_key::text || %(seed)s::text) ASC, c.cluster_key ASC
+     LIMIT %(sample_size)s::int
+)
+"""
+    + _VALIDATION_COUNTS
+    + "FROM s"
+    + _CLUSTER_VERDICT_LATERAL
+)
+
+VALIDATION_GROUPS_TOTAL_SQL = (
+    """
+WITH s AS (
+    SELECT c.cluster_key FROM autodedup.clusters c
+     WHERE c.generation = %(generation)s::text
+)
+"""
+    + _VALIDATION_COUNTS
+    + "FROM s"
+    + _CLUSTER_VERDICT_LATERAL
+)
+
+VALIDATION_RESIDUAL_SAMPLE_SQL = (
+    """
+WITH s AS (
+    SELECT p.listing_lo, p.listing_hi
+      FROM autodedup.pairs p
+     WHERE p.score >= %(min_score)s::real
+"""
+    + _RESIDUAL_UNCLUSTERED
+    + """     ORDER BY md5(p.listing_lo::text || ':' || p.listing_hi::text || %(seed)s::text) ASC,
+              p.listing_lo ASC, p.listing_hi ASC
+     LIMIT %(sample_size)s::int
+)
+"""
+    + _VALIDATION_COUNTS
+    + "FROM s"
+    + _PAIR_VERDICT_LATERAL
+)
+
+VALIDATION_RESIDUAL_TOTAL_SQL = (
+    """
+WITH s AS (
+    SELECT p.listing_lo, p.listing_hi
+      FROM autodedup.pairs p
+     WHERE p.score >= %(min_score)s::real
+"""
+    + _RESIDUAL_UNCLUSTERED
+    + """)
+"""
+    + _VALIDATION_COUNTS
+    + "FROM s"
+    + _PAIR_VERDICT_LATERAL
+)
+
+# ------------------------------------------ operator vs judge (D6: the gate, measured live)
+
+AGREEMENT_COLUMNS: tuple[str, ...] = (
+    "listing_lo",
+    "listing_hi",
+    "operator_verdict",
+    "operator_source",
+    "judge_verdict",
+    "judge_tier",
+    "judge_model",
+)
+
+# ONE statement, one row per COMPARABLE PAIR, and the arithmetic in Python (`autodedup.
+# agreement`) — a Wilson interval written in SQL is a formula nobody can test by hand.
+#
+# THE OPERATOR'S LABEL SET IS TWO THINGS UNIONED. An explicit pair verdict is the obvious half.
+# The other half is IMPLIED: confirming a cluster says every pair inside it is one property,
+# which is exactly the statement the judge made per pair — and 103 confirmed groups carry far
+# more pair-grade evidence than the handful of pairs ruled on one at a time. An explicit
+# verdict WINS over an implied one (the operator looked at that pair), `unsure` is not a label
+# at all, and only `same` clusters imply anything: a rejected group says the members are not
+# ALL one property, never which pair inside it was the wrong one.
+#
+# THE EXPANSION IS BOUNDED. A cluster of n members implies n(n-1)/2 pairs, so a runaway group
+# would dominate the number it is measured with. `max_cluster_size` caps which clusters expand
+# at all (the route sends it, and reports how many clusters it skipped), so the cost is
+# O(n_clusters x cap^2) rather than O(size^2) of the worst group.
+#
+# THE JUDGE'S LABEL IS THE BEST TIER, NOT THE NEWEST ROW: gold > vision > text, `oss` excluded
+# entirely (a rented open-model arm answers the same pairs gold already answered — on a clock
+# it would silently replace ground truth). `insufficient_evidence` travels back as itself and
+# is excluded from the agreement in Python, where it is counted and reported separately.
+AGREEMENT_PAIRS_SQL = """
+WITH explicit AS (
+    SELECT DISTINCT ON (v.listing_lo, v.listing_hi)
+           v.listing_lo, v.listing_hi, v.verdict
+      FROM autodedup.verdicts v
+     WHERE v.kind = 'pair'
+       AND v.listing_lo IS NOT NULL
+       AND v.listing_hi IS NOT NULL
+     ORDER BY v.listing_lo, v.listing_hi, v.decided_at DESC, v.id DESC
+),
+confirmed AS (
+    SELECT DISTINCT ON (v.cluster_key) v.cluster_key, v.verdict
+      FROM autodedup.verdicts v
+     WHERE v.kind = 'cluster' AND v.cluster_key IS NOT NULL
+     ORDER BY v.cluster_key, v.decided_at DESC, v.id DESC
+),
+implied AS (
+    SELECT DISTINCT ma.listing_id AS listing_lo, mb.listing_id AS listing_hi
+      FROM confirmed cf
+      JOIN autodedup.clusters c
+        ON c.cluster_key = cf.cluster_key
+       AND c.generation = %(generation)s::text
+       AND c.size <= %(max_cluster_size)s::int
+      JOIN autodedup.cluster_members ma ON ma.cluster_key = cf.cluster_key
+      JOIN autodedup.cluster_members mb
+        ON mb.cluster_key = cf.cluster_key AND mb.listing_id > ma.listing_id
+     WHERE cf.verdict = 'same'
+),
+operator AS (
+    SELECT e.listing_lo, e.listing_hi, e.verdict, 'explicit'::text AS source
+      FROM explicit e
+    UNION ALL
+    SELECT i.listing_lo, i.listing_hi, 'same'::text, 'implied'::text
+      FROM implied i
+     WHERE NOT EXISTS (
+         SELECT 1 FROM explicit e2
+          WHERE e2.listing_lo = i.listing_lo AND e2.listing_hi = i.listing_hi
+     )
+),
+judged AS (
+    SELECT DISTINCT ON (j.listing_lo, j.listing_hi)
+           j.listing_lo, j.listing_hi, j.verdict, j.tier, j.model
+      FROM autodedup.judgements j
+     WHERE j.tier IN ('gold', 'vision', 'text')
+     ORDER BY j.listing_lo, j.listing_hi,
+              CASE j.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END,
+              j.created_at DESC
+)
+SELECT o.listing_lo, o.listing_hi, o.verdict, o.source, g.verdict, g.tier, g.model
+FROM operator o
+JOIN judged g ON g.listing_lo = o.listing_lo AND g.listing_hi = o.listing_hi
+WHERE o.verdict <> 'unsure'
+ORDER BY o.listing_lo, o.listing_hi
+"""
+
+# The bound, reported rather than hidden: confirmed groups too large to expand. `EXISTS` on any
+# `same` row (not the latest one) is deliberate — this is a diagnostic about the cap, and a
+# group whose confirmation was later re-decided is still a group the cap would have expanded.
+AGREEMENT_OVERSIZE_SQL = """
+SELECT count(*)
+FROM autodedup.clusters c
+WHERE c.generation = %(generation)s::text
+  AND c.size > %(max_cluster_size)s::int
+  AND EXISTS (
+      SELECT 1 FROM autodedup.verdicts v
+       WHERE v.kind = 'cluster' AND v.cluster_key = c.cluster_key AND v.verdict = 'same'
+  )
 """
