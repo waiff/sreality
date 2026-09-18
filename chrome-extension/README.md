@@ -195,6 +195,18 @@ npm run build
 
 The output lands in `chrome-extension/dist/`.
 
+`npm run build` runs vite **twice** — `--mode content`, then `--mode background`
+— and that is not a style choice. A manifest-declared content script is a
+*classic* script (MV3 has no module mode for `content_scripts[].js`), so
+`content.js` may not contain a static `import`. Rollup hoists any module shared
+between entries into a chunk, and `portals.ts` is imported by both entries, so a
+single two-entry build emitted `import … from "./chunks/portals-*.js"` as line 1
+of `content.js`; Chrome refused the script outright and the panel silently never
+mounted (2026-08-04 → 2026-09-18). Separate passes keep each entry
+self-contained, and a build-time guard in `vite.config.ts` re-parses `content.js`
+as a classic script and fails the build if a static import ever comes back. A
+bare `vite build` with no `--mode` now errors rather than emitting half a bundle.
+
 ## Install in Chrome (unpacked)
 
 1. Open `chrome://extensions` in Chrome.
@@ -204,6 +216,12 @@ The output lands in `chrome-extension/dist/`.
    (Option B).
 5. Confirm the extension card shows "Limen Reality — výnos & pipeline" with
    the copper "%" icon.
+
+**Unzip somewhere Windows won't decorate.** Chrome refuses to load a folder
+containing `desktop.ini` ("The filename is illegal"), and File Explorer creates
+one in any folder it has rendered — OneDrive-synced folders especially. Unzip to
+a plain local path (or delete `desktop.ini` from `dist/` before loading); on WSL,
+`\\wsl.localhost\...` paths avoid it entirely.
 
 The `key` field pinned in `manifest.json` means the extension ID is always
 `eibnegoankipleeegjilnjhpnbaedpjd` (same on every machine, every CI
