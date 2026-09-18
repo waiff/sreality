@@ -53,9 +53,23 @@ describe('markUnitTokens', () => {
     );
   });
 
-  it('does not read a town name as a compass point', () => {
+  it('finds the south the way a Czech advert actually spells it', () => {
+    /* The regression this pins: "severní" is sever+ní so the compass stems reach
+     * it, but "jižní" is NOT jih+ní — and "jižní orientace" / "jižní strana" is
+     * the commonest way an advert says south-facing. It went silently unmarked. */
+    expect(marked('jižní orientace, velký balkon')).toEqual(
+      expect.arrayContaining(['jižní', 'orientace']),
+    );
+    expect(marked('okna směřují jižně')).toContain('jižně');
+    expect(marked('výhled jižním směrem')).toContain('jižním');
+    expect(marked('jihozápadní terasa')).toContain('jihozápadní');
+  });
+
+  it('does not read a town name — or the adverb "již" — as a compass point', () => {
     expect(marked('Prodej v obci Jihlava')).toEqual([]);
     expect(marked('Severka je restaurace')).toEqual([]);
+    /* "již" on its own is "already", which is why that branch demands the suffix. */
+    expect(marked('dům je již zrekonstruovaný')).toEqual([]);
   });
 
   it('is empty for an empty text', () => {
@@ -101,6 +115,27 @@ describe('<MemberText>', () => {
       'true',
     );
     expect(document.querySelector('p')!.className).not.toContain('line-clamp-6');
+  });
+
+  it('works from the keyboard and keeps the focus on the toggle', async () => {
+    /* The dialog is read, not clicked through: the operator tabs down five members.
+     * A toggle that loses focus on expand sends them back to the top of the dialog
+     * — so this pins a real <button> (Enter AND Space) that survives its own state
+     * change, which a div with an onClick would not. */
+    const user = userEvent.setup();
+    render(<MemberText text={`Byt č. 14 ve 4. patře. ${'Klidná lokalita. '.repeat(30)}`} />);
+    const toggle = screen.getByRole('button', { name: /zobrazit celý popis/ });
+
+    await user.tab();
+    expect(toggle).toHaveFocus();
+
+    await user.keyboard('{Enter}');
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+    await user.keyboard(' ');
+    expect(toggle).toHaveFocus();
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('renders nothing at all when the listing has no text', () => {

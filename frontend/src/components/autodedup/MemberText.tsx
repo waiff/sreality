@@ -47,6 +47,12 @@ const TOKEN_SOURCE: string = [
    * name teaches the operator to stop trusting the marks. */
   String.raw`${NOT_L}(?:orientac[${L}]*|orientovan[${L}]*)`,
   String.raw`${NOT_L}(?:sever|jih|východ|západ)(?:o(?:zápa|výcho)d)?(?:n[íě][${L}]*|u|em)?(?![${L}])`,
+  /* "jižní" / "jižně" — the h→ž the adjective makes, which the stems above cannot
+   * reach: "severní" is sever+ní but "jižní" is NOT jih+ní. Its own branch and not
+   * a fifth stem, because the suffix has to be MANDATORY here: bare `již` is the
+   * adverb "already", the commonest word in an advert that is not a compass point
+   * at all. The compounds keep matching above ("jihozápadní" is jih+o+západ+ní). */
+  String.raw`${NOT_L}jižn[íě][${L}]*`,
 ].join('|');
 
 export interface TextSegment {
