@@ -17,8 +17,12 @@ reverses that verdict, §9's feedback loop). That write stays
 inside schema `autodedup`: shadow mode (D4) is untouched, no production table is written, and
 `listings` / `images` are read for display only.
 
-PII (E28): no broker column is selected anywhere (autodedup/ui_sql.py), and a description
-reaches a response only through `autodedup.judge.listing_digest`, which scrubs it.
+PII (E28): no broker column is selected anywhere (autodedup/ui_sql.py), and every advert text
+— description or title — reaches a response only through the judge's own scrubber
+(`autodedup.judge.listing_digest` / `scrubbed_text`, the same regexes either way). The two
+OPERATOR surfaces (the group dialog, the pair page) are shown the WHOLE scrubbed text rather
+than the judge's token-capped slice: reading costs no tokens, and the sentence that tells two
+developer units apart is as often in the last paragraph as the first.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ from autodedup import progress_sql as psql
 from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
-from autodedup.judge import listing_digest
+from autodedup.judge import listing_digest, scrubbed_text
 from autodedup.model import LogisticModel, hand_initialised
 
 try:  # the two SQLSTATEs a missing store raises, if the catalog probe ever misses it
@@ -608,6 +612,39 @@ def _member_row(row: dict[str, Any]) -> dict[str, Any]:
     return member
 
 
+# A member whose `listings` row is gone (the LEFT JOIN case) still renders — with no text
+# rather than a missing key, so the client never has to tell "absent" from "not selected here".
+_NO_TEXT: dict[str, Any] = {
+    "title": None,
+    "description": None,
+    "description_truncated": False,
+    "description_chars": 0,
+}
+
+
+def _member_texts(conn: Any, ids: list[int]) -> dict[int, dict[str, Any]]:
+    """The advert text of each member of ONE cluster, scrubbed (E28), for the DETAIL route.
+
+    Deliberately not part of `_member_row`: the queue renders the same member shape from
+    `GROUP_MEMBERS_SQL` and must not carry a description — 20 cards x N members of TOASTed text
+    for a payload the operator has not opened. Here the dialog asked for exactly one cluster.
+    """
+    if not ids:
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    for row in _rows(usql.MEMBER_TEXT_COLUMNS, _fetch(conn, usql.MEMBER_TEXT_SQL, {"ids": ids})):
+        description = scrubbed_text(row["description"])
+        out[int(row["listing_id"])] = {
+            "title": scrubbed_text(row["title"]),
+            "description": description,
+            # The operator's copy is never cut; the key stays so one client component can render
+            # this text and the judge digest, which IS cut on the paid path.
+            "description_truncated": False,
+            "description_chars": len(description or ""),
+        }
+    return out
+
+
 def _side(row: dict[str, Any], prefix: str, listing_id: int) -> dict[str, Any]:
     side = {
         field: row[f"{prefix}{field}"]
@@ -687,7 +724,8 @@ def _digest(row: dict[str, Any]) -> dict[str, Any]:
         inactive_at=_stamp(row["inactive_at"]),
         is_active=bool(row["is_active"]),
     )
-    digest = listing_digest(listing)
+    # The operator reads the WHOLE scrubbed advert; the judge's own digest stays capped.
+    digest = listing_digest(listing, truncate=False)
     return {
         "listing_id": digest.listing_id,
         "portal": digest.portal,
@@ -710,6 +748,7 @@ def _digest(row: dict[str, Any]) -> dict[str, Any]:
         "active": digest.active,
         "description": digest.description,
         "description_truncated": digest.description_truncated,
+        "description_chars": len(digest.description or ""),
         "absent": digest.absent,
         "source_url": listing.source_url,
     }
@@ -1046,8 +1085,17 @@ def group_detail(
         )
         ids = [row["listing_id"] for row in member_rows]
         galleries = _images_by_listing(conn, ids)
-        members = [{**_member_row(row), "images": galleries.get(row["listing_id"], [])}
-                   for row in member_rows]
+        # The advert TEXT is the dialog's reason to exist for a developer project: five units
+        # share one photo set and one attribute row, and differ only in what the ad says.
+        texts = _member_texts(conn, ids)
+        members = [
+            {
+                **_member_row(row),
+                "images": galleries.get(row["listing_id"], []),
+                **texts.get(row["listing_id"], _NO_TEXT),
+            }
+            for row in member_rows
+        ]
 
         pairs = [
             _pair_view(row)
