@@ -497,11 +497,13 @@ def _member(cluster_key: int, listing_id: int, **over: Any) -> tuple[Any, ...]:
 
 
 def _member_text(listing_id: int, **over: Any) -> tuple[Any, ...]:
-    """A member's own advert text — the DIALOG's row, not the queue's. The description carries
-    contact details on purpose: E28 is asserted on the rendered payload, not on intent."""
+    """A member's own advert text — the DIALOG's row, not the queue's. BOTH strings carry
+    contact details on purpose: E28 is asserted on the rendered payload, not on intent, and
+    the title is the half that is new here — a bazos advert signs its headline as readily as
+    its body, so a title that reached the wire unscrubbed would be the whole leak."""
     values: dict[str, Any] = {
         "listing_id": listing_id,
-        "title": f"Prodej bytu 3+kk 68 m2, byt c. {listing_id}",
+        "title": f"Prodej bytu 3+kk 68 m2, byt c. {listing_id} - Ing. Jan Novak, tel. 777 123 456",
         "description": (
             "Byt c. 12 ve 4. patre, orientace na jih, 68 m2. "
             "Kontaktujte Jana Novakova na 777 123 456 nebo jan.novak@example.cz"
@@ -1163,7 +1165,8 @@ def test_group_detail_members_carry_the_title_and_the_WHOLE_scrubbed_description
     }
     members = client.get("/autodedup/groups/101").json()["data"]["members"]
     by_id = {m["listing_id"]: m for m in members}
-    assert by_id[11]["title"] == "Prodej bytu 3+kk 68 m2, byt c. 11"
+    # The advert's own headline survives the scrub; the broker signed onto it does not.
+    assert by_id[11]["title"] == "Prodej bytu 3+kk 68 m2, byt c. 11 - [jmeno], tel. [telefon]"
     # The discriminating sentence survives; the contact details do not.
     assert by_id[11]["description"].startswith("Byt c. 12 ve 4. patre, orientace na jih, 68 m2.")
     assert "777 123 456" not in by_id[11]["description"]
@@ -1196,6 +1199,39 @@ def test_a_member_whose_listing_row_is_gone_still_renders_with_no_text(client, c
     member = client.get("/autodedup/groups/101").json()["data"]["members"][0]
     assert (member["title"], member["description"]) == (None, None)
     assert member["description_truncated"] is False
+
+
+def test_the_group_dialog_carries_no_pii(client, conn):
+    """E28 over the surface that newly carries advert text, asserted the way the pair view is:
+    on the RENDERED body, not on the intent of the code that built it.
+
+    The title is the half this wave added, so it gets the same proof as the description — one
+    member, one contact block per string, and BOTH tokens have to come back replaced. Counting
+    them is what distinguishes "the scrubber ran on both" from "it ran on the body and the
+    headline went out whole", which is the failure mode a `assert phone not in description`
+    cannot see."""
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11)],
+        "member_text": [_member_text(11)],
+        "images": [],
+        "cluster_pairs": [],
+        "judgements": [],
+        "cluster_verdicts": [],
+        "pair_verdicts": [],
+        "conflicts": [],
+    }
+    raw = client.get("/autodedup/groups/101").text
+    for secret in ("777 123 456", "jan.novak@example.cz", "Jan Novak", "Jana Novakova"):
+        assert secret not in raw
+    # Two strings went in carrying a phone; two came back with it replaced.
+    assert raw.count("[telefon]") == 2
+    assert raw.count("[jmeno]") == 2 and raw.count("[email]") == 1
+    # And the statement itself never asks for a contact field, in a column or out of raw_json.
+    assert "broker" not in usql.MEMBER_TEXT_SQL.lower()
+    for name in ("broker_name", "broker_phone", "broker_email"):
+        assert name not in usql.MEMBER_TEXT_SQL
+        assert name not in usql.MEMBER_TEXT_COLUMNS
 
 
 def test_the_group_QUEUE_carries_no_advert_text_at_all(client, conn):
