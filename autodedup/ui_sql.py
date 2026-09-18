@@ -7,8 +7,9 @@ Nothing here writes a production table — the two write statements at the botto
 `autodedup.verdicts` and `autodedup.must_not_link`, which is the operator feedback loop of §9.
 
 PII (E28). `listings` carries `broker_name` / `broker_email` / `broker_phone` (migration 025);
-NOT ONE of them is selected by any statement in this module, and the description travels
-through `autodedup.judge.listing_digest`'s scrub before it reaches a response. A future
+NOT ONE of them is selected by any statement in this module, and every advert string —
+description AND title — travels through the judge's own scrub (`listing_digest` /
+`scrubbed_text`, one set of regexes, two lengths) before it reaches a response. A future
 column added to `LISTING_DETAIL_COLUMNS` has to be checked against that rule by hand — the
 select lists here are explicit for exactly that reason, never `l.*`.
 
@@ -242,6 +243,34 @@ LEFT JOIN LATERAL (
 ) frames ON true
 WHERE m.cluster_key = any(%(keys)s::bigint[])
 ORDER BY m.cluster_key, m.listing_id
+"""
+
+# --------------------------------------------------------------- the members' own advert text
+
+MEMBER_TEXT_COLUMNS: tuple[str, ...] = ("listing_id", "title", "description")
+
+# THE DIALOG ONLY, never the queue. `GROUP_MEMBERS_SQL` runs for every member of every card on
+# a 20-group page; `listings.description` is a TOASTed column and `raw_json` a whole payload, so
+# selecting either there would detoast hundreds of adverts to render a photo strip nobody has
+# opened yet. This statement runs once, over the members of the ONE cluster being opened.
+#
+# The title is not a column: each portal parser files it in `raw_json` under its own key
+# (`title` for the six HTML portals, `advert_name` for sreality's v1 API; `name` is the generic
+# fallback). `nullif(btrim(...), '')` so an empty string is an absent title, not a blank heading.
+# Both fields go through `autodedup.judge.scrubbed_text` before they reach a response (E28) —
+# the statement selects no broker column, and a bazos advert signs its title as often as its body.
+MEMBER_TEXT_SQL = """
+SELECT
+    l.id,
+    coalesce(
+        nullif(btrim(l.raw_json->>'title'), ''),
+        nullif(btrim(l.raw_json->>'advert_name'), ''),
+        nullif(btrim(l.raw_json->>'name'), '')
+    ),
+    l.description
+FROM listings l
+WHERE l.id = any(%(ids)s::bigint[])
+ORDER BY l.id
 """
 
 IMAGE_COLUMNS: tuple[str, ...] = (

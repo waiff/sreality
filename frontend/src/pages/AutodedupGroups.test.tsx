@@ -952,6 +952,65 @@ describe('<AutodedupGroups>', () => {
     expect(within(dialog).getByRole('button', { name: 'Save split' })).toBeInTheDocument();
   });
 
+  it('shows each member\'s advert text, marked and collapsed, in the dialog', async () => {
+    /* The operator\'s own ask: a developer project\'s units share the photos and
+     * the attribute row, so the TEXT is the only place the unit number, the floor
+     * and the orientation differ. Long adverts open collapsed — five members of
+     * two thousand characters each is a dialog nobody scrolls. */
+    const user = userEvent.setup();
+    const long = `Byt č. 14 ve 4. patře, 68 m². ${'Klidná lokalita, jižní orientace. '.repeat(20)}`;
+    vi.mocked(api.getAutodedupGroup).mockResolvedValue({
+      store_ready: true,
+      data: {
+        cluster: group({ cluster_key: 7 }),
+        members: [
+          {
+            ...member({ listing_id: 101 }),
+            images: FRAMES,
+            title: 'Prodej bytu 3+kk 68 m²',
+            description: long,
+            description_truncated: false,
+            description_chars: long.length,
+          },
+          {
+            ...member({ listing_id: 202, source: 'bazos' }),
+            images: FRAMES,
+            title: 'Prodej bytu 3+kk, Jihlava',
+            description: 'Byt č. 3 v přízemí.',
+            description_truncated: false,
+            description_chars: 19,
+          },
+        ],
+        pairs: [],
+        judgements: [],
+        conflicts: [],
+        verdicts: [],
+      },
+    });
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    await user.click(within(card).getByRole('button', { name: 'Open' }));
+    const dialog = await screen.findByRole('dialog');
+
+    expect(await within(dialog).findByText('Prodej bytu 3+kk 68 m²')).toBeInTheDocument();
+    expect(within(dialog).getByText('Prodej bytu 3+kk, Jihlava')).toBeInTheDocument();
+    /* The tokens that decide the question are marked; the town is not a compass point. */
+    const marks = [...dialog.querySelectorAll('mark')].map((m) => m.textContent);
+    expect(marks).toEqual(
+      expect.arrayContaining(['Byt č. 14', '4. patře', '68 m²', 'Byt č. 3', 'přízemí']),
+    );
+    expect(marks).not.toContain('Jihlava');
+
+    /* One toggle: the SHORT advert is simply shown, and a control that does
+     * nothing is worse than no control. */
+    const toggle = within(dialog).getByRole('button', { name: /zobrazit celý popis/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await user.click(toggle);
+    expect(
+      within(dialog).getByRole('button', { name: /skrýt/ }),
+    ).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('opens a group onto its members and its edges', async () => {
     const user = userEvent.setup();
     vi.mocked(api.getAutodedupGroup).mockResolvedValue({

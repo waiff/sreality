@@ -200,6 +200,55 @@ def test_scrub_for_prompt_leaves_ordinary_advert_prose_alone() -> None:
     assert judge.scrub_for_prompt(text) == text
 
 
+PII_CASES: tuple[str, ...] = (
+    "Kontakt: Ing. Jan Novák, tel. +420 777 654 321, e-mail makler@rkdomov.cz",
+    "Volejte realitní makléř Petr Svoboda na 606123456",
+    "Více na https://www.rkdomov.cz/nabidka/12345 nebo j.novakova@remax-czech.cz",
+    "Prohlídky domlouvá Petra Dvořáková na čísle 720 555 111",
+    "Kontaktní osoba: Marie Nová, tel 601 202 303",
+)
+# What the CURRENT scrubber removes. A bare advert URL is deliberately NOT on this list:
+# `export.scrub_description` leaves one standing (the operator already has `source_url`), and
+# this test pins that the two paths agree, not that either grew a new rule.
+PII_SECRETS: tuple[str, ...] = (
+    "777 654 321", "Novák", "Svoboda", "606123456",
+    "Dvořáková", "720 555 111", "Nová,", "601 202 303", "makler@", "j.novakova@",
+)
+
+
+@pytest.mark.parametrize("raw", PII_CASES)
+def test_the_uncapped_text_scrubs_exactly_what_the_judge_digest_scrubs(raw: str) -> None:
+    """ONE scrubber, two lengths (E28). The operator's surfaces read `scrubbed_text`, which is
+    the digest's own scrub with the token cap removed — so a pattern caught for the model is
+    caught for the page, and a leak cannot appear on one path only."""
+    whole = judge.scrubbed_text(raw)
+    capped = judge.listing_digest(make_listing(description=raw)).description
+    assert whole is not None and capped is not None
+    # Short enough to survive the cap, so the two paths must agree character for character.
+    assert whole == capped
+    for secret in PII_SECRETS:
+        assert secret not in whole
+
+
+def test_scrubbed_text_is_none_for_an_absent_or_blank_description() -> None:
+    """A panel with nothing to say says nothing, rather than opening a blank box."""
+    assert judge.scrubbed_text(None) is None
+    assert judge.scrubbed_text("   \n  ") is None
+
+
+def test_the_uncapped_digest_keeps_the_whole_advert_and_says_it_is_not_truncated() -> None:
+    """The cap is a token budget, not a privacy rule: the operator pays no tokens and the unit
+    number is as often in the last paragraph as the first."""
+    raw = "a" * 400 + " tel. +420 777 654 321 " + "b" * 2000
+    digest = judge.listing_digest(make_listing(description=raw), truncate=False)
+    assert digest.description is not None
+    assert len(digest.description) > judge.DESCRIPTION_MAX_CHARS
+    assert digest.description_truncated is False
+    assert digest.description.endswith("b" * 20)
+    assert "777 654 321" not in digest.description
+    assert judge.scrubbed_text(raw) == digest.description
+
+
 def test_digest_truncates_the_description_after_scrubbing() -> None:
     raw = "a" * 400 + " tel. +420 777 654 321 " + "b" * 2000
     digest = judge.listing_digest(make_listing(description=raw))

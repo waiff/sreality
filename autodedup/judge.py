@@ -245,6 +245,24 @@ def scrub_for_prompt(text: str | None) -> str | None:
     return _scrub_names(cleaned) if cleaned else cleaned
 
 
+def scrubbed_text(text: str | None) -> str | None:
+    """The SAME E28 scrub, with no character cap — what a HUMAN reader is shown.
+
+    `DESCRIPTION_MAX_CHARS` is a token budget, not a privacy rule: it exists so a 6,000-char
+    advert does not cost six times the tokens of a short one. The operator validating a group
+    pays no tokens and needs the whole text, because the unit number or the floor sentence that
+    tells two developer units apart is as often in the last paragraph as the first. One scrubber
+    either way — a second copy of the PII rules is how a leak ships.
+
+    The one deliberate difference from the digest path is emptiness: a scrub that leaves only
+    whitespace is an ABSENT description here, so a surface renders nothing instead of a blank
+    panel. What survives the scrub is returned verbatim — the line breaks are the advert's own
+    paragraphs, and the page preserves them.
+    """
+    cleaned = scrub_for_prompt(text)
+    return cleaned if (cleaned or "").strip() else None
+
+
 def _clean(value: Any) -> str | None:
     if value is None or isinstance(value, bool):
         return None if value is None else ("yes" if value else "no")
@@ -280,13 +298,18 @@ def _attr_text(key: str, raw: Any) -> str | None:
     return _clean(raw)
 
 
-def listing_digest(listing: Listing) -> ListingDigest:
-    """One side of the pair, PII-free: no broker field of any kind reaches this record."""
+def listing_digest(listing: Listing, *, truncate: bool = True) -> ListingDigest:
+    """One side of the pair, PII-free: no broker field of any kind reaches this record.
+
+    `truncate=False` keeps the whole scrubbed description (the operator's deep-dive reads it;
+    see `scrubbed_text`). The judge never passes it — its digest stays capped, unchanged.
+    """
     attrs = listing.attrs or {}
     attributes = {label: _attr_text(key, attrs.get(key)) for key, label in DIGEST_ATTRS}
     scrubbed = scrub_for_prompt(listing.description)
-    truncated = bool(scrubbed) and len(scrubbed or "") > DESCRIPTION_MAX_CHARS
-    description = (scrubbed or "")[:DESCRIPTION_MAX_CHARS] or None
+    truncated = truncate and bool(scrubbed) and len(scrubbed or "") > DESCRIPTION_MAX_CHARS
+    whole = scrubbed or ""
+    description = (whole[:DESCRIPTION_MAX_CHARS] if truncate else whole) or None
 
     digest = ListingDigest(
         listing_id=listing.id,

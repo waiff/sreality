@@ -280,6 +280,26 @@ describe('<AutodedupPair>', () => {
     expect(screen.queryByText(/makléř/i)).toBeNull();
   });
 
+  it('renders the advert through the shared MemberText, unit tokens marked', async () => {
+    /* The SAME component the group dialog uses: one advert reads the same on both
+     * surfaces, and the tokens that tell two units of one building apart are
+     * marked in both places rather than only where someone remembered to. */
+    vi.mocked(api.getAutodedupPair).mockResolvedValue({
+      store_ready: true,
+      data: {
+        ...DETAIL,
+        digests: {
+          lo: { ...digest(101), description: 'Byt č. 14 ve 4. patře, 68 m². Jihlava.' },
+          hi: { ...digest(202), description: null },
+        },
+      },
+    });
+    renderPair();
+    await screen.findByText(/judge: same property/);
+    const marks = [...document.querySelectorAll('mark')].map((m) => m.textContent);
+    expect(marks).toEqual(['Byt č. 14', '4. patře', '68 m²']);
+  });
+
   it('still takes two clicks for a negative verdict', async () => {
     const user = userEvent.setup();
     renderPair();

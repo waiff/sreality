@@ -34,6 +34,7 @@ _LABELS: dict[str, str] = {
     usql.GROUPS_LARGEST_SQL: "groups_largest",
     usql.GROUP_ONE_SQL: "group_one",
     usql.GROUP_MEMBERS_SQL: "members",
+    usql.MEMBER_TEXT_SQL: "member_text",
     usql.EDGE_SUMMARY_SQL: "edges",
     usql.LISTING_IMAGES_SQL: "images",
     usql.LISTING_PHASHES_SQL: "phashes",
@@ -493,6 +494,23 @@ def _member(cluster_key: int, listing_id: int, **over: Any) -> tuple[Any, ...]:
     }
     values.update(over)
     return _tuple(usql.MEMBER_COLUMNS, **values)
+
+
+def _member_text(listing_id: int, **over: Any) -> tuple[Any, ...]:
+    """A member's own advert text — the DIALOG's row, not the queue's. BOTH strings carry
+    contact details on purpose: E28 is asserted on the rendered payload, not on intent, and
+    the title is the half that is new here — a bazos advert signs its headline as readily as
+    its body, so a title that reached the wire unscrubbed would be the whole leak."""
+    values: dict[str, Any] = {
+        "listing_id": listing_id,
+        "title": f"Prodej bytu 3+kk 68 m2, byt c. {listing_id} - Ing. Jan Novak, tel. 777 123 456",
+        "description": (
+            "Byt c. 12 ve 4. patre, orientace na jih, 68 m2. "
+            "Kontaktujte Jana Novakova na 777 123 456 nebo jan.novak@example.cz"
+        ),
+    }
+    values.update(over)
+    return _tuple(usql.MEMBER_TEXT_COLUMNS, **values)
 
 
 def _pair_row(lo: int = 11, hi: int = 12, **over: Any) -> tuple[Any, ...]:
@@ -1126,6 +1144,113 @@ def test_group_detail_carries_members_photos_edges_and_conflicts(client, conn):
     assert _last_call(conn, usql.LISTING_IMAGES_SQL)["per_listing"] == routes.IMAGES_PER_LISTING
 
 
+def test_group_detail_members_carry_the_title_and_the_WHOLE_scrubbed_description(client, conn):
+    """The operator's need: developer units share the photos and the attribute row and differ
+    only in what the advert SAYS. So the dialog's members carry the title and the full text —
+    scrubbed (E28), and explicitly not cut at the judge's token cap."""
+    long_tail = " Klidna lokalita, vlastni parkovani." * 80
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12)],
+        "member_text": [
+            _member_text(11),
+            _member_text(12, description="Byt c. 14 v prizemi." + long_tail),
+        ],
+        "images": [_image(11, 900, 1, 5)],
+        "cluster_pairs": [],
+        "judgements": [],
+        "cluster_verdicts": [],
+        "pair_verdicts": [],
+        "conflicts": [],
+    }
+    members = client.get("/autodedup/groups/101").json()["data"]["members"]
+    by_id = {m["listing_id"]: m for m in members}
+    # The advert's own headline survives the scrub; the broker signed onto it does not.
+    assert by_id[11]["title"] == "Prodej bytu 3+kk 68 m2, byt c. 11 - [jmeno], tel. [telefon]"
+    # The discriminating sentence survives; the contact details do not.
+    assert by_id[11]["description"].startswith("Byt c. 12 ve 4. patre, orientace na jih, 68 m2.")
+    assert "777 123 456" not in by_id[11]["description"]
+    assert "jan.novak@example.cz" not in by_id[11]["description"]
+    # Longer than the judge's cap and NOT truncated — the reader pays no tokens.
+    from autodedup.judge import DESCRIPTION_MAX_CHARS
+
+    assert len(by_id[12]["description"]) > DESCRIPTION_MAX_CHARS
+    assert by_id[12]["description"].endswith("vlastni parkovani.")
+    assert by_id[12]["description_truncated"] is False
+    assert by_id[12]["description_chars"] == len(by_id[12]["description"])
+    # One statement, once, over the members of THIS cluster only.
+    assert _last_call(conn, usql.MEMBER_TEXT_SQL)["ids"] == [11, 12]
+
+
+def test_a_member_whose_listing_row_is_gone_still_renders_with_no_text(client, conn):
+    """The members statement LEFT JOINs `listings`; a pruned row must not make the key vanish
+    and turn "absent" into "this surface does not select it" on the client."""
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11)],
+        "member_text": [],
+        "images": [],
+        "cluster_pairs": [],
+        "judgements": [],
+        "cluster_verdicts": [],
+        "pair_verdicts": [],
+        "conflicts": [],
+    }
+    member = client.get("/autodedup/groups/101").json()["data"]["members"][0]
+    assert (member["title"], member["description"]) == (None, None)
+    assert member["description_truncated"] is False
+
+
+def test_the_group_dialog_carries_no_pii(client, conn):
+    """E28 over the surface that newly carries advert text, asserted the way the pair view is:
+    on the RENDERED body, not on the intent of the code that built it.
+
+    The title is the half this wave added, so it gets the same proof as the description — one
+    member, one contact block per string, and BOTH tokens have to come back replaced. Counting
+    them is what distinguishes "the scrubber ran on both" from "it ran on the body and the
+    headline went out whole", which is the failure mode a `assert phone not in description`
+    cannot see."""
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11)],
+        "member_text": [_member_text(11)],
+        "images": [],
+        "cluster_pairs": [],
+        "judgements": [],
+        "cluster_verdicts": [],
+        "pair_verdicts": [],
+        "conflicts": [],
+    }
+    raw = client.get("/autodedup/groups/101").text
+    for secret in ("777 123 456", "jan.novak@example.cz", "Jan Novak", "Jana Novakova"):
+        assert secret not in raw
+    # Two strings went in carrying a phone; two came back with it replaced.
+    assert raw.count("[telefon]") == 2
+    assert raw.count("[jmeno]") == 2 and raw.count("[email]") == 1
+    # And the statement itself never asks for a contact field, in a column or out of raw_json.
+    assert "broker" not in usql.MEMBER_TEXT_SQL.lower()
+    for name in ("broker_name", "broker_phone", "broker_email"):
+        assert name not in usql.MEMBER_TEXT_SQL
+        assert name not in usql.MEMBER_TEXT_COLUMNS
+
+
+def test_the_group_QUEUE_carries_no_advert_text_at_all(client, conn):
+    """The cost rule, pinned. 20 cards x N members of TOASTed description to render a photo
+    strip nobody opened is why the text lives on the detail path and nowhere else."""
+    conn.canned = {
+        "groups": [_cluster()],
+        "members": [_member(101, 11)],
+        "member_text": [_member_text(11)],
+        "edges": [],
+    }
+    body = client.get("/autodedup/groups").json()
+    member = body["data"]["items"][0]["members"][0]
+    assert "description" not in member and "title" not in member
+    # Not merely absent from the payload: the statement never ran.
+    assert all(sql != usql.MEMBER_TEXT_SQL for sql, _ in conn.calls)
+    assert "777 123 456" not in client.get("/autodedup/groups").text
+
+
 def test_an_unknown_group_is_a_404(client, conn):
     assert client.get("/autodedup/groups/999").status_code == 404
 
@@ -1315,6 +1440,24 @@ def test_the_pair_view_carries_no_pii(client, conn):
     for name in ("broker_name", "broker_phone", "broker_email"):
         assert name not in usql.LISTING_DETAIL_SQL
         assert name not in usql.LISTING_DETAIL_COLUMNS
+
+
+def test_the_pair_digest_is_no_longer_cut_at_the_judges_token_cap(client, conn):
+    """The pair page is the deep-dive. The JUDGE keeps its capped digest (that cap is a token
+    budget); the operator reading the page pays no tokens and gets the whole scrubbed advert."""
+    from autodedup.judge import DESCRIPTION_MAX_CHARS
+
+    long_ad = "Byt c. 14 ve 2. patre. " + "Klidna lokalita, jizni orientace. " * 90
+    _pair_evidence(conn)
+    conn.canned["listing_detail"] = [
+        _listing_detail(11, description=long_ad + " tel. 777 123 456"),
+        _listing_detail(12, source="bazos"),
+    ]
+    digest = client.get("/autodedup/pair/11/12").json()["data"]["digests"]["a"]
+    assert len(digest["description"]) > DESCRIPTION_MAX_CHARS
+    assert digest["description"].endswith("tel. [telefon]")
+    assert digest["description_truncated"] is False
+    assert "777 123 456" not in digest["description"]
 
 
 def test_the_pair_view_keeps_the_price_unit_the_judge_digest_dropped(client, conn):
