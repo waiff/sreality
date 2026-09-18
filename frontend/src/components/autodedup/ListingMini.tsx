@@ -174,8 +174,10 @@ export default function ListingMini({
   className?: string;
   /* QUEUE GRAIN. A residual row is a decision, and the decision is made on the
    * diff table and the reason — which a pair of 600px hero photos pushes below
-   * the fold. Dense puts a 160px thumbnail BESIDE the facts instead; the full
-   * photos are one click away on the pair page. */
+   * the fold. Dense puts the gallery BESIDE the facts at 160px instead: the
+   * FOOTPRINT shrinks, not the gallery — the frames still page here exactly as
+   * they do on a group card, which is the whole of the operator's request. The
+   * full-size photos are one click away on the pair page. */
   dense?: boolean;
 }) {
   const inApp = memberListingPath(member);

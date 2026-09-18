@@ -3662,10 +3662,11 @@ export interface AutodedupMember {
   sreality_id?: number | null;
   source_id_native?: string | null;
   /* The first frames of the album, in the SAME order the cover is picked from —
-   * so `images[0]` IS `cover`. The groups list ships 12 per member so a card can
-   * be paged; `n_images` still counts the whole album, which is how the card
-   * says how many more the dialog would show. Absent on a surface that selects
-   * only the cover, which is why the card falls back rather than assuming. */
+   * so `images[0]` IS `cover`. Both queues ship 12 per advert — a group card's
+   * member and a residual row's side — so the card can be paged; `n_images`
+   * still counts the whole album, which is how the card says how many more the
+   * dialog would show. Absent on a surface that selects only the cover, which
+   * is why the card falls back rather than assuming. */
   images?: AutodedupMemberImage[];
 }
 

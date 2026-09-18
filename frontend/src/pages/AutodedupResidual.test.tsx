@@ -185,7 +185,15 @@ const BLOCKS = {
 };
 
 function LocationProbe() {
-  return <i data-testid="search">{useLocation().search}</i>;
+  const loc = useLocation();
+  return (
+    <>
+      <i data-testid="search">{loc.search}</i>
+      {/* Separate from the search probe: paging a gallery may not move the route,
+        * and a combined string would let a pathname change hide inside it. */}
+      <i data-testid="path">{loc.pathname}</i>
+    </>
+  );
 }
 
 function renderPage(entry = '/autodedup/residual') {
@@ -513,6 +521,91 @@ describe('<AutodedupResidual>', () => {
      * the diff table, the reason and the four answers below the fold — the
      * whole decision off screen. */
     expect(container.querySelectorAll('.w-40.shrink-0').length).toBe(2);
+  });
+
+  /* ------------------------------------- the row gallery (the operator's ask) */
+
+  const frames = (listing: number, ...sequences: number[]) =>
+    sequences.map((sequence) => ({
+      image_id: listing * 100 + sequence,
+      storage_path: null,
+      sreality_url: `https://img.example.invalid/${listing}/${sequence}.jpg`,
+      sequence,
+    }));
+
+  function withGalleries() {
+    vi.mocked(api.getAutodedupResidual).mockResolvedValue(
+      page([
+        {
+          ...ROW,
+          lo: member({ listing_id: 101, images: frames(101, 1, 2, 3), n_images: 30 }),
+          hi: member({
+            listing_id: 202,
+            source: 'bazos',
+            floor: 5,
+            price_czk: null,
+            category_type: null,
+            images: frames(202, 1, 2),
+            n_images: 2,
+          }),
+        },
+      ]),
+    );
+  }
+
+  it('pages each side of the row, and only that side', async () => {
+    const user = userEvent.setup();
+    withGalleries();
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    /* One cover is the weakest evidence a portal offers: two adverts for one flat
+     * often share nothing but the floor plan. So both sides page, right here. */
+    expect(within(row).getByText('1 / 3')).toBeInTheDocument();
+    expect(within(row).getByText('1 / 2')).toBeInTheDocument();
+    /* The album is bigger than the frames the row carries, and it says so rather
+     * than implying the advert has three photos. */
+    expect(within(row).getByText('+27 fotek v detailu')).toBeInTheDocument();
+
+    const [left, right] = within(row).getAllByRole('button', { name: 'Next photo' });
+    await user.click(left);
+    expect(within(row).getByText('2 / 3')).toBeInTheDocument();
+    /* DELIBERATELY UNSYNCED: the two adverts are being compared, not scrolled
+     * together — the right side has not moved. */
+    expect(within(row).getByText('1 / 2')).toBeInTheDocument();
+    await user.click(right);
+    expect(within(row).getByText('2 / 2')).toBeInTheDocument();
+    expect(within(row).getByText('2 / 3')).toBeInTheDocument();
+  });
+
+  it('pages without navigating and without recording a verdict', async () => {
+    const user = userEvent.setup();
+    withGalleries();
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    await user.click(within(row).getAllByRole('button', { name: 'Next photo' })[0]);
+    /* A chevron inside a review row must mean exactly one thing: the row's own
+     * "Full evidence" link and the four verdict buttons are NOT what was clicked. */
+    expect(screen.getByTestId('path')).toHaveTextContent('/autodedup/residual');
+    expect(api.postAutodedupVerdict).not.toHaveBeenCalled();
+    expectNoNestedInteractive(row);
+  });
+
+  it('keeps the queue grain while it pages', async () => {
+    withGalleries();
+    const { container } = renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    /* jsdom loads no CSS, so the grain is asserted where it is decided: the 160px
+     * dense box. A gallery that grew the footprint would push the diff table, the
+     * reason and the four answers below the fold — the whole decision off screen. */
+    expect(container.querySelectorAll('.w-40.shrink-0').length).toBe(2);
+  });
+
+  it('falls back to the cover when a side carries no gallery', async () => {
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    /* Nothing to page, so no chevrons and no counter — never an empty box. */
+    expect(within(row).queryByRole('button', { name: 'Next photo' })).toBeNull();
+    expect(within(row).getAllByRole('presentation', { hidden: true }).length).toBe(2);
   });
 
   it('labels a cover the portal refuses to serve', async () => {
