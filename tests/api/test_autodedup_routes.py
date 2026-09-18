@@ -10,6 +10,7 @@ un-migrated database renders instead of 500ing.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from decimal import Decimal
@@ -23,6 +24,7 @@ TestClient = pytest.importorskip("fastapi.testclient").TestClient
 from api import dependencies as deps
 from api import main as api_main
 from api.routes import autodedup as routes
+from autodedup import candidates as candidate_groups
 from autodedup import progress_sql as psql
 from autodedup import ui_sql as usql
 
@@ -49,6 +51,13 @@ _LABELS: dict[str, str] = {
     usql.CLUSTER_CONFLICTS_SQL: "conflicts",
     usql.RESIDUAL_SQL: "residual",
     usql.RESIDUAL_RANDOM_SQL: "residual_random",
+    # The candidate queue (E56): three cheap reads feed the packing, one reads the cards.
+    usql.CANDIDATE_FINGERPRINT_SQL: "candidate_fingerprint",
+    usql.CANDIDATE_PAIRS_SQL: "candidate_pairs",
+    usql.CANDIDATE_CLUSTER_MEMBERS_SQL: "candidate_locks",
+    usql.OPERATOR_PAIR_VERDICTS_SQL: "pair_verdict_map",
+    usql.LISTING_CARDS_SQL: "listing_cards",
+    usql.GENERATION_EXISTS_SQL: "generation_exists",
     usql.VALIDATION_GROUPS_SAMPLE_SQL: "validation_sample",
     usql.VALIDATION_GROUPS_TOTAL_SQL: "validation_total",
     usql.VALIDATION_RESIDUAL_SAMPLE_SQL: "validation_sample",
@@ -644,6 +653,27 @@ def _listing_detail(listing_id: int, **over: Any) -> tuple[Any, ...]:
     }
     values.update(over)
     return _tuple(usql.LISTING_DETAIL_COLUMNS, **values)
+
+
+def _judgement(lo: int, hi: int, **over: Any) -> tuple[Any, ...]:
+    """The judge's latest word on one pair, in `JUDGEMENT_COLUMNS` order."""
+    values: dict[str, Any] = {
+        "listing_lo": lo,
+        "listing_hi": hi,
+        "judge_version": "j2",
+        "tier": "text",
+        "model": "gpt-5.6-luna",
+        "verdict": "same_property",
+        "confidence": 0.81,
+        "unit_discriminator": None,
+        "key_evidence": ["same street and number"],
+        "contradicting_evidence": [],
+        "developer_project_suspected": False,
+        "cost_usd": Decimal("0.000400"),
+        "created_at": datetime(2026, 9, 16, 4, tzinfo=timezone.utc),
+    }
+    values.update(over)
+    return _tuple(usql.JUDGEMENT_COLUMNS, **values)
 
 
 def _last_call(conn: _FakeConn, sql: str) -> dict[str, Any]:
@@ -2776,3 +2806,755 @@ def test_a_residual_row_carries_the_reasons_of_its_stored_verdict(client, conn):
     }
     row = client.get("/autodedup/residual").json()["data"]["items"][0]
     assert row["verdict"]["reasons"] == ["identical_photos", "price_history"]
+
+
+# ---------------------------------------------------- the candidate groups (§12, E56)
+#
+# The residual cohort, packed into cards. What is pinned here is the ROUTE's half of E56: the
+# cohort statements it reads, one member statement per page (never one per card), the derived
+# `reviewed` state, the seeded order, the lock rule on the write, and that no judge artefact
+# reaches a card the operator has not ruled on.
+
+
+@pytest.fixture(autouse=True)
+def _drop_candidate_memo():
+    """The packing is memoised per (generation, fingerprint) IN PROCESS, so one test's canned
+    cohort would otherwise be served to the next under the same generation name."""
+    candidate_groups.clear_cache()
+    yield
+    candidate_groups.clear_cache()
+
+
+def _candidate_pair(lo: int, hi: int, **over: Any) -> tuple[Any, ...]:
+    values: dict[str, Any] = {
+        "listing_lo": lo,
+        "listing_hi": hi,
+        "score": 0.44,
+        "zone": "band",
+        "families": 5,  # ATTR | TXT
+        "block_key": 500123,
+        "block_grain": "o",
+    }
+    values.update(over)
+    return _tuple(usql.CANDIDATE_PAIR_COLUMNS, **values)
+
+
+def _fingerprint(n_pairs: int = 2, n_locks: int = 3) -> tuple[Any, ...]:
+    return _tuple(
+        usql.CANDIDATE_FINGERPRINT_COLUMNS,
+        n_pairs=n_pairs,
+        decided_at=datetime(2026, 9, 17, 5, 0, tzinfo=timezone.utc),
+        n_locks=n_locks,
+    )
+
+
+def _listing_card(listing_id: int, **over: Any) -> tuple[Any, ...]:
+    """The SAME card the groups queue renders, read over listing ids instead of membership."""
+    values: dict[str, Any] = {
+        "listing_id": listing_id,
+        "source": "sreality",
+        "source_url": f"https://www.sreality.cz/detail/{listing_id}",
+        "category_main": "byt",
+        "category_type": "prodej",
+        "disposition": "2+kk",
+        "area_m2": Decimal("52.0"),
+        "floor": 2,
+        "price_czk": 5_500_000,
+        "first_seen_at": datetime(2026, 2, 1, tzinfo=timezone.utc),
+        "last_seen_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        "is_active": True,
+        "cover_storage_path": f"listings/{listing_id}/1.jpg",
+        "cover_sreality_url": f"https://img.example.invalid/{listing_id}.jpg",
+        "n_images": 8,
+    }
+    values.update(over)
+    return _tuple(usql.LISTING_CARD_COLUMNS, **values)
+
+
+def _fan_out_store(conn: _FakeConn) -> _FakeConn:
+    """ONE advert against each member of a merged group — the measured shape (§12).
+
+    50 is unclustered; 201/202/203 are the members of g3's cluster 900. Three residual pairs,
+    one candidate card, one question.
+    """
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=3, n_locks=3)],
+        "candidate_pairs": [
+            _candidate_pair(50, 201, score=0.55),
+            _candidate_pair(50, 202, score=0.48),
+            _candidate_pair(50, 203, score=0.41),
+        ],
+        "candidate_locks": [(900, 201), (900, 202), (900, 203)],
+        "listing_cards": [_listing_card(i) for i in (50, 201, 202, 203)],
+        "pair_verdict_map": [],
+    }
+    return conn
+
+
+def test_candidates_render_when_the_store_does_not_exist(client, conn):
+    conn.ready = False
+    resp = client.get("/autodedup/candidates")
+    assert resp.status_code == 200
+    assert resp.json() == {"data": None, "store_ready": False}
+    assert len(conn.calls) == 1
+
+
+def test_a_store_with_no_clustering_is_an_empty_candidate_queue(client, conn):
+    """E54: no pass resolves to no generation at all — never to a fabricated name, and never
+    to a cohort of every scored pair (every pair is 'unclustered' in a pass that never ran)."""
+    conn.latest_generation = None
+    data = client.get("/autodedup/candidates").json()["data"]
+    assert data["items"] == [] and data["total"] == 0 and data["generation"] is None
+    assert all(sql != usql.CANDIDATE_PAIRS_SQL for sql, _ in conn.calls)
+
+
+def test_the_fan_out_of_one_advert_against_a_group_is_ONE_card(client, conn):
+    _fan_out_store(conn)
+    data = client.get("/autodedup/candidates").json()["data"]
+    assert data["generation"] == "g3"
+    assert len(data["items"]) == 1
+    item = data["items"][0]
+    assert item["size"] == 4
+    assert item["n_units"] == 2
+    assert item["n_pairs"] == 3
+    assert [m["listing_id"] for m in item["members"]] == [50, 201, 202, 203]
+    # THE LOCK travels with every member: the three merged adverts carry their cluster key and
+    # the lone one carries null, which is what makes the letters lockable on the card.
+    assert [m["unit_lock"] for m in item["members"]] == [None, 900, 900, 900]
+    assert item["locked_cluster_keys"] == [900]
+    assert item["score_min"] == pytest.approx(0.55)
+    assert item["sources"] == ["sreality"]
+
+
+def test_a_candidate_card_carries_the_same_member_shape_the_groups_card_does(client, conn):
+    _fan_out_store(conn)
+    member = client.get("/autodedup/candidates").json()["data"]["items"][0]["members"][0]
+    for key in ("listing_id", "source", "source_url", "category_main", "disposition",
+                "area_m2", "floor", "price_czk", "first_seen_at", "last_seen_at",
+                "is_active", "n_images", "cover", "images"):
+        assert key in member
+    # and NOT the advert text: that is the dialog's statement, over one card's members.
+    assert "description" not in member and "title" not in member
+
+
+def test_the_page_reads_its_members_in_ONE_statement(client, conn):
+    """The N+1 the groups queue avoids by keying on `any(keys)`: a candidate page spans several
+    clusters, so its members cannot come from `cluster_members` — but they still come once."""
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=2, n_locks=0)],
+        "candidate_pairs": [_candidate_pair(1, 2, score=0.9), _candidate_pair(3, 4, score=0.8)],
+        "candidate_locks": [],
+        "listing_cards": [_listing_card(i) for i in (1, 2, 3, 4)],
+        "pair_verdict_map": [],
+    }
+    data = client.get("/autodedup/candidates").json()["data"]
+    assert len(data["items"]) == 2
+    assert sum(1 for sql, _ in conn.calls if sql == usql.LISTING_CARDS_SQL) == 1
+    assert _last_call(conn, usql.LISTING_CARDS_SQL)["ids"] == [1, 2, 3, 4]
+    assert _last_call(conn, usql.LISTING_CARDS_SQL)["card_frames"] == routes.GROUP_CARD_IMAGES
+
+
+def test_the_cohort_is_the_pair_queues_own_floor_and_generation(client, conn):
+    _fan_out_store(conn)
+    client.get("/autodedup/candidates")
+    params = _last_call(conn, usql.CANDIDATE_PAIRS_SQL)
+    assert params["min_score"] == routes.RESIDUAL_MIN_SCORE
+    assert params["generation"] == "g3"
+    assert _last_call(conn, usql.CANDIDATE_CLUSTER_MEMBERS_SQL)["generation"] == "g3"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"min_score": 0.3},     # the candidate cohort has ONE floor, so there is no control
+        {"source_pair": "bazos+sreality"},
+        {"category_main": "byt"},
+        {"nonsense": "1"},
+    ],
+)
+def test_an_unknown_candidate_filter_is_refused(client, conn, params):
+    assert client.get("/autodedup/candidates", params=params).status_code == 400
+    assert conn.calls == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"sort": "newest"},
+        {"zone": "nonsense"},
+        {"verdict": "same"},        # the candidate queue's verdict filter is reviewed/unreviewed
+        {"block_grain": "x"},
+        {"after": "not-a-key"},
+        {"seed": "NOPE"},
+    ],
+)
+def test_a_candidate_filter_value_outside_the_registry_is_refused(client, conn, params):
+    assert client.get("/autodedup/candidates", params=params).status_code == 400
+    assert conn.calls == []
+
+
+def test_the_candidate_queue_pages_by_its_own_key(client, conn):
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=3, n_locks=0)],
+        "candidate_pairs": [
+            _candidate_pair(1, 2, score=0.9),
+            _candidate_pair(3, 4, score=0.6),
+            _candidate_pair(5, 6, score=0.3),
+        ],
+        "candidate_locks": [],
+        "listing_cards": [_listing_card(i) for i in range(1, 7)],
+        "pair_verdict_map": [],
+    }
+    first = client.get("/autodedup/candidates", params={"limit": 2}).json()["data"]
+    assert len(first["items"]) == 2
+    assert first["has_more"] is True
+    assert first["total"] == 3
+    # weakest edge first, exactly like the groups queue's default.
+    assert [i["score_min"] for i in first["items"]] == [pytest.approx(0.3), pytest.approx(0.6)]
+    assert first["next_after"] == first["items"][-1]["candidate_key"]
+
+    second = client.get(
+        "/autodedup/candidates", params={"limit": 2, "after": first["next_after"]}
+    ).json()["data"]
+    assert len(second["items"]) == 1
+    assert second["items"][0]["score_min"] == pytest.approx(0.9)
+    assert second["has_more"] is False
+    assert second["next_after"] is None
+    seen = [i["candidate_key"] for i in first["items"] + second["items"]]
+    assert len(seen) == len(set(seen)) == 3
+
+
+def test_a_cursor_that_names_no_group_of_this_queue_is_refused(client, conn):
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=1, n_locks=0)],
+        "candidate_pairs": [_candidate_pair(1, 2)],
+        "candidate_locks": [],
+        "listing_cards": [_listing_card(1), _listing_card(2)],
+        "pair_verdict_map": [],
+    }
+    resp = client.get("/autodedup/candidates", params={"after": "99-0123456789"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("sort", ["weakest", "strongest", "largest", "random"])
+def test_every_order_is_total_and_stable(client, conn, sort):
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=3, n_locks=0)],
+        "candidate_pairs": [
+            _candidate_pair(1, 2, score=0.9),
+            _candidate_pair(3, 4, score=0.6),
+            _candidate_pair(5, 6, score=0.3),
+        ],
+        "candidate_locks": [],
+        "listing_cards": [_listing_card(i) for i in range(1, 7)],
+        "pair_verdict_map": [],
+    }
+    once = client.get("/autodedup/candidates", params={"sort": sort}).json()["data"]
+    twice = client.get("/autodedup/candidates", params={"sort": sort}).json()["data"]
+    assert [i["candidate_key"] for i in once["items"]] == [
+        i["candidate_key"] for i in twice["items"]
+    ]
+    assert once["sort"] == sort and once["seed"] == "v1"
+
+
+def test_a_second_seed_is_a_second_candidate_sample(client, conn):
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=4, n_locks=0)],
+        "candidate_pairs": [
+            _candidate_pair(1, 2, score=0.9),
+            _candidate_pair(3, 4, score=0.8),
+            _candidate_pair(5, 6, score=0.7),
+            _candidate_pair(7, 8, score=0.6),
+        ],
+        "candidate_locks": [],
+        "listing_cards": [_listing_card(i) for i in range(1, 9)],
+        "pair_verdict_map": [],
+    }
+    one = client.get(
+        "/autodedup/candidates", params={"sort": "random", "seed": "v1"}
+    ).json()["data"]
+    two = client.get(
+        "/autodedup/candidates", params={"sort": "random", "seed": "v2"}
+    ).json()["data"]
+    assert two["seed"] == "v2"
+    assert sorted(i["candidate_key"] for i in one["items"]) == sorted(
+        i["candidate_key"] for i in two["items"]
+    )
+    assert [i["candidate_key"] for i in one["items"]] != [
+        i["candidate_key"] for i in two["items"]
+    ]
+
+
+def test_reviewed_is_derived_from_the_pair_verdicts(client, conn):
+    """There is no candidate row to carry a verdict, so the card's state is READ OFF the pairs:
+    reviewed when every residual pair inside it carries one (by any operator)."""
+    _fan_out_store(conn)
+    conn.canned["pair_verdict_map"] = [
+        _tuple(usql.CANDIDATE_VERDICT_COLUMNS, listing_lo=50, listing_hi=201, verdict="same"),
+        _tuple(usql.CANDIDATE_VERDICT_COLUMNS, listing_lo=50, listing_hi=202,
+               verdict="different"),
+    ]
+    item = client.get("/autodedup/candidates").json()["data"]["items"][0]
+    assert item["n_pairs"] == 3
+    assert item["n_pairs_reviewed"] == 2
+    assert item["reviewed"] is False
+    assert item["n_pairs_not_same"] == 1
+    assert client.get(
+        "/autodedup/candidates", params={"verdict": "reviewed"}
+    ).json()["data"]["items"] == []
+    assert len(
+        client.get("/autodedup/candidates", params={"verdict": "unreviewed"})
+        .json()["data"]["items"]
+    ) == 1
+
+
+def test_a_fully_ruled_card_is_reviewed(client, conn):
+    _fan_out_store(conn)
+    conn.canned["pair_verdict_map"] = [
+        _tuple(usql.CANDIDATE_VERDICT_COLUMNS, listing_lo=50, listing_hi=hi, verdict="same")
+        for hi in (201, 202, 203)
+    ]
+    data = client.get("/autodedup/candidates", params={"verdict": "reviewed"}).json()["data"]
+    assert len(data["items"]) == 1
+    assert data["items"][0]["reviewed"] is True
+    assert data["items"][0]["n_pairs_not_same"] == 0
+
+
+def test_the_zone_and_block_filters_narrow_the_built_cards(client, conn):
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=2, n_locks=0)],
+        "candidate_pairs": [
+            _candidate_pair(1, 2, score=0.9, zone="band", block_key=500123),
+            _candidate_pair(3, 4, score=0.8, zone="reject", block_key=777777),
+        ],
+        "candidate_locks": [],
+        "listing_cards": [_listing_card(i) for i in range(1, 5)],
+        "pair_verdict_map": [],
+    }
+    banded = client.get("/autodedup/candidates", params={"zone": "band"}).json()["data"]
+    assert len(banded["items"]) == 1 and banded["items"][0]["zones"] == {"band": 1}
+    assert banded["total"] == 1
+    blocked = client.get(
+        "/autodedup/candidates", params={"block": 777777, "block_grain": "o"}
+    ).json()["data"]
+    assert len(blocked["items"]) == 1 and blocked["items"][0]["block_key"] == 777777
+    assert client.get(
+        "/autodedup/candidates", params={"block": 777777, "block_grain": "c"}
+    ).json()["data"]["items"] == []
+
+
+def test_the_candidate_queue_carries_no_judge_artefact_at_all(client, conn):
+    """Blind mode is the page's default here (E55) and the QUEUE simply has nothing to leak:
+    no judge verdict, no confidence, no tier, no has-judgement hint."""
+    _fan_out_store(conn)
+    item = client.get("/autodedup/candidates").json()["data"]["items"][0]
+    flat = json.dumps(item)
+    for leak in ("judge", "judgement", "confidence", "tier", "same_property"):
+        assert leak not in flat
+    assert all(sql != usql.JUDGEMENTS_LATEST_SQL for sql, _ in conn.calls)
+
+
+def test_the_candidate_queue_carries_no_advert_text(client, conn):
+    _fan_out_store(conn)
+    client.get("/autodedup/candidates")
+    assert all(sql != usql.MEMBER_TEXT_SQL for sql, _ in conn.calls)
+
+
+def test_a_new_score_run_moves_the_fingerprint_and_the_cards_rebuild(client, conn):
+    """The memo must not serve a packing the engine no longer produces."""
+    _fan_out_store(conn)
+    first = client.get("/autodedup/candidates").json()["data"]
+    assert len(first["items"]) == 1
+    reads = sum(1 for sql, _ in conn.calls if sql == usql.CANDIDATE_PAIRS_SQL)
+    client.get("/autodedup/candidates")
+    # unchanged fingerprint -> served from memory, the cohort is not re-read
+    assert sum(1 for sql, _ in conn.calls if sql == usql.CANDIDATE_PAIRS_SQL) == reads
+    conn.canned["candidate_fingerprint"] = [_fingerprint(n_pairs=4, n_locks=3)]
+    conn.canned["candidate_pairs"] = [
+        *conn.canned["candidate_pairs"],
+        _candidate_pair(70, 71, score=0.6),
+    ]
+    conn.canned["listing_cards"] = [_listing_card(i) for i in (50, 70, 71, 201, 202, 203)]
+    after = client.get("/autodedup/candidates").json()["data"]
+    assert len(after["items"]) == 2
+    assert sum(1 for sql, _ in conn.calls if sql == usql.CANDIDATE_PAIRS_SQL) == reads + 1
+
+
+# ------------------------------------------------------------------ one candidate group
+
+
+def _detail_store(conn: _FakeConn) -> str:
+    _fan_out_store(conn)
+    key = client_key(conn)
+    conn.canned.update(
+        {
+            "images": [_image(i, i * 10, 1, 1) for i in (50, 201, 202, 203)],
+            "member_text": [_member_text(i) for i in (50, 201, 202, 203)],
+            "cluster_pairs": [
+                _pair_row(50, 201, score=0.55, zone="band", decision="evidence_gate",
+                          cluster_key=None),
+                _pair_row(201, 202, score=0.93, zone="merge", decision="certificate:K-B",
+                          cluster_key=900),
+            ],
+            "judgements": [_judgement(50, 201)],
+            "member_verdicts": [],
+        }
+    )
+    return key
+
+
+def client_key(conn: _FakeConn) -> str:
+    """The key the packing gives the fan-out card — computed, never typed into a fixture."""
+    return candidate_groups.candidate_key([50, 201, 202, 203])
+
+
+def test_candidate_detail_carries_the_text_the_pairs_and_the_judge(client, conn):
+    key = _detail_store(conn)
+    body = client.get(f"/autodedup/candidates/{key}").json()
+    assert body["store_ready"] is True
+    data = body["data"]
+    assert data["candidate"]["candidate_key"] == key
+    assert [m["listing_id"] for m in data["members"]] == [50, 201, 202, 203]
+    # the DIALOG's own reason to exist: the advert's words, scrubbed (E28)
+    assert data["members"][0]["title"] is not None
+    assert "777 123 456" not in json.dumps(data["members"])
+    assert "jan.novak@example.cz" not in json.dumps(data["members"])
+    # every scored pair among the members, with why it wasn't merged — and which of them are
+    # the questions THIS card asks
+    by_pair = {(p["listing_lo"], p["listing_hi"]): p for p in data["pairs"]}
+    assert by_pair[(50, 201)]["residual"] is True
+    assert by_pair[(201, 202)]["residual"] is False
+    assert by_pair[(50, 201)]["why_not_merged"]
+    assert by_pair[(201, 202)]["certificate"] == "K-B"
+    assert data["judgements"][0]["listing_lo"] == 50
+
+
+def test_candidate_detail_hands_back_the_whole_album_not_the_card_gallery(client, conn):
+    key = _detail_store(conn)
+    data = client.get(f"/autodedup/candidates/{key}").json()["data"]
+    assert any(sql == usql.LISTING_IMAGES_SQL for sql, _ in conn.calls)
+    assert data["members"][0]["images"]
+
+
+def test_an_unknown_candidate_group_is_a_404(client, conn):
+    _fan_out_store(conn)
+    assert client.get("/autodedup/candidates/99-0123456789").status_code == 404
+
+
+def test_a_malformed_candidate_key_is_refused_before_it_is_looked_up(client, conn):
+    assert client.get("/autodedup/candidates/not-a-key").status_code == 400
+    assert conn.calls == []
+
+
+def test_candidate_detail_renders_when_the_store_does_not_exist(client, conn):
+    conn.ready = False
+    resp = client.get("/autodedup/candidates/11-0123456789")
+    assert resp.status_code == 200
+    assert resp.json() == {"data": None, "store_ready": False}
+
+
+# -------------------------------------------------------------- the candidate split write
+
+
+def _candidate_split_body(conn: _FakeConn, **over: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "candidate_key": client_key(conn),
+        "generation": "g3",
+        "units": [
+            {"listing_id": 50, "unit": "A"},
+            {"listing_id": 201, "unit": "B"},
+            {"listing_id": 202, "unit": "B"},
+            {"listing_id": 203, "unit": "B"},
+        ],
+        "relation": "same_building_different_unit",
+    }
+    body.update(over)
+    return body
+
+
+@pytest.fixture()
+def candidate_conn(conn: _FakeConn) -> _FakeConn:
+    _fan_out_store(conn)
+    conn.canned["generation_exists"] = [(1,)]
+    conn.canned["member_verdicts"] = []
+    return conn
+
+
+def test_a_candidate_split_rules_every_pair_that_crosses_the_units(
+    admin_client, candidate_conn
+):
+    body = admin_client.post(
+        "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn)
+    ).json()
+    assert body["store_ready"] is True
+    data = body["data"]
+    # 50 against each of the three locked adverts; the three pairs INSIDE the lock are not
+    # this route's to write.
+    assert (data["n_pairs_same"], data["n_pairs_negative"]) == (0, 3)
+    assert data["n_pairs_locked"] == 3
+    assert data["must_not_link_written"] == 3
+    written = {
+        (p["listing_lo"], p["listing_hi"]): p["verdict"]
+        for p in _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    }
+    assert written == {
+        (50, 201): "same_building_different_unit",
+        (50, 202): "same_building_different_unit",
+        (50, 203): "same_building_different_unit",
+    }
+    vetoes = {
+        (p["listing_lo"], p["listing_hi"])
+        for p in _calls(candidate_conn, usql.MUST_NOT_LINK_UPSERT_SQL)
+    }
+    assert vetoes == {(50, 201), (50, 202), (50, 203)}
+
+
+def test_a_candidate_split_never_writes_inside_a_lock(admin_client, candidate_conn):
+    """The pairs of an already-merged group are the GROUPS page's ruling: this route neither
+    confirms them nor retracts the must-not-links a split there wrote."""
+    admin_client.post(
+        "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn)
+    )
+    touched = {
+        (p["listing_lo"], p["listing_hi"])
+        for p in _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        + _calls(candidate_conn, usql.MUST_NOT_LINK_UPSERT_SQL)
+        + _calls(candidate_conn, usql.MUST_NOT_LINK_RETRACT_SQL)
+    }
+    for inside in ((201, 202), (201, 203), (202, 203)):
+        assert inside not in touched
+
+
+def test_all_one_unit_confirms_every_crossing_pair_and_retracts_its_vetoes(
+    admin_client, candidate_conn
+):
+    body = admin_client.post(
+        "/autodedup/verdict/candidate-split",
+        json=_candidate_split_body(
+            candidate_conn,
+            units=[{"listing_id": i, "unit": "A"} for i in (50, 201, 202, 203)],
+        ),
+    ).json()
+    data = body["data"]
+    assert (data["n_pairs_same"], data["n_pairs_negative"]) == (3, 0)
+    assert data["must_not_link_retracted"] == 3
+    assert all(
+        sql != usql.MUST_NOT_LINK_UPSERT_SQL for sql, _ in candidate_conn.calls
+    )
+
+
+def test_a_candidate_split_writes_NO_cluster_verdict(admin_client, candidate_conn):
+    """There is no cluster: a candidate group is a packing of residual pairs, not a proposal."""
+    body = admin_client.post(
+        "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn)
+    ).json()
+    assert body["data"]["cluster_verdict"] is None
+    assert all(
+        sql != usql.VERDICT_CLUSTER_UPSERT_SQL for sql, _ in candidate_conn.calls
+    )
+
+
+def test_a_candidate_split_lands_in_one_transaction(admin_client, candidate_conn):
+    admin_client.post(
+        "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn)
+    )
+    assert candidate_conn.transactions == 1
+    assert [sql for sql, _ in candidate_conn.tx_calls].count(
+        usql.VERDICT_PAIR_UPSERT_SQL
+    ) == 3
+
+
+def test_splitting_a_locked_group_is_refused_and_says_where_to_do_it(
+    admin_client, candidate_conn
+):
+    resp = admin_client.post(
+        "/autodedup/verdict/candidate-split",
+        json=_candidate_split_body(
+            candidate_conn,
+            units=[
+                {"listing_id": 50, "unit": "A"},
+                {"listing_id": 201, "unit": "B"},
+                {"listing_id": 202, "unit": "C"},
+                {"listing_id": 203, "unit": "B"},
+            ],
+        ),
+    )
+    assert resp.status_code == 400
+    assert "Groups page" in resp.json()["detail"]
+    assert "900" in resp.json()["detail"]
+    assert all(
+        sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in candidate_conn.calls
+    )
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"units": [{"listing_id": 50, "unit": "A"}]},                      # a member left out
+        {"units": [{"listing_id": i, "unit": "A"} for i in (50, 201, 202, 203, 99)]},
+        {"units": [{"listing_id": 50, "unit": " "},
+                   {"listing_id": 201, "unit": "B"},
+                   {"listing_id": 202, "unit": "B"},
+                   {"listing_id": 203, "unit": "B"}]},
+        {"relation": "same"},
+        {"candidate_key": "nonsense"},
+        {"reasons": ["floor_plan_differs"]},
+    ],
+)
+def test_a_malformed_candidate_split_is_refused(admin_client, candidate_conn, over):
+    resp = admin_client.post(
+        "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn, **over)
+    )
+    assert resp.status_code == 400
+    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in candidate_conn.calls)
+
+
+def test_reason_chips_are_refused_rather_than_silently_dropped(admin_client, candidate_conn):
+    resp = admin_client.post(
+        "/autodedup/verdict/candidate-split",
+        json=_candidate_split_body(candidate_conn, reasons=["identical_photos"]),
+    )
+    assert resp.status_code == 400
+    assert "note" in resp.json()["detail"]
+
+
+def test_the_note_rides_on_every_pair_row_with_the_assignment(admin_client, candidate_conn):
+    admin_client.post(
+        "/autodedup/verdict/candidate-split",
+        json=_candidate_split_body(candidate_conn, note="jiny dum stejneho projektu"),
+    )
+    note = _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)[0]["note"]
+    assert note.startswith("jiny dum stejneho projektu · operator candidate split: ")
+    assert "A: 50 | B: 201,202,203" in note
+
+
+def test_a_candidate_split_that_takes_back_a_veto_asks_first(admin_client, candidate_conn):
+    candidate_conn.canned["member_verdicts"] = [
+        _verdict_row(listing_lo=50, listing_hi=201, verdict="different",
+                     decided_by="operator@example.com")
+    ]
+    one_unit = _candidate_split_body(
+        candidate_conn, units=[{"listing_id": i, "unit": "A"} for i in (50, 201, 202, 203)]
+    )
+    resp = admin_client.post("/autodedup/verdict/candidate-split", json=one_unit)
+    assert resp.status_code == 409
+    assert "50-201" in resp.json()["detail"]
+    assert all(sql != usql.VERDICT_PAIR_UPSERT_SQL for sql, _ in candidate_conn.calls)
+
+    confirmed = admin_client.post(
+        "/autodedup/verdict/candidate-split", json={**one_unit, "confirm_retract": True}
+    ).json()
+    assert confirmed["data"]["reversed_pairs"] == [[50, 201]]
+    assert confirmed["data"]["n_pairs_same"] == 3
+
+
+def test_a_candidate_split_in_a_generation_that_never_clustered_is_a_404(
+    admin_client, candidate_conn
+):
+    candidate_conn.canned["generation_exists"] = []
+    resp = admin_client.post(
+        "/autodedup/verdict/candidate-split",
+        json=_candidate_split_body(candidate_conn, generation="g9"),
+    )
+    assert resp.status_code == 404
+    assert all(sql != usql.CANDIDATE_PAIRS_SQL for sql, _ in candidate_conn.calls)
+
+
+def test_a_candidate_split_against_a_store_that_does_not_exist_is_refused(admin_client, conn):
+    key = candidate_groups.candidate_key([50, 201, 202, 203])
+    conn.ready = False
+    resp = admin_client.post(
+        "/autodedup/verdict/candidate-split",
+        json={
+            "candidate_key": key,
+            "generation": "g3",
+            "units": [{"listing_id": 50, "unit": "A"}],
+            "relation": "different",
+        },
+    )
+    assert resp.status_code == 503
+    assert "528" in resp.json()["detail"] or "not created" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [("get", "/autodedup/candidates"), ("post", "/autodedup/verdict/candidate-split")],
+)
+def test_the_candidate_routes_require_admin(client, conn, method, path):
+    """The router carries `require_admin`; this pins that the new routes are inside it."""
+    api_main.app.dependency_overrides.pop(deps.require_admin, None)
+    resp = getattr(client, method)(path, **({"json": {}} if method == "post" else {}))
+    assert resp.status_code in (401, 403)
+
+
+# ------------------------------------------------------- the session counter on candidates
+
+
+def test_the_session_counter_counts_candidate_CARDS(client, conn):
+    conn.canned = {
+        "candidate_fingerprint": [_fingerprint(n_pairs=3, n_locks=0)],
+        "candidate_pairs": [
+            _candidate_pair(1, 2, score=0.9),
+            _candidate_pair(3, 4, score=0.8),
+            _candidate_pair(5, 6, score=0.7),
+        ],
+        "candidate_locks": [],
+        "listing_cards": [_listing_card(i) for i in range(1, 7)],
+        "pair_verdict_map": [
+            _tuple(usql.CANDIDATE_VERDICT_COLUMNS, listing_lo=1, listing_hi=2, verdict="same"),
+            _tuple(usql.CANDIDATE_VERDICT_COLUMNS, listing_lo=3, listing_hi=4,
+                   verdict="different"),
+        ],
+    }
+    data = client.get(
+        "/autodedup/validation-progress", params={"surface": "candidates"}
+    ).json()["data"]
+    assert data["grain"] == "candidate"
+    assert data["total"] == {"n": 3, "n_reviewed": 2, "n_not_same": 1}
+    # the sample is the first 100 of the seeded order over the whole generation — three here
+    assert data["sample"]["n"] == 3
+    assert data["seed"] == "v1"
+    assert data["generation"] == "g3"
+    # and it is counted WITHOUT the queue's own statements
+    assert all(sql != usql.VALIDATION_RESIDUAL_SAMPLE_SQL for sql, _ in conn.calls)
+
+
+def test_the_candidate_counter_renders_against_an_un_migrated_store(client, conn):
+    conn.ready = False
+    body = client.get(
+        "/autodedup/validation-progress", params={"surface": "candidates"}
+    ).json()
+    assert body == {"data": None, "store_ready": False}
+
+
+# --------------------------------------------- the candidate split feeds the D6 agreement
+
+
+def test_candidate_split_verdicts_are_explicit_operator_labels_for_the_agreement(
+    admin_client, candidate_conn
+):
+    """D6's agreement read takes EVERY pair verdict as an explicit operator label (§9/E55).
+
+    The candidate split writes through the same `VERDICT_PAIR_UPSERT_SQL` with `kind = 'pair'`
+    as the pair queue does, and `AGREEMENT_PAIRS_SQL`'s `explicit` CTE selects those rows with
+    no predicate beyond the kind — so a card ruled here counts towards the gate exactly as a
+    pair ruled one at a time does. Both halves are asserted, because either one alone would
+    let the two drift apart."""
+    admin_client.post(
+        "/autodedup/verdict/candidate-split", json=_candidate_split_body(candidate_conn)
+    )
+    writes = _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+    assert writes, "the split wrote no pair verdict"
+    # `kind` is written as the literal 'pair' — the same row shape the pair queue writes.
+    assert "INSERT INTO autodedup.verdicts (kind," in usql.VERDICT_PAIR_UPSERT_SQL
+    assert "VALUES ('pair'," in usql.VERDICT_PAIR_UPSERT_SQL
+    explicit = usql.AGREEMENT_PAIRS_SQL[
+        usql.AGREEMENT_PAIRS_SQL.index("WITH explicit AS"):
+        usql.AGREEMENT_PAIRS_SQL.index("confirmed AS")
+    ]
+    assert "FROM autodedup.verdicts v" in explicit
+    assert "v.kind = 'pair'" in explicit
+    # no generation, no cluster, no source: a pair verdict is a pair verdict
+    for narrowing in ("generation", "cluster_key", "cluster_members", "decided_by"):
+        assert narrowing not in explicit
+    assert "'explicit'::text AS source" in usql.AGREEMENT_PAIRS_SQL

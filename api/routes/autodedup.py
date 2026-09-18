@@ -32,13 +32,14 @@ import re
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from autodedup import agreement as agreement_math
+from autodedup import candidates as candidate_groups
 from autodedup import progress_sql as psql
 from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
@@ -79,6 +80,10 @@ router = APIRouter(
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+
+# What a queue keys its cards on — a cluster key on the groups queue, a candidate key on the
+# candidate one. The member-verdict fan-out is the same read either way.
+_Key = TypeVar("_Key", int, str)
 
 # D2, the program's spend gate: $25 is the hard per-run cap wired into a lane's `--max-usd`,
 # $200 the total for the whole program. They are served next to the spend so the header strip
@@ -306,6 +311,13 @@ RESIDUAL_FILTER_KEYS: frozenset[str] = frozenset(
 )
 DETAIL_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
 BLOCK_FILTER_KEYS: frozenset[str] = frozenset({"generation"})
+# The candidate queue (E56) reads the residual cohort at ITS OWN floor, so there is no
+# `min_score` here: the floor is `RESIDUAL_MIN_SCORE` and the packing — and its cache — is one
+# structure per generation. `source_pair` is likewise absent: a candidate group spans several
+# adverts, so "the pair of portals" is not a question it can answer.
+CANDIDATE_FILTER_KEYS: frozenset[str] = frozenset(
+    {"generation", "after", "limit", "block", "block_grain", "zone", "verdict", "sort", "seed"}
+)
 PROGRESS_FILTER_KEYS: frozenset[str] = frozenset(
     {"generation", "seed", "surface", "min_score"}
 )
@@ -325,7 +337,22 @@ HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 # THE SAMPLE IS THE FIRST 100 OF THE SEEDED ORDER. Two of these (one per surface) is the
 # ~200-pair session D6 names; the counter counts against exactly that.
 VALIDATION_SAMPLE_SIZE = 100
-VALIDATION_SURFACES: tuple[str, ...] = ("groups", "residual")
+VALIDATION_SURFACES: tuple[str, ...] = ("groups", "residual", "candidates")
+
+# ------------------------------------------------------------------ the candidate queue (E56)
+#
+# The residual pairs of one generation, packed into small groups so ONE save rules many pairs.
+# The packing is `autodedup/candidates.py` — pure, cached per generation — and everything here
+# is the page around it: a closed sort vocabulary, a closed filter vocabulary, and paging.
+CANDIDATE_SORTS: tuple[str, ...] = ("weakest", "strongest", "largest", "random")
+# Reviewed is DERIVED, not stored: there is no candidate row in `autodedup.verdicts` to carry a
+# verdict, so a group counts as reviewed when EVERY residual pair inside it carries an operator
+# pair verdict — by ANY operator, this being a single-operator platform, which is the same
+# reading `AGREEMENT_PAIRS_SQL` and the progress strip make of the same rows.
+CANDIDATE_VERDICT_VALUES: tuple[str, ...] = ("unreviewed", "reviewed")
+# `<smallest listing id>-<10 hex>` — `candidates.candidate_key`. Validated before it is looked
+# up, so a hand-edited key is a 400 rather than a scan of the whole index.
+CANDIDATE_KEY_RE = re.compile(r"^[0-9]{1,19}-[0-9a-f]{10}$")
 
 # How big a confirmed cluster may be before the agreement read stops expanding it into pairs
 # (n members imply n(n-1)/2 of them). 12 is far above the trial's group sizes and bounds the
@@ -606,8 +633,8 @@ def _execute(conn: Any, sql: str, params: dict[str, Any]) -> None:
 
 
 def _member_verdicts(
-    conn: Any, members: dict[int, list[dict[str, Any]]]
-) -> dict[int, list[dict[str, Any]]]:
+    conn: Any, members: dict[_Key, list[dict[str, Any]]]
+) -> dict[_Key, list[dict[str, Any]]]:
     """The operator's pair verdicts that fall INSIDE each listed cluster.
 
     A queue card has to show the split that is STORED — letters reading "A" over a group the
@@ -618,7 +645,7 @@ def _member_verdicts(
     if not ids:
         return {key: [] for key in members}
     rows = _rows(usql.VERDICT_COLUMNS, _fetch(conn, usql.MEMBER_PAIR_VERDICTS_SQL, {"ids": ids}))
-    out: dict[int, list[dict[str, Any]]] = {}
+    out: dict[_Key, list[dict[str, Any]]] = {}
     for key, member_rows in members.items():
         inside = {row["listing_id"] for row in member_rows}
         out[key] = [
@@ -1376,6 +1403,396 @@ def residual(
     }
 
 
+# ------------------------------------------------------- the candidate groups (§12, E56)
+
+
+def _candidate_index(conn: Any, generation: str) -> candidate_groups.CandidateIndex:
+    """This generation's candidate groups, built once per store fingerprint.
+
+    Three cheap statements: the fingerprint, the residual cohort (ids + score + zone + family
+    mask + block, a few thousand rows) and the generation's locks. The packing itself is pure
+    Python, so a second page of the same queue re-reads nothing."""
+    params = {"generation": generation, "min_score": RESIDUAL_MIN_SCORE}
+    stamp = _fetch(conn, usql.CANDIDATE_FINGERPRINT_SQL, params)
+    fingerprint = tuple(_jsonable(value) for value in (stamp[0] if stamp else ()))
+
+    def build() -> tuple[candidate_groups.CandidateGroup, ...]:
+        pairs = [
+            candidate_groups.ResidualPair(
+                listing_lo=int(row["listing_lo"]),
+                listing_hi=int(row["listing_hi"]),
+                score=float(row["score"] or 0.0),
+                zone=row["zone"],
+                families=int(row["families"] or 0),
+                block_key=None if row["block_key"] is None else int(row["block_key"]),
+                block_grain=row["block_grain"],
+            )
+            for row in _rows(
+                usql.CANDIDATE_PAIR_COLUMNS, _fetch(conn, usql.CANDIDATE_PAIRS_SQL, params)
+            )
+        ]
+        locks = [
+            (int(row[0]), int(row[1]))
+            for row in _fetch(
+                conn, usql.CANDIDATE_CLUSTER_MEMBERS_SQL, {"generation": generation}
+            )
+        ]
+        return candidate_groups.build_candidates(pairs, locks)
+
+    return candidate_groups.cached_index(generation, fingerprint, build)
+
+
+def _pair_verdict_map(conn: Any) -> dict[tuple[int, int], str]:
+    """Every pair the operator has ruled on, latest ruling per pair."""
+    return {
+        (int(row["listing_lo"]), int(row["listing_hi"])): str(row["verdict"])
+        for row in _rows(
+            usql.CANDIDATE_VERDICT_COLUMNS, _fetch(conn, usql.OPERATOR_PAIR_VERDICTS_SQL)
+        )
+    }
+
+
+def _candidate_review(
+    group: candidate_groups.CandidateGroup, verdicts: dict[tuple[int, int], str]
+) -> dict[str, Any]:
+    """Whether the operator has answered this card — DERIVED off the pair verdicts (E56).
+
+    A candidate group is not a row anywhere, so "reviewed" cannot be stored on it: it is
+    reviewed when every residual pair inside it carries an operator pair verdict. Partly-ruled
+    groups are counted too (`n_pairs_reviewed`), because a card that was abandoned halfway is
+    exactly what the operator wants to find again."""
+    ruled = [verdicts.get((pair.listing_lo, pair.listing_hi)) for pair in group.pairs]
+    n_ruled = sum(1 for value in ruled if value is not None)
+    return {
+        "n_pairs": len(group.pairs),
+        "n_pairs_reviewed": n_ruled,
+        "reviewed": bool(group.pairs) and n_ruled == len(group.pairs),
+        "n_pairs_not_same": sum(
+            1 for value in ruled if value is not None and value != "same"
+        ),
+    }
+
+
+def _candidate_order(
+    groups: list[candidate_groups.CandidateGroup], sort: str, seed: str
+) -> list[candidate_groups.CandidateGroup]:
+    """The four orders, each a TOTAL order (the key always ends in the candidate key).
+
+    `weakest` first, like the groups queue: the weakest link of a card is where its error is.
+    `strongest` is the residual queue's working order — the likeliest duplicates on top.
+    `random` is the seeded, unbiased one D6 is measured on, keyed on the candidate key so it
+    is stable across pages, reloads and days for one seed (E55)."""
+    if sort == "strongest":
+        return sorted(groups, key=lambda g: (-(g.score_max or 0.0), g.candidate_key))
+    if sort == "largest":
+        return sorted(groups, key=lambda g: (-g.size, g.candidate_key))
+    if sort == RANDOM_SORT:
+        return sorted(groups, key=lambda g: (_seeded_hash(g.candidate_key, seed), g.candidate_key))
+    return sorted(groups, key=lambda g: ((g.score_min if g.score_min is not None else -1.0),
+                                         g.candidate_key))
+
+
+def _candidate_matches(
+    group: candidate_groups.CandidateGroup,
+    zone: str | None,
+    block: int | None,
+    block_grain: str | None,
+    verdict: str | None,
+    review: dict[str, Any],
+) -> bool:
+    """The filter bar, applied to a BUILT group — never to the packing.
+
+    A filter that narrowed the cohort before the packing would hand the operator different
+    groups per filter combination, and a card whose membership changes with a select is not a
+    card anybody can rule on."""
+    if zone is not None and zone not in group.zones():
+        return False
+    if block is not None:
+        blocks = group.blocks()
+        if not any(
+            code == block and (block_grain is None or grain == block_grain)
+            for code, grain in blocks
+        ):
+            return False
+    if verdict == "reviewed" and not review["reviewed"]:
+        return False
+    if verdict == "unreviewed" and review["reviewed"]:
+        return False
+    return True
+
+
+def _candidate_header(
+    group: candidate_groups.CandidateGroup,
+    generation: str,
+    review: dict[str, Any],
+) -> dict[str, Any]:
+    """The card's own facts — no judge artefact among them (E55: blind mode is the page's
+    default here, and a header chip that leaked the judge's word would defeat it)."""
+    blocks = group.blocks()
+    return {
+        "candidate_key": group.candidate_key,
+        "generation": generation,
+        "size": group.size,
+        "n_units": group.n_units,
+        "score_min": group.score_min,
+        "score_max": group.score_max,
+        "zones": group.zones(),
+        "families": group.families(),
+        "family_names": _families(group.families()),
+        "block_key": blocks[0][0] if blocks else None,
+        "block_grain": blocks[0][1] if blocks else None,
+        "locked_cluster_keys": list(group.cluster_keys),
+        "units": [
+            {
+                "unit_key": unit.key,
+                "cluster_key": unit.cluster_key,
+                "listing_ids": list(unit.listing_ids),
+            }
+            for unit in group.units
+        ],
+        **review,
+    }
+
+
+def _candidate_locks(group: candidate_groups.CandidateGroup) -> dict[int, dict[str, Any]]:
+    """listing id -> which unit it belongs to, and whether that unit is a LOCK.
+
+    `unit_lock` is the g4 cluster key or null, and it is the whole contract between the packing
+    and the card: members sharing a lock share one letter, and the save refuses anything else."""
+    return {
+        listing_id: {"unit_key": unit.key, "unit_lock": unit.cluster_key}
+        for unit in group.units
+        for listing_id in unit.listing_ids
+    }
+
+
+def _candidate_members(
+    conn: Any, groups: list[candidate_groups.CandidateGroup]
+) -> dict[int, dict[str, Any]]:
+    """ONE statement over every listing the page shows — not one per group (the N+1 the groups
+    queue avoids by keying its member statement on `any(keys)`)."""
+    ids = sorted({listing_id for group in groups for listing_id in group.listing_ids})
+    if not ids:
+        return {}
+    rows = _rows(
+        usql.LISTING_CARD_COLUMNS,
+        _fetch(conn, usql.LISTING_CARDS_SQL, {"ids": ids, "card_frames": GROUP_CARD_IMAGES}),
+    )
+    return {int(row["listing_id"]): _member_row(row) for row in rows}
+
+
+@router.get("/candidates")
+def candidates(
+    request: Request,
+    generation: str | None = Query(None),
+    after: str | None = Query(None),
+    limit: int = Query(GROUP_PAGE_SIZE, ge=1, le=GROUP_MAX_PAGE_SIZE),
+    block: int | None = Query(None),
+    block_grain: str | None = Query(None),
+    zone: str | None = Query(None),
+    verdict: str | None = Query(None),
+    sort: str = Query("weakest"),
+    seed: str | None = Query(None),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The residual cohort as CANDIDATE GROUPS — the Groups card UX on the unmerged side (E56).
+
+    The pair queue asks one question per pair, and the pairs are not independent: one advert
+    against each member of a merged group is the same question asked five times. So the pairs
+    are lifted to UNIT level (an existing cluster of this generation, whole, or a lone advert),
+    packed greedily by score under an 8-advert cap, and served as cards. Every residual pair
+    lands in exactly one card, so nothing stops being asked.
+    """
+    _reject_unknown_filters(request, CANDIDATE_FILTER_KEYS)
+    _one_of("sort", sort, CANDIDATE_SORTS)
+    sample_seed = _seed(seed)
+    _one_of("zone", zone, ZONE_VALUES)
+    _one_of("verdict", verdict, CANDIDATE_VERDICT_VALUES)
+    _one_of("block_grain", block_grain, usql.BLOCK_GRAIN_VALUES)
+    if after is not None and not CANDIDATE_KEY_RE.match(after):
+        raise _bad("after is not a cursor from this endpoint")
+    if not store_ready(conn):
+        return _not_ready()
+
+    empty = {
+        "items": [],
+        "has_more": False,
+        "next_after": None,
+        "generation": None,
+        "sort": sort,
+        "seed": sample_seed,
+        "total": 0,
+    }
+    try:
+        resolved = _resolve_generation(conn, generation)
+        if resolved is None:
+            # A store with no clustering resolves to no pass at all (E54) — and with no locks
+            # there is no unit vocabulary either, so the honest answer is an empty queue.
+            return {"data": empty, "store_ready": True}
+        index = _candidate_index(conn, resolved)
+        verdicts = _pair_verdict_map(conn)
+        reviews = {
+            group.candidate_key: _candidate_review(group, verdicts) for group in index.groups
+        }
+        selected = [
+            group
+            for group in index.groups
+            if _candidate_matches(
+                group, zone, block, block_grain, verdict, reviews[group.candidate_key]
+            )
+        ]
+        ordered = _candidate_order(selected, sort, sample_seed)
+        start = 0
+        if after is not None:
+            keys = [group.candidate_key for group in ordered]
+            if after not in keys:
+                # The group the cursor names is gone (a new score run repacked it, or a filter
+                # moved). Starting from the top is wrong and guessing is worse, so say so.
+                raise _bad("after names no group of this queue — reload the first page")
+            start = keys.index(after) + 1
+        page = ordered[start:start + limit]
+        has_more = len(ordered) > start + limit
+        members = _candidate_members(conn, page)
+        by_group = {
+            group.candidate_key: [
+                members[listing_id]
+                for listing_id in group.listing_ids
+                if listing_id in members
+            ]
+            for group in page
+        }
+        member_verdicts = _member_verdicts(conn, by_group)
+    except _STORE_BEHIND:
+        return _not_ready()
+
+    items: list[dict[str, Any]] = []
+    for group in page:
+        locks = _candidate_locks(group)
+        items.append(
+            {
+                **_candidate_header(group, resolved, reviews[group.candidate_key]),
+                "sources": sorted(
+                    {
+                        str(member["source"])
+                        for member in by_group[group.candidate_key]
+                        if member["source"]
+                    }
+                ),
+                "members": [
+                    {**member, **locks.get(member["listing_id"], {})}
+                    for member in by_group[group.candidate_key]
+                ],
+                # The stored ruling, so the unit letters hydrate after a reload (E50).
+                "member_verdicts": member_verdicts.get(group.candidate_key, []),
+            }
+        )
+
+    return {
+        "data": {
+            "items": items,
+            "has_more": has_more,
+            "next_after": page[-1].candidate_key if page and has_more else None,
+            "generation": resolved,
+            "sort": sort,
+            "seed": sample_seed,
+            # Counted on EVERY page, unlike the keyset queues: the whole ordered set is already
+            # in memory, so "20 of N" costs nothing and cannot go stale between pages.
+            "total": len(ordered),
+        },
+        "store_ready": True,
+    }
+
+
+@router.get("/candidates/{candidate_key}")
+def candidate_detail(
+    request: Request,
+    candidate_key: str,
+    generation: str | None = Query(None),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One candidate group, whole: the members with their own advert text, every scored pair
+    among them with "why it wasn't merged", and the judge's latest word per tier.
+
+    The text is the reason this dialog exists, exactly as on the groups queue: a developer
+    project's units share the photos and the attribute row and differ only in what the ad says.
+    It reaches the response through the judge's own scrubber and no other path (E28)."""
+    _reject_unknown_filters(request, DETAIL_FILTER_KEYS)
+    if not CANDIDATE_KEY_RE.match(candidate_key):
+        raise _bad("candidate_key is not a key from this endpoint")
+    if not store_ready(conn):
+        return _not_ready()
+    try:
+        resolved = _resolve_generation(conn, generation)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail="no such candidate group")
+        index = _candidate_index(conn, resolved)
+        group = index.get(candidate_key)
+        if group is None:
+            raise HTTPException(status_code=404, detail="no such candidate group")
+        ids = list(group.listing_ids)
+        cards = _candidate_members(conn, [group])
+        galleries = _images_by_listing(conn, ids)
+        texts = _member_texts(conn, ids)
+        locks = _candidate_locks(group)
+        members = [
+            {
+                **cards[listing_id],
+                **locks.get(listing_id, {}),
+                "images": galleries.get(listing_id, []),
+                **texts.get(listing_id, _NO_TEXT),
+            }
+            for listing_id in ids
+            if listing_id in cards
+        ]
+        residual_keys = {(pair.listing_lo, pair.listing_hi) for pair in group.pairs}
+        pairs = []
+        for row in _rows(usql.PAIR_COLUMNS, _fetch(conn, usql.CLUSTER_PAIRS_SQL, {"ids": ids})):
+            view = _pair_view(row)
+            view["why_not_merged"] = _why_not_merged(
+                row["zone"], row["decision"], row["guard_veto"]
+            )
+            # Which of the scored edges among these adverts are the ones this CARD is asking
+            # about: an edge inside a locked group is evidence, never a question here.
+            view["residual"] = (
+                int(row["listing_lo"]), int(row["listing_hi"])
+            ) in residual_keys
+            pairs.append(view)
+        judgements = (
+            _rows(
+                usql.JUDGEMENT_COLUMNS,
+                _fetch(
+                    conn,
+                    usql.JUDGEMENTS_LATEST_SQL,
+                    {
+                        "los": [pair["listing_lo"] for pair in pairs],
+                        "his": [pair["listing_hi"] for pair in pairs],
+                    },
+                ),
+            )
+            if pairs
+            else []
+        )
+        member_verdicts = _rows(
+            usql.VERDICT_COLUMNS, _fetch(conn, usql.MEMBER_PAIR_VERDICTS_SQL, {"ids": ids})
+        )
+        verdicts = _pair_verdict_map(conn)
+    except _STORE_BEHIND:
+        return _not_ready()
+
+    return {
+        "data": {
+            "candidate": _candidate_header(
+                group, resolved, _candidate_review(group, verdicts)
+            ),
+            "members": members,
+            "pairs": pairs,
+            "judgements": judgements,
+            "member_verdicts": member_verdicts,
+        },
+        "store_ready": True,
+    }
+
+
 # --------------------------------------------------------------- the blocks of a generation
 
 
@@ -1458,16 +1875,23 @@ def validation_progress(
     try:
         generation = _resolve_generation(conn, generation)
         params["generation"] = generation
-        sample = _counts(
-            conn,
-            usql.VALIDATION_GROUPS_SAMPLE_SQL if groups else usql.VALIDATION_RESIDUAL_SAMPLE_SQL,
-            params,
-        )
-        total = _counts(
-            conn,
-            usql.VALIDATION_GROUPS_TOTAL_SQL if groups else usql.VALIDATION_RESIDUAL_TOTAL_SQL,
-            params,
-        )
+        if surface == "candidates":
+            sample, total = _candidate_counts(conn, generation, sample_seed)
+        else:
+            sample = _counts(
+                conn,
+                usql.VALIDATION_GROUPS_SAMPLE_SQL
+                if groups
+                else usql.VALIDATION_RESIDUAL_SAMPLE_SQL,
+                params,
+            )
+            total = _counts(
+                conn,
+                usql.VALIDATION_GROUPS_TOTAL_SQL
+                if groups
+                else usql.VALIDATION_RESIDUAL_TOTAL_SQL,
+                params,
+            )
     except _STORE_BEHIND:
         return _not_ready()
 
@@ -1477,14 +1901,47 @@ def validation_progress(
             "surface": surface,
             "seed": sample_seed,
             "sample_size": VALIDATION_SAMPLE_SIZE,
-            # The grain each number is counted at, said out loud: a cluster verdict and a pair
-            # verdict are not the same unit of work and must never be added up on a page.
-            "grain": "cluster" if groups else "pair",
+            # The grain each number is counted at, said out loud: a cluster verdict, a pair
+            # verdict and a candidate CARD are three units of work and must never be added up
+            # on a page. A candidate card is reviewed when every pair inside it is (E56), so
+            # its counter is deliberately not comparable with the pair queue's.
+            "grain": "cluster" if groups else "candidate" if surface == "candidates" else "pair",
             "sample": sample,
             "total": total,
         },
         "store_ready": True,
     }
+
+
+def _candidate_counts(
+    conn: Any, generation: str | None, seed: str
+) -> tuple[dict[str, int], dict[str, int]]:
+    """The candidate queue's two counters, at CARD grain (E56).
+
+    Both halves are computed off the cached index rather than a statement, because a candidate
+    group is not a row: the whole generation, and the first 100 of the SEEDED order over it —
+    the same order `sort=random` pages, so the sample the strip counts is the sample the
+    operator walks. Unfiltered, like the other two surfaces' samples are."""
+    zero = {name: 0 for name in usql.VALIDATION_COUNT_COLUMNS}
+    if generation is None:
+        return zero, dict(zero)
+    index = _candidate_index(conn, generation)
+    verdicts = _pair_verdict_map(conn)
+    ordered = _candidate_order(list(index.groups), RANDOM_SORT, seed)
+
+    def counted(groups: list[candidate_groups.CandidateGroup]) -> dict[str, int]:
+        reviews = [_candidate_review(group, verdicts) for group in groups]
+        return {
+            "n": len(groups),
+            "n_reviewed": sum(1 for review in reviews if review["reviewed"]),
+            "n_not_same": sum(
+                1
+                for review in reviews
+                if review["reviewed"] and review["n_pairs_not_same"] > 0
+            ),
+        }
+
+    return counted(ordered[:VALIDATION_SAMPLE_SIZE]), counted(ordered)
 
 
 def _counts(conn: Any, sql: str, params: dict[str, Any]) -> dict[str, int]:
@@ -2070,6 +2527,236 @@ def verdict_split(
             "must_not_link_retracted": n_pairs_same,
             # The pairs this save actually took back — the operator had ruled them negative
             # and the split re-ruled them as one unit. Named, so the page can say which.
+            "reversed_pairs": [[lo, hi] for lo, hi in reversed_pairs],
+        },
+        "store_ready": True,
+    }
+
+
+class CandidateSplitIn(BaseModel):
+    """The candidate card's one write — the split route's body, minus the cluster.
+
+    Same fields, same meanings, same 409: `units` names every member exactly once, `relations`
+    names each unit pair (E51) with `relation` as the fill, and `confirm_retract` is how a save
+    that takes back an earlier veto says it meant to (E52).
+    """
+
+    candidate_key: str
+    generation: str
+    units: list[SplitUnitIn]
+    relation: str
+    relations: list[SplitRelationIn] = Field(default_factory=list)
+    confirm_retract: bool = False
+    note: str | None = Field(default=None, max_length=2000)
+    # DELIBERATELY NOT ACCEPTED as chips. A split stamps its reasons on the CLUSTER row, and a
+    # candidate group has no row: stamping them on the pairwise fan-out instead would post
+    # C(n,2) reason rows from one click, so the §9 histogram would measure card size rather
+    # than operator evidence and stop being comparable with the judge's `unit_discriminator`.
+    # A non-empty list is a 400 rather than a silent drop — a reason the operator clicked and
+    # the store never kept is worse than a reason they were never offered. The note stays.
+    reasons: list[str] = Field(default_factory=list,
+                               max_length=reasons_registry.MAX_REASONS)
+
+
+@router.post("/verdict/candidate-split")
+def verdict_candidate_split(
+    body: CandidateSplitIn,
+    claims: dict = Depends(deps.require_admin),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One CANDIDATE GROUP, ruled unit by unit — many residual pairs answered in one save (E56).
+
+    The fan-out, the permanent must-not-links, the retraction of the operator's own vetoes and
+    the 409 confirmation are the split route's, unchanged: members sharing a letter are one
+    property, members in different letters are the relation named for THOSE TWO LETTERS.
+
+    TWO THINGS ARE DIFFERENT, and both follow from there being no cluster.
+    (1) NO CLUSTER VERDICT IS WRITTEN. A candidate group is a packing of this generation's
+        residual pairs, not a proposal the engine made, so there is nothing to confirm or
+        reject — the ruling IS its pair rows, which is also how the card reads itself back.
+    (2) A LOCK IS NEVER WRITTEN THROUGH. Two adverts the engine already merged into one g4
+        group arrive locked to one letter, and the pairs INSIDE that lock are skipped: they are
+        the Groups page's ruling, and this route neither confirms them nor retracts the
+        must-not-links a split there wrote. An assignment that splits a lock is refused (400)
+        and says where to do it instead.
+
+    The pair need not exist in `autodedup.pairs` — the same reason the split route gives: the
+    card's membership is the validation.
+    """
+    _one_of("relation", body.relation, SPLIT_RELATIONS)
+    if body.reasons:
+        raise _bad(
+            "a candidate split writes no cluster row, so it carries no reason chips — "
+            "put the why in the note"
+        )
+    if not CANDIDATE_KEY_RE.match(body.candidate_key):
+        raise _bad("candidate_key is not a key from this endpoint")
+    decided_by = claims.get("email") or claims.get("sub")
+    if not decided_by:
+        raise HTTPException(status_code=403, detail="the admin identity carries no email")
+    if not store_ready(conn):
+        raise HTTPException(status_code=503, detail="the autodedup store is not created yet")
+
+    # A pass nothing clustered would make EVERY scored pair "unclustered" and pack a cohort
+    # out of the whole table — so the name is checked before it is packed, not after.
+    if not _fetch(conn, usql.GENERATION_EXISTS_SQL, {"generation": body.generation}):
+        raise HTTPException(status_code=404, detail="no such generation")
+    index = _candidate_index(conn, body.generation)
+    group = index.get(body.candidate_key)
+    if group is None:
+        raise HTTPException(
+            status_code=404, detail="no such candidate group in this generation"
+        )
+    member_ids = sorted(int(listing_id) for listing_id in group.listing_ids)
+
+    assignment: dict[int, str] = {}
+    for entry in body.units:
+        unit = entry.unit.strip()
+        if not unit:
+            raise _bad("a unit label cannot be empty")
+        if entry.listing_id in assignment:
+            raise _bad(f"listing {entry.listing_id} is assigned to two units")
+        assignment[entry.listing_id] = unit
+    if set(assignment) != set(member_ids):
+        raise _bad(
+            "the unit assignment must name every advert of the candidate group, and only them"
+        )
+    distinct = sorted(set(assignment.values()))
+    if len(distinct) > MAX_SPLIT_UNITS:
+        raise _bad(f"a split names at most {MAX_SPLIT_UNITS} units")
+
+    # THE LOCK RULE. Adverts the engine merged share one unit letter or the save is refused —
+    # separating them is a statement about that g4 group, and the Groups page is where a group
+    # is split (with a cluster verdict, which this route does not write).
+    lock_of: dict[int, int | None] = {
+        listing_id: unit.cluster_key
+        for unit in group.units
+        for listing_id in unit.listing_ids
+    }
+    by_lock: dict[int, set[str]] = {}
+    for listing_id, cluster_key in lock_of.items():
+        if cluster_key is not None:
+            by_lock.setdefault(cluster_key, set()).add(assignment[listing_id])
+    for cluster_key, letters in sorted(by_lock.items()):
+        if len(letters) > 1:
+            raise _bad(
+                f"the adverts of merged group #{cluster_key} are one unit here and must share "
+                "one letter — split that group on the Groups page instead"
+            )
+
+    named: dict[tuple[str, str], str] = {}
+    for entry in body.relations:
+        unit_a, unit_b = entry.unit_a.strip(), entry.unit_b.strip()
+        _one_of("relation", entry.relation, SPLIT_RELATIONS)
+        if unit_a == unit_b:
+            raise _bad("a relation is between two DIFFERENT units")
+        if unit_a not in distinct or unit_b not in distinct:
+            raise _bad(
+                f"no such unit in this split: {unit_a if unit_a not in distinct else unit_b}"
+            )
+        key = _unit_pair(unit_a, unit_b)
+        if key in named:
+            raise _bad(f"the units {key[0]} and {key[1]} are given two relations")
+        named[key] = entry.relation
+
+    stored_verdicts: dict[tuple[int, int], str] = {}
+    for row in _rows(
+        usql.VERDICT_COLUMNS,
+        _fetch(conn, usql.MEMBER_PAIR_VERDICTS_SQL, {"ids": member_ids}),
+    ):
+        if row["decided_by"] != str(decided_by):
+            continue
+        key = (int(row["listing_lo"]), int(row["listing_hi"]))
+        stored_verdicts.setdefault(key, row["verdict"])
+
+    pairs: list[tuple[int, int, str, bool]] = []
+    reversed_pairs: list[tuple[int, int]] = []
+    n_skipped_locked = 0
+    for index_lo, lo in enumerate(member_ids):
+        for hi in member_ids[index_lo + 1:]:
+            lock = lock_of.get(lo)
+            if lock is not None and lock_of.get(hi) == lock:
+                n_skipped_locked += 1
+                continue
+            same_unit = assignment[lo] == assignment[hi]
+            relation = (
+                "same"
+                if same_unit
+                else named.get(_unit_pair(assignment[lo], assignment[hi]), body.relation)
+            )
+            if same_unit and stored_verdicts.get((lo, hi)) in NEGATIVE_VERDICTS:
+                reversed_pairs.append((lo, hi))
+            pairs.append((lo, hi, relation, same_unit))
+
+    if reversed_pairs and not body.confirm_retract:
+        listed = ", ".join(f"{lo}-{hi}" for lo, hi in reversed_pairs[:8])
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"this split takes back your earlier ruling on {len(reversed_pairs)} pair(s) "
+                f"({listed}) and drops their permanent must-not-link — re-send with "
+                "confirm_retract to go ahead"
+            ),
+        )
+
+    summary = _split_summary(assignment)
+    note = f"operator candidate split: {summary}"
+    if body.note:
+        note = f"{body.note} · {note}"
+
+    n_pairs_same = 0
+    n_pairs_negative = 0
+    try:
+        with conn.transaction():
+            for lo, hi, relation, same_unit in pairs:
+                _execute(
+                    conn,
+                    usql.VERDICT_PAIR_UPSERT_SQL,
+                    {
+                        "listing_lo": lo,
+                        "listing_hi": hi,
+                        "verdict": relation,
+                        "note": note,
+                        # The fan-out carries no reason chips — see the body's own comment.
+                        "reasons": [],
+                        "decided_by": str(decided_by),
+                    },
+                )
+                if same_unit:
+                    n_pairs_same += 1
+                    _execute(
+                        conn,
+                        usql.MUST_NOT_LINK_RETRACT_SQL,
+                        {"listing_lo": lo, "listing_hi": hi},
+                    )
+                else:
+                    n_pairs_negative += 1
+                    _execute(
+                        conn,
+                        usql.MUST_NOT_LINK_UPSERT_SQL,
+                        {
+                            "listing_lo": lo,
+                            "listing_hi": hi,
+                            "reason": f"operator split: {relation}",
+                        },
+                    )
+    except _CHECK_VIOLATION as exc:
+        raise _needs_migration_532() from exc
+    except _UNDEFINED_COLUMN as exc:
+        raise _needs_migration_533() from exc
+
+    return {
+        "data": {
+            "candidate_key": body.candidate_key,
+            # There is no cluster here, and the key says so rather than leaving the client to
+            # guess from an absent field: the split route's own shape, honestly empty.
+            "cluster_verdict": None,
+            "n_pairs_same": n_pairs_same,
+            "n_pairs_negative": n_pairs_negative,
+            "must_not_link_written": n_pairs_negative,
+            "must_not_link_retracted": n_pairs_same,
+            # Pairs inside one already-merged group: the Groups page's ruling, untouched.
+            "n_pairs_locked": n_skipped_locked,
             "reversed_pairs": [[lo, hi] for lo, hi in reversed_pairs],
         },
         "store_ready": True,
