@@ -227,24 +227,22 @@ MEMBER_COLUMNS: tuple[str, ...] = (
 # reports the WHOLE album, so a card can say how many frames the dialog would add. Capped IN
 # THE STATEMENT (the LISTING_IMAGES_SQL lesson): trimming after the fetch still drags a
 # 120-frame album across the wire for every member of every cluster on the page.
-GROUP_MEMBERS_SQL = """
-SELECT
-    m.cluster_key, m.listing_id,
-    l.source, l.source_url, l.category_main, l.category_type, l.disposition,
-    l.area_m2, l.floor, l.price_czk, l.first_seen_at, l.last_seen_at, l.is_active,
-    cover.storage_path, cover.sreality_url, coalesce(gallery.n, 0),
-    coalesce(frames.images, '[]'::json)
-FROM autodedup.cluster_members m
-LEFT JOIN listings l ON l.id = m.listing_id
+#
+# The three LATERALs are spelled ONCE and driven by whichever expression names the listing,
+# because the candidate-group queue (§12, E56) reads the identical card over a set of LISTING
+# ids rather than over cluster membership. A second copy of them is a second frame order, and
+# the day the two diverge the carousel opens on a photo the cover does not name.
+def _card_photos(listing: str) -> str:
+    return f"""
 LEFT JOIN LATERAL (
     SELECT i.storage_path, i.sreality_url
       FROM images i
-     WHERE i.listing_id = m.listing_id
+     WHERE i.listing_id = {listing}
      ORDER BY i.sequence NULLS LAST, i.id
      LIMIT 1
 ) cover ON true
 LEFT JOIN LATERAL (
-    SELECT count(*) AS n FROM images i WHERE i.listing_id = m.listing_id
+    SELECT count(*) AS n FROM images i WHERE i.listing_id = {listing}
 ) gallery ON true
 LEFT JOIN LATERAL (
     SELECT json_agg(
@@ -260,14 +258,59 @@ LEFT JOIN LATERAL (
           SELECT i.id, i.storage_path, i.sreality_url, i.sequence,
                  row_number() OVER (ORDER BY i.sequence NULLS LAST, i.id) AS rn
             FROM images i
-           WHERE i.listing_id = m.listing_id
+           WHERE i.listing_id = {listing}
            ORDER BY i.sequence NULLS LAST, i.id
            LIMIT %(card_frames)s::int
       ) f
 ) frames ON true
+"""
+
+
+_MEMBER_CARD_SELECT = """
+    l.source, l.source_url, l.category_main, l.category_type, l.disposition,
+    l.area_m2, l.floor, l.price_czk, l.first_seen_at, l.last_seen_at, l.is_active,
+    cover.storage_path, cover.sreality_url, coalesce(gallery.n, 0),
+    coalesce(frames.images, '[]'::json)
+"""
+
+GROUP_MEMBERS_SQL = (
+    """
+SELECT
+    m.cluster_key, m.listing_id,
+"""
+    + _MEMBER_CARD_SELECT
+    + """
+FROM autodedup.cluster_members m
+LEFT JOIN listings l ON l.id = m.listing_id
+"""
+    + _card_photos("m.listing_id")
+    + """
 WHERE m.cluster_key = any(%(keys)s::bigint[])
 ORDER BY m.cluster_key, m.listing_id
 """
+)
+
+# The same card, over a SET OF LISTINGS rather than a cluster: the candidate-group queue packs
+# adverts from several clusters (and unclustered ones) onto one card, so its members cannot be
+# read out of `cluster_members`. ONE statement per page over every listing the page shows —
+# never one per group, which is the N+1 the groups queue avoids by keying on `any(keys)`.
+LISTING_CARD_COLUMNS: tuple[str, ...] = MEMBER_COLUMNS[1:]
+
+LISTING_CARDS_SQL = (
+    """
+SELECT
+    l.id,
+"""
+    + _MEMBER_CARD_SELECT
+    + """
+FROM listings l
+"""
+    + _card_photos("l.id")
+    + """
+WHERE l.id = any(%(ids)s::bigint[])
+ORDER BY l.id
+"""
+)
 
 # --------------------------------------------------------------- the members' own advert text
 
@@ -791,6 +834,98 @@ LIMIT %(limit)s::int
 # answer a different question from the list above it.
 RESIDUAL_COUNT_SQL = "SELECT count(*)" + _RESIDUAL_FROM + _RESIDUAL_BLOCK + _RESIDUAL_WHERE
 
+# ------------------------------------------------- the candidate groups over that cohort (E56)
+#
+# Three cheap statements feed `autodedup/candidates.py`, which does the packing in Python.
+#
+# THE COHORT IS THE PAIR QUEUE'S, to the letter: the same display floor and the same
+# `_RESIDUAL_UNCLUSTERED` predicate, and the same inner joins to `listings` — a pair whose
+# advert row is gone is not on the pair queue either, and a card cannot render it. What is
+# NOT here is the filter bar: zone, block and the rest are applied to the BUILT groups, so the
+# packing (and its cache) is one structure per generation rather than one per filter combination.
+#
+# Only the columns the packing reads: ids, score, zone, the family mask for the header chip and
+# the block for the filter. No photos, no text, no features — the page's own statements fetch
+# those for the twenty groups it actually shows.
+CANDIDATE_PAIR_COLUMNS: tuple[str, ...] = (
+    "listing_lo",
+    "listing_hi",
+    "score",
+    "zone",
+    "families",
+    "block_key",
+    "block_grain",
+)
+
+CANDIDATE_PAIRS_SQL = (
+    """
+SELECT p.listing_lo, p.listing_hi, p.score, p.zone, p.families, bl.block_key, bl.block_grain
+FROM autodedup.pairs p
+JOIN listings la ON la.id = p.listing_lo
+JOIN listings lb ON lb.id = p.listing_hi
+"""
+    + _RESIDUAL_BLOCK
+    + """
+WHERE p.score >= %(min_score)s::real
+"""
+    + _RESIDUAL_UNCLUSTERED
+    + """
+ORDER BY p.score DESC, p.listing_lo, p.listing_hi
+"""
+)
+
+# The LOCKS: every advert this generation already merged, with the group it was merged into.
+# A unit is a whole cluster, so this selects ALL members — including the ones no residual pair
+# names, which is what keeps a candidate card from showing three adverts of a five-advert group.
+CANDIDATE_CLUSTER_MEMBER_COLUMNS: tuple[str, ...] = ("cluster_key", "listing_id")
+
+CANDIDATE_CLUSTER_MEMBERS_SQL = """
+SELECT m.cluster_key, m.listing_id
+FROM autodedup.cluster_members m
+JOIN autodedup.clusters c ON c.cluster_key = m.cluster_key
+WHERE c.generation = %(generation)s::text
+ORDER BY m.cluster_key, m.listing_id
+"""
+
+# WHAT THE IN-PROCESS CACHE IS KEYED ON. Three numbers that move whenever the packing would
+# change: how many pairs are above the floor, when the newest of them was decided, and how many
+# advert-to-cluster locks this generation holds. A new score run moves the first two, a
+# re-clustering the third — so a cached index cannot outlive the pass it describes. It is
+# deliberately NOT a hash of the rows: the point is to avoid reading them.
+CANDIDATE_FINGERPRINT_COLUMNS: tuple[str, ...] = ("n_pairs", "decided_at", "n_locks")
+
+# DELIBERATELY UNFILTERED by the display floor, unlike the cohort it fingerprints. The score
+# index is PARTIAL (`where zone = 'band'`, migration 528), so a `score >= …` predicate cannot
+# use it and would make both halves a filtered scan on EVERY page; `max(decided_at)` over the
+# whole table is a one-row index scan on `autodedup_pairs_decided_idx`, and counting every pair
+# is a strict superset of counting the cohort — a superset invalidates more often, never less,
+# which is the safe direction for a cache.
+CANDIDATE_FINGERPRINT_SQL = """
+SELECT
+    (SELECT count(*) FROM autodedup.pairs),
+    (SELECT max(p.decided_at) FROM autodedup.pairs p),
+    (SELECT count(*)
+       FROM autodedup.cluster_members m
+       JOIN autodedup.clusters c ON c.cluster_key = m.cluster_key
+      WHERE c.generation = %(generation)s::text)
+"""
+
+# Every pair the operator has ruled on, latest ruling per pair — what makes a candidate group
+# "reviewed" (every underlying residual pair carries a verdict) and what the progress strip
+# counts. The whole table, because `autodedup.verdicts` is operator-written and small, and
+# because the filter has to know the state of groups the current page does not show.
+CANDIDATE_VERDICT_COLUMNS: tuple[str, ...] = ("listing_lo", "listing_hi", "verdict")
+
+OPERATOR_PAIR_VERDICTS_SQL = """
+SELECT DISTINCT ON (v.listing_lo, v.listing_hi)
+       v.listing_lo, v.listing_hi, v.verdict
+FROM autodedup.verdicts v
+WHERE v.kind = 'pair'
+  AND v.listing_lo IS NOT NULL
+  AND v.listing_hi IS NOT NULL
+ORDER BY v.listing_lo, v.listing_hi, v.decided_at DESC, v.id DESC
+"""
+
 # ---------------------------------------------------------------- the blocks of a generation
 
 BLOCK_COLUMNS: tuple[str, ...] = (
@@ -1087,6 +1222,13 @@ ORDER BY m.listing_id
 
 CLUSTER_EXISTS_SQL = """
 SELECT 1 FROM autodedup.clusters WHERE cluster_key = %(cluster_key)s::bigint
+"""
+
+# Does this clustering pass exist at all? The candidate WRITE names its generation (the card
+# says which pass it was packed from), and a name nothing clustered would otherwise build a
+# cohort out of every scored pair — every pair is "unclustered" in a pass that does not exist.
+GENERATION_EXISTS_SQL = """
+SELECT 1 FROM autodedup.clusters WHERE generation = %(generation)s::text LIMIT 1
 """
 
 PAIR_EXISTS_SQL = """

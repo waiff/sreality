@@ -196,7 +196,13 @@ function LocationProbe() {
   );
 }
 
-function renderPage(entry = '/autodedup/residual') {
+/* THE PAIR VIEW IS NOW A VIEW, not the page. Everything below this line is
+ * about `po dvojicích` — the original queue, unchanged — so the default entry
+ * names it. The grouped view (the page's own default) has its own file:
+ * AutodedupResidualGroups.test.tsx. A test that forgot the parameter would
+ * render the candidate cards and fail on the first `findByText`, which is how
+ * this stayed honest when the switch landed. */
+function renderPage(entry = '/autodedup/residual?view=pairs') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
@@ -302,7 +308,7 @@ describe('<AutodedupResidual>', () => {
   it('shows both adverts, the reason, the contributions and the judge', async () => {
     /* Blind is this queue's default (D6), so the judge is asked for explicitly
      * here: everything BUT the judge is on the row either way. */
-    renderPage('/autodedup/residual?blind=0');
+    renderPage('/autodedup/residual?view=pairs&blind=0');
     const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
     /* Each id appears on its own card and again as a diff-table caption. */
     expect(within(row).getAllByText('#101').length).toBeGreaterThan(0);
@@ -451,7 +457,7 @@ describe('<AutodedupResidual>', () => {
   /* -------------------------------------------------- the URL is the state */
 
   it('reads its filters out of the query string', async () => {
-    renderPage('/autodedup/residual?zone=reject&min_score=0.5&block=563510');
+    renderPage('/autodedup/residual?view=pairs&zone=reject&min_score=0.5&block=563510');
     await screen.findByText(/Why it wasn't merged/);
     expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
       expect.objectContaining({

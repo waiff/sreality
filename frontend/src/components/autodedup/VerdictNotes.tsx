@@ -137,6 +137,7 @@ export default function VerdictNotes({
   onSave,
   pending = false,
   label = 'důvod / poznámka',
+  showReasons = true,
 }: {
   value: VerdictAnnotation;
   onChange: (next: VerdictAnnotation) => void;
@@ -146,8 +147,16 @@ export default function VerdictNotes({
   onSave?: () => void;
   pending?: boolean;
   label?: string;
+  /* OFF where the ruling has no row to carry chips. A candidate split writes
+   * only pair rows, and §9 keeps reason chips off a pairwise fan-out — the
+   * server answers 400 — so offering the chips there would be offering a
+   * control whose clicks are refused. The note still travels. */
+  showReasons?: boolean;
 }) {
-  const reasons = useVerdictReasons();
+  /* The hook runs unconditionally — the registry read is shared and cached, and
+   * a conditional hook is a re-render hazard; only the CHIPS are withheld. */
+  const registry = useVerdictReasons();
+  const reasons = showReasons ? registry : [];
   const [open, setOpen] = useState(defaultOpen);
 
   /* A row that arrives already annotated opens itself: hiding the operator's own

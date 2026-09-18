@@ -4438,6 +4438,158 @@ export const postAutodedupSplitVerdict = (
     jwt: true,
   });
 
+/* ---------------------------------------------------------------------------
+ * CANDIDATE GROUPS (PROGRAM.md §12, E56) — the residual cohort, packed.
+ *
+ * WHY. The pair queue asks one question per PAIR, and the pairs of one
+ * generation are not independent: one advert against each member of a merged
+ * group is the same question five times. So the server lifts the residual pairs
+ * to UNIT level — an existing cluster of that generation (all its members,
+ * locked together) or a lone advert — and packs the units into cards of at most
+ * eight adverts. Every residual pair lands in exactly one card, so nothing stops
+ * being asked, and one save rules many pairs.
+ *
+ * THE CARD IS THE GROUPS CARD. Same member shape, same galleries, same unit
+ * letters, same relation-per-unit-pair split. Two differences, both because the
+ * engine did NOT merge these: the adverts of one already-merged group are locked
+ * to one letter, and the letters start apart rather than all on A.
+ * ------------------------------------------------------------------------- */
+
+/* One thing the engine already treats as a single property. `cluster_key` is the
+ * merged group it belongs to, or null for a lone advert — and it is what makes a
+ * letter lockable on the card. */
+export interface AutodedupCandidateUnit {
+  unit_key: string;
+  cluster_key: number | null;
+  listing_ids: number[];
+}
+
+/* A card member is a queue member plus WHICH UNIT it belongs to. `unit_lock` is
+ * the merged group's key or null; members sharing one must share a letter, and
+ * the server refuses a save that separates them (that ruling belongs on the
+ * Groups page, where it writes a cluster verdict). */
+export interface AutodedupCandidateMember extends AutodedupMember {
+  unit_key?: string;
+  unit_lock?: number | null;
+}
+
+/* The header facts. NO judge artefact among them by construction: this surface
+ * is blind by default (E55) and a chip that leaked the judge's word would defeat
+ * it before the operator had said anything. */
+export interface AutodedupCandidateHeader {
+  candidate_key: string;
+  generation: string;
+  /* Adverts, not units — the number the card's own grid shows. */
+  size: number;
+  n_units: number;
+  score_min: number | null;
+  score_max: number | null;
+  zones: Partial<Record<AutodedupZone, number>>;
+  families: number;
+  family_names: string[];
+  block_key: number | null;
+  block_grain: string | null;
+  locked_cluster_keys: number[];
+  units: AutodedupCandidateUnit[];
+  /* REVIEWED IS DERIVED, never stored: a candidate group is not a row anywhere,
+   * so the card is reviewed when every residual pair inside it carries an
+   * operator pair verdict (by any operator — one operator, one platform). */
+  n_pairs: number;
+  n_pairs_reviewed: number;
+  n_pairs_not_same: number;
+  reviewed: boolean;
+}
+
+export interface AutodedupCandidate extends AutodedupCandidateHeader {
+  sources: string[];
+  members: AutodedupCandidateMember[];
+  /* The operator's own rulings on the members' pairs, so the unit letters
+   * hydrate after a reload rather than reading "all one unit" over a card that
+   * was partitioned last week (E50). */
+  member_verdicts: AutodedupVerdictRow[];
+}
+
+export interface AutodedupCandidatePair extends AutodedupPairRow {
+  why_not_merged?: string;
+  /* Whether this scored edge is one of the questions THIS card asks. An edge
+   * inside a locked group is evidence here, never a question. */
+  residual?: boolean;
+}
+
+export interface AutodedupCandidateDetail {
+  candidate: AutodedupCandidateHeader;
+  members: Array<AutodedupMemberDetail & { unit_key?: string; unit_lock?: number | null }>;
+  pairs: AutodedupCandidatePair[];
+  judgements: AutodedupJudgementRow[];
+  member_verdicts: AutodedupVerdictRow[];
+}
+
+export interface AutodedupCandidateFilters {
+  generation?: string | null;
+  /* The cursor is the last card's KEY — the order is a total order over a
+   * structure the server holds whole, so the page boundary is a name rather
+   * than a tuple of sort values. */
+  after?: string | null;
+  limit?: number | null;
+  block?: number | null;
+  block_grain?: string | null;
+  zone?: AutodedupZone | null;
+  /* Two values only: this surface has no verdict of its own to filter on. */
+  verdict?: 'reviewed' | 'unreviewed' | null;
+  sort?: 'weakest' | 'strongest' | 'largest' | 'random' | null;
+  seed?: string | null;
+}
+
+export const getAutodedupCandidates = async (
+  f: AutodedupCandidateFilters = {},
+): Promise<AutodedupEnvelope<AutodedupKeysetPage<AutodedupCandidate>>> =>
+  request<AutodedupEnvelope<AutodedupKeysetPage<AutodedupCandidate>>>(
+    '/autodedup/candidates',
+    { query: { ...f } as Record<string, QueryValue>, jwt: true },
+  );
+
+export const getAutodedupCandidate = async (
+  candidateKey: string,
+  generation?: string | null,
+): Promise<AutodedupEnvelope<AutodedupCandidateDetail>> =>
+  request<AutodedupEnvelope<AutodedupCandidateDetail>>(
+    `/autodedup/candidates/${encodeURIComponent(candidateKey)}`,
+    { query: { generation: generation ?? null }, jwt: true },
+  );
+
+/* THE CANDIDATE SPLIT. The cluster split's body minus the cluster: the same unit
+ * assignment, the same relation per unit pair, the same 409 when it would take
+ * back a veto the operator wrote earlier.
+ *
+ * It carries NO `reasons`. A split stamps its reason chips on the cluster row,
+ * and there is no cluster row here — stamping them on the pairwise fan-out
+ * instead would post one reason row per pair from a single click, so the §9
+ * histogram would measure card size rather than what the operator saw. The
+ * server answers 400 rather than dropping them silently; the note stays. */
+export interface AutodedupCandidateSplitInput {
+  candidate_key: string;
+  generation: string;
+  units: AutodedupSplitUnit[];
+  relation: AutodedupSplitRelation;
+  relations?: AutodedupSplitRelationEntry[];
+  confirm_retract?: boolean;
+  note?: string | null;
+}
+
+export interface AutodedupCandidateSplitResult extends AutodedupSplitResult {
+  candidate_key?: string;
+  /* Pairs inside one already-merged group: the Groups page's ruling, untouched. */
+  n_pairs_locked?: number;
+}
+
+export const postAutodedupCandidateSplitVerdict = (
+  body: AutodedupCandidateSplitInput,
+): Promise<AutodedupEnvelope<AutodedupCandidateSplitResult>> =>
+  request<AutodedupEnvelope<AutodedupCandidateSplitResult>>(
+    '/autodedup/verdict/candidate-split',
+    { method: 'POST', json: body, jwt: true },
+  );
+
 /* HOW FAR THROUGH THE VALIDATION SESSION (D6). Two counts at one grain: the
  * whole generation, and the first `sample_size` of the seeded random order —
  * the draw the program's gate is measured on. `n_not_same` counts every ruling
@@ -4452,20 +4604,24 @@ export interface AutodedupValidationCounts {
   n_not_same: number;
 }
 
+export type AutodedupSurface = 'groups' | 'residual' | 'candidates';
+
 export interface AutodedupValidationProgress {
   generation: string | null;
-  surface: 'groups' | 'residual';
+  surface: AutodedupSurface;
   seed: string;
   sample_size: number;
-  /* `cluster` on the groups queue, `pair` on the residual one — two different
-   * units of work, never added together on a page. */
-  grain: 'cluster' | 'pair';
+  /* `cluster` on the groups queue, `pair` on the residual one, `candidate` on
+   * the candidate-group view — three different units of work, never added
+   * together on a page. A candidate card is reviewed when every residual pair
+   * inside it is, so its counter is deliberately not the pair counter. */
+  grain: 'cluster' | 'pair' | 'candidate';
   sample: AutodedupValidationCounts;
   total: AutodedupValidationCounts;
 }
 
 export const getAutodedupValidationProgress = (q: {
-  surface: 'groups' | 'residual';
+  surface: AutodedupSurface;
   generation?: string | null;
   seed?: string | null;
   min_score?: number | null;

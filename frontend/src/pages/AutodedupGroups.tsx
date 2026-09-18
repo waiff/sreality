@@ -10,172 +10,137 @@
  * its worst link: a five-member group joined by one 0.52 edge is where the false
  * merges live, and a newest-first queue would bury it under confident ones.
  *
- * FILTERS ARE KEYS, NEVER PREDICATES. Every control below sends a NAME the
- * server validates against its own registry; nothing here composes SQL, and an
- * unknown value is the server's 400 rather than this page's problem.
+ * FILTERS ARE KEYS, NEVER PREDICATES. Every control sends a NAME the server
+ * validates against its own registry; nothing here composes SQL, and an unknown
+ * value is the server's 400 rather than this page's problem.
  *
- * A GROUP IS NOT ALWAYS ONE ANSWER. The engine proposes a set, and the operator
- * regularly finds two of its adverts are one flat, a third is the house next
- * door and a fourth is a different unit of the same development. The four
- * whole-group buttons cannot say that, so every member carries a UNIT LABEL:
- * members sharing a letter are one property, members in different letters are
- * the relation named for THOSE TWO LETTERS — and every pair across letters
- * becomes a permanent must-not-link, which is why the relation is named rather
- * than assumed, and named per unit pair rather than once for the whole group
- * (two units of one building and a third building of the same development are
- * routinely in one group, and one value cannot say both).
- *
- * THE STORED RULING IS READ BACK, NOT REMEMBERED. A split lives in the store as
- * pair verdicts, and the page derives the assignment from the group's
- * `member_verdicts` before the operator can act on it. Page state that a reload
- * throws away would show "A" over every member of a group that was partitioned
- * last week — and the next save would re-derive all pairs as one unit and
- * retract the permanent must-not-links the first save wrote. For the same
- * reason the split row STAYS once a split is stored: putting every member back
- * into one unit is the undo, and the whole-group "Confirm" is not it.
+ * A GROUP IS NOT ALWAYS ONE ANSWER, so every member carries a unit letter and
+ * two letters raise the split row. The machinery — the letters, the relation per
+ * unit pair, the stored ruling read back off the members' pair verdicts — is
+ * `components/autodedup/UnitSplit`, shared with the candidate-group view on
+ * /autodedup/residual, which rules on the adverts the engine did NOT merge using
+ * this same card. The pieces this page used to own and now shares (the filter
+ * bar, the member grid, the dialog's member row, the verdict overlay) are
+ * re-exported below, because they are this queue's vocabulary too and a page
+ * that changed all of its import sites in the same breath as the extraction is
+ * how a refactor turns into a regression.
  *
  * "NOT YET" IS A REAL ANSWER. Before migration 528 and before the first score
  * run there is nothing to show, and the page says so in words. A zero would read
  * as "the engine found no duplicates", which is the one wrong answer.
  */
 
-import { useCallback, useMemo, useState, type ReactNode } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
 import {
-  ApiError,
   getAutodedupGroup,
   getAutodedupGroups,
-  postAutodedupSplitVerdict,
-  postAutodedupVerdict,
   type AutodedupGroup,
   type AutodedupGroupFilters,
   type AutodedupJudgementRow,
-  type AutodedupMemberDetail,
-  type AutodedupSplitInput,
-  type AutodedupSplitRelation,
-  type AutodedupSplitResult,
-  type AutodedupSplitUnit,
-  type AutodedupVerdictInput,
   type AutodedupVerdictRow,
   type AutodedupVerdictValue,
 } from '@/lib/api';
-import { ROUTES, withQuery, type RoutePath } from '@/lib/routes';
 import { useUrlFilters } from '@/lib/useUrlFilters';
-import { imageSrc } from '@/lib/imageUrl';
-import { pushToast } from '@/lib/toast';
 import { fmtCount } from '@/lib/format';
 import Dialog from '@/components/Dialog';
 import ErrorBanner from '@/components/ErrorBanner';
-import ImageCarousel from '@/components/ImageCarousel';
 import Spinner from '@/components/Spinner';
 import EvidenceChips, {
   Chip,
   EvidenceLegend,
   fmtScore,
 } from '@/components/autodedup/EvidenceChips';
-import BlockSelect, { parseBlockValue } from '@/components/autodedup/BlockSelect';
-import GenerationSelect, {
+import { parseBlockValue } from '@/components/autodedup/BlockSelect';
+import {
   GenerationNotice,
   useAutodedupGenerations,
 } from '@/components/autodedup/GenerationSelect';
-import ListingMini, {
-  MissingPhotoTile,
-  memberAttrs,
-  memberListingPath,
-} from '@/components/autodedup/ListingMini';
-import MemberText from '@/components/autodedup/MemberText';
 import VerdictButtons, { GROUP_LABELS } from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
-  EMPTY_ANNOTATION,
   annotationInput,
   useVerdictAnnotations,
-  type VerdictAnnotation,
 } from '@/components/autodedup/VerdictNotes';
 import { JudgeChip } from '@/components/autodedup/PairCard';
 import ValidationStrip, { BlindToggle } from '@/components/autodedup/ValidationStrip';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
+import MemberGrid from '@/components/autodedup/MemberGrid';
+import MemberRow from '@/components/autodedup/MemberRow';
+import {
+  FILTER_CONTROL,
+  FILTER_LABEL,
+  FilterBar,
+  ResultCount,
+} from '@/components/autodedup/FilterBar';
+import {
+  EMPTY_FILTERS,
+  flag,
+  num,
+  pairHref,
+  sanitizeGroupFilters,
+  type GroupFilterState,
+} from '@/components/autodedup/filterState';
+import {
+  EMPTY_SPLIT,
+  SplitRow,
+  UnitSelect,
+  deriveSplit,
+  splitInput,
+  unitPairKey,
+  type SplitControls,
+  type SplitState,
+} from '@/components/autodedup/UnitSplit';
+import useVerdictOverlay from '@/components/autodedup/useVerdictOverlay';
+
+/* The shared vocabulary, re-exported from where this queue's siblings expect to
+ * find it. */
+export {
+  FILTER_CONTROL,
+  FILTER_LABEL,
+  FilterBar,
+  ResultCount,
+  SOURCES,
+} from '@/components/autodedup/FilterBar';
+export {
+  DEFAULT_SEED,
+  EMPTY_FILTERS,
+  VERDICTS,
+  pairHref,
+  sanitizeGroupFilters,
+  type GroupFilterState,
+} from '@/components/autodedup/filterState';
+export {
+  DEFAULT_RELATION,
+  EMPTY_SPLIT,
+  SPLIT_RELATIONS,
+  SPLIT_RELATION_LABELS,
+  SplitRow,
+  UNIT_LETTERS,
+  UnitSelect,
+  clusterVerdictOf,
+  deriveSplit,
+  distinctUnits,
+  receiptRelations,
+  relationOf,
+  splitInput,
+  splitSummary,
+  unitOf,
+  unitPairKey,
+  unitPairs,
+  unitsSummary,
+  type SplitControls,
+  type SplitError,
+  type SplitReceipt,
+  type SplitState,
+  type UnitMap,
+} from '@/components/autodedup/UnitSplit';
+export { default as useVerdictOverlay } from '@/components/autodedup/useVerdictOverlay';
+export { MEMBERS_BEFORE_FOLD, EAGER_MEMBERS } from '@/components/autodedup/MemberGrid';
 
 const NOT_YET = 'not yet';
 const PAGE_SIZE = 20;
-/* EVERY member of the group is a card with its own photos. The card used to show
- * four and count the rest, and the operator read that as the group being
- * smaller than the header said ("I see only 4 adverts here while it says there
- * should be 5") — which on a surface whose whole job is "are these the same
- * flat?" is the one thing it may not do. Four still fit a row at lg; the rest
- * wrap onto the next one.
- *
- * Past this many the card would be a page of its own, so the remainder is
- * folded behind one button that expands it IN PLACE — not a count, not a
- * drawer: the adverts are still one click away on the same card. */
-const MEMBERS_BEFORE_FOLD = 12;
-/* The photos above the fold are decoded immediately, the rest lazily — a
- * twelve-member group must not fire twelve eager requests. */
-const EAGER_MEMBERS = 2;
-
-/* The seeded sample's name. Shared by both queues, and the same default the
- * server uses — a page that sent a different one would silently review a
- * different sample from the one the counter counts. */
-export const DEFAULT_SEED = 'v1';
-const SEED_RE = /^[a-z0-9]{1,16}$/;
-
-export interface GroupFilterState {
-  generation: string;
-  block: string;
-  source: string;
-  category_main: string;
-  category_type: string;
-  min_size: string;
-  max_size: string;
-  min_score: string;
-  max_score: string;
-  verdict: string;
-  shared_photo: string;
-  has_judgement: string;
-  sort: 'weakest' | 'newest' | 'largest' | 'random';
-  /* WHICH random sample. Only meaningful with `sort=random`, and only written to
-   * the URL when it is not the default one. */
-  seed: string;
-  /* '1' = hide every judge artefact until this row carries the operator's own
-   * verdict. Default OFF here and ON on the residual queue, which is where the
-   * D6 pairs are judged — so each page reads its own default (`=== '1'` here,
-   * `!== '0'` there) rather than sharing a sanitiser that cannot know both. */
-  blind: string;
-}
-
-export const EMPTY_FILTERS: GroupFilterState = {
-  /* NOT a generation name. The empty value means "the newest pass", which the
-   * server resolves off `autodedup.clusters`: a constant here (`g1`) is what
-   * kept the queue on a superseded pass long after the engine moved on, and it
-   * would go stale again the next time the lane writes a generation. */
-  generation: '',
-  block: '',
-  source: '',
-  category_main: '',
-  category_type: '',
-  min_size: '',
-  max_size: '',
-  min_score: '',
-  max_score: '',
-  verdict: '',
-  shared_photo: '',
-  has_judgement: '',
-  sort: 'weakest',
-  seed: DEFAULT_SEED,
-  blind: '0',
-};
-
-/* A blank control is a MISSING parameter; so is a typo. `Number('abc')` is NaN,
- * which `request()` happily stringifies into `?min_size=NaN` and the server
- * answers with a 422 nobody can read — a filter that cannot be parsed simply
- * does not constrain. */
-const num = (v: string): number | null => {
-  if (v.trim() === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
-const flag = (v: string): 0 | 1 | null => (v === '1' ? 1 : v === '0' ? 0 : null);
 
 /* The wire shape. An empty control is a MISSING parameter, never an empty
  * string: `lib/api`'s request() drops both, and spelling it here keeps the
@@ -210,775 +175,6 @@ export function toQuery(f: GroupFilterState, after: string | null): AutodedupGro
   };
 }
 
-/* The evidence page is a DIFFERENT generation's worth of rows unless it is
- * told which one the queue was reading; the drill-down carries it rather than
- * silently falling back to the default. */
-export function pairHref(
-  lo: number,
-  hi: number,
-  generation: string,
-  /* BLIND TRAVELS WITH THE LINK. A drill-down out of a blind queue that showed
-   * the judge's transcript on arrival would undo the blinding in one click —
-   * the operator would read the verdict they were not supposed to see yet on
-   * exactly the pair they were about to rule on. */
-  blind = false,
-): RoutePath {
-  return withQuery(ROUTES.autodedupPair.build({ lo, hi }), {
-    generation: generation || null,
-    blind: blind ? '1' : null,
-  });
-}
-
-export const FILTER_LABEL = 'text-[0.6rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)]';
-export const FILTER_CONTROL =
-  'mt-0.5 w-full rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]';
-
-/* The portal vocabulary is the backend's `listings.source` enum; the page only
- * offers the nine that exist rather than a free-text box, so a typo can never
- * silently return an empty queue. */
-export const SOURCES = [
-  'sreality',
-  'bazos',
-  'bezrealitky',
-  'idnes',
-  'mmreality',
-  'remax',
-  'ceskereality',
-  'realitymix',
-  'maxima',
-];
-
-export function FilterBar<T extends GroupFilterState>({
-  value,
-  onChange,
-  children,
-  /* A control this surface does not SEND must not be rendered: an inert select
-   * that silently returns the same list is worse than no select at all. The
-   * residual view filters by a source PAIR, not a single portal, and its route
-   * takes no category keys — so it drops both groups of controls.  */
-  showSource = true,
-  showCategory = true,
-}: {
-  /* Generic over the filter state so a surface with extra keys of its own (the
-   * residual view's zone + portal pair) keeps them through every edit made
-   * here — a non-generic bar would spread them away on the first keystroke. */
-  value: T;
-  onChange: (next: T) => void;
-  children?: ReactNode;
-  showSource?: boolean;
-  showCategory?: boolean;
-}) {
-  const set = <K extends keyof T>(key: K, v: T[K]) => onChange({ ...value, [key]: v });
-  return (
-    <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3">
-      <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <GenerationSelect
-          value={value.generation}
-          onChange={(next) => set('generation', next as T['generation'])}
-          labelClassName={FILTER_LABEL}
-          controlClassName={FILTER_CONTROL}
-        />
-        <BlockSelect
-          value={value.block}
-          onChange={(next) => set('block', next)}
-          /* '' resolves server-side to the newest pass — the same answer the
-           * queue itself gets, so the vocabulary can never be another pass's. */
-          generation={value.generation || null}
-          labelClassName={FILTER_LABEL}
-          controlClassName={FILTER_CONTROL}
-        />
-        {showSource && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Portal</span>
-            <select
-              className={FILTER_CONTROL}
-              value={value.source}
-              onChange={(e) => set('source', e.target.value)}
-            >
-              <option value="">vše</option>
-              {SOURCES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        {showCategory && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Druh</span>
-            <select
-              className={FILTER_CONTROL}
-              value={value.category_main}
-              onChange={(e) => set('category_main', e.target.value)}
-            >
-              <option value="">vše</option>
-              <option value="byt">byt</option>
-              <option value="dum">dům</option>
-              <option value="pozemek">pozemek</option>
-              <option value="komercni">komerční</option>
-              <option value="ostatni">ostatní</option>
-            </select>
-          </label>
-        )}
-        {showCategory && (
-          <label className="block">
-            <span className={FILTER_LABEL}>Nabídka</span>
-            <select
-              className={FILTER_CONTROL}
-              value={value.category_type}
-              onChange={(e) => set('category_type', e.target.value)}
-            >
-              <option value="">vše</option>
-              <option value="prodej">prodej</option>
-              <option value="pronajem">pronájem</option>
-              <option value="drazba">dražba</option>
-            </select>
-          </label>
-        )}
-        <label className="block">
-          <span className={FILTER_LABEL}>Verdict</span>
-          <select
-            className={FILTER_CONTROL}
-            value={value.verdict}
-            onChange={(e) => set('verdict', e.target.value)}
-          >
-            <option value="">vše</option>
-            <option value="unreviewed">unreviewed</option>
-            <option value="same">same</option>
-            <option value="different">different</option>
-            <option value="same_building_different_unit">same building</option>
-            <option value="same_project_different_unit">same project</option>
-            <option value="unsure">unsure</option>
-          </select>
-        </label>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-/* HOW MUCH OF THE QUEUE IS ON SCREEN. A keyset page cannot count itself, so the
- * total arrives with the first page and the loaded rows are counted here. When
- * the server sent no count the loaded number is still said plainly — "20 groups
- * loaded" — because a silent list gives no sense of the work left, and a
- * fabricated total would be worse than none. The noun agrees with the number it
- * follows: "1 groups loaded" is the kind of seam that makes a careful page read
- * as a generated one. */
-const plural = (n: number, noun: string): string => (n === 1 ? noun.replace(/s$/, '') : noun);
-export function ResultCount({
-  shown,
-  total,
-  noun,
-}: {
-  shown: number;
-  total: number | null;
-  noun: string;
-}) {
-  return (
-    <p className="mt-4 text-[0.72rem] text-[var(--color-ink-3)] tabular-nums">
-      {total == null
-        ? `${fmtCount(shown)} ${plural(shown, noun)} loaded`
-        : `${fmtCount(shown)} of ${fmtCount(total)} ${plural(total, noun)}`}
-    </p>
-  );
-}
-
-/* One provisional row so the badge flips on click; the server's own row
- * replaces it as soon as it lands. `id: 0` marks it as not-yet-stored. */
-function optimisticVerdict(
-  input: AutodedupVerdictInput,
-  decidedBy: string,
-): AutodedupVerdictRow {
-  return {
-    id: 0,
-    kind: input.kind,
-    cluster_key: input.cluster_key ?? null,
-    listing_lo: input.listing_lo ?? null,
-    listing_hi: input.listing_hi ?? null,
-    verdict: input.verdict,
-    note: input.note ?? null,
-    decided_by: decidedBy,
-    decided_at: new Date().toISOString(),
-  };
-}
-
-/* ------------------------------------------------------------ the unit split
- *
- * A unit is a LETTER, not a free-text label: the operator is partitioning the
- * members of one small group, and a typed name would only add a way to spell the
- * same unit two ways. The map is keyed by `listings.id` and lives at page level
- * so the card and the dialog edit ONE assignment — a dialog opened over a card
- * that already separated two adverts must not start from a blank slate. */
-export type UnitMap = Record<number, string>;
-
-export const UNIT_LETTERS: readonly string[] = Array.from({ length: 26 }, (_, i) =>
-  String.fromCharCode(65 + i),
-);
-
-/* Two units, in one order — the key both the relation map and the matrix read. */
-export const unitPairKey = (a: string, b: string): string =>
-  a <= b ? `${a}|${b}` : `${b}|${a}`;
-
-export interface SplitState {
-  units: UnitMap;
-  /* The FILL for a unit pair the operator has not named, not the answer for all
-   * of them: see `relations`. */
-  relation: AutodedupSplitRelation;
-  /* THE RELATION IS PER UNIT PAIR. A group regularly holds two units of one
-   * BUILDING and a third advert from a different building of the same
-   * development. One value for the whole split would stamp a shared building
-   * onto the adverts that do not share one, or throw the building away for the
-   * ones that do — and both are written as permanent must-not-links AND as
-   * calibration labels, corrupting the one distinction the developer rails are
-   * measured against. */
-  relations: Record<string, AutodedupSplitRelation>;
-}
-
-/* The wording the operator reads is the relation BETWEEN two units, which is why
- * "same" is not on offer: two different units are never one property. */
-export const SPLIT_RELATIONS: ReadonlyArray<AutodedupSplitRelation> = [
-  'same_building_different_unit',
-  'same_project_different_unit',
-  'different',
-];
-
-export const SPLIT_RELATION_LABELS: Record<AutodedupSplitRelation, string> = {
-  same_building_different_unit: 'stejná budova, jiné jednotky',
-  same_project_different_unit: 'stejný projekt, jiné jednotky',
-  different: 'nesouvisí',
-};
-
-/* The default is the SHAPE THIS FEATURE WAS BUILT FOR: the operator's group was
- * one development with several buildings. The other two are one click away. */
-export const DEFAULT_RELATION: AutodedupSplitRelation = 'same_project_different_unit';
-
-export const EMPTY_SPLIT: SplitState = { units: {}, relation: DEFAULT_RELATION, relations: {} };
-
-/* An unassigned member is in unit A — the whole group is one property until the
- * operator says otherwise, which is exactly what the engine proposed. */
-export const unitOf = (units: UnitMap, listingId: number): string => units[listingId] ?? 'A';
-
-export const relationOf = (
-  state: SplitState,
-  unitA: string,
-  unitB: string,
-): AutodedupSplitRelation => state.relations[unitPairKey(unitA, unitB)] ?? state.relation;
-
-export function distinctUnits(
-  members: ReadonlyArray<{ listing_id: number }>,
-  units: UnitMap,
-): string[] {
-  return Array.from(new Set(members.map((m) => unitOf(units, m.listing_id)))).sort();
-}
-
-/* Every unordered pair of the units in play — one row of the relation matrix
- * each, and one wire entry each. */
-export function unitPairs(units: readonly string[]): Array<[string, string]> {
-  const out: Array<[string, string]> = [];
-  for (let i = 0; i < units.length; i += 1) {
-    for (let j = i + 1; j < units.length; j += 1) out.push([units[i], units[j]]);
-  }
-  return out;
-}
-
-/* `A: 101,202 · B: 303` — the assignment in one line, so the card says what it is
- * about to store rather than leaving it to be read off four selects. */
-export function splitSummary(
-  members: ReadonlyArray<{ listing_id: number }>,
-  units: UnitMap,
-): string {
-  const byUnit = new Map<string, number[]>();
-  for (const m of members) {
-    const unit = unitOf(units, m.listing_id);
-    byUnit.set(unit, [...(byUnit.get(unit) ?? []), m.listing_id]);
-  }
-  return [...byUnit.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([unit, ids]) => `${unit}: ${ids.join(',')}`)
-    .join(' · ');
-}
-
-/* The same line, read off a SUBMITTED assignment rather than off the live
- * selects. The receipt has to say what was stored, and live state stops being
- * that the moment the operator touches a select after saving. */
-export function unitsSummary(units: ReadonlyArray<AutodedupSplitUnit>): string {
-  return splitSummary(
-    units.map((u) => ({ listing_id: u.listing_id })),
-    Object.fromEntries(units.map((u) => [u.listing_id, u.unit])),
-  );
-}
-
-/* THE STORED RULING, READ BACK. A split lives in the store as pair verdicts —
- * members ruled `same` are one unit, a negative pair verdict is the relation
- * between two units — so the assignment is DERIVED from them rather than kept in
- * page state that a reload throws away. Without this the card shows "A" over
- * every member of a group it knows was split, and the next save quietly retracts
- * the permanent must-not-links the first one wrote.
- *
- * Null means nobody has ruled on any pair of this group: there is nothing stored
- * to show, which is a different statement from "everything is one unit". */
-export function deriveSplit(
-  members: ReadonlyArray<{ listing_id: number }>,
-  verdicts: ReadonlyArray<AutodedupVerdictRow>,
-): SplitState | null {
-  const inside = new Set(members.map((m) => m.listing_id));
-  /* The server sends newest first, so the FIRST row for a pair is its live word. */
-  const latest = new Map<string, AutodedupVerdictValue>();
-  for (const v of verdicts) {
-    if (v.kind && v.kind !== 'pair') continue;
-    const lo = v.listing_lo;
-    const hi = v.listing_hi;
-    if (lo == null || hi == null || !inside.has(lo) || !inside.has(hi)) continue;
-    if (v.verdict !== 'same' && !SPLIT_RELATIONS.includes(v.verdict as AutodedupSplitRelation)) {
-      continue; /* "unsure" says nothing about the partition. */
-    }
-    const key = `${lo}:${hi}`;
-    if (!latest.has(key)) latest.set(key, v.verdict);
-  }
-  if (latest.size === 0) return null;
-
-  /* Members joined by a `same` verdict are one unit — the transitive closure, so
-   * a chain of pair rulings lands in one letter rather than three. */
-  const parent = new Map<number, number>();
-  const find = (x: number): number => {
-    const up = parent.get(x);
-    if (up == null || up === x) return x;
-    const root = find(up);
-    parent.set(x, root);
-    return root;
-  };
-  const union = (a: number, b: number) => {
-    const [ra, rb] = [find(a), find(b)];
-    if (ra !== rb) parent.set(rb, ra);
-  };
-  for (const m of members) parent.set(m.listing_id, m.listing_id);
-  for (const [key, verdict] of latest) {
-    if (verdict !== 'same') continue;
-    const [lo, hi] = key.split(':').map(Number);
-    union(lo, hi);
-  }
-
-  /* Letters follow the member order, so the first advert on the card is A. */
-  const letterOf = new Map<number, string>();
-  const units: UnitMap = {};
-  for (const m of members) {
-    const root = find(m.listing_id);
-    if (!letterOf.has(root)) letterOf.set(root, UNIT_LETTERS[letterOf.size] ?? 'A');
-    units[m.listing_id] = letterOf.get(root)!;
-  }
-
-  const relations: Record<string, AutodedupSplitRelation> = {};
-  for (const [key, verdict] of latest) {
-    if (verdict === 'same') continue;
-    const [lo, hi] = key.split(':').map(Number);
-    const pair = unitPairKey(units[lo], units[hi]);
-    if (!(pair in relations)) relations[pair] = verdict as AutodedupSplitRelation;
-  }
-  return { units, relation: DEFAULT_RELATION, relations };
-}
-
-/* EVERY member travels, including the ones the card counted rather than showed:
- * the server requires the assignment to name the whole cluster, and a card that
- * sent only its four visible members would be refused — rightly. The relation of
- * every unit pair travels too, named rather than left to the server's fill. */
-export function splitInput(
-  clusterKey: number,
-  generation: string,
-  members: ReadonlyArray<{ listing_id: number }>,
-  state: SplitState,
-  confirmRetract = false,
-  annotation: VerdictAnnotation = EMPTY_ANNOTATION,
-): AutodedupSplitInput {
-  const units = distinctUnits(members, state.units);
-  return {
-    cluster_key: clusterKey,
-    generation,
-    units: members.map((m) => ({ listing_id: m.listing_id, unit: unitOf(state.units, m.listing_id) })),
-    relation: state.relation,
-    relations: unitPairs(units).map(([unit_a, unit_b]) => ({
-      unit_a,
-      unit_b,
-      relation: relationOf(state, unit_a, unit_b),
-    })),
-    ...(confirmRetract ? { confirm_retract: true } : {}),
-    /* ONE set for the whole split: it is one ruling, and the server stamps it on
-     * every pair row and on the cluster row. */
-    ...annotationInput(annotation),
-  };
-}
-
-export interface SplitError {
-  message: string;
-  /* The server refused because the split takes back an earlier ruling (409). */
-  needsConfirm: boolean;
-}
-
-export interface SplitReceipt {
-  input: AutodedupSplitInput;
-  result: AutodedupSplitResult;
-}
-
-/* How much two adverts have in common, weakest first — the server's own order.
- * A split that says different things about different unit pairs is summarised on
- * the CLUSTER by its weakest claim, the only statement true of the whole group,
- * so the optimistic badge has to agree with the row that is about to land. */
-const RELATION_STRENGTH: Record<AutodedupSplitRelation, number> = {
-  different: 0,
-  same_project_different_unit: 1,
-  same_building_different_unit: 2,
-};
-
-export function clusterVerdictOf(input: AutodedupSplitInput): AutodedupVerdictValue {
-  const used = new Set(input.units.map((u) => u.unit));
-  if (used.size < 2) return 'same';
-  const relations = (input.relations ?? []).map((r) => r.relation);
-  if (relations.length === 0) return input.relation;
-  return relations.reduce((weakest, r) =>
-    RELATION_STRENGTH[r] < RELATION_STRENGTH[weakest] ? r : weakest,
-  );
-}
-
-/* The verdict write, shared by both queue pages: optimistic overlay keyed by a
- * caller-chosen string, rolled back on failure. The LIST IS NEVER INVALIDATED —
- * the review-grid lesson: a queue that reorders under a correcting hand causes
- * the mis-clicks it exists to catch. */
-export function useVerdictOverlay() {
-  const [overlay, setOverlay] = useState<Record<string, AutodedupVerdictRow>>({});
-  /* The session counter is a SERVER count, and a verdict is what changes it —
-   * so every successful write invalidates it and the strip re-reads. Without
-   * this "37 / 100" would stand still through a whole session and the operator
-   * would have no way to tell the sample was progressing. */
-  const queryClient = useQueryClient();
-  const countAgain = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['autodedup', 'validation-progress'] });
-    queryClient.invalidateQueries({ queryKey: ['autodedup', 'agreement'] });
-  }, [queryClient]);
-  /* The IN-FLIGHT KEY, not a global boolean. One shared `isPending` would mark
-   * every row in the queue busy while a single write lands, and disabling the
-   * button that was just clicked blurs it — a keyboard operator loses their
-   * place after every verdict. Nothing is disabled here: the optimistic overlay
-   * already shows the press and onError already rolls it back. */
-  const [inFlight, setInFlight] = useState<string | null>(null);
-  const mutation = useMutation({
-    mutationFn: (vars: { key: string; input: AutodedupVerdictInput }) =>
-      postAutodedupVerdict(vars.input),
-    onMutate: (vars) => {
-      const previous = overlay[vars.key];
-      setInFlight(vars.key);
-      setOverlay((o) => ({ ...o, [vars.key]: optimisticVerdict(vars.input, 'ukládám…') }));
-      return { previous };
-    },
-    onSuccess: (res, vars) => {
-      if (res.data) setOverlay((o) => ({ ...o, [vars.key]: res.data as AutodedupVerdictRow }));
-      const retracted = res.must_not_link_retracted ?? 0;
-      pushToast(
-        'ok',
-        res.must_not_link
-          ? 'Verdict recorded — this pair is now permanently un-linkable.'
-          : retracted > 0
-            /* A cluster confirmed as one property drops every veto inside it —
-             * said out loud, because it is the permanent half of the click. */
-            ? `Verdict recorded — ${retracted} pair(s) are linkable again.`
-            : 'Verdict recorded.',
-      );
-    },
-    onError: (err: Error, vars, ctx) => {
-      setOverlay((o) => {
-        const next = { ...o };
-        if (ctx?.previous) next[vars.key] = ctx.previous;
-        else delete next[vars.key];
-        return next;
-      });
-      pushToast('err', `Verdict failed: ${err.message}`);
-    },
-    onSettled: () => {
-      setInFlight(null);
-      countAgain();
-    },
-  });
-  const submit = useCallback(
-    (key: string, input: AutodedupVerdictInput) => mutation.mutate({ key, input }),
-    [mutation],
-  );
-
-  /* The SPLIT write rides the same overlay, because what it stores about the
-   * group is a cluster verdict: the badge has to flip to it exactly as it does
-   * for the whole-group buttons. What it does NOT share is the failure
-   * treatment — a rejected split must leave the operator's letters on screen to
-   * correct, so the error is kept per cluster and shown in place. */
-  const [splitErrors, setSplitErrors] = useState<Record<string, SplitError>>({});
-  /* The SUBMITTED assignment is kept beside the server's counts. A receipt read
-   * off live state is not a receipt: change a select after saving and the line
-   * would confirm, in the server's own numbers, a ruling that was never sent. */
-  const [splitResults, setSplitResults] = useState<Record<string, SplitReceipt>>({});
-  const splitMutation = useMutation({
-    mutationFn: (vars: { key: string; input: AutodedupSplitInput }) =>
-      postAutodedupSplitVerdict(vars.input),
-    onMutate: (vars) => {
-      const previous = overlay[vars.key];
-      setInFlight(vars.key);
-      setSplitErrors((e) => {
-        const next = { ...e };
-        delete next[vars.key];
-        return next;
-      });
-      setOverlay((o) => ({
-        ...o,
-        [vars.key]: optimisticVerdict(
-          {
-            kind: 'cluster',
-            cluster_key: vars.input.cluster_key,
-            verdict: clusterVerdictOf(vars.input),
-          },
-          'ukládám…',
-        ),
-      }));
-      return { previous };
-    },
-    onSuccess: (res, vars) => {
-      const stored = res.data?.cluster_verdict ?? null;
-      if (stored) setOverlay((o) => ({ ...o, [vars.key]: stored }));
-      if (res.data) {
-        setSplitResults((r) => ({
-          ...r,
-          [vars.key]: { input: vars.input, result: res.data as AutodedupSplitResult },
-        }));
-      }
-      const reversed = res.data?.reversed_pairs?.length ?? 0;
-      pushToast(
-        'ok',
-        `Split recorded — ${res.data?.n_pairs_negative ?? 0} pair(s) permanently un-linkable`
-          + (reversed > 0 ? `, ${reversed} earlier ruling(s) taken back.` : '.'),
-      );
-    },
-    onError: (err: Error, vars, ctx) => {
-      setOverlay((o) => {
-        const next = { ...o };
-        if (ctx?.previous) next[vars.key] = ctx.previous;
-        else delete next[vars.key];
-        return next;
-      });
-      /* 409 is not a failure: the server is asking whether the operator really
-       * means to take back a veto they wrote earlier. The letters stay, the
-       * reason is shown in place, and the Save button arms rather than retries. */
-      setSplitErrors((e) => ({
-        ...e,
-        [vars.key]: {
-          message: err.message,
-          needsConfirm: err instanceof ApiError && err.status === 409,
-        },
-      }));
-    },
-    onSettled: () => {
-      setInFlight(null);
-      countAgain();
-    },
-  });
-  const submitSplit = useCallback(
-    (key: string, input: AutodedupSplitInput) => splitMutation.mutate({ key, input }),
-    [splitMutation],
-  );
-
-  return { overlay, submit, submitSplit, pendingKey: inFlight, splitErrors, splitResults };
-}
-
-/* What a card or the dialog needs to edit ONE group's assignment. Bundled rather
- * than passed as seven props, because both surfaces take exactly the same set and
- * a split edited in the dialog has to be the split the card is holding. */
-export interface SplitControls {
-  state: SplitState;
-  setUnit: (listingId: number, unit: string) => void;
-  setRelation: (unitA: string, unitB: string, relation: AutodedupSplitRelation) => void;
-  save: (members: ReadonlyArray<{ listing_id: number }>, confirmRetract?: boolean) => void;
-  pending: boolean;
-  /* WHY this split — the chips and the note, sent with the save. NOT hydrated
-   * from the stored cluster verdict the way a plain verdict's is: the server
-   * writes the ASSIGNMENT into that note (`A: 11,12 | B: 13`), with the
-   * operator's own words merely in front of it, so reading it back into the
-   * input and re-posting would store the summary twice. */
-  annotation: VerdictAnnotation;
-  setAnnotation: (next: VerdictAnnotation) => void;
-  error?: SplitError;
-  receipt?: SplitReceipt;
-  /* The ruling that is STORED, derived from the group's pair verdicts. Present
-   * means this group already carries a split — which is what keeps the row on
-   * screen when the operator merges every member back into one unit. */
-  stored: SplitState | null;
-}
-
-/* One member's unit. Letters up to the member count: a group of three cannot
- * hold four units, and offering 26 where 3 are possible is a control that mostly
- * misleads. */
-export function UnitSelect({
-  listingId,
-  units,
-  count,
-  onChange,
-}: {
-  listingId: number;
-  units: UnitMap;
-  count: number;
-  onChange: (unit: string) => void;
-}) {
-  const letters = UNIT_LETTERS.slice(0, Math.min(Math.max(count, 2), UNIT_LETTERS.length));
-  return (
-    <label className="flex items-center gap-1.5 text-[0.62rem] text-[var(--color-ink-3)]">
-      <span>Jednotka #{listingId}</span>
-      <select
-        className="rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-1.5 py-0.5 text-[0.68rem] text-[var(--color-ink)]"
-        value={unitOf(units, listingId)}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {letters.map((letter) => (
-          <option key={letter} value={letter}>
-            {letter}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
-/* THE SPLIT. It appears once the operator has actually separated something — a
- * relation select over a group nobody has split is a question with no subject —
- * AND it stays once the group carries a stored split, however the operator then
- * assigns the letters. That second half is not a detail: putting every member
- * back into one unit is the UNDO, the one assignment the server implements as
- * "every pair same, every veto retracted", and a row that vanished at one unit
- * made it unreachable from this page. The whole-group "Confirm" is not that
- * undo either — it writes `same` on the cluster and leaves the pair vetoes
- * standing, a contradiction visible on no surface at all.
- *
- * Every pair across two units becomes a permanent must-not-link, so the row says
- * so in words before the click rather than in a toast after it. */
-export function SplitRow({
-  members,
-  split,
-  generation,
-  notesOpen = false,
-}: {
-  members: ReadonlyArray<{ listing_id: number }>;
-  split: SplitControls;
-  generation: string;
-  /* Open where one group is the whole screen (the dialog); collapsed on a queue
-   * card, which is a scroll. */
-  notesOpen?: boolean;
-}) {
-  const units = distinctUnits(members, split.state.units);
-  const one = units.length < 2;
-  if (one && !split.stored && !split.receipt) return null;
-  const pairs = unitPairs(units);
-  const confirm = split.error?.needsConfirm ?? false;
-  return (
-    <div className="rounded-[var(--radius-sm)] border border-dashed border-[var(--color-rule-strong)] bg-[var(--color-paper)] px-3 py-2 space-y-2">
-      <p className="text-[0.7rem] text-[var(--color-ink-2)]">
-        {one ? (
-          <>
-            Sloučit zpět: všech {members.length} inzerátů jako jedna jednotka —{' '}
-            <span className="font-mono">{splitSummary(members, split.state.units)}</span>.
-            Uložením se zruší dřívější zákazy spojení mezi nimi.
-          </>
-        ) : (
-          <>
-            Rozdělit na {units.length} jednotky —{' '}
-            <span className="font-mono">{splitSummary(members, split.state.units)}</span>.
-            Každá dvojice napříč jednotkami dostane trvalý zákaz spojení.
-          </>
-        )}
-      </p>
-      {split.stored && (
-        /* WHAT IS STORED, not what is on the selects. Without it a reload shows a
-         * blank assignment over a group that was ruled on last week. */
-        <p className="text-[0.66rem] text-[var(--color-ink-3)]">
-          Uloženo dříve:{' '}
-          <span className="font-mono">{splitSummary(members, split.stored.units)}</span>
-        </p>
-      )}
-      {pairs.length > 0 && (
-        <div className="flex flex-wrap items-end gap-2">
-          {/* One relation PER UNIT PAIR: a group can hold two units of one
-            * building and a third advert from a different building of the same
-            * development, and one value cannot say both. */}
-          {pairs.map(([a, b]) => (
-            <label key={unitPairKey(a, b)} className="block">
-              <span className={FILTER_LABEL}>{`Vztah ${a} ↔ ${b}`}</span>
-              <select
-                className={`${FILTER_CONTROL} w-auto`}
-                value={relationOf(split.state, a, b)}
-                onChange={(e) => split.setRelation(a, b, e.target.value as AutodedupSplitRelation)}
-              >
-                {SPLIT_RELATIONS.map((relation) => (
-                  <option key={relation} value={relation}>
-                    {SPLIT_RELATION_LABELS[relation]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
-        </div>
-      )}
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          /* Not disabled while in flight — the review-queue rule: disabling the
-           * button that was just clicked drops focus onto <body>. */
-          aria-busy={split.pending}
-          onClick={() => split.save(members, confirm)}
-          className={`rounded-[var(--radius-sm)] border px-3 py-1.5 text-[0.72rem] hover:bg-[var(--color-paper-3)] ${
-            confirm
-              ? 'border-[var(--color-brick)] bg-[var(--color-paper-2)] text-[var(--color-brick)]'
-              : 'border-[var(--color-rule-strong)] bg-[var(--color-paper-2)] text-[var(--color-ink)]'
-          } ${split.pending ? 'opacity-60' : ''}`}
-        >
-          {split.pending
-            ? 'Ukládám…'
-            : confirm
-              ? 'Přepsat a uložit'
-              : one
-                ? 'Sloučit zpět'
-                : 'Save split'}
-        </button>
-        <span className="text-[0.62rem] text-[var(--color-ink-4)]">generace {generation}</span>
-      </div>
-      {/* The split's own reasons — one set for the whole ruling. There is no
-        * "Uložit poznámku" here: the split IS the save button above, and a
-        * second one would write a second, different ruling. The toggle NAMES its
-        * destination: a card can show this picker and the cluster verdict's at
-        * once, and two identical labels over two different drafts silently drop
-        * whichever set the operator did not then save. */}
-      <VerdictNotes
-        defaultOpen={notesOpen}
-        value={split.annotation}
-        onChange={split.setAnnotation}
-        pending={split.pending}
-        label="důvod rozdělení"
-      />
-      {split.receipt && (
-        <p className="text-[0.68rem] text-[var(--color-ink-2)]">
-          Uloženo: {receiptRelations(split.receipt.input)} ·{' '}
-          {split.receipt.result.n_pairs_same} dvojic jako stejná jednotka,{' '}
-          {split.receipt.result.n_pairs_negative} oddělených ·{' '}
-          <span className="font-mono">{unitsSummary(split.receipt.input.units)}</span>
-        </p>
-      )}
-      {split.error && <ErrorBanner message={split.error.message} />}
-    </div>
-  );
-}
-
-/* The relations of the SUBMITTED split, in the receipt's own words: `A ↔ B:
- * stejná budova…`, or the single relation when the split said one thing. */
-export function receiptRelations(input: AutodedupSplitInput): string {
-  const relations = input.relations ?? [];
-  if (relations.length === 0) return 'jedna jednotka';
-  const distinct = new Set(relations.map((r) => r.relation));
-  if (distinct.size === 1) return SPLIT_RELATION_LABELS[relations[0].relation];
-  return relations
-    .map((r) => `${r.unit_a} ↔ ${r.unit_b}: ${SPLIT_RELATION_LABELS[r.relation]}`)
-    .join(' · ');
-}
-
 interface GroupsPage extends InfiniteListPage<AutodedupGroup> {
   store_ready: boolean;
   /* WHICH PASS this queue actually is — the server's answer, not the request's:
@@ -989,39 +185,6 @@ interface GroupsPage extends InfiniteListPage<AutodedupGroup> {
    * the page `useInfiniteList` hands back as `firstPage` — so "20 of N" reads
    * the number from where it was actually sent. */
   total: number | null;
-}
-
-/* EVERY enumerated key arriving off the URL is checked here, not only the sort:
- * the server 400s an unknown value, and a hand-edited or stale link should show
- * the queue rather than replace it with a red banner. The two keys the server
- * validates against a closed vocabulary are `sort` and `verdict`; the free ones
- * (generation, block, the numbers) are already "no filter" when unparseable. */
-const SORTS: ReadonlyArray<GroupFilterState['sort']> = [
-  'weakest',
-  'newest',
-  'largest',
-  'random',
-];
-export const VERDICTS: readonly string[] = [
-  '',
-  'unreviewed',
-  'same',
-  'different',
-  'same_building_different_unit',
-  'same_project_different_unit',
-  'unsure',
-];
-
-export function sanitizeGroupFilters<T extends GroupFilterState>(raw: T): T {
-  const sort = SORTS.includes(raw.sort) ? raw.sort : 'weakest';
-  const verdict = VERDICTS.includes(raw.verdict) ? raw.verdict : '';
-  /* The server 400s a seed outside its charset, and a red banner over the queue
-   * is the wrong answer to a hand-edited link: an unusable seed means the
-   * default sample, exactly as an unusable number means "no filter". */
-  const seed = SEED_RE.test(raw.seed) ? raw.seed : DEFAULT_SEED;
-  return sort === raw.sort && verdict === raw.verdict && seed === raw.seed
-    ? raw
-    : { ...raw, sort, verdict, seed };
 }
 
 export default function AutodedupGroups() {
@@ -1363,17 +526,11 @@ function GroupCard({
   generation: string;
   notes: ReturnType<typeof useVerdictAnnotations>;
 }) {
-  /* The fold is per card and lives in the card: expanding one group must not
-   * expand the next, and collapsing on a re-render would fight the operator. */
-  const [expanded, setExpanded] = useState(false);
   /* A group being ruled unit by unit is never folded, whatever its size: the
    * assignment travels WHOLE, so a letter set over adverts the operator cannot
    * see is a ruling by omission. Any unit touched — or a split already stored —
    * opens the card. */
   const splitStarted = Object.keys(split.state.units).length > 0 || split.stored != null;
-  const folded = group.members.length > MEMBERS_BEFORE_FOLD && !expanded && !splitStarted;
-  const shown = folded ? group.members.slice(0, MEMBERS_BEFORE_FOLD) : group.members;
-  const hidden = group.members.length - shown.length;
   /* A ruled card shows the judge again: the blinding protects the DECISION, and
    * the operator learns nothing from a chip they can never see. */
   const revealed = !blind || verdict != null;
@@ -1415,34 +572,19 @@ function GroupCard({
         * select. Four fit a row at lg and the rest wrap — the card is as tall as
         * the group is big, which is the honest shape for a surface that asks
         * "are these the same flat?". */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {shown.map((m, i) => (
-          <div key={m.listing_id} className="space-y-1">
-            {/* Only the first frames of the first cards are decoded eagerly: a
-              * twelve-member group otherwise fires twelve requests at once. */}
-            <ListingMini member={m} eager={eager && i < EAGER_MEMBERS} />
-            <UnitSelect
-              listingId={m.listing_id}
-              units={split.state.units}
-              count={group.members.length}
-              onChange={(unit) => split.setUnit(m.listing_id, unit)}
-            />
-          </div>
-        ))}
-      </div>
-      {hidden > 0 && (
-        /* The remainder expands IN PLACE. It is not a count and not a link to
-         * the drawer: the split sends every member (the server refuses a partial
-         * assignment), so a member the operator cannot see is a member they
-         * would rule on by omission. */
-        <button
-          type="button"
-          onClick={() => setExpanded(true)}
-          className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-3 py-1.5 text-[0.72rem] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]"
-        >
-          zobrazit všech {fmtCount(group.members.length)} inzerátů
-        </button>
-      )}
+      <MemberGrid
+        members={group.members}
+        eager={eager}
+        unfolded={splitStarted}
+        renderUnder={(m) => (
+          <UnitSelect
+            listingId={m.listing_id}
+            units={split.state.units}
+            count={group.members.length}
+            onChange={(unit) => split.setUnit(m.listing_id, unit)}
+          />
+        )}
+      />
 
       <SplitRow members={group.members} split={split} generation={generation} />
 
@@ -1607,87 +749,5 @@ function GroupDialog({
         </button>
       </div>
     </Dialog>
-  );
-}
-
-function MemberRow({
-  member,
-  split,
-  count,
-}: {
-  member: AutodedupMemberDetail;
-  split: SplitControls;
-  count: number;
-}) {
-  /* The carousel wants render-ready urls; these photos carry no CLIP tag on
-   * this surface, so both decorations are explicitly null rather than faked.
-   * The drawer shows ALL the photos, which is why it renders the carousel and
-   * the attributes rather than the single-cover card the queue uses. */
-  const images = member.images.map((img) => ({
-    url: imageSrc(img),
-    tag: null,
-    confidence: null,
-    renderScore: null,
-  }));
-  const inApp = memberListingPath(member);
-  return (
-    <li className="grid gap-3 sm:grid-cols-[18rem_1fr] items-start">
-      <ImageCarousel
-        images={images}
-        aspect="aspect-[4/3]"
-        /* A frame the portal refuses says so, here too: the dialog is where the
-         * operator looks hardest at the photos. */
-        fallback={<MissingPhotoTile source={member.source} reason="foto nedostupné" />}
-      />
-      <div className="space-y-1">
-        <p className="text-[0.75rem] text-[var(--color-ink-2)]">
-          <span className="font-mono">#{member.listing_id}</span> · {member.source} ·{' '}
-          {member.is_active ? 'aktivní' : 'staženo'}
-        </p>
-        <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[0.72rem] max-w-[22rem]">
-          {memberAttrs(member).map(([label, value]) => (
-            <div key={label} className="flex items-baseline justify-between gap-2">
-              <dt className="text-[var(--color-ink-4)]">{label}</dt>
-              <dd className="font-mono tabular-nums text-[var(--color-ink-2)]">{value}</dd>
-            </div>
-          ))}
-        </dl>
-        {/* THE POINT OF THE DIALOG for a developer project: five units share the
-          * photos above and the attribute row above that, and differ only in what
-          * the advert says. The text sits under the facts and over the controls,
-          * because it is read last and decides. */}
-        <MemberText
-          title={member.title}
-          text={member.description}
-          label={`#${member.listing_id}`}
-        />
-        <UnitSelect
-          listingId={member.listing_id}
-          units={split.state.units}
-          count={count}
-          onChange={(unit) => split.setUnit(member.listing_id, unit)}
-        />
-        <p className="flex items-center gap-3 text-[0.7rem]">
-          {inApp && (
-            <Link
-              to={inApp}
-              className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-            >
-              Detail
-            </Link>
-          )}
-          {member.source_url && (
-            <a
-              href={member.source_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-            >
-              Na portálu
-            </a>
-          )}
-        </p>
-      </div>
-    </li>
   );
 }
