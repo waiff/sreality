@@ -691,8 +691,9 @@ def _pair_view(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _digest(row: dict[str, Any]) -> dict[str, Any]:
-    """`autodedup.judge.listing_digest` over a DB row — the SAME PII-free record the judge
-    sees, so the operator reads exactly what the model was shown (and never a broker field)."""
+    """`autodedup.judge.listing_digest` over a DB row — the judge's own PII-free record, so
+    the operator reads what the model was shown (and never a broker field). One deliberate
+    difference: the description is NOT cut here. The cap is the paid lane's token budget."""
     attrs = {
         key: row[key]
         for key in (

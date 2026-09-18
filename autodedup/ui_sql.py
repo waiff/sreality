@@ -7,8 +7,9 @@ Nothing here writes a production table — the two write statements at the botto
 `autodedup.verdicts` and `autodedup.must_not_link`, which is the operator feedback loop of §9.
 
 PII (E28). `listings` carries `broker_name` / `broker_email` / `broker_phone` (migration 025);
-NOT ONE of them is selected by any statement in this module, and the description travels
-through `autodedup.judge.listing_digest`'s scrub before it reaches a response. A future
+NOT ONE of them is selected by any statement in this module, and every advert string —
+description AND title — travels through the judge's own scrub (`listing_digest` /
+`scrubbed_text`, one set of regexes, two lengths) before it reaches a response. A future
 column added to `LISTING_DETAIL_COLUMNS` has to be checked against that rule by hand — the
 select lists here are explicit for exactly that reason, never `l.*`.
 
