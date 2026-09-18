@@ -14,6 +14,14 @@
  * NO PII. The digests come from the judge's own `listing_digest`, which carries
  * no broker field of any kind and a scrubbed description. Nothing on this page
  * re-adds one.
+ *
+ * BLIND CARRIES IN THE URL (`?blind=1`). Reached from a blind queue, this page
+ * withholds the judge's transcript until the operator has recorded a verdict on
+ * the pair — otherwise the drill-down would be the hole in the blinding: one
+ * click on exactly the pair being ruled on, and the verdict the operator was not
+ * supposed to see yet is the largest section on the screen. Everything the
+ * ENGINE knew stays visible: features, digests, photos, the score. The judge is
+ * the only thing hidden, and only until the operator has answered.
  */
 
 import { useState } from 'react';
@@ -63,6 +71,9 @@ export default function AutodedupPair() {
   const { lo: loRaw, hi: hiRaw } = useParams<{ lo: string; hi: string }>();
   const [params, setParams] = useSearchParams();
   const generation = params.get('generation');
+  /* Only the explicit '1' blinds: this page is reachable directly, and its own
+   * default is the full record. */
+  const blind = params.get('blind') === '1';
   const lo = asId(loRaw);
   const hi = asId(hiRaw);
   const { overlay, submit, pendingKey } = useVerdictOverlay();
@@ -265,7 +276,15 @@ export default function AutodedupPair() {
 
           <section className={SECTION}>
             <h2 className={EYEBROW}>Judgements</h2>
-            {data.judgements.length === 0 ? (
+            {blind && stored == null ? (
+              /* Said in words, never rendered as an empty section: "hidden" and
+                * "nobody has judged this" are different facts, and printing the
+                * second for the first would teach the operator that a blind pair
+                * is an unjudged one. */
+              <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
+                Naslepo: verdikt soudce je skrytý, dokud neuložíte vlastní verdikt.
+              </p>
+            ) : data.judgements.length === 0 ? (
               <p className="mt-1 text-[0.72rem] text-[var(--color-ink-3)]">
                 No judge has ruled on this pair.
               </p>

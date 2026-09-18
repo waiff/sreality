@@ -37,6 +37,7 @@ import {
   type AutodedupReasonRollup,
 } from '@/lib/api';
 import { useReasonLabels } from '@/components/autodedup/VerdictNotes';
+import AgreementPanel from '@/components/autodedup/AgreementPanel';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import { Chevron, useCollapsed } from '@/components/settings/SectionChrome';
@@ -490,6 +491,11 @@ export default function AutodedupProgress() {
           hint="The wave the newest iteration belongs to."
         />
       </div>
+
+      {/* THE D6 GATE, LIVE — read from the verdicts and judgements that exist,
+        * not from a lane's end-of-wave report. It renders with no argument: the
+        * newest clustering pass is the server's own answer (E54). */}
+      <AgreementPanel />
 
       {s && <ReasonTable rollups={s.engine?.verdict_reasons ?? []} />}
 

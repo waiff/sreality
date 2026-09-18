@@ -13,6 +13,15 @@
  * A DISPLAY FLOOR, NOT A DECISION. `min_score` defaults to 0.20 because below
  * that the list is noise; it is an operator control, never a claim that 0.20
  * means anything to the engine.
+ *
+ * BLIND BY DEFAULT (D6). This is where the gate's pairs are judged, and an
+ * agreement number between an operator who has just read "judge: same property
+ * 0.93" and the judge that wrote it measures how persuasive the chip is, not
+ * whether the judge is right. So every judge artefact on a row — the chip, the
+ * verdict words, the key and contradicting evidence — is withheld until the
+ * operator has recorded their own verdict on THAT pair, and appears the moment
+ * they have. The engine's own score, zone, contributions and "why it wasn't
+ * merged" stay visible throughout: they are not the thing being validated.
  */
 
 import { useMemo } from 'react';
@@ -34,6 +43,7 @@ import {
   GenerationNotice,
   useAutodedupGenerations,
 } from '@/components/autodedup/GenerationSelect';
+import ValidationStrip, { BlindToggle } from '@/components/autodedup/ValidationStrip';
 import {
   EMPTY_FILTERS,
   FILTER_CONTROL,
@@ -107,7 +117,12 @@ export function toResidualQuery(
     source_pair: sourcePair(f.source_a, f.source_b),
     has_judgement: flag(f.has_judgement),
     verdict: f.verdict || null,
-    sort: 'score_desc',
+    /* Two orders: the working one (expected yield) and the seeded sample the D6
+     * agreement number is measured on. The shared `GroupFilterState.sort` also
+     * carries the groups queue's three, which this view does not serve — the
+     * sanitiser below maps anything that is not `random` back to score order. */
+    sort: f.sort === 'random' ? 'random' : 'score_desc',
+    seed: f.sort === 'random' ? f.seed : null,
   };
 }
 
@@ -117,6 +132,8 @@ export const EMPTY_RESIDUAL_FILTERS: ResidualFilterState = {
   zone: '',
   source_a: '',
   source_b: '',
+  /* ON by default — see the header comment. The groups queue defaults it off. */
+  blind: '1',
 };
 
 interface ResidualPage extends InfiniteListPage<AutodedupResidualRow> {
@@ -130,12 +147,19 @@ const pairKey = (row: AutodedupResidualRow) => `${row.listing_lo}:${row.listing_
 
 const ZONES: ReadonlyArray<ResidualExtras['zone']> = ['', 'band', 'reject', 'merge'];
 
-/* The shared keys are checked by the shared sanitiser (sort, verdict) and this
- * view's own zone here, so a hand-edited link shows the queue rather than the
- * server's 400 in a red banner. */
+/* The shared keys are checked by the shared sanitiser (sort, verdict, seed) and
+ * this view's own zone here, so a hand-edited link shows the queue rather than
+ * the server's 400 in a red banner.
+ *
+ * THIS VIEW SERVES TWO ORDERS, not the groups queue's four: the working one
+ * (expected yield) and the seeded sample. Anything that is not `random` is the
+ * working order, spelled with the shared default (`weakest`) so an unset sort
+ * stays out of the URL. */
 export function sanitizeResidualFilters(raw: ResidualFilterState): ResidualFilterState {
   const base = sanitizeGroupFilters(raw);
-  return ZONES.includes(base.zone) ? base : { ...base, zone: '' };
+  const zone = ZONES.includes(base.zone) ? base.zone : '';
+  const sort = base.sort === 'random' ? 'random' : 'weakest';
+  return zone === base.zone && sort === base.sort ? base : { ...base, zone, sort };
 }
 
 export default function AutodedupResidual() {
@@ -169,6 +193,9 @@ export default function AutodedupResidual() {
   const total = list.firstPage?.total ?? null;
   const generation = filters.generation || list.firstPage?.generation || null;
   const halfPair = Boolean(filters.source_a) !== Boolean(filters.source_b);
+  /* Default ON here — so only the explicit '0' turns the judge back on, and a
+   * link written before this key existed still arrives blind. */
+  const blind = filters.blind !== '0';
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
@@ -253,12 +280,38 @@ export default function AutodedupResidual() {
             <option value="0">bez verdiktu</option>
           </select>
         </label>
+        <label className="block">
+          <span className={FILTER_LABEL}>Sort</span>
+          <select
+            className={FILTER_CONTROL}
+            value={filters.sort === 'random' ? 'random' : 'weakest'}
+            onChange={(e) =>
+              setFilters({ ...filters, sort: e.target.value as ResidualFilterState['sort'] })
+            }
+          >
+            <option value="weakest">nejvyšší skóre nahoře</option>
+            <option value="random">náhodný vzorek</option>
+          </select>
+        </label>
       </FilterBar>
 
       <GenerationNotice
         generation={generation}
         latest={latest}
         onLatest={() => setFilters({ ...filters, generation: '' })}
+      />
+
+      <ValidationStrip
+        surface="residual"
+        generation={generation}
+        seed={filters.seed}
+        sampleOrder={filters.sort === 'random'}
+        minScore={toResidualQuery(filters, null).min_score}
+      />
+
+      <BlindToggle
+        checked={blind}
+        onChange={(next) => setFilters({ ...filters, blind: next ? '1' : '0' })}
       />
 
       {/* Said out loud rather than filtered silently: half a pair is not a
@@ -298,6 +351,11 @@ export default function AutodedupResidual() {
           {rows.map((row, i) => {
             const key = pairKey(row);
             const stored = overlay[key] ?? row.verdict;
+            /* THE ONE GATE. Every judge artefact this card renders — the chip,
+              * the verdict words, the key and contradicting evidence — hangs off
+              * this single prop, so blinding is one condition rather than four
+              * places that each have to remember. */
+            const judgement = blind && stored == null ? null : row.judgement;
             return (
             <li key={key}>
               <PairCard
@@ -314,12 +372,13 @@ export default function AutodedupResidual() {
                 guardVeto={row.guard_veto}
                 whyNotMerged={row.why_not_merged}
                 contributions={row.contributions}
-                judgement={row.judgement}
+                judgement={judgement}
+                blind={blind && stored == null}
                 verdict={stored}
                 pending={pendingKey === key}
                 eager={i < 2}
                 labels={PAIR_LABELS}
-                evidenceHref={pairHref(row.listing_lo, row.listing_hi, generation ?? '')}
+                evidenceHref={pairHref(row.listing_lo, row.listing_hi, generation ?? '', blind)}
                 annotation={notes.annotationOf(key, stored)}
                 onAnnotationChange={(next) => notes.setAnnotation(key, next)}
                 annotationDirty={notes.isDirty(key, stored)}

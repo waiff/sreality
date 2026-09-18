@@ -48,8 +48,23 @@ vi.mock('@/lib/api', async (importOriginal) => {
     postAutodedupVerdict: vi.fn(),
     postAutodedupSplitVerdict: vi.fn(),
     getAutodedupVerdictReasons: vi.fn(),
+    getAutodedupValidationProgress: vi.fn(),
   };
 });
+
+/* The D6 session counter's read — cluster grain on this queue. */
+const PROGRESS = {
+  store_ready: true,
+  data: {
+    generation: 'g3',
+    surface: 'groups' as const,
+    seed: 'v1',
+    sample_size: 100,
+    grain: 'cluster' as const,
+    sample: { n: 100, n_reviewed: 37, n_not_same: 2 },
+    total: { n: 870, n_reviewed: 103, n_not_same: 5 },
+  },
+};
 
 const PAGE_SIZE = 20;
 
@@ -298,6 +313,48 @@ describe('<AutodedupGroups>', () => {
       { code: 'floor_plan_differs', label: 'Jiný půdorys' },
       { code: 'same_project', label: 'Stejný projekt' },
     ]);
+    vi.mocked(api.getAutodedupValidationProgress).mockResolvedValue(PROGRESS);
+  });
+
+  /* --------------------------------------- the seeded sample + blind review */
+
+  it('offers the seeded sample order, and the counter counts it', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('#7');
+    /* The whole-generation count is on the strip from the start; the sample
+     * half only when the queue IS the sample. */
+    await screen.findByText(/Zkontrolováno:/);
+    expect(screen.queryByTestId('validation-sample')).toBeNull();
+
+    await user.selectOptions(screen.getByLabelText('Sort'), 'random');
+    await waitFor(() =>
+      expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: 'random', seed: 'v1', after: null }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('validation-sample')).toHaveTextContent(
+        /Náhodný vzorek: 37 \/ 100 zkontrolováno · 2 jiných než/,
+      ),
+    );
+    const search = screen.getByTestId('search').textContent ?? '';
+    expect(search).toContain('sort=random');
+    expect(search).not.toContain('seed=');
+  });
+
+  it('is NOT blind by default, and blinds the whole card when asked', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    /* The judged chip is a judge artefact like the chip on a pair is. */
+    expect(within(card).getByText('judged 1')).toBeInTheDocument();
+    await user.click(screen.getByLabelText(/naslepo/));
+    await waitFor(() => expect(screen.queryByText('judged 1')).toBeNull());
+    expect(screen.getByTestId('search').textContent).toContain('blind=1');
+    /* And it comes back the moment the group carries the operator's ruling. */
+    await user.click(within(card).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(screen.getByText('judged 1')).toBeInTheDocument());
   });
 
   /* ------------------------------------------------- the operator's reasons (mig 533) */
@@ -368,17 +425,63 @@ describe('<AutodedupGroups>', () => {
     expectNoNestedInteractive(card);
   });
 
-  it('counts the members it cannot show rather than cropping them', async () => {
-    const many = group({
+  it('shows EVERY advert of the group, not the first four', async () => {
+    /* The operator's own report: "I see only 4 adverts here while it says there
+     * should be 5". A card that counts what it will not show is a card that
+     * looks smaller than the group it is asking about. */
+    const five = group({
       cluster_key: 8,
-      size: 6,
-      members: [101, 202, 303, 404, 505, 606].map((id) => member({ listing_id: id })),
+      size: 5,
+      members: [101, 202, 303, 404, 505].map((id) => member({ listing_id: id })),
     });
-    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([many]));
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([five]));
     renderPage();
     const card = (await screen.findByText('#8')).closest('li')!;
-    expect(within(card).getByText(/\+2 further advert/)).toBeInTheDocument();
-    expect(within(card).queryByText('#606')).toBeNull();
+    for (const id of [101, 202, 303, 404, 505]) {
+      expect(within(card).getByText(`#${id}`)).toBeInTheDocument();
+      expect(within(card).getByLabelText(`Jednotka #${id}`)).toBeInTheDocument();
+    }
+    expect(within(card).queryByText(/further advert/)).toBeNull();
+  });
+
+  it('folds a very large group behind one button that expands it in place', async () => {
+    const user = userEvent.setup();
+    const ids = Array.from({ length: 14 }, (_, i) => 101 + i);
+    const huge = group({
+      cluster_key: 11,
+      size: ids.length,
+      members: ids.map((id) => member({ listing_id: id })),
+    });
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([huge]));
+    renderPage();
+    const card = (await screen.findByText('#11')).closest('li')!;
+    /* Twelve on screen, the rest one click away — on the same card, never in a
+     * drawer and never merely counted. */
+    expect(within(card).getAllByLabelText(/^Jednotka #/)).toHaveLength(12);
+    const expander = within(card).getByRole('button', { name: /zobrazit všech 14 inzerátů/ });
+    await user.click(expander);
+    expect(within(card).getAllByLabelText(/^Jednotka #/)).toHaveLength(14);
+    expect(within(card).queryByRole('button', { name: /zobrazit všech/ })).toBeNull();
+  });
+
+  it('sends every member of a folded group, expanded or not', async () => {
+    const user = userEvent.setup();
+    const ids = Array.from({ length: 14 }, (_, i) => 101 + i);
+    const huge = group({
+      cluster_key: 11,
+      size: ids.length,
+      members: ids.map((id) => member({ listing_id: id })),
+    });
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([huge]));
+    renderPage();
+    const card = (await screen.findByText('#11')).closest('li')!;
+    /* Touching one unit un-folds the card: an assignment travels WHOLE, and a
+     * letter set over adverts nobody can see is a ruling by omission. */
+    await user.selectOptions(within(card).getByLabelText('Jednotka #102'), 'B');
+    expect(within(card).getAllByLabelText(/^Jednotka #/)).toHaveLength(14);
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    const sent = vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0];
+    expect(sent.units.map((u) => u.listing_id)).toEqual(ids);
   });
 
   it('sends a filter as a key on the query', async () => {

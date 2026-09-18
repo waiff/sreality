@@ -4165,7 +4165,14 @@ export interface AutodedupGroupFilters {
   verdict?: string | null;
   shared_photo?: 0 | 1 | null;
   has_judgement?: 0 | 1 | null;
-  sort?: 'weakest' | 'newest' | 'largest' | null;
+  /* `random` is the SEEDED sample order (D6) — stable across pages and reloads
+   * for one seed, and uncorrelated with anything the engine did, which is what
+   * makes an error rate measured on it an error rate about the engine rather
+   * than about the top of a working queue. */
+  sort?: 'weakest' | 'newest' | 'largest' | 'random' | null;
+  /* WHICH sample. Sent with `sort=random`; the server defaults it to `v1` and
+   * echoes back the seed it drew, so a session can be resumed tomorrow. */
+  seed?: string | null;
 }
 
 export interface AutodedupResidualFilters {
@@ -4179,7 +4186,8 @@ export interface AutodedupResidualFilters {
   source_pair?: string | null;
   has_judgement?: 0 | 1 | null;
   verdict?: string | null;
-  sort?: 'score_desc' | null;
+  sort?: 'score_desc' | 'random' | null;
+  seed?: string | null;
 }
 
 /* One block of a generation: the stored blocking key, the grain it was keyed at
@@ -4426,5 +4434,105 @@ export const postAutodedupSplitVerdict = (
   request<AutodedupEnvelope<AutodedupSplitResult>>('/autodedup/verdict/split', {
     method: 'POST',
     json: body,
+    jwt: true,
+  });
+
+/* HOW FAR THROUGH THE VALIDATION SESSION (D6). Two counts at one grain: the
+ * whole generation, and the first `sample_size` of the seeded random order —
+ * the draw the program's gate is measured on. `n_not_same` counts every ruling
+ * that is not "one property" (including `unsure`), which on the groups queue is
+ * the engine's error count on an unbiased sample.
+ *
+ * The sample is NOT narrowed by the filter bar: a sample that moved with the
+ * filters would mean a different thing on every page of one session. */
+export interface AutodedupValidationCounts {
+  n: number;
+  n_reviewed: number;
+  n_not_same: number;
+}
+
+export interface AutodedupValidationProgress {
+  generation: string | null;
+  surface: 'groups' | 'residual';
+  seed: string;
+  sample_size: number;
+  /* `cluster` on the groups queue, `pair` on the residual one — two different
+   * units of work, never added together on a page. */
+  grain: 'cluster' | 'pair';
+  sample: AutodedupValidationCounts;
+  total: AutodedupValidationCounts;
+}
+
+export const getAutodedupValidationProgress = (q: {
+  surface: 'groups' | 'residual';
+  generation?: string | null;
+  seed?: string | null;
+  min_score?: number | null;
+}): Promise<AutodedupEnvelope<AutodedupValidationProgress>> =>
+  request<AutodedupEnvelope<AutodedupValidationProgress>>('/autodedup/validation-progress', {
+    query: {
+      surface: q.surface,
+      generation: q.generation ?? null,
+      seed: q.seed ?? null,
+      min_score: q.min_score ?? null,
+    },
+    jwt: true,
+  });
+
+/* OPERATOR vs JUDGE (D6, the gate that can stop the program). One binary
+ * question — one property, or not — asked of both, over the pairs where both
+ * have spoken. `ci_low`/`ci_high` are a Wilson 95% interval computed
+ * server-side; `agreement` is null when nothing is comparable yet, which is a
+ * different statement from zero. */
+export interface AutodedupAgreementStats {
+  n: number;
+  n_agree: number;
+  agreement: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  /* The two directions, never summed: an engine the operator over-ruled and a
+   * judge that under-calls duplicates are different failures. */
+  n_judge_different_operator_same: number;
+  n_judge_same_operator_different: number;
+  /* Where the operator's label came from: a verdict on THAT pair, or a pair
+   * implied by a confirmed group. */
+  n_explicit: number;
+  n_implied: number;
+}
+
+export interface AutodedupAgreementTier extends AutodedupAgreementStats {
+  tier: string;
+}
+
+export interface AutodedupDisagreement {
+  listing_lo: number;
+  listing_hi: number;
+  operator_verdict: AutodedupVerdictValue;
+  operator_source: 'explicit' | 'implied';
+  judge_verdict: AutodedupJudgementRow['verdict'];
+  judge_tier: string;
+  judge_model: string | null;
+}
+
+export interface AutodedupAgreement {
+  generation: string | null;
+  overall: AutodedupAgreementStats;
+  tiers: AutodedupAgreementTier[];
+  n_insufficient_evidence: number;
+  insufficient_by_tier: Record<string, number>;
+  disagreements: AutodedupDisagreement[];
+  n_disagreements: number;
+  /* The bar this number is measured against, served rather than hard-coded, so
+   * the page and the program document cannot drift apart. */
+  gate: { tier: string; bar: number; target_n: number };
+  max_cluster_size: number;
+  n_clusters_over_cap: number;
+}
+
+export const getAutodedupAgreement = (
+  generation?: string | null,
+): Promise<AutodedupEnvelope<AutodedupAgreement>> =>
+  request<AutodedupEnvelope<AutodedupAgreement>>('/autodedup/agreement', {
+    query: { generation: generation ?? null },
     jwt: true,
   });

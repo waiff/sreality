@@ -32,6 +32,7 @@ _LABELS: dict[str, str] = {
     usql.GROUPS_WEAKEST_SQL: "groups",
     usql.GROUPS_NEWEST_SQL: "groups_newest",
     usql.GROUPS_LARGEST_SQL: "groups_largest",
+    usql.GROUPS_RANDOM_SQL: "groups_random",
     usql.GROUP_ONE_SQL: "group_one",
     usql.GROUP_MEMBERS_SQL: "members",
     usql.MEMBER_TEXT_SQL: "member_text",
@@ -47,6 +48,13 @@ _LABELS: dict[str, str] = {
     usql.CLUSTER_VERDICTS_SQL: "cluster_verdicts",
     usql.CLUSTER_CONFLICTS_SQL: "conflicts",
     usql.RESIDUAL_SQL: "residual",
+    usql.RESIDUAL_RANDOM_SQL: "residual_random",
+    usql.VALIDATION_GROUPS_SAMPLE_SQL: "validation_sample",
+    usql.VALIDATION_GROUPS_TOTAL_SQL: "validation_total",
+    usql.VALIDATION_RESIDUAL_SAMPLE_SQL: "validation_sample",
+    usql.VALIDATION_RESIDUAL_TOTAL_SQL: "validation_total",
+    usql.AGREEMENT_PAIRS_SQL: "agreement_pairs",
+    usql.AGREEMENT_OVERSIZE_SQL: "agreement_oversize",
     usql.GROUPS_COUNT_SQL: "groups_count",
     usql.RESIDUAL_COUNT_SQL: "residual_count",
     usql.BLOCKS_SQL: "blocks",
@@ -66,7 +74,9 @@ _LABELS: dict[str, str] = {
     usql.PAIR_EXISTS_SQL: "pair_exists",
 }
 # The statements that fetch one row over the asked-for page size.
-_PAGED: frozenset[str] = frozenset({"groups", "groups_newest", "groups_largest", "residual"})
+_PAGED: frozenset[str] = frozenset(
+    {"groups", "groups_newest", "groups_largest", "groups_random", "residual", "residual_random"}
+)
 
 
 def _tuple(columns: tuple[str, ...], **values: Any) -> tuple[Any, ...]:
@@ -1081,6 +1091,250 @@ def test_a_malformed_cursor_is_refused(client, conn, params):
     `%(after_ts)s::timestamptz` would be a 500 where the numeric sorts answer 400."""
     assert client.get("/autodedup/groups", params=params).status_code == 400
     assert all(sql != usql.GROUPS_WEAKEST_SQL for sql, _ in conn.calls)
+
+
+# ------------------------------------------ the seeded sample order (D6's unbiased draw)
+
+
+def _md5(text: str) -> str:
+    import hashlib
+
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def test_the_random_sort_has_its_own_statement_and_a_seeded_cursor(client, conn):
+    """The cursor is the ORDER KEY, and the order key is `md5(cluster_key || seed)` — so the
+    route must spell the hash exactly as Postgres does or the next page starts elsewhere."""
+    conn.canned = {"groups_random": [_cluster(101), _cluster(102)]}
+    page = client.get(
+        "/autodedup/groups", params={"sort": "random", "limit": 1}
+    ).json()["data"]
+    assert page["sort"] == "random"
+    assert page["seed"] == "v1"
+    assert page["next_after"] == f"{_md5('101v1')}|101"
+    params = _last_call(conn, usql.GROUPS_RANDOM_SQL)
+    assert params["seed"] == "v1"
+    assert params["after_hash"] is None
+
+    client.get(
+        "/autodedup/groups",
+        params={"sort": "random", "after": page["next_after"], "seed": "v1"},
+    )
+    cursor = _last_call(conn, usql.GROUPS_RANDOM_SQL)
+    assert cursor["after_hash"] == _md5("101v1")
+    assert cursor["after_key"] == 101
+
+
+def test_a_second_seed_is_a_second_sample(client, conn):
+    conn.canned = {"groups_random": [_cluster(101), _cluster(102)]}
+    page = client.get(
+        "/autodedup/groups", params={"sort": "random", "limit": 1, "seed": "s2"}
+    ).json()["data"]
+    assert page["seed"] == "s2"
+    assert page["next_after"] == f"{_md5('101s2')}|101"
+    assert _last_call(conn, usql.GROUPS_RANDOM_SQL)["seed"] == "s2"
+
+
+def test_the_residual_random_order_keys_on_the_pair(client, conn):
+    conn.canned = {"residual_random": [_residual_row(21, 22), _residual_row(23, 24)]}
+    page = client.get(
+        "/autodedup/residual", params={"sort": "random", "limit": 1}
+    ).json()["data"]
+    assert page["sort"] == "random"
+    # `lo:hi` with a separator, so 1:23 and 12:3 are two strings rather than one.
+    assert page["next_after"] == f"{_md5('21:22v1')}|21|22"
+    client.get("/autodedup/residual", params={"sort": "random", "after": page["next_after"]})
+    cursor = _last_call(conn, usql.RESIDUAL_RANDOM_SQL)
+    assert cursor["after_hash"] == _md5("21:22v1")
+    assert (cursor["after_lo"], cursor["after_hi"]) == (21, 22)
+    # The score cursor is NOT also set: two orders, one cursor each.
+    assert cursor["after_score"] is None
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"sort": "random", "seed": "Nope"},
+        {"sort": "random", "seed": "a b"},
+        {"sort": "random", "seed": "x" * 17},
+        {"sort": "random", "seed": "semínko"},
+    ],
+)
+def test_a_seed_outside_the_charset_is_refused(client, conn, params):
+    assert client.get("/autodedup/groups", params=params).status_code == 400
+    assert client.get("/autodedup/residual", params=params).status_code == 400
+    assert all(sql != usql.GROUPS_RANDOM_SQL for sql, _ in conn.calls)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"sort": "random", "after": "0.44|101"},
+        {"sort": "random", "after": "zzzz|101"},
+        {"sort": "random", "after": f"{'a' * 31}|101"},
+    ],
+)
+def test_a_cursor_that_is_not_a_seeded_hash_is_refused(client, conn, params):
+    """An arbitrary string reaching `%(after_hash)s::text` is not a 500 — it is worse: it
+    compares as itself and pages from somewhere nobody asked for."""
+    assert client.get("/autodedup/groups", params=params).status_code == 400
+
+
+# ------------------------------------------------- the validation session counter (D6)
+
+
+def _counts(n: int, reviewed: int, not_same: int) -> tuple[Any, ...]:
+    return _tuple(usql.VALIDATION_COUNT_COLUMNS, n=n, n_reviewed=reviewed, n_not_same=not_same)
+
+
+def test_the_session_counter_reports_the_sample_and_the_whole_generation(client, conn):
+    conn.canned = {
+        "validation_sample": [_counts(100, 37, 2)],
+        "validation_total": [_counts(870, 103, 5)],
+    }
+    body = client.get("/autodedup/validation-progress", params={"surface": "groups"}).json()
+    assert body["store_ready"] is True
+    data = body["data"]
+    assert data["generation"] == "g3"
+    assert data["seed"] == "v1"
+    assert data["sample_size"] == 100
+    assert data["grain"] == "cluster"
+    assert data["sample"] == {"n": 100, "n_reviewed": 37, "n_not_same": 2}
+    assert data["total"] == {"n": 870, "n_reviewed": 103, "n_not_same": 5}
+    params = _last_call(conn, usql.VALIDATION_GROUPS_SAMPLE_SQL)
+    assert params["seed"] == "v1"
+    assert params["sample_size"] == 100
+    assert params["generation"] == "g3"
+
+
+def test_the_residual_counter_counts_pairs_above_the_floor_it_was_given(client, conn):
+    conn.canned = {
+        "validation_sample": [_counts(100, 12, 9)],
+        "validation_total": [_counts(4200, 61, 40)],
+    }
+    data = client.get(
+        "/autodedup/validation-progress",
+        params={"surface": "residual", "min_score": 0.35, "seed": "s2"},
+    ).json()["data"]
+    assert data["grain"] == "pair"
+    assert data["seed"] == "s2"
+    params = _last_call(conn, usql.VALIDATION_RESIDUAL_SAMPLE_SQL)
+    assert params["min_score"] == 0.35
+    assert params["seed"] == "s2"
+    # The residual statements were used, never the cluster ones.
+    assert all(sql != usql.VALIDATION_GROUPS_SAMPLE_SQL for sql, _ in conn.calls)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"surface": "blocks"}, {"surface": "groups", "seed": "NO"}, {"nope": 1}],
+)
+def test_the_counter_refuses_anything_outside_its_registry(client, conn, params):
+    assert client.get("/autodedup/validation-progress", params=params).status_code == 400
+
+
+def test_the_counter_renders_against_an_un_migrated_store(client, conn):
+    conn.ready = False
+    body = client.get("/autodedup/validation-progress").json()
+    assert body == {"data": None, "store_ready": False}
+    assert len(conn.calls) == 1
+
+
+# -------------------------------------------------- operator vs judge (the D6 gate)
+
+
+def _agree_row(
+    lo: int,
+    hi: int,
+    operator: str,
+    judge: str,
+    tier: str = "gold",
+    source: str = "explicit",
+) -> tuple[Any, ...]:
+    return _tuple(
+        usql.AGREEMENT_COLUMNS,
+        listing_lo=lo,
+        listing_hi=hi,
+        operator_verdict=operator,
+        operator_source=source,
+        judge_verdict=judge,
+        judge_tier=tier,
+        judge_model="gpt-5.6-luna",
+    )
+
+
+def test_the_agreement_read_reports_the_gate_the_directions_and_the_bound(client, conn):
+    """Hand-computed: 4 comparable pairs, 3 agree. 3/4 = 0.75, and the Wilson 95% interval is
+    0.30064–0.95442 — worked through on paper (z = 1.959964, z^2 = 3.841459; denominator
+    1 + z^2/4 = 1.960365; centre (0.75 + 0.480182)/1.960365 = 0.627530; half-width
+    (z/1.960365) * sqrt(0.046875 + 0.060023) = 0.326886) and pinned here, so a rewrite of the
+    maths shows up as a failing number rather than as a different gate."""
+    conn.canned = {
+        "agreement_pairs": [
+            _agree_row(1, 2, "same", "same_property"),
+            _agree_row(3, 4, "same", "same_property", source="implied"),
+            _agree_row(5, 6, "different", "different_property", tier="vision"),
+            _agree_row(7, 8, "same", "different_property", source="implied"),
+            # Not a judgement: counted, never scored.
+            _agree_row(9, 10, "same", "insufficient_evidence", tier="vision"),
+        ],
+        "agreement_oversize": [(2,)],
+    }
+    data = client.get("/autodedup/agreement").json()["data"]
+    assert data["generation"] == "g3"
+    assert data["overall"]["n"] == 4
+    assert data["overall"]["n_agree"] == 3
+    assert data["overall"]["agreement"] == pytest.approx(0.75)
+    assert data["overall"]["ci_low"] == pytest.approx(0.627530 - 0.326886, abs=1e-5)
+    assert data["overall"]["ci_high"] == pytest.approx(0.627530 + 0.326886, abs=1e-5)
+    # The two directions, apart.
+    assert data["overall"]["n_judge_different_operator_same"] == 1
+    assert data["overall"]["n_judge_same_operator_different"] == 0
+    # Where the labels came from.
+    assert (data["overall"]["n_explicit"], data["overall"]["n_implied"]) == (2, 2)
+    assert data["n_insufficient_evidence"] == 1
+    gold = next(t for t in data["tiers"] if t["tier"] == "gold")
+    assert (gold["n"], gold["n_agree"]) == (3, 2)
+    assert data["gate"] == {"tier": "gold", "bar": 0.95, "target_n": 200}
+    # The implied expansion's bound, reported rather than assumed away.
+    assert data["max_cluster_size"] == routes.AGREEMENT_MAX_CLUSTER_SIZE
+    assert data["n_clusters_over_cap"] == 2
+    assert [
+        (d["listing_lo"], d["listing_hi"]) for d in data["disagreements"]
+    ] == [(7, 8)]
+    params = _last_call(conn, usql.AGREEMENT_PAIRS_SQL)
+    assert params["generation"] == "g3"
+    assert params["max_cluster_size"] == routes.AGREEMENT_MAX_CLUSTER_SIZE
+
+
+def test_the_agreement_statement_unions_explicit_and_implied_pairs(client, conn):
+    """The implied half is the reason the number exists at all — 103 confirmed groups carry
+    far more pair evidence than the pairs ruled on one at a time. Asserted on the statement,
+    since the fake connection cannot execute a CTE."""
+    sql = " ".join(usql.AGREEMENT_PAIRS_SQL.split())
+    # Only a `same` cluster implies anything; a rejected group says nothing per pair.
+    assert "WHERE cf.verdict = 'same'" in sql
+    # Both members of one cluster, each pair once (mb > ma), and the cluster must be in the
+    # generation the view read.
+    assert "mb.listing_id > ma.listing_id" in sql
+    assert "c.generation = %(generation)s::text" in sql
+    # The explicit verdict WINS: an implied row is dropped when the pair carries one.
+    assert "WHERE NOT EXISTS ( SELECT 1 FROM explicit e2" in sql
+    # `unsure` is not a label; `oss` is not a judge here; the best tier wins.
+    assert "WHERE o.verdict <> 'unsure'" in sql
+    assert "j.tier IN ('gold', 'vision', 'text')" in sql
+    assert "CASE j.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END" in sql
+    # The implied expansion is bounded.
+    assert "c.size <= %(max_cluster_size)s::int" in sql
+
+
+def test_the_agreement_read_renders_against_an_un_migrated_store(client, conn):
+    conn.ready = False
+    assert client.get("/autodedup/agreement").json() == {"data": None, "store_ready": False}
+
+
+def test_the_agreement_read_refuses_an_unknown_filter(client, conn):
+    assert client.get("/autodedup/agreement", params={"tier": "gold"}).status_code == 400
 
 
 # ----------------------------------------------------------------------- one group, whole

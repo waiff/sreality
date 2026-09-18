@@ -40,7 +40,7 @@
  */
 
 import { useCallback, useMemo, useState, type ReactNode } from 'react';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 
 import {
@@ -94,13 +94,31 @@ import VerdictNotes, {
   type VerdictAnnotation,
 } from '@/components/autodedup/VerdictNotes';
 import { JudgeChip } from '@/components/autodedup/PairCard';
+import ValidationStrip, { BlindToggle } from '@/components/autodedup/ValidationStrip';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 
 const NOT_YET = 'not yet';
 const PAGE_SIZE = 20;
-/* Four members fit one row at every width the shell allows; the rest are
- * counted rather than cropped, so the card never lies about the group size. */
-const VISIBLE_MEMBERS = 4;
+/* EVERY member of the group is a card with its own photos. The card used to show
+ * four and count the rest, and the operator read that as the group being
+ * smaller than the header said ("I see only 4 adverts here while it says there
+ * should be 5") — which on a surface whose whole job is "are these the same
+ * flat?" is the one thing it may not do. Four still fit a row at lg; the rest
+ * wrap onto the next one.
+ *
+ * Past this many the card would be a page of its own, so the remainder is
+ * folded behind one button that expands it IN PLACE — not a count, not a
+ * drawer: the adverts are still one click away on the same card. */
+const MEMBERS_BEFORE_FOLD = 12;
+/* The photos above the fold are decoded immediately, the rest lazily — a
+ * twelve-member group must not fire twelve eager requests. */
+const EAGER_MEMBERS = 2;
+
+/* The seeded sample's name. Shared by both queues, and the same default the
+ * server uses — a page that sent a different one would silently review a
+ * different sample from the one the counter counts. */
+export const DEFAULT_SEED = 'v1';
+const SEED_RE = /^[a-z0-9]{1,16}$/;
 
 export interface GroupFilterState {
   generation: string;
@@ -115,7 +133,15 @@ export interface GroupFilterState {
   verdict: string;
   shared_photo: string;
   has_judgement: string;
-  sort: 'weakest' | 'newest' | 'largest';
+  sort: 'weakest' | 'newest' | 'largest' | 'random';
+  /* WHICH random sample. Only meaningful with `sort=random`, and only written to
+   * the URL when it is not the default one. */
+  seed: string;
+  /* '1' = hide every judge artefact until this row carries the operator's own
+   * verdict. Default OFF here and ON on the residual queue, which is where the
+   * D6 pairs are judged — so each page reads its own default (`=== '1'` here,
+   * `!== '0'` there) rather than sharing a sanitiser that cannot know both. */
+  blind: string;
 }
 
 export const EMPTY_FILTERS: GroupFilterState = {
@@ -136,6 +162,8 @@ export const EMPTY_FILTERS: GroupFilterState = {
   shared_photo: '',
   has_judgement: '',
   sort: 'weakest',
+  seed: DEFAULT_SEED,
+  blind: '0',
 };
 
 /* A blank control is a MISSING parameter; so is a typo. `Number('abc')` is NaN,
@@ -175,15 +203,29 @@ export function toQuery(f: GroupFilterState, after: string | null): AutodedupGro
     shared_photo: flag(f.shared_photo),
     has_judgement: flag(f.has_judgement),
     sort: f.sort,
+    /* Sent only with the order it names: a seed on a weakest-edge query is a
+     * parameter the statement never reads, and it would split the react-query
+     * cache by a value that changes nothing. */
+    seed: f.sort === 'random' ? f.seed : null,
   };
 }
 
 /* The evidence page is a DIFFERENT generation's worth of rows unless it is
  * told which one the queue was reading; the drill-down carries it rather than
  * silently falling back to the default. */
-export function pairHref(lo: number, hi: number, generation: string): RoutePath {
+export function pairHref(
+  lo: number,
+  hi: number,
+  generation: string,
+  /* BLIND TRAVELS WITH THE LINK. A drill-down out of a blind queue that showed
+   * the judge's transcript on arrival would undo the blinding in one click —
+   * the operator would read the verdict they were not supposed to see yet on
+   * exactly the pair they were about to rule on. */
+  blind = false,
+): RoutePath {
   return withQuery(ROUTES.autodedupPair.build({ lo, hi }), {
     generation: generation || null,
+    blind: blind ? '1' : null,
   });
 }
 
@@ -603,6 +645,15 @@ export function clusterVerdictOf(input: AutodedupSplitInput): AutodedupVerdictVa
  * the mis-clicks it exists to catch. */
 export function useVerdictOverlay() {
   const [overlay, setOverlay] = useState<Record<string, AutodedupVerdictRow>>({});
+  /* The session counter is a SERVER count, and a verdict is what changes it —
+   * so every successful write invalidates it and the strip re-reads. Without
+   * this "37 / 100" would stand still through a whole session and the operator
+   * would have no way to tell the sample was progressing. */
+  const queryClient = useQueryClient();
+  const countAgain = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['autodedup', 'validation-progress'] });
+    queryClient.invalidateQueries({ queryKey: ['autodedup', 'agreement'] });
+  }, [queryClient]);
   /* The IN-FLIGHT KEY, not a global boolean. One shared `isPending` would mark
    * every row in the queue busy while a single write lands, and disabling the
    * button that was just clicked blurs it — a keyboard operator loses their
@@ -641,7 +692,10 @@ export function useVerdictOverlay() {
       });
       pushToast('err', `Verdict failed: ${err.message}`);
     },
-    onSettled: () => setInFlight(null),
+    onSettled: () => {
+      setInFlight(null);
+      countAgain();
+    },
   });
   const submit = useCallback(
     (key: string, input: AutodedupVerdictInput) => mutation.mutate({ key, input }),
@@ -716,7 +770,10 @@ export function useVerdictOverlay() {
         },
       }));
     },
-    onSettled: () => setInFlight(null),
+    onSettled: () => {
+      setInFlight(null);
+      countAgain();
+    },
   });
   const submitSplit = useCallback(
     (key: string, input: AutodedupSplitInput) => splitMutation.mutate({ key, input }),
@@ -939,7 +996,12 @@ interface GroupsPage extends InfiniteListPage<AutodedupGroup> {
  * the queue rather than replace it with a red banner. The two keys the server
  * validates against a closed vocabulary are `sort` and `verdict`; the free ones
  * (generation, block, the numbers) are already "no filter" when unparseable. */
-const SORTS: ReadonlyArray<GroupFilterState['sort']> = ['weakest', 'newest', 'largest'];
+const SORTS: ReadonlyArray<GroupFilterState['sort']> = [
+  'weakest',
+  'newest',
+  'largest',
+  'random',
+];
 export const VERDICTS: readonly string[] = [
   '',
   'unreviewed',
@@ -953,7 +1015,13 @@ export const VERDICTS: readonly string[] = [
 export function sanitizeGroupFilters<T extends GroupFilterState>(raw: T): T {
   const sort = SORTS.includes(raw.sort) ? raw.sort : 'weakest';
   const verdict = VERDICTS.includes(raw.verdict) ? raw.verdict : '';
-  return sort === raw.sort && verdict === raw.verdict ? raw : { ...raw, sort, verdict };
+  /* The server 400s a seed outside its charset, and a red banner over the queue
+   * is the wrong answer to a hand-edited link: an unusable seed means the
+   * default sample, exactly as an unusable number means "no filter". */
+  const seed = SEED_RE.test(raw.seed) ? raw.seed : DEFAULT_SEED;
+  return sort === raw.sort && verdict === raw.verdict && seed === raw.seed
+    ? raw
+    : { ...raw, sort, verdict, seed };
 }
 
 export default function AutodedupGroups() {
@@ -997,6 +1065,9 @@ export default function AutodedupGroups() {
   /* The pass the QUEUE read: what the URL named, else what the server answered
    * with. Null only before the first page lands. */
   const generation = filters.generation || list.firstPage?.generation || null;
+  /* Default OFF on this surface — so anything that is not the explicit '1' is
+   * "show the judge", including a hand-edited link. */
+  const blind = filters.blind === '1';
 
   /* Per-row actions name the pass the ROW came from, never the queue's: a split
    * is stored against one clustering, and the evidence link must open the same
@@ -1140,6 +1211,10 @@ export default function AutodedupGroups() {
             <option value="weakest">weakest edge first</option>
             <option value="newest">newest first</option>
             <option value="largest">largest first</option>
+            {/* The one order that is not a working order: a seeded shuffle, so
+              * the error rate measured on it is about the engine rather than
+              * about the top of a queue sorted by where the errors live. */}
+            <option value="random">náhodný vzorek</option>
           </select>
         </label>
       </FilterBar>
@@ -1148,6 +1223,22 @@ export default function AutodedupGroups() {
         generation={generation}
         latest={latest}
         onLatest={() => setFilters({ ...filters, generation: '' })}
+      />
+
+      <ValidationStrip
+        surface="groups"
+        generation={generation}
+        seed={filters.seed}
+        sampleOrder={filters.sort === 'random'}
+      />
+
+      {/* OFF by default here: the groups queue is a working surface, and the
+        * judge's word on an edge is evidence the operator is entitled to. It is
+        * offered because a session that wants an unbiased error rate on GROUPS
+        * needs the same blinding the residual queue has by default. */}
+      <BlindToggle
+        checked={blind}
+        onChange={(next) => setFilters({ ...filters, blind: next ? '1' : '0' })}
       />
 
       {list.error && <ErrorBanner message={list.error.message} />}
@@ -1182,6 +1273,7 @@ export default function AutodedupGroups() {
               key={group.cluster_key}
               group={group}
               eager={i < 2}
+              blind={blind}
               verdict={overlay[String(group.cluster_key)] ?? group.verdict}
               pending={pendingKey === String(group.cluster_key)}
               notes={notes}
@@ -1229,6 +1321,10 @@ export default function AutodedupGroups() {
           clusterKey={openKey}
           generation={generationOf(openKey)}
           split={splitControls(openKey)}
+          /* The drawer is the same review, so it blinds with the queue — and
+            * un-blinds on the same condition: the cluster carries a verdict. */
+          blind={blind && (overlay[String(openKey)] ?? null) == null
+            && (rows.find((r) => r.cluster_key === openKey)?.verdict ?? null) == null}
           onClose={() => setOpenKey(null)}
         />
       )}
@@ -1244,6 +1340,7 @@ function GroupCard({
   onOpen,
   pending,
   eager,
+  blind,
   split,
   generation,
   notes,
@@ -1260,12 +1357,26 @@ function GroupCard({
   onOpen: () => void;
   pending: boolean;
   eager: boolean;
+  /* Hide every judge artefact on this card until it carries a verdict. */
+  blind: boolean;
   split: SplitControls;
   generation: string;
   notes: ReturnType<typeof useVerdictAnnotations>;
 }) {
-  const shown = group.members.slice(0, VISIBLE_MEMBERS);
+  /* The fold is per card and lives in the card: expanding one group must not
+   * expand the next, and collapsing on a re-render would fight the operator. */
+  const [expanded, setExpanded] = useState(false);
+  /* A group being ruled unit by unit is never folded, whatever its size: the
+   * assignment travels WHOLE, so a letter set over adverts the operator cannot
+   * see is a ruling by omission. Any unit touched — or a split already stored —
+   * opens the card. */
+  const splitStarted = Object.keys(split.state.units).length > 0 || split.stored != null;
+  const folded = group.members.length > MEMBERS_BEFORE_FOLD && !expanded && !splitStarted;
+  const shown = folded ? group.members.slice(0, MEMBERS_BEFORE_FOLD) : group.members;
   const hidden = group.members.length - shown.length;
+  /* A ruled card shows the judge again: the blinding protects the DECISION, and
+   * the operator learns nothing from a chip they can never see. */
+  const revealed = !blind || verdict != null;
   const noteKey = String(group.cluster_key);
   return (
     <li className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3 space-y-3">
@@ -1292,15 +1403,24 @@ function GroupCard({
         minEdgeScore={group.min_edge_score}
         nCertificates={group.n_certificate_edges}
         families={group.family_names}
-        nJudged={group.n_judged_edges}
+        /* "judged 2" / "not judged" is a judge artefact like the chip is: it
+          * says the machine has (or has not) an opinion on this group, which is
+          * exactly what blind mode withholds until the operator has ruled. */
+        nJudged={revealed ? group.n_judged_edges : null}
         sharedPhoto={group.shared_photo_warning}
         maxGapDays={group.max_gap_days}
       />
 
+      {/* EVERY advert of the group, each with its own gallery and its own unit
+        * select. Four fit a row at lg and the rest wrap — the card is as tall as
+        * the group is big, which is the honest shape for a surface that asks
+        * "are these the same flat?". */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {shown.map((m) => (
+        {shown.map((m, i) => (
           <div key={m.listing_id} className="space-y-1">
-            <ListingMini member={m} eager={eager} />
+            {/* Only the first frames of the first cards are decoded eagerly: a
+              * twelve-member group otherwise fires twelve requests at once. */}
+            <ListingMini member={m} eager={eager && i < EAGER_MEMBERS} />
             <UnitSelect
               listingId={m.listing_id}
               units={split.state.units}
@@ -1311,28 +1431,17 @@ function GroupCard({
         ))}
       </div>
       {hidden > 0 && (
-        /* EVERY member gets a select, not only the four the card shows. The
-         * assignment travels whole — the server refuses a partial one — so a
-         * member with no control on screen would be ruled on by omission, and
-         * the operator would have asserted something about adverts they never
-         * saw. The photos are still one click away; the letter is not. */
-        <div className="space-y-1">
-          <p className="text-[0.7rem] text-[var(--color-ink-3)]">
-            +{hidden} further advert{hidden === 1 ? '' : 's'} in this group — open it to see
-            them; their unit is set here.
-          </p>
-          <div className="flex flex-wrap gap-x-4 gap-y-1">
-            {group.members.slice(VISIBLE_MEMBERS).map((m) => (
-              <UnitSelect
-                key={m.listing_id}
-                listingId={m.listing_id}
-                units={split.state.units}
-                count={group.members.length}
-                onChange={(unit) => split.setUnit(m.listing_id, unit)}
-              />
-            ))}
-          </div>
-        </div>
+        /* The remainder expands IN PLACE. It is not a count and not a link to
+         * the drawer: the split sends every member (the server refuses a partial
+         * assignment), so a member the operator cannot see is a member they
+         * would rule on by omission. */
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-3 py-1.5 text-[0.72rem] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]"
+        >
+          zobrazit všech {fmtCount(group.members.length)} inzerátů
+        </button>
       )}
 
       <SplitRow members={group.members} split={split} generation={generation} />
@@ -1364,11 +1473,13 @@ function GroupDialog({
   clusterKey,
   generation,
   split,
+  blind,
   onClose,
 }: {
   clusterKey: number;
   generation: string;
   split: SplitControls;
+  blind: boolean;
   onClose: () => void;
 }) {
   const detail = useQuery({
@@ -1443,10 +1554,18 @@ function GroupDialog({
                         <td className={`${TD} font-mono tabular-nums`}>{fmtScore(p.score)}</td>
                         <td className={TD}>{p.zone ?? '—'}</td>
                         <td className={TD}>{p.certificate ?? '—'}</td>
-                        <td className={TD}>{judge ? <JudgeChip judgement={judge} /> : '—'}</td>
+                        <td className={TD}>
+                          {blind ? (
+                            <span className="text-[var(--color-ink-4)]">skryto</span>
+                          ) : judge ? (
+                            <JudgeChip judgement={judge} />
+                          ) : (
+                            '—'
+                          )}
+                        </td>
                         <td className={TD}>
                           <Link
-                            to={pairHref(p.listing_lo, p.listing_hi, generation)}
+                            to={pairHref(p.listing_lo, p.listing_hi, generation, blind)}
                             className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
                           >
                             Evidence

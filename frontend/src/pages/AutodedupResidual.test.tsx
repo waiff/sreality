@@ -38,8 +38,23 @@ vi.mock('@/lib/api', async (importOriginal) => {
     getAutodedupGenerations: vi.fn(),
     postAutodedupVerdict: vi.fn(),
     getAutodedupVerdictReasons: vi.fn(),
+    getAutodedupValidationProgress: vi.fn(),
   };
 });
+
+/* The session counter's read (D6). Pair grain here: 100 of the seeded order. */
+const PROGRESS = {
+  store_ready: true,
+  data: {
+    generation: 'g3',
+    surface: 'residual' as const,
+    seed: 'v1',
+    sample_size: 100,
+    grain: 'pair' as const,
+    sample: { n: 100, n_reviewed: 12, n_not_same: 4 },
+    total: { n: 4200, n_reviewed: 61, n_not_same: 40 },
+  },
+};
 
 function member(over: Partial<AutodedupMember> & { listing_id: number }): AutodedupMember {
   return {
@@ -196,6 +211,76 @@ describe('<AutodedupResidual>', () => {
       { code: 'floor_plan_differs', label: 'Jiný půdorys' },
       { code: 'identical_photos', label: 'Stejné fotky' },
     ]);
+    vi.mocked(api.getAutodedupValidationProgress).mockResolvedValue(PROGRESS);
+  });
+
+  /* --------------------------------------- blind review + the seeded sample */
+
+  it('hides every judge artefact by default and reveals it once the pair is ruled', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
+    /* The chip, the verdict words and the judge's own evidence are all gone —
+     * one gate, not four places that each remember. */
+    expect(within(row).queryByText(/judge: not enough evidence/)).toBeNull();
+    expect(within(row).queryByText(/different floor/)).toBeNull();
+    expect(within(row).queryByText(/same kitchen/)).toBeNull();
+    /* And it SAYS it is hidden: "hidden" and "nobody judged this" are different
+     * facts about a pair. */
+    expect(within(row).getByText('soudce skryt')).toBeInTheDocument();
+    /* The engine's own evidence is untouched — it is not what is being
+     * validated. */
+    expect(within(row).getByText('img_best_hamming')).toBeInTheDocument();
+    expect(row).toHaveTextContent('Only one evidence family was present');
+
+    await user.click(within(row).getByRole('button', { name: 'This IS a duplicate' }));
+    await waitFor(() =>
+      expect(within(row).getByText(/judge: not enough evidence/)).toBeInTheDocument(),
+    );
+    expect(within(row).queryByText('soudce skryt')).toBeNull();
+  });
+
+  it('turns the judge back on with the toggle, and says so in the URL', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    await user.click(screen.getByLabelText(/naslepo/));
+    await waitFor(() =>
+      expect(screen.getByText(/judge: not enough evidence/)).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('search').textContent).toContain('blind=0');
+  });
+
+  it('asks for the seeded sample order and keeps the default seed out of the URL', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    await user.selectOptions(screen.getByLabelText('Sort'), 'random');
+    await waitFor(() =>
+      expect(api.getAutodedupResidual).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sort: 'random', seed: 'v1', after: null }),
+      ),
+    );
+    const search = screen.getByTestId('search').textContent ?? '';
+    expect(search).toContain('sort=random');
+    /* The default seed is not a filter state anybody set. */
+    expect(search).not.toContain('seed=');
+  });
+
+  it('counts the seeded sample in the header strip, and only in that order', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/Why it wasn't merged/);
+    /* The whole-generation count is always there… */
+    await screen.findByText(/Zkontrolováno:/);
+    /* …the sample only when the queue IS the sample. */
+    expect(screen.queryByTestId('validation-sample')).toBeNull();
+    await user.selectOptions(screen.getByLabelText('Sort'), 'random');
+    await waitFor(() =>
+      expect(screen.getByTestId('validation-sample')).toHaveTextContent(
+        /Náhodný vzorek: 12 \/ 100 zkontrolováno/,
+      ),
+    );
   });
 
   it('asks for the display floor of 0.20 on the first read', async () => {
@@ -207,7 +292,9 @@ describe('<AutodedupResidual>', () => {
   });
 
   it('shows both adverts, the reason, the contributions and the judge', async () => {
-    renderPage();
+    /* Blind is this queue's default (D6), so the judge is asked for explicitly
+     * here: everything BUT the judge is on the row either way. */
+    renderPage('/autodedup/residual?blind=0');
     const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
     /* Each id appears on its own card and again as a diff-table caption. */
     expect(within(row).getAllByText('#101').length).toBeGreaterThan(0);
@@ -318,7 +405,9 @@ describe('<AutodedupResidual>', () => {
      * showing — a drill-down into a pass nobody asked for. */
     renderPage();
     const link = await screen.findByRole('link', { name: 'Full evidence' });
-    expect(link).toHaveAttribute('href', '/autodedup/pair/101/202?generation=g3');
+    /* And it carries the blind mode with it — a drill-down out of a blind queue
+     * that showed the transcript on arrival would be the hole in the blinding. */
+    expect(link).toHaveAttribute('href', '/autodedup/pair/101/202?generation=g3&blind=1');
   });
 
 
