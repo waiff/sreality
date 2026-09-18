@@ -1,5 +1,15 @@
 /* AUTODEDUP · Residual — the duplicates the engine did NOT accept.
  *
+ * TWO VIEWS OF ONE COHORT. "Po skupinách" (the default) asks about a SET of
+ * adverts with the card the operator already knows from /autodedup/groups; "po
+ * dvojicích" is the original pair-at-a-time queue, unchanged. They read the same
+ * residual pairs at the same display floor — the grouped view just stops asking
+ * the same question five times: measured on g4, 7,653 residual pairs touch only
+ * 4,158 listings, 2,909 of those sit in two or more pairs, and ~3,180 already
+ * belong to a merged group, so "advert X vs each member of group G" was most of
+ * the queue. Every residual pair still sits inside exactly one card (E56), so
+ * switching view changes how much is asked at once, never what is asked.
+ *
  * THE OTHER HALF OF THE ERROR BUDGET. Groups shows what the engine merged and
  * asks "is this right?"; this page shows what it left apart, ranked by score so
  * the scroll is ordered by expected yield, and asks the same question from the
@@ -24,10 +34,15 @@
  * merged" stay visible throughout: they are not the thing being validated.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 import {
+  getAutodedupCandidates,
   getAutodedupResidual,
+  postAutodedupCandidateSplitVerdict,
+  type AutodedupCandidate,
+  type AutodedupCandidateFilters,
+  type AutodedupCandidateSplitInput,
   type AutodedupResidualFilters,
   type AutodedupResidualRow,
   type AutodedupZone,
@@ -56,6 +71,20 @@ import {
   useVerdictOverlay,
   type GroupFilterState,
 } from './AutodedupGroups';
+import CandidateCard, {
+  candidateDefaultSplit,
+  respectLocks,
+} from '@/components/autodedup/CandidateCard';
+import CandidateDialog from '@/components/autodedup/CandidateDialog';
+import {
+  EMPTY_SPLIT,
+  candidateSplitInput,
+  deriveSplit,
+  unitPairKey,
+  type SplitControls,
+  type SplitState,
+  type UnitMap,
+} from '@/components/autodedup/UnitSplit';
 import { useInfiniteList, type InfiniteListPage } from '@/lib/useInfiniteList';
 import { useUrlFilters } from '@/lib/useUrlFilters';
 import { portalLabel } from '@/lib/portals';
@@ -74,7 +103,14 @@ export interface ResidualExtras {
   zone: '' | AutodedupZone;
   source_a: string;
   source_b: string;
+  /* WHICH VIEW of the same cohort. In the URL, so a link restores the view the
+   * operator was in — '' is the default (groups), 'pairs' the original queue. */
+  view: '' | 'pairs';
 }
+
+export type ResidualView = 'groups' | 'pairs';
+
+export const viewOf = (raw: string): ResidualView => (raw === 'pairs' ? 'pairs' : 'groups');
 
 export type ResidualFilterState = GroupFilterState & ResidualExtras;
 
@@ -132,6 +168,10 @@ export const EMPTY_RESIDUAL_FILTERS: ResidualFilterState = {
   zone: '',
   source_a: '',
   source_b: '',
+  /* PO SKUPINÁCH BY DEFAULT: one card rules many pairs, and the pairs of one
+   * generation are not independent questions. The pair view stays one click
+   * away, unchanged. */
+  view: '',
   /* ON by default — see the header comment. The groups queue defaults it off. */
   blind: '1',
 };
@@ -158,17 +198,86 @@ const ZONES: ReadonlyArray<ResidualExtras['zone']> = ['', 'band', 'reject', 'mer
 export function sanitizeResidualFilters(raw: ResidualFilterState): ResidualFilterState {
   const base = sanitizeGroupFilters(raw);
   const zone = ZONES.includes(base.zone) ? base.zone : '';
-  const sort = base.sort === 'random' ? 'random' : 'weakest';
-  return zone === base.zone && sort === base.sort ? base : { ...base, zone, sort };
+  /* The GROUPED view serves four orders (the groups queue's own, minus
+   * "newest": a candidate card has no clock of its own), the pair view two. A
+   * sort the current view does not serve falls back to its default rather than
+   * travelling — the server would 400 it, and a red banner is the wrong answer
+   * to a link written in the other view. */
+  const grouped = viewOf(base.view) === 'groups';
+  const allowed: ReadonlyArray<GroupFilterState['sort']> = grouped
+    ? ['weakest', 'largest', 'random']
+    : ['weakest', 'random'];
+  const sort = allowed.includes(base.sort) ? base.sort : 'weakest';
+  const view = base.view === 'pairs' ? 'pairs' : '';
+  /* ONE url key, TWO vocabularies. A pair carries one of the five verdicts; a
+   * CARD carries none of its own — it is reviewed when every pair inside it is —
+   * so the grouped view's control is reviewed/unreviewed. The shared sanitiser
+   * knows only the five, and would blank `reviewed` on the way in; the same key
+   * is kept because switching view with a verdict the other view cannot express
+   * has to clear it, not smuggle it. */
+  const verdict = grouped
+    ? (raw.verdict === 'reviewed' || raw.verdict === 'unreviewed' ? raw.verdict : '')
+    : base.verdict;
+  return zone === base.zone && sort === base.sort && view === base.view
+    && verdict === base.verdict
+    ? base
+    : { ...base, zone, sort, view, verdict };
+}
+
+/* The candidate queue's wire shape. It reads the SAME cohort at the server's own
+ * display floor, so there is no `min_score` and no source pair here: a candidate
+ * card spans several adverts, and "the pair of portals" is not a question it can
+ * answer. The controls this view does not send are not rendered either. */
+export function toCandidateQuery(
+  f: ResidualFilterState,
+  after: string | null,
+): AutodedupCandidateFilters {
+  const block = parseBlockValue(f.block);
+  return {
+    generation: f.generation || null,
+    after,
+    limit: PAGE_SIZE,
+    block: block.block,
+    block_grain: block.block_grain,
+    zone: f.zone || null,
+    /* Two values, not the five verdicts: a card is reviewed when every pair
+     * inside it carries one. */
+    verdict:
+      f.verdict === 'reviewed' || f.verdict === 'unreviewed' ? f.verdict : null,
+    sort:
+      f.sort === 'random' ? 'random' : f.sort === 'largest' ? 'largest' : 'weakest',
+    seed: f.sort === 'random' ? f.seed : null,
+  };
+}
+
+interface CandidatePage extends InfiniteListPage<AutodedupCandidate> {
+  store_ready: boolean;
+  generation: string | null;
+  total: number | null;
 }
 
 export default function AutodedupResidual() {
   /* One url state for the whole bar — the shared filters and this view's own. */
   const [urlFilters, setFilters] = useUrlFilters<ResidualFilterState>(EMPTY_RESIDUAL_FILTERS);
   const filters = useMemo(() => sanitizeResidualFilters(urlFilters), [urlFilters]);
+  const view = viewOf(filters.view);
+  const grouped = view === 'groups';
   const { overlay, submit, pendingKey } = useVerdictOverlay();
+  /* The candidate save is its own endpoint, so it gets its own overlay — one
+   * shared overlay keyed by two different kinds of key would flip a pair badge
+   * from a card's save. Everything the operator sees is the same hook. */
+  const candidates = useVerdictOverlay<AutodedupCandidateSplitInput>(
+    postAutodedupCandidateSplitVerdict,
+  );
   const notes = useVerdictAnnotations();
+  const candidateNotes = useVerdictAnnotations();
   const { latest } = useAutodedupGenerations();
+  const [openCandidate, setOpenCandidate] = useState<string | null>(null);
+  /* The letters the operator has moved, per card. Page level for the reason the
+   * groups queue keeps them there: the card and the dialog are two views of ONE
+   * decision, and a dialog that started blank would throw away the letters the
+   * card already carries. */
+  const [candidateSplits, setCandidateSplits] = useState<Record<string, SplitState>>({});
 
   const list = useInfiniteList<AutodedupResidualRow, ResidualPage>({
     queryKey: ['autodedup', 'residual', filters],
@@ -186,16 +295,106 @@ export default function AutodedupResidual() {
     },
     pageSize: PAGE_SIZE,
     getRowId: pairKey,
+    /* The view that is NOT on screen asks nothing: two queues over one cohort
+     * would double every page load for a list nobody is looking at. */
+    enabled: !grouped,
   });
 
-  const storeReady = list.firstPage?.store_ready ?? null;
+  const cards = useInfiniteList<AutodedupCandidate, CandidatePage>({
+    queryKey: ['autodedup', 'candidates', filters],
+    queryFn: async (cursor) => {
+      const res = await getAutodedupCandidates(
+        toCandidateQuery(filters, (cursor as string | null) ?? null),
+      );
+      return {
+        rows: res.data?.items ?? [],
+        nextCursor: res.data?.next_after ?? undefined,
+        store_ready: res.store_ready,
+        generation: res.data?.generation ?? null,
+        total: res.data?.total ?? null,
+      };
+    },
+    pageSize: PAGE_SIZE,
+    getRowId: (row) => row.candidate_key,
+    enabled: grouped,
+  });
+
+  const active = grouped ? cards : list;
+  const storeReady = active.firstPage?.store_ready ?? null;
   const rows = list.rows;
-  const total = list.firstPage?.total ?? null;
-  const generation = filters.generation || list.firstPage?.generation || null;
+  const cardRows = cards.rows;
+  const total = active.firstPage?.total ?? null;
+  const generation = filters.generation || active.firstPage?.generation || null;
   const halfPair = Boolean(filters.source_a) !== Boolean(filters.source_b);
   /* Default ON here — so only the explicit '0' turns the judge back on, and a
    * link written before this key existed still arrives blind. */
   const blind = filters.blind !== '0';
+
+  /* THE STORED RULING, READ BACK (E50) — the same derivation the groups card
+   * makes, then reconciled with the locks: the operator may have split a merged
+   * group on the Groups page, and this card holds that group as one unit. */
+  const storedSplits = useMemo(() => {
+    const out: Record<string, SplitState | null> = {};
+    for (const row of cardRows) {
+      const derived = deriveSplit(row.members, row.member_verdicts);
+      out[row.candidate_key] = derived ? respectLocks(derived, row.units) : null;
+    }
+    return out;
+  }, [cardRows]);
+
+  const candidateOf = (key: string): AutodedupCandidate | undefined =>
+    cardRows.find((row) => row.candidate_key === key);
+
+  const candidateControls = (card: AutodedupCandidate): SplitControls => {
+    const key = card.candidate_key;
+    const stored = storedSplits[key] ?? null;
+    /* Untouched, the card edits the STORED ruling if there is one, else the
+     * opening assignment: one letter per unit, because the engine did not merge
+     * these (all-A would be putting its answer in the operator's mouth). */
+    const base =
+      candidateSplits[key] ?? stored ?? candidateDefaultSplit(card.units) ?? EMPTY_SPLIT;
+    const edit = (patch: (current: SplitState) => SplitState) =>
+      setCandidateSplits((all) => ({
+        ...all,
+        [key]: patch(all[key] ?? stored ?? candidateDefaultSplit(card.units)),
+      }));
+    return {
+      state: base,
+      setUnit: (listingId, unit) =>
+        edit((current) => ({ ...current, units: { ...current.units, [listingId]: unit } })),
+      setRelation: (unitA, unitB, relation) =>
+        edit((current) => ({
+          ...current,
+          relations: { ...current.relations, [unitPairKey(unitA, unitB)]: relation },
+        })),
+      save: (members, confirmRetract = false) =>
+        candidates.submitSplit(
+          key,
+          candidateSplitInput(
+            key,
+            /* The pass the CARD came from, never the queue's: a ruling is stored
+             * against one clustering. */
+            card.generation,
+            members,
+            base,
+            confirmRetract,
+            candidateNotes.annotationOf(`candidate:${key}`, null),
+          ),
+        ),
+      pending: candidates.pendingKey === key,
+      annotation: candidateNotes.annotationOf(`candidate:${key}`, null),
+      setAnnotation: (next) => candidateNotes.setAnnotation(`candidate:${key}`, next),
+      error: candidates.splitErrors[key],
+      receipt: candidates.splitResults[key],
+      stored,
+    };
+  };
+
+  const setCandidateUnits = (key: string, units: UnitMap) =>
+    setCandidateSplits((all) => ({
+      ...all,
+      [key]: { ...(all[key] ?? EMPTY_SPLIT), units },
+    }));
 
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-xl mx-auto">
@@ -209,9 +408,62 @@ export default function AutodedupResidual() {
         </p>
       </header>
 
+      {/* ONE COHORT, TWO VIEWS. The switch is a view, not a filter: it changes
+        * how much is asked at once, never which pairs are asked about. */}
+      <div
+        role="group"
+        aria-label="Zobrazení"
+        className="mt-3 inline-flex rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-0.5"
+      >
+        {([
+          ['', 'po skupinách'],
+          ['pairs', 'po dvojicích'],
+        ] as const).map(([value, label]) => {
+          const on = (filters.view || '') === value;
+          return (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={on}
+              onClick={() => setFilters({ ...filters, view: value })}
+              className={[
+                'rounded-[var(--radius-xs)] px-3 py-1 text-[0.72rem] transition-colors',
+                on
+                  ? 'bg-[var(--color-paper-3)] text-[var(--color-ink)]'
+                  : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink)]',
+              ].join(' ')}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+
       <EvidenceLegend />
 
-      <FilterBar value={filters} onChange={setFilters} showSource={false} showCategory={false}>
+      <FilterBar
+        value={filters}
+        onChange={setFilters}
+        showSource={false}
+        showCategory={false}
+        /* The five-verdict select is about a PAIR. The grouped view has its own
+          * two-value control below — a card is reviewed when every pair in it is. */
+        showVerdict={!grouped}
+      >
+        {grouped && (
+          <label className="block">
+            <span className={FILTER_LABEL}>Stav</span>
+            <select
+              className={FILTER_CONTROL}
+              value={filters.verdict}
+              onChange={(e) => setFilters({ ...filters, verdict: e.target.value })}
+            >
+              <option value="">vše</option>
+              <option value="unreviewed">nezkontrolované</option>
+              <option value="reviewed">zkontrolované</option>
+            </select>
+          </label>
+        )}
         <label className="block">
           <span className={FILTER_LABEL}>Zone</span>
           <select
@@ -227,6 +479,11 @@ export default function AutodedupResidual() {
             <option value="merge">merge</option>
           </select>
         </label>
+        {/* THE DISPLAY FLOOR IS THE PAIR VIEW'S. The cards are packed server-side
+          * at one floor — the cohort a card comes from cannot move under a
+          * control — so this is not offered in the grouped view rather than
+          * offered and ignored. */}
+        {!grouped && (
         <label className="block">
           <span className={FILTER_LABEL}>Score ≥</span>
           <input
@@ -236,8 +493,11 @@ export default function AutodedupResidual() {
             onChange={(e) => setFilters({ ...filters, min_score: e.target.value })}
           />
         </label>
+        )}
         {/* Two portals, not a typed pair string: the wire filter is an unordered
-          * pair and the 45 of them are not a list anyone reads. */}
+          * pair and the 45 of them are not a list anyone reads. A CARD spans
+          * several adverts, so a portal pair is not a question it can answer. */}
+        {!grouped && (
         <label className="block">
           <span className={FILTER_LABEL}>Portál A</span>
           <select
@@ -253,6 +513,8 @@ export default function AutodedupResidual() {
             ))}
           </select>
         </label>
+        )}
+        {!grouped && (
         <label className="block">
           <span className={FILTER_LABEL}>Portál B</span>
           <select
@@ -268,6 +530,13 @@ export default function AutodedupResidual() {
             ))}
           </select>
         </label>
+        )}
+        {/* "has a judge verdict" is a JUDGE ARTEFACT — a filter that tells the
+          * operator which rows the machine has an opinion about. It belongs to
+          * the pair view, where it predates blind mode; the grouped view, which
+          * is blind by default and carries no judge field at all, does not
+          * offer a way to sort by what the judge has done. */}
+        {!grouped && (
         <label className="block">
           <span className={FILTER_LABEL}>Judged</span>
           <select
@@ -280,16 +549,20 @@ export default function AutodedupResidual() {
             <option value="0">bez verdiktu</option>
           </select>
         </label>
+        )}
         <label className="block">
           <span className={FILTER_LABEL}>Sort</span>
           <select
             className={FILTER_CONTROL}
-            value={filters.sort === 'random' ? 'random' : 'weakest'}
+            value={filters.sort}
             onChange={(e) =>
               setFilters({ ...filters, sort: e.target.value as ResidualFilterState['sort'] })
             }
           >
-            <option value="weakest">nejvyšší skóre nahoře</option>
+            <option value="weakest">
+              {grouped ? 'nejslabší dvojice nahoře' : 'nejvyšší skóre nahoře'}
+            </option>
+            {grouped && <option value="largest">největší skupiny nahoře</option>}
             <option value="random">náhodný vzorek</option>
           </select>
         </label>
@@ -301,12 +574,15 @@ export default function AutodedupResidual() {
         onLatest={() => setFilters({ ...filters, generation: '' })}
       />
 
+      {/* The counter counts the grain the operator is working at: cards in the
+        * grouped view, pairs in the pair view. The two are never added up — a
+        * card is reviewed only when every pair inside it is. */}
       <ValidationStrip
-        surface="residual"
+        surface={grouped ? 'candidates' : 'residual'}
         generation={generation}
         seed={filters.seed}
         sampleOrder={filters.sort === 'random'}
-        minScore={toResidualQuery(filters, null).min_score}
+        minScore={grouped ? null : toResidualQuery(filters, null).min_score}
       />
 
       <BlindToggle
@@ -317,17 +593,17 @@ export default function AutodedupResidual() {
       {/* Said out loud rather than filtered silently: half a pair is not a
         * filter the server can apply, and a control that quietly does nothing is
         * the defect this bar was rebuilt to remove. */}
-      {halfPair && (
+      {halfPair && !grouped && (
         <p className="mt-2 text-[0.72rem] text-[var(--color-ink-3)]">
           Vyberte oba portály — dvojice se filtruje jen jako pár (A + B).
         </p>
       )}
 
-      {list.error && <ErrorBanner message={list.error.message} />}
+      {active.error && <ErrorBanner message={active.error.message} />}
 
-      {list.isLoading && (
+      {active.isLoading && (
         <p className="mt-6 flex items-center gap-2 text-sm text-[var(--color-ink-3)]">
-          <Spinner /> Loading residual pairs…
+          <Spinner /> {grouped ? 'Načítám skupiny kandidátů…' : 'Loading residual pairs…'}
         </p>
       )}
 
@@ -338,15 +614,40 @@ export default function AutodedupResidual() {
         </p>
       )}
 
-      {storeReady !== false && !list.isLoading && !list.isError && rows.length === 0 && (
+      {storeReady !== false && !active.isLoading && !active.isError
+        && (grouped ? cardRows : rows).length === 0 && (
         <p className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 text-sm text-[var(--color-ink-2)]">
-          No pair above this score matches these filters.
+          {grouped
+            ? 'Žádná skupina kandidátů neodpovídá těmto filtrům.'
+            : 'No pair above this score matches these filters.'}
         </p>
       )}
 
-      {rows.length > 0 && <ResultCount shown={rows.length} total={total} noun="pairs" />}
+      {grouped && cardRows.length > 0 && (
+        <ResultCount shown={cardRows.length} total={total} noun="groups" />
+      )}
 
-      {rows.length > 0 && (
+      {grouped && cardRows.length > 0 && (
+        <ul className="mt-3 space-y-4">
+          {cardRows.map((card, i) => (
+            <CandidateCard
+              key={card.candidate_key}
+              candidate={card}
+              split={candidateControls(card)}
+              eager={i < 2}
+              verdict={candidates.overlay[card.candidate_key] ?? null}
+              onOpen={() => setOpenCandidate(card.candidate_key)}
+              onShortcut={(units) => setCandidateUnits(card.candidate_key, units)}
+            />
+          ))}
+        </ul>
+      )}
+
+      {!grouped && rows.length > 0 && (
+        <ResultCount shown={rows.length} total={total} noun="pairs" />
+      )}
+
+      {!grouped && rows.length > 0 && (
         <ul className="mt-3 space-y-4">
           {rows.map((row, i) => {
             const key = pairKey(row);
@@ -408,17 +709,33 @@ export default function AutodedupResidual() {
         </ul>
       )}
 
-      {list.hasNextPage && (
+      {active.hasNextPage && (
         <div className="mt-4">
           <button
             type="button"
-            onClick={list.fetchNextPage}
-            disabled={list.isFetchingNextPage}
+            onClick={active.fetchNextPage}
+            disabled={active.isFetchingNextPage}
             className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-1.5 text-sm text-[var(--color-ink-2)] hover:text-[var(--color-ink)] disabled:opacity-50"
           >
-            {list.isFetchingNextPage ? 'Loading…' : 'Load more'}
+            {active.isFetchingNextPage ? 'Loading…' : 'Load more'}
           </button>
         </div>
+      )}
+
+      {openCandidate != null && candidateOf(openCandidate) && (
+        <CandidateDialog
+          candidateKey={openCandidate}
+          generation={candidateOf(openCandidate)!.generation}
+          split={candidateControls(candidateOf(openCandidate)!)}
+          /* The drawer is the same review, so it blinds with the queue and
+            * un-blinds on the same condition: this card has been ruled on. */
+          blind={
+            blind
+            && candidates.overlay[openCandidate] == null
+            && !(candidateOf(openCandidate)!.reviewed)
+          }
+          onClose={() => setOpenCandidate(null)}
+        />
       )}
     </div>
   );

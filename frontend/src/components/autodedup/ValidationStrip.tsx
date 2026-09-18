@@ -20,11 +20,15 @@
 
 import { useQuery } from '@tanstack/react-query';
 
-import { getAutodedupValidationProgress } from '@/lib/api';
+import { getAutodedupValidationProgress, type AutodedupSurface } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
 
 export interface ValidationStripProps {
-  surface: 'groups' | 'residual';
+  /* Three surfaces, three grains: a cluster on the groups queue, a pair on the
+   * residual one, a CARD on the candidate-group view — where a card is reviewed
+   * only when every residual pair inside it is (E56). The strip never adds two
+   * of them together. */
+  surface: AutodedupSurface;
   /* The pass the QUEUE read, so the strip and the rows count one generation.
    * Null before the first page lands — the read is skipped rather than asked
    * about a pass nobody named. */
@@ -38,12 +42,13 @@ export interface ValidationStripProps {
   minScore?: number | null;
 }
 
-const NOUNS: Record<'groups' | 'residual', { one: string; many: string }> = {
+const NOUNS: Record<AutodedupSurface, { one: string; many: string }> = {
   groups: { one: 'skupina', many: 'skupin' },
   residual: { one: 'dvojice', many: 'dvojic' },
+  candidates: { one: 'karta', many: 'karet' },
 };
 
-const noun = (surface: 'groups' | 'residual', n: number): string =>
+const noun = (surface: AutodedupSurface, n: number): string =>
   n === 1 ? NOUNS[surface].one : NOUNS[surface].many;
 
 export default function ValidationStrip({
@@ -60,6 +65,9 @@ export default function ValidationStrip({
         surface,
         generation,
         seed,
+        /* The display floor belongs to the PAIR queue's cohort. The candidate
+         * view is packed at the server's own floor and has no control for it,
+         * so sending one here would name a cohort the cards do not come from. */
         min_score: surface === 'residual' ? (minScore ?? null) : null,
       }),
     enabled: generation != null,
@@ -81,7 +89,7 @@ export default function ValidationStrip({
           {fmtCount(total.n_reviewed)} / {fmtCount(total.n)}
         </span>{' '}
         {noun(surface, total.n)}
-        {surface === 'groups' && total.n_reviewed > 0 && (
+        {surface !== 'residual' && total.n_reviewed > 0 && (
           <span className="text-[var(--color-ink-4)]">
             {' '}· z toho {fmtCount(total.n_not_same)} jiných než „stejné“
           </span>
@@ -95,7 +103,7 @@ export default function ValidationStrip({
         >
           Náhodný vzorek: <span className="font-mono tabular-nums">{fmtCount(sampleDone)} / {fmtCount(sample.n)}</span>{' '}
           zkontrolováno
-          {surface === 'groups' && (
+          {surface !== 'residual' && (
             <>
               {' · '}
               <span className="font-mono tabular-nums">{fmtCount(sample.n_not_same)}</span> jiných
