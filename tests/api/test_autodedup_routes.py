@@ -1008,12 +1008,21 @@ def test_the_block_vocabulary_is_the_newest_passs_blocks(client, conn):
     assert body["data"]["generation"] == "g3"
 
 
-def test_the_pair_view_echoes_the_pass_it_was_validated_against(client, conn):
-    """`autodedup.pairs` is generation-free, but the echo is what a link written from this page
-    carries — so it names a real pass instead of repeating a missing parameter."""
+def test_the_pair_view_reads_and_echoes_the_pass_it_was_validated_against(client, conn):
+    """A scored edge belongs to a PASS (E58, migration 538): `autodedup.pairs` holds one row
+    per (generation, pair), so an unscoped read would hand back whichever engine last touched
+    the pair — a g2 zone answering a g4 question, the mix M42 found in the panel."""
     conn.canned = {"pair_one": [_pair_row()]}
     body = client.get("/autodedup/pair/11/12").json()
     assert body["data"]["generation"] == "g3"
+    assert _last_call(conn, usql.PAIR_ONE_SQL)["generation"] == "g3"
+
+
+def test_a_pair_the_asked_for_pass_never_scored_is_a_404(client, conn):
+    conn.canned = {"pair_one": []}
+    resp = client.get("/autodedup/pair/11/12", params={"generation": "g4"})
+    assert resp.status_code == 404
+    assert "generation" in resp.json()["detail"]
 
 
 def test_a_store_with_no_clustering_yet_resolves_to_no_generation(client, conn):
