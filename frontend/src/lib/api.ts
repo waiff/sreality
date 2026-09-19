@@ -3764,6 +3764,23 @@ export interface AutodedupVerdictRow {
   listing_lo?: number | null;
   listing_hi?: number | null;
   weight?: number | null;
+  /* WHICH PASS the ruling was taken on, and WHICH SET OF ADVERTS it binds
+   * (migration 538, rule E58). Null on a pair verdict by the table's own check
+   * — a pair ruling is about two listings and belongs to no generation — and
+   * null on a legacy cluster row taken before the store recorded the set. */
+  generation?: string | null;
+  member_ids?: number[] | null;
+}
+
+/* A CLUSTER RULING THAT NO LONGER APPLIES. The group the operator confirmed is
+ * not the group on screen: a bridge grew it, or a promotion absorbed it into
+ * another key. The server sends the earlier ruling with the adverts that arrived
+ * and the ones that left, the card reads as UNREVIEWED, and the notice asks for
+ * the ruling again rather than inheriting a claim about adverts nobody looked
+ * at. Null on every group whose membership has not moved. */
+export interface AutodedupStaleVerdict extends AutodedupVerdictRow {
+  added: number[];
+  removed: number[];
 }
 
 /* The judge's ruling. Only the verdict is guaranteed: the residual queue carries
@@ -3845,6 +3862,8 @@ export interface AutodedupGroup extends AutodedupClusterRow {
    * the badge says the group was split, and the next save silently retracts the
    * permanent must-not-links the first one wrote. */
   member_verdicts: AutodedupVerdictRow[];
+  /* The ruling that no longer applies, and what moved under it (E58). */
+  stale_verdict: AutodedupStaleVerdict | null;
   /* Decoded once — from the server's names when it sends them, from the bitmask
    * otherwise. The chips read this and never the raw smallint. */
   family_names: string[];
@@ -3861,6 +3880,8 @@ export interface AutodedupGroupDetail {
    * scored — a split rules on those too, and keying the read on the scored
    * edges would hide exactly the rulings the dialog has to show back. */
   member_verdicts?: AutodedupVerdictRow[];
+  /* The ruling that no longer applies to this group (E58). */
+  stale_verdict?: AutodedupStaleVerdict | null;
 }
 
 /* What the wire actually carries for one queue item. Every field the server may
@@ -3870,6 +3891,7 @@ interface WireGroupItem {
   members?: AutodedupMember[] | AutodedupMemberDetail[];
   edges?: (AutodedupEdgeSummary & { families?: number | string[] | null }) | null;
   verdict?: AutodedupVerdictRow | null;
+  stale_verdict?: AutodedupStaleVerdict | null;
   member_verdicts?: AutodedupVerdictRow[] | null;
 }
 
@@ -3900,6 +3922,7 @@ export function normalizeGroup(item: WireGroupItem & Partial<AutodedupClusterRow
     members: item.members ?? [],
     edges,
     verdict: item.verdict ?? null,
+    stale_verdict: item.stale_verdict ?? null,
     member_verdicts: item.member_verdicts ?? [],
     family_names: decodeFamilies(
       cluster.evidence_family_names ?? edges?.family_names ?? edges?.families ??
@@ -4317,6 +4340,11 @@ export interface AutodedupVerdictInput {
   listing_lo?: number | null;
   listing_hi?: number | null;
   cluster_key?: number | null;
+  /* REQUIRED on a cluster ruling, refused on a pair one (E58). A cluster key
+   * names one set of adverts only inside one pass, so a ruling that does not
+   * say which pass is a ruling about nothing; the SERVER then resolves the
+   * member set for that (generation, cluster_key) and stamps it on the row. */
+  generation?: string | null;
   note?: string | null;
   /* Reason CODES, never labels: the label is the registry's rendering of the
    * code and changing one must not change what a past verdict recorded. */

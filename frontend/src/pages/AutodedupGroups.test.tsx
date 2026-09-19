@@ -113,6 +113,7 @@ function group(over: Partial<AutodedupGroup> & { cluster_key: number }): Autoded
     members: [member({ listing_id: 101 }), member({ listing_id: 202, source: 'bazos' })],
     edges: { n_edges: 1, min_score: 0.61, mean_score: 0.61, n_certificates: 0 },
     verdict: null,
+    stale_verdict: null,
     member_verdicts: [],
     ...over,
   };
@@ -370,6 +371,8 @@ describe('<AutodedupGroups>', () => {
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'cluster',
       cluster_key: 7,
+      // WHICH PASS the ruling was taken on (E58) — the server refuses one without it.
+      generation: 'g1',
       verdict: 'same',
       reasons: ['same_project'],
       note: null,
@@ -508,6 +511,7 @@ describe('<AutodedupGroups>', () => {
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'cluster',
       cluster_key: 7,
+      generation: 'g1',
       verdict: 'same',
       /* The annotation rides with every verdict — empty when the operator gave
         * none, never absent, so the stored row is the click's whole statement. */

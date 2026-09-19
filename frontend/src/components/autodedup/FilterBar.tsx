@@ -49,6 +49,10 @@ export function FilterBar<T extends GroupFilterState>({
    * queue has no verdict of its own — a card is reviewed when every pair inside
    * it is — so it hides this one and offers its own two-value control instead. */
   showVerdict = true,
+  /* GROUPS ONLY. "změněno od verdiktu" asks for the groups whose membership has
+   * moved since the operator ruled them (E58) — a question only a cluster-grain
+   * queue can answer, and one the residual queue's server refuses. */
+  showChangedVerdict = false,
 }: {
   /* Generic over the filter state so a surface with extra keys of its own (the
    * residual view's zone + portal pair) keeps them through every edit made
@@ -59,6 +63,7 @@ export function FilterBar<T extends GroupFilterState>({
   showSource?: boolean;
   showCategory?: boolean;
   showVerdict?: boolean;
+  showChangedVerdict?: boolean;
 }) {
   const set = <K extends keyof T>(key: K, v: T[K]) => onChange({ ...value, [key]: v });
   return (
@@ -138,6 +143,9 @@ export function FilterBar<T extends GroupFilterState>({
             >
               <option value="">vše</option>
               <option value="unreviewed">unreviewed</option>
+              {showChangedVerdict && (
+                <option value="changed">změněno od verdiktu</option>
+              )}
               <option value="same">same</option>
               <option value="different">different</option>
               <option value="same_building_different_unit">same building</option>

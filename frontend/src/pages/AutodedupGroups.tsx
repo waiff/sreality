@@ -54,6 +54,7 @@ import EvidenceChips, {
   fmtScore,
 } from '@/components/autodedup/EvidenceChips';
 import { parseBlockValue } from '@/components/autodedup/BlockSelect';
+import StaleVerdictNotice from '@/components/autodedup/StaleVerdictNotice';
 import {
   GenerationNotice,
   useAutodedupGenerations,
@@ -301,7 +302,7 @@ export default function AutodedupGroups() {
 
       <EvidenceLegend />
 
-      <FilterBar value={filters} onChange={setFilters}>
+      <FilterBar value={filters} onChange={setFilters} showChangedVerdict>
         <label className="block">
           <span className={FILTER_LABEL}>Size ≥</span>
           <input
@@ -444,6 +445,10 @@ export default function AutodedupGroups() {
                 submit(String(group.cluster_key), {
                   kind: 'cluster',
                   cluster_key: group.cluster_key,
+                  /* WHICH PASS this ruling was taken on (E58). The key alone
+                   * names a different set of adverts in every generation, and
+                   * the server refuses a cluster verdict that does not say. */
+                  generation: group.generation,
                   verdict: value,
                   ...annotation,
                 })
@@ -452,6 +457,7 @@ export default function AutodedupGroups() {
                 submit(String(group.cluster_key), {
                   kind: 'cluster',
                   cluster_key: group.cluster_key,
+                  generation: group.generation,
                   verdict: stored.verdict,
                   ...annotationInput(
                     notes.annotationOf(String(group.cluster_key), stored),
@@ -535,6 +541,10 @@ function GroupCard({
    * the operator learns nothing from a chip they can never see. */
   const revealed = !blind || verdict != null;
   const noteKey = String(group.cluster_key);
+  /* The overlay wins: once this session has ruled the group again, the ruling is
+   * about THIS set of adverts and the hint has served its purpose. */
+  const stale = verdict == null ? group.stale_verdict : null;
+  const arrived = new Set(stale?.added ?? []);
   return (
     <li className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -572,17 +582,32 @@ function GroupCard({
         * select. Four fit a row at lg and the rest wrap — the card is as tall as
         * the group is big, which is the honest shape for a surface that asks
         * "are these the same flat?". */}
+      <StaleVerdictNotice stale={stale} />
+
       <MemberGrid
         members={group.members}
         eager={eager}
         unfolded={splitStarted}
         renderUnder={(m) => (
-          <UnitSelect
-            listingId={m.listing_id}
-            units={split.state.units}
-            count={group.members.length}
-            onChange={(unit) => split.setUnit(m.listing_id, unit)}
-          />
+          <>
+            {/* WHICH advert is the new one. The notice names the ids; this puts
+              * the same fact on the card the operator is actually looking at,
+              * which is where the question "is THIS one of them too?" is asked. */}
+            {arrived.has(m.listing_id) && (
+              <span
+                data-testid={`stale-added-${m.listing_id}`}
+                className="mb-1 inline-block rounded-[var(--radius-xs)] border border-[var(--color-ochre)] bg-[var(--color-ochre-soft)] px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] uppercase text-[var(--color-ink-2)]"
+              >
+                nový od verdiktu
+              </span>
+            )}
+            <UnitSelect
+              listingId={m.listing_id}
+              units={split.state.units}
+              count={group.members.length}
+              onChange={(unit) => split.setUnit(m.listing_id, unit)}
+            />
+          </>
         )}
       />
 
@@ -650,6 +675,9 @@ function GroupDialog({
       {detail.error && <ErrorBanner message={(detail.error as Error).message} />}
       {data && (
         <div className="mt-4 space-y-5">
+          {/* The same hint the card wears (E58) — the dialog is where a group is
+            * ruled in full, so it must not be the one surface that hides it. */}
+          <StaleVerdictNotice stale={data.stale_verdict ?? null} />
           <ul className="space-y-3">
             {data.members.map((m) => (
               <MemberRow

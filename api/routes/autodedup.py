@@ -276,6 +276,11 @@ SPLIT_RELATIONS: tuple[str, ...] = (
 # rejecting it — and the whole-cluster `different` verdict says that in one click.
 MAX_SPLIT_UNITS = 26
 VERDICT_FILTER_VALUES: tuple[str, ...] = ("unreviewed", *VERDICT_VALUES)
+# The GROUPS queue has one filter value the pair queues cannot have: a ruling that no longer
+# applies, because its member set has moved (E58). A pair verdict binds two listings and can
+# never go stale that way, so `changed` is offered here and refused there rather than silently
+# matching nothing.
+GROUP_VERDICT_FILTER_VALUES: tuple[str, ...] = ("changed", *VERDICT_FILTER_VALUES)
 ZONE_VALUES: tuple[str, ...] = ("merge", "band", "reject")
 VERDICT_KINDS: tuple[str, ...] = ("pair", "cluster")
 
@@ -1092,7 +1097,7 @@ def groups(
     _reject_unknown_filters(request, GROUP_FILTER_KEYS)
     _one_of("sort", sort, tuple(GROUP_SORTS))
     sample_seed = _seed(seed)
-    _one_of("verdict", verdict, VERDICT_FILTER_VALUES)
+    _one_of("verdict", verdict, GROUP_VERDICT_FILTER_VALUES)
     _one_of("block_grain", block_grain, usql.BLOCK_GRAIN_VALUES)
     if not store_ready(conn):
         return _not_ready()
