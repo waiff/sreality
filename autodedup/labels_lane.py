@@ -286,11 +286,16 @@ def member_pairs(members: Sequence[int]) -> Iterator[tuple[int, int]]:
 
 def implied_from_clusters(
     cluster_rows: Sequence[dict[str, Any]],
-    members_by_cluster: dict[int, list[int]],
     *,
     max_members: int,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Member pairs of every group whose latest cluster-grain verdict is `same`.
+
+    THE MEMBERS COME OFF THE VERDICT (`member_ids`, migration 538 / E58) — the set the operator
+    was looking at when they ruled — and never off the current clustering. A re-clustering that
+    grew or absorbed a group used to change what an old confirmation asserted, silently; the
+    statement resolves a LEGACY row with no set to the members of its own generation, which is
+    the most that can honestly be said about it.
 
     A group ruled anything else is NOT expanded into negatives: "this proposal is wrong" does
     not say which of its member pairs were the wrong ones, and manufacturing n*(n-1)/2
@@ -304,7 +309,7 @@ def implied_from_clusters(
             continue
         counts["clusters_same"] += 1
         key = int(row["cluster_key"])
-        members = members_by_cluster.get(key) or []
+        members = [int(listing_id) for listing_id in (row.get("member_ids") or ())]
         if len(members) < 2:
             counts["clusters_without_members"] += 1
             continue
@@ -366,9 +371,13 @@ def run_labels(
             conn, CLUSTER_VERDICTS_SQL, {"generation": parsed.generation}, timeout
         )
         keys = [int(row["cluster_key"]) for row in cluster_rows]
+        # Read for the RUN SUMMARY only — how much of this generation's clustering the ruled
+        # keys still describe. The labels themselves come off `member_ids`.
         members_by_cluster: dict[int, list[int]] = {}
         for chunk in batched(keys):
-            for row in _run(conn, CLUSTER_MEMBERS_SQL, {"keys": chunk}, timeout):
+            for row in _run(conn, CLUSTER_MEMBERS_SQL, {
+                "keys": chunk, "generation": parsed.generation,
+            }, timeout):
                 members_by_cluster.setdefault(int(row["cluster_key"]), []).append(
                     int(row["listing_id"])
                 )
@@ -384,7 +393,12 @@ def run_labels(
         timings["read_s"] = round(time.monotonic() - started, 3)
 
         implied_rows, cluster_counts = implied_from_clusters(
-            cluster_rows, members_by_cluster, max_members=parsed.max_members
+            cluster_rows, max_members=parsed.max_members
+        )
+        # How many ruled keys the CURRENT clustering of this generation still holds — the one
+        # number that says whether the export describes a pass the store can still show.
+        cluster_counts["clusters_in_current_clustering"] = sum(
+            1 for key in keys if members_by_cluster.get(key)
         )
 
         # Explicit wins, and it wins BEFORE the engine view is fetched so the artifact and the

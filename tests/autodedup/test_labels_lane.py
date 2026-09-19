@@ -38,8 +38,8 @@ COLUMNS: dict[int, tuple[str, ...]] = {
         "listing_lo", "listing_hi", "verdict", "note", "reasons", "decided_by", "decided_at",
     ),
     id(CLUSTER_VERDICTS_SQL): (
-        "cluster_key", "verdict", "note", "reasons", "decided_by", "decided_at", "size",
-        "generation",
+        "cluster_key", "verdict", "note", "reasons", "decided_by", "decided_at",
+        "generation", "member_ids", "size",
     ),
     id(CLUSTER_MEMBERS_SQL): ("cluster_key", "listing_id"),
     id(ENGINE_PAIRS_SQL): (
@@ -110,10 +110,13 @@ def _store() -> dict[int, Any]:
             (31, 32, "same_project_different_unit", "jiny dum", [], "operator", DECIDED),
             (41, 42, "unsure", None, [], "operator", DECIDED),
         ],
+        # `member_ids` is the set the operator ruled on (E58) — the implied labels come off
+        # THIS, not off `cluster_members`, which is read only for the run summary.
         id(CLUSTER_VERDICTS_SQL): [
-            (900, "same", "potvrzeno", ["same_photos"], "operator", DECIDED, 3, "g4"),
-            (901, "different", None, [], "operator", DECIDED, 2, "g4"),
-            (902, "same", None, [], "operator", DECIDED, 3, "g4"),
+            (900, "same", "potvrzeno", ["same_photos"], "operator", DECIDED,
+             "g4", [31, 32, 33], 3),
+            (901, "different", None, [], "operator", DECIDED, "g4", [51, 52], 2),
+            (902, "same", None, [], "operator", DECIDED, "g4", [61, 62, 63], 3),
         ],
         id(CLUSTER_MEMBERS_SQL): [
             (900, 31), (900, 32), (900, 33),
@@ -390,7 +393,7 @@ def test_the_decider_leaves_as_a_stable_digest_not_an_email(lane, tmp_path: Path
 
 
 def test_the_engine_view_is_scoped_to_the_generation(lane, tmp_path: Path) -> None:
-    """`autodedup.pairs` accumulates every pass ever scored and carries no generation column.
+    """`autodedup.pairs` accumulates every pass ever scored.
 
     W6 found 153 of 444 explicit labels whose `engine.zone` came from g2 or g3 rows because the
     read was unscoped — which is the difference between "this label sits in the band g4 pays a
@@ -401,10 +404,11 @@ def test_the_engine_view_is_scoped_to_the_generation(lane, tmp_path: Path) -> No
     ]
     assert engine_calls, "the engine view was never read"
     assert all(params.get("generation") == "g3" for params in engine_calls)
-    # The scope is a join on the generation's own model/feature version, not a text filter on
-    # a column the table does not have.
-    assert "autodedup.clusters" in ENGINE_PAIRS_SQL
-    assert "model_version = p.model_version" in ENGINE_PAIRS_SQL
+    # Since migration 538 the scope is the pair's OWN column — the derivation through the
+    # clusters' (model_version, feature_version) broke the moment a generation's clusters were
+    # re-stamped away, which is exactly what happened to g4.
+    assert "p.generation = %(generation)s::text" in ENGINE_PAIRS_SQL
+    assert "autodedup.clusters" not in ENGINE_PAIRS_SQL
 
 
 @pytest.mark.parametrize("command", ["fit", "evaluate", "errors"])

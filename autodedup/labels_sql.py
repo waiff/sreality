@@ -42,22 +42,40 @@ select distinct on (v.listing_lo, v.listing_hi)
 # The cluster-grain half. Scoped to ONE generation because a cluster key is only meaningful
 # inside the pass that built it — `score` rebuilds clusters whole, so the same key in g3 and
 # g4 is not the same set of listings.
+#
+# THE SET COMES OFF THE VERDICT (E58, migration 538), not off the clustering. Before 538 this
+# joined `autodedup.clusters` by key alone and read TODAY's members, so promoting g5 silently
+# changed what a g4 export asserted — and then erased g4's clusters entirely, leaving
+# `mode=labels generation=g4` unable to reproduce itself at all. `member_ids` is what the
+# operator was looking at; the join to `cluster_members` survives only as the fallback for a
+# LEGACY row that carries none, and that fallback is scoped to the asked-for generation.
 CLUSTER_VERDICTS_SQL = """
 select distinct on (v.cluster_key)
        v.cluster_key, v.verdict, v.note, v.reasons, v.decided_by, v.decided_at,
-       c.size, c.generation
+       v.generation, coalesce(v.member_ids, fb.ids) as member_ids,
+       coalesce(array_length(coalesce(v.member_ids, fb.ids), 1), 0) as size
   from autodedup.verdicts v
-  join autodedup.clusters c on c.cluster_key = v.cluster_key
+  left join lateral (
+      select array_agg(m.listing_id order by m.listing_id) as ids
+        from autodedup.cluster_members m
+       where m.generation = %(generation)s::text
+         and m.cluster_key = v.cluster_key
+  ) fb on v.member_ids is null
  where v.kind = 'cluster'
    and v.cluster_key is not null
-   and c.generation = %(generation)s::text
+   and (v.generation = %(generation)s::text
+        or (v.generation is null and fb.ids is not null))
  order by v.cluster_key, v.decided_at desc, v.id desc
 """
 
+# Still read, and still ONLY for the sample rank and the run summary: the implied labels come
+# off `verdicts.member_ids` above. Scoped to the generation, because a key alone no longer
+# names one set of members (migration 538).
 CLUSTER_MEMBERS_SQL = """
 select m.cluster_key, m.listing_id
   from autodedup.cluster_members m
- where m.cluster_key = any(%(keys)s::bigint[])
+ where m.generation = %(generation)s::text
+   and m.cluster_key = any(%(keys)s::bigint[])
  order by m.cluster_key, m.listing_id
 """
 
@@ -65,24 +83,20 @@ select m.cluster_key, m.listing_id
 # clustered it as. It is a snapshot for auditing a label against the engine that saw it, never
 # an input to the label itself — a pair the engine never stored is still a label.
 #
-# SCOPED TO THE GENERATION, via the (model_version, feature_version) its clusters carry.
-# `autodedup.pairs` accumulates every pass ever scored — g1 `hand_v1`/1 through g4 `w5_gold`/4 —
-# and has no generation column, so an unscoped read hands a g2 zone to a g4 question. That is
-# not a cosmetic slip: it is what decides whether a label sits in the band this generation pays
-# a judge for, and W6 found 153 of 444 explicit labels carrying a zone no g4 pass ever assigned.
+# SCOPED TO THE GENERATION, and since migration 538 by the pair's OWN column rather than by the
+# `(model_version, feature_version)` its clusters happened to carry. `autodedup.pairs` holds
+# every pass ever scored — g1 `hand_v1`/1 through g5 `w6_gold`/4 — so an unscoped read hands a
+# g2 zone to a g4 question. That is not a cosmetic slip: it decides whether a label sits in the
+# band this generation pays a judge for, and W6 found 153 of 444 explicit labels carrying a
+# zone no g4 pass ever assigned. The old spelling ALSO broke the moment a generation's clusters
+# were re-stamped away — g4's were — because the version pair it derived the scope from came
+# from a table that no longer described g4.
 ENGINE_PAIRS_SQL = """
-with generation as (
-    select distinct model_version, feature_version
-      from autodedup.clusters
-     where generation = %(generation)s::text
-)
 select p.listing_lo, p.listing_hi, p.score, p.zone, p.decision, p.guard_veto, p.cluster_key,
        p.model_version, p.feature_version, p.families, p.decided_at
   from autodedup.pairs p
-  join generation g
-    on g.model_version = p.model_version
-   and g.feature_version = p.feature_version
- where (p.listing_lo, p.listing_hi) in (
+ where p.generation = %(generation)s::text
+   and (p.listing_lo, p.listing_hi) in (
          select lo, hi from unnest(%(los)s::bigint[], %(his)s::bigint[]) as pair(lo, hi)
        )
 """
