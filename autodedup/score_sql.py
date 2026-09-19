@@ -15,6 +15,13 @@ spans two towns has no one `block_key`), so the casts are the rule here, not the
 grain-prefixed text (`c490245` / `o563510`) and the column is a bigint, so the letter is stored
 beside the code rather than thrown away — the two together are the block, one alone is not.
 
+EVERY STATEMENT IS SCOPED TO ONE GENERATION (migration 538, rule E58). `clusters` is keyed
+`(generation, cluster_key)`, `cluster_members` on `(generation, cluster_key, listing_id)` and
+`pairs` on `(generation, listing_lo, listing_hi)`, so a pass can only ever overwrite its own
+rows — the defect that made promoting g5 re-stamp 836 of g4's 870 clusters. The pruning
+statements at the bottom are the ONE place this lane deletes another generation, and they run
+only when the operator asks for it by name (`keep_generations`).
+
 `applied_merge_group` is NEVER listed — not in the insert, not in the `do update set`. It is
 the write path's own column (E40) and shadow mode leaves it alone; naming it in the upsert
 would let a re-score silently clear a stamp the engine did not place.
@@ -62,20 +69,25 @@ select listing_lo, listing_hi
   from autodedup.must_not_link
 """
 
-# Latest-wins per unordered pair (the table's own primary key). A re-score of the same cohort
-# overwrites the previous verdict rather than accumulating history — `listing_snapshots` this
-# is not; the history of a decision is the `runs` row that produced it.
+# Latest-wins per unordered pair WITHIN ONE GENERATION (the table's own primary key since
+# migration 538). A re-score of the same cohort at the same generation overwrites its own
+# verdict rather than accumulating history — `listing_snapshots` this is not; the history of a
+# decision is the `runs` row that produced it. Another generation's row for the same pair is a
+# DIFFERENT row and this statement can no longer reach it, which is the whole point of E58: g5
+# used to overwrite g4's 48,908 scored pairs, and `mode=labels generation=g4` then read g5's
+# zones. A re-score at a HIGHER store floor still leaves its own generation's previously stored
+# rows in place — the sweep below is the cluster grain's, not the pair grain's.
 PAIR_UPSERT_SQL = """
 insert into autodedup.pairs (
-    listing_lo, listing_hi, probes, families, features, score, zone, decision,
+    generation, listing_lo, listing_hi, probes, families, features, score, zone, decision,
     guard_veto, cluster_key, feature_version, model_version, decided_at
 ) values (
-    %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(probes)s::text[],
+    %(generation)s::text, %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(probes)s::text[],
     %(families)s::smallint, %(features)s::jsonb, %(score)s::real, %(zone)s::text,
     %(decision)s::text, %(guard_veto)s::text, %(cluster_key)s::bigint,
     %(feature_version)s::smallint, %(model_version)s::text, now()
 )
-on conflict (listing_lo, listing_hi) do update set
+on conflict (generation, listing_lo, listing_hi) do update set
     probes          = excluded.probes,
     families        = excluded.families,
     features        = excluded.features,
@@ -112,21 +124,15 @@ select listing_lo, listing_hi
 # not an update of anything: union-find reassigns identities, and an upsert alone would leave
 # yesterday's members attached to today's clusters.
 #
-# TWO disjuncts, not one. `clusters` is keyed on `cluster_key` ALONE, so a key first written
-# under `g1` and re-written under `g2` is the SAME row, silently re-labelled by the upsert —
-# scoping the sweep on `generation` alone would then match nothing and leave g1's members
-# attached to g2's cluster. The incoming key set closes that: whatever this pass is about to
-# write is swept whichever generation last claimed it. Members are swept by key directly (not
-# only through their cluster row) so an orphan from an interrupted pass is collected too.
+# STRICTLY WITHIN THIS GENERATION, since migration 538. The old sweep also deleted by incoming
+# KEY, whichever generation held it, because `clusters` was keyed on `cluster_key` alone and a
+# key first written under g4 and re-written under g5 was the same row. It is not any more —
+# `(generation, cluster_key)` is the key — so the key disjunct is exactly the cross-generation
+# reach E58 forbids, and it is gone. Members are swept by generation directly (not only through
+# their cluster row) so an orphan from an interrupted pass of THIS generation is collected too.
 CLUSTER_MEMBERS_DELETE_SQL = """
 delete from autodedup.cluster_members m
- where m.cluster_key = any(%(keys)s::bigint[])
-    or exists (
-         select 1
-           from autodedup.clusters c
-          where c.cluster_key = m.cluster_key
-            and c.generation  = %(generation)s
-       )
+ where m.generation = %(generation)s
 """
 
 # `cluster_conflicts` carries no `generation` column of its own (migration 528), so the lane
@@ -140,19 +146,23 @@ delete from autodedup.cluster_conflicts
 CLUSTERS_DELETE_SQL = """
 delete from autodedup.clusters
  where generation = %(generation)s
-    or cluster_key = any(%(keys)s::bigint[])
 """
 
-# `pairs` survives the generation rebuild (it is latest-wins and generation-free), so a pair
-# whose cluster was just deleted and not re-created would keep pointing at a cluster row that
-# no longer exists — and the residual view would read that dangling key as "already clustered".
-# Run LAST, after the new clusters are in, so it only ever clears what really vanished.
+# A pair of THIS generation whose cluster was just deleted and not re-created would keep
+# pointing at a cluster row that no longer exists — and the residual view would read that
+# dangling key as "already clustered". Run LAST, after the new clusters are in, so it only ever
+# clears what really vanished. Scoped to the generation on both sides: another pass's pair is
+# not this pass's to repair, and its cluster key names ITS OWN cluster row.
 PAIR_CLUSTER_ORPHAN_CLEAR_SQL = """
 update autodedup.pairs p
    set cluster_key = null
- where p.cluster_key is not null
+ where p.generation = %(generation)s
+   and p.cluster_key is not null
    and not exists (
-         select 1 from autodedup.clusters c where c.cluster_key = p.cluster_key
+         select 1
+           from autodedup.clusters c
+          where c.cluster_key = p.cluster_key
+            and c.generation = p.generation
        )
 """
 
@@ -176,8 +186,7 @@ insert into autodedup.clusters (
     %(shared_photo_warning)s::boolean, %(status)s, %(model_version)s::text,
     %(feature_version)s::smallint, now()
 )
-on conflict (cluster_key) do update set
-    generation           = excluded.generation,
+on conflict (generation, cluster_key) do update set
     size                 = excluded.size,
     block_key            = excluded.block_key,
     block_grain          = excluded.block_grain,
@@ -202,10 +211,11 @@ on conflict (cluster_key) do update set
 """
 
 CLUSTER_MEMBER_INSERT_SQL = """
-insert into autodedup.cluster_members (cluster_key, listing_id, joined_via_lo, joined_via_hi)
-values (%(cluster_key)s::bigint, %(listing_id)s::bigint, %(joined_via_lo)s::bigint,
-        %(joined_via_hi)s::bigint)
-on conflict (cluster_key, listing_id) do update set
+insert into autodedup.cluster_members (generation, cluster_key, listing_id,
+                                       joined_via_lo, joined_via_hi)
+values (%(generation)s::text, %(cluster_key)s::bigint, %(listing_id)s::bigint,
+        %(joined_via_lo)s::bigint, %(joined_via_hi)s::bigint)
+on conflict (generation, cluster_key, listing_id) do update set
     joined_via_lo = excluded.joined_via_lo,
     joined_via_hi = excluded.joined_via_hi
 """
@@ -217,4 +227,47 @@ insert into autodedup.cluster_conflicts (
     %(kind)s, %(cluster_key_a)s::bigint, %(cluster_key_b)s::bigint, %(listing_lo)s::bigint,
     %(listing_hi)s::bigint, %(invariant)s::text, %(detail)s::jsonb
 )
+"""
+
+
+# ------------------------------------------------------------------ generation pruning
+#
+# The ONLY statements in this lane that touch a generation other than its own, and they run
+# only when `keep_generations=<n>` is passed. Nothing is pruned by default: a generation is
+# the evidence a published number rests on, and this program has already lost one sealed
+# artifact to a scratch directory (M47).
+#
+# WHAT ONE GENERATION COSTS, measured on the live store 2026-09-20 (4,569-listing trial
+# cohort): `pairs` 91 MB over 39,832 rows across four generations — about 2.3 kB a pair, so
+# g5's 15,856 stored pairs are ~36 MB — plus ~1.7 MB of clusters and members (836 + 4,078
+# rows) and ~4 MB of `cluster_conflicts` (10,850 rows). Call it **~40 MB a generation** here;
+# at M20's production dial it scales with the pair count, not with the listing count.
+
+# Which passes the store holds, oldest first, by when their clusters were last written. The
+# lane keeps the newest `n` of these and its own, whatever order they land in.
+GENERATIONS_SQL = """
+select c.generation, max(c.last_changed_at) as last_changed_at
+  from autodedup.clusters c
+ group by c.generation
+ order by max(c.last_changed_at) asc
+"""
+
+PRUNE_MEMBERS_SQL = """
+delete from autodedup.cluster_members
+ where generation = any(%(generations)s::text[])
+"""
+
+PRUNE_CONFLICTS_SQL = """
+delete from autodedup.cluster_conflicts
+ where detail ->> 'generation' = any(%(generations)s::text[])
+"""
+
+PRUNE_CLUSTERS_SQL = """
+delete from autodedup.clusters
+ where generation = any(%(generations)s::text[])
+"""
+
+PRUNE_PAIRS_SQL = """
+delete from autodedup.pairs
+ where generation = any(%(generations)s::text[])
 """
