@@ -44,7 +44,73 @@ VERDICTS: tuple[str, ...] = (
     "insufficient_evidence",
 )
 TIERS: tuple[str, ...] = ("text", "vision", "gold")
-STRATEGIES: tuple[str, ...] = ("matched_first", "sequence_first")
+STRATEGIES: tuple[str, ...] = ("matched_first", "sequence_first", "matched_first_j1")
+
+
+@dataclass(frozen=True, slots=True)
+class Presentation:
+    """One named way of putting the SAME question to a model, so a bake-off can attribute a
+    difference in verdicts to one change rather than to a forked prompt.
+
+    A presentation never rewrites the instruction: it appends a named block to it, overrides
+    the frame-selection strategy, or tightens the tool schema. Every presentation but `j2`
+    must be run under its own `judge_version`, because E29 caches on that key and two
+    presentations under one version would silently serve each other's verdicts."""
+
+    name: str
+    system_addendum: str = ""
+    require_discriminator: bool = False
+    strategy: str | None = None
+
+
+PRESENTATIONS: dict[str, Presentation] = {
+    "j2": Presentation("j2"),
+    # The pre-j2 frame selection, everything else held fixed.
+    "j1_frames": Presentation("j1_frames", strategy="matched_first_j1"),
+    # j2 plus the two rules the operator's own residual notes kept repeating.
+    "j2b": Presentation("j2b", system_addendum=prompts.J2B_ADDENDUM),
+    # E27's discriminator made a schema obligation rather than a caller-side downgrade: the
+    # W5 oss arm left it empty on ~90% of votes and was scored as an abstainer for it, which
+    # measures the model's schema-filling, not its judgement.
+    "strict_discriminator": Presentation(
+        "strict_discriminator",
+        system_addendum=prompts.STRICT_DISCRIMINATOR_ADDENDUM,
+        require_discriminator=True,
+    ),
+    # Both fixes at once, for an arm that needs the schema fix and the unit rules together.
+    "j2b_strict": Presentation(
+        "j2b_strict",
+        system_addendum=prompts.J2B_ADDENDUM + prompts.STRICT_DISCRIMINATOR_ADDENDUM,
+        require_discriminator=True,
+    ),
+}
+
+
+def presentation(name: str | None) -> Presentation:
+    if not name:
+        return PRESENTATIONS["j2"]
+    try:
+        return PRESENTATIONS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown presentation {name!r}; expected one of {sorted(PRESENTATIONS)}"
+        ) from None
+
+
+def system_prompt(view: Presentation | None = None) -> str:
+    return SYSTEM_PROMPT + (view.system_addendum if view else "")
+
+
+def tool_schema(view: Presentation | None = None) -> dict[str, Any]:
+    """The E27 tool, with `unit_discriminator` promoted into `required` when the presentation
+    asks for it. The property itself is always present; only the obligation changes."""
+    if view is None or not view.require_discriminator:
+        return TOOL_SCHEMA
+    schema = json.loads(json.dumps(TOOL_SCHEMA))
+    required = schema["input_schema"]["required"]
+    if "unit_discriminator" not in required:
+        required.append("unit_discriminator")
+    return schema
 
 DESCRIPTION_MAX_CHARS: int = 1200
 MAX_PRICE_POINTS: int = 8
@@ -868,6 +934,61 @@ def paired_prefix(picked_a: Sequence[Image], picked_b: Sequence[Image]) -> int:
     return count
 
 
+def _select_images_j1(
+    left: Sequence[Image], right: Sequence[Image], n_per_side: int
+) -> tuple[list[Image], list[Image]]:
+    """The pre-j2 selection, restored verbatim so the two presentations can be raced.
+
+    j1 picked the best pHash pair, then the best CLIP pair, then the most interior-looking
+    unmatched frame on each side, then filled — never asking whether the two frames in a
+    position show the SAME ROOM. Keeping it selectable is the only way to attribute a judge's
+    behaviour to the room pairing rather than to everything else that changed with it."""
+    picked_a: list[Image] = []
+    picked_b: list[Image] = []
+    chosen_a: set[int] = set()
+    chosen_b: set[int] = set()
+
+    def take(a: Image | None, b: Image | None) -> None:
+        if a is not None and a.image_id not in chosen_a and len(picked_a) < n_per_side:
+            picked_a.append(a)
+            chosen_a.add(a.image_id)
+        if b is not None and b.image_id not in chosen_b and len(picked_b) < n_per_side:
+            picked_b.append(b)
+            chosen_b.add(b.image_id)
+
+    phash_pair = _best_phash_pair(left, right)
+    if phash_pair:
+        take(*phash_pair)
+    clip_pair = _best_clip_pair(
+        [img for img in left if img.image_id not in chosen_a],
+        [img for img in right if img.image_id not in chosen_b],
+    )
+    if clip_pair:
+        take(*clip_pair)
+
+    unmatched_a = sorted(
+        (img for img in left if img.image_id not in chosen_a),
+        key=lambda img: (-_interior_score(img), _order_key(img)),
+    )
+    unmatched_b = sorted(
+        (img for img in right if img.image_id not in chosen_b),
+        key=lambda img: (-_interior_score(img), _order_key(img)),
+    )
+    take(
+        unmatched_a[0] if unmatched_a and _interior_score(unmatched_a[0]) >= 0.0 else None,
+        unmatched_b[0] if unmatched_b and _interior_score(unmatched_b[0]) >= 0.0 else None,
+    )
+
+    for side, picked, chosen in ((left, picked_a, chosen_a), (right, picked_b, chosen_b)):
+        cover = next((img for img in side if img.seq == 0), None)
+        rest = _fill_order(side, chosen)
+        _diverse_fill(
+            ([cover] if cover is not None else []) + rest, picked, chosen, n_per_side
+        )
+
+    return picked_a[:n_per_side], picked_b[:n_per_side]
+
+
 def select_images(
     listing_a: Listing,
     images_a: Sequence[Image],
@@ -897,6 +1018,8 @@ def select_images(
             _fill_order(left, set())[:n_per_side],
             _fill_order(right, set())[:n_per_side],
         )
+    if strategy == "matched_first_j1":
+        return _select_images_j1(left, right, n_per_side)
 
     picked_a: list[Image] = []
     picked_b: list[Image] = []

@@ -1,4 +1,4 @@
-"""Compare judge arms against gold on the SAME pairs — `python3 -m autodedup.compare`.
+"""Compare judge arms against one reference on the SAME pairs — `python3 -m autodedup.compare`.
 
 The question this answers is the only one that matters before the vision step is handed to a
 model this program rents instead of buys: over the pairs gold has already ruled on, how often
@@ -23,6 +23,17 @@ votes per pair — two from the paid vision model and one from a rented open-wei
 stores their aggregate. That mode reads the individual votes instead, so the rented arm can be
 scored against the paid one it was bought to be independent of, with the paid model's own
 two-vote disagreement as the baseline any arm has to beat.
+
+`--operator-labels` swaps the reference: `operator_labels.jsonl` from the `labels` lane instead
+of a gold run. This removes the bias every gold-referenced comparison carries — gold is cast by
+two of the models being compared, so an arm can agree with it by agreeing with itself — and it
+is the reference the rollout decision is actually made against. Under it the report leads with
+the two errors kept apart rather than pooled: the FALSE-MERGE rate (the arm said same_property
+where the operator says not-same, over the operator's not-same pairs) and the MISSED-DUPLICATE
+rate (over the operator's same pairs), each with a Wilson interval, because the operator's
+standing ruling is that a false merge is the error that must not happen and a missed duplicate
+only costs a row in the residual view. The reference's `stratum` is the engine zone, so both
+rates are also reported per merge / band / reject / unstored.
 
 Reads files only: no database, no network, no spend.
 """
@@ -56,6 +67,18 @@ BINARY: dict[str, str] = {
 
 REPORT_JSON: str = "compare.json"
 REPORT_MD: str = "compare.md"
+
+# The operator's own vocabulary mapped onto the judge's four-way one. `same_project_different_
+# unit` has no judge verdict of its own — the judge's `same_building_different_unit` is about
+# one building and the operator's project relation about a development of several — so it folds
+# into `different_property`, which is what both mean for a merge: do not link these two.
+OPERATOR_RELATION: dict[str, str] = {
+    "same": "same_property",
+    "different": "different_property",
+    "same_building_different_unit": "same_building_different_unit",
+    "same_project_different_unit": "different_property",
+}
+OPERATOR_SOURCES: tuple[str, ...] = ("explicit", "implied")
 
 
 @dataclass(slots=True)
@@ -143,6 +166,57 @@ def load_rows(path: Path) -> Pairs:
     return rows
 
 
+def load_operator_labels(
+    path: Path, sources: Sequence[str] = ("explicit",)
+) -> Pairs:
+    """`operator_labels.jsonl` from the `labels` lane as a reference the arms are scored against.
+
+    The operator is the top label tier, and — unlike gold — his rulings were not cast by any of
+    the models being compared, so an arm cannot score well here by agreeing with itself.
+
+    `stratum` carries the ENGINE's zone for the pair (merge / band / reject), so the per-stratum
+    table reads as a per-zone one: a judge that is only ever asked about band pairs is judged on
+    band pairs. Implied labels are off by default — they are all `same` by construction, and
+    folding 714 positives into the reference would move every rate without adding one ruling
+    the operator actually typed."""
+    if not path.is_file():
+        raise SystemExit(f"no operator labels file at {path}")
+    wanted = set(sources)
+    unknown = wanted - set(OPERATOR_SOURCES)
+    if unknown:
+        raise SystemExit(f"unknown operator label source(s): {sorted(unknown)}")
+    rows: Pairs = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if str(record.get("source") or "") not in wanted:
+            continue
+        verdict = OPERATOR_RELATION.get(str(record.get("verdict") or ""))
+        if verdict is None:
+            continue
+        try:
+            lo, hi = int(record["listing_lo"]), int(record["listing_hi"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        engine = record.get("engine")
+        zone = str(engine.get("zone")) if isinstance(engine, dict) else "unstored"
+        # Explicit beats implied for the same pair, as it does in the lane and the loader.
+        seen = rows.get((lo, hi))
+        if seen is not None and seen.tier == "explicit" and record.get("source") != "explicit":
+            continue
+        rows[(lo, hi)] = Row(
+            lo=lo, hi=hi, verdict=verdict, tier=str(record.get("source") or ""),
+            model="operator", stratum=zone,
+        )
+    if not rows:
+        raise SystemExit(f"{path} holds no operator label for source(s) {sorted(wanted)}")
+    return rows
+
+
 # --- statistics ------------------------------------------------------------------------
 
 
@@ -179,6 +253,40 @@ def confusion(pairs: Sequence[tuple[str, str]]) -> dict[str, dict[str, int]]:
         matrix.setdefault(gold_label, {})
         matrix[gold_label][arm_label] = matrix[gold_label].get(arm_label, 0) + 1
     return matrix
+
+
+def _rate(k: int, n: int) -> dict[str, Any]:
+    low, high = wilson_interval(k, n) if n else (None, None)
+    return {
+        "k": k,
+        "n": n,
+        "rate": _round(k / n) if n else None,
+        "wilson_low": _round(low),
+        "wilson_high": _round(high),
+    }
+
+
+def error_rates(pairs: Sequence[tuple[str, str]]) -> dict[str, Any]:
+    """The two errors a merge engine makes, never pooled into one agreement number.
+
+    A false merge links two units the operator says are not one, and is the error the operator
+    ruled must not happen. A missed duplicate leaves a real duplicate unmerged and costs only a
+    row in the residual view. They are counted over DIFFERENT denominators — the reference's
+    not-same pairs and its same pairs — so an arm cannot trade one for the other and keep its
+    headline agreement. `insufficient_evidence` on the arm's side is NOT a false merge (nothing
+    is linked) and IS a missed duplicate, reported separately as `abstained`."""
+    not_same = [arm for ref, arm in pairs if ref != "same_property"]
+    same = [arm for ref, arm in pairs if ref == "same_property"]
+    false_merge = sum(1 for arm in not_same if arm == "same_property")
+    missed = sum(1 for arm in same if arm != "same_property")
+    abstained_on_same = sum(1 for arm in same if arm == INSUFFICIENT)
+    return {
+        "false_merge": _rate(false_merge, len(not_same)),
+        "missed_duplicate": _rate(missed, len(same)),
+        "missed_as_not_same": missed - abstained_on_same,
+        "missed_as_abstention": abstained_on_same,
+        "false_merge_as_abstention": sum(1 for arm in not_same if arm == INSUFFICIENT),
+    }
 
 
 def _percentile(values: Sequence[float], q: float) -> float | None:
@@ -236,10 +344,12 @@ def compare_arm(name: str, path: Path, arm: Pairs, gold: Pairs) -> dict[str, Any
             "kappa": _round(cohen_kappa(binary)),
         },
         "confusion": confusion(four_way),
+        "errors": error_rates(four_way),
         "per_stratum": {
             stratum: {
                 "n": len(rows),
                 "agreement": _round(agreement(rows)),
+                "errors": error_rates(rows),
             }
             for stratum, rows in sorted(strata.items())
         },
@@ -288,8 +398,10 @@ def compare_arms(arms: dict[str, Pairs]) -> list[dict[str, Any]]:
 
 
 def build_report(gold_path: Path, gold: Pairs,
-                 arms: list[tuple[str, Path, Pairs]]) -> dict[str, Any]:
+                 arms: list[tuple[str, Path, Pairs]],
+                 reference: str = "gold") -> dict[str, Any]:
     return {
+        "reference": reference,
         "gold": {
             "path": str(gold_path),
             "n_pairs": len(gold),
@@ -332,13 +444,49 @@ def _table(header: Sequence[str], rows: Iterable[Sequence[Any]]) -> list[str]:
     return lines
 
 
+def _rate_cell(rate: dict[str, Any]) -> str:
+    """`k/n = 12.34% [7.10, 20.60]` — the count is kept beside the rate because a rate over 8
+    pairs and a rate over 800 render identically and mean nothing alike."""
+    if not rate["n"]:
+        return "–"
+    return (f"{rate['k']}/{rate['n']} = {100 * rate['rate']:.2f}% "
+            f"[{100 * rate['wilson_low']:.2f}, {100 * rate['wilson_high']:.2f}]")
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     gold = report["gold"]
+    reference = report.get("reference", "gold")
     lines = [
-        "# Judge arms vs gold",
+        f"# Judge arms vs {reference}",
         "",
-        f"Gold: `{gold['path']}` — {gold['n_pairs']} pair(s) "
+        f"Reference: `{gold['path']}` — {gold['n_pairs']} pair(s) "
         f"({', '.join(f'{name} {count}' for name, count in gold['verdicts'].items())}).",
+        "",
+        "## Errors, by the operator's ordering — false merges first",
+        "",
+    ]
+    lines += _table(
+        ["arm", "false merge (95% Wilson)", "missed duplicate (95% Wilson)",
+         "missed: not-same", "missed: abstained", "$/pair", "s/pair"],
+        [
+            [
+                arm["name"],
+                _rate_cell(arm["errors"]["false_merge"]),
+                _rate_cell(arm["errors"]["missed_duplicate"]),
+                arm["errors"]["missed_as_not_same"],
+                arm["errors"]["missed_as_abstention"],
+                _usd(arm["cost"]["per_pair_usd"]),
+                arm["latency"]["mean_s"],
+            ]
+            for arm in report["arms"]
+        ],
+    )
+    lines += [
+        "",
+        "False merge = the arm said `same_property` where the reference says not-same, over "
+        "the reference's not-same pairs. Missed duplicate = the arm said anything else where "
+        "the reference says `same_property`, over the reference's same pairs. An abstention "
+        "links nothing, so it is never a false merge and always a missed duplicate.",
         "",
         "## Agreement",
         "",
@@ -386,9 +534,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         )
         lines += ["", "Per stratum:", ""]
         lines += _table(
-            ["stratum", "n", "4-way agreement"],
+            ["stratum", "n", "4-way agreement", "false merge", "missed duplicate"],
             [
-                [stratum, stats["n"], stats["agreement"]]
+                [stratum, stats["n"], stats["agreement"],
+                 _rate_cell(stats["errors"]["false_merge"]),
+                 _rate_cell(stats["errors"]["missed_duplicate"])]
                 for stratum, stats in arm["per_stratum"].items()
             ],
         )
@@ -1176,8 +1326,15 @@ def run(argv: Sequence[str] | None = None) -> int:
         prog="python3 -m autodedup.compare",
         description="Agreement, cost and latency of judge arms against gold, same pairs.",
     )
-    parser.add_argument("--gold", required=True, type=Path, action="append",
+    parser.add_argument("--gold", type=Path, action="append",
                         help="judgements.jsonl from a gold run; repeatable with --gold-votes")
+    parser.add_argument("--operator-labels", type=Path,
+                        help="operator_labels.jsonl from the labels lane, used as the "
+                             "reference instead of --gold")
+    parser.add_argument("--operator-source", action="append",
+                        choices=list(OPERATOR_SOURCES),
+                        help="which operator label sources to score against "
+                             "(default: explicit only); repeatable")
     parser.add_argument("--arm", action="append", metavar="NAME=PATH",
                         help="an arm's judgements.jsonl; repeatable")
     parser.add_argument("--gold-votes", action="store_true",
@@ -1186,20 +1343,30 @@ def run(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.gold_votes:
+        if not args.gold:
+            parser.error("--gold-votes takes at least one --gold")
         return run_gold_votes(args.gold, Path(args.out))
     if not args.arm:
         parser.error("--arm is required unless --gold-votes is given")
-    if len(args.gold) != 1:
-        parser.error("arm comparison takes exactly one --gold")
-    gold_path = args.gold[0]
+    if bool(args.gold) == bool(args.operator_labels):
+        parser.error("give exactly one reference: --gold or --operator-labels")
 
-    gold = load_rows(gold_path)
+    if args.operator_labels:
+        reference = "operator"
+        gold_path = args.operator_labels
+        gold = load_operator_labels(gold_path, args.operator_source or ("explicit",))
+    else:
+        reference = "gold"
+        if len(args.gold) != 1:
+            parser.error("arm comparison takes exactly one --gold")
+        gold_path = args.gold[0]
+        gold = load_rows(gold_path)
     arms: list[tuple[str, Path, Pairs]] = []
     for spec in args.arm:
         name, path = parse_arm(spec)
         arms.append((name, path, load_rows(path)))
 
-    report = build_report(gold_path, gold, arms)
+    report = build_report(gold_path, gold, arms, reference)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / REPORT_JSON).write_text(

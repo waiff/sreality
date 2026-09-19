@@ -131,8 +131,14 @@ def test_per_stratum_agreement_splits_the_headline(tmp_path: Path) -> None:
     ]
     report = _arm_report(tmp_path, gold_rows, arm_rows)
     assert report["four_way"]["agreement"] == pytest.approx(1 / 3, abs=1e-4)
-    assert report["per_stratum"]["catalog-only"] == {"n": 2, "agreement": 0.0}
-    assert report["per_stratum"]["band|model|o1|cross"] == {"n": 1, "agreement": 1.0}
+    catalog = report["per_stratum"]["catalog-only"]
+    assert (catalog["n"], catalog["agreement"]) == (2, 0.0)
+    banded = report["per_stratum"]["band|model|o1|cross"]
+    assert (banded["n"], banded["agreement"]) == (1, 1.0)
+    # Both of the catalogue pairs are gold `same` and the arm called them different: two
+    # missed duplicates, no false merge, and the stratum row says which of the two it is.
+    assert catalog["errors"]["missed_duplicate"]["k"] == 2
+    assert catalog["errors"]["false_merge"]["n"] == 0
 
 
 def test_confusion_is_gold_by_arm(tmp_path: Path) -> None:
