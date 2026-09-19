@@ -1151,6 +1151,8 @@ GENERATION_COLUMNS: tuple[str, ...] = (
     "last_changed_at",
 )
 
+# One row per pass. It is the picker's vocabulary AND, since migration 538, what scopes the
+# engine stat strip: the newest row here names the pass whose pairs the zone histogram counts.
 GENERATION_COUNTS_SQL = """
 SELECT
     c.generation,
