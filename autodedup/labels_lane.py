@@ -388,7 +388,10 @@ def run_labels(
         started = time.monotonic()
         engine_rows: dict[tuple[int, int], dict[str, Any]] = {}
         for chunk in batched(keys_sorted):
-            params = {"los": [key[0] for key in chunk], "his": [key[1] for key in chunk]}
+            params = {
+                "los": [key[0] for key in chunk], "his": [key[1] for key in chunk],
+                "generation": parsed.generation,
+            }
             for row in _run(conn, ENGINE_PAIRS_SQL, params, timeout):
                 engine_rows[pair_key(row["listing_lo"], row["listing_hi"])] = row
         timings["engine_view_s"] = round(time.monotonic() - started, 3)

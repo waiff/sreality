@@ -272,7 +272,12 @@ def test_the_mode_never_writes(lane, tmp_path: Path) -> None:
     lane(tmp_path)
     for sql, _params in lane.executed:
         head = sql.strip().split()[0].upper()
-        assert head in {"SELECT", "SET"}, sql
+        # WITH is a reading head too — the engine view leads with a CTE that scopes the pass
+        # to one generation — but only when no writing statement follows it.
+        assert head in {"SELECT", "SET", "WITH"}, sql
+        assert not {"INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE"} & {
+            token.strip("(,;").upper() for token in sql.split()
+        }, sql
     assert all(conn.closed for conn in lane.conns)
 
 
@@ -378,3 +383,21 @@ def test_the_decider_leaves_as_a_stable_digest_not_an_email(lane, tmp_path: Path
     assert labels_lane.decider("a@b.cz") != labels_lane.decider("c@d.cz")
     assert labels_lane.decider("a@b.cz") == labels_lane.decider(" a@b.cz ")
     assert labels_lane.decider(None) is None
+
+
+def test_the_engine_view_is_scoped_to_the_generation(lane, tmp_path: Path) -> None:
+    """`autodedup.pairs` accumulates every pass ever scored and carries no generation column.
+
+    W6 found 153 of 444 explicit labels whose `engine.zone` came from g2 or g3 rows because the
+    read was unscoped — which is the difference between "this label sits in the band g4 pays a
+    judge for" and "some older model once banded it"."""
+    lane(tmp_path, generation="g3")
+    engine_calls = [
+        params for sql, params in lane.executed if sql is ENGINE_PAIRS_SQL
+    ]
+    assert engine_calls, "the engine view was never read"
+    assert all(params.get("generation") == "g3" for params in engine_calls)
+    # The scope is a join on the generation's own model/feature version, not a text filter on
+    # a column the table does not have.
+    assert "autodedup.clusters" in ENGINE_PAIRS_SQL
+    assert "model_version = p.model_version" in ENGINE_PAIRS_SQL

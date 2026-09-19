@@ -1241,6 +1241,8 @@ def run_judge(
     summary: dict[str, Any] = {
         "tier": parsed.tier,
         "judge_version": judge_version,
+        "presentation": view.name,
+        "llm_model": parsed.llm_model,
         "export_run": parsed.export_run or None,
         "cohort": str(cohort_path),
         "seed": parsed.seed,

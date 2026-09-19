@@ -64,10 +64,24 @@ select m.cluster_key, m.listing_id
 # The engine's view of a labelled pair AT READ TIME: what the stored pass scored, decided and
 # clustered it as. It is a snapshot for auditing a label against the engine that saw it, never
 # an input to the label itself — a pair the engine never stored is still a label.
+#
+# SCOPED TO THE GENERATION, via the (model_version, feature_version) its clusters carry.
+# `autodedup.pairs` accumulates every pass ever scored — g1 `hand_v1`/1 through g4 `w5_gold`/4 —
+# and has no generation column, so an unscoped read hands a g2 zone to a g4 question. That is
+# not a cosmetic slip: it is what decides whether a label sits in the band this generation pays
+# a judge for, and W6 found 153 of 444 explicit labels carrying a zone no g4 pass ever assigned.
 ENGINE_PAIRS_SQL = """
+with generation as (
+    select distinct model_version, feature_version
+      from autodedup.clusters
+     where generation = %(generation)s::text
+)
 select p.listing_lo, p.listing_hi, p.score, p.zone, p.decision, p.guard_veto, p.cluster_key,
        p.model_version, p.feature_version, p.families, p.decided_at
   from autodedup.pairs p
+  join generation g
+    on g.model_version = p.model_version
+   and g.feature_version = p.feature_version
  where (p.listing_lo, p.listing_hi) in (
          select lo, hi from unnest(%(los)s::bigint[], %(his)s::bigint[]) as pair(lo, hi)
        )
