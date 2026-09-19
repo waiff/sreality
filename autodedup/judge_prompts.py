@@ -118,6 +118,38 @@ TIER_CODA: dict[str, str] = {
     "gold": GOLD_CODA,
 }
 
+# --- presentation addenda ----------------------------------------------------------------
+#
+# A presentation is the SAME instruction plus a named suffix, never a forked copy of it: an arm
+# that differs from the baseline in one appended paragraph can be attributed to that paragraph,
+# and an arm whose whole prompt file was rewritten could not be.
+
+J2B_ADDENDUM: str = """
+
+TWO FURTHER RULES
+- A room pair that merely LOOKS ALIKE is not a match. Czech flats of the same vintage share
+  kitchen units, bathroom tiling, flooring and fittings by the thousand, and the tagger pairs
+  frames by room, so two DIFFERENT bathrooms will often be shown to you side by side. Only
+  detail individual to one unit — the view out of the window, a mark of wear, the exact
+  arrangement of furniture and fittings within the frame, a visible unit or door number —
+  can carry same_property.
+- A STATED unit-level conflict outranks photographic resemblance. When the two adverts state
+  different floors, different unit numbers, areas apart by more than the portal conventions
+  above allow, or different orientations, that conflict decides the pair even if the photos
+  look like the same rooms. Name it in unit_discriminator.
+"""
+
+STRICT_DISCRIMINATOR_ADDENDUM: str = """
+
+FILLING IN unit_discriminator
+unit_discriminator is a REQUIRED field of the tool call. Never omit it and never leave it
+empty, whatever the verdict. For same_property write the single fact that PROVES identity
+(for example "same unit number A.3.07", "same view from the kitchen window onto the same
+courtyard"). For every other verdict write the single fact that SEPARATES the two adverts, or
+— for insufficient_evidence — the one fact you would need and do not have. A tool call that
+omits it is rejected.
+"""
+
 PAIR_HEADER: str = "PAIR {lo} / {hi}"
 SIDE_HEADER: str = "===== LISTING {side} ====="
 EVIDENCE_HEADER: str = "===== ENGINE-MEASURED FACTS ABOUT THE PAIR ====="

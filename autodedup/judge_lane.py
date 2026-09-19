@@ -251,6 +251,14 @@ class JudgeArgs:
     # different engine than the one that drew the sample.
     settings: str | None
     model: str | None
+    # A NAMED presentation from `judge.PRESENTATIONS`: the same question, appended to or with
+    # a different frame selection. Distinct presentations MUST be run under distinct
+    # judge_version values — E29 caches on that key and would otherwise serve one arm's
+    # verdicts to another.
+    presentation: str | None
+    # Replace the LLM id on every vote of the plan, keeping tier, prompt and frames: how a
+    # rented open-weights model is raced against the paid one on the identical question.
+    llm_model: str | None
 
 
 def _int_arg(args: dict[str, str], name: str, default: int) -> int:
@@ -358,6 +366,8 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         gold_version=(args.get("gold_version") or "").strip() or None,
         settings=(args.get("settings") or "").strip() or None,
         model=(args.get("model") or "").strip() or None,
+        presentation=(args.get("presentation") or "").strip() or None,
+        llm_model=(args.get("llm_model") or "").strip() or None,
     )
 
 
@@ -411,6 +421,9 @@ class Vote:
     # under. `oss` is the vision prompt to the character — `judge.TIERS` knows three tiers
     # and this arm must not become a fourth prompt, or the comparison measures two changes.
     prompt_tier: str | None = None
+    # The named `judge.Presentation` this vote is put under — the system addendum, the tool
+    # schema's strictness and (via `strategy`) the frame selection. None = the `j2` baseline.
+    view: str | None = None
 
 
 @dataclass(slots=True)
@@ -453,6 +466,30 @@ def vote_plan(tier: str, oss_model: str = MODEL_OSS) -> tuple[Vote, ...]:
         Vote("gold", MODEL_GOLD_THIRD, CALLED_FOR["gold"], IMAGES_GOLD, "matched_first",
              EST_COST_USD["gold_qwen"]),
     )
+
+
+def apply_presentation(
+    plan: tuple[Vote, ...], view: Any, model: str | None = None
+) -> tuple[Vote, ...]:
+    """Put one presentation — and optionally one model id — on every vote of a plan.
+
+    The strategy override is applied here rather than inside `select_images` so the chosen
+    strategy stays visible in `judgements.jsonl`, where the comparison reads it: an arm whose
+    frames came from the j1 selection must say so in its own rows, not only in the run args."""
+    out: list[Vote] = []
+    for vote in plan:
+        replaced = replace(
+            vote,
+            view=view.name if view is not None and view.name != "j2" else None,
+            strategy=view.strategy if view is not None and view.strategy else vote.strategy,
+        )
+        if model:
+            # A model swap keeps the tier, the prompt and the frames: the arm differs from the
+            # baseline in exactly one input, which is the only way the comparison means
+            # anything. `provider` is cleared so `provider_for_model` routes the new id.
+            replaced = replace(replaced, model=model, provider=None)
+        out.append(replaced)
+    return tuple(out)
 
 
 def min_budget_usd(tier: str) -> float:
@@ -1177,7 +1214,10 @@ def run_judge(
     selected: list[dict[str, Any]] = list(sample["pairs"])
     if parsed.tier == "smoke":
         selected = selected[:SMOKE_PAIRS]
-    plan = vote_plan(parsed.tier, parsed.oss_model)
+    view = judge.presentation(parsed.presentation)
+    plan = apply_presentation(
+        vote_plan(parsed.tier, parsed.oss_model), view, parsed.llm_model
+    )
     drawable = [
         row for row in selected
         if int(row["lo"]) in dataset.listings and int(row["hi"]) in dataset.listings
@@ -1201,6 +1241,8 @@ def run_judge(
     summary: dict[str, Any] = {
         "tier": parsed.tier,
         "judge_version": judge_version,
+        "presentation": view.name,
+        "llm_model": parsed.llm_model,
         "export_run": parsed.export_run or None,
         "cohort": str(cohort_path),
         "seed": parsed.seed,
@@ -1482,7 +1524,8 @@ def _estimate(judge: Any, dataset: Any, jobs: list[PairJob],
             # ~500 and stops being a check on the flat cost table above.
             chars += (
                 len(json.dumps(messages, ensure_ascii=False, default=str))
-                + len(judge.SYSTEM_PROMPT)
+                + len(judge.system_prompt(judge.presentation(job.votes[0].view
+                                                              if job.votes else None)))
                 + len(json.dumps(judge.TOOL_SCHEMA, ensure_ascii=False, default=str))
             )
     tokens = chars // EST_CHARS_PER_TOKEN + images * EST_TOKENS_PER_IMAGE
@@ -1651,7 +1694,7 @@ def _run_job(
             # The arm is out for the rest of the pass: take the weaker vote straight away rather
             # than launch a call whose only possible outcomes are another 429 and another line
             # in `errors`. Budget is never reserved for a call that is not made.
-            plan.append(GOLD_FALLBACK)
+            plan.append(replace(GOLD_FALLBACK, view=vote.view))
             continue
         if not budget.reserve(vote.est_usd):
             with lock:
@@ -1700,7 +1743,7 @@ def _run_job(
                 # its independent vote and nothing more.
                 if kind in ARM_KILLING:
                     arm.disable(f"{kind}: {exc}", job.index)
-                plan.append(GOLD_FALLBACK)
+                plan.append(replace(GOLD_FALLBACK, view=vote.view))
                 continue
             if kind in ARM_KILLING or is_fatal(str(exc)):
                 # The PRIMARY model, which has no second family behind it: a dead key, a missing
@@ -1741,6 +1784,7 @@ def _run_job(
         results.append({
             "lo": job.lo, "hi": job.hi, "stratum": job.stratum,
             "tier": vote.tier, "model": vote.model, "strategy": vote.strategy,
+            "presentation": vote.view or "j2",
             "weaker": vote.weaker, "cost_usd": stored_cost, "llm_call_id": call_id,
             "latency_s": round(latency_s, 3),
             "pair_wall_s": round(pair_wall_s, 3),
@@ -1829,6 +1873,8 @@ def _one_call(
 ) -> tuple[Any, Any]:
     from toolkit.vision_images import COMPARISON_MAX_EDGE
 
+    view = judge.presentation(vote.view)
+
     blocks_a: list[tuple[str, dict[str, Any]]] = []
     blocks_b: list[tuple[str, dict[str, Any]]] = []
     paired = 0
@@ -1857,8 +1903,8 @@ def _one_call(
         called_for=vote.called_for,
         model=vote.model,
         messages=messages,
-        system=judge.SYSTEM_PROMPT,
-        tools=[judge.TOOL_SCHEMA],
+        system=judge.system_prompt(view),
+        tools=[judge.tool_schema(view)],
         tool_choice=judge.TOOL_NAME,
         max_tokens=MAX_TOKENS,
         **extra,
