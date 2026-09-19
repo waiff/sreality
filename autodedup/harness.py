@@ -772,6 +772,24 @@ def _add_operator_label_args(command: argparse.ArgumentParser) -> None:
                               " while leaving them in the reports")
 
 
+def judgement_paths(args: argparse.Namespace) -> list[str] | None:
+    """The `--judgements` files, or None when there is no label source at all.
+
+    The operator is a tier in its own right (`labels.OPERATOR_TIER`), so a judgements file is no
+    longer the only way to put a label on a pair — but SOME source has to be named, or there is
+    nothing to measure against."""
+    paths = list(getattr(args, "judgements", None) or ())
+    if not paths and not list(getattr(args, "operator_labels", None) or ()):
+        print("pass --judgements and/or --operator-labels: nothing to label with",
+              file=sys.stderr)
+        return None
+    missing = [path for path in paths if not Path(path).is_file()]
+    if missing:
+        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+        return None
+    return paths
+
+
 def operator_tier(args: argparse.Namespace) -> dict[Any, Any]:
     """The operator tier as the flags ask for it, or empty when no artifact was given."""
     paths = list(getattr(args, "operator_labels", None) or ())
@@ -807,19 +825,16 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     if not (run_dir / PAIRS_FILE).is_file():
         print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
         return 1
-    missing = [path for path in args.judgements if not Path(path).is_file()]
-    if missing:
-        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+    paths = judgement_paths(args)
+    if paths is None:
         return 1
     operator = operator_tier(args)
-    judgements, labels, per_tier = load_labels(
-        args.judgements, args.precedence, operator
-    )
+    judgements, labels, per_tier = load_labels(paths, args.precedence, operator)
     if not labels:
         print("no usable labels in the judgements given", file=sys.stderr)
         return 1
     try:
-        sample, sample_note = resolve_sample(args.judgements, args.sample)
+        sample, sample_note = resolve_sample(paths, args.sample)
     except ValueError as exc:
         print(f"unusable --sample: {exc}", file=sys.stderr)
         return 1
@@ -862,7 +877,7 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
         print(f"evaluate failed: {exc}", file=sys.stderr)
         return 1
     json_path, markdown_path = write_report(report, Path(args.out) / EVAL_STEM)
-    print(f"evaluate {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"evaluate {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
     print(f"  model {model_note}", file=out)
     print("", file=out)
@@ -892,14 +907,13 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     if not (run_dir / PAIRS_FILE).is_file():
         print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
         return 1
-    missing = [path for path in args.judgements if not Path(path).is_file()]
-    if missing:
-        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+    paths = judgement_paths(args)
+    if paths is None:
         return 1
     operator = operator_tier(args)
-    judgements, labels, _ = load_labels(args.judgements, args.precedence, operator)
+    judgements, labels, _ = load_labels(paths, args.precedence, operator)
     try:
-        sample, sample_note = resolve_sample(args.judgements, args.sample)
+        sample, sample_note = resolve_sample(paths, args.sample)
     except ValueError as exc:
         print(f"unusable --sample: {exc}", file=sys.stderr)
         return 1
@@ -935,7 +949,7 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
         encoding="utf-8",
     )
     json_path, markdown_path = write_report(report, out_dir / FIT_STEM)
-    print(f"fit {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"fit {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
     print("", file=out)
     for line in report.headline():
@@ -1004,9 +1018,10 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         command = sub.add_parser(name, help=helptext)
         command.add_argument("run_dir", help="a directory written by `run`")
-        command.add_argument("--judgements", action="append", required=True,
+        command.add_argument("--judgements", action="append", default=None,
                              help="judgements.jsonl from the judge lane; repeatable"
-                                  " (tiers are merged by --precedence)")
+                                  " (tiers are merged by --precedence). Optional when"
+                                  " --operator-labels is given")
         command.add_argument("--sample", action="append", default=None,
                              help="sample.json carrying the per-stratum populations the"
                                   " Horvitz-Thompson weights need; repeatable, ONE PER"
@@ -1065,9 +1080,10 @@ def build_parser() -> argparse.ArgumentParser:
         "errors", help="false merges, false rejects and band composition, feature by feature"
     )
     errors_parser.add_argument("run_dir", help="a directory written by `run`")
-    errors_parser.add_argument("--judgements", action="append", required=True,
+    errors_parser.add_argument("--judgements", action="append", default=None,
                                help="judgements.jsonl from the judge lane; repeatable"
-                                    " (tiers are merged by --precedence)")
+                                    " (tiers are merged by --precedence). Optional when"
+                                    " --operator-labels is given")
     errors_parser.add_argument("--sample", action="append", default=None,
                                help="sample.json carrying the per-stratum populations the"
                                     " Horvitz-Thompson weights need; repeatable, one per"
@@ -1097,17 +1113,16 @@ def cmd_errors(args: argparse.Namespace, out: Any) -> int:
     if not (run_dir / PAIRS_FILE).is_file():
         print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
         return 1
-    missing = [path for path in args.judgements if not Path(path).is_file()]
-    if missing:
-        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+    paths = judgement_paths(args)
+    if paths is None:
         return 1
     operator = operator_tier(args)
-    judgements, labels, _ = load_labels(args.judgements, args.precedence, operator)
+    judgements, labels, _ = load_labels(paths, args.precedence, operator)
     if not labels:
         print("no usable labels in the judgements given", file=sys.stderr)
         return 1
     try:
-        sample, sample_note = resolve_sample(args.judgements, args.sample)
+        sample, sample_note = resolve_sample(paths, args.sample)
     except ValueError as exc:
         print(f"unusable --sample: {exc}", file=sys.stderr)
         return 1
@@ -1123,7 +1138,7 @@ def cmd_errors(args: argparse.Namespace, out: Any) -> int:
     )
     out_dir = Path(args.out) if args.out else run_dir
     json_path, markdown_path = write_report(report, out_dir / ERRORS_STEM)
-    print(f"errors {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"errors {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}",
           file=out)
     print("", file=out)

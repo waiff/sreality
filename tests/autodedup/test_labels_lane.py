@@ -401,3 +401,37 @@ def test_the_engine_view_is_scoped_to_the_generation(lane, tmp_path: Path) -> No
     # a column the table does not have.
     assert "autodedup.clusters" in ENGINE_PAIRS_SQL
     assert "model_version = p.model_version" in ENGINE_PAIRS_SQL
+
+
+@pytest.mark.parametrize("command", ["fit", "evaluate", "errors"])
+def test_the_operator_tier_alone_is_a_usable_label_source(command: str, tmp_path: Path) -> None:
+    """The operator outranks gold, so requiring a judgements file to measure against the
+    operator's own testimony made the top tier unusable on its own."""
+    from autodedup import harness
+
+    path = _artifact(tmp_path / "operator_labels.jsonl")
+    args = harness.build_parser().parse_args([
+        command, str(tmp_path), "--out", str(tmp_path), "--operator-labels", str(path),
+    ])
+    assert harness.judgement_paths(args) == []
+    assert set(harness.operator_tier(args)) == {(11, 12), (21, 22)}
+
+
+@pytest.mark.parametrize("command", ["fit", "evaluate", "errors"])
+def test_naming_no_label_source_at_all_is_refused(command: str, tmp_path: Path) -> None:
+    from autodedup import harness
+
+    args = harness.build_parser().parse_args([
+        command, str(tmp_path), "--out", str(tmp_path),
+    ])
+    assert harness.judgement_paths(args) is None
+
+
+def test_a_missing_judgements_file_is_still_refused(tmp_path: Path) -> None:
+    from autodedup import harness
+
+    args = harness.build_parser().parse_args([
+        "fit", str(tmp_path), "--out", str(tmp_path),
+        "--judgements", str(tmp_path / "nope.jsonl"),
+    ])
+    assert harness.judgement_paths(args) is None
