@@ -697,12 +697,6 @@ RESIDUAL_COLUMNS: tuple[str, ...] = (
     "verdict_reasons",
     "verdict_decided_by",
     "verdict_decided_at",
-    # Migration 538 / rule E58. WHICH pass the ruling was taken on, WHICH SET of adverts it
-    # was about, and whether that set is still this group's — the three facts that turn a
-    # carried-over verdict from a silent lie into a visible hint.
-    "verdict_generation",
-    "verdict_member_ids",
-    "verdict_applies",
 )
 
 # "Residual" = scored above the display floor and NOT joined into one cluster of this
