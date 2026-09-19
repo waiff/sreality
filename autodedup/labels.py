@@ -1,8 +1,9 @@
 """Judge output -> training and evaluation labels (PROGRAM.md §9).
 
 A judgement is what one tier said about one pair; a **label** is what the label store believes
-about that pair after precedence is applied — gold outranks vision outranks text, and a tier is
-never averaged with another (a cheap verdict cannot dilute the oracle). Three verdicts map onto
+about that pair after precedence is applied — the OPERATOR outranks gold, gold outranks vision,
+vision outranks text, and a tier is never averaged with another (a cheap verdict cannot dilute
+the oracle, and no machine verdict may dilute the operator). Three verdicts map onto
 two classes: `same_property` is the positive, `different_property` and
 `same_building_different_unit` are both negatives, and `insufficient_evidence` is an abstention
 that must stay OUT of every denominator rather than counting as a negative — an abstention
@@ -11,6 +12,20 @@ denominator is how an evaluation quietly inflates its own precision.
 `same_building_different_unit` additionally carries `must_not_link`: it is the developer-project
 negative E33's clustering is forbidden to union, and it is a stronger statement than
 `different_property`, not a weaker one.
+
+THE OPERATOR TIER. `operator_labels.jsonl` (the `labels` lane) is the operator's own testimony
+about pairs of listings, and it is the top tier for one reason: it is the only source whose
+mistakes the programme cannot average away — the standing ruling is NO FALSE MERGES, so what the
+operator ruled is the target, not evidence about it. Its own five-value vocabulary maps onto the
+same two classes: `same` is the positive; `different`, `same_building_different_unit` and
+`same_project_different_unit` are all negatives; `unsure` is dropped entirely rather than carried
+as an abstention, because an operator who declined to rule made no statement at all.
+
+Each operator label carries a PROVENANCE: `explicit` (a verdict typed against that very pair) or
+`implied` (a member pair of a group whose cluster-grain verdict is `same`). The two are not the
+same strength of claim — an implied pair inside a confirmed group of eight was never compared on
+its own — so `implied` rows can be down-weighted or excluded, and every report can be filtered
+to the explicit ones.
 
 The sample file is the other half of the arithmetic. Pairs are drawn with per-stratum quotas, so
 a judged pair stands for `n_total / n_selected` cohort pairs; every cohort-level number in
@@ -27,7 +42,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 PairKey = tuple[int, int]
 
-TIER_PRECEDENCE: tuple[str, ...] = ("gold", "vision", "text")
+OPERATOR_TIER: str = "operator"
+TIER_PRECEDENCE: tuple[str, ...] = (OPERATOR_TIER, "gold", "vision", "text")
 CHEAP_TIERS: tuple[str, ...] = ("vision", "text")
 
 POSITIVE_VERDICT: str = "same_property"
@@ -35,11 +51,32 @@ NEGATIVE_VERDICTS: tuple[str, ...] = ("different_property", "same_building_diffe
 ABSTAIN_VERDICT: str = "insufficient_evidence"
 MUST_NOT_LINK_VERDICT: str = "same_building_different_unit"
 
+# `autodedup.verdicts.verdict` (migrations 528 + 532), which is NOT the judge's vocabulary.
+OPERATOR_POSITIVE_VERDICT: str = "same"
+OPERATOR_NEGATIVE_VERDICTS: tuple[str, ...] = (
+    "different", "same_building_different_unit", "same_project_different_unit",
+)
+OPERATOR_ABSTAIN_VERDICT: str = "unsure"
+# Both operator negatives that name a shared building or project are permanent must-not-links
+# (E49): a unit the operator called a different unit may never come back as a merge proposal.
+OPERATOR_MUST_NOT_LINK_VERDICTS: tuple[str, ...] = (
+    "same_building_different_unit", "same_project_different_unit",
+)
+
+SOURCE_EXPLICIT: str = "explicit"
+SOURCE_IMPLIED: str = "implied"
+
 WEIGHT_GOLD_UNANIMOUS: float = 1.0
 WEIGHT_GOLD_MAJORITY: float = 0.67
 WEIGHT_VISION: float = 0.6
 WEIGHT_TEXT: float = 0.3
+# The operator is the target, not evidence about it, so an explicit ruling carries the full
+# weight the oracle does. An implied one defaults to the same and is scaled by the caller's
+# flag — the default says "a confirmed group means what it says", the flag is how a fit tests
+# whether believing that hurt it.
+WEIGHT_OPERATOR: float = 1.0
 TIER_WEIGHTS: dict[str, float] = {
+    OPERATOR_TIER: WEIGHT_OPERATOR,
     "gold": WEIGHT_GOLD_UNANIMOUS,
     "vision": WEIGHT_VISION,
     "text": WEIGHT_TEXT,
@@ -156,6 +193,9 @@ class Label:
     stratum: str | None = None
     n_votes: int | None = None
     unanimous: bool | None = None
+    # Provenance WITHIN the tier: `explicit`/`implied` on an operator label, None on a judged
+    # one (a judgement is always about the pair it names). Reports filter on it; fits weight it.
+    source: str | None = None
 
     @property
     def key(self) -> PairKey:
@@ -179,6 +219,7 @@ class Label:
             "stratum": self.stratum,
             "n_votes": self.n_votes,
             "unanimous": self.unanimous,
+            "source": self.source,
         }
 
 
@@ -249,12 +290,146 @@ def label_pairs(
     judgements: Sequence[JudgementRow],
     *,
     precedence: Sequence[str] = TIER_PRECEDENCE,
+    operator: Mapping[PairKey, Label] | None = None,
 ) -> dict[PairKey, Label]:
-    """Collapse every tier onto one label per pair, highest-precedence tier wins outright."""
-    per_tier = labels_by_tier(judgements)
+    """Collapse every tier onto one label per pair, highest-precedence tier wins outright.
+
+    `operator` is the operator tier as `operator_label_pairs` built it; it joins the same
+    precedence machinery rather than being special-cased, so `--precedence gold operator`
+    remains expressible (and answers "what would the machine alone have believed?")."""
+    per_tier = all_labels_by_tier(judgements, operator=operator)
     out: dict[PairKey, Label] = {}
     for tier in reversed(effective_precedence(per_tier, precedence)):
         out.update(per_tier[tier])
+    return out
+
+
+def all_labels_by_tier(
+    judgements: Sequence[JudgementRow],
+    *,
+    operator: Mapping[PairKey, Label] | None = None,
+) -> dict[str, dict[PairKey, Label]]:
+    """Every tier's labels, the operator's among them — the map `evaluate` reports per tier."""
+    per_tier = labels_by_tier(judgements)
+    if operator:
+        per_tier[OPERATOR_TIER] = dict(operator)
+    return per_tier
+
+
+# --- the operator tier ---------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class OperatorLabelRow:
+    """One line of `operator_labels.jsonl` (the `labels` lane)."""
+
+    lo: int
+    hi: int
+    verdict: str
+    source: str
+    relation: str | None = None
+    reasons: tuple[str, ...] = ()
+    note: str | None = None
+    decided_by: str | None = None
+    decided_at: str | None = None
+    cluster_key: int | None = None
+    must_not_link: bool = False
+    engine: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def key(self) -> PairKey:
+        return pair_key(self.lo, self.hi)
+
+    @property
+    def is_implied(self) -> bool:
+        return self.source == SOURCE_IMPLIED
+
+
+def operator_verdict_class(verdict: str) -> int | None:
+    """`same` -> 1, the three negatives -> 0, `unsure` (or anything unknown) -> None."""
+    if verdict == OPERATOR_POSITIVE_VERDICT:
+        return 1
+    if verdict in OPERATOR_NEGATIVE_VERDICTS:
+        return 0
+    return None
+
+
+def parse_operator_label(payload: Mapping[str, Any]) -> OperatorLabelRow:
+    engine = payload.get("engine")
+    return OperatorLabelRow(
+        lo=int(payload["listing_lo"]),
+        hi=int(payload["listing_hi"]),
+        verdict=str(payload.get("verdict") or ""),
+        source=str(payload.get("source") or SOURCE_EXPLICIT),
+        relation=(str(payload["relation"]) if payload.get("relation") else None),
+        reasons=tuple(str(item) for item in (payload.get("reasons") or ())),
+        note=(str(payload["note"]) if payload.get("note") else None),
+        decided_by=(str(payload["decided_by"]) if payload.get("decided_by") else None),
+        decided_at=(str(payload["decided_at"]) if payload.get("decided_at") else None),
+        cluster_key=(
+            int(payload["cluster_key"]) if payload.get("cluster_key") is not None else None
+        ),
+        must_not_link=bool(payload.get("must_not_link")),
+        engine=dict(engine) if isinstance(engine, Mapping) else {},
+    )
+
+
+def load_operator_labels(path: str | Path) -> list[OperatorLabelRow]:
+    rows: list[OperatorLabelRow] = []
+    with Path(path).open("rt", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(parse_operator_label(json.loads(line)))
+    return rows
+
+
+def load_all_operator_labels(paths: Iterable[str | Path]) -> list[OperatorLabelRow]:
+    out: list[OperatorLabelRow] = []
+    for path in paths:
+        out.extend(load_operator_labels(path))
+    return out
+
+
+def operator_label_pairs(
+    rows: Sequence[OperatorLabelRow],
+    *,
+    include_implied: bool = True,
+    implied_weight: float = WEIGHT_OPERATOR,
+) -> dict[PairKey, Label]:
+    """The operator tier: one label per pair, `unsure` dropped, explicit beating implied.
+
+    Explicit wins inside this function too, not only in the lane that wrote the file: pooling
+    two artifacts (an older export plus a fresh one) must not let a stale implied row overwrite
+    a separation the operator typed by hand."""
+    out: dict[PairKey, Label] = {}
+    for row in rows:
+        if row.is_implied and not include_implied:
+            continue
+        y = operator_verdict_class(row.verdict)
+        if y is None:
+            continue
+        existing = out.get(row.key)
+        if existing is not None and existing.source == SOURCE_EXPLICIT and row.is_implied:
+            continue
+        out[row.key] = Label(
+            lo=row.key[0],
+            hi=row.key[1],
+            y=y,
+            verdict=row.verdict,
+            tier=OPERATOR_TIER,
+            confidence=1.0,
+            weight=(implied_weight if row.is_implied else WEIGHT_OPERATOR),
+            must_not_link=(
+                row.must_not_link or row.verdict in OPERATOR_MUST_NOT_LINK_VERDICTS
+            ),
+            developer_project_suspected=(
+                row.verdict in OPERATOR_MUST_NOT_LINK_VERDICTS
+            ),
+            stratum=None,
+            source=row.source,
+        )
     return out
 
 

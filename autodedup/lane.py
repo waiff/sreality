@@ -4,6 +4,7 @@
     python3 -m autodedup.lane --mode probes --args "source=remax" --out out/
     python3 -m autodedup.lane --mode export --args "blocks=town:563510 quarter:490245" --out out/
     python3 -m autodedup.lane --mode judge --args "export_run=123,tier=text,n=400,max_usd=5"
+    python3 -m autodedup.lane --mode labels --args "generation=g4" --out out/
     python3 -m autodedup.lane --mode record --args "wave=W0,title=Region census,cost_usd=0"
     python3 -m autodedup.lane --mode record --args "id=12,cost_usd=3.10,status=done"
 
@@ -48,6 +49,7 @@ from autodedup.census import run_census, run_probes, write_json
 from autodedup.export import run_export
 from autodedup.iterations import run_record
 from autodedup.judge_lane import run_judge
+from autodedup.labels_lane import run_labels
 from autodedup.score_lane import run_score
 
 Mode = Callable[[Callable[[], Any], dict[str, str], Path], dict[str, Any]]
@@ -58,6 +60,7 @@ MODES: dict[str, Mode] = {
     "export": run_export,
     "judge": run_judge,
     "score": run_score,
+    "labels": run_labels,
     "record": run_record,
 }
 
@@ -110,6 +113,20 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         ),
         "tools": [
             "autodedup.score_lane", "autodedup.harness", "autodedup.lane", "GitHub Actions",
+            "Postgres (schema autodedup)",
+        ],
+    },
+    "labels": {
+        "wave": "W6",
+        "title": "Operator labels",
+        "approach": (
+            "The operator's own rulings — every explicit pair verdict plus the member pairs "
+            "of every confirmed group, each with the engine's view of that pair and the "
+            "permanent must-not-links — exported as one artifact, so a fit reads the top "
+            "label tier from a file instead of an ad-hoc query."
+        ),
+        "tools": [
+            "autodedup.labels_lane", "autodedup.labels", "autodedup.lane", "GitHub Actions",
             "Postgres (schema autodedup)",
         ],
     },
