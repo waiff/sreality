@@ -640,6 +640,8 @@ D1–D10 ruled on **2026-09-16**, **ruled by: program lead (operator delegated)*
 - **Numbers are cited by code and tests — never renumber E1–E54.** A rule that changes meaning gets a new number and the old one is marked superseded.
 - **A merge is not a deploy, and a merged PR is not an applied migration.** Migrations apply via `apply_migration.yml` *before* the PR merges; Railway rollout is confirmed via `gh api repos/{owner}/{repo}/commits/<sha>/status`.
 - **Shadow is the mode.** If any document, comment or code path in this program implies a production write, it is wrong (D4).
+- **A split seal lives in the repository, not in scratch.** `harness fit` writes the split map beside the model it fits, and the map is committed as `autodedup/splits/<sha256>.json`; `--split-map` takes a committed seal wherever it takes a path, and `evaluate` finds a model's own seal without a flag. W6 opened with the W4/W5 maps gone to a tmpfs wipe, so `w4_gold`, `w4f_gold` and `w5_gold` cannot be re-measured on the holdout they were fitted on: those two seals are recorded in `autodedup.seals.LOST_SEALS` with the reason, and `tests/autodedup/test_seals.py` refuses any shipped model that names a seal which is neither committed nor recorded.
+- **No lane artifact carries the operator's identity.** `out/` is uploaded to a GitHub Actions artifact of a PUBLIC repository. `autodedup.verdicts.decided_by` is a login (an e-mail), so the `labels` lane ships it as a salted digest — E28's broker idiom — and `tests/autodedup/test_artifact_identity_census.py` holds the rail for every lane writer.
 - **This document is the program's source of truth.** If a PR changes behaviour described here, it updates this file in the same PR.
 
 ---

@@ -101,3 +101,28 @@ select count(*) as n_clusters, coalesce(max(c.size), 0) as max_size
   from autodedup.clusters c
  where c.generation = %(generation)s::text
 """
+
+
+# THE SEEDED SAMPLE ORDER, AS A RANK (D6/E55). The validation UI offers groups in
+# `md5(cluster_key || seed)` order (`ui_sql.GROUPS_RANDOM_SQL`) so a session's sample is
+# unbiased and stable; "the first 100 groups" is the population every unbiased precision
+# number in this programme is measured on. That population is reconstructible only while the
+# same seed is re-run against the same cluster set, which is a live-store fact — so the rank
+# travels IN the artifact: an implied label carries where its group sat in the sample order,
+# and a later fit can rebuild the sample from the file alone.
+#
+# The window is over the WHOLE generation, not over the labelled subset: a rank that counted
+# only confirmed groups would renumber itself every time the operator ruled one more.
+SAMPLE_RANK_SQL = """
+with ranked as (
+    select c.cluster_key,
+           row_number() over (
+               order by md5(c.cluster_key::text || %(seed)s::text) asc, c.cluster_key asc
+           ) as sample_rank
+      from autodedup.clusters c
+     where c.generation = %(generation)s::text
+)
+select r.cluster_key, r.sample_rank
+  from ranked r
+ where r.cluster_key = any(%(keys)s::bigint[])
+"""

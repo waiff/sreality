@@ -52,6 +52,7 @@ from autodedup.evaluate import (
     split_groups,
     write_report,
 )
+from autodedup import seals
 from autodedup.features import (
     MIN_RARE_BLOCK_DOCS,
     RARE_TOKEN_CAP,
@@ -862,11 +863,21 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     # different set here than they were at fit time and part of the holdout is training data.
     split_map = None
     if args.split_map:
-        split_map = {int(key): int(value) for key, value
-                     in json.loads(Path(args.split_map).read_text(encoding="utf-8")).items()}
+        try:
+            split_map = seals.read_map(seals.resolve(args.split_map))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"unusable --split-map: {exc}", file=sys.stderr)
+            return 1
+    elif expect_seal and seals.committed(expect_seal):
+        # The map the model names is IN THE REPOSITORY, so the holdout needs no argument.
+        split_map = seals.load(expect_seal)
+        print(f"using the committed split map for seal {expect_seal[:12]}", file=out)
     elif expect_seal:
-        print(f"warning: --model carries seal {expect_seal[:12]} but no --split-map was given; "
-              f"the holdout below is re-derived from this run's own merge edges",
+        lost = seals.LOST_SEALS.get(expect_seal)
+        print(f"warning: --model carries seal {expect_seal[:12]} but no --split-map was given "
+              f"and no map is committed for it"
+              + (f" ({lost})" if lost else "")
+              + "; the holdout below is re-derived from this run's own merge edges",
               file=sys.stderr)
         expect_seal = None
     try:
@@ -921,8 +932,11 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
         sample = sample_from_judgements(judgements)
     rows = read_pairs(run_dir)
     if args.split_map:
-        groups = {int(key): int(value) for key, value
-                  in json.loads(Path(args.split_map).read_text(encoding="utf-8")).items()}
+        try:
+            groups = seals.read_map(seals.resolve(args.split_map))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"unusable --split-map: {exc}", file=sys.stderr)
+            return 1
     else:
         groups = split_groups(rows, labels)
     try:
@@ -944,10 +958,8 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     )
     # The split map is written beside the model so a challenger can be scored on THIS seal
     # rather than on whatever components its own merge edges happen to form (§9's feedback loop).
-    (out_dir / SPLIT_MAP_FILE).write_text(
-        json.dumps({str(key): value for key, value in sorted(groups.items())}, sort_keys=True),
-        encoding="utf-8",
-    )
+    seals.write_map(out_dir / SPLIT_MAP_FILE, groups)
+    fit_seal = str(report.sections.get("split", {}).get("seal", {}).get("sha256") or "")
     json_path, markdown_path = write_report(report, out_dir / FIT_STEM)
     print(f"fit {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
@@ -956,6 +968,12 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
         print(line, file=out)
     print(f"\nwrote {model_path}, {out_dir / SPLIT_MAP_FILE}, {json_path} and {markdown_path}",
           file=out)
+    # A seal that lives only in a scratch directory is a seal the next wave cannot re-measure
+    # on (W6 lost two that way), so every fit says how to make this one durable.
+    if fit_seal and not seals.committed(fit_seal):
+        print(f"  seal {fit_seal[:12]} is NOT committed — keep the holdout reproducible with:",
+              file=out)
+        print(f"    cp {out_dir / SPLIT_MAP_FILE} {seals.path_for(fit_seal)}", file=out)
     print(f"  activate with: run <artifact> --model {model_path}", file=out)
     if not report.sections["convergence"].get("converged_flag"):
         # The l2 advice points the OPPOSITE way per method: gradient descent stalls on a stiff
@@ -1058,8 +1076,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="cap on label weight x stratum weight"
                           " (default: 10x the median weight)")
     fit.add_argument("--split-map", default=None,
-                     help="a split_map.json from an earlier fit, so a challenger is scored on"
-                          " the incumbent's sealed split")
+                     help="a split_map.json from an earlier fit, or a committed seal under"
+                          " autodedup/splits, so a challenger is scored on the incumbent's"
+                          " sealed split")
     fit.add_argument("--require-convergence", action="store_true",
                      help="exit 1 when the fit hits its iteration ceiling short of tolerance")
     evaluate_parser = sub.choices["evaluate"]
@@ -1069,8 +1088,10 @@ def build_parser() -> argparse.ArgumentParser:
                                       "it)")
     evaluate_parser.add_argument(
         "--split-map", default=None,
-        help="the split_map.json written beside the model being evaluated, so the sealed split "
-             "is the one the fit held out rather than one re-derived from this run's merge edges",
+        help="the split_map.json written beside the model being evaluated, or a committed "
+             "seal under autodedup/splits, so the sealed split is the one the fit held out "
+             "rather than one re-derived from this run's merge edges (a model whose seal IS "
+             "committed needs no flag)",
     )
     evaluate_parser.add_argument("--settings", default=None,
                                  help="Settings JSON; default: the settings on run.json")

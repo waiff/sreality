@@ -25,6 +25,7 @@ from autodedup.labels_sql import (
     GENERATION_CLUSTERS_SQL,
     MUST_NOT_LINK_SQL,
     PAIR_VERDICTS_SQL,
+    SAMPLE_RANK_SQL,
     STORE_PRESENT_SQL,
 )
 
@@ -46,6 +47,7 @@ COLUMNS: dict[int, tuple[str, ...]] = {
         "model_version", "feature_version", "families", "decided_at",
     ),
     id(MUST_NOT_LINK_SQL): ("listing_lo", "listing_hi", "source", "reason", "created_at"),
+    id(SAMPLE_RANK_SQL): ("cluster_key", "sample_rank"),
 }
 
 
@@ -71,7 +73,7 @@ class FakeCursor:
         if sql is ENGINE_PAIRS_SQL and params:
             wanted = set(zip(params["los"], params["his"]))
             self._rows = [row for row in self._rows if (row[0], row[1]) in wanted]
-        if sql is CLUSTER_MEMBERS_SQL and params:
+        if sql in (CLUSTER_MEMBERS_SQL, SAMPLE_RANK_SQL) and params:
             keys = set(params["keys"])
             self._rows = [row for row in self._rows if row[0] in keys]
 
@@ -123,6 +125,8 @@ def _store() -> dict[int, Any]:
             (31, 32, 0.81, "band", "model", None, 900, "w5_gold", 4, 36, DECIDED),
         ],
         id(MUST_NOT_LINK_SQL): [(21, 22, "operator", "different unit", DECIDED)],
+        # The seeded order the UI served: 902 came up before 900, 901 last.
+        id(SAMPLE_RANK_SQL): [(902, 1), (900, 2), (901, 3)],
     }
     return rows
 
@@ -435,3 +439,57 @@ def test_a_missing_judgements_file_is_still_refused(tmp_path: Path) -> None:
         "--judgements", str(tmp_path / "nope.jsonl"),
     ])
     assert harness.judgement_paths(args) is None
+
+
+# --- the seeded sample rank ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", [{"sample_seed": "V1"}, {"sample_seed": "v-1"},
+                                 {"sample_seed": "seventeencharacter"},
+                                 {"sample_seed": "v1' or 1=1"}])
+def test_the_sample_seed_is_a_closed_charset(raw: dict[str, str]) -> None:
+    with pytest.raises(SystemExit):
+        labels_lane.parse_args(raw)
+
+
+def test_the_sample_seed_defaults_to_the_session_the_operator_ran(lane, tmp_path: Path) -> None:
+    summary = lane(tmp_path)
+    assert labels_lane.parse_args({}).sample_seed == labels_lane.DEFAULT_SAMPLE_SEED == "v1"
+    assert summary["params"]["sample_seed"] == "v1"
+    # The seed NAMES the sample: a rank without it is a number nobody can reproduce.
+    assert summary["generation"]["sample_seed"] == "v1"
+    calls = [params for sql, params in lane.executed if sql is SAMPLE_RANK_SQL]
+    assert calls and all(params["seed"] == "v1" for params in calls)
+    assert all(params["generation"] == "g4" for params in calls)
+
+
+def test_an_implied_label_carries_its_group_s_place_in_the_sample(lane, tmp_path: Path) -> None:
+    """The unbiased sample (100 of 100 confirmed) is "the first N groups of seed v1", and it
+    was reproducible only from the live store until the rank travelled in the artifact."""
+    lane(tmp_path)
+    records = {(r["listing_lo"], r["listing_hi"]): r for r in
+               _read(tmp_path / labels_lane.LABELS_FILE)}
+    assert records[(31, 33)]["cluster_key"] == 900 and records[(31, 33)]["sample_rank"] == 2
+    assert records[(61, 62)]["cluster_key"] == 902 and records[(61, 62)]["sample_rank"] == 1
+    # An explicit verdict was typed against a pair, not drawn from the group queue.
+    assert records[(11, 12)]["sample_rank"] is None
+    assert records[(31, 32)]["sample_rank"] is None
+
+
+def test_the_rank_is_over_the_whole_generation_not_the_labelled_subset() -> None:
+    """A rank counted over confirmed groups only would renumber itself with every new ruling —
+    so the window runs over `autodedup.clusters` for the generation and is filtered after."""
+    body = " ".join(SAMPLE_RANK_SQL.split())
+    assert "row_number() over ( order by md5(c.cluster_key::text || %(seed)s::text) asc," in body
+    assert "from autodedup.clusters c where c.generation = %(generation)s::text" in body
+    assert "where r.cluster_key = any(%(keys)s::bigint[])" in body
+
+
+def test_the_rank_reaches_the_label_loader(lane, tmp_path: Path) -> None:
+    from autodedup import labels as labels_module
+
+    lane(tmp_path)
+    rows = {row.key: row for row in
+            labels_module.load_operator_labels(tmp_path / labels_lane.LABELS_FILE)}
+    assert rows[(31, 33)].sample_rank == 2
+    assert rows[(11, 12)].sample_rank is None

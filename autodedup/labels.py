@@ -333,6 +333,10 @@ class OperatorLabelRow:
     decided_by: str | None = None
     decided_at: str | None = None
     cluster_key: int | None = None
+    # The group's place in the seeded sample order the validation UI served (implied rows
+    # only). It is how a consumer rebuilds "the first N groups of seed v1" — the population an
+    # unbiased precision number is measured on — from the artifact instead of from the store.
+    sample_rank: int | None = None
     must_not_link: bool = False
     engine: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -368,6 +372,9 @@ def parse_operator_label(payload: Mapping[str, Any]) -> OperatorLabelRow:
         decided_at=(str(payload["decided_at"]) if payload.get("decided_at") else None),
         cluster_key=(
             int(payload["cluster_key"]) if payload.get("cluster_key") is not None else None
+        ),
+        sample_rank=(
+            int(payload["sample_rank"]) if payload.get("sample_rank") is not None else None
         ),
         must_not_link=bool(payload.get("must_not_link")),
         engine=dict(engine) if isinstance(engine, Mapping) else {},
