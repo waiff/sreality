@@ -3640,3 +3640,176 @@ def test_candidate_split_verdicts_are_explicit_operator_labels_for_the_agreement
     for narrowing in ("generation", "cluster_key", "cluster_members", "decided_by"):
         assert narrowing not in explicit
     assert "'explicit'::text AS source" in usql.AGREEMENT_PAIRS_SQL
+
+
+# ================================ E58 — a cluster verdict binds a member set (migration 538)
+
+
+def test_a_verdict_taken_on_another_set_of_adverts_does_not_apply(client, conn):
+    """The defect this repairs, end to end.
+
+    Promoting g5 re-stamped 836 of g4's 870 cluster keys, so 21 of the operator's 224
+    confirmations landed on a group whose membership had moved under them. The server decides
+    that on the SET, so the group reads as unreviewed and the earlier ruling travels back as a
+    hint naming what arrived and what left — never as a verdict about adverts nobody looked at.
+    """
+    conn.canned = {
+        "groups": [
+            _cluster(
+                verdict="same",
+                verdict_note="jeden byt",
+                verdict_decided_by="operator@example.com",
+                verdict_decided_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                verdict_generation="g4",
+                verdict_member_ids=[11, 12],
+                verdict_applies=False,
+            )
+        ],
+        "members": [_member(101, 11), _member(101, 12), _member(101, 13)],
+    }
+    item = client.get("/autodedup/groups").json()["data"]["items"][0]
+    assert item["verdict"] is None
+    stale = item["stale_verdict"]
+    assert stale["verdict"] == "same"
+    assert stale["generation"] == "g4"
+    assert stale["member_ids"] == [11, 12]
+    # 13 arrived (a bridge), nothing left.
+    assert stale["added"] == [13]
+    assert stale["removed"] == []
+
+
+def test_a_verdict_on_the_same_set_of_adverts_still_applies(client, conn):
+    conn.canned = {
+        "groups": [
+            _cluster(
+                verdict="same",
+                verdict_decided_by="operator@example.com",
+                verdict_decided_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                verdict_generation="g4",
+                verdict_member_ids=[11, 12],
+                verdict_applies=True,
+            )
+        ],
+        "members": [_member(101, 11), _member(101, 12)],
+    }
+    item = client.get("/autodedup/groups").json()["data"]["items"][0]
+    assert item["verdict"]["verdict"] == "same"
+    assert item["verdict"]["generation"] == "g4"
+    assert item["stale_verdict"] is None
+
+
+def test_an_absorbed_group_names_the_adverts_that_left(client, conn):
+    conn.canned = {
+        "groups": [
+            _cluster(
+                verdict="same",
+                verdict_decided_by="operator@example.com",
+                verdict_decided_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                verdict_generation="g4",
+                verdict_member_ids=[11, 12, 13],
+                verdict_applies=False,
+            )
+        ],
+        "members": [_member(101, 11), _member(101, 14)],
+    }
+    stale = client.get("/autodedup/groups").json()["data"]["items"][0]["stale_verdict"]
+    assert stale["added"] == [14]
+    assert stale["removed"] == [12, 13]
+
+
+def test_the_groups_queue_filters_on_the_ruling_that_applies(client, conn):
+    """`unreviewed` means "no ruling this group can be said to carry" — an absent one OR one
+    about a different set — and `changed` is the queue a promotion creates."""
+    sql = " ".join(usql.GROUPS_WEAKEST_SQL.split())
+    assert "'unreviewed' AND (v.verdict IS NULL OR NOT v.applies)" in sql
+    assert "'changed' AND v.verdict IS NOT NULL AND NOT v.applies" in sql
+    assert "v.verdict = %(verdict)s::text AND v.applies" in sql
+    assert client.get("/autodedup/groups", params={"verdict": "changed"}).status_code == 200
+    # A pair ruling binds two listings and can never go stale that way, so the residual queue
+    # refuses the value rather than silently returning nothing.
+    assert client.get(
+        "/autodedup/residual", params={"verdict": "changed"}
+    ).status_code == 400
+
+
+def test_a_group_read_is_scoped_to_one_pass_everywhere(client, conn):
+    """Members, edges and pairs are all keyed on the generation since migration 538 — a read
+    that dropped it would mix two passes' groups under one key."""
+    conn.canned = {
+        "groups": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12)],
+        "edges": [_tuple(usql.EDGE_SUMMARY_COLUMNS, cluster_key=101, n_edges=1, min_score=0.6,
+                         mean_score=0.6, n_certificates=0, n_judged=0, families=1)],
+    }
+    client.get("/autodedup/groups", params={"generation": "g4"})
+    assert _last_call(conn, usql.GROUP_MEMBERS_SQL)["generation"] == "g4"
+    assert _last_call(conn, usql.EDGE_SUMMARY_SQL)["generation"] == "g4"
+    for sql in (usql.GROUP_MEMBERS_SQL, usql.EDGE_SUMMARY_SQL, usql.CLUSTER_PAIRS_SQL,
+                usql.CANDIDATE_CLUSTER_MEMBERS_SQL):
+        assert "%(generation)s::text" in sql
+
+
+def test_a_cluster_verdict_without_a_generation_is_a_400(admin_client, conn):
+    """A cluster key names one set of adverts only inside one pass (E58), so a ruling that
+    does not say which pass is a ruling about nothing."""
+    resp = admin_client.post(
+        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 101, "verdict": "same"}
+    )
+    assert resp.status_code == 400
+    assert "generation" in resp.json()["detail"]
+    assert all(sql != usql.VERDICT_CLUSTER_UPSERT_SQL for sql, _ in conn.calls)
+
+
+def test_a_cluster_verdict_is_stamped_with_the_set_the_server_resolved(admin_client, conn):
+    """The member ids never come from the request: a client's idea of the membership is as old
+    as its last fetch, and a ruling recorded against a set nobody checked is the whole defect."""
+    conn.canned = {
+        "cluster_exists": [(1,)],
+        "cluster_member_ids": [(13,), (11,), (12,)],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="same", generation="g5",
+                                       member_ids=[11, 12, 13])],
+    }
+    body = admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "cluster", "cluster_key": 101, "verdict": "same", "generation": "g5"},
+    ).json()
+    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    assert written["generation"] == "g5"
+    # Sorted, which is the shape every read compares against.
+    assert written["member_ids"] == [11, 12, 13]
+    assert _last_call(conn, usql.CLUSTER_MEMBER_IDS_SQL)["generation"] == "g5"
+    assert _last_call(conn, usql.CLUSTER_EXISTS_SQL)["generation"] == "g5"
+    assert body["data"]["verdict"]["member_ids"] == [11, 12, 13]
+
+
+def test_a_split_stamps_the_set_it_ruled(admin_client, conn):
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12)],
+        "member_verdicts": [],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="same", generation="g4",
+                                       member_ids=[11, 12])],
+    }
+    resp = admin_client.post(
+        "/autodedup/verdict/split",
+        json={
+            "cluster_key": 101,
+            "generation": "g4",
+            "relation": "different",
+            "units": [{"listing_id": 11, "unit": "A"}, {"listing_id": 12, "unit": "A"}],
+        },
+    )
+    assert resp.status_code == 200
+    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    assert (written["generation"], written["member_ids"]) == ("g4", [11, 12])
+
+
+def test_the_progress_strip_counts_only_a_ruling_that_applies(client, conn):
+    """A verdict about a different set is not progress: counting it would tell the operator
+    they are done with a queue they still have to walk."""
+    for sql in (usql.VALIDATION_GROUPS_SAMPLE_SQL, usql.VALIDATION_GROUPS_TOTAL_SQL):
+        flat = " ".join(sql.split())
+        assert "vv.member_ids = coalesce(mem.ids, '{}'::bigint[])" in flat
+        assert "m.generation = %(generation)s::text" in flat

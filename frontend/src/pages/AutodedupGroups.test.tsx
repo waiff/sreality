@@ -317,6 +317,90 @@ describe('<AutodedupGroups>', () => {
     vi.mocked(api.getAutodedupValidationProgress).mockResolvedValue(PROGRESS);
   });
 
+  /* ------------------------------- E58: a verdict binds the set it was taken on */
+
+  it('reads a carried-over verdict as unreviewed and says which adverts moved', async () => {
+    /* The defect this repairs: promoting g5 re-stamped 836 of g4's cluster keys,
+     * and 21 of the operator's 224 confirmations landed on a group whose
+     * membership had moved under them with nothing on screen to say so. */
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(
+      page([
+        group({
+          cluster_key: 7,
+          members: [
+            member({ listing_id: 101 }),
+            member({ listing_id: 202, source: 'bazos' }),
+            member({ listing_id: 303, source: 'idnes' }),
+          ],
+          verdict: null,
+          stale_verdict: {
+            verdict: 'same',
+            note: null,
+            decided_by: 'operator@example.invalid',
+            decided_at: '2026-09-18T10:00:00Z',
+            generation: 'g4',
+            member_ids: [101, 202],
+            added: [303],
+            removed: [404],
+          },
+        }),
+      ]),
+    );
+    renderPage();
+    const notice = await screen.findByTestId('stale-verdict-notice');
+    expect(notice.textContent).toContain('Potvrzeno v g4 pro jinou sestavu inzerátů');
+    expect(notice.textContent).toContain('přibyly #303');
+    expect(notice.textContent).toContain('ubyly #404');
+    /* The advert that arrived is marked on its OWN card, which is where the
+     * question "is this one of them too?" is actually asked. */
+    expect(screen.getByTestId('stale-added-303')).toBeTruthy();
+    expect(screen.queryByTestId('stale-added-101')).toBeNull();
+    /* And the group is UNREVIEWED: no button is pressed, so the operator rules
+     * it again rather than inheriting a claim about adverts nobody looked at. */
+    for (const button of screen.getAllByRole('button')) {
+      expect(button.getAttribute('aria-pressed')).not.toBe('true');
+    }
+  });
+
+  it('hides the notice once this session has ruled the group again', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(
+      page([
+        group({
+          cluster_key: 7,
+          verdict: null,
+          stale_verdict: {
+            verdict: 'same',
+            note: null,
+            decided_by: 'operator@example.invalid',
+            decided_at: '2026-09-18T10:00:00Z',
+            generation: 'g4',
+            member_ids: [101],
+            added: [202],
+            removed: [],
+          },
+        }),
+      ]),
+    );
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(screen.queryByTestId('stale-verdict-notice')).toBeNull());
+  });
+
+  it('offers "změněno od verdiktu" as a verdict filter and sends it as a key', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText(/#7/);
+    const select = screen.getByLabelText('Verdict');
+    await user.selectOptions(select, 'changed');
+    await waitFor(() =>
+      expect(screen.getByTestId('search').textContent).toContain('verdict=changed'),
+    );
+    expect(
+      within(select).getByRole('option', { name: 'změněno od verdiktu' }),
+    ).toBeTruthy();
+  });
+
   /* --------------------------------------- the seeded sample + blind review */
 
   it('offers the seeded sample order, and the counter counts it', async () => {

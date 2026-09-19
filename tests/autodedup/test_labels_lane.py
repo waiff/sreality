@@ -152,6 +152,8 @@ def lane():
 
     run.executed = executed  # type: ignore[attr-defined]
     run.conns = conns  # type: ignore[attr-defined]
+    # The canned store, so a test can say what the CURRENT clustering looks like.
+    run.rows = rows  # type: ignore[attr-defined]
     run.rows = rows  # type: ignore[attr-defined]
     return run
 
@@ -497,3 +499,37 @@ def test_the_rank_reaches_the_label_loader(lane, tmp_path: Path) -> None:
             labels_module.load_operator_labels(tmp_path / labels_lane.LABELS_FILE)}
     assert rows[(31, 33)].sample_rank == 2
     assert rows[(11, 12)].sample_rank is None
+
+
+# ------------------------------- E58: the implied labels come off the verdict's own member set
+
+
+def test_implied_labels_come_from_the_verdict_not_from_todays_clustering(lane, tmp_path: Path):
+    """The set the operator was looking at is recorded ON THE RULING (migration 538).
+
+    Before it was, this lane expanded a confirmation over `cluster_members` read at export
+    time — so re-clustering a key silently changed what an old label asserted, and erasing the
+    generation's clusters (which promoting g5 did to g4) made the export impossible to
+    reproduce at all. Here the current clustering says something else entirely and the labels
+    ignore it.
+    """
+    # The store now clusters 900 as {31, 32, 99} — a bridge pulled 99 in and dropped 33.
+    lane.rows[id(CLUSTER_MEMBERS_SQL)] = [(900, 31), (900, 32), (900, 99)]
+    lane(tmp_path)
+    implied = {
+        (row["listing_lo"], row["listing_hi"])
+        for row in _read(tmp_path / labels_lane.LABELS_FILE)
+        if row["source"] == "implied" and row["cluster_key"] == 900
+    }
+    # The ruled set was {31, 32, 33}; 31-32 is shadowed by an explicit verdict.
+    assert implied == {(31, 33), (32, 33)}
+    assert not any(99 in pair for pair in implied)
+
+
+def test_a_legacy_ruling_falls_back_to_its_own_generations_members() -> None:
+    """A row taken before migration 538 carries no set; the statement resolves it to the
+    members of the generation being exported, which is the most that can honestly be said."""
+    flat = " ".join(CLUSTER_VERDICTS_SQL.split())
+    assert "coalesce(v.member_ids, fb.ids) as member_ids" in flat
+    assert "m.generation = %(generation)s::text" in flat
+    assert "v.generation = %(generation)s::text or (v.generation is null" in flat
