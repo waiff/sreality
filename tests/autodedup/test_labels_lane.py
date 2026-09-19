@@ -364,3 +364,17 @@ def test_a_missing_operator_labels_file_is_fatal(tmp_path: Path) -> None:
     ])
     with pytest.raises(SystemExit):
         harness.operator_tier(args)
+
+
+def test_the_decider_leaves_as_a_stable_digest_not_an_email(lane, tmp_path: Path) -> None:
+    lane(tmp_path)
+    records = _read(tmp_path / labels_lane.LABELS_FILE)
+    deciders = {row["decided_by"] for row in records}
+    assert deciders == {labels_lane.decider("operator")}
+    assert all(value.startswith(labels_lane.DECIDED_BY_PREFIX) for value in deciders)
+    # The artifact is uploaded by a workflow in a public repository: no login may reach it.
+    body = (tmp_path / labels_lane.LABELS_FILE).read_text(encoding="utf-8")
+    assert "@" not in body
+    assert labels_lane.decider("a@b.cz") != labels_lane.decider("c@d.cz")
+    assert labels_lane.decider("a@b.cz") == labels_lane.decider(" a@b.cz ")
+    assert labels_lane.decider(None) is None

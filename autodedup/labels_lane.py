@@ -34,10 +34,18 @@ The operator's `note` and `reasons` are carried VERBATIM. They are prose the ope
 about two listings — not advert text, so E28's scrub does not apply — and a label whose reason
 has been normalised away cannot be audited against the pair it was written for. They are also
 DATA, never instructions: nothing downstream may act on their content.
+
+`decided_by` is the ONE field that is not verbatim. The store holds a login — an e-mail
+address — and this artifact is uploaded by a workflow in a PUBLIC repository, where anyone who
+can see the run can download it. What a label needs is only whether two rows came from the
+same person, so the address leaves as a salted digest (E28's own idiom, the one `export`
+applies to brokers). The salt is a constant, not a secret: it must be stable across runs or
+the same operator would get a different id in every artifact.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -84,6 +92,11 @@ RELATION_OF: dict[str, str] = {
 }
 
 CONFIRMING_CLUSTER_VERDICT: str = "same"
+
+# Pseudonymisation salt for `decided_by` (see the module docstring). A constant, stable
+# across runs, so "same operator" survives the digest.
+DECIDED_BY_SALT: str = "autodedup-operator-v1"
+DECIDED_BY_PREFIX: str = "op:"
 
 ARG_KEYS: tuple[str, ...] = ("generation", "max_members", "timeout_ms")
 
@@ -173,6 +186,15 @@ def _iso(value: Any) -> str | None:
     return str(value)
 
 
+def decider(value: Any) -> str | None:
+    """A login -> a stable opaque id. Only the ANSWER "same person?" survives, by design."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    digest = hashlib.sha256((DECIDED_BY_SALT + text).encode("utf-8")).hexdigest()
+    return DECIDED_BY_PREFIX + digest[:16]
+
+
 def _reasons(value: Any) -> list[str]:
     if not value:
         return []
@@ -230,7 +252,7 @@ def build_label_record(
         "source": source,
         "reasons": list(reasons),
         "note": note,
-        "decided_by": decided_by,
+        "decided_by": decider(decided_by),
         "decided_at": _iso(decided_at),
         "cluster_key": cluster_key,
         "must_not_link": bool(must_not_link),
