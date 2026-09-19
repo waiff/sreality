@@ -61,6 +61,7 @@ from autodedup.labels_sql import (
     GENERATION_CLUSTERS_SQL,
     MUST_NOT_LINK_SQL,
     PAIR_VERDICTS_SQL,
+    SAMPLE_RANK_SQL,
     STORE_PRESENT_SQL,
 )
 
@@ -73,6 +74,10 @@ DEFAULT_GENERATION: str = "g4"
 DEFAULT_MAX_MEMBERS: int = 12
 MAX_MAX_MEMBERS: int = 64
 DEFAULT_TIMEOUT_MS: int = 120_000
+# The sample's NAME, not a fresh draw: `v1` is the seed the operator's validation session ran
+# under, and the ranks in this artifact mean nothing except under the seed that produced them
+# (api/routes/autodedup.py `_seed`, same default, same charset).
+DEFAULT_SAMPLE_SEED: str = "v1"
 CHUNK: int = 1_000
 
 SOURCE_EXPLICIT: str = "explicit"
@@ -98,11 +103,14 @@ CONFIRMING_CLUSTER_VERDICT: str = "same"
 DECIDED_BY_SALT: str = "autodedup-operator-v1"
 DECIDED_BY_PREFIX: str = "op:"
 
-ARG_KEYS: tuple[str, ...] = ("generation", "max_members", "timeout_ms")
+ARG_KEYS: tuple[str, ...] = ("generation", "max_members", "timeout_ms", "sample_seed")
 
 # A generation is a short slug the score lane stamps (`g1`, `g4`). Validated here because it
 # reaches a query as a parameter and an operator string is not a vocabulary.
 _GENERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,15}$")
+# The route's own closed charset for a seed (1-16 of a-z0-9), repeated here because the seed
+# reaches `md5(key || seed)` as a parameter and an operator string is not a vocabulary.
+_SEED_RE = re.compile(r"^[a-z0-9]{1,16}$")
 
 
 @dataclass(slots=True)
@@ -110,6 +118,7 @@ class LabelArgs:
     generation: str
     max_members: int
     timeout_ms: int
+    sample_seed: str
 
 
 def parse_args(args: dict[str, str]) -> LabelArgs:
@@ -125,7 +134,11 @@ def parse_args(args: dict[str, str]) -> LabelArgs:
     if max_members < 2 or max_members > MAX_MAX_MEMBERS:
         raise SystemExit(f"max_members must be between 2 and {MAX_MAX_MEMBERS}")
     timeout_ms = _positive_int(args.get("timeout_ms"), DEFAULT_TIMEOUT_MS, "timeout_ms")
-    return LabelArgs(generation=generation, max_members=max_members, timeout_ms=timeout_ms)
+    sample_seed = (args.get("sample_seed") or "").strip() or DEFAULT_SAMPLE_SEED
+    if not _SEED_RE.match(sample_seed):
+        raise SystemExit(f"sample_seed must be 1-16 characters of a-z0-9, got {sample_seed!r}")
+    return LabelArgs(generation=generation, max_members=max_members, timeout_ms=timeout_ms,
+                     sample_seed=sample_seed)
 
 
 def _positive_int(raw: str | None, default: int, name: str) -> int:
@@ -241,6 +254,7 @@ def build_label_record(
     decided_by: str | None,
     decided_at: Any,
     cluster_key: int | None,
+    sample_rank: int | None,
     must_not_link: bool,
     engine: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -255,6 +269,9 @@ def build_label_record(
         "decided_by": decider(decided_by),
         "decided_at": _iso(decided_at),
         "cluster_key": cluster_key,
+        # Where this label's group sat in the seeded sample order (implied labels only — an
+        # explicit pair verdict was typed against a pair, not drawn from the group queue).
+        "sample_rank": sample_rank,
         "must_not_link": bool(must_not_link),
         "engine": engine,
     }
@@ -355,6 +372,14 @@ def run_labels(
                 members_by_cluster.setdefault(int(row["cluster_key"]), []).append(
                     int(row["listing_id"])
                 )
+        # The sample order is a property of the GENERATION's cluster set, so it is read once
+        # for every confirmed group, under the seed the artifact stamps.
+        sample_rank_by_cluster: dict[int, int] = {}
+        for chunk in batched(keys):
+            for row in _run(conn, SAMPLE_RANK_SQL, {
+                "keys": chunk, "generation": parsed.generation, "seed": parsed.sample_seed,
+            }, timeout):
+                sample_rank_by_cluster[int(row["cluster_key"])] = int(row["sample_rank"])
         mnl_rows = _run(conn, MUST_NOT_LINK_SQL, None, timeout)
         timings["read_s"] = round(time.monotonic() - started, 3)
 
@@ -411,6 +436,7 @@ def run_labels(
             decided_by=by_key[key]["decided_by"],
             decided_at=by_key[key]["decided_at"],
             cluster_key=by_key[key]["cluster_key"],
+            sample_rank=sample_rank_by_cluster.get(by_key[key]["cluster_key"]),
             must_not_link=key in mnl_keys,
             engine=engine_view(engine_rows.get(key)),
         )
@@ -441,6 +467,7 @@ def run_labels(
         "implied": sum(1 for r in records if r["source"] == SOURCE_IMPLIED),
         "implied_shadowed_by_explicit": n_implied_shadowed,
         "engine_view": sum(1 for r in records if r["engine"] is not None),
+        "sample_ranked": sum(1 for r in records if r["sample_rank"] is not None),
         "must_not_link": len(mnl_records),
         **{f"cluster_{name}": value for name, value in cluster_counts.items()},
     }
@@ -458,6 +485,8 @@ def run_labels(
         "by_zone_verdict": _nested(records, _zone_of, lambda r: r["verdict"]),
         "generation": {
             "generation": parsed.generation,
+            "sample_seed": parsed.sample_seed,
+            "n_clusters_sampled": len(sample_rank_by_cluster),
             "n_clusters": _int_or_none(generation_stats.get("n_clusters")),
             "max_size": _int_or_none(generation_stats.get("max_size")),
         },
@@ -465,6 +494,7 @@ def run_labels(
             "generation": parsed.generation,
             "max_members": parsed.max_members,
             "timeout_ms": parsed.timeout_ms,
+            "sample_seed": parsed.sample_seed,
         },
         "timings": timings,
     }

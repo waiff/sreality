@@ -52,6 +52,7 @@ from autodedup.evaluate import (
     split_groups,
     write_report,
 )
+from autodedup import seals
 from autodedup.features import (
     MIN_RARE_BLOCK_DOCS,
     RARE_TOKEN_CAP,
@@ -772,6 +773,24 @@ def _add_operator_label_args(command: argparse.ArgumentParser) -> None:
                               " while leaving them in the reports")
 
 
+def judgement_paths(args: argparse.Namespace) -> list[str] | None:
+    """The `--judgements` files, or None when there is no label source at all.
+
+    The operator is a tier in its own right (`labels.OPERATOR_TIER`), so a judgements file is no
+    longer the only way to put a label on a pair — but SOME source has to be named, or there is
+    nothing to measure against."""
+    paths = list(getattr(args, "judgements", None) or ())
+    if not paths and not list(getattr(args, "operator_labels", None) or ()):
+        print("pass --judgements and/or --operator-labels: nothing to label with",
+              file=sys.stderr)
+        return None
+    missing = [path for path in paths if not Path(path).is_file()]
+    if missing:
+        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+        return None
+    return paths
+
+
 def operator_tier(args: argparse.Namespace) -> dict[Any, Any]:
     """The operator tier as the flags ask for it, or empty when no artifact was given."""
     paths = list(getattr(args, "operator_labels", None) or ())
@@ -807,19 +826,16 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     if not (run_dir / PAIRS_FILE).is_file():
         print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
         return 1
-    missing = [path for path in args.judgements if not Path(path).is_file()]
-    if missing:
-        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+    paths = judgement_paths(args)
+    if paths is None:
         return 1
     operator = operator_tier(args)
-    judgements, labels, per_tier = load_labels(
-        args.judgements, args.precedence, operator
-    )
+    judgements, labels, per_tier = load_labels(paths, args.precedence, operator)
     if not labels:
         print("no usable labels in the judgements given", file=sys.stderr)
         return 1
     try:
-        sample, sample_note = resolve_sample(args.judgements, args.sample)
+        sample, sample_note = resolve_sample(paths, args.sample)
     except ValueError as exc:
         print(f"unusable --sample: {exc}", file=sys.stderr)
         return 1
@@ -847,11 +863,21 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     # different set here than they were at fit time and part of the holdout is training data.
     split_map = None
     if args.split_map:
-        split_map = {int(key): int(value) for key, value
-                     in json.loads(Path(args.split_map).read_text(encoding="utf-8")).items()}
+        try:
+            split_map = seals.read_map(seals.resolve(args.split_map))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"unusable --split-map: {exc}", file=sys.stderr)
+            return 1
+    elif expect_seal and seals.committed(expect_seal):
+        # The map the model names is IN THE REPOSITORY, so the holdout needs no argument.
+        split_map = seals.load(expect_seal)
+        print(f"using the committed split map for seal {expect_seal[:12]}", file=out)
     elif expect_seal:
-        print(f"warning: --model carries seal {expect_seal[:12]} but no --split-map was given; "
-              f"the holdout below is re-derived from this run's own merge edges",
+        lost = seals.LOST_SEALS.get(expect_seal)
+        print(f"warning: --model carries seal {expect_seal[:12]} but no --split-map was given "
+              f"and no map is committed for it"
+              + (f" ({lost})" if lost else "")
+              + "; the holdout below is re-derived from this run's own merge edges",
               file=sys.stderr)
         expect_seal = None
     try:
@@ -862,7 +888,7 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
         print(f"evaluate failed: {exc}", file=sys.stderr)
         return 1
     json_path, markdown_path = write_report(report, Path(args.out) / EVAL_STEM)
-    print(f"evaluate {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"evaluate {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
     print(f"  model {model_note}", file=out)
     print("", file=out)
@@ -892,14 +918,13 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     if not (run_dir / PAIRS_FILE).is_file():
         print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
         return 1
-    missing = [path for path in args.judgements if not Path(path).is_file()]
-    if missing:
-        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+    paths = judgement_paths(args)
+    if paths is None:
         return 1
     operator = operator_tier(args)
-    judgements, labels, _ = load_labels(args.judgements, args.precedence, operator)
+    judgements, labels, _ = load_labels(paths, args.precedence, operator)
     try:
-        sample, sample_note = resolve_sample(args.judgements, args.sample)
+        sample, sample_note = resolve_sample(paths, args.sample)
     except ValueError as exc:
         print(f"unusable --sample: {exc}", file=sys.stderr)
         return 1
@@ -907,8 +932,11 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
         sample = sample_from_judgements(judgements)
     rows = read_pairs(run_dir)
     if args.split_map:
-        groups = {int(key): int(value) for key, value
-                  in json.loads(Path(args.split_map).read_text(encoding="utf-8")).items()}
+        try:
+            groups = seals.read_map(seals.resolve(args.split_map))
+        except (FileNotFoundError, ValueError) as exc:
+            print(f"unusable --split-map: {exc}", file=sys.stderr)
+            return 1
     else:
         groups = split_groups(rows, labels)
     try:
@@ -930,18 +958,22 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     )
     # The split map is written beside the model so a challenger can be scored on THIS seal
     # rather than on whatever components its own merge edges happen to form (§9's feedback loop).
-    (out_dir / SPLIT_MAP_FILE).write_text(
-        json.dumps({str(key): value for key, value in sorted(groups.items())}, sort_keys=True),
-        encoding="utf-8",
-    )
+    seals.write_map(out_dir / SPLIT_MAP_FILE, groups)
+    fit_seal = str(report.sections.get("split", {}).get("seal", {}).get("sha256") or "")
     json_path, markdown_path = write_report(report, out_dir / FIT_STEM)
-    print(f"fit {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"fit {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
     print("", file=out)
     for line in report.headline():
         print(line, file=out)
     print(f"\nwrote {model_path}, {out_dir / SPLIT_MAP_FILE}, {json_path} and {markdown_path}",
           file=out)
+    # A seal that lives only in a scratch directory is a seal the next wave cannot re-measure
+    # on (W6 lost two that way), so every fit says how to make this one durable.
+    if fit_seal and not seals.committed(fit_seal):
+        print(f"  seal {fit_seal[:12]} is NOT committed — keep the holdout reproducible with:",
+              file=out)
+        print(f"    cp {out_dir / SPLIT_MAP_FILE} {seals.path_for(fit_seal)}", file=out)
     print(f"  activate with: run <artifact> --model {model_path}", file=out)
     if not report.sections["convergence"].get("converged_flag"):
         # The l2 advice points the OPPOSITE way per method: gradient descent stalls on a stiff
@@ -1004,9 +1036,10 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         command = sub.add_parser(name, help=helptext)
         command.add_argument("run_dir", help="a directory written by `run`")
-        command.add_argument("--judgements", action="append", required=True,
+        command.add_argument("--judgements", action="append", default=None,
                              help="judgements.jsonl from the judge lane; repeatable"
-                                  " (tiers are merged by --precedence)")
+                                  " (tiers are merged by --precedence). Optional when"
+                                  " --operator-labels is given")
         command.add_argument("--sample", action="append", default=None,
                              help="sample.json carrying the per-stratum populations the"
                                   " Horvitz-Thompson weights need; repeatable, ONE PER"
@@ -1043,8 +1076,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="cap on label weight x stratum weight"
                           " (default: 10x the median weight)")
     fit.add_argument("--split-map", default=None,
-                     help="a split_map.json from an earlier fit, so a challenger is scored on"
-                          " the incumbent's sealed split")
+                     help="a split_map.json from an earlier fit, or a committed seal under"
+                          " autodedup/splits, so a challenger is scored on the incumbent's"
+                          " sealed split")
     fit.add_argument("--require-convergence", action="store_true",
                      help="exit 1 when the fit hits its iteration ceiling short of tolerance")
     evaluate_parser = sub.choices["evaluate"]
@@ -1054,8 +1088,10 @@ def build_parser() -> argparse.ArgumentParser:
                                       "it)")
     evaluate_parser.add_argument(
         "--split-map", default=None,
-        help="the split_map.json written beside the model being evaluated, so the sealed split "
-             "is the one the fit held out rather than one re-derived from this run's merge edges",
+        help="the split_map.json written beside the model being evaluated, or a committed "
+             "seal under autodedup/splits, so the sealed split is the one the fit held out "
+             "rather than one re-derived from this run's merge edges (a model whose seal IS "
+             "committed needs no flag)",
     )
     evaluate_parser.add_argument("--settings", default=None,
                                  help="Settings JSON; default: the settings on run.json")
@@ -1065,9 +1101,10 @@ def build_parser() -> argparse.ArgumentParser:
         "errors", help="false merges, false rejects and band composition, feature by feature"
     )
     errors_parser.add_argument("run_dir", help="a directory written by `run`")
-    errors_parser.add_argument("--judgements", action="append", required=True,
+    errors_parser.add_argument("--judgements", action="append", default=None,
                                help="judgements.jsonl from the judge lane; repeatable"
-                                    " (tiers are merged by --precedence)")
+                                    " (tiers are merged by --precedence). Optional when"
+                                    " --operator-labels is given")
     errors_parser.add_argument("--sample", action="append", default=None,
                                help="sample.json carrying the per-stratum populations the"
                                     " Horvitz-Thompson weights need; repeatable, one per"
@@ -1097,17 +1134,16 @@ def cmd_errors(args: argparse.Namespace, out: Any) -> int:
     if not (run_dir / PAIRS_FILE).is_file():
         print(f"no {PAIRS_FILE} in {run_dir}", file=sys.stderr)
         return 1
-    missing = [path for path in args.judgements if not Path(path).is_file()]
-    if missing:
-        print(f"no such judgements file(s): {missing}", file=sys.stderr)
+    paths = judgement_paths(args)
+    if paths is None:
         return 1
     operator = operator_tier(args)
-    judgements, labels, _ = load_labels(args.judgements, args.precedence, operator)
+    judgements, labels, _ = load_labels(paths, args.precedence, operator)
     if not labels:
         print("no usable labels in the judgements given", file=sys.stderr)
         return 1
     try:
-        sample, sample_note = resolve_sample(args.judgements, args.sample)
+        sample, sample_note = resolve_sample(paths, args.sample)
     except ValueError as exc:
         print(f"unusable --sample: {exc}", file=sys.stderr)
         return 1
@@ -1123,7 +1159,7 @@ def cmd_errors(args: argparse.Namespace, out: Any) -> int:
     )
     out_dir = Path(args.out) if args.out else run_dir
     json_path, markdown_path = write_report(report, out_dir / ERRORS_STEM)
-    print(f"errors {run_dir}  judgements {', '.join(args.judgements)}", file=out)
+    print(f"errors {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}",
           file=out)
     print("", file=out)

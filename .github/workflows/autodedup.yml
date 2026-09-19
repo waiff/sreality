@@ -174,7 +174,11 @@ name: "AUTODEDUP: engine lane"
 #             the verdict, the relation in the judge's own vocabulary, the operator's note and
 #             reason chips verbatim, who decided it and when, and the engine's view of that
 #             pair at read time (score, zone, decision, cluster key) or null where the engine
-#             never stored it. out/must_not_link.jsonl carries the permanent operator
+#             never stored it - SCOPED TO THE GENERATION asked for, since autodedup.pairs
+#             keeps every pass ever scored and an older model's zone is not this one's. An
+#             implied label also carries `sample_rank`: where its group sat in the seeded
+#             random order the validation UI serves, so the unbiased sample the precision
+#             numbers are measured on is reproducible from the file. out/must_not_link.jsonl carries the permanent operator
 #             negatives, which are an INPUT to the next generation's clustering. The operator
 #             is the TOP label tier - above gold - so `harness fit` and `harness evaluate`
 #             read these files with --operator-labels instead of an ad-hoc query nobody can
@@ -231,8 +235,9 @@ name: "AUTODEDUP: engine lane"
 # `workers`th of it); score accepts export_run, cohort, settings, model, generation
 # and store_floor; labels accepts generation (which generation's clusters imply
 # pair labels, default g4), max_members (the cap on a confirmed group's size before
-# its pairs are skipped rather than flooding the label set, default 12) and
-# timeout_ms.
+# its pairs are skipped rather than flooding the label set, default 12),
+# sample_seed (the seed the UI's unbiased group order ran under, default v1, which is
+# what each implied label's `sample_rank` is a rank UNDER) and timeout_ms.
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
