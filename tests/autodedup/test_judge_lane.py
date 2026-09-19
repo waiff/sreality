@@ -214,7 +214,25 @@ def lane(monkeypatch: pytest.MonkeyPatch, cohort: Path):
         return target
 
     state["sleeps"] = []
-    monkeypatch.setattr(judge_lane, "RETRY_SLEEP", lambda seconds: state["sleeps"].append(seconds))
+    state["paces"] = []
+    # One fake clock behind every wait the lane takes, so a pass that backs off and paces
+    # itself costs the suite nothing and the two kinds of sleep stay separately readable.
+    state["clock"] = 1000.0
+
+    def fake_retry_sleep(seconds: float) -> None:
+        state["sleeps"].append(seconds)
+        state["clock"] += seconds
+
+    def fake_pace_sleep(seconds: float) -> None:
+        state["paces"].append(seconds)
+        state["clock"] += seconds
+
+    monkeypatch.setattr(judge_lane, "RETRY_SLEEP", fake_retry_sleep)
+    monkeypatch.setattr(judge_lane, "PACE_SLEEP", fake_pace_sleep)
+    monkeypatch.setattr(judge_lane, "MONOTONIC", lambda: state["clock"])
+    # The ladder is jittered in production; 0.5 is the middle of the draw, which is the rung
+    # itself — the jitter's own bounds are asserted in `test_the_ladder_is_jittered`.
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 0.5)
     monkeypatch.setattr(judge_lane, "download_cohort", fake_download)
     monkeypatch.setattr(judge_lane, "llm_client", lambda conn: state["client"])
     monkeypatch.setattr(judge_lane, "image_store", lambda: state["r2"])
@@ -704,12 +722,19 @@ def test_a_qwen_quota_exhaustion_disables_the_arm_instead_of_stopping_the_run(
     assert summary["pairs_processed"] == summary["drawn"] > healthy
     assert summary["done"] == 3 * summary["drawn"]
     assert summary["fatal"] is None and summary["budget_stopped"] is False
-    # One call actually hit the quota; the arm was down before any of the rest launched.
+    # One VOTE hit the quota; the arm was down before any of the rest launched.
     assert summary["failed"] == 1
     assert summary["weaker_votes"] == summary["drawn"] - healthy
     qwen_calls = [call for call in lane.calls
                   if call["model"] == judge_lane.MODEL_GOLD_THIRD]
-    assert len(qwen_calls) == healthy + 1
+    # That one vote is several CALLS now: the wording arrived after this arm had already
+    # answered three times, which W6 showed is DashScope pacing rather than an empty account,
+    # so the ladder and every step-down are spent before the arm is written off — and it still
+    # is written off, on the unindulged classification, which is the guard staying intact.
+    ladder = len(judge_lane.RETRY_BACKOFF_S) + 1
+    assert len(qwen_calls) == healthy + ladder * (judge_lane.MAX_STEP_DOWNS + 1)
+    assert summary["pacing"]["qwen"]["step_downs"], summary["pacing"]
+    assert summary["pacing"]["qwen"]["backoff_s"] > 0
     # Spend is the calls that were MADE: three votes a pair either way, plus the one that 429'd
     # and bought nothing.
     assert summary["spent_usd_in_process"] == pytest.approx(0.001 * summary["done"])
@@ -736,7 +761,16 @@ def test_a_rate_limited_third_family_is_retried_to_the_ladder_then_falls_back(
     )
     summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1)
     assert lane.state["sleeps"][:3] == list(judge_lane.RETRY_BACKOFF_S)
-    assert len(lane.state["sleeps"]) == 3 * summary["drawn"]
+    # The first pair walks the ladder, narrows the arm, walks it again — twice — and only then
+    # falls back; by the second pair there is nothing left to narrow and it is the ladder alone.
+    ladder = len(judge_lane.RETRY_BACKOFF_S)
+    first_pair = ladder * (judge_lane.MAX_STEP_DOWNS + 1) + judge_lane.MAX_STEP_DOWNS
+    assert len(lane.state["sleeps"]) == first_pair + ladder * (summary["drawn"] - 1)
+    assert len(summary["pacing"]["qwen"]["step_downs"]) == judge_lane.MAX_STEP_DOWNS
+    assert summary["pacing_step_downs"] == judge_lane.MAX_STEP_DOWNS
+    assert summary["pacing_backoff_s"] == pytest.approx(
+        sum(lane.state["sleeps"]), abs=0.05
+    )
     assert summary["qwen_arm_disabled"] is False
     assert summary["qwen_arm_disabled_reason"] is None
     assert summary["qwen_arm_disabled_at_pair"] is None
@@ -1733,3 +1767,233 @@ def test_parse_args_takes_the_gold_version_the_labels_live_under() -> None:
     assert judge_lane.parse_args({
         "export_run": "1", "tier": "vision", "max_usd": "4",
     }).gold_version is None
+
+
+# --- pacing: a 429 after a success is the provider pacing us, not an empty account ---------
+
+
+def test_a_429_that_follows_a_success_is_pacing_not_an_exhausted_account() -> None:
+    """The truth table W6 cost two Qwen arms to learn.
+
+    DashScope answers a PACING wall in OpenAI's billing wording, so the words alone cannot tell
+    "slow down" from "you are out of allowance". The run can: an account does not refill and
+    drain again between two calls, so the same 429 means one thing on an arm that has already
+    answered and the other on an arm that never has. Only the retry loop passes the flag, and
+    everything else — including the caller that writes an arm off — classifies without it.
+    """
+    after_success_flips = {
+        QUOTA_429: judge_lane.ERROR_RATE_LIMIT,
+        "qwen call failed: HTTP 429 quota exceeded for your plan": judge_lane.ERROR_RATE_LIMIT,
+        "qwen call failed: HTTP 429 insufficient_quota": judge_lane.ERROR_RATE_LIMIT,
+    }
+    for message, expected in after_success_flips.items():
+        assert judge_lane.classify_provider_error(
+            RuntimeError(message), after_success=True
+        ) == expected, message
+        # The first call of a run is taken at its word — the guard run 35146813906 bought.
+        assert judge_lane.classify_provider_error(
+            RuntimeError(message)
+        ) == judge_lane.ERROR_QUOTA, message
+
+    unmoved = {
+        # 402 says money whatever came before it, and a body with no status behind it carries
+        # no evidence of pacing at all.
+        "openai call failed: HTTP 402 payment required": judge_lane.ERROR_QUOTA,
+        "openai call failed: no credits remaining": judge_lane.ERROR_QUOTA,
+        "qwen call failed: HTTP 403 {\"code\":\"Arrearage\"}": judge_lane.ERROR_QUOTA,
+        "openai call failed: HTTP 429 slow down": judge_lane.ERROR_RATE_LIMIT,
+        "HTTP 429 Too Many Requests": judge_lane.ERROR_RATE_LIMIT,
+        "openai call failed: HTTP 401 invalid_api_key": judge_lane.ERROR_FATAL,
+        "qwen call failed: HTTP 404 model_not_found": judge_lane.ERROR_FATAL,
+        "openai call failed: HTTP 503 upstream unavailable": judge_lane.ERROR_TRANSIENT,
+        "openai call failed: Read timed out": judge_lane.ERROR_TRANSIENT,
+        "no compare_listings tool call in the response": judge_lane.ERROR_UNKNOWN,
+    }
+    for message, expected in unmoved.items():
+        for flag in (False, True):
+            assert judge_lane.classify_provider_error(
+                RuntimeError(message), after_success=flag
+            ) == expected, (message, flag)
+
+
+def test_the_ladder_is_jittered_so_throttled_workers_stop_arriving_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact 2/4/8 ladder re-synchronises every worker that tripped the limit together and
+    reproduces the burst one rung later; the spread is what breaks the convoy."""
+    rung = judge_lane.RETRY_BACKOFF_S[0]
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 0.5)
+    assert judge_lane.jittered(rung) == pytest.approx(rung)
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 0.0)
+    assert judge_lane.jittered(rung) == pytest.approx(rung * (1 - judge_lane.RETRY_JITTER))
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: 1.0)
+    assert judge_lane.jittered(rung) == pytest.approx(rung * (1 + judge_lane.RETRY_JITTER))
+    draws = iter([0.1, 0.9, 0.3, 0.7])
+    monkeypatch.setattr(judge_lane, "RANDOM", lambda: next(draws))
+    assert len({judge_lane.jittered(rung) for _ in range(4)}) == 4
+
+
+def test_an_arm_admits_only_its_own_workers_and_spaces_their_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dial itself: at most `workers` of this arm's calls in flight, and no two of them
+    starting closer together than `min_interval_ms`."""
+    import threading
+    import time as real_time
+
+    for workers in (1, 2, 3):
+        pacer = judge_lane.ArmPacer("qwen", workers=workers, min_interval_ms=0)
+        seen = {"now": 0, "max": 0}
+        guard = threading.Lock()
+
+        def one() -> None:
+            with pacer.slot():
+                with guard:
+                    seen["now"] += 1
+                    seen["max"] = max(seen["max"], seen["now"])
+                real_time.sleep(0.05)
+                with guard:
+                    seen["now"] -= 1
+
+        threads = [threading.Thread(target=one) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        assert not any(thread.is_alive() for thread in threads), workers
+        assert seen["max"] == workers, (workers, seen)
+
+    # Spacing is the second half of the dial, and it is read off a fake clock: the gap is the
+    # provider's to demand and the suite's to not actually wait out.
+    clock = {"t": 0.0}
+    waits: list[float] = []
+    monkeypatch.setattr(judge_lane, "MONOTONIC", lambda: clock["t"])
+
+    def fake_pace(seconds: float) -> None:
+        waits.append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(judge_lane, "PACE_SLEEP", fake_pace)
+    spaced = judge_lane.ArmPacer("qwen", workers=1, min_interval_ms=500)
+    for _ in range(3):
+        with spaced.slot():
+            pass
+    assert waits == [pytest.approx(0.5), pytest.approx(0.5)]
+    assert spaced.to_json()["paced_s"] == pytest.approx(1.0)
+    # An unpaced arm never sleeps — the default costs the primary model nothing.
+    waits.clear()
+    unpaced = judge_lane.ArmPacer("primary", workers=6, min_interval_ms=0)
+    for _ in range(3):
+        with unpaced.slot():
+            pass
+    assert waits == []
+
+
+def test_a_step_down_narrows_the_arm_and_then_admits_it_has_nothing_left() -> None:
+    """Parallelism first, then spacing, then the truthful False that lets the arm die."""
+    paced = judge_lane.ArmPacer("qwen", workers=4, min_interval_ms=0)
+    assert paced.step_down("429", at_pair=7) is True
+    assert paced.to_json()["workers_now"] == 1
+    assert paced.to_json()["workers"] == 4
+    assert paced.step_down("429", at_pair=8) is True
+    assert paced.to_json()["min_interval_ms_now"] == judge_lane.STEP_DOWN_INTERVAL_MS
+    assert paced.step_down("429", at_pair=9) is False
+    steps = paced.to_json()["step_downs"]
+    assert len(steps) == judge_lane.MAX_STEP_DOWNS == 2
+    assert steps[0]["at_pair"] == 7 and steps[0]["to_workers"] == 1
+    assert steps[1]["to_min_interval_ms"] == judge_lane.STEP_DOWN_INTERVAL_MS
+    # An arm that is already at its narrowest has nothing to offer at all.
+    assert judge_lane.ArmPacer(
+        "qwen", workers=1, min_interval_ms=judge_lane.STEP_DOWN_INTERVAL_MAX_MS
+    ).step_down("429") is False
+
+
+def test_the_secondary_arm_is_paced_apart_from_the_primary_one() -> None:
+    """`workers` is the PRIMARY model's parallelism and it was never the arm being throttled:
+    the routing has to send the DashScope votes — and only those — to the secondary dial."""
+    parsed = judge_lane.parse_args({
+        "export_run": "1", "tier": "gold", "n": "4", "max_usd": "5",
+        "workers": "6", "qwen_workers": "2", "qwen_min_interval_ms": "750",
+    })
+    assert (parsed.workers, parsed.qwen_workers, parsed.qwen_min_interval_ms) == (6, 2, 750)
+    pacing = judge_lane.build_pacing(parsed)
+    plan = judge_lane.vote_plan("gold")
+    assert [pacing.for_vote(vote).name for vote in plan] == ["primary", "primary", "qwen"]
+    assert pacing.for_vote(judge_lane.vote_plan("vision")[0]).name == "primary"
+    # The rented pod serves a Qwen id too, and it has neither a rate limit nor a per-call
+    # bill: pacing it on DashScope's dial would be idle GPU at $0.44 an hour.
+    oss_vote = judge_lane.vote_plan("oss")[0]
+    assert oss_vote.model.lower().startswith(f"{judge_lane.OSS_PREFIX}qwen")
+    assert pacing.for_vote(oss_vote).name == "primary"
+    assert pacing.qwen.to_json()["workers"] == 2
+    assert pacing.primary.to_json()["workers"] == 6
+
+
+def test_the_pacing_dials_default_to_one_worker_and_refuse_nonsense() -> None:
+    """One worker is what actually finished a W6 pass; the defaults say so."""
+    base = {"export_run": "1", "tier": "gold", "n": "4", "max_usd": "5"}
+    parsed = judge_lane.parse_args(dict(base))
+    assert parsed.qwen_workers == judge_lane.QWEN_WORKERS_DEFAULT == 1
+    assert parsed.qwen_min_interval_ms == judge_lane.QWEN_MIN_INTERVAL_MS_DEFAULT == 0
+    for bad in ({"qwen_workers": "0"}, {"qwen_min_interval_ms": "-1"}):
+        with pytest.raises(SystemExit):
+            judge_lane.parse_args({**base, **bad})
+
+
+def test_a_throttled_secondary_arm_is_stepped_down_before_it_is_written_off(
+    lane, tmp_path: Path
+) -> None:
+    """W6 end to end: the arm answers, then 429s in billing words at more than one worker.
+
+    The pass must not lose the arm to the wording — it walks the ladder, gives up its
+    parallelism, walks it again — and must still lose it in the end, because an account that
+    really is empty answers nothing else either. summary.json carries both: what the pacing
+    cost in seconds, and every narrowing it tried.
+    """
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_after={judge_lane.MODEL_GOLD_THIRD: 2}, error=QUOTA_429,
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1,
+                   qwen_workers=3, qwen_min_interval_ms=250)
+
+    arm = summary["pacing"]["qwen"]
+    assert summary["qwen_workers"] == 3 and summary["qwen_min_interval_ms"] == 250
+    assert arm["workers"] == 3 and arm["workers_now"] == 1
+    assert [step.get("to_workers") for step in arm["step_downs"]][0] == 1
+    assert arm["successes"] == 2
+    assert arm["retries"] == len(judge_lane.RETRY_BACKOFF_S) * (
+        judge_lane.MAX_STEP_DOWNS + 1
+    ) + judge_lane.MAX_STEP_DOWNS
+    assert arm["backoff_s"] > 0 and summary["pacing_backoff_s"] >= arm["backoff_s"]
+    assert summary["pacing_step_downs"] == judge_lane.MAX_STEP_DOWNS
+    # The step-down bought time, not immunity: the arm still goes down, on the unindulged
+    # reading of the same error, and the pass still finishes with its weaker third vote.
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_reason"].startswith("quota:")
+    assert summary["qwen_arm_disabled_at_pair"] == 2
+    assert summary["done"] == 3 * summary["drawn"]
+    assert summary["fatal"] is None
+    # The primary model was answering throughout and is not paced for the other arm's sake.
+    assert summary["pacing"]["primary"]["step_downs"] == []
+    assert summary["pacing"]["primary"]["retries"] == 0
+
+
+def test_the_first_call_of_a_run_is_still_taken_at_its_word(lane, tmp_path: Path) -> None:
+    """The half of the rule that must not move: with no success behind it, the billing wording
+    is an exhausted account, the arm goes down on the FIRST call, and nothing is retried."""
+    out = tmp_path / "out"
+    lane.state["client"] = FakeLLM(
+        lane.calls, fail_models=(judge_lane.MODEL_GOLD_THIRD,), error=QUOTA_429,
+    )
+    summary = lane(out, export_run="1", tier="gold", n=2, max_usd=5, workers=1,
+                   qwen_workers=4)
+    qwen_calls = [call for call in lane.calls
+                  if call["model"] == judge_lane.MODEL_GOLD_THIRD]
+    assert len(qwen_calls) == 1
+    assert lane.state["sleeps"] == []
+    assert summary["pacing"]["qwen"]["step_downs"] == []
+    assert summary["pacing"]["qwen"]["retries"] == 0
+    assert summary["qwen_arm_disabled"] is True
+    assert summary["qwen_arm_disabled_at_pair"] == 0
+    assert summary["done"] == 3 * summary["drawn"]

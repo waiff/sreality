@@ -210,7 +210,11 @@ name: "AUTODEDUP: engine lane"
 # id=<n> plus any of title, status, approach, tools, cost_usd and notes to correct that row
 # (`tools` is a SEMICOLON or SLASH list - the comma already separates k=v pairs and this
 # workflow's charset check rejects `;`, so a dispatched entry writes `a/b/c`); judge
-# accepts export_run, tier, n, max_usd (required), seed, workers, strata (SPACE-separated
+# accepts export_run, tier, n, max_usd (required), seed, workers, qwen_workers (the
+# SECONDARY DashScope arm's own parallelism, default 1 - `workers` is the primary model's
+# and it was never the arm being throttled; W6 lost that arm at six and at three workers
+# and finished the pass at one), qwen_min_interval_ms (the gap between two calls of that
+# arm, default 0), strata (SPACE-separated
 # stratum prefixes), judge_version, refresh, cohort (a local artifact path instead of a
 # download), dry_run, pairs_from (`gold` restricts the draw to pairs with a gold row),
 # pairs_file (an explicit `[lo, hi]` list under autodedup/pairs/) and,
