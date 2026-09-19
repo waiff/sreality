@@ -167,6 +167,19 @@ name: "AUTODEDUP: engine lane"
 #             engine summary), out/pairs.jsonl.gz, out/clusters.json and out/score.json.
 #             It costs nothing but GitHub minutes and database time.
 #
+#   labels  - READS the operator's own rulings, writes nothing. Exports every explicit pair
+#             verdict in autodedup.verdicts plus every member pair of a group whose latest
+#             cluster-grain verdict is `same` (an explicit verdict on a pair always wins over
+#             the group that implies it) as out/operator_labels.jsonl, one row per pair with
+#             the verdict, the relation in the judge's own vocabulary, the operator's note and
+#             reason chips verbatim, who decided it and when, and the engine's view of that
+#             pair at read time (score, zone, decision, cluster key) or null where the engine
+#             never stored it. out/must_not_link.jsonl carries the permanent operator
+#             negatives, which are an INPUT to the next generation's clustering. The operator
+#             is the TOP label tier - above gold - so `harness fit` and `harness evaluate`
+#             read these files with --operator-labels instead of an ad-hoc query nobody can
+#             re-run the same way twice. Every statement is a SELECT.
+#
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
 #             row from its arguments, for work that happened outside a lane run (a migration
 #             applied by apply_migration.yml, an operator review session, a wave that closed
@@ -216,7 +229,10 @@ name: "AUTODEDUP: engine lane"
 # estimate divides by `workers`; calibrate it from the previous pass's `latency_s_mean`, NOT
 # from `pod_wall_s_per_pair`, which is the rental divided by the pairs and is about a
 # `workers`th of it); score accepts export_run, cohort, settings, model, generation
-# and store_floor.
+# and store_floor; labels accepts generation (which generation's clusters imply
+# pair labels, default g4), max_members (the cap on a confirmed group's size before
+# its pairs are skipped rather than flooding the label set, default 12) and
+# timeout_ms.
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
@@ -226,7 +242,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one."
         required: true
         default: "census"
         type: string
