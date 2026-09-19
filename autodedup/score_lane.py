@@ -427,6 +427,10 @@ def conflict_params(
             ),
         })
     for bridge in clusters.get("bridges") or ():
+        # E57: an APPLIED bridge is a union, not a conflict — it has no evidence in two
+        # directions left to show.
+        if bridge.get("applied"):
+            continue
         lo, hi = sorted((int(bridge["lo"]), int(bridge["hi"])))
         rows.append({
             "kind": "bridge",

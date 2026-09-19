@@ -1,0 +1,14 @@
+{
+ "bridge_apply": true,
+ "bridge_min_score": 0.999,
+ "store_floor": 0.02,
+ "t_hi": 1.0,
+ "t_hi_by_stratum": {
+  "K-A|cross": null,
+  "K-A|same": null,
+  "K-C|same": null,
+  "model|cross": 0.9788,
+  "model|same": null
+ },
+ "t_lo": 0.1823495333100157
+}

@@ -1,0 +1,350 @@
+{
+ "attribution": {
+  "bridges_only_no_must_not_link": 836,
+  "must_not_link_only": 870,
+  "reading": "every cluster the must-not-links would refuse was already refused by another invariant, so the 246 vetoes bind nothing in this cohort \u2014 they are carried as a rail, not as a result"
+ },
+ "bridges": {
+  "bridges_applied": 34,
+  "bridges_applied_by_certificate": {
+   "K-B": 18,
+   "K-C": 3,
+   "None": 13
+  },
+  "bridges_applied_min_score": 0.9545135077598513,
+  "bridges_refused_by_reason": {
+   "bridge_score": 42,
+   "floor_spread": 335,
+   "redundant": 127,
+   "size": 791
+  }
+ },
+ "delta_g4_to_g5": {
+  "examples": [
+   "78255x199788:same:explicit",
+   "78255x442643:same:explicit",
+   "78255x18429617:same:explicit",
+   "86335x103778:same:explicit",
+   "86335x11536751:same:explicit",
+   "86335x11845519:same:explicit",
+   "103778x11523088:same:explicit",
+   "199788x235945:same:explicit",
+   "199788x354758:same:explicit",
+   "235945x442643:same:explicit",
+   "235945x18429617:same:explicit",
+   "354758x442643:same:explicit"
+  ],
+  "pairs_gained": {
+   "explicit_same": 15,
+   "implied_same": 0,
+   "n": 15,
+   "not_same": 0,
+   "same": 15,
+   "sealed_same": 6
+  },
+  "pairs_lost": {
+   "n": 0,
+   "same": 0
+  }
+ },
+ "merge_zone_by_stratum_explicit": {
+  "K-B|same": {
+   "clustered_not_same": 0,
+   "clustered_same": 0,
+   "n": 51,
+   "not_same": 0,
+   "same": 51
+  },
+  "K-C|cross": {
+   "clustered_not_same": 0,
+   "clustered_same": 0,
+   "n": 36,
+   "not_same": 1,
+   "same": 35
+  },
+  "model|cross": {
+   "clustered_not_same": 0,
+   "clustered_same": 9,
+   "n": 13,
+   "not_same": 0,
+   "same": 13
+  }
+ },
+ "promotion_bar": {
+  "band_share_not_larger": {
+   "g4": 0.1096139690848123,
+   "g5": 0.1096139690848123,
+   "met": true
+  },
+  "merge_zone_precision_vs_operator": {
+   "clause": "not below g4 on the same labels",
+   "g4": 0.99,
+   "g5": 0.99,
+   "met": true
+  },
+  "no_judged_false_merge_added": {
+   "judge": {
+    "run_g4": {
+     "bad": [
+      "10196193x10410436:same_building_different_unit:vision"
+     ],
+     "not_same": 1,
+     "same": 305,
+     "undecided": 3
+    },
+    "run_g5": {
+     "bad": [
+      "10196193x10410436:same_building_different_unit:vision"
+     ],
+     "not_same": 1,
+     "same": 336,
+     "undecided": 3
+    }
+   },
+   "met": true,
+   "operator": {
+    "g4": [],
+    "g5": []
+   }
+  },
+  "sealed_floor": {
+   "g4": {
+    "n": 55,
+    "not_same": 0,
+    "same": 55
+   },
+   "g5": {
+    "n": 55,
+    "not_same": 0,
+    "same": 55
+   },
+   "met": true,
+   "sealed_clustered_g5": {
+    "n": 6,
+    "not_same": 0,
+    "same": 6
+   }
+  }
+ },
+ "provenance": {
+  "cohort_export_run": "35200225251",
+  "judge_label_files": [
+   "35115036274",
+   "35116313682",
+   "35124676256",
+   "35149028995",
+   "35155058503",
+   "35185988862",
+   "35202925670",
+   "35203586251",
+   "35205840437"
+  ],
+  "measured_by": "scratchpad/autodedup-w6/decide/{measure.py,measure.json,strata.json}",
+  "model": "autodedup/models/w6_gold.json (weights identical to w5_gold)",
+  "operator_labels_artifact_run": "35468267042 (1,158 labels, 246 must-not-links)",
+  "settings": "autodedup/settings/w6.json",
+  "spend_usd": 0.0,
+  "split_seal": "37c8771fda6b06db2ead790fcf7728e0ccb0e80c60cad5358c2905ed39be52cc"
+ },
+ "runs": {
+  "run_bridge_only": {
+   "all_labels_clustered": {
+    "n": 729,
+    "not_same": 0,
+    "same": 729
+   },
+   "all_labels_clustered_wilson_lb": 0.9947579395056176,
+   "band_share_of_scored": 0.1096139690848123,
+   "band_share_of_stored": 0.33810544904137235,
+   "clustered_explicit": {
+    "n": 15,
+    "not_same": 0,
+    "same": 15
+   },
+   "false_merges_at_cluster_grain": [],
+   "implied_same_clustered": 714,
+   "implied_same_clustered_sealed": 184,
+   "max_cluster_size": 8,
+   "merge_zone_explicit": {
+    "n": 100,
+    "not_same": 1,
+    "same": 99
+   },
+   "merge_zone_precision": 0.99,
+   "merge_zone_wilson_lb": 0.9455124752390653,
+   "n_bridges_applied": 34,
+   "n_bridges_refused": 1295,
+   "n_clustered_listings": 2295,
+   "n_clusters": 836,
+   "n_must_not_link": 0,
+   "sealed_clustered_explicit": {
+    "n": 6,
+    "not_same": 0,
+    "same": 6
+   },
+   "sealed_merge_zone_explicit": {
+    "n": 55,
+    "not_same": 0,
+    "same": 55
+   },
+   "zones": {
+    "band": 5361,
+    "merge": 4263,
+    "reject": 39284,
+    "veto": 0
+   }
+  },
+  "run_g4": {
+   "all_labels_clustered": {
+    "n": 714,
+    "not_same": 0,
+    "same": 714
+   },
+   "all_labels_clustered_wilson_lb": 0.99464840154151,
+   "band_share_of_scored": 0.1096139690848123,
+   "band_share_of_stored": 0.33810544904137235,
+   "clustered_explicit": {
+    "n": 0,
+    "not_same": 0,
+    "same": 0
+   },
+   "false_merges_at_cluster_grain": [],
+   "implied_same_clustered": 714,
+   "implied_same_clustered_sealed": 184,
+   "max_cluster_size": 8,
+   "merge_zone_explicit": {
+    "n": 100,
+    "not_same": 1,
+    "same": 99
+   },
+   "merge_zone_precision": 0.99,
+   "merge_zone_wilson_lb": 0.9455124752390653,
+   "n_bridges_applied": 0,
+   "n_bridges_refused": 1329,
+   "n_clustered_listings": 2295,
+   "n_clusters": 870,
+   "n_must_not_link": 0,
+   "random100": {
+    "clustered": 352,
+    "clustered_not_same": 0,
+    "pairs": 352
+   },
+   "sealed_clustered_explicit": {
+    "n": 0,
+    "not_same": 0,
+    "same": 0
+   },
+   "sealed_merge_zone_explicit": {
+    "n": 55,
+    "not_same": 0,
+    "same": 55
+   },
+   "zones": {
+    "band": 5361,
+    "merge": 4263,
+    "reject": 39284,
+    "veto": 0
+   }
+  },
+  "run_g5": {
+   "all_labels_clustered": {
+    "n": 729,
+    "not_same": 0,
+    "same": 729
+   },
+   "all_labels_clustered_wilson_lb": 0.9947579395056176,
+   "band_share_of_scored": 0.1096139690848123,
+   "band_share_of_stored": 0.33810544904137235,
+   "clustered_explicit": {
+    "n": 15,
+    "not_same": 0,
+    "same": 15
+   },
+   "false_merges_at_cluster_grain": [],
+   "implied_same_clustered": 714,
+   "implied_same_clustered_sealed": 184,
+   "max_cluster_size": 8,
+   "merge_zone_explicit": {
+    "n": 100,
+    "not_same": 1,
+    "same": 99
+   },
+   "merge_zone_precision": 0.99,
+   "merge_zone_wilson_lb": 0.9455124752390653,
+   "n_bridges_applied": 34,
+   "n_bridges_refused": 1295,
+   "n_clustered_listings": 2295,
+   "n_clusters": 836,
+   "n_must_not_link": 246,
+   "random100": {
+    "clustered": 352,
+    "clustered_not_same": 0,
+    "pairs": 352
+   },
+   "sealed_clustered_explicit": {
+    "n": 6,
+    "not_same": 0,
+    "same": 6
+   },
+   "sealed_merge_zone_explicit": {
+    "n": 55,
+    "not_same": 0,
+    "same": 55
+   },
+   "zones": {
+    "band": 5361,
+    "merge": 4263,
+    "reject": 39284,
+    "veto": 0
+   }
+  },
+  "run_mnl_only": {
+   "all_labels_clustered": {
+    "n": 714,
+    "not_same": 0,
+    "same": 714
+   },
+   "all_labels_clustered_wilson_lb": 0.99464840154151,
+   "band_share_of_scored": 0.1096139690848123,
+   "band_share_of_stored": 0.33810544904137235,
+   "clustered_explicit": {
+    "n": 0,
+    "not_same": 0,
+    "same": 0
+   },
+   "false_merges_at_cluster_grain": [],
+   "implied_same_clustered": 714,
+   "implied_same_clustered_sealed": 184,
+   "max_cluster_size": 8,
+   "merge_zone_explicit": {
+    "n": 100,
+    "not_same": 1,
+    "same": 99
+   },
+   "merge_zone_precision": 0.99,
+   "merge_zone_wilson_lb": 0.9455124752390653,
+   "n_bridges_applied": 0,
+   "n_bridges_refused": 1329,
+   "n_clustered_listings": 2295,
+   "n_clusters": 870,
+   "n_must_not_link": 246,
+   "sealed_clustered_explicit": {
+    "n": 0,
+    "not_same": 0,
+    "same": 0
+   },
+   "sealed_merge_zone_explicit": {
+    "n": 55,
+    "not_same": 0,
+    "same": 55
+   },
+   "zones": {
+    "band": 5361,
+    "merge": 4263,
+    "reject": 39284,
+    "veto": 0
+   }
+  }
+ },
+ "what": "W6 strata + promotion-bar evidence for generation g5 (clustering-only; weights are w5_gold's)"
+}

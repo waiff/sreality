@@ -87,6 +87,12 @@ class Settings:
     # K-C|cross keep merging: certificates are read BEFORE `t_hi`, so a global cut cannot reach
     # them.
     t_hi_by_stratum: dict[str, float | None] = field(default_factory=dict)
+    # E57: a refused BRIDGE (E37) is re-offered once, and applied only when the MERGED member
+    # set satisfies every invariant — must-not-link included — and the edge is a certificate or
+    # scores at least `bridge_min_score`. Default OFF, so E37 stands wherever a settings row does
+    # not ask for it.
+    bridge_apply: bool = False
+    bridge_min_score: float = 0.999
     # The two image-lane sample caps `features.py` reads: CLIP is the only non-popcount quadratic
     # in the pass, so both belong in the swept row rather than in a module constant.
     clip_sample: int = 8
@@ -176,6 +182,8 @@ class Settings:
                 )
             if value is not None and not 0.0 <= value <= 1.0:
                 raise ValueError(f"t_hi_by_stratum[{key}] must be in [0, 1] or null: {value}")
+        if not 0.0 <= self.bridge_min_score <= 1.0:
+            raise ValueError(f"bridge_min_score must be in [0, 1]: {self.bridge_min_score}")
         if self.max_attr_contradictions <= 0.0:
             raise ValueError(
                 f"max_attr_contradictions must be positive: {self.max_attr_contradictions}"

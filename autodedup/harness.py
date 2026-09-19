@@ -471,6 +471,7 @@ def cmd_run(args: argparse.Namespace, out: Any) -> int:
     print(f"  clusters {summary['clusters']['n_clusters']}"
           f"  refused unions {summary['clusters']['n_edges_refused']}"
           f"  bridges {summary['clusters']['n_bridges_refused']}"
+          f" (applied {summary['clusters'].get('n_bridges_applied', 0)})"
           f"  must-not-link {summary['clusters']['n_must_not_link']}", file=out)
     print(f"  timings {json.dumps({k: round(v, 2) for k, v in summary['timings'].items()})}",
           file=out)

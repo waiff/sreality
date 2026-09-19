@@ -13,7 +13,14 @@ strong evidence in both directions.
 
 E37: an edge whose two sides are BOTH already multi-member clusters is a bridge, and bridging
 is outside the autonomous envelope — one wrong bridge corrupts two properties at once. The
-bridge is recorded on `ClusterResult.bridges` and surfaced in the stats; nothing is applied.
+bridge is recorded on `ClusterResult.bridges` and surfaced in the stats.
+
+E57 narrows that refusal rather than lifting it: a recorded bridge is re-offered ONCE, in the
+same certificate-first order, and applied only when the edge is a certificate or scores at
+least `bridge_min_score` AND the merged member set satisfies every invariant — must-not-link,
+size, category, area spread, disposition and floor spread — exactly as an ordinary union does.
+The pass is off unless a settings row asks for it, and a bridge it does not apply stays on
+`bridges` with the invariant that refused it, so nothing becomes invisible.
 
 Cluster identity is the smallest listing id it ever admitted (E36), which is also the union
 representative, so identity never moves as a cluster grows.
@@ -90,6 +97,52 @@ def edge_rank(decision: Decision) -> tuple[int, float, int, int]:
     return (0 if decision.certificate else 1, -decision.score, decision.lo, decision.hi)
 
 
+def bridge_rank(bridge: Mapping[str, Any]) -> tuple[int, float, int, int]:
+    """The same order `edge_rank` gives an edge, read off a recorded bridge row (E57)."""
+    return (
+        0 if bridge.get("certificate") else 1,
+        -float(bridge.get("score") or 0.0),
+        int(bridge["lo"]),
+        int(bridge["hi"]),
+    )
+
+
+def apply_bridges(
+    bridges: list[dict[str, Any]],
+    union_find: "_UnionFind",
+    fps: Mapping[int, Fingerprint],
+    settings: Settings,
+    must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
+) -> int:
+    """E57: re-offer each recorded bridge once; apply it only if the MERGED set still holds.
+
+    Mutates the bridge rows in place (`applied`, `invariant`) so the refused ones keep naming
+    why, and returns how many were applied."""
+    if not settings.bridge_apply:
+        return 0
+    applied = 0
+    for bridge in sorted(bridges, key=bridge_rank):
+        if not (bridge.get("certificate")
+                or float(bridge.get("score") or 0.0) >= settings.bridge_min_score):
+            bridge["invariant"] = "bridge_score"
+            continue
+        root_lo = union_find.find(int(bridge["lo"]))
+        root_hi = union_find.find(int(bridge["hi"]))
+        if root_lo == root_hi:
+            bridge["invariant"] = "redundant"
+            continue
+        members = union_find.members(root_lo) + union_find.members(root_hi)
+        fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
+        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link)
+        if invariant is not None:
+            bridge["invariant"] = invariant
+            continue
+        union_find.union(root_lo, root_hi)
+        bridge["applied"] = True
+        applied += 1
+    return applied
+
+
 def cluster_pairs(
     decisions: Sequence[Decision],
     listings: Mapping[int, Listing],
@@ -131,6 +184,8 @@ def cluster_pairs(
                 "right_cluster": root_hi,
                 "left_members": left,
                 "right_members": right,
+                "applied": False,
+                "invariant": None,
             })
             continue
         members = left + right
@@ -150,6 +205,8 @@ def cluster_pairs(
         union_find.union(root_lo, root_hi)
         accepted.append(decision)
 
+    bridges_applied = apply_bridges(bridges, union_find, fps, settings, must_not_link)
+
     for root, members in union_find.groups.items():
         grouped[root] = sorted(members)
     clusters = {key: members for key, members in sorted(grouped.items()) if len(members) > 1}
@@ -167,7 +224,8 @@ def cluster_pairs(
         "n_edges_applied": len(accepted) - redundant,
         "n_edges_redundant": redundant,
         "n_edges_refused": len(conflicts),
-        "n_bridges_refused": len(bridges),
+        "n_bridges_applied": bridges_applied,
+        "n_bridges_refused": len(bridges) - bridges_applied,
         "n_must_not_link": len(must_not_link),
         "n_clusters": len(clusters),
         "n_clustered_listings": sum(sizes),
