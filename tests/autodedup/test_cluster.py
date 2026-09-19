@@ -205,3 +205,82 @@ def test_must_not_link_count_is_reported() -> None:
                            must_not_link={(1, 2), (1, 3)})
     assert result.clusters == {}
     assert result.stats["n_must_not_link"] == 2
+
+
+# --- E57: the refused bridge, re-offered once -------------------------------------------
+
+
+def _bridged_world() -> tuple[dict[int, Listing], dict[int, Fingerprint], list[Decision]]:
+    """{1,2} and {3,4} cluster first; the 2x3 edge then arrives as a bridge."""
+    listings, fps = _world(_listing(1), _listing(2), _listing(3), _listing(4))
+    edges = [_edge(1, 2, 1.0), _edge(3, 4, 0.9999), _edge(2, 3, 0.999)]
+    return listings, fps, edges
+
+
+def test_a_bridge_is_still_refused_by_default() -> None:
+    listings, fps, edges = _bridged_world()
+    result = cluster_pairs(edges, listings, fps, SETTINGS)
+    assert sorted(result.clusters.values()) == [[1, 2], [3, 4]]
+    assert result.stats["n_bridges_refused"] == 1
+    assert result.stats["n_bridges_applied"] == 0
+    assert result.bridges[0]["applied"] is False
+
+
+def test_a_bridge_is_applied_when_the_merged_set_holds() -> None:
+    listings, fps, edges = _bridged_world()
+    settings = Settings(bridge_apply=True)
+    result = cluster_pairs(edges, listings, fps, settings)
+    assert result.clusters == {1: [1, 2, 3, 4]}
+    assert result.stats["n_bridges_applied"] == 1
+    assert result.stats["n_bridges_refused"] == 0
+    assert result.bridges[0]["applied"] is True
+
+
+def test_a_bridge_whose_merged_set_breaks_an_invariant_is_not_applied() -> None:
+    """The four adverts are two floors apart: floor_spread refuses the union, not the edge."""
+    listings, fps = _world(
+        _listing(1), _listing(2), _listing(3, floor=4), _listing(4, floor=4)
+    )
+    edges = [_edge(1, 2, 1.0), _edge(3, 4, 0.9999), _edge(2, 3, 0.999)]
+    result = cluster_pairs(edges, listings, fps, Settings(bridge_apply=True))
+    assert sorted(result.clusters.values()) == [[1, 2], [3, 4]]
+    assert result.stats["n_bridges_applied"] == 0
+    assert result.bridges[0]["invariant"] == "floor_spread"
+
+
+def test_a_must_not_link_inside_the_merged_set_refuses_the_bridge() -> None:
+    listings, fps, edges = _bridged_world()
+    result = cluster_pairs(
+        edges, listings, fps, Settings(bridge_apply=True), frozenset({(1, 4)})
+    )
+    assert sorted(result.clusters.values()) == [[1, 2], [3, 4]]
+    assert result.bridges[0]["invariant"] == "must_not_link"
+
+
+def test_a_weak_bridge_needs_a_certificate() -> None:
+    listings, fps = _world(_listing(1), _listing(2), _listing(3), _listing(4))
+    weak = [_edge(1, 2, 1.0), _edge(3, 4, 0.9999), _edge(2, 3, 0.98)]
+    settings = Settings(bridge_apply=True)
+    refused = cluster_pairs(weak, listings, fps, settings)
+    assert refused.stats["n_bridges_applied"] == 0
+    assert refused.bridges[0]["invariant"] == "bridge_score"
+
+    # Certificates rank first, so the two sides must also be certified for the weak K-B edge
+    # to arrive as a bridge at all.
+    certified = [_edge(1, 2, 1.0, certificate="K-B"),
+                 _edge(3, 4, 0.9999, certificate="K-B"),
+                 _edge(2, 3, 0.98, certificate="K-B")]
+    result = cluster_pairs(certified, listings, fps, settings)
+    assert result.clusters == {1: [1, 2, 3, 4]}
+    assert result.stats["n_bridges_applied"] == 1
+
+
+def test_a_bridge_that_a_previous_bridge_made_redundant_is_recorded_as_such() -> None:
+    listings, fps = _world(_listing(1), _listing(2), _listing(3), _listing(4))
+    edges = [_edge(1, 2, 1.0), _edge(3, 4, 0.9999),
+             _edge(2, 3, 0.9995), _edge(1, 4, 0.999)]
+    result = cluster_pairs(edges, listings, fps, Settings(bridge_apply=True))
+    assert result.clusters == {1: [1, 2, 3, 4]}
+    assert result.stats["n_bridges_applied"] == 1
+    assert [bridge["invariant"] for bridge in result.bridges
+            if not bridge["applied"]] == ["redundant"]
