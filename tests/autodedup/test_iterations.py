@@ -366,9 +366,11 @@ def test_update_iteration_refuses_an_unknown_status() -> None:
 
 
 def test_every_mode_is_registered() -> None:
-    assert set(lane.MODES) == {"census", "probes", "export", "judge", "score", "record"}
+    assert set(lane.MODES) == {"census", "probes", "export", "judge", "score", "labels",
+                               "record"}
     # `record` writes its own terminal row, so wrapping it would file the same iteration twice.
-    assert set(lane.ITERATION_META) == {"census", "probes", "export", "judge", "score"}
+    assert set(lane.ITERATION_META) == {"census", "probes", "export", "judge", "score",
+                                        "labels"}
     for meta in lane.ITERATION_META.values():
         assert meta["wave"] and meta["title"] and meta["approach"] and meta["tools"]
 

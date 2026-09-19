@@ -27,7 +27,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup.blocking import build_index, generate_pairs
 from autodedup.cluster import cluster_pairs, cluster_rows
@@ -62,11 +62,14 @@ from autodedup.features import (
 from autodedup.fingerprint import Fingerprint, build_all
 from autodedup.labels import (
     TIER_PRECEDENCE,
+    WEIGHT_OPERATOR,
     Sample,
+    all_labels_by_tier,
     label_pairs,
-    labels_by_tier,
     load_all_judgements,
+    load_all_operator_labels,
     load_sample,
+    operator_label_pairs,
     sample_from_judgements,
 )
 from autodedup.model import CALIBRATION_METHODS, LogisticModel, hand_initialised
@@ -755,9 +758,48 @@ def resolve_sample(
     return pooled, f"{len(draws)} draws pooled [{pooled.stratum_fn}]: " + "; ".join(notes)
 
 
-def load_labels(paths: Sequence[str], precedence: Sequence[str]) -> tuple[Any, Any, Any]:
+def _add_operator_label_args(command: argparse.ArgumentParser) -> None:
+    """The operator tier's three flags, shared by `evaluate`, `fit` and `errors`."""
+    command.add_argument("--operator-labels", action="append", default=None,
+                         help="operator_labels.jsonl from the `labels` lane; repeatable."
+                              " The operator is the TOP tier — it outranks gold")
+    command.add_argument("--exclude-implied", action="store_true",
+                         help="drop operator labels implied by a confirmed group and keep only"
+                              " the pairs the operator ruled explicitly")
+    command.add_argument("--implied-weight", type=float, default=None,
+                         help="weight for implied operator labels (default: 1.0, the same as"
+                              " an explicit one); 0 excludes them from the fit's arithmetic"
+                              " while leaving them in the reports")
+
+
+def operator_tier(args: argparse.Namespace) -> dict[Any, Any]:
+    """The operator tier as the flags ask for it, or empty when no artifact was given."""
+    paths = list(getattr(args, "operator_labels", None) or ())
+    if not paths:
+        return {}
+    missing = [path for path in paths if not Path(path).is_file()]
+    if missing:
+        raise SystemExit(f"no such operator-labels file(s): {missing}")
+    rows = load_all_operator_labels(paths)
+    weight = getattr(args, "implied_weight", None)
+    return operator_label_pairs(
+        rows,
+        include_implied=not getattr(args, "exclude_implied", False),
+        implied_weight=(WEIGHT_OPERATOR if weight is None else float(weight)),
+    )
+
+
+def load_labels(
+    paths: Sequence[str],
+    precedence: Sequence[str],
+    operator: Mapping[Any, Any] | None = None,
+) -> tuple[Any, Any, Any]:
     judgements = load_all_judgements(paths)
-    return judgements, label_pairs(judgements, precedence=precedence), labels_by_tier(judgements)
+    return (
+        judgements,
+        label_pairs(judgements, precedence=precedence, operator=operator),
+        all_labels_by_tier(judgements, operator=operator),
+    )
 
 
 def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
@@ -769,7 +811,10 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     if missing:
         print(f"no such judgements file(s): {missing}", file=sys.stderr)
         return 1
-    judgements, labels, per_tier = load_labels(args.judgements, args.precedence)
+    operator = operator_tier(args)
+    judgements, labels, per_tier = load_labels(
+        args.judgements, args.precedence, operator
+    )
     if not labels:
         print("no usable labels in the judgements given", file=sys.stderr)
         return 1
@@ -851,7 +896,8 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     if missing:
         print(f"no such judgements file(s): {missing}", file=sys.stderr)
         return 1
-    judgements, labels, _ = load_labels(args.judgements, args.precedence)
+    operator = operator_tier(args)
+    judgements, labels, _ = load_labels(args.judgements, args.precedence, operator)
     try:
         sample, sample_note = resolve_sample(args.judgements, args.sample)
     except ValueError as exc:
@@ -970,7 +1016,8 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--out", required=True, help="directory for the report files")
         command.add_argument("--precedence", action="append", default=None,
                              help="tier precedence, highest first; repeatable"
-                                  " (default: gold, vision, text)")
+                                  " (default: operator, gold, vision, text)")
+        _add_operator_label_args(command)
         command.set_defaults(func=handler, precedence_default=TIER_PRECEDENCE)
         command.add_argument("--seed", type=int, default=SAMPLE_SEED,
                              help="deterministic 60/20/20 cluster-split seed")
@@ -1032,7 +1079,8 @@ def build_parser() -> argparse.ArgumentParser:
                                help="how many example pairs to list per error group")
     errors_parser.add_argument("--precedence", action="append", default=None,
                                help="tier precedence, highest first; repeatable"
-                                    " (default: gold, vision, text)")
+                                    " (default: operator, gold, vision, text)")
+    _add_operator_label_args(errors_parser)
     errors_parser.add_argument("--threshold", action="append", type=float, default=None,
                                help="score cut for the model-merge tables; repeatable"
                                     " (default: the run's own t_hi and the rungs above it)")
@@ -1053,7 +1101,8 @@ def cmd_errors(args: argparse.Namespace, out: Any) -> int:
     if missing:
         print(f"no such judgements file(s): {missing}", file=sys.stderr)
         return 1
-    judgements, labels, _ = load_labels(args.judgements, args.precedence)
+    operator = operator_tier(args)
+    judgements, labels, _ = load_labels(args.judgements, args.precedence, operator)
     if not labels:
         print("no usable labels in the judgements given", file=sys.stderr)
         return 1

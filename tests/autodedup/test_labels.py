@@ -304,3 +304,110 @@ def test_a_partial_precedence_keeps_vision_above_text() -> None:
     assert out[(1, 2)].tier == "vision" and out[(1, 2)].y == 0
     assert lb.effective_precedence(["text", "vision"], ("gold",)) == ["vision", "text"]
     assert lb.effective_precedence(["text", "operator"], ("operator",)) == ["operator", "text"]
+
+
+# --- the operator tier ---------------------------------------------------------------------
+
+
+def operator_row(lo: int, hi: int, verdict: str, source: str = lb.SOURCE_EXPLICIT,
+                 **extra: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "listing_lo": lo, "listing_hi": hi, "verdict": verdict, "source": source,
+        "relation": verdict, "reasons": [], "note": None, "decided_by": "operator",
+        "decided_at": "2026-09-18T10:30:00+00:00", "cluster_key": None,
+        "must_not_link": False, "engine": None,
+    }
+    row.update(extra)
+    return row
+
+
+@pytest.mark.parametrize("verdict,expected", [
+    ("same", 1),
+    ("different", 0),
+    ("same_building_different_unit", 0),
+    ("same_project_different_unit", 0),
+    ("unsure", None),
+    ("nonsense", None),
+])
+def test_the_operator_verdict_maps_onto_the_binary_target(verdict: str,
+                                                          expected: int | None) -> None:
+    assert lb.operator_verdict_class(verdict) == expected
+
+
+def test_unsure_is_dropped_rather_than_carried_as_an_abstention() -> None:
+    rows = [lb.parse_operator_label(operator_row(1, 2, "unsure")),
+            lb.parse_operator_label(operator_row(3, 4, "same"))]
+    out = lb.operator_label_pairs(rows)
+    assert set(out) == {(3, 4)}
+
+
+def test_the_operator_outranks_gold() -> None:
+    judged = [lb.parse_judgement(judgement(1, 2, "same_property", tier="gold",
+                                           unanimous=True, votes=3))]
+    judged[0].n_votes = 3
+    operator = lb.operator_label_pairs(
+        [lb.parse_operator_label(operator_row(1, 2, "different"))]
+    )
+    out = lb.label_pairs(judged, operator=operator)
+    assert out[(1, 2)].tier == lb.OPERATOR_TIER
+    assert out[(1, 2)].y == 0 and out[(1, 2)].source == lb.SOURCE_EXPLICIT
+    # ... and the machine tiers are still there to be reported on their own.
+    per_tier = lb.all_labels_by_tier(judged, operator=operator)
+    assert per_tier["gold"][(1, 2)].y == 1
+    assert per_tier[lb.OPERATOR_TIER][(1, 2)].y == 0
+
+
+def test_a_precedence_that_omits_the_operator_still_ranks_it_first() -> None:
+    # `--precedence gold` names only one tier; the operator must not fall to the alphabetical
+    # tail, where it would rank below `gold` and `text` alike.
+    assert lb.effective_precedence(
+        ["text", "gold", lb.OPERATOR_TIER], ("gold",)
+    ) == ["gold", lb.OPERATOR_TIER, "text"]
+    assert lb.effective_precedence(["text", "gold", lb.OPERATOR_TIER]) == [
+        lb.OPERATOR_TIER, "gold", "text"
+    ]
+
+
+def test_explicit_beats_implied_whatever_order_the_rows_arrive_in() -> None:
+    explicit = operator_row(1, 2, "different")
+    implied = operator_row(1, 2, "same", source=lb.SOURCE_IMPLIED, cluster_key=900)
+    for rows in ([implied, explicit], [explicit, implied]):
+        out = lb.operator_label_pairs([lb.parse_operator_label(r) for r in rows])
+        assert out[(1, 2)].y == 0 and out[(1, 2)].source == lb.SOURCE_EXPLICIT
+
+
+def test_implied_labels_can_be_excluded_or_weighted() -> None:
+    rows = [lb.parse_operator_label(operator_row(1, 2, "same")),
+            lb.parse_operator_label(
+                operator_row(3, 4, "same", source=lb.SOURCE_IMPLIED, cluster_key=900))]
+    both = lb.operator_label_pairs(rows)
+    assert set(both) == {(1, 2), (3, 4)}
+    assert both[(3, 4)].weight == lb.WEIGHT_OPERATOR
+
+    only_explicit = lb.operator_label_pairs(rows, include_implied=False)
+    assert set(only_explicit) == {(1, 2)}
+
+    discounted = lb.operator_label_pairs(rows, implied_weight=0.25)
+    assert discounted[(3, 4)].weight == 0.25
+    assert discounted[(1, 2)].weight == lb.WEIGHT_OPERATOR
+
+
+def test_both_shared_building_verdicts_are_must_not_links() -> None:
+    rows = [lb.parse_operator_label(operator_row(1, 2, "same_building_different_unit")),
+            lb.parse_operator_label(operator_row(3, 4, "same_project_different_unit")),
+            lb.parse_operator_label(operator_row(5, 6, "different"))]
+    out = lb.operator_label_pairs(rows)
+    assert out[(1, 2)].must_not_link and out[(3, 4)].must_not_link
+    assert not out[(5, 6)].must_not_link
+
+
+def test_operator_labels_load_from_a_jsonl_artifact(tmp_path: Path) -> None:
+    path = write_jsonl(tmp_path / "operator_labels.jsonl", [
+        operator_row(2, 1, "same"),  # out of order on purpose: the key is normalised
+        operator_row(3, 4, "same", source=lb.SOURCE_IMPLIED, cluster_key=900,
+                     engine={"score": 0.9, "zone": "band"}),
+    ])
+    rows = lb.load_all_operator_labels([path])
+    assert [row.key for row in rows] == [(1, 2), (3, 4)]
+    assert rows[1].is_implied and rows[1].engine["zone"] == "band"
+    assert lb.operator_label_pairs(rows)[(1, 2)].to_json()["source"] == lb.SOURCE_EXPLICIT
