@@ -86,6 +86,20 @@ SPENT_SEALS: dict[str, str] = {
         "test side carries the contested development families, which today means an operator "
         "ruling on them first."
     ),
+    "510db099bed2d473827257ebc2211f00bbbf0beceff23906d3567e3c7f0dd6c1": (
+        "W13's seal: W11's map (4456 listings, 664 groups — still the FIXPOINT M108 found) "
+        "under a fresh seed 20260927, cut by the pre-stated seed rule (20260926 failed its "
+        "15 % validation floor). SPENT by W13's verification, which opened it ONCE to "
+        "adjudicate D36: the honest clock merges 204 of 250 reliable sealed labelled "
+        "duplicates against g6's 164 — McNemar gained 40, lost 0, p ~ 1.8e-12; gold-only 77 "
+        "against 59, gained 18 lost 0 — at precision 1.0 (Wilson95 lower 0.9815) and 0 "
+        "reliable false merges at pair, block, family and cluster grain in BOTH arms. That "
+        "read promoted g7. Its test side carries NO contested pair (M112's limitation is "
+        "unchanged, though the class is now three gold-only POSITIVES), and 122 of its 342 "
+        "reliable labelled pairs were also test under W12's seed ebc141fa… where this same "
+        "arm was reported (M110) — confirmation overlap, not a tuning leak, because no search "
+        "was run there. The next choice needs a fresh seed again."
+    ),
     "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884": (
         "W9's fresh seal (4456 listings, 663 groups), seed 20260922. SPENT because it was read "
         "TWICE: once for the refused g7 refit (D25) and once for W10's verification, which is "

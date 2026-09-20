@@ -824,9 +824,15 @@ def test_e65_defaults_off_leaves_the_detection_clock_untouched() -> None:
     assert certificate_b(feats, gone, successor, Settings(live_window_from_sighting=False))
 
 
-def test_e65_the_honest_clock_may_not_run_without_the_floor() -> None:
-    with pytest.raises(ValueError, match="needs a price: the E65 image floor"):
+def test_e95_the_honest_clock_pays_with_e84_and_the_floor_is_optional() -> None:
+    """E110 (W13) replaces E65 as the honest clock's price: the operator ruled the two pairs
+    that were the floor's whole case (`522698 x 13221982`, `555448 x 18626270`) duplicates, so
+    the sealed read that carries the arm is W11's — 347 of 406 against g6's 300, gained 47,
+    lost 0 — and the price it measured is the E84 pair gap. The floor still BUILDS and still
+    binds `certificate_b`; what changed is that it is no longer mandatory."""
+    with pytest.raises(ValueError, match="E84 gap rail"):
         Settings(live_window_from_sighting=True)
+    Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP)
     Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
              certificate_b_min_images=1.0)
 

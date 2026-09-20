@@ -88,7 +88,7 @@ def test_the_lane_writer_census_covers_the_package() -> None:
             "family.py", "features.py",
         "fingerprint.py", "guards.py", "hazard_context.py", "incremental.py",
         "incremental_scope.py", "incremental_store.py", "parity_digest.py",
-        "model.py", "normalize.py", "oss_pod.py", "settings.py", "stock.py",
+        "model.py", "normalize.py", "oss_pod.py", "revocation.py", "settings.py", "stock.py",
             "text_facts.py",
         "ui_sql.py", "verdict_reasons.py",
     }

@@ -48,10 +48,15 @@ def test_the_honest_clock_arm_carries_the_floor_and_the_incumbents_cuts() -> Non
         assert getattr(ARM, name) == getattr(W8, name), name
 
 
-def test_the_pairing_of_the_honest_clock_and_the_floor_is_enforced_not_remembered() -> None:
-    with pytest.raises(ValueError, match="needs a price: the E65 image floor"):
-        Settings.from_dict({**ARM.to_dict(), "certificate_b_min_images": 0.0,
-                            "certificate_b_min_matched_images": 0.0})
+def test_the_w9_arm_still_carries_its_floor_although_e95_no_longer_demands_one() -> None:
+    """W9's arm is a RECORD of what was measured with the floor at (1, 1); E110 (W13) makes the
+    floor optional, so dropping it now builds — and builds the W13 arm, which is a different
+    row with its own sealed read behind it."""
+    floorless = Settings.from_dict({**ARM.to_dict(), "certificate_b_min_images": 0.0,
+                                    "certificate_b_min_matched_images": 0.0})
+    assert floorless.live_window_from_sighting is True
+    assert floorless.certificate_b_min_gap_days > 0.0, "E84 is still required"
+    assert ARM.certificate_b_min_images == 1.0, "and the W9 record is untouched"
 
 
 def test_no_shipped_settings_file_carries_a_cut_the_refit_chose() -> None:
