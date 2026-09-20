@@ -1003,3 +1003,192 @@ RT_MUST_NOT_LINK_SQL = """
 select listing_lo, listing_hi
   from autodedup.must_not_link
 """
+
+
+# ------------------------------------------------------------------ the clean reset (E97)
+#
+# `rt_seed reseed=true fresh=true`: the twelve statements that empty ONE generation and
+# nothing else, run inside the seed's own transaction so a refusal anywhere after them puts
+# every row back. Each is a `delete ... returning` wrapped in a count, because the summary has
+# to say what it removed per table — a reset whose receipt is "ok" is the reset that left
+# 15,923 undecidable pairs in `rt` on 2026-09-20 and nobody noticed for a day.
+#
+# What is NOT here is the point of the list: `autodedup.verdicts`, `must_not_link` and the
+# judge's `judgements` are GENERATION-FREE operator evidence (E95 says so for a re-seed and it
+# is the same rule here), `rt_calibration` is rewritten two statements later by the seed
+# itself, `phash_pop` is the frozen population the seed re-materialises, and no statement in
+# this file names a table outside schema `autodedup` (D4/D8).
+RT_FRESH_PAIRS_SQL = """
+with gone as (
+    delete from autodedup.pairs
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_CLUSTER_MEMBERS_SQL = """
+with gone as (
+    delete from autodedup.cluster_members
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_CLUSTERS_SQL = """
+with gone as (
+    delete from autodedup.clusters
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+# `cluster_conflicts` carries no generation COLUMN — the score lane writes the generation into
+# `detail` and prunes on it there, so the reset reads it the same way rather than inventing a
+# second spelling.
+RT_FRESH_CLUSTER_CONFLICTS_SQL = """
+with gone as (
+    delete from autodedup.cluster_conflicts
+     where detail ->> 'generation' = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_RT_FP_SQL = """
+with gone as (
+    delete from autodedup.rt_fp
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_FP_KEY_SQL = """
+with gone as (
+    delete from autodedup.fp_key
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_BLOCK_CELL_SQL = """
+with gone as (
+    delete from autodedup.rt_block_cell
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_SCOPE_IDS_SQL = """
+with gone as (
+    delete from autodedup.rt_scope_ids
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_SCOPE_SCAN_SQL = """
+with gone as (
+    delete from autodedup.rt_scope_scan
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_RETIRE_EVENT_SQL = """
+with gone as (
+    delete from autodedup.rt_retire_event
+     where generation = %(generation)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+# `scan_cursor` is keyed on the cursor NAME alone, so the rows this generation owns are named
+# explicitly by the caller rather than filtered by a column that does not exist.
+RT_FRESH_CURSORS_SQL = """
+with gone as (
+    delete from autodedup.scan_cursor
+     where name = any(%(names)s::text[])
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+RT_FRESH_LEASE_SQL = """
+with gone as (
+    delete from autodedup.rt_lease
+     where name = %(name)s::text
+ returning 1
+)
+select count(*)::bigint from gone
+"""
+
+# ------------------------------------------------------------------ the bootstrap phase (E98)
+#
+# Which blocks this generation has EVER walked, with no 24-hour window on it. The cadence's own
+# state query is windowed (a block last walked two days ago has to read as due), but the
+# bootstrap phase ends on "every block has been walked once", which is a question about all of
+# history and cannot be asked of a rolling day.
+RT_SCOPE_SCAN_SEEN_SQL = """
+select distinct s.block_key
+  from autodedup.rt_scope_scan s
+ where s.generation = %(generation)s::text
+"""
+
+# How many in-scope listings this generation has not fingerprinted yet — the bootstrap phase's
+# own end condition, read from the membership snapshot and the store, both in schema
+# `autodedup`: ZERO blocks of `public`.
+RT_SCOPE_BACKLOG_SQL = """
+select count(*)::bigint
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and not exists (select 1
+                     from autodedup.rt_fp f
+                    where f.generation = %(generation)s::text
+                      and f.listing_id = s.listing_id)
+"""
+
+# ------------------------------------------------------------------ live equivalence (E99)
+#
+# `--mode rt_equivalence`: the LIVE store against a batch generation scored on the same export.
+# Read-only, and deliberately whole-table rather than id-filtered — one generation of the trial
+# scope is ~16,000 pair rows, so the scope restriction is applied in Python against the
+# membership snapshot instead of shipping a 5,000-element array into every statement.
+RT_EQUIV_PAIRS_SQL = """
+select p.listing_lo, p.listing_hi, p.score, p.zone, p.certificate, p.decision,
+       p.guard_veto, p.families, p.model_version
+  from autodedup.pairs p
+ where p.generation = %(generation)s::text
+ order by p.listing_lo, p.listing_hi
+"""
+
+RT_EQUIV_MEMBERS_SQL = """
+select m.cluster_key, m.listing_id
+  from autodedup.cluster_members m
+ where m.generation = %(generation)s::text
+ order by m.cluster_key, m.listing_id
+"""
+
+RT_EQUIV_SCOPE_IDS_SQL = """
+select s.listing_id
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+ order by s.listing_id
+"""
+
+# The one read of `public` this mode makes, and it is `listings_pkey`: a pair the live store
+# holds and the batch generation cannot is EXPLAINED when either endpoint arrived after the
+# export the batch generation was scored on.
+RT_EQUIV_FIRST_SEEN_SQL = """
+select l.id, l.first_seen_at
+  from public.listings l
+ where l.id = any(%(ids)s::bigint[])
+"""

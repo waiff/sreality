@@ -31,7 +31,8 @@ LANE_WRITERS: tuple[str, ...] = (
     "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
     "parity.py",
-    "progress_sql.py", "replay.py", "score_lane.py", "score_sql.py", "seals.py",
+    "progress_sql.py", "replay.py", "rt_equivalence.py", "score_lane.py", "score_sql.py",
+    "seals.py",
     "structural_truth.py",
 )
 

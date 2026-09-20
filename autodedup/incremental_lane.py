@@ -106,12 +106,25 @@ from autodedup.incremental_sql import (
     RT_CURSOR_SET_SQL,
     RT_CURSOR_WRITE_SQL,
     RT_FLIPPED_LISTINGS_SQL,
+    RT_EQUIV_FIRST_SEEN_SQL,
     RT_EVIDENCE_CANDIDATES_SQL,
     RT_EVIDENCE_HELD_COUNT_SQL,
     RT_EVIDENCE_PROBE_SQL,
     RT_EVIDENCE_RELEASE_SQL,
     RT_FP_COUNT_SQL,
     RT_FP_DELETE_SQL,
+    RT_FRESH_BLOCK_CELL_SQL,
+    RT_FRESH_CLUSTER_CONFLICTS_SQL,
+    RT_FRESH_CLUSTER_MEMBERS_SQL,
+    RT_FRESH_CLUSTERS_SQL,
+    RT_FRESH_CURSORS_SQL,
+    RT_FRESH_FP_KEY_SQL,
+    RT_FRESH_LEASE_SQL,
+    RT_FRESH_PAIRS_SQL,
+    RT_FRESH_RETIRE_EVENT_SQL,
+    RT_FRESH_RT_FP_SQL,
+    RT_FRESH_SCOPE_IDS_SQL,
+    RT_FRESH_SCOPE_SCAN_SQL,
     RT_FP_READ_SQL,
     RT_FP_UPSERT_SQL,
     RT_IDLE_GUARD_SQL,
@@ -141,6 +154,7 @@ from autodedup.incremental_sql import (
     RT_ROW_CENSUS_SQL,
     RT_ROW_ESTIMATE_SQL,
     RT_SCHEMA_SIZE_SQL,
+    RT_SCOPE_BACKLOG_SQL,
     RT_SCOPE_BLOCK_SQL,
     RT_SCOPE_ENTRANTS_SQL,
     RT_SCOPE_IDS_DELETE_SQL,
@@ -148,6 +162,7 @@ from autodedup.incremental_sql import (
     RT_SCOPE_IDS_PRUNE_SQL,
     RT_SCOPE_IDS_WRITE_SQL,
     RT_SCOPE_PARENT_OBEC_SQL,
+    RT_SCOPE_SCAN_SEEN_SQL,
     RT_SCOPE_SCAN_STATE_SQL,
     RT_SCOPE_SCAN_WRITE_SQL,
     RT_SCOPE_DRIFT_SQL,
@@ -198,6 +213,11 @@ SCAN_CAP_SETTING: str = "rt_enter_max_scans_per_day"
 INTERVAL_SETTING: str = "rt_enter_interval_hours"
 EVIDENCE_HORIZON_SETTING: str = "rt_evidence_horizon_hours"
 EVIDENCE_SLICE_SETTING: str = "rt_evidence_slice"
+# --- the bootstrap phase and the time budget (E98) ---
+# Both are per-generation `autodedup.settings` rows, written by the seed and read by the pass.
+BOOTSTRAP_SETTING: str = "rt_bootstrap"
+PASS_RATE_SETTING: str = "rt_pass_rate_per_s"
+PASS_BUDGET_SETTING: str = "rt_pass_budget_s"
 CALIBRATION_AGE_SETTING: str = "rt_calibration_max_age_days"
 RESCOPE_ARG: str = "rt_rescope"
 STORAGE_WATERMARK: str = "rt_storage_last"
@@ -260,6 +280,45 @@ ENTER_INTERVAL_HOURS: dict[str, float] = {"obec": 1.0, "cast_obce": 6.0}
 # is mis-set to zero or the block list grows. Under the trial scope the cadence asks for 52 a
 # day (24 + 24 + 4) against this 60. Data: `rt_enter_max_scans_per_day`.
 MAX_ENTER_SCANS_PER_DAY: int = 60
+# --- the bootstrap phase (E98) ---------------------------------------------------------------
+#
+# What a SEEDED generation costs when the seed wrote no pairs: nothing merges. A backfilled seed
+# writes `rt_fp` and `fp_key` for every listing of the cohort and NOT ONE PAIR, so the store
+# holds the whole scope and knows of no duplicate in it; a later arrival can only ever be
+# compared with what arrives after it, and its group misses every duplicate the seed backfilled.
+# The fix is not a "backfill pairs" step — it is to make every in-scope listing an ARRIVAL, which
+# is the one path the replay-equivalence proof covers (E70). `backfill=false` does that; this
+# phase is what makes it finish in hours instead of days.
+#
+# During the phase the entrant claim is the WHOLE `max_listings` rather than a seventh of it, and
+# the block walks ignore the per-grain cadence until every block has been walked once — a cadence
+# is what keeps a STEADY-STATE lane off `public`, and a scope nothing has listed yet has no
+# steady state. The rolling-day scan cap (`rt_enter_max_scans_per_day`) still holds, because that
+# rail exists for the case where the cadence is wrong. The phase ends BY ITSELF — the pass that
+# finds the entrant backlog empty writes the row false — so nothing has to remember to end it.
+BOOTSTRAP_MIN_CLAIM: int = 1
+# --- the time budget (E98) -------------------------------------------------------------------
+#
+# The claim is bounded by SECONDS as well as by counts, because the count bound is not a bound on
+# time and the job's is 25 minutes. Measured: the one live pass that ever did work claimed 77
+# listings and took 876.7 s (2026-09-20, run 35520830343) — 0.088 claimed listings a second, 14.6
+# minutes of a 25-minute timeout on a claim a sixth of the shipped one. A claim of 500 at that
+# rate is an hour and a half, and a pass that dies on the runner's timeout has written nothing,
+# advanced no cursor and left the lease held until it expires.
+#
+# So every pass measures its OWN rate (claimed listings per second of pass wall time) into
+# `rt_pass_rate_per_s:<generation>` and the next pass claims at most `budget x rate`. The default
+# below is the one live measurement, which is the pathological case this branch removes — the
+# first pass of a build therefore claims ~90 listings, measures the real rate, and the second
+# claims the full slice. One extra pass is the price of never guessing the rate upward.
+PASS_BUDGET_S: float = 900.0
+PASS_RATE_PER_S: float = 0.1
+# A rate is only recorded when the pass actually claimed enough for the quotient to mean
+# something: an idle pass is 0 listings in 7 seconds and would otherwise wedge the claim at 1.
+PASS_RATE_MIN_CLAIM: int = 20
+# How much of the new measurement the stored rate takes. A build ramps from the conservative
+# default to the real rate in two passes at 0.5 and cannot be knocked out of it by one slow pass.
+PASS_RATE_ALPHA: float = 0.5
 # The window the retirement rail is measured over (W9e/R2). A slice-sized rail could only fire
 # while one drift slice was itself a twentieth of the store; a rolling day is independent of
 # `drift_slice` and of the store's size.
@@ -932,7 +991,10 @@ class SqlWork:
                  enter_interval_hours: Mapping[str, float] | None = None,
                  max_enter_scans_per_day: int = MAX_ENTER_SCANS_PER_DAY,
                  evidence_slice: int = EVIDENCE_SLICE,
-                 evidence_horizon_hours: float = EVIDENCE_HORIZON_HOURS) -> None:
+                 evidence_horizon_hours: float = EVIDENCE_HORIZON_HOURS,
+                 bootstrap: bool = False,
+                 pass_budget_s: float = PASS_BUDGET_S,
+                 rate_per_s: float = PASS_RATE_PER_S) -> None:
         self.conn = conn
         self.scope = scope
         self.generation = generation
@@ -947,6 +1009,15 @@ class SqlWork:
         self.max_enter_scans_per_day = int(max_enter_scans_per_day)
         self.evidence_slice = int(evidence_slice)
         self.evidence_horizon_hours = float(evidence_horizon_hours)
+        self.bootstrap = bool(bootstrap)
+        self.pass_budget_s = float(pass_budget_s)
+        self.rate_per_s = float(rate_per_s)
+        # Set by `claim` while the phase is on: the entrant backlog it measured, and whether
+        # this pass is the one that empties it (E98).
+        self.bootstrap_done = False
+        self.bootstrap_backlog: int | None = None
+        # What bound this pass's claim — the count or the clock — for the run summary.
+        self.claim_bound: dict[str, Any] = {}
         self.parents = dict(parents or {})
         self.enter_blocks = _enter_blocks(scope, self.parents)
         self.statements = 0
@@ -973,8 +1044,24 @@ class SqlWork:
         return out
 
     def claim(self, limit: int) -> list[WorkItem]:
+        # THE TIME BUDGET (E98). `max_listings` bounds the work; it does not bound the CLOCK,
+        # and the runner's timeout is a clock. The rate is what the last pass of this
+        # generation measured itself at, so the bound is evidence rather than a guess, and it
+        # is applied here — before a statement is issued — because an aborted pass has spent
+        # its time whether or not it wrote anything.
+        by_time = max(BOOTSTRAP_MIN_CLAIM, int(self.pass_budget_s * self.rate_per_s))
+        effective = max(1, min(int(limit), by_time))
+        self.claim_bound = {"max_listings": int(limit), "pass_budget_s": self.pass_budget_s,
+                            "rate_per_s": self.rate_per_s, "by_time": by_time,
+                            "limit": effective,
+                            "bound_by": "time" if by_time < int(limit) else "count"}
+        limit = effective
         cursors = self.cursors()
         share = max(1, limit // 5)
+        # During the bootstrap phase the entrant feed is not one of seven equals: it is the
+        # build. Every other feed keeps its share, so an arrival, a delisting or a photograph
+        # landing mid-build is still decided in the pass that sees it.
+        enter_share = limit if self.bootstrap else share
         scope = self.scope.params()
         items: list[WorkItem] = []
         self._pending = {}
@@ -1064,14 +1151,16 @@ class SqlWork:
             after_enter = cursors[CURSOR_ENTER][0]
             rows = self._query(RT_SCOPE_ENTRANTS_SQL, {
                 "generation": self.generation, "after_id": after_enter,
-                "lag": self.lag, "limit": share})
+                "lag": self.lag, "limit": enter_share})
             self.windows["entered"] = len(rows)
             # Short of the share means the snapshot is walked out: the cursor wraps so the
             # next cycle re-offers whatever the settle lag held back this time.
             self._pending[CURSOR_ENTER] = (
-                (int(rows[-1][0]), pointer) if len(rows) >= share else (0, pointer))
+                (int(rows[-1][0]), pointer) if len(rows) >= enter_share else (0, pointer))
             for row in rows:
                 items.append(WorkItem(int(row[0]), "entered", _epoch(row[1]), None))
+            if self.bootstrap:
+                self._measure_bootstrap(len(rows))
 
         # The SEVENTH feed (E92): the listings whose PHOTOGRAPHS moved since this generation
         # decided them, and the merges whose hold has run out of horizon. Neither is visible
@@ -1086,6 +1175,20 @@ class SqlWork:
         for item in items:
             self._claimed.setdefault(item.feed, set()).add(item.listing_id)
         return items
+
+    def _measure_bootstrap(self, taken: int) -> None:
+        """Does this pass end the phase (E98)? Two conditions, both read inside `autodedup`.
+
+        Every block has to have been walked at least once — otherwise a block's listings have
+        never been OFFERED — and the backlog the snapshot still holds has to fit in what this
+        pass just claimed. The phase then ends by itself: no operator step, no second dispatch,
+        and nothing to remember when the build finishes at three in the morning."""
+        walked = self._walked_ever()
+        backlog = int(self._query(RT_SCOPE_BACKLOG_SQL,
+                                  {"generation": self.generation})[0][0] or 0)
+        self.bootstrap_backlog = backlog
+        self.bootstrap_done = bool(
+            backlog <= int(taken) and all(block.key in walked for block in self.enter_blocks))
 
     def _evidence_feed(self, after_id: int, share: int,
                        retiring: set[int] | None = None) -> list[WorkItem]:
@@ -1187,34 +1290,60 @@ class SqlWork:
         if not due:
             return start
         scans_24h = sum(scans for _age, scans in state.values())
-        if scans_24h >= self.max_enter_scans_per_day:
-            # A count, not a crash: the pass goes on claiming out of the snapshot it has.
-            self.enter_scan = {"skipped": "daily cap", "scans_24h": scans_24h,
-                               "cap": self.max_enter_scans_per_day}
-            return start
-        _age, _offset, index = max(due, key=lambda row: (row[0], -row[1]))
-        block = blocks[index]
-        started = time.time()
-        rows = self._query(RT_SCOPE_BLOCK_SQL, {
-            "obec": block.obec, "cast_obce": block.cast_obce, "limit": self.enter_slice})
-        elapsed_ms = (time.time() - started) * 1000.0
-        listing_ids = [int(row[0]) for row in rows]
-        params = {"generation": self.generation, "block_key": block.key,
-                  "listing_ids": listing_ids}
-        if listing_ids:
+        # THE BOOTSTRAP PHASE (E98). A cadence is what keeps a steady-state lane off `public`;
+        # a scope nothing has listed yet has no steady state, and one block a pass means the
+        # entrant feed offers nothing at all until the pass that walks the block a listing is
+        # in. So while the phase is on, every block this generation has NEVER walked is walked
+        # in the same pass — the cadence is ignored, the cap is not — and a block already
+        # walked once falls back to the cadence immediately, because re-walking Vysočany is
+        # 231 MB of cold heap reads and the phase is about listing it, not about refreshing it.
+        seen = self._walked_ever() if self.bootstrap else set()
+        order = [index for _age, _offset, index in
+                 sorted(due, key=lambda row: (-row[0], row[1]))]
+        wanted = ([index for index in order if blocks[index].key not in seen]
+                  if self.bootstrap else []) or order[:1]
+        walked: list[dict[str, Any]] = []
+        last = start
+        for index in wanted:
+            if scans_24h >= self.max_enter_scans_per_day:
+                # A count, not a crash: the pass goes on claiming out of the snapshot it has.
+                self.enter_scan = {"skipped": "daily cap", "scans_24h": scans_24h,
+                                   "cap": self.max_enter_scans_per_day, "blocks": walked}
+                return last if walked else start
+            block = blocks[index]
+            started = time.time()
+            rows = self._query(RT_SCOPE_BLOCK_SQL, {
+                "obec": block.obec, "cast_obce": block.cast_obce, "limit": self.enter_slice})
+            elapsed_ms = (time.time() - started) * 1000.0
+            listing_ids = [int(row[0]) for row in rows]
+            params = {"generation": self.generation, "block_key": block.key,
+                      "listing_ids": listing_ids}
+            if listing_ids:
+                self.statements += 1
+                _exec(self.conn, RT_SCOPE_IDS_WRITE_SQL,
+                      {**params, "resolved": [_iso(row[1]) for row in rows]})
             self.statements += 1
-            _exec(self.conn, RT_SCOPE_IDS_WRITE_SQL,
-                  {**params, "resolved": [_iso(row[1]) for row in rows]})
-        self.statements += 1
-        _exec(self.conn, RT_SCOPE_IDS_PRUNE_SQL, params)
-        self.statements += 1
-        _exec(self.conn, RT_SCOPE_SCAN_WRITE_SQL, {
-            "generation": self.generation, "block_key": block.key,
-            "rows_found": len(listing_ids), "elapsed_ms": round(elapsed_ms, 3)})
-        self.enter_scan = {"block": block.key, "rows": len(listing_ids),
-                           "elapsed_ms": round(elapsed_ms, 3), "scans_24h": scans_24h + 1,
-                           "cap": self.max_enter_scans_per_day}
-        return (index + 1) % len(blocks)
+            _exec(self.conn, RT_SCOPE_IDS_PRUNE_SQL, params)
+            self.statements += 1
+            _exec(self.conn, RT_SCOPE_SCAN_WRITE_SQL, {
+                "generation": self.generation, "block_key": block.key,
+                "rows_found": len(listing_ids), "elapsed_ms": round(elapsed_ms, 3)})
+            scans_24h += 1
+            walked.append({"block": block.key, "rows": len(listing_ids),
+                           "elapsed_ms": round(elapsed_ms, 3)})
+            last = (index + 1) % len(blocks)
+        self.enter_scan = {**walked[-1], "scans_24h": scans_24h,
+                           "cap": self.max_enter_scans_per_day, "blocks": walked}
+        return last
+
+    def _walked_ever(self) -> set[str]:
+        """The scope blocks this generation HAS a scan row for, ever (E98).
+
+        Not the cadence's own state query: that one is windowed to a rolling day, so a block
+        walked two days ago reads the same as a block never walked, and "every block has been
+        walked once" is a question about all of history."""
+        return {str(row[0]) for row in
+                self._query(RT_SCOPE_SCAN_SEEN_SQL, {"generation": self.generation})}
 
     def _guard_retirement(self, departed: Sequence[Any], wanted: int) -> None:
         """Refuse a drift sweep that is not drift (W9d-1), measured over a ROLLING DAY (W9e/R2).
@@ -1448,6 +1577,27 @@ def scope_setting_key(generation: str) -> str:
     return f"{SCOPE_SETTING}:{generation}"
 
 
+def bootstrap_setting_key(generation: str) -> str:
+    """`rt_bootstrap:<generation>` — the phase is a property of ONE generation's build."""
+    return f"{BOOTSTRAP_SETTING}:{generation}"
+
+
+def pass_rate_key(generation: str) -> str:
+    """`rt_pass_rate_per_s:<generation>` — what a pass of THIS generation measured itself at."""
+    return f"{PASS_RATE_SETTING}:{generation}"
+
+
+def setting_flag(value: Any) -> bool:
+    """A settings row read as a boolean. `true`, `True` and `"true"` all mean the same thing,
+    and anything else — a missing row included — means off, because the phases and switches
+    these rows carry are all opt-in."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
 def read_scope_setting(control: Mapping[str, Any], generation: str) -> Any:
     """The generation's scope row, and the legacy global row for `rt` alone (W9e/R4)."""
     value = control.get(scope_setting_key(generation))
@@ -1550,6 +1700,56 @@ def record_storage(conn: Any, generation: str, bytes_now: int) -> None:
         "value": json.dumps({"bytes": int(bytes_now), "generation": generation,
                              "at": datetime.now(timezone.utc).isoformat()}),
         "updated_by": LANE_NAME})
+
+
+# The cursor rows ONE generation owns. `autodedup.scan_cursor` is keyed on the name alone, so
+# the generation's rows are named here rather than filtered by a column the table does not have
+# — which is also why two real-time generations cannot run at once, and why the reset says so.
+RESET_CURSORS: tuple[str, ...] = (CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE,
+                                  CURSOR_SCOPE, CURSOR_ENTER, CURSOR_EVIDENCE)
+
+# The reset's statements, in the order they run: members and conflicts before the clusters they
+# name, pairs before the fingerprints they were scored from. Nothing here is an FK requirement —
+# schema `autodedup` declares none between these — it is so a half-applied reset, if one were
+# ever possible, could not leave a cluster with no members.
+RESET_TABLES: tuple[tuple[str, str], ...] = (
+    ("pairs", RT_FRESH_PAIRS_SQL),
+    ("cluster_members", RT_FRESH_CLUSTER_MEMBERS_SQL),
+    ("cluster_conflicts", RT_FRESH_CLUSTER_CONFLICTS_SQL),
+    ("clusters", RT_FRESH_CLUSTERS_SQL),
+    ("rt_fp", RT_FRESH_RT_FP_SQL),
+    ("fp_key", RT_FRESH_FP_KEY_SQL),
+    ("rt_block_cell", RT_FRESH_BLOCK_CELL_SQL),
+    ("rt_scope_ids", RT_FRESH_SCOPE_IDS_SQL),
+    ("rt_scope_scan", RT_FRESH_SCOPE_SCAN_SQL),
+    ("rt_retire_event", RT_FRESH_RETIRE_EVENT_SQL),
+)
+
+
+def reset_generation(conn: Any, generation: str) -> dict[str, int]:
+    """Empty ONE generation and nothing else (E97), counting what went.
+
+    `reseed=true` re-cuts the calibration, the frozen population and the parity baseline, and
+    leaves every pair and cluster the generation already holds exactly where they are — which is
+    right when the re-seed is a REFRESH of a generation scored under the same scorer (E95's
+    refresh recipe) and wrong when it is a rebuild. On 2026-09-20 it was a rebuild: the 15,923
+    pairs and 703 clusters written by the defective first pass (wrong scorer, `model_version`
+    NULL on every row, no photo evidence) survived the re-seed, and nothing in the lane will ever
+    re-decide a pair whose fingerprint digests still agree. So `fresh=true` is the other half of
+    `reseed=true`, and it is a DELETE of this generation's rows, never a TRUNCATE.
+
+    The caller runs it inside the seed's transaction: a seed that refuses after this point — an
+    empty scope, a refused parity baseline, a storage guard — leaves the store exactly as it
+    found it."""
+    deleted: dict[str, int] = {}
+    for name, sql in RESET_TABLES:
+        rows = _rows(conn, sql, {"generation": generation})
+        deleted[name] = int(rows[0][0] or 0) if rows else 0
+    rows = _rows(conn, RT_FRESH_CURSORS_SQL, {"names": list(RESET_CURSORS)})
+    deleted["scan_cursor"] = int(rows[0][0] or 0) if rows else 0
+    rows = _rows(conn, RT_FRESH_LEASE_SQL, {"name": LANE_NAME})
+    deleted["rt_lease"] = int(rows[0][0] or 0) if rows else 0
+    return deleted
 
 
 def env_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -1923,6 +2123,22 @@ def check_parity(conn: Any, generation: str, payload: Mapping[str, Any], k: int,
     return report
 
 
+def _measure_rate(result: Any, control: Mapping[str, Any], generation: str,
+                  elapsed_s: float) -> float | None:
+    """This pass's claimed-listings-per-second, blended with what the generation had (E98).
+
+    None when the pass claimed too little for the quotient to mean anything — an idle pass is
+    0 listings in 7 seconds, and a lane that learned 0 from it would claim one listing a pass
+    for ever."""
+    claimed = len(getattr(result, "claimed", ()) or ())
+    if claimed < PASS_RATE_MIN_CLAIM or elapsed_s <= 0:
+        return None
+    previous = max(1e-6, _setting_number(control.get(pass_rate_key(generation)),
+                                         PASS_RATE_PER_S))
+    blended = PASS_RATE_ALPHA * (claimed / float(elapsed_s)) + (1.0 - PASS_RATE_ALPHA) * previous
+    return round(blended, 6)
+
+
 def run_incremental(
     conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path
 ) -> dict[str, Any]:
@@ -1966,6 +2182,9 @@ def run_incremental(
                                        PARITY_MIN_SHARE_SETTING,
                                        PARITY_UNKNOWN_POP_SETTING, CALIBRATION_AGE_SETTING,
                                        EVIDENCE_HORIZON_SETTING, EVIDENCE_SLICE_SETTING,
+                                       PASS_BUDGET_SETTING,
+                                       bootstrap_setting_key(generation),
+                                       pass_rate_key(generation),
                                        parity_baseline_key(generation)])
         try:
             # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
@@ -1989,6 +2208,11 @@ def run_incremental(
             evidence_slice = control_number(EVIDENCE_SLICE_SETTING, args, control,
                                             float(EVIDENCE_SLICE), rescope)
             floors = resolve_floors(args, control, rescope)
+            # The build phase and the clock the claim is bounded by (E98), both data.
+            bootstrap = setting_flag(control.get(bootstrap_setting_key(generation)))
+            pass_budget_s = _setting_number(control.get(PASS_BUDGET_SETTING), PASS_BUDGET_S)
+            rate_per_s = max(1e-6, _setting_number(control.get(pass_rate_key(generation)),
+                                                   PASS_RATE_PER_S))
         except ScopeError as exc:
             raise SystemExit(str(exc)) from exc
         try:
@@ -2028,7 +2252,9 @@ def run_incremental(
                        enter_interval_hours=intervals,
                        max_enter_scans_per_day=int(max_enter_scans),
                        evidence_slice=int(evidence_slice),
-                       evidence_horizon_hours=evidence_horizon)
+                       evidence_horizon_hours=evidence_horizon,
+                       bootstrap=bootstrap, pass_budget_s=pass_budget_s,
+                       rate_per_s=rate_per_s)
         result = None
         try:
             with _transaction(conn):
@@ -2052,6 +2278,7 @@ def run_incremental(
                 # has none, so the replay's default is no hold and the equivalence proof is
                 # untouched by it.
                 pass_now = time.time()
+                pass_clock = time.perf_counter()
                 result = run_pass_bounded(store, facts, work, settings, model, calibration,
                                           limits=limits, generation=generation,
                                           now=pass_now,
@@ -2060,6 +2287,21 @@ def run_incremental(
                 if result.aborted:
                     # Nothing this pass wrote survives a refusal, and no cursor moved.
                     raise _Refused()
+                # What this pass measured ITSELF at, for the next pass's time budget (E98).
+                # Written inside the transaction, so a refused pass records nothing and a
+                # slow one cannot teach the lane to claim more than it can finish.
+                measured = _measure_rate(result, control, generation, time.perf_counter()
+                                         - pass_clock)
+                if measured is not None:
+                    _exec(conn, RT_SETTING_WRITE_SQL, {
+                        "key": pass_rate_key(generation), "value": json.dumps(measured),
+                        "updated_by": f"{LANE_NAME}:rate"})
+                # The phase ends by ITSELF, in the transaction that empties the backlog: the
+                # entrant claim goes back to a seventh and the cadence takes the blocks back.
+                if bootstrap and work.bootstrap_done:
+                    _exec(conn, RT_SETTING_WRITE_SQL, {
+                        "key": bootstrap_setting_key(generation), "value": json.dumps(False),
+                        "updated_by": f"{LANE_NAME}:bootstrap_done"})
         except _Refused:
             pass
         except RetireRefusal as exc:
@@ -2098,6 +2340,17 @@ def run_incremental(
         # What the entrant feed cost the production instance THIS pass: a block refresh, a
         # refusal against the rolling-day cap, or nothing at all (W9e/R3).
         summary["enter_scan"] = dict(work.enter_scan)
+        # The build phase and the clock (E98): what bounded this claim, what the phase still
+        # owes, and whether this pass was the one that ended it.
+        summary["claim_bound"] = dict(work.claim_bound)
+        summary["bootstrap"] = {
+            "active": bool(bootstrap),
+            "backlog": work.bootstrap_backlog,
+            "ended_this_pass": bool(bootstrap and work.bootstrap_done
+                                    and result is not None and not result.aborted),
+            "setting_key": bootstrap_setting_key(generation),
+            "rate_key": pass_rate_key(generation),
+        }
         summary["enter_interval_hours"] = dict(intervals)
         summary["max_enter_scans_per_day"] = int(max_enter_scans)
         # The seventh feed and the hold it serves (E92/E93): what the sweep probed on
@@ -2184,6 +2437,22 @@ def run_rt_seed(
     settings, model, settings_name, model_name = named_config(args, what="rt_seed")
     backfill = str(args.get("backfill") or "").strip().lower() == "true"
     reseed = str(args.get("reseed") or "").strip().lower() == "true"
+    # A CLEAN RESET (E97), and only ever beside the word that already means "I mean it": a
+    # `fresh` that could run without `reseed` would be one fat-fingered dispatch away from
+    # emptying a generation somebody is reading.
+    fresh = str(args.get("fresh") or "").strip().lower() == "true"
+    if fresh and not reseed:
+        raise SystemExit(
+            "fresh=true empties THIS generation's pairs, clusters, fingerprints, postings, "
+            "census cells, scope snapshot and cursors — it is only valid with reseed=true, "
+            "which is how this lane spells 'I mean it'. Nothing was written.")
+    bootstrap = str(args.get("rt_bootstrap") or "").strip().lower() == "true"
+    if bootstrap and backfill:
+        raise SystemExit(
+            "rt_bootstrap=true builds the generation through the ARRIVAL path (E98) and "
+            "backfill=true writes the fingerprints without a single pair (E97) — a generation "
+            "seeded with both would spend the phase walking a scope whose every listing is "
+            "already in the store, and would still hold no pairs. Pass backfill=false.")
     parity_n = int(_setting_number(args.get("parity_n"), float(PARITY_BASELINE_N)))
 
     conn = conn_factory()
@@ -2198,6 +2467,14 @@ def run_rt_seed(
                 f"{str(existing[0][1])!r}, cut {existing[0][2]}) — a re-seed re-cuts the frozen "
                 "calibration every stored decision of this generation was taken under. Pass "
                 "reseed=true to mean it, or seed a new generation.")
+        if fresh and not existing:
+            # The reset deletes pairs, clusters, members and conflicts BY GENERATION NAME. A
+            # batch generation (g4..g7) has no rt_calibration row, so without this refusal
+            # `generation=g7 reseed=true fresh=true` would empty the operator's reviewed pass.
+            raise SystemExit(
+                f"fresh=true refused: generation {generation!r} carries no real-time "
+                "calibration, so it was never seeded by this lane and is not this lane's to "
+                "empty. Seed it first (without fresh), or name the real-time generation.")
         scope_key = scope_setting_key(generation)
         control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
                                        PARITY_MIN_CHECKED_SETTING, PARITY_MIN_SHARE_SETTING,
@@ -2237,7 +2514,13 @@ def run_rt_seed(
             fps, {i: ds.listings[i] for i in in_scope}, settings, generation)
         payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
         written = 0
+        reset: dict[str, int] = {}
         with _transaction(conn):
+            # FIRST, inside the seed's own transaction (E97): a refusal anywhere below — an
+            # empty scope, a parity baseline that cannot clear the floors — puts every deleted
+            # row back, so there is no state in which the generation is emptied and unseeded.
+            if fresh:
+                reset = reset_generation(conn, generation)
             # THE FROZEN POPULATION FIRST (E91). Everything below — the parity gate included —
             # reads galleries through `SqlFacts`, which joins this table, so it has to be
             # written before anything looks at an image.
@@ -2276,6 +2559,14 @@ def run_rt_seed(
                 "key": parity_baseline_key(generation),
                 "value": json.dumps(parity["baseline"], sort_keys=True, default=str),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
+            # The build phase, as DATA rather than as a flag on one dispatch (E98): the passes
+            # that do the building are the `*/10` schedule's, and none of them carries an
+            # argument. The row is written on every seed — true when the operator asked for the
+            # phase, false when they did not — so a re-seed can never leave a stale one on.
+            _exec(conn, RT_SETTING_WRITE_SQL, {
+                "key": bootstrap_setting_key(generation),
+                "value": json.dumps(bool(bootstrap)),
+                "updated_by": f"{LANE_NAME}:rt_seed"})
             if backfill:
                 store = SqlStore(conn, generation, store_floor=settings.store_floor,
                                  model_version=model.version,
@@ -2313,6 +2604,12 @@ def run_rt_seed(
             "cursors": {CURSOR_NEW: int(seeded[0]), CURSOR_CHANGED: int(seeded[1]),
                         CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0, CURSOR_SCOPE: 0},
             "backfilled": written,
+            # What the reset removed, per table (E97). `{}` when `fresh` was not asked for —
+            # which is itself the receipt that the generation's old rows are still there.
+            "fresh": bool(fresh),
+            "reset": reset,
+            "bootstrap": bool(bootstrap),
+            "bootstrap_key": bootstrap_setting_key(generation),
             "scope": scope.as_json(),
             "scope_key": scope_key,
             "reseed": bool(reseed),

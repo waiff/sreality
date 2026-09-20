@@ -108,6 +108,9 @@ class FakePg:
             "cluster_conflicts": [dict(row) for row in self.cluster_conflicts],
             "cells": {k: dict(v) for k, v in self.cells.items()},
             "cursors": {k: dict(v) for k, v in self.cursors.items()},
+            # The clean reset (E97) deletes the lease row inside the seed's transaction, so a
+            # refusal has to put it back the way Postgres would.
+            "lease": {k: dict(v) for k, v in self.lease.items()},
             "scope_ids": {k: dict(v) for k, v in self.scope_ids.items()},
             "scope_scans": [dict(row) for row in self.scope_scans],
             "retire_events": [dict(row) for row in self.retire_events],
@@ -127,6 +130,7 @@ class FakePg:
         self.cluster_conflicts = state["cluster_conflicts"]
         self.cells = state["cells"]
         self.cursors = state["cursors"]
+        self.lease = state["lease"]
         self.scope_ids = state["scope_ids"]
         self.scope_scans = state["scope_scans"]
         self.retire_events = state["retire_events"]
@@ -526,6 +530,83 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_MUST_NOT_LINK_SQL:
         return sorted(db.mnl)
 
+    # ---------------------------------------------------------------- the clean reset (E97)
+    #
+    # Each statement counts what it deleted, because the seed's receipt says so per table. The
+    # fake enforces the one thing the reset promises: the predicate is THIS generation, so a
+    # statement that lost its `where` would show up here as another generation going missing.
+    if sql == S.RT_FRESH_PAIRS_SQL:
+        gone = [key for key in db.pairs if key[0] == gen]
+        for key in gone:
+            db.pairs.pop(key)
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_CLUSTER_MEMBERS_SQL:
+        gone = [row for row in db.cluster_members if row[0] == gen]
+        db.cluster_members = {row for row in db.cluster_members if row[0] != gen}
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_CLUSTERS_SQL:
+        gone = [key for key in db.clusters if key[0] == gen]
+        for key in gone:
+            db.clusters.pop(key)
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_CLUSTER_CONFLICTS_SQL:
+        keep = [row for row in db.cluster_conflicts
+                if (_jsonb(row.get("detail")) or {}).get("generation") != gen]
+        gone = len(db.cluster_conflicts) - len(keep)
+        db.cluster_conflicts[:] = keep
+        return [(gone,)]
+    if sql == S.RT_FRESH_RT_FP_SQL:
+        gone = [key for key in db.rt_fp if key[0] == gen]
+        for key in gone:
+            db.rt_fp.pop(key)
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_FP_KEY_SQL:
+        gone = [row for row in db.fp_key if row[0] == gen]
+        db.fp_key = {row for row in db.fp_key if row[0] != gen}
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_BLOCK_CELL_SQL:
+        gone = [key for key in db.cells if key[0] == gen]
+        for key in gone:
+            db.cells.pop(key)
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_SCOPE_IDS_SQL:
+        gone = [key for key in db.scope_ids if key[0] == gen]
+        for key in gone:
+            db.scope_ids.pop(key)
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_SCOPE_SCAN_SQL:
+        keep = [row for row in db.scope_scans if row["generation"] != gen]
+        gone = len(db.scope_scans) - len(keep)
+        db.scope_scans[:] = keep
+        return [(gone,)]
+    if sql == S.RT_FRESH_RETIRE_EVENT_SQL:
+        keep = [row for row in db.retire_events if row["generation"] != gen]
+        gone = len(db.retire_events) - len(keep)
+        db.retire_events[:] = keep
+        return [(gone,)]
+    if sql == S.RT_FRESH_CURSORS_SQL:
+        names = {str(name) for name in p["names"]}
+        gone = [name for name in db.cursors if name in names]
+        for name in gone:
+            db.cursors.pop(name)
+        return [(len(gone),)]
+    if sql == S.RT_FRESH_LEASE_SQL:
+        return [(1,)] if db.lease.pop(str(p["name"]), None) is not None else [(0,)]
+
+    # ---------------------------------------------------------------- live equivalence (E99)
+    if sql == S.RT_EQUIV_PAIRS_SQL:
+        return [(lo, hi, row["score"], row["zone"], row["certificate"], row["decision"],
+                 row["guard_veto"], row["families"], row.get("model_version"))
+                for (g, lo, hi), row in sorted(db.pairs.items()) if g == gen]
+    if sql == S.RT_EQUIV_MEMBERS_SQL:
+        return sorted((key, listing_id) for g, key, listing_id in db.cluster_members
+                      if g == gen)
+    if sql == S.RT_EQUIV_SCOPE_IDS_SQL:
+        return sorted((listing_id,) for (g, _block, listing_id) in db.scope_ids if g == gen)
+    if sql == S.RT_EQUIV_FIRST_SEEN_SQL:
+        return [(int(i), (db.listings.get(int(i)) or {}).get("first_seen_at"))
+                for i in sorted(p["ids"]) if int(i) in db.listings]
+
     # ---------------------------------------------------------------- calibration
     if sql == S.RT_CALIBRATION_PRESENT_SQL:
         row = db.calibration.get(gen)
@@ -667,6 +748,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                 state[1] += 1
         return [(block, (db.now - last).total_seconds(), scans)
                 for block, (last, scans) in sorted(out.items())]
+    if sql == S.RT_SCOPE_SCAN_SEEN_SQL:
+        return sorted({(row["block_key"],) for row in db.scope_scans
+                       if row["generation"] == gen})
+    if sql == S.RT_SCOPE_BACKLOG_SQL:
+        return [(sum(1 for (g, _block, listing_id) in db.scope_ids
+                     if g == gen and (gen, listing_id) not in db.rt_fp),)]
     if sql == S.RT_SCOPE_SCAN_WRITE_SQL:
         db.scope_scans.append({"generation": gen, "block_key": str(p["block_key"]),
                                "scanned_at": db.now, "rows_found": int(p["rows_found"]),
