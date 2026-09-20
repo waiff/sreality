@@ -772,7 +772,6 @@ class SqlWork:
         self.max_retire_fraction = float(max_retire_fraction)
         self.parents = dict(parents or {})
         self.enter_blocks = _enter_blocks(scope, self.parents)
-        self.retired_refused = 0
         self.statements = 0
         self.windows: dict[str, int] = {}
         self._pending: dict[str, Any] = {}
@@ -921,7 +920,6 @@ class SqlWork:
         self.statements += 1
         allowed = max(1, int(self.max_retire_fraction * store_rows))
         if len(departed) > allowed:
-            self.retired_refused = len(departed)
             raise RetireRefusal(
                 f"the drift sweep would retire {len(departed)} of the generation's "
                 f"{store_rows} listings in one pass, over the {self.max_retire_fraction:.0%} "
@@ -976,8 +974,8 @@ class SqlWork:
         if CURSOR_ENTER in pending:
             after_id, block = pending[CURSOR_ENTER]
             self.statements += 1
-            # Both halves written whole: the sweep WRAPS to 0 inside a block and rolls the
-            # block pointer over, and a coalescing write could never take either back to 0.
+            # Both halves are written as VALUES: the sweep wraps to 0 inside a block and
+            # rolls the block pointer over, and the write coalesces on NULL, never on 0.
             _exec(self.conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_ENTER, "last_listing_id": int(after_id),
                 "last_snapshot_id": int(block), "watermark": None})
