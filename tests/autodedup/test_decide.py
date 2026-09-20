@@ -825,7 +825,7 @@ def test_e65_defaults_off_leaves_the_detection_clock_untouched() -> None:
 
 
 def test_e65_the_honest_clock_may_not_run_without_the_floor() -> None:
-    with pytest.raises(ValueError, match="needs the E65 image floor"):
+    with pytest.raises(ValueError, match="needs a price: the E65 image floor"):
         Settings(live_window_from_sighting=True)
     Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
              certificate_b_min_images=1.0)

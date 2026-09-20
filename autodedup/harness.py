@@ -40,6 +40,7 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
+from autodedup.development import holds as development_holds
 from autodedup.family import refusals as family_guard_refusals
 from autodedup.hazard_context import ContextIndex
 from autodedup.guards import UNIT_DESIGNATOR_VETO
@@ -512,7 +513,9 @@ def run_engine(
             })
             sink((lo, hi), json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
-    guard_on = settings.family_guard_mode != "off"
+    # E85 and E88 both decide a K-B row only once the whole pair set is known, so either one
+    # sends the K-B rows down the deferred path. E86's ordering rail covers both.
+    guard_on = settings.family_guard_mode != "off" or settings.development_hold_mode != "off"
     part_path = out_dir / (PAIRS_FILE + ".part" if guard_on else PAIRS_FILE)
     with gzip.open(part_path, "wt", encoding="utf-8") as handle:
         def to_file(key: tuple[int, int], line: str) -> None:
@@ -543,19 +546,34 @@ def run_engine(
             finish(item, to_file)
 
         family_report: dict[str, Any] = {"mode": settings.family_guard_mode}
+        hold_report: dict[str, Any] = {"mode": settings.development_hold_mode}
         if deferred:
+            kb_decisions = [item["decision"] for item in deferred]
             refused, family_report = family_guard_refusals(
-                [item["decision"] for item in deferred], dataset.listings, settings
+                kb_decisions, dataset.listings, settings
+            )
+            # E88: the hold reads the SAME pre-guard certificate set as E85 — both are
+            # properties of the pair set, and reading one off the other's verdict would make
+            # the family a function of the rule it is judging.
+            dev_held, hold_report = development_holds(
+                kb_decisions, dataset.listings, settings
             )
             for item in deferred:
-                clause = refused.get((item["lo"], item["hi"]))
-                if clause is not None:
+                key = (item["lo"], item["hi"])
+                clause, marker = refused.get(key), dev_held.get(key)
+                if clause is not None or marker is not None:
                     item["decision"] = decide_pair(
                         item["fa"], item["fb"], item["la"], item["lb"], item["feats"],
                         item["probes"], model, settings, hazard, kb_refused=True,
                     )
-                    item["decision"].reason = f"{item['decision'].reason}:kb_family:{clause}"
-                    item["decision"].evidence["kb_family"] = clause
+                    if clause is not None:
+                        item["decision"].reason = f"{item['decision'].reason}:kb_family:{clause}"
+                        item["decision"].evidence["kb_family"] = clause
+                    if marker is not None:
+                        item["decision"].reason = (
+                            f"{item['decision'].reason}:dev_hold:{marker}"
+                        )
+                        item["decision"].evidence["development_hold"] = marker
                 finish(item, to_memory)
 
     if guard_on:
@@ -620,6 +638,7 @@ def run_engine(
         "per_source_pair": {key: per_source_pair[key] for key in sorted(per_source_pair)},
         "clusters": clusters.stats,
         "family_guard": family_report,
+        "development_hold": hold_report,
         "timings": timings,
     }
     return summary

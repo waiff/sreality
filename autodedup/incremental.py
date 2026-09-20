@@ -936,6 +936,21 @@ def run_pass(
     # certified yesterday has to fall back to the BAND when tomorrow's arrival makes its family
     # impure. Until that exists a pass would certify what the cohort pass refuses, which is
     # exactly the divergence E70's replay equivalence is there to catch, so it fails loudly.
+    # E88 is decided over a K-B FAMILY too, and the same slice problem applies — with one
+    # difference worth stating, because it is what makes the rail designable: the hold is
+    # MONOTONE. A family only gains members, vocabulary only arrives, a size bar is only
+    # cleared upwards and a block census only fills up, so a family can only ever turn
+    # development-like and a hold can only ever be ADDED. The rail owed is therefore E64's,
+    # triggered by a family gaining a member or a marker, demoting that family's earlier K-B
+    # merges to the BAND and never unmerging, capped per family the way E64 caps per block.
+    if settings.development_hold_mode != "off":
+        raise NotImplementedError(
+            "development_hold_mode (E88) has no incremental family index or re-evaluation "
+            "rail yet: a pass that sees one claim cannot read the whole K-B family or its "
+            "block census, and the hold is monotone — the rail owed is E64's, triggered by a "
+            "family gaining a member or a marker, with K-B the one certificate E64's "
+            "certificate exemption must not cover"
+        )
     if settings.family_guard_mode != "off":
         raise NotImplementedError(
             "family_guard_mode (E85) has no incremental family index or re-evaluation rail "
