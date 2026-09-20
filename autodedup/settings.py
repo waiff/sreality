@@ -112,6 +112,39 @@ class Settings:
     # one index walk saw both adverts for the first and only time. So the rail is required
     # exactly where the hazard is: `validate` refuses the honest clock without it.
     certificate_b_min_gap_days: float = 0.0
+    # E85 (W11): K-B certifies a pair only when its FAMILY — the connected component of the
+    # pairs K-B certified — is consistent with ONE unit. Every clause of K-B is pair-local, and
+    # a serial developer's project reads the same way pair by pair as a broker's own re-post
+    # chain; what separates them is the chain. `off` is the shipped default, `family` refuses
+    # every K-B edge of an impure family, `cell` partitions the family and refuses only the
+    # edges that cross a cell or sit in an inconsistent one. Each clause below is its own row
+    # because each was priced separately against the 77 adjudicated families (M93).
+    # W11's verification then RE-ADJUDICATED those families and inverted the reading (M99): the
+    # two ceskereality families that carry 64 of the 77 refusals are one unit each, and on the
+    # sealed split the guard changes nothing at all (M100). It stays as data, `off`, with its
+    # structural case withdrawn; `pair` is the fourth mode E86 added, the only one whose verdict
+    # does not move with the order its family arrived in (M101).
+    family_guard_mode: str = "off"
+    family_guard_area_tol: float = 0.01
+    # How far a number the body prints may sit from the stored area and still be read as this
+    # unit's headline size. `stated_areas` bounds mentions at 3x the stored value, which is wide
+    # enough to pick a half-house's whole-house number (478609: 103 and 206 against a stored
+    # 150) and refuse a true re-post on it.
+    family_guard_area_window: float = 0.25
+    family_guard_price_tol: float = 0.01
+    family_guard_price_rise_max: float = 0.10
+    family_guard_overlap_days: float = 0.0
+    family_guard_concurrency_clause: bool = True
+    family_guard_price_clause: bool = True
+    # OFF, and the measurement says why: E60 already ruled that a DIFFERING agency order code is
+    # evidence of nothing in either direction, and engine-wide this clause refuses E60's own
+    # worked example (23201 x 486034 and 395722 x 496635 — one 43,3 m2 flat at 7 974 910 Kc
+    # under codes N115815 and N118731) plus two more pairs of the identical shape in one
+    # project. It buys two adjudicated MULTI families whose only separator is a code, and it
+    # pays for them by contradicting a standing rule (M95).
+    family_guard_ref_code_clause: bool = False
+    family_guard_unit_designator_clause: bool = True
+    family_guard_disposition_clause: bool = True
     # E61 (W8): two adverts naming a DIFFERENT unit inside one address block are two units,
     # whatever they look like. ON by default — it demotes nothing the operator or gold calls a
     # duplicate, and it is the only rule that can separate a developer's own near-identical
@@ -300,12 +333,19 @@ class Settings:
                 "matched set is a subset of the smaller gallery "
                 f"({self.certificate_b_min_matched_images} > {self.certificate_b_min_images})"
             )
+        # E87 (W11 verification): the gate takes back the payment it briefly accepted from E85.
+        # The W11 seal measured the guard INERT against the same arm without it — 0 sealed
+        # labelled duplicates gained, 0 lost, every sealed demotion unlabelled (M100) — so it
+        # buys the honest clock nothing and cannot stand as its price. E65 is the only payment
+        # a sealed read has measured, and the honest clock's true price is an open question
+        # D30 (vii) owes, not a row this gate may assume.
         if self.live_window_from_sighting and self.certificate_b_min_images <= 0.0:
             raise ValueError(
                 "live_window_from_sighting needs the E65 image floor: the honest clock is what "
                 "lets a developer's serial template re-posts satisfy every clause of K-B, and "
                 "certificate_b_min_images=0 leaves the certificate resting on no observation "
-                "of the unit"
+                "of the unit (E87: the E85 family guard is measurably inert on the W11 seal "
+                "and does not pay for it)"
             )
         if self.live_window_from_sighting and self.certificate_b_min_gap_days <= 0.0:
             raise ValueError(
@@ -313,6 +353,21 @@ class Settings:
                 "once-seen advert's live window is a point, so every pair of once-seen adverts "
                 "is disjoint by construction and K-B certifies a 2.8-second separation as a "
                 "re-post"
+            )
+        from autodedup.family import MODES as FAMILY_GUARD_MODES
+
+        if self.family_guard_mode not in FAMILY_GUARD_MODES:
+            raise ValueError(
+                f"family_guard_mode must be one of {FAMILY_GUARD_MODES}: {self.family_guard_mode}"
+            )
+        for name in ("family_guard_area_tol", "family_guard_area_window",
+                     "family_guard_price_tol", "family_guard_price_rise_max"):
+            value = getattr(self, name)
+            if not 0.0 <= value < 1.0:
+                raise ValueError(f"{name} must be in [0, 1): {value}")
+        if self.family_guard_overlap_days < 0.0:
+            raise ValueError(
+                f"family_guard_overlap_days must not be negative: {self.family_guard_overlap_days}"
             )
         if not 0.0 <= self.unit_interior_min <= 1.0:
             raise ValueError(f"unit_interior_min must be in [0, 1]: {self.unit_interior_min}")
