@@ -215,6 +215,12 @@ def compare(
         # OTHER frame of that listing is still checked.
         want = {int(entry[0]): (entry[1], entry[2]) for entry in (row.get("im") or ())}
         if not want:
+            if "im" in row:
+                # A new-shape row with an EMPTY gallery: there is no population to compare,
+                # which is not the same thing as a baseline that cannot be compared. Counting
+                # it as legacy would let a sample of image-less listings trip E94's vacuity
+                # rail for the one reason that is not vacuity.
+                continue
             legacy_rows += 1
             if live["c"] != row.get("c") and live["p"] == row.get("p"):
                 breaches.append(Breach(listing_id, "population",

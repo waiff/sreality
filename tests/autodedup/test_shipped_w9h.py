@@ -537,6 +537,27 @@ def test_a_producer_move_on_one_image_no_longer_excuses_the_rest(world) -> None:
     assert report["breaches"] == 1 and report["breaches_by_kind"] == {"population": 1}
 
 
+def test_an_image_less_listing_is_not_a_legacy_baseline_row(world) -> None:
+    """A gallery with nothing in it has no population to compare, which is not the same as a
+    baseline that CANNOT be compared — and E94's vacuity rail reads the difference."""
+    from autodedup.incremental_lane import SqlFacts
+
+    conn, _artifact = world
+    conn.phash_pop.update(true_population(conn))
+    listing_id = 4_000
+    listing, _gallery = SqlFacts(conn).facts([listing_id])[listing_id]
+    rows = baseline({listing_id: listing}, {listing_id: []})
+
+    report = compare(rows, {listing_id: listing}, {listing_id: []})
+
+    assert report["checked"] == 1 and report["breaches"] == 0
+    assert report["legacy_baseline_rows"] == 0
+    assert report["population_images_checked"] == 0
+    assert verdict(report, generation="rt",
+                   floors=Floors(min_checked=1, min_checked_share=0.0),
+                   what="the pass") is None
+
+
 # ==================================================== V3: the calibration has an expiry date
 
 
