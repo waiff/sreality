@@ -33,10 +33,12 @@ from __future__ import annotations
 import json
 import os
 import queue
+import random
 import re
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -126,6 +128,33 @@ OSS_EST_S_PER_PAIR: float = 12.0
 # sized for — the gold tier takes its weaker fallback rather than hold a worker any longer.
 RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 4.0, 8.0)
 RETRY_SLEEP: Callable[[float], None] = time.sleep
+
+# Jittered, because the point of backing off is that the workers stop arriving together: an
+# exact ladder re-synchronises every worker that tripped the limit on the same 2/4/8 beat and
+# reproduces the burst one rung later. Plus or minus a quarter of the rung, drawn per sleep.
+RETRY_JITTER: float = 0.25
+RANDOM: Callable[[], float] = random.random
+
+# The pacer's own wait — the `min_interval_ms` gap between two calls of ONE arm — kept apart
+# from `RETRY_SLEEP` so the backoff ladder stays readable next to it.
+PACE_SLEEP: Callable[[float], None] = time.sleep
+MONOTONIC: Callable[[], float] = time.monotonic
+# How long a worker queued behind a full arm waits before looking again. Only a backstop: a
+# finished call notifies, and a step-down does too.
+SLOT_WAIT_S: float = 0.25
+
+# The secondary arm is paced on its OWN dials: W6 ran the same Qwen judge three times and it
+# died after 13 verdicts at six workers and 21 at three, while ONE worker finished the pass.
+# One worker is therefore the default, and the primary model — which was answering every call
+# throughout — keeps `workers`.
+QWEN_WORKERS_DEFAULT: int = 1
+QWEN_MIN_INTERVAL_MS_DEFAULT: int = 0
+# What a step-down imposes once the arm is already down to one worker: it keeps the worker and
+# spaces it out instead. Bounded, because an arm that cannot be paced into answering has to be
+# allowed to die rather than hold the pass open call after call.
+STEP_DOWN_INTERVAL_MS: int = 2000
+STEP_DOWN_INTERVAL_MAX_MS: int = 8000
+MAX_STEP_DOWNS: int = 2
 
 # The pod's meter: WALL clock, because that is what RunPod bills and what `oss_pod.PodHandle`
 # stamps itself with — a monotonic reading could not be compared against `started_at` at all.
@@ -219,6 +248,11 @@ class JudgeArgs:
     max_usd: float
     seed: int
     workers: int
+    # The secondary (DashScope/Qwen) arm's own concurrency and spacing. Separate dials because
+    # W6 could only choose between an arm that dies and a pass that crawls: `workers` is the
+    # primary model's parallelism and it was never the one being throttled.
+    qwen_workers: int
+    qwen_min_interval_ms: int
     judge_version: str | None
     strata: tuple[str, ...]
     dry_run: bool
@@ -259,6 +293,12 @@ class JudgeArgs:
     # Replace the LLM id on every vote of the plan, keeping tier, prompt and frames: how a
     # rented open-weights model is raced against the paid one on the identical question.
     llm_model: str | None
+    # Redact every agency order code from the description before it is digested. A DIAGNOSTIC,
+    # not a production shape: `pos_ref_*` structural positives are certified BY that code and
+    # 69.3 % of them carry it into the 1,200-character window, so an arm's recall on them is
+    # partly a string match the prompt handed it. Run under its own judge_version — E29 caches
+    # on that key and a masked pass and an unmasked one are two different questions.
+    mask_codes: bool = False
 
 
 def _int_arg(args: dict[str, str], name: str, default: int) -> int:
@@ -328,6 +368,16 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
     workers = _int_arg(args, "workers", 6)
     if workers < 1:
         raise SystemExit(f"workers must be at least 1, got {workers}")
+    qwen_workers = _int_arg(args, "qwen_workers", QWEN_WORKERS_DEFAULT)
+    if qwen_workers < 1:
+        raise SystemExit(f"qwen_workers must be at least 1, got {qwen_workers}")
+    qwen_min_interval_ms = _int_arg(
+        args, "qwen_min_interval_ms", QWEN_MIN_INTERVAL_MS_DEFAULT
+    )
+    if qwen_min_interval_ms < 0:
+        raise SystemExit(
+            f"qwen_min_interval_ms cannot be negative, got {qwen_min_interval_ms}"
+        )
     n = _int_arg(args, "n", SMOKE_PAIRS if tier == "smoke" else 400)
     if n < 1:
         raise SystemExit(f"n must be at least 1, got {n}")
@@ -343,6 +393,8 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         max_usd=max_usd,
         seed=_int_arg(args, "seed", harness.SAMPLE_SEED),
         workers=workers,
+        qwen_workers=qwen_workers,
+        qwen_min_interval_ms=qwen_min_interval_ms,
         judge_version=(args.get("judge_version") or "").strip() or None,
         strata=tuple(part for part in (args.get("strata") or "").split() if part),
         dry_run=_flag(args, "dry_run"),
@@ -368,6 +420,7 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         model=(args.get("model") or "").strip() or None,
         presentation=(args.get("presentation") or "").strip() or None,
         llm_model=(args.get("llm_model") or "").strip() or None,
+        mask_codes=_flag(args, "mask_codes"),
     )
 
 
@@ -532,11 +585,18 @@ def feats_of(row: dict[str, Any]) -> dict[str, tuple[float, bool]]:
     return out
 
 
-def scrubbed(listing: Listing) -> Listing:
-    """E28's defensive second pass — scrub, THEN truncate, so a half-cut phone cannot survive."""
+def scrubbed(listing: Listing, mask_codes: bool = False) -> Listing:
+    """E28's defensive second pass — scrub, THEN truncate, so a half-cut phone cannot survive.
+
+    Masking runs BEFORE the truncation, so a code the window would have clipped cannot come
+    back through a shifted cut."""
     from autodedup.export import scrub_description
 
     text = scrub_description(listing.description)
+    if mask_codes:
+        from autodedup.structural_truth import mask_codes as redact
+
+        text = redact(text)
     if text and len(text) > DESCRIPTION_MAX:
         text = text[:DESCRIPTION_MAX]
     return replace(listing, description=text)
@@ -700,7 +760,7 @@ def http_status(message: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def classify_provider_error(exc: Exception | str) -> str:
+def classify_provider_error(exc: Exception | str, *, after_success: bool = False) -> str:
     """Which of four failures this is — the whole point being that they are NOT one thing.
 
       quota       the account is out of allowance; every remaining call fails identically
@@ -710,12 +770,24 @@ def classify_provider_error(exc: Exception | str) -> str:
 
     Only the caller knows what to do with each, because that depends on whether the arm that
     failed has a fallback: the gold tier's third vote does, the primary model does not.
+
+    `after_success` is the one piece of RUN state the words cannot carry: DashScope answers a
+    PACING wall in billing wording ("You exceeded your current quota ... billing details"), and
+    W6 lost two Qwen arms to it — at six and at three workers, after 13 and 21 verdicts — while
+    one worker finished the same pass. An account does not refill and drain again between two
+    calls, so that wording on a 429 the arm has already been ANSWERED past is a rate limit; the
+    identical wording on an arm that has never answered is the exhaustion it claims to be and
+    still raises at once. 402 says money whatever has happened before it, and only the retry
+    loop passes the flag — every other caller classifies without it, so an arm that outlasts
+    the ladder is still written off as quota.
     """
     low = str(exc or "").lower()
     status = http_status(low)
-    if any(marker in low for marker in QUOTA_MARKERS):
-        return ERROR_QUOTA
     if status == 402:
+        return ERROR_QUOTA
+    if after_success and status == 429:
+        return ERROR_RATE_LIMIT
+    if any(marker in low for marker in QUOTA_MARKERS):
         return ERROR_QUOTA
     if status in (403, 429) and any(marker in low for marker in QUOTA_BODY_MARKERS):
         return ERROR_QUOTA
@@ -778,6 +850,157 @@ class SecondaryArm:
                 f"{self.name}_arm_disabled_reason": self.reason,
                 f"{self.name}_arm_disabled_at_pair": self.at_pair,
             }
+
+
+def jittered(seconds: float) -> float:
+    """One rung of the ladder, spread over plus or minus `RETRY_JITTER` of itself."""
+    return round(max(0.0, seconds * (1.0 + RETRY_JITTER * (2.0 * RANDOM() - 1.0))), 3)
+
+
+class ArmPacer:
+    """One provider arm's concurrency and spacing, narrowable while the pass runs.
+
+    The arm that is being throttled is not the pass: W6's primary model answered every call
+    while DashScope refused the secondary one, so a single `workers` dial can only choose
+    between an unpaced secondary arm and a needlessly slow primary. This is the secondary
+    arm's own dial — how many of its calls may be in flight, and how far apart they may start
+    — and the last thing tried before the arm is written off: a 429 the backoff ladder could
+    not clear costs the arm its parallelism first, and only then its place in the pass.
+    """
+
+    def __init__(self, name: str, workers: int = 1, min_interval_ms: int = 0) -> None:
+        self._cv = threading.Condition()
+        self.name = name
+        self._workers = max(1, int(workers))
+        self._interval_ms = max(0, int(min_interval_ms))
+        self._asked = (self._workers, self._interval_ms)
+        self._in_flight = 0
+        self._next_at = 0.0
+        self._successes = 0
+        self._retries = 0
+        self._backoff_s = 0.0
+        self._paced_s = 0.0
+        self._step_downs: list[dict[str, Any]] = []
+
+    @property
+    def had_success(self) -> bool:
+        with self._cv:
+            return self._successes > 0
+
+    @contextmanager
+    def slot(self) -> Any:
+        self._acquire()
+        try:
+            yield
+        finally:
+            self._release()
+
+    def _acquire(self) -> None:
+        while True:
+            with self._cv:
+                if self._in_flight >= self._workers:
+                    # A finished call and a step-down both notify; the timeout is the backstop.
+                    self._cv.wait(SLOT_WAIT_S)
+                    continue
+                now = MONOTONIC()
+                wait = self._next_at - now
+                if wait <= 0:
+                    self._in_flight += 1
+                    self._next_at = now + self._interval_ms / 1000.0
+                    return
+                self._paced_s += wait
+            # Outside the lock, and rechecked on the way back in: two workers that wake to the
+            # same gap must not both take it.
+            PACE_SLEEP(wait)
+
+    def _release(self) -> None:
+        with self._cv:
+            self._in_flight = max(0, self._in_flight - 1)
+            self._cv.notify_all()
+
+    def record_success(self) -> None:
+        with self._cv:
+            self._successes += 1
+
+    def record_backoff(self, seconds: float) -> None:
+        with self._cv:
+            self._retries += 1
+            self._backoff_s += max(0.0, float(seconds))
+
+    def step_down(self, reason: str, at_pair: int | None = None) -> bool:
+        """Narrow the arm one notch — parallelism first, then spacing.
+
+        False means there is nothing left to give up and the caller should stop retrying."""
+        with self._cv:
+            if len(self._step_downs) >= MAX_STEP_DOWNS:
+                return False
+            if self._workers > 1:
+                change: dict[str, Any] = {"from_workers": self._workers, "to_workers": 1}
+                self._workers = 1
+            elif self._interval_ms < STEP_DOWN_INTERVAL_MAX_MS:
+                widened = min(
+                    max(self._interval_ms * 2, STEP_DOWN_INTERVAL_MS),
+                    STEP_DOWN_INTERVAL_MAX_MS,
+                )
+                change = {"from_min_interval_ms": self._interval_ms,
+                          "to_min_interval_ms": widened}
+                self._interval_ms = widened
+            else:
+                return False
+            change["at_pair"] = at_pair
+            change["reason"] = str(reason)[:200]
+            self._step_downs.append(change)
+            self._cv.notify_all()
+            return True
+
+    def to_json(self) -> dict[str, Any]:
+        with self._cv:
+            return {
+                "workers": self._asked[0],
+                "workers_now": self._workers,
+                "min_interval_ms": self._asked[1],
+                "min_interval_ms_now": self._interval_ms,
+                "successes": self._successes,
+                "retries": self._retries,
+                "backoff_s": round(self._backoff_s, 2),
+                "paced_s": round(self._paced_s, 2),
+                "step_downs": list(self._step_downs),
+            }
+
+
+@dataclass(slots=True)
+class Pacing:
+    """The run's pacers, one per arm — because the throttled arm is not the one to slow down."""
+
+    primary: ArmPacer
+    qwen: ArmPacer
+
+    def for_vote(self, vote: Vote) -> ArmPacer:
+        model = vote.model or ""
+        if vote.provider == OSS_PROVIDER or model.startswith(OSS_PREFIX):
+            # A rented pod has no rate limit and no per-call bill: pacing it is idle GPU.
+            return self.primary
+        return self.qwen if model.lower().startswith("qwen") else self.primary
+
+    def to_json(self) -> dict[str, Any]:
+        arms = {"primary": self.primary.to_json(), "qwen": self.qwen.to_json()}
+        return {
+            "pacing": arms,
+            # Flat, beside the arms, because these two are what the operator reads first: a
+            # pass that backed off for minutes or narrowed an arm was throttled, whatever
+            # wording the provider used while doing it.
+            "pacing_step_downs": sum(len(arm["step_downs"]) for arm in arms.values()),
+            "pacing_backoff_s": round(
+                sum(float(arm["backoff_s"]) for arm in arms.values()), 2
+            ),
+        }
+
+
+def build_pacing(parsed: "JudgeArgs") -> Pacing:
+    return Pacing(
+        primary=ArmPacer("primary", parsed.workers),
+        qwen=ArmPacer("qwen", parsed.qwen_workers, parsed.qwen_min_interval_ms),
+    )
 
 
 # --- verdict -> row ----------------------------------------------------------------------
@@ -1238,6 +1461,7 @@ def run_judge(
     # Gold's third vote is the only arm in the lane with somewhere to fall back to, so it is the
     # only one that can be switched off instead of stopping the pass.
     arm = SecondaryArm("qwen", MODEL_GOLD_THIRD)
+    pacing = build_pacing(parsed)
     summary: dict[str, Any] = {
         "tier": parsed.tier,
         "judge_version": judge_version,
@@ -1253,6 +1477,8 @@ def run_judge(
         # rather than discovered as an early budget stop.
         "sample_inflated_by_floor": max(0, int(sample["n_selected"]) - parsed.n),
         "workers": parsed.workers,
+        "qwen_workers": parsed.qwen_workers,
+        "qwen_min_interval_ms": parsed.qwen_min_interval_ms,
         "max_usd": parsed.max_usd,
         # What the DRAW would cost at the pre-flight rate, published before a call is made.
         # `n` is the operator's only cost dial and the per-stratum floor can multiply it by
@@ -1268,6 +1494,7 @@ def run_judge(
         "pairs_file_requested": pairs_file_requested,
         "pairs_file_missing": pairs_file_missing,
         "gold_version": parsed.gold_version,
+        "mask_codes": parsed.mask_codes,
         "pairs_without_gold_dropped": gold_restricted,
         "sample_strata": sample["strata"],
         "engine": {
@@ -1294,6 +1521,7 @@ def run_judge(
     if parsed.dry_run:
         summary.update(counters.to_json())
         summary.update(arm.to_json())
+        summary.update(pacing.to_json())
         summary["estimate"] = _estimate(judge, dataset, jobs, parsed, settings)
         summary["spent_usd"] = 0.0
         summary["budget_stopped"] = False
@@ -1333,6 +1561,7 @@ def run_judge(
                 summary["pod_boot_failed"] = f"{type(exc).__name__}: {exc}"[:400]
                 summary["pod_boot_s"] = round(max(0.0, CLOCK() - boot_started), 2)
                 summary.update(counters.to_json())
+                summary.update(pacing.to_json())
                 summary["spent_usd"] = 0.0
                 summary["spent_usd_source"] = "pod (boot failed, bill unknown)"
                 summary["budget_stopped"] = False
@@ -1380,7 +1609,7 @@ def run_judge(
                 started=pod_started,
             )
         _dispatch(judge, dataset, jobs, parsed, judge_version, budget, counters, arm,
-                  conn_factory, out_dir, client_factory, settings)
+                  conn_factory, out_dir, client_factory, settings, pacing)
     finally:
         if pod is not None:
             try:
@@ -1439,6 +1668,7 @@ def run_judge(
 
     summary.update(counters.to_json())
     summary.update(arm.to_json())
+    summary.update(pacing.to_json())
     summary["spent_usd"] = round(spent, 6)
     summary["spent_usd_in_process"] = round(budget.spent, 6)
     summary["budget_stopped"] = budget.stopped
@@ -1506,7 +1736,8 @@ def _estimate(judge: Any, dataset: Any, jobs: list[PairJob],
     cost = 0.0
     for job in jobs:
         la, lb = dataset.listings[job.lo], dataset.listings[job.hi]
-        digests, evidence = _inputs(judge, job, la, lb, settings)
+        digests, evidence = _inputs(judge, job, la, lb, settings,
+                                    parsed.mask_codes)
         for vote in job.votes:
             calls += 1
             cost += vote.est_usd
@@ -1570,14 +1801,16 @@ def pin_distance_m(la: Listing, lb: Listing) -> float | None:
 
 
 def _inputs(
-    judge: Any, job: PairJob, la: Listing, lb: Listing, settings: Settings | None = None
+    judge: Any, job: PairJob, la: Listing, lb: Listing, settings: Settings | None = None,
+    mask_codes: bool = False,
 ) -> tuple[Any, str]:
     """The prompt's view of the pair, built through the SAME settings row the engine ran.
 
     `attribute_conflicts` reads `vocabulary_attr_keys`: a slot the engine refuses to count must
     not be listed to the judge as a conflict either, or the labels come back arguing against a
     contradiction the engine never raised."""
-    digests = (judge.listing_digest(scrubbed(la)), judge.listing_digest(scrubbed(lb)))
+    digests = (judge.listing_digest(scrubbed(la, mask_codes)),
+               judge.listing_digest(scrubbed(lb, mask_codes)))
     evidence = judge.evidence_digest(
         feats_of(job.row),
         job.row.get("probes") or [],
@@ -1603,8 +1836,10 @@ def _dispatch(
     out_dir: Path,
     client_factory: Callable[[Any], Any] = None,  # type: ignore[assignment]
     settings: Settings | None = None,
+    pacing: Pacing | None = None,
 ) -> None:
     client_factory = client_factory or llm_client
+    pacing = pacing or build_pacing(parsed)
     work: queue.Queue = queue.Queue()
     for job in jobs:
         work.put(job)
@@ -1633,7 +1868,7 @@ def _dispatch(
                     return
                 try:
                     _run_job(judge, dataset, job, parsed, judge_version, budget, counters,
-                             arm, conn, client, r2, stats_lock, _emit, settings)
+                             arm, conn, client, r2, stats_lock, _emit, settings, pacing)
                 except Exception as exc:  # noqa: BLE001 — see below
                     # Everything outside the call itself lives here too: a digest, an image
                     # selection, a JSONL write. Unguarded, one malformed listing kills the
@@ -1678,9 +1913,11 @@ def _run_job(
     lock: threading.Lock,
     emit: Callable[[dict[str, Any]], None],
     settings: Settings | None = None,
+    pacing: Pacing | None = None,
 ) -> None:
+    pacing = pacing or build_pacing(parsed)
     la, lb = dataset.listings[job.lo], dataset.listings[job.hi]
-    digests, evidence = _inputs(judge, job, la, lb, settings)
+    digests, evidence = _inputs(judge, job, la, lb, settings, parsed.mask_codes)
     votes: list[Any] = []
     used: list[Vote] = []
     results: list[dict[str, Any]] = []
@@ -1711,7 +1948,8 @@ def _run_job(
         call_started = time.monotonic()
         try:
             parsed_vote, response = _call_with_retry(
-                judge, dataset, job, la, lb, digests, evidence, vote, r2, client
+                judge, dataset, job, la, lb, digests, evidence, vote, r2, client,
+                pacing.for_vote(vote),
             )
         except Exception as exc:  # noqa: BLE001 — one pair must not kill the pass
             message = f"{job.lo}x{job.hi} {vote.tier}/{vote.model}: {type(exc).__name__}: {exc}"
@@ -1846,19 +2084,44 @@ def _run_job(
 def _call_with_retry(
     judge: Any, dataset: Any, job: PairJob, la: Listing, lb: Listing,
     digests: Any, evidence: str, vote: Vote, r2: Any, client: Any,
+    pacer: ArmPacer | None = None,
 ) -> tuple[Any, Any]:
-    """Budget is reserved once, per CALL — a retried 429 bought nothing and is not billed."""
-    for attempt in range(len(RETRY_BACKOFF_S) + 1):
+    """Budget is reserved once, per CALL — a retried 429 bought nothing and is not billed.
+
+    Three answers, in order of how much they cost the pass: back off (a burst clears inside the
+    ladder), step the ARM down (the ladder did not clear it, so the arm stops asking for as
+    much parallelism), give up. A quota exhaustion is none of them — retrying it buys identical
+    429s and fourteen seconds of a worker — which is why the classification runs first and, for
+    a 429, reads `pacer.had_success`: the same DashScope wording means "pace yourself" once the
+    arm has answered and "you are out of allowance" before it ever has. The exception is raised
+    UNCHANGED once the ladder and the step-downs are spent, and the caller re-classifies it
+    without that indulgence, so a real exhaustion still puts the arm down — merely later.
+    """
+    pacer = pacer or ArmPacer("primary")
+    attempt = 0
+    while True:
         try:
-            return _one_call(judge, dataset, job, la, lb, digests, evidence, vote, r2, client)
+            with pacer.slot():
+                result = _one_call(
+                    judge, dataset, job, la, lb, digests, evidence, vote, r2, client
+                )
         except Exception as exc:  # noqa: BLE001 — classified, then re-raised or waited out
-            last = attempt == len(RETRY_BACKOFF_S)
-            # A quota exhaustion is not a burst: retrying it buys three more identical 429s
-            # and fourteen seconds of a worker. Only rate limits and 5xx/timeouts earn the sleep.
-            if last or classify_provider_error(exc) not in RETRYABLE:
-                raise
-            RETRY_SLEEP(RETRY_BACKOFF_S[attempt])
-    raise RuntimeError("unreachable")
+            kind = classify_provider_error(exc, after_success=pacer.had_success)
+            if kind in RETRYABLE and attempt < len(RETRY_BACKOFF_S):
+                delay = jittered(RETRY_BACKOFF_S[attempt])
+                pacer.record_backoff(delay)
+                RETRY_SLEEP(delay)
+                attempt += 1
+                continue
+            if kind == ERROR_RATE_LIMIT and pacer.step_down(str(exc), job.index):
+                delay = jittered(RETRY_BACKOFF_S[0])
+                pacer.record_backoff(delay)
+                RETRY_SLEEP(delay)
+                attempt = 0
+                continue
+            raise
+        pacer.record_success()
+        return result
 
 
 def _reversed_halves(blocks: list[Any], split: int) -> list[Any]:
