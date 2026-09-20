@@ -481,10 +481,12 @@ def run_engine(
             # E88: the hold reads the SAME pre-guard certificate set as E85 — both are
             # properties of the pair set, and reading one off the other's verdict would make
             # the family a function of the rule it is judging.
-            held, hold_report = development_holds(kb_decisions, dataset.listings, settings)
+            dev_held, hold_report = development_holds(
+                kb_decisions, dataset.listings, settings
+            )
             for item in deferred:
                 key = (item["lo"], item["hi"])
-                clause, marker = refused.get(key), held.get(key)
+                clause, marker = refused.get(key), dev_held.get(key)
                 if clause is not None or marker is not None:
                     item["decision"] = decide_pair(
                         item["fa"], item["fb"], item["la"], item["lb"], item["feats"],

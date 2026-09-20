@@ -65,7 +65,10 @@ def test_a_committed_map_hashes_to_the_name_it_is_filed_under() -> None:
     assert W6_SEAL in committed, "the W6 seal must be committed, not left in scratch"
     for seal in committed:
         groups = seals.load(seal)
-        assert split_seal(groups)["sha256"] == seal, f"{seal[:12]} is filed under the wrong name"
+        # A seal is named by its MAP, or — since W12, whose map reproduced W11's to the listing
+        # — by its map AND the seed that partitions it. Either spelling, never a third.
+        names = {split_seal(groups)["sha256"], seals.seal_id(groups, seals.seed_for(seal))}
+        assert seal in names, f"{seal[:12]} is filed under the wrong name"
 
 
 def test_the_w6_seal_is_the_split_the_refit_measured_on() -> None:

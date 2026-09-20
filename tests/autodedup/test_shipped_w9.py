@@ -49,7 +49,7 @@ def test_the_honest_clock_arm_carries_the_floor_and_the_incumbents_cuts() -> Non
 
 
 def test_the_pairing_of_the_honest_clock_and_the_floor_is_enforced_not_remembered() -> None:
-    with pytest.raises(ValueError, match="needs the E65 image floor"):
+    with pytest.raises(ValueError, match="needs a price: the E65 image floor"):
         Settings.from_dict({**ARM.to_dict(), "certificate_b_min_images": 0.0,
                             "certificate_b_min_matched_images": 0.0})
 

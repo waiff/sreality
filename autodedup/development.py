@@ -243,10 +243,10 @@ def markers_of(
 ) -> FamilyMarkers:
     rows = [listings[item] for item in members if item in listings]
     size = len(members)
-    project_hits = {item: _terms_in(item, PROJECT_TERMS) for item in rows}
-    coop_hits = {item: _terms_in(item, COOP_TERMS) for item in rows}
-    n_project = sum(1 for terms in project_hits.values() if terms)
-    n_coop = sum(1 for terms in coop_hits.values() if terms)
+    project_hits = [_terms_in(item, PROJECT_TERMS) for item in rows]
+    coop_hits = [_terms_in(item, COOP_TERMS) for item in rows]
+    n_project = sum(1 for terms in project_hits if terms)
+    n_coop = sum(1 for terms in coop_hits if terms)
     share = settings.development_vocab_min_share
     denominator = len(rows) or 1
     project_vocab = (n_project / denominator) >= share
@@ -276,8 +276,8 @@ def markers_of(
         size=size,
         n_project_members=n_project,
         n_coop_members=n_coop,
-        project_terms=tuple(sorted({term for terms in project_hits.values() for term in terms})),
-        coop_terms=tuple(sorted({term for terms in coop_hits.values() for term in terms})),
+        project_terms=tuple(sorted({term for terms in project_hits for term in terms})),
+        coop_terms=tuple(sorted({term for terms in coop_hits for term in terms})),
         block_density=density,
         unit_fact_disagreement=_unit_fact_disagreement(rows, settings),
         vocabulary=vocabulary,
