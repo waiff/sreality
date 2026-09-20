@@ -46,10 +46,15 @@ from autodedup.score_sql import (
     CLUSTER_MEMBER_INSERT_SQL,
     CLUSTER_MEMBERS_DELETE_SQL,
     CLUSTERS_DELETE_SQL,
+    GENERATIONS_SQL,
     JUDGED_EDGES_SQL,
     MUST_NOT_LINK_SQL,
     PAIR_CLUSTER_ORPHAN_CLEAR_SQL,
     PAIR_UPSERT_SQL,
+    PRUNE_CLUSTERS_SQL,
+    PRUNE_CONFLICTS_SQL,
+    PRUNE_MEMBERS_SQL,
+    PRUNE_PAIRS_SQL,
     RUN_FINISH_SQL,
     RUN_START_SQL,
     STORE_PRESENT_SQL,
@@ -126,10 +131,14 @@ class ScoreArgs:
     model: str | None
     generation: str
     store_floor: float | None
+    # How many generations the store keeps, newest first, after this pass — the operator's
+    # own dial and NOT a default. `None` keeps every one of them.
+    keep_generations: int | None
 
 
 ARG_KEYS: tuple[str, ...] = (
     "export_run", "cohort", "settings", "model", "generation", "store_floor",
+    "keep_generations",
 )
 
 
@@ -166,6 +175,15 @@ def parse_args(args: dict[str, str]) -> ScoreArgs:
         except ValueError as exc:
             raise SystemExit(f"store_floor must be a number, got {raw_floor!r}") from exc
 
+    raw_keep = (args.get("keep_generations") or "").strip()
+    keep_generations: int | None = None
+    if raw_keep:
+        if not raw_keep.isdigit() or int(raw_keep) < 1:
+            raise SystemExit(
+                f"keep_generations must be a positive whole number, got {raw_keep!r}"
+            )
+        keep_generations = int(raw_keep)
+
     return ScoreArgs(
         export_run=export_run,
         cohort=cohort,
@@ -173,6 +191,7 @@ def parse_args(args: dict[str, str]) -> ScoreArgs:
         model=(args.get("model") or "").strip() or None,
         generation=generation,
         store_floor=store_floor,
+        keep_generations=keep_generations,
     )
 
 
@@ -258,7 +277,7 @@ def membership_of(clusters: dict[str, Any]) -> dict[int, int]:
 
 
 def pair_params(
-    row: dict[str, Any], membership: dict[int, int], model_version: str
+    row: dict[str, Any], membership: dict[int, int], model_version: str, generation: str
 ) -> dict[str, Any]:
     # `autodedup_pairs_order_ck` refuses lo >= hi, and one reversed row aborts the whole
     # chunk it travels in; `decide` orders its pairs today, so this is the cheap belt.
@@ -266,6 +285,7 @@ def pair_params(
     cluster_lo, cluster_hi = membership.get(lo), membership.get(hi)
     features = present_features(row)
     return {
+        "generation": generation,
         "listing_lo": lo,
         "listing_hi": hi,
         "probes": sorted(str(probe) for probe in (row.get("probes") or ())),
@@ -610,7 +630,7 @@ def persist(
     """Pairs, then the generation rebuilt whole. Returns what each relation received."""
     membership = membership_of(clusters)
     stored = [row for row in rows if storable(row, store_floor)]
-    pairs = [pair_params(row, membership, model_version) for row in stored]
+    pairs = [pair_params(row, membership, model_version, generation) for row in stored]
     n_pairs = execute_many(conn, PAIR_UPSERT_SQL, pairs)
 
     edges = edges_by_cluster(rows, membership)
@@ -630,17 +650,17 @@ def persist(
         for listing_id in members:
             edge = via.get(listing_id)
             member_rows.append({
+                "generation": generation,
                 "cluster_key": key,
                 "listing_id": listing_id,
                 "joined_via_lo": edge[0] if edge else None,
                 "joined_via_hi": edge[1] if edge else None,
             })
     conflicts = conflict_params(clusters, membership, generation)
-    keys = sorted({int(row["cluster_key"]) for row in cluster_rows})
 
     # The sweep and the rebuild are ONE transaction: half a generation — clusters without
     # members, or a deleted generation never re-inserted — is what the UI would render.
-    scope = {"generation": generation, "keys": keys}
+    scope = {"generation": generation}
     with conn.transaction():
         _execute(conn, CLUSTER_MEMBERS_DELETE_SQL, scope)
         _execute(conn, CLUSTER_CONFLICTS_DELETE_SQL, {"generation": generation})
@@ -648,7 +668,7 @@ def persist(
         n_clusters = insert_chunked(conn, CLUSTER_INSERT_SQL, cluster_rows)
         n_members = insert_chunked(conn, CLUSTER_MEMBER_INSERT_SQL, member_rows)
         n_conflicts = insert_chunked(conn, CLUSTER_CONFLICT_INSERT_SQL, conflicts)
-        _execute(conn, PAIR_CLUSTER_ORPHAN_CLEAR_SQL)
+        _execute(conn, PAIR_CLUSTER_ORPHAN_CLEAR_SQL, {"generation": generation})
     return {
         "pairs_upserted": n_pairs,
         "clusters": n_clusters,
@@ -656,6 +676,34 @@ def persist(
         "cluster_conflicts": n_conflicts,
         "judged_edges": len(judged),
     }
+
+
+def prune_generations(
+    conn: Any, *, keep: int | None, current: str
+) -> dict[str, Any]:
+    """Drop the OLDEST generations beyond `keep`, newest first, never the one just written.
+
+    Off unless the operator asks: a generation is the evidence a published number rests on
+    (M47 is what losing one costs), so the lane's default is to keep every pass it ever wrote
+    and let the store grow at roughly 40 MB a generation on the trial cohort. `pairs` is
+    pruned too — it is 90 % of that — and `cluster_conflicts` by the generation its `detail`
+    carries, which is the only place that table records one."""
+    if keep is None:
+        return {"pruned": [], "kept": None}
+    rows = _fetchall(conn, GENERATIONS_SQL)
+    ordered = [str(_value(row, "generation")) for row in rows]
+    # Oldest first from the statement, so the tail is what survives.
+    survivors = set(ordered[-keep:]) | {current}
+    doomed = [name for name in ordered if name not in survivors]
+    if not doomed:
+        return {"pruned": [], "kept": keep}
+    params = {"generations": doomed}
+    with conn.transaction():
+        _execute(conn, PRUNE_MEMBERS_SQL, params)
+        _execute(conn, PRUNE_CONFLICTS_SQL, params)
+        _execute(conn, PRUNE_CLUSTERS_SQL, params)
+        _execute(conn, PRUNE_PAIRS_SQL, params)
+    return {"pruned": doomed, "kept": keep}
 
 
 def _close(conn: Any) -> None:
@@ -708,6 +756,7 @@ def run_score(
                 "model_path": parsed.model,
                 "model_version": model.version,
                 "feature_version": FEATURE_VERSION,
+                "keep_generations": parsed.keep_generations,
                 "n_must_not_link": len(must_not_link),
             }, ensure_ascii=False, sort_keys=True, default=str),
         })
@@ -731,6 +780,11 @@ def run_score(
                 generation=parsed.generation,
                 model_version=model.version,
                 store_floor=settings.store_floor,
+            )
+            # AFTER the pass is stored, so a prune can never take the store below what this
+            # run just wrote, and inside the same try so a failure still lands on the run row.
+            counts["prune"] = prune_generations(
+                conn, keep=parsed.keep_generations, current=parsed.generation
             )
             cohort = {
                 "artifact": str(cohort_path),
@@ -766,6 +820,7 @@ def run_score(
             "model_version": model.version,
             "feature_version": FEATURE_VERSION,
             "store_floor": settings.store_floor,
+            "keep_generations": parsed.keep_generations,
             "n_must_not_link": len(must_not_link),
             "counts": counts,
             "timings": engine.get("timings") or {},

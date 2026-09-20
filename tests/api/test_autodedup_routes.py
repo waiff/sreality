@@ -385,6 +385,8 @@ def test_the_headline_total_is_the_wave_column_added_up(client, conn):
 EMPTY_ENGINE: dict[str, Any] = {
     "pairs_by_zone": {},
     "n_pairs": 0,
+    # WHICH pass the two pair histograms describe (E58) — null when the store holds none.
+    "pairs_generation": None,
     "certificates": {},
     "generations": [],
     "latest_generation": None,
@@ -487,6 +489,11 @@ def _cluster(cluster_key: int = 101, **over: Any) -> tuple[Any, ...]:
         "verdict_reasons": None,
         "verdict_decided_by": None,
         "verdict_decided_at": None,
+        # Migration 538 / E58. The default is the LEGACY shape — a ruling with no recorded
+        # member set, which applies exactly as it did before the column existed.
+        "verdict_generation": None,
+        "verdict_member_ids": None,
+        "verdict_applies": True,
     }
     values.update(over)
     return _tuple(usql.CLUSTER_COLUMNS, **values)
@@ -745,7 +752,12 @@ def test_a_group_carries_the_operators_latest_verdict(client, conn):
         "reasons": [],
         "decided_by": "operator@example.com",
         "decided_at": "2026-09-16T07:00:00+00:00",
+        # Migration 538 / E58: the pass and the set the ruling binds. Null and empty on a
+        # LEGACY row, which is what this fixture is.
+        "generation": None,
+        "member_ids": [],
     }
+    assert item["stale_verdict"] is None
     # the verdict is lifted OUT of the cluster object, never duplicated inside it
     assert "verdict" not in item["cluster"]
 
@@ -996,12 +1008,21 @@ def test_the_block_vocabulary_is_the_newest_passs_blocks(client, conn):
     assert body["data"]["generation"] == "g3"
 
 
-def test_the_pair_view_echoes_the_pass_it_was_validated_against(client, conn):
-    """`autodedup.pairs` is generation-free, but the echo is what a link written from this page
-    carries — so it names a real pass instead of repeating a missing parameter."""
+def test_the_pair_view_reads_and_echoes_the_pass_it_was_validated_against(client, conn):
+    """A scored edge belongs to a PASS (E58, migration 538): `autodedup.pairs` holds one row
+    per (generation, pair), so an unscoped read would hand back whichever engine last touched
+    the pair — a g2 zone answering a g4 question, the mix M42 found in the panel."""
     conn.canned = {"pair_one": [_pair_row()]}
     body = client.get("/autodedup/pair/11/12").json()
     assert body["data"]["generation"] == "g3"
+    assert _last_call(conn, usql.PAIR_ONE_SQL)["generation"] == "g3"
+
+
+def test_a_pair_the_asked_for_pass_never_scored_is_a_404(client, conn):
+    conn.canned = {"pair_one": []}
+    resp = client.get("/autodedup/pair/11/12", params={"generation": "g4"})
+    assert resp.status_code == 404
+    assert "generation" in resp.json()["detail"]
 
 
 def test_a_store_with_no_clustering_yet_resolves_to_no_generation(client, conn):
@@ -1333,7 +1354,9 @@ def test_the_agreement_read_reports_the_gate_the_directions_and_the_bound(client
         (d["listing_lo"], d["listing_hi"]) for d in data["disagreements"]
     ] == [(7, 8)]
     params = _last_call(conn, usql.AGREEMENT_PAIRS_SQL)
-    assert params["generation"] == "g3"
+    # The label set is every ruling on record (E58: a verdict carries its own member set), so
+    # the generation is an ECHO in the answer and NOT a filter on the statement.
+    assert "generation" not in params
     assert params["max_cluster_size"] == routes.AGREEMENT_MAX_CLUSTER_SIZE
 
 
@@ -1344,18 +1367,24 @@ def test_the_agreement_statement_unions_explicit_and_implied_pairs(client, conn)
     sql = " ".join(usql.AGREEMENT_PAIRS_SQL.split())
     # Only a `same` cluster implies anything; a rejected group says nothing per pair.
     assert "WHERE cf.verdict = 'same'" in sql
-    # Both members of one cluster, each pair once (mb > ma), and the cluster must be in the
-    # generation the view read.
-    assert "mb.listing_id > ma.listing_id" in sql
-    assert "c.generation = %(generation)s::text" in sql
+    # THE SET COMES OFF THE VERDICT (E58), not off today's clustering: `member_ids` is what
+    # the operator was looking at, so a later pass re-clustering the key cannot change what
+    # this label asserts. `cluster_members` survives only as the LEGACY fallback, scoped to
+    # the verdict's OWN generation.
+    assert "unnest(cf.member_ids)" in sql
+    assert "coalesce(v.member_ids, fb.ids)" in sql
+    assert "v.generation IS NULL OR m.generation = v.generation" in sql
+    assert "JOIN autodedup.clusters" not in sql
+    # Each pair once.
+    assert "mb.id > ma.id" in sql
     # The explicit verdict WINS: an implied row is dropped when the pair carries one.
     assert "WHERE NOT EXISTS ( SELECT 1 FROM explicit e2" in sql
     # `unsure` is not a label; `oss` is not a judge here; the best tier wins.
     assert "WHERE o.verdict <> 'unsure'" in sql
     assert "j.tier IN ('gold', 'vision', 'text')" in sql
     assert "CASE j.tier WHEN 'gold' THEN 0 WHEN 'vision' THEN 1 ELSE 2 END" in sql
-    # The implied expansion is bounded.
-    assert "c.size <= %(max_cluster_size)s::int" in sql
+    # The implied expansion is bounded, and bounded on the SET the operator ruled.
+    assert "array_length(cf.member_ids, 1), 0) <= %(max_cluster_size)s::int" in sql
 
 
 def test_the_agreement_read_renders_against_an_un_migrated_store(client, conn):
@@ -1783,6 +1812,9 @@ def _verdict_row(**over: Any) -> tuple[Any, ...]:
         "note": "two units in one building",
         "decided_by": "operator@example.com",
         "decided_at": datetime(2026, 9, 16, 10, tzinfo=timezone.utc),
+        # Migration 538: null on a pair row by the table's own CHECK (E58).
+        "generation": None,
+        "member_ids": None,
     }
     values.update(over)
     return _tuple(usql.VERDICT_COLUMNS, **values)
@@ -1878,7 +1910,8 @@ def test_a_negative_verdict_does_not_retract_what_it_just_wrote(admin_client, co
 def test_a_cluster_verdict_touches_no_must_not_link_either_way(admin_client, conn):
     conn.canned = {"cluster_exists": [(1,)], "verdict_write": [_verdict_row(kind="cluster")]}
     admin_client.post(
-        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 101, "verdict": "same"}
+        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 101, "verdict": "same",
+              "generation": "g1"}
     )
     assert all(
         sql not in (usql.MUST_NOT_LINK_UPSERT_SQL, usql.MUST_NOT_LINK_RETRACT_SQL)
@@ -1896,7 +1929,8 @@ def test_a_cluster_verdict_records_only_the_verdict(admin_client, conn):
     }
     body = admin_client.post(
         "/autodedup/verdict",
-        json={"kind": "cluster", "cluster_key": 101, "verdict": "different"},
+        json={"kind": "cluster", "cluster_key": 101, "verdict": "different",
+              "generation": "g1"},
     ).json()
     assert body["data"]["must_not_link"] is False
     assert body["data"]["verdict"]["cluster_key"] == 101
@@ -1927,7 +1961,9 @@ def test_a_verdict_on_something_that_does_not_exist_is_a_404(admin_client, conn)
         json={"kind": "pair", "listing_lo": 11, "listing_hi": 12, "verdict": "same"},
     ).status_code == 404
     assert admin_client.post(
-        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 9, "verdict": "same"}
+        "/autodedup/verdict",
+            json={"kind": "cluster", "cluster_key": 9, "verdict": "same",
+                  "generation": "g1"},
     ).status_code == 404
 
 
@@ -2032,7 +2068,8 @@ def test_a_verdict_against_a_store_that_does_not_exist_is_refused_not_accepted(
     is a success to the optimistic client, which would then show a decision nothing stored."""
     conn.ready = False
     resp = admin_client.post(
-        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 1, "verdict": "same"}
+        "/autodedup/verdict",
+        json={"kind": "cluster", "cluster_key": 1, "verdict": "same", "generation": "g1"},
     )
     assert resp.status_code == 503
     assert len(conn.calls) == 1
@@ -2383,7 +2420,8 @@ def test_a_cluster_confirmed_as_one_property_retracts_every_veto_in_it(admin_cli
         "cluster_member_ids": [(11,), (12,), (13,)],
     }
     body = admin_client.post(
-        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 101, "verdict": "same"}
+        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 101, "verdict": "same",
+              "generation": "g1"}
     ).json()
     assert body["data"]["must_not_link_retracted"] == 3
     assert [(p["listing_lo"], p["listing_hi"])
@@ -2398,7 +2436,8 @@ def test_a_cluster_verdict_that_is_not_same_retracts_nothing(admin_client, conn,
                                                   listing_lo=None, listing_hi=None)]}
     body = admin_client.post(
         "/autodedup/verdict",
-        json={"kind": "cluster", "cluster_key": 101, "verdict": verdict},
+        json={"kind": "cluster", "cluster_key": 101, "verdict": verdict,
+              "generation": "g1"},
     ).json()
     assert body["data"]["must_not_link_retracted"] == 0
     assert all(sql != usql.MUST_NOT_LINK_RETRACT_SQL for sql, _ in conn.calls)
@@ -2409,7 +2448,7 @@ def test_a_cluster_verdict_that_is_not_same_retracts_nothing(admin_client, conn,
     [
         ({"kind": "pair", "listing_lo": 11, "listing_hi": 12,
           "verdict": "same_project_different_unit"}, usql.VERDICT_PAIR_UPSERT_SQL),
-        ({"kind": "cluster", "cluster_key": 101,
+        ({"kind": "cluster", "cluster_key": 101, "generation": "g1",
           "verdict": "same_project_different_unit"}, usql.VERDICT_CLUSTER_UPSERT_SQL),
     ],
 )
@@ -2629,6 +2668,7 @@ def test_a_cluster_verdict_stores_its_reasons(admin_client, conn):
     admin_client.post(
         "/autodedup/verdict",
         json={"kind": "cluster", "cluster_key": 101, "verdict": "same",
+              "generation": "g1",
               "reasons": ["identical_photos"]},
     )
     assert _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["reasons"] == ["identical_photos"]
@@ -3609,3 +3649,176 @@ def test_candidate_split_verdicts_are_explicit_operator_labels_for_the_agreement
     for narrowing in ("generation", "cluster_key", "cluster_members", "decided_by"):
         assert narrowing not in explicit
     assert "'explicit'::text AS source" in usql.AGREEMENT_PAIRS_SQL
+
+
+# ================================ E58 — a cluster verdict binds a member set (migration 538)
+
+
+def test_a_verdict_taken_on_another_set_of_adverts_does_not_apply(client, conn):
+    """The defect this repairs, end to end.
+
+    Promoting g5 re-stamped 836 of g4's 870 cluster keys, so 21 of the operator's 224
+    confirmations landed on a group whose membership had moved under them. The server decides
+    that on the SET, so the group reads as unreviewed and the earlier ruling travels back as a
+    hint naming what arrived and what left — never as a verdict about adverts nobody looked at.
+    """
+    conn.canned = {
+        "groups": [
+            _cluster(
+                verdict="same",
+                verdict_note="jeden byt",
+                verdict_decided_by="operator@example.com",
+                verdict_decided_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                verdict_generation="g4",
+                verdict_member_ids=[11, 12],
+                verdict_applies=False,
+            )
+        ],
+        "members": [_member(101, 11), _member(101, 12), _member(101, 13)],
+    }
+    item = client.get("/autodedup/groups").json()["data"]["items"][0]
+    assert item["verdict"] is None
+    stale = item["stale_verdict"]
+    assert stale["verdict"] == "same"
+    assert stale["generation"] == "g4"
+    assert stale["member_ids"] == [11, 12]
+    # 13 arrived (a bridge), nothing left.
+    assert stale["added"] == [13]
+    assert stale["removed"] == []
+
+
+def test_a_verdict_on_the_same_set_of_adverts_still_applies(client, conn):
+    conn.canned = {
+        "groups": [
+            _cluster(
+                verdict="same",
+                verdict_decided_by="operator@example.com",
+                verdict_decided_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                verdict_generation="g4",
+                verdict_member_ids=[11, 12],
+                verdict_applies=True,
+            )
+        ],
+        "members": [_member(101, 11), _member(101, 12)],
+    }
+    item = client.get("/autodedup/groups").json()["data"]["items"][0]
+    assert item["verdict"]["verdict"] == "same"
+    assert item["verdict"]["generation"] == "g4"
+    assert item["stale_verdict"] is None
+
+
+def test_an_absorbed_group_names_the_adverts_that_left(client, conn):
+    conn.canned = {
+        "groups": [
+            _cluster(
+                verdict="same",
+                verdict_decided_by="operator@example.com",
+                verdict_decided_at=datetime(2026, 9, 18, tzinfo=timezone.utc),
+                verdict_generation="g4",
+                verdict_member_ids=[11, 12, 13],
+                verdict_applies=False,
+            )
+        ],
+        "members": [_member(101, 11), _member(101, 14)],
+    }
+    stale = client.get("/autodedup/groups").json()["data"]["items"][0]["stale_verdict"]
+    assert stale["added"] == [14]
+    assert stale["removed"] == [12, 13]
+
+
+def test_the_groups_queue_filters_on_the_ruling_that_applies(client, conn):
+    """`unreviewed` means "no ruling this group can be said to carry" — an absent one OR one
+    about a different set — and `changed` is the queue a promotion creates."""
+    sql = " ".join(usql.GROUPS_WEAKEST_SQL.split())
+    assert "'unreviewed' AND (v.verdict IS NULL OR NOT v.applies)" in sql
+    assert "'changed' AND v.verdict IS NOT NULL AND NOT v.applies" in sql
+    assert "v.verdict = %(verdict)s::text AND v.applies" in sql
+    assert client.get("/autodedup/groups", params={"verdict": "changed"}).status_code == 200
+    # A pair ruling binds two listings and can never go stale that way, so the residual queue
+    # refuses the value rather than silently returning nothing.
+    assert client.get(
+        "/autodedup/residual", params={"verdict": "changed"}
+    ).status_code == 400
+
+
+def test_a_group_read_is_scoped_to_one_pass_everywhere(client, conn):
+    """Members, edges and pairs are all keyed on the generation since migration 538 — a read
+    that dropped it would mix two passes' groups under one key."""
+    conn.canned = {
+        "groups": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12)],
+        "edges": [_tuple(usql.EDGE_SUMMARY_COLUMNS, cluster_key=101, n_edges=1, min_score=0.6,
+                         mean_score=0.6, n_certificates=0, n_judged=0, families=1)],
+    }
+    client.get("/autodedup/groups", params={"generation": "g4"})
+    assert _last_call(conn, usql.GROUP_MEMBERS_SQL)["generation"] == "g4"
+    assert _last_call(conn, usql.EDGE_SUMMARY_SQL)["generation"] == "g4"
+    for sql in (usql.GROUP_MEMBERS_SQL, usql.EDGE_SUMMARY_SQL, usql.CLUSTER_PAIRS_SQL,
+                usql.CANDIDATE_CLUSTER_MEMBERS_SQL):
+        assert "%(generation)s::text" in sql
+
+
+def test_a_cluster_verdict_without_a_generation_is_a_400(admin_client, conn):
+    """A cluster key names one set of adverts only inside one pass (E58), so a ruling that
+    does not say which pass is a ruling about nothing."""
+    resp = admin_client.post(
+        "/autodedup/verdict", json={"kind": "cluster", "cluster_key": 101, "verdict": "same"}
+    )
+    assert resp.status_code == 400
+    assert "generation" in resp.json()["detail"]
+    assert all(sql != usql.VERDICT_CLUSTER_UPSERT_SQL for sql, _ in conn.calls)
+
+
+def test_a_cluster_verdict_is_stamped_with_the_set_the_server_resolved(admin_client, conn):
+    """The member ids never come from the request: a client's idea of the membership is as old
+    as its last fetch, and a ruling recorded against a set nobody checked is the whole defect."""
+    conn.canned = {
+        "cluster_exists": [(1,)],
+        "cluster_member_ids": [(13,), (11,), (12,)],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="same", generation="g5",
+                                       member_ids=[11, 12, 13])],
+    }
+    body = admin_client.post(
+        "/autodedup/verdict",
+        json={"kind": "cluster", "cluster_key": 101, "verdict": "same", "generation": "g5"},
+    ).json()
+    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    assert written["generation"] == "g5"
+    # Sorted, which is the shape every read compares against.
+    assert written["member_ids"] == [11, 12, 13]
+    assert _last_call(conn, usql.CLUSTER_MEMBER_IDS_SQL)["generation"] == "g5"
+    assert _last_call(conn, usql.CLUSTER_EXISTS_SQL)["generation"] == "g5"
+    assert body["data"]["verdict"]["member_ids"] == [11, 12, 13]
+
+
+def test_a_split_stamps_the_set_it_ruled(admin_client, conn):
+    conn.canned = {
+        "group_one": [_cluster()],
+        "members": [_member(101, 11), _member(101, 12)],
+        "member_verdicts": [],
+        "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
+                                       listing_hi=None, verdict="same", generation="g4",
+                                       member_ids=[11, 12])],
+    }
+    resp = admin_client.post(
+        "/autodedup/verdict/split",
+        json={
+            "cluster_key": 101,
+            "generation": "g4",
+            "relation": "different",
+            "units": [{"listing_id": 11, "unit": "A"}, {"listing_id": 12, "unit": "A"}],
+        },
+    )
+    assert resp.status_code == 200
+    written = _last_call(conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    assert (written["generation"], written["member_ids"]) == ("g4", [11, 12])
+
+
+def test_the_progress_strip_counts_only_a_ruling_that_applies(client, conn):
+    """A verdict about a different set is not progress: counting it would tell the operator
+    they are done with a queue they still have to walk."""
+    for sql in (usql.VALIDATION_GROUPS_SAMPLE_SQL, usql.VALIDATION_GROUPS_TOTAL_SQL):
+        flat = " ".join(sql.split())
+        assert "vv.member_ids = coalesce(mem.ids, '{}'::bigint[])" in flat
+        assert "m.generation = %(generation)s::text" in flat

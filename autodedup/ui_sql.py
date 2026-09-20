@@ -62,18 +62,54 @@ CLUSTER_COLUMNS: tuple[str, ...] = (
     "verdict_reasons",
     "verdict_decided_by",
     "verdict_decided_at",
+    # Migration 538 / rule E58. WHICH pass the ruling was taken on, WHICH SET of adverts it
+    # was about, and whether that set is still this group's — the three facts that turn a
+    # carried-over verdict from a silent lie into a visible hint.
+    "verdict_generation",
+    "verdict_member_ids",
+    "verdict_applies",
 )
 
 # The FROM is its own constant so the COUNT behind "20 of N" runs the SAME joins as the page
 # it counts. The verdict LATERAL is not decoration — `_CLUSTER_WHERE` filters on it — and a
 # count that dropped it would answer a different question from the list above it.
+#
+# A CLUSTER VERDICT IS A STATEMENT ABOUT A SET OF LISTINGS (E58), so it is matched on that set
+# and not on the key. `mem.ids` is this group's current membership IN THIS GENERATION; the
+# ruling APPLIES when the operator's recorded `member_ids` equal it, and otherwise the group
+# reads as unreviewed and the row carries the earlier ruling as a hint. That is the whole
+# repair: promoting g5 re-stamped 836 of g4's keys, and 21 of the operator's 224 confirmations
+# landed on a group whose membership had moved under them — 11 grown by a bridge, 10 absorbed.
+#
+# THE RULING THAT APPLIES WINS, and only when none does is the latest carried as a hint. The
+# order is `applies` first, `decided_at` second — one spelling, shared with
+# `_CLUSTER_VERDICT_LATERAL` behind the progress strip, which selects the applying ruling and
+# nothing else. Newest-first alone would diverge from it the moment a key holds a ruling per
+# pass (which is exactly what migration 538's generation-scoped verdict key now allows): the
+# queue would read a g5 ruling while browsing g4, call the group unreviewed, and the strip
+# would count the same group as done off the g4 ruling it still holds.
+#
+# LEGACY ROWS (no `member_ids`: taken before migration 538) keep the pre-538 behaviour — they
+# apply to their own generation, and to any generation when they carry none. There is no
+# faithful record of what those operators saw, and inventing one from today's clustering is the
+# defect, not the fix.
 _CLUSTER_FROM = """
 FROM autodedup.clusters c
 LEFT JOIN LATERAL (
-    SELECT vv.verdict, vv.note, vv.reasons, vv.decided_by, vv.decided_at
+    SELECT array_agg(m.listing_id ORDER BY m.listing_id) AS ids
+      FROM autodedup.cluster_members m
+     WHERE m.generation = c.generation AND m.cluster_key = c.cluster_key
+) mem ON true
+LEFT JOIN LATERAL (
+    SELECT vv.verdict, vv.note, vv.reasons, vv.decided_by, vv.decided_at,
+           vv.generation, vv.member_ids,
+           (vv.member_ids IS NOT NULL
+            AND vv.member_ids = coalesce(mem.ids, '{}'::bigint[]))
+           OR (vv.member_ids IS NULL
+               AND (vv.generation IS NULL OR vv.generation = c.generation)) AS applies
       FROM autodedup.verdicts vv
      WHERE vv.kind = 'cluster' AND vv.cluster_key = c.cluster_key
-     ORDER BY vv.decided_at DESC, vv.id DESC
+     ORDER BY applies DESC, vv.decided_at DESC, vv.id DESC
      LIMIT 1
 ) v ON true
 """
@@ -86,7 +122,8 @@ SELECT
     c.min_edge_score, c.mean_edge_score, c.n_judged_edges, c.n_certificate_edges,
     c.evidence_families, c.max_gap_days, c.shared_photo_warning, c.status,
     c.model_version, c.feature_version, c.first_built_at, c.last_changed_at,
-    v.verdict, v.note, v.reasons, v.decided_by, v.decided_at
+    v.verdict, v.note, v.reasons, v.decided_by, v.decided_at,
+    v.generation, v.member_ids, coalesce(v.applies, false)
 """
     + _CLUSTER_FROM
 )
@@ -113,9 +150,18 @@ WHERE c.generation = %(generation)s::text
        OR c.shared_photo_warning = %(shared_photo)s::boolean)
   AND (%(has_judgement)s::boolean IS NULL
        OR (c.n_judged_edges > 0) = %(has_judgement)s::boolean)
+  -- THE FILTER READS THE RULING THAT APPLIES, never the row that merely exists (E58).
+  -- `unreviewed` is "no ruling this group can be said to carry" — an absent verdict OR one
+  -- taken on a different set of adverts; `changed` is the new arm that asks for exactly the
+  -- second half, which is the queue the operator needs after a promotion; every other value
+  -- is a verdict that both matches and applies.
   AND (%(verdict)s::text IS NULL
-       OR (%(verdict)s::text = 'unreviewed' AND v.verdict IS NULL)
-       OR v.verdict = %(verdict)s::text)
+       OR (%(verdict)s::text = 'unreviewed'
+           AND (v.verdict IS NULL OR NOT v.applies))
+       OR (%(verdict)s::text = 'changed'
+           AND v.verdict IS NOT NULL AND NOT v.applies)
+       OR (%(verdict)s::text NOT IN ('unreviewed', 'changed')
+           AND v.verdict = %(verdict)s::text AND v.applies))
 """
 
 # Default sort: the WEAKEST accepted edge first, because that is where the errors live (§8).
@@ -187,11 +233,18 @@ LIMIT %(limit)s::int
 # only, because paging does not change it and counting again per page is pure cost.
 GROUPS_COUNT_SQL = "SELECT count(*)" + _CLUSTER_FROM + _CLUSTER_WHERE
 
+# ONE ROW, DETERMINISTICALLY. `(generation, cluster_key)` is the primary key since migration
+# 538, so a key alone can match a group per pass and an unqualified caller (the route allows
+# `generation` to be absent) would get whichever row the plan handed back first — the dialog's
+# members, pairs and stale-verdict hint all derive from it. Newest-changed first, generation as
+# the tie-break, one row.
 GROUP_ONE_SQL = (
     _CLUSTER_SELECT
     + """
 WHERE c.cluster_key = %(cluster_key)s::bigint
   AND (%(generation)s::text IS NULL OR c.generation = %(generation)s::text)
+ORDER BY c.last_changed_at DESC, c.generation DESC
+LIMIT 1
 """
 )
 
@@ -285,7 +338,8 @@ LEFT JOIN listings l ON l.id = m.listing_id
 """
     + _card_photos("m.listing_id")
     + """
-WHERE m.cluster_key = any(%(keys)s::bigint[])
+WHERE m.generation = %(generation)s::text
+  AND m.cluster_key = any(%(keys)s::bigint[])
 ORDER BY m.cluster_key, m.listing_id
 """
 )
@@ -414,7 +468,8 @@ CLUSTER_PAIRS_SQL = (
     + _PAIR_SELECT_LIST
     + """
 FROM autodedup.pairs p
-WHERE p.listing_lo = any(%(ids)s::bigint[])
+WHERE p.generation = %(generation)s::text
+  AND p.listing_lo = any(%(ids)s::bigint[])
   AND p.listing_hi = any(%(ids)s::bigint[])
 ORDER BY p.score DESC NULLS LAST, p.listing_lo, p.listing_hi
 """
@@ -425,7 +480,8 @@ PAIR_ONE_SQL = (
     + _PAIR_SELECT_LIST
     + """
 FROM autodedup.pairs p
-WHERE p.listing_lo = %(listing_lo)s::bigint AND p.listing_hi = %(listing_hi)s::bigint
+WHERE p.generation = %(generation)s::text
+  AND p.listing_lo = %(listing_lo)s::bigint AND p.listing_hi = %(listing_hi)s::bigint
 """
 )
 
@@ -457,15 +513,18 @@ SELECT
     count(*) FILTER (WHERE judged.n > 0)                                       AS n_judged,
     coalesce(bit_or(p.families), 0::smallint)                                  AS families
 FROM autodedup.cluster_members ma
-JOIN autodedup.cluster_members mb ON mb.cluster_key = ma.cluster_key
+JOIN autodedup.cluster_members mb
+  ON mb.generation = ma.generation AND mb.cluster_key = ma.cluster_key
 JOIN autodedup.pairs p
-  ON p.listing_lo = ma.listing_id AND p.listing_hi = mb.listing_id
+  ON p.generation = ma.generation
+ AND p.listing_lo = ma.listing_id AND p.listing_hi = mb.listing_id
 LEFT JOIN LATERAL (
     SELECT count(*) AS n
       FROM autodedup.judgements j
      WHERE j.listing_lo = p.listing_lo AND j.listing_hi = p.listing_hi
 ) judged ON true
-WHERE ma.cluster_key = any(%(keys)s::bigint[])
+WHERE ma.generation = %(generation)s::text
+  AND ma.cluster_key = any(%(keys)s::bigint[])
 GROUP BY ma.cluster_key
 """
 
@@ -514,11 +573,15 @@ VERDICT_COLUMNS: tuple[str, ...] = (
     "reasons",
     "decided_by",
     "decided_at",
+    # Migration 538. Null on every pair-grain row by construction (the table's own CHECK):
+    # a pair ruling is about two listings and belongs to no generation (E58).
+    "generation",
+    "member_ids",
 )
 
 _VERDICT_SELECT_LIST = """
     v.id, v.kind, v.cluster_key, v.listing_lo, v.listing_hi, v.verdict, v.weight, v.note,
-    v.reasons, v.decided_by, v.decided_at
+    v.reasons, v.decided_by, v.decided_at, v.generation, v.member_ids
 """
 
 PAIR_VERDICTS_SQL = (
@@ -743,7 +806,8 @@ LEFT JOIN LATERAL (
 _RESIDUAL_PHOTOS = _residual_photos("a", "listing_lo") + _residual_photos("b", "listing_hi")
 
 _RESIDUAL_FILTERS = """
-WHERE p.score >= %(min_score)s::real
+WHERE p.generation = %(generation)s::text
+  AND p.score >= %(min_score)s::real
   AND (%(zone)s::text IS NULL OR p.zone = %(zone)s::text)
   AND (%(block)s::bigint IS NULL
        OR (bl.block_key = %(block)s::bigint
@@ -766,10 +830,10 @@ _RESIDUAL_UNCLUSTERED = """  AND NOT EXISTS (
       SELECT 1
         FROM autodedup.cluster_members ma
         JOIN autodedup.cluster_members mb
-          ON mb.cluster_key = ma.cluster_key AND mb.listing_id = p.listing_hi
-        JOIN autodedup.clusters cl
-          ON cl.cluster_key = ma.cluster_key AND cl.generation = %(generation)s::text
-       WHERE ma.listing_id = p.listing_lo
+          ON mb.generation = ma.generation AND mb.cluster_key = ma.cluster_key
+         AND mb.listing_id = p.listing_hi
+       WHERE ma.generation = %(generation)s::text
+         AND ma.listing_id = p.listing_lo
   )
 """
 
@@ -866,7 +930,8 @@ JOIN listings lb ON lb.id = p.listing_hi
 """
     + _RESIDUAL_BLOCK
     + """
-WHERE p.score >= %(min_score)s::real
+WHERE p.generation = %(generation)s::text
+  AND p.score >= %(min_score)s::real
 """
     + _RESIDUAL_UNCLUSTERED
     + """
@@ -882,8 +947,7 @@ CANDIDATE_CLUSTER_MEMBER_COLUMNS: tuple[str, ...] = ("cluster_key", "listing_id"
 CANDIDATE_CLUSTER_MEMBERS_SQL = """
 SELECT m.cluster_key, m.listing_id
 FROM autodedup.cluster_members m
-JOIN autodedup.clusters c ON c.cluster_key = m.cluster_key
-WHERE c.generation = %(generation)s::text
+WHERE m.generation = %(generation)s::text
 ORDER BY m.cluster_key, m.listing_id
 """
 
@@ -894,20 +958,21 @@ ORDER BY m.cluster_key, m.listing_id
 # deliberately NOT a hash of the rows: the point is to avoid reading them.
 CANDIDATE_FINGERPRINT_COLUMNS: tuple[str, ...] = ("n_pairs", "decided_at", "n_locks")
 
-# DELIBERATELY UNFILTERED by the display floor, unlike the cohort it fingerprints. The score
-# index is PARTIAL (`where zone = 'band'`, migration 528), so a `score >= …` predicate cannot
-# use it and would make both halves a filtered scan on EVERY page; `max(decided_at)` over the
-# whole table is a one-row index scan on `autodedup_pairs_decided_idx`, and counting every pair
+# DELIBERATELY UNFILTERED by the display floor, unlike the cohort it fingerprints — and, since
+# migration 538, SCOPED TO THE GENERATION, because that is what the cached index describes. The
+# score index is PARTIAL (`where zone = 'band'`), so a `score >= …` predicate cannot use it and
+# would make both halves a filtered scan on EVERY page; `(generation, decided_at desc)` serves
+# the newest-decided probe as a one-row index scan, and counting the generation's whole pair set
 # is a strict superset of counting the cohort — a superset invalidates more often, never less,
-# which is the safe direction for a cache.
+# which is the safe direction for a cache. Before 538 this counted EVERY generation's pairs,
+# so a score run at g5 silently invalidated g4's cached packing.
 CANDIDATE_FINGERPRINT_SQL = """
 SELECT
-    (SELECT count(*) FROM autodedup.pairs),
-    (SELECT max(p.decided_at) FROM autodedup.pairs p),
-    (SELECT count(*)
-       FROM autodedup.cluster_members m
-       JOIN autodedup.clusters c ON c.cluster_key = m.cluster_key
-      WHERE c.generation = %(generation)s::text)
+    (SELECT count(*) FROM autodedup.pairs p WHERE p.generation = %(generation)s::text),
+    (SELECT max(p.decided_at) FROM autodedup.pairs p
+      WHERE p.generation = %(generation)s::text),
+    (SELECT count(*) FROM autodedup.cluster_members m
+      WHERE m.generation = %(generation)s::text)
 """
 
 # Every pair the operator has ruled on, latest ruling per pair — what makes a candidate group
@@ -1061,9 +1126,13 @@ ORDER BY l.id
 
 ZONE_COUNT_COLUMNS: tuple[str, ...] = ("zone", "n")
 
+# SCOPED TO ONE PASS (migration 538). `autodedup.pairs` holds every generation ever scored, so
+# an unscoped histogram counts four engines at once — the very mix that made the validation
+# panel read band 75/67 where g4 reads 73/18 (M42).
 PAIR_ZONES_SQL = """
 SELECT coalesce(p.zone, 'unscored') AS zone, count(*) AS n
 FROM autodedup.pairs p
+WHERE p.generation = %(generation)s::text
 GROUP BY 1
 ORDER BY 1
 """
@@ -1073,7 +1142,8 @@ CERTIFICATE_COUNT_COLUMNS: tuple[str, ...] = ("certificate", "n")
 CERTIFICATE_COUNTS_SQL = """
 SELECT split_part(p.decision, ':', 2) AS certificate, count(*) AS n
 FROM autodedup.pairs p
-WHERE split_part(p.decision, ':', 1) = 'certificate'
+WHERE p.generation = %(generation)s::text
+  AND split_part(p.decision, ':', 1) = 'certificate'
 GROUP BY 1
 ORDER BY 1
 """
@@ -1086,6 +1156,8 @@ GENERATION_COLUMNS: tuple[str, ...] = (
     "last_changed_at",
 )
 
+# One row per pass. It is the picker's vocabulary AND, since migration 538, what scopes the
+# engine stat strip: the newest row here names the pass whose pairs the zone histogram counts.
 GENERATION_COUNTS_SQL = """
 SELECT
     c.generation,
@@ -1176,18 +1248,35 @@ ON CONFLICT (kind, listing_lo, listing_hi, decided_by) WHERE kind = 'pair'
 DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
               reasons = excluded.reasons, decided_at = now()
 RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
-          decided_by, decided_at
+          decided_by, decided_at, generation, member_ids
 """
 
+# STAMPED WITH THE SET IT IS ABOUT (E58, migration 538). `generation` and `member_ids` are not
+# optional extras on this write: the ruling is a statement about those adverts. The route
+# resolves `member_ids` from the store for that (generation, cluster_key) at write time and
+# never from the request body.
+#
+# THE CONFLICT TARGET CARRIES THE GENERATION, which is the write half of E58. The pre-538 index
+# was unique on (kind, cluster_key, decided_by), so ruling the g5 group 38324 UPDATEd the row
+# that held the operator's g4 ruling — the same "one key, one row, last pass wins" defect this
+# migration removes from `clusters`, and on the one table that has no history to fall back on.
+# A re-ruling now replaces only a ruling of the SAME pass, so `generation` is never reassigned;
+# `member_ids` still is, because a re-run of that pass can legitimately have moved the group
+# under the key. `coalesce(generation, '')` matches the partial index expression exactly —
+# inference is by expression, and a mismatch is a 42P10 at runtime, not at import.
 VERDICT_CLUSTER_UPSERT_SQL = """
-INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, note, reasons, decided_by)
+INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, note, reasons, decided_by,
+                                generation, member_ids)
 VALUES ('cluster', %(cluster_key)s::bigint, %(verdict)s::text, %(note)s::text,
-        %(reasons)s::text[], %(decided_by)s::text)
-ON CONFLICT (kind, cluster_key, decided_by) WHERE kind = 'cluster'
+        %(reasons)s::text[], %(decided_by)s::text, %(generation)s::text,
+        %(member_ids)s::bigint[])
+ON CONFLICT (kind, cluster_key, (coalesce(generation, ''::text)), decided_by)
+  WHERE kind = 'cluster'
 DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
-              reasons = excluded.reasons, decided_at = now()
+              reasons = excluded.reasons, member_ids = excluded.member_ids,
+              decided_at = now()
 RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
-          decided_by, decided_at
+          decided_by, decided_at, generation, member_ids
 """
 
 # PERMANENT (§13's own word): an operator "not the same" outranks every machine source, so it
@@ -1213,15 +1302,20 @@ WHERE listing_lo = %(listing_lo)s::bigint
 
 # Just the ids — the membership a whole-cluster ruling fans out over. `GROUP_MEMBERS_SQL`
 # answers the same question with three lateral joins and a gallery, which a write does not need.
+# Just the ids of ONE generation's group — the membership a whole-cluster ruling fans out over
+# AND the set that ruling is stamped with (E58). The server resolves it; a client never names
+# it, because a client's idea of the membership is as old as its last fetch.
 CLUSTER_MEMBER_IDS_SQL = """
 SELECT m.listing_id
 FROM autodedup.cluster_members m
-WHERE m.cluster_key = %(cluster_key)s::bigint
+WHERE m.generation = %(generation)s::text
+  AND m.cluster_key = %(cluster_key)s::bigint
 ORDER BY m.listing_id
 """
 
 CLUSTER_EXISTS_SQL = """
-SELECT 1 FROM autodedup.clusters WHERE cluster_key = %(cluster_key)s::bigint
+SELECT 1 FROM autodedup.clusters
+WHERE generation = %(generation)s::text AND cluster_key = %(cluster_key)s::bigint
 """
 
 # Does this clustering pass exist at all? The candidate WRITE names its generation (the card
@@ -1231,9 +1325,12 @@ GENERATION_EXISTS_SQL = """
 SELECT 1 FROM autodedup.clusters WHERE generation = %(generation)s::text LIMIT 1
 """
 
+# ANY generation: a pair verdict is about two adverts, not about the pass that proposed them
+# (E58), so a pair this engine scored under g4 is still a pair the operator may rule today.
 PAIR_EXISTS_SQL = """
 SELECT 1 FROM autodedup.pairs
 WHERE listing_lo = %(listing_lo)s::bigint AND listing_hi = %(listing_hi)s::bigint
+LIMIT 1
 """
 
 # ------------------------------------------------- the validation session (D6): how far in?
@@ -1253,11 +1350,26 @@ VALIDATION_COUNT_COLUMNS: tuple[str, ...] = ("n", "n_reviewed", "n_not_same")
 # The verdict LATERAL is the SAME "latest wins" read the queue's own statement makes (one row
 # per cluster, newest first) — a count that summed `autodedup.verdicts` directly would count a
 # re-decided group twice and report more reviewed groups than the generation holds.
+# ONLY A RULING THAT APPLIES COUNTS AS PROGRESS (E58). A verdict whose recorded `member_ids`
+# are not this group's current set is a ruling about a different set of adverts, and counting
+# it would tell the operator they are done with a queue they still have to walk. The sample's
+# own membership is read here rather than passed in: the strip and the queue must answer the
+# same question, and the queue asks the store.
 _CLUSTER_VERDICT_LATERAL = """
+LEFT JOIN LATERAL (
+    SELECT array_agg(m.listing_id ORDER BY m.listing_id) AS ids
+      FROM autodedup.cluster_members m
+     WHERE m.generation = %(generation)s::text AND m.cluster_key = s.cluster_key
+) mem ON true
 LEFT JOIN LATERAL (
     SELECT vv.verdict
       FROM autodedup.verdicts vv
      WHERE vv.kind = 'cluster' AND vv.cluster_key = s.cluster_key
+       AND ((vv.member_ids IS NOT NULL
+             AND vv.member_ids = coalesce(mem.ids, '{}'::bigint[]))
+            OR (vv.member_ids IS NULL
+                AND (vv.generation IS NULL
+                     OR vv.generation = %(generation)s::text)))
      ORDER BY vv.decided_at DESC, vv.id DESC
      LIMIT 1
 ) v ON true
@@ -1313,7 +1425,8 @@ VALIDATION_RESIDUAL_SAMPLE_SQL = (
 WITH s AS (
     SELECT p.listing_lo, p.listing_hi
       FROM autodedup.pairs p
-     WHERE p.score >= %(min_score)s::real
+     WHERE p.generation = %(generation)s::text
+       AND p.score >= %(min_score)s::real
 """
     + _RESIDUAL_UNCLUSTERED
     + """     ORDER BY md5(p.listing_lo::text || ':' || p.listing_hi::text || %(seed)s::text) ASC,
@@ -1331,7 +1444,8 @@ VALIDATION_RESIDUAL_TOTAL_SQL = (
 WITH s AS (
     SELECT p.listing_lo, p.listing_hi
       FROM autodedup.pairs p
-     WHERE p.score >= %(min_score)s::real
+     WHERE p.generation = %(generation)s::text
+       AND p.score >= %(min_score)s::real
 """
     + _RESIDUAL_UNCLUSTERED
     + """)
@@ -1364,6 +1478,19 @@ AGREEMENT_COLUMNS: tuple[str, ...] = (
 # at all, and only `same` clusters imply anything: a rejected group says the members are not
 # ALL one property, never which pair inside it was the wrong one.
 #
+# THE IMPLIED PAIRS COME OUT OF THE VERDICT, NOT OUT OF TODAY'S CLUSTERING (E58, migration
+# 538). `member_ids` is the set the operator was actually looking at, so the label set no
+# longer moves when a later pass re-clusters — which is exactly what happened when g5 re-stamped
+# 836 of g4's keys and 21 confirmations silently changed what they asserted. The fallback for a
+# LEGACY row that carries no set is the members of ITS OWN generation, which is the pre-538
+# read and the most that can honestly be said about it — and it answers ONLY when the key names
+# one set. A legacy row carries no generation either, and `(generation, cluster_key)` lets the
+# same key live in several passes, so an unguarded `array_agg` would hand back the UNION of
+# every pass that ever held it: six ids where four were ruled on, and up to 45 "the operator
+# said same" pairs invented for the D6 gate out of the 6 they actually asserted. The
+# `count(DISTINCT m.generation) = 1` guard returns NULL instead, and a row with no set implies
+# nothing.
+#
 # THE EXPANSION IS BOUNDED. A cluster of n members implies n(n-1)/2 pairs, so a runaway group
 # would dominate the number it is measured with. `max_cluster_size` caps which clusters expand
 # at all (the route sends it, and reports how many clusters it skipped), so the cost is
@@ -1384,22 +1511,28 @@ WITH explicit AS (
      ORDER BY v.listing_lo, v.listing_hi, v.decided_at DESC, v.id DESC
 ),
 confirmed AS (
-    SELECT DISTINCT ON (v.cluster_key) v.cluster_key, v.verdict
+    SELECT DISTINCT ON (v.cluster_key)
+           v.cluster_key, v.verdict, coalesce(v.member_ids, fb.ids) AS member_ids
       FROM autodedup.verdicts v
+      LEFT JOIN LATERAL (
+          SELECT CASE WHEN count(DISTINCT m.generation) = 1
+                      THEN array_agg(m.listing_id ORDER BY m.listing_id) END AS ids
+            FROM autodedup.cluster_members m
+           WHERE m.cluster_key = v.cluster_key
+             AND (v.generation IS NULL OR m.generation = v.generation)
+      ) fb ON v.member_ids IS NULL
      WHERE v.kind = 'cluster' AND v.cluster_key IS NOT NULL
      ORDER BY v.cluster_key, v.decided_at DESC, v.id DESC
 ),
 implied AS (
-    SELECT DISTINCT ma.listing_id AS listing_lo, mb.listing_id AS listing_hi
+    SELECT DISTINCT ma.id AS listing_lo, mb.id AS listing_hi
       FROM confirmed cf
-      JOIN autodedup.clusters c
-        ON c.cluster_key = cf.cluster_key
-       AND c.generation = %(generation)s::text
-       AND c.size <= %(max_cluster_size)s::int
-      JOIN autodedup.cluster_members ma ON ma.cluster_key = cf.cluster_key
-      JOIN autodedup.cluster_members mb
-        ON mb.cluster_key = cf.cluster_key AND mb.listing_id > ma.listing_id
+      CROSS JOIN LATERAL unnest(cf.member_ids) AS ma(id)
+      CROSS JOIN LATERAL unnest(cf.member_ids) AS mb(id)
      WHERE cf.verdict = 'same'
+       AND cf.member_ids IS NOT NULL
+       AND coalesce(array_length(cf.member_ids, 1), 0) <= %(max_cluster_size)s::int
+       AND mb.id > ma.id
 ),
 operator AS (
     SELECT e.listing_lo, e.listing_hi, e.verdict, 'explicit'::text AS source
@@ -1428,16 +1561,24 @@ WHERE o.verdict <> 'unsure'
 ORDER BY o.listing_lo, o.listing_hi
 """
 
-# The bound, reported rather than hidden: confirmed groups too large to expand. `EXISTS` on any
-# `same` row (not the latest one) is deliberate — this is a diagnostic about the cap, and a
-# group whose confirmation was later re-decided is still a group the cap would have expanded.
+# The bound, reported rather than hidden: confirmed groups too large to expand. Counted over
+# the VERDICTS and their own member sets, for the same reason the expansion is (E58) — a
+# diagnostic about the cap must be measured on the sets the cap was applied to. Any `same` row
+# counts, not only the latest: a confirmation later re-decided is still one the cap would have
+# expanded.
 AGREEMENT_OVERSIZE_SQL = """
 SELECT count(*)
-FROM autodedup.clusters c
-WHERE c.generation = %(generation)s::text
-  AND c.size > %(max_cluster_size)s::int
-  AND EXISTS (
-      SELECT 1 FROM autodedup.verdicts v
-       WHERE v.kind = 'cluster' AND v.cluster_key = c.cluster_key AND v.verdict = 'same'
-  )
+FROM autodedup.verdicts v
+LEFT JOIN LATERAL (
+    SELECT CASE WHEN count(DISTINCT m.generation) = 1
+                THEN array_agg(m.listing_id ORDER BY m.listing_id) END AS ids
+      FROM autodedup.cluster_members m
+     WHERE m.cluster_key = v.cluster_key
+       AND (v.generation IS NULL OR m.generation = v.generation)
+) fb ON v.member_ids IS NULL
+WHERE v.kind = 'cluster'
+  AND v.cluster_key IS NOT NULL
+  AND v.verdict = 'same'
+  AND coalesce(array_length(coalesce(v.member_ids, fb.ids), 1), 0)
+      > %(max_cluster_size)s::int
 """

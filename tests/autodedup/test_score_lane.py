@@ -30,10 +30,15 @@ from autodedup.score_sql import (
     CLUSTER_MEMBER_INSERT_SQL,
     CLUSTER_MEMBERS_DELETE_SQL,
     CLUSTERS_DELETE_SQL,
+    GENERATIONS_SQL,
     JUDGED_EDGES_SQL,
     MUST_NOT_LINK_SQL,
     PAIR_CLUSTER_ORPHAN_CLEAR_SQL,
     PAIR_UPSERT_SQL,
+    PRUNE_CLUSTERS_SQL,
+    PRUNE_CONFLICTS_SQL,
+    PRUNE_MEMBERS_SQL,
+    PRUNE_PAIRS_SQL,
     RUN_FINISH_SQL,
     RUN_START_SQL,
     STORE_PRESENT_SQL,
@@ -43,6 +48,7 @@ from tests.autodedup.test_engine_e2e import DUP_A, DUP_B, build_records
 MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
 MIGRATION = MIGRATIONS / "528_autodedup_foundation.sql"
 BLOCK_GRAIN_MIGRATION = MIGRATIONS / "529_autodedup_cluster_block_grain.sql"
+GENERATION_MIGRATION = MIGRATIONS / "538_autodedup_generation_scoped_store.sql"
 
 RUN_ID = 77
 
@@ -79,6 +85,8 @@ class FakeCursor:
             self._rows = list(self._conn.must_not_link)
         elif sql is JUDGED_EDGES_SQL:
             self._rows = list(self._conn.judged)
+        elif sql is GENERATIONS_SQL:
+            self._rows = list(self._conn.generations)
         else:
             self._rows = []
 
@@ -101,6 +109,7 @@ class FakeConn:
         self.store_ready = bool(state.get("store_ready", True))
         self.must_not_link = list(state.get("must_not_link", ()))
         self.judged = list(state.get("judged", ()))
+        self.generations = list(state.get("generations", ()))
         self.raises: dict[str, str] = dict(state.get("raises", {}))
         self.closed = False
 
@@ -327,7 +336,14 @@ def _migration_columns(table: str) -> list[str]:
         )
         if match and match.group(1) not in ("primary", "constraint"):
             columns.append(match.group(1))
-    return columns
+    # Migration 538 adds `generation` to three of these tables; the contract a writer has to
+    # satisfy is the CURRENT one, so the added columns are folded in here rather than listed
+    # by hand in every test below.
+    added = re.findall(
+        rf"alter table autodedup\.{table}\s+add column if not exists ([a-z_]+)",
+        GENERATION_MIGRATION.read_text(encoding="utf-8"),
+    )
+    return columns + [name for name in added if name not in columns]
 
 
 def test_pair_upsert_params_match_migration_528(lane, tmp_path: Path) -> None:
@@ -363,13 +379,14 @@ def test_the_family_bitmask_is_the_sum_of_its_families() -> None:
     row = {"lo": 2, "hi": 1, "families": ["LOC", "TXT"], "zone": "veto",
            "veto": "deal_conflict", "reason": "guard:deal_conflict", "score": 0.0,
            "probes": ["K1"], "feats": {"dist_norm": [0.1, True], "gap_days": [3.0, False]}}
-    params = score_lane.pair_params(row, {}, "hand_v1")
+    params = score_lane.pair_params(row, {}, "hand_v1", "g1")
     # `autodedup_pairs_order_ck` refuses lo >= hi, and one bad row aborts its whole chunk.
     assert (params["listing_lo"], params["listing_hi"]) == (1, 2)
     assert params["families"] == 4 + 16
     # A fourth zone value would violate the table's CHECK; the veto survives in its own column.
     assert params["zone"] == "reject" and params["guard_veto"] == "deal_conflict"
     assert json.loads(params["features"]) == {"dist_norm": [0.1, True]}
+    assert params["generation"] == "g1"
 
 
 def test_the_store_floor_decides_which_tail_is_written(lane, tmp_path: Path) -> None:
@@ -397,19 +414,60 @@ def test_a_generation_is_deleted_before_it_is_inserted(lane, tmp_path: Path) -> 
         assert _index(lane.executed, CLUSTERS_DELETE_SQL) < _index(lane.executed, sql)
 
 
-def test_the_sweep_also_scopes_the_keys_this_pass_is_about_to_write(
-    lane, tmp_path: Path
-) -> None:
-    """`clusters` is keyed on cluster_key ALONE: a key last written under another generation
-    is the same row, so a generation-only sweep would leave its members attached."""
+def test_the_sweep_never_reaches_outside_its_own_generation(lane, tmp_path: Path) -> None:
+    """E58. `clusters` is keyed `(generation, cluster_key)` since migration 538, so this
+    pass's own generation is the whole scope — the old key-set disjunct was exactly the
+    cross-generation reach that let g5 re-stamp 836 of g4's clusters."""
     lane(tmp_path / "out", export_run="1", generation="g2")
-    inserted = {row["cluster_key"] for row in _rows(lane.executed, CLUSTER_INSERT_SQL)}
-    assert inserted
+    assert {row["cluster_key"] for row in _rows(lane.executed, CLUSTER_INSERT_SQL)}
     for sql in (CLUSTER_MEMBERS_DELETE_SQL, CLUSTERS_DELETE_SQL):
-        params = _params(lane.executed, sql)[0]
-        assert params["generation"] == "g2"
-        assert set(params["keys"]) == inserted
-        assert "%(keys)s::bigint[]" in sql
+        assert _params(lane.executed, sql) == [{"generation": "g2"}]
+        assert "cluster_key" not in sql
+    # Every row and every scope this pass wrote names g2 and nothing else.
+    for sql, params in lane.executed:
+        if not isinstance(sql, str) or "autodedup." not in sql:
+            continue
+        if sql in (GENERATIONS_SQL, MUST_NOT_LINK_SQL, JUDGED_EDGES_SQL, STORE_PRESENT_SQL):
+            continue
+        if not ("clusters" in sql or "cluster_members" in sql or "autodedup.pairs" in sql):
+            continue
+        for row in (params if isinstance(params, list) else [params]):
+            if isinstance(row, dict) and "generation" in row:
+                assert row["generation"] == "g2", sql
+
+
+# --- keep_generations --------------------------------------------------------------------
+
+
+def test_nothing_is_pruned_unless_the_operator_asks(lane, tmp_path: Path) -> None:
+    lane(tmp_path / "out", export_run="1", generation="g9")
+    for sql in (PRUNE_MEMBERS_SQL, PRUNE_CLUSTERS_SQL, PRUNE_PAIRS_SQL, PRUNE_CONFLICTS_SQL):
+        assert _params(lane.executed, sql) == []
+
+
+def test_keep_generations_drops_the_oldest_and_never_this_pass(lane, tmp_path: Path) -> None:
+    lane.state["generations"] = [("g1",), ("g2",), ("g3",), ("g4",)]
+    summary = lane(tmp_path / "out", export_run="1", generation="g5", keep_generations="2")
+    doomed = _params(lane.executed, PRUNE_CLUSTERS_SQL)[0]["generations"]
+    # Oldest first from GENERATIONS_SQL, so g3/g4 survive and the pass's own g5 always does.
+    assert doomed == ["g1", "g2"]
+    assert "g5" not in doomed
+    for sql in (PRUNE_MEMBERS_SQL, PRUNE_PAIRS_SQL, PRUNE_CONFLICTS_SQL):
+        assert _params(lane.executed, sql) == [{"generations": ["g1", "g2"]}]
+    assert summary["counts"]["prune"] == {"pruned": ["g1", "g2"], "kept": 2}
+    # The prune runs AFTER the generation it is keeping is on disk.
+    assert _index(lane.executed, CLUSTER_INSERT_SQL) < _index(lane.executed, PRUNE_CLUSTERS_SQL)
+
+
+def test_keep_generations_refuses_a_value_that_is_not_a_count() -> None:
+    for bad in ("0", "-1", "all", "1.5"):
+        with pytest.raises(SystemExit) as exc:
+            score_lane.parse_args({"export_run": "1", "keep_generations": bad})
+        assert "keep_generations" in str(exc.value)
+    assert score_lane.parse_args({"export_run": "1"}).keep_generations is None
+    assert score_lane.parse_args(
+        {"export_run": "1", "keep_generations": "3"}
+    ).keep_generations == 3
 
 
 def test_the_generation_rebuild_is_one_transaction(lane, tmp_path: Path) -> None:
@@ -427,7 +485,7 @@ def test_a_pair_left_pointing_at_a_vanished_cluster_is_unlinked(
 ) -> None:
     """`pairs` outlives the generation rebuild, so its cluster_key can dangle."""
     lane(tmp_path / "out", export_run="1")
-    assert _params(lane.executed, PAIR_CLUSTER_ORPHAN_CLEAR_SQL) == [None]
+    assert _params(lane.executed, PAIR_CLUSTER_ORPHAN_CLEAR_SQL) == [{"generation": "g1"}]
     assert _index(lane.executed, PAIR_CLUSTER_ORPHAN_CLEAR_SQL) > _index(
         lane.executed, CLUSTER_INSERT_SQL
     )

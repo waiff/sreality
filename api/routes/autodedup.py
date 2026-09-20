@@ -276,6 +276,11 @@ SPLIT_RELATIONS: tuple[str, ...] = (
 # rejecting it — and the whole-cluster `different` verdict says that in one click.
 MAX_SPLIT_UNITS = 26
 VERDICT_FILTER_VALUES: tuple[str, ...] = ("unreviewed", *VERDICT_VALUES)
+# The GROUPS queue has one filter value the pair queues cannot have: a ruling that no longer
+# applies, because its member set has moved (E58). A pair verdict binds two listings and can
+# never go stale that way, so `changed` is offered here and refused there rather than silently
+# matching nothing.
+GROUP_VERDICT_FILTER_VALUES: tuple[str, ...] = ("changed", *VERDICT_FILTER_VALUES)
 ZONE_VALUES: tuple[str, ...] = ("merge", "band", "reject")
 VERDICT_KINDS: tuple[str, ...] = ("pair", "cluster")
 
@@ -656,10 +661,17 @@ def _member_verdicts(
     return out
 
 
-def _cluster_member_ids(conn: Any, cluster_key: int) -> list[int]:
+def _cluster_member_ids(conn: Any, cluster_key: int, generation: str) -> list[int]:
+    """The membership of ONE generation's group, resolved by the SERVER (E58).
+
+    It is both the fan-out a whole-cluster ruling writes over and the set the ruling is
+    stamped with, and neither may come from the request: a client's idea of the membership is
+    as old as its last fetch, and the whole defect this repairs is a verdict recorded against
+    a set nobody checked."""
     return sorted(
         {int(row[0]) for row in _fetch(conn, usql.CLUSTER_MEMBER_IDS_SQL,
-                                       {"cluster_key": cluster_key})}
+                                       {"cluster_key": cluster_key,
+                                        "generation": generation})}
     )
 
 
@@ -758,27 +770,54 @@ def _side(row: dict[str, Any], prefix: str, listing_id: int) -> dict[str, Any]:
     return side
 
 
-def _cluster_row(row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """The cluster, and the operator's latest verdict on it, as two objects."""
-    verdict = (
+_VERDICT_ROW_KEYS = (
+    "verdict", "verdict_note", "verdict_reasons", "verdict_decided_by", "verdict_decided_at",
+    "verdict_generation", "verdict_member_ids", "verdict_applies",
+)
+
+
+def _cluster_row(
+    row: dict[str, Any], members: list[dict[str, Any]] | None = None
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]:
+    """The cluster, the verdict that APPLIES to it, and the hint when one does not (E58).
+
+    A cluster verdict binds the member set it was taken on. When that set is still this
+    group's, the ruling is the group's verdict as it always was. When it is not — a bridge
+    grew the group, or a promotion absorbed it into another key — the group reads as
+    UNREVIEWED and the earlier ruling travels back as a hint naming which adverts arrived and
+    which left, so the operator re-rules what actually changed instead of inheriting a claim
+    they never made about these adverts.
+    """
+    applies = bool(row.get("verdict_applies"))
+    stored = (
         {
             "verdict": row["verdict"],
             "note": row["verdict_note"],
             "reasons": list(row["verdict_reasons"] or []),
             "decided_by": row["verdict_decided_by"],
             "decided_at": row["verdict_decided_at"],
+            "generation": row.get("verdict_generation"),
+            "member_ids": [int(value) for value in (row.get("verdict_member_ids") or [])],
         }
         if row["verdict"] is not None
         else None
     )
+    stale = None
+    if stored is not None and not applies:
+        current = sorted(int(member["listing_id"]) for member in (members or []))
+        ruled = stored["member_ids"]
+        stale = {
+            **stored,
+            # Empty on both sides when the server could not resolve the membership (a detail
+            # read with no member list) — the notice still names the ruling and its pass.
+            "added": [listing_id for listing_id in current if listing_id not in ruled],
+            "removed": [listing_id for listing_id in ruled if listing_id not in current],
+        }
     cluster = {
-        key: value
-        for key, value in row.items()
-        if key not in ("verdict", "verdict_note", "verdict_reasons", "verdict_decided_by",
-                       "verdict_decided_at")
+        key: value for key, value in row.items() if key not in _VERDICT_ROW_KEYS
     }
     cluster["evidence_family_names"] = _families(cluster.get("evidence_families"))
-    return cluster, verdict
+    return cluster, (stored if applies else None), stale
 
 
 def _pair_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -944,16 +983,26 @@ def _total(conn: Any, sql: str, params: dict[str, Any], after: str | None) -> in
 
 
 def _engine_stats(conn: Any) -> dict[str, Any]:
-    """What the engine has produced, for the header strip beside the program's spend."""
+    """What the engine has produced, for the header strip beside the program's spend.
+
+    THE PAIR HISTOGRAMS ARE ONE PASS'S (E58): `autodedup.pairs` holds every generation ever
+    scored, and an unscoped zone count adds four engines together — the mix that made the
+    validation panel read a band g4 never assigned (M42). The pass is the newest one, the
+    same default every queue opens on, and it is named in the answer."""
+    generations = _rows(usql.GENERATION_COLUMNS, _fetch(conn, usql.GENERATION_COUNTS_SQL))
+    generation = generations[0]["generation"] if generations else None
+    scope = {"generation": generation}
     zones = {
         row["zone"]: int(row["n"])
-        for row in _rows(usql.ZONE_COUNT_COLUMNS, _fetch(conn, usql.PAIR_ZONES_SQL))
+        for row in _rows(usql.ZONE_COUNT_COLUMNS, _fetch(conn, usql.PAIR_ZONES_SQL, scope))
     }
     certificates = {
         row["certificate"]: int(row["n"])
-        for row in _rows(usql.CERTIFICATE_COUNT_COLUMNS, _fetch(conn, usql.CERTIFICATE_COUNTS_SQL))
+        for row in _rows(
+            usql.CERTIFICATE_COUNT_COLUMNS,
+            _fetch(conn, usql.CERTIFICATE_COUNTS_SQL, scope),
+        )
     }
-    generations = _rows(usql.GENERATION_COLUMNS, _fetch(conn, usql.GENERATION_COUNTS_SQL))
     verdicts = _rows(usql.VERDICT_COUNT_COLUMNS, _fetch(conn, usql.VERDICT_COUNTS_SQL))
     judgements = _rows(usql.JUDGEMENT_COUNT_COLUMNS, _fetch(conn, usql.JUDGEMENT_COUNTS_SQL))
     # A READ degrades where a write refuses: the header strip must still render against a
@@ -969,6 +1018,9 @@ def _engine_stats(conn: Any) -> dict[str, Any]:
     return {
         "pairs_by_zone": zones,
         "n_pairs": sum(zones.values()),
+        # WHICH pass those two histograms describe. A number with no pass beside it is the
+        # thing that went wrong here in the first place.
+        "pairs_generation": generation,
         "certificates": certificates,
         "generations": generations,
         "latest_generation": generations[0]["generation"] if generations else None,
@@ -1045,7 +1097,7 @@ def groups(
     _reject_unknown_filters(request, GROUP_FILTER_KEYS)
     _one_of("sort", sort, tuple(GROUP_SORTS))
     sample_seed = _seed(seed)
-    _one_of("verdict", verdict, VERDICT_FILTER_VALUES)
+    _one_of("verdict", verdict, GROUP_VERDICT_FILTER_VALUES)
     _one_of("block_grain", block_grain, usql.BLOCK_GRAIN_VALUES)
     if not store_ready(conn):
         return _not_ready()
@@ -1109,12 +1161,21 @@ def groups(
                 _fetch(
                     conn,
                     usql.GROUP_MEMBERS_SQL,
-                    {"keys": keys, "card_frames": GROUP_CARD_IMAGES},
+                    {
+                        "keys": keys,
+                        "generation": generation,
+                        "card_frames": GROUP_CARD_IMAGES,
+                    },
                 ),
             ):
                 members.setdefault(row["cluster_key"], []).append(_member_row(row))
             for row in _rows(
-                usql.EDGE_SUMMARY_COLUMNS, _fetch(conn, usql.EDGE_SUMMARY_SQL, {"keys": keys})
+                usql.EDGE_SUMMARY_COLUMNS,
+                _fetch(
+                    conn,
+                    usql.EDGE_SUMMARY_SQL,
+                    {"keys": keys, "generation": generation},
+                ),
             ):
                 row["family_names"] = _families(row.pop("families"))
                 edges[row.pop("cluster_key")] = row
@@ -1124,13 +1185,18 @@ def groups(
 
     items: list[dict[str, Any]] = []
     for row in rows:
-        cluster, cluster_verdict = _cluster_row(row)
+        cluster, cluster_verdict, stale_verdict = _cluster_row(
+            row, members.get(row["cluster_key"], [])
+        )
         items.append(
             {
                 "cluster": cluster,
                 "members": members.get(cluster["cluster_key"], []),
                 "edges": edges.get(cluster["cluster_key"]),
                 "verdict": cluster_verdict,
+                # The ruling that no longer applies, and what moved under it (E58). Null on
+                # every group whose membership has not changed since it was ruled.
+                "stale_verdict": stale_verdict,
                 # The operator's own rulings on the members' PAIRS, so a card can show the
                 # split that is stored rather than a blank set of letters over it (E50).
                 "member_verdicts": member_verdicts.get(cluster["cluster_key"], []),
@@ -1189,16 +1255,24 @@ def group_detail(
         )
         if not rows:
             raise HTTPException(status_code=404, detail="no such cluster")
-        cluster, cluster_verdict = _cluster_row(_row(usql.CLUSTER_COLUMNS, rows[0]))
+        row = _row(usql.CLUSTER_COLUMNS, rows[0])
+        # The cluster row names its own pass, so the member read is scoped even when the
+        # caller asked for no generation at all.
+        generation = str(row["generation"])
 
         member_rows = _rows(
             usql.MEMBER_COLUMNS,
             _fetch(
                 conn,
                 usql.GROUP_MEMBERS_SQL,
-                {"keys": [cluster_key], "card_frames": GROUP_CARD_IMAGES},
+                {
+                    "keys": [cluster_key],
+                    "generation": generation,
+                    "card_frames": GROUP_CARD_IMAGES,
+                },
             ),
         )
+        cluster, cluster_verdict, stale_verdict = _cluster_row(row, member_rows)
         ids = [row["listing_id"] for row in member_rows]
         galleries = _images_by_listing(conn, ids)
         # The advert TEXT is the dialog's reason to exist for a developer project: five units
@@ -1216,7 +1290,12 @@ def group_detail(
         pairs = [
             _pair_view(row)
             for row in _rows(
-                usql.PAIR_COLUMNS, _fetch(conn, usql.CLUSTER_PAIRS_SQL, {"ids": ids})
+                usql.PAIR_COLUMNS,
+                _fetch(
+                    conn,
+                    usql.CLUSTER_PAIRS_SQL,
+                    {"ids": ids, "generation": generation},
+                ),
             )
         ]
         los = [pair["listing_lo"] for pair in pairs]
@@ -1251,6 +1330,7 @@ def group_detail(
         "data": {
             "cluster": cluster,
             "verdict": cluster_verdict,
+            "stale_verdict": stale_verdict,
             "members": members,
             "pairs": pairs,
             "judgements": judgements,
@@ -1746,7 +1826,10 @@ def candidate_detail(
         ]
         residual_keys = {(pair.listing_lo, pair.listing_hi) for pair in group.pairs}
         pairs = []
-        for row in _rows(usql.PAIR_COLUMNS, _fetch(conn, usql.CLUSTER_PAIRS_SQL, {"ids": ids})):
+        for row in _rows(
+            usql.PAIR_COLUMNS,
+            _fetch(conn, usql.CLUSTER_PAIRS_SQL, {"ids": ids, "generation": resolved}),
+        ):
             view = _pair_view(row)
             view["why_not_merged"] = _why_not_merged(
                 row["zone"], row["decision"], row["guard_veto"]
@@ -1968,16 +2051,19 @@ def agreement(
     The operator's label set is explicit pair verdicts UNION the pairs IMPLIED by confirmed
     clusters; the judge's is the best tier per pair (gold > vision > text, `oss` excluded).
     `insufficient_evidence` is counted, never scored. The arithmetic — the binary mapping and
-    the Wilson interval — is `autodedup/agreement.py`, so it can be checked by hand."""
+    the Wilson interval — is `autodedup/agreement.py`, so it can be checked by hand.
+
+    THE IMPLIED HALF COMES OUT OF THE VERDICTS (E58), not out of a clustering, so this number
+    no longer moves when a later pass re-clusters: the label set is what the operator was
+    looking at. `generation` is therefore an ECHO here and not a filter — it names the pass the
+    caller is validating against, and the labels it is compared with are every ruling on
+    record."""
     _reject_unknown_filters(request, AGREEMENT_FILTER_KEYS)
     if not store_ready(conn):
         return _not_ready()
     try:
         generation = _resolve_generation(conn, generation)
-        params = {
-            "generation": generation,
-            "max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE,
-        }
+        params = {"max_cluster_size": AGREEMENT_MAX_CLUSTER_SIZE}
         rows = _rows(usql.AGREEMENT_COLUMNS, _fetch(conn, usql.AGREEMENT_PAIRS_SQL, params))
         oversize_rows = _fetch(conn, usql.AGREEMENT_OVERSIZE_SQL, params)
     except _STORE_BEHIND:
@@ -2017,15 +2103,22 @@ def pair(
     if not store_ready(conn):
         return _not_ready()
     try:
-        # The pair itself is generation-free — `autodedup.pairs` is one scored edge, not a
-        # clustering. The echo still names the pass the caller is validating against, so a
-        # link written from this page cannot silently mean a superseded one.
+        # THE SCORED EDGE BELONGS TO A PASS (E58, migration 538). `autodedup.pairs` holds one
+        # row per (generation, pair), so reading it unscoped hands back whichever engine last
+        # touched the pair — a g2 zone answering a g4 question, which is the same mix M42
+        # found in the validation panel. The generation resolves to the newest pass when the
+        # caller names none, and the answer echoes it.
         generation = _resolve_generation(conn, generation)
         rows = _fetch(
-            conn, usql.PAIR_ONE_SQL, {"listing_lo": listing_lo, "listing_hi": listing_hi}
+            conn,
+            usql.PAIR_ONE_SQL,
+            {"listing_lo": listing_lo, "listing_hi": listing_hi,
+             "generation": generation},
         )
         if not rows:
-            raise HTTPException(status_code=404, detail="no such pair")
+            raise HTTPException(
+                status_code=404, detail="no such pair in this generation"
+            )
         row = _row(usql.PAIR_COLUMNS, rows[0])
         feats = _feats(row["features"])
 
@@ -2097,6 +2190,11 @@ class VerdictIn(BaseModel):
     listing_lo: int | None = None
     listing_hi: int | None = None
     cluster_key: int | None = None
+    # REQUIRED for a cluster verdict, refused on a pair one (E58). A cluster key names one set
+    # of adverts only inside one pass — the same key means 870 different groups across g1..g5 —
+    # so a ruling that does not say which pass it was taken on is a ruling about nothing. The
+    # SERVER then resolves the member set for that (generation, cluster_key) and stamps it.
+    generation: str | None = Field(default=None, max_length=40)
     note: str | None = Field(default=None, max_length=2000)
     # WHY the operator ruled this way (migration 533), validated against the registry.
     reasons: list[str] = Field(default_factory=list,
@@ -2203,8 +2301,19 @@ def verdict(
             raise _bad("a cluster verdict needs cluster_key")
         if body.listing_lo is not None or body.listing_hi is not None:
             raise _bad("a cluster verdict carries no listing ids")
-        if not _fetch(conn, usql.CLUSTER_EXISTS_SQL, {"cluster_key": body.cluster_key}):
-            raise HTTPException(status_code=404, detail="no such cluster")
+        if not body.generation:
+            raise _bad("a cluster verdict needs the generation it was taken on")
+        if not _fetch(
+            conn,
+            usql.CLUSTER_EXISTS_SQL,
+            {"cluster_key": body.cluster_key, "generation": body.generation},
+        ):
+            raise HTTPException(
+                status_code=404, detail="no such cluster in this generation"
+            )
+        # Resolved HERE, from the store, at write time: the ruling is a statement about these
+        # adverts (E58), and the only honest record of which ones is the one the server reads.
+        ids = _cluster_member_ids(conn, body.cluster_key, body.generation)
         try:
             stored = _fetch(
                 conn,
@@ -2215,6 +2324,8 @@ def verdict(
                     "note": body.note,
                     "reasons": reasons,
                     "decided_by": str(decided_by),
+                    "generation": body.generation,
+                    "member_ids": ids,
                 },
             )
         except _CHECK_VIOLATION as exc:
@@ -2224,7 +2335,6 @@ def verdict(
         must_not_link = False
         retracted = 0
         if body.verdict == "same":
-            ids = _cluster_member_ids(conn, body.cluster_key)
             for index, lo in enumerate(ids):
                 for hi in ids[index + 1:]:
                     _execute(
@@ -2367,7 +2477,8 @@ def verdict_split(
         _fetch(
             conn,
             usql.GROUP_MEMBERS_SQL,
-            {"keys": [body.cluster_key], "card_frames": GROUP_CARD_IMAGES},
+            {"keys": [body.cluster_key], "generation": body.generation,
+             "card_frames": GROUP_CARD_IMAGES},
         ),
     )
     member_ids = sorted({int(row["listing_id"]) for row in members})
@@ -2509,6 +2620,10 @@ def verdict_split(
                     "note": note,
                     "reasons": reasons,
                     "decided_by": str(decided_by),
+                    # The SET this split ruled on (E58): the members the server just read for
+                    # this pass, which is also the set the assignment had to cover exactly.
+                    "generation": body.generation,
+                    "member_ids": member_ids,
                 },
             )
     except _CHECK_VIOLATION as exc:
