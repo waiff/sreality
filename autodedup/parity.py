@@ -33,7 +33,11 @@ from autodedup.dataset import Dataset, Image, Listing, load
 from autodedup.decide import decide_pair
 from autodedup.features import FEATURE_VERSION, pair_features
 from autodedup.fingerprint import Fingerprint, build_fingerprint
-from autodedup.harness import load_model, load_settings
+# The instrument NAMES its scorer the way every other lane does (E83a): `settings=w8`
+# was read as a path here and found no file, which is how a lane ends up running the
+# uncalibrated prior while its operator believes it is running w8.
+from autodedup.harness import named_model as load_model
+from autodedup.harness import named_settings as load_settings
 from autodedup.hazard_context import ContextIndex
 from autodedup.incremental import GENERATION, Calibration, Keyer, context_for
 from autodedup.incremental_lane import SqlFacts

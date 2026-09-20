@@ -283,8 +283,18 @@ PRIOR_MODEL_NAME: str = "prior"
 
 
 def repo_path(raw: str, base: Path, suffix: str = ".json") -> Path:
-    """`sweep_a` or `sweep_a.json` -> `<base>/sweep_a.json`, refusing anything outside `base`."""
-    name = raw if raw.endswith(suffix) else f"{raw}{suffix}"
+    """`sweep_a` or `sweep_a.json` -> `<base>/sweep_a.json`, refusing anything outside `base`.
+
+    A dispatch that spells the whole repo-relative path (`autodedup/settings/w8.json`, which is
+    how the recipes in git history spell it) names the same file and is accepted as such — the
+    prefix is stripped, never followed, so what can be read is still only what is inside
+    `base`."""
+    name = raw.strip()
+    for prefix in (f"autodedup/{base.name}/", f"{base.name}/", f"./{base.name}/"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    name = name if name.endswith(suffix) else f"{name}{suffix}"
     resolved = (base / name).resolve()
     if base.resolve() not in resolved.parents:
         raise SystemExit(f"{raw!r} must name a file inside {base.name}/")
