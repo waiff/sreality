@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from autodedup import structural_truth as st
 from autodedup.dataset import Listing, Location
 from autodedup.structural_truth import (
     LABEL_DIFFERENT,
@@ -288,3 +289,32 @@ def test_committed_pair_lists_are_what_the_judge_lane_reads(name: str) -> None:
         assert isinstance(lo, int) and isinstance(hi, int) and lo < hi
         assert (lo, hi) not in seen
         seen.add((lo, hi))
+
+
+def test_mask_codes_redacts_every_order_code_the_rules_certify_on() -> None:
+    text = (
+        "Nabizime byt 2+kk, evidencni cislo zakazky N115815, dale ev. c.: 657349. "
+        "Kontakt v inzeratu [ID 84553]."
+    )
+    assert st.reference_codes(text) == {"N115815", "657349", "84553"}
+    masked = st.mask_codes(text)
+    assert st.reference_codes(masked) == set()
+    assert "N115815" not in masked and "657349" not in masked and "84553" not in masked
+    assert masked.count(st.CODE_MASK) == 3
+    # The keyword survives: the judge still sees that an order number was printed, only not
+    # WHICH one, so the arm cannot match two adverts on the string itself.
+    assert "evidencni cislo zakazky" in masked
+
+
+def test_mask_codes_is_a_no_op_on_text_with_no_code() -> None:
+    assert st.mask_codes(None) is None
+    assert st.mask_codes("") == ""
+    plain = "Slunny byt 3+1 o vymere 72 m2 v cihlovem dome."
+    assert st.mask_codes(plain) == plain
+
+
+def test_mask_codes_follows_whitespace_the_capture_removed() -> None:
+    text = "evidencni cislo zakazky N 115815 konec"
+    codes = st.reference_codes(text)
+    assert codes == {"N115815"}
+    assert st.mask_codes(text) == "evidencni cislo zakazky [KOD] konec"

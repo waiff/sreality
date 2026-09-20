@@ -111,6 +111,27 @@ def reference_codes(text: str | None) -> set[str]:
     return out
 
 
+CODE_MASK: str = "[KOD]"
+
+
+def mask_codes(text: str | None) -> str | None:
+    r"""Every agency order code this module can find, replaced by one token.
+
+    The diagnostic W7 needs: `pos_ref_*` certifies a pair BECAUSE both bodies carry one code,
+    and 69.3 % of those codes survive into the judge's 1,200-character description window — so
+    an arm's recall on structural positives is partly a string match the prompt handed it.
+    Masking runs over the ORIGINAL text (the folded copy `reference_codes` matches on is not
+    index-aligned with it), joining the code's characters with `\s*` because the capture
+    removed the whitespace a body may print inside the number."""
+    if not text:
+        return text
+    out = text
+    for code in reference_codes(text):
+        pattern = re.compile(r"\s*".join(re.escape(ch) for ch in code), re.IGNORECASE)
+        out = pattern.sub(CODE_MASK, out)
+    return out
+
+
 def reference_context(text: str | None, code: str, width: int = 44) -> str:
     """The scrubbed window around `code`'s first mention — what a human adjudicates from."""
     if not text:
