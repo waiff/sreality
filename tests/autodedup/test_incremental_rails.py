@@ -243,6 +243,32 @@ def test_a_listing_that_leaves_a_block_leaves_its_snapshot() -> None:
     assert (GEN, "obec:563510", 10) not in db.scope_ids
 
 
+def test_a_retired_listing_leaves_the_snapshot_in_the_same_pass() -> None:
+    """W9e-1: the entrant claim has no scope check of its own, so a snapshot row that outlives
+    the retirement hands the listing straight back and burns the rolling-day retire budget."""
+    from autodedup.incremental_lane import SqlStore
+
+    db = FakePg()
+    db.scope_ids[(GEN, "obec:563510", 10)] = {"resolved_at": None, "refreshed_at": db.now}
+    db.scope_ids[(GEN, "obec:563510", 11)] = {"resolved_at": None, "refreshed_at": db.now}
+    db.rt_fp[(GEN, 10)] = _fp_row()
+    SqlStore(db, GEN).drop_listing(10)
+    assert (GEN, 10) not in db.rt_fp
+    assert (GEN, "obec:563510", 10) not in db.scope_ids
+    assert (GEN, "obec:563510", 11) in db.scope_ids
+
+
+def test_a_block_dropped_by_a_rescope_leaves_no_snapshot_behind() -> None:
+    """W9e-1b: the per-block prune only runs for a WALKED block, and a dropped block is never
+    walked again, so its rows would be claimed as entrants and retired for ever."""
+    db = _registry(FakePg())
+    db.scope_ids[(GEN, "cast_obce:490245", 77)] = {"resolved_at": None, "refreshed_at": db.now}
+    _place(db, 10, obec=563510)
+    _work(db, TOWN, enter_slice=20000).claim(50)
+    assert (GEN, "cast_obce:490245", 77) not in db.scope_ids
+    assert (GEN, "obec:563510", 10) in db.scope_ids
+
+
 # ------------------------------------------------------- R4: one scope row per generation
 
 

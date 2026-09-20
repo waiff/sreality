@@ -547,6 +547,16 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                         if not (key[0] == gen and key[1] == str(p["block_key"])
                                 and key[2] not in keep)}
         return []
+    if sql == S.RT_SCOPE_IDS_DELETE_SQL:
+        gone = set(int(i) for i in p["ids"])
+        db.scope_ids = {key: row for key, row in db.scope_ids.items()
+                        if not (key[0] == gen and key[2] in gone)}
+        return []
+    if sql == S.RT_SCOPE_IDS_PRUNE_BLOCKS_SQL:
+        keep = set(str(b) for b in p["block_keys"])
+        db.scope_ids = {key: row for key, row in db.scope_ids.items()
+                        if not (key[0] == gen and key[1] not in keep)}
+        return []
     if sql == S.RT_SCOPE_ENTRANTS_SQL:
         cut = db.now - timedelta(seconds=int(p["lag"]))
         rows = sorted((listing_id, row["resolved_at"])

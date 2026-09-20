@@ -124,6 +124,8 @@ from autodedup.incremental_sql import (
     RT_SCHEMA_SIZE_SQL,
     RT_SCOPE_BLOCK_SQL,
     RT_SCOPE_ENTRANTS_SQL,
+    RT_SCOPE_IDS_DELETE_SQL,
+    RT_SCOPE_IDS_PRUNE_BLOCKS_SQL,
     RT_SCOPE_IDS_PRUNE_SQL,
     RT_SCOPE_IDS_WRITE_SQL,
     RT_SCOPE_PARENT_OBEC_SQL,
@@ -375,6 +377,8 @@ class SqlStore:
         self._fp[int(listing_id)] = None
         self._run(RT_KEY_DELETE_SQL, {"generation": self.generation, "ids": [int(listing_id)]})
         self._run(RT_FP_DELETE_SQL, {"generation": self.generation, "ids": [int(listing_id)]})
+        self._run(RT_SCOPE_IDS_DELETE_SQL,
+                  {"generation": self.generation, "ids": [int(listing_id)]})
         self._lookups.clear()
 
     def keys_many(self, ids: Iterable[int]) -> dict[int, list[tuple[str, str]]]:
@@ -958,6 +962,9 @@ class SqlWork:
         Returns the block pointer the cursor should carry, so ties (nothing scanned yet) rotate
         instead of always naming the same block."""
         blocks = self.enter_blocks
+        self.statements += 1
+        _exec(self.conn, RT_SCOPE_IDS_PRUNE_BLOCKS_SQL, {
+            "generation": self.generation, "block_keys": [block.key for block in blocks]})
         state = {str(row[0]): (row[1], int(row[2] or 0))
                  for row in self._query(RT_SCOPE_SCAN_STATE_SQL, {
                      "generation": self.generation, "hours": 24})}

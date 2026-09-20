@@ -362,6 +362,24 @@ delete from autodedup.rt_scope_ids s
    and not (s.listing_id = any(%(listing_ids)s::bigint[]))
 """
 
+# A listing the drift sweep RETIRES must leave the membership snapshot in the same transaction
+# (W9e-1): the entrant claim reads the snapshot with no scope check of its own, so a row left
+# behind hands the listing straight back, it is retired again, and the rolling-day retire
+# budget burns down until the lane refuses itself for up to 24 h.
+RT_SCOPE_IDS_DELETE_SQL = """
+delete from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and s.listing_id = any(%(ids)s::bigint[])
+"""
+
+# A rescope that DROPS a block leaves that block's snapshot rows with no walk to prune them
+# (the prune above is per walked block), so they would be claimed and retired for ever (W9e-1b).
+RT_SCOPE_IDS_PRUNE_BLOCKS_SQL = """
+delete from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and not (s.block_key = any(%(block_keys)s::text[]))
+"""
+
 # What an ordinary pass costs the production instance for this feed: NOTHING. Both sides of the
 # anti-join are in schema `autodedup`, served by `autodedup_rt_scope_ids_claim_idx` and the
 # `rt_fp` primary key. The settle lag is the same one every other feed honours (W9e/R5) and it
