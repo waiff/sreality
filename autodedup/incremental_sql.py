@@ -16,7 +16,7 @@ primary key. EXPLAIN against the live database confirms the `public` cursors are
 (`listings_pkey`, `listing_snapshots_pkey`, `listings_inactive_at_idx`) and that the gallery
 fetch rides `images_listing_id_idx`.
 
-**Why the feeds carry a settle LAG and a keyset tie-break (E68).** `id` is assigned at INSERT
+**Why the feeds carry a settle LAG and a keyset tie-break (E73).** `id` is assigned at INSERT
 and not at COMMIT, so two overlapping batch transactions can commit out of id order and a bare
 `id > cursor` watermark would step over the slower one; `inactive_at` is `now()` — the
 TRANSACTION timestamp — so one `mark_inactive` batch shares one stamp, and a `limit` that cuts
@@ -42,7 +42,7 @@ select to_regclass('autodedup.fp_key')         is not null
    and to_regclass('autodedup.rt_lease')       is not null as present
 """
 
-# A pass is one transaction (E70) and a statement that runs away is a lease held past its TTL,
+# A pass is one transaction (E75) and a statement that runs away is a lease held past its TTL,
 # so both bounds are set on the session before any work begins.
 # `SET` is a utility statement and takes no parameter, so the two session bounds go through
 # `set_config` — same effect, one PREPARE-able statement each.
@@ -88,7 +88,7 @@ update autodedup.rt_lease
 
 # ------------------------------------------------------------------ the watermark feeds
 #
-# FIVE bounded feeds, all read-only (D4) and all restricted to `rt_scope` (E74):
+# FIVE bounded feeds, all read-only (D4) and all restricted to `rt_scope` (E79):
 #   * new       — `listings_pkey`, paged on `id`, settle-lagged, plus a straggler anti-join.
 #   * changed   — `listing_snapshots_pkey`. Rule #2 makes that table an append-on-content-change
 #                 feed, so it is exactly "a listing whose content moved", with no column of its
@@ -102,7 +102,7 @@ update autodedup.rt_lease
 #   * drifted   — a listing the geocoder MOVES out of the scope touches no cursor either. The
 #                 fifth feed sweeps this generation's own fingerprint rows against the scope
 #                 and hands back the ones that left, to be retired.
-# WINDOW FIRST, SCOPE SECOND — and the cursor advances over the WINDOW (E74). The lane holds
+# WINDOW FIRST, SCOPE SECOND — and the cursor advances over the WINDOW (E79). The lane holds
 # only the listings of `rt_scope`, ~0.6% of the corpus, so a feed that filtered BY the scope
 # would either seq-scan `listing_location` (there is no index on `cast_obce_kod`, and D8
 # forbids adding one) or crawl. Each feed reads a bounded window off its OWN cursor index,
@@ -141,7 +141,7 @@ select coalesce(max(w.id), %(after_id)s::bigint) as window_max,
 """
 
 # The proof rather than the assumption: any id at or below the cursor that this generation has
-# no fingerprint row for was committed after the pass that stepped over it (E68). Under a scope
+# no fingerprint row for was committed after the pass that stepped over it (E73). Under a scope
 # the anti-join ALONE would answer with out-of-scope ids for ever — almost nothing in the
 # window has a fingerprint row, and almost nothing should — so the scope is part of this
 # statement rather than a filter over its answer.
@@ -249,7 +249,7 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
              or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
 """
 
-# The FIFTH feed, and the one the scope owes (E74): a listing the operator's geocoder MOVES —
+# The FIFTH feed, and the one the scope owes (E79): a listing the operator's geocoder MOVES —
 # an obec correction, a resolved část — leaves the scope without touching any cursor the other
 # four page over. The sweep is the revive sweep's twin: a bounded round-robin slice of THIS
 # generation's own fingerprint rows, left-joined to the scope, returning the ids the scope no
@@ -275,7 +275,7 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
              or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
 """
 
-# ------------------------------------------------------------------ the storage budget (E74)
+# ------------------------------------------------------------------ the storage budget (E79)
 #
 # The operator pays for this store by the megabyte, so a pass reads what the schema already
 # costs BEFORE it writes anything and refuses to run over the budget. `pg_total_relation_size`
@@ -370,11 +370,11 @@ on conflict (name) do update set
 # history, so E19's price-event features too; no `broker_key`, so the whole BRK family; and
 # `granularity` read as an enum rather than text. A replay against an exported artifact cannot
 # see any of that, which is why the lane now reads through the export's definitions instead of
-# beside them (E72).
+# beside them (E77).
 #
 # The ONE deliberate difference is the corpus-wide pHash population: the export computes it
 # with a sequential scan over `public.images` (no index, D8 forbids adding one), and the lane
-# reads the frozen one out of `autodedup.phash_pop`, because E65 freezes it with the other
+# reads the frozen one out of `autodedup.phash_pop`, because E70 freezes it with the other
 # cohort statistics — a pass that recomputed it would move `catalog_ratio`, `anchor_bands` and
 # with them every certificate that reads a catalogue ratio.
 RT_PHASH_POP_SQL = """
@@ -385,7 +385,7 @@ select p.phash, p.n_listings
 
 # ------------------------------------------------------------------ probe postings
 #
-# One statement per PASS rather than per probe key (E69): a listing carries 17.3 index keys and
+# One statement per PASS rather than per probe key (E74): a listing carries 17.3 index keys and
 # a pass touches hundreds of listings, so the per-key spelling was ~12,000 round trips a pass.
 RT_LOOKUP_MANY_SQL = """
 select k.probe, k.key_token, k.listing_id
@@ -505,7 +505,7 @@ select {_PAIR_COLUMNS}
 """
 
 # E64's rail reads only the merges of the blocks whose census MOVED this pass: under a frozen
-# calibration (E65) no other block's counter can have changed, so a generation-wide scan would
+# calibration (E70) no other block's counter can have changed, so a generation-wide scan would
 # read millions of rows to re-confirm what cannot have moved.
 RT_STAMPED_MERGES_SQL = f"""
 select {_PAIR_COLUMNS}
@@ -516,7 +516,7 @@ select {_PAIR_COLUMNS}
  order by p.listing_lo, p.listing_hi
 """
 
-# E67's BFS step: the merge edges out of a frontier, both directions in one statement.
+# E72's BFS step: the merge edges out of a frontier, both directions in one statement.
 RT_MERGE_NEIGHBOURS_SQL = """
 select p.listing_lo as a, p.listing_hi as b
   from autodedup.pairs p
@@ -592,7 +592,7 @@ update autodedup.pairs p
 
 # ------------------------------------------------------------------ cluster grain
 #
-# Scoped to the COMPONENT, not to the generation: E67 rewrites the components it recomputed and
+# Scoped to the COMPONENT, not to the generation: E72 rewrites the components it recomputed and
 # leaves every other group of the same pass alone, which is what makes a bounded pass safe to
 # interrupt.
 RT_CLUSTERS_TOUCHING_SQL = """
@@ -654,7 +654,7 @@ on conflict (generation, cell_key, category_group) do update set
     updated_at = now()
 """
 
-# ------------------------------------------------------------------ calibration (E65)
+# ------------------------------------------------------------------ calibration (E70)
 RT_CALIBRATION_READ_SQL = """
 select c.generation, c.digest, c.n_listings, c.payload, c.artifact_url, c.settings,
        c.model_version, c.built_at
@@ -678,7 +678,7 @@ on conflict (generation) do update set
 """
 
 # The seed reads the PRESENT, so a new generation starts at the corpus instead of walking the
-# whole history of it (E71): the cold-start cursors are the live maxima.
+# whole history of it (E76): the cold-start cursors are the live maxima.
 RT_SEED_CURSORS_SQL = """
 select (select coalesce(max(id), 0) from public.listings)              as last_listing_id,
        (select coalesce(max(id), 0) from public.listing_snapshots)     as last_snapshot_id,

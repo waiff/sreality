@@ -1,9 +1,9 @@
-"""Shape gate for migration 539 — the real-time shadow lane's state (PROGRAM.md E65/E66/E67).
+"""Shape gate for migration 539 — the real-time shadow lane's state (PROGRAM.md E70/E71/E72).
 
 Offline, no DB. The generic RLS/grant rails see every statement here; this file checks what a
 generic rail cannot know: that the lane's own tables never reach outside schema `autodedup`
 (ruling D4, and D8's ban on DDL over a shared hot table), that the posting table is keyed by
-GENERATION so two calibrations can never share one probe key, and that E66's two direction
+GENERATION so two calibrations can never share one probe key, and that E71's two direction
 bits and E64's stored census are columns rather than something re-derived at read time.
 """
 
@@ -55,7 +55,7 @@ def test_it_is_additive_and_idempotent() -> None:
 
 
 def test_the_posting_table_is_keyed_by_generation() -> None:
-    """E65: a probe key is a function of the frozen calibration (K3's price decile), so two
+    """E70: a probe key is a function of the frozen calibration (K3's price decile), so two
     generations must not be able to read each other's postings."""
     code = _code()
     assert "create table if not exists autodedup.fp_key" in code
@@ -64,7 +64,7 @@ def test_the_posting_table_is_keyed_by_generation() -> None:
 
 
 def test_the_pair_grain_carries_both_directions_the_census_and_the_certificate() -> None:
-    """E66 keeps a pair while EITHER side retrieves the other; E64 replays the census a
+    """E71 keeps a pair while EITHER side retrieves the other; E64 replays the census a
     promotion was taken under, never today's; and E33 orders a component's edges
     certificate-first, which a lane clustering from STORED rows can only do from a column."""
     code = _code()

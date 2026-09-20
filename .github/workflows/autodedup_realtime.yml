@@ -10,7 +10,7 @@ name: "AUTODEDUP: realtime shadow lane"
 # gives no LLM judge merge authority on the band, so this lane calls no provider at all.
 #
 # What one pass does. FIVE bounded watermark feeds hand it a slice of listings, and every one of
-# them is restricted to `rt_scope` (E74 — the lane holds three blocks, not the corpus): new rows
+# them is restricted to `rt_scope` (E79 — the lane holds three blocks, not the corpus): new rows
 # off `listings_pkey`, content changes off `listing_snapshots_pkey`, activity flips off the
 # partial `listings_inactive_at_idx` paged on `(inactive_at, id)`, a round-robin sweep for
 # REVIVALS — `touch_listings` un-delists in place and appends no snapshot, so no forward cursor
@@ -20,13 +20,13 @@ name: "AUTODEDUP: realtime shadow lane"
 # cursor over the window rather than over the survivors. Before any of it, the pass reads what
 # schema `autodedup` costs and REFUSES over `rt_max_schema_mb` (default 400). Every feed ignores rows younger than a settle lag and the new-row feed carries an
 # anti-join straggler sweep, because `id` is assigned at INSERT and two overlapping batch
-# transactions can commit out of id order (E68). For each one it rebuilds the fingerprint, refreshes the
-# probe postings in `autodedup.fp_key`, widens to the probe-key NEIGHBOURHOOD (E66 — a fan-out
+# transactions can commit out of id order (E73). For each one it rebuilds the fingerprint, refreshes the
+# probe postings in `autodedup.fp_key`, widens to the probe-key NEIGHBOURHOOD (E71 — a fan-out
 # cap makes retrieval order-dependent unless every listing that probes a changed key is
 # re-probed too), retrieves candidates with the same six probes the cohort lane uses, computes
-# the same features under the generation's FROZEN calibration (E65), takes the same decision —
+# the same features under the generation's FROZEN calibration (E70), takes the same decision —
 # certificates, E45/E46/E47's gates, E61's veto, E48's per-stratum cut, E63's promotion — and
-# re-clusters only the connected components whose merge edges moved (E67), constrained
+# re-clusters only the connected components whose merge edges moved (E72), constrained
 # union-find, must-not-link and E57's bridge rule included. E64's rail then re-opens to the
 # band any stamped promotion the live census has since overtaken; certificates are exempt.
 #
@@ -35,7 +35,7 @@ name: "AUTODEDUP: realtime shadow lane"
 # the watermark advances only over what the pass actually decided. A pass whose pair set does
 # not fit `max_pairs` writes NOTHING and re-claims a smaller slice rather than truncating —
 # a partial pair set re-clusters from a partial edge set and the watermark would then step over
-# the difference for ever (E70). Two runs cannot overlap: a lease row in `autodedup.rt_lease` is
+# the difference for ever (E75). Two runs cannot overlap: a lease row in `autodedup.rt_lease` is
 # taken by CAS (never `pg_advisory_lock`, which strands over the transaction pooler), its TTL
 # outlives this job's timeout, and a run that cannot take it exits green as `skipped: leased`.
 #
@@ -46,7 +46,7 @@ name: "AUTODEDUP: realtime shadow lane"
 # REQUIRES migration 539 (`autodedup.fp_key`, `rt_fp`, `rt_calibration`, `rt_block_cell`,
 # `rt_lease` plus the pair-grain columns) and a generation seeded by
 # `gh workflow run autodedup.yml -f mode=rt_seed -f args=artifact=<cohort>,backfill=true`,
-# which cuts the frozen calibration (E65) and starts the cursors at TODAY rather than at id 0.
+# which cuts the frozen calibration (E70) and starts the cursors at TODAY rather than at id 0.
 # Without either the lane exits non-zero rather than running on a guess.
 #
 # The run summary (out/incremental.json, uploaded on every outcome and echoed into the job

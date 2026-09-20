@@ -1,4 +1,4 @@
-"""E74 — the real-time lane's SCOPE and its storage budget, exercised.
+"""E79 — the real-time lane's SCOPE and its storage budget, exercised.
 
 W9 built a lane whose four feeds claimed the arrivals of the WHOLE corpus: ~178,000 new
 listings in 30 days, a fingerprint, 17.3 postings and a pair fan-out for each, into a store the
@@ -268,7 +268,7 @@ def test_a_refused_pass_advances_no_cursor_even_across_an_empty_window() -> None
     db = _feeds_db()
     work = SqlWork(db, SCOPE, GEN)
     work.claim(50)
-    work.commit([])  # E70: the pair budget refused this claim
+    work.commit([])  # E75: the pair budget refused this claim
     assert db.cursors == {CURSOR_NEW: {"last_listing_id": 50}}, "the fixture's own row only"
 
 

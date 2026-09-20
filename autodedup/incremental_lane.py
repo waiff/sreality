@@ -152,7 +152,7 @@ SCOPE_SETTING: str = "rt_scope"
 BUDGET_SETTING: str = "rt_max_schema_mb"
 STORAGE_WATERMARK: str = "rt_storage_last"
 
-# How long a row must have existed before the lane will claim it (E68). Portal writes commit in
+# How long a row must have existed before the lane will claim it (E73). Portal writes commit in
 # seconds; a transaction still open after five minutes would have to be a stuck one, and the
 # straggler sweep catches even that.
 SETTLE_LAG_S: int = 300
@@ -162,7 +162,7 @@ STRAGGLER_WINDOW: int = 5000
 # every ~22 passes (~3.7 h at the `*/10` cadence), which is the lane's revival latency.
 REVIVE_SLICE: int = 20000
 # How many rows of its OWN cursor index a forward feed reads before the scope is resolved for
-# them (E74). Measured on the live corpus: the three feeds together take 23,234 rows a day —
+# them (E79). Measured on the live corpus: the three feeds together take 23,234 rows a day —
 # 161 in a ten-minute pass — so 1,000 a feed is >6x headroom on the corpus rate and >200x on
 # the scope's own. It is a bound on work, not on progress: whatever the window holds, the
 # cursor crosses it in one pass.
@@ -215,7 +215,7 @@ def _epoch(value: Any) -> float | None:
 class SqlStore:
     """`incremental.Store` over Postgres. Every write is inside schema `autodedup` (D4).
 
-    Three things are buffered rather than written statement by statement (E69): the fingerprint
+    Three things are buffered rather than written statement by statement (E74): the fingerprint
     rows and postings of one pass, the census cells, and the lookups already answered. Measured:
     a whole 24-listing cohort decided in one pass costs **14 statements** and a pass over an
     unchanged corpus costs **4**, where the per-listing spelling cost ~17,700 for a 166-listing
@@ -411,7 +411,7 @@ class SqlStore:
         return out
 
     def upsert_pairs(self, rows: Sequence[PairRow]) -> None:
-        # RETENTION (E74), and it is the batch lane's rule rather than a new one:
+        # RETENTION (E79), and it is the batch lane's rule rather than a new one:
         # `score_lane.persist` writes only `storable(row, store_floor)` — the whole merge and
         # band zones whatever they scored, plus the reject tail at or above `store_floor`
         # (0.02 at w8) — so the store grows with duplicates and not with comparisons. Measured
@@ -644,9 +644,9 @@ class SqlFacts:
     quiet ones — no `attrs`, so every attribute feature would have been absent in production
     while the replay had them; no price history, so E19's price events; no `broker_key`, so the
     whole BRK family; `granularity` read as an enum rather than text. A replay over an exported
-    artifact cannot see any of that (E72).
+    artifact cannot see any of that (E77).
 
-    The one deliberate difference from the export is the pHash population: frozen (E65) and
+    The one deliberate difference from the export is the pHash population: frozen (E70) and
     read from `autodedup.phash_pop`, never recounted."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL) -> None:
@@ -700,7 +700,7 @@ class SqlFacts:
         for row in self._dicts(COHORT_CLIP_TAGS_SQL,
                                {"ids": image_ids, "model": self.clip_model}):
             tags.setdefault(int(row["image_id"]), []).append(row)
-        # Frozen, never recounted (E65) — and absent from the table means a population of 0
+        # Frozen, never recounted (E70) — and absent from the table means a population of 0
         # for that hash, not an unknown, because the cohort lane writes every hash it saw.
         population = {int(row[0]): int(row[1]) for row in
                       _rows(self.conn, RT_PHASH_POP_SQL, {"hashes": hashes})} if hashes else {}
@@ -719,13 +719,13 @@ class SqlWork:
     """The five bounded watermark feeds, restricted to `rt_scope`, and the rule that a cursor
     moves only over what a pass actually decided.
 
-    Every feed is settle-lagged and paged on its FULL key (E68), because neither of the two
+    Every feed is settle-lagged and paged on its FULL key (E73), because neither of the two
     things that look like watermarks here is monotone on its own: `id` is assigned at INSERT
     (so overlapping batch transactions commit out of order) and `inactive_at` is the
     transaction timestamp (so a `mark_inactive` batch shares one stamp — 189 live tie groups
     are larger than one pass's share, the largest 5,534 rows).
 
-    **The scope is what a cursor steps OVER, not what it stops at (E74).** The lane holds ~0.6%
+    **The scope is what a cursor steps OVER, not what it stops at (E79).** The lane holds ~0.6%
     of the corpus, so each forward feed reads a bounded WINDOW off its own index, resolves the
     scope for that window through `listing_location_pkey`, and advances to the window's end
     even when nothing in it was in scope — a feed that advanced only over survivors would need
@@ -831,7 +831,7 @@ class SqlWork:
             for listing_id in revived:
                 items.append(WorkItem(int(listing_id), "revived", None, None))
 
-        # The fifth feed (E74): the rows of this generation the scope has stopped holding.
+        # The fifth feed (E79): the rows of this generation the scope has stopped holding.
         if self.drift_slice:
             after_scope = cursors[CURSOR_SCOPE][0]
             rows = self._query(RT_SCOPE_DRIFT_SQL, {
@@ -853,7 +853,7 @@ class SqlWork:
         The cursor VALUES were fixed at claim time, because a feed's watermark is its window's
         end and a window that yielded no in-scope row still has one. What `done` decides is
         whether they are written at all: a feed advances only when every item it handed over
-        comes back decided, so a refused pass (E70) — which hands back nothing — advances
+        comes back decided, so a refused pass (E75) — which hands back nothing — advances
         nothing, while an all-out-of-scope window still crosses."""
         out: dict[str, Any] = {}
         pending, self._pending = self._pending, {}
@@ -954,7 +954,7 @@ def rt_rows(conn: Any, generation: str, scope: Scope) -> dict[str, int]:
 def storage_guard(conn: Any, generation: str, scope: Scope,
                   max_schema_mb: float) -> dict[str, Any]:
     """Read what schema `autodedup` costs BEFORE the pass writes anything, and refuse over
-    budget (E74).
+    budget (E79).
 
     The operator pays for this store by the megabyte, and the failure this guards is not a
     crash but a silent one: a lane nobody watches for a week, adding rows at 10-minute
@@ -1025,7 +1025,7 @@ def release_lease(conn: Any, holder: str) -> None:
 
 
 def _transaction(conn: Any) -> ContextManager[Any]:
-    """One pass, one transaction (E70). `db.connect` is autocommit, so without this a crash
+    """One pass, one transaction (E75). `db.connect` is autocommit, so without this a crash
     between the cluster DELETE and its INSERT loses those clusters permanently — the re-claim
     finds matching digests, skips, and never rebuilds them."""
     opener = getattr(conn, "transaction", None)
@@ -1033,7 +1033,7 @@ def _transaction(conn: Any) -> ContextManager[Any]:
 
 
 class _Refused(Exception):
-    """The pair budget refused this claim — roll the pass back and report it (E70)."""
+    """The pair budget refused this claim — roll the pass back and report it (E75)."""
 
 
 def run_incremental(
@@ -1081,7 +1081,7 @@ def run_incremental(
         rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation})
         if not rows:
             raise SystemExit(
-                f"no frozen calibration for generation {generation!r} (E65) — seed it with "
+                f"no frozen calibration for generation {generation!r} (E70) — seed it with "
                 "`--mode rt_seed` before the lane runs")
         payload = rows[0][3]
         calibration = Calibration.from_json(
@@ -1148,7 +1148,7 @@ def run_rt_seed(
 
     Without this the lane has no calibration at all (it refuses to run on a guess) and its
     cursors would start at id 0 — 83 days of walking history at the shipped slice before the
-    first live arrival is reached (E71). The seed writes the calibration from the same cohort
+    first live arrival is reached (E76). The seed writes the calibration from the same cohort
     artifact the batch pass scored, stamps the forward cursors at the corpus's current maxima,
     and — with `backfill=true` — writes the cohort's own fingerprints and postings so the
     generation starts from a populated store rather than an empty one.
@@ -1185,7 +1185,7 @@ def run_rt_seed(
 
         ds = load(artifact)
         # The artifact is the BATCH cohort and carries the assembled negative control, which
-        # has no arrival feed and is therefore outside every real-time scope (E74). The seed
+        # has no arrival feed and is therefore outside every real-time scope (E79). The seed
         # drops it here rather than backfilling rows the lane could never maintain — and the
         # frozen calibration is cut over what the generation will actually HOLD, because every
         # statistic in it is cohort-relative.

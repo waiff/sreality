@@ -1,4 +1,4 @@
--- 539 — the real-time SHADOW lane's own state (PROGRAM.md E65/E66/E67, rules D4/D8).
+-- 539 — the real-time SHADOW lane's own state (PROGRAM.md E70/E71/E72, rules D4/D8).
 --
 -- Additive and idempotent. NOTHING here touches a table outside schema `autodedup`: ruling D8
 -- forbids DDL on the shared hot tables, and the six retrieval probes are over DERIVED keys
@@ -17,13 +17,13 @@
 --                          NOT migration 528's `listing_fp`, which is keyed on `listing_id`
 --                          alone (so it cannot hold two generations) and which no lane has
 --                          ever written.
---   * `rt_calibration`  — E65: the six cohort-relative inputs of a decision, frozen so a
+--   * `rt_calibration`  — E70: the six cohort-relative inputs of a decision, frozen so a
 --                          pair's score cannot depend on WHEN it was scored.
 --   * `rt_block_cell`   — the live census E64's rail reads, as a counter plus three capped
 --                          sets (the three cardinalities are reported, never read by a rule).
 --   * `rt_lease`        — mutual exclusion by lease-row CAS. NEVER `pg_advisory_lock`: a
 --                          session lock strands over the transaction pooler.
---   * `pairs.from_lo` / `pairs.from_hi` — E66's bookkeeping. A pair is kept while EITHER side
+--   * `pairs.from_lo` / `pairs.from_hi` — E71's bookkeeping. A pair is kept while EITHER side
 --                          retrieves the other, which is what makes the fan-out cap
 --                          order-insensitive; one boolean per direction is the whole mechanism.
 --   * `pairs.evidence` / `pairs.context` — the strings a rule refused or certified on, and the
@@ -96,7 +96,7 @@ create index if not exists autodedup_rt_fp_inactive_idx
   on autodedup.rt_fp (generation, listing_id) where is_active = false;
 
 ------------------------------------------------------------------
--- the frozen calibration (E65)
+-- the frozen calibration (E70)
 ------------------------------------------------------------------
 
 -- `payload` holds the six statistics inline while they fit; above that the lane writes
@@ -166,10 +166,10 @@ alter table autodedup.pairs
   add column if not exists calibration_digest text;
 
 comment on column autodedup.pairs.from_lo is
-  'E66: the LOW side''s own retrieval reached the high side. A pair is kept while either '
+  'E71: the LOW side''s own retrieval reached the high side. A pair is kept while either '
   'direction holds, which is what makes the fan-out cap order-insensitive.';
 comment on column autodedup.pairs.from_hi is
-  'E66: the HIGH side''s own retrieval reached the low side.';
+  'E71: the HIGH side''s own retrieval reached the low side.';
 comment on column autodedup.pairs.context is
   'E64: the census this decision was taken under — replayed as stored, never re-read from '
   'today''s census.';

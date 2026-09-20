@@ -4,10 +4,10 @@
         --model autodedup/models/w6_gold.json --out out/ [--shuffle-seed 7]
 
 The claim this proves is narrow and mechanical: **at the same settings, the same model and the
-same frozen calibration (E65), the incremental path's final state equals the cohort pass's.**
+same frozen calibration (E70), the incremental path's final state equals the cohort pass's.**
 Pair decisions are pure functions of the pair under a frozen calibration, so any zone
 difference is a retrieval or bookkeeping bug; clusters are recomputed per connected component
-(E67), so any cluster difference is an ordering bug. Both are reported by cause rather than
+(E72), so any cluster difference is an ordering bug. Both are reported by cause rather than
 counted, because a count cannot be debugged.
 
 `--shuffle-seed` re-runs the same cohort with arrivals shuffled INSIDE each calendar day and
@@ -73,7 +73,7 @@ class ScheduleWork:
     """The WorkSource: an arrival schedule instead of the four watermark cursors.
 
     It obeys the same contract production's does — a claim advances nothing, a COMMIT advances
-    over exactly the items it is handed — so a pass the pair budget refused (E70) re-claims the
+    over exactly the items it is handed — so a pass the pair budget refused (E75) re-claims the
     same arrivals here as it would there."""
 
     def __init__(self, order: Sequence[int]) -> None:
@@ -279,7 +279,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-component", type=int, default=400)
     parser.add_argument("--max-pairs", type=int, default=Limits().max_pairs)
     parser.add_argument("--shuffle-seed", type=int, default=None)
-    # The real-time lane holds only `rt_scope` (E74), so the honest equivalence claim is over
+    # The real-time lane holds only `rt_scope` (E79), so the honest equivalence claim is over
     # the scope: the SAME listings on both sides, the batch pass included. Passing it here
     # restricts the dataset once, before either path sees it.
     parser.add_argument("--scope", default=None)

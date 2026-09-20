@@ -71,7 +71,7 @@ class FakePg:
         self.transactions = 0
         self.rolled_back = 0
         # What `pg_total_relation_size` over schema `autodedup` answers — the storage guard's
-        # one input (E74). Tests move it to put the lane over budget.
+        # one input (E79). Tests move it to put the lane over budget.
         self.schema_bytes = 64 * 1_048_576
 
     # ------------------------------------------------------------------ psycopg surface
@@ -490,7 +490,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         end_stamp, end_id = win[-1] if win else (None, 0)
         return [(end_stamp, end_id, len(win),
                  [i for _s, i in keep], [stamp for stamp, _i in keep])]
-    # The fifth feed: this generation's own rows the scope no longer holds (E74).
+    # The fifth feed: this generation's own rows the scope no longer holds (E79).
     if sql == S.RT_SCOPE_DRIFT_SQL:
         slice_ids = sorted(i for g, i in db.rt_fp
                            if g == gen and i > int(p["after_id"]))[:int(p["limit"])]

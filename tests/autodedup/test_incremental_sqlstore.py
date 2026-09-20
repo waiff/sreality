@@ -54,7 +54,7 @@ from tests.autodedup.test_incremental import (
 
 GEN = "rt"
 # The trial scope's first block, and the thing every feed test now has to state: a listing the
-# scope does not hold is a listing no feed may claim (E74).
+# scope does not hold is a listing no feed may claim (E79).
 SCOPE = Scope((ScopeBlock("obec", 563510),))
 
 
@@ -101,7 +101,7 @@ def _sql_drain(ds, settings, calibration, order, batch: int = 5, db: FakePg | No
                limits: Limits | None = None):
     conn = db or FakePg()
     # A floor of zero keeps every decided pair, because THIS comparison is about the adapter
-    # and not about retention (E74, which has its own test): a store that dropped the sub-floor
+    # and not about retention (E79, which has its own test): a store that dropped the sub-floor
     # rejects would make "the SQL store equals the twin" a weaker claim than it reads as.
     store = SqlStore(conn, GEN, store_floor=0.0)
     facts = DatasetFacts(ds)
@@ -423,7 +423,7 @@ class _RecordingWork(ScheduleWork):
 
 
 def test_the_bounded_runner_shrinks_the_claim_before_it_gives_up() -> None:
-    """E70: a refused claim is re-claimed smaller, and a refusal that survives that STOPS.
+    """E75: a refused claim is re-claimed smaller, and a refusal that survives that STOPS.
 
     A pass's pair count is driven by the BLOCKS its arrivals touch rather than by how many it
     claimed, so shrinking helps where a claim spans many blocks and cannot where one block
@@ -518,7 +518,7 @@ def test_the_calibration_digest_is_a_function_of_content_not_of_build_time() -> 
 
 
 def test_a_pass_is_bounded_in_statements() -> None:
-    """E69: the per-key spelling cost ~17,700 statements for a 166-listing claim."""
+    """E74: the per-key spelling cost ~17,700 statements for a 166-listing claim."""
     ds = _dataset(24)
     settings = _settings()
     calibration = _calibration(ds, settings)
@@ -556,7 +556,7 @@ def test_the_store_serves_a_fingerprint_row_it_has_not_flushed_yet() -> None:
     assert store.known([5]) == {5}
 
 
-# ------------------------------------------------------------- E71: seeding a generation
+# ------------------------------------------------------------- E76: seeding a generation
 
 
 def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, monkeypatch):
@@ -587,7 +587,7 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     assert run_rt_seed(lambda: conn, {"artifact": str(artifact)}, tmp_path)["skipped"] == "dark"
 
 
-# --------------------------------------------- E72: the lane's facts ARE the export's facts
+# --------------------------------------------- E77: the lane's facts ARE the export's facts
 
 
 def _seed_public(conn: FakePg, listing_id: int = 4_242) -> None:
@@ -656,7 +656,7 @@ def test_the_lane_reads_the_facts_the_export_reads() -> None:
     assert listing.location.house_number == "12/3"
     assert listing.location.granularity == "address"
     assert listing.location.granularity_rank == 6 and listing.location.is_address_grain
-    # The gallery, with the FROZEN population (E65) and the export's tag pairs.
+    # The gallery, with the FROZEN population (E70) and the export's tag pairs.
     assert len(images) == 1
     assert images[0].phash == 7_919 and images[0].pop == 4
     assert images[0].tags == [("kitchen", 0.81), ("kitchen_modern", 0.81)]

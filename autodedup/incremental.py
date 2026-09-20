@@ -6,7 +6,7 @@ incrementally. Nothing here re-implements a decision: fingerprints come from
 `decide.decide_pair` and the groups from `cluster.cluster_pairs`. What this module adds is
 the three mechanisms a cohort pass gets for free and an arrival does not.
 
-**E65 — the calibration is FROZEN per generation.** Six of the engine's inputs are read off
+**E70 — the calibration is FROZEN per generation.** Six of the engine's inputs are read off
 the cohort rather than off the pair: the price deciles K3 blocks on, the exploded-key set,
 the block and corpus document frequencies behind `tfidf`/`rare_token_overlap`, the in-block
 attribute frequencies behind `attr_rarity`, the exact-pin population, and E60's certifying
@@ -14,7 +14,7 @@ code set. Left live they would make a pair's score a function of WHEN it was sco
 re-run would silently re-decide yesterday's pairs. They are computed once, stored, and a
 generation runs under them until an operator cuts a new one — which is a new generation.
 
-**E66 — an arrival re-probes its whole probe-key NEIGHBOURHOOD, so the final state is a pure
+**E71 — an arrival re-probes its whole probe-key NEIGHBOURHOOD, so the final state is a pure
 function of the corpus.** `BlockIndex.candidates` caps fan-out at `max_candidates_per_listing`
 (297 of g6's 5,687 listings sit at the cap), and a cap makes retrieval depend on what was
 present when it ran. The fix is not a bigger cap: when a listing's keys change, every listing
@@ -22,7 +22,7 @@ that PROBES one of those keys has its retrieval recomputed too, and a pair is ke
 side retrieves the other (`from_lo` / `from_hi`). The neighbourhood is the ±1 band/decile
 relation, which is symmetric, so it is exactly the set `probe_keys` reaches.
 
-**E67 — clustering is recomputed per CONNECTED COMPONENT, not per edge.** Union-find over an
+**E72 — clustering is recomputed per CONNECTED COMPONENT, not per edge.** Union-find over an
 edge stream is order-dependent; `cluster_pairs` over a component's whole edge set is not,
 because every rule it applies — the certificate-first order, `cluster_invariants_ok` on the
 merged member set, E37's bridge refusal and E57's second offer — reads only members of the two
@@ -30,11 +30,11 @@ clusters being joined, and those never leave the component. So the component is 
 work, and its result is identical to the cohort pass's.
 
 Everything else is what W9's verification found missing, and each of those is a rule too:
-a watermark over FOUR bounded feeds, none of which is monotone on its own (E68); a pass bounded
-in statements and not only in listings (E69); a pass that REFUSES a claim it cannot fit rather
-than truncating it, and writes nothing until it has agreed to it (E70); a generation seeded at
-the present (E71); a store that reads a decision back exactly as it was taken (E72); and an
-operator refusal reconciled on every pass, idle ones included (E73). Nothing written leaves
+a watermark over FOUR bounded feeds, none of which is monotone on its own (E73); a pass bounded
+in statements and not only in listings (E74); a pass that REFUSES a claim it cannot fit rather
+than truncating it, and writes nothing until it has agreed to it (E75); a generation seeded at
+the present (E76); a store that reads a decision back exactly as it was taken (E77); and an
+operator refusal reconciled on every pass, idle ones included (E78). Nothing written leaves
 schema `autodedup` (D4).
 """
 
@@ -132,7 +132,7 @@ class FpRow:
 
 @dataclass(slots=True)
 class PairRow:
-    """One stored pair of the rolling generation, plus the two bookkeeping bits E66 needs."""
+    """One stored pair of the rolling generation, plus the two bookkeeping bits E71 needs."""
 
     lo: int
     hi: int
@@ -189,7 +189,7 @@ SET_CAP: int = 256
 
 @dataclass(slots=True)
 class Calibration:
-    """E65: every cohort-relative input of a decision, frozen for one generation."""
+    """E70: every cohort-relative input of a decision, frozen for one generation."""
 
     generation: str
     feature_version: int
@@ -250,7 +250,7 @@ class Calibration:
 
         `built_at` is excluded deliberately: it says WHEN the calibration was cut, not what it
         contains, and a digest that moved every time the same cohort was re-cut would certify
-        nothing. Two identical calibrations must hash identically or E65's stamp is decoration."""
+        nothing. Two identical calibrations must hash identically or E70's stamp is decoration."""
         payload = dict(self.to_json())
         payload.pop("built_at", None)
         return hashlib.sha256(
@@ -335,7 +335,7 @@ def context_for(
     """A `FeatureContext` over the WORKING SET whose cohort statistics are the frozen ones.
 
     The per-listing halves (`tfidf`, `rare`, `codes`) are derived here because they are cheap
-    and local; the cohort halves are never recomputed, which is E65."""
+    and local; the cohort halves are never recomputed, which is E70."""
     ctx = FeatureContext(settings=settings)
     ctx.block_docs = dict(calibration.block_docs)
     ctx.block_token_df = {block: dict(df) for block, df in calibration.block_token_df.items()}
@@ -435,7 +435,7 @@ class WorkItem:
     # `(inactive_at, id)` pair. The watermark is the MAXIMUM over the items a pass committed,
     # so a claim that was refused advances nothing.
     cursor: Any = None
-    # The scope no longer holds this listing (E74). It is RETIRED rather than refreshed: its
+    # The scope no longer holds this listing (E79). It is RETIRED rather than refreshed: its
     # postings, its fingerprint row and its pairs go, and the neighbours it linked re-cluster
     # without it. Half-indexed is worse than unindexed — every neighbour would go on
     # retrieving it through postings nothing maintains.
@@ -473,7 +473,7 @@ def retrieve(
         by_probe[probe].append(token)
         if not keyer.is_exploded(probe, token):
             wanted.append((probe, token))
-    # ONE statement for the whole listing (E69), not one per key: the posting lists are read
+    # ONE statement for the whole listing (E74), not one per key: the posting lists are read
     # in `PROBE_PRIORITY` order below, so batching the fetch cannot move the fill order.
     postings = store.lookup_many(wanted)
     out: dict[int, set[str]] = {}
@@ -531,14 +531,14 @@ class Limits:
     20,000 of a wanted set and wrote them would leave the rest of the neighbourhood's pairs
     undecided, re-cluster from a partial edge set and then advance the watermark over the
     difference — measured on g6 at a cap of 500, that manufactures 38 member sets the cohort
-    pass never produces. So the pass REFUSES instead (E70) and `run_pass_bounded` re-claims a
+    pass never produces. So the pass REFUSES instead (E75) and `run_pass_bounded` re-claims a
     smaller slice, which is the same work at the same answer."""
 
     max_listings: int = 500
     # Sized from the measurement rather than from a round number: the densest pass over the g6
     # cohort wants {{WANTED_MAX}} pairs at a 200-listing claim, and a block seen for the FIRST
     # time has to score its whole pair set however small the claim is (which is what the seed
-    # backfill, E71, exists to pay once).
+    # backfill, E76, exists to pay once).
     max_pairs: int = 150_000
     max_component: int = 400
 
@@ -668,7 +668,7 @@ class _Working:
 
 
 class _Overlay:
-    """The pass's OWN writes, held back until the budget has agreed to them (E70).
+    """The pass's OWN writes, held back until the budget has agreed to them (E75).
 
     A pass refuses a claim it cannot fit, and the refusal has to leave nothing behind: a store
     that already held the new postings would tell the next, smaller attempt that those listings
@@ -688,7 +688,7 @@ class _Overlay:
         self.dropped: dict[tuple[str, str], set[int]] = {}
         self.cell_rows: dict[tuple[str, str], CellRow] = {}
         self.ops: list[tuple[str, Any]] = []
-        # Retired listings (E74), held back like everything else until the budget agrees.
+        # Retired listings (E79), held back like everything else until the budget agrees.
         self.gone: set[int] = set()
 
     def __getattr__(self, name: str) -> Any:
@@ -813,11 +813,11 @@ def run_pass(
     """One bounded, idempotent incremental pass. Re-running it on an unchanged corpus is a no-op.
 
     The order is the cohort pass's order, restricted: refresh the fingerprints that moved,
-    widen to the probe-key neighbourhood (E66), retrieve, score what is new or stale, write the
-    pair rows, re-cluster the touched components (E67), then run E64's rail over the census.
+    widen to the probe-key neighbourhood (E71), retrieve, score what is new or stale, write the
+    pair rows, re-cluster the touched components (E72), then run E64's rail over the census.
 
     Every write lands before the watermark moves, and the watermark moves only when the whole
-    claim was decided — a pass that cannot fit its pair set writes nothing at all (E70)."""
+    claim was decided — a pass that cannot fit its pair set writes nothing at all (E75)."""
     caps = limits or Limits()
     result = PassResult(generation=generation, calibration_digest=calibration.digest())
     clock = time.perf_counter()
@@ -835,7 +835,7 @@ def run_pass(
         result.feeds[item.feed] = result.feeds.get(item.feed, 0) + 1
     if not claimed and not retire_ids:
         # An idle pass is still the only moment an operator's must-not-link row can be
-        # honoured: it moves no pair, so nothing else would ever seed its component (E73).
+        # honoured: it moves no pair, so nothing else would ever seed its component (E78).
         operator_mnl = store.must_not_link()
         seeds = _mnl_seeds(store, operator_mnl)
         if seeds:
@@ -850,18 +850,18 @@ def run_pass(
     working = _Working(facts, settings)
     working.ensure(claimed)
     # Everything this pass writes before the budget check goes through the overlay, so a
-    # refusal leaves the store exactly as it found it (E70).
+    # refusal leaves the store exactly as it found it (E75).
     view = _Overlay(store)
 
     # --- 1. refresh the changed listings' fingerprints and postings ------------------------
-    # Two batched reads for the whole claim, not two statements per listing (E69).
+    # Two batched reads for the whole claim, not two statements per listing (E74).
     stored_rows = view.rows(claimed)
     stored_keys = view.keys_many(claimed)
     changed: set[int] = set()
     touched_keys: list[tuple[str, str]] = []
     touched_blocks: set[str] = set()
 
-    # --- 1a. E74: retire what the scope no longer holds ------------------------------------
+    # --- 1a. E79: retire what the scope no longer holds ------------------------------------
     # A retired listing's keys are TOUCHED keys, so step 2 widens to everything that could
     # retrieve it; its stored pairs are then absent from the wanted set, which is what deletes
     # them, and step 6 re-clusters the components those edges held together.
@@ -913,7 +913,7 @@ def run_pass(
         changed.add(listing_id)
     result.timings["refresh_s"] = time.perf_counter() - clock
 
-    # --- 2. E66: the dirty set is the probe-key neighbourhood ------------------------------
+    # --- 2. E71: the dirty set is the probe-key neighbourhood ------------------------------
     clock = time.perf_counter()
     dirty = set(changed) | neighbourhood(keyer, view, set(touched_keys))
     dirty &= view.known(dirty)
@@ -979,7 +979,7 @@ def run_pass(
             wanted[(lo, hi)] = entry
 
     result.wanted_pairs = len(wanted)
-    # E70: the budget is refused BEFORE the first write, because a partial pair set re-clusters
+    # E75: the budget is refused BEFORE the first write, because a partial pair set re-clusters
     # from a partial edge set and the watermark would then step over the difference for ever.
     if len(wanted) > caps.max_pairs:
         # Nothing of this pass has reached the store yet, so the refusal IS the rollback.
@@ -1047,7 +1047,7 @@ def run_pass(
     result.pairs_written = len(rows)
     result.timings["score_s"] = time.perf_counter() - clock
 
-    # --- 6. E67: re-cluster the touched components ----------------------------------------
+    # --- 6. E72: re-cluster the touched components ----------------------------------------
     # Only a component whose MERGE edges or vetoes moved can cluster differently, so a pass
     # that scores a thousand rejects re-clusters nothing. A pair that merely changed its
     # probes or its band score leaves the component's edge set alone.
@@ -1104,7 +1104,7 @@ def run_pass_bounded(
 ) -> PassResult:
     """`run_pass`, re-claiming a SMALLER slice when the pair budget refused the last one.
 
-    An aborted pass has written nothing and advanced no cursor (E70), so a retry is the same
+    An aborted pass has written nothing and advanced no cursor (E75), so a retry is the same
     work over fewer arrivals rather than a resumption of a half-written one. When even a
     single-listing claim will not fit, the lane STOPS: a neighbourhood that alone exceeds the
     budget is a block worth an operator's eye, not a number to quietly truncate."""
@@ -1178,7 +1178,7 @@ def _census(
     # The carrier count is read off the IMAGE, never recounted: `public.images.phash` carries
     # no index and D8 forbids adding one, so the corpus-wide count is one sequential scan the
     # cohort lane runs per pass into `autodedup.phash_pop` and this lane joins per image. That
-    # makes it a cohort statistic like the other five, and E65 freezes it with them — a pass
+    # makes it a cohort statistic like the other five, and E70 freezes it with them — a pass
     # that recounted it from what it happened to have seen would move `catalog_ratio`,
     # `anchor_bands` and with them the K4 probe and every certificate reading a catalogue ratio.
     population: dict[int, int] = {}
@@ -1203,7 +1203,7 @@ def _components(
 
     A component larger than the cap is NOT silently clustered from a partial member set — it is
     named on the pass summary and left to the cohort lane, because a partial component is the
-    one input that would make E67's result differ from the batch pass's."""
+    one input that would make E72's result differ from the batch pass's."""
     seen: set[int] = set()
     out: list[list[int]] = []
     oversized: list[int] = []
@@ -1292,7 +1292,7 @@ def _run_rail(
             and settings.context_rule_image_population_min is None) or not blocks:
         return {"reopened": 0, "deferred_by_cap": 0, "blocks_at_cap": 0, "blocks_touched": 0,
                 "owed": 0}
-    # Only the blocks whose census MOVED this pass: under a frozen calibration (E65) the image
+    # Only the blocks whose census MOVED this pass: under a frozen calibration (E70) the image
     # population cannot change at all and a block counter changes only where a listing was
     # bumped, so a generation-wide scan would re-confirm what cannot have moved.
     stamped = store.stamped_merges(list(blocks))

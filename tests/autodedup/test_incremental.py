@@ -1,4 +1,4 @@
-"""The real-time lane's mechanisms, offline (PROGRAM.md E65/E66/E67, E64).
+"""The real-time lane's mechanisms, offline (PROGRAM.md E70/E71/E72, E64).
 
 Five things a replay over one cohort cannot prove on its own, and each is a rail rather than a
 restatement: retrieval matches `BlockIndex.candidates` EXACTLY rather than approximately; an
@@ -87,7 +87,7 @@ def _drain(ds: Dataset, settings: Settings, calibration: Calibration,
     return store, passes
 
 
-# --------------------------------------------------------------------------- E66 retrieval
+# --------------------------------------------------------------------------- E71 retrieval
 
 
 def test_retrieval_matches_the_cohort_pass_exactly() -> None:
@@ -168,7 +168,7 @@ def test_the_watermark_only_advances_over_what_it_claimed() -> None:
 
 
 def test_a_refused_claim_leaves_the_schedule_where_it_was() -> None:
-    """E70: an aborted pass commits nothing, so the same arrivals come back next time."""
+    """E75: an aborted pass commits nothing, so the same arrivals come back next time."""
     work = ScheduleWork([1, 2, 3])
     claimed = work.claim(3)
     work.commit([])
@@ -177,7 +177,7 @@ def test_a_refused_claim_leaves_the_schedule_where_it_was() -> None:
                                                            for item in claimed]
 
 
-# --------------------------------------------------------------------- E67 and the replay
+# --------------------------------------------------------------------- E72 and the replay
 
 
 def test_the_incremental_final_state_equals_the_cohort_pass() -> None:
@@ -195,7 +195,7 @@ def test_the_incremental_final_state_equals_the_cohort_pass() -> None:
 
 
 def test_arrival_order_does_not_change_the_final_state() -> None:
-    """E66/E67 in one assertion: two orders, one state."""
+    """E71/E72 in one assertion: two orders, one state."""
     ds = _dataset(24)
     settings = _settings()
     calibration = _calibration(ds, settings)
@@ -307,7 +307,7 @@ def test_no_statement_of_this_lane_writes_outside_schema_autodedup() -> None:
 
 
 def test_every_feed_is_bounded_and_settle_lagged() -> None:
-    """E68: a feed without a LIMIT is an unbounded pass; one without a lag skips late commits."""
+    """E73: a feed without a LIMIT is an unbounded pass; one without a lag skips late commits."""
     from autodedup import incremental_sql as sql_module
 
     for name in ("RT_NEW_LISTINGS_SQL", "RT_CHANGED_LISTINGS_SQL", "RT_FLIPPED_LISTINGS_SQL",
