@@ -55,6 +55,11 @@ class Settings:
     # ON by default — 0 operator and 0 gold false merges on g5, and it is the only certificate
     # resting on a fact the broker states rather than on a resemblance.
     certificate_kr_enabled: bool = True
+    # E61 (W8): two adverts naming a DIFFERENT unit inside one address block are two units,
+    # whatever they look like. ON by default — it demotes nothing the operator or gold calls a
+    # duplicate, and it is the only rule that can separate a developer's own near-identical
+    # adverts. Its evidence is 3 facts in 1 development; the mechanism carries it, not the n.
+    unit_designator_veto: bool = True
     # E45: the merge zone needs one UNIT-specific corroboration. K-A + interior_match_ratio >= 0.5
     # scored 88.6% (n=35) against K-A's 52.6% overall; K-B (the disjoint-window re-post shape)
     # scored 100% (n=94).

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, Sequence
 
+from autodedup.dataset import Listing
 from autodedup.settings import Settings
+from autodedup.text_facts import address_block_key, unit_designators
 from toolkit.room_taxonomy import category_main_compatible
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -23,6 +25,8 @@ if TYPE_CHECKING:  # pragma: no cover
 
 LAND_CATEGORY: str = "pozemek"
 FLAT_CATEGORY: str = "byt"
+
+UNIT_DESIGNATOR_VETO: str = "unit_designator_conflict"
 
 
 class GuardSide(Protocol):
@@ -77,6 +81,37 @@ def pair_veto(a: GuardSide, b: GuardSide, settings: Settings | None = None) -> s
             and abs(a.floor - b.floor) >= 2):
         return "floor"
     return None
+
+
+def unit_designator_conflict(
+    a: Listing, b: Listing, settings: Settings | None = None
+) -> tuple[str, str] | None:
+    """E61: the two designators, when both adverts name a DIFFERENT unit of one address block.
+
+    A developer's adverts inside one building are near-identical by construction — same address,
+    same photographs, same template, often the same price — so no resemblance can separate them.
+    The one thing that can is the building's own naming: `byt (č.3)`, `označením B36`,
+    `jednotka č. 12`. When both bodies name exactly one unit and the names differ at one address,
+    they are two units and no certificate and no score may merge them.
+
+    Exactly one designator per side is required. A body listing several (`jednotky č. 3, 5 a 7`)
+    is a project's price list, not this advert's identity, and two such lists overlapping proves
+    nothing either way. The block must match too: two buildings number their flats independently,
+    so `byt č. 3` in one house and `byt č. 5` in another is not a conflict.
+
+    Honest about its evidence: this fires on 3 distinct (block, unit-pair) facts in ONE Zizkov
+    building in the g5 cohort (ruian:21778370, units 1/3/5). It is a rule with a sound mechanism
+    measured on one development, never a rate."""
+    if settings is not None and not settings.unit_designator_veto:
+        return None
+    left, right = unit_designators(a.description), unit_designators(b.description)
+    # Read the texts FIRST: a side that names no unit ends the rule here, which is also the
+    # only thing a stub side (`evaluate._SimSide`, everything None) can honestly answer.
+    if len(left) != 1 or len(right) != 1 or left == right:
+        return None
+    if address_block_key(a) != address_block_key(b):
+        return None
+    return next(iter(left)), next(iter(right))
 
 
 def floor_relation(a: GuardSide, b: GuardSide) -> str:

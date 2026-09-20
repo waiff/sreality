@@ -224,6 +224,22 @@ def test_certificate_order_is_r_then_a_then_b_then_c() -> None:
     assert certificate_of(coded, early, late, KA_SETTINGS) == "K-R"
 
 
+def test_a_conflicting_unit_designator_vetoes_whatever_the_pair_scores() -> None:
+    """E61 at the rule floor: no certificate and no score may reach a pair whose two bodies
+    name a different unit of one address block, and the two strings travel on the decision."""
+    everything = _feats(same_ruian_adm_kod=1.0, dispo_equal=1.0, area_rel_diff=0.0,
+                        floor_diff=0.0, ref_code_shared=1.0, **UNIT_EVIDENCE)
+    a = _listing(1, description="Prodej bytu (č.3) v novostavbě.",
+                 location=Location(ruian_adm_kod=7, obec_kod=1, granularity_rank=60))
+    b = _listing(2, description="Prodej bytu (č.5) v novostavbě.",
+                 location=Location(ruian_adm_kod=7, obec_kod=1, granularity_rank=60))
+    decision = _decide(a, b, everything, probability=0.999)
+    assert decision.zone == "veto"
+    assert decision.veto == "unit_designator_conflict"
+    assert decision.evidence == {"unit_lo": "3", "unit_hi": "5"}
+    assert decision.to_json()["evidence"] == {"unit_lo": "3", "unit_hi": "5"}
+
+
 def test_a_shared_order_code_certifies_and_a_differing_one_says_nothing() -> None:
     """E60. The feature is PRESENT only when the two bodies share a code, so the `absent` case
     below is both `no codes at all` and `two different codes` — W7 refuted reading the second

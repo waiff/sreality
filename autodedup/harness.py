@@ -40,6 +40,7 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
+from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.evaluate import (
     CALIBRATION_AUTO,
     FIT_MAX_ITER,
@@ -347,6 +348,7 @@ def run_engine(
     per_block: dict[str, dict[str, Any]] = {}
     per_source_pair: dict[str, dict[str, Any]] = {}
     scores: list[float] = []
+    vetoed: set[tuple[int, int]] = set()
     stored = 0
 
     clock = time.perf_counter()
@@ -370,9 +372,19 @@ def run_engine(
             block = pair_block(la, lb)
             _bump(per_block, block, decision)
             _bump(per_source_pair, source_pair(fa, fb), decision)
-            if decision.score >= settings.store_floor or decision.zone in ("merge", "band"):
+            if decision.veto == UNIT_DESIGNATOR_VETO:
+                vetoed.add((lo, hi))
+            # A vetoed row is stored although it scores nothing: E61 refuses on two STRINGS, and
+            # the only way to adjudicate that refusal later is to read them off the row.
+            if (decision.score >= settings.store_floor
+                    or decision.zone in ("merge", "band")
+                    or decision.evidence):
                 stored += 1
                 row = decision.to_json()
+                if decision.certificate == "K-R":
+                    row.setdefault("evidence", {})["ref_codes"] = ",".join(
+                        ctx.shared_codes(lo, hi)
+                    )
                 row.update({
                     "block": block,
                     "block_key": pair_block_key(fa, fb),
@@ -389,7 +401,11 @@ def run_engine(
     timings["features_decide_s"] = time.perf_counter() - clock
 
     clock = time.perf_counter()
-    clusters = cluster_pairs(decisions, dataset.listings, fps, settings, must_not_link)
+    # E61 refuses a UNION, not only an edge: two units of one building must not be joined
+    # transitively through a third advert either, so the veto joins the must-not-link set.
+    clusters = cluster_pairs(
+        decisions, dataset.listings, fps, settings, frozenset(must_not_link) | vetoed
+    )
     rows = cluster_rows(clusters, decisions, fps)
     timings["cluster_s"] = time.perf_counter() - clock
 

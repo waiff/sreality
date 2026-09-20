@@ -24,7 +24,7 @@ from typing import Iterable
 from autodedup.dataset import Listing
 from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
-from autodedup.guards import pair_veto
+from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
@@ -56,6 +56,9 @@ class Decision:
     certificate: str | None = None
     veto: str | None = None
     reason: str = ""
+    # The STRINGS a rule refused or certified on, so a refusal can be adjudicated by reading it
+    # rather than by re-running the pass (E61 carries the two unit designators, E60 the code).
+    evidence: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -67,6 +70,7 @@ class Decision:
             "certificate": self.certificate,
             "veto": self.veto,
             "reason": self.reason,
+            **({"evidence": dict(self.evidence)} if self.evidence else {}),
         }
 
 
@@ -376,6 +380,16 @@ def decide_pair(
     veto = pair_veto(fa, fb, settings)
     if veto is not None:
         return Decision(lo, hi, "veto", 0.0, set(), None, veto, f"guard:{veto}")
+
+    # E61 is a guard, not a score: it reads the two BODIES, which `pair_veto`'s fingerprint-grain
+    # sides cannot see, so it stands here rather than inside it.
+    designators = unit_designator_conflict(la, lb, settings)
+    if designators is not None:
+        return Decision(
+            lo, hi, "veto", 0.0, set(), None, UNIT_DESIGNATOR_VETO,
+            f"guard:{UNIT_DESIGNATOR_VETO}",
+            {"unit_lo": designators[0], "unit_hi": designators[1]},
+        )
 
     families = evidence_families(feats)
     score = model.predict_proba(feats)
