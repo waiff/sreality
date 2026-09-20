@@ -81,7 +81,8 @@ def test_the_lane_writer_census_covers_the_package() -> None:
     quietly sit outside the rail. Modules that only compute are listed as exempt."""
     exempt = {
         "__init__.py", "agreement.py", "blocking.py", "candidates.py", "cluster.py",
-        "cohort.py", "dataset.py", "decide.py", "features.py", "fingerprint.py", "guards.py",
+        "cohort.py", "dataset.py", "decide.py", "ensembles.py", "features.py",
+        "fingerprint.py", "guards.py",
         "model.py", "normalize.py", "oss_pod.py", "settings.py", "ui_sql.py",
         "verdict_reasons.py",
     }
