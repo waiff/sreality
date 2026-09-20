@@ -115,6 +115,10 @@ const SORTS: ReadonlyArray<GroupFilterState['sort']> = [
 export const VERDICTS: readonly string[] = [
   '',
   'unreviewed',
+  /* GROUPS ONLY (E58): a ruling whose member set has moved. A pair verdict binds
+   * two listings and can never go stale that way, so the pair queues refuse this
+   * value rather than silently returning nothing. */
+  'changed',
   'same',
   'different',
   'same_building_different_unit',
