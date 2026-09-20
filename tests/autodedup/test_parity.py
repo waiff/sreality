@@ -250,7 +250,7 @@ def test_the_instrument_can_read_the_population_a_seed_WOULD_write(world) -> Non
     """`population=artifact` is how the operator measures a seed before seeding: the live side
     reads the cohort's own counts — the exact rows `rt_seed` materialises into
     `autodedup.phash_pop` — so the certificates the fix restores are visible from a read-only
-    run against a table that is still empty (E84)."""
+    run against a table that is still empty (E86)."""
     world.conn.phash_pop.clear()
 
     broken = world()

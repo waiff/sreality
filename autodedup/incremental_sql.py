@@ -566,7 +566,7 @@ select p.phash, p.n_listings
  where p.phash = any(%(hashes)s::bigint[])
 """
 
-# The one WRITER of the frozen population (E84). It is the SEED's, and what it writes is the
+# The one WRITER of the frozen population (E86). It is the SEED's, and what it writes is the
 # artifact's own `pop` — the number `COHORT_PHASH_POP_SQL` counted over `public.images` when
 # the calibration was cut — so the live lane joins against exactly the statistic the batch
 # engine scored with, at zero cost against `public`. Migration 528's prose says "only hashes on

@@ -44,14 +44,14 @@ TOWN = Scope((ScopeBlock("obec", 563510),))
 SCOPE = Scope((ScopeBlock("obec", 563510), ScopeBlock("cast_obce", 490245)))
 PARENTS = {490245: 554782}
 
-# A generation is scored by ONE scorer and the lane refuses to guess which (E83a), so every
+# A generation is scored by ONE scorer and the lane refuses to guess which (E85a), so every
 # seed here NAMES it — `default`/`prior` being the two words for the uncalibrated defaults
 # these fixtures were already running on.
 SCORER: dict[str, str] = {"settings": "default", "model": "prior"}
 
 
 def _baseline(db: Any, generation: str = "rt") -> None:
-    """The parity gate (E84) refuses a generation with no fact baseline. A fixture that
+    """The parity gate (E86) refuses a generation with no fact baseline. A fixture that
     hand-writes the calibration row hand-writes the baseline too — an empty one, because its
     `public` holds no cohort listing to compare against. What the gate is FOR is proved in
     `test_incremental_sqlstore.py` and `test_parity.py`."""

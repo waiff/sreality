@@ -33,7 +33,7 @@ from autodedup.dataset import Dataset, Image, Listing, load
 from autodedup.decide import decide_pair
 from autodedup.features import FEATURE_VERSION, pair_features
 from autodedup.fingerprint import Fingerprint, build_fingerprint
-# The instrument NAMES its scorer the way every other lane does (E83a): `settings=w8`
+# The instrument NAMES its scorer the way every other lane does (E85a): `settings=w8`
 # was read as a path here and found no file, which is how a lane ends up running the
 # uncalibrated prior while its operator believes it is running w8.
 from autodedup.harness import named_model as load_model
@@ -118,7 +118,7 @@ def _population_source(args: Mapping[str, str]) -> str:
     """Which pHash population the LIVE side reads. `frozen` is what the lane really does —
     `autodedup.phash_pop`, and an absent hash is unknown. `artifact` reads the cohort's own
     counts instead, which is exactly what `rt_seed` writes into that table, so the operator can
-    measure a seed's effect on the certificates BEFORE seeding anything (E84)."""
+    measure a seed's effect on the certificates BEFORE seeding anything (E86)."""
     raw = str(args.get("population") or "frozen").strip().lower()
     if raw not in POPULATION_SOURCES:
         raise SystemExit(f"population must be one of {', '.join(POPULATION_SOURCES)}, "
@@ -194,7 +194,7 @@ class FieldDiff:
 # What an image field IS decides how a difference in it reads. `seq` and `storage_path` are
 # stored facts of the gallery; `phash`, `clip` and `tags` are producer output that a re-run of
 # the pHash or CLIP job moves under a frozen calibration without any listing changing; `pop` is
-# the frozen cohort statistic the lane joins against (E83).
+# the frozen cohort statistic the lane joins against (E85).
 IMAGE_FIELD_CLASS: dict[str, str] = {
     "image.seq": "stored", "image.storage_path": "stored",
     "image.phash": "producer", "image.clip": "producer", "image.clip_present": "producer",
@@ -589,7 +589,7 @@ def run_parity(
         },
         # What the GATE would say, from the same two sides the diff above is taken from: the
         # seed refuses to cut a baseline when this is non-zero, and every pass refuses to run
-        # on one (E84). Read-only, and worth having in the instrument's own report — it is the
+        # on one (E86). Read-only, and worth having in the instrument's own report — it is the
         # answer to "will the re-seed be refused?" before anything is seeded.
         "gate": _gate_view(artifact_side, live_side, sample, drifted),
         "facts": compare_facts(sample, artifact_side, live_side, drifted),

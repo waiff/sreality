@@ -71,7 +71,7 @@ def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
 
 
 def _baseline(db: FakePg, generation: str = GEN) -> None:
-    """The parity gate (E84) refuses a generation with no fact baseline. A fixture that
+    """The parity gate (E86) refuses a generation with no fact baseline. A fixture that
     hand-writes the calibration row hand-writes the baseline too — an empty one, because its
     `public` holds no cohort listing to compare against. What the gate is FOR is proved in
     `test_incremental_sqlstore.py` and `test_parity.py`."""

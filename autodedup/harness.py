@@ -273,7 +273,7 @@ def load_model(path: str | None) -> LogisticModel:
 # operator string and a bare path would make `settings=/etc/passwd` a readable file. This
 # lived in `score_lane` until W9g, when the real-time lane was found running `Settings()` and
 # the uncalibrated prior because it took a PATH — so `settings=w8` named no file it could
-# read and the recipe that shipped passed nothing at all (E83a). One definition (E12).
+# read and the recipe that shipped passed nothing at all (E85a). One definition (E12).
 SETTINGS_DIR: Path = Path(__file__).resolve().parent / "settings"
 MODELS_DIR: Path = Path(__file__).resolve().parent / "models"
 # The two words that NAME the uncalibrated defaults, so choosing them is a choice a dispatch

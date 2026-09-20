@@ -87,6 +87,7 @@ def test_the_lane_writer_census_covers_the_package() -> None:
         "cohort.py", "dataset.py", "decide.py", "ensembles.py", "features.py",
         "fingerprint.py", "guards.py", "hazard_context.py", "incremental.py",
         "incremental_scope.py", "incremental_store.py", "parity_digest.py",
+        # W10 adds "stock.py" to this list on main; a merge keeps BOTH or the census fails.
         "model.py", "normalize.py", "oss_pod.py", "settings.py", "text_facts.py",
         "ui_sql.py", "verdict_reasons.py",
     }

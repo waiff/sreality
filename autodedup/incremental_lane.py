@@ -242,7 +242,7 @@ MAX_RETIRE_FRACTION: float = 0.05
 # TOAST included). The schema is ~148 MB today and the operator pays for it; a lane that has
 # not been watched for a week must not be able to double it.
 MAX_SCHEMA_MB: float = 400.0
-# --- the parity gate (E84) ---------------------------------------------------------------
+# --- the parity gate (E86) ---------------------------------------------------------------
 #
 # The seed writes a baseline of per-listing fact digests into `autodedup.settings` (one row, a
 # few kilobytes — no migration, and it is cut at exactly the moment the calibration is) and
@@ -320,7 +320,7 @@ class SqlStore:
                  calibration_digest: str | None = None) -> None:
         self.conn = conn
         self.generation = generation
-        # WHICH SCORER TOOK THE DECISION, stamped on every row this store writes (E83a). The
+        # WHICH SCORER TOOK THE DECISION, stamped on every row this store writes (E85a). The
         # columns existed and the lane wrote `evidence["_model"]` into them — a key nothing has
         # ever set — so all 15,923 rows of the live generation `rt` carry a NULL model_version
         # against `w6_gold` on the batch generation's, and the store could not say which
@@ -758,7 +758,7 @@ class SqlFacts:
     every gallery, `build_fingerprint` published `catalog_ratio = None` for every listing,
     `catalog_ratio_max` was absent on every pair and `certificate_c` — which requires the ratio
     to be PRESENT — could not fire at all. One live pass, 36,940 pairs, zero K-C against the
-    batch generation's 1,771 (E84). The table has a writer now (the seed) and this counts what
+    batch generation's 1,771 (E86). The table has a writer now (the seed) and this counts what
     it could not measure, so a pass says so rather than scoring on it silently."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
@@ -768,7 +768,7 @@ class SqlFacts:
         # A population handed in INSTEAD of the frozen table, for the one read-only caller that
         # needs to see what the table WOULD hold: `--mode rt_parity population=artifact` reads
         # the cohort's own counts so the operator can measure a seed's effect before seeding.
-        # The pass never passes this — its population is the frozen one or nothing (E84).
+        # The pass never passes this — its population is the frozen one or nothing (E86).
         self.population = None if population is None else {
             int(key): int(value) for key, value in population.items()}
         self.reads = 0
@@ -824,7 +824,7 @@ class SqlFacts:
         for row in self._dicts(COHORT_CLIP_TAGS_SQL,
                                {"ids": image_ids, "model": self.clip_model}):
             tags.setdefault(int(row["image_id"]), []).append(row)
-        # Frozen, never recounted (E70). Absent from the table is UNKNOWN, not zero (E84):
+        # Frozen, never recounted (E70). Absent from the table is UNKNOWN, not zero (E86):
         # `public.images` carries no index on `phash` (checked: `images_phash_idx` is on
         # `sreality_id`), D8 forbids adding one, and there is no in-schema mirror to count
         # from — so the only way to measure a hash the calibration never saw is the export's
@@ -1513,7 +1513,7 @@ def seed_parity(conn: Any, dataset: Any, in_scope: Sequence[int], generation: st
 
 def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
                 args: Mapping[str, str]) -> dict[str, Any]:
-    """The permanent rail: no pass runs on facts that are not the export's (E84).
+    """The permanent rail: no pass runs on facts that are not the export's (E86).
 
     A generation with no baseline is refused rather than waved through — the baseline is cut by
     the seed at the same moment as the calibration, so its absence means this generation was
@@ -1526,7 +1526,7 @@ def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
             f"PARITY GATE: generation {generation!r} carries no fact baseline "
             f"(autodedup.settings {parity_baseline_key(generation)}) — it was seeded before "
             "the gate existed, so nothing has ever checked that the live lane reads the "
-            "export's facts (E84). Re-seed it "
+            "export's facts (E86). Re-seed it "
             "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
             "backfill=true,reseed=true`). Nothing was written and no cursor moved.")
     # The knob may only RAISE the sample (E82's lesson at a rail one dispatch argument could
@@ -1546,7 +1546,7 @@ def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
     if at_seed and not int(report.get("phash_pop_rows") or 0):
         raise SystemExit(
             f"PARITY GATE: autodedup.phash_pop is EMPTY and generation {generation!r} was "
-            f"seeded with {at_seed} hashes in it (E84). Every image would read an unknown "
+            f"seeded with {at_seed} hashes in it (E86). Every image would read an unknown "
             "population, every catalog_ratio would go absent and no K-C certificate could "
             "fire. Nothing was written and no cursor moved — re-seed the generation.")
     refused = parity_refusal(report, generation=generation, tolerance=PARITY_TOLERANCE,
@@ -1557,7 +1557,7 @@ def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
     return report
 
 
-# --- WHICH SCORER (E83a) -----------------------------------------------------------------
+# --- WHICH SCORER (E85a) -----------------------------------------------------------------
 
 
 def named_config(args: Mapping[str, str], *, what: str
@@ -1581,7 +1581,7 @@ def named_config(args: Mapping[str, str], *, what: str
             f"decision is stamped with it. The batch generation g6 is "
             f"`settings=w8,model=w6_gold`; the uncalibrated defaults are "
             f"`settings={DEFAULT_SETTINGS_NAME},model={PRIOR_MODEL_NAME}`, which is a choice "
-            "this lane will not make on your behalf again (E83a).")
+            "this lane will not make on your behalf again (E85a).")
     return (named_settings(settings_name), named_model(model_name),
             settings_name, model_name)
 
@@ -1597,7 +1597,7 @@ def pass_config(args: Mapping[str, str], recorded: Any, model_version: Any,
     if recorded is None:
         raise SystemExit(
             f"generation {generation!r} carries no settings on its frozen calibration — it "
-            "was seeded before the scorer was recorded (E83a). Re-seed it "
+            "was seeded before the scorer was recorded (E85a). Re-seed it "
             "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
             "reseed=true`) before the schedule runs.")
     try:
@@ -1626,7 +1626,7 @@ def pass_config(args: Mapping[str, str], recorded: Any, model_version: Any,
     return settings, model
 
 
-# --- the frozen pHash population (E84) ----------------------------------------------------
+# --- the frozen pHash population (E86) ----------------------------------------------------
 
 
 def phash_pop_rows(conn: Any) -> int:
@@ -1657,7 +1657,7 @@ def write_population(conn: Any, dataset: Any) -> dict[str, Any]:
             "the cohort artifact carries no MEASURED pHash population (`phash_pop_ok` false: "
             "the export's population probe timed out) — seeding from it would freeze a "
             "generation in which every catalog_ratio is absent and no K-C certificate can "
-            "ever fire (E84). Re-run the export first.")
+            "ever fire (E86). Re-run the export first.")
     rows = [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())]
     # Chunked like the score lane's writes: the trial cohort carries 41,791 distinct hashes and
     # one `executemany` of that many bound parameters is megabytes in a single call.
@@ -1668,7 +1668,7 @@ def write_population(conn: Any, dataset: Any) -> dict[str, Any]:
             "hashes_at_or_above_2": sum(1 for n in population.values() if n >= 2)}
 
 
-# --- the parity gate (E84) ----------------------------------------------------------------
+# --- the parity gate (E86) ----------------------------------------------------------------
 
 
 def parity_baseline_key(generation: str) -> str:
@@ -1811,9 +1811,9 @@ def run_incremental(
         payload = rows[0][3]
         calibration = Calibration.from_json(
             payload if isinstance(payload, dict) else json.loads(payload or "{}"))
-        # The scorer is the GENERATION's, read off the row the seed wrote (E83a).
+        # The scorer is the GENERATION's, read off the row the seed wrote (E85a).
         settings, model = pass_config(args, rows[0][5], rows[0][6], generation)
-        # THE GATE (E84). Before the lease's transaction, before a single write: a slice of the
+        # THE GATE (E86). Before the lease's transaction, before a single write: a slice of the
         # seeded baseline re-read through the same `SqlFacts` the pass is about to score with.
         # A breach stops the pass — non-zero, nothing written, no cursor moved.
         parity = parity_gate(conn, generation, control, args)
@@ -1869,7 +1869,7 @@ def run_incremental(
         summary["settings"] = settings.to_dict()
         summary["model_version"] = model.version
         # What this pass could not measure: images whose hash the frozen population does not
-        # carry (E84). Zero on a generation whose seed and export are the same cut; it grows
+        # carry (E86). Zero on a generation whose seed and export are the same cut; it grows
         # with every photograph that arrived after the export, and it is the number that says
         # when the generation is due a re-export and re-seed.
         summary["population"] = {
@@ -2006,7 +2006,7 @@ def run_rt_seed(
         payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
         written = 0
         with _transaction(conn):
-            # THE FROZEN POPULATION FIRST (E84). Everything below — the parity gate included —
+            # THE FROZEN POPULATION FIRST (E86). Everything below — the parity gate included —
             # reads galleries through `SqlFacts`, which joins this table, so it has to be
             # written before anything looks at an image.
             population = write_population(conn, ds)
@@ -2039,7 +2039,7 @@ def run_rt_seed(
                 "key": scope_key, "value": json.dumps(scope.as_json()),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
             # The gate's baseline, cut at the same moment as the calibration and stored where
-            # the lane already reads its control rows — a settings row needs no migration (E84).
+            # the lane already reads its control rows — a settings row needs no migration (E86).
             _exec(conn, RT_SETTING_WRITE_SQL, {
                 "key": parity_baseline_key(generation),
                 "value": json.dumps(parity["baseline"], sort_keys=True, default=str),
