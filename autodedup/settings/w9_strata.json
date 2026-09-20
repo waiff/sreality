@@ -1795,10 +1795,10 @@
   "version": "w9_gold"
  },
  "promotion_bar": {
-  "band smaller": "FAILED \u2014 4,913 against 4,907",
-  "recall higher": "FAILED \u2014 reliable merge recall 0.6659 against g6's 0.7588 over all splits, 0.5054 against 0.6712 sealed",
+  "band smaller": "FAILED — 4,913 against 4,907",
+  "recall higher": "FAILED — reliable merge recall 0.6659 against g6's 0.7588 over all splits, 0.5054 against 0.6712 sealed",
   "sealed clean": "FAILED (same five)",
-  "zero labelled false merges, pair and block grain, reliable tier": "FAILED \u2014 g7 carries 5 sealed reliable false merges (g6: 0), every one from the model layer the dev-side stratum rule opened (model|same 3, model|cross 2)"
+  "zero labelled false merges, pair and block grain, reliable tier": "FAILED — g7 carries 5 sealed reliable false merges (g6: 0), every one from the model layer the dev-side stratum rule opened (model|same 3, model|cross 2)"
  },
  "seal": {
   "built_from": [
@@ -1853,9 +1853,16 @@
  "sealed_reads": [
   "the task brief itself named the two sealed gold negatives (522698x13221982, 555448x18626270) before the seal existed",
   "harness fit prints a sealed test ECE automatically; it was seen for isotonic_pav, platt and auto, and did NOT choose the map (auto chooses on out-of-fold VALIDATION ECE)",
-  "one consolidated final read: sealed_g7_vs_g6.json + all_g7_vs_g6.json + the pooled arm of e9_repost_chain.json"
+  "one consolidated final read: sealed_g7_vs_g6.json + all_g7_vs_g6.json + the pooled arm of e9_repost_chain.json",
+  "W9a, added by the assembler: kb_audit.py and kb_census.py tabulate reliable labels over ALL splits with no split filter, so the B_photos_all_catalogue|y=0 cell that motivates E65 is a sealed-side count. The brief had already named both pairs, so nothing new was learned - but the read happened and Track A's log omitted it",
+  "W9a: one consolidated confirmation read of the arms table over train+validation+test (assemble/arms_confirm.json), of the like-for-like ECE (assemble/confirm2.json) and of the seal containment of g7 - taken AFTER the promotion decision was made against the candidate, to check the verifier rather than to choose anything"
  ],
- "spent_seal": "37c8771f\u2026 registered in seals.SPENT_SEALS (W8a's 1,476-candidate search)",
+ "settings_files": {
+  "autodedup/settings/w8.json": "the SHIPPED row (g6). Unchanged by W9 and W9a",
+  "autodedup/settings/w9_g7_candidate.json": "exactly what generation g7 ran: honest clock + E65 floor (1,1) + the dev-chosen stratum row. Kept so the candidate stays reproducible; REFUTED and never to be dispatched as a scoring row - both of its model cuts violate E68",
+  "autodedup/settings/w9_honest_arm.json": "the only clean arm W9 produced (Track B's honest_f2_1_1): w8.json + the honest clock + the E65 floor, carrying the INCUMBENT's cuts (model|cross 0.9788 per D21, model|same propose-only). 0 reliable false merges at pair, block and cluster grain and 0 inside developments, and it removes g6's one cluster-grain false merge - but reliable merge recall 0.6468 against g6's 0.7588 and band 5,864 against 4,907, so it is NOT promoted either. Paired with models/w6_gold.json, never with w9_gold"
+ },
+ "spent_seal": "37c8771f… registered in seals.SPENT_SEALS (W8a's 1,476-candidate search)",
  "stratum_row": {
   "min_stratum_n": 30,
   "per_cell": {
@@ -4025,5 +4032,172 @@
    }
   }
  },
- "what": "W9 Track A \u2014 honest clock, fresh seal, E65 K-B image floor, refit to w9_gold; the g7 candidate MISSES the promotion bar and is recorded as a candidate, not a promotion"
+ "verification": {
+  "conditions_met_by_W9a": {
+   "1 nothing from the model refit ships": "MET - no settings file carries a w9-chosen cut, and no shipped row names w9_gold",
+   "2 honest_f2_1_1 is the only clean arm": "RECORDED - shipped as settings/w9_honest_arm.json and NOT promoted (recall 0.6468 against 0.7588, band 5,864 against 4,907)",
+   "3 a stratum cut needs a variance term AND a margin": "MET in code - E68: evaluate.stratum_thresholds keeps the 0.99 Wilson lower bound as the variance term and adds CUT_MARGIN (1e-3) of daylight above the nearest labelled must-not-link; a cut withheld on margin says propose_only_reason margin",
+   "4 the shipped row must take the same excluded-run list as thresholds_dev.json": "MET by withdrawal - no shipped row is derived from labels at all any more. The defect is recorded here and in M66 so a future row is built from ONE label loader",
+   "5 a seal that adjudicates a challenger must contain it": "MET in code - E69: evaluate.components_spanning_split reports it; W10 cuts its seal from blocking, or unions the challenger's edges before measuring it",
+   "6 the floor's exchange rate": "RECORDED (M59, and the verification block above); the fix is E9's catalogue test in W10"
+  },
+  "confirmed": {
+   "both dev-chosen cuts sit on a labelled must-not-link": {
+    "model|cross": {
+     "cut": 0.967765,
+     "margin": 9.956e-05,
+     "nearest_negative_below": "10515376x18656500, gold same_building_different_unit",
+     "stored_pairs_between": 1
+    },
+    "model|same": {
+     "cut": 0.999188,
+     "margin": 1.393e-05,
+     "nearest_negative_below": "76097x265936, operator same_project_different_unit, 60 m2 2+kk at 26,000 and 27,000 CZK under one broker in one project",
+     "stored_pairs_between": 2
+    },
+    "precedent": "D16 (iv) refused 3e-5 and D18/M43 (ii) refused 7e-5 for this shape; E68 now refuses it in code"
+   },
+   "carrier exclusivity cannot be tested on this cohort": {
+    "multi_carrier": {
+     "n": 356,
+     "portal": "ceskereality 353/356",
+     "reliable": "87 positive, 2 negative",
+     "split": "all 89 labels are in the sealed split"
+    },
+    "one_broker_one_portal": {
+     "n": 961,
+     "portal": "idnes 961/961",
+     "reliable": "133 positive, 0 negative"
+    },
+    "reading": "on this cohort the rule reads as a portal prior. W10, on a fresh seal with its own labels"
+   },
+   "four of the five sealed negatives look like true duplicates on the adverts": {
+    "28071x18661514": "71 m2 3+kk both, but 11,800,000 against 12,780,000 in one Prague project under one broker: a genuine hazard, and gold's different stands",
+    "341900 / 15912495 / 18893401": "208 m2, 11,485,000 CZK, Jablonec nad Nisou (Janackova) on all three; 15912495 and 18893401 are one idnes broker's own re-post, 341900 the sreality twin",
+    "445691 / 15427866 / 15582985": "401 m2, 19,977,000 CZK, Turnov, identical description; dum against komercni on ONE portal - the one sanctioned cross-type",
+    "76097x265936": "60 m2 2+kk at 26,000 and 27,000 CZK, one broker, one project: the operator's explicit must-not-link that the model|same cut sits 1.4e-5 above",
+    "method": "read off the cohort export the engine itself scored, not re-labelled"
+   },
+   "label strength is not what the headline implies": {
+    "gold_weights": {
+     "0.67 (majority)": 831,
+     "1.0 (unanimous)": 367
+    },
+    "reading": "four of the five rest on majority gold. The bar is still failed as the program defines truth, and nothing was re-labelled",
+    "the five sealed negatives": {
+     "28071x18661514": 0.67,
+     "341900x15912495": 1.0,
+     "341900x18893401": 0.67,
+     "445691x15427866": 0.67,
+     "445691x15582985": 0.67
+    }
+   },
+   "the E65 floor is right in principle and badly priced": {
+    "all_same_portal": {
+     "ceskereality|ceskereality": 356,
+     "idnes|idnes": 1000,
+     "sreality|sreality": 7
+    },
+    "cause": "E9 calls a frame stock at 8 carriers, so a broker's tenth re-post makes their own gallery catalogue; the instrument to fix is E9's catalogue test, not the certificate",
+    "reliable_negatives_closed": 2,
+    "reliable_positives_withheld": 228,
+    "withheld_K-B_merges": 1363
+   },
+   "the calibration win does not survive a common population": {
+    "method": "10-bin ECE over ONE set of rows, scored by both generations",
+    "pooled|sealed": {
+     "g6": 0.0747,
+     "g7": 0.0838,
+     "n": 655
+    },
+    "reading": "M60's 4.56 % against 5.75 % compares two label populations on two seals. On one population the two are indistinguishable at the reliable tier and g7 is worse at the pooled tier. The isotonic_pav refusal itself stands",
+    "reliable|dev": {
+     "g6": 0.0091,
+     "g7": 0.0136,
+     "n": 1106
+    },
+    "reliable|sealed": {
+     "g6": 0.0296,
+     "g7": 0.0289,
+     "n": 417
+    }
+   },
+   "the development hazard, the operator's red line": {
+    "caveat": "the proxy also fires on a legitimate re-list with a price cut, so absolute counts overstate; the g6-against-g7 contrast at matched grain does not",
+    "f2": {
+     "clusters_mixing": 66,
+     "intra_building_merges": 549,
+     "reliable_neg": 0
+    },
+    "g6": {
+     "clusters_mixing": 52,
+     "intra_building_merges": 1470,
+     "reliable_neg": 0
+    },
+    "g7": {
+     "clusters_mixing": 98,
+     "intra_building_merges": 637,
+     "reliable_neg": 2
+    },
+    "method": "69 buildings with >=10 listings at one exact pin, 2,608 listings; clusters fusing distinct (area|price) configurations",
+    "x1": {
+     "clusters_mixing": 85,
+     "intra_building_merges": 545,
+     "reliable_neg": 2
+    }
+   },
+   "the fresh seal cannot adjudicate cluster-grain claims about g7": {
+    "cause": "the seal unions g6 and honest_nofix edges plus every labelled pair; a listing the map does not contain falls back to its own id and hashes into a split of its own",
+    "g6": {
+     "components": 992,
+     "spanning": 0
+    },
+    "g7": {
+     "components": 1095,
+     "listings": 231,
+     "listings_absent_from_the_map": 151,
+     "spanning": 75
+    },
+    "honest_nofix": {
+     "components": 1023,
+     "spanning": 0
+    },
+    "rail": "evaluate.components_spanning_split (E69)"
+   },
+   "the refit loses at MATCHED clock, floor and cuts": {
+    "f2 (w6_gold, honest clock, floor, g6 cuts)": {
+     "band": 5864,
+     "cluster_grain_false": 0,
+     "clusters": 957,
+     "merge": 3798,
+     "recall_reliable": 0.6468,
+     "reliable_labelled": 866,
+     "reliable_neg": 0
+    },
+    "method": "w9_eval over train+validation+test on four arms; f2 and x1 differ only in the model",
+    "reading": "less recall AND more false merges than the incumbent model on identical settings, so the refit is a source of the damage in its own right and not only its stratum row",
+    "x1 (w9_gold, same everything else)": {
+     "band": 5100,
+     "cluster_grain_false": 2,
+     "clusters": 1006,
+     "merge": 4072,
+     "recall_reliable": 0.639,
+     "reliable_labelled": 857,
+     "reliable_neg": 2
+    }
+   },
+   "the shipped row is not reproducible from the sanctioned label set": {
+    "breach": "w9_shipped_row.py imports tiers() from kb_audit.py, which loads judge run 35205840437 - the adaptive boundary draw D16 (vi) reserves for MEASUREMENT. thresholds_dev.json excludes it; the shipped row did not",
+    "effect_measured_by_the_assembler": {
+     "model|cross on sanctioned labels only": 0.898609,
+     "model|cross with the reserved run": 0.967765,
+     "model|same either way": 0.999188
+    },
+    "note": "the reserved label RAISES the cut, so the breach was protective - but a cut nobody can re-derive from the eight sanctioned files is not a published cut. Track B reported the sanctioned-only answer as ~0.77; the assembler's reproduction of Track A's own rule gives 0.898609"
+   }
+  },
+  "verdict": "g7 is a refuted candidate. Nothing from the refit ships: not the model, not the stratum row",
+  "what": "W9a: the Track B verdict (DO NOT PROMOTE), each finding reproduced by the assembler"
+ },
+ "what": "W9 Track A - honest clock, fresh seal, E65 K-B image floor, refit to w9_gold; the g7 candidate MISSES the promotion bar. W9a (assembly) verified every Track B finding, WITHDREW the dev-chosen stratum row from any shipped settings file (E68), and ships nothing from the refit: the shipped generation stays g6 = settings/w8.json + models/w6_gold.json"
 }

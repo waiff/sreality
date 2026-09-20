@@ -47,6 +47,7 @@ from autodedup.evaluate import (
     FIT_MAX_ITER,
     FIT_METHODS,
     L2_GRID,
+    components_spanning_split,
     evaluate,
     fit_model,
     pooled_sample,
@@ -915,6 +916,18 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
             print(f"the committed map records seed {recorded}; using it", file=out)
     if expect_seal and seals.spent(expect_seal):
         print(f"note: seal {expect_seal[:12]} is SPENT — {seals.spent(expect_seal)}", file=out)
+    if split_map is not None:
+        # E69: a map is cut from the components that existed when it was sealed, so a CHALLENGER
+        # merging pairs the incumbent banded can put one cluster on both sides of the holdout.
+        held = components_spanning_split(rows, split_map, seed)
+        if not held["contained"]:
+            print(
+                f"warning: {held['n_spanning']} of this run's merge components span the holdout "
+                f"({held['listings_in_spanning']} listings, {held['listings_absent_from_map']} "
+                "of them absent from the map): the seal cannot adjudicate a cluster-grain claim "
+                "about a run it does not contain (E69)",
+                file=sys.stderr,
+            )
     try:
         report = evaluate(rows, labels, sample, settings, by_tier=per_tier,
                           precedence=args.precedence, seed=seed,
