@@ -37,7 +37,18 @@ from autodedup.harness import load_model, load_settings
 from autodedup.hazard_context import ContextIndex
 from autodedup.incremental import GENERATION, Calibration, Keyer, context_for
 from autodedup.incremental_lane import SqlFacts
-from autodedup.incremental_sql import RT_CALIBRATION_READ_SQL
+from autodedup.incremental_sql import (
+    RT_CALIBRATION_READ_SQL,
+    RT_PARITY_CHANGE_SQL,
+    RT_PHASH_POP_COUNT_SQL,
+)
+from autodedup.parity_digest import (
+    baseline,
+    compare,
+    image_view,
+    listing_view,
+    stratified_sample,
+)
 from autodedup.judge_lane import COHORT_FILE, download_cohort
 from autodedup.settings import Settings
 
@@ -45,23 +56,13 @@ PARITY_FILE = "parity.json"
 MAX_EXAMPLES = 5
 FLOAT_TOL = 1e-9
 
-# The change stamp of a listing's CONTENT: rule #2 appends a `listing_snapshots` row only when
-# the content hash moves, so the newest snapshot is when this row last really changed. There is
-# no `last_change_at` column on `listings` to read instead.
-PARITY_CHANGE_SQL = """
-select s.listing_id           as listing_id,
-       max(s.scraped_at)      as last_change_at,
-       count(*)               as n_snapshots
-from listing_snapshots s
-where s.listing_id = any(%(ids)s::bigint[])
-group by s.listing_id
-"""
+# The change stamp of a listing's CONTENT — the GATE's definition, imported rather than
+# restated, so the instrument and the rail that runs every pass read drift the same way.
+PARITY_CHANGE_SQL = RT_PARITY_CHANGE_SQL
 
 # E70 freezes the corpus-wide pHash population in this table and `SqlFacts` joins every image
 # against it. How many rows it actually holds is the first thing the report needs to say.
-PARITY_PHASH_POP_SQL = """
-select count(*) as n from autodedup.phash_pop
-"""
+PARITY_PHASH_POP_SQL = RT_PHASH_POP_COUNT_SQL
 
 # Presence for the WHOLE cohort in one statement: the sample is drawn from what is still there,
 # and the count of what is not is a headline of its own. Full facts are then read for the
@@ -114,39 +115,10 @@ def _positive(args: Mapping[str, str], key: str, fallback: int) -> int:
 
 
 # --- field views --------------------------------------------------------------------------
-
-
-_LISTING_SKIP: frozenset[str] = frozenset({"location", "block"})
-
-
-def listing_view(listing: Listing) -> dict[str, Any]:
-    """One flat `field -> value` map per listing: the record's own fields, then `location.*`,
-    then the two collection shapes spelled out so a diff can name WHAT moved rather than print
-    two blobs. `block` is excluded: the lane deliberately has none (a real-time arrival belongs
-    to no cohort draw) and it reaches no feature."""
-    view: dict[str, Any] = {
-        field.name: getattr(listing, field.name)
-        for field in dataclass_fields(listing)
-        if field.name not in _LISTING_SKIP
-    }
-    view["attrs"] = dict(listing.attrs or {})
-    view["attrs_keys"] = sorted(view["attrs"])
-    view["price_history"] = [list(entry) for entry in (listing.price_history or [])]
-    view["price_history_len"] = len(listing.price_history or [])
-    for field in dataclass_fields(listing.location):
-        view[f"location.{field.name}"] = getattr(listing.location, field.name)
-    return view
-
-
-def image_view(image: Image) -> dict[str, Any]:
-    view: dict[str, Any] = {
-        name: getattr(image, name)
-        for name in ("seq", "storage_path", "phash", "pop", "clip")
-    }
-    view["tags"] = [list(tag) for tag in (image.tags or [])]
-    view["tags_len"] = len(image.tags or [])
-    view["clip_present"] = image.clip is not None
-    return view
+#
+# `listing_view` and `image_view` live in `parity_digest` beside the three digests the GATE is
+# built from, so the instrument's field-by-field diff and the gate's short digest are a view of
+# the same facts rather than two opinions about what a listing is (E12).
 
 
 def equal(left: Any, right: Any) -> bool:
@@ -233,32 +205,6 @@ def _tally(table: Mapping[str, FieldDiff]) -> dict[str, Any]:
 
 
 # --- the sample ----------------------------------------------------------------------------
-
-
-def stratified_sample(
-    listings: Mapping[int, Listing], present: set[int], n: int, seed: int
-) -> list[int]:
-    """`n` ids present on BOTH sides, drawn proportionally per source so a portal that is 3% of
-    the cohort is not absent from a 200-row sample by luck. Deterministic in `seed`."""
-    by_source: dict[str, list[int]] = {}
-    for listing_id in sorted(present):
-        listing = listings.get(listing_id)
-        if listing is None:
-            continue
-        by_source.setdefault(listing.source or "(none)", []).append(listing_id)
-    total = sum(len(ids) for ids in by_source.values())
-    if total <= n:
-        return sorted(present & set(listings))
-    rng = random.Random(seed)
-    picked: list[int] = []
-    for source in sorted(by_source):
-        ids = by_source[source]
-        # At least one of every portal, then that portal's share of the rest.
-        share = max(1, round(n * len(ids) / total))
-        picked.extend(rng.sample(ids, min(share, len(ids))))
-    if len(picked) > n:
-        picked = rng.sample(picked, n)
-    return sorted(set(picked))
 
 
 class Keys:

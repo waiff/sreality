@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import socket
 import time
 from contextlib import nullcontext
@@ -54,7 +55,14 @@ from autodedup.export_sql import (
     COHORT_PRICE_HISTORY_SQL,
 )
 from autodedup.features import FEATURE_VERSION
-from autodedup.harness import load_model, load_settings
+from autodedup.harness import (
+    DEFAULT_SETTINGS_NAME,
+    PRIOR_MODEL_NAME,
+    model_name_of,
+    model_of_version,
+    named_model,
+    named_settings,
+)
 from autodedup.hazard_context import ContextStamp, address_block_key, category_group
 from autodedup.incremental import (
     GENERATION,
@@ -100,7 +108,10 @@ from autodedup.incremental_sql import (
     RT_FP_UPSERT_SQL,
     RT_IDLE_GUARD_SQL,
     RT_LOCK_GUARD_SQL,
+    RT_PARITY_CHANGE_SQL,
+    RT_PHASH_POP_COUNT_SQL,
     RT_PHASH_POP_SQL,
+    RT_PHASH_POP_WRITE_SQL,
     RT_KEY_DELETE_SQL,
     RT_KEY_INSERT_SQL,
     RT_KEYS_MANY_SQL,
@@ -150,7 +161,13 @@ from autodedup.score_lane import (
     present_features,
     storable,
 )
+from autodedup.model import LogisticModel
+from autodedup.parity_digest import baseline as parity_baseline
+from autodedup.parity_digest import compare as parity_compare
+from autodedup.parity_digest import refusal as parity_refusal
+from autodedup.parity_digest import stratified_sample
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
+from autodedup.settings import Settings
 
 LANE_NAME: str = "autodedup_realtime"
 # Longer than the workflow's own 25-minute timeout: a lease that expires while its holder is
@@ -225,6 +242,21 @@ MAX_RETIRE_FRACTION: float = 0.05
 # TOAST included). The schema is ~148 MB today and the operator pays for it; a lane that has
 # not been watched for a week must not be able to double it.
 MAX_SCHEMA_MB: float = 400.0
+# --- the parity gate (E84) ---------------------------------------------------------------
+#
+# The seed writes a baseline of per-listing fact digests into `autodedup.settings` (one row, a
+# few kilobytes — no migration, and it is cut at exactly the moment the calibration is) and
+# every pass re-checks a slice of it before it opens its transaction. The tolerance is ZERO
+# breaches: a stored fact or a frozen statistic that differs on a listing nothing has changed
+# is the W9f defect, and the one thing W9f proved is that it can run for a whole pass unnoticed.
+PARITY_BASELINE_SETTING: str = "rt_parity_baseline"
+PARITY_SAMPLE_SETTING: str = "rt_parity_sample"
+# How many listings the SEED puts in the baseline, and how many of them a PASS re-checks. The
+# pass's slice is drawn fresh each time, so a day of passes covers the baseline many times over
+# at one fact read (6 statements, ~0.7 s) a pass.
+PARITY_BASELINE_N: int = 120
+PARITY_PASS_SAMPLE: int = 25
+PARITY_TOLERANCE: int = 0
 STATEMENT_TIMEOUT_MS: int = 120_000
 LOCK_TIMEOUT_MS: int = 5_000
 IDLE_TIMEOUT_MS: int = 300_000
@@ -281,9 +313,18 @@ class SqlStore:
     claim."""
 
     def __init__(self, conn: Any, generation: str = GENERATION,
-                 store_floor: float = 0.02) -> None:
+                 store_floor: float = 0.02, model_version: str | None = None,
+                 calibration_digest: str | None = None) -> None:
         self.conn = conn
         self.generation = generation
+        # WHICH SCORER TOOK THE DECISION, stamped on every row this store writes (E83a). The
+        # columns existed and the lane wrote `evidence["_model"]` into them — a key nothing has
+        # ever set — so all 15,923 rows of the live generation `rt` carry a NULL model_version
+        # against `w6_gold` on the batch generation's, and the store could not say which
+        # scorer it had been. The pass's model and calibration are the generation's, so they
+        # are held here rather than fished out of a per-pair evidence bag.
+        self.model_version = model_version
+        self.calibration_digest = calibration_digest
         # The batch lane's own retention floor, carried here so the two stores keep the same
         # rows. It comes from the pass's settings, never from a constant of this module.
         self.store_floor = float(store_floor)
@@ -508,9 +549,9 @@ class SqlStore:
             "decision": row.reason, "guard_veto": row.veto,
             "evidence": json.dumps(row.evidence, ensure_ascii=False),
             "context": json.dumps(row.context),
-            "calibration_digest": row.evidence.get("_calibration"),
+            "calibration_digest": row.evidence.get("_calibration") or self.calibration_digest,
             "feature_version": FEATURE_VERSION,
-            "model_version": row.evidence.get("_model"),
+            "model_version": row.evidence.get("_model") or self.model_version,
         } for row in keep])
 
     def delete_pairs(self, keys: Sequence[tuple[int, int]]) -> None:
@@ -708,13 +749,25 @@ class SqlFacts:
     artifact cannot see any of that (E77).
 
     The one deliberate difference from the export is the pHash population: frozen (E70) and
-    read from `autodedup.phash_pop`, never recounted."""
+    read from `autodedup.phash_pop`, never recounted. A hash that table does not carry is
+    UNKNOWN — `pop = None`, exactly as the export writes it when its own probe did not run —
+    and never 0. W9f read it as 0 against an EMPTY table: `pop_is_measured` then said no for
+    every gallery, `build_fingerprint` published `catalog_ratio = None` for every listing,
+    `catalog_ratio_max` was absent on every pair and `certificate_c` — which requires the ratio
+    to be PRESENT — could not fire at all. One live pass, 36,940 pairs, zero K-C against the
+    batch generation's 1,771 (E84). The table has a writer now (the seed) and this counts what
+    it could not measure, so a pass says so rather than scoring on it silently."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL) -> None:
         self.conn = conn
         self.clip_model = clip_model
         self.reads = 0
         self.statements = 0
+        # The population readout, for the pass summary: how many phash-bearing images this pass
+        # scored with a population the frozen table could not give it.
+        self.images_with_phash = 0
+        self.images_unmeasured = 0
+        self.hashes_unmeasured: set[int] = set()
 
     def _dicts(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
         self.statements += 1
@@ -761,11 +814,22 @@ class SqlFacts:
         for row in self._dicts(COHORT_CLIP_TAGS_SQL,
                                {"ids": image_ids, "model": self.clip_model}):
             tags.setdefault(int(row["image_id"]), []).append(row)
-        # Frozen, never recounted (E70) — and absent from the table means a population of 0
-        # for that hash, not an unknown, because the cohort lane writes every hash it saw.
+        # Frozen, never recounted (E70). Absent from the table is UNKNOWN, not zero (E84):
+        # `public.images` carries no index on `phash` (checked: `images_phash_idx` is on
+        # `sreality_id`), D8 forbids adding one, and there is no in-schema mirror to count
+        # from — so the only way to measure a hash the calibration never saw is the export's
+        # own sequential scan, which belongs to the export and the re-seed, never to a pass.
         population = {int(row[0]): int(row[1]) for row in
                       _rows(self.conn, RT_PHASH_POP_SQL, {"hashes": hashes})} if hashes else {}
         self.statements += 1
+        self.images_with_phash += sum(1 for row in rows if row.get("phash") is not None)
+        unmeasured = [h for h in hashes if h not in population]
+        self.hashes_unmeasured.update(unmeasured)
+        if unmeasured:
+            unknown = set(unmeasured)
+            self.images_unmeasured += sum(
+                1 for row in rows if row.get("phash") is not None
+                and int(row["phash"]) in unknown)
         out: dict[int, list[Image]] = {}
         for row in rows:
             image_id = int(row["image_id"])
@@ -1389,6 +1453,265 @@ class _Refused(Exception):
     """The pair budget refused this claim — roll the pass back and report it (E75)."""
 
 
+def seed_parity(conn: Any, dataset: Any, in_scope: Sequence[int], generation: str,
+                n: int) -> dict[str, Any]:
+    """The seed's own gate, and the baseline every later pass re-checks against.
+
+    Here the whole artifact is in hand, so the comparison is the real one: a stratified sample
+    of the generation's own listings, built from the artifact with the export's builders and
+    read back through `SqlFacts` from the database, digest against digest. A seed that cannot
+    show the two agree is refused — it would be freezing a calibration for a lane that cannot
+    reproduce the facts it was cut from."""
+    sample = stratified_sample(dataset.listings, set(int(i) for i in in_scope), n, seed=1)
+    reader = SqlFacts(conn)
+    live: dict[int, tuple[Listing, list[Image]]] = {}
+    for start in range(0, len(sample), 100):
+        live.update(reader.facts(sample[start:start + 100]))
+    rows = parity_baseline({i: dataset.listings[i] for i in sample},
+                           {i: dataset.images(i) for i in sample})
+    drifted = drifted_since(conn, sample, dataset.meta.exported_at)
+    report = parity_compare(rows, {i: value[0] for i, value in live.items()},
+                            {i: value[1] for i, value in live.items()}, drifted)
+    refused = parity_refusal(report, generation=generation, tolerance=PARITY_TOLERANCE,
+                             what="rt_seed")
+    if refused:
+        raise SystemExit(refused)
+    report.update({
+        "ok": True, "sampled": len(sample), "tolerance": PARITY_TOLERANCE,
+        "phash_pop_rows": phash_pop_rows(conn),
+        "images_with_phash": reader.images_with_phash,
+        "images_unmeasured": reader.images_unmeasured,
+        "statements": reader.statements + 1,
+    })
+    return {
+        "report": report,
+        "baseline": {
+            "generation": generation,
+            "rows": rows,
+            "exported_at": dataset.meta.exported_at,
+            "cut_at": datetime.now(timezone.utc).isoformat(),
+            "phash_pop_rows": report["phash_pop_rows"],
+            "tolerance": PARITY_TOLERANCE,
+            "n": len(rows),
+        },
+    }
+
+
+def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
+                args: Mapping[str, str]) -> dict[str, Any]:
+    """The permanent rail: no pass runs on facts that are not the export's (E84).
+
+    A generation with no baseline is refused rather than waved through — the baseline is cut by
+    the seed at the same moment as the calibration, so its absence means this generation was
+    seeded before the gate existed and nothing has ever checked its facts."""
+    payload = control.get(parity_baseline_key(generation))
+    if isinstance(payload, str):
+        payload = json.loads(payload or "{}")
+    if not isinstance(payload, Mapping) or "rows" not in payload:
+        raise SystemExit(
+            f"PARITY GATE: generation {generation!r} carries no fact baseline "
+            f"(autodedup.settings {parity_baseline_key(generation)}) — it was seeded before "
+            "the gate existed, so nothing has ever checked that the live lane reads the "
+            "export's facts (E84). Re-seed it "
+            "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
+            "backfill=true,reseed=true`). Nothing was written and no cursor moved.")
+    sample = int(_setting_number(args.get(PARITY_SAMPLE_SETTING,
+                                          control.get(PARITY_SAMPLE_SETTING)),
+                                 float(PARITY_PASS_SAMPLE)))
+    report = check_parity(conn, generation, payload, max(1, sample))
+    # The W9f defect itself FIRST, because it is the specific diagnosis of what the sample is
+    # about to report generically: a frozen population that HAD rows when the generation was
+    # seeded and has none now is the table emptied under a running lane.
+    at_seed = int(report.get("phash_pop_rows_at_seed") or 0)
+    if at_seed and not int(report.get("phash_pop_rows") or 0):
+        raise SystemExit(
+            f"PARITY GATE: autodedup.phash_pop is EMPTY and generation {generation!r} was "
+            f"seeded with {at_seed} hashes in it (E84). Every image would read an unknown "
+            "population, every catalog_ratio would go absent and no K-C certificate could "
+            "fire. Nothing was written and no cursor moved — re-seed the generation.")
+    refused = parity_refusal(report, generation=generation, tolerance=PARITY_TOLERANCE,
+                             what="the scheduled pass")
+    if refused:
+        raise SystemExit(refused)
+    report["ok"] = True
+    return report
+
+
+# --- WHICH SCORER (E83a) -----------------------------------------------------------------
+
+
+def named_config(args: Mapping[str, str], *, what: str
+                 ) -> tuple[Settings, LogisticModel, str, str]:
+    """The settings row and the model a dispatch NAMES — and silence is not a name.
+
+    W9f's seed and its first live pass both ran on empty arguments, so `Settings()` and the
+    uncalibrated `hand_initialised()` prior scored a generation the operator believed was the
+    batch pass's `w8` + `w6_gold` (t_lo 0.30 against 0.1823, t_hi 0.97 against 1.0, no
+    per-stratum ceiling, no bridge, no context rule). That is 5,888 of 7,878 shared pairs
+    scored differently and 1,039 pairs merged that the batch generation bands — and no
+    argument was mis-typed, because `settings=w8` would have been read as a PATH and found no
+    file. Both halves are fixed: the name resolves inside the repo (`harness.named_settings`),
+    and choosing the defaults is spelled `settings=default,model=prior`."""
+    settings_name = str(args.get("settings") or "").strip()
+    model_name = str(args.get("model") or "").strip()
+    if not settings_name or not model_name:
+        raise SystemExit(
+            f"{what} needs settings=<row in autodedup/settings> and model=<file in "
+            f"autodedup/models> — a generation is scored by ONE scorer and every stored "
+            f"decision is stamped with it. The batch generation g6 is "
+            f"`settings=w8,model=w6_gold`; the uncalibrated defaults are "
+            f"`settings={DEFAULT_SETTINGS_NAME},model={PRIOR_MODEL_NAME}`, which is a choice "
+            "this lane will not make on your behalf again (E83a).")
+    return (named_settings(settings_name), named_model(model_name),
+            settings_name, model_name)
+
+
+def pass_config(args: Mapping[str, str], recorded: Any, model_version: Any,
+                generation: str) -> tuple[Settings, LogisticModel]:
+    """The GENERATION's scorer, read back from its frozen calibration row.
+
+    The seed writes both columns and W9's pass read neither, so the schedule scored with
+    whatever the dispatch happened to carry. Now the row decides and a dispatch argument may
+    only AGREE with it: changing a generation's scorer is a re-seed, because every decision
+    already in the store was taken under the old one."""
+    if recorded is None:
+        raise SystemExit(
+            f"generation {generation!r} carries no settings on its frozen calibration — it "
+            "was seeded before the scorer was recorded (E83a). Re-seed it "
+            "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
+            "reseed=true`) before the schedule runs.")
+    try:
+        settings = Settings.from_dict(dict(recorded))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"generation {generation!r} carries settings this build cannot read ({exc}) — "
+            "re-seed it.") from exc
+    model = model_of_version(str(model_version) if model_version else None)
+    asked_settings = str(args.get("settings") or "").strip()
+    asked_model = str(args.get("model") or "").strip()
+    if asked_settings:
+        chosen = named_settings(asked_settings)
+        if chosen != settings:
+            moved = {key: {"generation": settings.to_dict().get(key), "dispatch": value}
+                     for key, value in chosen.to_dict().items()
+                     if settings.to_dict().get(key) != value}
+            raise SystemExit(
+                f"settings={asked_settings} is not what generation {generation!r} was seeded "
+                f"with: {json.dumps(moved, sort_keys=True, default=str)}. A pass may name the "
+                "generation's scorer, never a different one — re-seed to change it.")
+    if asked_model and named_model(asked_model).version != model.version:
+        raise SystemExit(
+            f"model={asked_model} is not generation {generation!r}'s model "
+            f"({model.version}) — re-seed to change it.")
+    return settings, model
+
+
+# --- the frozen pHash population (E84) ----------------------------------------------------
+
+
+def phash_pop_rows(conn: Any) -> int:
+    return int(_rows(conn, RT_PHASH_POP_COUNT_SQL)[0][0] or 0)
+
+
+def write_population(conn: Any, dataset: Any) -> dict[str, Any]:
+    """Materialise the calibration's own pHash population into `autodedup.phash_pop`.
+
+    The number is the artifact's: `COHORT_PHASH_POP_SQL` counted `count(DISTINCT listing_id)`
+    over `public.images` when the cohort was exported, and every image record carries it. So
+    the seed copies it rather than recounting it — zero blocks of `public`, and the live lane
+    then joins against EXACTLY the statistic the batch engine scored with. What that buys and
+    what it costs: the population is frozen at export time (E70), it can only have grown since,
+    and a hash the export never saw stays unknown until the next export and re-seed."""
+    population: dict[int, int] = {}
+    images = with_phash = 0
+    for image in dataset.all_images():
+        images += 1
+        if image.phash is None:
+            continue
+        with_phash += 1
+        if image.pop is None:
+            continue
+        population[int(image.phash)] = max(population.get(int(image.phash), 0), int(image.pop))
+    if with_phash and not population:
+        raise SystemExit(
+            "the cohort artifact carries no MEASURED pHash population (`phash_pop_ok` false: "
+            "the export's population probe timed out) — seeding from it would freeze a "
+            "generation in which every catalog_ratio is absent and no K-C certificate can "
+            "ever fire (E84). Re-run the export first.")
+    _exec_many(conn, RT_PHASH_POP_WRITE_SQL,
+               [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())])
+    return {"images": images, "images_with_phash": with_phash,
+            "hashes_written": len(population),
+            "hashes_at_or_above_2": sum(1 for n in population.values() if n >= 2)}
+
+
+# --- the parity gate (E84) ----------------------------------------------------------------
+
+
+def parity_baseline_key(generation: str) -> str:
+    return f"{PARITY_BASELINE_SETTING}:{generation}"
+
+
+def drifted_since(conn: Any, ids: Sequence[int], exported_at: Any) -> set[int]:
+    """The sampled listings whose CONTENT changed after the export — genuine drift, never a
+    parity breach (rule #2: a snapshot row is appended only when the content hash moves)."""
+    cut = _stamp(exported_at)
+    if cut is None or not ids:
+        return set()
+    out: set[int] = set()
+    for row in _rows(conn, RT_PARITY_CHANGE_SQL, {"ids": list(ids)}):
+        stamp = _stamp(row[1])
+        if stamp is not None and stamp > cut:
+            out.add(int(row[0]))
+    return out
+
+
+def _stamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T", 1))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def parity_sample(rows: Mapping[str, Any], k: int) -> list[int]:
+    """A fresh slice of the baseline each pass, so a day of passes covers all of it."""
+    ids = sorted(int(key) for key in rows)
+    if len(ids) <= k:
+        return ids
+    return sorted(random.sample(ids, k))
+
+
+def check_parity(conn: Any, generation: str, payload: Mapping[str, Any], k: int,
+                 facts: "SqlFacts | None" = None) -> dict[str, Any]:
+    """Re-read a slice of the seeded baseline through `SqlFacts` and compare the digests."""
+    rows = payload.get("rows") or {}
+    sample = parity_sample(rows, k)
+    reader = facts or SqlFacts(conn)
+    live: dict[int, tuple[Listing, list[Image]]] = {}
+    for start in range(0, len(sample), 100):
+        live.update(reader.facts(sample[start:start + 100]))
+    drifted = drifted_since(conn, sample, payload.get("exported_at"))
+    report = parity_compare(
+        {str(i): rows[str(i)] for i in sample},
+        {i: value[0] for i, value in live.items()},
+        {i: value[1] for i, value in live.items()},
+        drifted)
+    report["sampled"] = len(sample)
+    report["baseline_listings"] = len(rows)
+    report["baseline_cut_at"] = payload.get("cut_at")
+    report["exported_at"] = payload.get("exported_at")
+    report["tolerance"] = PARITY_TOLERANCE
+    report["phash_pop_rows"] = phash_pop_rows(conn)
+    report["phash_pop_rows_at_seed"] = payload.get("phash_pop_rows")
+    report["statements"] = reader.statements + 2
+    return report
+
+
 def run_incremental(
     conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path
 ) -> dict[str, Any]:
@@ -1402,8 +1725,6 @@ def run_incremental(
     if not env_enabled():
         return {"skipped": "dark", "reason": f"{ENV_FLAG} is not true", "spent_usd": 0.0}
 
-    settings = load_settings(args.get("settings") or None)
-    model = load_model(args.get("model") or None)
     holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()
     leased = False
@@ -1429,7 +1750,9 @@ def run_incremental(
         rescope = str(args.get(RESCOPE_ARG) or "").strip().lower() == "true"
         scope_key = scope_setting_key(generation)
         control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
-                                       RETIRE_SETTING, SCAN_CAP_SETTING, INTERVAL_SETTING])
+                                       RETIRE_SETTING, SCAN_CAP_SETTING, INTERVAL_SETTING,
+                                       PARITY_SAMPLE_SETTING,
+                                       parity_baseline_key(generation)])
         try:
             # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
             # the operator has to ask for by name (W9d-2). The row is PER GENERATION (W9e/R4).
@@ -1465,7 +1788,15 @@ def run_incremental(
         payload = rows[0][3]
         calibration = Calibration.from_json(
             payload if isinstance(payload, dict) else json.loads(payload or "{}"))
-        store = SqlStore(conn, generation, store_floor=settings.store_floor)
+        # The scorer is the GENERATION's, read off the row the seed wrote (E83a).
+        settings, model = pass_config(args, rows[0][5], rows[0][6], generation)
+        # THE GATE (E84). Before the lease's transaction, before a single write: a slice of the
+        # seeded baseline re-read through the same `SqlFacts` the pass is about to score with.
+        # A breach stops the pass — non-zero, nothing written, no cursor moved.
+        parity = parity_gate(conn, generation, control, args)
+        store = SqlStore(conn, generation, store_floor=settings.store_floor,
+                         model_version=model.version,
+                         calibration_digest=calibration.digest())
         facts = SqlFacts(conn)
         work = SqlWork(conn, scope, generation,
                        lag=int(args.get("settle_lag") or SETTLE_LAG_S),
@@ -1509,7 +1840,21 @@ def run_incremental(
             raise SystemExit(str(exc)) from exc
         summary = result.to_json() if result is not None else {"aborted": "unknown"}
         summary["fact_reads"] = facts.reads
-        summary["statements"] = store.statements + facts.statements + work.statements
+        summary["statements"] = (store.statements + facts.statements + work.statements
+                                 + int(parity.get("statements") or 0))
+        summary["parity"] = parity
+        summary["settings"] = settings.to_dict()
+        summary["model_version"] = model.version
+        # What this pass could not measure: images whose hash the frozen population does not
+        # carry (E84). Zero on a generation whose seed and export are the same cut; it grows
+        # with every photograph that arrived after the export, and it is the number that says
+        # when the generation is due a re-export and re-seed.
+        summary["population"] = {
+            "phash_pop_rows": parity.get("phash_pop_rows"),
+            "images_with_phash": facts.images_with_phash,
+            "images_unmeasured": facts.images_unmeasured,
+            "hashes_unmeasured": len(facts.hashes_unmeasured),
+        }
         summary["calibration_n_listings"] = int(rows[0][2] or 0)
         summary["store_rows"] = int(
             _rows(conn, RT_FP_COUNT_SQL, {"generation": generation})[0][0])
@@ -1587,10 +1932,10 @@ def run_rt_seed(
         raise SystemExit(
             "rt_seed needs export_run=<the export lane's run id> or artifact=<cohort.jsonl.gz>")
     generation = (args.get("generation") or "").strip() or GENERATION
-    settings = load_settings(args.get("settings") or None)
-    model = load_model(args.get("model") or None)
+    settings, model, settings_name, model_name = named_config(args, what="rt_seed")
     backfill = str(args.get("backfill") or "").strip().lower() == "true"
     reseed = str(args.get("reseed") or "").strip().lower() == "true"
+    parity_n = int(_setting_number(args.get("parity_n"), float(PARITY_BASELINE_N)))
 
     conn = conn_factory()
     try:
@@ -1638,6 +1983,11 @@ def run_rt_seed(
         payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
         written = 0
         with _transaction(conn):
+            # THE FROZEN POPULATION FIRST (E84). Everything below — the parity gate included —
+            # reads galleries through `SqlFacts`, which joins this table, so it has to be
+            # written before anything looks at an image.
+            population = write_population(conn, ds)
+            parity = seed_parity(conn, ds, in_scope, generation, parity_n)
             _exec(conn, RT_CALIBRATION_WRITE_SQL, {
                 "generation": generation, "digest": calibration.digest(),
                 "n_listings": calibration.n_listings,
@@ -1665,8 +2015,16 @@ def run_rt_seed(
             _exec(conn, RT_SETTING_WRITE_SQL, {
                 "key": scope_key, "value": json.dumps(scope.as_json()),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
+            # The gate's baseline, cut at the same moment as the calibration and stored where
+            # the lane already reads its control rows — a settings row needs no migration (E84).
+            _exec(conn, RT_SETTING_WRITE_SQL, {
+                "key": parity_baseline_key(generation),
+                "value": json.dumps(parity["baseline"], sort_keys=True, default=str),
+                "updated_by": f"{LANE_NAME}:rt_seed"})
             if backfill:
-                store = SqlStore(conn, generation, store_floor=settings.store_floor)
+                store = SqlStore(conn, generation, store_floor=settings.store_floor,
+                                 model_version=model.version,
+                                 calibration_digest=calibration.digest())
                 keyer = Keyer(settings, calibration)
                 for listing_id in sorted(fps):
                     fp = fps[listing_id]
@@ -1686,6 +2044,11 @@ def run_rt_seed(
             "generation": generation,
             "calibration_digest": calibration.digest(),
             "calibration_n_listings": calibration.n_listings,
+            "settings_name": settings_name,
+            "model_name": model_name,
+            "model_version": model.version,
+            "population": population,
+            "parity": parity["report"],
             "cursors": {CURSOR_NEW: int(seeded[0]), CURSOR_CHANGED: int(seeded[1]),
                         CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0, CURSOR_SCOPE: 0},
             "backfilled": written,

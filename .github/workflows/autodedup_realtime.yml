@@ -60,6 +60,21 @@ name: "AUTODEDUP: realtime shadow lane"
 # on a dispatch only beside `rt_rescope=true`, and a value that is not a number stops the lane
 # rather than reverting to a default.
 #
+# THE FACTS ARE THE EXPORT'S FACTS, AND A GATE SAYS SO EVERY PASS (E84). The lane reads a
+# listing through the export's own statements and builders, and the one input it cannot recount
+# — the corpus-wide pHash population E9 subtracts catalogue photos with — is FROZEN into
+# `autodedup.phash_pop` by the seed, which copies the number the export already measured. W9f
+# ran a whole live pass with that table EMPTY and no writer anywhere in the repository: every
+# image read a population of 0, every `catalog_ratio` went absent, and K-C — the certificate
+# that rests on exact photo matches — could not fire at all (1,024 K-B, 75 K-R, ZERO K-C against
+# the batch generation's 1,771). So `rt_seed` now cuts a per-listing fact baseline beside the
+# calibration and EVERY pass re-checks a slice of it before it opens its transaction: a stored
+# fact or a frozen statistic that differs on a listing nothing has changed stops the pass —
+# non-zero, nothing written, no cursor moved. pHash and CLIP are producers that re-run on their
+# own cadence, so their movement is reported and not refused; a hash the frozen population never
+# saw is UNKNOWN (never 0), and `population.images_unmeasured` in the summary is what says when
+# the generation is due a fresh export and re-seed.
+#
 # REQUIRES migration 539 (`autodedup.fp_key`, `rt_fp`, `rt_calibration`, `rt_block_cell`,
 # `rt_lease`, `rt_scope_ids`, `rt_scope_scan`, `rt_retire_event` plus the pair-grain columns) and
 # a SEEDED generation. Without the migration the lane exits non-zero; without the seed it exits 0
@@ -70,23 +85,34 @@ name: "AUTODEDUP: realtime shadow lane"
 #   2. Merge this branch. Nothing starts: the schedule stays dark until step 5.
 #   3. Seed the generation — this works WHILE THE LANE IS DARK, which is the point of it:
 #        gh workflow run autodedup.yml --ref main -f mode=rt_seed \
-#          -f args=export_run=35200225251,backfill=true,rt_scope=obec:563510 obec:577626 cast_obce:490245
+#          -f args=export_run=35200225251,settings=w8,model=w6_gold,backfill=true,reseed=true,rt_scope=obec:563510 obec:577626 cast_obce:490245
 #      35200225251 is the export run whose 5,687-listing cohort the batch pass scored; the seed
 #      downloads that artifact, keeps the 4,887 listings of it the scope holds, cuts the frozen
-#      calibration over them (E70) and starts the cursors at TODAY. `rt_scope` here is the
-#      default spelled out — leave it off and the same three trial blocks are used; the budget
-#      default is 400 MB (`rt_max_schema_mb=<n>` moves it). A second seed of a seeded generation
-#      is refused unless `reseed=true`.
-#   4. Verify: `rt_seed.json` reports the calibration digest, `in_scope_listings` and
-#      `backfilled`; in the database `autodedup.settings` carries `rt_scope:rt` and
-#      `autodedup.rt_calibration` one row for generation `rt`.
+#      calibration over them (E70), materialises their pHash population, cuts the parity
+#      baseline and starts the cursors at TODAY. `settings` and `model` are REQUIRED and NAMED
+#      (E83a): they are the generation's scorer, every pass runs it and every stored row is
+#      stamped with it, and W9f seeded and ran on the uncalibrated prior because an empty
+#      argument was allowed to mean one. `rt_scope` here is the default spelled out — leave it
+#      off and the same three trial blocks are used; the budget default is 400 MB
+#      (`rt_max_schema_mb=<n>` moves it). A second seed of a seeded generation is refused unless
+#      `reseed=true`, and a re-seed is how a generation changes its scorer or refreshes its
+#      frozen population from a newer export.
+#   4. Verify: `rt_seed.json` reports the calibration digest, `in_scope_listings`, `backfilled`,
+#      `model_version`, `population.hashes_written` and `parity` (breaches 0 over the listings
+#      it checked); in the database `autodedup.settings` carries `rt_scope:rt` and
+#      `rt_parity_baseline:rt`, `autodedup.phash_pop` is no longer empty and
+#      `autodedup.rt_calibration` has one row for generation `rt` carrying the settings and the
+#      model version.
 #   5. Flip the switch: `gh variable set AUTODEDUP_REALTIME_ENABLED --body true`. Reversing it
 #      is the same flip the other way; `autodedup.settings.realtime_enabled = false` stops a
 #      running lane with no repository change at all.
 #
 # The run summary (out/incremental.json, uploaded on every outcome and echoed into the job
 # summary) carries the counts, the per-listing latency from arrival to decision with p50/p95,
-# the components it re-clustered, the rail's plan and the measured spend.
+# the components it re-clustered, the rail's plan and the measured spend — plus `parity` (what
+# the gate checked, what drifted and what the producers moved), `population` (how many images
+# carried a hash the frozen table could not measure), `model_version` and the settings the
+# generation was seeded with.
 
 on:
   schedule:
@@ -97,7 +123,7 @@ on:
   workflow_dispatch:
     inputs:
       args:
-        description: "Pass arguments as k=v,k=v — generation (default rt), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings, model. The rails (rt_max_schema_mb, rt_max_retire_fraction, rt_enter_max_scans_per_day, rt_enter_interval_hours) are autodedup.settings rows and are accepted here only beside rt_rescope=true."
+        description: "Pass arguments as k=v,k=v — generation (default rt), rt_parity_sample (how many baseline listings the gate re-checks, default 25), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings and model (a pass may NAME the generation's own scorer, never a different one — changing it is a re-seed). The rails (rt_max_schema_mb, rt_max_retire_fraction, rt_enter_max_scans_per_day, rt_enter_interval_hours) are autodedup.settings rows and are accepted here only beside rt_rescope=true."
         required: false
         default: ""
         type: string

@@ -34,6 +34,7 @@ from autodedup.incremental_lane import (
     RetireRefusal,
     SqlStore,
     SqlWork,
+    parity_baseline_key,
     resolve_scope_parents,
     run_incremental,
     scope_setting_key,
@@ -69,11 +70,21 @@ def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
     db.locations[int(listing_id)] = {"obec_kod": obec, "cast_obce_kod": cast_obce}
 
 
+def _baseline(db: FakePg, generation: str = GEN) -> None:
+    """The parity gate (E84) refuses a generation with no fact baseline. A fixture that
+    hand-writes the calibration row hand-writes the baseline too — an empty one, because its
+    `public` holds no cohort listing to compare against. What the gate is FOR is proved in
+    `test_incremental_sqlstore.py` and `test_parity.py`."""
+    db.settings[parity_baseline_key(generation)] = {
+        "rows": {}, "exported_at": db.now.isoformat(), "n": 0}
+
 def _calibrated(db: FakePg, generation: str = GEN) -> FakePg:
     """A SEEDED generation. A pass over an unseeded one is a green skip (W9e/R1), so every
     test about what a pass REFUSES has to seed it first."""
     db.calibration[generation] = {"digest": "d", "n_listings": 3, "payload": {},
-                                  "artifact_url": None, "settings": {}, "model_version": "m"}
+                                  "artifact_url": None, "settings": {},
+                                  "model_version": "hand_v1"}
+    _baseline(db, generation)
     return db
 
 
@@ -414,7 +425,9 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, 
     conn = FakePg()
     conn.schema_bytes = 64 * 1_048_576
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     monkeypatch.setenv(ENV_FLAG, "true")
     out = run_incremental(lambda: conn, {SCOPE_SETTING: "obec:563510"}, tmp_path)
@@ -494,7 +507,9 @@ def test_a_handful_of_departures_is_still_retired() -> None:
 def test_the_lane_stops_loudly_when_the_drift_sweep_refuses(tmp_path, monkeypatch) -> None:
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     for listing_id in range(1, 101):
         conn.rt_fp[(GEN, listing_id)] = _fp_row()
@@ -512,7 +527,9 @@ def test_the_lane_stops_loudly_when_the_drift_sweep_refuses(tmp_path, monkeypatc
 def _seeded(scope_json: Any) -> FakePg:
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     conn.settings[SCOPE_SETTING] = scope_json
     return conn
 
@@ -554,7 +571,9 @@ def test_a_seeded_generation_with_no_scope_row_is_a_hard_error(tmp_path, monkeyp
     """Never a silent fall back to the default: the row IS the generation's scope."""
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     monkeypatch.setenv(ENV_FLAG, "true")
     with pytest.raises(SystemExit) as raised:
         run_incremental(lambda: conn, {"generation": GEN}, tmp_path)

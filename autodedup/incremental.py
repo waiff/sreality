@@ -1196,38 +1196,90 @@ def _census(
     )
 
 
+class _Reach:
+    """Union-find over the merge edges one pass walks, so the whole seed set is expanded
+    TOGETHER rather than one component at a time."""
+
+    def __init__(self) -> None:
+        self.parent: dict[int, int] = {}
+        self.count: dict[int, int] = {}
+
+    def add(self, item: int) -> int:
+        if item not in self.parent:
+            self.parent[item] = item
+            self.count[item] = 1
+        return self.find(item)
+
+    def find(self, item: int) -> int:
+        parent = self.parent
+        root = parent.setdefault(item, item)
+        self.count.setdefault(item, 1)
+        while root != parent[root]:
+            parent[root] = parent[parent[root]]
+            root = parent[root]
+        parent[item] = root
+        return root
+
+    def union(self, left: int, right: int) -> None:
+        a, b = self.find(left), self.find(right)
+        if a == b:
+            return
+        small, large = (a, b) if self.count[a] < self.count[b] else (b, a)
+        self.parent[small] = large
+        self.count[large] += self.count[small]
+
+    def size(self, item: int) -> int:
+        return self.count[self.find(item)]
+
+    def groups(self) -> dict[int, list[int]]:
+        out: dict[int, list[int]] = {}
+        for item in self.parent:
+            out.setdefault(self.find(item), []).append(item)
+        return {root: sorted(members) for root, members in out.items()}
+
+
 def _components(
     store: Store, seeds: Iterable[int], max_size: int
 ) -> tuple[list[list[int]], list[int]]:
     """Connected components of the merge-edge graph reachable from the seeds, BFS-bounded.
 
+    ONE `merge_neighbours` per BFS LEVEL for the whole seed set, not one per level per seed
+    (E74). W9f's first live pass walked 700 components this way and paid 7,131 serial
+    statements at ~96 ms of Frankfurt round trip each — 682 s of a 876 s pass — and the shape
+    is per-pass, not per-cold-store: a rescope, a re-seed or a large delist batch moves the
+    merge graph at that scale again.
+
     A component larger than the cap is NOT silently clustered from a partial member set — it is
     named on the pass summary and left to the cohort lane, because a partial component is the
-    one input that would make E72's result differ from the batch pass's."""
+    one input that would make E72's result differ from the batch pass's. It also stops growing
+    the moment it passes the cap, which is what bounds this walk."""
+    wanted = sorted(set(seeds))
+    if not wanted:
+        return [], []
+    reach = _Reach()
+    for seed in wanted:
+        reach.add(seed)
+    frontier = set(wanted)
     seen: set[int] = set()
+    while frontier:
+        seen |= frontier
+        found: set[int] = set()
+        for listing_id, others in store.merge_neighbours(sorted(frontier)).items():
+            reach.add(listing_id)
+            for other in others:
+                reach.add(other)
+                reach.union(listing_id, other)
+            found |= others
+        frontier = {i for i in (found - seen) if reach.size(i) <= max_size}
     out: list[list[int]] = []
     oversized: list[int] = []
-    for seed in sorted(set(seeds)):
-        if seed in seen:
+    inside = set(wanted)
+    for members in sorted(reach.groups().values()):
+        if len(members) > max_size:
+            oversized.extend(i for i in members if i in inside)
             continue
-        frontier = {seed}
-        members: set[int] = set()
-        overflow = False
-        while frontier:
-            members |= frontier
-            if len(members) > max_size:
-                overflow = True
-                break
-            nxt: set[int] = set()
-            for listing_id, others in store.merge_neighbours(frontier).items():
-                nxt |= others
-            frontier = nxt - members
-        seen |= members
-        if overflow:
-            oversized.append(seed)
-            continue
-        out.append(sorted(members))
-    return out, oversized
+        out.append(members)
+    return out, sorted(oversized)
 
 
 def _recluster(
@@ -1240,13 +1292,35 @@ def _recluster(
     result: PassResult,
     operator_mnl: frozenset[tuple[int, int]] | set[tuple[int, int]] | None = None,
 ) -> None:
+    """Re-cluster every touched component, in a fixed number of statements (E74).
+
+    The per-component spelling cost ~10 serial round trips each — a fact read, `pairs_within`,
+    `clusters_touching` and up to six writes — so a pass that moved 700 components spent its
+    whole budget on latency. The components are computed in memory; the four reads and the one
+    write are batched across all of them. A pair whose two sides fell in DIFFERENT components
+    is nobody's edge (a merge edge would have joined them), which is exactly what the
+    per-component `pairs_within` used to answer."""
     components, oversized = _components(store, seeds, caps.max_component)
     result.oversized_components = sorted(set(result.oversized_components) | set(oversized))
     result.components += len(components)
     operator_mnl = store.must_not_link() if operator_mnl is None else operator_mnl
-    for members in components:
-        working.ensure(members)
-        pairs = store.pairs_within(members)
+    if not components:
+        return
+    every = sorted({i for members in components for i in members})
+    working.ensure(every)
+    of_component = {i: index for index, members in enumerate(components) for i in members}
+    edges: list[list[PairRow]] = [[] for _ in components]
+    for row in store.pairs_within(every):
+        index = of_component.get(row.lo)
+        if index is not None and index == of_component.get(row.hi):
+            edges[index].append(row)
+    touched = store.clusters_touching(every)
+
+    rows: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    keep: set[int] = set()
+    for index, members in enumerate(components):
+        pairs = edges[index]
         decisions = [row.decision() for row in pairs]
         vetoed = {(row.lo, row.hi) for row in pairs if row.veto == UNIT_DESIGNATOR_VETO}
         inside = set(members)
@@ -1256,20 +1330,22 @@ def _recluster(
         fps = {i: working.fps[i] for i in members if i in working.fps}
         listings = {i: working.listings[i] for i in members if i in working.listings}
         clustered = cluster_pairs(decisions, listings, fps, settings, mnl)
-        rows = cluster_rows(clustered, decisions, fps)
-        existing = store.clusters_touching(members)
-        keep = set(clustered.clusters)
-        drop = [key for key in existing if key not in keep]
+        rows.extend(cluster_rows(clustered, decisions, fps))
+        keep |= set(clustered.clusters)
         # Refused unions AND refused bridges: §8 calls these the highest-value rows in the UI,
         # because a conflict is evidence in two directions. An APPLIED bridge is a union and
         # has nothing left to show.
-        conflicts = [{**conflict, "kind": "invariant", "generation": result.generation}
-                     for conflict in clustered.conflicts]
+        conflicts += [{**conflict, "kind": "invariant", "generation": result.generation}
+                      for conflict in clustered.conflicts]
         conflicts += [{**bridge, "kind": "bridge", "generation": result.generation}
                       for bridge in clustered.bridges if not bridge.get("applied")]
-        store.write_clusters(drop, rows, conflicts)
-        result.clusters_written += len(rows)
-        result.clusters_dropped += len(drop)
+    # A stale cluster is dropped once, by the WHOLE pass: the per-component spelling let one
+    # component drop a key another had just kept, so which of the two ran last decided whether
+    # the cluster survived.
+    drop = sorted(key for key in touched if key not in keep)
+    store.write_clusters(drop, rows, conflicts)
+    result.clusters_written += len(rows)
+    result.clusters_dropped += len(drop)
 
 
 def _run_rail(

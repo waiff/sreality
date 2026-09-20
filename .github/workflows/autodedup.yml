@@ -197,7 +197,25 @@ name: "AUTODEDUP: engine lane"
 #             field, reporting a listing whose content changed after the export as DRIFT
 #             rather than as a defect. It then scores `pairs=400` sampled pairs from both fact
 #             sets under one settings/model/calibration and reports every feature, score, zone
-#             and certificate that moved. out/parity.json is the deliverable.
+#             and certificate that moved. out/parity.json is the deliverable. What it found:
+#             `autodedup.phash_pop` held ZERO rows and nothing in the repository wrote it, so
+#             every image read pop=0, every catalog_ratio went absent and K-C was structurally
+#             unreachable - 3 of 3 sampled K-C lost with the model held constant. The GATE that
+#             now stops that shipping again is not this mode: `rt_seed` writes a per-listing
+#             fact baseline and every scheduled pass re-checks a slice of it before it writes
+#             anything (E84). This mode remains the field-by-field report you run when the gate
+#             refuses.
+#
+#   rt_seed - READS the artifact and `public`, WRITES schema `autodedup` only. Cuts a
+#             generation's FROZEN calibration from an export run's cohort artifact, starts its
+#             cursors at TODAY, writes the scope it seeded, materialises the calibration's own
+#             pHash population into `autodedup.phash_pop` (the number the export already
+#             measured - no scan of public.images), and cuts the parity baseline the schedule
+#             is gated on. args: export_run or artifact, settings and model (BOTH REQUIRED and
+#             NAMED, e.g. settings=w8,model=w6_gold, or settings=default,model=prior for the
+#             uncalibrated ones - a generation is scored by one scorer and the lane will not
+#             pick it for you, E83a), generation, rt_scope, backfill, reseed, parity_n.
+#             It is deliberately NOT behind the dark switch: seeding is the step before it.
 #
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
 #             row from its arguments, for work that happened outside a lane run (a migration
@@ -256,7 +274,10 @@ name: "AUTODEDUP: engine lane"
 # pair labels, default g4), max_members (the cap on a confirmed group's size before
 # its pairs are skipped rather than flooding the label set, default 12),
 # sample_seed (the seed the UI's unbiased group order ran under, default v1, which is
-# what each implied label's `sample_rank` is a rank UNDER) and timeout_ms.
+# what each implied label's `sample_rank` is a rank UNDER) and timeout_ms; rt_seed accepts
+# export_run, artifact, settings (required), model (required), generation, rt_scope, backfill,
+# reseed and parity_n; rt_parity accepts export_run, cohort, n, pairs, seed, generation,
+# settings and model.
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json

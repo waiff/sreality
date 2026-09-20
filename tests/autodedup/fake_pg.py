@@ -111,6 +111,11 @@ class FakePg:
             "scope_ids": {k: dict(v) for k, v in self.scope_ids.items()},
             "scope_scans": [dict(row) for row in self.scope_scans],
             "retire_events": [dict(row) for row in self.retire_events],
+            # The seed writes these three INSIDE its transaction (the frozen population, the
+            # calibration and the control rows), so a refusal has to put them back too.
+            "phash_pop": dict(self.phash_pop),
+            "calibration": {k: dict(v) for k, v in self.calibration.items()},
+            "settings": dict(self.settings),
         }
 
     def restore(self, state: Mapping[str, Any]) -> None:
@@ -125,6 +130,9 @@ class FakePg:
         self.scope_ids = state["scope_ids"]
         self.scope_scans = state["scope_scans"]
         self.retire_events = state["retire_events"]
+        self.phash_pop = state["phash_pop"]
+        self.calibration = state["calibration"]
+        self.settings = state["settings"]
 
 
 class _Tx:
@@ -435,6 +443,9 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_PHASH_POP_SQL:
         wanted = set(p["hashes"])
         return sorted((h, n) for h, n in db.phash_pop.items() if h in wanted)
+    if sql == S.RT_PHASH_POP_WRITE_SQL:
+        db.phash_pop[int(p["phash"])] = int(p["n_listings"])
+        return []
 
     # --------------------------------------------- the read-only parity instrument
     if sql == P.PARITY_PRESENT_SQL:

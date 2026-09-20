@@ -566,6 +566,37 @@ select p.phash, p.n_listings
  where p.phash = any(%(hashes)s::bigint[])
 """
 
+# The one WRITER of the frozen population (E84). It is the SEED's, and what it writes is the
+# artifact's own `pop` — the number `COHORT_PHASH_POP_SQL` counted over `public.images` when
+# the calibration was cut — so the live lane joins against exactly the statistic the batch
+# engine scored with, at zero cost against `public`. Migration 528's prose says "only hashes on
+# >= 3 listings"; that was never true of the table, only of an intention, and a population of 1
+# or 2 is the difference between "this photo is unique" and "nobody measured it".
+RT_PHASH_POP_WRITE_SQL = """
+insert into autodedup.phash_pop (phash, n_listings, computed_at)
+values (%(phash)s::bigint, %(n_listings)s::integer, now())
+on conflict (phash) do update set
+    n_listings  = excluded.n_listings,
+    computed_at = now()
+"""
+
+RT_PHASH_POP_COUNT_SQL = """
+select count(*) as n from autodedup.phash_pop
+"""
+
+# The change stamp of a listing's CONTENT, for the parity gate and for the instrument that
+# shares its definition: rule #2 appends a `listing_snapshots` row only when the content hash
+# moves, so the newest snapshot is when this row last really changed. There is no
+# `last_change_at` column on `listings` to read instead.
+RT_PARITY_CHANGE_SQL = """
+select s.listing_id           as listing_id,
+       max(s.scraped_at)      as last_change_at,
+       count(*)               as n_snapshots
+from listing_snapshots s
+where s.listing_id = any(%(ids)s::bigint[])
+group by s.listing_id
+"""
+
 # ------------------------------------------------------------------ probe postings
 #
 # One statement per PASS rather than per probe key (E74): a listing carries 17.3 index keys and
