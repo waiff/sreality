@@ -21,6 +21,11 @@ from autodedup.features import DEFAULT_VOCABULARY_ATTR_KEYS
 # lower.
 CONTEXT_RULE_MIN_IMAGES_FLOOR: float = 4.0
 
+# E84: one minute, the floor under K-B's window separation. No scrape cadence in this program
+# re-lists an advert within a minute of its last sighting, so the bar can only catch two adverts
+# the same index walk saw for the first and only time.
+MIN_CERTIFICATE_B_GAP_DAYS: float = 1.0 / 1440.0
+
 
 @dataclass(slots=True)
 class Settings:
@@ -90,6 +95,23 @@ class Settings:
     # `validate` refuses to run the honest clock without it.
     certificate_b_min_images: float = 0.0
     certificate_b_min_matched_images: float = 0.0
+    # E84 (W10): K-B's disjointness clause reads a PAIR of windows, so it has to be read at the
+    # resolution the sightings have. Under the honest clock an advert seen exactly once has
+    # `first_seen == last_seen` and its live window is a POINT, which makes `max(starts) >
+    # min(ends)` true for ANY two once-seen adverts — two Regus products listed 2.8 seconds apart
+    # in one index walk certified as a re-post (412540 x 412544, gold not-same, unanimous). The
+    # separation must therefore exceed the sighting cadence, and the rail reads the pair, never
+    # one side: "either side degenerate" costs 7 labelled duplicates, the pair gap costs 0. One
+    # minute is measured: engine-wide over the candidate's 1,167 K-B merges it withholds exactly
+    # that pair; an hour costs 2 labelled duplicates, a day 95 (M89). 0 by DEFAULT, and that is
+    # not timidity: on the detection clock the gap runs from `inactive_at`, so a sub-minute one
+    # is a delisting DETECTED and the successor listed in the same drain pass — a true re-post,
+    # and the minute withholds exactly one of g6's K-B certificates, 18715382 x 18739520, the
+    # same broker's 29,000 Kc 2+kk re-listed 44 seconds after it was detected gone (M89). Under
+    # the honest clock the gap runs from a SIGHTING, where a sub-minute separation can only mean
+    # one index walk saw both adverts for the first and only time. So the rail is required
+    # exactly where the hazard is: `validate` refuses the honest clock without it.
+    certificate_b_min_gap_days: float = 0.0
     # E61 (W8): two adverts naming a DIFFERENT unit inside one address block are two units,
     # whatever they look like. ON by default — it demotes nothing the operator or gold calls a
     # duplicate, and it is the only rule that can separate a developer's own near-identical
@@ -263,6 +285,11 @@ class Settings:
                 "catalog_carrier_aware needs at least one carrier limb: with none configured "
                 "the switch is inert and E9 runs exactly as it does with it off"
             )
+        if self.certificate_b_min_gap_days < 0.0:
+            raise ValueError(
+                "certificate_b_min_gap_days must not be negative: "
+                f"{self.certificate_b_min_gap_days}"
+            )
         for name in ("certificate_b_min_images", "certificate_b_min_matched_images"):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must not be negative: {getattr(self, name)}")
@@ -279,6 +306,13 @@ class Settings:
                 "lets a developer's serial template re-posts satisfy every clause of K-B, and "
                 "certificate_b_min_images=0 leaves the certificate resting on no observation "
                 "of the unit"
+            )
+        if self.live_window_from_sighting and self.certificate_b_min_gap_days <= 0.0:
+            raise ValueError(
+                "live_window_from_sighting needs the E84 gap rail: under the honest clock a "
+                "once-seen advert's live window is a point, so every pair of once-seen adverts "
+                "is disjoint by construction and K-B certifies a 2.8-second separation as a "
+                "re-post"
             )
         if not 0.0 <= self.unit_interior_min <= 1.0:
             raise ValueError(f"unit_interior_min must be in [0, 1]: {self.unit_interior_min}")

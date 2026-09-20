@@ -6,6 +6,11 @@ provably inert there (M86). `w10_honest_carrier.json` is the CANDIDATE — hones
 floor, carrier-aware E9, every cut the incumbent's — and it is not a promotion: the
 multi-carrier cell that decides it holds no reliable label on the dev side of the fresh seal
 (M88), which is what the two pair lists are for.
+
+W10 closed with the labels bought and the seal opened, and it promotes NOTHING (D28): the
+candidate lost on the sealed split (M90) and its 931 merges are one family (M91). What ships is
+E84 — the pair-gap floor under K-B's disjointness clause — as a rail that is OFF on the shipped
+clock and REQUIRED under the honest one (M89).
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from autodedup.settings import Settings
+from autodedup.settings import MIN_CERTIFICATE_B_GAP_DAYS, Settings
 from autodedup.stock import CarrierPolicy
 
 ROOT = Path(__file__).resolve().parents[2] / "autodedup"
@@ -73,3 +78,31 @@ def test_the_two_label_lists_exist_and_hold_ordered_distinct_pairs() -> None:
         assert 0 < len(keys) <= cap
         assert len(set(keys)) == len(keys)
         assert all(lo < hi for lo, hi in keys)
+
+
+def test_w10_promotes_nothing_so_there_is_no_promoted_settings_row() -> None:
+    """D28: the shipped generation is still g6. A `w10.json` would BE the promotion."""
+    assert not (ROOT / "settings/w10.json").exists()
+    assert not (ROOT / "settings/w10_strata.json").exists()
+    assert (ROOT / "settings/w8.json").exists()
+    assert (ROOT / "models/w6_gold.json").exists()
+
+
+def test_e84_is_off_on_the_shipped_clock_and_carried_by_every_honest_row() -> None:
+    """M89: the same minute that is free under the honest clock withholds a true re-post under
+    the detection one (g6's 18715382 x 18739520, re-listed 44 s after it was found gone)."""
+    assert Settings().certificate_b_min_gap_days == 0.0
+    assert W8.certificate_b_min_gap_days == 0.0
+    assert CARRIER.certificate_b_min_gap_days == 0.0
+    for path in sorted((ROOT / "settings").glob("*.json")):
+        if path.name.endswith("_strata.json"):
+            continue
+        row = Settings.from_json(path)
+        if row.live_window_from_sighting:
+            assert row.certificate_b_min_gap_days >= MIN_CERTIFICATE_B_GAP_DAYS, path.name
+
+
+def test_the_candidate_carries_the_gap_rail_the_gold_labels_bought() -> None:
+    assert CANDIDATE.certificate_b_min_gap_days == MIN_CERTIFICATE_B_GAP_DAYS
+    raw = json.loads((ROOT / "settings/w10_honest_carrier.json").read_text(encoding="utf-8"))
+    assert "certificate_b_min_gap_days" in raw  # spelled out, not inherited from a default

@@ -1,6 +1,7 @@
 {
  "bridge_apply": true,
  "bridge_min_score": 0.999,
+ "certificate_b_min_gap_days": 0.0006944444444444445,
  "certificate_b_min_images": 1.0,
  "certificate_b_min_matched_images": 1.0,
  "certificate_kr_enabled": true,
