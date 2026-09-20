@@ -299,41 +299,126 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
              or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
 """
 
-# The SIXTH feed, and the one the scope owes in the other direction (W9d-3): `listing_location` is
-# written asynchronously from the scrape, so an in-scope listing can carry no `obec_kod` at all
-# when its arrival window passes. The forward feed correctly skips it — it is not yet in scope —
-# and the cursor steps over it; when the geocoder resolves it an hour later NOTHING claims it
-# (the drift sweep only sweeps OUT, the revive sweep only reads rows the store already holds,
-# and the straggler sweep looks back a bounded number of rows). Measured live: 6.2% of the
-# listings first seen in the last 6 h carry a NULL `obec_kod`, against a 4.2-7.1% steady state.
+# The SIXTH feed, and the one the scope owes in the other direction (W9d-3):
+# `listing_location` is written asynchronously from the scrape, so an in-scope listing can carry
+# no `obec_kod` at all when its arrival window passes. The forward feed correctly skips it — it
+# is not yet in scope — and the cursor steps over it; when the geocoder resolves it an hour
+# later NOTHING claims it (the drift sweep only sweeps OUT, the revive sweep only reads rows the
+# store already holds, and the straggler sweep looks back a bounded number of rows). Measured
+# live: 6.2% of the listings first seen in the last 6 h carry a NULL `obec_kod`.
 #
-# There is no index-served change stamp to drive it off — `listing_location.resolved_at` carries
-# no index at all and D8 forbids adding one — so the feed is a bounded round-robin over the
-# SCOPE's own listing ids, ONE block a pass, served by `listing_location_obec_granularity`.
-# `EXPLAIN ANALYZE` on THIS statement at its shipped slice, live: Bitmap Index Scan on
-# `(obec_kod, granularity)` for a town block (Jablonec: 3,115 index rows -> 2,780 rows, 57 ms),
-# and for a QUARTER block the narrowest path this schema can serve — the parent obec's index
-# entries filtered on `cast_obce_kod`, because there is no index on that column
-# (Praha-Vysočany: 159,353 index rows -> 1,439 rows, 5.7 s cold). One block a pass is what keeps
-# the quarter's cost off every pass.
-RT_SCOPE_ENTER_SQL = """
-select coalesce(max(e.listing_id), %(after_id)s::bigint) as slice_max,
-       count(*)                                          as slice_size,
-       coalesce(array_agg(e.listing_id order by e.listing_id)
-                filter (where e.missing),
-                '{}'::bigint[])                          as entered
-  from (select ll.listing_id as listing_id,
-               not exists (select 1
-                             from autodedup.rt_fp f
-                            where f.generation = %(generation)s::text
-                              and f.listing_id = ll.listing_id) as missing
-          from public.listing_location ll
-         where ll.obec_kod = %(obec)s::bigint
-           and (%(cast_obce)s::bigint is null
-                or ll.cast_obce_kod = %(cast_obce)s::bigint)
-           and ll.listing_id > %(after_id)s::bigint
-         order by ll.listing_id
-         limit %(limit)s) e
+# W9d served that feed by scanning a scope block on `public` EVERY cycle, and W9e's cost audit
+# priced it: there is no index-served path to a quarter (`listing_location` has a btree on
+# `(obec_kod, granularity)` and none on `cast_obce_kod`; D8 forbids adding one; `listings`
+# carries no obec or quarter column indexed either — all three checked live against
+# `pg_indexes`), so the quarter block is a bitmap heap scan of its PARENT obec filtered on
+# `cast_obce_kod`: measured live `EXPLAIN (ANALYZE, BUFFERS)`, **159,357 index rows -> 1,439
+# rows, 29,265 heap blocks, 29,568 buffers = 231 MB, 6.4 s, cold every time** (the working set
+# does not stay in shared_buffers). One block a cycle over three blocks is ~48 scans of it a
+# day: **~11 GB a day of cold reads on the instance that serves Browse**, whether or not
+# anything entered, and `enter_slice` does not bound it — the `order by ... limit` is applied
+# AFTER the bitmap is read.
+#
+# So the scan is no longer what a pass does. It REFRESHES `autodedup.rt_scope_ids` — the block's
+# membership snapshot — on a cadence that is data, and an ordinary pass claims its entrants out
+# of that snapshot with an anti-join that touches `public` not at all. What is lost is latency,
+# not coverage, and only for the TAIL: a listing whose location resolves shortly after it
+# arrives is already claimed by the straggler sweep (the last N rows of `listings`, anti-joined
+# on `rt_fp`), so this feed exists for the long tail — an old listing re-geocoded into the
+# scope — which is measured in days rather than in minutes.
+RT_SCOPE_BLOCK_SQL = """
+select ll.listing_id  as listing_id,
+       ll.resolved_at as resolved_at
+  from public.listing_location ll
+ where ll.obec_kod = %(obec)s::bigint
+   and (%(cast_obce)s::bigint is null
+        or ll.cast_obce_kod = %(cast_obce)s::bigint)
+ order by ll.listing_id
+ limit %(limit)s
+"""
+
+# The snapshot write. One block is replaced whole: what the scan found is upserted, and what it
+# no longer finds is pruned — a listing the geocoder moved OUT leaves the snapshot here and is
+# retired by the drift sweep there, which is the other direction and keeps its own rail.
+RT_SCOPE_IDS_WRITE_SQL = """
+insert into autodedup.rt_scope_ids (generation, block_key, listing_id, resolved_at,
+                                    refreshed_at)
+select %(generation)s::text, %(block_key)s::text, t.listing_id, t.resolved_at, now()
+  from unnest(%(listing_ids)s::bigint[], %(resolved)s::timestamptz[])
+         as t(listing_id, resolved_at)
+on conflict (generation, block_key, listing_id) do update set
+    resolved_at  = excluded.resolved_at,
+    refreshed_at = now()
+"""
+
+RT_SCOPE_IDS_PRUNE_SQL = """
+delete from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and s.block_key = %(block_key)s::text
+   and not (s.listing_id = any(%(listing_ids)s::bigint[]))
+"""
+
+# What an ordinary pass costs the production instance for this feed: NOTHING. Both sides of the
+# anti-join are in schema `autodedup`, served by `autodedup_rt_scope_ids_claim_idx` and the
+# `rt_fp` primary key. The settle lag is the same one every other feed honours (W9e/R5) and it
+# is spelled on `resolved_at` — the moment the location that PUT the listing in scope was
+# written — because that, not the listing's age, is this feed's arrival event.
+RT_SCOPE_ENTRANTS_SQL = """
+select s.listing_id, s.resolved_at
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and s.listing_id > %(after_id)s::bigint
+   and (s.resolved_at is null
+        or s.resolved_at <= now() - make_interval(secs => %(lag)s))
+   and not exists (select 1
+                     from autodedup.rt_fp f
+                    where f.generation = %(generation)s::text
+                      and f.listing_id = s.listing_id)
+ order by s.listing_id
+ limit %(limit)s
+"""
+
+# The cadence's two inputs, in one statement: how long ago each block was walked, and how many
+# walks this generation has spent in the rolling day the cap is measured over. `age_s` is
+# computed by the SERVER — a runner's clock is not the database's, and the cadence is the only
+# thing standing between this lane and W9d's ~11 GB a day.
+RT_SCOPE_SCAN_STATE_SQL = """
+select s.block_key                                                     as block_key,
+       extract(epoch from now() - max(s.scanned_at))::double precision as age_s,
+       count(*) filter (
+         where s.scanned_at > now() - make_interval(hours => %(hours)s::int))::int as scans
+  from autodedup.rt_scope_scan s
+ where s.generation = %(generation)s::text
+ group by s.block_key
+"""
+
+RT_SCOPE_SCAN_WRITE_SQL = """
+insert into autodedup.rt_scope_scan (generation, block_key, scanned_at, rows_found,
+                                     elapsed_ms)
+values (%(generation)s::text, %(block_key)s::text, now(), %(rows_found)s::int,
+        %(elapsed_ms)s::double precision)
+"""
+
+# The retire rail's rolling window (W9e/R2). `retired` is what the generation has already
+# retired inside it, and `store_at_start` is the store as the OLDEST pass in the window
+# measured it — the denominator W9d took from the current store, which shrinks with every
+# retirement and so could never bound a slow grind.
+RT_RETIRE_WINDOW_SQL = """
+select coalesce(sum(e.n_retired), 0)::bigint as retired,
+       (select e2.store_rows
+          from autodedup.rt_retire_event e2
+         where e2.generation = %(generation)s::text
+           and e2.retired_at > now() - make_interval(hours => %(hours)s::int)
+         order by e2.retired_at, e2.id
+         limit 1)                            as store_at_start
+  from autodedup.rt_retire_event e
+ where e.generation = %(generation)s::text
+   and e.retired_at > now() - make_interval(hours => %(hours)s::int)
+"""
+
+RT_RETIRE_EVENT_WRITE_SQL = """
+insert into autodedup.rt_retire_event (generation, retired_at, n_retired, store_rows)
+values (%(generation)s::text, now(), %(n_retired)s::int, %(store_rows)s::bigint)
 """
 
 # A quarter has no index of its own, so the entrant sweep reaches it through its PARENT obec.
@@ -731,6 +816,15 @@ on conflict (generation, cell_key, category_group) do update set
 """
 
 # ------------------------------------------------------------------ calibration (E70)
+# Is this generation SEEDED at all? The payload is megabytes of frozen statistics, so the
+# question "has `rt_seed` run here" is asked on its own (W9e/R1): an unseeded generation is a
+# green `skipped: unseeded`, not a pass that hard-errors every ten minutes for ever.
+RT_CALIBRATION_PRESENT_SQL = """
+select c.generation, c.digest, c.built_at
+  from autodedup.rt_calibration c
+ where c.generation = %(generation)s::text
+"""
+
 RT_CALIBRATION_READ_SQL = """
 select c.generation, c.digest, c.n_listings, c.payload, c.artifact_url, c.settings,
        c.model_version, c.built_at

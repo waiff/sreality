@@ -7,7 +7,7 @@
 -- three index-served watermark cursors (`listings_pkey`, `listing_snapshots_pkey`,
 -- `listings_inactive_at_idx`) plus id-keyed fact fetches; its writes are all below.
 --
--- Five new relations and seven columns:
+-- Eight new relations and seven columns:
 --   * `fp_key`          — the posting lists the six probes look up, keyed by GENERATION,
 --                          because a probe key is a function of the frozen calibration
 --                          (K3's price decile) and two generations must not share one.
@@ -23,6 +23,11 @@
 --                          sets (the three cardinalities are reported, never read by a rule).
 --   * `rt_lease`        — mutual exclusion by lease-row CAS. NEVER `pg_advisory_lock`: a
 --                          session lock strands over the transaction pooler.
+--   * `rt_scope_ids`    — the scope's membership SNAPSHOT, so an ordinary pass claims
+--                          entrants without reading `public` at all (W9e/R3: the quarter's
+--                          sweep was 231 MB of cold heap reads ~48 times a day).
+--   * `rt_scope_scan`   — the scan ledger the entrant cadence and its rolling-day cap read.
+--   * `rt_retire_event` — the retirement ledger W9e's rail measures a rolling day against.
 --   * `pairs.from_lo` / `pairs.from_hi` — E71's bookkeeping. A pair is kept while EITHER side
 --                          retrieves the other, which is what makes the fan-out cap
 --                          order-insensitive; one boolean per direction is the whole mechanism.
@@ -137,6 +142,70 @@ create table if not exists autodedup.rt_block_cell (
 );
 
 ------------------------------------------------------------------
+-- the scope's own membership, and the two ledgers that rail it (W9e)
+------------------------------------------------------------------
+
+-- WHY a side table rather than the sweep reading `public` every pass. The entrant sweep — the
+-- feed that claims a listing whose location resolved INTO the scope after its arrival window
+-- had passed — has no index-served path to a QUARTER: `listing_location` carries a btree on
+-- `(obec_kod, granularity)` and NONE on `cast_obce_kod`, and D8 forbids adding one. Measured
+-- live on the trial scope, the quarter's block (Praha-Vysocany 490245 through its parent obec
+-- 554782) is a 29,265-block bitmap heap scan — 231 MB, 6.4 s, cold every time — and W9d ran it
+-- once every three passes, ~48 times a day: ~11 GB a day of cold reads on the instance that
+-- serves Browse, whether or not anything entered. This table is the membership SNAPSHOT that
+-- scan produces, so an ordinary pass claims entrants with an anti-join inside schema
+-- `autodedup` and reads NOTHING in `public`; the wide scan runs on a cadence that is data
+-- (`rt_enter_interval_hours`) under a rolling-day cap that is data
+-- (`rt_enter_max_scans_per_day`). `resolved_at` rides along because the scan already reads the
+-- row: it is what gives the entrant feed the same settle lag every other feed has.
+create table if not exists autodedup.rt_scope_ids (
+  generation   text   not null,
+  block_key    text   not null,
+  listing_id   bigint not null,
+  resolved_at  timestamptz,
+  refreshed_at timestamptz not null default now(),
+  primary key (generation, block_key, listing_id)
+);
+
+-- The claim path: this generation's snapshot in listing-id order, anti-joined against `rt_fp`.
+create index if not exists autodedup_rt_scope_ids_claim_idx
+  on autodedup.rt_scope_ids (generation, listing_id);
+
+-- The scan ledger. Append-only, and the only thing that can answer the two questions the
+-- cadence asks: when was THIS block last walked, and how many walks has the generation spent
+-- in the last rolling day. A settings row could hold neither without being rewritten by every
+-- pass.
+create table if not exists autodedup.rt_scope_scan (
+  id         bigserial   primary key,
+  generation text        not null,
+  block_key  text        not null,
+  scanned_at timestamptz not null default now(),
+  rows_found integer     not null default 0,
+  elapsed_ms double precision
+);
+
+create index if not exists autodedup_rt_scope_scan_gen_idx
+  on autodedup.rt_scope_scan (generation, scanned_at desc);
+
+-- The retirement ledger (W9e). W9d's rail compared the departed count of ONE drift SLICE with
+-- a fraction of the store, so it could only fire while the slice was at least that fraction —
+-- above ~400,000 rows, or under a small `drift_slice` dispatch argument, the store could be
+-- ground away a share a pass with the rail never speaking. Retirement is therefore measured
+-- over a ROLLING DAY against the store as it stood when that day began, which is what this
+-- table remembers: one row per pass that retired anything, with the store size the rail
+-- measured itself against.
+create table if not exists autodedup.rt_retire_event (
+  id         bigserial   primary key,
+  generation text        not null,
+  retired_at timestamptz not null default now(),
+  n_retired  integer     not null default 0,
+  store_rows bigint      not null default 0
+);
+
+create index if not exists autodedup_rt_retire_event_gen_idx
+  on autodedup.rt_retire_event (generation, retired_at desc);
+
+------------------------------------------------------------------
 -- mutual exclusion
 ------------------------------------------------------------------
 
@@ -196,12 +265,18 @@ alter table autodedup.rt_fp          enable row level security;
 alter table autodedup.rt_calibration enable row level security;
 alter table autodedup.rt_block_cell  enable row level security;
 alter table autodedup.rt_lease       enable row level security;
+alter table autodedup.rt_scope_ids    enable row level security;
+alter table autodedup.rt_scope_scan   enable row level security;
+alter table autodedup.rt_retire_event enable row level security;
 
 revoke all on autodedup.fp_key         from anon, authenticated;
 revoke all on autodedup.rt_fp          from anon, authenticated;
 revoke all on autodedup.rt_calibration from anon, authenticated;
 revoke all on autodedup.rt_block_cell  from anon, authenticated;
 revoke all on autodedup.rt_lease       from anon, authenticated;
+revoke all on autodedup.rt_scope_ids    from anon, authenticated;
+revoke all on autodedup.rt_scope_scan   from anon, authenticated;
+revoke all on autodedup.rt_retire_event from anon, authenticated;
 
 revoke all on all sequences in schema autodedup from anon, authenticated;
 
