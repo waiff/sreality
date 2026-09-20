@@ -419,12 +419,13 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, 
 
 # ------------------------------------------------- W9d: the four defects the verification found
 #
-# D1 a separator-only scope parsed to an EMPTY, non-whole-corpus scope and the drift sweep then
-# reported every row of the store as departed; D2 a dispatch-arg scope retired everything the
-# seeded scope holds without ever being persisted; D3 nothing claimed a listing whose location
-# resolved INTO the scope after the cursor had passed it, and the straggler look-back was an id
-# RANGE rather than a row count; D4 the session guards were set outside the pass's transaction
-# on a transaction-pooled connection.
+# W9d-1 a separator-only scope parsed to an EMPTY, non-whole-corpus scope and the drift sweep
+# then reported every row of the store as departed; W9d-2 a dispatch-arg scope retired everything
+# the seeded scope holds without ever being persisted; W9d-3 nothing claimed a listing whose
+# location resolved INTO the scope after the cursor had passed it, and the straggler look-back
+# was an id RANGE rather than a row count; W9d-4 the session guards were set outside the pass's
+# transaction on a transaction-pooled connection. (They are the VERIFICATION's numbering: the
+# program's own D1/D4 are the cohort-block and shadow-posture rulings.)
 
 
 def _empty_scope() -> Scope:
@@ -494,7 +495,7 @@ def test_the_lane_stops_loudly_when_the_drift_sweep_refuses(tmp_path, monkeypatc
     assert not conn.cursors and len(conn.rt_fp) == 100
 
 
-# ------------------------------------------------------------ D2: the seeded scope is the truth
+# -------------------------------------------------------- W9d-2: the seeded scope is the truth
 
 
 def _seeded(scope_json: Any) -> FakePg:
@@ -549,7 +550,7 @@ def test_a_seeded_generation_with_no_scope_row_is_a_hard_error(tmp_path, monkeyp
     assert not conn.cursors and not conn.rt_fp
 
 
-# --------------------------------------------------------------- D3: the drift-IN feed
+# ----------------------------------------------------------- W9d-3: the drift-IN feed
 
 
 def test_the_straggler_sweep_looks_back_a_row_count_not_an_id_range() -> None:
@@ -611,7 +612,7 @@ def test_a_quarter_block_needs_its_parent_obec_resolved() -> None:
         resolve_scope_parents(FakePg(), SCOPE)
 
 
-# ------------------------------------------- D4: the session guards belong INSIDE the transaction
+# --------------------------- W9d-4: the session guards belong INSIDE the transaction
 
 
 def test_the_session_guards_are_set_local_inside_the_pass_transaction(tmp_path, monkeypatch):

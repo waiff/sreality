@@ -8,7 +8,7 @@ rather than a tuning knob: an empty, separator-only or missing scope is a hard e
 with no blocks is not constructible at all (W9d-1), and a whole-corpus run has to be spelled `all`
 AND fit the storage guard (`incremental_lane.storage_guard`). A PASS goes further still: its
 scope is the one `rt_seed` PERSISTED, and a dispatch argument that differs is a re-scope the
-operator has to ask for by name (`resolve_pass_scope`, D2).
+operator has to ask for by name (`resolve_pass_scope`, W9d-2).
 
 Two grains, and they are the two the cohort already uses: `obec` is
 `listing_location.obec_kod` (a town) and `cast_obce` is `cast_obce_kod` (a quarter). The
