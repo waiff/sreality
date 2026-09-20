@@ -732,3 +732,41 @@ def test_cli_ensembles_section_prices_a_cascade_on_survivors_only(tmp_path: Path
     assert alone["false_merge"]["k"] == 1
     assert alone["blocks"]["false_merge_blocks"] == 1
     assert alone["cost"]["per_pair_usd"] == 0.005
+
+
+def test_ensembles_markdown_orders_by_the_upper_bound_not_the_point_estimate() -> None:
+    section = {
+        "n_rules": 2,
+        "band_pairs_per_month": 296_550,
+        "recall_dial_75pct": 0.386,
+        "rules": [
+            {
+                "rule": "thin",
+                "false_merge": {"k": 0, "n": 4, "rate": 0.0,
+                                "wilson_low": 0.0, "wilson_high": 0.49},
+                "recall": {"k": 4, "n": 4, "rate": 1.0,
+                           "wilson_low": 0.51, "wilson_high": 1.0},
+                "blocks": {"false_merge_blocks": 0, "negative_blocks": 2},
+                "cost": {"per_pair_usd": 0.001},
+                "projection": {"monthly_usd": 296.55, "monthly_usd_at_75pct_dial": 114.47},
+                "latency": {"p50_s": 2.0, "p95_s": 3.0},
+            },
+            {
+                "rule": "thick",
+                "false_merge": {"k": 0, "n": 43, "rate": 0.0,
+                                "wilson_low": 0.0, "wilson_high": 0.0824},
+                "recall": {"k": 40, "n": 205, "rate": 0.195,
+                           "wilson_low": 0.15, "wilson_high": 0.25},
+                "blocks": {"false_merge_blocks": 0, "negative_blocks": 11},
+                "cost": {"per_pair_usd": 0.004},
+                "projection": {"monthly_usd": 1186.2, "monthly_usd_at_75pct_dial": 457.87},
+                "latency": {"p50_s": 20.0, "p95_s": 30.0},
+            },
+        ],
+    }
+    lines = compare.render_ensembles(section)
+    body = [line for line in lines if line.startswith("| ")]
+    # Both rules made zero errors; the one measured on 43 negatives ranks above the one
+    # measured on 4, because the bound — not the point estimate — is the operator's number.
+    assert body[2].startswith("| thick |")
+    assert body[3].startswith("| thin |")

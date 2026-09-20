@@ -707,7 +707,51 @@ def render_markdown(report: dict[str, Any]) -> str:
             ],
         )
         lines += [""]
+    if report.get("ensembles"):
+        lines += render_ensembles(report["ensembles"])
     return "\n".join(lines)
+
+
+def render_ensembles(section: dict[str, Any], limit: int = 20) -> list[str]:
+    """The rule table, ordered by the number the operator's ruling makes first: the UPPER bound
+    on the false-merge rate, not the point estimate. A rule with 0 errors over 8 negatives and
+    one with 0 over 43 look identical until the bound is printed beside them."""
+    rows = sorted(
+        section["rules"],
+        key=lambda entry: (
+            entry["false_merge"]["wilson_high"] if entry["false_merge"]["n"] else 1.0,
+            -(entry["recall"]["rate"] or 0.0),
+        ),
+    )
+    lines = [
+        "## Ensemble rules over the stored verdicts",
+        "",
+        f"{section['n_rules']} rule(s), none of which made a call that was not already paid "
+        f"for. Monthly figures are {section['band_pairs_per_month']:,} band pairs "
+        f"(M20's production dial) and that dial times {section['recall_dial_75pct']} "
+        "(D15's 75 %-recall shape).",
+        "",
+    ]
+    lines += _table(
+        ["rule", "false merge (95% Wilson)", "err. blocks", "recall", "$/pair",
+         "$/month", "$/month @75%", "p50 s", "p95 s"],
+        [
+            [
+                entry["rule"],
+                _rate_cell(entry["false_merge"]),
+                f"{entry['blocks']['false_merge_blocks']}/"
+                f"{entry['blocks']['negative_blocks']}",
+                _rate_cell(entry["recall"]),
+                _usd(entry["cost"]["per_pair_usd"]),
+                entry["projection"]["monthly_usd"],
+                entry["projection"]["monthly_usd_at_75pct_dial"],
+                entry["latency"]["p50_s"],
+                entry["latency"]["p95_s"],
+            ]
+            for entry in rows[:limit]
+        ],
+    )
+    return lines + [""]
 
 
 # --- gold votes ------------------------------------------------------------------------
