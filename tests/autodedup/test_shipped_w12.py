@@ -77,9 +77,13 @@ def test_the_sealed_read_refuses_the_candidate_the_dev_rule_already_refused() ->
     )
 
 
-def test_the_three_w12_rows_are_records_outside_settings_and_do_not_build() -> None:
-    """E87's precedent, applied to E89's refutation: `settings/` holds rows the engine can
-    build, and a refuted arm keeps its record beside it under `settings/refuted/`."""
+def test_the_three_w12_rows_are_records_outside_settings() -> None:
+    """E87's precedent, applied to E89's refutation: `settings/` holds rows a scoring run may
+    be pointed at, and a refuted arm keeps its record beside it under `settings/refuted/`.
+
+    E95 (W13) retires the half of that precedent that made the rows UNBUILDABLE — the honest
+    clock's price is E84, which these rows carry — so what keeps them refuted is M105 and M110,
+    the two measurements, and the `off` default they never reach."""
     for name in ("w12_candidate", "w12_narrow", "w12_wide"):
         assert not (ROOT / f"settings/{name}.json").exists(), f"{name} is not a shipped row"
         record = ROOT / f"settings/refuted/{name}.json"
@@ -89,8 +93,7 @@ def test_the_three_w12_rows_are_records_outside_settings_and_do_not_build() -> N
         assert raw.get("certificate_b_min_images", 0.0) == 0.0, "no E65 floor — the hold paid"
         assert raw.get("family_guard_mode", "off") == "off", "E85 stays off (D30 ii)"
         assert raw.get("catalog_carrier_aware", False) is False, "E83 stays off (D28 ii)"
-        with pytest.raises(ValueError, match="E89"):
-            Settings.from_json(record)
+        assert Settings.from_json(record).development_hold_mode in ("narrow", "wide")
     narrow = json.loads(
         (ROOT / "settings/refuted/w12_candidate.json").read_text(encoding="utf-8")
     )
@@ -143,9 +146,13 @@ def test_the_seal_that_decided_W11_stays_registered_spent() -> None:
     assert reason and "FIXPOINT" in reason and W12_SEAL[:8] in reason
 
 
-def test_the_honest_clock_still_cannot_run_for_free() -> None:
-    with pytest.raises(ValueError, match="needs a price"):
-        Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0)
+def test_the_honest_clock_now_runs_on_the_e84_rail_alone() -> None:
+    """Superseded by E95 (W13). The gate kept asking for a price because no sealed read had
+    measured one; W11's seal had already measured this exact arm, and the single reliable false
+    merge that refused it is a pair the operator ruled a duplicate on 2026-09-20."""
+    Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0)
+    with pytest.raises(ValueError, match="E84 gap rail"):
+        Settings(live_window_from_sighting=True)
 
 
 def test_lifting_the_hold_is_a_settings_change_and_the_lane_is_not_part_of_it() -> None:

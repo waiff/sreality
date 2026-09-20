@@ -272,21 +272,22 @@ def test_a_refusal_never_reaches_k_r() -> None:
 # --- the settings contract ----------------------------------------------------------------
 
 
-def test_the_guard_does_not_pay_for_the_honest_clock(mode: str = "cell") -> None:
-    """E87: the payment `validate` briefly accepted from E85 is taken back.
+def test_the_guard_still_buys_nothing_although_the_gate_no_longer_asks(mode: str = "cell") -> None:
+    """E95 (W13) retires the price gate; M100's verdict on E85 is untouched.
 
     The W11 seal read the guard against the same arm without it and measured NOTHING — 0 sealed
-    labelled duplicates gained, 0 lost, all 27 demotions unlabelled (M100). A gate may only
-    accept a price a sealed read has measured, so the E65 floor is again the only one."""
+    labelled duplicates gained, 0 lost, all 27 demotions unlabelled. That is still why E85 is
+    off. It is no longer why a row carrying it fails to build: under E95 the honest clock pays
+    with E84 alone, so every one of these rows constructs and the guard's refusal is carried by
+    the measurement and by the default, as E83's and E88's are."""
     naked = Settings()
     naked.live_window_from_sighting = True
     naked.certificate_b_min_gap_days = 1.0 / 1440.0
-    with pytest.raises(ValueError, match="E65 image floor"):
-        naked.validate()
+    naked.validate()
     for guard in ("cell", "family", "pair"):
         naked.family_guard_mode = guard
-        with pytest.raises(ValueError, match="E87"):
-            naked.validate()
+        naked.validate()
+    assert Settings().family_guard_mode == "off", "the default is what refuses E85"
     naked.family_guard_mode = "off"
     naked.certificate_b_min_images = 4.0
     naked.validate()
@@ -325,10 +326,11 @@ def test_the_w11_candidate_is_the_shipped_row_plus_the_clock_the_rail_and_the_gu
         "family_guard_ref_code_clause", "family_guard_unit_designator_clause",
         "family_guard_disposition_clause",
     }
-    # E87: and it is no longer CONSTRUCTIBLE — the row records an arm that was measured by
-    # assignment and refuted on the seal, and `validate` now refuses to build it.
-    with pytest.raises(ValueError, match="E65 image floor"):
-        Settings.from_json(ROOT / "settings/refuted/w11_candidate.json")
+    # E95 (W13): the row builds again, because the honest clock's price is E84 and this row
+    # carries it. It stays under `refuted/` on the strength of M100, not of the gate — the
+    # directory records the VERDICT, and `settings/` is what a scoring run may be pointed at.
+    rebuilt = Settings.from_json(ROOT / "settings/refuted/w11_candidate.json")
+    assert rebuilt.family_guard_mode == "cell"
     assert raw["family_guard_mode"] == "cell"
     assert raw.get("certificate_b_min_images", 0.0) == 0.0
     assert raw["family_guard_ref_code_clause"] is False, "E60 forbids it"

@@ -166,22 +166,22 @@ def test_off_is_inert() -> None:
 
 # --- the gates ---------------------------------------------------------------------------
 
-def test_the_hold_is_not_a_price_the_gate_accepts_for_the_honest_clock() -> None:
-    """E89: the widening E88 asked for, taken back on the seal that measured it.
+def test_the_hold_is_still_refuted_although_the_gate_no_longer_refuses_it() -> None:
+    """E95 (W13) retires the price gate E87/E89 policed; E89's VERDICT on the hold stands.
 
-    W12's verification read the W12 seal once and priced the NARROW hold at 145 of 238 sealed
-    reliable duplicates against g6's 177 — a NEGATIVE price — so under E87 the gate may not
-    accept it. The E65 image floor is again the only payment `validate` knows."""
-    with pytest.raises(ValueError, match="needs a price"):
-        Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0)
-    with pytest.raises(ValueError, match="E89"):
-        Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
-                 development_hold_mode="narrow")
-    with pytest.raises(ValueError, match="E89"):
-        Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
-                 development_hold_mode="wide")
-    # The floor still pays, and the hold is still constructible BESIDE it — the rule ships as
-    # data and off, and nothing about E89 makes the mechanism unbuildable.
+    The hold was refused by two measurements, not by `validate`: the pre-stated dev rule named
+    no candidate (212 and 297 against a budget of 55) and the W12 seal read NARROW at 145 of
+    238 against g6's 177. Nothing in W13 re-opens either number. What W13 changes is only that
+    the honest clock's price is E84, so a row carrying the hold now BUILDS — and is still off
+    by default, still refuted, and still refused by the real-time lane."""
+    Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0)
+    for mode in ("narrow", "wide"):
+        built = Settings(live_window_from_sighting=True,
+                         certificate_b_min_gap_days=1.0 / 1440.0,
+                         development_hold_mode=mode)
+        assert built.development_hold_mode == mode
+    assert Settings().development_hold_mode == "off", "and the default is untouched"
+    # The floor still pays for nothing it is not asked to pay for, and still builds beside it.
     Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
              certificate_b_min_images=1.0)
     Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
