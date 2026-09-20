@@ -3822,3 +3822,14 @@ def test_the_progress_strip_counts_only_a_ruling_that_applies(client, conn):
         flat = " ".join(sql.split())
         assert "vv.member_ids = coalesce(mem.ids, '{}'::bigint[])" in flat
         assert "m.generation = %(generation)s::text" in flat
+
+
+def test_a_real_time_generation_is_never_the_default_pass() -> None:
+    """`rt` is rewritten every ten minutes, so recency alone would make it the default and the
+    operator's links into a batch generation would 404 (2026-09-20)."""
+    from autodedup import ui_sql
+
+    for statement in (ui_sql.LATEST_GENERATION_SQL, ui_sql.GENERATION_COUNTS_SQL):
+        order_by = statement.split("ORDER BY", 1)[1]
+        assert "left(c.generation, 2) = 'rt'" in order_by
+        assert order_by.index("'rt'") < order_by.index("last_changed_at")
