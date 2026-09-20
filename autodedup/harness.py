@@ -47,6 +47,7 @@ from autodedup.evaluate import (
     FIT_MAX_ITER,
     FIT_METHODS,
     L2_GRID,
+    components_spanning_split,
     evaluate,
     fit_model,
     pooled_sample,
@@ -907,9 +908,29 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
               + "; the holdout below is re-derived from this run's own merge edges",
               file=sys.stderr)
         expect_seal = None
+    seed = split_seed_from_map(args.split_map, args.seed, out)
+    if seed == args.seed and expect_seal and split_map is not None and not args.split_map:
+        recorded = seals.seed_for(expect_seal)
+        if recorded is not None and args.seed == SAMPLE_SEED:
+            seed = recorded
+            print(f"the committed map records seed {recorded}; using it", file=out)
+    if expect_seal and seals.spent(expect_seal):
+        print(f"note: seal {expect_seal[:12]} is SPENT — {seals.spent(expect_seal)}", file=out)
+    if split_map is not None:
+        # E69: a map is cut from the components that existed when it was sealed, so a CHALLENGER
+        # merging pairs the incumbent banded can put one cluster on both sides of the holdout.
+        held = components_spanning_split(rows, split_map, seed)
+        if not held["contained"]:
+            print(
+                f"warning: {held['n_spanning']} of this run's merge components span the holdout "
+                f"({held['listings_in_spanning']} listings, {held['listings_absent_from_map']} "
+                "of them absent from the map): the seal cannot adjudicate a cluster-grain claim "
+                "about a run it does not contain (E69)",
+                file=sys.stderr,
+            )
     try:
         report = evaluate(rows, labels, sample, settings, by_tier=per_tier,
-                          precedence=args.precedence, seed=args.seed,
+                          precedence=args.precedence, seed=seed,
                           split_map=split_map, expect_seal=expect_seal)
     except ValueError as exc:
         print(f"evaluate failed: {exc}", file=sys.stderr)
@@ -923,6 +944,29 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
         print(line, file=out)
     print(f"\nwrote {json_path} and {markdown_path}", file=out)
     return 0
+
+
+def split_seed_from_map(value: str | None, given: int, out: Any) -> int:
+    """A committed map carries the seed that partitions it, so a holdout is never re-randomised.
+
+    `split_of` hashes `<seed>:<group>`: one map under two seeds is two different holdouts. When
+    the resolved map records a seed and the caller left `--seed` at its default, the FILE wins
+    and says so; an explicit `--seed` that disagrees is an override, and it is printed as one."""
+    if not value:
+        return given
+    try:
+        recorded = seals.read_seed(seals.resolve(value))
+    except (FileNotFoundError, ValueError):
+        return given
+    if recorded is None or recorded == given:
+        return given
+    if given == SAMPLE_SEED:
+        print(f"split map records seed {recorded}; using it rather than the default {given}",
+              file=out)
+        return recorded
+    print(f"warning: --seed {given} overrides the seed {recorded} the split map records; the "
+          "holdout is not the one that map names", file=sys.stderr)
+    return given
 
 
 def parse_l2_grid(raw: str | None) -> tuple[float, ...] | None:
@@ -966,9 +1010,10 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
             return 1
     else:
         groups = split_groups(rows, labels)
+    seed = split_seed_from_map(args.split_map, args.seed, out)
     try:
         model, report = fit_model(
-            rows, labels, sample=sample, seed=args.seed, version=args.version,
+            rows, labels, sample=sample, seed=seed, version=args.version,
             epochs=args.epochs, method=args.method, max_iter=args.max_iter,
             tol=args.tol, l2=args.l2, l2_grid=parse_l2_grid(args.l2_grid),
             calibration=args.calibration,
@@ -985,7 +1030,7 @@ def cmd_fit(args: argparse.Namespace, out: Any) -> int:
     )
     # The split map is written beside the model so a challenger can be scored on THIS seal
     # rather than on whatever components its own merge edges happen to form (§9's feedback loop).
-    seals.write_map(out_dir / SPLIT_MAP_FILE, groups)
+    seals.write_map(out_dir / SPLIT_MAP_FILE, groups, seed=seed)
     fit_seal = str(report.sections.get("split", {}).get("seal", {}).get("sha256") or "")
     json_path, markdown_path = write_report(report, out_dir / FIT_STEM)
     print(f"fit {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)

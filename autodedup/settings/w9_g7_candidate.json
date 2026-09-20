@@ -1,0 +1,24 @@
+{
+ "bridge_apply": true,
+ "bridge_min_score": 0.999,
+ "certificate_b_min_images": 1.0,
+ "certificate_b_min_matched_images": 1.0,
+ "certificate_kr_enabled": true,
+ "context_rule_enabled": true,
+ "live_window_from_sighting": true,
+ "store_floor": 0.02,
+ "t_hi": 1.0,
+ "t_hi_by_stratum": {
+  "K-A|cross": null,
+  "K-A|same": null,
+  "K-B|same": 1.0,
+  "K-C|cross": 1.0,
+  "K-C|same": null,
+  "K-R|cross": 1.0,
+  "K-R|same": 1.0,
+  "model|cross": 0.967765,
+  "model|same": 0.999188
+ },
+ "t_lo": 0.3229366350707349,
+ "unit_designator_veto": true
+}

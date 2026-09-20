@@ -13,6 +13,17 @@ same `{listing_id: group}` object `fit` writes, named by the digest it hashes to
 is checkable, not merely a label). `LOST_SEALS` records the ones that predate this rule, with
 why they are gone; the census test allows a model to name a seal only when it resolves to a
 committed file or is listed there.
+
+A seal is also SPENT once a search has read its test side. W8a ran a 1,476-candidate rule
+search on `37c8771f…`, so g6's sealed column confirms a rule chosen elsewhere and cannot
+adjudicate between rules (D23 ii). `SPENT_SEALS` records that, with what spent it — the file
+stays, because an incumbent must still be re-measurable on the split it was fitted on; what is
+gone is its power to DECIDE. A new choice needs a new seal.
+
+The map alone does not fix the holdout: `evaluate.split_of` hashes `<seed>:<group>`, so two
+seeds over one map are two different partitions under one name. A committed map therefore
+carries the seed it was partitioned with, in the object form `{"seed": n, "groups": {...}}`;
+the bare `{listing_id: group}` form predates that and reads as the legacy `SPLIT_SEED`.
 """
 
 from __future__ import annotations
@@ -38,6 +49,19 @@ LOST_SEALS: dict[str, str] = {
     ),
 }
 
+# A seal whose TEST side a search has already read. The map is still committed — the incumbent
+# it sealed must stay re-measurable — but a number taken on it can only ever confirm a choice
+# made elsewhere, so the next choice needs a fresh seal. Entries are append-only.
+SPENT_SEALS: dict[str, str] = {
+    "37c8771fda6b06db2ead790fcf7728e0ccb0e80c60cad5358c2905ed39be52cc": (
+        "w6_gold's split (4569 listings, 691 groups), sealed 2026-09 with SPLIT_SEED "
+        "20260916. SPENT by W8a's 1,476-candidate rule search, which read the test side while "
+        "choosing E63 (D23 ii, C5); W8's own verification then read it again for the g6 "
+        "columns. Every g6 sealed number CONFIRMS a rule chosen on dev — none adjudicates. "
+        "W9 sealed fb9df2ea… over the same cohort with seed 20260922 to make a choice again."
+    ),
+}
+
 _HEX = set("0123456789abcdef")
 
 
@@ -60,6 +84,11 @@ def known(seal: str) -> bool:
     return committed(seal) or (seal or "").strip().lower() in LOST_SEALS
 
 
+def spent(seal: str) -> str | None:
+    """Why this seal can no longer DECIDE, or None. A spent seal still measures an incumbent."""
+    return SPENT_SEALS.get((seal or "").strip().lower())
+
+
 def load(seal: str) -> dict[int, int]:
     path = path_for(seal)
     if not path.is_file():
@@ -70,18 +99,39 @@ def load(seal: str) -> dict[int, int]:
     return read_map(path)
 
 
+def _raw(path: Path) -> dict[str, object]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _groups_of(raw: dict[str, object]) -> dict[str, object]:
+    """Both shapes: the legacy bare map, and `{"seed": n, "groups": {...}}`."""
+    inner = raw.get("groups") if isinstance(raw.get("groups"), dict) else None
+    return inner if inner is not None else raw  # type: ignore[return-value]
+
+
 def read_map(path: Path) -> dict[int, int]:
-    return {int(key): int(value)
-            for key, value in json.loads(Path(path).read_text(encoding="utf-8")).items()}
+    return {int(key): int(value) for key, value in _groups_of(_raw(Path(path))).items()}
 
 
-def write_map(path: Path, groups: dict[int, int]) -> Path:
+def read_seed(path: Path) -> int | None:
+    """The seed this map was partitioned with, or None for a legacy bare map."""
+    raw = _raw(Path(path))
+    value = raw.get("seed") if isinstance(raw.get("groups"), dict) else None
+    return None if value is None else int(value)  # type: ignore[arg-type]
+
+
+def seed_for(seal: str) -> int | None:
+    path = path_for(seal)
+    return read_seed(path) if path.is_file() else None
+
+
+def write_map(path: Path, groups: dict[int, int], seed: int | None = None) -> Path:
+    """The map, and the seed that partitions it — a map without one names no holdout."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({str(key): groups[key] for key in sorted(groups)}, sort_keys=True),
-        encoding="utf-8",
-    )
+    body: dict[str, object] = {str(key): groups[key] for key in sorted(groups)}
+    payload: dict[str, object] = body if seed is None else {"seed": int(seed), "groups": body}
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     return path
 
 

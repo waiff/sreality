@@ -86,6 +86,15 @@ CUT_RESOLUTION: float = 1e-4
 # No stratum earns a cut of its own off a handful of rows: under this many judged merges the
 # search is describing noise, and a published cut invites someone to run it.
 MIN_STRATUM_N: int = 30
+# E68: how far a published cut must sit above the nearest labelled MUST-NOT-LINK below it. A
+# search that stops as soon as the merge set is clean lands, BY CONSTRUCTION, one grid rung above
+# the top labelled negative — a rank again rather than a probability, and the shape this program
+# has now refused three times: D16 (iv) at 3e-5, D18/M43 (ii) at 7e-5, and W9's two dev-chosen
+# cuts at 1.4e-5 (`model|same`, two stored pairs above an operator `same_project_different_unit`)
+# and 1.0e-4 (`model|cross`, one stored pair above a gold `same_building_different_unit`), which
+# between them bought five sealed false merges. Ten rungs of `CUT_RESOLUTION` is the smallest gap
+# a refit's own score drift cannot close in silence.
+CUT_MARGIN: float = 1e-3
 
 # A stratum weight is a population ratio and the real draw runs to ~500x on the thinnest cell.
 # Capping at a constant would re-order the design (a 4,000-pair stratum and an 80-pair one would
@@ -886,6 +895,22 @@ def expressible_cuts(
     return sorted(out, reverse=True)
 
 
+def nearest_negative_below(
+    cut: float, rows: Sequence[ScoredRow]
+) -> tuple[float, float] | None:
+    """The top-scoring labelled NEGATIVE the cut leaves below it, and how far below (E68).
+
+    Only the score-governed rows count: a certificate merges at every cut, so a certificate
+    negative is not a statement about where the cut sits. `None` means the cell holds no labelled
+    negative under the cut at all — the margin is then unmeasured, not infinite, and the caller
+    says which of the two it is."""
+    below = [row.score for row in rows if row.score_governed and row.y == 0 and row.score < cut]
+    if not below:
+        return None
+    top = max(below)
+    return top, cut - top
+
+
 def _t_hi_search(
     rows: Sequence[ScoredRow],
     precision_lb: float,
@@ -893,6 +918,7 @@ def _t_hi_search(
     *,
     zone_rule: bool = True,
     resolution: float | None = CUT_RESOLUTION,
+    min_margin: float = 0.0,
 ) -> tuple[float | None, int, int]:
     """Smallest EXPRESSIBLE cut whose SIMULATED merge set clears both gates; (t, k, n) there.
 
@@ -900,7 +926,13 @@ def _t_hi_search(
     or single-family pairs sit outside it at every cut, so the cut only ever moves the
     score-governed pairs in and out. Precision is not monotone in t, so every candidate cut is
     tried and the smallest winner kept — over the grid `expressible_cuts` returns, never over the
-    raw scores, which is how a threshold ends up fitted to individual holdout pairs."""
+    raw scores, which is how a threshold ends up fitted to individual holdout pairs.
+
+    `min_margin` (E68) is the third gate: a cut that clears both rates by stopping one rung above
+    the top labelled must-not-link is fitted to that one pair, and the search will do exactly that
+    unless it is told not to. It binds only on a cut that admits score-governed rows — a cut of
+    1.0 over a cell whose merges are all certificates decides nothing by score, so there is
+    nothing for a negative to sit under."""
     if zone_rule:
         fixed = [row for row in rows if row.merged_regardless]
         movable = [row for row in rows if row.score_governed]
@@ -919,8 +951,13 @@ def _t_hi_search(
             k += ordered[index].y
             n += 1
             index += 1
-        if _gates(k, n, precision_lb, precision_point):
-            best = (cut, k, n)
+        if not _gates(k, n, precision_lb, precision_point):
+            continue
+        if min_margin > 0.0 and index:
+            gap = nearest_negative_below(cut, movable)
+            if gap is not None and gap[1] < min_margin:
+                continue
+        best = (cut, k, n)
     return best
 
 
@@ -1273,6 +1310,7 @@ def stratum_thresholds(
     fitted_on: str = "train+validation",
     allow_overrides: bool = True,
     resolution: float | None = CUT_RESOLUTION,
+    min_margin: float = CUT_MARGIN,
 ) -> dict[str, Any]:
     """A T_hi per deciding stratum, CHOSEN on dev and MEASURED on the sealed split (D3/E22-E25).
 
@@ -1286,6 +1324,12 @@ def stratum_thresholds(
     `min_n` is the floor under BOTH cuts: a cell whose merge set is thinner than that gets no
     threshold of its own at all. The 0.99 gate enforces it by accident (it needs ~381 merges); the
     relaxed cut, searched with no lower bound, would otherwise publish a cut read off two rows.
+
+    `min_margin` is E68: the two rate gates above say the merge set is clean, and a search
+    satisfying them alone stops one grid rung above the top labelled must-not-link — so the cut
+    is read off that one pair and a refit's own drift walks it back over. The cell reports what
+    the margin cost (`t_hi_without_margin`) and which pair it is measured against, because a cut
+    withheld on margin is a labelling question, not a modelling one.
 
     `allow_overrides=False` refuses every threshold whatever the arithmetic says — the honest
     answer when `dev_rows` are not held out from `sealed_rows`."""
@@ -1302,10 +1346,15 @@ def stratum_thresholds(
     for cell in sorted(set(by_cell) | set(sealed_by_cell)):
         members = by_cell.get(cell, [])
         t_hi, k_hi, n_hi = _t_hi_search(
+            members, precision_lb, precision_point, zone_rule=zone_rule, resolution=resolution,
+            min_margin=min_margin,
+        )
+        unguarded_t, _, _ = _t_hi_search(
             members, precision_lb, precision_point, zone_rule=zone_rule, resolution=resolution
         )
         relaxed_t, relaxed_k, relaxed_n = _t_hi_search(
-            members, 0.0, precision_point, zone_rule=zone_rule, resolution=resolution
+            members, 0.0, precision_point, zone_rule=zone_rule, resolution=resolution,
+            min_margin=min_margin,
         )
         sealed = sealed_by_cell.get(cell, [])
         at = t_hi if t_hi is not None else relaxed_t
@@ -1323,8 +1372,14 @@ def stratum_thresholds(
         # A cell whose relaxed merge set is under `min_n` has not measured anything: its cut is
         # published as a diagnostic, never as a candidate to ship.
         relaxed_thin = relaxed_t is not None and relaxed_n < min_n
+        # The margin gate is the only one that can withhold a cut BOTH rate gates cleared, so
+        # whether it is what bound is recorded before `min_n` gets its say.
+        margin_withheld = t_hi is None and unguarded_t is not None and min_margin > 0.0
         if t_hi is not None and n_hi < min_n:
             t_hi = None
+        margin_gap = (
+            nearest_negative_below(t_hi, members) if t_hi is not None else None
+        )
         reason: str | None = None
         if t_hi is None:
             # "sample" and "precision" demand opposite work — more labels, or a better rule — so
@@ -1335,6 +1390,11 @@ def stratum_thresholds(
                 "precision" if floor_fails
                 else ("sample" if (relaxed_t is not None or floor_n < needed) else "precision")
             )
+            # A cut the rates would have published and the margin withheld is neither of those
+            # two: the rule is good enough and the sample is deep enough, and what is missing is
+            # daylight between the cut and one labelled must-not-link.
+            if margin_withheld:
+                reason = "margin"
         if not allow_overrides:
             t_hi = None
             reason = "no dev split"
@@ -1346,6 +1406,11 @@ def stratum_thresholds(
             "n_at_t_hi": n_hi,
             "precision_at_t_hi": (k_hi / n_hi) if n_hi else None,
             "wilson_lb_at_t_hi": wilson_lower(k_hi, n_hi) if n_hi else None,
+            "min_margin": min_margin,
+            "t_hi_without_margin": unguarded_t,
+            "margin_withheld": margin_withheld,
+            "margin_at_t_hi": None if margin_gap is None else margin_gap[1],
+            "nearest_negative_below_t_hi": None if margin_gap is None else margin_gap[0],
             "relaxed_t_hi": relaxed_t,
             "relaxed_insufficient_n": relaxed_thin,
             "min_n": min_n,
@@ -1387,7 +1452,7 @@ def stratum_thresholds(
     return {
         "criteria": {
             "precision_lb": precision_lb, "precision_point": precision_point,
-            "stratum_floor": stratum_floor, "min_n": min_n,
+            "stratum_floor": stratum_floor, "min_n": min_n, "min_margin": min_margin,
             # Named rather than left implicit: the gate counts JUDGED PAIRS (Wilson on k/n) while
             # the target it is compared against is a cohort rate. `sealed_weighted_precision` and
             # `sealed_design` beside it are what say whether the two agree on this cell.
@@ -1954,6 +2019,47 @@ def split_seal(groups: Mapping[int, int]) -> dict[str, Any]:
         digest.update(f"{item}:{groups[item]}\n".encode("utf-8"))
     return {"sha256": digest.hexdigest(), "n_listings": len(groups),
             "n_groups": len(set(groups.values()))}
+
+
+def components_spanning_split(
+    run_pairs: Sequence[Mapping[str, Any]],
+    groups: Mapping[int, int],
+    seed: int = SPLIT_SEED,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Whether a seal can ADJUDICATE this run: do its own merge components stay inside one split?
+
+    E69. A seal is built from the components of the runs that existed when it was cut, so a
+    CHALLENGER that merges pairs the incumbent banded produces components the map never saw. Each
+    listing the map is missing falls back to its own id (`group_of`), which hashes into a split of
+    its own — so one of the challenger's clusters can have members on both sides of the holdout,
+    and a cluster-grain claim about it is then measured partly on rows the fit had seen. Measured
+    on W9: g6 and honest_nofix, the two runs the fresh seal was unioned from, span nothing; the g7
+    candidate spans 75 components over 231 listings, off 151 listings the map does not contain.
+
+    This is a report, not a veto: the answer for a challenger that spans is either a seal cut from
+    BLOCKING alone (every pair the engine could ever score, whatever it decides) or one unioned
+    with the challenger's own edges before the challenger is measured."""
+    components: dict[int, list[int]] = {}
+    for listing, root in merge_groups(run_pairs).items():
+        components.setdefault(int(root), []).append(int(listing))
+    spanning: list[list[int]] = []
+    listings, absent = 0, 0
+    for members in components.values():
+        if len(members) < 2:
+            continue
+        absent += sum(1 for item in members if item not in groups)
+        if len({split_of(groups.get(item, item), seed) for item in members}) > 1:
+            spanning.append(sorted(members))
+            listings += len(members)
+    return {
+        "n_components": sum(1 for members in components.values() if len(members) > 1),
+        "n_spanning": len(spanning),
+        "listings_in_spanning": listings,
+        "listings_absent_from_map": absent,
+        "contained": not spanning,
+        "sample": sorted(spanning, key=len, reverse=True)[:limit],
+    }
 
 
 @dataclass(slots=True)
