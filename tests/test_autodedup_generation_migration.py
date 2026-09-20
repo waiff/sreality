@@ -120,7 +120,8 @@ def test_the_g4_rulings_are_backfilled_from_the_evidence_one_row_at_a_time() -> 
     updates = re.findall(
         r"update autodedup\.verdicts set generation = 'g4', member_ids = "
         r"array\[([0-9,]+)\]::bigint\[\] where kind = 'cluster' and cluster_key = (\d+) "
-        r"and member_ids is null;",
+        r"and member_ids is null"
+        r" and decided_at < timestamptz '2026-09-19 00:00\+00';",
         _sql(),
     )
     # The operator's 224 cluster-grain confirmations taken on g4 groups.
@@ -149,3 +150,43 @@ def test_the_header_says_what_happens_to_the_surviving_g4_rows() -> None:
     header = _sql().split("set lock_timeout")[0].lower()
     assert "34 surviving g4 rows" in header
     assert "re-running the score lane" in header
+
+
+def test_the_backfill_cannot_claim_a_ruling_taken_after_the_evidence() -> None:
+    """The NULL guard alone is not idempotency here. The apply lands BEFORE the PR merges, so
+    for a few minutes the old api still writes cluster rulings with `generation` and
+    `member_ids` both NULL — rows a re-run (a lock-timeout retry, a replay) could not tell from
+    September's. Every cluster ruling in the store was decided by 2026-09-18 14:17 UTC, so the
+    backfill is bounded there as well as on NULL.
+    """
+    sql = _sql()
+    bound = "decided_at < timestamptz '2026-09-19 00:00+00'"
+    literals = [
+        line for line in sql.splitlines()
+        if line.startswith("update autodedup.verdicts set generation = 'g4'")
+    ]
+    assert len(literals) == 224
+    for line in literals:
+        assert bound in line, line
+    # The era rule that stamps every OTHER cluster ruling is bounded by the same clock.
+    era = sql.split("with era as (")[1].split("update autodedup.verdicts v")[0]
+    assert bound.replace("decided_at", "v.decided_at") in era
+
+
+def test_a_cluster_ruling_is_unique_PER_PASS_and_never_overwrites_another() -> None:
+    """E58's write half. `autodedup_verdicts_cluster_uidx` was unique on
+    (kind, cluster_key, decided_by), so ruling a g5 group UPDATEd the row holding the g4
+    ruling — the same defect this file removes from `clusters`, on the one table with no
+    history behind it. `coalesce`, because NULL never equals NULL in a unique index.
+    """
+    sql = _sql()
+    created = sql.index(
+        "create unique index if not exists autodedup_verdicts_cluster_gen_uidx"
+    )
+    dropped = sql.index("drop index if exists autodedup.autodedup_verdicts_cluster_uidx;")
+    assert created < dropped, "the replacement must exist before the old one goes"
+    stanza = sql[created:dropped]
+    assert "(kind, cluster_key, (coalesce(generation, ''::text)), decided_by)" in stanza
+    assert "where kind = 'cluster'" in stanza
+    # A pair ruling is about two adverts and no pass owns it: its uniqueness is untouched.
+    assert "autodedup_verdicts_pair_uidx" not in sql

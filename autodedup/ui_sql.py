@@ -81,9 +81,13 @@ CLUSTER_COLUMNS: tuple[str, ...] = (
 # repair: promoting g5 re-stamped 836 of g4's keys, and 21 of the operator's 224 confirmations
 # landed on a group whose membership had moved under them — 11 grown by a bridge, 10 absorbed.
 #
-# The LATEST verdict is the one tested, not the newest APPLYING one: the operator's most recent
-# ruling is their current belief, and a card that quietly fell back to an older confirmation
-# would hide exactly the ruling the hint exists to show.
+# THE RULING THAT APPLIES WINS, and only when none does is the latest carried as a hint. The
+# order is `applies` first, `decided_at` second — one spelling, shared with
+# `_CLUSTER_VERDICT_LATERAL` behind the progress strip, which selects the applying ruling and
+# nothing else. Newest-first alone would diverge from it the moment a key holds a ruling per
+# pass (which is exactly what migration 538's generation-scoped verdict key now allows): the
+# queue would read a g5 ruling while browsing g4, call the group unreviewed, and the strip
+# would count the same group as done off the g4 ruling it still holds.
 #
 # LEGACY ROWS (no `member_ids`: taken before migration 538) keep the pre-538 behaviour — they
 # apply to their own generation, and to any generation when they carry none. There is no
@@ -105,7 +109,7 @@ LEFT JOIN LATERAL (
                AND (vv.generation IS NULL OR vv.generation = c.generation)) AS applies
       FROM autodedup.verdicts vv
      WHERE vv.kind = 'cluster' AND vv.cluster_key = c.cluster_key
-     ORDER BY vv.decided_at DESC, vv.id DESC
+     ORDER BY applies DESC, vv.decided_at DESC, vv.id DESC
      LIMIT 1
 ) v ON true
 """
@@ -229,11 +233,18 @@ LIMIT %(limit)s::int
 # only, because paging does not change it and counting again per page is pure cost.
 GROUPS_COUNT_SQL = "SELECT count(*)" + _CLUSTER_FROM + _CLUSTER_WHERE
 
+# ONE ROW, DETERMINISTICALLY. `(generation, cluster_key)` is the primary key since migration
+# 538, so a key alone can match a group per pass and an unqualified caller (the route allows
+# `generation` to be absent) would get whichever row the plan handed back first — the dialog's
+# members, pairs and stale-verdict hint all derive from it. Newest-changed first, generation as
+# the tie-break, one row.
 GROUP_ONE_SQL = (
     _CLUSTER_SELECT
     + """
 WHERE c.cluster_key = %(cluster_key)s::bigint
   AND (%(generation)s::text IS NULL OR c.generation = %(generation)s::text)
+ORDER BY c.last_changed_at DESC, c.generation DESC
+LIMIT 1
 """
 )
 
@@ -1241,20 +1252,29 @@ RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, 
 """
 
 # STAMPED WITH THE SET IT IS ABOUT (E58, migration 538). `generation` and `member_ids` are not
-# optional extras on this write: the ruling is a statement about those adverts, and a re-ruling
-# REPLACES both — the operator looked at today's group, not at the one they saw in September.
-# The route resolves `member_ids` from the store for that (generation, cluster_key) at write
-# time and never from the request body.
+# optional extras on this write: the ruling is a statement about those adverts. The route
+# resolves `member_ids` from the store for that (generation, cluster_key) at write time and
+# never from the request body.
+#
+# THE CONFLICT TARGET CARRIES THE GENERATION, which is the write half of E58. The pre-538 index
+# was unique on (kind, cluster_key, decided_by), so ruling the g5 group 38324 UPDATEd the row
+# that held the operator's g4 ruling — the same "one key, one row, last pass wins" defect this
+# migration removes from `clusters`, and on the one table that has no history to fall back on.
+# A re-ruling now replaces only a ruling of the SAME pass, so `generation` is never reassigned;
+# `member_ids` still is, because a re-run of that pass can legitimately have moved the group
+# under the key. `coalesce(generation, '')` matches the partial index expression exactly —
+# inference is by expression, and a mismatch is a 42P10 at runtime, not at import.
 VERDICT_CLUSTER_UPSERT_SQL = """
 INSERT INTO autodedup.verdicts (kind, cluster_key, verdict, note, reasons, decided_by,
                                 generation, member_ids)
 VALUES ('cluster', %(cluster_key)s::bigint, %(verdict)s::text, %(note)s::text,
         %(reasons)s::text[], %(decided_by)s::text, %(generation)s::text,
         %(member_ids)s::bigint[])
-ON CONFLICT (kind, cluster_key, decided_by) WHERE kind = 'cluster'
+ON CONFLICT (kind, cluster_key, (coalesce(generation, ''::text)), decided_by)
+  WHERE kind = 'cluster'
 DO UPDATE SET verdict = excluded.verdict, note = excluded.note,
-              reasons = excluded.reasons, generation = excluded.generation,
-              member_ids = excluded.member_ids, decided_at = now()
+              reasons = excluded.reasons, member_ids = excluded.member_ids,
+              decided_at = now()
 RETURNING id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
           decided_by, decided_at, generation, member_ids
 """
@@ -1463,7 +1483,13 @@ AGREEMENT_COLUMNS: tuple[str, ...] = (
 # longer moves when a later pass re-clusters — which is exactly what happened when g5 re-stamped
 # 836 of g4's keys and 21 confirmations silently changed what they asserted. The fallback for a
 # LEGACY row that carries no set is the members of ITS OWN generation, which is the pre-538
-# read and the most that can honestly be said about it.
+# read and the most that can honestly be said about it — and it answers ONLY when the key names
+# one set. A legacy row carries no generation either, and `(generation, cluster_key)` lets the
+# same key live in several passes, so an unguarded `array_agg` would hand back the UNION of
+# every pass that ever held it: six ids where four were ruled on, and up to 45 "the operator
+# said same" pairs invented for the D6 gate out of the 6 they actually asserted. The
+# `count(DISTINCT m.generation) = 1` guard returns NULL instead, and a row with no set implies
+# nothing.
 #
 # THE EXPANSION IS BOUNDED. A cluster of n members implies n(n-1)/2 pairs, so a runaway group
 # would dominate the number it is measured with. `max_cluster_size` caps which clusters expand
@@ -1489,7 +1515,8 @@ confirmed AS (
            v.cluster_key, v.verdict, coalesce(v.member_ids, fb.ids) AS member_ids
       FROM autodedup.verdicts v
       LEFT JOIN LATERAL (
-          SELECT array_agg(m.listing_id ORDER BY m.listing_id) AS ids
+          SELECT CASE WHEN count(DISTINCT m.generation) = 1
+                      THEN array_agg(m.listing_id ORDER BY m.listing_id) END AS ids
             FROM autodedup.cluster_members m
            WHERE m.cluster_key = v.cluster_key
              AND (v.generation IS NULL OR m.generation = v.generation)
@@ -1543,7 +1570,8 @@ AGREEMENT_OVERSIZE_SQL = """
 SELECT count(*)
 FROM autodedup.verdicts v
 LEFT JOIN LATERAL (
-    SELECT array_agg(m.listing_id ORDER BY m.listing_id) AS ids
+    SELECT CASE WHEN count(DISTINCT m.generation) = 1
+                THEN array_agg(m.listing_id ORDER BY m.listing_id) END AS ids
       FROM autodedup.cluster_members m
      WHERE m.cluster_key = v.cluster_key
        AND (v.generation IS NULL OR m.generation = v.generation)

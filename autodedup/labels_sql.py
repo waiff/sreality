@@ -49,22 +49,32 @@ select distinct on (v.listing_lo, v.listing_hi)
 # `mode=labels generation=g4` unable to reproduce itself at all. `member_ids` is what the
 # operator was looking at; the join to `cluster_members` survives only as the fallback for a
 # LEGACY row that carries none, and that fallback is scoped to the asked-for generation.
+#
+# "DOES THIS RULING APPLY HERE?" IS ANSWERED ON THE SET, exactly as the Groups page and the
+# progress strip answer it (`ui_sql._CLUSTER_FROM`). The generation STRING alone is not that
+# answer: after 538 all 224 backfilled rulings read `g4`, so a string test would have exported
+# ZERO implied labels for g5 — while the UI shows 203 of those rulings applying to g5 groups
+# whose membership never moved, and the agreement read counts them. One fact, three readers,
+# one test. The string arm stays as a union, not as the test: it is what keeps a pass's own
+# rulings exportable when that pass's clusters are not in the store (g4's, until the score lane
+# re-persists them), which is the whole point of recording the set.
 CLUSTER_VERDICTS_SQL = """
 select distinct on (v.cluster_key)
        v.cluster_key, v.verdict, v.note, v.reasons, v.decided_by, v.decided_at,
-       v.generation, coalesce(v.member_ids, fb.ids) as member_ids,
-       coalesce(array_length(coalesce(v.member_ids, fb.ids), 1), 0) as size
+       v.generation, coalesce(v.member_ids, mem.ids) as member_ids,
+       coalesce(array_length(coalesce(v.member_ids, mem.ids), 1), 0) as size
   from autodedup.verdicts v
   left join lateral (
       select array_agg(m.listing_id order by m.listing_id) as ids
         from autodedup.cluster_members m
        where m.generation = %(generation)s::text
          and m.cluster_key = v.cluster_key
-  ) fb on v.member_ids is null
+  ) mem on true
  where v.kind = 'cluster'
    and v.cluster_key is not null
    and (v.generation = %(generation)s::text
-        or (v.generation is null and fb.ids is not null))
+        or (v.member_ids is not null and v.member_ids = mem.ids)
+        or (v.generation is null and mem.ids is not null))
  order by v.cluster_key, v.decided_at desc, v.id desc
 """
 

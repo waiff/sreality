@@ -530,6 +530,19 @@ def test_a_legacy_ruling_falls_back_to_its_own_generations_members() -> None:
     """A row taken before migration 538 carries no set; the statement resolves it to the
     members of the generation being exported, which is the most that can honestly be said."""
     flat = " ".join(CLUSTER_VERDICTS_SQL.split())
-    assert "coalesce(v.member_ids, fb.ids) as member_ids" in flat
+    assert "coalesce(v.member_ids, mem.ids) as member_ids" in flat
     assert "m.generation = %(generation)s::text" in flat
-    assert "v.generation = %(generation)s::text or (v.generation is null" in flat
+    assert "or (v.generation is null and mem.ids is not null)" in flat
+
+
+def test_a_ruling_applies_to_a_generation_whose_group_it_names() -> None:
+    """The labels lane answers "does this ruling apply here?" the way the Groups page does —
+    on the SET (E58). After migration 538 every backfilled ruling reads `generation = 'g4'`,
+    so a generation-STRING test alone would export zero implied labels for g5 while the UI
+    shows 203 of those same rulings applying to g5 groups that never moved.
+    """
+    flat = " ".join(CLUSTER_VERDICTS_SQL.split())
+    assert "or (v.member_ids is not null and v.member_ids = mem.ids)" in flat
+    # The string arm survives as a UNION, not as the test: it is what keeps a pass's own
+    # rulings exportable while that pass's clusters are missing from the store.
+    assert "v.generation = %(generation)s::text or (v.member_ids is not null" in flat
