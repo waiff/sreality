@@ -1,0 +1,798 @@
+{
+  "calibration": [
+    [
+      6.144174602214718e-06,
+      4.071929963020215e-06
+    ],
+    [
+      7.889262586245034e-06,
+      5.302437429273792e-06
+    ],
+    [
+      1.0129990980873921e-05,
+      6.904792688424529e-06
+    ],
+    [
+      1.3007128466476033e-05,
+      8.99136286287545e-06
+    ],
+    [
+      1.670142184809518e-05,
+      1.1708469580995792e-05
+    ],
+    [
+      2.144494842091395e-05,
+      1.5246648306583211e-05
+    ],
+    [
+      2.753569111458347e-05,
+      1.9854006915857494e-05
+    ],
+    [
+      3.535625074174431e-05,
+      2.5853619357252085e-05
+    ],
+    [
+      4.5397868702434395e-05,
+      3.36661725188639e-05
+    ],
+    [
+      5.829126566113865e-05,
+      4.383945166650715e-05
+    ],
+    [
+      7.484622751061124e-05,
+      5.708672742405242e-05
+    ],
+    [
+      9.610241549947395e-05,
+      7.433672817878868e-05
+    ],
+    [
+      0.00012339457598623172,
+      9.679868859836194e-05
+    ],
+    [
+      0.00015843621910252594,
+      0.00012604701260703042
+    ],
+    [
+      0.0002034269780552065,
+      0.000164131448421426
+    ],
+    [
+      0.0002611903190957194,
+      0.00021372043477556788
+    ],
+    [
+      0.00033535013046647816,
+      0.00027828755695335236
+    ],
+    [
+      0.00043055708132461493,
+      0.0003623539952606375
+    ],
+    [
+      0.0005527786369235996,
+      0.00047180364108239157
+    ],
+    [
+      0.0007096703991005882,
+      0.000614292424632725
+    ],
+    [
+      0.0009110511944006454,
+      0.0007997796211626123
+    ],
+    [
+      0.0011695102650555148,
+      0.0010412168068079553
+    ],
+    [
+      0.0015011822567369915,
+      0.0013554400933137008
+    ],
+    [
+      0.0019267346633274755,
+      0.0017643236742180834
+    ],
+    [
+      0.0024726231566347748,
+      0.0022962679194353146
+    ],
+    [
+      0.0031726828424851893,
+      0.0029881134679931426
+    ],
+    [
+      0.004070137715896127,
+      0.003887593839336827
+    ],
+    [
+      0.005220125693558397,
+      0.0050564621304514485
+    ],
+    [
+      0.006692850924284856,
+      0.006574450139118152
+    ],
+    [
+      0.008577485413711986,
+      0.008544236084528712
+    ],
+    [
+      0.01098694263059318,
+      0.011097601234739648
+    ],
+    [
+      0.014063627043245474,
+      0.014402930853180876
+    ],
+    [
+      0.017986209962091555,
+      0.0186741354742921
+    ],
+    [
+      0.02297736991002561,
+      0.024180894578022364
+    ],
+    [
+      0.029312230751356316,
+      0.031259797285752254
+    ],
+    [
+      0.037326887344129464,
+      0.040325394443737284
+    ],
+    [
+      0.04742587317756679,
+      0.051879292006288304
+    ],
+    [
+      0.06008665017400762,
+      0.06651413419435567
+    ],
+    [
+      0.07585818002124356,
+      0.08490766551336465
+    ],
+    [
+      0.0953494648991095,
+      0.10780027201626766
+    ],
+    [
+      0.11920292202211755,
+      0.13594816618190483
+    ],
+    [
+      0.1480471980316895,
+      0.17004500776091377
+    ],
+    [
+      0.18242552380635632,
+      0.21060914413000167
+    ],
+    [
+      0.22270013882530884,
+      0.25784359999091905
+    ],
+    [
+      0.2689414213699951,
+      0.31149140742377734
+    ],
+    [
+      0.32082130082460697,
+      0.37072558987449766
+    ],
+    [
+      0.37754066879814546,
+      0.4341216015934261
+    ],
+    [
+      0.4378234991142019,
+      0.4997490574615784
+    ],
+    [
+      0.5,
+      0.5653851608729726
+    ],
+    [
+      0.5621765008857981,
+      0.6288059533499609
+    ],
+    [
+      0.6224593312018546,
+      0.6880778835384092
+    ],
+    [
+      0.679178699175393,
+      0.7417720497871803
+    ],
+    [
+      0.7310585786300049,
+      0.7890569024759914
+    ],
+    [
+      0.7772998611746911,
+      0.829671480945667
+    ],
+    [
+      0.8175744761936437,
+      0.8638158431477456
+    ],
+    [
+      0.8519528019683106,
+      0.8920064919179062
+    ],
+    [
+      0.8807970779778823,
+      0.9149362218578553
+    ],
+    [
+      0.9046505351008906,
+      0.9333611090827256
+    ],
+    [
+      0.9241418199787566,
+      0.9480218725507283
+    ],
+    [
+      0.9399133498259924,
+      0.9595968434975263
+    ],
+    [
+      0.9525741268224334,
+      0.9686793518830401
+    ],
+    [
+      0.9626731126558706,
+      0.9757716898610702
+    ],
+    [
+      0.9706877692486436,
+      0.9812890399485741
+    ],
+    [
+      0.9770226300899744,
+      0.9855685433342507
+    ],
+    [
+      0.9820137900379085,
+      0.9888803454860665
+    ],
+    [
+      0.9859363729567544,
+      0.9914387407845221
+    ],
+    [
+      0.9890130573694068,
+      0.9934124251622869
+    ],
+    [
+      0.991422514586288,
+      0.9949334281037068
+    ],
+    [
+      0.9933071490757153,
+      0.9961046242515094
+    ],
+    [
+      0.9947798743064417,
+      0.9970058997267921
+    ],
+    [
+      0.995929862284104,
+      0.9976991282167732
+    ],
+    [
+      0.9968273171575148,
+      0.9982321370848813
+    ],
+    [
+      0.9975273768433653,
+      0.9986418397720506
+    ],
+    [
+      0.9980732653366725,
+      0.9989566929917371
+    ],
+    [
+      0.998498817743263,
+      0.9991986144641426
+    ],
+    [
+      0.9988304897349445,
+      0.9993844738796052
+    ],
+    [
+      0.9990889488055994,
+      0.9995272486908621
+    ],
+    [
+      0.9992903296008995,
+      0.9996369180981413
+    ],
+    [
+      0.9994472213630764,
+      0.9997211533642975
+    ],
+    [
+      0.9995694429186754,
+      0.9997858501738166
+    ],
+    [
+      0.9996646498695336,
+      0.9998355387743327
+    ],
+    [
+      0.9997388096809043,
+      0.9998736997207364
+    ],
+    [
+      0.9997965730219448,
+      0.999903006807793
+    ],
+    [
+      0.9998415637808975,
+      0.9999255138990606
+    ],
+    [
+      0.9998766054240137,
+      0.999942798560109
+    ],
+    [
+      0.9999038975845005,
+      0.9999560724543294
+    ],
+    [
+      0.9999251537724895,
+      0.999966266175673
+    ],
+    [
+      0.9999417087343389,
+      0.9999740944276685
+    ],
+    [
+      0.9999546021312976,
+      0.9999801060961205
+    ],
+    [
+      0.9999646437492582,
+      0.9999847227131538
+    ],
+    [
+      0.9999724643088853,
+      0.9999882680018587
+    ],
+    [
+      0.9999785550515792,
+      0.9999909905686444
+    ],
+    [
+      0.999983298578152,
+      0.9999930813318335
+    ],
+    [
+      0.9999869928715335,
+      0.9999946869070774
+    ],
+    [
+      0.9999898700090192,
+      0.9999959198872952
+    ],
+    [
+      0.9999921107374138,
+      0.99999686673748
+    ],
+    [
+      0.9999938558253978,
+      0.9999975938576767
+    ]
+  ],
+  "calibration_kind": "platt",
+  "feature_order": [
+    "area_rel_diff",
+    "area_exact",
+    "dispo_equal",
+    "floor_diff",
+    "total_floors_equal",
+    "attr_agreements",
+    "attr_contradictions",
+    "attr_agreements_rare",
+    "price_last_ratio",
+    "ppm2_rel_diff",
+    "price_path_event_match",
+    "jaccard_shingle",
+    "containment_max",
+    "tfidf_cos",
+    "simhash_hamming",
+    "len_ratio",
+    "rare_token_overlap",
+    "numeric_fact_overlap",
+    "numeral_conflict",
+    "same_broker_key",
+    "same_broker_identity",
+    "broker_known_both",
+    "same_ruian_adm_kod",
+    "same_street_key",
+    "same_house_number",
+    "same_psc",
+    "dist_norm",
+    "same_exact_pin",
+    "pin_pop",
+    "phash_tight_matches",
+    "phash_loose_matches",
+    "phash_match_ratio",
+    "clip_max_cos",
+    "clip_mean_top3_cos",
+    "seq_monotone_ratio",
+    "interior_match_ratio",
+    "exterior_match_ratio",
+    "plan_match_ratio",
+    "catalog_ratio_max",
+    "n_images_min",
+    "gap_days",
+    "overlap_days",
+    "both_active",
+    "same_source",
+    "unit_number_shared",
+    "plot_area_rel_diff",
+    "plot_area_exact",
+    "tag_rooms_both",
+    "tag_rooms_private",
+    "tag_tight_matches",
+    "tag_dhash_min",
+    "tag_clip_mean",
+    "tag_clip_min",
+    "tag_room_clip_min",
+    "tag_room_clip_min2",
+    "tag_lookalike_share",
+    "floorplan_tight_match",
+    "floorplan_conflict",
+    "floor_stated_conflict",
+    "ref_code_shared"
+  ],
+  "fit_report": {
+    "converged": 1.0,
+    "duplicate_terms": 22.0,
+    "gradient_fallbacks": 0.0,
+    "iterations": 14.0,
+    "log_loss": 0.15290576792260288,
+    "max_abs_delta": 1.5100323617710834e-15,
+    "pinned_terms": 0.0,
+    "terms": 129.0,
+    "terms_dropped": 8.0,
+    "terms_identified": 121.0
+  },
+  "format": 1,
+  "interactions": [
+    [
+      "interior_match_ratio",
+      "catalog_ratio_max",
+      -0.9793103803579545
+    ],
+    [
+      "catalog_ratio_max",
+      "phash_match_ratio",
+      0.30984511371013107
+    ],
+    [
+      "rare_token_overlap",
+      "same_source",
+      -0.23846199229133747
+    ],
+    [
+      "dist_norm",
+      "pin_pop",
+      0.14056044964173325
+    ],
+    [
+      "area_exact",
+      "dispo_equal",
+      0.09885075466498863
+    ],
+    [
+      "same_broker_key",
+      "containment_max",
+      0.6371342631314972
+    ],
+    [
+      "price_path_event_match",
+      "same_broker_key",
+      -0.014872024063595009
+    ],
+    [
+      "overlap_days",
+      "same_source",
+      -0.5453207817841706
+    ]
+  ],
+  "intercept": 7.9494830484684,
+  "kind": "autodedup.logistic",
+  "means": {
+    "area_exact": 0.78330658105939,
+    "area_rel_diff": 0.004211524484646897,
+    "attr_agreements": 3.4646869983948636,
+    "attr_agreements_rare": 3.881047411295631,
+    "attr_contradictions": 0.264446227929374,
+    "both_active": 0.31942215088282505,
+    "broker_known_both": 0.6019261637239165,
+    "catalog_ratio_max": 0.24177745130323128,
+    "clip_max_cos": 0.8627347554648949,
+    "clip_mean_top3_cos": 0.8544759985235032,
+    "containment_max": 0.7474993188275603,
+    "dispo_equal": 0.5553772070626003,
+    "dist_norm": 1.1747343090205302,
+    "exterior_match_ratio": 0.49910519523280356,
+    "floor_diff": 0.1797752808988764,
+    "floor_stated_conflict": 0.01765650080256822,
+    "floorplan_conflict": 0.038523274478330656,
+    "floorplan_tight_match": 0.20385232744783308,
+    "gap_days": 6.61542209825977,
+    "interior_match_ratio": 0.5476204764194137,
+    "jaccard_shingle": 0.6925919719415153,
+    "len_ratio": 0.8643227128179405,
+    "n_images_min": 11.004012841091493,
+    "numeral_conflict": 0.024077046548956663,
+    "numeric_fact_overlap": 2.751203852327448,
+    "overlap_days": 23.03862798655485,
+    "phash_loose_matches": 8.324237560192616,
+    "phash_match_ratio": 0.6002568199699477,
+    "phash_tight_matches": 8.09951845906902,
+    "pin_pop": 3.265116172295548,
+    "plan_match_ratio": 0.3026886035313001,
+    "plot_area_exact": 0.04253611556982344,
+    "plot_area_rel_diff": 0.0008510386843363711,
+    "ppm2_rel_diff": 0.033106447727682564,
+    "price_last_ratio": 0.871463616837518,
+    "price_path_event_match": 0.06112894596040664,
+    "rare_token_overlap": 0.5658105939004815,
+    "ref_code_shared": 0.033707865168539325,
+    "same_broker_identity": 0.12680577849117175,
+    "same_broker_key": 0.1276083467094703,
+    "same_exact_pin": 0.46308186195826645,
+    "same_house_number": 0.26324237560192615,
+    "same_psc": 0.37881219903691815,
+    "same_ruian_adm_kod": 0.2680577849117175,
+    "same_source": 0.2624398073836276,
+    "same_street_key": 0.5369181380417335,
+    "seq_monotone_ratio": 0.5966468807033528,
+    "simhash_hamming": 7.020064205457464,
+    "tag_clip_mean": 0.8468207084989187,
+    "tag_clip_min": 0.8263427941818632,
+    "tag_dhash_min": 5.373996789727127,
+    "tag_lookalike_share": 0.18806156613138955,
+    "tag_room_clip_min": 0.6567282800646141,
+    "tag_room_clip_min2": 0.6647777304913308,
+    "tag_rooms_both": 4.284911717495987,
+    "tag_rooms_private": 1.918940609951846,
+    "tag_tight_matches": 3.3274478330658104,
+    "tfidf_cos": 0.7475645065476013,
+    "total_floors_equal": 0.22712680577849118,
+    "unit_number_shared": 0.012841091492776886
+  },
+  "presence_weights": {
+    "area_exact": 0.36588837224223497,
+    "area_rel_diff": 0.36588837224223497,
+    "attr_agreements": -0.4226514992864574,
+    "attr_agreements_rare": -0.4226514992864574,
+    "attr_contradictions": -0.4226514992864574,
+    "both_active": 0.0,
+    "broker_known_both": 0.0,
+    "catalog_ratio_max": -1.645060668416305,
+    "clip_max_cos": -0.11652174572447709,
+    "clip_mean_top3_cos": -0.11652174572447709,
+    "containment_max": -0.44103630804395205,
+    "dispo_equal": -0.23951941923932032,
+    "dist_norm": -0.140692534044855,
+    "exterior_match_ratio": 0.7221826215654177,
+    "floor_diff": 0.2984069567608062,
+    "floor_stated_conflict": 0.2984069567608062,
+    "floorplan_conflict": -0.12664729732269014,
+    "floorplan_tight_match": -0.12664729732269014,
+    "gap_days": 0.0,
+    "interior_match_ratio": 0.9894352956291325,
+    "jaccard_shingle": -0.44103630804395205,
+    "len_ratio": -0.44103630804395205,
+    "n_images_min": 0.0,
+    "numeral_conflict": 0.7483733228902183,
+    "numeric_fact_overlap": 0.7483733228902183,
+    "overlap_days": 0.0,
+    "phash_loose_matches": -0.11652174572447709,
+    "phash_match_ratio": -0.11652174572447709,
+    "phash_tight_matches": -0.11652174572447709,
+    "pin_pop": 0.0,
+    "plan_match_ratio": -0.25335200105724287,
+    "plot_area_exact": 0.5703825083159593,
+    "plot_area_rel_diff": 0.5703825083159593,
+    "ppm2_rel_diff": -0.8143983510879304,
+    "price_last_ratio": -0.8735742480987362,
+    "price_path_event_match": 0.8885359957361076,
+    "rare_token_overlap": -0.1440862254916947,
+    "ref_code_shared": -0.031324963270548435,
+    "same_broker_identity": -0.9121639390931292,
+    "same_broker_key": 0.36802931276024753,
+    "same_exact_pin": 0.0,
+    "same_house_number": 0.30568323650483115,
+    "same_psc": -0.4271819525194306,
+    "same_ruian_adm_kod": 0.014913774692154401,
+    "same_source": 0.0,
+    "same_street_key": -0.140692534044855,
+    "seq_monotone_ratio": -0.036730881750885895,
+    "simhash_hamming": -0.4456086425313473,
+    "tag_clip_mean": 0.009618083592543725,
+    "tag_clip_min": 0.009618083592543725,
+    "tag_dhash_min": 0.009618083592543725,
+    "tag_lookalike_share": 0.009618083592543725,
+    "tag_room_clip_min": -0.4823909501460949,
+    "tag_room_clip_min2": -0.4823909501460949,
+    "tag_rooms_both": -0.11652174572447709,
+    "tag_rooms_private": -0.11652174572447709,
+    "tag_tight_matches": 0.009618083592543725,
+    "tfidf_cos": -0.44103630804395205,
+    "total_floors_equal": 0.04789490378078484,
+    "unit_number_shared": -0.39432541571015495
+  },
+  "provenance": {
+    "calibration_note": "isotonic_pav was the briefed map and LOST on out-of-fold validation ECE \u2014 13.82% against platt's 5.67%, with a saturated ceiling of 1.0 that collapses every threshold search; `--calibration auto` chose platt on validation, never on the sealed side",
+    "export_run": "35200225251 (5,687 listings; /home/hejtm/autodedup-artifacts/w7/cohort/)",
+    "feature_version": {
+      "n_features": 60,
+      "sha256_16": "251b9026ff422167"
+    },
+    "label_run_excluded": "35205840437 \u2014 the adaptive boundary draw, reserved for measurement by D16 vi and never read by a search",
+    "label_runs": [
+      "35115036274",
+      "35116313682",
+      "35124676256",
+      "35149028995",
+      "35155058503",
+      "35185988862",
+      "35202925670",
+      "35203586251"
+    ],
+    "operator_labels": "w6/labels_v2/autodedup-labels-35468267042, implied weight 0.25, the six pairs touching the disputed card 18705144 removed before the fit",
+    "seal": {
+      "n_groups": 663,
+      "n_listings": 4456,
+      "sha256": "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884"
+    },
+    "substrate_run": "honest clock (E62) + the E65 image floor at (1, 1)",
+    "training": {
+      "calibration": "platt",
+      "l2": 0.001,
+      "method": "irls",
+      "n_test": 616,
+      "n_train": 1246,
+      "n_validation": 476,
+      "seed": 20260922,
+      "split": "cluster",
+      "weight_cap": 43.724999999999994
+    }
+  },
+  "scales": {
+    "area_exact": 0.41199196731057663,
+    "area_rel_diff": 0.013462860876418308,
+    "attr_agreements": 2.8937784355358325,
+    "attr_agreements_rare": 3.9007472719636276,
+    "attr_contradictions": 0.642349074714,
+    "both_active": 0.4662527645046352,
+    "broker_known_both": 0.4895008244615379,
+    "catalog_ratio_max": 0.35314031205451374,
+    "clip_max_cos": 0.29899064865019537,
+    "clip_mean_top3_cos": 0.29782096229610777,
+    "containment_max": 0.3975311386746967,
+    "dispo_equal": 0.4969239025625009,
+    "dist_norm": 10.570850513291942,
+    "exterior_match_ratio": 0.4883979963676791,
+    "floor_diff": 0.40237091993082763,
+    "floor_stated_conflict": 0.13169946386366624,
+    "floorplan_conflict": 0.19245579181151667,
+    "floorplan_tight_match": 0.4028604672115824,
+    "gap_days": 16.087151750807443,
+    "interior_match_ratio": 0.47903007350070426,
+    "jaccard_shingle": 0.396754508654157,
+    "len_ratio": 0.21591862181102145,
+    "n_images_min": 8.714988653795837,
+    "numeral_conflict": 0.15328842871670398,
+    "numeric_fact_overlap": 2.7153438918894075,
+    "overlap_days": 30.2911450449107,
+    "phash_loose_matches": 8.664006836726275,
+    "phash_match_ratio": 0.4633348622563125,
+    "phash_tight_matches": 8.65226474175269,
+    "pin_pop": 1.5855196652255208,
+    "plan_match_ratio": 0.4507124770735689,
+    "plot_area_exact": 0.20180880665137996,
+    "plot_area_rel_diff": 0.019300806558758377,
+    "ppm2_rel_diff": 0.09520568978313192,
+    "price_last_ratio": 0.28612087227040334,
+    "price_path_event_match": 0.23877438593502118,
+    "rare_token_overlap": 1.44345079085993,
+    "ref_code_shared": 0.18047616184504506,
+    "same_broker_identity": 0.3327552749881204,
+    "same_broker_key": 0.33365319803584365,
+    "same_exact_pin": 0.49863518837275367,
+    "same_house_number": 0.44039281021535825,
+    "same_psc": 0.4850912459504216,
+    "same_ruian_adm_kod": 0.44294786246232287,
+    "same_source": 0.4399604014954892,
+    "same_street_key": 0.49863518837275367,
+    "seq_monotone_ratio": 0.46931664153717817,
+    "simhash_hamming": 8.529266883814335,
+    "tag_clip_mean": 0.30310762423938015,
+    "tag_clip_min": 0.3028427527760355,
+    "tag_dhash_min": 9.825512925562258,
+    "tag_lookalike_share": 0.34545066241105676,
+    "tag_room_clip_min": 0.44384301003636467,
+    "tag_room_clip_min2": 0.44764966034289305,
+    "tag_rooms_both": 2.7800389647443304,
+    "tag_rooms_private": 1.6192097733810742,
+    "tag_tight_matches": 3.1206865941179007,
+    "tfidf_cos": 0.3648053395798841,
+    "total_floors_equal": 0.418975201981395,
+    "unit_number_shared": 0.11258862225842814
+  },
+  "version": "w9_gold",
+  "weights": {
+    "area_exact": -0.04375001429794333,
+    "area_rel_diff": -0.4810755929050714,
+    "attr_agreements": -0.16314227624535066,
+    "attr_agreements_rare": 0.5879102194261611,
+    "attr_contradictions": -0.07087858815447239,
+    "both_active": -0.39417234786280286,
+    "broker_known_both": 0.7518461550398574,
+    "catalog_ratio_max": -0.9383627013332227,
+    "clip_max_cos": -0.08376360323722969,
+    "clip_mean_top3_cos": 0.7571131296133906,
+    "containment_max": -0.20644865534805973,
+    "dispo_equal": -0.48200422238532714,
+    "dist_norm": -0.5713478259952245,
+    "exterior_match_ratio": 0.07148003816419649,
+    "floor_diff": -0.141398959671993,
+    "floor_stated_conflict": -0.17993415285860698,
+    "floorplan_conflict": -0.21550994610643806,
+    "floorplan_tight_match": 0.011351433073439847,
+    "gap_days": -0.1691698594138374,
+    "interior_match_ratio": 1.4974235738673383,
+    "jaccard_shingle": 0.030697430668476165,
+    "len_ratio": -0.44630236605408635,
+    "n_images_min": -0.7681716880744442,
+    "numeral_conflict": -0.01758331780799191,
+    "numeric_fact_overlap": 0.40962592182764884,
+    "overlap_days": -0.4576495742628664,
+    "phash_loose_matches": 0.6709344330544055,
+    "phash_match_ratio": -0.23830515931106808,
+    "phash_tight_matches": -0.17389026312895253,
+    "pin_pop": -0.06924362646748733,
+    "plan_match_ratio": -0.21459840484220596,
+    "plot_area_exact": 0.9128814813629238,
+    "plot_area_rel_diff": -0.038395542322485196,
+    "ppm2_rel_diff": 0.07615015280192021,
+    "price_last_ratio": 0.7603031740846685,
+    "price_path_event_match": 0.16680969595337597,
+    "rare_token_overlap": 0.8922717912492031,
+    "ref_code_shared": -0.17356842560428404,
+    "same_broker_identity": -0.21262015799581171,
+    "same_broker_key": 0.5201565897155404,
+    "same_exact_pin": 0.6299155512637774,
+    "same_house_number": 0.14864067041871232,
+    "same_psc": 0.5008803135079773,
+    "same_ruian_adm_kod": -0.7134567977170727,
+    "same_source": -0.6750558521526555,
+    "same_street_key": 0.45182748532300593,
+    "seq_monotone_ratio": -0.2849848670976745,
+    "simhash_hamming": 0.5693524024832536,
+    "tag_clip_mean": -0.24230164277779614,
+    "tag_clip_min": 0.5338258012061777,
+    "tag_dhash_min": -0.310613111910297,
+    "tag_lookalike_share": -0.17458075764599779,
+    "tag_room_clip_min": 0.26616266893373997,
+    "tag_room_clip_min2": -0.2752141663459618,
+    "tag_rooms_both": 0.34628899901352356,
+    "tag_rooms_private": -0.19835939551871967,
+    "tag_tight_matches": -0.056966994095465746,
+    "tfidf_cos": 2.316747344064784,
+    "total_floors_equal": -0.036955506761495706,
+    "unit_number_shared": 0.34198676470193046
+  }
+}
