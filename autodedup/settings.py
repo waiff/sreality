@@ -145,6 +145,29 @@ class Settings:
     family_guard_ref_code_clause: bool = False
     family_guard_unit_designator_clause: bool = True
     family_guard_disposition_clause: bool = True
+    # E88 (W12): the honest clock everywhere EXCEPT where the new-development hazard lives.
+    # A K-B certificate inside a new-development serial-poster family is HELD in the band and
+    # the pair is decided as it would be with no certificate — never rejected. `off` is the
+    # shipped default; `narrow` is vocabulary AND a family of at least
+    # `development_size_min_narrow`; `wide` is vocabulary OR a family of at least
+    # `development_size_min_wide` OR a block density at or above
+    # `development_block_density_min`. Both definitions and every constant below were written
+    # down and committed BEFORE the first arm ran (E88) — they are a pre-registration, not a
+    # fit, and `autodedup/development.py` carries the two term lists.
+    development_hold_mode: str = "off"
+    # A marker is a property of the FAMILY, so a term has to be in at least this share of its
+    # members: a serial poster re-posts one template, so a genuine project marker travels with
+    # it. One member mentioning a project next door is not a development family.
+    development_vocab_min_share: float = 0.50
+    # A co-operative advert on its own is a flat sold as a share (`podil` + `anuita` is how a
+    # družstevní byt is priced); it is a DEVELOPMENT marker only beside a family of adverts.
+    development_coop_min_size: int = 3
+    development_size_min_narrow: int = 3
+    development_size_min_wide: int = 4
+    # "Many OTHER listings at the same address block in the same category". 20 is not a new
+    # number: it is E63's own fungible-catalogue block limb (C3, `context_rule_block_min`),
+    # which is the only block-density bar this program has ever written down.
+    development_block_density_min: int = 20
     # E61 (W8): two adverts naming a DIFFERENT unit inside one address block are two units,
     # whatever they look like. ON by default — it demotes nothing the operator or gold calls a
     # duplicate, and it is the only rule that can separate a developer's own near-identical
@@ -339,13 +362,21 @@ class Settings:
         # buys the honest clock nothing and cannot stand as its price. E65 is the only payment
         # a sealed read has measured, and the honest clock's true price is an open question
         # D30 (vii) owes, not a row this gate may assume.
-        if self.live_window_from_sighting and self.certificate_b_min_images <= 0.0:
+        # E88 (W12) widens the payment the gate accepts by exactly one alternative: the
+        # new-development HOLD, which withholds a K-B certificate where the hazard the standing
+        # ruling names actually lives instead of withholding it everywhere. E87 still binds —
+        # a gate may only accept a price a sealed read has measured — so the alternative is
+        # admissible only once this wave's verifier has read it on the W12 seal, and until then
+        # the one file that exercises it is a CANDIDATE row, not a promoted one.
+        if (self.live_window_from_sighting and self.certificate_b_min_images <= 0.0
+                and self.development_hold_mode == "off"):
             raise ValueError(
-                "live_window_from_sighting needs the E65 image floor: the honest clock is what "
-                "lets a developer's serial template re-posts satisfy every clause of K-B, and "
-                "certificate_b_min_images=0 leaves the certificate resting on no observation "
-                "of the unit (E87: the E85 family guard is measurably inert on the W11 seal "
-                "and does not pay for it)"
+                "live_window_from_sighting needs a price: the E65 image floor "
+                "(certificate_b_min_images) or the E88 new-development hold "
+                "(development_hold_mode). The honest clock is what lets a developer's serial "
+                "template re-posts satisfy every clause of K-B, and with neither price the "
+                "certificate rests on no observation of the unit (E87: the E85 family guard is "
+                "measurably inert on the W11 seal and does not pay for it)"
             )
         if self.live_window_from_sighting and self.certificate_b_min_gap_days <= 0.0:
             raise ValueError(
@@ -353,6 +384,38 @@ class Settings:
                 "once-seen advert's live window is a point, so every pair of once-seen adverts "
                 "is disjoint by construction and K-B certifies a 2.8-second separation as a "
                 "re-post"
+            )
+        from autodedup.development import MODES as DEVELOPMENT_HOLD_MODES
+
+        if self.development_hold_mode not in DEVELOPMENT_HOLD_MODES:
+            raise ValueError(
+                f"development_hold_mode must be one of {DEVELOPMENT_HOLD_MODES}: "
+                f"{self.development_hold_mode}"
+            )
+        if not 0.0 < self.development_vocab_min_share <= 1.0:
+            raise ValueError(
+                "development_vocab_min_share must be in (0, 1]: "
+                f"{self.development_vocab_min_share}"
+            )
+        # A family has at least two adverts by construction, so a size bar below two is
+        # vacuous: it would hold every K-B certificate the engine ever issues.
+        for name in ("development_coop_min_size", "development_size_min_narrow",
+                     "development_size_min_wide"):
+            if getattr(self, name) < 2:
+                raise ValueError(f"{name} must be at least 2: {getattr(self, name)}")
+        if self.development_block_density_min < 1:
+            raise ValueError(
+                "development_block_density_min must be at least 1: "
+                f"{self.development_block_density_min}"
+            )
+        # The hold is not a second spelling of E84: it withholds a certificate the honest clock
+        # manufactured, and E84 removes the degenerate window that manufactures it. A hold
+        # without the gap rail would still certify two adverts one index walk saw once each.
+        if self.development_hold_mode != "off" and self.certificate_b_min_gap_days <= 0.0:
+            raise ValueError(
+                "development_hold_mode needs the E84 gap rail (certificate_b_min_gap_days): "
+                "the hold removes a certificate inside a development family, and E84 removes "
+                "the one it should never have issued anywhere"
             )
         from autodedup.family import MODES as FAMILY_GUARD_MODES
 
