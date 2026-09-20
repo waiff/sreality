@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-from autodedup.dataset import Listing, Location
+from pathlib import Path
+
+from autodedup.dataset import Image, Listing, Location
 from autodedup.hazard_context import (
     BlockCell,
     block_cells,
     block_members,
     category_group,
     confusable_twins,
+    ContextIndex,
+    ContextStamp,
     disjoint_windows,
-    is_safe_context,
+    fungible_catalogue,
     live_overlap_days,
     live_window,
     pair_cell,
+    rail_plan,
+    rail_reopen,
 )
 
 
@@ -141,23 +147,127 @@ def test_twins_are_the_units_at_this_address_a_merge_could_fuse_it_with() -> Non
     assert confusable_twins(rows[0], members) == [2]
 
 
-# --- the safe context -------------------------------------------------------------------
+# --- the refusing direction: the fungible-catalogue veto ---------------------------------
 
 
-def test_safe_context_needs_all_three_clauses() -> None:
-    a = make(1, last_seen="2026-06-01T00:00:00+00:00")
-    b = make(2, first="2026-07-01T00:00:00+00:00", last_seen="2026-08-01T00:00:00+00:00")
-    cells = block_cells([a, b])
-    assert is_safe_context(a, b, cells, catalog_ratio_max=0.0)
-    # a catalogue-only gallery is never safe, whatever the windows say
-    assert not is_safe_context(a, b, cells, catalog_ratio_max=0.9)
-    # co-live is never safe
-    c = make(3, first="2026-05-15T00:00:00+00:00", last_seen="2026-07-01T00:00:00+00:00")
-    assert not is_safe_context(a, c, block_cells([a, c]), catalog_ratio_max=0.0)
-    # a one-shape stack is never safe
-    stack = [make(i, area=50.0, last_seen="2026-06-01T00:00:00+00:00") for i in range(10, 16)]
-    stack_cells = block_cells(stack)
-    late = make(20, first="2026-07-01T00:00:00+00:00", area=50.0)
-    assert not is_safe_context(stack[0], late, block_cells([*stack, late]),
-                               catalog_ratio_max=0.0)
-    assert isinstance(stack_cells[("ruian:1001", "byt|prodej")], BlockCell)
+def _index(rows: list[Listing], images: dict[int, list[Image]] | None = None) -> ContextIndex:
+    return ContextIndex.build({row.id: row for row in rows}, images or {})
+
+
+def test_a_stated_from_price_refuses_the_promotion() -> None:
+    a = make(1)
+    a.description = "Ceny od 5 499 000 Kč, k nastěhování ihned."
+    b = make(2)
+    index = _index([a, b])
+    assert a.id in index.from_price and b.id not in index.from_price
+    stamp = index.stamp(a, b)
+    assert fungible_catalogue(stamp, True, block_min=None, image_population_min=10,
+                              from_price_veto=True) == "from_price"
+    assert fungible_catalogue(stamp, True, block_min=None, image_population_min=10,
+                              from_price_veto=False) is None
+
+
+def test_a_shared_STOCK_image_refuses_and_a_shared_private_one_does_not() -> None:
+    a, b = make(1), make(2)
+    images = {
+        1: [Image(listing_id=1, image_id=11, phash=7, pop=34)],
+        2: [Image(listing_id=2, image_id=21, phash=7, pop=34)],
+    }
+    index = _index([a, b], images)
+    assert index.shared_image_population(1, 2) == 34
+    assert fungible_catalogue(index.stamp(a, b), False, block_min=None,
+                              image_population_min=10, from_price_veto=True) == "stock_images"
+
+    private = {
+        1: [Image(listing_id=1, image_id=11, phash=9, pop=2)],
+        2: [Image(listing_id=2, image_id=21, phash=9, pop=2)],
+    }
+    lone = _index([a, b], private)
+    assert fungible_catalogue(lone.stamp(a, b), False, block_min=None,
+                              image_population_min=10, from_price_veto=True) is None
+
+
+def test_one_templated_photo_beside_private_ones_does_not_make_a_warrant_stock() -> None:
+    # The limb asks whether the whole agreement is stock, not whether any of it is: reading the
+    # MOST-carried shared image instead refuses 101 g5 promotions carrying 35 labelled duplicates.
+    a, b = make(1), make(2)
+    images = {
+        1: [Image(listing_id=1, image_id=11, phash=7, pop=40),
+            Image(listing_id=1, image_id=12, phash=8, pop=1)],
+        2: [Image(listing_id=2, image_id=21, phash=7, pop=40),
+            Image(listing_id=2, image_id=22, phash=8, pop=1)],
+    }
+    index = _index([a, b], images)
+    assert index.shared_image_population(1, 2) == 1
+    assert fungible_catalogue(index.stamp(a, b), False, block_min=None,
+                              image_population_min=10, from_price_veto=True) is None
+
+
+def test_images_that_are_not_SHARED_never_refuse() -> None:
+    a, b = make(1), make(2)
+    images = {
+        1: [Image(listing_id=1, image_id=11, phash=7, pop=40)],
+        2: [Image(listing_id=2, image_id=21, phash=8, pop=40)],
+    }
+    index = _index([a, b], images)
+    assert index.shared_image_population(1, 2) == 0
+    assert fungible_catalogue(index.stamp(a, b), False, block_min=None,
+                              image_population_min=10, from_price_veto=True) is None
+
+
+def test_the_block_limb_is_off_unless_a_settings_row_asks_for_it() -> None:
+    rows = [make(i, area=52.0) for i in range(25)]
+    index = _index(rows)
+    stamp = index.stamp(rows[0], rows[1])
+    assert stamp.cell_n_listings == 25
+    assert fungible_catalogue(stamp, False, block_min=None, image_population_min=10,
+                              from_price_veto=True) is None
+    assert fungible_catalogue(stamp, False, block_min=20, image_population_min=10,
+                              from_price_veto=True) == "catalogue_block"
+
+
+# --- the rail ----------------------------------------------------------------------------
+
+
+def test_the_rail_fires_only_when_the_census_CROSSES_the_bar() -> None:
+    under = ContextStamp(cell_n_listings=4, shared_image_pop_min=2)
+    assert rail_reopen(under, ContextStamp(25, 2), block_min=20,
+                       image_population_min=10) == "catalogue_block"
+    assert rail_reopen(under, ContextStamp(4, 14), block_min=20,
+                       image_population_min=10) == "stock_images"
+    # already over the bar when it merged: that was the veto's business, not the rail's
+    assert rail_reopen(ContextStamp(25, 2), ContextStamp(30, 2), block_min=20,
+                       image_population_min=10) is None
+    # no limb configured, nothing to cross
+    assert rail_reopen(under, ContextStamp(99, 99), block_min=None,
+                       image_population_min=None) is None
+
+
+def test_the_rail_caps_a_block_and_names_what_it_deferred() -> None:
+    rows = [make(i, area=52.0) for i in range(25)]
+    index = _index(rows)
+    merges = [(i, i + 1, ContextStamp(4, 0), "ruian:1001") for i in range(0, 8)]
+    actions, counters = rail_plan(merges, index, {row.id: row for row in rows},
+                                  block_min=20, image_population_min=10, max_per_block=3)
+    assert counters == {"reopened": 3, "deferred_by_cap": 5, "blocks_at_cap": 1,
+                        "blocks_touched": 1}
+    assert {action.limb for action in actions} == {"catalogue_block"}
+    assert actions[0].to_json()["stamped"] == [4, 0]
+
+
+def test_a_certificate_is_exempt_from_the_rail() -> None:
+    rows = [make(i, area=52.0) for i in range(25)]
+    index = _index(rows)
+    merges = [(0, 1, ContextStamp(4, 0), "ruian:1001")]
+    _, counters = rail_plan(merges, index, {row.id: row for row in rows}, block_min=20,
+                            image_population_min=10, max_per_block=8,
+                            exempt=frozenset({(0, 1)}))
+    assert counters["reopened"] == 0
+
+
+def test_the_stack_test_survives_as_a_signal_and_reaches_no_rule() -> None:
+    stack = [make(i, area=52.0) for i in range(6)]
+    cell = block_cells(stack)[("ruian:1001", "byt|prodej")]
+    assert isinstance(cell, BlockCell) and cell.is_shape_stack
+    import autodedup.decide as decide
+    assert "is_shape_stack" not in Path(decide.__file__).read_text(encoding="utf-8")

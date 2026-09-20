@@ -40,6 +40,7 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
+from autodedup.hazard_context import ContextIndex
 from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.evaluate import (
     CALIBRATION_AUTO,
@@ -337,6 +338,9 @@ def run_engine(
     clock = time.perf_counter()
     ctx = FeatureContext.build(fps, settings, dataset)
     ctx.index_attrs(fps, dataset.listings)
+    # E63's refusing direction reads a census of the whole cohort, so it is built once here
+    # beside the feature context rather than per pair.
+    hazard = ContextIndex.build(dataset.listings, dataset.images_by_listing)
     timings["context_s"] = time.perf_counter() - clock
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -360,7 +364,7 @@ def run_engine(
             feats = pair_features(
                 fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings
             )
-            decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings)
+            decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings, hazard)
             decisions.append(decision)
             zones[decision.zone] += 1
             reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
@@ -386,6 +390,9 @@ def run_engine(
                         ctx.shared_codes(lo, hi)
                     )
                 row.update({
+                    # E63's census travels with the row so a re-simulation replays the census
+                    # the decision was taken under, never today's.
+                    "context": hazard.pair_context(la, lb).to_json(),
                     "block": block,
                     "block_key": pair_block_key(fa, fb),
                     "source_pair": source_pair(fa, fb),
@@ -532,7 +539,10 @@ def cmd_pair(args: argparse.Namespace, out: Any) -> int:
     pairs, _ = generate_pairs(fps, settings)
     probes = sorted(pairs.get((lo, hi), set()))
     feats = pair_features(fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings)
-    decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings)
+    decision = decide_pair(
+        fa, fb, la, lb, feats, probes, model, settings,
+        ContextIndex.build(dataset.listings, dataset.images_by_listing),
+    )
 
     left = _side(fa, la)
     right = _side(fb, lb)

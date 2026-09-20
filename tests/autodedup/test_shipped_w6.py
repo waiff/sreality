@@ -34,6 +34,16 @@ def test_w6_settings_load_and_turn_the_bridge_rail_on() -> None:
     assert settings.t_hi_by_stratum == w5.t_hi_by_stratum
 
 
+def test_w6_json_still_describes_g5_after_the_w8_defaults_moved() -> None:
+    """A settings file names a GENERATION's decision surface, so a new default may not rewrite
+    an older generation's — the E58 defect at settings grain. E60, E61 and E63 all ship ON by
+    default or by promotion, so g5's file pins each of them off and keeps reproducing g5."""
+    settings = Settings.from_json(ROOT / "settings/w6.json")
+    assert settings.certificate_kr_enabled is False
+    assert settings.unit_designator_veto is False
+    assert settings.context_rule_enabled is False
+
+
 def test_w6_gold_is_w5_gold_under_a_new_version() -> None:
     assert W6["version"] == "w6_gold" and W5["version"] == "w5_gold"
     for key in LEARNED:

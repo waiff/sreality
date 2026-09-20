@@ -215,6 +215,20 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
     return out
 
 
+# A price the advert states as a STARTING price — "ceny od 5 499 000 Kč", "již od 2 750 000".
+# It is the printed admission that the number belongs to a CATALOGUE of units rather than to
+# this one, which is why a price tie between two such adverts says nothing about identity.
+_FROM_PRICE = re.compile(
+    r"(?:cen\w*\s+(?:jiz\s+)?od|jiz\s+od|prodej\s+od|pronajem\s+od|k\s+dispozici\s+od)"
+    r"\s*(?:cca\s*)?\d[\d\s\u00a0]{3,}"
+)
+
+
+def states_from_price(text: str | None) -> bool:
+    """Does the body quote a FROM price — the advert's own word for a price list?"""
+    return bool(text) and bool(_FROM_PRICE.search(fold(text)))
+
+
 def address_block_key(listing: "Listing") -> str:
     """The finest place key the listing carries — the stratification unit and the "one project" test.
 

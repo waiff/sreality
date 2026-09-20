@@ -16,6 +16,11 @@ from typing import Any
 
 from autodedup.features import DEFAULT_VOCABULARY_ATTR_KEYS
 
+# C2 of the W8 verification: 21 of the 23 pairs an interior ratio alone would have carried
+# rested on three photos or fewer, so an interior arm carries a floor no settings row may
+# lower.
+CONTEXT_RULE_MIN_IMAGES_FLOOR: float = 4.0
+
 
 @dataclass(slots=True)
 class Settings:
@@ -93,6 +98,41 @@ class Settings:
     # looser one for every co-live test it feeds — see `features.window_end_stamp` for the
     # measurement and the refit debt.
     live_window_from_sighting: bool = False
+    # E63 (W8): the band promotion the W8 verification endorsed, and the ONLY one it endorsed.
+    # W8a proposed merging band pairs inside a "safe" hazard context; verification refuted that
+    # — the context arm carried both of the rule's labelled errors while the context-free arm
+    # carried none — and kept this: a near-identical BODY (`containment_max`), an identical
+    # current PRICE, and a score at the very top of the isotonic range. On g5 it moves 347 band
+    # pairs (6.47%) at 0 labelled negatives on 110 labelled pairs, 0 negative blocks in 66, and
+    # 0 in 33 sealed; it selects none of the 18 operator, 63 gold or 43 structural band
+    # negatives. OFF by default: the sealed split that read it had already been spent by W8a's
+    # 1,476-candidate search, so this is a settings row a promotion turns on (as E57's bridge
+    # pass is), not a new default.
+    context_rule_enabled: bool = False
+    context_rule_min_score: float = 0.9999
+    context_rule_containment_min: float = 0.90
+    context_rule_price_ratio_min: float = 0.995
+    # C1 from the verification: the endorsed arm states no area clause and 2 of its 347 pairs
+    # differ by more than 1% (max 5.3%). Adding it is a TIGHTENING — it withholds no labelled
+    # pair — so the rule ships with the clause the verifier said any wider rule would need.
+    context_rule_area_max: float = 0.01
+    # C2: an interior-ratio arm may never rest on three photos. The arm itself is OFF (None);
+    # `validate` refuses to enable it below four images, so the condition cannot be forgotten.
+    context_rule_interior_min: float | None = None
+    context_rule_min_images: float = 4.0
+    # C3, the fungible-catalogue veto, one settings row per limb because each costs differently
+    # and each cost was measured rather than assumed. On g5: the FROM price withholds 0 of the
+    # 347 endorsed pairs, an ALL-stock image warrant 3 — while the block-size limb withholds
+    # 112 pairs carrying 66 labelled DUPLICATES, so that limb is off and its cost is recorded
+    # rather than paid. `None` disables a census limb. `image_population_min` reads the
+    # LEAST-carried SHARED image (see `hazard_context.shared_image_population`).
+    context_rule_from_price_veto: bool = True
+    context_rule_block_min: int | None = None
+    context_rule_image_population_min: int | None = 10
+    # C4: a census only ever gets worse, so a promotion taken under one owes a re-read. The cap
+    # is per address block, so a block that doubles overnight re-opens a few merges rather than
+    # all of them; re-opening means back to the BAND, never an unmerge.
+    context_rail_max_reopen_per_block: int = 8
     # E48: the per-stratum merge switch D3 asks for. A key is `<layer>|<side>` spelled exactly
     # as `evaluate.decide_stratum` spells it (K-A/K-B/K-C/model x same/cross); the value is that
     # stratum's own `t_hi`, and NULL is not "missing" but PROPOSE-ONLY — the stratum could not
@@ -197,6 +237,36 @@ class Settings:
                 )
             if value is not None and not 0.0 <= value <= 1.0:
                 raise ValueError(f"t_hi_by_stratum[{key}] must be in [0, 1] or null: {value}")
+        if not 0.0 <= self.context_rule_min_score <= 1.0:
+            raise ValueError(
+                f"context_rule_min_score must be in [0, 1]: {self.context_rule_min_score}"
+            )
+        for name in ("context_rule_containment_min", "context_rule_price_ratio_min",
+                     "context_rule_area_max"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]: {value}")
+        if self.context_rule_interior_min is not None:
+            if not 0.0 <= self.context_rule_interior_min <= 1.0:
+                raise ValueError(
+                    f"context_rule_interior_min must be in [0, 1] or null: "
+                    f"{self.context_rule_interior_min}"
+                )
+            if self.context_rule_min_images < CONTEXT_RULE_MIN_IMAGES_FLOOR:
+                raise ValueError(
+                    "an interior-ratio arm needs at least "
+                    f"{CONTEXT_RULE_MIN_IMAGES_FLOOR:g} images (C2 of the W8 verification): "
+                    f"context_rule_min_images={self.context_rule_min_images}"
+                )
+        for name in ("context_rule_block_min", "context_rule_image_population_min"):
+            value = getattr(self, name)
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be at least 1 or null: {value}")
+        if self.context_rail_max_reopen_per_block < 1:
+            raise ValueError(
+                "context_rail_max_reopen_per_block must be at least 1: "
+                f"{self.context_rail_max_reopen_per_block}"
+            )
         if not 0.0 <= self.bridge_min_score <= 1.0:
             raise ValueError(f"bridge_min_score must be in [0, 1]: {self.bridge_min_score}")
         if self.max_attr_contradictions <= 0.0:

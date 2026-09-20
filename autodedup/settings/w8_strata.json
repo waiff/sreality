@@ -1,0 +1,1428 @@
+{
+ "baseline_drift": {
+  "note": "w6.json on this branch reproduces g5 at 4,267 / 5,357 / 837 rather than the archived 4,263 / 5,361 / 836. Four pairs (17793x374615, 17793x418916, 374615x418916, 288869x18774401) now pass E45's re-post arm because W8's window clamp (features._window: an end before the start reads as the start) zeroes their overlap_days. It is the clock groundwork, not E63."
+ },
+ "e63": {
+  "band_reason_before_promotion": {
+   "certificate:K-C:stratum_propose_only": 59,
+   "certificate:K-C:unit_evidence_gate": 18,
+   "model": 110,
+   "unit_evidence_gate": 86
+  },
+  "promoted": 273,
+  "refused_by_a_fungible_limb": 3,
+  "refused_pairs": [
+   [
+    49918,
+    13463576
+   ],
+   [
+    431697,
+    13193504
+   ],
+   [
+    18661508,
+    18735193
+   ]
+  ],
+  "sealed_vs_reliable": {
+   "block_neg_hi95": 0.1936,
+   "clean_blocks": 16,
+   "labelled": 19,
+   "n_pairs": 57,
+   "neg": 0,
+   "neg_blocks": 0,
+   "neg_hi95": 0.1682,
+   "neg_pairs": [],
+   "pos": 19,
+   "precision": 1.0
+  },
+  "splits": {
+   "test": 57,
+   "train": 148,
+   "validation": 68
+  },
+  "touching_the_disputed_card": [],
+  "vs_gold": {
+   "block_neg_hi95": 0.1043,
+   "clean_blocks": 33,
+   "labelled": 40,
+   "n_pairs": 273,
+   "neg": 0,
+   "neg_blocks": 0,
+   "neg_hi95": 0.0876,
+   "neg_pairs": [],
+   "pos": 40,
+   "precision": 1.0
+  },
+  "vs_operator": {
+   "block_neg_hi95": 0.2039,
+   "clean_blocks": 15,
+   "labelled": 22,
+   "n_pairs": 273,
+   "neg": 0,
+   "neg_blocks": 0,
+   "neg_hi95": 0.1487,
+   "neg_pairs": [],
+   "pos": 22,
+   "precision": 1.0
+  },
+  "vs_reliable": {
+   "block_neg_hi95": 0.0803,
+   "clean_blocks": 44,
+   "labelled": 62,
+   "n_pairs": 273,
+   "neg": 0,
+   "neg_blocks": 0,
+   "neg_hi95": 0.0583,
+   "neg_pairs": [],
+   "pos": 62,
+   "precision": 1.0
+  },
+  "vs_structural": {
+   "block_neg_hi95": 0.7935,
+   "clean_blocks": 1,
+   "labelled": 3,
+   "n_pairs": 273,
+   "neg": 0,
+   "neg_blocks": 0,
+   "neg_hi95": 0.5615,
+   "neg_pairs": [],
+   "pos": 3,
+   "precision": 1.0
+  }
+ },
+ "llm_cost_at_rollout": {
+  "assumptions": {
+   "cohort_listings": 5687,
+   "corpus_listings": 872357,
+   "new_listings_per_30d": 178040,
+   "scaling": "band pairs per LISTING, held flat from the cohort. A floor, not a forecast: a denser corpus blocks more pairs per listing, so the real number is higher.",
+   "source": "w7/verify/cost_reconciliation.json (text_pos 0.154738 USD / 205 rows, text_neg 0.033318 / 43)",
+   "text_judge_usd_per_pair": 0.000755
+  },
+  "g5": {
+   "band_pairs": 5357,
+   "band_pairs_per_listing": 0.942,
+   "full_pass_band_pairs_at_corpus_scale": 821737,
+   "full_pass_usd_once": 620.41,
+   "steady_state_band_pairs_per_month": 167709,
+   "steady_state_usd_per_month": 126.62
+  },
+  "g6": {
+   "band_pairs": 4907,
+   "band_pairs_per_listing": 0.8628,
+   "full_pass_band_pairs_at_corpus_scale": 752709,
+   "full_pass_usd_once": 568.3,
+   "steady_state_band_pairs_per_month": 153621,
+   "steady_state_usd_per_month": 115.98
+  },
+  "left_unjudged_usd_per_month": 0.0,
+  "reading": "D19 leaves the band unjudged, so the shipped posture costs $0/month. A SHADOW text proposer over every new band pair costs about $116/month at g6 against $127 at g5 \u2014 inside the $50-150 envelope either way, with E63 returning about $11 a month of it. A one-off pass over the WHOLE standing band is $568 and is not a monthly cost."
+ },
+ "operator_group_checks": {
+  "cluster_grain_card": {
+   "edge_zone_in_g6": "band",
+   "facts": [
+    {
+     "active": false,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.588:15.152",
+     "category_main": "dum",
+     "disposition": null,
+     "first_seen": "2026-06-01",
+     "floor": null,
+     "id": 150001,
+     "last_seen": "2026-08-11",
+     "price": 19977000.0,
+     "source": "idnes"
+    },
+    {
+     "active": false,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.588:15.152",
+     "category_main": "komercni",
+     "disposition": null,
+     "first_seen": "2026-06-06",
+     "floor": null,
+     "id": 245973,
+     "last_seen": "2026-08-11",
+     "price": 19977000.0,
+     "source": "idnes"
+    },
+    {
+     "active": false,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.587:15.157",
+     "category_main": "dum",
+     "disposition": null,
+     "first_seen": "2026-06-30",
+     "floor": null,
+     "id": 445691,
+     "last_seen": "2026-08-11",
+     "price": 19977000.0,
+     "source": "ceskereality"
+    },
+    {
+     "active": false,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.587:15.157",
+     "category_main": "komercni",
+     "disposition": null,
+     "first_seen": "2026-07-04",
+     "floor": null,
+     "id": 488643,
+     "last_seen": "2026-08-11",
+     "price": 19977000.0,
+     "source": "ceskereality"
+    },
+    {
+     "active": true,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.587:15.157",
+     "category_main": "komercni",
+     "disposition": null,
+     "first_seen": "2026-08-11",
+     "floor": null,
+     "id": 15422290,
+     "last_seen": "2026-09-17",
+     "price": 19977000.0,
+     "source": "realitymix"
+    },
+    {
+     "active": false,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.588:15.152",
+     "category_main": "komercni",
+     "disposition": null,
+     "first_seen": "2026-08-11",
+     "floor": null,
+     "id": 15425294,
+     "last_seen": "2026-08-12",
+     "price": 19977000.0,
+     "source": "idnes"
+    },
+    {
+     "active": false,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.587:15.157",
+     "category_main": "komercni",
+     "disposition": null,
+     "first_seen": "2026-08-11",
+     "floor": null,
+     "id": 15427866,
+     "last_seen": "2026-08-12",
+     "price": 19977000.0,
+     "source": "ceskereality"
+    },
+    {
+     "active": true,
+     "area_m2": 401.0,
+     "block": "pin:577626:50.587:15.157",
+     "category_main": "komercni",
+     "disposition": null,
+     "first_seen": "2026-08-11",
+     "floor": 0,
+     "id": 15434111,
+     "last_seen": "2026-09-17",
+     "price": 19977000.0,
+     "source": "sreality"
+    }
+   ],
+   "g5_clusters": [
+    [
+     150001,
+     245973,
+     445691,
+     488643
+    ],
+    [
+     15422290,
+     15425294,
+     15427866,
+     15434111,
+     15582985
+    ]
+   ],
+   "g6_cluster": [
+    150001,
+    245973,
+    445691,
+    488643,
+    15422290,
+    15425294,
+    15427866,
+    15434111
+   ],
+   "pair": [
+    445691,
+    15427866
+   ],
+   "reading": "the edge itself is BANDED in g5 and in g6 \u2014 the contradiction is transitive. All eight adverts are one multifunctional property at Ohrazenice u Turnova, 401 m2, 19 977 000 Kc, identical body, across idnes / ceskereality / realitymix / sreality. The two sides of the card are BOTH ceskereality and differ only in `category_main` (dum vs komercni), the one cross-type rule #15 sanctions \u2014 the same class the W8 verifier's own guard census read as seven single properties posted under two labels. Reported, not re-labelled: the operator rules it.",
+   "tiers": {
+    "gold": 0,
+    "vision": 0
+   }
+  },
+  "disputed_card_18705144": {
+   "g5_group": [],
+   "g6_group": [],
+   "promoted_by_e63": [],
+   "stored_pairs": [
+    {
+     "pair": [
+      305954,
+      18705144
+     ],
+     "reason": "model",
+     "run": "g5",
+     "score": 0.136074,
+     "zone": "reject"
+    },
+    {
+     "pair": [
+      18705144,
+      18706836
+     ],
+     "reason": "certificate:K-C",
+     "run": "g5",
+     "score": 0.991948,
+     "zone": "merge"
+    },
+    {
+     "pair": [
+      18705144,
+      18707946
+     ],
+     "reason": "model",
+     "run": "g5",
+     "score": 0.954514,
+     "zone": "band"
+    },
+    {
+     "pair": [
+      305954,
+      18705144
+     ],
+     "reason": "model",
+     "run": "g6",
+     "score": 0.136074,
+     "zone": "reject"
+    },
+    {
+     "pair": [
+      18705144,
+      18706836
+     ],
+     "reason": "certificate:K-C",
+     "run": "g6",
+     "score": 0.991948,
+     "zone": "merge"
+    },
+    {
+     "pair": [
+      18705144,
+      18707946
+     ],
+     "reason": "model",
+     "run": "g6",
+     "score": 0.954514,
+     "zone": "band"
+    }
+   ]
+  },
+  "pod_krocinkou": {
+   "groups": {
+    "g5": {
+     "24205": [
+      24205,
+      401459
+     ]
+    },
+    "g6": {
+     "24205": [
+      24205,
+      401459
+     ],
+     "50871": [
+      50871,
+      50888
+     ]
+    },
+    "w8_no_context": {
+     "24205": [
+      24205,
+      401459
+     ]
+    }
+   },
+   "listings_at_the_address": 36,
+   "new_in_g6": {
+    "facts": [
+     {
+      "active": true,
+      "area_m2": 119.0,
+      "block": "ruian:87601052",
+      "category_main": "byt",
+      "disposition": "4+kk",
+      "first_seen": "2026-05-10",
+      "floor": 5,
+      "id": 50871,
+      "last_seen": "2026-09-17",
+      "price": 19373005.0,
+      "source": "sreality"
+     },
+     {
+      "active": true,
+      "area_m2": 119.0,
+      "block": "ruian:87601052",
+      "category_main": "byt",
+      "disposition": "4+kk",
+      "first_seen": "2026-05-10",
+      "floor": 5,
+      "id": 50888,
+      "last_seen": "2026-09-17",
+      "price": 19373005.0,
+      "source": "sreality"
+     }
+    ],
+    "pair": [
+     50871,
+     50888
+    ],
+    "reading": "both bodies name the SAME unit \u2014 'Rezidence Klicov ... (C.17)', 119.2 m2, terrace 37.4 m2, floor 5, 19 373 005 Kc, one broker, two sreality native ids. A same-portal re-post, which the standing ruling calls a duplicate. Vision and text both judged it `same`; no operator or gold label touches it.",
+    "reason": "context_rule:text"
+   },
+   "operator_labels_touching_the_address": {
+    "n": 11,
+    "negatives": 9,
+    "negatives_co_clustered_in_g6": 0
+   }
+  }
+ },
+ "promotion_bar": {
+  "band_smaller": {
+   "g5": 5357,
+   "g6": 4907,
+   "met": true
+  },
+  "no_new_labelled_false_merge_cluster_grain": {
+   "card": [
+    445691,
+    15427866
+   ],
+   "g5": 0,
+   "g6": 1,
+   "met_after_reading_the_card": true,
+   "met_as_labelled": false
+  },
+  "no_new_labelled_false_merge_pair_grain": {
+   "g5": 0,
+   "g6": 0,
+   "met": true
+  },
+  "recall_higher": {
+   "g5": 0.6923,
+   "g6": 0.7588,
+   "met": true
+  },
+  "seal_caveat": "C5 of the W8 verification: W8a's 1,476-candidate search already read the sealed split, so g6's sealed numbers CONFIRM a rule chosen elsewhere and cannot adjudicate between rules. A re-seal is owed before the next one.",
+  "sealed_floor": {
+   "g5": {
+    "block_neg_hi95": 0.0469,
+    "clean_blocks": 78,
+    "labelled": 268,
+    "n_pairs": 943,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0141,
+    "neg_pairs": [],
+    "pos": 268,
+    "precision": 1.0
+   },
+   "g6": {
+    "block_neg_hi95": 0.0432,
+    "clean_blocks": 85,
+    "labelled": 292,
+    "n_pairs": 1042,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.013,
+    "neg_pairs": [],
+    "pos": 292,
+    "precision": 1.0
+   },
+   "met": true
+  }
+ },
+ "provenance": {
+  "circularity": "K-R shares a parser with the benchmark's pos_ref_* labels and E61 with neg_unit_number_conflict, so `vs_structural` is coverage, never accuracy.",
+  "cohort_export_run": "35200225251",
+  "label_tiers": {
+   "gold": 1084,
+   "operator": 1158,
+   "text": 1074,
+   "vision": 3011
+  },
+  "measured_by": "/home/hejtm/autodedup-artifacts/w8/assemble/{evaluate_g6.py,extras.py,g6_evaluation.json}",
+  "model": "autodedup/models/w6_gold.json (weights identical to w5_gold \u2014 no refit)",
+  "operator_labels_artifact_run": "35468267042",
+  "settings": "autodedup/settings/w8.json",
+  "spend_usd": 0.0,
+  "split_seal": "37c8771fda6b06db2ead790fcf7728e0ccb0e80c60cad5358c2905ed39be52cc",
+  "truth": "reliable = operator > gold, with every pair touching the DISPUTED operator card 18705144 excluded; the cheap vision/text tiers are reported under `vs_pooled` and never scored (D16)."
+ },
+ "runs": {
+  "g5": {
+   "band_share_of_scored": 0.1095,
+   "by_merge_source": {
+    "K-B": {
+     "n": 1110,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.1611,
+      "clean_blocks": 20,
+      "labelled": 105,
+      "n_pairs": 328,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0353,
+      "neg_pairs": [],
+      "pos": 105,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 291,
+      "neg": 0,
+      "precision": 1.0
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0713,
+      "clean_blocks": 50,
+      "labelled": 233,
+      "n_pairs": 1110,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0162,
+      "neg_pairs": [],
+      "pos": 233,
+      "precision": 1.0
+     }
+    },
+    "K-C": {
+     "n": 1817,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.1043,
+      "clean_blocks": 33,
+      "labelled": 75,
+      "n_pairs": 350,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0487,
+      "neg_pairs": [],
+      "pos": 75,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 381,
+      "neg": 4,
+      "precision": 0.9895
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0275,
+      "clean_blocks": 136,
+      "labelled": 283,
+      "n_pairs": 1817,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0134,
+      "neg_pairs": [],
+      "pos": 283,
+      "precision": 1.0
+     }
+    },
+    "model": {
+     "n": 1340,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.0803,
+      "clean_blocks": 44,
+      "labelled": 88,
+      "n_pairs": 265,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0418,
+      "neg_pairs": [],
+      "pos": 88,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 450,
+      "neg": 0,
+      "precision": 1.0
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0248,
+      "clean_blocks": 151,
+      "labelled": 411,
+      "n_pairs": 1340,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0093,
+      "neg_pairs": [],
+      "pos": 411,
+      "precision": 1.0
+     }
+    }
+   },
+   "certificates": {
+    "K-A": 0,
+    "K-B": 1110,
+    "K-C": 2046,
+    "K-R": 0
+   },
+   "cluster_grain_false_merges_vs_reliable": {
+    "n": 0,
+    "n_excluding_disputed": 0,
+    "pairs": []
+   },
+   "clusters": 837,
+   "max_cluster_size": 8,
+   "merge_zone_sealed_vs_reliable": {
+    "block_neg_hi95": 0.0469,
+    "clean_blocks": 78,
+    "labelled": 268,
+    "n_pairs": 943,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0141,
+    "neg_pairs": [],
+    "pos": 268,
+    "precision": 1.0
+   },
+   "merge_zone_vs_gold": {
+    "block_neg_hi95": 0.0256,
+    "clean_blocks": 146,
+    "labelled": 263,
+    "n_pairs": 4267,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0144,
+    "neg_pairs": [],
+    "pos": 263,
+    "precision": 1.0
+   },
+   "merge_zone_vs_operator_no_disputed": {
+    "block_neg_hi95": 0.0188,
+    "clean_blocks": 201,
+    "labelled": 704,
+    "n_pairs": 4267,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0054,
+    "neg_pairs": [],
+    "pos": 704,
+    "precision": 1.0
+   },
+   "merge_zone_vs_pooled_incl_cheap_tiers": {
+    "block_neg_hi95": 0.0256,
+    "clean_blocks": 337,
+    "labelled": 1122,
+    "n_pairs": 4267,
+    "neg": 4,
+    "neg_blocks": 3,
+    "neg_hi95": 0.0091,
+    "neg_pairs": [
+     [
+      17793,
+      374615
+     ],
+     [
+      17793,
+      418916
+     ],
+     [
+      374615,
+      418916
+     ],
+     [
+      18705144,
+      18706836
+     ]
+    ],
+    "pos": 1118,
+    "precision": 0.9964
+   },
+   "merge_zone_vs_reliable_no_disputed": {
+    "block_neg_hi95": 0.0136,
+    "clean_blocks": 279,
+    "labelled": 927,
+    "n_pairs": 4267,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0041,
+    "neg_pairs": [],
+    "pos": 927,
+    "precision": 1.0
+   },
+   "recall": {
+    "gold": {
+     "in_merge_zone": 263,
+     "labelled_duplicates_stored": 495,
+     "merge_recall": 0.5313,
+     "sealed_merge_recall": 0.6068,
+     "still_in_band": 224
+    },
+    "operator": {
+     "in_merge_zone": 704,
+     "labelled_duplicates_stored": 891,
+     "merge_recall": 0.7901,
+     "sealed_merge_recall": 0.7402,
+     "still_in_band": 177
+    },
+    "pooled": {
+     "in_merge_zone": 1118,
+     "labelled_duplicates_stored": 1850,
+     "merge_recall": 0.6043,
+     "sealed_merge_recall": 0.6159,
+     "still_in_band": 689
+    },
+    "reliable": {
+     "in_merge_zone": 927,
+     "labelled_duplicates_stored": 1339,
+     "merge_recall": 0.6923,
+     "sealed_merge_recall": 0.6979,
+     "still_in_band": 394
+    }
+   },
+   "zones": {
+    "band": 5357,
+    "merge": 4267,
+    "reject": 39284,
+    "veto": 0
+   }
+  },
+  "g6": {
+   "band_share_of_scored": 0.1003,
+   "by_merge_source": {
+    "K-B": {
+     "n": 1110,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.1611,
+      "clean_blocks": 20,
+      "labelled": 105,
+      "n_pairs": 328,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0353,
+      "neg_pairs": [],
+      "pos": 105,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 291,
+      "neg": 0,
+      "precision": 1.0
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0713,
+      "clean_blocks": 50,
+      "labelled": 233,
+      "n_pairs": 1110,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0162,
+      "neg_pairs": [],
+      "pos": 233,
+      "precision": 1.0
+     }
+    },
+    "K-C": {
+     "n": 1786,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.1043,
+      "clean_blocks": 33,
+      "labelled": 75,
+      "n_pairs": 345,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0487,
+      "neg_pairs": [],
+      "pos": 75,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 364,
+      "neg": 1,
+      "precision": 0.9973
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0283,
+      "clean_blocks": 132,
+      "labelled": 271,
+      "n_pairs": 1786,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.014,
+      "neg_pairs": [],
+      "pos": 271,
+      "precision": 1.0
+     }
+    },
+    "K-R": {
+     "n": 187,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.4345,
+      "clean_blocks": 5,
+      "labelled": 7,
+      "n_pairs": 49,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.3543,
+      "neg_pairs": [],
+      "pos": 7,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 171,
+      "neg": 88,
+      "precision": 0.4854
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.1487,
+      "clean_blocks": 22,
+      "labelled": 43,
+      "n_pairs": 187,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.082,
+      "neg_pairs": [],
+      "pos": 43,
+      "precision": 1.0
+     }
+    },
+    "context_rule": {
+     "n": 273,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.1936,
+      "clean_blocks": 16,
+      "labelled": 19,
+      "n_pairs": 57,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.1682,
+      "neg_pairs": [],
+      "pos": 19,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 96,
+      "neg": 1,
+      "precision": 0.9896
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0803,
+      "clean_blocks": 44,
+      "labelled": 62,
+      "n_pairs": 273,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0583,
+      "neg_pairs": [],
+      "pos": 62,
+      "precision": 1.0
+     }
+    },
+    "model": {
+     "n": 1334,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.082,
+      "clean_blocks": 43,
+      "labelled": 86,
+      "n_pairs": 263,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0428,
+      "neg_pairs": [],
+      "pos": 86,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 445,
+      "neg": 0,
+      "precision": 1.0
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0253,
+      "clean_blocks": 148,
+      "labelled": 407,
+      "n_pairs": 1334,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0094,
+      "neg_pairs": [],
+      "pos": 407,
+      "precision": 1.0
+     }
+    }
+   },
+   "certificates": {
+    "K-A": 0,
+    "K-B": 1110,
+    "K-C": 1993,
+    "K-R": 189
+   },
+   "cluster_grain_false_merges_vs_reliable": {
+    "n": 1,
+    "n_excluding_disputed": 1,
+    "pairs": [
+     [
+      445691,
+      15427866
+     ]
+    ]
+   },
+   "clusters": 939,
+   "max_cluster_size": 8,
+   "merge_zone_sealed_vs_reliable": {
+    "block_neg_hi95": 0.0432,
+    "clean_blocks": 85,
+    "labelled": 292,
+    "n_pairs": 1042,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.013,
+    "neg_pairs": [],
+    "pos": 292,
+    "precision": 1.0
+   },
+   "merge_zone_vs_gold": {
+    "block_neg_hi95": 0.0222,
+    "clean_blocks": 169,
+    "labelled": 321,
+    "n_pairs": 4690,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0118,
+    "neg_pairs": [],
+    "pos": 321,
+    "precision": 1.0
+   },
+   "merge_zone_vs_operator_no_disputed": {
+    "block_neg_hi95": 0.0184,
+    "clean_blocks": 205,
+    "labelled": 736,
+    "n_pairs": 4690,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0052,
+    "neg_pairs": [],
+    "pos": 736,
+    "precision": 1.0
+   },
+   "merge_zone_vs_pooled_incl_cheap_tiers": {
+    "block_neg_hi95": 0.1025,
+    "clean_blocks": 349,
+    "labelled": 1367,
+    "n_pairs": 4690,
+    "neg": 90,
+    "neg_blocks": 27,
+    "neg_hi95": 0.0802,
+    "neg_pairs": [
+     [
+      17793,
+      110332
+     ],
+     [
+      17793,
+      276430
+     ],
+     [
+      17793,
+      374615
+     ],
+     [
+      17793,
+      418916
+     ],
+     [
+      17793,
+      14622877
+     ],
+     [
+      19643,
+      390133
+     ],
+     [
+      23201,
+      395722
+     ],
+     [
+      27247,
+      395694
+     ],
+     [
+      77416,
+      94812
+     ],
+     [
+      77416,
+      338547
+     ],
+     [
+      77417,
+      338553
+     ],
+     [
+      94801,
+      338537
+     ],
+     [
+      94801,
+      12315487
+     ],
+     [
+      94801,
+      13465628
+     ],
+     [
+      94804,
+      338539
+     ],
+     [
+      94804,
+      12315486
+     ],
+     [
+      94806,
+      338541
+     ],
+     [
+      94806,
+      12315482
+     ],
+     [
+      94808,
+      338545
+     ],
+     [
+      94808,
+      12315484
+     ],
+     [
+      94812,
+      338547
+     ],
+     [
+      94814,
+      338553
+     ],
+     [
+      94816,
+      338549
+     ],
+     [
+      94818,
+      338550
+     ],
+     [
+      110332,
+      374615
+     ]
+    ],
+    "pos": 1277,
+    "precision": 0.9342
+   },
+   "merge_zone_vs_reliable_no_disputed": {
+    "block_neg_hi95": 0.0125,
+    "clean_blocks": 303,
+    "labelled": 1016,
+    "n_pairs": 4690,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0038,
+    "neg_pairs": [],
+    "pos": 1016,
+    "precision": 1.0
+   },
+   "recall": {
+    "gold": {
+     "in_merge_zone": 321,
+     "labelled_duplicates_stored": 495,
+     "merge_recall": 0.6485,
+     "sealed_merge_recall": 0.7094,
+     "still_in_band": 166
+    },
+    "operator": {
+     "in_merge_zone": 736,
+     "labelled_duplicates_stored": 891,
+     "merge_recall": 0.826,
+     "sealed_merge_recall": 0.7829,
+     "still_in_band": 145
+    },
+    "pooled": {
+     "in_merge_zone": 1277,
+     "labelled_duplicates_stored": 1850,
+     "merge_recall": 0.6903,
+     "sealed_merge_recall": 0.6992,
+     "still_in_band": 530
+    },
+    "reliable": {
+     "in_merge_zone": 1016,
+     "labelled_duplicates_stored": 1339,
+     "merge_recall": 0.7588,
+     "sealed_merge_recall": 0.7604,
+     "still_in_band": 305
+    }
+   },
+   "zones": {
+    "band": 4907,
+    "merge": 4690,
+    "reject": 39266,
+    "veto": 45
+   }
+  },
+  "w8_no_context": {
+   "band_share_of_scored": 0.1059,
+   "by_merge_source": {
+    "K-B": {
+     "n": 1110,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.1611,
+      "clean_blocks": 20,
+      "labelled": 105,
+      "n_pairs": 328,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0353,
+      "neg_pairs": [],
+      "pos": 105,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 291,
+      "neg": 0,
+      "precision": 1.0
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0713,
+      "clean_blocks": 50,
+      "labelled": 233,
+      "n_pairs": 1110,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0162,
+      "neg_pairs": [],
+      "pos": 233,
+      "precision": 1.0
+     }
+    },
+    "K-C": {
+     "n": 1786,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.1043,
+      "clean_blocks": 33,
+      "labelled": 75,
+      "n_pairs": 345,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0487,
+      "neg_pairs": [],
+      "pos": 75,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 364,
+      "neg": 1,
+      "precision": 0.9973
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0283,
+      "clean_blocks": 132,
+      "labelled": 271,
+      "n_pairs": 1786,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.014,
+      "neg_pairs": [],
+      "pos": 271,
+      "precision": 1.0
+     }
+    },
+    "K-R": {
+     "n": 187,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.4345,
+      "clean_blocks": 5,
+      "labelled": 7,
+      "n_pairs": 49,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.3543,
+      "neg_pairs": [],
+      "pos": 7,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 171,
+      "neg": 88,
+      "precision": 0.4854
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.1487,
+      "clean_blocks": 22,
+      "labelled": 43,
+      "n_pairs": 187,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.082,
+      "neg_pairs": [],
+      "pos": 43,
+      "precision": 1.0
+     }
+    },
+    "model": {
+     "n": 1334,
+     "sealed_vs_reliable": {
+      "block_neg_hi95": 0.082,
+      "clean_blocks": 43,
+      "labelled": 86,
+      "n_pairs": 263,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0428,
+      "neg_pairs": [],
+      "pos": 86,
+      "precision": 1.0
+     },
+     "vs_pooled": {
+      "labelled": 445,
+      "neg": 0,
+      "precision": 1.0
+     },
+     "vs_reliable": {
+      "block_neg_hi95": 0.0253,
+      "clean_blocks": 148,
+      "labelled": 407,
+      "n_pairs": 1334,
+      "neg": 0,
+      "neg_blocks": 0,
+      "neg_hi95": 0.0094,
+      "neg_pairs": [],
+      "pos": 407,
+      "precision": 1.0
+     }
+    }
+   },
+   "certificates": {
+    "K-A": 0,
+    "K-B": 1110,
+    "K-C": 1993,
+    "K-R": 189
+   },
+   "cluster_grain_false_merges_vs_reliable": {
+    "n": 0,
+    "n_excluding_disputed": 0,
+    "pairs": []
+   },
+   "clusters": 872,
+   "max_cluster_size": 8,
+   "merge_zone_sealed_vs_reliable": {
+    "block_neg_hi95": 0.0464,
+    "clean_blocks": 79,
+    "labelled": 273,
+    "n_pairs": 985,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0139,
+    "neg_pairs": [],
+    "pos": 273,
+    "precision": 1.0
+   },
+   "merge_zone_vs_gold": {
+    "block_neg_hi95": 0.0245,
+    "clean_blocks": 153,
+    "labelled": 281,
+    "n_pairs": 4417,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0135,
+    "neg_pairs": [],
+    "pos": 281,
+    "precision": 1.0
+   },
+   "merge_zone_vs_operator_no_disputed": {
+    "block_neg_hi95": 0.0188,
+    "clean_blocks": 201,
+    "labelled": 714,
+    "n_pairs": 4417,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.0054,
+    "neg_pairs": [],
+    "pos": 714,
+    "precision": 1.0
+   },
+   "merge_zone_vs_pooled_incl_cheap_tiers": {
+    "block_neg_hi95": 0.1084,
+    "clean_blocks": 328,
+    "labelled": 1271,
+    "n_pairs": 4417,
+    "neg": 89,
+    "neg_blocks": 27,
+    "neg_hi95": 0.0854,
+    "neg_pairs": [
+     [
+      17793,
+      110332
+     ],
+     [
+      17793,
+      276430
+     ],
+     [
+      17793,
+      374615
+     ],
+     [
+      17793,
+      418916
+     ],
+     [
+      17793,
+      14622877
+     ],
+     [
+      19643,
+      390133
+     ],
+     [
+      23201,
+      395722
+     ],
+     [
+      27247,
+      395694
+     ],
+     [
+      77416,
+      94812
+     ],
+     [
+      77416,
+      338547
+     ],
+     [
+      77417,
+      338553
+     ],
+     [
+      94801,
+      338537
+     ],
+     [
+      94801,
+      12315487
+     ],
+     [
+      94801,
+      13465628
+     ],
+     [
+      94804,
+      338539
+     ],
+     [
+      94804,
+      12315486
+     ],
+     [
+      94806,
+      338541
+     ],
+     [
+      94806,
+      12315482
+     ],
+     [
+      94808,
+      338545
+     ],
+     [
+      94808,
+      12315484
+     ],
+     [
+      94812,
+      338547
+     ],
+     [
+      94814,
+      338553
+     ],
+     [
+      94816,
+      338549
+     ],
+     [
+      94818,
+      338550
+     ],
+     [
+      110332,
+      374615
+     ]
+    ],
+    "pos": 1182,
+    "precision": 0.93
+   },
+   "merge_zone_vs_reliable_no_disputed": {
+    "block_neg_hi95": 0.0133,
+    "clean_blocks": 285,
+    "labelled": 954,
+    "n_pairs": 4417,
+    "neg": 0,
+    "neg_blocks": 0,
+    "neg_hi95": 0.004,
+    "neg_pairs": [],
+    "pos": 954,
+    "precision": 1.0
+   },
+   "recall": {
+    "gold": {
+     "in_merge_zone": 281,
+     "labelled_duplicates_stored": 495,
+     "merge_recall": 0.5677,
+     "sealed_merge_recall": 0.6239,
+     "still_in_band": 206
+    },
+    "operator": {
+     "in_merge_zone": 714,
+     "labelled_duplicates_stored": 891,
+     "merge_recall": 0.8013,
+     "sealed_merge_recall": 0.7509,
+     "still_in_band": 167
+    },
+    "pooled": {
+     "in_merge_zone": 1182,
+     "labelled_duplicates_stored": 1850,
+     "merge_recall": 0.6389,
+     "sealed_merge_recall": 0.6443,
+     "still_in_band": 625
+    },
+    "reliable": {
+     "in_merge_zone": 954,
+     "labelled_duplicates_stored": 1339,
+     "merge_recall": 0.7125,
+     "sealed_merge_recall": 0.7109,
+     "still_in_band": 367
+    }
+   },
+   "zones": {
+    "band": 5180,
+    "merge": 4417,
+    "reject": 39266,
+    "veto": 45
+   }
+  }
+ },
+ "what": "W8 strata + promotion-bar evidence for generation g6 (E60 K-R, E61 unit-designator veto, E63 safe-evidence band promotion; weights are w5_gold's, unchanged)"
+}

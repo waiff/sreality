@@ -533,3 +533,133 @@ def test_a_stratum_cut_overrides_the_global_one_for_the_score_layer() -> None:
     assert _decide(_listing(1), _listing(2), same, probability=1.0, settings=row).zone == "band"
     # An EMPTY table is the incumbent engine, untouched.
     assert stratum_t_hi(feats, None, Settings()) == Settings().t_hi
+
+
+# --- E63: the band promotion the W8 verification endorsed --------------------------------
+
+E63 = Settings(context_rule_enabled=True)
+
+
+def _e63_feats(**over: float) -> dict[str, tuple[float, bool]]:
+    """The warrant: a near-identical body, an identical current price, an agreeing area."""
+    base = {"containment_max": 0.97, "price_last_ratio": 1.0, "area_rel_diff": 0.0}
+    base.update(over)
+    return _feats(**base)
+
+
+_NO_CENSUS = Settings(context_rule_enabled=True, context_rule_image_population_min=None,
+                      context_rule_from_price_veto=False)
+
+
+def _e63(la: Listing, lb: Listing, feats: dict[str, tuple[float, bool]],
+         probability: float = 1.0, settings: Settings = _NO_CENSUS,
+         context: Any = None) -> Decision:
+    return decide_pair(_fp(la), _fp(lb), la, lb, feats, {"attr_dispo"},
+                       FixedModel(probability), settings, context)
+
+
+def test_e63_promotes_a_band_pair_the_warrant_carries() -> None:
+    a, b = _listing(1), _listing(2)
+    banded = _e63(a, b, _e63_feats(), settings=Settings())
+    assert banded.zone == "band"
+    promoted = _e63(a, b, _e63_feats())
+    assert (promoted.zone, promoted.reason) == ("merge", "context_rule:text")
+
+
+def test_e63_is_off_unless_a_settings_row_asks_for_it() -> None:
+    assert _e63(_listing(1), _listing(2), _e63_feats(), settings=Settings()).zone == "band"
+
+
+def test_e63_with_the_default_census_limbs_needs_the_cohort_index() -> None:
+    from autodedup.hazard_context import ContextIndex
+
+    a, b = _listing(1), _listing(2)
+    assert _e63(a, b, _e63_feats(), settings=E63).zone == "band"
+    index = ContextIndex.build({1: a, 2: b}, {})
+    assert _e63(a, b, _e63_feats(), settings=E63, context=index).zone == "merge"
+
+
+@pytest.mark.parametrize(
+    "over, why",
+    [
+        ({"containment_max": 0.89}, "a body that is not near-identical"),
+        ({"price_last_ratio": 0.99}, "a price that moved"),
+        ({"area_rel_diff": 0.02}, "C1: areas more than 1% apart"),
+    ],
+)
+def test_e63_refuses_a_pair_missing_one_clause(over: dict[str, float], why: str) -> None:
+    assert _e63(_listing(1), _listing(2), _e63_feats(**over)).zone == "band", why
+
+
+def test_e63_refuses_a_score_below_the_top_of_the_range() -> None:
+    # 0.9545 is the isotonic plateau the disputed operator card (18705144) and its partner sit
+    # on; W8 measured 41 negatives and 310 positives there, so no clause may promote it.
+    assert _e63(_listing(1), _listing(2), _e63_feats(), probability=0.9545).zone == "band"
+    assert _e63(_listing(1), _listing(2), _e63_feats(), probability=0.9998).zone == "band"
+
+
+def test_e63_never_overrules_the_developer_guards() -> None:
+    # E46: co-live adverts agreeing only on catalogue material.
+    feats = _e63_feats(overlap_days=30.0, catalog_ratio_max=1.0, interior_match_ratio=0.0)
+    blocked = _e63(_listing(1), _listing(2), feats)
+    assert blocked.zone == "band" and blocked.reason == "developer_signature"
+    # E47: one broker, one portal, side by side for weeks.
+    colive = _e63_feats(same_source=1.0, same_broker_key=1.0, overlap_days=61.0,
+                        rare_token_overlap=2.0)
+    refused = _e63(_listing(1), _listing(2), colive)
+    assert refused.zone == "band" and refused.reason == "developer_colive"
+
+
+def test_e63_reads_pairs_the_unit_gate_and_the_diversity_gate_banded() -> None:
+    gated = _e63(_listing(1), _listing(2), _e63_feats())
+    assert gated.zone == "merge"
+
+
+def test_e63_never_reaches_a_veto_or_an_auto_reject() -> None:
+    vetoed = _e63(_listing(1), _listing(2, category_type="pronajem"), _e63_feats())
+    assert vetoed.zone == "veto"
+    rejected = _e63(_listing(1), _listing(2), _e63_feats(numeral_conflict=1.0))
+    assert rejected.zone == "reject"
+
+
+def test_e63_stamps_the_census_it_was_taken_under() -> None:
+    from autodedup.hazard_context import ContextIndex
+
+    a, b = _listing(1), _listing(2)
+    index = ContextIndex.build({1: a, 2: b}, {})
+    promoted = _e63(a, b, _e63_feats(), settings=E63, context=index)
+    assert promoted.zone == "merge"
+    assert promoted.evidence["context_cell_n"] == "2"
+    assert promoted.evidence["context_image_pop_min"] == "0"
+
+
+def test_e63_refuses_a_promotion_a_fungible_limb_names() -> None:
+    from autodedup.hazard_context import ContextIndex
+
+    a, b = _listing(1), _listing(2)
+    a.description = "Ceny od 4 990 000 Kč. " + "x" * 300
+    index = ContextIndex.build({1: a, 2: b}, {})
+    refused = _e63(a, b, _e63_feats(), settings=E63, context=index)
+    assert refused.zone == "band"
+    assert refused.reason == "context_rule:fungible:from_price"
+
+
+def test_e63_refuses_to_promote_when_a_census_limb_has_no_index_to_read() -> None:
+    # An unanswered guard fails towards the stricter side, exactly as E48 does.
+    assert _e63(_listing(1), _listing(2), _e63_feats(), settings=E63, context=None).zone == "band"
+    assert _e63(_listing(1), _listing(2), _e63_feats(), context=None).zone == "merge"
+
+
+def test_e63_interior_arm_is_off_and_cannot_be_enabled_below_four_images() -> None:
+    # No text warrant, an interior ratio of 1.0 over THREE photos, and a score the model path
+    # cannot merge on its own: only an interior arm could promote this, and none may.
+    feats = _e63_feats(containment_max=0.1, interior_match_ratio=1.0, n_images_min=3.0)
+    assert _e63(_listing(1), _listing(2), feats, probability=0.5).zone == "band"
+    interior = Settings(context_rule_enabled=True, context_rule_interior_min=0.5,
+                        context_rule_image_population_min=None,
+                        context_rule_from_price_veto=False)
+    assert _e63(_listing(1), _listing(2), feats, probability=0.5,
+                settings=interior).zone == "band"
+    with pytest.raises(ValueError, match="at least 4"):
+        Settings(context_rule_enabled=True, context_rule_interior_min=0.5,
+                 context_rule_min_images=3.0)

@@ -25,6 +25,7 @@ from autodedup.dataset import Listing
 from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
+from autodedup.hazard_context import ContextIndex, PairContext, fungible_catalogue
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
@@ -36,6 +37,14 @@ MIN_EVIDENCE_FAMILIES: int = 2
 MAX_ATTR_CONTRADICTIONS: float = 3.0
 
 UNIT_N_IMAGES_MIN: float = 1.0
+
+# E63 names its own reasons so a run summary can say which arm promoted a pair and which
+# limb refused one, without re-deriving either from the features.
+CONTEXT_RULE_REASON: str = "context_rule"
+# The two guards E63 may never overrule: E46 and E47 are the developer shapes the standing
+# ruling is about, and a pair they banded is exactly the pair a text-and-price warrant
+# cannot speak for (a developer's adverts share both by construction).
+CONTEXT_RULE_NEVER_OVERRIDES: tuple[str, ...] = ("developer_signature", "developer_colive")
 
 CERT_A_AREA: float = 0.02
 CERT_B_AREA: float = 0.01
@@ -360,6 +369,93 @@ def merge_zone_block(feats: Feats, settings: Settings) -> str | None:
     return None
 
 
+def context_rule_warrant(feats: Feats, score: float, settings: Settings) -> str | None:
+    """E63: the arm this band pair carries, or None.
+
+    ONE arm is live — a near-identical body, an identical current price and a score at the top
+    of the isotonic range — because it is the only one the W8 verification read clean at both
+    grains on both splits (347 g5 band pairs, 0 negatives in 110 labelled, 0 negative blocks in
+    66, 0 in 33 sealed). The interior arm beside it is OFF and carries C2's image floor, so a
+    settings row that reaches for it cannot reach for three photos."""
+    if score < settings.context_rule_min_score:
+        return None
+    area = present_value(feats, "area_rel_diff")
+    if area is None or area > settings.context_rule_area_max:
+        return None
+    price = present_value(feats, "price_last_ratio")
+    if price is None or price < settings.context_rule_price_ratio_min:
+        return None
+    containment = present_value(feats, "containment_max")
+    if containment is not None and containment >= settings.context_rule_containment_min:
+        return "text"
+    if settings.context_rule_interior_min is not None:
+        interior = present_value(feats, "interior_match_ratio")
+        images = present_value(feats, "n_images_min")
+        if (interior is not None
+                and interior >= settings.context_rule_interior_min
+                and images is not None
+                and images >= settings.context_rule_min_images):
+            return "interior"
+    return None
+
+
+def context_rule_may_promote(reason: str) -> bool:
+    """E63 re-reads E11, E45 and E48's propose-only cells; it never re-reads E46 or E47."""
+    return not any(name in reason for name in CONTEXT_RULE_NEVER_OVERRIDES)
+
+
+def _census_limbs_configured(settings: Settings) -> bool:
+    return (settings.context_rule_block_min is not None
+            or settings.context_rule_image_population_min is not None)
+
+
+def apply_context_rule(
+    decision: Decision,
+    feats: Feats,
+    la: Listing,
+    lb: Listing,
+    settings: Settings,
+    context: ContextIndex | PairContext | None,
+) -> Decision:
+    """Promote a band pair the E63 warrant carries — unless a fungible-catalogue limb refuses.
+
+    A census limb with no index to read is a limb that cannot answer, and an unanswered guard
+    fails towards the stricter side (E48's direction): the promotion is simply not made."""
+    if not settings.context_rule_enabled or decision.zone != "band":
+        return decision
+    if not context_rule_may_promote(decision.reason):
+        return decision
+    arm = context_rule_warrant(feats, decision.score, settings)
+    if arm is None:
+        return decision
+    pair_context = (
+        context.pair_context(la, lb) if isinstance(context, ContextIndex) else context
+    )
+    if pair_context is None:
+        if _census_limbs_configured(settings):
+            return decision
+        evidence = dict(decision.evidence)
+    else:
+        refused = fungible_catalogue(
+            pair_context.stamp,
+            pair_context.from_price,
+            block_min=settings.context_rule_block_min,
+            image_population_min=settings.context_rule_image_population_min,
+            from_price_veto=settings.context_rule_from_price_veto,
+        )
+        if refused is not None:
+            return Decision(
+                decision.lo, decision.hi, "band", decision.score, decision.families,
+                decision.certificate, None,
+                f"{CONTEXT_RULE_REASON}:fungible:{refused}", dict(decision.evidence),
+            )
+        evidence = {**decision.evidence, **pair_context.stamp.to_evidence()}
+    return Decision(
+        decision.lo, decision.hi, "merge", decision.score, decision.families,
+        decision.certificate, None, f"{CONTEXT_RULE_REASON}:{arm}", evidence,
+    )
+
+
 def decide_pair(
     fa: Fingerprint,
     fb: Fingerprint,
@@ -369,11 +465,30 @@ def decide_pair(
     probes: Iterable[str],
     model: LogisticModel,
     settings: Settings,
+    context: ContextIndex | PairContext | None = None,
 ) -> Decision:
-    """Guards, then auto-rejects, then certificates, then the calibrated score — in that order.
+    """Guards, then auto-rejects, then certificates, then the calibrated score — in that order,
+    and then E63 re-reads what landed in the band.
 
     Every merge, certificate or score, is read against ITS STRATUM's cut (E48): a stratum the
-    evidence could not clear ships propose-only and lands in the band whatever it earned."""
+    evidence could not clear ships propose-only and lands in the band whatever it earned. E63
+    is the one path back out of that band, and it can only ever read a pair the layers above it
+    have already decided — it never reaches a veto, an auto-reject or a developer guard."""
+    decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings)
+    return apply_context_rule(decision, feats, la, lb, settings, context)
+
+
+def _decide_layers(
+    fa: Fingerprint,
+    fb: Fingerprint,
+    la: Listing,
+    lb: Listing,
+    feats: Feats,
+    probes: Iterable[str],
+    model: LogisticModel,
+    settings: Settings,
+) -> Decision:
+    """The rule floor and the calibrated score — every zone E63 is then allowed to re-read."""
     lo, hi = (fa.listing_id, fb.listing_id) if fa.listing_id < fb.listing_id else (
         fb.listing_id, fa.listing_id
     )
