@@ -80,6 +80,7 @@ from autodedup.incremental_scope import (
     resolve_scope,
 )
 from autodedup.incremental_sql import (
+    RT_CALIBRATION_PRESENT_SQL,
     RT_CALIBRATION_READ_SQL,
     RT_CALIBRATION_WRITE_SQL,
     RT_CELL_READ_SQL,
@@ -121,9 +122,16 @@ from autodedup.incremental_sql import (
     RT_ROW_CENSUS_SQL,
     RT_ROW_ESTIMATE_SQL,
     RT_SCHEMA_SIZE_SQL,
-    RT_SCOPE_ENTER_SQL,
+    RT_SCOPE_BLOCK_SQL,
+    RT_SCOPE_ENTRANTS_SQL,
+    RT_SCOPE_IDS_PRUNE_SQL,
+    RT_SCOPE_IDS_WRITE_SQL,
     RT_SCOPE_PARENT_OBEC_SQL,
+    RT_SCOPE_SCAN_STATE_SQL,
+    RT_SCOPE_SCAN_WRITE_SQL,
     RT_SCOPE_DRIFT_SQL,
+    RT_RETIRE_EVENT_WRITE_SQL,
+    RT_RETIRE_WINDOW_SQL,
     RT_SEED_CURSORS_SQL,
     RT_SETTING_SQL,
     RT_SETTING_WRITE_SQL,
@@ -157,8 +165,15 @@ DB_FLAG: str = "realtime_enabled"
 SCOPE_SETTING: str = "rt_scope"
 BUDGET_SETTING: str = "rt_max_schema_mb"
 RETIRE_SETTING: str = "rt_max_retire_fraction"
+SCAN_CAP_SETTING: str = "rt_enter_max_scans_per_day"
+INTERVAL_SETTING: str = "rt_enter_interval_hours"
 RESCOPE_ARG: str = "rt_rescope"
 STORAGE_WATERMARK: str = "rt_storage_last"
+# The generation whose scope row may still be the LEGACY global one (W9e/R4). `rt_scope` was
+# one row for every generation, so a second generation's seed silently rescoped the first; the
+# row is `rt_scope:<generation>` now, and the old spelling is read exactly here and nowhere
+# else, because only this generation can have written one.
+LEGACY_SCOPE_GENERATION: str = GENERATION
 
 # How long a row must have existed before the lane will claim it (E73). Portal writes commit in
 # seconds; a transaction still open after five minutes would have to be a stuck one, and the
@@ -178,10 +193,27 @@ FEED_WINDOW: int = 1000
 # One round-robin slice of the scope-drift sweep, over this generation's own fingerprint rows.
 # Under the trial scope (4,969 listings) one slice covers the whole store every pass.
 DRIFT_SLICE: int = 20000
-# One round-robin slice of the ENTRANT sweep (W9d-3), over ONE of the scope's blocks a pass. The
-# trial scope's largest block is Praha-Vysočany at 1,439 rows, so a slice covers a block whole
-# and the sweep cycles the scope every len(blocks) passes — 30 minutes at the `*/10` cadence.
+# How many rows one REFRESH of a scope block may snapshot (W9e/R3). The trial scope's largest
+# block is Praha-Vysočany at 1,439 rows; the cap exists so a mis-typed obec code cannot pull a
+# whole city into `rt_scope_ids`, and it does not reduce the scan's cost — the `limit` is
+# applied after the bitmap heap scan, which is precisely why a smaller `enter_slice` was never
+# the answer to what that scan costs.
 ENTER_SLICE: int = 20000
+# How often a scope block's membership is re-walked on `public`, by grain and in HOURS. A town
+# block is an index-served bitmap scan of its own obec (Jablonec: 2,745 buffers = 21 MB, 61 ms);
+# a QUARTER has no index of its own at all and costs 29,568 buffers = 231 MB, 6.4 s, cold every
+# time. So they do not deserve the same cadence, and neither is per-pass work. Data, overridable
+# per grain: `rt_enter_interval_hours`.
+ENTER_INTERVAL_HOURS: dict[str, float] = {"obec": 1.0, "cast_obce": 6.0}
+# The hard ceiling on those walks, per generation and per rolling day (W9e/R3). The cadence
+# above is what the lane INTENDS to spend; this is what it is allowed to spend when an interval
+# is mis-set to zero or the block list grows. Under the trial scope the cadence asks for 52 a
+# day (24 + 24 + 4) against this 60. Data: `rt_enter_max_scans_per_day`.
+MAX_ENTER_SCANS_PER_DAY: int = 60
+# The window the retirement rail is measured over (W9e/R2). A slice-sized rail could only fire
+# while one drift slice was itself a twentieth of the store; a rolling day is independent of
+# `drift_slice` and of the store's size.
+RETIRE_WINDOW_HOURS: int = 24
 # The share of the store one pass's drift sweep may retire before the lane STOPS instead (W9d-1).
 # A geocode correction moves a listing or two; a scope that has gone wrong moves everything, and
 # the difference between those two is the only thing standing between a hand-edited settings row
@@ -759,7 +791,9 @@ class SqlWork:
                  revive_slice: int = REVIVE_SLICE, window: int = FEED_WINDOW,
                  drift_slice: int = DRIFT_SLICE, enter_slice: int = ENTER_SLICE,
                  parents: Mapping[int, int] | None = None,
-                 max_retire_fraction: float = MAX_RETIRE_FRACTION) -> None:
+                 max_retire_fraction: float = MAX_RETIRE_FRACTION,
+                 enter_interval_hours: Mapping[str, float] | None = None,
+                 max_enter_scans_per_day: int = MAX_ENTER_SCANS_PER_DAY) -> None:
         self.conn = conn
         self.scope = scope
         self.generation = generation
@@ -770,12 +804,18 @@ class SqlWork:
         self.drift_slice = drift_slice
         self.enter_slice = enter_slice
         self.max_retire_fraction = float(max_retire_fraction)
+        self.enter_interval_hours = dict(enter_interval_hours or ENTER_INTERVAL_HOURS)
+        self.max_enter_scans_per_day = int(max_enter_scans_per_day)
         self.parents = dict(parents or {})
         self.enter_blocks = _enter_blocks(scope, self.parents)
         self.statements = 0
         self.windows: dict[str, int] = {}
+        # What this pass spent on `public` for the entrant feed, for the run summary: a block
+        # refresh, a refusal against the daily cap, or nothing at all.
+        self.enter_scan: dict[str, Any] = {}
         self._pending: dict[str, Any] = {}
         self._claimed: dict[str, set[int]] = {}
+        self._retire: tuple[int, int] | None = None
 
     def _query(self, sql: str, params: Mapping[str, Any]) -> list[tuple]:
         self.statements += 1
@@ -865,50 +905,114 @@ class SqlWork:
             slice_max, slice_size, departed = (
                 (int(rows[0][0]), int(rows[0][1]), list(rows[0][2] or ()))
                 if rows else (after_scope, 0, []))
-            self._guard_retirement(departed)
+            retiring = [int(value) for value in departed[:share]]
+            self._guard_retirement(departed, len(retiring))
             self._pending[CURSOR_SCOPE] = 0 if slice_size < self.drift_slice else slice_max
-            for listing_id in departed[:share]:
-                items.append(WorkItem(int(listing_id), "drifted", None, None, retire=True))
+            for listing_id in retiring:
+                items.append(WorkItem(listing_id, "drifted", None, None, retire=True))
 
-        # The sixth feed (W9d-3): the rows the scope has started holding and no cursor has ever
-        # seen, because `listing_location` is written after the listing is.
+        # The sixth feed (W9d-3), at W9e's cost (R3): the rows the scope has started holding
+        # and no cursor has ever seen, because `listing_location` is written after the listing
+        # is. A pass reads them out of `autodedup.rt_scope_ids` — an anti-join inside this
+        # schema, ZERO blocks of `public` — and the wide scan that fills that snapshot runs on
+        # a cadence, one block at a time, under a rolling-day cap.
         if self.enter_slice and self.enter_blocks:
-            index = cursors[CURSOR_ENTER][1] % len(self.enter_blocks)
+            pointer = self._refresh_scope_ids(cursors[CURSOR_ENTER][1])
             after_enter = cursors[CURSOR_ENTER][0]
-            block = self.enter_blocks[index]
-            rows = self._query(RT_SCOPE_ENTER_SQL, {
-                "generation": self.generation, "obec": block.obec,
-                "cast_obce": block.cast_obce, "after_id": after_enter,
-                "limit": self.enter_slice})
-            slice_max, slice_size, entered = (
-                (int(rows[0][0]), int(rows[0][1]), list(rows[0][2] or ()))
-                if rows else (after_enter, 0, []))
-            self.windows["entered"] = slice_size
-            taken = [int(value) for value in entered[:share]]
-            if len(entered) > len(taken):
-                # Cut like a forward feed: stop at the last row this pass took.
-                self._pending[CURSOR_ENTER] = (taken[-1], index)
-            elif slice_size < self.enter_slice:
-                # The block is walked out — move to the next one and start it from the top.
-                self._pending[CURSOR_ENTER] = (0, (index + 1) % len(self.enter_blocks))
-            else:
-                self._pending[CURSOR_ENTER] = (slice_max, index)
-            for listing_id in taken:
-                items.append(WorkItem(listing_id, "entered", None, None))
+            rows = self._query(RT_SCOPE_ENTRANTS_SQL, {
+                "generation": self.generation, "after_id": after_enter,
+                "lag": self.lag, "limit": share})
+            self.windows["entered"] = len(rows)
+            # Short of the share means the snapshot is walked out: the cursor wraps so the
+            # next cycle re-offers whatever the settle lag held back this time.
+            self._pending[CURSOR_ENTER] = (
+                (int(rows[-1][0]), pointer) if len(rows) >= share else (0, pointer))
+            for row in rows:
+                items.append(WorkItem(int(row[0]), "entered", _epoch(row[1]), None))
         for item in items:
             self._claimed.setdefault(item.feed, set()).add(item.listing_id)
         return items
 
-    def _guard_retirement(self, departed: Sequence[Any]) -> None:
-        """Refuse a drift sweep that is not drift (W9d-1).
+    def _refresh_scope_ids(self, pointer: int) -> int:
+        """Re-walk ONE scope block on `public`, but only when its cadence says so (W9e/R3).
+
+        This is the whole cost of the entrant feed, and it used to be paid every cycle: the
+        quarter block is a 29,265-block bitmap heap scan of its parent obec — 231 MB and 6.4 s,
+        cold every time, because the working set does not stay in shared_buffers — and there is
+        no narrower path (no index on `cast_obce_kod`, D8 forbids adding one, and `listings`
+        carries no indexed obec or quarter column either). At ~48 walks a day that was ~11 GB a
+        day of cold reads on the instance that serves Browse, whether or not anything had
+        entered. Now it is `rt_enter_interval_hours` a block — 6 h for a quarter, 1 h for a
+        town — the block the interval has been waiting on longest first, at most ONE a pass,
+        and never more than `rt_enter_max_scans_per_day` in a rolling day. What that cadence
+        costs in latency it costs only on the TAIL: an entrant that arrived recently is already
+        the straggler sweep's.
+
+        Returns the block pointer the cursor should carry, so ties (nothing scanned yet) rotate
+        instead of always naming the same block."""
+        blocks = self.enter_blocks
+        state = {str(row[0]): (row[1], int(row[2] or 0))
+                 for row in self._query(RT_SCOPE_SCAN_STATE_SQL, {
+                     "generation": self.generation, "hours": 24})}
+        start = int(pointer) % len(blocks)
+        due: list[tuple[float, int, int]] = []
+        for offset in range(len(blocks)):
+            index = (start + offset) % len(blocks)
+            block = blocks[index]
+            age, _scans = state.get(block.key, (None, 0))
+            interval = float(self.enter_interval_hours.get(
+                block.grain, ENTER_INTERVAL_HOURS.get(block.grain, 6.0))) * 3600.0
+            if age is None:
+                due.append((float("inf"), offset, index))
+            elif float(age) >= interval:
+                due.append((float(age), offset, index))
+        if not due:
+            return start
+        scans_24h = sum(scans for _age, scans in state.values())
+        if scans_24h >= self.max_enter_scans_per_day:
+            # A count, not a crash: the pass goes on claiming out of the snapshot it has.
+            self.enter_scan = {"skipped": "daily cap", "scans_24h": scans_24h,
+                               "cap": self.max_enter_scans_per_day}
+            return start
+        _age, _offset, index = max(due, key=lambda row: (row[0], -row[1]))
+        block = blocks[index]
+        started = time.time()
+        rows = self._query(RT_SCOPE_BLOCK_SQL, {
+            "obec": block.obec, "cast_obce": block.cast_obce, "limit": self.enter_slice})
+        elapsed_ms = (time.time() - started) * 1000.0
+        listing_ids = [int(row[0]) for row in rows]
+        params = {"generation": self.generation, "block_key": block.key,
+                  "listing_ids": listing_ids}
+        if listing_ids:
+            self.statements += 1
+            _exec(self.conn, RT_SCOPE_IDS_WRITE_SQL,
+                  {**params, "resolved": [row[1] for row in rows]})
+        self.statements += 1
+        _exec(self.conn, RT_SCOPE_IDS_PRUNE_SQL, params)
+        self.statements += 1
+        _exec(self.conn, RT_SCOPE_SCAN_WRITE_SQL, {
+            "generation": self.generation, "block_key": block.key,
+            "rows_found": len(listing_ids), "elapsed_ms": round(elapsed_ms, 3)})
+        self.enter_scan = {"block": block.key, "rows": len(listing_ids),
+                           "elapsed_ms": round(elapsed_ms, 3), "scans_24h": scans_24h + 1,
+                           "cap": self.max_enter_scans_per_day}
+        return (index + 1) % len(blocks)
+
+    def _guard_retirement(self, departed: Sequence[Any], wanted: int) -> None:
+        """Refuse a drift sweep that is not drift (W9d-1), measured over a ROLLING DAY (W9e/R2).
 
         The sweep reads the scope as a PREDICATE, so a scope that holds nothing — a settings
         row hand-written as `","`, a rescope that lost its blocks — reports the whole store as
         departed and the lane grinds it away a share at a time, silently, until a re-seed is
-        the only recovery. Two rails, both independent of how the scope was parsed: a scope
-        with no blocks retires nothing at all, and a sweep that wants more than
-        `rt_max_retire_fraction` of the generation's rows in ONE pass window stops the lane
-        loudly with the cursor unmoved, because that is drift's shape in no corpus."""
+        the only recovery. W9d's rail compared ONE slice's departed count with a fraction of
+        the store, which is a rail only while the slice is itself that big: above ~400,000 rows
+        — or under a `drift_slice=1` dispatch argument — the grind was unguarded. So the
+        measurement is what the generation has RETIRED in the last `RETIRE_WINDOW_HOURS`, this
+        pass included, against the store as it stood when that window opened. Three rails, each
+        independent of the others: a scope with no blocks retires nothing at all, the rolling
+        day is capped, and over it the lane STOPS — non-zero, transaction rolled back, cursor
+        unmoved."""
+        self._retire = None
         if not departed:
             return
         if not self.scope.whole_corpus and not self.scope.blocks:
@@ -918,14 +1022,25 @@ class SqlWork:
         store_rows = int(_rows(self.conn, RT_FP_COUNT_SQL,
                                {"generation": self.generation})[0][0] or 0)
         self.statements += 1
-        allowed = max(1, int(self.max_retire_fraction * store_rows))
-        if len(departed) > allowed:
+        window = _rows(self.conn, RT_RETIRE_WINDOW_SQL,
+                       {"generation": self.generation, "hours": RETIRE_WINDOW_HOURS})
+        self.statements += 1
+        retired_before = int((window[0][0] if window else 0) or 0)
+        baseline_raw = window[0][1] if window else None
+        # The store as the window OPENED: a denominator that shrank with every retirement
+        # would let a slow grind stay under the fraction for ever.
+        baseline = int(baseline_raw) if baseline_raw else store_rows
+        allowed = max(1, int(self.max_retire_fraction * baseline))
+        if retired_before + wanted > allowed:
             raise RetireRefusal(
-                f"the drift sweep would retire {len(departed)} of the generation's "
-                f"{store_rows} listings in one pass, over the {self.max_retire_fraction:.0%} "
-                f"{RETIRE_SETTING} rail ({allowed}) — refusing. That is a scope that has gone "
-                "wrong, not a geocode correction. Nothing was written and no cursor moved; "
-                f"check autodedup.settings {SCOPE_SETTING!r}.")
+                f"the drift sweep would retire {wanted} listings on top of the "
+                f"{retired_before} this generation has retired in the last "
+                f"{RETIRE_WINDOW_HOURS} h, over the {self.max_retire_fraction:.0%} "
+                f"{RETIRE_SETTING} rail ({allowed} of the {baseline} rows the store held when "
+                "that window opened) — refusing. That is a scope that has gone wrong, not a "
+                "geocode correction. Nothing was written and no cursor moved; check "
+                f"autodedup.settings {SCOPE_SETTING}:{self.generation}.")
+        self._retire = (wanted, baseline)
 
     def commit(self, done: Sequence[WorkItem]) -> dict[str, Any]:
         """Advance each feed to the end of the window THIS pass decided, and no further.
@@ -971,6 +1086,15 @@ class SqlWork:
                 _exec(self.conn, RT_CURSOR_SET_SQL, {
                     "name": name, "last_listing_id": int(pending[name])})
                 out[name] = int(pending[name])
+        # The retirement ledger (W9e/R2): written where the retirement itself is, inside the
+        # pass's transaction, so a rolled-back pass leaves the rolling day exactly as it found
+        # it. `store_rows` is the denominator the rail measured, not today's shrinking store.
+        retired = sorted(claimed.get("drifted", set()) & decided)
+        if retired and self._retire is not None:
+            self.statements += 1
+            _exec(self.conn, RT_RETIRE_EVENT_WRITE_SQL, {
+                "generation": self.generation, "n_retired": len(retired),
+                "store_rows": int(self._retire[1])})
         if CURSOR_ENTER in pending:
             after_id, block = pending[CURSOR_ENTER]
             self.statements += 1
@@ -1018,10 +1142,20 @@ class RetireRefusal(Exception):
 @dataclass(frozen=True, slots=True)
 class EnterBlock:
     """One block of the scope as the entrant sweep reads it: always an obec (the index this
-    schema HAS), plus the quarter code when the block is a quarter (a filter, not an index)."""
+    schema HAS), plus the quarter code when the block is a quarter (a filter, not an index).
 
+    `grain` and `code` are the SCOPE's own spelling of the block, because that is what the
+    cadence and the scan ledger are keyed by (W9e/R3) — a quarter walked through its parent
+    obec is still a quarter, and it is the quarter's 231 MB that earns the slower interval."""
+
+    grain: str
+    code: int
     obec: int
     cast_obce: int | None = None
+
+    @property
+    def key(self) -> str:
+        return f"{self.grain}:{self.code}"
 
 
 def _enter_blocks(scope: Scope, parents: Mapping[int, int]) -> tuple[EnterBlock, ...]:
@@ -1029,14 +1163,14 @@ def _enter_blocks(scope: Scope, parents: Mapping[int, int]) -> tuple[EnterBlock,
         return ()        # nothing can enter a scope that already holds everything
     blocks: list[EnterBlock] = []
     for code in scope.obec_codes:
-        blocks.append(EnterBlock(int(code)))
+        blocks.append(EnterBlock("obec", int(code), int(code)))
     for code in scope.cast_obce_codes:
         parent = parents.get(int(code))
         # A quarter with no parent is refused by `resolve_scope_parents` before a pass is
         # built, so here it can only be a caller that resolved none: sweep what CAN be swept
         # rather than refusing a second time in the wrong place.
         if parent is not None:
-            blocks.append(EnterBlock(int(parent), int(code)))
+            blocks.append(EnterBlock("cast_obce", int(code), int(parent), int(code)))
     return tuple(blocks)
 
 
@@ -1067,12 +1201,81 @@ def lane_settings(conn: Any, keys: Sequence[str]) -> dict[str, Any]:
 
 
 def _setting_number(value: Any, fallback: float) -> float:
-    if isinstance(value, Mapping):
-        value = value.get("value", value.get("mb"))
-    try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    """A control number, or a HARD ERROR (W9e/R6).
+
+    W9d fell back to the default whenever `float()` refused the value, so
+    `rt_max_retire_fraction = "0,05"` — or a settings row holding an object the lane did not
+    expect — disabled nothing and said nothing: the rail simply ran at a number nobody had
+    chosen. A control row that cannot be read is a lane that must not run."""
+    if value is None:
         return float(fallback)
+    raw = value
+    if isinstance(raw, Mapping):
+        raw = raw.get("value", raw.get("mb"))
+        if raw is None:
+            return float(fallback)
+    if isinstance(raw, bool):
+        raise ScopeError(f"expected a number, got {value!r}")
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise ScopeError(f"expected a number, got {value!r}") from None
+
+
+def scope_setting_key(generation: str) -> str:
+    """`rt_scope:<generation>` (W9e/R4). One global row meant a second generation's seed
+    silently rescoped the first — and a scope that differs a LITTLE is retirement under a rail
+    that was built for the case where it differs a lot."""
+    return f"{SCOPE_SETTING}:{generation}"
+
+
+def read_scope_setting(control: Mapping[str, Any], generation: str) -> Any:
+    """The generation's scope row, and the legacy global row for `rt` alone (W9e/R4)."""
+    value = control.get(scope_setting_key(generation))
+    if value is None and generation == LEGACY_SCOPE_GENERATION:
+        return control.get(SCOPE_SETTING)
+    return value
+
+
+def control_number(key: str, args: Mapping[str, Any], control: Mapping[str, Any],
+                   fallback: float, rescope: bool) -> float:
+    """A control number's resolution order — and what a DISPATCH may do to it (W9e/R6).
+
+    `rt_max_retire_fraction` was a plain dispatch argument, so one `args=rt_max_retire_fraction=1`
+    disabled the store's last rail for that pass with nothing persisted and nothing said. These
+    numbers are `autodedup.settings` rows: the argument is accepted only beside `rt_rescope=true`
+    — the same word the operator already has to say to move a generation's scope — and a value
+    that is not a number stops the lane rather than reverting to a default."""
+    if key in args and str(args.get(key) or "").strip() != "":
+        if not rescope:
+            raise ScopeError(
+                f"{key} is an autodedup.settings row, not a dispatch argument — it governs a "
+                f"rail, and a pass that could move it could disable it. Write the row, or "
+                f"pass {RESCOPE_ARG}=true to mean it for this pass.")
+        return _setting_number(args[key], fallback)
+    return _setting_number(control.get(key), fallback)
+
+
+def enter_intervals(args: Mapping[str, Any], control: Mapping[str, Any],
+                    rescope: bool) -> dict[str, float]:
+    """The per-grain entrant cadence (W9e/R3), as data: a number for every grain, or an object
+    keyed by grain (`{"obec": 1, "cast_obce": 6}`). Unreadable is a hard error, never a
+    default — the cadence IS the cost control."""
+    out = dict(ENTER_INTERVAL_HOURS)
+    value = control.get(INTERVAL_SETTING)
+    if isinstance(value, Mapping) and not {"value", "mb"} & set(value):
+        for grain, hours in value.items():
+            out[str(grain)] = _setting_number(hours, ENTER_INTERVAL_HOURS.get(str(grain), 6.0))
+    elif value is not None:
+        out = {grain: _setting_number(value, hours) for grain, hours in out.items()}
+    if INTERVAL_SETTING in args and str(args.get(INTERVAL_SETTING) or "").strip() != "":
+        if not rescope:
+            raise ScopeError(
+                f"{INTERVAL_SETTING} is an autodedup.settings row, not a dispatch argument — "
+                f"pass {RESCOPE_ARG}=true to mean it for this pass.")
+        hours = _setting_number(args[INTERVAL_SETTING], 0.0)
+        out = {grain: hours for grain in out}
+    return out
 
 
 def schema_bytes(conn: Any) -> int:
@@ -1197,20 +1400,38 @@ def run_incremental(
         if not db_enabled(conn):
             return {"skipped": "dark", "reason": f"autodedup.settings {DB_FLAG} is false",
                     "spent_usd": 0.0}
-        control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING, RETIRE_SETTING])
+        # Is the generation SEEDED (W9e/R1)? Seeding is the step BEFORE the switch, so the
+        # variable being on says nothing about whether `rt_seed` has run. An unseeded
+        # generation is a loud green skip — the schedule says so every ten minutes without
+        # failing every ten minutes — and never the hard error the missing `rt_scope` row
+        # would otherwise raise two statements below.
+        if not _rows(conn, RT_CALIBRATION_PRESENT_SQL, {"generation": generation}):
+            return {
+                "skipped": "unseeded",
+                "reason": (f"generation {generation!r} has no frozen calibration (E70) — seed "
+                           "it with `gh workflow run autodedup.yml -f mode=rt_seed` before the "
+                           "schedule can do anything"),
+                "generation": generation, "spent_usd": 0.0}
+        rescope = str(args.get(RESCOPE_ARG) or "").strip().lower() == "true"
+        scope_key = scope_setting_key(generation)
+        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
+                                       RETIRE_SETTING, SCAN_CAP_SETTING, INTERVAL_SETTING])
         try:
             # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
-            # the operator has to ask for by name (W9d-2).
+            # the operator has to ask for by name (W9d-2). The row is PER GENERATION (W9e/R4).
             scope, rescoped = resolve_pass_scope(
-                args.get(SCOPE_SETTING), control.get(SCOPE_SETTING),
-                rescope=str(args.get(RESCOPE_ARG) or "").strip().lower() == "true")
+                args.get(SCOPE_SETTING), read_scope_setting(control, generation),
+                rescope=rescope)
             parents = resolve_scope_parents(conn, scope)
+            max_schema_mb = control_number(BUDGET_SETTING, args, control, MAX_SCHEMA_MB,
+                                           rescope)
+            max_retire_fraction = control_number(RETIRE_SETTING, args, control,
+                                                 MAX_RETIRE_FRACTION, rescope)
+            max_enter_scans = control_number(SCAN_CAP_SETTING, args, control,
+                                             float(MAX_ENTER_SCANS_PER_DAY), rescope)
+            intervals = enter_intervals(args, control, rescope)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
-        max_schema_mb = _setting_number(
-            args.get(BUDGET_SETTING, control.get(BUDGET_SETTING)), MAX_SCHEMA_MB)
-        max_retire_fraction = _setting_number(
-            args.get(RETIRE_SETTING, control.get(RETIRE_SETTING)), MAX_RETIRE_FRACTION)
         try:
             storage = storage_guard(conn, generation, scope, max_schema_mb)
         except StorageRefusal as exc:
@@ -1236,7 +1457,9 @@ def run_incremental(
                        window=int(args.get("feed_window") or FEED_WINDOW),
                        drift_slice=int(args.get("drift_slice") or DRIFT_SLICE),
                        enter_slice=int(args.get("enter_slice") or ENTER_SLICE),
-                       parents=parents, max_retire_fraction=max_retire_fraction)
+                       parents=parents, max_retire_fraction=max_retire_fraction,
+                       enter_interval_hours=intervals,
+                       max_enter_scans_per_day=int(max_enter_scans))
         result = None
         try:
             with _transaction(conn):
@@ -1251,7 +1474,7 @@ def run_incremental(
                     # A rescope is PERSISTED, not applied for one pass, and the entrant sweep
                     # restarts so everything the new scope holds is (re)claimed (W9d-2).
                     _exec(conn, RT_SETTING_WRITE_SQL, {
-                        "key": SCOPE_SETTING, "value": json.dumps(scope.as_json()),
+                        "key": scope_key, "value": json.dumps(scope.as_json()),
                         "updated_by": f"{LANE_NAME}:rescope"})
                     _exec(conn, RT_CURSOR_WRITE_SQL, {
                         "name": CURSOR_ENTER, "last_listing_id": 0,
@@ -1274,8 +1497,14 @@ def run_incremental(
         summary["store_rows"] = int(
             _rows(conn, RT_FP_COUNT_SQL, {"generation": generation})[0][0])
         summary["scope"] = scope.as_json()
+        summary["scope_key"] = scope_key
         summary["rescoped"] = bool(rescoped)
         summary["windows"] = dict(work.windows)
+        # What the entrant feed cost the production instance THIS pass: a block refresh, a
+        # refusal against the rolling-day cap, or nothing at all (W9e/R3).
+        summary["enter_scan"] = dict(work.enter_scan)
+        summary["enter_interval_hours"] = dict(intervals)
+        summary["max_enter_scans_per_day"] = int(max_enter_scans)
         summary["retention"] = {"store_floor": settings.store_floor,
                                 "pairs_retained": store.pairs_retained,
                                 "pairs_evicted": store.pairs_evicted}
@@ -1316,36 +1545,62 @@ def run_rt_seed(
     and — with `backfill=true` — writes the cohort's own fingerprints and postings so the
     generation starts from a populated store rather than an empty one.
 
-    Read-only against `public` like the pass itself, and behind the same dark switch."""
+    Read-only against `public` like the pass itself — and deliberately NOT behind the dark
+    switch (W9e/R1). Seeding is the step BEFORE the switch: the documented enable sequence is
+    apply 539, merge, SEED, verify, then flip `AUTODEDUP_REALTIME_ENABLED`. W9 gated this mode
+    on that variable, so the recipe printed in the workflow header and in PROGRAM.md exited 0
+    having done nothing, and flipping the variable afterwards left the `*/10` schedule
+    hard-erroring on a generation nothing had seeded. It is idempotent instead: a generation
+    that already carries a frozen calibration is REFUSED unless `reseed=true`, because a
+    re-seed re-cuts the calibration every stored decision of that generation was taken under."""
     from autodedup.dataset import load
     from autodedup.fingerprint import build_all
+    from autodedup.judge_lane import download_cohort
 
-    if not env_enabled():
-        return {"skipped": "dark", "reason": f"{ENV_FLAG} is not true", "spent_usd": 0.0}
     artifact = (args.get("artifact") or "").strip()
+    export_run = (args.get("export_run") or "").strip()
+    if export_run:
+        # The same input the batch pass took, fetched the same way the score and judge lanes
+        # fetch it: a runner has no cohort file until `gh run download` puts one there, so a
+        # documented recipe that only took a PATH could not be run on a runner at all.
+        if not export_run.isdigit():
+            raise SystemExit(f"export_run must be a GitHub run id, got {export_run!r}")
+        artifact = str(download_cohort(export_run, Path(out_dir) / "artifact"))
     if not artifact:
-        raise SystemExit("rt_seed needs artifact=<cohort.jsonl.gz>")
+        raise SystemExit(
+            "rt_seed needs export_run=<the export lane's run id> or artifact=<cohort.jsonl.gz>")
     generation = (args.get("generation") or "").strip() or GENERATION
     settings = load_settings(args.get("settings") or None)
     model = load_model(args.get("model") or None)
     backfill = str(args.get("backfill") or "").strip().lower() == "true"
+    reseed = str(args.get("reseed") or "").strip().lower() == "true"
 
     conn = conn_factory()
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
             raise SystemExit("autodedup realtime store absent — migration 539 not applied")
-        control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING])
+        existing = _rows(conn, RT_CALIBRATION_PRESENT_SQL, {"generation": generation})
+        if existing and not reseed:
+            raise SystemExit(
+                f"generation {generation!r} is already seeded (calibration "
+                f"{str(existing[0][1])!r}, cut {existing[0][2]}) — a re-seed re-cuts the frozen "
+                "calibration every stored decision of this generation was taken under. Pass "
+                "reseed=true to mean it, or seed a new generation.")
+        scope_key = scope_setting_key(generation)
+        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING])
         try:
-            scope = resolve_scope(args.get(SCOPE_SETTING), control.get(SCOPE_SETTING))
+            scope = resolve_scope(args.get(SCOPE_SETTING),
+                                  read_scope_setting(control, generation))
             # Proved at SEED time rather than at the first pass: a quarter the register cannot
             # place is a scope whose entrant sweep could never walk it (W9d-3).
             resolve_scope_parents(conn, scope)
+            max_schema_mb = _setting_number(
+                args.get(BUDGET_SETTING, control.get(BUDGET_SETTING)), MAX_SCHEMA_MB)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         try:
-            storage = storage_guard(conn, generation, scope, _setting_number(
-                args.get(BUDGET_SETTING, control.get(BUDGET_SETTING)), MAX_SCHEMA_MB))
+            storage = storage_guard(conn, generation, scope, max_schema_mb)
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
 
@@ -1391,7 +1646,7 @@ def run_rt_seed(
             # without an argument then runs the scope this generation was seeded for, and can
             # never quietly widen to one it has no fingerprints for.
             _exec(conn, RT_SETTING_WRITE_SQL, {
-                "key": SCOPE_SETTING, "value": json.dumps(scope.as_json()),
+                "key": scope_key, "value": json.dumps(scope.as_json()),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
             if backfill:
                 store = SqlStore(conn, generation, store_floor=settings.store_floor)
@@ -1418,6 +1673,10 @@ def run_rt_seed(
                         CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0, CURSOR_SCOPE: 0},
             "backfilled": written,
             "scope": scope.as_json(),
+            "scope_key": scope_key,
+            "reseed": bool(reseed),
+            "artifact": str(artifact),
+            "export_run": export_run or None,
             "artifact_listings": len(ds.listings),
             "in_scope_listings": len(in_scope),
             "storage": storage,

@@ -571,7 +571,8 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     conn.admin_parents[490245] = 554782
     conn.listings[9_001] = {"first_seen_at": conn.now, "inactive_at": None, "is_active": True}
     conn.snapshots.append({"id": 4_242, "listing_id": 9_001, "scraped_at": conn.now})
-    monkeypatch.setenv(ENV_FLAG, "true")
+    # DARK: seeding is the step BEFORE the switch, so it never consults the variable (W9e/R1).
+    monkeypatch.delenv(ENV_FLAG, raising=False)
 
     out = run_rt_seed(lambda: conn, {"artifact": str(artifact), "backfill": "true"}, tmp_path)
 
@@ -585,9 +586,11 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     stored = conn.calibration[GEN]
     assert stored["digest"] == out["calibration_digest"]
     assert conn.rt_fp and conn.fp_key
-    # And it is dark like everything else in this lane.
-    monkeypatch.delenv(ENV_FLAG, raising=False)
-    assert run_rt_seed(lambda: conn, {"artifact": str(artifact)}, tmp_path)["skipped"] == "dark"
+    # And it is idempotent: a second seed of a seeded generation is refused, because a re-seed
+    # re-cuts the calibration every stored decision was taken under (W9e/R1).
+    with pytest.raises(SystemExit) as raised:
+        run_rt_seed(lambda: conn, {"artifact": str(artifact)}, tmp_path)
+    assert "reseed" in str(raised.value)
 
 
 # --------------------------------------------- E77: the lane's facts ARE the export's facts

@@ -75,6 +75,11 @@ class FakePg:
         self.in_transaction = False
         # `public.ruian_admin_units`: cast_obce code -> parent obec code (W9d-3).
         self.admin_parents: dict[int, int] = {}
+        # The scope's membership snapshot and the two ledgers W9e rails the lane with: the
+        # entrant cadence's scan log and the rolling-day retirement log.
+        self.scope_ids: dict[tuple[str, str, int], dict[str, Any]] = {}
+        self.scope_scans: list[dict[str, Any]] = []
+        self.retire_events: list[dict[str, Any]] = []
         self.transactions = 0
         self.rolled_back = 0
         # What `pg_total_relation_size` over schema `autodedup` answers — the storage guard's
@@ -102,6 +107,9 @@ class FakePg:
             "cluster_conflicts": [dict(row) for row in self.cluster_conflicts],
             "cells": {k: dict(v) for k, v in self.cells.items()},
             "cursors": {k: dict(v) for k, v in self.cursors.items()},
+            "scope_ids": {k: dict(v) for k, v in self.scope_ids.items()},
+            "scope_scans": [dict(row) for row in self.scope_scans],
+            "retire_events": [dict(row) for row in self.retire_events],
         }
 
     def restore(self, state: Mapping[str, Any]) -> None:
@@ -113,6 +121,9 @@ class FakePg:
         self.cluster_conflicts = state["cluster_conflicts"]
         self.cells = state["cells"]
         self.cursors = state["cursors"]
+        self.scope_ids = state["scope_ids"]
+        self.scope_scans = state["scope_scans"]
+        self.retire_events = state["retire_events"]
 
 
 class _Tx:
@@ -428,6 +439,9 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return sorted(db.mnl)
 
     # ---------------------------------------------------------------- calibration
+    if sql == S.RT_CALIBRATION_PRESENT_SQL:
+        row = db.calibration.get(gen)
+        return [] if row is None else [(gen, row["digest"], db.now)]
     if sql == S.RT_CALIBRATION_READ_SQL:
         row = db.calibration.get(gen)
         return [] if row is None else [(gen, row["digest"], row["n_listings"],
@@ -509,18 +523,65 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         departed = [i for i in slice_ids if not _in_scope(db, i, p)]
         return [(max(slice_ids) if slice_ids else int(p["after_id"]),
                  len(slice_ids), departed)]
-    # The sixth feed: what the scope has started holding and no cursor ever saw (W9d-3).
-    if sql == S.RT_SCOPE_ENTER_SQL:
+    # The sixth feed (W9d-3), as W9e pays for it (R3): the wide block walk on `public` is a
+    # cadence-driven REFRESH of the snapshot, and an ordinary pass claims out of the snapshot.
+    if sql == S.RT_SCOPE_BLOCK_SQL:
         obec, cast_obce = p["obec"], p.get("cast_obce")
-        slice_ids = sorted(
+        found = sorted(
             listing_id for listing_id, place in db.locations.items()
-            if listing_id > int(p["after_id"])
-            and place.get("obec_kod") == obec
-            and (cast_obce is None or place.get("cast_obce_kod") == cast_obce)
-        )[:int(p["limit"])]
-        entered = [i for i in slice_ids if (gen, i) not in db.rt_fp]
-        return [(max(slice_ids) if slice_ids else int(p["after_id"]),
-                 len(slice_ids), entered)]
+            if place.get("obec_kod") == obec
+            and (cast_obce is None or place.get("cast_obce_kod") == cast_obce))
+        return [(i, db.locations[i].get("resolved_at")) for i in found[:int(p["limit"])]]
+    if sql == S.RT_SCOPE_IDS_WRITE_SQL:
+        for listing_id, resolved in zip(p["listing_ids"], p["resolved"]):
+            db.scope_ids[(gen, str(p["block_key"]), int(listing_id))] = {
+                "resolved_at": resolved, "refreshed_at": db.now}
+        return []
+    if sql == S.RT_SCOPE_IDS_PRUNE_SQL:
+        keep = set(int(i) for i in p["listing_ids"])
+        db.scope_ids = {key: row for key, row in db.scope_ids.items()
+                        if not (key[0] == gen and key[1] == str(p["block_key"])
+                                and key[2] not in keep)}
+        return []
+    if sql == S.RT_SCOPE_ENTRANTS_SQL:
+        cut = db.now - timedelta(seconds=int(p["lag"]))
+        rows = sorted((listing_id, row["resolved_at"])
+                      for (g, _block, listing_id), row in db.scope_ids.items()
+                      if g == gen and listing_id > int(p["after_id"])
+                      and (row["resolved_at"] is None or row["resolved_at"] <= cut)
+                      and (gen, listing_id) not in db.rt_fp)
+        return rows[:int(p["limit"])]
+    if sql == S.RT_SCOPE_SCAN_STATE_SQL:
+        out: dict[str, list[Any]] = {}
+        window = db.now - timedelta(hours=int(p["hours"]))
+        for row in db.scope_scans:
+            if row["generation"] != gen:
+                continue
+            state = out.setdefault(row["block_key"], [None, 0])
+            last = state[0]
+            if last is None or row["scanned_at"] > last:
+                state[0] = row["scanned_at"]
+            if row["scanned_at"] > window:
+                state[1] += 1
+        return [(block, (db.now - last).total_seconds(), scans)
+                for block, (last, scans) in sorted(out.items())]
+    if sql == S.RT_SCOPE_SCAN_WRITE_SQL:
+        db.scope_scans.append({"generation": gen, "block_key": str(p["block_key"]),
+                               "scanned_at": db.now, "rows_found": int(p["rows_found"]),
+                               "elapsed_ms": p["elapsed_ms"]})
+        return []
+    # The rolling-day retirement window (W9e/R2).
+    if sql == S.RT_RETIRE_WINDOW_SQL:
+        window = db.now - timedelta(hours=int(p["hours"]))
+        rows = sorted((row["retired_at"], row["store_rows"], row["n_retired"])
+                      for row in db.retire_events
+                      if row["generation"] == gen and row["retired_at"] > window)
+        return [(sum(row[2] for row in rows), rows[0][1] if rows else None)]
+    if sql == S.RT_RETIRE_EVENT_WRITE_SQL:
+        db.retire_events.append({"generation": gen, "retired_at": db.now,
+                                 "n_retired": int(p["n_retired"]),
+                                 "store_rows": int(p["store_rows"])})
+        return []
     if sql == S.RT_SCOPE_PARENT_OBEC_SQL:
         return [(int(code), int(db.admin_parents[int(code)])) for code in p["codes"]
                 if int(code) in db.admin_parents]

@@ -36,6 +36,7 @@ from autodedup.incremental_lane import (
     SqlWork,
     resolve_scope_parents,
     run_incremental,
+    scope_setting_key,
     storage_guard,
 )
 from autodedup.incremental_sql import (
@@ -66,6 +67,14 @@ SCOPE = Scope((ScopeBlock("obec", 563510), ScopeBlock("cast_obce", 490245)))
 def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
            cast_obce: int | None = None) -> None:
     db.locations[int(listing_id)] = {"obec_kod": obec, "cast_obce_kod": cast_obce}
+
+
+def _calibrated(db: FakePg, generation: str = GEN) -> FakePg:
+    """A SEEDED generation. A pass over an unseeded one is a green skip (W9e/R1), so every
+    test about what a pass REFUSES has to seed it first."""
+    db.calibration[generation] = {"digest": "d", "n_listings": 3, "payload": {},
+                                  "artifact_url": None, "settings": {}, "model_version": "m"}
+    return db
 
 
 def _fp_row(is_active: bool = True) -> dict:
@@ -119,7 +128,9 @@ def test_an_empty_or_missing_scope_is_a_hard_error_never_the_whole_corpus() -> N
 
 
 def test_the_lane_refuses_an_empty_scope_setting(tmp_path, monkeypatch) -> None:
-    conn = FakePg()
+    # SEEDED (W9e/R1): an UNseeded generation is a green skip, and only a seeded one can have a
+    # scope row that is wrong.
+    conn = _calibrated(FakePg())
     conn.settings[SCOPE_SETTING] = []
     monkeypatch.setenv(ENV_FLAG, "true")
     with pytest.raises(SystemExit) as raised:
@@ -132,7 +143,7 @@ def test_the_lane_refuses_an_empty_scope_setting(tmp_path, monkeypatch) -> None:
 
 
 def test_the_guard_refuses_a_pass_when_the_schema_is_over_budget(tmp_path, monkeypatch):
-    conn = FakePg()
+    conn = _calibrated(FakePg())
     conn.schema_bytes = 500 * 1_048_576
     conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     conn.settings[BUDGET_SETTING] = 400
@@ -533,7 +544,8 @@ def test_rt_rescope_persists_the_new_scope_and_requeues_the_entrants(tmp_path, m
     out = run_incremental(lambda: conn, {"generation": GEN, SCOPE_SETTING: "obec:563510",
                                          "rt_rescope": "true"}, tmp_path)
     assert out["rescoped"] is True
-    assert conn.settings[SCOPE_SETTING] == [{"grain": "obec", "code": 563510}]
+    # The row the rescope persists is the GENERATION's (W9e/R4), never the legacy global one.
+    assert conn.settings[scope_setting_key(GEN)] == [{"grain": "obec", "code": 563510}]
     # The entrant sweep restarts, so everything the new scope holds is re-claimed.
     assert conn.cursors[CURSOR_ENTER]["last_listing_id"] == 0
 
@@ -585,7 +597,10 @@ def test_a_listing_whose_location_resolves_into_the_scope_later_is_claimed() -> 
                                          drift_slice=0).claim(50) if item.feed == "entered"]
 
 
-def test_the_entrant_sweep_walks_one_block_a_pass_and_wraps() -> None:
+def test_the_entrant_sweep_refreshes_one_block_and_claims_from_the_snapshot() -> None:
+    """W9e/R3 moved the cost, not the coverage: the wide walk of a block on `public` fills
+    `autodedup.rt_scope_ids` on a cadence, one block at a time, and the pass claims what the
+    snapshot holds — so both blocks' entrants are reached without either walk being per-pass."""
     db = FakePg()
     db.admin_parents[490245] = 554782
     for listing_id, place in ((1, {"obec": 563510}), (2, {"cast_obce": 490245})):
@@ -598,10 +613,14 @@ def test_the_entrant_sweep_walks_one_block_a_pass_and_wraps() -> None:
                    parents={490245: 554782})
     first = [item.listing_id for item in work.claim(50) if item.feed == "entered"]
     work.commit([WorkItem(listing_id, "entered", None, None) for listing_id in first])
+    for listing_id in first:                      # the pass fingerprints what it decided
+        db.rt_fp[(GEN, listing_id)] = _fp_row()
+    assert len(db.scope_scans) == 1, "one block's walk a pass, never the scope's"
+    db.now += timedelta(hours=12)
     second_work = SqlWork(db, SCOPE, GEN, straggler_window=0, revive_slice=0, drift_slice=0,
                           parents={490245: 554782})
     second = [item.listing_id for item in second_work.claim(50) if item.feed == "entered"]
-    assert first == [1] and second == [2], "one block a pass, then the next"
+    assert sorted(first + second) == [1, 2], "both blocks are reached, one walk at a time"
 
 
 def test_a_quarter_block_needs_its_parent_obec_resolved() -> None:
