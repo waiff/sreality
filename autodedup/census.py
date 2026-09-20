@@ -436,7 +436,7 @@ WITH block AS (
         l.disposition                       AS disposition,
         l.area_m2                           AS area_m2,
         l.first_seen_at                     AS first_seen_at,
-        coalesce(l.inactive_at, now())      AS ended_at
+        coalesce(l.last_seen_at, l.inactive_at, now()) AS ended_at
     FROM listings l
     JOIN listing_location ll ON ll.listing_id = l.id
     WHERE (%(obec_kod)s::bigint IS NULL OR ll.obec_kod = %(obec_kod)s::bigint)

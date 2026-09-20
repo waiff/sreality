@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
-from autodedup.dataset import Dataset, Image, Listing, cosine_norm, hamming64
+from autodedup.dataset import Dataset, Image, Listing, cosine_norm, hamming64, live_end_stamp
 from autodedup.normalize import canonical_attr
 from toolkit.room_taxonomy import ROOM_FAMILIES
 
@@ -1164,9 +1164,26 @@ def _tag_features(
     return feats
 
 
-def _window(listing: Listing) -> tuple[float | None, float | None]:
+def window_end_stamp(listing: Listing, settings: "Settings") -> str | None:
+    """Which end-of-life stamp the RULE FLOOR reads for this advert (W8).
+
+    `dataset.live_end_stamp` is the TRUE end — the last sighting — and the benchmark always
+    reads it. The engine reads it only when `live_window_from_sighting` says so, because the
+    truer clock is also the LOOSER one here: every co-live measure shrinks, so K-B's
+    disjoint-window clause and the E46/E47 co-live guards all fire in the merging direction.
+    Measured on g5 (`w8/evidence/clock.json`): +503 merges, operator merge recall 79.01% ->
+    86.76% with 0 operator false merges, but +2 gold false merges and +10 vision-only ones, all
+    in one ceskereality developer's 21 identically-priced 27 m2 adverts — the shape the standing
+    ruling protects. It flips on when the hazard context can hold that block, and the fitted
+    model owes a refit first: `overlap_days` and `gap_days` move on 3,120 inactive listings."""
+    if getattr(settings, "live_window_from_sighting", False):
+        return live_end_stamp(listing)
+    return listing.inactive_at or listing.last_seen_at
+
+
+def _window(listing: Listing, settings: "Settings") -> tuple[float | None, float | None]:
     start = parse_ts(listing.first_seen_at)
-    end = parse_ts(listing.inactive_at) or parse_ts(listing.last_seen_at)
+    end = parse_ts(window_end_stamp(listing, settings))
     if start is not None and end is not None and end < start:
         end = start
     return start, end
@@ -1419,8 +1436,8 @@ def pair_features(
     )
 
     # --- TIME -------------------------------------------------------------------------
-    start_a, end_a = _window(la)
-    start_b, end_b = _window(lb)
+    start_a, end_a = _window(la, settings)
+    start_b, end_b = _window(lb, settings)
     if start_a is not None and start_b is not None:
         first_end = end_a if start_a <= start_b else end_b
         later_start = max(start_a, start_b)

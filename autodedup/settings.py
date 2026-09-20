@@ -78,6 +78,12 @@ class Settings:
     # with the bar, so the default sits at the wide end that still clears the 61.6-day case.
     developer_colive_guard: bool = True
     colive_overlap_days: float = 30.0
+    # W8: read an advert's live window as ending at its last SIGHTING rather than at the
+    # delisting-DETECTION stamp (`dataset.live_end_stamp`). True is the honest clock and the one
+    # the benchmark always uses; the engine defaults to False because the truer clock is the
+    # looser one for every co-live test it feeds — see `features.window_end_stamp` for the
+    # measurement and the refit debt.
+    live_window_from_sighting: bool = False
     # E48: the per-stratum merge switch D3 asks for. A key is `<layer>|<side>` spelled exactly
     # as `evaluate.decide_stratum` spells it (K-A/K-B/K-C/model x same/cross); the value is that
     # stratum's own `t_hi`, and NULL is not "missing" but PROPOSE-ONLY — the stratum could not

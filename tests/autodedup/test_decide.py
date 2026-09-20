@@ -174,6 +174,29 @@ def test_certificate_b_requires_disjoint_active_windows() -> None:
     assert not disjoint_windows(early, unknown)
 
 
+def test_which_end_stamp_k_b_reads_is_a_setting_not_a_second_spelling() -> None:
+    """W8: the delisting-DETECTION stamp keeps an advert nominally live for up to 70 days.
+
+    The honest clock (`live_window_from_sighting`) says these two never ran together; the
+    default keeps the wider window, under which they did, so K-B does not fire."""
+    from dataclasses import replace
+
+    feats = _feats(same_source=1.0, same_broker_key=1.0, containment_max=0.95,
+                   area_rel_diff=0.005)
+    gone = _listing(1, first_seen_at="2026-06-01T00:00:00+00:00",
+                    last_seen_at="2026-07-18T00:00:00+00:00",
+                    inactive_at="2026-09-07T00:00:00+00:00", is_active=False)
+    successor = _listing(2, first_seen_at="2026-08-03T00:00:00+00:00",
+                         last_seen_at="2026-08-06T00:00:00+00:00",
+                         inactive_at="2026-09-08T00:00:00+00:00", is_active=False)
+    assert not disjoint_windows(gone, successor, SETTINGS)
+    assert not certificate_b(feats, gone, successor, SETTINGS)
+
+    honest = replace(SETTINGS, live_window_from_sighting=True)
+    assert disjoint_windows(gone, successor, honest)
+    assert certificate_b(feats, gone, successor, honest)
+
+
 def test_certificate_c_needs_four_ordered_non_catalog_matches() -> None:
     base = dict(phash_tight_matches=4.0, seq_monotone_ratio=0.9, area_rel_diff=0.02,
                 dispo_equal=1.0, catalog_ratio_max=0.1)

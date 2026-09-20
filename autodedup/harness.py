@@ -494,7 +494,7 @@ def _side(fp: Fingerprint, listing: Listing) -> list[tuple[str, str]]:
         ("ruian", str(fp.ruian_adm_kod)),
         ("pin", f"{fp.pin_key or '-'} r={loc.uncertainty_radius_m}"),
         ("images", f"{fp.n_images} (non-catalog {len(fp.image_hashes)})"),
-        ("window", f"{fp.first_seen_at} .. {fp.inactive_at or fp.last_seen_at}"),
+        ("window", f"{fp.first_seen_at} .. {fp.last_seen_at or fp.inactive_at}"),
         ("desc", " ".join((listing.description or "").split())[:60]),
     ]
 

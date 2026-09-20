@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup import judge_prompts as prompts
-from autodedup.dataset import CATALOG_POP_MIN, Image, Listing, cosine_norm
+from autodedup.dataset import CATALOG_POP_MIN, Image, Listing, cosine_norm, live_end_stamp
 from autodedup.export import NAME_TOKEN, scrub_description
 from autodedup.features import STREET_GRAIN_RANK
 from autodedup.fingerprint import dominant_family, family_scores, logical_tag
@@ -391,7 +391,7 @@ def listing_digest(listing: Listing, *, truncate: bool = True) -> ListingDigest:
         price_history=list(listing.price_history or [])[-MAX_PRICE_POINTS:],
         attributes=attributes,
         first_seen=_day(listing.first_seen_at),
-        last_seen=_day(listing.inactive_at or listing.last_seen_at),
+        last_seen=_day(live_end_stamp(listing)),
         active=bool(listing.is_active),
         description=description,
         description_truncated=truncated,

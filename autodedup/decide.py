@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from autodedup.dataset import Listing
-from autodedup.features import Feats, evidence_families, parse_ts
+from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import pair_veto
 from autodedup.model import LogisticModel
@@ -76,15 +76,14 @@ def present_value(feats: Feats, name: str) -> float | None:
     return float(value) if present else None
 
 
-def disjoint_windows(la: Listing, lb: Listing) -> bool:
+def disjoint_windows(la: Listing, lb: Listing, settings: Settings | None = None) -> bool:
     """K-B's load-bearing clause: the two adverts were never live at the same time.
 
-    Unknown is not disjoint — a missing window can never assert the absence of overlap."""
+    Unknown is not disjoint — a missing window can never assert the absence of overlap. Which
+    end stamp counts is `features.window_end_stamp`'s question, not a second spelling here."""
+    cfg = settings or Settings()
     starts = (parse_ts(la.first_seen_at), parse_ts(lb.first_seen_at))
-    ends = (
-        parse_ts(la.inactive_at) or parse_ts(la.last_seen_at),
-        parse_ts(lb.inactive_at) or parse_ts(lb.last_seen_at),
-    )
+    ends = (parse_ts(window_end_stamp(la, cfg)), parse_ts(window_end_stamp(lb, cfg)))
     if any(value is None for value in starts) or any(value is None for value in ends):
         return False
     return max(starts[0], starts[1]) > min(ends[0], ends[1])  # type: ignore[operator]
@@ -103,7 +102,9 @@ def certificate_a(feats: Feats) -> bool:
     )
 
 
-def certificate_b(feats: Feats, la: Listing, lb: Listing) -> bool:
+def certificate_b(
+    feats: Feats, la: Listing, lb: Listing, settings: Settings | None = None
+) -> bool:
     """One broker's own re-post on one portal: same text, same size, never live together."""
     area = present_value(feats, "area_rel_diff")
     containment = present_value(feats, "containment_max")
@@ -114,7 +115,7 @@ def certificate_b(feats: Feats, la: Listing, lb: Listing) -> bool:
         and containment >= CERT_B_CONTAINMENT
         and area is not None
         and area <= CERT_B_AREA
-        and disjoint_windows(la, lb)
+        and disjoint_windows(la, lb, settings)
     )
 
 
@@ -150,7 +151,7 @@ def certificate_of(
     back on."""
     if settings is not None and settings.certificate_ka_enabled and certificate_a(feats):
         return "K-A"
-    if certificate_b(feats, la, lb):
+    if certificate_b(feats, la, lb, settings):
         return "K-B"
     if certificate_c(feats):
         return "K-C"
