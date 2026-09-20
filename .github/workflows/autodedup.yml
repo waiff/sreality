@@ -204,7 +204,9 @@ name: "AUTODEDUP: engine lane"
 #             now stops that shipping again is not this mode: `rt_seed` writes a per-listing
 #             fact baseline and every scheduled pass re-checks a slice of it before it writes
 #             anything (E84). This mode remains the field-by-field report you run when the gate
-#             refuses.
+#             refuses. `population=artifact` makes the live side read the cohort's own pHash
+#             counts instead of the frozen table — the exact rows `rt_seed` writes — so a
+#             seed's effect on the certificates is measurable read-only, before seeding.
 #
 #   rt_seed - READS the artifact and `public`, WRITES schema `autodedup` only. Cuts a
 #             generation's FROZEN calibration from an export run's cohort artifact, starts its
@@ -277,7 +279,7 @@ name: "AUTODEDUP: engine lane"
 # what each implied label's `sample_rank` is a rank UNDER) and timeout_ms; rt_seed accepts
 # export_run, artifact, settings (required), model (required), generation, rt_scope, backfill,
 # reseed and parity_n; rt_parity accepts export_run, cohort, n, pairs, seed, generation,
-# settings and model.
+# settings, model and population (frozen, the default, or artifact).
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
