@@ -153,7 +153,9 @@ class Settings:
     # `development_size_min_wide` OR a block density at or above
     # `development_block_density_min`. Both definitions and every constant below were written
     # down and committed BEFORE the first arm ran (E88) — they are a pre-registration, not a
-    # fit, and `autodedup/development.py` carries the two term lists.
+    # fit, and `autodedup/development.py` carries the two term lists. REFUTED (E89, D32): the
+    # rule stays here as DATA and OFF; both definitions cost more true duplicates than the
+    # honest clock buys, and the sealed read makes the NARROW row worse than g6 outright.
     development_hold_mode: str = "off"
     # A marker is a property of the FAMILY, so a term has to be in at least this share of its
     # members: a serial poster re-posts one template, so a genuine project marker travels with
@@ -362,21 +364,22 @@ class Settings:
         # buys the honest clock nothing and cannot stand as its price. E65 is the only payment
         # a sealed read has measured, and the honest clock's true price is an open question
         # D30 (vii) owes, not a row this gate may assume.
-        # E88 (W12) widens the payment the gate accepts by exactly one alternative: the
-        # new-development HOLD, which withholds a K-B certificate where the hazard the standing
-        # ruling names actually lives instead of withholding it everywhere. E87 still binds —
-        # a gate may only accept a price a sealed read has measured — so the alternative is
-        # admissible only once this wave's verifier has read it on the W12 seal, and until then
-        # the one file that exercises it is a CANDIDATE row, not a promoted one.
-        if (self.live_window_from_sighting and self.certificate_b_min_images <= 0.0
-                and self.development_hold_mode == "off"):
+        # E88 (W12) briefly widened that payment by one alternative — the new-development HOLD,
+        # aimed at the hazard instead of at every K-B pair — and E89 takes it back the same way
+        # E87 took back E85's, on the same seal's test side: the NARROW hold merges 145 of 238
+        # reliable sealed duplicates against g6's 177 (McNemar gained 7, lost 39, p < 1e-5) and
+        # removes 0 sealed false merges, so it is a NEGATIVE price, not a price. E65 is still
+        # the only payment a sealed read has measured, and the honest clock's true price stays
+        # the open question D30 (vii) / D32 (v) owes, not a row this gate may assume.
+        if self.live_window_from_sighting and self.certificate_b_min_images <= 0.0:
             raise ValueError(
                 "live_window_from_sighting needs a price: the E65 image floor "
-                "(certificate_b_min_images) or the E88 new-development hold "
-                "(development_hold_mode). The honest clock is what lets a developer's serial "
-                "template re-posts satisfy every clause of K-B, and with neither price the "
+                "(certificate_b_min_images). The honest clock is what lets a developer's serial "
+                "template re-posts satisfy every clause of K-B, and without that floor the "
                 "certificate rests on no observation of the unit (E87: the E85 family guard is "
-                "measurably inert on the W11 seal and does not pay for it)"
+                "measurably inert on the W11 seal and does not pay for it; E89: the E88 "
+                "new-development hold is measurably NEGATIVE on the W12 seal and does not "
+                "either)"
             )
         if self.live_window_from_sighting and self.certificate_b_min_gap_days <= 0.0:
             raise ValueError(

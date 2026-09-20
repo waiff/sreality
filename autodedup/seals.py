@@ -73,6 +73,19 @@ SPENT_SEALS: dict[str, str] = {
         "SEED, and `seal_id` now names a seed-bearing seal by map AND seed rather than by the "
         "map alone (the W12 seal ebc141fa… is this map under seed 20260925)."
     ),
+    "ebc141fa51555bf7e2dd1757d84fb912e907c377e927e1b5c6de6132844d1b24": (
+        "W12's seal: W11's map (4456 listings, 664 groups — M108 found the map is a FIXPOINT "
+        "over this cohort and these arms) under a fresh seed 20260925, the first seal named by "
+        "map AND seed. SPENT by W12's verification, which opened it ONCE to rule D32: the E88 "
+        "NARROW hold merges 145 of 238 reliable sealed labelled duplicates against g6's 177 "
+        "(McNemar gained 7, lost 39, exact p < 1e-5) and removes 0 sealed false merges, while "
+        "the honest clock alone gains 12 and loses 0 (p = 0.00049); all three arms carry 0 "
+        "reliable false merges at pair, block, family and cluster grain. Its test side holds "
+        "NO contested pair, so it is spent as evidence about RECALL and is silent on the "
+        "hazard that refused W11 (M112): the next rule read at that grain owes a seal whose "
+        "test side carries the contested development families, which today means an operator "
+        "ruling on them first."
+    ),
     "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884": (
         "W9's fresh seal (4456 listings, 663 groups), seed 20260922. SPENT because it was read "
         "TWICE: once for the refused g7 refit (D25) and once for W10's verification, which is "

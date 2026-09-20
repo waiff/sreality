@@ -40,8 +40,17 @@ def _kb(lo: int, hi: int) -> Decision:
 
 
 def _settings(mode: str) -> Settings:
-    return Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
-                    development_hold_mode=mode)
+    """The W12 arms, built the way they were MEASURED — by assignment, not through `validate`.
+
+    E89 took back the payment the gate briefly accepted from the hold, so an honest-clock row
+    with no E65 floor is not constructible from a settings file any more. That is the gate
+    doing its job and it is asserted below; these tests are about what the HOLD does, so they
+    build the refuted arms by hand exactly as the W12 build and verification did."""
+    settings = Settings()
+    settings.live_window_from_sighting = True
+    settings.certificate_b_min_gap_days = 1.0 / 1440.0
+    settings.development_hold_mode = mode
+    return settings
 
 
 # --- the family -------------------------------------------------------------------------
@@ -157,13 +166,26 @@ def test_off_is_inert() -> None:
 
 # --- the gates ---------------------------------------------------------------------------
 
-def test_the_honest_clock_may_be_paid_for_by_the_floor_or_by_the_hold_never_by_neither() -> None:
+def test_the_hold_is_not_a_price_the_gate_accepts_for_the_honest_clock() -> None:
+    """E89: the widening E88 asked for, taken back on the seal that measured it.
+
+    W12's verification read the W12 seal once and priced the NARROW hold at 145 of 238 sealed
+    reliable duplicates against g6's 177 — a NEGATIVE price — so under E87 the gate may not
+    accept it. The E65 image floor is again the only payment `validate` knows."""
     with pytest.raises(ValueError, match="needs a price"):
         Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0)
+    with pytest.raises(ValueError, match="E89"):
+        Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
+                 development_hold_mode="narrow")
+    with pytest.raises(ValueError, match="E89"):
+        Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
+                 development_hold_mode="wide")
+    # The floor still pays, and the hold is still constructible BESIDE it — the rule ships as
+    # data and off, and nothing about E89 makes the mechanism unbuildable.
     Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
              certificate_b_min_images=1.0)
     Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0,
-             development_hold_mode="narrow")
+             certificate_b_min_images=1.0, development_hold_mode="narrow")
 
 
 def test_the_hold_may_not_run_without_the_E84_gap_rail() -> None:
