@@ -51,6 +51,10 @@ class Settings:
     # BUILDING (one RUIAN point + disposition + area), which is exactly the developer-unit
     # false-merge shape. Kept as code so an evaluation can switch it back on.
     certificate_ka_enabled: bool = False
+    # E60 (W8): two adverts printing the same rare, pure agency order code are one order.
+    # ON by default — 0 operator and 0 gold false merges on g5, and it is the only certificate
+    # resting on a fact the broker states rather than on a resemblance.
+    certificate_kr_enabled: bool = True
     # E45: the merge zone needs one UNIT-specific corroboration. K-A + interior_match_ratio >= 0.5
     # scored 88.6% (n=35) against K-A's 52.6% overall; K-B (the disjoint-window re-post shape)
     # scored 100% (n=94).

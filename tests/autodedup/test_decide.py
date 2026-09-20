@@ -18,6 +18,7 @@ from autodedup.decide import (
     decide_pair,
     developer_colive,
     developer_signature,
+    certificate_r,
     disjoint_windows,
     present_value,
     stratum_key,
@@ -207,7 +208,7 @@ def test_certificate_c_needs_four_ordered_non_catalog_matches() -> None:
     assert not certificate_c(_feats(**{**base, "dispo_equal": 0.0}))
 
 
-def test_certificate_order_is_a_then_b_then_c() -> None:
+def test_certificate_order_is_r_then_a_then_b_then_c() -> None:
     early = _listing(1, inactive_at="2024-05-01T00:00:00+00:00",
                      last_seen_at="2024-05-01T00:00:00+00:00")
     late = _listing(2, first_seen_at="2025-01-01T00:00:00+00:00")
@@ -216,7 +217,31 @@ def test_certificate_order_is_a_then_b_then_c() -> None:
                    phash_tight_matches=6.0, seq_monotone_ratio=1.0, catalog_ratio_max=0.0)
     assert certificate_of(every, early, late, KA_SETTINGS) == "K-A"
     assert certificate_of(_feats(), early, late, KA_SETTINGS) is None
-    assert set(CERTIFICATES) == {"K-A", "K-B", "K-C"}
+    assert set(CERTIFICATES) == {"K-A", "K-B", "K-C", "K-R"}
+    # E60 is read before every resemblance: the broker SAID which order this is.
+    coded = dict(every)
+    coded["ref_code_shared"] = (1.0, True)
+    assert certificate_of(coded, early, late, KA_SETTINGS) == "K-R"
+
+
+def test_a_shared_order_code_certifies_and_a_differing_one_says_nothing() -> None:
+    """E60. The feature is PRESENT only when the two bodies share a code, so the `absent` case
+    below is both `no codes at all` and `two different codes` — W7 refuted reading the second
+    as a negative (395722 x 486034: N115815 on ceskereality, N118731 on sreality, one flat)."""
+    from dataclasses import replace
+
+    early = _listing(1, inactive_at="2024-05-01T00:00:00+00:00",
+                     last_seen_at="2024-05-01T00:00:00+00:00")
+    late = _listing(2, first_seen_at="2025-01-01T00:00:00+00:00")
+    shared = _feats(ref_code_shared=1.0)
+    assert certificate_r(shared)
+    assert certificate_of(shared, early, late, SETTINGS) == "K-R"
+    assert not certificate_r(_feats())
+    assert certificate_of(_feats(), early, late, SETTINGS) is None
+    # the order code alone satisfies E45 — no image, no rare token, no unit number needed
+    assert unit_evidence(shared, SETTINGS)
+    off = replace(SETTINGS, certificate_kr_enabled=False)
+    assert certificate_of(shared, early, late, off) is None
 
 
 def test_k_a_is_demoted_by_default_and_switchable_for_the_evaluation() -> None:

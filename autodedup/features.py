@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Dataset, Image, Listing, cosine_norm, hamming64, live_end_stamp
 from autodedup.normalize import canonical_attr
+from autodedup.text_facts import MAX_CODE_POPULATION, reference_codes
 from toolkit.room_taxonomy import ROOM_FAMILIES
 
 if TYPE_CHECKING:  # the sibling modules are imported for their types only, never at runtime
@@ -45,9 +46,10 @@ DIST_FLOOR_M: float = 25.0
 
 # `FEATURE_ORDER` is a closed vocabulary; this is its version, bumped whenever the tuple changes
 # shape. v2 appends `unit_number_shared` (E45); v3 appends the two plot-area slots (W4e); v4
-# appends the room-tag-paired image slots plus `floor_stated_conflict` (W5). The lane's
-# `score_lane.FEATURE_VERSION` stamp on `autodedup.pairs` must follow this number.
-FEATURE_VERSION: int = 4
+# appends the room-tag-paired image slots plus `floor_stated_conflict` (W5); v5 appends
+# `ref_code_shared` (E60, W8). The lane's `score_lane.FEATURE_VERSION` stamp on
+# `autodedup.pairs` must follow this number.
+FEATURE_VERSION: int = 5
 
 # Comparable attribute slots: `attrs` keys (autodedup/export_sql.ATTR_COLUMNS) that carry a
 # categorical value, plus the listing-level subtype. Numeric side-areas and timestamps are not
@@ -242,6 +244,11 @@ IMG_CATALOG_MAX: float = 0.20
 
 SECONDS_PER_DAY: float = 86400.0
 
+# E60: two carriers of one order code may differ by this much in stored area and still be the
+# same order — one portal parses `užitná`, another the total. Wider than that and the code is
+# naming a project, not an order.
+CODE_AREA_TOL: float = 0.05
+
 FEATURE_ORDER: tuple[str, ...] = (
     # ATTR
     "area_rel_diff",
@@ -316,6 +323,11 @@ FEATURE_ORDER: tuple[str, ...] = (
     "floorplan_tight_match",
     "floorplan_conflict",
     "floor_stated_conflict",
+    # v5 append-only tail (E60, W8): the agency ORDER code both bodies print. The strongest
+    # positive the cohort holds was invisible to the model — `rare_token_overlap` is 0.0 on
+    # 62.8% of the pairs a shared code certifies, because a code is one token and the block
+    # corpus has to be 20 documents deep before a token can even be called rare.
+    "ref_code_shared",
 )
 
 FAMILY_OF: dict[str, str] = {
@@ -336,6 +348,7 @@ FAMILY_OF: dict[str, str] = {
     "simhash_hamming": "TXT",
     "len_ratio": "TXT",
     "rare_token_overlap": "TXT",
+    "ref_code_shared": "TXT",
     "numeric_fact_overlap": "TXT",
     "numeral_conflict": "TXT",
     "same_broker_key": "BRK",
@@ -414,6 +427,9 @@ EVIDENCE_RULES: dict[str, tuple[tuple[Condition, ...], ...]] = {
     "TXT": (
         (("rare_token_overlap", TXT_RARE_TOKENS, math.inf),),
         (("numeric_fact_overlap", TXT_NUMERIC_FACTS, math.inf),),
+        # E60: an agency order key names ONE order, which is one unit — the only text fact in
+        # this table that is unit-specific by construction rather than by rarity.
+        (("ref_code_shared", 1.0, 1.0),),
     ),
     "BRK": (
         (("same_broker_identity", 1.0, 1.0),),
@@ -730,6 +746,7 @@ class FeatureContext:
     tfidf: dict[int, dict[str, float]] = field(default_factory=dict)
     tfidf_corpus: dict[int, dict[str, float]] = field(default_factory=dict)
     rare: dict[int, set[str]] = field(default_factory=dict)
+    codes: dict[int, frozenset[str]] = field(default_factory=dict)
     pin_pop: dict[str, int] = field(default_factory=dict)
     dataset: Dataset | None = None
     _events: dict[int, list[tuple[float, float]]] = field(default_factory=dict)
@@ -759,6 +776,8 @@ class FeatureContext:
         for block, members in listings_by_block.items():
             ctx.block_docs[block] = len(members)
         ctx.corpus_docs = len(fps)
+        if dataset is not None:
+            ctx.index_reference_codes(dataset.listings)
         for listing_id, fp in fps.items():
             block = _block_of(fp)
             df = ctx.block_token_df[block]
@@ -778,6 +797,47 @@ class FeatureContext:
                 else set()
             )
         return ctx
+
+    def index_reference_codes(self, listings: Mapping[int, Listing]) -> None:
+        """The CERTIFYING agency order codes of every listing (E60): rare, and pure.
+
+        Two purity rails, both from the W7 census of all 205 band positives a shared code
+        certifies. RARE: a code carried by more than `MAX_CODE_POPULATION` listings is a
+        per-broker sequence number, not an order key (the largest certifying population
+        observed was 6, so the cap has never bound). PURE: a code whose carriers disagree about
+        a UNIT-level fact — the disposition, or the stored area beyond `CODE_AREA_TOL` — is the
+        project's code rather than one order's, and certifies nothing. The census found no such
+        code certifying two different units in this cohort; the rail is here because that is the
+        one failure mode which would be fatal, and it costs a code that could not be trusted
+        anyway."""
+        carriers: dict[str, list[int]] = {}
+        for listing_id, listing in listings.items():
+            found = reference_codes(listing.description)
+            if found:
+                self.codes[listing_id] = frozenset(found)
+            for code in found:
+                carriers.setdefault(code, []).append(listing_id)
+        certifying: dict[str, bool] = {}
+        for code, members in carriers.items():
+            if len(members) > MAX_CODE_POPULATION:
+                certifying[code] = False
+                continue
+            dispositions = {listings[i].disposition for i in members
+                            if listings[i].disposition is not None}
+            areas = [listings[i].area_m2 for i in members
+                     if listings[i].area_m2 is not None and listings[i].area_m2 > 0.0]
+            spread = (max(areas) - min(areas)) / max(areas) if areas else 0.0
+            certifying[code] = len(dispositions) <= 1 and spread <= CODE_AREA_TOL
+        for listing_id, found in list(self.codes.items()):
+            kept = frozenset(code for code in found if certifying.get(code))
+            if kept:
+                self.codes[listing_id] = kept
+            else:
+                del self.codes[listing_id]
+
+    def shared_codes(self, lo: int, hi: int) -> list[str]:
+        """The certifying codes BOTH listings print — E60's evidence, as strings."""
+        return sorted(self.codes.get(lo, frozenset()) & self.codes.get(hi, frozenset()))
 
     def attr_rarity(self, block: str, key: str, value: str) -> float:
         """Self-information of an attribute value inside its block: rare agreements score more."""
@@ -1324,6 +1384,14 @@ def pair_features(
     rare_b = ctx.rare.get(lb.id) or set()
     feats["rare_token_overlap"] = (
         (min(float(len(rare_a & rare_b)), RARE_TOKEN_CAP), True) if rare_a and rare_b else ABSENT
+    )
+    # E60: a shared agency order code is one ORDER, so it is one unit. A DIFFERING code is not
+    # evidence of anything and is therefore not a value but an absence: W6b built the conflict
+    # rule and W7 refuted it (395722 x 486034 and x 496635 are one flat carrying N115815 on
+    # ceskereality and N118731 on sreality, identical text, identical 7 974 910 Kc), so this
+    # slot is PRESENT only when it has something to say.
+    feats["ref_code_shared"] = (
+        (1.0, True) if ctx.shared_codes(la.id, lb.id) else ABSENT
     )
     numerals_a = fa.numerals or set()
     numerals_b = fb.numerals or set()

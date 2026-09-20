@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from autodedup.features import FEATURE_ORDER
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
@@ -42,10 +43,21 @@ def test_w6_gold_is_w5_gold_under_a_new_version() -> None:
 
 
 def test_the_shipped_model_loads_and_scores_the_current_feature_version() -> None:
-    model = LogisticModel.from_json(json.loads(
-        (ROOT / "models/w6_gold.json").read_text(encoding="utf-8")))
+    """W8 appends `ref_code_shared` (E60), which `w6_gold` was not fitted on: the load warns by
+    name and the model scores that slot at zero. The certificate reads the fact directly, so the
+    debt costs the SCORE a signal, not the rule floor — the refit is owed, not urgent."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as warned:
+        warnings.simplefilter("always")
+        model = LogisticModel.from_json(json.loads(
+            (ROOT / "models/w6_gold.json").read_text(encoding="utf-8")))
     assert model.version == "w6_gold"
     assert len(model.feature_order) == W6["provenance"]["feature_version"]["n_features"]
+    assert [name for name in FEATURE_ORDER if name not in set(model.feature_order)] == [
+        "ref_code_shared"
+    ]
+    assert len(warned) == 1 and "ref_code_shared" in str(warned[0].message)
 
 
 def test_the_w6_evidence_file_records_a_met_promotion_bar() -> None:

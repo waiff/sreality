@@ -29,7 +29,7 @@ from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
 ZONES: tuple[str, ...] = ("merge", "band", "reject", "veto")
-CERTIFICATES: tuple[str, ...] = ("K-A", "K-B", "K-C")
+CERTIFICATES: tuple[str, ...] = ("K-A", "K-B", "K-C", "K-R")
 SIDES: tuple[str, ...] = ("same", "cross")
 
 MIN_EVIDENCE_FAMILIES: int = 2
@@ -138,17 +138,37 @@ def certificate_c(feats: Feats) -> bool:
     )
 
 
+def certificate_r(feats: Feats) -> bool:
+    """E60: both bodies print the SAME rare agency order code.
+
+    An order number is the agency's key for ONE order, and one order is one unit: it travels
+    onto every portal the order is syndicated to and onto the re-post when the advert expires.
+    `features.index_reference_codes` has already thrown out the codes a crowd carries and the
+    codes whose carriers disagree about the unit, so what reaches here certifies.
+
+    A DIFFERING code certifies nothing in either direction — W6b built the conflict rule and W7
+    refuted it on 395722 x 486034 and 395722 x 496635, one flat carrying N115815 on
+    ceskereality and N118731 on sreality with identical text and an identical 7 974 910 Kc.
+    That is why the feature is ABSENT rather than 0.0 when the codes differ, and why this
+    reads a presence, never a value."""
+    return present_value(feats, "ref_code_shared") == 1.0
+
+
 def certificate_of(
     feats: Feats, la: Listing, lb: Listing, settings: Settings | None = None
 ) -> str | None:
     """The first certificate the pair earns, in K-A, K-B, K-C order.
 
-    K-A is off unless `settings.certificate_ka_enabled` says otherwise — an OMITTED settings row
+    K-R is read FIRST because it is the only certificate whose premise is a broker's own
+    statement about which order this advert is, rather than an inference from what the two
+    adverts look like. K-A is off unless `settings.certificate_ka_enabled` says otherwise — an OMITTED settings row
     leaves it off too, because the default must be the decision the evidence supports: K-A merged
     at 52.6% HT precision (n=98) on the gold holdout against K-B's 100% (n=94) and K-C's 97.6%
     (n=150), one RUIAN point plus disposition plus area certifying a BUILDING, which is the
     developer-unit false-merge shape itself. The code path stays so an evaluation can switch it
     back on."""
+    if (settings is None or settings.certificate_kr_enabled) and certificate_r(feats):
+        return "K-R"
     if settings is not None and settings.certificate_ka_enabled and certificate_a(feats):
         return "K-A"
     if certificate_b(feats, la, lb, settings):
@@ -215,12 +235,23 @@ def _rare_token_arm(feats: Feats, settings: Settings) -> bool:
     )
 
 
+def _ref_code_arm(feats: Feats) -> bool:
+    """E60 inside E45: an order key names one ORDER, so it is unit-grade by construction.
+
+    The arm the gate was missing. Of the pairs a shared code certifies, 62.8% carry
+    `rare_token_overlap` 0.0 — one token cannot be rare in a block of fewer than 20 documents —
+    so without this arm the strongest positive in the cohort reaches the gate with no evidence
+    family that speaks about a unit."""
+    return certificate_r(feats)
+
+
 def unit_grade_evidence(feats: Feats, settings: Settings) -> bool:
-    """The arms that held up on the holdout: interior frames, the K-B re-post, a unit number."""
+    """The arms that held up: interior frames, the K-B re-post, a unit number, an order code."""
     return (
         _interior_arm(feats, settings)
         or _repost_arm(feats, settings)
         or _unit_number_arm(feats)
+        or _ref_code_arm(feats)
     )
 
 

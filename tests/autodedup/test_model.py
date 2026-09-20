@@ -849,12 +849,18 @@ def test_the_feature_digest_moves_when_the_vocabulary_does() -> None:
 # --- the stamp is tautological; the CODE is the other half of the check ------------------------
 
 # The v4 tail (W5): twelve room-paired slots no shipped model is fitted on.
-W5_TAIL: tuple[str, ...] = ft.FEATURE_ORDER[47:]
+W5_TAIL: tuple[str, ...] = ft.TAG_FEATURE_NAMES + ("floor_stated_conflict",)
+
+# The v5 tail (W8, E60): the shared agency order code. No shipped model scores it yet — the
+# certificate reads it directly, so the debt costs precision, not the rule.
+W8_TAIL: tuple[str, ...] = ("ref_code_shared",)
 
 # The feature names `autodedup/models/w4_gold.json` was fitted WITHOUT and therefore scores at
 # zero. Empty is the goal: the next refit must shrink this tuple to () in the same commit that
 # reruns the fit, and this test is the place the debt is written down.
-W4_GOLD_UNSCORED: tuple[str, ...] = ("plot_area_rel_diff", "plot_area_exact") + W5_TAIL
+W4_GOLD_UNSCORED: tuple[str, ...] = (
+    ("plot_area_rel_diff", "plot_area_exact") + W5_TAIL + W8_TAIL
+)
 
 
 def test_the_shipped_model_names_the_features_it_cannot_score() -> None:
@@ -910,7 +916,7 @@ def test_the_w4f_refit_pays_the_debt_the_w4_model_still_carries() -> None:
     body = json.loads((ROOT / "autodedup" / "models" / "w4f_gold.json").read_text())
     stored = tuple(body["feature_order"])
     assert ft.FEATURE_ORDER[: len(stored)] == stored
-    assert ft.FEATURE_ORDER[len(stored):] == W5_TAIL
+    assert ft.FEATURE_ORDER[len(stored):] == W5_TAIL + W8_TAIL
     with pytest.warns(UserWarning, match="refit to let them pay") as warned:
         model = LogisticModel.from_json(json.dumps(body))
     assert all(name in str(warned[0].message) for name in W5_TAIL)
@@ -921,14 +927,17 @@ def test_the_w4f_refit_pays_the_debt_the_w4_model_still_carries() -> None:
 
 
 def test_w5_gold_is_the_v4_refit_and_pays_the_room_paired_slots() -> None:
-    """W5d promoted the v4 refit on the healed cohort (PROGRAM.md D16, generation g4). Unlike
-    `w4f_gold` this model was fitted on all 59 slots, so it must load with NO debt warning and
-    every room-paired slot must carry a learned weight rather than a structural zero."""
+    """W5d promoted the v4 refit on the healed cohort (PROGRAM.md D16, generation g4).
+
+    It was fitted on all 59 v4 slots. W8 appended a 60th (`ref_code_shared`, E60), so the
+    artifact now carries a refit debt of exactly that one name — the warning IS the debt, and
+    the test pins its size rather than pretending it is not there."""
     body = json.loads((ROOT / "autodedup" / "models" / "w5_gold.json").read_text())
-    assert tuple(body["feature_order"]) == ft.FEATURE_ORDER
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    assert set(body["feature_order"]) == set(ft.FEATURE_ORDER) - {"ref_code_shared"}
+    with warnings.catch_warnings(record=True) as warned:
+        warnings.simplefilter("always")
         model = LogisticModel.from_json(json.dumps(body))
+    assert len(warned) == 1 and "ref_code_shared" in str(warned[0].message)
     assert model.version == "w5_gold"
     assert all(model.weights[name] != 0.0 for name in W5_TAIL)
     # The seal is the W4f split map's: the fit reused it rather than re-randomising the holdout.

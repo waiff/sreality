@@ -240,7 +240,7 @@ def test_the_stored_stamp_is_the_vocabularys_own_version_not_a_second_number() -
     from autodedup import score_lane
 
     assert score_lane.FEATURE_VERSION == ft.FEATURE_VERSION
-    assert ft.FEATURE_VERSION == 4 and len(ft.FEATURE_ORDER) == 59
+    assert ft.FEATURE_VERSION == 5 and len(ft.FEATURE_ORDER) == 60
 
 
 def test_a_shared_unit_number_is_its_own_feature() -> None:
@@ -249,7 +249,9 @@ def test_a_shared_unit_number_is_its_own_feature() -> None:
     still reads."""
     assert ft.FEATURE_ORDER[44] == "unit_number_shared"
     assert ft.FEATURE_ORDER[45:47] == ("plot_area_rel_diff", "plot_area_exact")
-    assert ft.FEATURE_ORDER[47:] == ft.TAG_FEATURE_NAMES + ("floor_stated_conflict",)
+    assert ft.FEATURE_ORDER[47:] == ft.TAG_FEATURE_NAMES + (
+        "floor_stated_conflict", "ref_code_shared",
+    )
     assert ft.FEATURE_VERSION >= 2
     shared = compute(
         StubFingerprint(1, numerals={("unit", 705.0), ("m2", 64.0)}),
