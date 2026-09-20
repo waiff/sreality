@@ -257,6 +257,9 @@ PARITY_SAMPLE_SETTING: str = "rt_parity_sample"
 PARITY_BASELINE_N: int = 120
 PARITY_PASS_SAMPLE: int = 25
 PARITY_TOLERANCE: int = 0
+# How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
+# 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
+POP_CHUNK: int = 5_000
 STATEMENT_TIMEOUT_MS: int = 120_000
 LOCK_TIMEOUT_MS: int = 5_000
 IDLE_TIMEOUT_MS: int = 300_000
@@ -1655,8 +1658,11 @@ def write_population(conn: Any, dataset: Any) -> dict[str, Any]:
             "the export's population probe timed out) — seeding from it would freeze a "
             "generation in which every catalog_ratio is absent and no K-C certificate can "
             "ever fire (E84). Re-run the export first.")
-    _exec_many(conn, RT_PHASH_POP_WRITE_SQL,
-               [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())])
+    rows = [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())]
+    # Chunked like the score lane's writes: the trial cohort carries 41,791 distinct hashes and
+    # one `executemany` of that many bound parameters is megabytes in a single call.
+    for start in range(0, len(rows), POP_CHUNK):
+        _exec_many(conn, RT_PHASH_POP_WRITE_SQL, rows[start:start + POP_CHUNK])
     return {"images": images, "images_with_phash": with_phash,
             "hashes_written": len(population),
             "hashes_at_or_above_2": sum(1 for n in population.values() if n >= 2)}
