@@ -340,11 +340,15 @@ select ll.listing_id  as listing_id,
 # The snapshot write. One block is replaced whole: what the scan found is upserted, and what it
 # no longer finds is pruned — a listing the geocoder moved OUT leaves the snapshot here and is
 # retired by the drift sweep there, which is the other direction and keeps its own rail.
+# `resolved_at` travels as TEXT and is cast per element: a block whose rows all carry a NULL
+# `resolved_at` would otherwise hand psycopg a list with nothing to infer a type from, and
+# Postgres has no cast from `text[]` to `timestamptz[]`.
 RT_SCOPE_IDS_WRITE_SQL = """
 insert into autodedup.rt_scope_ids (generation, block_key, listing_id, resolved_at,
                                     refreshed_at)
-select %(generation)s::text, %(block_key)s::text, t.listing_id, t.resolved_at, now()
-  from unnest(%(listing_ids)s::bigint[], %(resolved)s::timestamptz[])
+select %(generation)s::text, %(block_key)s::text, t.listing_id,
+       t.resolved_at::timestamptz, now()
+  from unnest(%(listing_ids)s::bigint[], %(resolved)s::text[])
          as t(listing_id, resolved_at)
 on conflict (generation, block_key, listing_id) do update set
     resolved_at  = excluded.resolved_at,
@@ -385,8 +389,8 @@ select s.listing_id, s.resolved_at
 RT_SCOPE_SCAN_STATE_SQL = """
 select s.block_key                                                     as block_key,
        extract(epoch from now() - max(s.scanned_at))::double precision as age_s,
-       count(*) filter (
-         where s.scanned_at > now() - make_interval(hours => %(hours)s::int))::int as scans
+       (count(*) filter (
+          where s.scanned_at > now() - make_interval(hours => %(hours)s::int)))::int as scans
   from autodedup.rt_scope_scan s
  where s.generation = %(generation)s::text
  group by s.block_key

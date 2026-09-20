@@ -534,8 +534,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return [(i, db.locations[i].get("resolved_at")) for i in found[:int(p["limit"])]]
     if sql == S.RT_SCOPE_IDS_WRITE_SQL:
         for listing_id, resolved in zip(p["listing_ids"], p["resolved"]):
+            # The column is `timestamptz`, so psycopg reads it back as a datetime however the
+            # INSERT spelled it.
             db.scope_ids[(gen, str(p["block_key"]), int(listing_id))] = {
-                "resolved_at": resolved, "refreshed_at": db.now}
+                "resolved_at": (datetime.fromisoformat(resolved)
+                                if isinstance(resolved, str) else resolved),
+                "refreshed_at": db.now}
         return []
     if sql == S.RT_SCOPE_IDS_PRUNE_SQL:
         keep = set(int(i) for i in p["listing_ids"])

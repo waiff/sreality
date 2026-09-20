@@ -278,6 +278,12 @@ revoke all on autodedup.rt_scope_ids    from anon, authenticated;
 revoke all on autodedup.rt_scope_scan   from anon, authenticated;
 revoke all on autodedup.rt_retire_event from anon, authenticated;
 
+-- The two ledgers' own sequences, by name. The blanket revoke below covers what exists when
+-- it runs; a named one is what the schema contract can SEE, and an unrevoked sequence outside
+-- `public` has been missed here before.
+revoke all on sequence autodedup.rt_scope_scan_id_seq   from anon, authenticated;
+revoke all on sequence autodedup.rt_retire_event_id_seq from anon, authenticated;
+
 revoke all on all sequences in schema autodedup from anon, authenticated;
 
 reset lock_timeout;

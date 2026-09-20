@@ -229,6 +229,13 @@ IDLE_TIMEOUT_MS: int = 300_000
 _EPOCH: str = "epoch"
 
 
+def _iso(value: Any) -> str | None:
+    """A timestamp as text, for the one statement that carries a possibly all-NULL column."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _rows(conn: Any, sql: str, params: Mapping[str, Any] | None = None) -> list[tuple]:
     with conn.cursor() as cur:
         cur.execute(sql, dict(params or {}))
@@ -986,7 +993,7 @@ class SqlWork:
         if listing_ids:
             self.statements += 1
             _exec(self.conn, RT_SCOPE_IDS_WRITE_SQL,
-                  {**params, "resolved": [row[1] for row in rows]})
+                  {**params, "resolved": [_iso(row[1]) for row in rows]})
         self.statements += 1
         _exec(self.conn, RT_SCOPE_IDS_PRUNE_SQL, params)
         self.statements += 1
@@ -1423,6 +1430,9 @@ def run_incremental(
                 args.get(SCOPE_SETTING), read_scope_setting(control, generation),
                 rescope=rescope)
             parents = resolve_scope_parents(conn, scope)
+        except ScopeError as exc:
+            raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
+        try:
             max_schema_mb = control_number(BUDGET_SETTING, args, control, MAX_SCHEMA_MB,
                                            rescope)
             max_retire_fraction = control_number(RETIRE_SETTING, args, control,
@@ -1431,7 +1441,7 @@ def run_incremental(
                                              float(MAX_ENTER_SCANS_PER_DAY), rescope)
             intervals = enter_intervals(args, control, rescope)
         except ScopeError as exc:
-            raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
+            raise SystemExit(str(exc)) from exc
         try:
             storage = storage_guard(conn, generation, scope, max_schema_mb)
         except StorageRefusal as exc:
