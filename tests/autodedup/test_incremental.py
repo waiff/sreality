@@ -152,14 +152,29 @@ def test_an_unchanged_listing_costs_nothing() -> None:
 
 def test_the_watermark_only_advances_over_what_it_claimed() -> None:
     work = ScheduleWork([1, 2, 3, 4, 5])
-    assert work.claim(2) == [1, 2]
-    assert work.commit()["arrivals_done"] == 2
-    assert work.claim(2) == [3, 4]
-    assert work.commit()["arrivals_done"] == 4
+    first = work.claim(2)
+    assert [item.listing_id for item in first] == [1, 2]
+    assert work.commit(first)["arrivals_done"] == 2
+    second = work.claim(2)
+    assert [item.listing_id for item in second] == [3, 4]
+    # A CLAIM moves nothing: only the items a pass actually decided advance the cursor.
+    assert work.cursor == 2
+    assert work.commit(second)["arrivals_done"] == 4
     assert not work.exhausted()
-    assert work.claim(2) == [5]
-    work.commit()
+    third = work.claim(2)
+    assert [item.listing_id for item in third] == [5]
+    work.commit(third)
     assert work.exhausted()
+
+
+def test_a_refused_claim_leaves_the_schedule_where_it_was() -> None:
+    """E70: an aborted pass commits nothing, so the same arrivals come back next time."""
+    work = ScheduleWork([1, 2, 3])
+    claimed = work.claim(3)
+    work.commit([])
+    assert work.cursor == 0
+    assert [item.listing_id for item in work.claim(3)] == [item.listing_id
+                                                           for item in claimed]
 
 
 # --------------------------------------------------------------------- E67 and the replay
@@ -262,3 +277,55 @@ def test_the_pass_spends_nothing(tmp_path) -> None:
     _store, passes = _drain(ds, settings, calibration, arrival_order(ds))
     assert all(p.spent_usd == 0.0 for p in passes)
     assert all(p.to_json()["spent_usd"] == 0.0 for p in passes)
+
+
+# ----------------------------------------------------------------- the schema boundary
+
+
+def test_no_statement_of_this_lane_writes_outside_schema_autodedup() -> None:
+    """D4, asserted over the file rather than trusted to a reading.
+
+    Every write verb in `incremental_sql` must name a table in `autodedup`; `public` appears
+    there only in SELECTs. A new statement that forgets this fails here, which is the point."""
+    import re
+
+    from autodedup import incremental_sql
+
+    # `(?<!do )` so an upsert's own `on conflict ... do update set` is not read as a write.
+    writes = re.compile(r"(?<!do )\b(insert\s+into|update|delete\s+from)\s+([a-z_.]+)", re.I)
+    seen = 0
+    for name in dir(incremental_sql):
+        if not name.endswith("_SQL"):
+            continue
+        sql = getattr(incremental_sql, name)
+        for verb, table in writes.findall(sql):
+            seen += 1
+            assert table.startswith("autodedup."), f"{name} writes {verb} {table}"
+    assert seen >= 10, "the audit found no write statements — did the constants move?"
+
+
+def test_every_feed_is_bounded_and_settle_lagged() -> None:
+    """E68: a feed without a LIMIT is an unbounded pass; one without a lag skips late commits."""
+    from autodedup import incremental_sql as sql_module
+
+    for name in ("RT_NEW_LISTINGS_SQL", "RT_CHANGED_LISTINGS_SQL", "RT_FLIPPED_LISTINGS_SQL",
+                 "RT_NEW_STRAGGLERS_SQL", "RT_REVIVED_SQL"):
+        assert "limit" in getattr(sql_module, name).lower(), name
+    for name in ("RT_NEW_LISTINGS_SQL", "RT_CHANGED_LISTINGS_SQL", "RT_FLIPPED_LISTINGS_SQL"):
+        assert "make_interval(secs => %(lag)s)" in getattr(sql_module, name), name
+    # The delisting feed pages on the FULL key, never on the timestamp alone.
+    assert "(l.inactive_at, l.id) >" in sql_module.RT_FLIPPED_LISTINGS_SQL
+
+
+def test_the_lane_never_prepares_a_statement_with_a_bare_percent() -> None:
+    """The repo's PREPARE gate: a `%` that is not a named parameter breaks psycopg's Parse."""
+    import re
+
+    from autodedup import incremental_sql
+
+    named = re.compile(r"%\([a-z_0-9]+\)s")
+    for name in dir(incremental_sql):
+        if not name.endswith("_SQL"):
+            continue
+        stripped = named.sub("", getattr(incremental_sql, name))
+        assert "%" not in stripped, name

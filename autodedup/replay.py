@@ -37,7 +37,8 @@ from autodedup.incremental import (
     Calibration,
     Limits,
     PassResult,
-    run_pass,
+    WorkItem,
+    run_pass_bounded,
 )
 from autodedup.incremental_store import MemoryStore
 from autodedup.blocking import generate_pairs
@@ -67,19 +68,25 @@ class DatasetFacts:
 
 
 class ScheduleWork:
-    """The WorkSource: an arrival schedule instead of the three watermark cursors."""
+    """The WorkSource: an arrival schedule instead of the four watermark cursors.
+
+    It obeys the same contract production's does — a claim advances nothing, a COMMIT advances
+    over exactly the items it is handed — so a pass the pair budget refused (E70) re-claims the
+    same arrivals here as it would there."""
 
     def __init__(self, order: Sequence[int]) -> None:
         self.order = list(order)
         self.cursor = 0
 
-    def claim(self, limit: int) -> list[int]:
+    def claim(self, limit: int) -> list[WorkItem]:
         batch = self.order[self.cursor:self.cursor + limit]
-        self._claimed = len(batch)
-        return list(batch)
+        return [WorkItem(listing_id, "new", None, position)
+                for position, listing_id in enumerate(batch, start=self.cursor + 1)]
 
-    def commit(self) -> dict[str, Any]:
-        self.cursor += getattr(self, "_claimed", 0)
+    def commit(self, done: Sequence[WorkItem]) -> dict[str, Any]:
+        positions = [int(item.cursor) for item in done if item.cursor is not None]
+        if positions:
+            self.cursor = max(positions)
         return {"arrivals_done": self.cursor, "arrivals_total": len(self.order)}
 
     def exhausted(self) -> bool:
@@ -166,8 +173,15 @@ def incremental_state(
     passes: list[PassResult] = []
     clock = time.perf_counter()
     while not work.exhausted():
-        passes.append(run_pass(store, facts, work, settings, model, calibration,
-                               limits=limits, now=None))
+        before = work.cursor
+        passes.append(run_pass_bounded(store, facts, work, settings, model, calibration,
+                                       limits=limits, now=None))
+        if work.cursor == before:
+            # `run_pass_bounded` exhausted its retries without fitting the budget. Looping
+            # again would spin, and pretending otherwise would hide it.
+            raise SystemExit(
+                f"pair budget refused {passes[-1].wanted_pairs} pairs at "
+                f"max_pairs={limits.max_pairs}; raise it or lower --batch-size")
     elapsed = time.perf_counter() - clock
     pairs = {
         key: {
@@ -186,6 +200,7 @@ def incremental_state(
         "elapsed_s": round(elapsed, 3),
         "listings_per_s": round(len(order) / elapsed, 2) if elapsed else 0.0,
         "pairs_scored": sum(p.pairs_scored for p in passes),
+        "pair_budget_refusals": sum(1 for p in passes if p.attempts > 1),
         "pairs_deleted": sum(p.pairs_deleted for p in passes),
         "fact_reads": facts.reads,
         "components": sum(p.components for p in passes),
@@ -253,6 +268,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", default="out/")
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--max-component", type=int, default=400)
+    parser.add_argument("--max-pairs", type=int, default=20000)
     parser.add_argument("--shuffle-seed", type=int, default=None)
     ns = parser.parse_args(argv)
 
@@ -266,7 +282,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     calibration = Calibration.build(fps, ds.listings, settings)
 
     reference, batch_clusters, timings = batch_state(ds, settings, model)
-    limits = Limits(max_listings=ns.batch_size, max_pairs=10 ** 9,
+    # The SHIPPED budget, not an unreachable one: `max_pairs` is the only cap the cohort pass
+    # has no equivalent of, so a replay that raised it out of reach would prove equivalence
+    # for a configuration production never runs.
+    limits = Limits(max_listings=ns.batch_size, max_pairs=ns.max_pairs,
                     max_component=ns.max_component)
     order = arrival_order(ds)
     pairs, clusters, stats = incremental_state(

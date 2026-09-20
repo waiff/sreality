@@ -1,8 +1,9 @@
 """Every statement the `incremental` lane runs, as module-level constants (the PREPARE gate).
 
 Two halves, and the line between them is ruling D4. The `public.*` statements are READS and
-only reads: three index-served watermark cursors and two id-keyed fact fetches. Everything
-written is inside schema `autodedup` (migrations 528, 538, 539).
+only reads: four bounded watermark feeds and three id-keyed fact fetches. Everything written
+is inside schema `autodedup` (migrations 528, 538, 539) — `tests/autodedup/test_incremental.py`
+asserts that over this file rather than trusting the reading.
 
 **Why the probes are served from `autodedup.fp_key` and not from `public.listings`.** Each of
 the six probes keys on a DERIVED value — a 16-bit band of the description SimHash, a 16-bit
@@ -11,9 +12,19 @@ obec/část code, a provenance-tagged house number. None of these is a column of
 `public.listings`, so no index on that table could serve one however it were written, and
 ruling D8 forbids adding one to a shared hot table. The side table is therefore the design, not
 a fallback: it is written only by this lane, keyed by generation, and every lookup is its own
-primary key. EXPLAIN against the live database confirms the three `public` cursors are index
-scans (`listings_pkey`, `listing_snapshots_pkey`, `listings_inactive_at_idx`) and that the
-gallery fetch rides `images_listing_id_idx`.
+primary key. EXPLAIN against the live database confirms the `public` cursors are index scans
+(`listings_pkey`, `listing_snapshots_pkey`, `listings_inactive_at_idx`) and that the gallery
+fetch rides `images_listing_id_idx`.
+
+**Why the feeds carry a settle LAG and a keyset tie-break (E68).** `id` is assigned at INSERT
+and not at COMMIT, so two overlapping batch transactions can commit out of id order and a bare
+`id > cursor` watermark would step over the slower one; `inactive_at` is `now()` — the
+TRANSACTION timestamp — so one `mark_inactive` batch shares one stamp, and a `limit` that cuts
+a tie group would skip its tail forever (measured live: groups of 5,534 / 3,341 / 3,062 flips
+at one identical timestamp). Every feed therefore (a) ignores rows younger than a settle lag,
+(b) pages on the FULL key — `(inactive_at, id)`, never `inactive_at` alone — and (c) the
+new-row feed carries an anti-join straggler sweep over the last `straggler_window` ids, which
+is what proves a row was not missed rather than assuming it.
 
 Nullable parameters carry explicit casts throughout: psycopg sends no type OID for a Python
 `None`, so an uncast NULL parameter fails Parse with 42P18.
@@ -25,9 +36,31 @@ from __future__ import annotations
 # the deliverable.
 RT_STORE_PRESENT_SQL = """
 select to_regclass('autodedup.fp_key')         is not null
+   and to_regclass('autodedup.rt_fp')          is not null
    and to_regclass('autodedup.rt_calibration') is not null
    and to_regclass('autodedup.rt_block_cell')  is not null
    and to_regclass('autodedup.rt_lease')       is not null as present
+"""
+
+# A pass is one transaction (E70) and a statement that runs away is a lease held past its TTL,
+# so both bounds are set on the session before any work begins.
+# `SET` is a utility statement and takes no parameter, so the two session bounds go through
+# `set_config` — same effect, one PREPARE-able statement each.
+RT_STATEMENT_GUARD_SQL = """
+select set_config('statement_timeout', %(statement_timeout_ms)s::text, false)
+"""
+
+RT_IDLE_GUARD_SQL = """
+select set_config('idle_in_transaction_session_timeout', %(idle_timeout_ms)s::text, false)
+"""
+
+# The SECOND kill switch, in the database rather than in the repository: an operator can stop
+# the lane without a workflow edit. Absent means "not blocked" — the repository variable is
+# what makes the lane dark by default, and this row is what stops one that is already on.
+RT_SETTING_SQL = """
+select s.value
+  from autodedup.settings s
+ where s.key = %(key)s::text
 """
 
 # ------------------------------------------------------------------ mutual exclusion
@@ -55,25 +88,50 @@ update autodedup.rt_lease
 
 # ------------------------------------------------------------------ the watermark feeds
 #
-# THREE cursors, all index-served, all read-only (D4):
-#   * new       — `listings_pkey`, and `id` is a bigserial so it is also the arrival order.
+# FOUR bounded feeds, all read-only (D4):
+#   * new       — `listings_pkey`, paged on `id`, settle-lagged, plus a straggler anti-join.
 #   * changed   — `listing_snapshots_pkey`. Rule #2 makes that table an append-on-content-change
 #                 feed, so it is exactly "a listing whose content moved", with no column of its
 #                 own to add and no trigger to install.
-#   * delisted  — `listings_inactive_at_idx` (partial, `inactive_at is not null`). An activity
-#                 flip moves K-B's disjointness and E46/E47's overlap, so it re-decides.
+#   * delisted  — `listings_inactive_at_idx` (partial), paged on `(inactive_at, id)`.
+#   * revived   — a delisting has an UNDO no cursor can see: `touch_listings` sets
+#                 `is_active = true, inactive_at = null` on the same id and appends no snapshot
+#                 (rule #2), so a revived advert is invisible to all three cursors above. The
+#                 fourth feed is a bounded round-robin sweep of the rows this lane itself
+#                 believes are inactive, anti-joined against the live flag.
 RT_NEW_LISTINGS_SQL = """
-select l.id
+select l.id, l.first_seen_at
   from public.listings l
  where l.id > %(after_id)s::bigint
+   and (l.first_seen_at is null
+        or l.first_seen_at <= now() - make_interval(secs => %(lag)s))
+ order by l.id
+ limit %(limit)s
+"""
+
+# The proof rather than the assumption: any id at or below the cursor that this generation has
+# no fingerprint row for was committed after the pass that stepped over it (E68).
+RT_NEW_STRAGGLERS_SQL = """
+select l.id, l.first_seen_at
+  from public.listings l
+ where l.id > %(after_id)s::bigint - %(window)s::bigint
+   and l.id <= %(after_id)s::bigint
+   and not exists (
+         select 1
+           from autodedup.rt_fp f
+          where f.generation = %(generation)s::text
+            and f.listing_id = l.id)
  order by l.id
  limit %(limit)s
 """
 
 RT_CHANGED_LISTINGS_SQL = """
-select s.id, s.listing_id
+select s.id, s.listing_id, s.scraped_at
   from public.listing_snapshots s
  where s.id > %(after_id)s::bigint
+   and s.listing_id is not null
+   and (s.scraped_at is null
+        or s.scraped_at <= now() - make_interval(secs => %(lag)s))
  order by s.id
  limit %(limit)s
 """
@@ -81,9 +139,31 @@ select s.id, s.listing_id
 RT_FLIPPED_LISTINGS_SQL = """
 select l.id, l.inactive_at
   from public.listings l
- where l.inactive_at > %(after)s::timestamptz
- order by l.inactive_at
+ where l.inactive_at is not null
+   and (l.inactive_at, l.id) > (%(after)s::timestamptz, %(after_id)s::bigint)
+   and l.inactive_at <= now() - make_interval(secs => %(lag)s)
+ order by l.inactive_at, l.id
  limit %(limit)s
+"""
+
+# One row back, never the slice: the sweep reads a bounded window of this generation's inactive
+# fingerprints and returns only the ids the live flag disagrees with, plus where to resume.
+RT_REVIVED_SQL = """
+select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
+       count(*)                                          as slice_size,
+       coalesce(array_remove(array_agg(
+           case when l.id is not null then f.listing_id end), null),
+           '{}'::bigint[])                               as revived
+  from (select listing_id
+          from autodedup.rt_fp
+         where generation = %(generation)s::text
+           and is_active = false
+           and listing_id > %(after_id)s::bigint
+         order by listing_id
+         limit %(limit)s) f
+  left join public.listings l
+         on l.id = f.listing_id
+        and l.is_active
 """
 
 RT_CURSOR_READ_SQL = """
@@ -103,6 +183,16 @@ on conflict (name) do update set
                                 autodedup.scan_cursor.last_snapshot_id),
     watermark        = coalesce(excluded.watermark, autodedup.scan_cursor.watermark),
     updated_at       = now()
+"""
+
+# The revive sweep WRAPS rather than ends, so its cursor is written whole: a coalesce would
+# never let it return to 0.
+RT_CURSOR_SET_SQL = """
+insert into autodedup.scan_cursor (name, last_listing_id, updated_at)
+values (%(name)s::text, %(last_listing_id)s::bigint, now())
+on conflict (name) do update set
+    last_listing_id = excluded.last_listing_id,
+    updated_at      = now()
 """
 
 # ------------------------------------------------------------------ facts (read-only)
@@ -154,125 +244,135 @@ select e.image_id, e.embedding::text
 """
 
 # ------------------------------------------------------------------ probe postings
-RT_LOOKUP_SQL = """
-select k.listing_id
+#
+# One statement per PASS rather than per probe key (E69): a listing carries 17.3 index keys and
+# a pass touches hundreds of listings, so the per-key spelling was ~12,000 round trips a pass.
+RT_LOOKUP_MANY_SQL = """
+select k.probe, k.key_token, k.listing_id
   from autodedup.fp_key k
+  join unnest(%(probes)s::text[], %(tokens)s::text[]) as w(probe, key_token)
+    on w.probe = k.probe and w.key_token = k.key_token
  where k.generation = %(generation)s::text
-   and k.probe = %(probe)s::text
-   and k.key_token = %(key_token)s::text
- order by k.listing_id
+ order by k.probe, k.key_token, k.listing_id
 """
 
-RT_KEYS_OF_SQL = """
-select k.probe, k.key_token
+RT_KEYS_MANY_SQL = """
+select k.listing_id, k.probe, k.key_token
   from autodedup.fp_key k
  where k.generation = %(generation)s::text
-   and k.listing_id = %(listing_id)s::bigint
- order by k.probe, k.key_token
+   and k.listing_id = any(%(ids)s::bigint[])
+ order by k.listing_id, k.probe, k.key_token
 """
 
 RT_KEY_DELETE_SQL = """
 delete from autodedup.fp_key
  where generation = %(generation)s::text
-   and listing_id = %(listing_id)s::bigint
+   and listing_id = any(%(ids)s::bigint[])
 """
 
 RT_KEY_INSERT_SQL = """
 insert into autodedup.fp_key (generation, probe, key_token, listing_id)
-values (%(generation)s::text, %(probe)s::text, %(key_token)s::text, %(listing_id)s::bigint)
+select %(generation)s::text, w.probe, w.key_token, w.listing_id
+  from unnest(%(probes)s::text[], %(tokens)s::text[], %(listing_ids)s::bigint[])
+       as w(probe, key_token, listing_id)
 on conflict (generation, probe, key_token, listing_id) do nothing
 """
 
 # ------------------------------------------------------------------ fingerprint row
 #
-# Only the columns retrieval and the rule floor read. The full fingerprint is rebuilt in
-# process from the facts on every pass — it carries token sets, shingles and hash sets that no
-# column could serve a probe from, and rebuilding it costs 0.43 ms a listing.
+# `autodedup.rt_fp`, NOT migration 528's `listing_fp`: that table is keyed on `listing_id`
+# alone so it cannot hold two generations, and nothing has ever written it. This one is
+# generation-scoped like every other row of this lane and carries exactly what the lane reads
+# without a fact fetch — the five guard columns (E17's rule floor), the re-score digest, the
+# census cell the listing is counted in (so a MOVE unbumps the cell it left, not the one it
+# arrived in) and the activity flag the revive sweep anti-joins.
 RT_FP_UPSERT_SQL = """
-insert into autodedup.listing_fp (
-    listing_id, source, category_main, category_type, cat_group, block_key, obec_kod,
-    cast_obce_kod, country_status, lat, lon, street_key, house_number_cp, psc, ruian_adm_kod,
-    area_m2, area_band, disposition, floor, total_floors, broker_key, broker_identity_id,
-    desc_simhash, n_images, first_seen_at, last_seen_at, inactive_at, is_active,
-    fp_version, fp_digest, generation, built_at
+insert into autodedup.rt_fp (
+    generation, listing_id, category_main, category_type, area_m2, disposition, floor,
+    fp_digest, cell_key, cell_group, is_active, updated_at
 ) values (
-    %(listing_id)s::bigint, %(source)s::text, %(category_main)s::text, %(category_type)s::text,
-    %(cat_group)s::text, %(block_key)s::bigint, %(obec_kod)s::bigint,
-    %(cast_obce_kod)s::bigint, %(country_status)s::text, %(lat)s::double precision,
-    %(lon)s::double precision, %(street_key)s::text, %(house_number_cp)s::text, %(psc)s::text,
-    %(ruian_adm_kod)s::bigint, %(area_m2)s::numeric, %(area_band)s::integer,
-    %(disposition)s::text, %(floor)s::integer, %(total_floors)s::integer,
-    %(broker_key)s::text, %(broker_identity_id)s::bigint, %(desc_simhash)s::bigint,
-    %(n_images)s::smallint, %(first_seen_at)s::timestamptz, %(last_seen_at)s::timestamptz,
-    %(inactive_at)s::timestamptz, %(is_active)s::boolean, %(fp_version)s::smallint,
-    %(fp_digest)s::text, %(generation)s::text, now()
+    %(generation)s::text, %(listing_id)s::bigint, %(category_main)s::text,
+    %(category_type)s::text, %(area_m2)s::double precision, %(disposition)s::text,
+    %(floor)s::integer, %(fp_digest)s::text, %(cell_key)s::text, %(cell_group)s::text,
+    %(is_active)s::boolean, now()
 )
-on conflict (listing_id) do update set
-    source             = excluded.source,
-    category_main      = excluded.category_main,
-    category_type      = excluded.category_type,
-    cat_group          = excluded.cat_group,
-    block_key          = excluded.block_key,
-    obec_kod           = excluded.obec_kod,
-    cast_obce_kod      = excluded.cast_obce_kod,
-    country_status     = excluded.country_status,
-    lat                = excluded.lat,
-    lon                = excluded.lon,
-    street_key         = excluded.street_key,
-    house_number_cp    = excluded.house_number_cp,
-    psc                = excluded.psc,
-    ruian_adm_kod      = excluded.ruian_adm_kod,
-    area_m2            = excluded.area_m2,
-    area_band          = excluded.area_band,
-    disposition        = excluded.disposition,
-    floor              = excluded.floor,
-    total_floors       = excluded.total_floors,
-    broker_key         = excluded.broker_key,
-    broker_identity_id = excluded.broker_identity_id,
-    desc_simhash       = excluded.desc_simhash,
-    n_images           = excluded.n_images,
-    first_seen_at      = excluded.first_seen_at,
-    last_seen_at       = excluded.last_seen_at,
-    inactive_at        = excluded.inactive_at,
-    is_active          = excluded.is_active,
-    fp_version         = excluded.fp_version,
-    fp_digest          = excluded.fp_digest,
-    generation         = excluded.generation,
-    built_at           = now()
+on conflict (generation, listing_id) do update set
+    category_main = excluded.category_main,
+    category_type = excluded.category_type,
+    area_m2       = excluded.area_m2,
+    disposition   = excluded.disposition,
+    floor         = excluded.floor,
+    fp_digest     = excluded.fp_digest,
+    cell_key      = excluded.cell_key,
+    cell_group    = excluded.cell_group,
+    is_active     = excluded.is_active,
+    updated_at    = now()
 """
 
-RT_GUARDS_SQL = """
+RT_FP_DELETE_SQL = """
+delete from autodedup.rt_fp
+ where generation = %(generation)s::text
+   and listing_id = any(%(ids)s::bigint[])
+"""
+
+RT_FP_READ_SQL = """
 select f.listing_id, f.category_main, f.category_type, f.area_m2, f.disposition, f.floor,
-       f.fp_digest
-  from autodedup.listing_fp f
- where f.listing_id = any(%(ids)s::bigint[])
+       f.fp_digest, f.cell_key, f.cell_group, f.is_active
+  from autodedup.rt_fp f
+ where f.generation = %(generation)s::text
+   and f.listing_id = any(%(ids)s::bigint[])
 """
 
 RT_KNOWN_SQL = """
 select f.listing_id
-  from autodedup.listing_fp f
+  from autodedup.rt_fp f
+ where f.generation = %(generation)s::text
+   and f.listing_id = any(%(ids)s::bigint[])
+"""
+
+RT_FP_COUNT_SQL = """
+select count(*)
+  from autodedup.rt_fp f
  where f.generation = %(generation)s::text
 """
 
 # ------------------------------------------------------------------ pair grain
 #
 # `zone` carries the table's own CHECK (`merge`/`band`/`reject`), so a guard veto is written as
-# `reject` with `guard_veto` naming the rule — the shape the score lane already writes.
-RT_PAIRS_TOUCHING_SQL = """
-select p.listing_lo, p.listing_hi, p.probes, p.from_lo, p.from_hi, p.score, p.zone,
-       p.decision, p.guard_veto, p.families, p.evidence, p.context, p.features
+# `reject` with `guard_veto` naming the rule — the shape the score lane already writes. The
+# certificate is a COLUMN here and not a parse of `decision`: E63 can re-promote a certified
+# pair under a `context_rule:` reason, so the reason string is lossy, and E33 orders a
+# component's edges certificate-first — a cluster that read its edges back without the
+# certificate would union them in a different order than the cohort pass did.
+_PAIR_COLUMNS = """p.listing_lo, p.listing_hi, p.probes, p.from_lo, p.from_hi, p.score,
+       p.zone, p.decision, p.guard_veto, p.families, p.certificate, p.evidence, p.context,
+       p.fp_lo, p.fp_hi"""
+
+RT_PAIRS_TOUCHING_SQL = f"""
+select {_PAIR_COLUMNS}
   from autodedup.pairs p
  where p.generation = %(generation)s::text
    and (p.listing_lo = any(%(ids)s::bigint[]) or p.listing_hi = any(%(ids)s::bigint[]))
 """
 
-RT_PAIRS_WITHIN_SQL = """
-select p.listing_lo, p.listing_hi, p.probes, p.from_lo, p.from_hi, p.score, p.zone,
-       p.decision, p.guard_veto, p.families, p.evidence, p.context
+RT_PAIRS_WITHIN_SQL = f"""
+select {_PAIR_COLUMNS}
   from autodedup.pairs p
  where p.generation = %(generation)s::text
    and p.listing_lo = any(%(ids)s::bigint[])
    and p.listing_hi = any(%(ids)s::bigint[])
+ order by p.listing_lo, p.listing_hi
+"""
+
+# E64's rail reads only the merges of the blocks whose census MOVED this pass: under a frozen
+# calibration (E65) no other block's counter can have changed, so a generation-wide scan would
+# read millions of rows to re-confirm what cannot have moved.
+RT_STAMPED_MERGES_SQL = f"""
+select {_PAIR_COLUMNS}
+  from autodedup.pairs p
+ where p.generation = %(generation)s::text
+   and p.zone = 'merge'
+   and p.context ->> 'block' = any(%(blocks)s::text[])
  order by p.listing_lo, p.listing_hi
 """
 
@@ -293,22 +393,25 @@ select p.listing_hi as a, p.listing_lo as b
 
 RT_PAIR_UPSERT_SQL = """
 insert into autodedup.pairs (
-    generation, listing_lo, listing_hi, probes, from_lo, from_hi, families, features, score,
-    zone, decision, guard_veto, evidence, context, calibration_digest, feature_version,
-    model_version, decided_at
+    generation, listing_lo, listing_hi, probes, from_lo, from_hi, families, certificate,
+    features, fp_lo, fp_hi, score, zone, decision, guard_veto, evidence, context,
+    calibration_digest, feature_version, model_version, decided_at
 ) values (
     %(generation)s::text, %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(probes)s::text[],
-    %(from_lo)s::boolean, %(from_hi)s::boolean, %(families)s::smallint, %(features)s::jsonb,
-    %(score)s::real, %(zone)s::text, %(decision)s::text, %(guard_veto)s::text,
-    %(evidence)s::jsonb, %(context)s::jsonb, %(calibration_digest)s::text,
-    %(feature_version)s::smallint, %(model_version)s::text, now()
+    %(from_lo)s::boolean, %(from_hi)s::boolean, %(families)s::smallint, %(certificate)s::text,
+    %(features)s::jsonb, %(fp_lo)s::text, %(fp_hi)s::text, %(score)s::real, %(zone)s::text,
+    %(decision)s::text, %(guard_veto)s::text, %(evidence)s::jsonb, %(context)s::jsonb,
+    %(calibration_digest)s::text, %(feature_version)s::smallint, %(model_version)s::text, now()
 )
 on conflict (generation, listing_lo, listing_hi) do update set
     probes             = excluded.probes,
     from_lo            = excluded.from_lo,
     from_hi            = excluded.from_hi,
     families           = excluded.families,
+    certificate        = excluded.certificate,
     features           = excluded.features,
+    fp_lo              = excluded.fp_lo,
+    fp_hi              = excluded.fp_hi,
     score              = excluded.score,
     zone               = excluded.zone,
     decision           = excluded.decision,
@@ -326,6 +429,23 @@ delete from autodedup.pairs
  where generation = %(generation)s::text
    and listing_lo = %(listing_lo)s::bigint
    and listing_hi = %(listing_hi)s::bigint
+"""
+
+# A pair is a cluster's EDGE only when both sides landed in that cluster (the score lane's
+# rule), so membership is stamped from the cluster's own member set.
+RT_PAIR_CLUSTER_SQL = """
+update autodedup.pairs p
+   set cluster_key = %(cluster_key)s::bigint
+ where p.generation = %(generation)s::text
+   and p.listing_lo = any(%(ids)s::bigint[])
+   and p.listing_hi = any(%(ids)s::bigint[])
+"""
+
+RT_PAIR_UNCLUSTER_SQL = """
+update autodedup.pairs p
+   set cluster_key = null
+ where p.generation = %(generation)s::text
+   and p.cluster_key = any(%(keys)s::bigint[])
 """
 
 # ------------------------------------------------------------------ cluster grain
@@ -356,6 +476,15 @@ RT_CLUSTER_MEMBERS_DROP_SQL = """
 delete from autodedup.cluster_members
  where generation = %(generation)s::text
    and cluster_key = any(%(keys)s::bigint[])
+"""
+
+# `cluster_conflicts` carries no generation column (migration 528) — the score lane stamps it
+# into `detail`, and this lane scopes its own re-write the same way.
+RT_CONFLICT_DROP_SQL = """
+delete from autodedup.cluster_conflicts c
+ where c.detail ->> 'generation' = %(generation)s::text
+   and c.listing_lo = any(%(ids)s::bigint[])
+   and c.listing_hi = any(%(ids)s::bigint[])
 """
 
 # ------------------------------------------------------------------ the live census
@@ -404,6 +533,16 @@ on conflict (generation) do update set
     settings      = excluded.settings,
     model_version = excluded.model_version,
     built_at      = now()
+"""
+
+# The seed reads the PRESENT, so a new generation starts at the corpus instead of walking the
+# whole history of it (E71): the cold-start cursors are the live maxima.
+RT_SEED_CURSORS_SQL = """
+select (select coalesce(max(id), 0) from public.listings)              as last_listing_id,
+       (select coalesce(max(id), 0) from public.listing_snapshots)     as last_snapshot_id,
+       (select coalesce(max(inactive_at), now()) from public.listings) as watermark,
+       (select coalesce(max(id), 0) from public.listings
+         where inactive_at = (select max(inactive_at) from public.listings)) as watermark_id
 """
 
 RT_MUST_NOT_LINK_SQL = """

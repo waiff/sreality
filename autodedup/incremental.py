@@ -29,12 +29,18 @@ merged member set, E37's bridge refusal and E57's second offer — reads only me
 clusters being joined, and those never leave the component. So the component is the unit of
 work, and its result is identical to the cohort pass's.
 
-Everything else is bookkeeping: a watermark over three index-served feeds, bounded work per
-pass, and writes that never leave schema `autodedup` (D4).
+Everything else is what W9's verification found missing, and each of those is a rule too:
+a watermark over FOUR bounded feeds, none of which is monotone on its own (E68); a pass bounded
+in statements and not only in listings (E69); a pass that REFUSES a claim it cannot fit rather
+than truncating it, and writes nothing until it has agreed to it (E70); a generation seeded at
+the present (E71); a store that reads a decision back exactly as it was taken (E72); and an
+operator refusal reconciled on every pass, idle ones included (E73). Nothing written leaves
+schema `autodedup` (D4).
 """
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import math
@@ -100,6 +106,28 @@ class GuardRow:
 def guard_row(fp: Fingerprint) -> GuardRow:
     return GuardRow(fp.listing_id, fp.category_main, fp.category_type, fp.area_m2,
                     fp.disposition, fp.floor)
+
+
+@dataclass(slots=True, frozen=True)
+class FpRow:
+    """What the store keeps about ONE listing: the guard columns, the re-score digest, the
+    census cell it is counted in and the activity flag.
+
+    The cell is stored rather than re-derived because a listing that MOVES (a resolved location,
+    a category correction) must unbump the cell it LEFT — derive it from today's facts and the
+    old cell keeps a phantom member forever, and `n_listings` is the exact counter
+    `fungible_catalogue` and E64's rail read. `is_active` is stored for the same reason in the
+    other direction: it is what the revive sweep anti-joins the live flag against."""
+
+    guard: GuardRow
+    digest: str
+    cell_key: str
+    cell_group: str
+    is_active: bool
+
+    @property
+    def cell(self) -> tuple[str, str]:
+        return (self.cell_key, self.cell_group)
 
 
 @dataclass(slots=True)
@@ -212,10 +240,17 @@ class Calibration:
         )
 
     def digest(self) -> str:
-        """A content hash of the frozen inputs — a pass stamps it so a decision can never be
-        read back under a calibration it was not taken under."""
-        payload = json.dumps(self.to_json(), sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        """A CONTENT hash of the frozen inputs — a pass stamps it so a decision can never be
+        read back under a calibration it was not taken under.
+
+        `built_at` is excluded deliberately: it says WHEN the calibration was cut, not what it
+        contains, and a digest that moved every time the same cohort was re-cut would certify
+        nothing. Two identical calibrations must hash identically or E65's stamp is decoration."""
+        payload = dict(self.to_json())
+        payload.pop("built_at", None)
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()[:16]
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -349,13 +384,14 @@ class Store(Protocol):
     between the two paths is a bug in one implementation, never in the proof."""
 
     def lookup(self, probe: str, token: str) -> list[int]: ...
-    def put_listing(self, listing_id: int, guard: GuardRow, digest: str,
+    def lookup_many(self, keys: Sequence[tuple[str, str]]
+                    ) -> dict[tuple[str, str], list[int]]: ...
+    def put_listing(self, listing_id: int, row: FpRow,
                     keys: Sequence[tuple[str, str]]) -> None: ...
     def drop_listing(self, listing_id: int) -> None: ...
-    def keys_of(self, listing_id: int) -> list[tuple[str, str]]: ...
-    def guards(self, ids: Iterable[int]) -> dict[int, GuardRow]: ...
-    def digests(self, ids: Iterable[int]) -> dict[int, str]: ...
-    def known_listings(self) -> set[int]: ...
+    def keys_many(self, ids: Iterable[int]) -> dict[int, list[tuple[str, str]]]: ...
+    def rows(self, ids: Iterable[int]) -> dict[int, FpRow]: ...
+    def known(self, ids: Iterable[int]) -> set[int]: ...
     def pairs_touching(self, ids: Iterable[int]) -> dict[tuple[int, int], PairRow]: ...
     def pairs_within(self, members: Iterable[int]) -> list[PairRow]: ...
     def merge_neighbours(self, ids: Iterable[int]) -> dict[int, set[int]]: ...
@@ -367,8 +403,10 @@ class Store(Protocol):
     def must_not_link(self) -> set[tuple[int, int]]: ...
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]: ...
     def bump_cell(self, listing: Listing) -> None: ...
-    def unbump_cell(self, listing: Listing) -> None: ...
-    def stamped_merges(self) -> list[tuple[int, int, ContextStamp, str, bool]]: ...
+    def unbump_cell(self, cell: tuple[str, str]) -> None: ...
+    def stamped_merges(self, blocks: Sequence[str]
+                       ) -> list[tuple[int, int, ContextStamp, str, bool]]: ...
+    def flush(self) -> None: ...
 
 
 class FactSource(Protocol):
@@ -377,12 +415,29 @@ class FactSource(Protocol):
     def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]: ...
 
 
+@dataclass(slots=True, frozen=True)
+class WorkItem:
+    """One claimed listing and WHEN it arrived, per feed.
+
+    The arrival stamp is the feed's own event time — a new row's `first_seen_at`, a content
+    change's `scraped_at`, a flip's `inactive_at` — and never the listing's age, so
+    "arrival to decision" measures the lane's latency rather than how old the advert is."""
+
+    listing_id: int
+    feed: str
+    arrived_at: float | None = None
+    # The feed's own cursor value for this row — a listing id, a snapshot id, an
+    # `(inactive_at, id)` pair. The watermark is the MAXIMUM over the items a pass committed,
+    # so a claim that was refused advances nothing.
+    cursor: Any = None
+
+
 class WorkSource(Protocol):
-    """The watermark feeds, bounded. Three index-served cursors in production; an arrival
+    """The watermark feeds, bounded. Four index-served cursors in production; an arrival
     schedule in the replay."""
 
-    def claim(self, limit: int) -> list[int]: ...
-    def commit(self) -> dict[str, Any]: ...
+    def claim(self, limit: int) -> list[WorkItem]: ...
+    def commit(self, done: Sequence[WorkItem]) -> dict[str, Any]: ...
 
 
 # ------------------------------------------------------------------------------ retrieval
@@ -403,15 +458,21 @@ def retrieve(
     weakest evidence class (E17). `tests/autodedup/test_incremental.py` asserts this against
     `BlockIndex.candidates` over the whole cohort rather than trusting the restatement."""
     by_probe: dict[str, list[str]] = {probe: [] for probe in PROBE_PRIORITY}
+    wanted: list[tuple[str, str]] = []
     for probe, token in keyer.probe_keys(fp):
         by_probe[probe].append(token)
+        if not keyer.is_exploded(probe, token):
+            wanted.append((probe, token))
+    # ONE statement for the whole listing (E69), not one per key: the posting lists are read
+    # in `PROBE_PRIORITY` order below, so batching the fetch cannot move the fill order.
+    postings = store.lookup_many(wanted)
     out: dict[int, set[str]] = {}
     cap = settings.max_candidates_per_listing
     for probe in PROBE_PRIORITY:
         for token in by_probe[probe]:
             if keyer.is_exploded(probe, token):
                 continue
-            for other in store.lookup(probe, token):
+            for other in postings.get((probe, token), ()):
                 if other == fp.listing_id:
                     continue
                 hit = out.get(other)
@@ -442,11 +503,10 @@ def neighbourhood(
     The ±1 relation on area band and price decile is symmetric, so "the listings that PROBE
     one of these keys" is exactly "the listings these keys' probes reach" — one lookup set,
     not a second widening."""
+    wanted = sorted({key for key in keys if not keyer.is_exploded(key[0], key[1])})
     out: set[int] = set()
-    for probe, token in keys:
-        if keyer.is_exploded(probe, token):
-            continue
-        out.update(store.lookup(probe, token))
+    for ids in store.lookup_many(wanted).values():
+        out.update(ids)
     return out
 
 
@@ -455,6 +515,15 @@ def neighbourhood(
 
 @dataclass(slots=True)
 class Limits:
+    """Everything one pass is allowed to spend, and what it does when it cannot fit.
+
+    `max_pairs` is a SCHEDULING bound, never a correctness one: a pass that scored the first
+    20,000 of a wanted set and wrote them would leave the rest of the neighbourhood's pairs
+    undecided, re-cluster from a partial edge set and then advance the watermark over the
+    difference — measured on g6 at a cap of 500, that manufactures 38 member sets the cohort
+    pass never produces. So the pass REFUSES instead (E70) and `run_pass_bounded` re-claims a
+    smaller slice, which is the same work at the same answer."""
+
     max_listings: int = 500
     max_pairs: int = 20000
     max_component: int = 400
@@ -480,6 +549,12 @@ class PassResult:
     spent_usd: float = 0.0
     oversized_components: list[int] = field(default_factory=list)
     cursors: dict[str, Any] = field(default_factory=dict)
+    feeds: dict[str, int] = field(default_factory=dict)
+    # Set when the wanted pair set did not fit `max_pairs`. The pass then wrote no pair, no
+    # cluster and no cursor: `aborted` is the reason a caller shrinks the claim and retries.
+    aborted: str = ""
+    wanted_pairs: int = 0
+    attempts: int = 1
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -494,7 +569,11 @@ class PassResult:
                 "components": self.components,
                 "clusters_written": self.clusters_written,
                 "clusters_dropped": self.clusters_dropped,
+                "wanted_pairs": self.wanted_pairs,
+                "attempts": self.attempts,
             },
+            "feeds": dict(self.feeds),
+            "aborted": self.aborted,
             "zones": dict(self.zones),
             "certificates": dict(self.certificates),
             "rail": dict(self.rail),
@@ -572,6 +651,119 @@ class _Working:
             self.fps[listing_id] = build_fingerprint(listing, images, self.settings)
 
 
+class _Overlay:
+    """The pass's OWN writes, held back until the budget has agreed to them (E70).
+
+    A pass refuses a claim it cannot fit, and the refusal has to leave nothing behind: a store
+    that already held the new postings would tell the next, smaller attempt that those listings
+    are unchanged, and their pairs would never be scored at all. So steps 1-4 read and write
+    through this view — postings, fingerprint rows and census cells — and `apply` is the single
+    moment it all lands. Everything else delegates, because nothing else is written before the
+    budget check."""
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+        self.fp: dict[int, FpRow] = {}
+        self.keys: dict[int, list[tuple[str, str]]] = {}
+        # Buffered postings, indexed BY KEY rather than by listing: retrieval asks for a
+        # listing's keys thousands of times a pass, and a scan of the whole buffer per ask
+        # would make the overlay cost more than the pass it protects.
+        self.added: dict[tuple[str, str], set[int]] = {}
+        self.dropped: dict[tuple[str, str], set[int]] = {}
+        self.cell_rows: dict[tuple[str, str], CellRow] = {}
+        self.ops: list[tuple[str, Any]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.store, name)
+
+    # -------------------------------------------------------------------- buffered writes
+    def put_listing(self, listing_id: int, row: FpRow, keys: Sequence[tuple[str, str]],
+                    old_keys: Sequence[tuple[str, str]] = ()) -> None:
+        self.fp[listing_id] = row
+        self.keys[listing_id] = list(keys)
+        fresh = set(keys)
+        for key in old_keys:
+            if key not in fresh:
+                self.dropped.setdefault(key, set()).add(listing_id)
+            self.added.get(key, set()).discard(listing_id)
+        for key in fresh:
+            self.added.setdefault(key, set()).add(listing_id)
+            self.dropped.get(key, set()).discard(listing_id)
+
+    def bump_cell(self, listing: Listing) -> None:
+        cell = (address_block_key(listing), category_group(listing))
+        row = self._cell(cell)
+        row.n_listings += 1
+        self.ops.append(("bump", listing))
+
+    def unbump_cell(self, cell: tuple[str, str]) -> None:
+        row = self._cell((str(cell[0]), str(cell[1])))
+        row.n_listings = max(0, row.n_listings - 1)
+        self.ops.append(("unbump", (str(cell[0]), str(cell[1]))))
+
+    def _cell(self, cell: tuple[str, str]) -> CellRow:
+        if cell not in self.cell_rows:
+            live = self.store.cells([cell]).get(cell)
+            self.cell_rows[cell] = CellRow(
+                cell[0], cell[1], live.n_listings if live else 0,
+                list(live.shapes) if live else [], list(live.brokers) if live else [],
+                list(live.source_ids) if live else [], bool(live.capped) if live else False)
+        return self.cell_rows[cell]
+
+    # --------------------------------------------------------------------- buffered reads
+    def lookup_many(self, keys: Sequence[tuple[str, str]]
+                    ) -> dict[tuple[str, str], list[int]]:
+        out = {key: list(ids) for key, ids in self.store.lookup_many(keys).items()}
+        for key in keys:
+            for listing_id in self.dropped.get(key, ()):
+                if listing_id in out.get(key, ()):
+                    out[key].remove(listing_id)
+            for listing_id in self.added.get(key, ()):
+                bucket = out.setdefault(key, [])
+                if listing_id not in bucket:
+                    # Postings stay ascending: the cap fills in listing-id order (E17).
+                    bisect.insort(bucket, listing_id)
+        return {key: ids for key, ids in out.items() if ids}
+
+    def rows(self, ids: Iterable[int]) -> dict[int, FpRow]:
+        wanted = list(ids)
+        out = dict(self.store.rows([i for i in wanted if i not in self.fp]))
+        out.update({i: self.fp[i] for i in wanted if i in self.fp})
+        return out
+
+    def known(self, ids: Iterable[int]) -> set[int]:
+        wanted = set(ids)
+        return self.store.known(wanted) | (wanted & set(self.fp))
+
+    def keys_many(self, ids: Iterable[int]) -> dict[int, list[tuple[str, str]]]:
+        wanted = list(ids)
+        out = dict(self.store.keys_many(wanted))
+        out.update({i: list(self.keys[i]) for i in wanted if i in self.keys})
+        return out
+
+    def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]:
+        wanted = list(keys)
+        out = dict(self.store.cells(wanted))
+        out.update({key: self.cell_rows[key] for key in wanted if key in self.cell_rows})
+        return out
+
+    # --------------------------------------------------------------------------- the gate
+    def apply(self) -> None:
+        for listing_id in sorted(self.keys):
+            self.store.put_listing(listing_id, self.fp[listing_id], self.keys[listing_id])
+        for verb, payload in self.ops:
+            if verb == "bump":
+                self.store.bump_cell(payload)
+            else:
+                self.store.unbump_cell(payload)
+        self.fp.clear()
+        self.keys.clear()
+        self.added.clear()
+        self.dropped.clear()
+        self.cell_rows.clear()
+        self.ops.clear()
+
+
 def run_pass(
     store: Store,
     facts: FactSource,
@@ -587,62 +779,110 @@ def run_pass(
 
     The order is the cohort pass's order, restricted: refresh the fingerprints that moved,
     widen to the probe-key neighbourhood (E66), retrieve, score what is new or stale, write the
-    pair rows, re-cluster the touched components (E67), then run E64's rail over the census."""
+    pair rows, re-cluster the touched components (E67), then run E64's rail over the census.
+
+    Every write lands before the watermark moves, and the watermark moves only when the whole
+    claim was decided — a pass that cannot fit its pair set writes nothing at all (E70)."""
     caps = limits or Limits()
     result = PassResult(generation=generation, calibration_digest=calibration.digest())
     clock = time.perf_counter()
 
-    claimed = work.claim(caps.max_listings)
+    items = list(work.claim(caps.max_listings))
+    seen_ids: set[int] = set()
+    claimed = [item.listing_id for item in items
+               if not (item.listing_id in seen_ids or seen_ids.add(item.listing_id))]
     result.claimed = list(claimed)
+    for item in items:
+        result.feeds[item.feed] = result.feeds.get(item.feed, 0) + 1
     if not claimed:
-        result.cursors = work.commit()
+        # An idle pass is still the only moment an operator's must-not-link row can be
+        # honoured: it moves no pair, so nothing else would ever seed its component (E72).
+        operator_mnl = store.must_not_link()
+        seeds = _mnl_seeds(store, operator_mnl)
+        if seeds:
+            _recluster(store, facts, settings, _Working(facts, settings), seeds, caps,
+                       result, operator_mnl)
+        store.flush()
+        result.cursors = work.commit(items)
         result.timings["total_s"] = time.perf_counter() - clock
         return result
 
     keyer = Keyer(settings, calibration)
     working = _Working(facts, settings)
     working.ensure(claimed)
+    # Everything this pass writes before the budget check goes through the overlay, so a
+    # refusal leaves the store exactly as it found it (E70).
+    view = _Overlay(store)
 
     # --- 1. refresh the changed listings' fingerprints and postings ------------------------
+    # Two batched reads for the whole claim, not two statements per listing (E69).
+    stored_rows = view.rows(claimed)
+    stored_keys = view.keys_many(claimed)
     changed: set[int] = set()
     touched_keys: list[tuple[str, str]] = []
-    known = store.known_listings()
+    touched_blocks: set[str] = set()
     for listing_id in claimed:
         fp = working.fps.get(listing_id)
         if fp is None:
             continue
-        digest = fp_digest(fp, working.images.get(listing_id, ()))
-        old_keys = store.keys_of(listing_id)
-        new_keys = keyer.index_keys(fp)
-        if store.digests([listing_id]).get(listing_id) == digest and old_keys == new_keys:
-            continue  # idempotence: an unchanged listing costs a digest, not a pass
         listing = working.listings[listing_id]
-        if listing_id in known:
-            store.unbump_cell(listing)
-        store.put_listing(listing_id, guard_row(fp), digest, new_keys)
-        store.bump_cell(listing)
+        digest = fp_digest(fp, working.images.get(listing_id, ()))
+        old = stored_rows.get(listing_id)
+        old_keys = sorted(set(stored_keys.get(listing_id, ())))
+        # DISTINCT and sorted on both sides: `index_keys` repeats a key whenever two images
+        # share a pHash band, and the posting list is a set — a pass that read that difference
+        # as a change would re-score the whole corpus on every drain.
+        new_keys = sorted(set(keyer.index_keys(fp)))
+        if old is not None and old.digest == digest and old_keys == new_keys:
+            continue  # idempotence: an unchanged listing costs a digest, not a pass
+        cell = (address_block_key(listing), category_group(listing))
+        if old is not None:
+            # The cell it LEFT, read off the stored row — never re-derived from today's facts,
+            # which would leave a phantom member in the old cell for ever (E64 reads that count).
+            view.unbump_cell(old.cell)
+            touched_blocks.add(old.cell_key)
+        view.put_listing(
+            listing_id,
+            FpRow(guard_row(fp), digest, cell[0], cell[1], bool(listing.is_active)),
+            new_keys, old_keys,
+        )
+        view.bump_cell(listing)
         touched_keys.extend(old_keys)
         touched_keys.extend(new_keys)
+        touched_blocks.add(cell[0])
         changed.add(listing_id)
     result.timings["refresh_s"] = time.perf_counter() - clock
 
     # --- 2. E66: the dirty set is the probe-key neighbourhood ------------------------------
     clock = time.perf_counter()
-    dirty = set(changed) | neighbourhood(keyer, store, set(touched_keys))
-    dirty &= store.known_listings()
+    dirty = set(changed) | neighbourhood(keyer, view, set(touched_keys))
+    dirty &= view.known(dirty)
     result.dirty = len(dirty)
     working.ensure(dirty)
-    guards = {i: guard_row(working.fps[i]) for i in dirty if i in working.fps}
 
     # --- 3. retrieval for every dirty listing, against the CURRENT corpus ------------------
+    # The postings and the candidates' guard rows are prefetched in two statements, so the
+    # retrieval loop below is pure computation over what is already in hand.
+    local_guards = {i: guard_row(working.fps[i]) for i in dirty if i in working.fps}
+    probe_keys: set[tuple[str, str]] = set()
+    for listing_id in sorted(dirty):
+        fp = working.fps.get(listing_id)
+        if fp is None:
+            continue
+        probe_keys.update(key for key in keyer.probe_keys(fp)
+                          if not keyer.is_exploded(key[0], key[1]))
+    reachable: set[int] = set()
+    for ids in view.lookup_many(sorted(probe_keys)).values():
+        reachable.update(ids)
+    fetched = view.rows(sorted(reachable - set(local_guards)))
+    lookup = _GuardLookup(view, local_guards, {i: row.guard for i, row in fetched.items()})
     vetoed: dict[tuple[int, int], str] = {}
     cand: dict[int, dict[int, set[str]]] = {}
     for listing_id in sorted(dirty):
         fp = working.fps.get(listing_id)
         if fp is None:
             continue
-        found = retrieve(fp, keyer, store, _GuardLookup(store, guards), settings, vetoed)
-        cand[listing_id] = found
+        cand[listing_id] = retrieve(fp, keyer, view, lookup, settings, vetoed)
     result.timings["retrieve_s"] = time.perf_counter() - clock
 
     # --- 4. the pair set: either side retrieving the other keeps it ------------------------
@@ -674,6 +914,17 @@ def run_pass(
             entry["probes"] |= set(row.probes)
             wanted[(lo, hi)] = entry
 
+    result.wanted_pairs = len(wanted)
+    # E70: the budget is refused BEFORE the first write, because a partial pair set re-clusters
+    # from a partial edge set and the watermark would then step over the difference for ever.
+    if len(wanted) > caps.max_pairs:
+        # Nothing of this pass has reached the store yet, so the refusal IS the rollback.
+        result.aborted = "pair_budget"
+        result.timings["total_s"] = sum(
+            value for key, value in result.timings.items() if key.endswith("_s"))
+        return result
+
+    view.apply()
     dropped = [key for key in stored if key not in wanted]
     if dropped:
         store.delete_pairs(dropped)
@@ -681,15 +932,13 @@ def run_pass(
 
     # --- 5. score what is new or stale -----------------------------------------------------
     working.ensure({i for pair in wanted for i in pair})
+    endpoints = {i for pair in wanted for i in pair}
     digests = {i: fp_digest(working.fps[i], working.images.get(i, ()))
-               for i in {i for pair in wanted for i in pair} if i in working.fps}
-    known_digests = store.digests(digests)
+               for i in endpoints if i in working.fps}
     ctx = context_for(calibration, settings, working.fps, working.listings)
     census = _census(store, working.listings, working.images)
     rows: list[PairRow] = []
     for (lo, hi) in sorted(wanted):
-        if len(rows) >= caps.max_pairs:
-            break
         entry = wanted[(lo, hi)]
         if lo not in working.fps or hi not in working.fps:
             continue
@@ -749,34 +998,70 @@ def run_pass(
         previous = stored.get(key)
         if previous is not None and previous.zone == "merge":
             seeds |= set(key)
-    _recluster(store, facts, settings, working, seeds, caps, result)
+    operator_mnl = store.must_not_link()
+    seeds |= _mnl_seeds(store, operator_mnl)
+    _recluster(store, facts, settings, working, seeds, caps, result, operator_mnl)
     result.timings["cluster_s"] = time.perf_counter() - clock
 
     # --- 7. E64: a census that has overtaken a stamped promotion re-opens it to the band ---
     clock = time.perf_counter()
-    result.rail = _run_rail(store, facts, settings, census, working, result)
+    result.rail = _run_rail(store, facts, settings, working, result, sorted(touched_blocks),
+                            operator_mnl)
     result.timings["rail_s"] = time.perf_counter() - clock
 
-    for listing_id in changed:
-        listing = working.listings.get(listing_id)
-        seen = _parse_epoch(listing.first_seen_at if listing else None)
-        if seen is not None and now is not None:
-            result.latency_s.append(max(0.0, now - seen))
-    result.cursors = work.commit()
+    store.flush()
+    if now is not None:
+        for item in items:
+            if item.arrived_at is not None:
+                result.latency_s.append(max(0.0, now - item.arrived_at))
+    result.cursors = work.commit(items)
     result.timings["total_s"] = sum(
         value for key, value in result.timings.items() if key.endswith("_s")
     )
     return result
 
 
-class _GuardLookup:
-    """`guards.get(other)` over the working set first, the store second — so retrieval never
-    builds a fingerprint for a candidate the rule floor is about to refuse."""
+def run_pass_bounded(
+    store: Store,
+    facts: FactSource,
+    work: WorkSource,
+    settings: Settings,
+    model: LogisticModel,
+    calibration: Calibration,
+    limits: Limits | None = None,
+    generation: str = GENERATION,
+    now: float | None = None,
+    shrink: int = 4,
+    attempts: int = 3,
+) -> PassResult:
+    """`run_pass`, re-claiming a SMALLER slice when the pair budget refused the last one.
 
-    def __init__(self, store: Store, local: Mapping[int, GuardRow]) -> None:
+    An aborted pass has written nothing and advanced no cursor (E70), so a retry is the same
+    work over fewer arrivals rather than a resumption of a half-written one. When even a
+    single-listing claim will not fit, the lane STOPS: a neighbourhood that alone exceeds the
+    budget is a block worth an operator's eye, not a number to quietly truncate."""
+    caps = limits or Limits()
+    result = run_pass(store, facts, work, settings, model, calibration, caps, generation, now)
+    tries = 1
+    while result.aborted and tries < attempts and caps.max_listings > 1:
+        caps = replace(caps, max_listings=max(1, caps.max_listings // shrink))
+        result = run_pass(store, facts, work, settings, model, calibration, caps, generation,
+                          now)
+        tries += 1
+    result.attempts = tries
+    return result
+
+
+class _GuardLookup:
+    """`guards.get(other)` over the working set first, the prefetched rows second, the store
+    last — so retrieval never builds a fingerprint for a candidate the rule floor is about to
+    refuse, and never spends a statement on one the pass already read."""
+
+    def __init__(self, store: Store, local: Mapping[int, GuardRow],
+                 prefetched: Mapping[int, GuardRow] | None = None) -> None:
         self.store = store
         self.local = local
-        self.cache: dict[int, GuardRow | None] = {}
+        self.cache: dict[int, GuardRow | None] = dict(prefetched or {})
 
     def get(self, listing_id: int) -> GuardRow | None:
         row = self.local.get(listing_id)
@@ -784,9 +1069,30 @@ class _GuardLookup:
             return row
         if listing_id in self.cache:
             return self.cache[listing_id]
-        fetched = self.store.guards([listing_id]).get(listing_id)
-        self.cache[listing_id] = fetched
-        return fetched
+        fetched = self.store.rows([listing_id]).get(listing_id)
+        guard = fetched.guard if fetched is not None else None
+        self.cache[listing_id] = guard
+        return guard
+
+
+def _mnl_seeds(store: Store, must_not_link: Iterable[tuple[int, int]]) -> set[int]:
+    """Operator must-not-link rows that TODAY'S clusters contradict.
+
+    A refusal added after the merge it refuses would otherwise never be honoured: re-clustering
+    is seeded by pairs whose zone moved, and an operator row moves no pair. The set is
+    operator-curated and small, so one membership read per pass settles it."""
+    pairs = [(lo, hi) for lo, hi in must_not_link]
+    if not pairs:
+        return set()
+    members: dict[int, int] = {}
+    for key, ids in store.clusters_touching({i for pair in pairs for i in pair}).items():
+        for listing_id in ids:
+            members[listing_id] = key
+    seeds: set[int] = set()
+    for lo, hi in pairs:
+        if lo in members and members[lo] == members.get(hi):
+            seeds |= {lo, hi}
+    return seeds
 
 
 def _census(
@@ -864,11 +1170,12 @@ def _recluster(
     seeds: Iterable[int],
     caps: Limits,
     result: PassResult,
+    operator_mnl: frozenset[tuple[int, int]] | set[tuple[int, int]] | None = None,
 ) -> None:
     components, oversized = _components(store, seeds, caps.max_component)
-    result.oversized_components = oversized
-    result.components = len(components)
-    operator_mnl = store.must_not_link()
+    result.oversized_components = sorted(set(result.oversized_components) | set(oversized))
+    result.components += len(components)
+    operator_mnl = store.must_not_link() if operator_mnl is None else operator_mnl
     for members in components:
         working.ensure(members)
         pairs = store.pairs_within(members)
@@ -885,9 +1192,14 @@ def _recluster(
         existing = store.clusters_touching(members)
         keep = set(clustered.clusters)
         drop = [key for key in existing if key not in keep]
-        for conflict in clustered.conflicts:
-            conflict["generation"] = result.generation
-        store.write_clusters(drop, rows, clustered.conflicts)
+        # Refused unions AND refused bridges: §8 calls these the highest-value rows in the UI,
+        # because a conflict is evidence in two directions. An APPLIED bridge is a union and
+        # has nothing left to show.
+        conflicts = [{**conflict, "kind": "invariant", "generation": result.generation}
+                     for conflict in clustered.conflicts]
+        conflicts += [{**bridge, "kind": "bridge", "generation": result.generation}
+                      for bridge in clustered.bridges if not bridge.get("applied")]
+        store.write_clusters(drop, rows, conflicts)
         result.clusters_written += len(rows)
         result.clusters_dropped += len(drop)
 
@@ -896,9 +1208,10 @@ def _run_rail(
     store: Store,
     facts: FactSource,
     settings: Settings,
-    census: ContextIndex,
     working: _Working,
     result: PassResult,
+    blocks: Sequence[str],
+    operator_mnl: frozenset[tuple[int, int]] | set[tuple[int, int]] | None = None,
 ) -> dict[str, int]:
     """E64: every stamped E63 promotion a census limb has since overtaken goes back to the band.
 
@@ -908,10 +1221,13 @@ def _run_rail(
     census limb off (the configuration W8's verification preferred) no census enters a warrant
     and this returns an empty plan, which is the rail costing nothing rather than not existing."""
     if (settings.context_rule_block_min is None
-            and settings.context_rule_image_population_min is None):
+            and settings.context_rule_image_population_min is None) or not blocks:
         return {"reopened": 0, "deferred_by_cap": 0, "blocks_at_cap": 0, "blocks_touched": 0,
                 "owed": 0}
-    stamped = store.stamped_merges()
+    # Only the blocks whose census MOVED this pass: under a frozen calibration (E65) the image
+    # population cannot change at all and a block counter changes only where a listing was
+    # bumped, so a generation-wide scan would re-confirm what cannot have moved.
+    stamped = store.stamped_merges(list(blocks))
     if not stamped:
         return {"reopened": 0, "deferred_by_cap": 0, "blocks_at_cap": 0, "blocks_touched": 0,
                 "owed": 0}
@@ -927,8 +1243,9 @@ def _run_rail(
         exempt=exempt,
     )
     demoted: list[PairRow] = []
+    live_rows = (store.pairs_touching({action.lo for action in actions}) if actions else {})
     for action in actions:
-        row = store.pairs_touching([action.lo]).get((action.lo, action.hi))
+        row = live_rows.get((action.lo, action.hi))
         if row is None or row.zone != "merge":
             continue
         row.zone = "band"
@@ -938,7 +1255,7 @@ def _run_rail(
         store.upsert_pairs(demoted)
         _recluster(store, facts, settings, working,
                    {i for row in demoted for i in (row.lo, row.hi)},
-                   Limits(), result)
+                   Limits(), result, operator_mnl)
     counters["owed"] = len(actions)
     return counters
 

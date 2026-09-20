@@ -355,7 +355,7 @@
       "inputs": [
         {
           "name": "args",
-          "description": "Pass arguments as k=v,k=v — generation (default rt), max_listings, max_pairs, max_component, settings, model.",
+          "description": "Pass arguments as k=v,k=v — generation (default rt), max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, settings, model.",
           "required": false,
           "type": "string",
           "default": "",

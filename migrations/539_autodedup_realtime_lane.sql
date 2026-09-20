@@ -7,10 +7,16 @@
 -- three index-served watermark cursors (`listings_pkey`, `listing_snapshots_pkey`,
 -- `listings_inactive_at_idx`) plus id-keyed fact fetches; its writes are all below.
 --
--- Four new relations and four columns:
+-- Five new relations and seven columns:
 --   * `fp_key`          — the posting lists the six probes look up, keyed by GENERATION,
 --                          because a probe key is a function of the frozen calibration
 --                          (K3's price decile) and two generations must not share one.
+--   * `rt_fp`           — one row per listing of a generation: the five guard columns E17's
+--                          rule floor reads, the re-score digest, the census cell the listing
+--                          is counted in and the activity flag the revive sweep anti-joins.
+--                          NOT migration 528's `listing_fp`, which is keyed on `listing_id`
+--                          alone (so it cannot hold two generations) and which no lane has
+--                          ever written.
 --   * `rt_calibration`  — E65: the six cohort-relative inputs of a decision, frozen so a
 --                          pair's score cannot depend on WHEN it was scored.
 --   * `rt_block_cell`   — the live census E64's rail reads, as a counter plus three capped
@@ -23,9 +29,12 @@
 --   * `pairs.evidence` / `pairs.context` — the strings a rule refused or certified on, and the
 --                          census a promotion was taken under (E64 replays THAT census, never
 --                          today's).
---   * `listing_fp.fp_digest` — what a re-score depends on. Equal digest, no re-decide: that is
---                          the lane's idempotence, and it is a column rather than a
---                          recomputation because the cheap answer has to be the common one.
+--   * `pairs.certificate` / `pairs.fp_lo` / `pairs.fp_hi` — the certificate is a COLUMN and not
+--                          a parse of `decision`, because E63 can re-promote a certified pair
+--                          under a `context_rule:` reason and E33 orders a component's edges
+--                          certificate-first: a lane that clustered from stored rows without it
+--                          would union in a different order than the cohort pass. The two
+--                          digests are what a re-score depends on — equal digest, no re-decide.
 --
 -- NOT APPLIED by this branch. The lane is dark by default (`AUTODEDUP_REALTIME_ENABLED`), and
 -- shadow mode's own kill switch (`autodedup_write_enabled`, E39/D4) is unchanged: no row of
@@ -55,6 +64,36 @@ create table if not exists autodedup.fp_key (
 -- needs the reverse direction as much as the forward one.
 create index if not exists autodedup_fp_key_listing_idx
   on autodedup.fp_key (generation, listing_id);
+
+------------------------------------------------------------------
+-- the fingerprint row
+------------------------------------------------------------------
+
+-- Everything a pass reads about a listing WITHOUT a fact fetch. `cell_key`/`cell_group` are
+-- stored rather than re-derived: a listing that moves (a resolved location, a category
+-- correction) has to unbump the cell it LEFT, and `n_listings` is the exact counter
+-- `fungible_catalogue` and E64's rail read.
+create table if not exists autodedup.rt_fp (
+  generation    text   not null,
+  listing_id    bigint not null,
+  category_main text,
+  category_type text,
+  area_m2       double precision,
+  disposition   text,
+  floor         integer,
+  fp_digest     text,
+  cell_key      text,
+  cell_group    text,
+  is_active     boolean not null default true,
+  updated_at    timestamptz not null default now(),
+  primary key (generation, listing_id)
+);
+
+-- The revive sweep's slice: `touch_listings` sets `is_active = true, inactive_at = null` on
+-- the same id and appends no snapshot (rule #2), so a revived advert is invisible to all three
+-- forward cursors. The fourth feed pages over THIS index and anti-joins the live flag.
+create index if not exists autodedup_rt_fp_inactive_idx
+  on autodedup.rt_fp (generation, listing_id) where is_active = false;
 
 ------------------------------------------------------------------
 -- the frozen calibration (E65)
@@ -117,10 +156,13 @@ create table if not exists autodedup.rt_lease (
 ------------------------------------------------------------------
 
 alter table autodedup.pairs
-  add column if not exists from_lo   boolean,
-  add column if not exists from_hi   boolean,
-  add column if not exists evidence  jsonb,
-  add column if not exists context   jsonb,
+  add column if not exists from_lo     boolean,
+  add column if not exists from_hi     boolean,
+  add column if not exists evidence    jsonb,
+  add column if not exists context     jsonb,
+  add column if not exists certificate text,
+  add column if not exists fp_lo       text,
+  add column if not exists fp_hi       text,
   add column if not exists calibration_digest text;
 
 comment on column autodedup.pairs.from_lo is
@@ -131,14 +173,18 @@ comment on column autodedup.pairs.from_hi is
 comment on column autodedup.pairs.context is
   'E64: the census this decision was taken under — replayed as stored, never re-read from '
   'today''s census.';
+comment on column autodedup.pairs.certificate is
+  'The certificate the decision carried (K-A/K-B/K-C/K-R), as a COLUMN: E63 can re-promote a '
+  'certified pair under a context_rule reason, so the decision string is lossy, and E33 '
+  'orders a component''s edges certificate-first.';
+comment on column autodedup.pairs.fp_lo is
+  'What a re-score depends on: equal digests on both sides and the pair is not re-decided. '
+  'The lane''s idempotence rail.';
 
-alter table autodedup.listing_fp
-  add column if not exists fp_digest  text,
-  add column if not exists generation text;
-
-comment on column autodedup.listing_fp.fp_digest is
-  'What a re-score depends on: equal digest and equal probe keys, no re-decide. The lane''s '
-  'idempotence rail.';
+-- The census cell of a merge, so E64''s rail can read the blocks a pass touched without
+-- scanning the generation.
+create index if not exists autodedup_pairs_gen_ctx_block_idx
+  on autodedup.pairs (generation, (context ->> 'block')) where zone = 'merge';
 
 ------------------------------------------------------------------
 -- RLS posture. Every new base table, no exceptions (tests/test_migration_rls_grants.py).
@@ -146,11 +192,13 @@ comment on column autodedup.listing_fp.fp_digest is
 ------------------------------------------------------------------
 
 alter table autodedup.fp_key         enable row level security;
+alter table autodedup.rt_fp          enable row level security;
 alter table autodedup.rt_calibration enable row level security;
 alter table autodedup.rt_block_cell  enable row level security;
 alter table autodedup.rt_lease       enable row level security;
 
 revoke all on autodedup.fp_key         from anon, authenticated;
+revoke all on autodedup.rt_fp          from anon, authenticated;
 revoke all on autodedup.rt_calibration from anon, authenticated;
 revoke all on autodedup.rt_block_cell  from anon, authenticated;
 revoke all on autodedup.rt_lease       from anon, authenticated;

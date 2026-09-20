@@ -9,9 +9,13 @@ name: "AUTODEDUP: realtime shadow lane"
 # `public.listings` row, no `property_id`, no merge. It spends $0 by construction — ruling D19
 # gives no LLM judge merge authority on the band, so this lane calls no provider at all.
 #
-# What one pass does. Three index-served watermark cursors (`listings_pkey` for new rows,
-# `listing_snapshots_pkey` for content changes, `listings_inactive_at_idx` for activity flips)
-# hand it a bounded slice of listings. For each one it rebuilds the fingerprint, refreshes the
+# What one pass does. FOUR bounded watermark feeds hand it a slice of listings: new rows off
+# `listings_pkey`, content changes off `listing_snapshots_pkey`, activity flips off the partial
+# `listings_inactive_at_idx` paged on `(inactive_at, id)`, and a round-robin sweep for
+# REVIVALS — `touch_listings` un-delists in place and appends no snapshot, so no forward cursor
+# can see one. Every feed ignores rows younger than a settle lag and the new-row feed carries an
+# anti-join straggler sweep, because `id` is assigned at INSERT and two overlapping batch
+# transactions can commit out of id order (E68). For each one it rebuilds the fingerprint, refreshes the
 # probe postings in `autodedup.fp_key`, widens to the probe-key NEIGHBOURHOOD (E66 — a fan-out
 # cap makes retrieval order-dependent unless every listing that probes a changed key is
 # re-probed too), retrieves candidates with the same six probes the cohort lane uses, computes
@@ -21,16 +25,20 @@ name: "AUTODEDUP: realtime shadow lane"
 # union-find, must-not-link and E57's bridge rule included. E64's rail then re-opens to the
 # band any stamped promotion the live census has since overtaken; certificates are exempt.
 #
-# Idempotent and safe to re-run: a listing whose fingerprint digest and probe keys are
-# unchanged costs a digest comparison and nothing else, every write is an upsert keyed inside
-# the generation, and the watermark only advances on what the pass actually claimed. Two runs
-# cannot overlap — a lease row in `autodedup.rt_lease` is taken by CAS (never
-# `pg_advisory_lock`, which strands over the transaction pooler) and a run that cannot take it
-# exits green as `skipped: leased`.
+# Idempotent, atomic and safe to re-run: a listing whose fingerprint digest and probe keys are
+# unchanged costs a digest comparison and nothing else, the whole pass is ONE transaction, and
+# the watermark advances only over what the pass actually decided. A pass whose pair set does
+# not fit `max_pairs` writes NOTHING and re-claims a smaller slice rather than truncating —
+# a partial pair set re-clusters from a partial edge set and the watermark would then step over
+# the difference for ever (E70). Two runs cannot overlap: a lease row in `autodedup.rt_lease` is
+# taken by CAS (never `pg_advisory_lock`, which strands over the transaction pooler), its TTL
+# outlives this job's timeout, and a run that cannot take it exits green as `skipped: leased`.
 #
-# REQUIRES migration 539 (`autodedup.fp_key`, `rt_calibration`, `rt_block_cell`, `rt_lease`
-# plus the pair-grain columns) and a frozen calibration row for the generation, seeded from a
-# cohort pass. Without either the lane exits non-zero rather than running on a guess.
+# REQUIRES migration 539 (`autodedup.fp_key`, `rt_fp`, `rt_calibration`, `rt_block_cell`,
+# `rt_lease` plus the pair-grain columns) and a generation seeded by
+# `gh workflow run autodedup.yml -f mode=rt_seed -f args=artifact=<cohort>,backfill=true`,
+# which cuts the frozen calibration (E65) and starts the cursors at TODAY rather than at id 0.
+# Without either the lane exits non-zero rather than running on a guess.
 #
 # The run summary (out/incremental.json, uploaded on every outcome and echoed into the job
 # summary) carries the counts, the per-listing latency from arrival to decision with p50/p95,
@@ -45,7 +53,7 @@ on:
   workflow_dispatch:
     inputs:
       args:
-        description: "Pass arguments as k=v,k=v — generation (default rt), max_listings, max_pairs, max_component, settings, model."
+        description: "Pass arguments as k=v,k=v — generation (default rt), max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, settings, model."
         required: false
         default: ""
         type: string
@@ -136,8 +144,11 @@ jobs:
                 f"`{data.get('generation')}` (calibration `{data.get('calibration_digest')}`)\n")
           print("| metric | value |\n| --- | --- |")
           for key in ("claimed", "dirty", "pairs_scored", "pairs_written", "pairs_deleted",
-                      "components", "clusters_written", "clusters_dropped"):
+                      "components", "clusters_written", "clusters_dropped", "wanted_pairs",
+                      "attempts"):
               print(f"| {key} | {counts.get(key, 0)} |")
+          for feed, seen in sorted((data.get("feeds") or {}).items()):
+              print(f"| feed {feed} | {seen} |")
           for key, label in (("merge", "zone merge"), ("band", "zone band"),
                              ("reject", "zone reject"), ("veto", "zone veto")):
               print(f"| {label} | {data.get('zones', {}).get(key, 0)} |")
@@ -145,6 +156,10 @@ jobs:
           print(f"| latency p95 s | {lat.get('p95', '-')} |")
           print(f"| latency max s | {lat.get('max', '-')} |")
           print(f"| rail re-opened | {data.get('rail', {}).get('reopened', 0)} |")
+          print(f"| SQL statements | {data.get('statements', '-')} |")
+          print(f"| fact reads | {data.get('fact_reads', '-')} |")
+          print(f"| store rows | {data.get('store_rows', '-')} |")
+          print(f"| refused | {data.get('aborted') or 'no'} |")
           print(f"| LLM spend USD | {data.get('spent_usd', 0.0)} |")
           PY
 

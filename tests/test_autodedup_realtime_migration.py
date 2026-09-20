@@ -63,12 +63,25 @@ def test_the_posting_table_is_keyed_by_generation() -> None:
     assert "autodedup_fp_key_listing_idx on autodedup.fp_key (generation, listing_id)" in code
 
 
-def test_the_pair_grain_carries_both_directions_and_the_census() -> None:
+def test_the_pair_grain_carries_both_directions_the_census_and_the_certificate() -> None:
     """E66 keeps a pair while EITHER side retrieves the other; E64 replays the census a
-    promotion was taken under, never today's."""
+    promotion was taken under, never today's; and E33 orders a component's edges
+    certificate-first, which a lane clustering from STORED rows can only do from a column."""
     code = _code()
-    for column in ("from_lo", "from_hi", "evidence", "context", "calibration_digest"):
+    for column in ("from_lo", "from_hi", "evidence", "context", "calibration_digest",
+                   "certificate", "fp_lo", "fp_hi"):
         assert f"add column if not exists {column}" in code, column
+
+
+def test_the_fingerprint_row_is_generation_scoped_and_sweepable() -> None:
+    """Not migration 528's `listing_fp`: that one is keyed on `listing_id` alone, so it could
+    not hold two generations, and no lane has ever written it."""
+    code = _code()
+    assert "create table if not exists autodedup.rt_fp" in code
+    assert "primary key (generation, listing_id)" in code
+    # The revive sweep's slice — the only feed that can see a `touch_listings` revival.
+    assert ("autodedup_rt_fp_inactive_idx on autodedup.rt_fp (generation, listing_id) "
+            "where is_active = false") in code
 
 
 def test_the_lane_uses_a_lease_row_and_not_an_advisory_lock() -> None:
