@@ -29,7 +29,7 @@ LANE_WRITERS: tuple[str, ...] = (
     "census.py", "compare.py", "errors.py", "evaluate.py", "export.py", "export_sql.py",
     "harness.py", "iterations.py", "judge.py", "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
-    "progress_sql.py", "score_lane.py", "score_sql.py", "seals.py",
+    "progress_sql.py", "score_lane.py", "score_sql.py", "seals.py", "structural_truth.py",
 )
 
 # Columns and claim names that identify a PERSON — the operator or a broker.
