@@ -244,3 +244,22 @@ def test_export_run_or_cohort_is_required() -> None:
         parity.parse_args({"export_run": "not-a-run"})
     parsed = parity.parse_args({"export_run": "35200225251"})
     assert (parsed.n, parsed.pairs, parsed.seed, parsed.generation) == (200, 400, 1, "rt")
+
+
+def test_the_instrument_can_read_the_population_a_seed_WOULD_write(world) -> None:
+    """`population=artifact` is how the operator measures a seed before seeding: the live side
+    reads the cohort's own counts — the exact rows `rt_seed` materialises into
+    `autodedup.phash_pop` — so the certificates the fix restores are visible from a read-only
+    run against a table that is still empty (E84)."""
+    world.conn.phash_pop.clear()
+
+    broken = world()
+    assert broken["population_source"] == "frozen" and broken["phash_pop_rows"] == 0
+    assert broken["pairs"]["certificates"]["live"].get("K-C", 0) == 0
+
+    fixed = world(population="artifact")
+    assert fixed["population_source"] == "artifact"
+    assert fixed["facts"]["image_fields"] == {}, "the population is the one the export measured"
+    assert (fixed["pairs"]["certificates"]["live"]
+            == fixed["pairs"]["certificates"]["artifact"])
+    assert fixed["pairs"]["certificate_moves"] == {}

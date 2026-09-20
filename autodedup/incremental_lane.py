@@ -758,9 +758,16 @@ class SqlFacts:
     batch generation's 1,771 (E84). The table has a writer now (the seed) and this counts what
     it could not measure, so a pass says so rather than scoring on it silently."""
 
-    def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL) -> None:
+    def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
+                 population: Mapping[int, int] | None = None) -> None:
         self.conn = conn
         self.clip_model = clip_model
+        # A population handed in INSTEAD of the frozen table, for the one read-only caller that
+        # needs to see what the table WOULD hold: `--mode rt_parity population=artifact` reads
+        # the cohort's own counts so the operator can measure a seed's effect before seeding.
+        # The pass never passes this — its population is the frozen one or nothing (E84).
+        self.population = None if population is None else {
+            int(key): int(value) for key, value in population.items()}
         self.reads = 0
         self.statements = 0
         # The population readout, for the pass summary: how many phash-bearing images this pass
@@ -819,9 +826,13 @@ class SqlFacts:
         # `sreality_id`), D8 forbids adding one, and there is no in-schema mirror to count
         # from — so the only way to measure a hash the calibration never saw is the export's
         # own sequential scan, which belongs to the export and the re-seed, never to a pass.
-        population = {int(row[0]): int(row[1]) for row in
-                      _rows(self.conn, RT_PHASH_POP_SQL, {"hashes": hashes})} if hashes else {}
-        self.statements += 1
+        if self.population is not None:
+            population = {h: self.population[h] for h in hashes if h in self.population}
+        else:
+            population = {int(row[0]): int(row[1]) for row in
+                          _rows(self.conn, RT_PHASH_POP_SQL,
+                                {"hashes": hashes})} if hashes else {}
+            self.statements += 1
         self.images_with_phash += sum(1 for row in rows if row.get("phash") is not None)
         unmeasured = [h for h in hashes if h not in population]
         self.hashes_unmeasured.update(unmeasured)

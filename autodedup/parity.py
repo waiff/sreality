@@ -88,6 +88,7 @@ class ParityArgs:
     generation: str
     settings: str | None
     model: str | None
+    population: str
 
 
 def parse_args(args: Mapping[str, str]) -> ParityArgs:
@@ -106,7 +107,23 @@ def parse_args(args: Mapping[str, str]) -> ParityArgs:
         generation=str(args.get("generation") or "").strip() or GENERATION,
         settings=str(args.get("settings") or "").strip() or None,
         model=str(args.get("model") or "").strip() or None,
+        population=_population_source(args),
     )
+
+
+POPULATION_SOURCES: tuple[str, ...] = ("frozen", "artifact")
+
+
+def _population_source(args: Mapping[str, str]) -> str:
+    """Which pHash population the LIVE side reads. `frozen` is what the lane really does —
+    `autodedup.phash_pop`, and an absent hash is unknown. `artifact` reads the cohort's own
+    counts instead, which is exactly what `rt_seed` writes into that table, so the operator can
+    measure a seed's effect on the certificates BEFORE seeding anything (E84)."""
+    raw = str(args.get("population") or "frozen").strip().lower()
+    if raw not in POPULATION_SOURCES:
+        raise SystemExit(f"population must be one of {', '.join(POPULATION_SOURCES)}, "
+                         f"got {raw!r}")
+    return raw
 
 
 def _positive(args: Mapping[str, str], key: str, fallback: int) -> int:
@@ -509,7 +526,8 @@ def run_parity(
             payload if isinstance(payload, dict) else json.loads(payload or "{}"))
         config = lane_config(conn, parsed.generation, settings, model)
 
-        facts = SqlFacts(conn)
+        facts = SqlFacts(conn, population=(artifact_population(dataset)
+                                           if parsed.population == "artifact" else None))
         # Presence for the whole cohort FIRST, in one statement, so the stratified draw is over
         # what is still there; the full fact read is then the sample's alone.
         cohort_ids = sorted(dataset.listings)
@@ -554,6 +572,7 @@ def run_parity(
         "model_version": getattr(model, "version", None),
         "lane_config": config,
         "phash_pop_rows": phash_pop_rows,
+        "population_source": parsed.population,
         "statements": statements,
         "sample": {
             "requested": parsed.n,
@@ -577,6 +596,16 @@ def run_parity(
         json.dumps(report, indent=2, sort_keys=True, default=str), encoding="utf-8")
     report["spent_usd"] = 0.0
     return report
+
+
+def artifact_population(dataset: Dataset) -> dict[int, int]:
+    """The cohort's own corpus-wide pHash counts — the rows `rt_seed` materialises."""
+    out: dict[int, int] = {}
+    for image in dataset.all_images():
+        if image.phash is None or image.pop is None:
+            continue
+        out[int(image.phash)] = max(out.get(int(image.phash), 0), int(image.pop))
+    return out
 
 
 def _by_source(dataset: Dataset, sample: Sequence[int]) -> dict[str, int]:
