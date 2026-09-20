@@ -1167,7 +1167,7 @@ SELECT
     max(c.last_changed_at)                            AS last_changed_at
 FROM autodedup.clusters c
 GROUP BY c.generation
-ORDER BY max(c.last_changed_at) DESC
+ORDER BY (left(c.generation, 2) = 'rt'), max(c.last_changed_at) DESC
 """
 
 # WHICH pass a validation view reads when the caller names none. The first row of
@@ -1175,10 +1175,15 @@ ORDER BY max(c.last_changed_at) DESC
 # because the list the picker offers and the default the queue opens on must never disagree
 # about which pass is current. A hard-coded default is what put a superseded generation's
 # proposals in front of the operator; the store names the newest pass, so the store is asked.
+# A REAL-TIME shadow generation (`rt…`) is rewritten every pass, so by recency it would always
+# be "newest" and every validation view would open on it — which is how the operator's pair
+# links 404'd on 2026-09-20 (the pairs lived in g6; the default had silently become `rt`).
+# The default is the newest BATCH pass; a real-time generation is offered by the picker, last,
+# and is only ever read when it is named.
 LATEST_GENERATION_SQL = """
 SELECT c.generation
 FROM autodedup.clusters c
-ORDER BY c.last_changed_at DESC
+ORDER BY (left(c.generation, 2) = 'rt'), c.last_changed_at DESC
 LIMIT 1
 """
 
