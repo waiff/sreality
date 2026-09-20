@@ -1526,10 +1526,16 @@ def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
             "export's facts (E84). Re-seed it "
             "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
             "backfill=true,reseed=true`). Nothing was written and no cursor moved.")
-    sample = int(_setting_number(args.get(PARITY_SAMPLE_SETTING,
-                                          control.get(PARITY_SAMPLE_SETTING)),
-                                 float(PARITY_PASS_SAMPLE)))
-    report = check_parity(conn, generation, payload, max(1, sample))
+    # The knob may only RAISE the sample (E82's lesson at a rail one dispatch argument could
+    # otherwise have turned into a formality): `rt_parity_sample=1` cannot weaken the gate.
+    try:
+        asked = _setting_number(args.get(PARITY_SAMPLE_SETTING,
+                                         control.get(PARITY_SAMPLE_SETTING)),
+                                float(PARITY_PASS_SAMPLE))
+    except ScopeError as exc:
+        raise SystemExit(f"{PARITY_SAMPLE_SETTING}: {exc}") from exc
+    report = check_parity(conn, generation, payload,
+                          max(PARITY_PASS_SAMPLE, int(asked)))
     # The W9f defect itself FIRST, because it is the specific diagnosis of what the sample is
     # about to report generically: a frozen population that HAD rows when the generation was
     # seeded and has none now is the table emptied under a running lane.
