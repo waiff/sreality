@@ -310,11 +310,12 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
 # There is no index-served change stamp to drive it off — `listing_location.resolved_at` carries
 # no index at all and D8 forbids adding one — so the feed is a bounded round-robin over the
 # SCOPE's own listing ids, ONE block a pass, served by `listing_location_obec_granularity`.
-# `EXPLAIN` on the live statements: Bitmap Index Scan on `(obec_kod, granularity)` for a town
-# block (Jablonec + Turnov: 3,999 index rows, 212 ms cold), and for a QUARTER block the
-# narrowest path this schema can serve — the parent obec's index entries filtered on
-# `cast_obce_kod`, because there is no index on that column (Praha-Vysočany: 159,340 index rows,
-# 1,439 of them the quarter's, 8.3 s cold). One block a pass is what keeps that off every pass.
+# `EXPLAIN ANALYZE` on THIS statement at its shipped slice, live: Bitmap Index Scan on
+# `(obec_kod, granularity)` for a town block (Jablonec: 3,115 index rows -> 2,780 rows, 57 ms),
+# and for a QUARTER block the narrowest path this schema can serve — the parent obec's index
+# entries filtered on `cast_obce_kod`, because there is no index on that column
+# (Praha-Vysočany: 159,353 index rows -> 1,439 rows, 5.7 s cold). One block a pass is what keeps
+# the quarter's cost off every pass.
 RT_SCOPE_ENTER_SQL = """
 select coalesce(max(e.listing_id), %(after_id)s::bigint) as slice_max,
        count(*)                                          as slice_size,

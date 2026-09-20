@@ -491,11 +491,13 @@ the one W9c ran — but two of them would have emptied the store and two would h
   now `order by id desc limit N` off `listings_pkey` — a backwards index scan, honestly N rows.
   There is no index-served change stamp to drive the entrant feed off instead: `listing_location`
   carries `resolved_at` with **no index at all** and D8 forbids adding one, so the sweep is served
-  by the indexes this schema HAS — `listing_location_obec_granularity` for a town block (`EXPLAIN`
-  live: Bitmap Index Scan, Jablonec + Turnov 3,999 index rows, 3,531 matching, **212 ms** cold) and,
-  for a QUARTER, the narrowest path that exists at all: its **parent obec's** index entries
-  filtered on `cast_obce_kod` (Praha-Vysočany: 159,340 index rows, 1,439 of them the quarter's,
-  **8.3 s** cold — which is exactly why the sweep walks ONE block a pass). The parent is a registry
+  by the indexes this schema HAS — `listing_location_obec_granularity` for a town block and, for a
+  QUARTER, the narrowest path that exists at all: its **parent obec's** index entries filtered on
+  `cast_obce_kod`. `EXPLAIN ANALYZE` on the SHIPPED statement at its shipped slice of 20,000, live:
+  Jablonec is a Bitmap Index Scan of **3,115 index rows → 2,780 rows in 57 ms**, and
+  Praha-Vysočany **159,353 index rows → 1,439 rows in 5.7 s** (29,265 heap blocks, cold) — which
+  is exactly why the sweep walks ONE block a pass rather than the scope, and why its cost is a
+  third of a pass's rather than every pass's, well inside the 120 s statement guard. The parent is a registry
   fact, read once a pass from `ruian_admin_units` through `(level, code)` + pkey (`EXPLAIN`: two
   Index Scans, **4.7 ms**; 490245 → 554782), and a quarter the register cannot place is a hard
   error at seed and at pass time rather than a block the sweep silently never walks.
