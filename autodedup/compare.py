@@ -35,6 +35,18 @@ standing ruling is that a false merge is the error that must not happen and a mi
 only costs a row in the residual view. The reference's `stratum` is the engine zone, so both
 rates are also reported per merge / band / reject / unstored.
 
+`--structural` swaps it again, for `labels_all_zones.jsonl` from `autodedup.structural_truth`:
+labels neither a model nor a person produced, but a fact the two adverts PRINT. It answers the
+one thing the operator's labels cannot — how an arm behaves across MANY developments — because
+the operator's 18 band negatives span five address blocks and 14 of them are one card. Under it
+the per-stratum table reads per RULE, and every arm additionally carries `blocks`: how many
+DISTINCT developments produced its false merges, since two errors inside one block are one
+error repeated.
+
+`--ensembles` adds the rules that can be scored over the stored verdicts without one extra
+call — each arm alone, unanimity, both cascade orders, a self-reported confidence floor, and
+each of those under an all-arm abstain/same-building veto. See `autodedup.ensembles`.
+
 Reads files only: no database, no network, no spend.
 """
 
