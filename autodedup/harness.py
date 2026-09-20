@@ -271,6 +271,80 @@ def load_model(path: str | None) -> LogisticModel:
     return LogisticModel.from_json(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
+# --- naming a settings row or a model, the way every lane names them --------------------
+#
+# `--args settings=w8` resolves inside the repo, never off the wire: a lane input is an
+# operator string and a bare path would make `settings=/etc/passwd` a readable file. This
+# lived in `score_lane` until W9g, when the real-time lane was found running `Settings()` and
+# the uncalibrated prior because it took a PATH — so `settings=w8` named no file it could
+# read and the recipe that shipped passed nothing at all (E90a). One definition (E12).
+SETTINGS_DIR: Path = Path(__file__).resolve().parent / "settings"
+MODELS_DIR: Path = Path(__file__).resolve().parent / "models"
+# The two words that NAME the uncalibrated defaults, so choosing them is a choice a dispatch
+# can be read to have made rather than the silence of an empty argument.
+DEFAULT_SETTINGS_NAME: str = "default"
+PRIOR_MODEL_NAME: str = "prior"
+
+
+def repo_path(raw: str, base: Path, suffix: str = ".json") -> Path:
+    """`sweep_a` or `sweep_a.json` -> `<base>/sweep_a.json`, refusing anything outside `base`.
+
+    A dispatch that spells the whole repo-relative path (`autodedup/settings/w8.json`, which is
+    how the recipes in git history spell it) names the same file and is accepted as such — the
+    prefix is stripped, never followed, so what can be read is still only what is inside
+    `base`."""
+    name = raw.strip()
+    for prefix in (f"autodedup/{base.name}/", f"{base.name}/", f"./{base.name}/"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    name = name if name.endswith(suffix) else f"{name}{suffix}"
+    resolved = (base / name).resolve()
+    if base.resolve() not in resolved.parents:
+        raise SystemExit(f"{raw!r} must name a file inside {base.name}/")
+    if not resolved.is_file():
+        raise SystemExit(f"no such file: {base.name}/{name}")
+    return resolved
+
+
+def named_settings(name: str | None) -> Settings:
+    """A settings row BY NAME (`w8`), or the uncalibrated defaults when the name says so."""
+    if not name or name == DEFAULT_SETTINGS_NAME:
+        return Settings()
+    return Settings.from_json(repo_path(name, SETTINGS_DIR))
+
+
+def named_model(name: str | None) -> LogisticModel:
+    """A model BY NAME (`w6_gold`), or the hand-initialised prior when the name says so.
+
+    A model file whose own `version` is not the name it was loaded under is refused: the
+    version is what every stored row is stamped with, so the two must be one string."""
+    if not name or name == PRIOR_MODEL_NAME:
+        return hand_initialised()
+    model = LogisticModel.from_json(
+        json.loads(repo_path(name, MODELS_DIR).read_text(encoding="utf-8")))
+    if model.version and model.version != name:
+        raise SystemExit(
+            f"models/{name}.json carries version {model.version!r} — a model is stamped on "
+            "every row it decides, so the file and its version must be one name")
+    return model
+
+
+def model_of_version(version: str | None) -> LogisticModel:
+    """The model a STORED `model_version` names — the prior's own version resolves to the
+    prior, anything else to `models/<version>.json`."""
+    if not version or str(version) == hand_initialised().version:
+        return hand_initialised()
+    return named_model(str(version))
+
+
+def model_name_of(model: LogisticModel) -> str:
+    """The name a model is dispatched under: its own version, or the prior's word."""
+    version = getattr(model, "version", None)
+    return PRIOR_MODEL_NAME if (not version or version == hand_initialised().version) \
+        else str(version)
+
+
 CROSS_BLOCK: str = "(cross-block)"
 
 

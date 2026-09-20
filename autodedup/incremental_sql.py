@@ -566,6 +566,37 @@ select p.phash, p.n_listings
  where p.phash = any(%(hashes)s::bigint[])
 """
 
+# The one WRITER of the frozen population (E91). It is the SEED's, and what it writes is the
+# artifact's own `pop` — the number `COHORT_PHASH_POP_SQL` counted over `public.images` when
+# the calibration was cut — so the live lane joins against exactly the statistic the batch
+# engine scored with, at zero cost against `public`. Migration 528's prose says "only hashes on
+# >= 3 listings"; that was never true of the table, only of an intention, and a population of 1
+# or 2 is the difference between "this photo is unique" and "nobody measured it".
+RT_PHASH_POP_WRITE_SQL = """
+insert into autodedup.phash_pop (phash, n_listings, computed_at)
+values (%(phash)s::bigint, %(n_listings)s::integer, now())
+on conflict (phash) do update set
+    n_listings  = excluded.n_listings,
+    computed_at = now()
+"""
+
+RT_PHASH_POP_COUNT_SQL = """
+select count(*) as n from autodedup.phash_pop
+"""
+
+# The change stamp of a listing's CONTENT, for the parity gate and for the instrument that
+# shares its definition: rule #2 appends a `listing_snapshots` row only when the content hash
+# moves, so the newest snapshot is when this row last really changed. There is no
+# `last_change_at` column on `listings` to read instead.
+RT_PARITY_CHANGE_SQL = """
+select s.listing_id           as listing_id,
+       max(s.scraped_at)      as last_change_at,
+       count(*)               as n_snapshots
+from listing_snapshots s
+where s.listing_id = any(%(ids)s::bigint[])
+group by s.listing_id
+"""
+
 # ------------------------------------------------------------------ probe postings
 #
 # One statement per PASS rather than per probe key (E74): a listing carries 17.3 index keys and
@@ -609,27 +640,41 @@ on conflict (generation, probe, key_token, listing_id) do nothing
 # without a fact fetch — the five guard columns (E17's rule floor), the re-score digest, the
 # census cell the listing is counted in (so a MOVE unbumps the cell it left, not the one it
 # arrived in) and the activity flag the revive sweep anti-joins.
+# `first_decided_at` is COALESCED, never overwritten (E92, migration 540): the evidence
+# horizon is measured from a generation's FIRST decision about a listing, so a refresh — and a
+# re-decision the evidence sweep itself asked for — must not restart that clock. The four
+# `ev_*` counts and the derived `ev_complete` are the opposite: they are what THIS decision
+# rested on, so they are replaced every time.
 RT_FP_UPSERT_SQL = """
 insert into autodedup.rt_fp (
     generation, listing_id, category_main, category_type, area_m2, disposition, floor,
-    fp_digest, cell_key, cell_group, is_active, updated_at
+    fp_digest, cell_key, cell_group, is_active, ev_images, ev_phash, ev_clip, ev_tags,
+    ev_complete, first_decided_at, updated_at
 ) values (
     %(generation)s::text, %(listing_id)s::bigint, %(category_main)s::text,
     %(category_type)s::text, %(area_m2)s::double precision, %(disposition)s::text,
     %(floor)s::integer, %(fp_digest)s::text, %(cell_key)s::text, %(cell_group)s::text,
-    %(is_active)s::boolean, now()
+    %(is_active)s::boolean, %(ev_images)s::integer, %(ev_phash)s::integer,
+    %(ev_clip)s::integer, %(ev_tags)s::integer, %(ev_complete)s::boolean, now(), now()
 )
 on conflict (generation, listing_id) do update set
-    category_main = excluded.category_main,
-    category_type = excluded.category_type,
-    area_m2       = excluded.area_m2,
-    disposition   = excluded.disposition,
-    floor         = excluded.floor,
-    fp_digest     = excluded.fp_digest,
-    cell_key      = excluded.cell_key,
-    cell_group    = excluded.cell_group,
-    is_active     = excluded.is_active,
-    updated_at    = now()
+    category_main    = excluded.category_main,
+    category_type    = excluded.category_type,
+    area_m2          = excluded.area_m2,
+    disposition      = excluded.disposition,
+    floor            = excluded.floor,
+    fp_digest        = excluded.fp_digest,
+    cell_key         = excluded.cell_key,
+    cell_group       = excluded.cell_group,
+    is_active        = excluded.is_active,
+    ev_images        = excluded.ev_images,
+    ev_phash         = excluded.ev_phash,
+    ev_clip          = excluded.ev_clip,
+    ev_tags          = excluded.ev_tags,
+    ev_complete      = excluded.ev_complete,
+    first_decided_at = coalesce(autodedup.rt_fp.first_decided_at,
+                                excluded.first_decided_at),
+    updated_at       = now()
 """
 
 RT_FP_DELETE_SQL = """
@@ -640,10 +685,85 @@ delete from autodedup.rt_fp
 
 RT_FP_READ_SQL = """
 select f.listing_id, f.category_main, f.category_type, f.area_m2, f.disposition, f.floor,
-       f.fp_digest, f.cell_key, f.cell_group, f.is_active
+       f.fp_digest, f.cell_key, f.cell_group, f.is_active,
+       f.ev_images, f.ev_phash, f.ev_clip, f.ev_tags,
+       extract(epoch from f.first_decided_at)::double precision as first_decided_epoch
   from autodedup.rt_fp f
  where f.generation = %(generation)s::text
    and f.listing_id = any(%(ids)s::bigint[])
+"""
+
+# ------------------------------------------------------------------ the evidence sweep (E92)
+#
+# The SEVENTH feed, and the real-time analogue of the defect W9g closed. The six feeds of W9
+# are keyed on `first_seen_at`, a snapshot id, `inactive_at`, a revival and scope drift — NOT
+# ONE of them is keyed on a hash or a vector arriving, and the producers that write those
+# arrive hours after the lane has already decided the listing (dHash hourly at :20, CLIP at
+# :40; p50 2.47 h to a first tag, against a claim at `first_seen_at + 5..15 min`). So ~80% of
+# arrivals were decided with every phash NULL and never looked at again.
+#
+# Arm one: this generation's own rows whose evidence was incomplete when it decided them, or
+# which it decided recently enough that a producer could still be behind. It reads `rt_fp`
+# alone — zero blocks of `public` — and hands the ids to the probe below. Measured on the
+# trial scope: 76 of 4,974 rows carry incomplete evidence in steady state, plus ~74 inside a
+# 48 h horizon at 37 arrivals a day.
+RT_EVIDENCE_CANDIDATES_SQL = """
+select f.listing_id, f.ev_images, f.ev_phash, f.ev_clip, f.ev_tags
+  from autodedup.rt_fp f
+ where f.generation = %(generation)s::text
+   and f.listing_id > %(after_id)s::bigint
+   and (f.ev_complete is not true
+        or f.first_decided_at is null
+        or f.first_decided_at > now() - make_interval(hours => %(horizon_hours)s::int))
+ order by f.listing_id
+ limit %(limit)s
+"""
+
+# The probe itself: `public.images` by listing id, through `images_listing_id_idx`, and NOTHING
+# else. `clip_tagged_at` is the CLIP job's own stamp on the image row, so the vector and the
+# tags are read without joining `image_clip_embeddings` or `image_clip_tags` — measured on the
+# trial scope's 73,208 images, the stamp and the two tables agree on every single row (72,171
+# each, 0 disagreements either way), and the two joins cost 14x the buffers (34,419 against
+# 2,375 for 200 listings).
+RT_EVIDENCE_PROBE_SQL = """
+select i.listing_id                as listing_id,
+       count(*)                    as n_images,
+       count(i.phash)              as n_phash,
+       count(i.clip_tagged_at)     as n_tagged
+  from public.images i
+ where i.listing_id = any(%(ids)s::bigint[])
+ group by i.listing_id
+"""
+
+# Arm two: a merge HELD in the band for want of photographs (E93) whose hold is over — neither
+# side is still pending inside the horizon. Nothing about such a pair has moved, so no digest
+# and no feed could ever find it again; it is asked for by reason. The horizon is evaluated by
+# the SERVER's clock, because a runner's is not the database's.
+RT_EVIDENCE_RELEASE_SQL = """
+select p.listing_lo, p.listing_hi
+  from autodedup.pairs p
+  left join autodedup.rt_fp flo
+         on flo.generation = p.generation and flo.listing_id = p.listing_lo
+  left join autodedup.rt_fp fhi
+         on fhi.generation = p.generation and fhi.listing_id = p.listing_hi
+ where p.generation = %(generation)s::text
+   and p.decision = %(reason)s::text
+   and not (coalesce(flo.ev_images, 0) > 0 and coalesce(flo.ev_phash, 0) = 0
+            and flo.first_decided_at
+                > now() - make_interval(hours => %(horizon_hours)s::int))
+   and not (coalesce(fhi.ev_images, 0) > 0 and coalesce(fhi.ev_phash, 0) = 0
+            and fhi.first_decided_at
+                > now() - make_interval(hours => %(horizon_hours)s::int))
+ order by p.listing_lo, p.listing_hi
+ limit %(limit)s
+"""
+
+# How many pairs of this generation are waiting on photographs, for the pass summary.
+RT_EVIDENCE_HELD_COUNT_SQL = """
+select count(*) as n
+  from autodedup.pairs p
+ where p.generation = %(generation)s::text
+   and p.decision = %(reason)s::text
 """
 
 RT_KNOWN_SQL = """

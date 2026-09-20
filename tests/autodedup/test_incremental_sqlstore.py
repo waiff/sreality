@@ -571,10 +571,18 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     conn.admin_parents[490245] = 554782
     conn.listings[9_001] = {"first_seen_at": conn.now, "inactive_at": None, "is_active": True}
     conn.snapshots.append({"id": 4_242, "listing_id": 9_001, "scraped_at": conn.now})
+    # This fixture's `public` holds no cohort listing at all, so the vacuity floors W9h put
+    # on the gate (E94) would refuse the seed. They are switched off BY NAME here — an
+    # operator settings row, the only way any rail on this lane moves — because what is under
+    # test is the seed's mechanics; the gate itself is proved in `test_rt_gate.py` and
+    # `test_shipped_w9h.py`.
+    conn.settings["rt_parity_min_checked"] = 0
+    conn.settings["rt_parity_min_checked_share"] = 0
     # DARK: seeding is the step BEFORE the switch, so it never consults the variable (W9e/R1).
     monkeypatch.delenv(ENV_FLAG, raising=False)
 
-    out = run_rt_seed(lambda: conn, {"artifact": str(artifact), "backfill": "true"}, tmp_path)
+    out = run_rt_seed(lambda: conn, {"artifact": str(artifact), "backfill": "true", "settings": "default",
+         "model": "prior"}, tmp_path)
 
     assert out["calibration_digest"] and out["calibration_n_listings"] >= 1
     assert out["backfilled"] >= 1
@@ -589,7 +597,8 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     # And it is idempotent: a second seed of a seeded generation is refused, because a re-seed
     # re-cuts the calibration every stored decision was taken under (W9e/R1).
     with pytest.raises(SystemExit) as raised:
-        run_rt_seed(lambda: conn, {"artifact": str(artifact)}, tmp_path)
+        run_rt_seed(lambda: conn, {"artifact": str(artifact), "settings": "default",
+                                   "model": "prior"}, tmp_path)
     assert "reseed" in str(raised.value)
 
 
@@ -668,11 +677,22 @@ def test_the_lane_reads_the_facts_the_export_reads() -> None:
     assert images[0].tags == [("kitchen", 0.81), ("kitchen_modern", 0.81)]
 
 
-def test_an_image_whose_hash_the_frozen_population_does_not_carry_reads_zero() -> None:
+def test_an_image_whose_hash_the_frozen_population_does_not_carry_is_unknown() -> None:
+    """W9f pinned the opposite of this ("unseen, not unknown") and shipped it. `pop = 0` is not
+    a population a photograph can have — it appears on at least its own listing — so reading an
+    absent row as 0 was a MEASUREMENT the lane had not made. Against an empty table that made
+    `catalog_ratio` absent on every listing and K-C structurally unreachable for a whole live
+    pass (E91). The export writes the same unknown as a null when its own probe does not run,
+    and this is now that same null."""
     from autodedup.incremental_lane import SqlFacts
 
     conn = FakePg()
     _seed_public(conn)
     conn.phash_pop.clear()
-    _listing, images = SqlFacts(conn).facts([4_242])[4_242]
-    assert images[0].pop == 0, "a hash the cohort never saw is unseen, not unknown"
+    facts = SqlFacts(conn)
+    _listing, images = facts.facts([4_242])[4_242]
+    assert images[0].pop is None
+    assert not images[0].pop_is_measured()
+    # And the pass can SAY how much it could not measure, rather than scoring on it silently.
+    assert facts.images_with_phash == 1 and facts.images_unmeasured == 1
+    assert facts.hashes_unmeasured == {7_919}

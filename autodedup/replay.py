@@ -34,7 +34,9 @@ from autodedup.fingerprint import build_all
 from autodedup.harness import load_model, load_settings
 from autodedup.hazard_context import ContextIndex
 from autodedup.incremental import (
+    EVIDENCE_HOLD_REASON,
     Calibration,
+    EvidenceHold,
     Limits,
     PassResult,
     WorkItem,
@@ -67,6 +69,65 @@ class DatasetFacts:
             self.reads += 1
             out[listing_id] = (listing, self.ds.images(listing_id))
         return out
+
+
+class WithheldFacts:
+    """`DatasetFacts` that hands a listing's PHOTOGRAPHS over late (E92/E93).
+
+    This is the shape production actually has and the plain replay cannot see: images land a
+    minute after the advert, their pHash an hour later and their CLIP vector two to four hours
+    after that, while the lane claims the listing within fifteen minutes. So the first claim
+    sees a gallery with `phash`, `pop`, `clip` and `tags` all stripped — an honest gallery of
+    unprocessed photographs, not an absent one — and `deliver` is the producers arriving."""
+
+    def __init__(self, ds: Dataset) -> None:
+        self.ds = ds
+        self.reads = 0
+        self.delivered: set[int] = set()
+
+    def deliver_all(self) -> None:
+        self.delivered = set(self.ds.listings)
+
+    def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]:
+        out: dict[int, tuple[Listing, list[Image]]] = {}
+        for listing_id in ids:
+            listing = self.ds.listings.get(listing_id)
+            if listing is None:
+                continue
+            self.reads += 1
+            images = self.ds.images(listing_id)
+            if listing_id not in self.delivered:
+                images = [replace(image, phash=None, pop=None, clip=None, tags=())
+                          for image in images]
+            out[listing_id] = (listing, images)
+        return out
+
+
+class RedecideWork:
+    """The evidence sweep, as a schedule: the same ids handed back with `redecide` set.
+
+    Production's sweep finds them by probing `public.images` against the counts on `rt_fp`;
+    here the arrival of the photographs is known, so what is being replayed is what the sweep
+    DOES with them — the pass re-writes the postings and re-scores the pairs even though, for
+    a hold the horizon released rather than the evidence, no digest moved at all."""
+
+    def __init__(self, order: Sequence[int]) -> None:
+        self.order = list(order)
+        self.cursor = 0
+
+    def claim(self, limit: int) -> list[WorkItem]:
+        batch = self.order[self.cursor:self.cursor + limit]
+        return [WorkItem(listing_id, "evidence", None, position, redecide=True)
+                for position, listing_id in enumerate(batch, start=self.cursor + 1)]
+
+    def commit(self, done: Sequence[WorkItem]) -> dict[str, Any]:
+        positions = [int(item.cursor) for item in done if item.cursor is not None]
+        if positions:
+            self.cursor = max(positions)
+        return {"redecided": self.cursor, "total": len(self.order)}
+
+    def exhausted(self) -> bool:
+        return self.cursor >= len(self.order)
 
 
 class ScheduleWork:
@@ -213,6 +274,95 @@ def incremental_state(
     return pairs, {key: list(members) for key, members in store.clusters.items()}, stats
 
 
+# The withheld-evidence replay's clock. Nothing here is a wall clock: what matters is that
+# the first decision is INSIDE the horizon (so the hold fires) and the last one is outside it
+# (so the hold expires with the evidence still absent).
+WITHHELD_T0: float = 1_780_000_000.0
+WITHHELD_HORIZON_S: float = 48 * 3600.0
+
+
+def withheld_state(
+    ds: Dataset,
+    settings: Settings,
+    model: LogisticModel,
+    calibration: Calibration,
+    order: Sequence[int],
+    batch_size: int,
+    limits: Limits,
+) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, Any]]:
+    """The incremental path run against production's actual evidence timeline (E92/E93).
+
+    Three phases, and the claim is about the THIRD: every listing is first decided with its
+    photographs unprocessed (and every photo-dependent merge therefore HELD in the band); the
+    producers then land and the evidence sweep re-claims; and finally the horizon passes, so a
+    hold that is still waiting on a gallery the cohort itself never hashed is released on what
+    the lane has. The final state must be the batch engine's, exactly — the hold changes WHEN
+    a decision is reached, never which one."""
+    store = MemoryStore(now=WITHHELD_T0)
+    facts = WithheldFacts(ds)
+    hold = EvidenceHold(now=WITHHELD_T0, horizon_s=WITHHELD_HORIZON_S)
+    passes: list[PassResult] = []
+    clock = time.perf_counter()
+
+    work = ScheduleWork(order)
+    while not work.exhausted():
+        before = work.cursor
+        passes.append(run_pass_bounded(store, facts, work, settings, model, calibration,
+                                       limits=limits, now=None, hold=hold))
+        if work.cursor == before:
+            raise SystemExit("pair budget refused the withheld-evidence replay")
+    held_first = sum(p.held for p in passes)
+
+    # The producers arrive. Production's sweep notices because the counts on `rt_fp` no longer
+    # match a probe of `public.images`; here they are handed over directly.
+    facts.deliver_all()
+    sweep = RedecideWork(order)
+    while not sweep.exhausted():
+        before = sweep.cursor
+        passes.append(run_pass_bounded(store, facts, sweep, settings, model, calibration,
+                                       limits=limits, now=None, hold=hold))
+        if sweep.cursor == before:
+            raise SystemExit("pair budget refused the evidence sweep")
+
+    # And the horizon passes, for the galleries the cohort itself never hashed.
+    late = EvidenceHold(now=WITHHELD_T0 + WITHHELD_HORIZON_S + 3600.0,
+                        horizon_s=WITHHELD_HORIZON_S)
+    expiry = RedecideWork(order)
+    while not expiry.exhausted():
+        before = expiry.cursor
+        passes.append(run_pass_bounded(store, facts, expiry, settings, model, calibration,
+                                       limits=limits, now=None, hold=late))
+        if expiry.cursor == before:
+            raise SystemExit("pair budget refused the horizon sweep")
+
+    elapsed = time.perf_counter() - clock
+    pairs = {
+        key: {
+            "zone": row.zone,
+            "score": round(float(row.score), 9),
+            "reason": row.reason,
+            "certificate": row.certificate,
+            "veto": row.veto,
+            "families": sorted(row.families),
+            "probes": sorted(row.probes),
+        }
+        for key, row in store.pairs.items()
+    }
+    stats = {
+        "passes": len(passes),
+        "elapsed_s": round(elapsed, 3),
+        "held_on_first_decision": held_first,
+        "held_total": sum(p.held for p in passes),
+        "released_total": sum(p.released for p in passes),
+        "still_held": sum(1 for row in store.pairs.values()
+                          if row.reason == EVIDENCE_HOLD_REASON),
+        "pairs_scored": sum(p.pairs_scored for p in passes),
+        "fact_reads": facts.reads,
+        "spent_usd": sum(p.spent_usd for p in passes),
+    }
+    return pairs, {key: list(members) for key, members in store.clusters.items()}, stats
+
+
 def compare_pairs(
     left: dict[tuple[int, int], dict[str, Any]],
     right: dict[tuple[int, int], dict[str, Any]],
@@ -279,6 +429,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-component", type=int, default=400)
     parser.add_argument("--max-pairs", type=int, default=Limits().max_pairs)
     parser.add_argument("--shuffle-seed", type=int, default=None)
+    # E92/E93: re-run the same cohort with every listing's photographs WITHHELD at its first
+    # claim and delivered afterwards. The final state must still be the batch engine's.
+    parser.add_argument("--withhold-photos", action="store_true")
     # The real-time lane holds only `rt_scope` (E79), so the honest equivalence claim is over
     # the scope: the SAME listings on both sides, the batch pass included. Passing it here
     # restricts the dataset once, before either path sees it.
@@ -336,6 +489,18 @@ def run(argv: Sequence[str] | None = None) -> int:
                                       _stored(pairs, settings.store_floor)),
         "clusters": compare_clusters(batch_clusters, clusters),
     }
+
+    if ns.withhold_photos:
+        w_pairs, w_clusters, w_stats = withheld_state(
+            ds, settings, model, calibration, order, ns.batch_size, limits
+        )
+        report["withheld_photos"] = {
+            "stats": w_stats,
+            "pairs_vs_batch": compare_pairs(reference, w_pairs),
+            "stored_pairs_vs_batch": compare_pairs(_stored(reference, settings.store_floor),
+                                                   _stored(w_pairs, settings.store_floor)),
+            "clusters_vs_batch": compare_clusters(batch_clusters, w_clusters),
+        }
 
     if ns.shuffle_seed is not None:
         shuffled = arrival_order(ds, ns.shuffle_seed)

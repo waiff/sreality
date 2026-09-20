@@ -350,7 +350,14 @@ def build_image_record(
 ) -> dict[str, Any]:
     """`pop=None` means the corpus-wide population is UNKNOWN (the probe did not run or
     timed out), and the record says so with a null — never a 0, which a consumer would read
-    as "this photo is unique" and E9's catalog subtraction would silently become a no-op."""
+    as "this photo is unique" and E9's catalog subtraction would silently become a no-op.
+
+    A hash MISSING from a `pop` that did run is the same unknown, not a zero. The export's own
+    probe counts `count(DISTINCT listing_id)` over `public.images` and so can never answer less
+    than 1 for a hash it was handed, which is why this never fires here; the real-time lane
+    joins the same builder against the FROZEN population instead, where a hash the calibration
+    never saw is exactly an unknown — and reading it as 0 was W9f's missing K-C certificates
+    (E91)."""
     phash = _int_or_none(row.get("phash"))
     return {
         "t": "image",
@@ -359,7 +366,8 @@ def build_image_record(
         "seq": _int_or_none(row.get("sequence")),
         "storage_path": row.get("storage_path"),
         "phash": phash,
-        "pop": None if (phash is None or pop is None) else int(pop.get(phash, 0)),
+        "pop": None if (phash is None or pop is None or phash not in pop)
+               else int(pop[phash]),
         "clip": clip,
         "tags": [list(tag) for tag in tags],
     }

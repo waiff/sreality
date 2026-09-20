@@ -78,9 +78,11 @@ FEATURE_VERSION: int = features.FEATURE_VERSION
 CHUNK: int = 1_000
 
 # `--args settings=sweep_a` resolves inside the repo, never off the wire: a lane input is an
-# operator string and a bare path would make `settings=/etc/passwd` a readable file.
-SETTINGS_DIR: Path = Path(__file__).resolve().parent / "settings"
-MODELS_DIR: Path = Path(__file__).resolve().parent / "models"
+# operator string and a bare path would make `settings=/etc/passwd` a readable file. The
+# resolution itself lives in `harness` since W9g, because the real-time lane needs the same
+# one — one definition, not two (E12).
+SETTINGS_DIR: Path = harness.SETTINGS_DIR
+MODELS_DIR: Path = harness.MODELS_DIR
 
 # `autodedup.pairs.families` is a bitmask, not an array: the UI filters on "has image evidence"
 # across millions of rows, and `families & 32 > 0` is an index-friendly predicate where
@@ -142,15 +144,7 @@ ARG_KEYS: tuple[str, ...] = (
 )
 
 
-def repo_path(raw: str, base: Path, suffix: str = ".json") -> Path:
-    """`sweep_a` or `sweep_a.json` -> `<base>/sweep_a.json`, refusing anything outside `base`."""
-    name = raw if raw.endswith(suffix) else f"{raw}{suffix}"
-    resolved = (base / name).resolve()
-    if base.resolve() not in resolved.parents:
-        raise SystemExit(f"{raw!r} must name a file inside {base.name}/")
-    if not resolved.is_file():
-        raise SystemExit(f"no such file: {base.name}/{name}")
-    return resolved
+repo_path = harness.repo_path
 
 
 def parse_args(args: dict[str, str]) -> ScoreArgs:

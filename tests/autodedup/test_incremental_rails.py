@@ -12,7 +12,7 @@ R4 one scope row per generation · R5 the entrant settle lag · R6 control numbe
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -31,6 +31,7 @@ from autodedup.incremental_lane import (
     SqlWork,
     run_incremental,
     run_rt_seed,
+    parity_baseline_key,
     scope_setting_key,
 )
 from autodedup.incremental_scope import Scope, ScopeBlock
@@ -43,11 +44,40 @@ TOWN = Scope((ScopeBlock("obec", 563510),))
 SCOPE = Scope((ScopeBlock("obec", 563510), ScopeBlock("cast_obce", 490245)))
 PARENTS = {490245: 554782}
 
+# A generation is scored by ONE scorer and the lane refuses to guess which (E90a), so every
+# seed here NAMES it — `default`/`prior` being the two words for the uncalibrated defaults
+# these fixtures were already running on.
+SCORER: dict[str, str] = {"settings": "default", "model": "prior"}
+
+
+def _baseline(db: Any, generation: str = "rt") -> None:
+    """The parity gate (E91) refuses a generation with no fact baseline. A fixture that
+    hand-writes the calibration row hand-writes the baseline too — an empty one, because its
+    `public` holds no cohort listing to compare against, and with W9h's vacuity floors (E94)
+    an empty baseline now REFUSES unless the rail is switched off by name. These fixtures
+    switch it off and say so: they test the scope, the feeds and the seed's mechanics, and
+    what the gate is FOR is proved end to end in `test_rt_gate.py`, `test_shipped_w9h.py`
+    and `test_parity.py`."""
+    db.settings[parity_baseline_key(generation)] = {
+        "rows": {}, "exported_at": db.now.isoformat(), "n": 0}
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
+
+
+
+# A SETTLED store row: its photographs were counted when the generation decided it, long
+# enough ago that the evidence sweep (E92) has no business in it. A hand-written row that left
+# these NULL would be claimed by the sweep on every pass — unmeasured is not the same as
+# nothing to measure — which is what `test_shipped_w9h.py` proves it does.
+_SETTLED = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
 
 def _fp_row(is_active: bool = True) -> dict:
     return {"category_main": None, "category_type": None, "area_m2": None,
             "disposition": None, "floor": None, "fp_digest": "d",
-            "cell_key": "o1", "cell_group": "byt", "is_active": is_active}
+            "cell_key": "o1", "cell_group": "byt", "is_active": is_active,
+            "ev_images": 0, "ev_phash": 0, "ev_clip": 0, "ev_tags": 0,
+            "ev_complete": True, "first_decided_at": _SETTLED}
 
 
 def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
@@ -57,14 +87,23 @@ def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
 
 
 def _registry(db: FakePg) -> FakePg:
-    """`public.ruian_admin_units`: the quarter block's parent obec (W9d-3)."""
+    """`public.ruian_admin_units`: the quarter block's parent obec (W9d-3).
+
+    And the vacuity floors W9h put on the gate (E94), switched off by name: these fixtures'
+    `public` holds no cohort listing, so a gate that now refuses an unverifiable seed would
+    refuse every one of them. The gate is proved in `test_rt_gate.py` / `test_shipped_w9h.py`.
+    """
     db.admin_parents[490245] = 554782
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
     return db
 
 
 def _seeded(db: FakePg, generation: str = GEN, scope: Any = None) -> FakePg:
     db.calibration[generation] = {"digest": "d", "n_listings": 3, "payload": {},
-                                  "artifact_url": None, "settings": {}, "model_version": "m"}
+                                  "artifact_url": None, "settings": {},
+                                  "model_version": "hand_v1"}
+    _baseline(db, generation)
     db.settings[scope_setting_key(generation)] = (
         scope if scope is not None else [{"grain": "obec", "code": 563510}])
     return db
@@ -86,7 +125,7 @@ def test_rt_seed_runs_while_the_schedule_is_dark(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv(ENV_FLAG, raising=False)
     conn = _registry(FakePg())
     monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    out = run_rt_seed(lambda: conn, {"artifact": "cohort.jsonl.gz"}, tmp_path)
+    out = run_rt_seed(lambda: conn, {"artifact": "cohort.jsonl.gz", **SCORER}, tmp_path)
     assert out.get("skipped") is None
     assert conn.calibration[GEN]["digest"]
     assert conn.settings[scope_setting_key(GEN)]
@@ -107,10 +146,11 @@ def test_rt_seed_takes_the_export_runs_own_artifact(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr("autodedup.judge_lane.download_cohort", _download)
     monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    out = run_rt_seed(lambda: conn, {"export_run": "35200225251"}, tmp_path)
+    out = run_rt_seed(lambda: conn, {"export_run": "35200225251", **SCORER}, tmp_path)
     assert fetched == ["35200225251"] and out["export_run"] == "35200225251"
     with pytest.raises(SystemExit) as raised:
-        run_rt_seed(lambda: conn, {"export_run": "not-a-run", "generation": "g9"}, tmp_path)
+        run_rt_seed(lambda: conn, {"export_run": "not-a-run", "generation": "g9", **SCORER},
+                    tmp_path)
     assert "run id" in str(raised.value)
 
 
@@ -120,9 +160,10 @@ def test_a_second_seed_of_a_seeded_generation_is_refused(tmp_path, monkeypatch) 
     conn = _seeded(_registry(FakePg()), scope=[{"grain": "cast_obce", "code": 490245}])
     monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
     with pytest.raises(SystemExit) as raised:
-        run_rt_seed(lambda: conn, {"artifact": "cohort.jsonl.gz"}, tmp_path)
+        run_rt_seed(lambda: conn, {"artifact": "cohort.jsonl.gz", **SCORER}, tmp_path)
     assert "reseed" in str(raised.value)
-    out = run_rt_seed(lambda: conn, {"artifact": "cohort.jsonl.gz", "reseed": "true"}, tmp_path)
+    out = run_rt_seed(lambda: conn, {"artifact": "cohort.jsonl.gz", "reseed": "true", **SCORER},
+                       tmp_path)
     assert out["reseed"] is True
 
 
@@ -278,7 +319,7 @@ def test_the_scope_row_is_per_generation(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv(ENV_FLAG, raising=False)
     conn = _seeded(_registry(FakePg()), GEN, [{"grain": "obec", "code": 563510}])
     monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
-    run_rt_seed(lambda: conn, {"artifact": "c.jsonl.gz", "generation": "g2",
+    run_rt_seed(lambda: conn, {"artifact": "c.jsonl.gz", "generation": "g2", **SCORER,
                                SCOPE_SETTING: "cast_obce:490245"}, tmp_path)
     assert conn.settings[scope_setting_key(GEN)] == [{"grain": "obec", "code": 563510}]
     assert conn.settings[scope_setting_key("g2")] == [{"grain": "cast_obce", "code": 490245}]
@@ -288,7 +329,9 @@ def test_the_legacy_global_row_is_read_for_the_rt_generation_only(tmp_path, monk
     """One-time, one generation: `rt` is the only generation that can have written the old row."""
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     conn.calibration["g2"] = dict(conn.calibration[GEN])
     conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     monkeypatch.setenv(ENV_FLAG, "true")
