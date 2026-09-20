@@ -604,3 +604,131 @@ def test_arm_comparison_still_takes_exactly_one_gold(tmp_path: Path) -> None:
                      "--out", str(tmp_path / "out")])
     with pytest.raises(SystemExit):
         compare.run(["--gold", str(gold), "--out", str(tmp_path / "out")])
+
+
+# --- the structural reference ------------------------------------------------------------
+
+
+def _struct(lo: int, hi: int, label: str, *, zone: str = "band",
+            rule: str = "pos_ref_relist", block: str = "ruian:1") -> dict[str, Any]:
+    return {"lo": lo, "hi": hi, "label": label, "zone": zone, "rule": rule, "block": block}
+
+
+def test_structural_labels_load_band_only_and_carry_rule_and_block(tmp_path: Path) -> None:
+    path = _write(tmp_path / "labels.jsonl", [
+        _struct(1, 2, "same"),
+        _struct(3, 4, "different", rule="neg_unit_number_conflict", block="ruian:2"),
+        _struct(5, 6, "same", zone="merge"),
+        _struct(7, 8, "different", zone="reject"),
+        {"lo": 9, "hi": 10, "label": "who knows", "zone": "band", "block": "b"},
+    ])
+    rows = compare.load_structural_labels(path)
+    assert set(rows) == {(1, 2), (3, 4)}
+    assert rows[(1, 2)].verdict == "same_property"
+    assert rows[(3, 4)].verdict == "different_property"
+    assert rows[(3, 4)].stratum == "neg_unit_number_conflict"
+    assert rows[(3, 4)].block == "ruian:2"
+    # The zone is a filter, not a stratum: ask for all three and the merge/reject rows arrive.
+    everywhere = compare.load_structural_labels(path, ("band", "merge", "reject"))
+    assert set(everywhere) == {(1, 2), (3, 4), (5, 6), (7, 8)}
+
+
+def test_structural_labels_reject_an_unknown_zone_and_an_empty_selection(
+    tmp_path: Path
+) -> None:
+    path = _write(tmp_path / "labels.jsonl", [_struct(1, 2, "same")])
+    with pytest.raises(SystemExit):
+        compare.load_structural_labels(path, ("nowhere",))
+    with pytest.raises(SystemExit):
+        compare.load_structural_labels(path, ("reject",))
+
+
+def test_block_attribution_counts_developments_not_pairs(tmp_path: Path) -> None:
+    labels = _write(tmp_path / "labels.jsonl", [
+        _struct(1, 2, "different", block="A"),
+        _struct(3, 4, "different", block="A"),
+        _struct(5, 6, "different", block="B"),
+        _struct(7, 8, "same", block="C"),
+    ])
+    gold = compare.load_structural_labels(labels)
+    arm_path = _write(tmp_path / "arm.jsonl", [
+        _row(1, 2, "same_property"),
+        _row(3, 4, "same_property"),
+        _row(5, 6, "different_property"),
+        _row(7, 8, "insufficient_evidence"),
+    ])
+    arm = compare.load_rows(arm_path)
+    report = compare.compare_arm("a", arm_path, arm, gold)
+    # Two false merges, but only ONE development produced them — the distinction W6 lacked.
+    assert report["errors"]["false_merge"]["k"] == 2
+    assert report["errors"]["false_merge"]["n"] == 3
+    blocks = report["blocks"]
+    assert blocks["negative_blocks"] == 2
+    assert blocks["false_merge_blocks"] == 1
+    assert blocks["false_merge_block_names"] == ["A"]
+    assert blocks["positive_blocks"] == 1 and blocks["missed_blocks"] == 1
+    assert blocks["per_block"]["A"] == {
+        "negatives": 2, "false_merges": 2, "positives": 0, "recalled": 0
+    }
+
+
+def test_block_attribution_is_absent_without_blocks(tmp_path: Path) -> None:
+    gold_path = _write(tmp_path / "gold.jsonl", [_gold(1, 2, "same_property")])
+    arm_path = _write(tmp_path / "arm.jsonl", [_row(1, 2, "same_property")])
+    report = compare.compare_arm(
+        "a", arm_path, compare.load_rows(arm_path), compare.load_rows(gold_path)
+    )
+    assert report["blocks"] is None
+
+
+def test_cli_refuses_two_references_and_accepts_structural(tmp_path: Path) -> None:
+    labels = _write(tmp_path / "labels.jsonl", [
+        _struct(1, 2, "same"), _struct(3, 4, "different", block="B"),
+    ])
+    arm = _write(tmp_path / "arm.jsonl", [
+        _row(1, 2, "same_property"), _row(3, 4, "different_property"),
+    ])
+    gold = _write(tmp_path / "gold.jsonl", [_gold(1, 2, "same_property")])
+    with pytest.raises(SystemExit):
+        compare.run(["--structural", str(labels), "--gold", str(gold),
+                     "--arm", f"a={arm}", "--out", str(tmp_path / "o")])
+    code = compare.run(["--structural", str(labels), "--arm", f"a={arm}",
+                        "--out", str(tmp_path / "out")])
+    assert code == 0
+    report = json.loads((tmp_path / "out" / compare.REPORT_JSON).read_text())
+    assert report["reference"] == "structural"
+    assert report["arms"][0]["errors"]["false_merge"] == {
+        "k": 0, "n": 1, "rate": 0.0, "wilson_low": 0.0, "wilson_high": 0.7935
+    }
+
+
+def test_cli_ensembles_section_prices_a_cascade_on_survivors_only(tmp_path: Path) -> None:
+    labels = _write(tmp_path / "labels.jsonl", [
+        _struct(1, 2, "same", block="A"),
+        _struct(3, 4, "different", block="B"),
+    ])
+    left = _write(tmp_path / "left.jsonl", [
+        _row(1, 2, "same_property", cost=0.001, latency=2.0),
+        _row(3, 4, "different_property", cost=0.001, latency=2.0),
+    ])
+    right = _write(tmp_path / "right.jsonl", [
+        _row(1, 2, "same_property", cost=0.005, latency=20.0),
+        _row(3, 4, "same_property", cost=0.005, latency=20.0),
+    ])
+    code = compare.run(["--structural", str(labels), "--arm", f"t={left}",
+                        "--arm", f"v={right}", "--ensembles",
+                        "--band-pairs", "1000", "--out", str(tmp_path / "out")])
+    assert code == 0
+    report = json.loads((tmp_path / "out" / compare.REPORT_JSON).read_text())
+    rules = {entry["rule"]: entry for entry in report["ensembles"]["rules"]}
+    cascade = rules["casc(t>v)"]
+    # v is paid on the one pair t proposed, so the mean is (0.006 + 0.001) / 2.
+    assert cascade["cost"]["per_pair_usd"] == 0.0035
+    assert cascade["escalation_rate"] == 0.5
+    assert cascade["false_merge"]["k"] == 0
+    assert cascade["recall"]["k"] == 1
+    assert cascade["projection"]["monthly_usd"] == 3.5
+    alone = rules["v"]
+    assert alone["false_merge"]["k"] == 1
+    assert alone["blocks"]["false_merge_blocks"] == 1
+    assert alone["cost"]["per_pair_usd"] == 0.005

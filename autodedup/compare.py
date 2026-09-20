@@ -89,6 +89,10 @@ class Row:
     tier: str | None = None
     model: str | None = None
     stratum: str | None = None
+    # The reference's address block, carried only by the structural reference: the unit a
+    # false-merge rate has to be read in, because 43 errors inside one development are one
+    # error repeated.
+    block: str | None = None
     confidence: float | None = None
     cost_usd: float | None = None
     latency_s: float | None = None
@@ -215,6 +219,109 @@ def load_operator_labels(
     if not rows:
         raise SystemExit(f"{path} holds no operator label for source(s) {sorted(wanted)}")
     return rows
+
+
+STRUCTURAL_RELATION: dict[str, str] = {
+    "same": "same_property",
+    "different": "different_property",
+}
+STRUCTURAL_ZONES: tuple[str, ...] = ("merge", "band", "reject")
+
+
+def load_structural_labels(
+    path: Path, zones: Sequence[str] = ("band",)
+) -> Pairs:
+    """`labels_all_zones.jsonl` from `autodedup.structural_truth` as the reference.
+
+    A third reference tier, and the only one that is neither a model nor a person: the label
+    comes from a fact the two adverts PRINT — one agency order code on both, or two conflicting
+    unit numbers. It cannot flatter an arm by sharing its blind spots, and unlike the operator's
+    labels it spans many developments, which is the axis W6 could not measure on.
+
+    `stratum` carries the RULE that produced the label rather than the engine zone, so the
+    per-stratum table answers "which kind of structural fact does this arm mishandle"; the zone
+    is the filter instead, because a judge is only ever asked about band pairs."""
+    if not path.is_file():
+        raise SystemExit(f"no structural labels file at {path}")
+    wanted = set(zones)
+    unknown = wanted - set(STRUCTURAL_ZONES)
+    if unknown:
+        raise SystemExit(f"unknown structural zone(s): {sorted(unknown)}")
+    rows: Pairs = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if str(record.get("zone") or "") not in wanted:
+            continue
+        verdict = STRUCTURAL_RELATION.get(str(record.get("label") or ""))
+        if verdict is None:
+            continue
+        try:
+            lo, hi = int(record["lo"]), int(record["hi"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        rows[(lo, hi)] = Row(
+            lo=lo, hi=hi, verdict=verdict, tier=str(record.get("zone") or ""),
+            model="structural", stratum=str(record.get("rule") or "(none)"),
+            block=str(record.get("block") or "") or None,
+        )
+    if not rows:
+        raise SystemExit(f"{path} holds no structural label in zone(s) {sorted(wanted)}")
+    return rows
+
+
+def block_attribution(
+    keys: Sequence[tuple[int, int]], gold: Pairs, arm: Pairs
+) -> dict[str, Any] | None:
+    """How many DISTINCT blocks an arm errs in, not just how many pairs.
+
+    Returned only when the reference carries blocks. W6's whole limitation was that 14 of its
+    18 band negatives came from one operator card, so a per-pair rate could not separate "this
+    arm is unsafe" from "this arm dislikes one development"."""
+    if not any(gold[key].block for key in keys):
+        return None
+    negative_blocks: set[str] = set()
+    error_blocks: set[str] = set()
+    positive_blocks: set[str] = set()
+    missed_blocks: set[str] = set()
+    per_block: dict[str, dict[str, int]] = {}
+    for key in keys:
+        block = gold[key].block
+        if not block:
+            continue
+        truth, said = gold[key].verdict, arm[key].verdict
+        cell = per_block.setdefault(
+            block, {"negatives": 0, "false_merges": 0, "positives": 0, "recalled": 0}
+        )
+        if truth == "same_property":
+            positive_blocks.add(block)
+            cell["positives"] += 1
+            if said == "same_property":
+                cell["recalled"] += 1
+            else:
+                missed_blocks.add(block)
+        else:
+            negative_blocks.add(block)
+            cell["negatives"] += 1
+            if said == "same_property":
+                error_blocks.add(block)
+                cell["false_merges"] += 1
+    return {
+        "negative_blocks": len(negative_blocks),
+        "false_merge_blocks": len(error_blocks),
+        "false_merge_block_names": sorted(error_blocks),
+        "positive_blocks": len(positive_blocks),
+        "missed_blocks": len(missed_blocks),
+        "per_block": {
+            block: cell for block, cell in sorted(per_block.items())
+            if cell["false_merges"] or cell["negatives"]
+        },
+    }
+
 
 
 # --- statistics ------------------------------------------------------------------------
@@ -353,6 +460,7 @@ def compare_arm(name: str, path: Path, arm: Pairs, gold: Pairs) -> dict[str, Any
             }
             for stratum, rows in sorted(strata.items())
         },
+        "blocks": block_attribution(keys, gold, arm),
         "insufficient_rate": _round(
             sum(1 for _, right in four_way if right == INSUFFICIENT) / len(four_way)
             if four_way else None
@@ -413,6 +521,51 @@ def build_report(gold_path: Path, gold: Pairs,
         },
         "arms": [compare_arm(name, path, rows, gold) for name, path, rows in arms],
         "between_arms": compare_arms({name: rows for name, _, rows in arms}),
+    }
+
+
+# M20's production dial, and D15's own 75 %-recall ratio: the two shapes every cost in this
+# program is quoted at, so a rule's monthly price never has to be re-derived by hand.
+BAND_PAIRS_PER_MONTH: int = 296_550
+RECALL_DIAL_75: float = 0.386
+
+
+def ensemble_report(
+    gold: Pairs, arms: Sequence[tuple[str, Path, Pairs]], band_pairs: int
+) -> dict[str, Any]:
+    """Every rule the stored verdicts answer, scored on the same reference as the arms.
+
+    Free by construction: no rule here makes a call that was not already made and paid for.
+    Cascades are charged honestly — stage two only on the pairs stage one let through."""
+    from autodedup import ensembles
+
+    tables = {
+        name: {
+            key: ensembles.ArmRow(row.verdict, row.cost_usd, row.latency_s)
+            for key, row in rows.items()
+        }
+        for name, _path, rows in arms
+    }
+    reference = {
+        key: (ensembles.SAME if row.verdict == "same_property" else ensembles.NOT_SAME)
+        for key, row in gold.items()
+    }
+    blocks = {key: row.block for key, row in gold.items() if row.block}
+    scored = ensembles.score_all(tables, reference, blocks)
+    for entry in scored:
+        per_pair = entry["cost"]["per_pair_usd"]  # type: ignore[index]
+        entry["projection"] = {
+            "band_pairs_per_month": band_pairs,
+            "monthly_usd": ensembles.project_monthly_usd(per_pair, band_pairs),
+            "monthly_usd_at_75pct_dial": ensembles.project_monthly_usd(
+                per_pair, band_pairs, RECALL_DIAL_75
+            ),
+        }
+    return {
+        "band_pairs_per_month": band_pairs,
+        "recall_dial_75pct": RECALL_DIAL_75,
+        "n_rules": len(scored),
+        "rules": scored,
     }
 
 
@@ -1337,6 +1490,20 @@ def run(argv: Sequence[str] | None = None) -> int:
                              "(default: explicit only); repeatable")
     parser.add_argument("--arm", action="append", metavar="NAME=PATH",
                         help="an arm's judgements.jsonl; repeatable")
+    parser.add_argument("--structural", type=Path,
+                        help="labels_all_zones.jsonl from autodedup.structural_truth, used as "
+                             "the reference instead of --gold / --operator-labels")
+    parser.add_argument("--structural-zone", action="append",
+                        choices=list(STRUCTURAL_ZONES),
+                        help="which engine zone(s) of the structural reference to score "
+                             "(default: band only); repeatable")
+    parser.add_argument("--ensembles", action="store_true",
+                        help="also score every rule the stored verdicts can answer: each arm "
+                             "alone, unanimity, both cascade orders, each under the all-arm "
+                             "abstain/same-building veto")
+    parser.add_argument("--band-pairs", type=int, default=BAND_PAIRS_PER_MONTH,
+                        help="band pairs a month for the --ensembles cost projection "
+                             f"(default {BAND_PAIRS_PER_MONTH}, M20's production dial)")
     parser.add_argument("--gold-votes", action="store_true",
                         help="report the gold tier's own arms against each other instead")
     parser.add_argument("--out", required=True, type=Path, help="report directory")
@@ -1348,10 +1515,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         return run_gold_votes(args.gold, Path(args.out))
     if not args.arm:
         parser.error("--arm is required unless --gold-votes is given")
-    if bool(args.gold) == bool(args.operator_labels):
-        parser.error("give exactly one reference: --gold or --operator-labels")
+    chosen = [bool(args.gold), bool(args.operator_labels), bool(args.structural)]
+    if sum(chosen) != 1:
+        parser.error(
+            "give exactly one reference: --gold, --operator-labels or --structural"
+        )
 
-    if args.operator_labels:
+    if args.structural:
+        reference = "structural"
+        gold_path = args.structural
+        gold = load_structural_labels(gold_path, args.structural_zone or ("band",))
+    elif args.operator_labels:
         reference = "operator"
         gold_path = args.operator_labels
         gold = load_operator_labels(gold_path, args.operator_source or ("explicit",))
@@ -1367,6 +1541,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         arms.append((name, path, load_rows(path)))
 
     report = build_report(gold_path, gold, arms, reference)
+    if args.ensembles:
+        report["ensembles"] = ensemble_report(gold, arms, args.band_pairs)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / REPORT_JSON).write_text(
