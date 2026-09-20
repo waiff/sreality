@@ -199,6 +199,25 @@ def test_a_re_run_pHash_job_is_producer_movement_not_a_breach(world, tmp_path, m
     assert out["population"]["images_unmeasured"] >= 1
 
 
+def test_a_re_sighted_listing_is_the_scrapers_clock_not_a_breach(world, tmp_path, monkeypatch):
+    """Rule #4 bumps `last_seen_at` on every index sighting and rule #3 flips `is_active`, and
+    neither appends a snapshot. Live, 78 of 200 sampled listings had a newer `last_seen_at` and
+    74 of those carried no newer snapshot — a gate that read the sighting clock as a stored
+    fact would refuse every re-seed of a corpus that is still being scraped."""
+    from datetime import timedelta
+
+    conn, artifact = world
+    _seed(conn, artifact, tmp_path)
+    for listing_id in (4_000, 4_001, 4_002):
+        conn.listings[listing_id]["last_seen_at"] = EXPORTED_AT + timedelta(days=1)
+    conn.listings[4_004]["is_active"] = False
+    conn.listings[4_004]["inactive_at"] = EXPORTED_AT + timedelta(days=1)
+
+    out = _pass(conn, tmp_path, monkeypatch, rt_parity_sample="99")
+    assert out["parity"]["ok"] and out["parity"]["breaches"] == 0
+    assert out["parity"]["sighting_moved"] == 4
+
+
 def test_a_listing_changed_since_the_export_is_drift_not_a_breach(world, tmp_path, monkeypatch):
     from datetime import timedelta
 

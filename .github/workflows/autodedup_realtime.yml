@@ -71,7 +71,8 @@ name: "AUTODEDUP: realtime shadow lane"
 # calibration and EVERY pass re-checks a slice of it before it opens its transaction: a stored
 # fact or a frozen statistic that differs on a listing nothing has changed stops the pass —
 # non-zero, nothing written, no cursor moved. pHash and CLIP are producers that re-run on their
-# own cadence, so their movement is reported and not refused; a hash the frozen population never
+# own cadence, and `last_seen_at` / `is_active` are the scraper's clock, which appends no
+# snapshot at all — both are reported and neither is refused; a hash the frozen population never
 # saw is UNKNOWN (never 0), and `population.images_unmeasured` in the summary is what says when
 # the generation is due a fresh export and re-seed.
 #

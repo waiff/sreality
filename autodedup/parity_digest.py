@@ -10,6 +10,12 @@ Three digests and not one, because the three move for three different reasons:
 * `stored` — the listing's own columns, its location, its attrs, its price history and its
   gallery's identity and ORDER. Under rule #2 these move only when the row's content hash
   moves, so a difference on a listing with no newer snapshot is a LANE defect and refuses.
+* `sighting` — `last_seen_at`, `is_active` and `inactive_at`. These move on the SCRAPER's clock
+  and append no snapshot at all: rule #4 bumps `last_seen_at` on every index sighting and rule
+  #3 flips `is_active` without one. Measured on the live cohort, 78 of 200 sampled listings had
+  a newer `last_seen_at` and 74 of those carried no newer snapshot — a gate that read them as
+  stored facts would refuse every re-seed. Reported, never refused; they are the corpus moving
+  under a frozen calibration, exactly like the producers.
 * `producer` — `phash`, the CLIP vector, the CLIP tags. The pHash and CLIP jobs re-run over the
   corpus on their own cadence, so these move under a frozen calibration without any listing
   changing. Reported, never refused.
@@ -68,17 +74,33 @@ def image_view(image: Image) -> dict[str, Any]:
     return view
 
 
+# What a portal SIGHTING moves without appending a snapshot (rules #3 and #4). They are facts
+# and they do reach features (`both_active`, the live-window clock), but no lane can read them
+# the same way an artifact cut last week did.
+SIGHTING_FIELDS: tuple[str, ...] = ("last_seen_at", "is_active", "inactive_at")
+
+
 def _digest(payload: Any) -> str:
     blob = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]
 
 
 def stored_digest(listing: Listing, images: Sequence[Image]) -> str:
-    """Everything a portal wrote: the listing's columns and its gallery's identity and order."""
+    """Everything a portal wrote that only a CONTENT change moves: the listing's columns (minus
+    the sighting clock), its location, attrs and price path, and its gallery's identity and
+    order."""
+    view = {name: value for name, value in listing_view(listing).items()
+            if name not in SIGHTING_FIELDS}
     return _digest([
-        listing_view(listing),
+        view,
         [[img.image_id, img.seq, img.storage_path] for img in images],
     ])
+
+
+def sighting_digest(listing: Listing) -> str:
+    """The scraper's clock, which moves with no snapshot behind it."""
+    view = listing_view(listing)
+    return _digest([view.get(name) for name in SIGHTING_FIELDS])
 
 
 def producer_digest(images: Sequence[Image]) -> str:
@@ -93,8 +115,8 @@ def population_digest(images: Sequence[Image]) -> str:
 
 
 def baseline_row(listing: Listing, images: Sequence[Image]) -> dict[str, Any]:
-    return {"f": stored_digest(listing, images), "p": producer_digest(images),
-            "c": population_digest(images), "n": len(images)}
+    return {"f": stored_digest(listing, images), "s": sighting_digest(listing),
+            "p": producer_digest(images), "c": population_digest(images), "n": len(images)}
 
 
 def baseline(listings: Mapping[int, Listing],
@@ -152,7 +174,7 @@ def compare(
     """The live side against the baseline. A listing whose CONTENT changed since the export is
     genuine drift and is counted, never judged."""
     breaches: list[Breach] = []
-    checked = producer_moved = drifted_skipped = absent = 0
+    checked = producer_moved = drifted_skipped = absent = sighting_moved = 0
     for key, row in sorted(rows.items(), key=lambda kv: int(kv[0])):
         listing_id = int(key)
         listing = listings.get(listing_id)
@@ -165,6 +187,8 @@ def compare(
             continue
         checked += 1
         live = baseline_row(listing, gallery)
+        if live["s"] != row.get("s"):
+            sighting_moved += 1
         if live["f"] != row.get("f"):
             breaches.append(Breach(listing_id, "stored",
                                    f"{row.get('f')} != {live['f']} "
@@ -182,6 +206,7 @@ def compare(
         "drifted_skipped": drifted_skipped,
         "absent": absent,
         "producer_moved": producer_moved,
+        "sighting_moved": sighting_moved,
         "breaches": len(breaches),
         "breaches_by_kind": _by_kind(breaches),
         "breach_examples": [breach.to_json() for breach in breaches[:MAX_BREACH_EXAMPLES]],
