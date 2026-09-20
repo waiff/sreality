@@ -355,7 +355,7 @@
       "inputs": [
         {
           "name": "args",
-          "description": "Pass arguments as k=v,k=v — generation (default rt), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all), rt_max_schema_mb, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, settings, model.",
+          "description": "Pass arguments as k=v,k=v — generation (default rt), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, rt_max_schema_mb, rt_max_retire_fraction, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings, model.",
           "required": false,
           "type": "string",
           "default": "",

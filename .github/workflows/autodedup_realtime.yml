@@ -9,13 +9,17 @@ name: "AUTODEDUP: realtime shadow lane"
 # `public.listings` row, no `property_id`, no merge. It spends $0 by construction — ruling D19
 # gives no LLM judge merge authority on the band, so this lane calls no provider at all.
 #
-# What one pass does. FIVE bounded watermark feeds hand it a slice of listings, and every one of
+# What one pass does. SIX bounded watermark feeds hand it a slice of listings, and every one of
 # them is restricted to `rt_scope` (E79 — the lane holds three blocks, not the corpus): new rows
 # off `listings_pkey`, content changes off `listing_snapshots_pkey`, activity flips off the
 # partial `listings_inactive_at_idx` paged on `(inactive_at, id)`, a round-robin sweep for
 # REVIVALS — `touch_listings` un-delists in place and appends no snapshot, so no forward cursor
-# can see one — and a round-robin sweep for listings the geocoder MOVED out of the scope, which
-# are retired rather than left half-indexed. Each forward feed reads a bounded WINDOW off its own
+# can see one — a round-robin sweep for listings the geocoder MOVED out of the scope, which
+# are retired rather than left half-indexed, and its mirror image: a round-robin sweep, one
+# scope block a pass, for listings whose location resolved INTO the scope after their arrival
+# window had already passed (D3 — `listing_location` is written asynchronously from the scrape).
+# The retiring direction carries a rail of its own: a sweep that wants more than
+# `rt_max_retire_fraction` of the generation in one pass stops the lane instead (D1). Each forward feed reads a bounded WINDOW off its own
 # index, resolves the scope for that window through `listing_location_pkey`, and advances its
 # cursor over the window rather than over the survivors. Before any of it, the pass reads what
 # schema `autodedup` costs and REFUSES over `rt_max_schema_mb` (default 400). Every feed ignores rows younger than a settle lag and the new-row feed carries an
@@ -41,7 +45,9 @@ name: "AUTODEDUP: realtime shadow lane"
 #
 # The scope and the budget are `autodedup.settings` rows (`rt_scope`, `rt_max_schema_mb`), so
 # neither needs a migration and neither needs a deploy to change; `--mode rt_seed` writes the
-# scope it seeded. An empty scope is a hard error, never a whole-corpus run.
+# scope it seeded, and that row — not the dispatch argument — is what a pass runs under (D2).
+# An empty scope is a hard error, never a whole-corpus run, and a dispatch argument that differs
+# from the seeded scope is refused unless `rt_rescope=true` moves the generation to it.
 #
 # REQUIRES migration 539 (`autodedup.fp_key`, `rt_fp`, `rt_calibration`, `rt_block_cell`,
 # `rt_lease` plus the pair-grain columns) and a generation seeded by
@@ -62,7 +68,7 @@ on:
   workflow_dispatch:
     inputs:
       args:
-        description: "Pass arguments as k=v,k=v — generation (default rt), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all), rt_max_schema_mb, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, settings, model."
+        description: "Pass arguments as k=v,k=v — generation (default rt), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, rt_max_schema_mb, rt_max_retire_fraction, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings, model."
         required: false
         default: ""
         type: string
