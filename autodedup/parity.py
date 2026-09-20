@@ -198,6 +198,33 @@ class FieldDiff:
                 "differ_stable": self.differ_stable, "examples": self.examples}
 
 
+# What an image field IS decides how a difference in it reads. `seq` and `storage_path` are
+# stored facts of the gallery; `phash`, `clip` and `tags` are producer output that a re-run of
+# the pHash or CLIP job moves under a frozen calibration without any listing changing; `pop` is
+# the frozen cohort statistic the lane joins against (E83).
+IMAGE_FIELD_CLASS: dict[str, str] = {
+    "image.seq": "stored", "image.storage_path": "stored",
+    "image.phash": "producer", "image.clip": "producer", "image.clip_present": "producer",
+    "image.tags": "producer", "image.tags_len": "producer",
+    "image.pop": "frozen_statistic",
+}
+
+
+def _classes(table: Mapping[str, FieldDiff]) -> dict[str, dict[str, int]]:
+    """The image diff rolled up by what the field is, so "the corpus moved" and "the lane reads
+    a different value for an unchanged image" are never read as one number."""
+    out: dict[str, dict[str, int]] = {}
+    for name, diff in table.items():
+        if not diff.differ:
+            continue
+        bucket = out.setdefault(IMAGE_FIELD_CLASS.get(name, "other"),
+                                {"fields": 0, "differ": 0, "differ_stable": 0})
+        bucket["fields"] += 1
+        bucket["differ"] += diff.differ
+        bucket["differ_stable"] += diff.differ_stable
+    return dict(sorted(out.items()))
+
+
 def _tally(table: Mapping[str, FieldDiff]) -> dict[str, Any]:
     """Only the fields that actually moved, worst first — a report of 60 zeroes hides its news."""
     moved = {name: diff for name, diff in table.items() if diff.differ}
@@ -389,6 +416,7 @@ def compare_facts(
         "gallery_examples": gallery_examples,
         "listing_fields": _tally(listing_diffs),
         "image_fields": _tally(image_diffs),
+        "image_field_classes": _classes(image_diffs),
     }
 
 
@@ -580,8 +608,9 @@ def run_parity(
         "sample": {
             "requested": parsed.n,
             "cohort_listings": len(dataset.listings),
-            "live_listings": len(live_facts),
-            "absent_live": len(dataset.listings) - len(live_facts),
+            "live_listings": len(present),
+            "absent_live": len(dataset.listings) - len(present),
+            "facts_read": len(live_facts),
             "sampled": len(sample),
             "by_source": _by_source(dataset, sample),
             "drifted": len(drifted),

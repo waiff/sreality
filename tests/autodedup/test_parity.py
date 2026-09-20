@@ -191,6 +191,8 @@ def test_an_empty_frozen_population_is_named_and_costs_every_catalogue_ratio(wor
     assert pop["differ"] == pop["compared"] > 0
     assert pop["differ_stable"] == pop["differ"], "nothing here drifted"
     assert set(report["facts"]["listing_fields"]) == set(), "only the images moved"
+    classes = report["facts"]["image_field_classes"]
+    assert set(classes) == {"frozen_statistic"}, "the frozen statistic moved and nothing else"
 
     features = report["pairs"]["features"]
     assert "catalog_ratio_max" in features
