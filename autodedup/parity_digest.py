@@ -1,4 +1,4 @@
-"""What a listing's facts ARE, as three digests — the permanent parity gate's unit (E86).
+"""What a listing's facts ARE, as three digests — the permanent parity gate's unit (E91).
 
 `rt_parity` compares the live lane's facts with the export artifact's field by field, and that
 is the instrument. This is the GATE: the same comparison compressed to three short digests per
@@ -233,7 +233,7 @@ def refusal(report: Mapping[str, Any], *, generation: str, tolerance: int,
         f"in generation {generation!r} do not carry the facts the export cut the calibration "
         f"from (tolerance {tolerance}; by kind {report.get('breaches_by_kind')}; {examples}). "
         "The live lane must read the export's facts or its decisions are not the batch "
-        "engine's (E86). Nothing was written and no cursor moved. Re-run `--mode rt_parity` "
+        "engine's (E91). Nothing was written and no cursor moved. Re-run `--mode rt_parity` "
         "for the field-by-field report, then re-seed the generation "
         "(`-f mode=rt_seed -f args=...,reseed=true`) once the facts agree."
     )

@@ -675,7 +675,7 @@ def test_an_image_whose_hash_the_frozen_population_does_not_carry_is_unknown() -
     a population a photograph can have — it appears on at least its own listing — so reading an
     absent row as 0 was a MEASUREMENT the lane had not made. Against an empty table that made
     `catalog_ratio` absent on every listing and K-C structurally unreachable for a whole live
-    pass (E86). The export writes the same unknown as a null when its own probe does not run,
+    pass (E91). The export writes the same unknown as a null when its own probe does not run,
     and this is now that same null."""
     from autodedup.incremental_lane import SqlFacts
 

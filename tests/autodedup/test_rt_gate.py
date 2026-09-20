@@ -1,4 +1,4 @@
-"""W9g: the live lane reads the EXPORT's facts, and a rail says so every pass (E86/E85a).
+"""W9g: the live lane reads the EXPORT's facts, and a rail says so every pass (E91/E90a).
 
 The world is `test_parity`'s: one cohort built twice, the artifact through the export's record
 builders and the live side through `SqlFacts` over the same fake `public` rows. Here it is
@@ -69,7 +69,7 @@ def _pass(conn: FakePg, tmp_path: Path, monkeypatch, **args: Any) -> dict[str, A
     return run_incremental(lambda: conn, {"rt_scope": SCOPE, **args}, tmp_path)
 
 
-# --------------------------------------------------- E86: the frozen population has a WRITER
+# --------------------------------------------------- E91: the frozen population has a WRITER
 
 
 def test_the_seed_materialises_the_calibrations_own_phash_population(world, tmp_path) -> None:
@@ -102,7 +102,7 @@ def test_a_seed_from_an_artifact_with_no_measured_population_is_refused(world, t
     assert not conn.calibration.get(GENERATION), "the refusal left nothing behind"
 
 
-# ------------------------------------------------------------- E86: parity is a permanent GATE
+# ------------------------------------------------------------- E91: parity is a permanent GATE
 
 
 def test_the_seed_refuses_when_the_live_facts_are_not_the_artifacts(world, tmp_path) -> None:
@@ -232,7 +232,7 @@ def test_a_listing_changed_since_the_export_is_drift_not_a_breach(world, tmp_pat
     assert out["parity"]["ok"] and out["parity"]["drifted_skipped"] == 1
 
 
-# ------------------------------------------------------- E85a: WHICH scorer took the decision
+# ------------------------------------------------------- E90a: WHICH scorer took the decision
 
 
 def test_a_seed_that_names_no_scorer_is_refused(world, tmp_path) -> None:

@@ -357,7 +357,7 @@ def build_image_record(
     than 1 for a hash it was handed, which is why this never fires here; the real-time lane
     joins the same builder against the FROZEN population instead, where a hash the calibration
     never saw is exactly an unknown — and reading it as 0 was W9f's missing K-C certificates
-    (E86)."""
+    (E91)."""
     phash = _int_or_none(row.get("phash"))
     return {
         "t": "image",

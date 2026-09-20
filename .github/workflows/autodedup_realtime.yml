@@ -60,7 +60,7 @@ name: "AUTODEDUP: realtime shadow lane"
 # on a dispatch only beside `rt_rescope=true`, and a value that is not a number stops the lane
 # rather than reverting to a default.
 #
-# THE FACTS ARE THE EXPORT'S FACTS, AND A GATE SAYS SO EVERY PASS (E86). The lane reads a
+# THE FACTS ARE THE EXPORT'S FACTS, AND A GATE SAYS SO EVERY PASS (E91). The lane reads a
 # listing through the export's own statements and builders, and the one input it cannot recount
 # — the corpus-wide pHash population E9 subtracts catalogue photos with — is FROZEN into
 # `autodedup.phash_pop` by the seed, which copies the number the export already measured. W9f
@@ -91,7 +91,7 @@ name: "AUTODEDUP: realtime shadow lane"
 #      downloads that artifact, keeps the 4,887 listings of it the scope holds, cuts the frozen
 #      calibration over them (E70), materialises their pHash population, cuts the parity
 #      baseline and starts the cursors at TODAY. `settings` and `model` are REQUIRED and NAMED
-#      (E85a): they are the generation's scorer, every pass runs it and every stored row is
+#      (E90a): they are the generation's scorer, every pass runs it and every stored row is
 #      stamped with it, and W9f seeded and ran on the uncalibrated prior because an empty
 #      argument was allowed to mean one. `rt_scope` here is the default spelled out — leave it
 #      off and the same three trial blocks are used; the budget default is 400 MB

@@ -203,7 +203,7 @@ name: "AUTODEDUP: engine lane"
 #             unreachable - 3 of 3 sampled K-C lost with the model held constant. The GATE that
 #             now stops that shipping again is not this mode: `rt_seed` writes a per-listing
 #             fact baseline and every scheduled pass re-checks a slice of it before it writes
-#             anything (E86). This mode remains the field-by-field report you run when the gate
+#             anything (E91). This mode remains the field-by-field report you run when the gate
 #             refuses. `population=artifact` makes the live side read the cohort's own pHash
 #             counts instead of the frozen table — the exact rows `rt_seed` writes — so a
 #             seed's effect on the certificates is measurable read-only, before seeding.
@@ -216,7 +216,7 @@ name: "AUTODEDUP: engine lane"
 #             is gated on. args: export_run or artifact, settings and model (BOTH REQUIRED and
 #             NAMED, e.g. settings=w8,model=w6_gold, or settings=default,model=prior for the
 #             uncalibrated ones - a generation is scored by one scorer and the lane will not
-#             pick it for you, E85a), generation, rt_scope, backfill, reseed, parity_n.
+#             pick it for you, E90a), generation, rt_scope, backfill, reseed, parity_n.
 #             It is deliberately NOT behind the dark switch: seeding is the step before it.
 #
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
