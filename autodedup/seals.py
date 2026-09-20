@@ -60,6 +60,14 @@ SPENT_SEALS: dict[str, str] = {
         "columns. Every g6 sealed number CONFIRMS a rule chosen on dev — none adjudicates. "
         "W9 sealed fb9df2ea… over the same cohort with seed 20260922 to make a choice again."
     ),
+    "00e2cb2fe4fe1e8ee9886729ef3420ebaa6aec059934b20e30630751500032b4": (
+        "W11's fresh seal (4456 listings, 664 groups), seed 20260923, cut with the honest "
+        "arm's K-B families unioned in. SPENT by W11's verification, which opened it ONCE to "
+        "read four arms and rule D30: the honest clock gains 47 sealed labelled duplicates "
+        "over g6 and loses 0, and the E85 family guard is inert against the same arm without "
+        "it (gained 0, lost 0). A later number on this split confirms; it cannot decide. The "
+        "next rule read at family grain owes a fresh seal cut the same way."
+    ),
     "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884": (
         "W9's fresh seal (4456 listings, 663 groups), seed 20260922. SPENT because it was read "
         "TWICE: once for the refused g7 refit (D25) and once for W10's verification, which is "

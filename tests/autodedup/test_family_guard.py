@@ -44,12 +44,18 @@ def listing(
     )
 
 
-def honest() -> Settings:
+def honest(mode: str = "cell") -> Settings:
+    """The W11 arm, built the way it was MEASURED — by assignment, not through `validate`.
+
+    E87 took back the payment `validate` briefly accepted from the guard, so an honest-clock row
+    with no E65 floor is no longer constructible from a committed settings file. That is the
+    gate doing its job, and it is asserted directly below; these tests are about what the guard
+    refuses, so they build the refuted arm by hand exactly as the W11 build and verification
+    did."""
     settings = Settings()
     settings.live_window_from_sighting = True
-    settings.family_guard_mode = "cell"
+    settings.family_guard_mode = mode
     settings.certificate_b_min_gap_days = 1.0 / 1440.0
-    settings.validate()
     return settings
 
 
@@ -266,20 +272,30 @@ def test_a_refusal_never_reaches_k_r() -> None:
 # --- the settings contract ----------------------------------------------------------------
 
 
-def test_the_honest_clock_may_pay_its_price_with_the_guard_instead_of_the_floor() -> None:
+def test_the_guard_does_not_pay_for_the_honest_clock(mode: str = "cell") -> None:
+    """E87: the payment `validate` briefly accepted from E85 is taken back.
+
+    The W11 seal read the guard against the same arm without it and measured NOTHING — 0 sealed
+    labelled duplicates gained, 0 lost, all 27 demotions unlabelled (M100). A gate may only
+    accept a price a sealed read has measured, so the E65 floor is again the only one."""
     naked = Settings()
     naked.live_window_from_sighting = True
     naked.certificate_b_min_gap_days = 1.0 / 1440.0
-    with pytest.raises(ValueError, match="E65 image floor or the E85 family guard"):
+    with pytest.raises(ValueError, match="E65 image floor"):
         naked.validate()
-    naked.family_guard_mode = "cell"
+    for guard in ("cell", "family", "pair"):
+        naked.family_guard_mode = guard
+        with pytest.raises(ValueError, match="E87"):
+            naked.validate()
+    naked.family_guard_mode = "off"
+    naked.certificate_b_min_images = 4.0
     naked.validate()
 
 
 def test_the_gap_rail_is_still_required_under_the_honest_clock() -> None:
     settings = Settings()
     settings.live_window_from_sighting = True
-    settings.family_guard_mode = "cell"
+    settings.certificate_b_min_images = 4.0
     with pytest.raises(ValueError, match="E84 gap rail"):
         settings.validate()
 
@@ -295,7 +311,11 @@ def test_the_shipped_row_still_carries_no_family_guard() -> None:
 
 
 def test_the_w11_candidate_is_the_shipped_row_plus_the_clock_the_rail_and_the_guard() -> None:
-    raw = json.loads((ROOT / "settings/w11_candidate.json").read_text(encoding="utf-8"))
+    """The refuted arm, kept as a RECORD — outside `settings/`, where every file must build."""
+    assert not (ROOT / "settings/w11_candidate.json").exists()
+    raw = json.loads(
+        (ROOT / "settings/refuted/w11_candidate.json").read_text(encoding="utf-8")
+    )
     base = json.loads((ROOT / "settings/w8.json").read_text(encoding="utf-8"))
     assert {key for key in raw if raw[key] != base.get(key)} == {
         "live_window_from_sighting", "certificate_b_min_gap_days", "family_guard_mode",
@@ -305,11 +325,14 @@ def test_the_w11_candidate_is_the_shipped_row_plus_the_clock_the_rail_and_the_gu
         "family_guard_ref_code_clause", "family_guard_unit_designator_clause",
         "family_guard_disposition_clause",
     }
-    candidate = Settings.from_json(ROOT / "settings/w11_candidate.json")
-    assert candidate.family_guard_mode == "cell"
-    assert candidate.certificate_b_min_images == 0.0, "the guard replaces the E65 floor"
-    assert candidate.family_guard_ref_code_clause is False, "E60 forbids it"
-    assert candidate.catalog_carrier_aware is False, "E83 stays off (D28 ii)"
+    # E87: and it is no longer CONSTRUCTIBLE — the row records an arm that was measured by
+    # assignment and refuted on the seal, and `validate` now refuses to build it.
+    with pytest.raises(ValueError, match="E65 image floor"):
+        Settings.from_json(ROOT / "settings/refuted/w11_candidate.json")
+    assert raw["family_guard_mode"] == "cell"
+    assert raw.get("certificate_b_min_images", 0.0) == 0.0
+    assert raw["family_guard_ref_code_clause"] is False, "E60 forbids it"
+    assert raw.get("catalog_carrier_aware", False) is False, "E83 stays off (D28 ii)"
 
 
 def test_the_incremental_lane_refuses_the_guard_until_its_rail_exists() -> None:
@@ -326,11 +349,77 @@ W11_SEAL = "00e2cb2fe4fe1e8ee9886729ef3420ebaa6aec059934b20e30630751500032b4"
 W9_SEAL = "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884"
 
 
-def test_the_fresh_seal_is_committed_unspent_and_carries_its_seed() -> None:
+def test_the_fresh_seal_is_committed_and_now_registered_spent() -> None:
+    """W11's verification opened it ONCE, to read four arms and rule D30 — so it is spent."""
     assert seals.committed(W11_SEAL)
     assert seals.seed_for(W11_SEAL) == 20260923
-    assert seals.spent(W11_SEAL) is None
+    reason = seals.spent(W11_SEAL)
+    assert reason and "D30" in reason
 
 
 def test_the_seal_w11_replaces_is_registered_spent() -> None:
     assert seals.spent(W9_SEAL) and seals.committed(W9_SEAL)
+
+
+# --- E86: the verdict must be the family's, not the arrival order's ---------------------------
+
+
+def _chain_family(first: dict[int, int]) -> list[Listing]:
+    """Three adverts A-B-C where A and C disagree on the printed area and B agrees with both.
+
+    `incompatible` is not transitive, so this is the shape first-fit reads differently from one
+    order to the next: whichever of A and C is seen first keeps B."""
+    bodies = {
+        1: "Prodej bytu 1+kk o podlahové ploše 27,0 m2 v projektu K Botiči.",
+        2: "Prodej bytu 1+kk o podlahové ploše 27,2 m2 v projektu K Botiči.",
+        3: "Prodej bytu 1+kk o podlahové ploše 27,4 m2 v projektu K Botiči.",
+    }
+    return [
+        listing(10 + key, first=_stamp(first[key]), last=_stamp(first[key] + 1),
+                area=27.0 + 0.1 * (key - 1), body=bodies[key])
+        for key in (1, 2, 3)
+    ]
+
+
+def _refused(order: dict[int, int], mode: str) -> set[tuple[int, int]]:
+    settings = honest(mode)
+    rows = _chain_family(order)
+    listings = {row.id: row for row in rows}
+    decisions = [kb(11, 12), kb(12, 13), kb(11, 13)]
+    refused, _ = family.refusals(decisions, listings, settings)
+    return set(refused)
+
+
+def test_cell_mode_refuses_a_different_edge_when_the_same_family_arrives_in_another_order() -> None:
+    """M101, pinned: the partition is DETERMINISTIC but not an invariant of the family.
+
+    The two readings below are the same three adverts with nothing changed but which of them was
+    sighted first, and they withdraw different certificates. That is the defect E86 names: in a
+    replay, a backfill or any arrival order but the cohort's, `cell` answers differently."""
+    early_a = _refused({1: 0, 2: 1, 3: 2}, "cell")
+    early_c = _refused({1: 4, 2: 1, 3: 0}, "cell")
+    assert early_a == {(12, 13), (11, 13)}
+    assert early_c == {(11, 12), (11, 13)}
+    assert early_a != early_c
+
+
+def test_pair_mode_is_an_invariant_of_the_family_under_every_order() -> None:
+    """E86: `pair` reads the edge's own two adverts, so only the A-C disagreement is refused."""
+    orders = [{1: 0, 2: 2, 3: 4}, {1: 4, 2: 2, 3: 0}, {1: 2, 2: 0, 3: 4}, {1: 4, 2: 0, 3: 2}]
+    verdicts = [_refused(order, "pair") for order in orders]
+    assert verdicts == [{(11, 13)}] * len(orders)
+
+
+def test_pair_mode_never_refuses_an_edge_a_third_advert_separated() -> None:
+    settings = honest("pair")
+    rows = _chain_family({1: 0, 2: 1, 3: 2})
+    listings = {row.id: row for row in rows}
+    refused, report = family.refusals([kb(11, 12), kb(12, 13), kb(11, 13)], listings, settings)
+    assert set(refused) == {(11, 13)}
+    assert refused[(11, 13)] == "printed_area"
+    assert "cross_cell" not in report["by_clause"]
+
+
+def test_every_mode_is_a_known_mode_and_off_is_the_shipped_one() -> None:
+    assert family.MODES == ("off", "family", "cell", "pair")
+    assert Settings().family_guard_mode == "off"

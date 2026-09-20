@@ -317,6 +317,32 @@ def load_must_not_link(path: str | None) -> frozenset[tuple[int, int]]:
     )
 
 
+def _merge_pairs_file(
+    part: Path,
+    written: Sequence[tuple[int, int]],
+    held: Sequence[tuple[tuple[int, int], str]],
+    target: Path,
+) -> None:
+    """Merge the rows held back by E85 into the key order the artifact is read in.
+
+    Both inputs are already sorted — the part file in the order the run decided pairs, the held
+    rows by key — so one linear pass restores `pairs.jsonl.gz` to exactly the order a run
+    without the guard writes. The part file never survives the run."""
+    keys = list(held)
+    keys.sort(key=lambda row: row[0])
+    index = 0
+    with gzip.open(part, "rt", encoding="utf-8") as source, \
+            gzip.open(target, "wt", encoding="utf-8") as out:
+        for key, line in zip(written, source, strict=True):
+            while index < len(keys) and keys[index][0] < key:
+                out.write(keys[index][1])
+                index += 1
+            out.write(line)
+        for key, line in keys[index:]:
+            out.write(line)
+    part.unlink()
+
+
 def run_engine(
     dataset: Dataset,
     settings: Settings,
@@ -363,8 +389,15 @@ def run_engine(
     # and each carries the features its re-decision needs — the alternative, a second feature
     # pass, would double the only expensive phase of the run.
     deferred: list[dict[str, Any]] = []
+    # ...and holding them back must not reorder anything downstream (W11 verification): the run
+    # writes `pairs.jsonl.gz` in key order and clusters in edge order, so a deferred row is
+    # merged back into its place rather than appended. `held` carries the finished K-B lines and
+    # `written` the keys already on the part file, which is what makes the merge O(n) without a
+    # second parse of every row.
+    held: list[tuple[tuple[int, int], str]] = []
+    written: list[tuple[int, int]] = []
 
-    def finish(item: dict[str, Any], handle: Any) -> None:
+    def finish(item: dict[str, Any], sink: Any) -> None:
         nonlocal stored
         decision, feats = item["decision"], item["feats"]
         lo, hi = item["lo"], item["hi"]
@@ -403,9 +436,18 @@ def run_engine(
                     name: [value, present] for name, (value, present) in feats.items()
                 },
             })
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            sink((lo, hi), json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
-    with gzip.open(out_dir / PAIRS_FILE, "wt", encoding="utf-8") as handle:
+    guard_on = settings.family_guard_mode != "off"
+    part_path = out_dir / (PAIRS_FILE + ".part" if guard_on else PAIRS_FILE)
+    with gzip.open(part_path, "wt", encoding="utf-8") as handle:
+        def to_file(key: tuple[int, int], line: str) -> None:
+            written.append(key)
+            handle.write(line)
+
+        def to_memory(key: tuple[int, int], line: str) -> None:
+            held.append((key, line))
+
         for (lo, hi) in sorted(pairs):
             probes = pairs[(lo, hi)]
             fa, fb = fps[lo], fps[hi]
@@ -421,10 +463,10 @@ def run_engine(
                 "source_pair": source_pair(fa, fb), "cross_source": fa.source != fb.source,
                 "context": hazard.pair_context(la, lb).to_json(),
             }
-            if settings.family_guard_mode != "off" and decision.certificate == "K-B":
+            if guard_on and decision.certificate == "K-B":
                 deferred.append(item)
                 continue
-            finish(item, handle)
+            finish(item, to_file)
 
         family_report: dict[str, Any] = {"mode": settings.family_guard_mode}
         if deferred:
@@ -440,7 +482,13 @@ def run_engine(
                     )
                     item["decision"].reason = f"{item['decision'].reason}:kb_family:{clause}"
                     item["decision"].evidence["kb_family"] = clause
-                finish(item, handle)
+                finish(item, to_memory)
+
+    if guard_on:
+        _merge_pairs_file(part_path, written, held, out_dir / PAIRS_FILE)
+    # The cohort pass decides in key order and the guard does not change what a pair is worth,
+    # only when it is finished — so the edge order the clusterer sees stays the key order.
+    decisions.sort(key=lambda decision: (decision.lo, decision.hi))
     timings["features_decide_s"] = time.perf_counter() - clock
 
     clock = time.perf_counter()

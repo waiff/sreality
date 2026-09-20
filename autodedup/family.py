@@ -19,12 +19,13 @@ consistent; otherwise the certificate is withdrawn and the pair falls to K-C or 
 exactly as any uncertified pair does (never to a veto, never to a reject — the guard removes
 evidence, it does not manufacture a contradiction).
 
-Three modes, because the two readings cost differently and W11 measured both: `off` (the
-shipped default), `family` (the whole family must be one consistent cell, else every K-B edge
-in it is refused) and `cell` (partition, and refuse only the edges that cross a cell boundary
-or sit in an inconsistent one). `cell` is the shape the adjudication pointed at — it keeps the
-19-advert chain of the ceskereality developer's 1+kk family while cutting off the two adverts
-that print a different size.
+Four modes, because the readings cost differently and W11 measured them: `off` (the shipped
+default), `family` (the whole family must be one consistent cell, else every K-B edge in it is
+refused), `cell` (partition, and refuse only the edges that cross a cell boundary or sit in an
+inconsistent one) and `pair` (refuse only an edge whose own two adverts are incompatible).
+`cell` is the shape the W11 adjudication pointed at; `pair` is the only shape whose verdict is
+an INVARIANT of the family (E86) — see `cells` for why the other two are not, and why the
+real-time lane may not carry them.
 
 INCREMENTALLY, a family is a property of the COHORT at decision time and it only ever grows:
 tomorrow's arrival can make today's pure family impure, never the other way round. That is
@@ -49,7 +50,7 @@ from autodedup.features import parse_ts, window_end_stamp
 from autodedup.settings import Settings
 from autodedup.text_facts import reference_codes, stated_areas, unit_designators
 
-MODES: tuple[str, ...] = ("off", "family", "cell")
+MODES: tuple[str, ...] = ("off", "family", "cell", "pair")
 
 # The clause names a refusal travels under, so a run summary can price each one separately.
 CLAUSES: tuple[str, ...] = (
@@ -209,8 +210,16 @@ def cells(members: Sequence[MemberFacts], settings: Settings) -> list[list[int]]
     The partition is a first-fit over members ordered by when they were first seen: each advert
     joins the earliest cell it is compatible with EVERY member of, or opens a new one. Time
     order is what makes it deterministic and what makes it right — a re-post chain is a
-    succession, so the cell an advert belongs to is settled by the adverts that came before it,
-    which is also the only information the real-time lane has when it decides."""
+    succession, so the cell an advert belongs to is settled by the adverts that came before it.
+
+    Deterministic is not the same as INVARIANT, and W11's verification measured the difference
+    (E86, M101): first-fit over the SAME members in a different order yields a different
+    partition on 4 of the 37 families of size >= 3, one of them three different partitions over
+    20 orders. This function pins the order to first sighting so a cohort pass and a replay of
+    it agree, but the verdict still depends on an order — a backfilled advert whose first
+    sighting precedes a member already decided moves the boundary. That is why `cell` and
+    `family` are batch-only and why `pair`, whose verdict reads only the two adverts of the edge
+    it refuses, is the mode an incremental rail may be designed on."""
     order = sorted(members, key=lambda item: (item.win_start is None, item.win_start or 0.0,
                                               item.listing_id))
     groups: list[list[MemberFacts]] = []
@@ -296,6 +305,12 @@ def refusals(
             clause: str | None = None
             if mode == "family":
                 clause = whole[0] if whole is not None else None
+            elif mode == "pair":
+                # E86: the edge's own two adverts and nothing else, so no third advert and no
+                # arrival order can move the verdict.
+                left, right = by_id.get(lo), by_id.get(hi)
+                if left is not None and right is not None:
+                    clause = incompatible(left, right, settings)
             else:
                 if cell_of.get(lo) != cell_of.get(hi):
                     # Cells are cliques, so a within-cell pair is compatible by construction and
