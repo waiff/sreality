@@ -18,7 +18,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from autodedup.incremental import (
-    Calibration,
     FpRow,
     GuardRow,
     Limits,

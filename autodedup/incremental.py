@@ -51,7 +51,7 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 from autodedup.blocking import PROBE_PRIORITY, BlockIndex
 from autodedup.cluster import cluster_pairs, cluster_rows
 from autodedup.dataset import Image, Listing
-from autodedup.decide import CERTIFICATES, Decision, decide_pair
+from autodedup.decide import Decision, decide_pair
 from autodedup.features import (
     FEATURE_VERSION,
     FeatureContext,
