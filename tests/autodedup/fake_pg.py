@@ -1,4 +1,4 @@
-"""A Postgres stand-in for the real-time lane's own statements — the rail the W9 verification asked for.
+"""A Postgres stand-in for the real-time lane's statements — the rail W9's verification asked for.
 
 Every one of W9's four blocking defects lived in `incremental_lane.SqlStore` and none of them
 could be seen from the in-memory twin: the fingerprint row was never written, the certificate
@@ -19,9 +19,11 @@ the cheapest place to find out.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from autodedup import export_sql as E
 from autodedup import incremental_sql as S
 from autodedup.decide import CERTIFICATES
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
@@ -55,9 +57,16 @@ class FakePg:
         self.lease: dict[str, dict[str, Any]] = {}
         self.settings: dict[str, Any] = {}
         self.mnl: set[tuple[int, int]] = set()
-        # `public`, read-only: what the four feeds page over.
+        # `public`, read-only: what the four feeds page over AND what the fact source reads.
+        # The rows carry whatever column a statement asks for, so a listing row here is the
+        # same dict the feeds and `COHORT_LISTINGS_SQL` both read.
         self.listings: dict[int, dict[str, Any]] = {}
         self.snapshots: list[dict[str, Any]] = []
+        self.locations: dict[int, dict[str, Any]] = {}
+        self.image_rows: list[dict[str, Any]] = []
+        self.clip_tags: list[dict[str, Any]] = []
+        self.clip_vectors: dict[int, str] = {}
+        self.phash_pop: dict[int, int] = {}
         self.statements: list[str] = []
         self.transactions = 0
         self.rolled_back = 0
@@ -134,6 +143,13 @@ class _Cursor:
     def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
         self.conn.statements.append(sql)
         self.rows = _dispatch(self.conn, sql, dict(params or {}))
+        # psycopg exposes the column names, and the fact source reads rows as dicts through
+        # them. Every export statement aliases every column, so the SELECT list IS the names.
+        self.description = [(name,) for name in _aliases(sql)]
+
+
+def _aliases(sql: str) -> list[str]:
+    return re.findall(r"\bAS\s+(\w+)", sql, re.I)
 
 
 def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noqa: C901
@@ -329,6 +345,43 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
             "brokers": _jsonb(p["brokers"]), "source_ids": _jsonb(p["source_ids"]),
             "capped": bool(p["capped"])}
         return []
+
+    # ------------------------------------------------- the export's own fact statements
+    if sql == E.COHORT_LISTINGS_SQL:
+        names = _aliases(sql)
+        return [tuple(db.listings[i].get(name) if name != "id" else i for name in names)
+                for i in sorted(p["ids"]) if i in db.listings]
+    if sql == E.COHORT_LOCATION_SQL:
+        names = _aliases(sql)
+        return [tuple(db.locations[i].get(name) if name != "listing_id" else i
+                      for name in names)
+                for i in sorted(p["ids"]) if i in db.locations]
+    if sql == E.COHORT_PRICE_HISTORY_SQL:
+        names = _aliases(sql)
+        wanted = set(p["ids"])
+        rows = [row for row in db.snapshots
+                if row.get("listing_id") in wanted and row.get("price_czk") is not None]
+        rows.sort(key=lambda r: (r["listing_id"], r.get("scraped_at") or db.now))
+        return [tuple(row.get(name) for name in names) for row in rows]
+    if sql == E.COHORT_IMAGES_SQL:
+        names = _aliases(sql)
+        wanted = set(p["ids"])
+        rows = [row for row in db.image_rows if row.get("listing_id") in wanted]
+        rows.sort(key=lambda r: (r["listing_id"], r.get("sequence") is None,
+                                 r.get("sequence") or 0, r["image_id"]))
+        return [tuple(row.get(name) for name in names) for row in rows]
+    if sql == E.COHORT_CLIP_SQL:
+        wanted = set(p["ids"])
+        return [(image_id, vector) for image_id, vector in sorted(db.clip_vectors.items())
+                if image_id in wanted]
+    if sql == E.COHORT_CLIP_TAGS_SQL:
+        names = _aliases(sql)
+        wanted = set(p["ids"])
+        return [tuple(row.get(name) for name in names) for row in db.clip_tags
+                if row.get("image_id") in wanted and row.get("model", p["model"]) == p["model"]]
+    if sql == S.RT_PHASH_POP_SQL:
+        wanted = set(p["hashes"])
+        return sorted((h, n) for h, n in db.phash_pop.items() if h in wanted)
 
     if sql == S.RT_MUST_NOT_LINK_SQL:
         return sorted(db.mnl)

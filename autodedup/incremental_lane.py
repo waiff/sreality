@@ -36,8 +36,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, Mapping, Sequence
 
-from autodedup.dataset import Image, Listing, Location
-from autodedup.export import DEFAULT_CLIP_MODEL, encode_clip
+from autodedup.dataset import Image, Listing
+from autodedup.export import (
+    DEFAULT_CLIP_MODEL,
+    build_image_record,
+    build_listing_record,
+    encode_clip,
+    tag_pairs,
+)
+from autodedup.export_sql import (
+    COHORT_CLIP_SQL,
+    COHORT_CLIP_TAGS_SQL,
+    COHORT_IMAGES_SQL,
+    COHORT_LISTINGS_SQL,
+    COHORT_LOCATION_SQL,
+    COHORT_PRICE_HISTORY_SQL,
+)
 from autodedup.features import FEATURE_VERSION
 from autodedup.harness import load_model, load_settings
 from autodedup.hazard_context import ContextStamp, address_block_key, category_group
@@ -69,16 +83,13 @@ from autodedup.incremental_sql import (
     RT_CURSOR_READ_SQL,
     RT_CURSOR_SET_SQL,
     RT_CURSOR_WRITE_SQL,
-    RT_FACTS_SQL,
     RT_FLIPPED_LISTINGS_SQL,
     RT_FP_COUNT_SQL,
     RT_FP_DELETE_SQL,
     RT_FP_READ_SQL,
     RT_FP_UPSERT_SQL,
     RT_IDLE_GUARD_SQL,
-    RT_IMAGE_CLIP_SQL,
-    RT_IMAGE_TAGS_SQL,
-    RT_IMAGES_SQL,
+    RT_PHASH_POP_SQL,
     RT_KEY_DELETE_SQL,
     RT_KEY_INSERT_SQL,
     RT_KEYS_MANY_SQL,
@@ -571,12 +582,16 @@ def _conflict_params(row: Mapping[str, Any], generation: str) -> dict[str, Any]:
 class SqlFacts:
     """The read-only half. `public` is READ here and nowhere written (D4).
 
-    The gallery is assembled exactly as the export lane assembles it — pHash, the corpus-wide
-    population, the CLIP tag pairs (logical first, then the fine anchor when it differs) and
-    the float16 vector — because a feature that reads a thinner image than the cohort pass did
-    is a decision the replay proof does not cover. `broker_key` is the one field a listing row
-    cannot serve: it is the export's SALTED key (E28), so the lane reads it from the
-    fingerprint mirror it wrote itself rather than re-deriving an identity here."""
+    It reads what the EXPORT lane reads and assembles it with the export's own builders, so a
+    listing's facts are one definition rather than two. W9 hand-wrote a thinner version: the
+    schema gate caught `loc.lat` (the store keeps a `geom`), and behind that symptom sat the
+    quiet ones — no `attrs`, so every attribute feature would have been absent in production
+    while the replay had them; no price history, so E19's price events; no `broker_key`, so the
+    whole BRK family; `granularity` read as an enum rather than text. A replay over an exported
+    artifact cannot see any of that (E72).
+
+    The one deliberate difference from the export is the pHash population: frozen (E65) and
+    read from `autodedup.phash_pop`, never recounted."""
 
     def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL) -> None:
         self.conn = conn
@@ -584,76 +599,64 @@ class SqlFacts:
         self.reads = 0
         self.statements = 0
 
+    def _dicts(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        self.statements += 1
+        with self.conn.cursor() as cur:
+            cur.execute(sql, dict(params))
+            rows = list(cur.fetchall())
+            if rows and isinstance(rows[0], dict):
+                return [dict(row) for row in rows]
+            names = [column[0] for column in cur.description]
+            return [dict(zip(names, row)) for row in rows]
+
     def facts(self, ids: Iterable[int]) -> dict[int, tuple[Listing, list[Image]]]:
         wanted = sorted({int(i) for i in ids})
         if not wanted:
             return {}
+        locations = {int(row["listing_id"]): row
+                     for row in self._dicts(COHORT_LOCATION_SQL, {"ids": wanted})}
+        history: dict[int, list[dict[str, Any]]] = {}
+        for row in self._dicts(COHORT_PRICE_HISTORY_SQL, {"ids": wanted}):
+            history.setdefault(int(row["listing_id"]), []).append(row)
         listings: dict[int, Listing] = {}
-        self.statements += 2
-        for row in _rows(self.conn, RT_FACTS_SQL, {"ids": wanted}):
-            listings[int(row[0])] = _listing_of(row)
-        galleries: dict[int, list[Image]] = {}
-        image_ids: list[int] = []
-        for row in _rows(self.conn, RT_IMAGES_SQL, {"ids": wanted}):
-            image_id = int(row[1])
-            image_ids.append(image_id)
-            galleries.setdefault(int(row[0]), []).append(
-                Image(image_id=image_id, listing_id=int(row[0]),
-                      seq=int(row[2]) if row[2] is not None else None,
-                      phash=int(row[3]) if row[3] is not None else None,
-                      pop=int(row[4]) if row[4] is not None else None))
-        tags: dict[int, list[tuple[str, float | None]]] = {}
-        clips: dict[int, str] = {}
-        if image_ids:
-            self.statements += 2
-            for row in _rows(self.conn, RT_IMAGE_TAGS_SQL,
-                             {"ids": image_ids, "model": self.clip_model}):
-                bucket = tags.setdefault(int(row[0]), [])
-                score = float(row[3]) if row[3] is not None else None
-                logical, fine = row[2], row[1]
-                if logical:
-                    bucket.append((str(logical), score))
-                if fine and fine != logical:
-                    bucket.append((str(fine), score))
-            for row in _rows(self.conn, RT_IMAGE_CLIP_SQL,
-                             {"ids": image_ids, "model": self.clip_model}):
-                clips[int(row[0])] = encode_clip(row[1])
-        for bucket in galleries.values():
-            for image in bucket:
-                image.tags = tags.get(image.image_id, [])
-                image.clip = clips.get(image.image_id)
+        for row in self._dicts(COHORT_LISTINGS_SQL, {"ids": wanted}):
+            listing_id = int(row["id"])
+            # `block` is the COHORT's draw label (a reporting field the engine never reads —
+            # decisions key on the fingerprint's `block_key`), and a real-time arrival belongs
+            # to no draw, so it is empty here rather than invented.
+            listings[listing_id] = Listing.from_json(build_listing_record(
+                row, block="", location=locations.get(listing_id),
+                history=history.get(listing_id, ())))
+        galleries = self._galleries(wanted)
         self.reads += len(listings)
         return {i: (listing, galleries.get(i, [])) for i, listing in listings.items()}
 
-
-def _listing_of(row: Sequence[Any]) -> Listing:
-    return Listing(
-        id=int(row[0]), block="", source=row[1], source_id_native=row[2], source_url=row[3],
-        category_main=row[4], category_type=row[5], subtype=row[6], disposition=row[7],
-        area_m2=float(row[8]) if row[8] is not None else None,
-        floor=int(row[9]) if row[9] is not None else None,
-        total_floors=int(row[10]) if row[10] is not None else None,
-        price=float(row[11]) if row[11] is not None else None,
-        description=row[12],
-        first_seen_at=row[13].isoformat() if row[13] is not None else None,
-        last_seen_at=row[14].isoformat() if row[14] is not None else None,
-        inactive_at=row[15].isoformat() if row[15] is not None else None,
-        is_active=bool(row[16]),
-        broker_key=None,
-        broker_identity_id=int(row[17]) if row[17] is not None else None,
-        broker_firm_id=int(row[18]) if row[18] is not None else None,
-        location=Location(
-            obec_kod=int(row[19]) if row[19] is not None else None,
-            cast_obce_kod=int(row[20]) if row[20] is not None else None,
-            granularity=row[21],
-            lat=float(row[22]) if row[22] is not None else None,
-            lon=float(row[23]) if row[23] is not None else None,
-            street_key=row[24], house_number=row[25], house_number_cp=row[26],
-            house_number_co=row[27], psc=row[28],
-            ruian_adm_kod=int(row[29]) if row[29] is not None else None,
-            country_code=row[30], country_status=row[31],
-        ),
-    )
+    def _galleries(self, ids: Sequence[int]) -> dict[int, list[Image]]:
+        rows = self._dicts(COHORT_IMAGES_SQL, {"ids": list(ids)})
+        if not rows:
+            return {}
+        image_ids = [int(row["image_id"]) for row in rows]
+        hashes = sorted({int(row["phash"]) for row in rows if row.get("phash") is not None})
+        clips = {int(row["image_id"]): encode_clip(row["embedding"])
+                 for row in self._dicts(COHORT_CLIP_SQL,
+                                        {"ids": image_ids, "model": self.clip_model})}
+        tags: dict[int, list[dict[str, Any]]] = {}
+        for row in self._dicts(COHORT_CLIP_TAGS_SQL,
+                               {"ids": image_ids, "model": self.clip_model}):
+            tags.setdefault(int(row["image_id"]), []).append(row)
+        # Frozen, never recounted (E65) — and absent from the table means a population of 0
+        # for that hash, not an unknown, because the cohort lane writes every hash it saw.
+        population = {int(row[0]): int(row[1]) for row in
+                      _rows(self.conn, RT_PHASH_POP_SQL, {"hashes": hashes})} if hashes else {}
+        self.statements += 1
+        out: dict[int, list[Image]] = {}
+        for row in rows:
+            image_id = int(row["image_id"])
+            record = build_image_record(row, clip=clips.get(image_id),
+                                        tags=tag_pairs(tags.get(image_id, [])),
+                                        pop=population)
+            out.setdefault(int(row["listing_id"]), []).append(Image.from_json(record))
+        return out
 
 
 class SqlWork:

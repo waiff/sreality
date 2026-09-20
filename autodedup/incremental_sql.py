@@ -197,50 +197,27 @@ on conflict (name) do update set
 
 # ------------------------------------------------------------------ facts (read-only)
 #
-# Id-keyed, so both ride a primary key. Location comes only from `public.listing_location`
-# (migration 508 dropped the listing-level columns).
-RT_FACTS_SQL = """
-select l.id, l.source, l.source_id_native, l.source_url, l.category_main, l.category_type,
-       l.subtype, l.disposition, l.area_m2, l.floor, l.total_floors, l.price_czk,
-       l.description, l.first_seen_at, l.last_seen_at, l.inactive_at, l.is_active,
-       l.broker_identity_id, l.broker_firm_id,
-       loc.obec_kod, loc.cast_obce_kod, loc.granularity, loc.lat, loc.lon,
-       loc.street_key, loc.house_number, loc.house_number_cp, loc.house_number_co,
-       loc.psc, loc.ruian_adm_kod, loc.country_code, loc.country_status
-  from public.listings l
-  left join public.listing_location loc on loc.listing_id = l.id
- where l.id = any(%(ids)s::bigint[])
-"""
-
-# The gallery, with the three things a feature reads off an image beside its pHash.
+# THE LANE DOES NOT SPELL THESE ITSELF. A listing's facts are whatever the EXPORT lane reads
+# for the cohort pass — `export_sql.COHORT_LISTINGS_SQL`, `COHORT_LOCATION_SQL`,
+# `COHORT_PRICE_HISTORY_SQL`, `COHORT_IMAGES_SQL`, `COHORT_CLIP_SQL`, `COHORT_CLIP_TAGS_SQL`
+# — assembled by the export's own `build_listing_record` / `build_image_record`. W9 hand-wrote
+# a thinner version of them and the schema gate caught only the loudest symptom (`loc.lat`
+# does not exist; the store keeps a `geom`). The quiet ones were worse: no `attrs`, so every
+# attribute feature would have been ABSENT in production while the replay had them; no price
+# history, so E19's price-event features too; no `broker_key`, so the whole BRK family; and
+# `granularity` read as an enum rather than text. A replay against an exported artifact cannot
+# see any of that, which is why the lane now reads through the export's definitions instead of
+# beside them (E72).
 #
-# `pop` — the CORPUS-WIDE count of listings carrying a hash, which E9's catalogue subtraction
-# and K-C's `catalog_ratio_max` both read — comes from `autodedup.phash_pop`, NEVER from a
-# live count: `public.images.phash` carries no index and ruling D8 forbids adding one, so the
-# count is one deliberate sequential scan the COHORT lane runs once per pass. That makes the
-# population a cohort statistic like the others, and E65 freezes it with them: a pass that
-# recomputed it would silently move `anchor_bands`, and with them the K4 probe and every
-# certificate that reads a catalogue ratio.
-RT_IMAGES_SQL = """
-select i.listing_id, i.id, i.sequence, i.phash, pp.n_listings
-  from public.images i
-  left join autodedup.phash_pop pp on pp.phash = i.phash
- where i.listing_id = any(%(ids)s::bigint[])
- order by i.listing_id, i.sequence nulls last, i.id
-"""
-
-RT_IMAGE_TAGS_SQL = """
-select t.image_id, t.fine_tag, t.logical_tag, t.confidence
-  from public.image_clip_tags t
- where t.image_id = any(%(ids)s::bigint[])
-   and t.model = %(model)s::text
-"""
-
-RT_IMAGE_CLIP_SQL = """
-select e.image_id, e.embedding::text
-  from public.image_clip_embeddings e
- where e.image_id = any(%(ids)s::bigint[])
-   and e.model = %(model)s::text
+# The ONE deliberate difference is the corpus-wide pHash population: the export computes it
+# with a sequential scan over `public.images` (no index, D8 forbids adding one), and the lane
+# reads the frozen one out of `autodedup.phash_pop`, because E65 freezes it with the other
+# cohort statistics — a pass that recomputed it would move `catalog_ratio`, `anchor_bands` and
+# with them every certificate that reads a catalogue ratio.
+RT_PHASH_POP_SQL = """
+select p.phash, p.n_listings
+  from autodedup.phash_pop p
+ where p.phash = any(%(hashes)s::bigint[])
 """
 
 # ------------------------------------------------------------------ probe postings

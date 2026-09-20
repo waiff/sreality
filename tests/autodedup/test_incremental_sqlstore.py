@@ -564,3 +564,88 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     # And it is dark like everything else in this lane.
     monkeypatch.delenv(ENV_FLAG, raising=False)
     assert run_rt_seed(lambda: conn, {"artifact": str(artifact)}, tmp_path)["skipped"] == "dark"
+
+
+# --------------------------------------------- E72: the lane's facts ARE the export's facts
+
+
+def _seed_public(conn: FakePg, listing_id: int = 4_242) -> None:
+    conn.listings[listing_id] = {
+        "id": listing_id, "source": "sreality", "source_id_native": "n1",
+        "source_url": "https://example.test/1", "category_main": "byt",
+        "category_type": "prodej", "subtype": None, "disposition": "2+kk",
+        "area_m2": 62.0, "floor": 3, "total_floors": 6, "price_czk": 6_200_000,
+        "price_unit": "celkem", "area_basis": "uzitna", "has_balcony": True,
+        "has_parking": None, "has_lift": True, "building_type": "cihlova",
+        "condition": "po_rekonstrukci", "energy_rating": "C", "estate_area": None,
+        "usable_area": 62.0, "garden_area": None, "category_sub_cb": None,
+        "furnished": "castecne", "terrace": None, "cellar": True, "garage": None,
+        "parking_lots": None, "ownership": "osobni",
+        "published_at": "2026-02-01T08:00:00+00:00",
+        "description": "Prodej bytu 2+kk, evidencni cislo zakazky N115423. " * 4,
+        "first_seen_at": conn.now - timedelta(days=9), "last_seen_at": conn.now,
+        "inactive_at": None, "is_active": True,
+        "broker_identity_id": 77, "broker_firm_id": 9,
+        "broker_phone": "+420 777 123 456", "broker_email": "a@agency.cz",
+    }
+    conn.locations[listing_id] = {
+        "listing_id": listing_id, "obec_kod": 554782, "obec_name": "Praha",
+        "cast_obce_kod": 490245, "cast_obce_name": "Vysocany", "granularity": "address",
+        "granularity_rank": 6, "is_address_grain": True, "lat": 50.1, "lon": 14.5,
+        "uncertainty_radius_m": 5.0, "street_name": "Kolbenova", "house_number_cp": "12",
+        "house_number_co": "3", "psc": "19000", "ruian_adm_kod": 22_349_841,
+        "country_status": "cz",
+    }
+    conn.snapshots.extend([
+        {"id": 1, "listing_id": listing_id, "scraped_at": conn.now - timedelta(days=9),
+         "price_czk": 6_500_000},
+        {"id": 2, "listing_id": listing_id, "scraped_at": conn.now - timedelta(days=2),
+         "price_czk": 6_200_000},
+    ])
+    conn.image_rows.append({"image_id": 900, "listing_id": listing_id, "sequence": 0,
+                            "storage_path": "img/900.jpg", "phash": 7_919})
+    conn.clip_tags.append({"image_id": 900, "fine_tag": "kitchen_modern",
+                           "logical_tag": "kitchen", "confidence": 0.81})
+    conn.phash_pop[7_919] = 4
+
+
+def test_the_lane_reads_the_facts_the_export_reads() -> None:
+    """W9 hand-wrote the fact SQL. The schema gate caught `loc.lat` (the store keeps a geom);
+    behind it sat the silent ones — no attrs, no price history, no broker key."""
+    from autodedup.export import build_listing_record, street_key
+    from autodedup.incremental_lane import SqlFacts
+
+    conn = FakePg()
+    _seed_public(conn)
+    facts = SqlFacts(conn)
+    listing, images = facts.facts([4_242])[4_242]
+
+    # The attribute block the attr features read — absent in W9's version.
+    assert listing.attrs["condition"] == "po_rekonstrukci"
+    assert listing.attrs["has_lift"] is True
+    assert "estate_area" not in listing.attrs, "an absent column is absent, never a zero"
+    # E19's price events.
+    assert [price for _stamp, price in listing.price_history] == [6_500_000.0, 6_200_000.0]
+    # The BRK family's identity, salted exactly as the export salts it (E28).
+    assert listing.broker_key and listing.broker_key == build_listing_record(
+        conn.listings[4_242], block="", location=conn.locations[4_242])["broker_key"]
+    # The location, through the export's own derivations: a geom, not lat/lon columns.
+    assert (listing.location.lat, listing.location.lon) == (50.1, 14.5)
+    assert listing.location.street_key == street_key("Kolbenova") == "kolbenova"
+    assert listing.location.house_number == "12/3"
+    assert listing.location.granularity == "address"
+    assert listing.location.granularity_rank == 6 and listing.location.is_address_grain
+    # The gallery, with the FROZEN population (E65) and the export's tag pairs.
+    assert len(images) == 1
+    assert images[0].phash == 7_919 and images[0].pop == 4
+    assert images[0].tags == [("kitchen", 0.81), ("kitchen_modern", 0.81)]
+
+
+def test_an_image_whose_hash_the_frozen_population_does_not_carry_reads_zero() -> None:
+    from autodedup.incremental_lane import SqlFacts
+
+    conn = FakePg()
+    _seed_public(conn)
+    conn.phash_pop.clear()
+    _listing, images = SqlFacts(conn).facts([4_242])[4_242]
+    assert images[0].pop == 0, "a hash the cohort never saw is unseen, not unknown"
