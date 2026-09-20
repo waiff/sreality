@@ -84,11 +84,11 @@ def test_the_lane_writer_census_covers_the_package() -> None:
     quietly sit outside the rail. Modules that only compute are listed as exempt."""
     exempt = {
         "__init__.py", "agreement.py", "blocking.py", "candidates.py", "cluster.py",
-        "cohort.py", "dataset.py", "decide.py", "ensembles.py", "features.py",
+        "cohort.py", "dataset.py", "decide.py", "ensembles.py", "family.py", "features.py",
         "fingerprint.py", "guards.py", "hazard_context.py", "incremental.py",
         "incremental_scope.py", "incremental_store.py", "parity_digest.py",
-        # W10 adds "stock.py" to this list on main; a merge keeps BOTH or the census fails.
-        "model.py", "normalize.py", "oss_pod.py", "settings.py", "text_facts.py",
+        "model.py", "normalize.py", "oss_pod.py", "settings.py", "stock.py",
+            "text_facts.py",
         "ui_sql.py", "verdict_reasons.py",
     }
     present = {path.name for path in PACKAGE.glob("*.py")}

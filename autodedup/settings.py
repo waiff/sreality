@@ -21,6 +21,11 @@ from autodedup.features import DEFAULT_VOCABULARY_ATTR_KEYS
 # lower.
 CONTEXT_RULE_MIN_IMAGES_FLOOR: float = 4.0
 
+# E84: one minute, the floor under K-B's window separation. No scrape cadence in this program
+# re-lists an advert within a minute of its last sighting, so the bar can only catch two adverts
+# the same index walk saw for the first and only time.
+MIN_CERTIFICATE_B_GAP_DAYS: float = 1.0 / 1440.0
+
 
 @dataclass(slots=True)
 class Settings:
@@ -28,6 +33,26 @@ class Settings:
     area_reject_pct: float = 0.08
     area_band_pct: float = 0.03
     catalog_df: int = 8
+    # E83 (W10): E9's population test cannot tell a marketing catalogue from a broker re-posting
+    # ONE advert nine times, so a frame is stock only when its carriers are several PARTIES.
+    # Each limb is a settings row because each costs differently; `combine` says whether one limb
+    # clearing its bar is enough to call a frame stock (`any`, the conservative reading — more
+    # frames stay subtracted) or every configured limb must (`all`).
+    # `catalog_carrier_coverage_min` is the honest rail: carrier identity is observable only
+    # inside the cohort while `pop` is corpus-wide, so a frame the cohort holds less than this
+    # share of the population of stays subtracted. OFF by default — E9 is what g6 shipped with,
+    # and every relaxation of it adds image evidence and therefore adds merges.
+    catalog_carrier_aware: bool = False
+    catalog_min_broker_carriers: int | None = None
+    catalog_min_source_carriers: int | None = None
+    catalog_min_block_carriers: int | None = None
+    catalog_carrier_combine: str = "any"
+    catalog_carrier_coverage_min: float = 1.0
+    # E83's purity rail, E60's restated for a photograph: carriers that print two dispositions
+    # or stated areas further apart than this hold the PROJECT's material, not one advert's.
+    # 0.01 is K-B's own `CERT_B_AREA` — the certificate already demands the two sides agree
+    # within 1 %, so the frame that carries it may not span more.
+    catalog_carrier_area_tol: float = 0.01
     anchor_images: int = 3
     max_block_size: int = 200
     max_candidates_per_listing: int = 60
@@ -70,6 +95,56 @@ class Settings:
     # `validate` refuses to run the honest clock without it.
     certificate_b_min_images: float = 0.0
     certificate_b_min_matched_images: float = 0.0
+    # E84 (W10): K-B's disjointness clause reads a PAIR of windows, so it has to be read at the
+    # resolution the sightings have. Under the honest clock an advert seen exactly once has
+    # `first_seen == last_seen` and its live window is a POINT, which makes `max(starts) >
+    # min(ends)` true for ANY two once-seen adverts — two Regus products listed 2.8 seconds apart
+    # in one index walk certified as a re-post (412540 x 412544, gold not-same, unanimous). The
+    # separation must therefore exceed the sighting cadence, and the rail reads the pair, never
+    # one side: "either side degenerate" costs 7 labelled duplicates, the pair gap costs 0. One
+    # minute is measured: engine-wide over the candidate's 1,167 K-B merges it withholds exactly
+    # that pair; an hour costs 2 labelled duplicates, a day 95 (M89). 0 by DEFAULT, and that is
+    # not timidity: on the detection clock the gap runs from `inactive_at`, so a sub-minute one
+    # is a delisting DETECTED and the successor listed in the same drain pass — a true re-post,
+    # and the minute withholds exactly one of g6's K-B certificates, 18715382 x 18739520, the
+    # same broker's 29,000 Kc 2+kk re-listed 44 seconds after it was detected gone (M89). Under
+    # the honest clock the gap runs from a SIGHTING, where a sub-minute separation can only mean
+    # one index walk saw both adverts for the first and only time. So the rail is required
+    # exactly where the hazard is: `validate` refuses the honest clock without it.
+    certificate_b_min_gap_days: float = 0.0
+    # E85 (W11): K-B certifies a pair only when its FAMILY — the connected component of the
+    # pairs K-B certified — is consistent with ONE unit. Every clause of K-B is pair-local, and
+    # a serial developer's project reads the same way pair by pair as a broker's own re-post
+    # chain; what separates them is the chain. `off` is the shipped default, `family` refuses
+    # every K-B edge of an impure family, `cell` partitions the family and refuses only the
+    # edges that cross a cell or sit in an inconsistent one. Each clause below is its own row
+    # because each was priced separately against the 77 adjudicated families (M93).
+    # W11's verification then RE-ADJUDICATED those families and inverted the reading (M99): the
+    # two ceskereality families that carry 64 of the 77 refusals are one unit each, and on the
+    # sealed split the guard changes nothing at all (M100). It stays as data, `off`, with its
+    # structural case withdrawn; `pair` is the fourth mode E86 added, the only one whose verdict
+    # does not move with the order its family arrived in (M101).
+    family_guard_mode: str = "off"
+    family_guard_area_tol: float = 0.01
+    # How far a number the body prints may sit from the stored area and still be read as this
+    # unit's headline size. `stated_areas` bounds mentions at 3x the stored value, which is wide
+    # enough to pick a half-house's whole-house number (478609: 103 and 206 against a stored
+    # 150) and refuse a true re-post on it.
+    family_guard_area_window: float = 0.25
+    family_guard_price_tol: float = 0.01
+    family_guard_price_rise_max: float = 0.10
+    family_guard_overlap_days: float = 0.0
+    family_guard_concurrency_clause: bool = True
+    family_guard_price_clause: bool = True
+    # OFF, and the measurement says why: E60 already ruled that a DIFFERING agency order code is
+    # evidence of nothing in either direction, and engine-wide this clause refuses E60's own
+    # worked example (23201 x 486034 and 395722 x 496635 — one 43,3 m2 flat at 7 974 910 Kc
+    # under codes N115815 and N118731) plus two more pairs of the identical shape in one
+    # project. It buys two adjudicated MULTI families whose only separator is a code, and it
+    # pays for them by contradicting a standing rule (M95).
+    family_guard_ref_code_clause: bool = False
+    family_guard_unit_designator_clause: bool = True
+    family_guard_disposition_clause: bool = True
     # E61 (W8): two adverts naming a DIFFERENT unit inside one address block are two units,
     # whatever they look like. ON by default — it demotes nothing the operator or gold calls a
     # duplicate, and it is the only rule that can separate a developer's own near-identical
@@ -214,6 +289,40 @@ class Settings:
         unknown_units = sorted(set(self.numeral_conflict_units) - set(NUMERAL_TOLERANCE))
         if unknown_units:
             raise ValueError(f"numeral_conflict_units names no slot: {', '.join(unknown_units)}")
+        from autodedup.stock import COMBINE_MODES, MIN_CARRIER_BAR
+
+        if self.catalog_carrier_combine not in COMBINE_MODES:
+            raise ValueError(
+                f"catalog_carrier_combine must be one of {COMBINE_MODES}: "
+                f"{self.catalog_carrier_combine}"
+            )
+        if not 0.0 <= self.catalog_carrier_area_tol < 1.0:
+            raise ValueError(
+                f"catalog_carrier_area_tol must be in [0, 1): {self.catalog_carrier_area_tol}"
+            )
+        if not 0.0 < self.catalog_carrier_coverage_min <= 1.0:
+            raise ValueError(
+                "catalog_carrier_coverage_min must be in (0, 1]: "
+                f"{self.catalog_carrier_coverage_min}"
+            )
+        limbs = ("catalog_min_broker_carriers", "catalog_min_source_carriers",
+                 "catalog_min_block_carriers")
+        for name in limbs:
+            value = getattr(self, name)
+            # A bar of one is vacuous: every frame has a carrier, so nothing would ever be stock.
+            if value is not None and value < MIN_CARRIER_BAR:
+                raise ValueError(f"{name} must be at least {MIN_CARRIER_BAR} or null: {value}")
+        if self.catalog_carrier_aware and not any(getattr(self, name) is not None
+                                                  for name in limbs):
+            raise ValueError(
+                "catalog_carrier_aware needs at least one carrier limb: with none configured "
+                "the switch is inert and E9 runs exactly as it does with it off"
+            )
+        if self.certificate_b_min_gap_days < 0.0:
+            raise ValueError(
+                "certificate_b_min_gap_days must not be negative: "
+                f"{self.certificate_b_min_gap_days}"
+            )
         for name in ("certificate_b_min_images", "certificate_b_min_matched_images"):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must not be negative: {getattr(self, name)}")
@@ -224,12 +333,41 @@ class Settings:
                 "matched set is a subset of the smaller gallery "
                 f"({self.certificate_b_min_matched_images} > {self.certificate_b_min_images})"
             )
+        # E87 (W11 verification): the gate takes back the payment it briefly accepted from E85.
+        # The W11 seal measured the guard INERT against the same arm without it — 0 sealed
+        # labelled duplicates gained, 0 lost, every sealed demotion unlabelled (M100) — so it
+        # buys the honest clock nothing and cannot stand as its price. E65 is the only payment
+        # a sealed read has measured, and the honest clock's true price is an open question
+        # D30 (vii) owes, not a row this gate may assume.
         if self.live_window_from_sighting and self.certificate_b_min_images <= 0.0:
             raise ValueError(
                 "live_window_from_sighting needs the E65 image floor: the honest clock is what "
                 "lets a developer's serial template re-posts satisfy every clause of K-B, and "
                 "certificate_b_min_images=0 leaves the certificate resting on no observation "
-                "of the unit"
+                "of the unit (E87: the E85 family guard is measurably inert on the W11 seal "
+                "and does not pay for it)"
+            )
+        if self.live_window_from_sighting and self.certificate_b_min_gap_days <= 0.0:
+            raise ValueError(
+                "live_window_from_sighting needs the E84 gap rail: under the honest clock a "
+                "once-seen advert's live window is a point, so every pair of once-seen adverts "
+                "is disjoint by construction and K-B certifies a 2.8-second separation as a "
+                "re-post"
+            )
+        from autodedup.family import MODES as FAMILY_GUARD_MODES
+
+        if self.family_guard_mode not in FAMILY_GUARD_MODES:
+            raise ValueError(
+                f"family_guard_mode must be one of {FAMILY_GUARD_MODES}: {self.family_guard_mode}"
+            )
+        for name in ("family_guard_area_tol", "family_guard_area_window",
+                     "family_guard_price_tol", "family_guard_price_rise_max"):
+            value = getattr(self, name)
+            if not 0.0 <= value < 1.0:
+                raise ValueError(f"{name} must be in [0, 1): {value}")
+        if self.family_guard_overlap_days < 0.0:
+            raise ValueError(
+                f"family_guard_overlap_days must not be negative: {self.family_guard_overlap_days}"
             )
         if not 0.0 <= self.unit_interior_min <= 1.0:
             raise ValueError(f"unit_interior_min must be in [0, 1]: {self.unit_interior_min}")

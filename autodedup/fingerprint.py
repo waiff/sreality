@@ -30,6 +30,7 @@ from autodedup.normalize import (
     simhash_bands,
 )
 from autodedup.settings import Settings
+from autodedup.stock import PLAIN as STOCK_PLAIN, StockIndex
 from toolkit.room_taxonomy import ROOM_FAMILIES
 
 _TAXONOMY_PATH = Path(__file__).resolve().parents[1] / "data" / "clip_taxonomy.json"
@@ -188,9 +189,15 @@ def _anchor_sort_key(image: Image) -> tuple[float, int, int]:
 
 
 def build_fingerprint(
-    listing: Listing, images: Sequence[Image], settings: Settings
+    listing: Listing,
+    images: Sequence[Image],
+    settings: Settings,
+    stock: "StockIndex | None" = None,
 ) -> Fingerprint:
-    """One listing plus its gallery -> the row every probe and feature reads."""
+    """One listing plus its gallery -> the row every probe and feature reads.
+
+    `stock` is E83's carrier-aware catalogue index; omitting it is plain E9 (every populous
+    frame is stock), which is the conservative reading and what g6 ships."""
     loc = listing.location
     description = listing.description or ""
     has_text = len(description) >= settings.text_min_chars
@@ -205,8 +212,9 @@ def build_fingerprint(
     # E9 can only subtract what was measured: `pop == 0`/None means the exporter's population
     # probe did not run, and publishing catalog_ratio=0.0 there would disarm K-C's stock guard.
     pop_measured = all(img.pop_is_measured() for img in hashed)
-    catalog = [img for img in hashed if img.is_catalog_candidate(settings.catalog_df)]
-    non_catalog = [img for img in hashed if not img.is_catalog_candidate(settings.catalog_df)]
+    test = stock or STOCK_PLAIN
+    catalog = [img for img in hashed if test.is_stock(img, settings.catalog_df)]
+    non_catalog = [img for img in hashed if not test.is_stock(img, settings.catalog_df)]
     anchors = sorted(non_catalog, key=_anchor_sort_key)[: settings.anchor_images]
     anchor_bands: list[tuple[int, int, int]] = []
     for image in anchors:
@@ -274,7 +282,10 @@ def build_fingerprint(
 
 def build_all(ds: Dataset, settings: Settings) -> dict[int, Fingerprint]:
     """Fingerprints for the whole cohort, in listing-id order so every pass is reproducible."""
+    stock = StockIndex.of_dataset(ds, settings)
     return {
-        listing_id: build_fingerprint(ds.listings[listing_id], ds.images(listing_id), settings)
+        listing_id: build_fingerprint(
+            ds.listings[listing_id], ds.images(listing_id), settings, stock
+        )
         for listing_id in sorted(ds.listings)
     }

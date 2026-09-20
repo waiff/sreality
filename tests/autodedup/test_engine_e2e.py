@@ -766,3 +766,37 @@ def test_harness_pair_prints_side_by_side(cohort: Path) -> None:
     assert f"pair {DUP_A} x {DUP_B}" in text
     assert "zone        merge" in text
     assert "phash_match_ratio" in text
+
+
+def _keys(run_dir: Path) -> list[tuple[int, int]]:
+    return [(row["lo"], row["hi"]) for row in harness.read_pairs(run_dir)]
+
+
+def test_the_family_guard_does_not_reorder_the_run_artifacts(
+    cohort: Path, tmp_path: Path
+) -> None:
+    """W11 verification: E85 holds K-B rows back until the family can be read, and holding them
+    back must change nothing but the verdict. `pairs.jsonl.gz` stays in key order, the part file
+    never survives, the clusters are identical and the guard-off run is untouched."""
+    plain = tmp_path / "run_plain"
+    assert harness.main(["run", str(cohort), "--out", str(plain)], out=io.StringIO()) == 0
+
+    settings_path = tmp_path / "guard.json"
+    settings_path.write_text(json.dumps({"family_guard_mode": "cell"}), encoding="utf-8")
+    guarded = tmp_path / "run_guard"
+    assert harness.main(
+        ["run", str(cohort), "--out", str(guarded), "--settings", str(settings_path)],
+        out=io.StringIO(),
+    ) == 0
+
+    keys = _keys(guarded)
+    assert keys == sorted(keys)
+    assert keys == _keys(plain)
+    assert (REPOST_A, REPOST_B) in keys, "the fixture's K-B pair is the row that is held back"
+    assert not list(guarded.glob("*.part"))
+
+    summary = json.loads((guarded / harness.RUN_FILE).read_text(encoding="utf-8"))
+    assert summary["family_guard"]["mode"] == "cell"
+    assert summary["family_guard"]["n_refused"] == 0, "nothing in this cohort is impure"
+    assert (guarded / harness.CLUSTERS_FILE).read_text(encoding="utf-8") == (
+        plain / harness.CLUSTERS_FILE).read_text(encoding="utf-8")

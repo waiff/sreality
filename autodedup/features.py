@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Dataset, Image, Listing, cosine_norm, hamming64, live_end_stamp
 from autodedup.normalize import canonical_attr
+from autodedup.stock import PLAIN as STOCK_PLAIN, StockIndex
 from autodedup.text_facts import MAX_CODE_POPULATION, reference_codes
 from toolkit.room_taxonomy import ROOM_FAMILIES
 
@@ -749,11 +750,12 @@ class FeatureContext:
     codes: dict[int, frozenset[str]] = field(default_factory=dict)
     pin_pop: dict[str, int] = field(default_factory=dict)
     dataset: Dataset | None = None
+    stock: "StockIndex" = field(default_factory=lambda: STOCK_PLAIN)
     _events: dict[int, list[tuple[float, float]]] = field(default_factory=dict)
-    _clip: dict[tuple[int, int], list[tuple["array[float]", float]]] = field(default_factory=dict)
-    _phash: dict[tuple[int, int], list[tuple[int, int, int]]] = field(default_factory=dict)
-    _live: dict[tuple[int, int], int] = field(default_factory=dict)
-    _tags: dict[tuple[int, int], dict[str, list["TagFrame"]]] = field(default_factory=dict)
+    _clip: dict[tuple[int, int, str], list[tuple["array[float]", float]]] = field(default_factory=dict)
+    _phash: dict[tuple[int, int, str], list[tuple[int, int, int]]] = field(default_factory=dict)
+    _live: dict[tuple[int, int, str], int] = field(default_factory=dict)
+    _tags: dict[tuple[int, int, str], dict[str, list["TagFrame"]]] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -762,7 +764,8 @@ class FeatureContext:
         settings: "Settings",
         dataset: Dataset | None = None,
     ) -> "FeatureContext":
-        ctx = cls(settings=settings, dataset=dataset)
+        ctx = cls(settings=settings, dataset=dataset,
+                  stock=StockIndex.of_dataset(dataset, settings))
         listings_by_block: dict[str, list[int]] = {}
         for listing_id, fp in fps.items():
             block = _block_of(fp)
@@ -876,14 +879,14 @@ class FeatureContext:
     ) -> list[tuple[int, int, int]]:
         """`(image_id, seq, phash)` for the non-catalog, phashed images, in gallery order (E9)."""
         active = settings or self.settings
-        key = (listing_id, int(active.catalog_df))
+        key = (listing_id, int(active.catalog_df), self.stock.token())
         cached = self._phash.get(key)
         if cached is not None:
             return cached
         limit = int(getattr(active, "phash_sample", PHASH_SAMPLE))
         gallery: list[tuple[int, int, int]] = []
         for index, image in enumerate(images):
-            if image.phash is None or image.is_catalog_candidate(active.catalog_df):
+            if image.phash is None or self.stock.is_stock(image, active.catalog_df):
                 continue
             gallery.append((image.image_id, image.seq if image.seq is not None else index, image.phash))
             if len(gallery) >= limit:
@@ -899,11 +902,12 @@ class FeatureContext:
     ) -> int:
         """Gallery size AFTER E9 subtraction — uncapped, so it is not the sample size."""
         active = settings or self.settings
-        key = (listing_id, int(active.catalog_df))
+        key = (listing_id, int(active.catalog_df), self.stock.token())
         cached = self._live.get(key)
         if cached is not None:
             return cached
-        count = sum(1 for image in images if not image.is_catalog_candidate(active.catalog_df))
+        count = sum(1 for image in images
+                    if not self.stock.is_stock(image, active.catalog_df))
         self._live[key] = count
         return count
 
@@ -916,7 +920,7 @@ class FeatureContext:
         """The CLIP sample, INTERIOR first (§4's anchor rule) so the cap can never select a pair
         of cover shots and call the result unit evidence."""
         active = settings or self.settings
-        key = (fp.listing_id, int(active.catalog_df))
+        key = (fp.listing_id, int(active.catalog_df), self.stock.token())
         cached = self._clip.get(key)
         if cached is not None:
             return cached
@@ -932,7 +936,7 @@ class FeatureContext:
         )
         gallery: list[tuple["array[float]", float]] = []
         for image in ordered:
-            if image.is_catalog_candidate(active.catalog_df):
+            if self.stock.is_stock(image, active.catalog_df):
                 continue
             vector = image.clip_vector()
             norm = image.clip_norm()
@@ -958,14 +962,14 @@ class FeatureContext:
         evidence. Frames with neither a pHash nor a CLIP vector are dropped — they can carry no
         comparison — so an empty dict means "this side has nothing taggable to compare"."""
         active = settings or self.settings
-        key = (listing_id, int(active.catalog_df))
+        key = (listing_id, int(active.catalog_df), self.stock.token())
         cached = self._tags.get(key)
         if cached is not None:
             return cached
         gallery: dict[str, list[TagFrame]] = {}
         for image in images:
             tag = image.room_tag()
-            if tag is None or image.is_catalog_candidate(active.catalog_df):
+            if tag is None or self.stock.is_stock(image, active.catalog_df):
                 continue
             frames = gallery.setdefault(tag, [])
             if len(frames) >= TAG_FRAME_CAP:

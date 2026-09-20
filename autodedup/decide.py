@@ -89,17 +89,35 @@ def present_value(feats: Feats, name: str) -> float | None:
     return float(value) if present else None
 
 
-def disjoint_windows(la: Listing, lb: Listing, settings: Settings | None = None) -> bool:
-    """K-B's load-bearing clause: the two adverts were never live at the same time.
+def window_gap_days(la: Listing, lb: Listing, settings: Settings | None = None) -> float | None:
+    """The separation between the two live windows, in days — negative when they overlap.
 
-    Unknown is not disjoint — a missing window can never assert the absence of overlap. Which
-    end stamp counts is `features.window_end_stamp`'s question, not a second spelling here."""
+    None when either window is unknown, which is never disjointness: a missing window can
+    assert neither overlap nor its absence."""
     cfg = settings or Settings()
     starts = (parse_ts(la.first_seen_at), parse_ts(lb.first_seen_at))
     ends = (parse_ts(window_end_stamp(la, cfg)), parse_ts(window_end_stamp(lb, cfg)))
     if any(value is None for value in starts) or any(value is None for value in ends):
+        return None
+    later, earlier = max(starts[0], starts[1]), min(ends[0], ends[1])  # type: ignore[type-var]
+    return float(later - earlier)  # `parse_ts` is already epoch DAYS
+
+
+def disjoint_windows(la: Listing, lb: Listing, settings: Settings | None = None) -> bool:
+    """K-B's load-bearing clause: the two adverts were never live at the same time.
+
+    Unknown is not disjoint — a missing window can never assert the absence of overlap. Which
+    end stamp counts is `features.window_end_stamp`'s question, not a second spelling here.
+
+    E84: the separation has to clear `certificate_b_min_gap_days`, read on the PAIR. A window is
+    only as sharp as the sightings behind it, and under the honest clock a once-seen advert's
+    window is a point — so without a floor any two adverts one index walk saw for the first and
+    only time are disjoint by construction, whatever else they are."""
+    cfg = settings or Settings()
+    gap = window_gap_days(la, lb, cfg)
+    if gap is None:
         return False
-    return max(starts[0], starts[1]) > min(ends[0], ends[1])  # type: ignore[operator]
+    return gap > 0.0 and gap >= cfg.certificate_b_min_gap_days
 
 
 def certificate_a(feats: Feats) -> bool:
@@ -204,7 +222,11 @@ def certificate_r(feats: Feats) -> bool:
 
 
 def certificate_of(
-    feats: Feats, la: Listing, lb: Listing, settings: Settings | None = None
+    feats: Feats,
+    la: Listing,
+    lb: Listing,
+    settings: Settings | None = None,
+    kb_refused: bool = False,
 ) -> str | None:
     """The first certificate the pair earns, in K-A, K-B, K-C order.
 
@@ -215,12 +237,18 @@ def certificate_of(
     at 52.6% HT precision (n=98) on the gold holdout against K-B's 100% (n=94) and K-C's 97.6%
     (n=150), one RUIAN point plus disposition plus area certifying a BUILDING, which is the
     developer-unit false-merge shape itself. The code path stays so an evaluation can switch it
-    back on."""
+    back on.
+
+    `kb_refused` is E85's one entry point: the family pass runs AFTER every pair has been
+    decided (a family is a property of the pair set, not of a pair), and a pair whose family
+    refuses it is re-decided with K-B withdrawn — so it falls to K-C or to the model exactly as
+    an uncertified pair does. Nothing else about the pair changes: the guard removes evidence,
+    it never manufactures a contradiction."""
     if (settings is None or settings.certificate_kr_enabled) and certificate_r(feats):
         return "K-R"
     if settings is not None and settings.certificate_ka_enabled and certificate_a(feats):
         return "K-A"
-    if certificate_b(feats, la, lb, settings):
+    if not kb_refused and certificate_b(feats, la, lb, settings):
         return "K-B"
     if certificate_c(feats):
         return "K-C"
@@ -502,6 +530,7 @@ def decide_pair(
     model: LogisticModel,
     settings: Settings,
     context: ContextIndex | PairContext | None = None,
+    kb_refused: bool = False,
 ) -> Decision:
     """Guards, then auto-rejects, then certificates, then the calibrated score — in that order,
     and then E63 re-reads what landed in the band.
@@ -510,7 +539,7 @@ def decide_pair(
     evidence could not clear ships propose-only and lands in the band whatever it earned. E63
     is the one path back out of that band, and it can only ever read a pair the layers above it
     have already decided — it never reaches a veto, an auto-reject or a developer guard."""
-    decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings)
+    decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings, kb_refused)
     return apply_context_rule(decision, feats, la, lb, settings, context)
 
 
@@ -523,6 +552,7 @@ def _decide_layers(
     probes: Iterable[str],
     model: LogisticModel,
     settings: Settings,
+    kb_refused: bool = False,
 ) -> Decision:
     """The rule floor and the calibrated score — every zone E63 is then allowed to re-read."""
     lo, hi = (fa.listing_id, fb.listing_id) if fa.listing_id < fb.listing_id else (
@@ -550,7 +580,7 @@ def _decide_layers(
         return Decision(lo, hi, "reject", score, families, None, None, f"auto_reject:{rejected}")
 
     diverse = len(families) >= MIN_EVIDENCE_FAMILIES
-    certificate = certificate_of(feats, la, lb, settings)
+    certificate = certificate_of(feats, la, lb, settings, kb_refused)
     if certificate is not None:
         if stratum_t_hi(feats, certificate, settings) is None:
             return Decision(lo, hi, "band", score, families, certificate, None,

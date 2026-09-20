@@ -91,8 +91,11 @@ def test_w9_gold_names_the_fresh_seal_and_the_map_is_committed() -> None:
     assert provenance["label_run_excluded"].startswith("35205840437")
 
 
-def test_the_spent_seal_is_not_the_one_w9_chose_on() -> None:
-    assert seals.spent(W9_SEAL) is None
+def test_the_seal_w9_chose_on_is_now_spent_too_and_still_committed() -> None:
+    """It was clean when W9 cut it; W10's verification was its second read (D28 v), so W11
+    registered it spent and opened a fresh one. The map stays: `w9_gold` names it."""
+    assert seals.spent(W9_SEAL)
+    assert seals.committed(W9_SEAL)
     assert seals.spent("37c8771fda6b06db2ead790fcf7728e0ccb0e80c60cad5358c2905ed39be52cc")
 
 
