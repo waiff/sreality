@@ -338,6 +338,42 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/autodedup.yml"
     },
     {
+      "filename": "autodedup_realtime.yml",
+      "name": "AUTODEDUP: realtime shadow lane",
+      "description": "The real-time half of the autonomous dedup engine: the SAME decisions the cohort lane makes over a whole export, made incrementally as listings arrive. It runs every 10 minutes and is DARK BY DEFAULT — the first step exits 0 unless the repository variable AUTODEDUP_REALTIME_ENABLED is exactly `true`, and `autodedup/incremental_lane.py` re-reads the same variable, so neither a schedule nor a manual dispatch can start a pass the operator has not switched on. Nothing outside schema `autodedup` is written (ruling D4): no `public.listings` row, no `property_id`, no merge. It spends $0 by construction — ruling D19 gives no LLM judge merge authority on the band, so this lane calls no provider at all.",
+      "portal": null,
+      "manual": true,
+      "schedules": [
+        {
+          "cron": "*/10 * * * *",
+          "human": "Every 10 minutes"
+        }
+      ],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "args",
+          "description": "Pass arguments as k=v,k=v — generation (default rt), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings, model. The rails (rt_max_schema_mb, rt_max_retire_fraction, rt_enter_max_scans_per_day, rt_enter_interval_hours) are autodedup.settings rows and are accepted here only beside rt_rescope=true.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_SESSION_URL",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "autodedup-realtime",
+      "cancelInProgress": false,
+      "timeoutMinutes": 25,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/autodedup_realtime.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/autodedup_realtime.yml"
+    },
+    {
       "filename": "backfill_area_basis.yml",
       "name": "Backfill area_basis (the provenance stamp migration 423 never filled)",
       "description": "One-off, dispatch-only backfill for the per-m² measure program's open item 2. Migration 423 added `listings.area_basis` with no backfill, so it fills only as rows are detail-drained — 24.1% of the table, and ZERO rows anywhere carry `plot`, which leaves every gate written on `area_basis` alone inert and reading \"not land\" for every parcel in the database. This does NOT re-derive the headline area: `scraper.area.derive_headline_area` stays the single definition of the precedence and the token vocabulary, and the script CALLS it, feeding it the one measure the stored columns prove was the winner. Three inferences are exact — land (`plot` is a function of area_m2 alone), a NULL area (the function returned no basis), and the `usable_area` column on the six portals that store it un-collapsed, plus bazos whose only arm is `fallback`. idnes and ceskereality are DECLINED by design: both collapse usable/floor/total into that one column, so a match there would fabricate a provenance claim on ~183k rows. Writes nothing but `listings.area_basis`, which is out of every content hash — so NO snapshot, no value change, and neither trigger on `listings` fires. DML, not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; it waits for a read-model rebuild gap before starting, bounded, then proceeds anyway since the contention is I/O and never a lock conflict. Keyset-paginated over a narrow projection that detoasts nothing; idempotent without a marker, and `--after` resumes. NOT a portal ingest workflow, so it carries no `# portal:` tag.",

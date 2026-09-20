@@ -240,6 +240,15 @@ def families_bitmask(names: Iterable[str]) -> int:
     return mask
 
 
+def families_of_bitmask(mask: int) -> list[str]:
+    """The inverse, so a lane that READS a pair back gets the names the decision carried.
+
+    The real-time lane clusters from stored rows and `cluster_rows` counts every edge's
+    evidence families — a read path that could not name them would report clusters with no
+    evidence at all."""
+    return sorted(name for name, bit in FAMILY_BITS.items() if int(mask) & bit)
+
+
 def present_features(row: dict[str, Any]) -> dict[str, list[Any]]:
     """Only what the pair actually HAS. An absent feature is unknown, never zero (E12), and a
     row that spells out all 44 absences costs more jsonb than the evidence it carries."""
