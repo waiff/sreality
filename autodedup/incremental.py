@@ -818,6 +818,15 @@ def run_pass(
 
     Every write lands before the watermark moves, and the watermark moves only when the whole
     claim was decided — a pass that cannot fit its pair set writes nothing at all (E75)."""
+    # E83 is a COHORT-wide index (who else carries each frame) and this pass sees one claim at
+    # a time, so it would silently subtract what the batch pass keeps and break E70's replay
+    # equivalence. An incremental path that wants it owes the index first.
+    if settings.catalog_carrier_aware:
+        raise NotImplementedError(
+            "catalog_carrier_aware (E83) has no incremental carrier index yet: a pass that "
+            "cannot see a frame's other carriers would decide it differently from the cohort "
+            "pass, and E70's replay equivalence is what says the two agree"
+        )
     caps = limits or Limits()
     result = PassResult(generation=generation, calibration_digest=calibration.digest())
     clock = time.perf_counter()

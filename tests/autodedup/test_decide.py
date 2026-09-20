@@ -21,15 +21,17 @@ from autodedup.decide import (
     certificate_r,
     disjoint_windows,
     present_value,
+    window_gap_days,
     stratum_key,
     stratum_t_hi,
     unit_evidence,
 )
 from autodedup.features import ABSENT, FEATURE_ORDER
 from autodedup.fingerprint import build_fingerprint
-from autodedup.settings import Settings
+from autodedup.settings import MIN_CERTIFICATE_B_GAP_DAYS, Settings
 
 SETTINGS = Settings()
+GAP = MIN_CERTIFICATE_B_GAP_DAYS  # E84: an honest-clock row may not omit it
 KA_SETTINGS = Settings(certificate_ka_enabled=True)
 
 # The cheapest unit-specific corroboration E45 accepts, added to any pair that is testing
@@ -195,13 +197,80 @@ def test_which_end_stamp_k_b_reads_is_a_setting_not_a_second_spelling() -> None:
 
     # The honest clock makes them disjoint. E65 is then what decides, and the two listings
     # carry no comparable frame, so the certificate does not fire (see the E65 tests below).
-    honest = replace(SETTINGS, live_window_from_sighting=True,
+    honest = replace(SETTINGS, live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
                      certificate_b_min_images=1.0, certificate_b_min_matched_images=1.0)
     assert disjoint_windows(gone, successor, honest)
     assert not certificate_b(feats, gone, successor, honest)
     with_frames = _feats(same_source=1.0, same_broker_key=1.0, containment_max=0.95,
                          area_rel_diff=0.005, n_images_min=6.0, phash_loose_matches=5.0)
     assert certificate_b(with_frames, gone, successor, honest)
+
+
+def test_e84_two_once_seen_adverts_are_not_a_re_post() -> None:
+    """The W10 false merge, in miniature: 412540 x 412544, 2.8 seconds apart.
+
+    Under the honest clock an advert seen exactly once has a live window of zero length, so
+    `max(starts) > min(ends)` holds for ANY two once-seen adverts — including two different
+    products one index walk picked up in the same second. The rail reads the PAIR's gap."""
+    from dataclasses import replace
+
+    feats = _feats(same_source=1.0, same_broker_key=1.0, containment_max=0.95,
+                   area_rel_diff=0.0, n_images_min=2.0, phash_loose_matches=1.0)
+    one_walk_a = _listing(1, first_seen_at="2026-06-29T12:31:19.100482+00:00",
+                          last_seen_at="2026-06-29T12:31:19.100482+00:00",
+                          inactive_at="2026-09-07T10:00:43+00:00", is_active=False)
+    one_walk_b = _listing(2, first_seen_at="2026-06-29T12:31:21.900697+00:00",
+                          last_seen_at="2026-06-29T12:31:21.900697+00:00",
+                          inactive_at="2026-09-07T10:00:45+00:00", is_active=False)
+    honest = replace(SETTINGS, live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+                     certificate_b_min_images=1.0, certificate_b_min_matched_images=1.0)
+    assert not disjoint_windows(one_walk_a, one_walk_b, honest)
+    assert not certificate_b(feats, one_walk_a, one_walk_b, honest)
+
+    # Without the rail the same pair certifies — which is exactly what the W10 candidate did
+    # and what the gold labels caught. `validate` refuses that row, so the only way to reach
+    # it is to defeat the rail after construction.
+    unrailed = replace(honest)
+    unrailed.certificate_b_min_gap_days = 0.0
+    assert disjoint_windows(one_walk_a, one_walk_b, unrailed)
+    assert certificate_b(feats, one_walk_a, one_walk_b, unrailed)
+
+
+def test_e84_costs_a_real_re_post_nothing_and_reads_the_pair_not_the_side() -> None:
+    """A once-seen advert is not itself disqualified: what has to clear the bar is the gap."""
+    from dataclasses import replace
+
+    feats = _feats(same_source=1.0, same_broker_key=1.0, containment_max=0.95,
+                   area_rel_diff=0.0, n_images_min=6.0, phash_loose_matches=5.0)
+    honest = replace(SETTINGS, live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+                     certificate_b_min_images=1.0, certificate_b_min_matched_images=1.0)
+    gone = _listing(1, first_seen_at="2026-06-01T00:00:00+00:00",
+                    last_seen_at="2026-06-01T00:00:00+00:00",
+                    inactive_at="2026-09-07T00:00:00+00:00", is_active=False)
+    successor = _listing(2, first_seen_at="2026-06-29T00:00:00+00:00",
+                         last_seen_at="2026-06-29T00:00:00+00:00",
+                         inactive_at="2026-09-08T00:00:00+00:00", is_active=False)
+    assert window_gap_days(gone, successor, honest) == 28.0
+    assert certificate_b(feats, gone, successor, honest)
+
+
+def test_window_gap_days_is_signed_and_unknown_stays_unknown() -> None:
+    overlapping = _listing(2, first_seen_at="2024-02-01T00:00:00+00:00",
+                           last_seen_at="2024-09-01T00:00:00+00:00")
+    early = _listing(1, first_seen_at="2024-01-01T00:00:00+00:00",
+                     last_seen_at="2024-05-01T00:00:00+00:00",
+                     inactive_at="2024-05-01T00:00:00+00:00", is_active=False)
+    gap = window_gap_days(early, overlapping, SETTINGS)
+    assert gap is not None and gap < 0.0
+    assert window_gap_days(early, _listing(2, first_seen_at=None), SETTINGS) is None
+
+
+def test_the_honest_clock_may_not_be_run_without_the_e84_rail() -> None:
+    with pytest.raises(ValueError, match="E84 gap rail"):
+        Settings(live_window_from_sighting=True, certificate_b_min_images=1.0,
+                 certificate_b_min_gap_days=0.0)
+    with pytest.raises(ValueError, match="must not be negative"):
+        Settings(certificate_b_min_gap_days=-1.0)
 
 
 def test_certificate_c_needs_four_ordered_non_catalog_matches() -> None:
@@ -691,7 +760,8 @@ def test_e65_an_all_catalogue_gallery_counts_as_zero_frames() -> None:
     """`n_images_min` is E9-subtracted: 11 stock photos on each side are zero comparable frames,
     which is the measured shape of 1,318 of the cohort's 1,348 image-less K-B merges."""
     feats, gone, successor = _kb_pair()
-    honest = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0,
+    honest = Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+                      certificate_b_min_images=1.0,
                       certificate_b_min_matched_images=1.0)
     assert disjoint_windows(gone, successor, honest)
     assert not certificate_b(feats, gone, successor, honest)
@@ -704,7 +774,8 @@ def test_e65_an_absent_match_count_fails_the_floor() -> None:
     feats["n_images_min"] = (8.0, True)
     feats["phash_loose_matches"] = ABSENT
     feats["phash_tight_matches"] = (0.0, True)  # tight is not the limb; loose is
-    honest = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0,
+    honest = Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+                      certificate_b_min_images=1.0,
                       certificate_b_min_matched_images=1.0)
     assert not certificate_b(feats, gone, successor, honest)
     feats["phash_loose_matches"] = (1.0, True)
@@ -716,7 +787,8 @@ def test_e65_floor_is_read_on_both_sides_not_on_the_larger_gallery() -> None:
     feats, gone, successor = _kb_pair()
     feats["n_images_min"] = (0.0, True)
     feats["phash_loose_matches"] = (4.0, True)
-    honest = Settings(live_window_from_sighting=True, certificate_b_min_images=2.0,
+    honest = Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+                      certificate_b_min_images=2.0,
                       certificate_b_min_matched_images=2.0)
     assert not certificate_b(feats, gone, successor, honest)
     feats["n_images_min"] = (2.0, True)
@@ -727,9 +799,11 @@ def test_e65_each_limb_is_its_own_settings_row() -> None:
     feats, gone, successor = _kb_pair()
     feats["n_images_min"] = (6.0, True)
     feats["phash_loose_matches"] = (0.0, True)
-    sides_only = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0)
+    sides_only = Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+                          certificate_b_min_images=1.0)
     assert certificate_b(feats, gone, successor, sides_only)
-    both = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0,
+    both = Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+                    certificate_b_min_images=1.0,
                     certificate_b_min_matched_images=1.0)
     assert not certificate_b(feats, gone, successor, both)
 
@@ -753,7 +827,8 @@ def test_e65_defaults_off_leaves_the_detection_clock_untouched() -> None:
 def test_e65_the_honest_clock_may_not_run_without_the_floor() -> None:
     with pytest.raises(ValueError, match="needs the E65 image floor"):
         Settings(live_window_from_sighting=True)
-    Settings(live_window_from_sighting=True, certificate_b_min_images=1.0)
+    Settings(live_window_from_sighting=True, certificate_b_min_gap_days=GAP,
+             certificate_b_min_images=1.0)
 
 
 def test_e65_a_matched_set_cannot_exceed_the_smaller_gallery() -> None:

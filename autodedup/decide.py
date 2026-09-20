@@ -89,17 +89,35 @@ def present_value(feats: Feats, name: str) -> float | None:
     return float(value) if present else None
 
 
-def disjoint_windows(la: Listing, lb: Listing, settings: Settings | None = None) -> bool:
-    """K-B's load-bearing clause: the two adverts were never live at the same time.
+def window_gap_days(la: Listing, lb: Listing, settings: Settings | None = None) -> float | None:
+    """The separation between the two live windows, in days — negative when they overlap.
 
-    Unknown is not disjoint — a missing window can never assert the absence of overlap. Which
-    end stamp counts is `features.window_end_stamp`'s question, not a second spelling here."""
+    None when either window is unknown, which is never disjointness: a missing window can
+    assert neither overlap nor its absence."""
     cfg = settings or Settings()
     starts = (parse_ts(la.first_seen_at), parse_ts(lb.first_seen_at))
     ends = (parse_ts(window_end_stamp(la, cfg)), parse_ts(window_end_stamp(lb, cfg)))
     if any(value is None for value in starts) or any(value is None for value in ends):
+        return None
+    later, earlier = max(starts[0], starts[1]), min(ends[0], ends[1])  # type: ignore[type-var]
+    return float(later - earlier)  # `parse_ts` is already epoch DAYS
+
+
+def disjoint_windows(la: Listing, lb: Listing, settings: Settings | None = None) -> bool:
+    """K-B's load-bearing clause: the two adverts were never live at the same time.
+
+    Unknown is not disjoint — a missing window can never assert the absence of overlap. Which
+    end stamp counts is `features.window_end_stamp`'s question, not a second spelling here.
+
+    E84: the separation has to clear `certificate_b_min_gap_days`, read on the PAIR. A window is
+    only as sharp as the sightings behind it, and under the honest clock a once-seen advert's
+    window is a point — so without a floor any two adverts one index walk saw for the first and
+    only time are disjoint by construction, whatever else they are."""
+    cfg = settings or Settings()
+    gap = window_gap_days(la, lb, cfg)
+    if gap is None:
         return False
-    return max(starts[0], starts[1]) > min(ends[0], ends[1])  # type: ignore[operator]
+    return gap > 0.0 and gap >= cfg.certificate_b_min_gap_days
 
 
 def certificate_a(feats: Feats) -> bool:
