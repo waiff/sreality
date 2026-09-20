@@ -120,3 +120,20 @@ def test_project_monthly_usd_scales_the_population_not_the_price() -> None:
     assert ensembles.project_monthly_usd(0.001, 296_550) == 296.55
     assert ensembles.project_monthly_usd(0.001, 296_550, 0.386) == 114.47
     assert ensembles.project_monthly_usd(None, 296_550) is None
+
+
+def test_escalation_is_counted_by_stages_run_not_by_arms_paid() -> None:
+    """An all-arm veto pays for every arm in stage 0, so `consulted` cannot tell a cascade
+    that escalated from one that stopped. Only the stage count can."""
+    rule = named(catalogue(["a", "b"]), "casc(a>b)|veto")
+    rows = {"a": ArmRow(SAME, 0.001, 1.0), "b": ArmRow(SAME, 0.005, 9.0)}
+    escalated = decide(rule, rows)
+    assert escalated.stages_run == 2 and escalated.consulted == ("a", "b")
+    stopped = decide(rule, {"a": ArmRow(DIFF, 0.001, 1.0), "b": ArmRow(SAME, 0.005, 9.0)})
+    assert stopped.stages_run == 1 and stopped.consulted == ("a", "b")
+    reference = {(1, 2): "same", (3, 4): "same"}
+    arms = {
+        "a": {(1, 2): ArmRow(SAME, 0.001, 1.0), (3, 4): ArmRow(DIFF, 0.001, 1.0)},
+        "b": {(1, 2): ArmRow(SAME, 0.005, 9.0), (3, 4): ArmRow(SAME, 0.005, 9.0)},
+    }
+    assert score(rule, arms, reference)["escalation_rate"] == 0.5

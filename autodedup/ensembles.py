@@ -68,6 +68,10 @@ class Decision:
     cost_usd: float
     latency_s: float
     priced: bool
+    # How many stages actually ran. Not derivable from `consulted`: an all-arm veto pays for
+    # every arm in stage 0, so a cascade under it consults the same four arms whether or not
+    # it escalated.
+    stages_run: int = 0
 
 
 def decide(rule: Rule, rows: Mapping[str, ArmRow]) -> Decision:
@@ -77,13 +81,14 @@ def decide(rule: Rule, rows: Mapping[str, ArmRow]) -> Decision:
     priced = True
     latency = 0.0
     merge = True
+    stages_run = 0
     for index, stage in enumerate(rule.stages):
         wanted = tuple(stage) + (rule.veto_arms if index == 0 else ())
         stage_latency = 0.0
         for arm in wanted:
             row = rows.get(arm)
             if row is None:
-                return Decision(False, False, tuple(consulted), 0.0, 0.0, False)
+                return Decision(False, False, tuple(consulted), 0.0, 0.0, False, stages_run)
             if arm in consulted:
                 continue
             consulted.append(arm)
@@ -95,13 +100,14 @@ def decide(rule: Rule, rows: Mapping[str, ArmRow]) -> Decision:
                 stage_latency = max(stage_latency, row.latency_s)
         # Arms within a stage are independent calls and run side by side; stages are serial.
         latency += stage_latency
+        stages_run += 1
         if any(rows[arm].verdict != MERGE for arm in stage):
             merge = False
             break
     if merge and rule.veto_arms:
         if any(rows[arm].verdict in VETO_VERDICTS for arm in rule.veto_arms):
             merge = False
-    return Decision(True, merge, tuple(consulted), cost, latency, priced)
+    return Decision(True, merge, tuple(consulted), cost, latency, priced, stages_run)
 
 
 def _with_veto(rule: Rule, arms: Sequence[str]) -> Rule:
@@ -205,7 +211,7 @@ def score(
             priced += 1
             costs.append(decision.cost_usd)
         latencies.append(decision.latency_s)
-        if len(decision.consulted) > len(rule.stages[0]) + len(rule.veto_arms):
+        if decision.stages_run > 1:
             escalated += 1
         block = blocks.get(key)
         if truth == NOT_SAME:
