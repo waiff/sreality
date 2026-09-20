@@ -541,7 +541,7 @@ def ensemble_report(
 
     tables = {
         name: {
-            key: ensembles.ArmRow(row.verdict, row.cost_usd, row.latency_s)
+            key: ensembles.ArmRow(row.verdict, row.cost_usd, row.latency_s, row.confidence)
             for key, row in rows.items()
         }
         for name, _path, rows in arms
@@ -719,6 +719,9 @@ def render_ensembles(section: dict[str, Any], limit: int = 20) -> list[str]:
     rows = sorted(
         section["rules"],
         key=lambda entry: (
+            # A rule that merges nothing has a perfect false-merge rate and is worthless;
+            # it sorts last rather than heading the table the operator reads first.
+            not entry["recall"]["k"],
             entry["false_merge"]["wilson_high"] if entry["false_merge"]["n"] else 1.0,
             -(entry["recall"]["rate"] or 0.0),
         ),

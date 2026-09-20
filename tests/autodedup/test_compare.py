@@ -770,3 +770,27 @@ def test_ensembles_markdown_orders_by_the_upper_bound_not_the_point_estimate() -
     # measured on 4, because the bound — not the point estimate — is the operator's number.
     assert body[2].startswith("| thick |")
     assert body[3].startswith("| thin |")
+
+
+def test_a_rule_that_merges_nothing_sorts_last_not_first() -> None:
+    """A floor no arm ever clears makes a rule that never merges, whose false-merge rate is a
+    perfect 0 over every negative. Ranked on the bound alone it would head the table."""
+    def entry(name: str, recalled: int, bound: float) -> dict[str, Any]:
+        return {
+            "rule": name,
+            "false_merge": {"k": 0, "n": 61, "rate": 0.0,
+                            "wilson_low": 0.0, "wilson_high": bound},
+            "recall": {"k": recalled, "n": 272,
+                       "rate": round(recalled / 272, 4) if recalled else 0.0,
+                       "wilson_low": 0.0, "wilson_high": 1.0},
+            "blocks": {"false_merge_blocks": 0, "negative_blocks": 14},
+            "cost": {"per_pair_usd": 0.001},
+            "projection": {"monthly_usd": 1.0, "monthly_usd_at_75pct_dial": 1.0},
+            "latency": {"p50_s": 1.0, "p95_s": 1.0},
+        }
+    section = {"n_rules": 2, "band_pairs_per_month": 1, "recall_dial_75pct": 0.386,
+               "rules": [entry("merges_nothing", 0, 0.0592),
+                         entry("finds_half", 136, 0.0872)]}
+    body = [line for line in compare.render_ensembles(section) if line.startswith("| ")]
+    assert body[2].startswith("| finds_half |")
+    assert body[3].startswith("| merges_nothing |")

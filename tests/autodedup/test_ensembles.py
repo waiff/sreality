@@ -18,7 +18,7 @@ ABSTAIN = ensembles.ABSTAIN
 
 
 def _rows(**kw: str) -> dict[str, ArmRow]:
-    return {name: ArmRow(verdict, 0.001, 2.0) for name, verdict in kw.items()}
+    return {name: ArmRow(verdict, 0.001, 2.0, 1.0) for name, verdict in kw.items()}
 
 
 def test_catalogue_covers_singles_unanimity_both_cascade_orders_and_vetoes() -> None:
@@ -29,9 +29,12 @@ def test_catalogue_covers_singles_unanimity_both_cascade_orders_and_vetoes() -> 
     # Both directions, because a proposing and b confirming is not the same rule as the reverse.
     assert "casc(a>b)" in names and "casc(b>a)" in names
     assert "unan(a+b)|veto" in names
-    # 3 singles + 3 pairs + 1 triple + 6 ordered cascades = 13, doubled by the veto.
-    assert len(rules) == 26
-    assert len(catalogue(["a", "b", "c"], veto=False)) == 13
+    # 3 singles + 3 pairs + 1 triple + 6 ordered cascades = 13 base rules, tripled by the two
+    # confidence floors and doubled again by the veto.
+    assert len(catalogue(["a", "b", "c"], veto=False, confidence=())) == 13
+    assert len(catalogue(["a", "b", "c"], veto=False)) == 39
+    assert len(rules) == 78
+    assert "a@0.95" in names and "unan(a+b)@0.99|veto" in names
 
 
 def test_unanimity_merges_only_when_every_arm_says_same() -> None:
@@ -137,3 +140,22 @@ def test_escalation_is_counted_by_stages_run_not_by_arms_paid() -> None:
         "b": {(1, 2): ArmRow(SAME, 0.005, 9.0), (3, 4): ArmRow(SAME, 0.005, 9.0)},
     }
     assert score(rule, arms, reference)["escalation_rate"] == 0.5
+
+
+def test_a_confidence_floor_turns_a_low_certainty_same_into_no_proposal() -> None:
+    rule = named(catalogue(["a", "b"]), "a@0.95")
+    assert rule.min_confidence == 0.95
+    assert decide(rule, {"a": ArmRow(SAME, 0.001, 1.0, 0.97)}).merge is True
+    assert decide(rule, {"a": ArmRow(SAME, 0.001, 1.0, 0.90)}).merge is False
+    # A verdict with no confidence attached has not met a condition about confidence.
+    assert decide(rule, {"a": ArmRow(SAME, 0.001, 1.0, None)}).merge is False
+    # The call was still made and still costs, whatever the floor did with its answer.
+    assert decide(rule, {"a": ArmRow(SAME, 0.001, 1.0, 0.10)}).cost_usd == 0.001
+
+
+def test_a_confidence_floor_stops_a_cascade_before_its_second_stage() -> None:
+    rule = named(catalogue(["a", "b"]), "casc(a>b)@0.99")
+    rows = {"a": ArmRow(SAME, 0.001, 1.0, 0.95), "b": ArmRow(SAME, 0.005, 9.0, 1.0)}
+    stopped = decide(rule, rows)
+    assert stopped.merge is False and stopped.stages_run == 1
+    assert stopped.cost_usd == pytest.approx(0.001)

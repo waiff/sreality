@@ -29,6 +29,10 @@ ABSTAIN: str = "insufficient_evidence"
 SAME_BUILDING: str = "same_building_different_unit"
 VETO_VERDICTS: frozenset[str] = frozenset({ABSTAIN, SAME_BUILDING})
 VETO_SUFFIX: str = "|veto"
+# The floors the catalogue gates on by default. 0.99 is not a rounding of 1.0 here: `gpt-5.6-luna`
+# reports 0.99 on half its correct merges and 0.93 on the median wrong one, so the whole
+# separation lives in the last two hundredths.
+CONFIDENCE_FLOORS: tuple[float, ...] = (0.95, 0.99)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +42,10 @@ class ArmRow:
     verdict: str
     cost_usd: float | None = None
     latency_s: float | None = None
+    # What the model said about its own certainty. A `same_property` below a rule's floor is
+    # read as "no merge proposed", never as a different verdict — the arm still said what it
+    # said, the rule just declines to act on it.
+    confidence: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +54,11 @@ class Rule:
     kind: str
     stages: tuple[tuple[str, ...], ...]
     veto_arms: tuple[str, ...] = ()
+    # Every proposing arm must ALSO clear this self-reported confidence. Free — the number is
+    # already in the stored verdict — and it is the one dial in this module that is CHOSEN on
+    # the same pairs it is scored on, so its interval is optimistic by construction and a
+    # gated rule needs a confirmation pass before anyone acts on it.
+    min_confidence: float | None = None
 
     @property
     def arms(self) -> tuple[str, ...]:
@@ -72,6 +85,18 @@ class Decision:
     # every arm in stage 0, so a cascade under it consults the same four arms whether or not
     # it escalated.
     stages_run: int = 0
+
+
+def proposes(row: ArmRow, floor: float | None) -> bool:
+    """Does this arm's answer count as a merge proposal under `floor`?
+
+    A verdict with no confidence attached never clears a floor: an arm that did not say how
+    sure it was has not met a condition about how sure it was."""
+    if row.verdict != MERGE:
+        return False
+    if floor is None:
+        return True
+    return row.confidence is not None and row.confidence >= floor
 
 
 def decide(rule: Rule, rows: Mapping[str, ArmRow]) -> Decision:
@@ -101,7 +126,7 @@ def decide(rule: Rule, rows: Mapping[str, ArmRow]) -> Decision:
         # Arms within a stage are independent calls and run side by side; stages are serial.
         latency += stage_latency
         stages_run += 1
-        if any(rows[arm].verdict != MERGE for arm in stage):
+        if any(not proposes(rows[arm], rule.min_confidence) for arm in stage):
             merge = False
             break
     if merge and rule.veto_arms:
@@ -116,10 +141,22 @@ def _with_veto(rule: Rule, arms: Sequence[str]) -> Rule:
         kind=rule.kind + "_veto",
         stages=rule.stages,
         veto_arms=tuple(arms),
+        min_confidence=rule.min_confidence,
     )
 
 
-def catalogue(arms: Sequence[str], veto: bool = True) -> list[Rule]:
+def _with_confidence(rule: Rule, floor: float) -> Rule:
+    return Rule(
+        name=f"{rule.name}@{floor:g}",
+        kind=rule.kind + "_conf",
+        stages=rule.stages,
+        veto_arms=rule.veto_arms,
+        min_confidence=floor,
+    )
+
+
+def catalogue(arms: Sequence[str], veto: bool = True,
+              confidence: Sequence[float] = CONFIDENCE_FLOORS) -> list[Rule]:
     """Every rule the stored verdicts can answer: each arm alone, unanimity of 2/3/…/n, every
     ordered two-stage cascade, and — when `veto` — each of those under the all-arm veto.
 
@@ -135,6 +172,9 @@ def catalogue(arms: Sequence[str], veto: bool = True) -> list[Rule]:
             rules.append(Rule(f"unan({'+'.join(combo)})", f"unanimity{size}", (combo,)))
     for first, second in permutations(names, 2):
         rules.append(Rule(f"casc({first}>{second})", "cascade2", ((first,), (second,))))
+    rules = rules + [
+        _with_confidence(rule, floor) for floor in confidence for rule in rules
+    ]
     if veto:
         rules = rules + [_with_veto(rule, names) for rule in rules]
     return rules
