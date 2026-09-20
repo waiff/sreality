@@ -261,11 +261,20 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
 
     # ---------------------------------------------------------------- fingerprint rows
     if sql == S.RT_FP_UPSERT_SQL:
-        db.rt_fp[(gen, int(p["listing_id"]))] = {
+        key = (gen, int(p["listing_id"]))
+        # `first_decided_at` is COALESCED server-side (migration 540): a refresh keeps the
+        # first stamp. The fake enforces that, because a lane that restamped it would hold a
+        # merge for ever and nothing else here could see it.
+        held = db.rt_fp.get(key) or {}
+        db.rt_fp[key] = {
             "category_main": p["category_main"], "category_type": p["category_type"],
             "area_m2": p["area_m2"], "disposition": p["disposition"], "floor": p["floor"],
             "fp_digest": p["fp_digest"], "cell_key": p["cell_key"],
             "cell_group": p["cell_group"], "is_active": p["is_active"],
+            "ev_images": p["ev_images"], "ev_phash": p["ev_phash"],
+            "ev_clip": p["ev_clip"], "ev_tags": p["ev_tags"],
+            "ev_complete": p["ev_complete"],
+            "first_decided_at": held.get("first_decided_at") or db.now,
         }
         return []
     if sql == S.RT_FP_DELETE_SQL:
@@ -278,9 +287,13 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
             row = db.rt_fp.get((gen, int(listing_id)))
             if row is None:
                 continue
+            stamp = row.get("first_decided_at")
             out.append((int(listing_id), row["category_main"], row["category_type"],
                         row["area_m2"], row["disposition"], row["floor"], row["fp_digest"],
-                        row["cell_key"], row["cell_group"], row["is_active"]))
+                        row["cell_key"], row["cell_group"], row["is_active"],
+                        row.get("ev_images"), row.get("ev_phash"), row.get("ev_clip"),
+                        row.get("ev_tags"),
+                        stamp.timestamp() if hasattr(stamp, "timestamp") else stamp))
         return out
     if sql == S.RT_KNOWN_SQL:
         return [(int(i),) for i in p["ids"] if (gen, int(i)) in db.rt_fp]
@@ -440,6 +453,52 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         wanted = set(p["ids"])
         return [tuple(row.get(name) for name in names) for row in db.clip_tags
                 if row.get("image_id") in wanted and row.get("model", p["model"]) == p["model"]]
+    if sql == S.RT_EVIDENCE_CANDIDATES_SQL:
+        horizon = timedelta(hours=int(p["horizon_hours"]))
+        out = []
+        for (g, listing_id), row in sorted(db.rt_fp.items()):
+            if g != gen or listing_id <= int(p["after_id"]):
+                continue
+            stamp = row.get("first_decided_at")
+            if not (row.get("ev_complete") is not True or stamp is None
+                    or stamp > db.now - horizon):
+                continue
+            out.append((int(listing_id), row.get("ev_images"), row.get("ev_phash"),
+                        row.get("ev_clip"), row.get("ev_tags")))
+        return out[:int(p["limit"])]
+    if sql == S.RT_EVIDENCE_PROBE_SQL:
+        wanted = set(int(i) for i in p["ids"])
+        counts: dict[int, list[int]] = {}
+        for row in db.image_rows:
+            listing_id = int(row.get("listing_id") or 0)
+            if listing_id not in wanted:
+                continue
+            bucket = counts.setdefault(listing_id, [0, 0, 0])
+            bucket[0] += 1
+            bucket[1] += int(row.get("phash") is not None)
+            bucket[2] += int(row.get("clip_tagged_at") is not None)
+        return [(listing_id, *counts[listing_id]) for listing_id in sorted(counts)]
+    if sql == S.RT_EVIDENCE_RELEASE_SQL:
+        horizon = timedelta(hours=int(p["horizon_hours"]))
+
+        def _pending(listing_id: int) -> bool:
+            row = db.rt_fp.get((gen, int(listing_id))) or {}
+            stamp = row.get("first_decided_at")
+            return bool(int(row.get("ev_images") or 0) > 0
+                        and int(row.get("ev_phash") or 0) == 0
+                        and stamp is not None and stamp > db.now - horizon)
+
+        out = []
+        for (g, lo, hi), row in sorted(db.pairs.items()):
+            if g != gen or row.get("decision") != p["reason"]:
+                continue
+            if _pending(lo) or _pending(hi):
+                continue
+            out.append((lo, hi))
+        return out[:int(p["limit"])]
+    if sql == S.RT_EVIDENCE_HELD_COUNT_SQL:
+        return [(sum(1 for (g, _lo, _hi), row in db.pairs.items()
+                     if g == gen and row.get("decision") == p["reason"]),)]
     if sql == S.RT_PHASH_POP_SQL:
         wanted = set(p["hashes"])
         return sorted((h, n) for h, n in db.phash_pop.items() if h in wanted)

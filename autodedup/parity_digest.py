@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 from dataclasses import dataclass, fields as dataclass_fields
 from typing import Any, Mapping, Sequence
@@ -114,9 +115,22 @@ def population_digest(images: Sequence[Image]) -> str:
     return _digest([[img.image_id, img.phash, img.pop] for img in images])
 
 
+def image_population_rows(images: Sequence[Image]) -> list[list[Any]]:
+    """The population PER IMAGE, keyed on the hash it was counted for (E94).
+
+    W9g's gate compared one digest per listing and skipped the whole listing's population
+    check as soon as ANY image's producer digest had moved. One re-hashed frame therefore
+    excused the other fourteen, and a population table decaying image by image ran green —
+    the W9f defect in slow motion. The excuse is per IMAGE now, which needs the baseline to
+    carry the pair it is excusing: 120 listings x ~15 images is ~54 KB of JSON in the one
+    settings row the seed already writes."""
+    return [[img.image_id, img.phash, img.pop] for img in images]
+
+
 def baseline_row(listing: Listing, images: Sequence[Image]) -> dict[str, Any]:
     return {"f": stored_digest(listing, images), "s": sighting_digest(listing),
-            "p": producer_digest(images), "c": population_digest(images), "n": len(images)}
+            "p": producer_digest(images), "c": population_digest(images), "n": len(images),
+            "im": image_population_rows(images)}
 
 
 def baseline(listings: Mapping[int, Listing],
@@ -175,6 +189,7 @@ def compare(
     genuine drift and is counted, never judged."""
     breaches: list[Breach] = []
     checked = producer_moved = drifted_skipped = absent = sighting_moved = 0
+    images_checked = images_excused = legacy_rows = 0
     for key, row in sorted(rows.items(), key=lambda kv: int(kv[0])):
         listing_id = int(key)
         listing = listings.get(listing_id)
@@ -195,11 +210,33 @@ def compare(
                                    f"(images {row.get('n')} -> {live['n']})"))
         if live["p"] != row.get("p"):
             producer_moved += 1
-            continue  # a moved hash or vector explains any population difference under it
-        if live["c"] != row.get("c"):
-            breaches.append(Breach(listing_id, "population",
-                                   f"{row.get('c')} != {live['c']} on {live['n']} images with "
-                                   "an unmoved producer digest"))
+        # The population, image by image (E94). A frame whose own hash moved is excused —
+        # the population of a hash the calibration never saw is honestly unknown — and every
+        # OTHER frame of that listing is still checked.
+        want = {int(entry[0]): (entry[1], entry[2]) for entry in (row.get("im") or ())}
+        if not want:
+            legacy_rows += 1
+            if live["c"] != row.get("c") and live["p"] == row.get("p"):
+                breaches.append(Breach(listing_id, "population",
+                                       f"{row.get('c')} != {live['c']} on {live['n']} images "
+                                       "with an unmoved producer digest"))
+            continue
+        moved: list[Any] = []
+        for image in gallery:
+            entry = want.get(int(image.image_id))
+            if entry is None:
+                continue  # an image the export never carried: no baseline to breach
+            if entry[0] != image.phash:
+                images_excused += 1
+                continue
+            images_checked += 1
+            if entry[1] != image.pop:
+                moved.append(image.image_id)
+        if moved:
+            breaches.append(Breach(
+                listing_id, "population",
+                f"{len(moved)} of {images_checked + images_excused} images changed population "
+                f"under an UNMOVED phash (first {moved[0]})"))
     return {
         "listings": len(rows),
         "checked": checked,
@@ -207,6 +244,9 @@ def compare(
         "absent": absent,
         "producer_moved": producer_moved,
         "sighting_moved": sighting_moved,
+        "population_images_checked": images_checked,
+        "population_images_excused": images_excused,
+        "legacy_baseline_rows": legacy_rows,
         "breaches": len(breaches),
         "breaches_by_kind": _by_kind(breaches),
         "breach_examples": [breach.to_json() for breach in breaches[:MAX_BREACH_EXAMPLES]],
@@ -218,6 +258,101 @@ def _by_kind(breaches: Sequence[Breach]) -> dict[str, int]:
     for breach in breaches:
         out[breach.kind] = out.get(breach.kind, 0) + 1
     return dict(sorted(out.items()))
+
+
+@dataclass(slots=True, frozen=True)
+class Floors:
+    """What the gate needs to have SEEN before a pass may read it as a pass (E94).
+
+    W9g's gate counted breaches and nothing else, so it passed vacuously in two ways that were
+    both demonstrated: give every baseline listing a newer snapshot and every stored fact can
+    then be broken with `checked` 0, `breaches` 0, `ok` true; delete every baseline listing and
+    `absent` 120 passes just as quietly. Drift is monotone in export age — 4 of 200 at three
+    days — so the gate self-weakened as the export aged, which is exactly backwards. Four
+    floors, all data, and below any of them the gate REFUSES instead of passing."""
+
+    tolerance: int = 0
+    # An absolute floor on what a pass must have compared. At the shipped 25-listing slice, 15
+    # means the gate refuses once 40% of the slice is drift or absence — against a measured 2%
+    # of drift at three days of export age, so this fires long before vacuity does.
+    min_checked: int = 15
+    # And a floor as a SHARE, because the absolute one alone is defeated from both ends: a
+    # baseline smaller than 15 could never meet it, and a 120-listing seed sample could meet
+    # it with 105 of its listings drifted or absent. Whichever floor is higher governs.
+    min_checked_share: float = 0.6
+    # The EXPORT's age, not the seed's: what is frozen is the cohort's statistics, and they go
+    # on ageing however recently the generation was cut from them.
+    max_age_days: float = 14.0
+    # The share of phash-bearing images whose hash the frozen population cannot measure.
+    # Measured 4.0% (115 of 2,847) at three days; a ceiling of 15% is roughly where that rate
+    # reaches the age rail, and it is a number to re-cut once a second export gives two points.
+    max_unknown_pop_share: float = 0.15
+
+    def required(self, offered: int) -> int:
+        """How many of the `offered` baseline listings this gate must have COMPARED.
+
+        Zero on both knobs switches the rail off — an operator settings row, never a dispatch
+        argument (W9e/R6) — and is how a fixture whose `public` holds no cohort at all admits
+        that it is not testing the gate. Everywhere else an EMPTY baseline needs at least one
+        comparison, which is the vacuity W9g's gate could not see."""
+        if self.min_checked <= 0 and self.min_checked_share <= 0:
+            return 0
+        by_share = math.ceil(self.min_checked_share * max(0, offered))
+        if offered < self.min_checked:
+            return max(1, by_share)
+        return max(self.min_checked, by_share)
+
+
+def verdict(report: Mapping[str, Any], *, generation: str, floors: Floors,
+            what: str) -> str | None:
+    """The gate's whole verdict: the breach count AND the four floors, in one sentence or None."""
+    breached = refusal(report, generation=generation, tolerance=floors.tolerance, what=what)
+    if breached:
+        return breached
+    checked = int(report.get("checked") or 0)
+    offered = int(report.get("listings") or 0)
+    required = floors.required(offered)
+    if checked < required:
+        return (
+            f"PARITY GATE: {what} — the gate checked {checked} of "
+            f"{offered} baseline listings in generation {generation!r}, below "
+            f"the floor of {required} (rt_parity_min_checked {floors.min_checked}): "
+            f"{report.get('drifted_skipped')} drifted since the export, "
+            f"{report.get('absent')} are absent live. A gate that checks nothing cannot pass "
+            "(E94) — re-seed the generation from a fresh export. Nothing was written and no "
+            "cursor moved.")
+    age = report.get("age_days")
+    if age is not None and float(age) > floors.max_age_days:
+        return (
+            f"PARITY GATE: {what} — generation {generation!r} was cut from an export "
+            f"{float(age):.1f} days old, over the {floors.max_age_days} day "
+            f"rt_calibration_max_age_days rail. A frozen population can only UNDERCOUNT, and "
+            "an undercount is the anti-conservative direction: a frame that spread since the "
+            "export is still read as rare, so E9 does not subtract it. Re-export and re-seed "
+            "(E95). Nothing was written and no cursor moved.")
+    share = report.get("unknown_pop_share")
+    if share is not None and float(share) > floors.max_unknown_pop_share:
+        return (
+            f"PARITY GATE: {what} — {float(share):.1%} of the phash-bearing images this pass "
+            f"read carry a hash generation {generation!r}'s frozen population has never "
+            f"measured, over the {floors.max_unknown_pop_share:.0%} ceiling "
+            "(rt_parity_max_unknown_pop_share). Those images cannot be subtracted as catalogue "
+            "photos and cannot certify K-C (E94/E96). Re-export and re-seed. Nothing was "
+            "written and no cursor moved.")
+    excused = int(report.get("population_images_excused") or 0)
+    legacy = int(report.get("legacy_baseline_rows") or 0)
+    # A sample of image-less listings is not a vacuous gate; a sample whose every image was
+    # excused, or whose baseline predates the per-image map, is.
+    if (checked and int(report.get("population_images_checked") or 0) <= 0
+            and (excused or legacy)):
+        return (
+            f"PARITY GATE: {what} — not one image of the {checked} checked listings in "
+            f"generation {generation!r} had its population compared "
+            f"({report.get('population_images_excused')} excused as re-hashed, "
+            f"{report.get('legacy_baseline_rows')} baseline rows carry no per-image map). "
+            "A producer move excuses ONE image, never a listing and never a sample (E94). "
+            "Re-seed the generation. Nothing was written and no cursor moved.")
+    return None
 
 
 def refusal(report: Mapping[str, Any], *, generation: str, tolerance: int,

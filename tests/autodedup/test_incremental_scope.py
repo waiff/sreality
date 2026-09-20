@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace as dc_replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from autodedup.incremental_lane import (
     BUDGET_SETTING,
     CURSOR_CHANGED,
     CURSOR_ENTER,
+    CURSOR_EVIDENCE,
     CURSOR_FLIPPED,
     CURSOR_NEW,
     CURSOR_SCOPE,
@@ -73,10 +74,15 @@ def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
 def _baseline(db: FakePg, generation: str = GEN) -> None:
     """The parity gate (E91) refuses a generation with no fact baseline. A fixture that
     hand-writes the calibration row hand-writes the baseline too — an empty one, because its
-    `public` holds no cohort listing to compare against. What the gate is FOR is proved in
-    `test_incremental_sqlstore.py` and `test_parity.py`."""
+    `public` holds no cohort listing to compare against, and with W9h's vacuity floors (E94)
+    an empty baseline now REFUSES unless the rail is switched off by name. These fixtures
+    switch it off and say so: they test the scope, the feeds and the seed's mechanics, and
+    what the gate is FOR is proved end to end in `test_rt_gate.py`, `test_shipped_w9h.py`
+    and `test_parity.py`."""
     db.settings[parity_baseline_key(generation)] = {
         "rows": {}, "exported_at": db.now.isoformat(), "n": 0}
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
 
 def _calibrated(db: FakePg, generation: str = GEN) -> FakePg:
     """A SEEDED generation. A pass over an unseeded one is a green skip (W9e/R1), so every
@@ -88,10 +94,19 @@ def _calibrated(db: FakePg, generation: str = GEN) -> FakePg:
     return db
 
 
+# A SETTLED store row: its photographs were counted when the generation decided it, long
+# enough ago that the evidence sweep (E92) has no business in it. A hand-written row that left
+# these NULL would be claimed by the sweep on every pass — unmeasured is not the same as
+# nothing to measure — which is what `test_shipped_w9h.py` proves it does.
+_SETTLED = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+
+
 def _fp_row(is_active: bool = True) -> dict:
     return {"category_main": None, "category_type": None, "area_m2": None,
             "disposition": None, "floor": None, "fp_digest": "d",
-            "cell_key": "o1", "cell_group": "byt", "is_active": is_active}
+            "cell_key": "o1", "cell_group": "byt", "is_active": is_active,
+            "ev_images": 0, "ev_phash": 0, "ev_clip": 0, "ev_tags": 0,
+            "ev_complete": True, "first_decided_at": _SETTLED}
 
 
 # ------------------------------------------------------------------- the scope as data
@@ -303,7 +318,11 @@ def test_a_refused_pass_advances_no_cursor_even_across_an_empty_window() -> None
     work = SqlWork(db, SCOPE, GEN, max_retire_fraction=1.0)
     work.claim(50)
     work.commit([])  # E75: the pair budget refused this claim
-    assert db.cursors == {CURSOR_NEW: {"last_listing_id": 50}}, "the fixture's own row only"
+    # The evidence sweep's pointer is a ROUND-ROBIN position over a read-only probe, not a
+    # watermark over work: it handed nothing over, so nothing it could have skipped was
+    # skipped, and a short slice wraps it to 0. Every real watermark is where it was.
+    assert db.cursors == {CURSOR_NEW: {"last_listing_id": 50},
+                          CURSOR_EVIDENCE: {"last_listing_id": 0}}
 
 
 # --------------------------------------------------------------- leaving the scope

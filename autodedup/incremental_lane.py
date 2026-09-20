@@ -65,9 +65,13 @@ from autodedup.harness import (
 )
 from autodedup.hazard_context import ContextStamp, address_block_key, category_group
 from autodedup.incremental import (
+    EVIDENCE_HOLD_REASON,
     GENERATION,
     Calibration,
     CellRow,
+    Evidence,
+    EvidenceHold,
+    evidence_of,
     FpRow,
     GuardRow,
     Keyer,
@@ -102,6 +106,10 @@ from autodedup.incremental_sql import (
     RT_CURSOR_SET_SQL,
     RT_CURSOR_WRITE_SQL,
     RT_FLIPPED_LISTINGS_SQL,
+    RT_EVIDENCE_CANDIDATES_SQL,
+    RT_EVIDENCE_HELD_COUNT_SQL,
+    RT_EVIDENCE_PROBE_SQL,
+    RT_EVIDENCE_RELEASE_SQL,
     RT_FP_COUNT_SQL,
     RT_FP_DELETE_SQL,
     RT_FP_READ_SQL,
@@ -162,10 +170,11 @@ from autodedup.score_lane import (
     storable,
 )
 from autodedup.model import LogisticModel
+from autodedup.parity_digest import Floors as ParityFloors
 from autodedup.parity_digest import baseline as parity_baseline
 from autodedup.parity_digest import compare as parity_compare
-from autodedup.parity_digest import refusal as parity_refusal
 from autodedup.parity_digest import stratified_sample
+from autodedup.parity_digest import verdict as parity_verdict
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.settings import Settings
 
@@ -179,6 +188,7 @@ CURSOR_FLIPPED: str = "rt_flipped"
 CURSOR_REVIVE: str = "rt_revive"
 CURSOR_SCOPE: str = "rt_scope_drift"
 CURSOR_ENTER: str = "rt_scope_enter"
+CURSOR_EVIDENCE: str = "rt_evidence"
 ENV_FLAG: str = "AUTODEDUP_REALTIME_ENABLED"
 DB_FLAG: str = "realtime_enabled"
 SCOPE_SETTING: str = "rt_scope"
@@ -186,6 +196,9 @@ BUDGET_SETTING: str = "rt_max_schema_mb"
 RETIRE_SETTING: str = "rt_max_retire_fraction"
 SCAN_CAP_SETTING: str = "rt_enter_max_scans_per_day"
 INTERVAL_SETTING: str = "rt_enter_interval_hours"
+EVIDENCE_HORIZON_SETTING: str = "rt_evidence_horizon_hours"
+EVIDENCE_SLICE_SETTING: str = "rt_evidence_slice"
+CALIBRATION_AGE_SETTING: str = "rt_calibration_max_age_days"
 RESCOPE_ARG: str = "rt_rescope"
 STORAGE_WATERMARK: str = "rt_storage_last"
 # The generation whose scope row may still be the LEGACY global one (W9e/R4). `rt_scope` was
@@ -218,6 +231,24 @@ DRIFT_SLICE: int = 20000
 # applied after the bitmap heap scan, which is precisely why a smaller `enter_slice` was never
 # the answer to what that scan costs.
 ENTER_SLICE: int = 20000
+# --- the evidence sweep (E92) ---------------------------------------------------------------
+#
+# One round-robin slice of the SEVENTH feed, over this generation's own `rt_fp` rows. The
+# candidate arm reads `autodedup` only; what it costs `public` is the probe below it, and the
+# probe is the only read of `public.images` this lane makes outside a fact fetch. Measured on
+# the trial scope with `EXPLAIN (ANALYZE, BUFFERS)`: 200 listings = 3,085 images = 2,375
+# buffers (920 heap blocks, 261 of them read cold), 12 buffers a listing. At the shipped slice
+# and the `*/10` cadence that is 400 x 144 = 57,600 listing probes a day IF the candidate set
+# were that large; it is not — the trial scope carries 76 rows of incomplete evidence in
+# steady state plus ~74 inside the 48 h horizon, so a pass probes ~150 listings (~1,800
+# buffers, 14 MB) and the day costs ~259,000 buffers, 2.0 GB — the same order as the entrant
+# feed's 1.6 GB after W9e cut it 7.8x. `rt_evidence_slice = 0` turns the feed off.
+EVIDENCE_SLICE: int = 400
+# How long after its FIRST decision a listing's photographs are still expected. The producers
+# are hourly (dHash at :20, CLIP at :40) and measured p90 4.51 h to a first tag, so 48 h is
+# ~10x the observed tail rather than a guess at it — and it is the bound on how long a merge
+# may wait (E93) as much as on how long the sweep chases one. Data: `rt_evidence_horizon_hours`.
+EVIDENCE_HORIZON_HOURS: float = 48.0
 # How often a scope block's membership is re-walked on `public`, by grain and in HOURS. A town
 # block is an index-served bitmap scan of its own obec (Jablonec: 2,745 buffers = 21 MB, 61 ms);
 # a QUARTER has no index of its own at all and costs 29,568 buffers = 231 MB, 6.4 s, cold every
@@ -257,6 +288,15 @@ PARITY_SAMPLE_SETTING: str = "rt_parity_sample"
 PARITY_BASELINE_N: int = 120
 PARITY_PASS_SAMPLE: int = 25
 PARITY_TOLERANCE: int = 0
+# The four FLOORS a pass must clear before a green gate means anything (E94). All data:
+# `rt_parity_min_checked`, `rt_calibration_max_age_days`, `rt_parity_max_unknown_pop_share`.
+PARITY_MIN_CHECKED_SETTING: str = "rt_parity_min_checked"
+PARITY_MIN_SHARE_SETTING: str = "rt_parity_min_checked_share"
+PARITY_UNKNOWN_POP_SETTING: str = "rt_parity_max_unknown_pop_share"
+PARITY_MIN_CHECKED: int = 15
+PARITY_MIN_CHECKED_SHARE: float = 0.6
+CALIBRATION_MAX_AGE_DAYS: float = 14.0
+PARITY_MAX_UNKNOWN_POP_SHARE: float = 0.15
 # How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
 # 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
 POP_CHUNK: int = 5_000
@@ -387,6 +427,11 @@ class SqlStore:
                 "cell_key": pending[listing_id][0].cell_key,
                 "cell_group": pending[listing_id][0].cell_group,
                 "is_active": pending[listing_id][0].is_active,
+                "ev_images": pending[listing_id][0].evidence.n_images,
+                "ev_phash": pending[listing_id][0].evidence.n_phash,
+                "ev_clip": pending[listing_id][0].evidence.n_clip,
+                "ev_tags": pending[listing_id][0].evidence.n_tags,
+                "ev_complete": pending[listing_id][0].evidence.complete,
             }
             for listing_id in ids
         ])
@@ -446,6 +491,9 @@ class SqlStore:
                          float(row[3]) if row[3] is not None else None, row[4],
                          int(row[5]) if row[5] is not None else None),
                 str(row[6] or ""), str(row[7] or ""), str(row[8] or ""), bool(row[9]),
+                Evidence(int(row[10] or 0), int(row[11] or 0), int(row[12] or 0),
+                         int(row[13] or 0)),
+                float(row[14]) if row[14] is not None else None,
             ) for row in self._query(RT_FP_READ_SQL,
                                      {"generation": self.generation, "ids": missing})}
             for listing_id in missing:
@@ -882,7 +930,9 @@ class SqlWork:
                  parents: Mapping[int, int] | None = None,
                  max_retire_fraction: float = MAX_RETIRE_FRACTION,
                  enter_interval_hours: Mapping[str, float] | None = None,
-                 max_enter_scans_per_day: int = MAX_ENTER_SCANS_PER_DAY) -> None:
+                 max_enter_scans_per_day: int = MAX_ENTER_SCANS_PER_DAY,
+                 evidence_slice: int = EVIDENCE_SLICE,
+                 evidence_horizon_hours: float = EVIDENCE_HORIZON_HOURS) -> None:
         self.conn = conn
         self.scope = scope
         self.generation = generation
@@ -895,6 +945,8 @@ class SqlWork:
         self.max_retire_fraction = float(max_retire_fraction)
         self.enter_interval_hours = dict(enter_interval_hours or ENTER_INTERVAL_HOURS)
         self.max_enter_scans_per_day = int(max_enter_scans_per_day)
+        self.evidence_slice = int(evidence_slice)
+        self.evidence_horizon_hours = float(evidence_horizon_hours)
         self.parents = dict(parents or {})
         self.enter_blocks = _enter_blocks(scope, self.parents)
         self.statements = 0
@@ -902,6 +954,8 @@ class SqlWork:
         # What this pass spent on `public` for the entrant feed, for the run summary: a block
         # refresh, a refusal against the daily cap, or nothing at all.
         self.enter_scan: dict[str, Any] = {}
+        # What the evidence sweep (E92) cost and found this pass, for the run summary.
+        self.evidence: dict[str, Any] = {}
         self._pending: dict[str, Any] = {}
         self._claimed: dict[str, set[int]] = {}
         self._retire: tuple[int, int] | None = None
@@ -912,7 +966,7 @@ class SqlWork:
 
     def cursors(self) -> dict[str, tuple[int, int, Any]]:
         names = [CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE, CURSOR_SCOPE,
-                 CURSOR_ENTER]
+                 CURSOR_ENTER, CURSOR_EVIDENCE]
         out = {name: (0, 0, _EPOCH) for name in names}
         for row in self._query(RT_CURSOR_READ_SQL, {"names": names}):
             out[str(row[0])] = (int(row[1] or 0), int(row[2] or 0), row[3] or _EPOCH)
@@ -1018,9 +1072,81 @@ class SqlWork:
                 (int(rows[-1][0]), pointer) if len(rows) >= share else (0, pointer))
             for row in rows:
                 items.append(WorkItem(int(row[0]), "entered", _epoch(row[1]), None))
+
+        # The SEVENTH feed (E92): the listings whose PHOTOGRAPHS moved since this generation
+        # decided them, and the merges whose hold has run out of horizon. Neither is visible
+        # to any of the six above — a phash or a CLIP vector arriving appends no snapshot,
+        # flips no flag and moves no location — which is why ~80% of arrivals were decided
+        # once, blind, and never again.
+        if self.evidence_slice:
+            # A listing the drift sweep is RETIRING this pass is not re-decided: the scope no
+            # longer holds it, so there is nothing to re-decide it into.
+            retiring = {item.listing_id for item in items if item.retire}
+            items.extend(self._evidence_feed(cursors[CURSOR_EVIDENCE][0], share, retiring))
         for item in items:
             self._claimed.setdefault(item.feed, set()).add(item.listing_id)
         return items
+
+    def _evidence_feed(self, after_id: int, share: int,
+                       retiring: set[int] | None = None) -> list[WorkItem]:
+        """Round-robin this generation's incomplete or young rows, probe `public.images` for
+        what their photographs ARE now, and hand over the ones that disagree with what the
+        stored decision rested on (E92) — plus the endpoints of every merge whose hold the
+        horizon has ended (E93).
+
+        The candidate arm reads `autodedup.rt_fp` only. The probe is the one read of
+        `public.images` outside a fact fetch, it is served by `images_listing_id_idx`, and it
+        reads NO other table: `images.clip_tagged_at` is the CLIP job's own stamp, and on the
+        trial scope's 73,208 images it agrees with `image_clip_embeddings` and
+        `image_clip_tags` on every row (72,171 each, 0 disagreements), at a fourteenth of the
+        buffers the two joins cost."""
+        horizon = {"horizon_hours": int(round(self.evidence_horizon_hours))}
+        rows = self._query(RT_EVIDENCE_CANDIDATES_SQL, {
+            "generation": self.generation, "after_id": int(after_id),
+            "limit": self.evidence_slice, **horizon})
+        recorded = {int(row[0]): (row[1], row[2], row[3], row[4]) for row in rows}
+        probed: dict[int, tuple[int, int, int]] = {}
+        if recorded:
+            probed = {int(row[0]): (int(row[1]), int(row[2]), int(row[3]))
+                      for row in self._query(RT_EVIDENCE_PROBE_SQL,
+                                             {"ids": sorted(recorded)})}
+        moved: list[int] = []
+        for listing_id, (images, phash, clip, tags) in sorted(recorded.items()):
+            live = probed.get(listing_id, (0, 0, 0))
+            # A NULL count is a row written before migration 540 — unmeasured, not zero, so
+            # it is re-decided once and then carries real counts.
+            if images is None or phash is None:
+                moved.append(listing_id)
+                continue
+            if (live[0] != int(images) or live[1] != int(phash)
+                    or live[2] != int(clip or 0) or live[2] != int(tags or 0)):
+                moved.append(listing_id)
+        released: list[int] = []
+        for row in self._query(RT_EVIDENCE_RELEASE_SQL, {
+                "generation": self.generation, "reason": EVIDENCE_HOLD_REASON,
+                "limit": max(1, share), **horizon}):
+            released.extend((int(row[0]), int(row[1])))
+        held_total = int(self._query(RT_EVIDENCE_HELD_COUNT_SQL, {
+            "generation": self.generation, "reason": EVIDENCE_HOLD_REASON})[0][0] or 0)
+        # A short slice is the end of the sweep, so the cursor wraps — the same round-robin
+        # the drift sweep uses, and the reason a candidate cut by `share` is re-offered.
+        self._pending[CURSOR_EVIDENCE] = (
+            0 if len(rows) < self.evidence_slice else max(recorded, default=int(after_id)))
+        self.windows["evidence"] = len(rows)
+        self.evidence = {
+            "candidates": len(rows), "listings_probed": len(recorded),
+            "images_probed": sum(row[0] for row in probed.values()),
+            "moved": len(moved), "release_candidates": len(set(released)),
+            "held_pairs": held_total,
+            "horizon_hours": self.evidence_horizon_hours, "slice": self.evidence_slice,
+        }
+        gone = set(retiring or ())
+        wanted: list[int] = []
+        for listing_id in moved[:share] + sorted(set(released)):
+            if listing_id not in wanted and listing_id not in gone:
+                wanted.append(listing_id)
+        return [WorkItem(listing_id, "evidence", None, None, redecide=True)
+                for listing_id in wanted]
 
     def _refresh_scope_ids(self, pointer: int) -> int:
         """Re-walk ONE scope block on `public`, but only when its cadence says so (W9e/R3).
@@ -1148,7 +1274,8 @@ class SqlWork:
         decided = {item.listing_id for item in done}
         for feed, name in (("new", CURSOR_NEW), ("changed", CURSOR_CHANGED),
                            ("flipped", CURSOR_FLIPPED), ("revived", CURSOR_REVIVE),
-                           ("drifted", CURSOR_SCOPE), ("entered", CURSOR_ENTER)):
+                           ("drifted", CURSOR_SCOPE), ("entered", CURSOR_ENTER),
+                           ("evidence", CURSOR_EVIDENCE)):
             if not claimed.get(feed, set()) <= decided:
                 pending.pop(name, None)
         if CURSOR_NEW in pending:
@@ -1172,7 +1299,7 @@ class SqlWork:
                 "name": CURSOR_FLIPPED, "last_listing_id": int(listing_id),
                 "last_snapshot_id": None, "watermark": stamp})
             out[CURSOR_FLIPPED] = [str(stamp), int(listing_id)]
-        for name in (CURSOR_REVIVE, CURSOR_SCOPE):
+        for name in (CURSOR_REVIVE, CURSOR_SCOPE, CURSOR_EVIDENCE):
             if name in pending:
                 self.statements += 1
                 _exec(self.conn, RT_CURSOR_SET_SQL, {
@@ -1468,7 +1595,7 @@ class _Refused(Exception):
 
 
 def seed_parity(conn: Any, dataset: Any, in_scope: Sequence[int], generation: str,
-                n: int) -> dict[str, Any]:
+                n: int, floors: ParityFloors) -> dict[str, Any]:
     """The seed's own gate, and the baseline every later pass re-checks against.
 
     Here the whole artifact is in hand, so the comparison is the real one: a stratified sample
@@ -1486,17 +1613,20 @@ def seed_parity(conn: Any, dataset: Any, in_scope: Sequence[int], generation: st
     drifted = drifted_since(conn, sample, dataset.meta.exported_at)
     report = parity_compare(rows, {i: value[0] for i, value in live.items()},
                             {i: value[1] for i, value in live.items()}, drifted)
-    refused = parity_refusal(report, generation=generation, tolerance=PARITY_TOLERANCE,
-                             what="rt_seed")
-    if refused:
-        raise SystemExit(refused)
     report.update({
-        "ok": True, "sampled": len(sample), "tolerance": PARITY_TOLERANCE,
+        "sampled": len(sample), "tolerance": floors.tolerance,
         "phash_pop_rows": phash_pop_rows(conn),
         "images_with_phash": reader.images_with_phash,
         "images_unmeasured": reader.images_unmeasured,
+        "unknown_pop_share": _unknown_share(reader),
+        "age_days": age_days(dataset.meta.exported_at),
+        "floors": floors_json(floors),
         "statements": reader.statements + 1,
     })
+    refused = parity_verdict(report, generation=generation, floors=floors, what="rt_seed")
+    if refused:
+        raise SystemExit(refused)
+    report["ok"] = True
     return {
         "report": report,
         "baseline": {
@@ -1505,14 +1635,54 @@ def seed_parity(conn: Any, dataset: Any, in_scope: Sequence[int], generation: st
             "exported_at": dataset.meta.exported_at,
             "cut_at": datetime.now(timezone.utc).isoformat(),
             "phash_pop_rows": report["phash_pop_rows"],
-            "tolerance": PARITY_TOLERANCE,
+            "tolerance": floors.tolerance,
             "n": len(rows),
         },
     }
 
 
+def _unknown_share(reader: "SqlFacts") -> float | None:
+    """The share of phash-bearing images whose hash the frozen population cannot measure."""
+    if not reader.images_with_phash:
+        return None
+    return round(reader.images_unmeasured / float(reader.images_with_phash), 6)
+
+
+def age_days(stamp: Any) -> float | None:
+    parsed = _stamp(stamp)
+    if parsed is None:
+        return None
+    return round((datetime.now(timezone.utc) - parsed).total_seconds() / 86400.0, 3)
+
+
+def floors_json(floors: ParityFloors) -> dict[str, Any]:
+    return {"tolerance": floors.tolerance, "min_checked": floors.min_checked,
+            "min_checked_share": floors.min_checked_share,
+            "max_age_days": floors.max_age_days,
+            "max_unknown_pop_share": floors.max_unknown_pop_share}
+
+
+def resolve_floors(args: Mapping[str, str], control: Mapping[str, Any],
+                   rescope: bool = False) -> ParityFloors:
+    """The four floors as SETTINGS rows (E94/E95). Like every other rail on this lane, a
+    dispatch argument may only move one beside `rt_rescope=true` — a rail one `-f args=` can
+    turn into a formality is not a rail (W9e/R6)."""
+    return ParityFloors(
+        tolerance=PARITY_TOLERANCE,
+        min_checked=int(control_number(PARITY_MIN_CHECKED_SETTING, args, control,
+                                       float(PARITY_MIN_CHECKED), rescope)),
+        min_checked_share=control_number(PARITY_MIN_SHARE_SETTING, args, control,
+                                         PARITY_MIN_CHECKED_SHARE, rescope),
+        max_age_days=control_number(CALIBRATION_AGE_SETTING, args, control,
+                                    CALIBRATION_MAX_AGE_DAYS, rescope),
+        max_unknown_pop_share=control_number(PARITY_UNKNOWN_POP_SETTING, args, control,
+                                             PARITY_MAX_UNKNOWN_POP_SHARE, rescope),
+    )
+
+
 def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
-                args: Mapping[str, str]) -> dict[str, Any]:
+                args: Mapping[str, str], floors: ParityFloors,
+                built_at: Any = None) -> dict[str, Any]:
     """The permanent rail: no pass runs on facts that are not the export's (E91).
 
     A generation with no baseline is refused rather than waved through — the baseline is cut by
@@ -1539,6 +1709,8 @@ def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
         raise SystemExit(f"{PARITY_SAMPLE_SETTING}: {exc}") from exc
     report = check_parity(conn, generation, payload,
                           max(PARITY_PASS_SAMPLE, int(asked)))
+    report["floors"] = floors_json(floors)
+    report["calibration_built_age_days"] = age_days(built_at)
     # The W9f defect itself FIRST, because it is the specific diagnosis of what the sample is
     # about to report generically: a frozen population that HAD rows when the generation was
     # seeded and has none now is the table emptied under a running lane.
@@ -1549,7 +1721,16 @@ def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
             f"seeded with {at_seed} hashes in it (E91). Every image would read an unknown "
             "population, every catalog_ratio would go absent and no K-C certificate could "
             "fire. Nothing was written and no cursor moved — re-seed the generation.")
-    refused = parity_refusal(report, generation=generation, tolerance=PARITY_TOLERANCE,
+    # The EXPORT's age has to be knowable for the age rail to mean anything (E95). A baseline
+    # that cannot say when its cohort was cut is a baseline the rail cannot read, so it is
+    # refused rather than waved through on a missing field.
+    if report.get("age_days") is None:
+        raise SystemExit(
+            f"PARITY GATE: generation {generation!r}'s baseline carries no `exported_at`, so "
+            "the calibration-age rail cannot be evaluated and a frozen population of unknown "
+            "age would be read as fresh (E95). Re-seed the generation. Nothing was written "
+            "and no cursor moved.")
+    refused = parity_verdict(report, generation=generation, floors=floors,
                              what="the scheduled pass")
     if refused:
         raise SystemExit(refused)
@@ -1731,6 +1912,13 @@ def check_parity(conn: Any, generation: str, payload: Mapping[str, Any], k: int,
     report["tolerance"] = PARITY_TOLERANCE
     report["phash_pop_rows"] = phash_pop_rows(conn)
     report["phash_pop_rows_at_seed"] = payload.get("phash_pop_rows")
+    # The two staleness readouts every pass owes (E95): how old the EXPORT the calibration was
+    # cut from is, and how much of what this gate just read the frozen population could not
+    # measure. Reported whether or not they refuse, so the drift is watchable before it bites.
+    report["age_days"] = age_days(payload.get("exported_at"))
+    report["images_with_phash"] = reader.images_with_phash
+    report["images_unmeasured"] = reader.images_unmeasured
+    report["unknown_pop_share"] = _unknown_share(reader)
     report["statements"] = reader.statements + 2
     return report
 
@@ -1774,7 +1962,10 @@ def run_incremental(
         scope_key = scope_setting_key(generation)
         control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
                                        RETIRE_SETTING, SCAN_CAP_SETTING, INTERVAL_SETTING,
-                                       PARITY_SAMPLE_SETTING,
+                                       PARITY_SAMPLE_SETTING, PARITY_MIN_CHECKED_SETTING,
+                                       PARITY_MIN_SHARE_SETTING,
+                                       PARITY_UNKNOWN_POP_SETTING, CALIBRATION_AGE_SETTING,
+                                       EVIDENCE_HORIZON_SETTING, EVIDENCE_SLICE_SETTING,
                                        parity_baseline_key(generation)])
         try:
             # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
@@ -1793,6 +1984,11 @@ def run_incremental(
             max_enter_scans = control_number(SCAN_CAP_SETTING, args, control,
                                              float(MAX_ENTER_SCANS_PER_DAY), rescope)
             intervals = enter_intervals(args, control, rescope)
+            evidence_horizon = control_number(EVIDENCE_HORIZON_SETTING, args, control,
+                                              EVIDENCE_HORIZON_HOURS, rescope)
+            evidence_slice = control_number(EVIDENCE_SLICE_SETTING, args, control,
+                                            float(EVIDENCE_SLICE), rescope)
+            floors = resolve_floors(args, control, rescope)
         except ScopeError as exc:
             raise SystemExit(str(exc)) from exc
         try:
@@ -1816,7 +2012,7 @@ def run_incremental(
         # THE GATE (E91). Before the lease's transaction, before a single write: a slice of the
         # seeded baseline re-read through the same `SqlFacts` the pass is about to score with.
         # A breach stops the pass — non-zero, nothing written, no cursor moved.
-        parity = parity_gate(conn, generation, control, args)
+        parity = parity_gate(conn, generation, control, args, floors, rows[0][7])
         store = SqlStore(conn, generation, store_floor=settings.store_floor,
                          model_version=model.version,
                          calibration_digest=calibration.digest())
@@ -1830,7 +2026,9 @@ def run_incremental(
                        enter_slice=int(args.get("enter_slice") or ENTER_SLICE),
                        parents=parents, max_retire_fraction=max_retire_fraction,
                        enter_interval_hours=intervals,
-                       max_enter_scans_per_day=int(max_enter_scans))
+                       max_enter_scans_per_day=int(max_enter_scans),
+                       evidence_slice=int(evidence_slice),
+                       evidence_horizon_hours=evidence_horizon)
         result = None
         try:
             with _transaction(conn):
@@ -1850,9 +2048,15 @@ def run_incremental(
                     _exec(conn, RT_CURSOR_WRITE_SQL, {
                         "name": CURSOR_ENTER, "last_listing_id": 0,
                         "last_snapshot_id": 0, "watermark": None})
+                # E93's clock. The hold exists only where there IS one: the batch engine
+                # has none, so the replay's default is no hold and the equivalence proof is
+                # untouched by it.
+                pass_now = time.time()
                 result = run_pass_bounded(store, facts, work, settings, model, calibration,
                                           limits=limits, generation=generation,
-                                          now=time.time())
+                                          now=pass_now,
+                                          hold=EvidenceHold(pass_now,
+                                                            evidence_horizon * 3600.0))
                 if result.aborted:
                     # Nothing this pass wrote survives a refusal, and no cursor moved.
                     raise _Refused()
@@ -1877,6 +2081,12 @@ def run_incremental(
             "images_with_phash": facts.images_with_phash,
             "images_unmeasured": facts.images_unmeasured,
             "hashes_unmeasured": len(facts.hashes_unmeasured),
+            # COVERAGE, the number the age rail is a proxy for: the share of the photographs
+            # this pass actually scored that the frozen population could measure (E95).
+            "coverage": (None if not facts.images_with_phash else round(
+                1.0 - facts.images_unmeasured / float(facts.images_with_phash), 6)),
+            "gate_unknown_share": parity.get("unknown_pop_share"),
+            "max_unknown_share": floors.max_unknown_pop_share,
         }
         summary["calibration_n_listings"] = int(rows[0][2] or 0)
         summary["store_rows"] = int(
@@ -1890,6 +2100,22 @@ def run_incremental(
         summary["enter_scan"] = dict(work.enter_scan)
         summary["enter_interval_hours"] = dict(intervals)
         summary["max_enter_scans_per_day"] = int(max_enter_scans)
+        # The seventh feed and the hold it serves (E92/E93): what the sweep probed on
+        # `public.images`, what it found moved, and how many merges are waiting.
+        summary["evidence"] = {
+            **dict(work.evidence),
+            "held_this_pass": result.held if result is not None else 0,
+            "released_this_pass": result.released if result is not None else 0,
+            "redecided": result.redecided if result is not None else 0,
+        }
+        # The staleness readout E95 owes every pass, refused above and REPORTED here.
+        summary["calibration"] = {
+            "digest": calibration.digest(),
+            "built_at": _iso(rows[0][7]),
+            "built_age_days": age_days(rows[0][7]),
+            "export_age_days": parity.get("age_days"),
+            "max_age_days": floors.max_age_days,
+        }
         summary["retention"] = {"store_floor": settings.store_floor,
                                 "pairs_retained": store.pairs_retained,
                                 "pairs_evicted": store.pairs_evicted}
@@ -1973,7 +2199,13 @@ def run_rt_seed(
                 "calibration every stored decision of this generation was taken under. Pass "
                 "reseed=true to mean it, or seed a new generation.")
         scope_key = scope_setting_key(generation)
-        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING])
+        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
+                                       PARITY_MIN_CHECKED_SETTING, PARITY_MIN_SHARE_SETTING,
+                                       CALIBRATION_AGE_SETTING, PARITY_UNKNOWN_POP_SETTING])
+        # The same four floors the scheduled pass is held to (E94/E95). A seed cut from an
+        # export already past the age rail would be refused by the first pass anyway; it is
+        # refused HERE, where the recipe that fixes it is one re-export away.
+        floors = resolve_floors({}, control)
         try:
             scope = resolve_scope(args.get(SCOPE_SETTING),
                                   read_scope_setting(control, generation))
@@ -2010,7 +2242,7 @@ def run_rt_seed(
             # reads galleries through `SqlFacts`, which joins this table, so it has to be
             # written before anything looks at an image.
             population = write_population(conn, ds)
-            parity = seed_parity(conn, ds, in_scope, generation, parity_n)
+            parity = seed_parity(conn, ds, in_scope, generation, parity_n, floors)
             _exec(conn, RT_CALIBRATION_WRITE_SQL, {
                 "generation": generation, "digest": calibration.digest(),
                 "n_listings": calibration.n_listings,
@@ -2058,7 +2290,11 @@ def run_rt_seed(
                                        fp.area_m2, fp.disposition, fp.floor),
                               fp_digest(fp, ds.images(listing_id)),
                               address_block_key(listing), category_group(listing),
-                              bool(listing.is_active)),
+                              bool(listing.is_active),
+                              # What the COHORT's own decision rested on (E92). A backfilled
+                              # listing whose artifact gallery was already hashed is complete
+                              # and never enters the evidence sweep.
+                              evidence_of(ds.images(listing_id))),
                         keyer.index_keys(fp))
                     store.bump_cell(listing)
                     written += 1
@@ -2072,6 +2308,8 @@ def run_rt_seed(
             "model_version": model.version,
             "population": population,
             "parity": parity["report"],
+            "floors": floors_json(floors),
+            "evidence_horizon_hours": EVIDENCE_HORIZON_HOURS,
             "cursors": {CURSOR_NEW: int(seeded[0]), CURSOR_CHANGED: int(seeded[1]),
                         CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0, CURSOR_SCOPE: 0},
             "backfilled": written,

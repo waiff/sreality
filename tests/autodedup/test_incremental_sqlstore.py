@@ -571,6 +571,13 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     conn.admin_parents[490245] = 554782
     conn.listings[9_001] = {"first_seen_at": conn.now, "inactive_at": None, "is_active": True}
     conn.snapshots.append({"id": 4_242, "listing_id": 9_001, "scraped_at": conn.now})
+    # This fixture's `public` holds no cohort listing at all, so the vacuity floors W9h put
+    # on the gate (E94) would refuse the seed. They are switched off BY NAME here — an
+    # operator settings row, the only way any rail on this lane moves — because what is under
+    # test is the seed's mechanics; the gate itself is proved in `test_rt_gate.py` and
+    # `test_shipped_w9h.py`.
+    conn.settings["rt_parity_min_checked"] = 0
+    conn.settings["rt_parity_min_checked_share"] = 0
     # DARK: seeding is the step BEFORE the switch, so it never consults the variable (W9e/R1).
     monkeypatch.delenv(ENV_FLAG, raising=False)
 

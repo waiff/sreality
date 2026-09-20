@@ -12,7 +12,7 @@ R4 one scope row per generation · R5 the entrant settle lag · R6 control numbe
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -53,17 +53,31 @@ SCORER: dict[str, str] = {"settings": "default", "model": "prior"}
 def _baseline(db: Any, generation: str = "rt") -> None:
     """The parity gate (E91) refuses a generation with no fact baseline. A fixture that
     hand-writes the calibration row hand-writes the baseline too — an empty one, because its
-    `public` holds no cohort listing to compare against. What the gate is FOR is proved in
-    `test_incremental_sqlstore.py` and `test_parity.py`."""
+    `public` holds no cohort listing to compare against, and with W9h's vacuity floors (E94)
+    an empty baseline now REFUSES unless the rail is switched off by name. These fixtures
+    switch it off and say so: they test the scope, the feeds and the seed's mechanics, and
+    what the gate is FOR is proved end to end in `test_rt_gate.py`, `test_shipped_w9h.py`
+    and `test_parity.py`."""
     db.settings[parity_baseline_key(generation)] = {
         "rows": {}, "exported_at": db.now.isoformat(), "n": 0}
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
 
+
+
+# A SETTLED store row: its photographs were counted when the generation decided it, long
+# enough ago that the evidence sweep (E92) has no business in it. A hand-written row that left
+# these NULL would be claimed by the sweep on every pass — unmeasured is not the same as
+# nothing to measure — which is what `test_shipped_w9h.py` proves it does.
+_SETTLED = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _fp_row(is_active: bool = True) -> dict:
     return {"category_main": None, "category_type": None, "area_m2": None,
             "disposition": None, "floor": None, "fp_digest": "d",
-            "cell_key": "o1", "cell_group": "byt", "is_active": is_active}
+            "cell_key": "o1", "cell_group": "byt", "is_active": is_active,
+            "ev_images": 0, "ev_phash": 0, "ev_clip": 0, "ev_tags": 0,
+            "ev_complete": True, "first_decided_at": _SETTLED}
 
 
 def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
@@ -73,8 +87,15 @@ def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
 
 
 def _registry(db: FakePg) -> FakePg:
-    """`public.ruian_admin_units`: the quarter block's parent obec (W9d-3)."""
+    """`public.ruian_admin_units`: the quarter block's parent obec (W9d-3).
+
+    And the vacuity floors W9h put on the gate (E94), switched off by name: these fixtures'
+    `public` holds no cohort listing, so a gate that now refuses an unverifiable seed would
+    refuse every one of them. The gate is proved in `test_rt_gate.py` / `test_shipped_w9h.py`.
+    """
     db.admin_parents[490245] = 554782
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
     return db
 
 
