@@ -205,7 +205,10 @@ def test_the_w6_seal_is_recorded_as_spent_and_still_committed() -> None:
     assert reason and "1,476" in reason
     assert seals.committed(W6_SEAL), "a spent seal that lost its map is lost, not spent"
     assert W6_SEAL not in seals.LOST_SEALS, "spent and lost are different registers"
-    assert seals.spent(W9_SEAL) is None, "the fresh seal has not been spent"
+    # W9's own seal is spent too from W11 on — read twice, for the refused g7 refit (D25) and
+    # for W10's verification (D28 v) — and it keeps its file for exactly the same reason.
+    assert seals.spent(W9_SEAL) and "TWICE" in seals.spent(W9_SEAL)
+    assert seals.committed(W9_SEAL)
 
 
 def test_every_spent_seal_names_what_spent_it_and_where_the_choice_moved() -> None:

@@ -222,7 +222,11 @@ def certificate_r(feats: Feats) -> bool:
 
 
 def certificate_of(
-    feats: Feats, la: Listing, lb: Listing, settings: Settings | None = None
+    feats: Feats,
+    la: Listing,
+    lb: Listing,
+    settings: Settings | None = None,
+    kb_refused: bool = False,
 ) -> str | None:
     """The first certificate the pair earns, in K-A, K-B, K-C order.
 
@@ -233,12 +237,18 @@ def certificate_of(
     at 52.6% HT precision (n=98) on the gold holdout against K-B's 100% (n=94) and K-C's 97.6%
     (n=150), one RUIAN point plus disposition plus area certifying a BUILDING, which is the
     developer-unit false-merge shape itself. The code path stays so an evaluation can switch it
-    back on."""
+    back on.
+
+    `kb_refused` is E85's one entry point: the family pass runs AFTER every pair has been
+    decided (a family is a property of the pair set, not of a pair), and a pair whose family
+    refuses it is re-decided with K-B withdrawn — so it falls to K-C or to the model exactly as
+    an uncertified pair does. Nothing else about the pair changes: the guard removes evidence,
+    it never manufactures a contradiction."""
     if (settings is None or settings.certificate_kr_enabled) and certificate_r(feats):
         return "K-R"
     if settings is not None and settings.certificate_ka_enabled and certificate_a(feats):
         return "K-A"
-    if certificate_b(feats, la, lb, settings):
+    if not kb_refused and certificate_b(feats, la, lb, settings):
         return "K-B"
     if certificate_c(feats):
         return "K-C"
@@ -520,6 +530,7 @@ def decide_pair(
     model: LogisticModel,
     settings: Settings,
     context: ContextIndex | PairContext | None = None,
+    kb_refused: bool = False,
 ) -> Decision:
     """Guards, then auto-rejects, then certificates, then the calibrated score — in that order,
     and then E63 re-reads what landed in the band.
@@ -528,7 +539,7 @@ def decide_pair(
     evidence could not clear ships propose-only and lands in the band whatever it earned. E63
     is the one path back out of that band, and it can only ever read a pair the layers above it
     have already decided — it never reaches a veto, an auto-reject or a developer guard."""
-    decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings)
+    decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings, kb_refused)
     return apply_context_rule(decision, feats, la, lb, settings, context)
 
 
@@ -541,6 +552,7 @@ def _decide_layers(
     probes: Iterable[str],
     model: LogisticModel,
     settings: Settings,
+    kb_refused: bool = False,
 ) -> Decision:
     """The rule floor and the calibrated score — every zone E63 is then allowed to re-read."""
     lo, hi = (fa.listing_id, fb.listing_id) if fa.listing_id < fb.listing_id else (
@@ -568,7 +580,7 @@ def _decide_layers(
         return Decision(lo, hi, "reject", score, families, None, None, f"auto_reject:{rejected}")
 
     diverse = len(families) >= MIN_EVIDENCE_FAMILIES
-    certificate = certificate_of(feats, la, lb, settings)
+    certificate = certificate_of(feats, la, lb, settings, kb_refused)
     if certificate is not None:
         if stratum_t_hi(feats, certificate, settings) is None:
             return Decision(lo, hi, "band", score, families, certificate, None,

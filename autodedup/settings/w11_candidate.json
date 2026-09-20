@@ -1,0 +1,30 @@
+{
+ "bridge_apply": true,
+ "bridge_min_score": 0.999,
+ "certificate_b_min_gap_days": 0.0006944444444444445,
+ "certificate_kr_enabled": true,
+ "context_rule_enabled": true,
+ "family_guard_area_tol": 0.01,
+ "family_guard_area_window": 0.25,
+ "family_guard_concurrency_clause": true,
+ "family_guard_disposition_clause": true,
+ "family_guard_mode": "cell",
+ "family_guard_overlap_days": 0.0,
+ "family_guard_price_clause": true,
+ "family_guard_price_rise_max": 0.1,
+ "family_guard_price_tol": 0.01,
+ "family_guard_ref_code_clause": false,
+ "family_guard_unit_designator_clause": true,
+ "live_window_from_sighting": true,
+ "store_floor": 0.02,
+ "t_hi": 1.0,
+ "t_hi_by_stratum": {
+  "K-A|cross": null,
+  "K-A|same": null,
+  "K-C|same": null,
+  "model|cross": 0.9788,
+  "model|same": null
+ },
+ "t_lo": 0.1823495333100157,
+ "unit_designator_veto": true
+}

@@ -60,6 +60,15 @@ SPENT_SEALS: dict[str, str] = {
         "columns. Every g6 sealed number CONFIRMS a rule chosen on dev — none adjudicates. "
         "W9 sealed fb9df2ea… over the same cohort with seed 20260922 to make a choice again."
     ),
+    "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884": (
+        "W9's fresh seal (4456 listings, 663 groups), seed 20260922. SPENT because it was read "
+        "TWICE: once for the refused g7 refit (D25) and once for W10's verification, which is "
+        "what refuted the honest-clock + carrier candidate (D28 v). Every later number on it "
+        "confirms a choice made elsewhere. W11 sealed a fresh split over the same cohort, with "
+        "seed 20260923 and the honest arm's K-B FAMILIES unioned in — a family that straddles "
+        "the split puts one developer chain on both sides of a holdout that exists to judge a "
+        "family-grain guard."
+    ),
 }
 
 _HEX = set("0123456789abcdef")

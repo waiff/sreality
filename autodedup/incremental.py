@@ -827,6 +827,20 @@ def run_pass(
             "cannot see a frame's other carriers would decide it differently from the cohort "
             "pass, and E70's replay equivalence is what says the two agree"
         )
+    # E85 is decided over the whole K-B FAMILY, and a family is a property of the pair set this
+    # pass sees only a slice of. The batch side is built (`family.refusals`); the incremental
+    # side owes a stored family index plus E64's re-evaluation rail extended to K-B — a pair
+    # certified yesterday has to fall back to the BAND when tomorrow's arrival makes its family
+    # impure. Until that exists a pass would certify what the cohort pass refuses, which is
+    # exactly the divergence E70's replay equivalence is there to catch, so it fails loudly.
+    if settings.family_guard_mode != "off":
+        raise NotImplementedError(
+            "family_guard_mode (E85) has no incremental family index or re-evaluation rail "
+            "yet: a pass that sees one claim cannot read the whole K-B family, and a family "
+            "only ever grows — the rail owed is E64's, triggered by a family gaining a member "
+            "rather than by a block census growing, with K-B the one certificate E64's "
+            "certificate exemption must not cover"
+        )
     caps = limits or Limits()
     result = PassResult(generation=generation, calibration_digest=calibration.digest())
     clock = time.perf_counter()

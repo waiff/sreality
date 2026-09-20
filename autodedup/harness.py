@@ -40,6 +40,7 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
+from autodedup.family import refusals as family_guard_refusals
 from autodedup.hazard_context import ContextIndex
 from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.evaluate import (
@@ -357,6 +358,53 @@ def run_engine(
     stored = 0
 
     clock = time.perf_counter()
+    # E85: a family is a property of the PAIR SET, so a K-B pair cannot be finished until every
+    # pair has been decided. Only the K-B rows are held back (1,600 of 49,000 on the g6 cohort),
+    # and each carries the features its re-decision needs — the alternative, a second feature
+    # pass, would double the only expensive phase of the run.
+    deferred: list[dict[str, Any]] = []
+
+    def finish(item: dict[str, Any], handle: Any) -> None:
+        nonlocal stored
+        decision, feats = item["decision"], item["feats"]
+        lo, hi = item["lo"], item["hi"]
+        decisions.append(decision)
+        zones[decision.zone] += 1
+        reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
+        if decision.certificate:
+            certificates[decision.certificate] += 1
+        for name in decision.families:
+            family_counts[name] = family_counts.get(name, 0) + 1
+        scores.append(decision.score)
+        _bump(per_block, item["block"], decision)
+        _bump(per_source_pair, item["source_pair"], decision)
+        if decision.veto == UNIT_DESIGNATOR_VETO:
+            vetoed.add((lo, hi))
+        # A vetoed row is stored although it scores nothing: E61 refuses on two STRINGS, and
+        # the only way to adjudicate that refusal later is to read them off the row.
+        if (decision.score >= settings.store_floor
+                or decision.zone in ("merge", "band")
+                or decision.evidence):
+            stored += 1
+            row = decision.to_json()
+            if decision.certificate == "K-R":
+                row.setdefault("evidence", {})["ref_codes"] = ",".join(ctx.shared_codes(lo, hi))
+            row.update({
+                # E63's census travels with the row so a re-simulation replays the census
+                # the decision was taken under, never today's.
+                "context": item["context"],
+                "block": item["block"],
+                "block_key": item["block_key"],
+                "source_pair": item["source_pair"],
+                "cross_source": item["cross_source"],
+                "probes": sorted(item["probes"]),
+                "exploded": sorted(set(exploded[lo]) | set(exploded[hi])),
+                "feats": {
+                    name: [value, present] for name, (value, present) in feats.items()
+                },
+            })
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
     with gzip.open(out_dir / PAIRS_FILE, "wt", encoding="utf-8") as handle:
         for (lo, hi) in sorted(pairs):
             probes = pairs[(lo, hi)]
@@ -366,46 +414,33 @@ def run_engine(
                 fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings
             )
             decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings, hazard)
-            decisions.append(decision)
-            zones[decision.zone] += 1
-            reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
-            if decision.certificate:
-                certificates[decision.certificate] += 1
-            for family in decision.families:
-                family_counts[family] = family_counts.get(family, 0) + 1
-            scores.append(decision.score)
-            block = pair_block(la, lb)
-            _bump(per_block, block, decision)
-            _bump(per_source_pair, source_pair(fa, fb), decision)
-            if decision.veto == UNIT_DESIGNATOR_VETO:
-                vetoed.add((lo, hi))
-            # A vetoed row is stored although it scores nothing: E61 refuses on two STRINGS, and
-            # the only way to adjudicate that refusal later is to read them off the row.
-            if (decision.score >= settings.store_floor
-                    or decision.zone in ("merge", "band")
-                    or decision.evidence):
-                stored += 1
-                row = decision.to_json()
-                if decision.certificate == "K-R":
-                    row.setdefault("evidence", {})["ref_codes"] = ",".join(
-                        ctx.shared_codes(lo, hi)
+            item = {
+                "lo": lo, "hi": hi, "decision": decision, "feats": feats, "probes": probes,
+                "fa": fa, "fb": fb, "la": la, "lb": lb,
+                "block": pair_block(la, lb), "block_key": pair_block_key(fa, fb),
+                "source_pair": source_pair(fa, fb), "cross_source": fa.source != fb.source,
+                "context": hazard.pair_context(la, lb).to_json(),
+            }
+            if settings.family_guard_mode != "off" and decision.certificate == "K-B":
+                deferred.append(item)
+                continue
+            finish(item, handle)
+
+        family_report: dict[str, Any] = {"mode": settings.family_guard_mode}
+        if deferred:
+            refused, family_report = family_guard_refusals(
+                [item["decision"] for item in deferred], dataset.listings, settings
+            )
+            for item in deferred:
+                clause = refused.get((item["lo"], item["hi"]))
+                if clause is not None:
+                    item["decision"] = decide_pair(
+                        item["fa"], item["fb"], item["la"], item["lb"], item["feats"],
+                        item["probes"], model, settings, hazard, kb_refused=True,
                     )
-                row.update({
-                    # E63's census travels with the row so a re-simulation replays the census
-                    # the decision was taken under, never today's.
-                    "context": hazard.pair_context(la, lb).to_json(),
-                    "block": block,
-                    "block_key": pair_block_key(fa, fb),
-                    "source_pair": source_pair(fa, fb),
-                    "cross_source": fa.source != fb.source,
-                    "probes": sorted(probes),
-                    "exploded": sorted(set(exploded[lo]) | set(exploded[hi])),
-                    "feats": {
-                        name: [value, present]
-                        for name, (value, present) in feats.items()
-                    },
-                })
-                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+                    item["decision"].reason = f"{item['decision'].reason}:kb_family:{clause}"
+                    item["decision"].evidence["kb_family"] = clause
+                finish(item, handle)
     timings["features_decide_s"] = time.perf_counter() - clock
 
     clock = time.perf_counter()
@@ -462,6 +497,7 @@ def run_engine(
         "per_block": {key: per_block[key] for key in sorted(per_block)},
         "per_source_pair": {key: per_source_pair[key] for key in sorted(per_source_pair)},
         "clusters": clusters.stats,
+        "family_guard": family_report,
         "timings": timings,
     }
     return summary
