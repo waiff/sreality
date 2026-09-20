@@ -805,7 +805,7 @@ def run_pass(
         result.feeds[item.feed] = result.feeds.get(item.feed, 0) + 1
     if not claimed:
         # An idle pass is still the only moment an operator's must-not-link row can be
-        # honoured: it moves no pair, so nothing else would ever seed its component (E72).
+        # honoured: it moves no pair, so nothing else would ever seed its component (E73).
         operator_mnl = store.must_not_link()
         seeds = _mnl_seeds(store, operator_mnl)
         if seeds:
