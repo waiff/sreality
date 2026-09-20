@@ -234,6 +234,22 @@ class Listing:
         )
 
 
+def live_end_stamp(listing: Listing) -> str | None:
+    """The stamp at which an advert was last known to be LIVE — one definition, three readers.
+
+    W8 correction. `inactive_at` is when the delisting was DETECTED, not when the advert went:
+    rule #3 flips a row only after a near-complete index walk plus a cadence-scaled staleness
+    window, and the lag runs to 70 days in this cohort (p90 17.6 d, median 0.57 d). Reading it
+    as the end of the live window inflated every co-live measure — the E47 co-live guard, the
+    `overlap_days` feature, K-B's disjoint-window clause and the benchmark's re-post guard all
+    read this one rule, so it is stated once here and never re-spelled at a call site.
+
+    `last_seen_at` is the stamp that means "seen live" for an active and an inactive row alike
+    (rule #4: index sightings and successful detail fetches only), so it wins; `inactive_at`
+    survives as the fallback for a row that carries no sighting at all."""
+    return listing.last_seen_at or listing.inactive_at
+
+
 @dataclass(slots=True)
 class Image:
     listing_id: int

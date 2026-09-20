@@ -22,20 +22,29 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from autodedup.dataset import Listing
-from autodedup.features import Feats, evidence_families, parse_ts
+from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
-from autodedup.guards import pair_veto
+from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
+from autodedup.hazard_context import ContextIndex, PairContext, fungible_catalogue
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
 ZONES: tuple[str, ...] = ("merge", "band", "reject", "veto")
-CERTIFICATES: tuple[str, ...] = ("K-A", "K-B", "K-C")
+CERTIFICATES: tuple[str, ...] = ("K-A", "K-B", "K-C", "K-R")
 SIDES: tuple[str, ...] = ("same", "cross")
 
 MIN_EVIDENCE_FAMILIES: int = 2
 MAX_ATTR_CONTRADICTIONS: float = 3.0
 
 UNIT_N_IMAGES_MIN: float = 1.0
+
+# E63 names its own reasons so a run summary can say which arm promoted a pair and which
+# limb refused one, without re-deriving either from the features.
+CONTEXT_RULE_REASON: str = "context_rule"
+# The two guards E63 may never overrule: E46 and E47 are the developer shapes the standing
+# ruling is about, and a pair they banded is exactly the pair a text-and-price warrant
+# cannot speak for (a developer's adverts share both by construction).
+CONTEXT_RULE_NEVER_OVERRIDES: tuple[str, ...] = ("developer_signature", "developer_colive")
 
 CERT_A_AREA: float = 0.02
 CERT_B_AREA: float = 0.01
@@ -56,6 +65,9 @@ class Decision:
     certificate: str | None = None
     veto: str | None = None
     reason: str = ""
+    # The STRINGS a rule refused or certified on, so a refusal can be adjudicated by reading it
+    # rather than by re-running the pass (E61 carries the two unit designators, E60 the code).
+    evidence: dict[str, str] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -67,6 +79,7 @@ class Decision:
             "certificate": self.certificate,
             "veto": self.veto,
             "reason": self.reason,
+            **({"evidence": dict(self.evidence)} if self.evidence else {}),
         }
 
 
@@ -76,15 +89,14 @@ def present_value(feats: Feats, name: str) -> float | None:
     return float(value) if present else None
 
 
-def disjoint_windows(la: Listing, lb: Listing) -> bool:
+def disjoint_windows(la: Listing, lb: Listing, settings: Settings | None = None) -> bool:
     """K-B's load-bearing clause: the two adverts were never live at the same time.
 
-    Unknown is not disjoint — a missing window can never assert the absence of overlap."""
+    Unknown is not disjoint — a missing window can never assert the absence of overlap. Which
+    end stamp counts is `features.window_end_stamp`'s question, not a second spelling here."""
+    cfg = settings or Settings()
     starts = (parse_ts(la.first_seen_at), parse_ts(lb.first_seen_at))
-    ends = (
-        parse_ts(la.inactive_at) or parse_ts(la.last_seen_at),
-        parse_ts(lb.inactive_at) or parse_ts(lb.last_seen_at),
-    )
+    ends = (parse_ts(window_end_stamp(la, cfg)), parse_ts(window_end_stamp(lb, cfg)))
     if any(value is None for value in starts) or any(value is None for value in ends):
         return False
     return max(starts[0], starts[1]) > min(ends[0], ends[1])  # type: ignore[operator]
@@ -103,7 +115,9 @@ def certificate_a(feats: Feats) -> bool:
     )
 
 
-def certificate_b(feats: Feats, la: Listing, lb: Listing) -> bool:
+def certificate_b(
+    feats: Feats, la: Listing, lb: Listing, settings: Settings | None = None
+) -> bool:
     """One broker's own re-post on one portal: same text, same size, never live together."""
     area = present_value(feats, "area_rel_diff")
     containment = present_value(feats, "containment_max")
@@ -114,7 +128,7 @@ def certificate_b(feats: Feats, la: Listing, lb: Listing) -> bool:
         and containment >= CERT_B_CONTAINMENT
         and area is not None
         and area <= CERT_B_AREA
-        and disjoint_windows(la, lb)
+        and disjoint_windows(la, lb, settings)
     )
 
 
@@ -137,20 +151,40 @@ def certificate_c(feats: Feats) -> bool:
     )
 
 
+def certificate_r(feats: Feats) -> bool:
+    """E60: both bodies print the SAME rare agency order code.
+
+    An order number is the agency's key for ONE order, and one order is one unit: it travels
+    onto every portal the order is syndicated to and onto the re-post when the advert expires.
+    `features.index_reference_codes` has already thrown out the codes a crowd carries and the
+    codes whose carriers disagree about the unit, so what reaches here certifies.
+
+    A DIFFERING code certifies nothing in either direction — W6b built the conflict rule and W7
+    refuted it on 395722 x 486034 and 395722 x 496635, one flat carrying N115815 on
+    ceskereality and N118731 on sreality with identical text and an identical 7 974 910 Kc.
+    That is why the feature is ABSENT rather than 0.0 when the codes differ, and why this
+    reads a presence, never a value."""
+    return present_value(feats, "ref_code_shared") == 1.0
+
+
 def certificate_of(
     feats: Feats, la: Listing, lb: Listing, settings: Settings | None = None
 ) -> str | None:
     """The first certificate the pair earns, in K-A, K-B, K-C order.
 
-    K-A is off unless `settings.certificate_ka_enabled` says otherwise — an OMITTED settings row
+    K-R is read FIRST because it is the only certificate whose premise is a broker's own
+    statement about which order this advert is, rather than an inference from what the two
+    adverts look like. K-A is off unless `settings.certificate_ka_enabled` says otherwise — an OMITTED settings row
     leaves it off too, because the default must be the decision the evidence supports: K-A merged
     at 52.6% HT precision (n=98) on the gold holdout against K-B's 100% (n=94) and K-C's 97.6%
     (n=150), one RUIAN point plus disposition plus area certifying a BUILDING, which is the
     developer-unit false-merge shape itself. The code path stays so an evaluation can switch it
     back on."""
+    if (settings is None or settings.certificate_kr_enabled) and certificate_r(feats):
+        return "K-R"
     if settings is not None and settings.certificate_ka_enabled and certificate_a(feats):
         return "K-A"
-    if certificate_b(feats, la, lb):
+    if certificate_b(feats, la, lb, settings):
         return "K-B"
     if certificate_c(feats):
         return "K-C"
@@ -214,12 +248,23 @@ def _rare_token_arm(feats: Feats, settings: Settings) -> bool:
     )
 
 
+def _ref_code_arm(feats: Feats) -> bool:
+    """E60 inside E45: an order key names one ORDER, so it is unit-grade by construction.
+
+    The arm the gate was missing. Of the pairs a shared code certifies, 62.8% carry
+    `rare_token_overlap` 0.0 — one token cannot be rare in a block of fewer than 20 documents —
+    so without this arm the strongest positive in the cohort reaches the gate with no evidence
+    family that speaks about a unit."""
+    return certificate_r(feats)
+
+
 def unit_grade_evidence(feats: Feats, settings: Settings) -> bool:
-    """The arms that held up on the holdout: interior frames, the K-B re-post, a unit number."""
+    """The arms that held up: interior frames, the K-B re-post, a unit number, an order code."""
     return (
         _interior_arm(feats, settings)
         or _repost_arm(feats, settings)
         or _unit_number_arm(feats)
+        or _ref_code_arm(feats)
     )
 
 
@@ -324,6 +369,93 @@ def merge_zone_block(feats: Feats, settings: Settings) -> str | None:
     return None
 
 
+def context_rule_warrant(feats: Feats, score: float, settings: Settings) -> str | None:
+    """E63: the arm this band pair carries, or None.
+
+    ONE arm is live — a near-identical body, an identical current price and a score at the top
+    of the isotonic range — because it is the only one the W8 verification read clean at both
+    grains on both splits (347 g5 band pairs, 0 negatives in 110 labelled, 0 negative blocks in
+    66, 0 in 33 sealed). The interior arm beside it is OFF and carries C2's image floor, so a
+    settings row that reaches for it cannot reach for three photos."""
+    if score < settings.context_rule_min_score:
+        return None
+    area = present_value(feats, "area_rel_diff")
+    if area is None or area > settings.context_rule_area_max:
+        return None
+    price = present_value(feats, "price_last_ratio")
+    if price is None or price < settings.context_rule_price_ratio_min:
+        return None
+    containment = present_value(feats, "containment_max")
+    if containment is not None and containment >= settings.context_rule_containment_min:
+        return "text"
+    if settings.context_rule_interior_min is not None:
+        interior = present_value(feats, "interior_match_ratio")
+        images = present_value(feats, "n_images_min")
+        if (interior is not None
+                and interior >= settings.context_rule_interior_min
+                and images is not None
+                and images >= settings.context_rule_min_images):
+            return "interior"
+    return None
+
+
+def context_rule_may_promote(reason: str) -> bool:
+    """E63 re-reads E11, E45 and E48's propose-only cells; it never re-reads E46 or E47."""
+    return not any(name in reason for name in CONTEXT_RULE_NEVER_OVERRIDES)
+
+
+def _census_limbs_configured(settings: Settings) -> bool:
+    return (settings.context_rule_block_min is not None
+            or settings.context_rule_image_population_min is not None)
+
+
+def apply_context_rule(
+    decision: Decision,
+    feats: Feats,
+    la: Listing,
+    lb: Listing,
+    settings: Settings,
+    context: ContextIndex | PairContext | None,
+) -> Decision:
+    """Promote a band pair the E63 warrant carries — unless a fungible-catalogue limb refuses.
+
+    A census limb with no index to read is a limb that cannot answer, and an unanswered guard
+    fails towards the stricter side (E48's direction): the promotion is simply not made."""
+    if not settings.context_rule_enabled or decision.zone != "band":
+        return decision
+    if not context_rule_may_promote(decision.reason):
+        return decision
+    arm = context_rule_warrant(feats, decision.score, settings)
+    if arm is None:
+        return decision
+    pair_context = (
+        context.pair_context(la, lb) if isinstance(context, ContextIndex) else context
+    )
+    if pair_context is None:
+        if _census_limbs_configured(settings):
+            return decision
+        evidence = dict(decision.evidence)
+    else:
+        refused = fungible_catalogue(
+            pair_context.stamp,
+            pair_context.from_price,
+            block_min=settings.context_rule_block_min,
+            image_population_min=settings.context_rule_image_population_min,
+            from_price_veto=settings.context_rule_from_price_veto,
+        )
+        if refused is not None:
+            return Decision(
+                decision.lo, decision.hi, "band", decision.score, decision.families,
+                decision.certificate, None,
+                f"{CONTEXT_RULE_REASON}:fungible:{refused}", dict(decision.evidence),
+            )
+        evidence = {**decision.evidence, **pair_context.stamp.to_evidence()}
+    return Decision(
+        decision.lo, decision.hi, "merge", decision.score, decision.families,
+        decision.certificate, None, f"{CONTEXT_RULE_REASON}:{arm}", evidence,
+    )
+
+
 def decide_pair(
     fa: Fingerprint,
     fb: Fingerprint,
@@ -333,17 +465,46 @@ def decide_pair(
     probes: Iterable[str],
     model: LogisticModel,
     settings: Settings,
+    context: ContextIndex | PairContext | None = None,
 ) -> Decision:
-    """Guards, then auto-rejects, then certificates, then the calibrated score — in that order.
+    """Guards, then auto-rejects, then certificates, then the calibrated score — in that order,
+    and then E63 re-reads what landed in the band.
 
     Every merge, certificate or score, is read against ITS STRATUM's cut (E48): a stratum the
-    evidence could not clear ships propose-only and lands in the band whatever it earned."""
+    evidence could not clear ships propose-only and lands in the band whatever it earned. E63
+    is the one path back out of that band, and it can only ever read a pair the layers above it
+    have already decided — it never reaches a veto, an auto-reject or a developer guard."""
+    decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings)
+    return apply_context_rule(decision, feats, la, lb, settings, context)
+
+
+def _decide_layers(
+    fa: Fingerprint,
+    fb: Fingerprint,
+    la: Listing,
+    lb: Listing,
+    feats: Feats,
+    probes: Iterable[str],
+    model: LogisticModel,
+    settings: Settings,
+) -> Decision:
+    """The rule floor and the calibrated score — every zone E63 is then allowed to re-read."""
     lo, hi = (fa.listing_id, fb.listing_id) if fa.listing_id < fb.listing_id else (
         fb.listing_id, fa.listing_id
     )
     veto = pair_veto(fa, fb, settings)
     if veto is not None:
         return Decision(lo, hi, "veto", 0.0, set(), None, veto, f"guard:{veto}")
+
+    # E61 is a guard, not a score: it reads the two BODIES, which `pair_veto`'s fingerprint-grain
+    # sides cannot see, so it stands here rather than inside it.
+    designators = unit_designator_conflict(la, lb, settings)
+    if designators is not None:
+        return Decision(
+            lo, hi, "veto", 0.0, set(), None, UNIT_DESIGNATOR_VETO,
+            f"guard:{UNIT_DESIGNATOR_VETO}",
+            {"unit_lo": designators[0], "unit_hi": designators[1]},
+        )
 
     families = evidence_families(feats)
     score = model.predict_proba(feats)

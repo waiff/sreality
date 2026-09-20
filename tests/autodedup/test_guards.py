@@ -16,6 +16,7 @@ from autodedup.guards import (
     cluster_invariants_ok,
     floor_relation,
     pair_veto,
+    unit_designator_conflict,
 )
 from autodedup.settings import Settings
 
@@ -225,3 +226,52 @@ def test_the_image_sample_caps_are_sweepable() -> None:
     """features.py reads these two off the settings row, so a sweep must be able to name them."""
     swept = Settings.from_dict({**Settings().to_dict(), "clip_sample": 12, "phash_sample": 40})
     assert (swept.clip_sample, swept.phash_sample) == (12, 40)
+
+
+# --- E61: a conflicting unit designator inside one address block ----------------------------
+
+
+def _unit_listing(listing_id: int, text: str, ruian: int | None = 21778370) -> Listing:
+    return Listing(id=listing_id, block="jablonec", description=text,
+                   location=Location(ruian_adm_kod=ruian, obec_kod=1))
+
+
+def test_two_different_units_of_one_building_are_a_veto() -> None:
+    """The Zizkov shape (ruian:21778370): one developer, one building, units 1/3/5, each with
+    its own price. Nothing about the adverts differs except the number they print."""
+    a = _unit_listing(1, "Prodej bytu (č.3) v novostavbě, cena 8 018 187 Kč.")
+    b = _unit_listing(2, "Prodej bytu (č.5) v novostavbě, cena 8 076 376 Kč.")
+    assert unit_designator_conflict(a, b) == ("3", "5")
+
+
+def test_the_same_unit_named_twice_is_not_a_conflict() -> None:
+    a = _unit_listing(1, "Prodej bytu (č.3) v novostavbě.")
+    b = _unit_listing(2, "Nabízíme byt č. 3 v novostavbě.")
+    assert unit_designator_conflict(a, b) is None
+
+
+def test_two_buildings_number_their_flats_independently() -> None:
+    a = _unit_listing(1, "Prodej bytu (č.3).")
+    b = _unit_listing(2, "Prodej bytu (č.5).", ruian=99999999)
+    assert unit_designator_conflict(a, b) is None
+
+
+def test_a_price_list_of_several_units_is_not_this_advert_s_identity() -> None:
+    a = _unit_listing(1, "Volné jednotky č. 3, jednotka č. 5 a jednotka č. 7.")
+    b = _unit_listing(2, "Prodej bytu (č.5).")
+    assert unit_designator_conflict(a, b) is None
+
+
+def test_a_side_that_names_no_unit_ends_the_rule() -> None:
+    a = _unit_listing(1, "Prodej bytu (č.3).")
+    b = _unit_listing(2, "Prodej bytu v novostavbě.")
+    assert unit_designator_conflict(a, b) is None
+
+
+def test_the_veto_is_switchable() -> None:
+    a = _unit_listing(1, "Prodej bytu (č.3).")
+    b = _unit_listing(2, "Prodej bytu (č.5).")
+    from dataclasses import replace
+
+    assert unit_designator_conflict(a, b, SETTINGS) == ("3", "5")
+    assert unit_designator_conflict(a, b, replace(SETTINGS, unit_designator_veto=False)) is None

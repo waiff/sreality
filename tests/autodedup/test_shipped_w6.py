@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from autodedup.features import FEATURE_ORDER
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
@@ -33,6 +34,16 @@ def test_w6_settings_load_and_turn_the_bridge_rail_on() -> None:
     assert settings.t_hi_by_stratum == w5.t_hi_by_stratum
 
 
+def test_w6_json_still_describes_g5_after_the_w8_defaults_moved() -> None:
+    """A settings file names a GENERATION's decision surface, so a new default may not rewrite
+    an older generation's — the E58 defect at settings grain. E60, E61 and E63 all ship ON by
+    default or by promotion, so g5's file pins each of them off and keeps reproducing g5."""
+    settings = Settings.from_json(ROOT / "settings/w6.json")
+    assert settings.certificate_kr_enabled is False
+    assert settings.unit_designator_veto is False
+    assert settings.context_rule_enabled is False
+
+
 def test_w6_gold_is_w5_gold_under_a_new_version() -> None:
     assert W6["version"] == "w6_gold" and W5["version"] == "w5_gold"
     for key in LEARNED:
@@ -42,10 +53,21 @@ def test_w6_gold_is_w5_gold_under_a_new_version() -> None:
 
 
 def test_the_shipped_model_loads_and_scores_the_current_feature_version() -> None:
-    model = LogisticModel.from_json(json.loads(
-        (ROOT / "models/w6_gold.json").read_text(encoding="utf-8")))
+    """W8 appends `ref_code_shared` (E60), which `w6_gold` was not fitted on: the load warns by
+    name and the model scores that slot at zero. The certificate reads the fact directly, so the
+    debt costs the SCORE a signal, not the rule floor — the refit is owed, not urgent."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as warned:
+        warnings.simplefilter("always")
+        model = LogisticModel.from_json(json.loads(
+            (ROOT / "models/w6_gold.json").read_text(encoding="utf-8")))
     assert model.version == "w6_gold"
     assert len(model.feature_order) == W6["provenance"]["feature_version"]["n_features"]
+    assert [name for name in FEATURE_ORDER if name not in set(model.feature_order)] == [
+        "ref_code_shared"
+    ]
+    assert len(warned) == 1 and "ref_code_shared" in str(warned[0].message)
 
 
 def test_the_w6_evidence_file_records_a_met_promotion_bar() -> None:

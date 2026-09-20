@@ -268,6 +268,14 @@ def test_repost_probe_requires_category_equality() -> None:
     assert "WHERE same_category" in sql and "WHERE NOT same_category" in sql
 
 
+def test_the_repost_probe_ends_an_advert_at_its_last_sighting() -> None:
+    """E62: `inactive_at` is the DETECTION stamp — up to 70 days after the advert went — so a
+    co-live window measured from it invents overlap the crawler never saw."""
+    sql = census.CENSUS_PROBE_REPOSTS_SQL
+    assert "coalesce(l.last_seen_at, l.inactive_at, now()) AS ended_at" in sql
+    assert "coalesce(l.inactive_at, now())" not in sql
+
+
 def test_repost_area_tolerance_does_not_depend_on_row_order() -> None:
     assert "0.02 * least(a.area_m2, b.area_m2)" in census.CENSUS_PROBE_REPOSTS_SQL
     assert "0.02 * a.area_m2" not in census.CENSUS_PROBE_REPOSTS_SQL

@@ -40,6 +40,8 @@ from autodedup.dataset import (
     load,
 )
 from autodedup.decide import CERTIFICATES, ZONES, Decision, decide_pair
+from autodedup.hazard_context import ContextIndex
+from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.evaluate import (
     CALIBRATION_AUTO,
     FIT_MAX_ITER,
@@ -336,6 +338,9 @@ def run_engine(
     clock = time.perf_counter()
     ctx = FeatureContext.build(fps, settings, dataset)
     ctx.index_attrs(fps, dataset.listings)
+    # E63's refusing direction reads a census of the whole cohort, so it is built once here
+    # beside the feature context rather than per pair.
+    hazard = ContextIndex.build(dataset.listings, dataset.images_by_listing)
     timings["context_s"] = time.perf_counter() - clock
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -347,6 +352,7 @@ def run_engine(
     per_block: dict[str, dict[str, Any]] = {}
     per_source_pair: dict[str, dict[str, Any]] = {}
     scores: list[float] = []
+    vetoed: set[tuple[int, int]] = set()
     stored = 0
 
     clock = time.perf_counter()
@@ -358,7 +364,7 @@ def run_engine(
             feats = pair_features(
                 fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings
             )
-            decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings)
+            decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings, hazard)
             decisions.append(decision)
             zones[decision.zone] += 1
             reasons[decision.reason] = reasons.get(decision.reason, 0) + 1
@@ -370,10 +376,23 @@ def run_engine(
             block = pair_block(la, lb)
             _bump(per_block, block, decision)
             _bump(per_source_pair, source_pair(fa, fb), decision)
-            if decision.score >= settings.store_floor or decision.zone in ("merge", "band"):
+            if decision.veto == UNIT_DESIGNATOR_VETO:
+                vetoed.add((lo, hi))
+            # A vetoed row is stored although it scores nothing: E61 refuses on two STRINGS, and
+            # the only way to adjudicate that refusal later is to read them off the row.
+            if (decision.score >= settings.store_floor
+                    or decision.zone in ("merge", "band")
+                    or decision.evidence):
                 stored += 1
                 row = decision.to_json()
+                if decision.certificate == "K-R":
+                    row.setdefault("evidence", {})["ref_codes"] = ",".join(
+                        ctx.shared_codes(lo, hi)
+                    )
                 row.update({
+                    # E63's census travels with the row so a re-simulation replays the census
+                    # the decision was taken under, never today's.
+                    "context": hazard.pair_context(la, lb).to_json(),
                     "block": block,
                     "block_key": pair_block_key(fa, fb),
                     "source_pair": source_pair(fa, fb),
@@ -389,7 +408,11 @@ def run_engine(
     timings["features_decide_s"] = time.perf_counter() - clock
 
     clock = time.perf_counter()
-    clusters = cluster_pairs(decisions, dataset.listings, fps, settings, must_not_link)
+    # E61 refuses a UNION, not only an edge: two units of one building must not be joined
+    # transitively through a third advert either, so the veto joins the must-not-link set.
+    clusters = cluster_pairs(
+        decisions, dataset.listings, fps, settings, frozenset(must_not_link) | vetoed
+    )
     rows = cluster_rows(clusters, decisions, fps)
     timings["cluster_s"] = time.perf_counter() - clock
 
@@ -494,7 +517,7 @@ def _side(fp: Fingerprint, listing: Listing) -> list[tuple[str, str]]:
         ("ruian", str(fp.ruian_adm_kod)),
         ("pin", f"{fp.pin_key or '-'} r={loc.uncertainty_radius_m}"),
         ("images", f"{fp.n_images} (non-catalog {len(fp.image_hashes)})"),
-        ("window", f"{fp.first_seen_at} .. {fp.inactive_at or fp.last_seen_at}"),
+        ("window", f"{fp.first_seen_at} .. {fp.last_seen_at or fp.inactive_at}"),
         ("desc", " ".join((listing.description or "").split())[:60]),
     ]
 
@@ -516,7 +539,10 @@ def cmd_pair(args: argparse.Namespace, out: Any) -> int:
     pairs, _ = generate_pairs(fps, settings)
     probes = sorted(pairs.get((lo, hi), set()))
     feats = pair_features(fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings)
-    decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings)
+    decision = decide_pair(
+        fa, fb, la, lb, feats, probes, model, settings,
+        ContextIndex.build(dataset.listings, dataset.images_by_listing),
+    )
 
     left = _side(fa, la)
     right = _side(fb, lb)

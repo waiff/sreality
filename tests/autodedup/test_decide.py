@@ -18,6 +18,7 @@ from autodedup.decide import (
     decide_pair,
     developer_colive,
     developer_signature,
+    certificate_r,
     disjoint_windows,
     present_value,
     stratum_key,
@@ -174,6 +175,29 @@ def test_certificate_b_requires_disjoint_active_windows() -> None:
     assert not disjoint_windows(early, unknown)
 
 
+def test_which_end_stamp_k_b_reads_is_a_setting_not_a_second_spelling() -> None:
+    """W8: the delisting-DETECTION stamp keeps an advert nominally live for up to 70 days.
+
+    The honest clock (`live_window_from_sighting`) says these two never ran together; the
+    default keeps the wider window, under which they did, so K-B does not fire."""
+    from dataclasses import replace
+
+    feats = _feats(same_source=1.0, same_broker_key=1.0, containment_max=0.95,
+                   area_rel_diff=0.005)
+    gone = _listing(1, first_seen_at="2026-06-01T00:00:00+00:00",
+                    last_seen_at="2026-07-18T00:00:00+00:00",
+                    inactive_at="2026-09-07T00:00:00+00:00", is_active=False)
+    successor = _listing(2, first_seen_at="2026-08-03T00:00:00+00:00",
+                         last_seen_at="2026-08-06T00:00:00+00:00",
+                         inactive_at="2026-09-08T00:00:00+00:00", is_active=False)
+    assert not disjoint_windows(gone, successor, SETTINGS)
+    assert not certificate_b(feats, gone, successor, SETTINGS)
+
+    honest = replace(SETTINGS, live_window_from_sighting=True)
+    assert disjoint_windows(gone, successor, honest)
+    assert certificate_b(feats, gone, successor, honest)
+
+
 def test_certificate_c_needs_four_ordered_non_catalog_matches() -> None:
     base = dict(phash_tight_matches=4.0, seq_monotone_ratio=0.9, area_rel_diff=0.02,
                 dispo_equal=1.0, catalog_ratio_max=0.1)
@@ -184,7 +208,7 @@ def test_certificate_c_needs_four_ordered_non_catalog_matches() -> None:
     assert not certificate_c(_feats(**{**base, "dispo_equal": 0.0}))
 
 
-def test_certificate_order_is_a_then_b_then_c() -> None:
+def test_certificate_order_is_r_then_a_then_b_then_c() -> None:
     early = _listing(1, inactive_at="2024-05-01T00:00:00+00:00",
                      last_seen_at="2024-05-01T00:00:00+00:00")
     late = _listing(2, first_seen_at="2025-01-01T00:00:00+00:00")
@@ -193,7 +217,47 @@ def test_certificate_order_is_a_then_b_then_c() -> None:
                    phash_tight_matches=6.0, seq_monotone_ratio=1.0, catalog_ratio_max=0.0)
     assert certificate_of(every, early, late, KA_SETTINGS) == "K-A"
     assert certificate_of(_feats(), early, late, KA_SETTINGS) is None
-    assert set(CERTIFICATES) == {"K-A", "K-B", "K-C"}
+    assert set(CERTIFICATES) == {"K-A", "K-B", "K-C", "K-R"}
+    # E60 is read before every resemblance: the broker SAID which order this is.
+    coded = dict(every)
+    coded["ref_code_shared"] = (1.0, True)
+    assert certificate_of(coded, early, late, KA_SETTINGS) == "K-R"
+
+
+def test_a_conflicting_unit_designator_vetoes_whatever_the_pair_scores() -> None:
+    """E61 at the rule floor: no certificate and no score may reach a pair whose two bodies
+    name a different unit of one address block, and the two strings travel on the decision."""
+    everything = _feats(same_ruian_adm_kod=1.0, dispo_equal=1.0, area_rel_diff=0.0,
+                        floor_diff=0.0, ref_code_shared=1.0, **UNIT_EVIDENCE)
+    a = _listing(1, description="Prodej bytu (č.3) v novostavbě.",
+                 location=Location(ruian_adm_kod=7, obec_kod=1, granularity_rank=60))
+    b = _listing(2, description="Prodej bytu (č.5) v novostavbě.",
+                 location=Location(ruian_adm_kod=7, obec_kod=1, granularity_rank=60))
+    decision = _decide(a, b, everything, probability=0.999)
+    assert decision.zone == "veto"
+    assert decision.veto == "unit_designator_conflict"
+    assert decision.evidence == {"unit_lo": "3", "unit_hi": "5"}
+    assert decision.to_json()["evidence"] == {"unit_lo": "3", "unit_hi": "5"}
+
+
+def test_a_shared_order_code_certifies_and_a_differing_one_says_nothing() -> None:
+    """E60. The feature is PRESENT only when the two bodies share a code, so the `absent` case
+    below is both `no codes at all` and `two different codes` — W7 refuted reading the second
+    as a negative (395722 x 486034: N115815 on ceskereality, N118731 on sreality, one flat)."""
+    from dataclasses import replace
+
+    early = _listing(1, inactive_at="2024-05-01T00:00:00+00:00",
+                     last_seen_at="2024-05-01T00:00:00+00:00")
+    late = _listing(2, first_seen_at="2025-01-01T00:00:00+00:00")
+    shared = _feats(ref_code_shared=1.0)
+    assert certificate_r(shared)
+    assert certificate_of(shared, early, late, SETTINGS) == "K-R"
+    assert not certificate_r(_feats())
+    assert certificate_of(_feats(), early, late, SETTINGS) is None
+    # the order code alone satisfies E45 — no image, no rare token, no unit number needed
+    assert unit_evidence(shared, SETTINGS)
+    off = replace(SETTINGS, certificate_kr_enabled=False)
+    assert certificate_of(shared, early, late, off) is None
 
 
 def test_k_a_is_demoted_by_default_and_switchable_for_the_evaluation() -> None:
@@ -469,3 +533,133 @@ def test_a_stratum_cut_overrides_the_global_one_for_the_score_layer() -> None:
     assert _decide(_listing(1), _listing(2), same, probability=1.0, settings=row).zone == "band"
     # An EMPTY table is the incumbent engine, untouched.
     assert stratum_t_hi(feats, None, Settings()) == Settings().t_hi
+
+
+# --- E63: the band promotion the W8 verification endorsed --------------------------------
+
+E63 = Settings(context_rule_enabled=True)
+
+
+def _e63_feats(**over: float) -> dict[str, tuple[float, bool]]:
+    """The warrant: a near-identical body, an identical current price, an agreeing area."""
+    base = {"containment_max": 0.97, "price_last_ratio": 1.0, "area_rel_diff": 0.0}
+    base.update(over)
+    return _feats(**base)
+
+
+_NO_CENSUS = Settings(context_rule_enabled=True, context_rule_image_population_min=None,
+                      context_rule_from_price_veto=False)
+
+
+def _e63(la: Listing, lb: Listing, feats: dict[str, tuple[float, bool]],
+         probability: float = 1.0, settings: Settings = _NO_CENSUS,
+         context: Any = None) -> Decision:
+    return decide_pair(_fp(la), _fp(lb), la, lb, feats, {"attr_dispo"},
+                       FixedModel(probability), settings, context)
+
+
+def test_e63_promotes_a_band_pair_the_warrant_carries() -> None:
+    a, b = _listing(1), _listing(2)
+    banded = _e63(a, b, _e63_feats(), settings=Settings())
+    assert banded.zone == "band"
+    promoted = _e63(a, b, _e63_feats())
+    assert (promoted.zone, promoted.reason) == ("merge", "context_rule:text")
+
+
+def test_e63_is_off_unless_a_settings_row_asks_for_it() -> None:
+    assert _e63(_listing(1), _listing(2), _e63_feats(), settings=Settings()).zone == "band"
+
+
+def test_e63_with_the_default_census_limbs_needs_the_cohort_index() -> None:
+    from autodedup.hazard_context import ContextIndex
+
+    a, b = _listing(1), _listing(2)
+    assert _e63(a, b, _e63_feats(), settings=E63).zone == "band"
+    index = ContextIndex.build({1: a, 2: b}, {})
+    assert _e63(a, b, _e63_feats(), settings=E63, context=index).zone == "merge"
+
+
+@pytest.mark.parametrize(
+    "over, why",
+    [
+        ({"containment_max": 0.89}, "a body that is not near-identical"),
+        ({"price_last_ratio": 0.99}, "a price that moved"),
+        ({"area_rel_diff": 0.02}, "C1: areas more than 1% apart"),
+    ],
+)
+def test_e63_refuses_a_pair_missing_one_clause(over: dict[str, float], why: str) -> None:
+    assert _e63(_listing(1), _listing(2), _e63_feats(**over)).zone == "band", why
+
+
+def test_e63_refuses_a_score_below_the_top_of_the_range() -> None:
+    # 0.9545 is the isotonic plateau the disputed operator card (18705144) and its partner sit
+    # on; W8 measured 41 negatives and 310 positives there, so no clause may promote it.
+    assert _e63(_listing(1), _listing(2), _e63_feats(), probability=0.9545).zone == "band"
+    assert _e63(_listing(1), _listing(2), _e63_feats(), probability=0.9998).zone == "band"
+
+
+def test_e63_never_overrules_the_developer_guards() -> None:
+    # E46: co-live adverts agreeing only on catalogue material.
+    feats = _e63_feats(overlap_days=30.0, catalog_ratio_max=1.0, interior_match_ratio=0.0)
+    blocked = _e63(_listing(1), _listing(2), feats)
+    assert blocked.zone == "band" and blocked.reason == "developer_signature"
+    # E47: one broker, one portal, side by side for weeks.
+    colive = _e63_feats(same_source=1.0, same_broker_key=1.0, overlap_days=61.0,
+                        rare_token_overlap=2.0)
+    refused = _e63(_listing(1), _listing(2), colive)
+    assert refused.zone == "band" and refused.reason == "developer_colive"
+
+
+def test_e63_reads_pairs_the_unit_gate_and_the_diversity_gate_banded() -> None:
+    gated = _e63(_listing(1), _listing(2), _e63_feats())
+    assert gated.zone == "merge"
+
+
+def test_e63_never_reaches_a_veto_or_an_auto_reject() -> None:
+    vetoed = _e63(_listing(1), _listing(2, category_type="pronajem"), _e63_feats())
+    assert vetoed.zone == "veto"
+    rejected = _e63(_listing(1), _listing(2), _e63_feats(numeral_conflict=1.0))
+    assert rejected.zone == "reject"
+
+
+def test_e63_stamps_the_census_it_was_taken_under() -> None:
+    from autodedup.hazard_context import ContextIndex
+
+    a, b = _listing(1), _listing(2)
+    index = ContextIndex.build({1: a, 2: b}, {})
+    promoted = _e63(a, b, _e63_feats(), settings=E63, context=index)
+    assert promoted.zone == "merge"
+    assert promoted.evidence["context_cell_n"] == "2"
+    assert promoted.evidence["context_image_pop_min"] == "0"
+
+
+def test_e63_refuses_a_promotion_a_fungible_limb_names() -> None:
+    from autodedup.hazard_context import ContextIndex
+
+    a, b = _listing(1), _listing(2)
+    a.description = "Ceny od 4 990 000 Kč. " + "x" * 300
+    index = ContextIndex.build({1: a, 2: b}, {})
+    refused = _e63(a, b, _e63_feats(), settings=E63, context=index)
+    assert refused.zone == "band"
+    assert refused.reason == "context_rule:fungible:from_price"
+
+
+def test_e63_refuses_to_promote_when_a_census_limb_has_no_index_to_read() -> None:
+    # An unanswered guard fails towards the stricter side, exactly as E48 does.
+    assert _e63(_listing(1), _listing(2), _e63_feats(), settings=E63, context=None).zone == "band"
+    assert _e63(_listing(1), _listing(2), _e63_feats(), context=None).zone == "merge"
+
+
+def test_e63_interior_arm_is_off_and_cannot_be_enabled_below_four_images() -> None:
+    # No text warrant, an interior ratio of 1.0 over THREE photos, and a score the model path
+    # cannot merge on its own: only an interior arm could promote this, and none may.
+    feats = _e63_feats(containment_max=0.1, interior_match_ratio=1.0, n_images_min=3.0)
+    assert _e63(_listing(1), _listing(2), feats, probability=0.5).zone == "band"
+    interior = Settings(context_rule_enabled=True, context_rule_interior_min=0.5,
+                        context_rule_image_population_min=None,
+                        context_rule_from_price_veto=False)
+    assert _e63(_listing(1), _listing(2), feats, probability=0.5,
+                settings=interior).zone == "band"
+    with pytest.raises(ValueError, match="at least 4"):
+        Settings(context_rule_enabled=True, context_rule_interior_min=0.5,
+                 context_rule_min_images=3.0)

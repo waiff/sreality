@@ -1,8 +1,9 @@
 {
  "bridge_apply": true,
  "bridge_min_score": 0.999,
- "certificate_kr_enabled": false,
- "context_rule_enabled": false,
+ "certificate_kr_enabled": true,
+ "context_rule_enabled": true,
+ "live_window_from_sighting": false,
  "store_floor": 0.02,
  "t_hi": 1.0,
  "t_hi_by_stratum": {
@@ -13,5 +14,5 @@
   "model|same": null
  },
  "t_lo": 0.1823495333100157,
- "unit_designator_veto": false
+ "unit_designator_veto": true
 }

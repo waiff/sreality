@@ -45,6 +45,7 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from autodedup import decide
 from autodedup.decide import MIN_EVIDENCE_FAMILIES, Decision
+from autodedup.hazard_context import PairContext
 from autodedup.labels import (
     CHEAP_TIERS,
     EMPTY_SAMPLE,
@@ -707,7 +708,8 @@ def resimulate(
         return Decision(lo, hi, "veto", 0.0, set(), None, str(veto), f"guard:{veto}")
     left, right = _sim_sides(row)
     return decide.decide_pair(
-        left, right, left, right, feats, list(row.get("probes") or ()), model, settings
+        left, right, left, right, feats, list(row.get("probes") or ()), model, settings,
+        PairContext.from_json(row.get("context")),
     )
 
 
