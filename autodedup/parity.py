@@ -587,6 +587,11 @@ def run_parity(
                                  for i in sorted(drifted)[:MAX_EXAMPLES]],
             "seed": parsed.seed,
         },
+        # What the GATE would say, from the same two sides the diff above is taken from: the
+        # seed refuses to cut a baseline when this is non-zero, and every pass refuses to run
+        # on one (E84). Read-only, and worth having in the instrument's own report — it is the
+        # answer to "will the re-seed be refused?" before anything is seeded.
+        "gate": _gate_view(artifact_side, live_side, sample, drifted),
         "facts": compare_facts(sample, artifact_side, live_side, drifted),
         "pairs": {"requested": parsed.pairs, "drawn": len(pairs),
                   **compare_pairs(pairs, artifact_side, live_side, calibration, settings,
@@ -595,6 +600,15 @@ def run_parity(
     (out_dir / PARITY_FILE).write_text(
         json.dumps(report, indent=2, sort_keys=True, default=str), encoding="utf-8")
     report["spent_usd"] = 0.0
+    return report
+
+
+def _gate_view(artifact: "Side", live: "Side", sample: Sequence[int],
+               drifted: Mapping[int, Any]) -> dict[str, Any]:
+    rows = baseline({i: artifact.listings[i] for i in sample if i in artifact.listings},
+                    {i: artifact.images.get(i, []) for i in sample})
+    report = compare(rows, live.listings, live.images, set(drifted))
+    report["would_refuse"] = report["breaches"] > 0
     return report
 
 

@@ -263,3 +263,17 @@ def test_the_instrument_can_read_the_population_a_seed_WOULD_write(world) -> Non
     assert (fixed["pairs"]["certificates"]["live"]
             == fixed["pairs"]["certificates"]["artifact"])
     assert fixed["pairs"]["certificate_moves"] == {}
+
+
+def test_the_report_says_whether_the_GATE_would_refuse(world) -> None:
+    """The instrument answers the question the parent asks before re-seeding: would the gate
+    refuse this? A clean world says no; a stored fact moved with no snapshot behind it says
+    yes, and names the listing."""
+    clean = world()
+    assert clean["gate"]["would_refuse"] is False and clean["gate"]["breaches"] == 0
+    assert clean["gate"]["checked"] == 9
+
+    world.conn.listings[4_000]["price_czk"] = 1
+    broken = world()
+    assert broken["gate"]["would_refuse"] is True
+    assert broken["gate"]["breaches_by_kind"] == {"stored": 1}
