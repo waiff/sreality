@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Mapping
 
 SPLITS_DIR: Path = Path(__file__).resolve().parent / "splits"
 
@@ -66,7 +67,24 @@ SPENT_SEALS: dict[str, str] = {
         "read four arms and rule D30: the honest clock gains 47 sealed labelled duplicates "
         "over g6 and loses 0, and the E85 family guard is inert against the same arm without "
         "it (gained 0, lost 0). A later number on this split confirms; it cannot decide. The "
-        "next rule read at family grain owes a fresh seal cut the same way."
+        "next rule read at family grain owes a fresh seal cut the same way. W12 then found "
+        "that this map is a FIXPOINT — the same cohort, the same two arms and the same "
+        "construction reproduce it to the listing — so its fresh holdout had to be a fresh "
+        "SEED, and `seal_id` now names a seed-bearing seal by map AND seed rather than by the "
+        "map alone (the W12 seal ebc141fa… is this map under seed 20260925)."
+    ),
+    "ebc141fa51555bf7e2dd1757d84fb912e907c377e927e1b5c6de6132844d1b24": (
+        "W12's seal: W11's map (4456 listings, 664 groups — M108 found the map is a FIXPOINT "
+        "over this cohort and these arms) under a fresh seed 20260925, the first seal named by "
+        "map AND seed. SPENT by W12's verification, which opened it ONCE to rule D32: the E88 "
+        "NARROW hold merges 145 of 238 reliable sealed labelled duplicates against g6's 177 "
+        "(McNemar gained 7, lost 39, exact p < 1e-5) and removes 0 sealed false merges, while "
+        "the honest clock alone gains 12 and loses 0 (p = 0.00049); all three arms carry 0 "
+        "reliable false merges at pair, block, family and cluster grain. Its test side holds "
+        "NO contested pair, so it is spent as evidence about RECALL and is silent on the "
+        "hazard that refused W11 (M112): the next rule read at that grain owes a seal whose "
+        "test side carries the contested development families, which today means an operator "
+        "ruling on them first."
     ),
     "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884": (
         "W9's fresh seal (4456 listings, 663 groups), seed 20260922. SPENT because it was read "
@@ -80,6 +98,26 @@ SPENT_SEALS: dict[str, str] = {
 }
 
 _HEX = set("0123456789abcdef")
+
+
+def seal_id(groups: "dict[int, int] | Mapping[int, int]", seed: int | None = None) -> str:
+    """The name a split map is filed under — the map alone, or the map AND its seed.
+
+    W12 found the hole in "a seal is named by its map". Its cohort, its arms and its
+    construction reproduce W11's map to the listing, so the only fresh holdout available over
+    that cohort is a fresh SEED — and under a map-only name that seal could be committed only
+    by overwriting a file the program has registered as SPENT. `split_of` hashes
+    `<seed>:<group>`, so a map under two seeds is two holdouts; a seed-bearing seal is
+    therefore named by both, and a map-only name stays exactly what it was for the four seals
+    cut before this rule."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    if seed is not None:
+        digest.update(f"seed:{int(seed)}\n".encode("utf-8"))
+    for item in sorted(groups):
+        digest.update(f"{item}:{groups[item]}\n".encode("utf-8"))
+    return digest.hexdigest()
 
 
 def is_seal(value: str) -> bool:
