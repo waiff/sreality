@@ -672,7 +672,7 @@ On the trial cohort that is **41,791 distinct hashes over 80,394 images — and 
 
 **And the GATE itself, run against production as it stands (read-only, `rt_parity` reports what it would say):** against the live `autodedup.phash_pop` — still empty — it **REFUSES, 179 of 196 checked listings breaching on `population`** and every one of them "with an unmoved producer digest", which is the defect stated in the gate's own words. Against the population the seed will write: **0 breaches of 196 checked, `would_refuse: false`**, with 4 listings skipped as drift, 14 producer-moved and **76 sighting-moved** — the last number being why the scraper's clock is a digest of its own and not a stored fact (run `35525701436` frozen, `35525571949` artifact).
 
-**Replay equivalence still holds exactly** on the same cohort and the same scorer (`w8` + `w6_gold`): 48,908 of 48,908 pair decisions identical, 15,811 of 15,811 stored rows identical, 939 of 939 clusters identical in key AND member set, 29 passes, 133.1 s, 0 budget refusals, $0 (`/home/hejtm/autodedup-artifacts/w9g/replay_after/replay.json`).
+**Replay equivalence still holds exactly** — and it is equivalence it proves, not cost: the replay runs against `MemoryStore`, which has no round trip, so the statement A/B above is what prices the re-cluster and the replay is what says the batching changed no decision. On the same cohort and the same scorer (`w8` + `w6_gold`): 48,908 of 48,908 pair decisions identical, 15,811 of 15,811 stored rows identical, 939 of 939 clusters identical in key AND member set, 29 passes, 133.1 s, 0 budget refusals, $0 (`/home/hejtm/autodedup-artifacts/w9g/replay_after/replay.json`).
 
 #### Re-seeding and re-enabling (for the parent — the lane is OFF and stays off until this is done)
 
