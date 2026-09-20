@@ -68,6 +68,13 @@ class FakePg:
         self.clip_vectors: dict[int, str] = {}
         self.phash_pop: dict[int, int] = {}
         self.statements: list[str] = []
+        # Which statements the pass issued INSIDE its transaction. `set_config(..., true)` is
+        # only a guard where the transaction can see it (D4), and over the transaction-mode
+        # pooler that is the only place it survives.
+        self.statements_in_tx: list[str] = []
+        self.in_transaction = False
+        # `public.ruian_admin_units`: cast_obce code -> parent obec code (D3).
+        self.admin_parents: dict[int, int] = {}
         self.transactions = 0
         self.rolled_back = 0
         # What `pg_total_relation_size` over schema `autodedup` answers — the storage guard's
@@ -115,10 +122,12 @@ class _Tx:
 
     def __enter__(self) -> "_Tx":
         self.conn.transactions += 1
+        self.conn.in_transaction = True
         self.state = self.conn.snapshot()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
+        self.conn.in_transaction = False
         if exc_type is not None and self.state is not None:
             self.conn.restore(self.state)
             self.conn.rolled_back += 1
@@ -145,6 +154,8 @@ class _Cursor:
 
     def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
         self.conn.statements.append(sql)
+        if self.conn.in_transaction:
+            self.conn.statements_in_tx.append(sql)
         self.rows = _dispatch(self.conn, sql, dict(params or {}))
         # psycopg exposes the column names, and the fact source reads rows as dicts through
         # them. Every export statement aliases every column, so the SELECT list IS the names.
@@ -187,7 +198,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_SETTING_WRITE_SQL:
         db.settings[str(p["key"])] = _jsonb(p["value"])
         return []
-    if sql in (S.RT_STATEMENT_GUARD_SQL, S.RT_IDLE_GUARD_SQL):
+    if sql in (S.RT_STATEMENT_GUARD_SQL, S.RT_LOCK_GUARD_SQL, S.RT_IDLE_GUARD_SQL):
         return [("set",)]
     if sql == S.RT_SETTING_SQL:
         key = str(p["key"])
@@ -462,10 +473,11 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return [(max((i for i, _s in win), default=int(p["after_id"])), len(win),
                  [i for i, _s in keep], [stamp for _i, stamp in keep])]
     if sql == S.RT_NEW_STRAGGLERS_SQL:
-        low = int(p["after_id"]) - int(p["window"])
-        rows = [(i, row["first_seen_at"]) for i, row in sorted(db.listings.items())
-                if low < i <= int(p["after_id"]) and (gen, i) not in db.rt_fp
-                and _in_scope(db, i, p)]
+        # The last N ROWS by id, never an id range (D3).
+        win = sorted((i for i in db.listings if i <= int(p["after_id"])),
+                     reverse=True)[:int(p["window"])]
+        rows = [(i, db.listings[i]["first_seen_at"]) for i in sorted(win)
+                if (gen, i) not in db.rt_fp and _in_scope(db, i, p)]
         return rows[:int(p["limit"])]
     if sql == S.RT_CHANGED_LISTINGS_SQL:
         cut = db.now - timedelta(seconds=int(p["lag"]))
@@ -497,6 +509,21 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         departed = [i for i in slice_ids if not _in_scope(db, i, p)]
         return [(max(slice_ids) if slice_ids else int(p["after_id"]),
                  len(slice_ids), departed)]
+    # The sixth feed: what the scope has started holding and no cursor ever saw (D3).
+    if sql == S.RT_SCOPE_ENTER_SQL:
+        obec, cast_obce = p["obec"], p.get("cast_obce")
+        slice_ids = sorted(
+            listing_id for listing_id, place in db.locations.items()
+            if listing_id > int(p["after_id"])
+            and place.get("obec_kod") == obec
+            and (cast_obce is None or place.get("cast_obce_kod") == cast_obce)
+        )[:int(p["limit"])]
+        entered = [i for i in slice_ids if (gen, i) not in db.rt_fp]
+        return [(max(slice_ids) if slice_ids else int(p["after_id"]),
+                 len(slice_ids), entered)]
+    if sql == S.RT_SCOPE_PARENT_OBEC_SQL:
+        return [(int(code), int(db.admin_parents[int(code)])) for code in p["codes"]
+                if int(code) in db.admin_parents]
     if sql == S.RT_REVIVED_SQL:
         slice_ids = sorted(i for g, i in db.rt_fp
                            if g == gen and not db.rt_fp[(g, i)]["is_active"]

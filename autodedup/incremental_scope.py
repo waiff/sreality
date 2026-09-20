@@ -4,8 +4,11 @@ The batch lane is scoped by construction: it runs over an exported cohort, and t
 four blocks (ruling D1). The real-time lane has no artifact, so without this module its four
 feeds claim the arrivals of the WHOLE corpus — ~178,000 new listings in 30 days against a
 store the operator pays for by the megabyte. `rt_scope` is therefore a REQUIRED lane setting
-rather than a tuning knob: an empty or missing scope is a hard error, and a whole-corpus run
-has to be spelled `all` AND fit the storage guard (`incremental_lane.storage_guard`).
+rather than a tuning knob: an empty, separator-only or missing scope is a hard error, a scope
+with no blocks is not constructible at all (D1), and a whole-corpus run has to be spelled `all`
+AND fit the storage guard (`incremental_lane.storage_guard`). A PASS goes further still: its
+scope is the one `rt_seed` PERSISTED, and a dispatch argument that differs is a re-scope the
+operator has to ask for by name (`resolve_pass_scope`, D2).
 
 Two grains, and they are the two the cohort already uses: `obec` is
 `listing_location.obec_kod` (a town) and `cast_obce` is `cast_obce_kod` (a quarter). The
@@ -53,8 +56,23 @@ class ScopeBlock:
 
 @dataclass(frozen=True, slots=True)
 class Scope:
+    """A scope with no blocks is not "everything" and not "nothing" — it is the NULL scope W9c
+    shipped, whose drift sweep reports every row of the store as departed (D1). It cannot be
+    built: `all` is spelled `whole_corpus`, and everything else needs at least one block."""
+
     blocks: tuple[ScopeBlock, ...] = ()
     whole_corpus: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.whole_corpus and not self.blocks:
+            raise ScopeError(
+                "an empty scope holds nothing and would retire the whole store — spell "
+                f"{ALL!r} for the corpus, or name at least one block")
+
+    def key(self) -> tuple[bool, tuple[tuple[str, int], ...]]:
+        """Identity, independent of the order the blocks were spelled in."""
+        return (bool(self.whole_corpus),
+                tuple(sorted((b.grain, b.code) for b in self.blocks)))
 
     @property
     def obec_codes(self) -> list[int]:
@@ -132,8 +150,12 @@ def parse_scope(raw: Any) -> Scope:
             raise ScopeError("rt_scope is empty (an empty scope would claim the whole corpus)")
         if text.lower() == ALL:
             return Scope((), whole_corpus=True)
-        return Scope(tuple(_dedupe(
-            _parse_token(token) for token in text.replace(",", " ").split())))
+        blocks = _dedupe(_parse_token(token) for token in text.replace(",", " ").split())
+        if not blocks:
+            raise ScopeError(
+                f"rt_scope {raw!r} names no block (separators only) — an empty scope would "
+                "retire the whole store")
+        return Scope(tuple(blocks))
     if isinstance(raw, Sequence):
         entries = list(raw)
         if not entries:
@@ -141,12 +163,17 @@ def parse_scope(raw: Any) -> Scope:
         blocks: list[ScopeBlock] = []
         for entry in entries:
             if isinstance(entry, str):
+                if not entry.strip():
+                    raise ScopeError("rt_scope entry is empty")
                 blocks.append(_parse_token(entry))
                 continue
             if not isinstance(entry, Mapping):
                 raise ScopeError(f"rt_scope entry must be an object or a token: {entry!r}")
             blocks.append(_block(entry.get("grain"), entry.get("code")))
-        return Scope(tuple(_dedupe(blocks)))
+        kept = _dedupe(blocks)
+        if not kept:
+            raise ScopeError(f"rt_scope {raw!r} names no block")
+        return Scope(tuple(kept))
     raise ScopeError(f"rt_scope must be a list, a token string or {ALL!r}: {raw!r}")
 
 
@@ -189,6 +216,37 @@ def resolve_scope(arg: Any = None, setting: Any = None) -> Scope:
     if setting is not None:
         return parse_scope(setting)
     return DEFAULT_SCOPE
+
+
+def resolve_pass_scope(arg: Any = None, setting: Any = None,
+                      rescope: bool = False) -> tuple[Scope, bool]:
+    """A PASS's scope: the persisted one, and a dispatch argument only as an explicit RE-SCOPE.
+
+    `resolve_scope` is the SEED's resolution order, where an argument chooses the scope the
+    generation is cut for. A pass is the other way round (D2): the `rt_scope` row `rt_seed`
+    wrote is what the store was built under, and a narrower argument is DESTRUCTIVE — the drift
+    sweep retires everything the argument leaves out, one dispatch, no undo, and the next
+    scheduled pass reads the wider row again with nothing to re-add the retired listings. So a
+    differing argument is refused unless `rt_rescope=true` says so, and a rescope is PERSISTED
+    rather than applied for one pass. A missing row under a seeded generation is a hard error:
+    falling back to the default would be the same destruction with no argument at all."""
+    if setting is None:
+        raise ScopeError(
+            "this generation has a frozen calibration but no rt_scope row — the row IS the "
+            "scope its store was built under. Re-seed it (`--mode rt_seed`) or write the row; "
+            "refusing to fall back to the default scope")
+    persisted = parse_scope(setting)
+    if arg is None or str(arg).strip() == "":
+        return persisted, False
+    asked = parse_scope(arg)
+    if asked.key() == persisted.key():
+        return persisted, False
+    if not rescope:
+        raise ScopeError(
+            f"the dispatch argument {asked.label()!r} is not the scope this generation was "
+            f"seeded with ({persisted.label()!r}); everything outside it would be RETIRED. "
+            "Pass rt_rescope=true to move the generation's scope, or re-seed")
+    return asked, True
 
 
 def guard_agrees(scope: Scope, max_schema_mb: float) -> bool:

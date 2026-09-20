@@ -15,6 +15,7 @@ import json
 from dataclasses import replace as dc_replace
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,16 +24,24 @@ from autodedup.incremental import Limits, WorkItem, run_pass
 from autodedup.incremental_lane import (
     BUDGET_SETTING,
     CURSOR_CHANGED,
+    CURSOR_ENTER,
     CURSOR_FLIPPED,
     CURSOR_NEW,
     CURSOR_SCOPE,
     ENV_FLAG,
     SCOPE_SETTING,
     STORAGE_WATERMARK,
+    RetireRefusal,
     SqlStore,
     SqlWork,
+    resolve_scope_parents,
     run_incremental,
     storage_guard,
+)
+from autodedup.incremental_sql import (
+    RT_IDLE_GUARD_SQL,
+    RT_LOCK_GUARD_SQL,
+    RT_STATEMENT_GUARD_SQL,
 )
 from autodedup.incremental_scope import (
     CORPUS_PROJECTION_MB,
@@ -125,6 +134,7 @@ def test_the_lane_refuses_an_empty_scope_setting(tmp_path, monkeypatch) -> None:
 def test_the_guard_refuses_a_pass_when_the_schema_is_over_budget(tmp_path, monkeypatch):
     conn = FakePg()
     conn.schema_bytes = 500 * 1_048_576
+    conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     conn.settings[BUDGET_SETTING] = 400
     monkeypatch.setenv(ENV_FLAG, "true")
     with pytest.raises(SystemExit) as raised:
@@ -200,7 +210,9 @@ def test_every_feed_claims_only_what_the_scope_holds() -> None:
     _place(db, 9, obec=563510)
     _place(db, 8, obec=999999)
 
-    items = SqlWork(db, SCOPE, GEN).claim(50)
+    # Half this fixture's store is out of scope on purpose, so D1's rail is opened for it:
+    # what is under test here is WHICH feed may name an out-of-scope listing.
+    items = SqlWork(db, SCOPE, GEN, max_retire_fraction=1.0).claim(50)
     by_feed = {feed: sorted(item.listing_id for item in items if item.feed == feed)
                for feed in {item.feed for item in items}}
     assert by_feed["straggler"] == [9]
@@ -258,7 +270,7 @@ def test_a_window_with_more_in_scope_than_the_share_stops_at_what_it_took() -> N
         db.listings[listing_id] = {"first_seen_at": old, "inactive_at": None,
                                    "is_active": True}
         _place(db, listing_id, obec=563510)
-    work = SqlWork(db, SCOPE, GEN, window=25, revive_slice=0, drift_slice=0)
+    work = SqlWork(db, SCOPE, GEN, window=25, revive_slice=0, drift_slice=0, enter_slice=0)
     items = work.claim(10)  # five feeds, so a share of two
     assert [item.listing_id for item in items] == [300, 301]
     assert work.commit(items)[CURSOR_NEW] == 301, "the window end would skip 302-309"
@@ -266,7 +278,7 @@ def test_a_window_with_more_in_scope_than_the_share_stops_at_what_it_took() -> N
 
 def test_a_refused_pass_advances_no_cursor_even_across_an_empty_window() -> None:
     db = _feeds_db()
-    work = SqlWork(db, SCOPE, GEN)
+    work = SqlWork(db, SCOPE, GEN, max_retire_fraction=1.0)
     work.claim(50)
     work.commit([])  # E75: the pair budget refused this claim
     assert db.cursors == {CURSOR_NEW: {"last_listing_id": 50}}, "the fixture's own row only"
@@ -392,6 +404,7 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, 
     conn.schema_bytes = 64 * 1_048_576
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
                              "artifact_url": None, "settings": {}, "model_version": "m"}
+    conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     monkeypatch.setenv(ENV_FLAG, "true")
     out = run_incremental(lambda: conn, {SCOPE_SETTING: "obec:563510"}, tmp_path)
     assert out["scope"] == [{"grain": "obec", "code": 563510}]
@@ -402,3 +415,211 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, 
     # The growth watermark is written, so the NEXT pass can report growth against this one.
     assert conn.settings[STORAGE_WATERMARK]["bytes"] == conn.schema_bytes
     assert json.loads(Path(tmp_path, "incremental.json").read_text())["scope"]
+
+
+# ------------------------------------------------- W9d: the four defects the verification found
+#
+# D1 a separator-only scope parsed to an EMPTY, non-whole-corpus scope and the drift sweep then
+# reported every row of the store as departed; D2 a dispatch-arg scope retired everything the
+# seeded scope holds without ever being persisted; D3 nothing claimed a listing whose location
+# resolved INTO the scope after the cursor had passed it, and the straggler look-back was an id
+# RANGE rather than a row count; D4 the session guards were set outside the pass's transaction
+# on a transaction-pooled connection.
+
+
+def _empty_scope() -> Scope:
+    """An empty scope the constructor now refuses, built around it — the drift sweep's own
+    refusal has to stand on its own feet (D1)."""
+    scope = object.__new__(Scope)
+    object.__setattr__(scope, "blocks", ())
+    object.__setattr__(scope, "whole_corpus", False)
+    return scope
+
+
+def test_a_separator_only_scope_is_a_hard_error_not_a_null_scope() -> None:
+    for raw in (",", " , , ", ",,", ";", " ; "):
+        with pytest.raises(ScopeError):
+            parse_scope(raw)
+    with pytest.raises(ScopeError):
+        Scope(())
+    with pytest.raises(ScopeError):
+        parse_scope([[]])
+
+
+def test_the_drift_sweep_refuses_to_retire_more_than_the_safety_fraction() -> None:
+    """The D1 scenario end to end: a scope that holds nothing would report the WHOLE store as
+    departed. The sweep refuses rather than retiring it, and no cursor moves."""
+    db = FakePg()
+    for listing_id in range(1, 101):
+        db.rt_fp[(GEN, listing_id)] = _fp_row()
+        _place(db, listing_id, obec=999999)
+    work = SqlWork(db, SCOPE, GEN)
+    with pytest.raises(RetireRefusal) as raised:
+        work.claim(50)
+    assert "retire" in str(raised.value).lower()
+    assert not db.cursors and len(db.rt_fp) == 100
+
+
+def test_the_drift_sweep_refuses_outright_on_an_empty_scope() -> None:
+    db = FakePg()
+    db.rt_fp[(GEN, 1)] = _fp_row()
+    _place(db, 1, obec=563510)
+    with pytest.raises(RetireRefusal):
+        SqlWork(db, _empty_scope(), GEN).claim(50)
+
+
+def test_a_handful_of_departures_is_still_retired() -> None:
+    """The guard is a rail against a store-wide wipe, not against the drift it exists for."""
+    db = FakePg()
+    for listing_id in range(1, 101):
+        db.rt_fp[(GEN, listing_id)] = _fp_row()
+        _place(db, listing_id, obec=563510)
+    _place(db, 7, obec=999999)
+    items = SqlWork(db, SCOPE, GEN).claim(50)
+    assert [item.listing_id for item in items if item.retire] == [7]
+
+
+def test_the_lane_stops_loudly_when_the_drift_sweep_refuses(tmp_path, monkeypatch) -> None:
+    conn = FakePg()
+    conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
+                             "artifact_url": None, "settings": {}, "model_version": "m"}
+    conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
+    for listing_id in range(1, 101):
+        conn.rt_fp[(GEN, listing_id)] = _fp_row()
+        _place(conn, listing_id, obec=999999)
+    monkeypatch.setenv(ENV_FLAG, "true")
+    with pytest.raises(SystemExit) as raised:
+        run_incremental(lambda: conn, {"generation": GEN}, tmp_path)
+    assert "retire" in str(raised.value).lower()
+    assert not conn.cursors and len(conn.rt_fp) == 100
+
+
+# ------------------------------------------------------------ D2: the seeded scope is the truth
+
+
+def _seeded(scope_json: Any) -> FakePg:
+    conn = FakePg()
+    conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
+                             "artifact_url": None, "settings": {}, "model_version": "m"}
+    conn.settings[SCOPE_SETTING] = scope_json
+    return conn
+
+
+def test_a_dispatch_scope_that_differs_from_the_seeded_one_is_refused(tmp_path, monkeypatch):
+    conn = _seeded([{"grain": "obec", "code": 563510}, {"grain": "obec", "code": 577626}])
+    monkeypatch.setenv(ENV_FLAG, "true")
+    with pytest.raises(SystemExit) as raised:
+        run_incremental(lambda: conn, {"generation": GEN, SCOPE_SETTING: "obec:563510"},
+                        tmp_path)
+    assert "rt_rescope" in str(raised.value)
+    assert conn.settings[SCOPE_SETTING] == [{"grain": "obec", "code": 563510},
+                                            {"grain": "obec", "code": 577626}]
+    assert not conn.lease and not conn.cursors
+
+
+def test_the_same_scope_spelled_differently_is_not_a_rescope(tmp_path, monkeypatch) -> None:
+    conn = _seeded([{"grain": "obec", "code": 577626}, {"grain": "obec", "code": 563510}])
+    monkeypatch.setenv(ENV_FLAG, "true")
+    out = run_incremental(lambda: conn, {"generation": GEN,
+                                         SCOPE_SETTING: "obec:563510 obec:577626"}, tmp_path)
+    assert out.get("rescoped") is False
+
+
+def test_rt_rescope_persists_the_new_scope_and_requeues_the_entrants(tmp_path, monkeypatch):
+    conn = _seeded([{"grain": "obec", "code": 563510}, {"grain": "obec", "code": 577626}])
+    conn.cursors[CURSOR_ENTER] = {"last_listing_id": 4242, "last_snapshot_id": 1}
+    monkeypatch.setenv(ENV_FLAG, "true")
+    out = run_incremental(lambda: conn, {"generation": GEN, SCOPE_SETTING: "obec:563510",
+                                         "rt_rescope": "true"}, tmp_path)
+    assert out["rescoped"] is True
+    assert conn.settings[SCOPE_SETTING] == [{"grain": "obec", "code": 563510}]
+    # The entrant sweep restarts, so everything the new scope holds is re-claimed.
+    assert conn.cursors[CURSOR_ENTER]["last_listing_id"] == 0
+
+
+def test_a_seeded_generation_with_no_scope_row_is_a_hard_error(tmp_path, monkeypatch) -> None:
+    """Never a silent fall back to the default: the row IS the generation's scope."""
+    conn = FakePg()
+    conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
+                             "artifact_url": None, "settings": {}, "model_version": "m"}
+    monkeypatch.setenv(ENV_FLAG, "true")
+    with pytest.raises(SystemExit) as raised:
+        run_incremental(lambda: conn, {"generation": GEN}, tmp_path)
+    assert SCOPE_SETTING in str(raised.value)
+    assert not conn.cursors and not conn.rt_fp
+
+
+# --------------------------------------------------------------- D3: the drift-IN feed
+
+
+def test_the_straggler_sweep_looks_back_a_row_count_not_an_id_range() -> None:
+    """Ids are sparse (21.7 id units a row on the live corpus), so an id RANGE of 5,000 is a
+    few hundred rows, not 5,000."""
+    db = FakePg()
+    for listing_id in (1_000, 40_000, 80_000):
+        db.listings[listing_id] = {"first_seen_at": db.now - timedelta(hours=2),
+                                   "inactive_at": None, "is_active": True}
+        _place(db, listing_id, obec=563510)
+    db.cursors[CURSOR_NEW] = {"last_listing_id": 100_000}
+    work = SqlWork(db, SCOPE, GEN, straggler_window=2, revive_slice=0, drift_slice=0,
+                   enter_slice=0)
+    stragglers = [item.listing_id for item in work.claim(50) if item.feed == "straggler"]
+    assert stragglers == [40_000, 80_000]
+
+
+def test_a_listing_whose_location_resolves_into_the_scope_later_is_claimed() -> None:
+    """`listing_location` is written asynchronously, so an in-scope listing can carry no obec
+    when its window passes. The sixth feed is the only thing that ever claims it."""
+    db = FakePg()
+    db.listings[10] = {"first_seen_at": db.now - timedelta(days=9), "inactive_at": None,
+                       "is_active": True}
+    _place(db, 10, obec=563510)                       # resolved AFTER the cursor passed it
+    db.cursors[CURSOR_NEW] = {"last_listing_id": 5_000_000}
+    work = SqlWork(db, SCOPE, GEN, straggler_window=0, revive_slice=0, drift_slice=0)
+    entered = [item.listing_id for item in work.claim(50) if item.feed == "entered"]
+    assert entered == [10]
+    # Once it holds a fingerprint row the sweep stops offering it.
+    db.rt_fp[(GEN, 10)] = _fp_row()
+    assert not [item for item in SqlWork(db, SCOPE, GEN, straggler_window=0, revive_slice=0,
+                                         drift_slice=0).claim(50) if item.feed == "entered"]
+
+
+def test_the_entrant_sweep_walks_one_block_a_pass_and_wraps() -> None:
+    db = FakePg()
+    db.admin_parents[490245] = 554782
+    for listing_id, place in ((1, {"obec": 563510}), (2, {"cast_obce": 490245})):
+        db.listings[listing_id] = {"first_seen_at": db.now - timedelta(days=9),
+                                   "inactive_at": None, "is_active": True}
+        _place(db, listing_id, obec=place.get("obec", 554782),
+               cast_obce=place.get("cast_obce"))
+    db.cursors[CURSOR_NEW] = {"last_listing_id": 5_000_000}
+    work = SqlWork(db, SCOPE, GEN, straggler_window=0, revive_slice=0, drift_slice=0,
+                   parents={490245: 554782})
+    first = [item.listing_id for item in work.claim(50) if item.feed == "entered"]
+    work.commit([WorkItem(listing_id, "entered", None, None) for listing_id in first])
+    second_work = SqlWork(db, SCOPE, GEN, straggler_window=0, revive_slice=0, drift_slice=0,
+                          parents={490245: 554782})
+    second = [item.listing_id for item in second_work.claim(50) if item.feed == "entered"]
+    assert first == [1] and second == [2], "one block a pass, then the next"
+
+
+def test_a_quarter_block_needs_its_parent_obec_resolved() -> None:
+    db = FakePg()
+    db.admin_parents[490245] = 554782
+    assert resolve_scope_parents(db, SCOPE) == {490245: 554782}
+    with pytest.raises(ScopeError):
+        resolve_scope_parents(FakePg(), SCOPE)
+
+
+# ------------------------------------------- D4: the session guards belong INSIDE the transaction
+
+
+def test_the_session_guards_are_set_local_inside_the_pass_transaction(tmp_path, monkeypatch):
+    """`db.connect` speaks to the transaction-mode pooler, which rebinds a connection between
+    queries: a guard set on the session is a guard the pass's own transaction may never see."""
+    conn = _seeded([{"grain": "obec", "code": 563510}])
+    monkeypatch.setenv(ENV_FLAG, "true")
+    run_incremental(lambda: conn, {"generation": GEN}, tmp_path)
+    for guard in (RT_STATEMENT_GUARD_SQL, RT_LOCK_GUARD_SQL, RT_IDLE_GUARD_SQL):
+        assert guard in conn.statements_in_tx, guard
+        assert ", true)" in guard, "set_config must be LOCAL to the transaction"

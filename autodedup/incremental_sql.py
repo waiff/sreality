@@ -43,15 +43,23 @@ select to_regclass('autodedup.fp_key')         is not null
 """
 
 # A pass is one transaction (E75) and a statement that runs away is a lease held past its TTL,
-# so both bounds are set on the session before any work begins.
-# `SET` is a utility statement and takes no parameter, so the two session bounds go through
-# `set_config` — same effect, one PREPARE-able statement each.
+# so all three bounds are set as the transaction's FIRST statements. `SET` is a utility
+# statement and takes no parameter, so each goes through `set_config` — same effect, one
+# PREPARE-able statement each — and every one is LOCAL (D4): `db.connect` speaks to Supabase's
+# transaction-mode pooler, which rebinds the connection between queries, so a guard set on the
+# session is a guard the pass's own transaction may never see (and one a later, unrelated
+# consumer of that backend may inherit). `is_local = true` binds it to this transaction and
+# unwinds with it.
 RT_STATEMENT_GUARD_SQL = """
-select set_config('statement_timeout', %(statement_timeout_ms)s::text, false)
+select set_config('statement_timeout', %(statement_timeout_ms)s::text, true)
+"""
+
+RT_LOCK_GUARD_SQL = """
+select set_config('lock_timeout', %(lock_timeout_ms)s::text, true)
 """
 
 RT_IDLE_GUARD_SQL = """
-select set_config('idle_in_transaction_session_timeout', %(idle_timeout_ms)s::text, false)
+select set_config('idle_in_transaction_session_timeout', %(idle_timeout_ms)s::text, true)
 """
 
 # The SECOND kill switch, in the database rather than in the repository: an operator can stop
@@ -145,22 +153,32 @@ select coalesce(max(w.id), %(after_id)s::bigint) as window_max,
 # the anti-join ALONE would answer with out-of-scope ids for ever — almost nothing in the
 # window has a fingerprint row, and almost nothing should — so the scope is part of this
 # statement rather than a filter over its answer.
+# The look-back is a ROW count and not an id range (D3). Ids are sparse and unevenly so —
+# measured live, the last 5,000 id UNITS hold 1,482 rows near the head and ~230 in older id
+# space, against a constant whose comment always meant 5,000 ROWS. `order by id desc limit N`
+# off `listings_pkey` is the honest spelling of "the last N rows", and it is a backwards index
+# scan rather than a range predicate.
 RT_NEW_STRAGGLERS_SQL = """
-select l.id, l.first_seen_at
-  from public.listings l
+with win as (
+  select l.id as id, l.first_seen_at as first_seen_at
+    from public.listings l
+   where l.id <= %(after_id)s::bigint
+   order by l.id desc
+   limit %(window)s
+)
+select w.id, w.first_seen_at
+  from win w
   left join public.listing_location ll
-         on ll.listing_id = l.id
+         on ll.listing_id = w.id
         and (ll.obec_kod = any(%(obec)s::bigint[])
              or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
- where l.id > %(after_id)s::bigint - %(window)s::bigint
-   and l.id <= %(after_id)s::bigint
-   and (%(all_scope)s::boolean or ll.listing_id is not null)
+ where (%(all_scope)s::boolean or ll.listing_id is not null)
    and not exists (
          select 1
            from autodedup.rt_fp f
           where f.generation = %(generation)s::text
-            and f.listing_id = l.id)
- order by l.id
+            and f.listing_id = w.id)
+ order by w.id
  limit %(limit)s
 """
 
@@ -273,6 +291,57 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
          on ll.listing_id = f.listing_id
         and (ll.obec_kod = any(%(obec)s::bigint[])
              or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+"""
+
+# The SIXTH feed, and the one the scope owes in the other direction (D3): `listing_location` is
+# written asynchronously from the scrape, so an in-scope listing can carry no `obec_kod` at all
+# when its arrival window passes. The forward feed correctly skips it — it is not yet in scope —
+# and the cursor steps over it; when the geocoder resolves it an hour later NOTHING claims it
+# (the drift sweep only sweeps OUT, the revive sweep only reads rows the store already holds,
+# and the straggler sweep looks back a bounded number of rows). Measured live: 6.2% of the
+# listings first seen in the last 6 h carry a NULL `obec_kod`, against a 4.2-7.1% steady state.
+#
+# There is no index-served change stamp to drive it off — `listing_location.resolved_at` carries
+# no index at all and D8 forbids adding one — so the feed is a bounded round-robin over the
+# SCOPE's own listing ids, ONE block a pass, served by `listing_location_obec_granularity`.
+# `EXPLAIN` on the live statements: Bitmap Index Scan on `(obec_kod, granularity)` for a town
+# block (Jablonec + Turnov: 3,999 index rows, 212 ms cold), and for a QUARTER block the
+# narrowest path this schema can serve — the parent obec's index entries filtered on
+# `cast_obce_kod`, because there is no index on that column (Praha-Vysočany: 159,340 index rows,
+# 1,439 of them the quarter's, 8.3 s cold). One block a pass is what keeps that off every pass.
+RT_SCOPE_ENTER_SQL = """
+select coalesce(max(e.listing_id), %(after_id)s::bigint) as slice_max,
+       count(*)                                          as slice_size,
+       coalesce(array_agg(e.listing_id order by e.listing_id)
+                filter (where e.missing),
+                '{}'::bigint[])                          as entered
+  from (select ll.listing_id as listing_id,
+               not exists (select 1
+                             from autodedup.rt_fp f
+                            where f.generation = %(generation)s::text
+                              and f.listing_id = ll.listing_id) as missing
+          from public.listing_location ll
+         where ll.obec_kod = %(obec)s::bigint
+           and (%(cast_obce)s::bigint is null
+                or ll.cast_obce_kod = %(cast_obce)s::bigint)
+           and ll.listing_id > %(after_id)s::bigint
+         order by ll.listing_id
+         limit %(limit)s) e
+"""
+
+# A quarter has no index of its own, so the entrant sweep reaches it through its PARENT obec.
+# The parent is a registry fact, read once a pass from `ruian_admin_units` through its
+# `(level, code)` index and its primary key (`EXPLAIN`: two Index Scans, 4.7 ms). A quarter the
+# registry cannot place is a hard error rather than a block the sweep silently skips.
+RT_SCOPE_PARENT_OBEC_SQL = """
+select u.code as cast_obce_kod, p.code as obec_kod
+  from public.ruian_admin_units u
+  join public.ruian_admin_units p
+    on p.id = u.parent_id
+   and p.level = 'obec'
+ where u.level = 'cast_obce'
+   and u.code = any(%(codes)s::bigint[])
+   and u.valid_to is null
 """
 
 # ------------------------------------------------------------------ the storage budget (E79)

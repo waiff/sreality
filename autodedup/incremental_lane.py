@@ -32,6 +32,7 @@ import os
 import socket
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, Mapping, Sequence
@@ -75,6 +76,7 @@ from autodedup.incremental_scope import (
     Scope,
     ScopeError,
     guard_agrees,
+    resolve_pass_scope,
     resolve_scope,
 )
 from autodedup.incremental_sql import (
@@ -96,6 +98,7 @@ from autodedup.incremental_sql import (
     RT_FP_READ_SQL,
     RT_FP_UPSERT_SQL,
     RT_IDLE_GUARD_SQL,
+    RT_LOCK_GUARD_SQL,
     RT_PHASH_POP_SQL,
     RT_KEY_DELETE_SQL,
     RT_KEY_INSERT_SQL,
@@ -118,6 +121,8 @@ from autodedup.incremental_sql import (
     RT_ROW_CENSUS_SQL,
     RT_ROW_ESTIMATE_SQL,
     RT_SCHEMA_SIZE_SQL,
+    RT_SCOPE_ENTER_SQL,
+    RT_SCOPE_PARENT_OBEC_SQL,
     RT_SCOPE_DRIFT_SQL,
     RT_SEED_CURSORS_SQL,
     RT_SETTING_SQL,
@@ -146,10 +151,13 @@ CURSOR_CHANGED: str = "rt_changed"
 CURSOR_FLIPPED: str = "rt_flipped"
 CURSOR_REVIVE: str = "rt_revive"
 CURSOR_SCOPE: str = "rt_scope_drift"
+CURSOR_ENTER: str = "rt_scope_enter"
 ENV_FLAG: str = "AUTODEDUP_REALTIME_ENABLED"
 DB_FLAG: str = "realtime_enabled"
 SCOPE_SETTING: str = "rt_scope"
 BUDGET_SETTING: str = "rt_max_schema_mb"
+RETIRE_SETTING: str = "rt_max_retire_fraction"
+RESCOPE_ARG: str = "rt_rescope"
 STORAGE_WATERMARK: str = "rt_storage_last"
 
 # How long a row must have existed before the lane will claim it (E73). Portal writes commit in
@@ -170,11 +178,21 @@ FEED_WINDOW: int = 1000
 # One round-robin slice of the scope-drift sweep, over this generation's own fingerprint rows.
 # Under the trial scope (4,969 listings) one slice covers the whole store every pass.
 DRIFT_SLICE: int = 20000
+# One round-robin slice of the ENTRANT sweep (D3), over ONE of the scope's blocks a pass. The
+# trial scope's largest block is Praha-Vysočany at 1,439 rows, so a slice covers a block whole
+# and the sweep cycles the scope every len(blocks) passes — 30 minutes at the `*/10` cadence.
+ENTER_SLICE: int = 20000
+# The share of the store one pass's drift sweep may retire before the lane STOPS instead (D1).
+# A geocode correction moves a listing or two; a scope that has gone wrong moves everything, and
+# the difference between those two is the only thing standing between a hand-edited settings row
+# and a store that has to be re-seeded. Data, not a constant: `rt_max_retire_fraction`.
+MAX_RETIRE_FRACTION: float = 0.05
 # The storage budget, in megabytes of schema `autodedup` (pg_total_relation_size, indexes and
 # TOAST included). The schema is ~148 MB today and the operator pays for it; a lane that has
 # not been watched for a week must not be able to double it.
 MAX_SCHEMA_MB: float = 400.0
 STATEMENT_TIMEOUT_MS: int = 120_000
+LOCK_TIMEOUT_MS: int = 5_000
 IDLE_TIMEOUT_MS: int = 300_000
 _EPOCH: str = "epoch"
 
@@ -739,7 +757,9 @@ class SqlWork:
     def __init__(self, conn: Any, scope: Scope, generation: str = GENERATION,
                  lag: int = SETTLE_LAG_S, straggler_window: int = STRAGGLER_WINDOW,
                  revive_slice: int = REVIVE_SLICE, window: int = FEED_WINDOW,
-                 drift_slice: int = DRIFT_SLICE) -> None:
+                 drift_slice: int = DRIFT_SLICE, enter_slice: int = ENTER_SLICE,
+                 parents: Mapping[int, int] | None = None,
+                 max_retire_fraction: float = MAX_RETIRE_FRACTION) -> None:
         self.conn = conn
         self.scope = scope
         self.generation = generation
@@ -748,6 +768,11 @@ class SqlWork:
         self.revive_slice = revive_slice
         self.window = window
         self.drift_slice = drift_slice
+        self.enter_slice = enter_slice
+        self.max_retire_fraction = float(max_retire_fraction)
+        self.parents = dict(parents or {})
+        self.enter_blocks = _enter_blocks(scope, self.parents)
+        self.retired_refused = 0
         self.statements = 0
         self.windows: dict[str, int] = {}
         self._pending: dict[str, Any] = {}
@@ -758,7 +783,8 @@ class SqlWork:
         return _rows(self.conn, sql, params)
 
     def cursors(self) -> dict[str, tuple[int, int, Any]]:
-        names = [CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE, CURSOR_SCOPE]
+        names = [CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE, CURSOR_SCOPE,
+                 CURSOR_ENTER]
         out = {name: (0, 0, _EPOCH) for name in names}
         for row in self._query(RT_CURSOR_READ_SQL, {"names": names}):
             out[str(row[0])] = (int(row[1] or 0), int(row[2] or 0), row[3] or _EPOCH)
@@ -840,12 +866,68 @@ class SqlWork:
             slice_max, slice_size, departed = (
                 (int(rows[0][0]), int(rows[0][1]), list(rows[0][2] or ()))
                 if rows else (after_scope, 0, []))
+            self._guard_retirement(departed)
             self._pending[CURSOR_SCOPE] = 0 if slice_size < self.drift_slice else slice_max
             for listing_id in departed[:share]:
                 items.append(WorkItem(int(listing_id), "drifted", None, None, retire=True))
+
+        # The sixth feed (D3): the rows the scope has started holding and no cursor has ever
+        # seen, because `listing_location` is written after the listing is.
+        if self.enter_slice and self.enter_blocks:
+            index = cursors[CURSOR_ENTER][1] % len(self.enter_blocks)
+            after_enter = cursors[CURSOR_ENTER][0]
+            block = self.enter_blocks[index]
+            rows = self._query(RT_SCOPE_ENTER_SQL, {
+                "generation": self.generation, "obec": block.obec,
+                "cast_obce": block.cast_obce, "after_id": after_enter,
+                "limit": self.enter_slice})
+            slice_max, slice_size, entered = (
+                (int(rows[0][0]), int(rows[0][1]), list(rows[0][2] or ()))
+                if rows else (after_enter, 0, []))
+            self.windows["entered"] = slice_size
+            taken = [int(value) for value in entered[:share]]
+            if len(entered) > len(taken):
+                # Cut like a forward feed: stop at the last row this pass took.
+                self._pending[CURSOR_ENTER] = (taken[-1], index)
+            elif slice_size < self.enter_slice:
+                # The block is walked out — move to the next one and start it from the top.
+                self._pending[CURSOR_ENTER] = (0, (index + 1) % len(self.enter_blocks))
+            else:
+                self._pending[CURSOR_ENTER] = (slice_max, index)
+            for listing_id in taken:
+                items.append(WorkItem(listing_id, "entered", None, None))
         for item in items:
             self._claimed.setdefault(item.feed, set()).add(item.listing_id)
         return items
+
+    def _guard_retirement(self, departed: Sequence[Any]) -> None:
+        """Refuse a drift sweep that is not drift (D1).
+
+        The sweep reads the scope as a PREDICATE, so a scope that holds nothing — a settings
+        row hand-written as `","`, a rescope that lost its blocks — reports the whole store as
+        departed and the lane grinds it away a share at a time, silently, until a re-seed is
+        the only recovery. Two rails, both independent of how the scope was parsed: a scope
+        with no blocks retires nothing at all, and a sweep that wants more than
+        `rt_max_retire_fraction` of the generation's rows in ONE pass window stops the lane
+        loudly with the cursor unmoved, because that is drift's shape in no corpus."""
+        if not departed:
+            return
+        if not self.scope.whole_corpus and not self.scope.blocks:
+            raise RetireRefusal(
+                f"the drift sweep would retire {len(departed)} listings under an EMPTY scope — "
+                "refusing. Nothing was written and no cursor moved.")
+        store_rows = int(_rows(self.conn, RT_FP_COUNT_SQL,
+                               {"generation": self.generation})[0][0] or 0)
+        self.statements += 1
+        allowed = max(1, int(self.max_retire_fraction * store_rows))
+        if len(departed) > allowed:
+            self.retired_refused = len(departed)
+            raise RetireRefusal(
+                f"the drift sweep would retire {len(departed)} of the generation's "
+                f"{store_rows} listings in one pass, over the {self.max_retire_fraction:.0%} "
+                f"{RETIRE_SETTING} rail ({allowed}) — refusing. That is a scope that has gone "
+                "wrong, not a geocode correction. Nothing was written and no cursor moved; "
+                f"check autodedup.settings {SCOPE_SETTING!r}.")
 
     def commit(self, done: Sequence[WorkItem]) -> dict[str, Any]:
         """Advance each feed to the end of the window THIS pass decided, and no further.
@@ -861,7 +943,7 @@ class SqlWork:
         decided = {item.listing_id for item in done}
         for feed, name in (("new", CURSOR_NEW), ("changed", CURSOR_CHANGED),
                            ("flipped", CURSOR_FLIPPED), ("revived", CURSOR_REVIVE),
-                           ("drifted", CURSOR_SCOPE)):
+                           ("drifted", CURSOR_SCOPE), ("entered", CURSOR_ENTER)):
             if not claimed.get(feed, set()) <= decided:
                 pending.pop(name, None)
         if CURSOR_NEW in pending:
@@ -891,6 +973,15 @@ class SqlWork:
                 _exec(self.conn, RT_CURSOR_SET_SQL, {
                     "name": name, "last_listing_id": int(pending[name])})
                 out[name] = int(pending[name])
+        if CURSOR_ENTER in pending:
+            after_id, block = pending[CURSOR_ENTER]
+            self.statements += 1
+            # Both halves written whole: the sweep WRAPS to 0 inside a block and rolls the
+            # block pointer over, and a coalescing write could never take either back to 0.
+            _exec(self.conn, RT_CURSOR_WRITE_SQL, {
+                "name": CURSOR_ENTER, "last_listing_id": int(after_id),
+                "last_snapshot_id": int(block), "watermark": None})
+            out[CURSOR_ENTER] = [int(after_id), int(block)]
         return out
 
 
@@ -920,6 +1011,53 @@ def _flip_window(rows: Sequence[Sequence[Any]]) -> tuple[Any, Any, int, list[int
 
 class StorageRefusal(Exception):
     """The schema is already over budget. The lane exits non-zero with nothing written."""
+
+
+class RetireRefusal(Exception):
+    """The drift sweep wants to retire more of the store than drift ever could (D1)."""
+
+
+@dataclass(frozen=True, slots=True)
+class EnterBlock:
+    """One block of the scope as the entrant sweep reads it: always an obec (the index this
+    schema HAS), plus the quarter code when the block is a quarter (a filter, not an index)."""
+
+    obec: int
+    cast_obce: int | None = None
+
+
+def _enter_blocks(scope: Scope, parents: Mapping[int, int]) -> tuple[EnterBlock, ...]:
+    if scope.whole_corpus:
+        return ()        # nothing can enter a scope that already holds everything
+    blocks: list[EnterBlock] = []
+    for code in scope.obec_codes:
+        blocks.append(EnterBlock(int(code)))
+    for code in scope.cast_obce_codes:
+        parent = parents.get(int(code))
+        # A quarter with no parent is refused by `resolve_scope_parents` before a pass is
+        # built, so here it can only be a caller that resolved none: sweep what CAN be swept
+        # rather than refusing a second time in the wrong place.
+        if parent is not None:
+            blocks.append(EnterBlock(int(parent), int(code)))
+    return tuple(blocks)
+
+
+def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
+    """Each quarter block's parent obec, read once a pass from the RÚIAN register (D3).
+
+    A quarter the register cannot place is a hard error rather than a block the entrant sweep
+    quietly never walks — silent partial coverage is the defect this feed exists to close."""
+    codes = [int(code) for code in scope.cast_obce_codes]
+    if scope.whole_corpus or not codes:
+        return {}
+    found = {int(row[0]): int(row[1])
+             for row in _rows(conn, RT_SCOPE_PARENT_OBEC_SQL, {"codes": codes})}
+    missing = [code for code in codes if code not in found]
+    if missing:
+        raise ScopeError(
+            f"rt_scope names cast_obce {missing} which public.ruian_admin_units has no obec "
+            "parent for — refusing to run a scope the entrant sweep cannot walk")
+    return found
 
 
 def lane_settings(conn: Any, keys: Sequence[str]) -> dict[str, Any]:
@@ -1061,13 +1199,20 @@ def run_incremental(
         if not db_enabled(conn):
             return {"skipped": "dark", "reason": f"autodedup.settings {DB_FLAG} is false",
                     "spent_usd": 0.0}
-        control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING])
+        control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING, RETIRE_SETTING])
         try:
-            scope = resolve_scope(args.get(SCOPE_SETTING), control.get(SCOPE_SETTING))
+            # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
+            # the operator has to ask for by name (D2).
+            scope, rescoped = resolve_pass_scope(
+                args.get(SCOPE_SETTING), control.get(SCOPE_SETTING),
+                rescope=str(args.get(RESCOPE_ARG) or "").strip().lower() == "true")
+            parents = resolve_scope_parents(conn, scope)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         max_schema_mb = _setting_number(
             args.get(BUDGET_SETTING, control.get(BUDGET_SETTING)), MAX_SCHEMA_MB)
+        max_retire_fraction = _setting_number(
+            args.get(RETIRE_SETTING, control.get(RETIRE_SETTING)), MAX_RETIRE_FRACTION)
         try:
             storage = storage_guard(conn, generation, scope, max_schema_mb)
         except StorageRefusal as exc:
@@ -1076,8 +1221,6 @@ def run_incremental(
             return {"skipped": "leased", "reason": "another pass holds the lease",
                     "spent_usd": 0.0}
         leased = True
-        _exec(conn, RT_STATEMENT_GUARD_SQL, {"statement_timeout_ms": STATEMENT_TIMEOUT_MS})
-        _exec(conn, RT_IDLE_GUARD_SQL, {"idle_timeout_ms": IDLE_TIMEOUT_MS})
         rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation})
         if not rows:
             raise SystemExit(
@@ -1093,10 +1236,28 @@ def run_incremental(
                        straggler_window=int(args.get("straggler_window") or STRAGGLER_WINDOW),
                        revive_slice=int(args.get("revive_slice") or REVIVE_SLICE),
                        window=int(args.get("feed_window") or FEED_WINDOW),
-                       drift_slice=int(args.get("drift_slice") or DRIFT_SLICE))
+                       drift_slice=int(args.get("drift_slice") or DRIFT_SLICE),
+                       enter_slice=int(args.get("enter_slice") or ENTER_SLICE),
+                       parents=parents, max_retire_fraction=max_retire_fraction)
         result = None
         try:
             with _transaction(conn):
+                # The three bounds are the transaction's first statements and LOCAL to it
+                # (D4): over the transaction-mode pooler a session-level guard may belong to
+                # a backend this transaction never runs on.
+                _exec(conn, RT_STATEMENT_GUARD_SQL,
+                      {"statement_timeout_ms": STATEMENT_TIMEOUT_MS})
+                _exec(conn, RT_LOCK_GUARD_SQL, {"lock_timeout_ms": LOCK_TIMEOUT_MS})
+                _exec(conn, RT_IDLE_GUARD_SQL, {"idle_timeout_ms": IDLE_TIMEOUT_MS})
+                if rescoped:
+                    # A rescope is PERSISTED, not applied for one pass, and the entrant sweep
+                    # restarts so everything the new scope holds is (re)claimed (D2).
+                    _exec(conn, RT_SETTING_WRITE_SQL, {
+                        "key": SCOPE_SETTING, "value": json.dumps(scope.as_json()),
+                        "updated_by": f"{LANE_NAME}:rescope"})
+                    _exec(conn, RT_CURSOR_WRITE_SQL, {
+                        "name": CURSOR_ENTER, "last_listing_id": 0,
+                        "last_snapshot_id": 0, "watermark": None})
                 result = run_pass_bounded(store, facts, work, settings, model, calibration,
                                           limits=limits, generation=generation,
                                           now=time.time())
@@ -1105,6 +1266,9 @@ def run_incremental(
                     raise _Refused()
         except _Refused:
             pass
+        except RetireRefusal as exc:
+            # The transaction rolled back on the way out: nothing written, no cursor moved.
+            raise SystemExit(str(exc)) from exc
         summary = result.to_json() if result is not None else {"aborted": "unknown"}
         summary["fact_reads"] = facts.reads
         summary["statements"] = store.statements + facts.statements + work.statements
@@ -1112,6 +1276,7 @@ def run_incremental(
         summary["store_rows"] = int(
             _rows(conn, RT_FP_COUNT_SQL, {"generation": generation})[0][0])
         summary["scope"] = scope.as_json()
+        summary["rescoped"] = bool(rescoped)
         summary["windows"] = dict(work.windows)
         summary["retention"] = {"store_floor": settings.store_floor,
                                 "pairs_retained": store.pairs_retained,
@@ -1175,6 +1340,9 @@ def run_rt_seed(
         control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING])
         try:
             scope = resolve_scope(args.get(SCOPE_SETTING), control.get(SCOPE_SETTING))
+            # Proved at SEED time rather than at the first pass: a quarter the register cannot
+            # place is a scope whose entrant sweep could never walk it (D3).
+            resolve_scope_parents(conn, scope)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         try:
@@ -1219,6 +1387,8 @@ def run_rt_seed(
                 "last_snapshot_id": None, "watermark": seeded[2]})
             _exec(conn, RT_CURSOR_SET_SQL, {"name": CURSOR_REVIVE, "last_listing_id": 0})
             _exec(conn, RT_CURSOR_SET_SQL, {"name": CURSOR_SCOPE, "last_listing_id": 0})
+            _exec(conn, RT_CURSOR_WRITE_SQL, {"name": CURSOR_ENTER, "last_listing_id": 0,
+                                              "last_snapshot_id": 0, "watermark": None})
             # The generation's scope, written where the lane reads it: a pass dispatched
             # without an argument then runs the scope this generation was seeded for, and can
             # never quietly widen to one it has no fingerprints for.
