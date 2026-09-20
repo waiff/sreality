@@ -9,7 +9,7 @@ name: "AUTODEDUP: realtime shadow lane"
 # `public.listings` row, no `property_id`, no merge. It spends $0 by construction — ruling D19
 # gives no LLM judge merge authority on the band, so this lane calls no provider at all.
 #
-# What one pass does. SIX bounded watermark feeds hand it a slice of listings, and every one of
+# What one pass does. SEVEN bounded watermark feeds hand it a slice of listings, and every one of
 # them is restricted to `rt_scope` (E79 — the lane holds three blocks, not the corpus): new rows
 # off `listings_pkey`, content changes off `listing_snapshots_pkey`, activity flips off the
 # partial `listings_inactive_at_idx` paged on `(inactive_at, id)`, a round-robin sweep for
@@ -25,6 +25,28 @@ name: "AUTODEDUP: realtime shadow lane"
 # The retiring direction carries a rail of its own: retirement is measured over a ROLLING DAY
 # against the store as it stood when that day opened, and over `rt_max_retire_fraction` of it the
 # lane stops instead (E82).
+# The SEVENTH feed is the EVIDENCE sweep (E92), and it exists because none of the six above is
+# keyed on a photograph becoming evidence: images land about a minute after `first_seen_at`,
+# their pHash is written by an hourly job at :20 and their CLIP vector and tags by another at
+# :40 (measured p50 2.47 h, p90 4.51 h to a first tag), while this lane claims the listing at
+# `first_seen_at + 5..15 min`. Roughly 80% of arrivals were therefore decided with every
+# `phash` NULL, 78% never carry a second snapshot, and the listing's stored index keys never
+# gained a pHash posting at all — so no other listing's photo probe could reach it either. The
+# sweep round-robins this generation's own `rt_fp` rows whose recorded evidence is incomplete
+# or whose first decision is inside `rt_evidence_horizon_hours` (48 h), probes `public.images`
+# by listing id through `images_listing_id_idx` — 12 buffers a listing, ~150 listings a pass on
+# the trial scope, ~2.0 GB a day, and no join to the CLIP tables because `images.clip_tagged_at`
+# is the CLIP job's own stamp — and re-claims every listing whose photographs no longer match
+# what its stored decision rested on. Its second arm asks for the merges HELD in the band for
+# want of photographs whose horizon has run out, because nothing about those has moved.
+# AND A MERGE DOES NOT ACT ON EVIDENCE THE LANE DOES NOT HAVE YET (E93): while a side's gallery
+# exists and carries no hash at all, a merge that does not rest on K-B (the re-post) or K-R (a
+# shared order code) — the two certificates that need no photograph — is held in the band with
+# reason `evidence_pending` and re-decided when the evidence lands or the horizon passes.
+# Rejects are never held. Text-and-certificate decisions therefore still complete within one
+# pass; a photo-dependent merge waits for the hourly producers, which is a latency cost the
+# production fix (hashing on download, in the image worker) would remove and which is the
+# operator's call, not this program's.
 # Each forward feed reads a bounded WINDOW off its own
 # index, resolves the scope for that window through `listing_location_pkey`, and advances its
 # cursor over the window rather than over the survivors. Before any of it, the pass reads what
@@ -76,13 +98,27 @@ name: "AUTODEDUP: realtime shadow lane"
 # saw is UNKNOWN (never 0), and `population.images_unmeasured` in the summary is what says when
 # the generation is due a fresh export and re-seed.
 #
-# REQUIRES migration 539 (`autodedup.fp_key`, `rt_fp`, `rt_calibration`, `rt_block_cell`,
+# AND THE GATE CANNOT PASS ON NOTHING (E94/E95). W9g's gate counted breaches and nothing else,
+# so `checked` 0 with `breaches` 0 was a green pass — reachable by drifting or deleting the
+# baseline, and drift is monotone in export age, so the gate self-weakened as the export aged.
+# It now REFUSES below a floor (`rt_parity_min_checked`, 15, and `rt_parity_min_checked_share`,
+# 60% of the slice), beyond `rt_calibration_max_age_days` (14 days of EXPORT age — a frozen
+# population can only undercount, and an undercount is the anti-conservative direction), and
+# over `rt_parity_max_unknown_pop_share` (15% of the phash-bearing images it read carrying a
+# hash the calibration never measured). The population is compared PER IMAGE, so one re-hashed
+# frame excuses itself and not its fourteen neighbours. Every pass reports the calibration's
+# age and the population's coverage whether or not they refuse.
+#
+# REQUIRES migrations 539 (`autodedup.fp_key`, `rt_fp`, `rt_calibration`, `rt_block_cell`,
 # `rt_lease`, `rt_scope_ids`, `rt_scope_scan`, `rt_retire_event` plus the pair-grain columns) and
+# 540 (`rt_fp.ev_images` / `ev_phash` / `ev_clip` / `ev_tags` / `ev_complete` /
+# `first_decided_at` plus the three indexes the evidence sweep reads), and
 # a SEEDED generation. Without the migration the lane exits non-zero; without the seed it exits 0
 # as `skipped: unseeded` rather than failing every ten minutes (E80).
 #
 # TURNING IT ON — the exact sequence, in this order (E80):
-#   1. Apply `migrations/539_autodedup_realtime_lane.sql` (additive, schema `autodedup` only).
+#   1. Apply `migrations/539_autodedup_realtime_lane.sql` and
+#      `migrations/540_autodedup_evidence_arrival.sql` (both additive, schema `autodedup` only).
 #   2. Merge this branch. Nothing starts: the schedule stays dark until step 5.
 #   3. Seed the generation — this works WHILE THE LANE IS DARK, which is the point of it:
 #        gh workflow run autodedup.yml --ref main -f mode=rt_seed \

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import dataclass, fields as dataclass_fields
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -47,11 +47,13 @@ from autodedup.incremental_sql import (
     RT_PHASH_POP_COUNT_SQL,
 )
 from autodedup.parity_digest import (
+    Floors,
     baseline,
     compare,
     image_view,
     listing_view,
     stratified_sample,
+    verdict,
 )
 from autodedup.judge_lane import COHORT_FILE, download_cohort
 from autodedup.settings import Settings
@@ -591,7 +593,8 @@ def run_parity(
         # seed refuses to cut a baseline when this is non-zero, and every pass refuses to run
         # on one (E91). Read-only, and worth having in the instrument's own report — it is the
         # answer to "will the re-seed be refused?" before anything is seeded.
-        "gate": _gate_view(artifact_side, live_side, sample, drifted),
+        "gate": _gate_view(artifact_side, live_side, sample, drifted,
+                           dataset.meta.exported_at, facts),
         "facts": compare_facts(sample, artifact_side, live_side, drifted),
         "pairs": {"requested": parsed.pairs, "drawn": len(pairs),
                   **compare_pairs(pairs, artifact_side, live_side, calibration, settings,
@@ -604,12 +607,36 @@ def run_parity(
 
 
 def _gate_view(artifact: "Side", live: "Side", sample: Sequence[int],
-               drifted: Mapping[int, Any]) -> dict[str, Any]:
+               drifted: Mapping[int, Any], exported_at: Any = None,
+               reader: Any = None) -> dict[str, Any]:
+    """What the GATE would say, in the gate's own words — floors included (E94/E95).
+
+    The instrument and the rail share one definition on purpose: `would_refuse` was a breach
+    count, and a breach count is exactly what W9g's gate could pass vacuously on."""
     rows = baseline({i: artifact.listings[i] for i in sample if i in artifact.listings},
                     {i: artifact.images.get(i, []) for i in sample})
     report = compare(rows, live.listings, live.images, set(drifted))
-    report["would_refuse"] = report["breaches"] > 0
+    report["age_days"] = _age_days(exported_at)
+    with_phash = getattr(reader, "images_with_phash", 0) or 0
+    unmeasured = getattr(reader, "images_unmeasured", 0) or 0
+    report["unknown_pop_share"] = (round(unmeasured / float(with_phash), 6)
+                                   if with_phash else None)
+    refusal = verdict(report, generation=GENERATION, floors=Floors(),
+                      what="the scheduled pass")
+    report["would_refuse"] = refusal is not None
+    report["would_refuse_because"] = refusal
+    report["floors"] = {"min_checked": Floors().min_checked,
+                        "min_checked_share": Floors().min_checked_share,
+                        "max_age_days": Floors().max_age_days,
+                        "max_unknown_pop_share": Floors().max_unknown_pop_share}
     return report
+
+
+def _age_days(stamp: Any) -> float | None:
+    parsed = as_datetime(stamp)
+    if parsed is None:
+        return None
+    return round((datetime.now(timezone.utc) - parsed).total_seconds() / 86400.0, 3)
 
 
 def artifact_population(dataset: Dataset) -> dict[int, int]:
