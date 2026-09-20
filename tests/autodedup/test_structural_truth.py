@@ -147,8 +147,29 @@ def test_overlap_days_ends_an_active_advert_at_its_last_sighting() -> None:
     a = make(1, first="2026-05-01T00:00:00+00:00", last_seen="2026-06-01T00:00:00+00:00")
     b = make(2, first="2026-05-20T00:00:00+00:00", last_seen="2026-07-01T00:00:00+00:00")
     assert overlap_days(a, b) == pytest.approx(12.0)
-    gone = make(3, first="2026-01-01T00:00:00+00:00", inactive="2026-02-01T00:00:00+00:00")
+    gone = make(3, first="2026-01-01T00:00:00+00:00", last_seen="2026-01-28T00:00:00+00:00",
+                inactive="2026-02-01T00:00:00+00:00", active=False)
     assert overlap_days(a, gone) == 0.0
+
+
+def test_overlap_days_ends_an_inactive_advert_at_its_last_sighting_not_the_stamp() -> None:
+    """W8: `inactive_at` is the DETECTION stamp, and the detection lag reaches 70 days.
+
+    Listing 412650's shape: last seen 2026-08-12, stamped inactive 2026-09-08. Its successor
+    started the day before the last sighting, so the two ran together for ONE day — the 27.4
+    days the old clock reported sailed past the 21-day re-post guard."""
+    gone = make(1, first="2026-06-01T00:00:00+00:00", last_seen="2026-08-12T00:00:00+00:00",
+                inactive="2026-09-08T00:00:00+00:00", active=False)
+    successor = make(2, first="2026-08-11T00:00:00+00:00",
+                     last_seen="2026-09-17T00:00:00+00:00")
+    assert overlap_days(gone, successor) == pytest.approx(1.0)
+
+
+def test_overlap_days_falls_back_to_the_stamp_when_there_is_no_sighting() -> None:
+    gone = make(1, first="2026-01-01T00:00:00+00:00", last_seen=None,
+                inactive="2026-02-01T00:00:00+00:00", active=False)
+    other = make(2, first="2026-01-20T00:00:00+00:00", last_seen="2026-03-01T00:00:00+00:00")
+    assert overlap_days(gone, other) == pytest.approx(12.0)
 
 
 # --- positives --------------------------------------------------------------------------

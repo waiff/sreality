@@ -83,8 +83,8 @@ def test_the_lane_writer_census_covers_the_package() -> None:
         "__init__.py", "agreement.py", "blocking.py", "candidates.py", "cluster.py",
         "cohort.py", "dataset.py", "decide.py", "ensembles.py", "features.py",
         "fingerprint.py", "guards.py",
-        "model.py", "normalize.py", "oss_pod.py", "settings.py", "ui_sql.py",
-        "verdict_reasons.py",
+        "model.py", "normalize.py", "oss_pod.py", "settings.py", "text_facts.py",
+        "ui_sql.py", "verdict_reasons.py",
     }
     present = {path.name for path in PACKAGE.glob("*.py")}
     unclassified = present - set(LANE_WRITERS) - exempt
