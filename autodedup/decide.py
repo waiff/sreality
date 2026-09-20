@@ -115,12 +115,47 @@ def certificate_a(feats: Feats) -> bool:
     )
 
 
+def certificate_b_image_floor(feats: Feats, settings: Settings) -> bool:
+    """E65: K-B may not certify a pair whose photographs it never compared.
+
+    Every clause of K-B — one portal, one broker, one template body, one stated size, windows
+    that never touched — is satisfied BY CONSTRUCTION when a developer re-posts one template
+    across several units of one project, so the certificate rests on no observation of the unit
+    itself. It held only because the delisting-DETECTION clock inflated an inactive advert's
+    window by up to 70.7 days and manufactured the overlap that K-B's disjointness clause reads
+    as "not a re-post"; the honest clock (E62) removes that accident. The guard written for this
+    exact shape — E46, catalogue-only agreement — cannot reach a K-B pair, because E46 requires
+    `overlap_days > 0` and K-B requires 0: the two are disjoint by construction.
+
+    So the floor is read here, on both sides and on the MATCHED set. `n_images_min` is the
+    E9-subtracted count, so a gallery that is entirely catalogue stock counts as zero frames —
+    which is the measured shape: of 1,600 K-B merges under the honest clock, 1,348 rest on
+    galleries E9 emptied (`catalog_ratio_max` 1.0 on 1,318 of them) and NONE on adverts that
+    carry no photograph at all. An ABSENT match count fails the floor: nothing to compare is
+    not evidence of agreement, and `present_value` returning None is exactly that.
+
+    The matched limb reads the LOOSE count, not K-C's tight one. K-C asks "the same shoot"; this
+    asks only "was anything compared, and did anything agree" — a portal re-encode moves a hash
+    by more than 6 bits, and on the g6 cohort the tight bar withholds 5 further dev-side
+    labelled duplicates for no measured negative."""
+    if settings.certificate_b_min_images > 0.0:
+        images = present_value(feats, "n_images_min")
+        if images is None or images < settings.certificate_b_min_images:
+            return False
+    if settings.certificate_b_min_matched_images > 0.0:
+        matched = present_value(feats, "phash_loose_matches")
+        if matched is None or matched < settings.certificate_b_min_matched_images:
+            return False
+    return True
+
+
 def certificate_b(
     feats: Feats, la: Listing, lb: Listing, settings: Settings | None = None
 ) -> bool:
     """One broker's own re-post on one portal: same text, same size, never live together."""
     area = present_value(feats, "area_rel_diff")
     containment = present_value(feats, "containment_max")
+    cfg = settings or Settings()
     return (
         present_value(feats, "same_source") == 1.0
         and present_value(feats, "same_broker_key") == 1.0
@@ -128,6 +163,7 @@ def certificate_b(
         and containment >= CERT_B_CONTAINMENT
         and area is not None
         and area <= CERT_B_AREA
+        and certificate_b_image_floor(feats, cfg)
         and disjoint_windows(la, lb, settings)
     )
 

@@ -193,9 +193,15 @@ def test_which_end_stamp_k_b_reads_is_a_setting_not_a_second_spelling() -> None:
     assert not disjoint_windows(gone, successor, SETTINGS)
     assert not certificate_b(feats, gone, successor, SETTINGS)
 
-    honest = replace(SETTINGS, live_window_from_sighting=True)
+    # The honest clock makes them disjoint. E65 is then what decides, and the two listings
+    # carry no comparable frame, so the certificate does not fire (see the E65 tests below).
+    honest = replace(SETTINGS, live_window_from_sighting=True,
+                     certificate_b_min_images=1.0, certificate_b_min_matched_images=1.0)
     assert disjoint_windows(gone, successor, honest)
-    assert certificate_b(feats, gone, successor, honest)
+    assert not certificate_b(feats, gone, successor, honest)
+    with_frames = _feats(same_source=1.0, same_broker_key=1.0, containment_max=0.95,
+                         area_rel_diff=0.005, n_images_min=6.0, phash_loose_matches=5.0)
+    assert certificate_b(with_frames, gone, successor, honest)
 
 
 def test_certificate_c_needs_four_ordered_non_catalog_matches() -> None:
@@ -663,3 +669,95 @@ def test_e63_interior_arm_is_off_and_cannot_be_enabled_below_four_images() -> No
     with pytest.raises(ValueError, match="at least 4"):
         Settings(context_rule_enabled=True, context_rule_interior_min=0.5,
                  context_rule_min_images=3.0)
+
+
+# --- E65: the K-B image floor ----------------------------------------------------------
+
+
+def _kb_pair() -> tuple[dict[str, tuple[float, bool]], Listing, Listing]:
+    """The 522698 x 13221982 shape: one ceskereality broker's template, disjoint short windows."""
+    gone = _listing(1, first_seen_at="2026-07-11T00:00:00+00:00",
+                    last_seen_at="2026-07-18T00:00:00+00:00",
+                    inactive_at="2026-09-07T00:00:00+00:00", is_active=False)
+    successor = _listing(2, first_seen_at="2026-08-03T00:00:00+00:00",
+                         last_seen_at="2026-08-06T00:00:00+00:00",
+                         inactive_at="2026-09-08T00:00:00+00:00", is_active=False)
+    feats = _feats(same_source=1.0, same_broker_key=1.0, containment_max=0.99,
+                   area_rel_diff=0.0, n_images_min=0.0, catalog_ratio_max=1.0)
+    return feats, gone, successor
+
+
+def test_e65_an_all_catalogue_gallery_counts_as_zero_frames() -> None:
+    """`n_images_min` is E9-subtracted: 11 stock photos on each side are zero comparable frames,
+    which is the measured shape of 1,318 of the cohort's 1,348 image-less K-B merges."""
+    feats, gone, successor = _kb_pair()
+    honest = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0,
+                      certificate_b_min_matched_images=1.0)
+    assert disjoint_windows(gone, successor, honest)
+    assert not certificate_b(feats, gone, successor, honest)
+    assert certificate_of(feats, gone, successor, honest) is None
+
+
+def test_e65_an_absent_match_count_fails_the_floor() -> None:
+    """Nothing to compare is not evidence of agreement — ABSENT must not read as satisfied."""
+    feats, gone, successor = _kb_pair()
+    feats["n_images_min"] = (8.0, True)
+    feats["phash_loose_matches"] = ABSENT
+    feats["phash_tight_matches"] = (0.0, True)  # tight is not the limb; loose is
+    honest = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0,
+                      certificate_b_min_matched_images=1.0)
+    assert not certificate_b(feats, gone, successor, honest)
+    feats["phash_loose_matches"] = (1.0, True)
+    assert certificate_b(feats, gone, successor, honest)
+
+
+def test_e65_floor_is_read_on_both_sides_not_on_the_larger_gallery() -> None:
+    """`n_images_min` is the MIN of the two galleries, so one rich side cannot carry an empty one."""
+    feats, gone, successor = _kb_pair()
+    feats["n_images_min"] = (0.0, True)
+    feats["phash_loose_matches"] = (4.0, True)
+    honest = Settings(live_window_from_sighting=True, certificate_b_min_images=2.0,
+                      certificate_b_min_matched_images=2.0)
+    assert not certificate_b(feats, gone, successor, honest)
+    feats["n_images_min"] = (2.0, True)
+    assert certificate_b(feats, gone, successor, honest)
+
+
+def test_e65_each_limb_is_its_own_settings_row() -> None:
+    feats, gone, successor = _kb_pair()
+    feats["n_images_min"] = (6.0, True)
+    feats["phash_loose_matches"] = (0.0, True)
+    sides_only = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0)
+    assert certificate_b(feats, gone, successor, sides_only)
+    both = Settings(live_window_from_sighting=True, certificate_b_min_images=1.0,
+                    certificate_b_min_matched_images=1.0)
+    assert not certificate_b(feats, gone, successor, both)
+
+
+def test_e65_defaults_off_leaves_the_detection_clock_untouched() -> None:
+    """The floor is the honest clock's price, not a free tightening: on the shipped clock it
+    withholds 982 of 1,110 K-B merges carrying 169 reliable duplicates and 0 negatives."""
+    assert Settings().certificate_b_min_images == 0.0
+    assert Settings().certificate_b_min_matched_images == 0.0
+    feats, _, _ = _kb_pair()
+    # Disjoint under BOTH clocks, so only the floor can decide.
+    gone = _listing(1, first_seen_at="2026-01-05T00:00:00+00:00",
+                    last_seen_at="2026-01-20T00:00:00+00:00",
+                    inactive_at="2026-01-21T00:00:00+00:00", is_active=False)
+    successor = _listing(2, first_seen_at="2026-03-01T00:00:00+00:00",
+                         last_seen_at="2026-03-10T00:00:00+00:00",
+                         inactive_at="2026-03-11T00:00:00+00:00", is_active=False)
+    assert certificate_b(feats, gone, successor, Settings(live_window_from_sighting=False))
+
+
+def test_e65_the_honest_clock_may_not_run_without_the_floor() -> None:
+    with pytest.raises(ValueError, match="needs the E65 image floor"):
+        Settings(live_window_from_sighting=True)
+    Settings(live_window_from_sighting=True, certificate_b_min_images=1.0)
+
+
+def test_e65_a_matched_set_cannot_exceed_the_smaller_gallery() -> None:
+    with pytest.raises(ValueError, match="matched set is a subset"):
+        Settings(certificate_b_min_images=2.0, certificate_b_min_matched_images=3.0)
+    with pytest.raises(ValueError, match="must not be negative"):
+        Settings(certificate_b_min_images=-1.0)

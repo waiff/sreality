@@ -191,3 +191,45 @@ def test_an_unusable_split_map_is_a_refusal_not_a_traceback(tmp_path: Path) -> N
         ["evaluate", str(run_dir), "--judgements", str(judgements), "--split-map", "nope",
          "--out", str(tmp_path / "eval")], out=io.StringIO()
     ) == 1
+
+
+# --- W9: spent seals, and the seed a committed map records ------------------------------
+
+W9_SEAL = "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884"
+
+
+def test_the_w6_seal_is_recorded_as_spent_and_still_committed() -> None:
+    """A spent seal keeps its file — the incumbent must stay re-measurable on it — and loses
+    only its power to DECIDE. W8a's 1,476-candidate search read its test side (D23 ii)."""
+    reason = seals.spent(W6_SEAL)
+    assert reason and "1,476" in reason
+    assert seals.committed(W6_SEAL), "a spent seal that lost its map is lost, not spent"
+    assert W6_SEAL not in seals.LOST_SEALS, "spent and lost are different registers"
+    assert seals.spent(W9_SEAL) is None, "the fresh seal has not been spent"
+
+
+def test_every_spent_seal_names_what_spent_it_and_where_the_choice_moved() -> None:
+    for seal, reason in seals.SPENT_SEALS.items():
+        assert seals.is_seal(seal)
+        assert seals.known(seal), "a seal nobody can resolve cannot be described as spent"
+        assert len(reason) > 80 and "SPENT" in reason
+
+
+def test_a_committed_map_records_the_seed_that_partitions_it(tmp_path: Path) -> None:
+    """`split_of` hashes `<seed>:<group>`: one map under two seeds is two holdouts under one
+    name, and `split_seal` hashes the map only — so the seed has to travel with the file."""
+    assert seals.seed_for(W9_SEAL) == 20260922
+    assert seals.seed_for(W6_SEAL) is None, "the legacy bare map predates the seed field"
+    local = tmp_path / "split_map.json"
+    seals.write_map(local, {7: 1, 9: 2}, seed=123)
+    assert seals.read_map(local) == {7: 1, 9: 2}
+    assert seals.read_seed(local) == 123
+    bare = tmp_path / "bare.json"
+    seals.write_map(bare, {7: 1, 9: 2})
+    assert seals.read_map(bare) == {7: 1, 9: 2} and seals.read_seed(bare) is None
+
+
+def test_the_w9_seal_is_the_split_this_wave_chose_on() -> None:
+    groups = seals.load(W9_SEAL)
+    assert len(groups) == 4456
+    assert len(set(groups.values())) == 663

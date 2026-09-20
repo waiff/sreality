@@ -60,6 +60,16 @@ class Settings:
     # ON by default — 0 operator and 0 gold false merges on g5, and it is the only certificate
     # resting on a fact the broker states rather than on a resemblance.
     certificate_kr_enabled: bool = True
+    # E65 (W9): K-B may not certify a pair whose photographs the engine never compared. The
+    # floor is read on both SIDES (`n_images_min`, E9-subtracted, so an all-catalogue gallery
+    # counts as zero) and on the MATCHED set (`phash_loose_matches`); an absent match count
+    # fails it, because nothing to compare is not evidence of agreement. 0 disables a limb.
+    # Measured on the g6 cohort: under the DETECTION clock a floor of (1, 1) withholds 982 of
+    # 1,110 K-B merges carrying 169 reliable labelled duplicates and 0 labelled negatives, so
+    # the default is OFF — the floor is the HONEST clock's price, not a free tightening, and
+    # `validate` refuses to run the honest clock without it.
+    certificate_b_min_images: float = 0.0
+    certificate_b_min_matched_images: float = 0.0
     # E61 (W8): two adverts naming a DIFFERENT unit inside one address block are two units,
     # whatever they look like. ON by default — it demotes nothing the operator or gold calls a
     # duplicate, and it is the only rule that can separate a developer's own near-identical
@@ -204,6 +214,23 @@ class Settings:
         unknown_units = sorted(set(self.numeral_conflict_units) - set(NUMERAL_TOLERANCE))
         if unknown_units:
             raise ValueError(f"numeral_conflict_units names no slot: {', '.join(unknown_units)}")
+        for name in ("certificate_b_min_images", "certificate_b_min_matched_images"):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"{name} must not be negative: {getattr(self, name)}")
+        if (self.certificate_b_min_matched_images > 0.0
+                and self.certificate_b_min_matched_images > self.certificate_b_min_images):
+            raise ValueError(
+                "certificate_b_min_matched_images cannot exceed certificate_b_min_images: a "
+                "matched set is a subset of the smaller gallery "
+                f"({self.certificate_b_min_matched_images} > {self.certificate_b_min_images})"
+            )
+        if self.live_window_from_sighting and self.certificate_b_min_images <= 0.0:
+            raise ValueError(
+                "live_window_from_sighting needs the E65 image floor: the honest clock is what "
+                "lets a developer's serial template re-posts satisfy every clause of K-B, and "
+                "certificate_b_min_images=0 leaves the certificate resting on no observation "
+                "of the unit"
+            )
         if not 0.0 <= self.unit_interior_min <= 1.0:
             raise ValueError(f"unit_interior_min must be in [0, 1]: {self.unit_interior_min}")
         if not 0.0 <= self.unit_containment_min <= 1.0:

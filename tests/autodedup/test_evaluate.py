@@ -1843,3 +1843,137 @@ def test_resolve_sample_pairs_one_draw_with_each_judgements_file(tmp_path: Path)
     assert one.strata["cell"].n_selected == 2
     with pytest.raises(ValueError, match="pass one per"):
         harness.resolve_sample(judgements + [str(tmp_path / "c.jsonl")], [str(first), str(second)])
+
+
+# --- E68: a cut may not be read off the top labelled must-not-link ---------------------------
+
+
+def test_a_cut_read_off_the_top_labelled_negative_is_lifted_clear_of_it() -> None:
+    """W9's shape, in miniature: the smallest CLEAN cut sits one grid rung above the one labelled
+    negative under it. Both rate gates pass there — the negative is not in the merge set — and
+    that is precisely the cut a zero-negative search returns and a refit's drift walks back over.
+    E68 lifts it to the first cut with `CUT_MARGIN` of daylight instead."""
+    dev = [in_cell(0.99, 0, "model|same")]
+    dev += [in_cell(0.9901 + index * 1e-5, 1, "model|same") for index in range(500)]
+    cell = ev.stratum_thresholds(
+        dev, [], precision_lb=0.5, precision_point=0.999
+    )["strata"]["model|same"]
+    assert cell["t_hi_without_margin"] == pytest.approx(0.9901)
+    assert cell["t_hi"] - 0.99 >= ev.CUT_MARGIN
+    assert cell["margin_at_t_hi"] >= ev.CUT_MARGIN
+    assert cell["nearest_negative_below_t_hi"] == pytest.approx(0.99)
+    assert cell["min_margin"] == ev.CUT_MARGIN
+
+
+def test_a_cell_with_no_daylight_anywhere_is_propose_only_and_says_margin() -> None:
+    """Every clean cut within one margin of the negative, and nothing above it: the cell is not
+    a modelling failure and not a labelling one, so the reason is neither `precision` nor
+    `sample` — the model ranks 60 duplicates over a must-not-link by 1e-4 and no more."""
+    dev = [in_cell(0.99, 0, "model|cross")]
+    dev += [in_cell(0.9901 + index * 1e-6, 1, "model|cross") for index in range(60)]
+    cell = ev.stratum_thresholds(
+        dev, [], precision_lb=0.5, precision_point=0.999
+    )["strata"]["model|cross"]
+    assert cell["t_hi"] is None
+    assert cell["margin_withheld"] is True
+    assert cell["propose_only_reason"] == "margin"
+    assert cell["t_hi_without_margin"] == pytest.approx(0.9901)
+
+
+def test_the_margin_leaves_a_cut_with_daylight_under_it_where_it_was() -> None:
+    dev = [in_cell(0.5, 0, "model|same")]
+    dev += [in_cell(0.99 + index * 1e-5, 1, "model|same") for index in range(500)]
+    cell = ev.stratum_thresholds(
+        dev, [], precision_lb=0.5, precision_point=0.999
+    )["strata"]["model|same"]
+    assert cell["t_hi"] == cell["t_hi_without_margin"] == pytest.approx(0.99)
+    assert cell["margin_at_t_hi"] > ev.CUT_MARGIN
+    assert cell["nearest_negative_below_t_hi"] == pytest.approx(0.5)
+    assert cell["margin_withheld"] is False
+    # and the guard can be switched off deliberately, which is how the W9 row was measured
+    off = ev.stratum_thresholds(
+        dev, [], precision_lb=0.5, precision_point=0.999, min_margin=0.0
+    )["strata"]["model|same"]
+    assert off["t_hi"] == cell["t_hi"] and off["min_margin"] == 0.0
+
+
+def test_the_margin_does_not_bind_on_a_cell_that_merges_only_certificates() -> None:
+    """A cut of 1.0 over a certificate cell decides nothing by score, so there is nothing for a
+    negative to sit under — E65's K-B row would otherwise be refused for a band pair below it."""
+    dev = [in_cell(0.1, 1, "K-B|same", certificate="K-B") for _ in range(400)]
+    dev += [in_cell(0.9999, 0, "K-B|same")]
+    cell = ev.stratum_thresholds(
+        dev, [], precision_lb=0.5, precision_point=0.999
+    )["strata"]["K-B|same"]
+    assert cell["t_hi"] == pytest.approx(1.0)
+    assert cell["propose_only"] is False
+
+
+def test_a_zero_negative_count_is_not_a_variance_term() -> None:
+    """The W9 stratum row's actual rule: no labelled negative in the merge set, over 337 and 17
+    dev labels. The published recipe refuses both cells and says `sample` — the Wilson lower bound
+    IS the variance term a count replaces, and 337 flawless merges cannot reach 0.99."""
+    dev = [in_cell(0.99, 1, "model|cross") for _ in range(337)]
+    dev += [in_cell(0.999, 1, "model|same") for _ in range(17)]
+    body = ev.stratum_thresholds(dev, [])["strata"]
+    assert body["model|cross"]["t_hi"] is None
+    assert body["model|cross"]["propose_only_reason"] == "sample"
+    assert body["model|cross"]["sample_sufficient"] is False
+    assert body["model|same"]["t_hi"] is None
+    assert ev.labels_needed_for_lb(0.99) > 337
+
+
+# --- E69: a seal that cannot contain a challenger cannot adjudicate it -----------------------
+
+
+def test_a_seal_reports_the_components_of_a_challenger_it_does_not_contain() -> None:
+    """The W9 shape: the fresh seal unions the incumbent's and one arm's merge edges, and the
+    CHALLENGER then merges a pair whose listings the map never saw — so the two sides of one
+    cluster can land in different splits and a cluster-grain claim is measured half on the fit."""
+    incumbent = [pair_row(1, 2, zone="merge"), pair_row(3, 4, zone="merge")]
+    groups = ev.merge_groups(incumbent)
+    contained = ev.components_spanning_split(incumbent, groups, seed=20260922)
+    assert contained["contained"] is True and contained["n_spanning"] == 0
+    assert contained["listings_absent_from_map"] == 0
+
+    challenger = incumbent + [pair_row(1, 900001, zone="merge")]
+    spanning = ev.components_spanning_split(challenger, groups, seed=20260922)
+    assert spanning["listings_absent_from_map"] == 1
+    assert spanning["n_components"] == 2
+    # 900001 hashes into a split of its own, and it lands in a different one from group 1 under
+    # this seed — which is the whole point: the map does not decide where it went.
+    assert spanning["contained"] is False
+    assert spanning["n_spanning"] == 1
+    assert spanning["sample"][0] == [1, 2, 900001]
+
+
+def test_the_evaluate_command_warns_when_the_seal_cannot_contain_the_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """E69. The map is cut from the INCUMBENT's components; the run being evaluated merges one
+    pair more, and that pair's listings the map has never seen."""
+    rows: list[dict[str, Any]] = []
+    labels: dict[Any, Label] = {}
+    for index in range(60):
+        lo, hi = 2 * index + 1, 2 * index + 2
+        rows.append(pair_row(lo, hi, zone="merge", score=0.99))
+        labels[(lo, hi)] = label(lo, hi, 1 if index % 3 else 0)
+    fit_map = ev.split_groups(rows, labels)
+    # 900003 is absent from the map, so it hashes into a split of its own — and under
+    # the default seed that split is not group 1's.
+    challenger = rows + [pair_row(1, 900003, zone="merge", score=0.999)]
+    run_dir = write_run(tmp_path, challenger)
+    judgement_path = write_judgements(tmp_path / "j.jsonl", labels)
+    map_path = tmp_path / "split_map.json"
+    map_path.write_text(
+        json.dumps({str(key): value for key, value in fit_map.items()}), encoding="utf-8"
+    )
+    code = harness.main(
+        ["evaluate", str(run_dir), "--judgements", str(judgement_path),
+         "--split-map", str(map_path), "--out", str(tmp_path / "out")],
+        out=io.StringIO(),
+    )
+    assert code == 0
+    warning = capsys.readouterr().err
+    assert "span the holdout" in warning and "E69" in warning
+    assert "1 of them absent from the map" in warning
