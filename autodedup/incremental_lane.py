@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import socket
 import time
 from contextlib import nullcontext
@@ -54,12 +55,23 @@ from autodedup.export_sql import (
     COHORT_PRICE_HISTORY_SQL,
 )
 from autodedup.features import FEATURE_VERSION
-from autodedup.harness import load_model, load_settings
+from autodedup.harness import (
+    DEFAULT_SETTINGS_NAME,
+    PRIOR_MODEL_NAME,
+    model_name_of,
+    model_of_version,
+    named_model,
+    named_settings,
+)
 from autodedup.hazard_context import ContextStamp, address_block_key, category_group
 from autodedup.incremental import (
+    EVIDENCE_HOLD_REASON,
     GENERATION,
     Calibration,
     CellRow,
+    Evidence,
+    EvidenceHold,
+    evidence_of,
     FpRow,
     GuardRow,
     Keyer,
@@ -94,13 +106,20 @@ from autodedup.incremental_sql import (
     RT_CURSOR_SET_SQL,
     RT_CURSOR_WRITE_SQL,
     RT_FLIPPED_LISTINGS_SQL,
+    RT_EVIDENCE_CANDIDATES_SQL,
+    RT_EVIDENCE_HELD_COUNT_SQL,
+    RT_EVIDENCE_PROBE_SQL,
+    RT_EVIDENCE_RELEASE_SQL,
     RT_FP_COUNT_SQL,
     RT_FP_DELETE_SQL,
     RT_FP_READ_SQL,
     RT_FP_UPSERT_SQL,
     RT_IDLE_GUARD_SQL,
     RT_LOCK_GUARD_SQL,
+    RT_PARITY_CHANGE_SQL,
+    RT_PHASH_POP_COUNT_SQL,
     RT_PHASH_POP_SQL,
+    RT_PHASH_POP_WRITE_SQL,
     RT_KEY_DELETE_SQL,
     RT_KEY_INSERT_SQL,
     RT_KEYS_MANY_SQL,
@@ -150,7 +169,14 @@ from autodedup.score_lane import (
     present_features,
     storable,
 )
+from autodedup.model import LogisticModel
+from autodedup.parity_digest import Floors as ParityFloors
+from autodedup.parity_digest import baseline as parity_baseline
+from autodedup.parity_digest import compare as parity_compare
+from autodedup.parity_digest import stratified_sample
+from autodedup.parity_digest import verdict as parity_verdict
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
+from autodedup.settings import Settings
 
 LANE_NAME: str = "autodedup_realtime"
 # Longer than the workflow's own 25-minute timeout: a lease that expires while its holder is
@@ -162,6 +188,7 @@ CURSOR_FLIPPED: str = "rt_flipped"
 CURSOR_REVIVE: str = "rt_revive"
 CURSOR_SCOPE: str = "rt_scope_drift"
 CURSOR_ENTER: str = "rt_scope_enter"
+CURSOR_EVIDENCE: str = "rt_evidence"
 ENV_FLAG: str = "AUTODEDUP_REALTIME_ENABLED"
 DB_FLAG: str = "realtime_enabled"
 SCOPE_SETTING: str = "rt_scope"
@@ -169,6 +196,9 @@ BUDGET_SETTING: str = "rt_max_schema_mb"
 RETIRE_SETTING: str = "rt_max_retire_fraction"
 SCAN_CAP_SETTING: str = "rt_enter_max_scans_per_day"
 INTERVAL_SETTING: str = "rt_enter_interval_hours"
+EVIDENCE_HORIZON_SETTING: str = "rt_evidence_horizon_hours"
+EVIDENCE_SLICE_SETTING: str = "rt_evidence_slice"
+CALIBRATION_AGE_SETTING: str = "rt_calibration_max_age_days"
 RESCOPE_ARG: str = "rt_rescope"
 STORAGE_WATERMARK: str = "rt_storage_last"
 # The generation whose scope row may still be the LEGACY global one (W9e/R4). `rt_scope` was
@@ -201,6 +231,24 @@ DRIFT_SLICE: int = 20000
 # applied after the bitmap heap scan, which is precisely why a smaller `enter_slice` was never
 # the answer to what that scan costs.
 ENTER_SLICE: int = 20000
+# --- the evidence sweep (E92) ---------------------------------------------------------------
+#
+# One round-robin slice of the SEVENTH feed, over this generation's own `rt_fp` rows. The
+# candidate arm reads `autodedup` only; what it costs `public` is the probe below it, and the
+# probe is the only read of `public.images` this lane makes outside a fact fetch. Measured on
+# the trial scope with `EXPLAIN (ANALYZE, BUFFERS)`: 200 listings = 3,085 images = 2,375
+# buffers (920 heap blocks, 261 of them read cold), 12 buffers a listing. At the shipped slice
+# and the `*/10` cadence that is 400 x 144 = 57,600 listing probes a day IF the candidate set
+# were that large; it is not — the trial scope carries 76 rows of incomplete evidence in
+# steady state plus ~74 inside the 48 h horizon, so a pass probes ~150 listings (~1,800
+# buffers, 14 MB) and the day costs ~259,000 buffers, 2.0 GB — the same order as the entrant
+# feed's 1.6 GB after W9e cut it 7.8x. `rt_evidence_slice = 0` turns the feed off.
+EVIDENCE_SLICE: int = 400
+# How long after its FIRST decision a listing's photographs are still expected. The producers
+# are hourly (dHash at :20, CLIP at :40) and measured p90 4.51 h to a first tag, so 48 h is
+# ~10x the observed tail rather than a guess at it — and it is the bound on how long a merge
+# may wait (E93) as much as on how long the sweep chases one. Data: `rt_evidence_horizon_hours`.
+EVIDENCE_HORIZON_HOURS: float = 48.0
 # How often a scope block's membership is re-walked on `public`, by grain and in HOURS. A town
 # block is an index-served bitmap scan of its own obec (Jablonec: 2,745 buffers = 21 MB, 61 ms);
 # a QUARTER has no index of its own at all and costs 29,568 buffers = 231 MB, 6.4 s, cold every
@@ -225,6 +273,33 @@ MAX_RETIRE_FRACTION: float = 0.05
 # TOAST included). The schema is ~148 MB today and the operator pays for it; a lane that has
 # not been watched for a week must not be able to double it.
 MAX_SCHEMA_MB: float = 400.0
+# --- the parity gate (E91) ---------------------------------------------------------------
+#
+# The seed writes a baseline of per-listing fact digests into `autodedup.settings` (one row, a
+# few kilobytes — no migration, and it is cut at exactly the moment the calibration is) and
+# every pass re-checks a slice of it before it opens its transaction. The tolerance is ZERO
+# breaches: a stored fact or a frozen statistic that differs on a listing nothing has changed
+# is the W9f defect, and the one thing W9f proved is that it can run for a whole pass unnoticed.
+PARITY_BASELINE_SETTING: str = "rt_parity_baseline"
+PARITY_SAMPLE_SETTING: str = "rt_parity_sample"
+# How many listings the SEED puts in the baseline, and how many of them a PASS re-checks. The
+# pass's slice is drawn fresh each time, so a day of passes covers the baseline many times over
+# at one fact read (6 statements, ~0.7 s) a pass.
+PARITY_BASELINE_N: int = 120
+PARITY_PASS_SAMPLE: int = 25
+PARITY_TOLERANCE: int = 0
+# The four FLOORS a pass must clear before a green gate means anything (E94). All data:
+# `rt_parity_min_checked`, `rt_calibration_max_age_days`, `rt_parity_max_unknown_pop_share`.
+PARITY_MIN_CHECKED_SETTING: str = "rt_parity_min_checked"
+PARITY_MIN_SHARE_SETTING: str = "rt_parity_min_checked_share"
+PARITY_UNKNOWN_POP_SETTING: str = "rt_parity_max_unknown_pop_share"
+PARITY_MIN_CHECKED: int = 15
+PARITY_MIN_CHECKED_SHARE: float = 0.6
+CALIBRATION_MAX_AGE_DAYS: float = 14.0
+PARITY_MAX_UNKNOWN_POP_SHARE: float = 0.15
+# How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
+# 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
+POP_CHUNK: int = 5_000
 STATEMENT_TIMEOUT_MS: int = 120_000
 LOCK_TIMEOUT_MS: int = 5_000
 IDLE_TIMEOUT_MS: int = 300_000
@@ -281,9 +356,18 @@ class SqlStore:
     claim."""
 
     def __init__(self, conn: Any, generation: str = GENERATION,
-                 store_floor: float = 0.02) -> None:
+                 store_floor: float = 0.02, model_version: str | None = None,
+                 calibration_digest: str | None = None) -> None:
         self.conn = conn
         self.generation = generation
+        # WHICH SCORER TOOK THE DECISION, stamped on every row this store writes (E90a). The
+        # columns existed and the lane wrote `evidence["_model"]` into them — a key nothing has
+        # ever set — so all 15,923 rows of the live generation `rt` carry a NULL model_version
+        # against `w6_gold` on the batch generation's, and the store could not say which
+        # scorer it had been. The pass's model and calibration are the generation's, so they
+        # are held here rather than fished out of a per-pair evidence bag.
+        self.model_version = model_version
+        self.calibration_digest = calibration_digest
         # The batch lane's own retention floor, carried here so the two stores keep the same
         # rows. It comes from the pass's settings, never from a constant of this module.
         self.store_floor = float(store_floor)
@@ -343,6 +427,11 @@ class SqlStore:
                 "cell_key": pending[listing_id][0].cell_key,
                 "cell_group": pending[listing_id][0].cell_group,
                 "is_active": pending[listing_id][0].is_active,
+                "ev_images": pending[listing_id][0].evidence.n_images,
+                "ev_phash": pending[listing_id][0].evidence.n_phash,
+                "ev_clip": pending[listing_id][0].evidence.n_clip,
+                "ev_tags": pending[listing_id][0].evidence.n_tags,
+                "ev_complete": pending[listing_id][0].evidence.complete,
             }
             for listing_id in ids
         ])
@@ -402,6 +491,9 @@ class SqlStore:
                          float(row[3]) if row[3] is not None else None, row[4],
                          int(row[5]) if row[5] is not None else None),
                 str(row[6] or ""), str(row[7] or ""), str(row[8] or ""), bool(row[9]),
+                Evidence(int(row[10] or 0), int(row[11] or 0), int(row[12] or 0),
+                         int(row[13] or 0)),
+                float(row[14]) if row[14] is not None else None,
             ) for row in self._query(RT_FP_READ_SQL,
                                      {"generation": self.generation, "ids": missing})}
             for listing_id in missing:
@@ -508,9 +600,9 @@ class SqlStore:
             "decision": row.reason, "guard_veto": row.veto,
             "evidence": json.dumps(row.evidence, ensure_ascii=False),
             "context": json.dumps(row.context),
-            "calibration_digest": row.evidence.get("_calibration"),
+            "calibration_digest": row.evidence.get("_calibration") or self.calibration_digest,
             "feature_version": FEATURE_VERSION,
-            "model_version": row.evidence.get("_model"),
+            "model_version": row.evidence.get("_model") or self.model_version,
         } for row in keep])
 
     def delete_pairs(self, keys: Sequence[tuple[int, int]]) -> None:
@@ -708,13 +800,32 @@ class SqlFacts:
     artifact cannot see any of that (E77).
 
     The one deliberate difference from the export is the pHash population: frozen (E70) and
-    read from `autodedup.phash_pop`, never recounted."""
+    read from `autodedup.phash_pop`, never recounted. A hash that table does not carry is
+    UNKNOWN — `pop = None`, exactly as the export writes it when its own probe did not run —
+    and never 0. W9f read it as 0 against an EMPTY table: `pop_is_measured` then said no for
+    every gallery, `build_fingerprint` published `catalog_ratio = None` for every listing,
+    `catalog_ratio_max` was absent on every pair and `certificate_c` — which requires the ratio
+    to be PRESENT — could not fire at all. One live pass, 36,940 pairs, zero K-C against the
+    batch generation's 1,771 (E91). The table has a writer now (the seed) and this counts what
+    it could not measure, so a pass says so rather than scoring on it silently."""
 
-    def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL) -> None:
+    def __init__(self, conn: Any, clip_model: str = DEFAULT_CLIP_MODEL,
+                 population: Mapping[int, int] | None = None) -> None:
         self.conn = conn
         self.clip_model = clip_model
+        # A population handed in INSTEAD of the frozen table, for the one read-only caller that
+        # needs to see what the table WOULD hold: `--mode rt_parity population=artifact` reads
+        # the cohort's own counts so the operator can measure a seed's effect before seeding.
+        # The pass never passes this — its population is the frozen one or nothing (E91).
+        self.population = None if population is None else {
+            int(key): int(value) for key, value in population.items()}
         self.reads = 0
         self.statements = 0
+        # The population readout, for the pass summary: how many phash-bearing images this pass
+        # scored with a population the frozen table could not give it.
+        self.images_with_phash = 0
+        self.images_unmeasured = 0
+        self.hashes_unmeasured: set[int] = set()
 
     def _dicts(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
         self.statements += 1
@@ -761,11 +872,26 @@ class SqlFacts:
         for row in self._dicts(COHORT_CLIP_TAGS_SQL,
                                {"ids": image_ids, "model": self.clip_model}):
             tags.setdefault(int(row["image_id"]), []).append(row)
-        # Frozen, never recounted (E70) — and absent from the table means a population of 0
-        # for that hash, not an unknown, because the cohort lane writes every hash it saw.
-        population = {int(row[0]): int(row[1]) for row in
-                      _rows(self.conn, RT_PHASH_POP_SQL, {"hashes": hashes})} if hashes else {}
-        self.statements += 1
+        # Frozen, never recounted (E70). Absent from the table is UNKNOWN, not zero (E91):
+        # `public.images` carries no index on `phash` (checked: `images_phash_idx` is on
+        # `sreality_id`), D8 forbids adding one, and there is no in-schema mirror to count
+        # from — so the only way to measure a hash the calibration never saw is the export's
+        # own sequential scan, which belongs to the export and the re-seed, never to a pass.
+        if self.population is not None:
+            population = {h: self.population[h] for h in hashes if h in self.population}
+        else:
+            population = {int(row[0]): int(row[1]) for row in
+                          _rows(self.conn, RT_PHASH_POP_SQL,
+                                {"hashes": hashes})} if hashes else {}
+            self.statements += 1
+        self.images_with_phash += sum(1 for row in rows if row.get("phash") is not None)
+        unmeasured = [h for h in hashes if h not in population]
+        self.hashes_unmeasured.update(unmeasured)
+        if unmeasured:
+            unknown = set(unmeasured)
+            self.images_unmeasured += sum(
+                1 for row in rows if row.get("phash") is not None
+                and int(row["phash"]) in unknown)
         out: dict[int, list[Image]] = {}
         for row in rows:
             image_id = int(row["image_id"])
@@ -804,7 +930,9 @@ class SqlWork:
                  parents: Mapping[int, int] | None = None,
                  max_retire_fraction: float = MAX_RETIRE_FRACTION,
                  enter_interval_hours: Mapping[str, float] | None = None,
-                 max_enter_scans_per_day: int = MAX_ENTER_SCANS_PER_DAY) -> None:
+                 max_enter_scans_per_day: int = MAX_ENTER_SCANS_PER_DAY,
+                 evidence_slice: int = EVIDENCE_SLICE,
+                 evidence_horizon_hours: float = EVIDENCE_HORIZON_HOURS) -> None:
         self.conn = conn
         self.scope = scope
         self.generation = generation
@@ -817,6 +945,8 @@ class SqlWork:
         self.max_retire_fraction = float(max_retire_fraction)
         self.enter_interval_hours = dict(enter_interval_hours or ENTER_INTERVAL_HOURS)
         self.max_enter_scans_per_day = int(max_enter_scans_per_day)
+        self.evidence_slice = int(evidence_slice)
+        self.evidence_horizon_hours = float(evidence_horizon_hours)
         self.parents = dict(parents or {})
         self.enter_blocks = _enter_blocks(scope, self.parents)
         self.statements = 0
@@ -824,6 +954,8 @@ class SqlWork:
         # What this pass spent on `public` for the entrant feed, for the run summary: a block
         # refresh, a refusal against the daily cap, or nothing at all.
         self.enter_scan: dict[str, Any] = {}
+        # What the evidence sweep (E92) cost and found this pass, for the run summary.
+        self.evidence: dict[str, Any] = {}
         self._pending: dict[str, Any] = {}
         self._claimed: dict[str, set[int]] = {}
         self._retire: tuple[int, int] | None = None
@@ -834,7 +966,7 @@ class SqlWork:
 
     def cursors(self) -> dict[str, tuple[int, int, Any]]:
         names = [CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE, CURSOR_SCOPE,
-                 CURSOR_ENTER]
+                 CURSOR_ENTER, CURSOR_EVIDENCE]
         out = {name: (0, 0, _EPOCH) for name in names}
         for row in self._query(RT_CURSOR_READ_SQL, {"names": names}):
             out[str(row[0])] = (int(row[1] or 0), int(row[2] or 0), row[3] or _EPOCH)
@@ -940,9 +1072,81 @@ class SqlWork:
                 (int(rows[-1][0]), pointer) if len(rows) >= share else (0, pointer))
             for row in rows:
                 items.append(WorkItem(int(row[0]), "entered", _epoch(row[1]), None))
+
+        # The SEVENTH feed (E92): the listings whose PHOTOGRAPHS moved since this generation
+        # decided them, and the merges whose hold has run out of horizon. Neither is visible
+        # to any of the six above — a phash or a CLIP vector arriving appends no snapshot,
+        # flips no flag and moves no location — which is why ~80% of arrivals were decided
+        # once, blind, and never again.
+        if self.evidence_slice:
+            # A listing the drift sweep is RETIRING this pass is not re-decided: the scope no
+            # longer holds it, so there is nothing to re-decide it into.
+            retiring = {item.listing_id for item in items if item.retire}
+            items.extend(self._evidence_feed(cursors[CURSOR_EVIDENCE][0], share, retiring))
         for item in items:
             self._claimed.setdefault(item.feed, set()).add(item.listing_id)
         return items
+
+    def _evidence_feed(self, after_id: int, share: int,
+                       retiring: set[int] | None = None) -> list[WorkItem]:
+        """Round-robin this generation's incomplete or young rows, probe `public.images` for
+        what their photographs ARE now, and hand over the ones that disagree with what the
+        stored decision rested on (E92) — plus the endpoints of every merge whose hold the
+        horizon has ended (E93).
+
+        The candidate arm reads `autodedup.rt_fp` only. The probe is the one read of
+        `public.images` outside a fact fetch, it is served by `images_listing_id_idx`, and it
+        reads NO other table: `images.clip_tagged_at` is the CLIP job's own stamp, and on the
+        trial scope's 73,208 images it agrees with `image_clip_embeddings` and
+        `image_clip_tags` on every row (72,171 each, 0 disagreements), at a fourteenth of the
+        buffers the two joins cost."""
+        horizon = {"horizon_hours": int(round(self.evidence_horizon_hours))}
+        rows = self._query(RT_EVIDENCE_CANDIDATES_SQL, {
+            "generation": self.generation, "after_id": int(after_id),
+            "limit": self.evidence_slice, **horizon})
+        recorded = {int(row[0]): (row[1], row[2], row[3], row[4]) for row in rows}
+        probed: dict[int, tuple[int, int, int]] = {}
+        if recorded:
+            probed = {int(row[0]): (int(row[1]), int(row[2]), int(row[3]))
+                      for row in self._query(RT_EVIDENCE_PROBE_SQL,
+                                             {"ids": sorted(recorded)})}
+        moved: list[int] = []
+        for listing_id, (images, phash, clip, tags) in sorted(recorded.items()):
+            live = probed.get(listing_id, (0, 0, 0))
+            # A NULL count is a row written before migration 540 — unmeasured, not zero, so
+            # it is re-decided once and then carries real counts.
+            if images is None or phash is None:
+                moved.append(listing_id)
+                continue
+            if (live[0] != int(images) or live[1] != int(phash)
+                    or live[2] != int(clip or 0) or live[2] != int(tags or 0)):
+                moved.append(listing_id)
+        released: list[int] = []
+        for row in self._query(RT_EVIDENCE_RELEASE_SQL, {
+                "generation": self.generation, "reason": EVIDENCE_HOLD_REASON,
+                "limit": max(1, share), **horizon}):
+            released.extend((int(row[0]), int(row[1])))
+        held_total = int(self._query(RT_EVIDENCE_HELD_COUNT_SQL, {
+            "generation": self.generation, "reason": EVIDENCE_HOLD_REASON})[0][0] or 0)
+        # A short slice is the end of the sweep, so the cursor wraps — the same round-robin
+        # the drift sweep uses, and the reason a candidate cut by `share` is re-offered.
+        self._pending[CURSOR_EVIDENCE] = (
+            0 if len(rows) < self.evidence_slice else max(recorded, default=int(after_id)))
+        self.windows["evidence"] = len(rows)
+        self.evidence = {
+            "candidates": len(rows), "listings_probed": len(recorded),
+            "images_probed": sum(row[0] for row in probed.values()),
+            "moved": len(moved), "release_candidates": len(set(released)),
+            "held_pairs": held_total,
+            "horizon_hours": self.evidence_horizon_hours, "slice": self.evidence_slice,
+        }
+        gone = set(retiring or ())
+        wanted: list[int] = []
+        for listing_id in moved[:share] + sorted(set(released)):
+            if listing_id not in wanted and listing_id not in gone:
+                wanted.append(listing_id)
+        return [WorkItem(listing_id, "evidence", None, None, redecide=True)
+                for listing_id in wanted]
 
     def _refresh_scope_ids(self, pointer: int) -> int:
         """Re-walk ONE scope block on `public`, but only when its cadence says so (W9e/R3).
@@ -1070,7 +1274,8 @@ class SqlWork:
         decided = {item.listing_id for item in done}
         for feed, name in (("new", CURSOR_NEW), ("changed", CURSOR_CHANGED),
                            ("flipped", CURSOR_FLIPPED), ("revived", CURSOR_REVIVE),
-                           ("drifted", CURSOR_SCOPE), ("entered", CURSOR_ENTER)):
+                           ("drifted", CURSOR_SCOPE), ("entered", CURSOR_ENTER),
+                           ("evidence", CURSOR_EVIDENCE)):
             if not claimed.get(feed, set()) <= decided:
                 pending.pop(name, None)
         if CURSOR_NEW in pending:
@@ -1094,7 +1299,7 @@ class SqlWork:
                 "name": CURSOR_FLIPPED, "last_listing_id": int(listing_id),
                 "last_snapshot_id": None, "watermark": stamp})
             out[CURSOR_FLIPPED] = [str(stamp), int(listing_id)]
-        for name in (CURSOR_REVIVE, CURSOR_SCOPE):
+        for name in (CURSOR_REVIVE, CURSOR_SCOPE, CURSOR_EVIDENCE):
             if name in pending:
                 self.statements += 1
                 _exec(self.conn, RT_CURSOR_SET_SQL, {
@@ -1389,6 +1594,335 @@ class _Refused(Exception):
     """The pair budget refused this claim — roll the pass back and report it (E75)."""
 
 
+def seed_parity(conn: Any, dataset: Any, in_scope: Sequence[int], generation: str,
+                n: int, floors: ParityFloors) -> dict[str, Any]:
+    """The seed's own gate, and the baseline every later pass re-checks against.
+
+    Here the whole artifact is in hand, so the comparison is the real one: a stratified sample
+    of the generation's own listings, built from the artifact with the export's builders and
+    read back through `SqlFacts` from the database, digest against digest. A seed that cannot
+    show the two agree is refused — it would be freezing a calibration for a lane that cannot
+    reproduce the facts it was cut from."""
+    sample = stratified_sample(dataset.listings, set(int(i) for i in in_scope), n, seed=1)
+    reader = SqlFacts(conn)
+    live: dict[int, tuple[Listing, list[Image]]] = {}
+    for start in range(0, len(sample), 100):
+        live.update(reader.facts(sample[start:start + 100]))
+    rows = parity_baseline({i: dataset.listings[i] for i in sample},
+                           {i: dataset.images(i) for i in sample})
+    drifted = drifted_since(conn, sample, dataset.meta.exported_at)
+    report = parity_compare(rows, {i: value[0] for i, value in live.items()},
+                            {i: value[1] for i, value in live.items()}, drifted)
+    report.update({
+        "sampled": len(sample), "tolerance": floors.tolerance,
+        "phash_pop_rows": phash_pop_rows(conn),
+        "images_with_phash": reader.images_with_phash,
+        "images_unmeasured": reader.images_unmeasured,
+        "unknown_pop_share": _unknown_share(reader),
+        "age_days": age_days(dataset.meta.exported_at),
+        "floors": floors_json(floors),
+        "statements": reader.statements + 1,
+    })
+    refused = parity_verdict(report, generation=generation, floors=floors, what="rt_seed")
+    if refused:
+        raise SystemExit(refused)
+    report["ok"] = True
+    return {
+        "report": report,
+        "baseline": {
+            "generation": generation,
+            "rows": rows,
+            "exported_at": dataset.meta.exported_at,
+            "cut_at": datetime.now(timezone.utc).isoformat(),
+            "phash_pop_rows": report["phash_pop_rows"],
+            "tolerance": floors.tolerance,
+            "n": len(rows),
+        },
+    }
+
+
+def _unknown_share(reader: "SqlFacts") -> float | None:
+    """The share of phash-bearing images whose hash the frozen population cannot measure."""
+    if not reader.images_with_phash:
+        return None
+    return round(reader.images_unmeasured / float(reader.images_with_phash), 6)
+
+
+def age_days(stamp: Any) -> float | None:
+    parsed = _stamp(stamp)
+    if parsed is None:
+        return None
+    return round((datetime.now(timezone.utc) - parsed).total_seconds() / 86400.0, 3)
+
+
+def floors_json(floors: ParityFloors) -> dict[str, Any]:
+    return {"tolerance": floors.tolerance, "min_checked": floors.min_checked,
+            "min_checked_share": floors.min_checked_share,
+            "max_age_days": floors.max_age_days,
+            "max_unknown_pop_share": floors.max_unknown_pop_share}
+
+
+def resolve_floors(args: Mapping[str, str], control: Mapping[str, Any],
+                   rescope: bool = False) -> ParityFloors:
+    """The four floors as SETTINGS rows (E94/E95). Like every other rail on this lane, a
+    dispatch argument may only move one beside `rt_rescope=true` — a rail one `-f args=` can
+    turn into a formality is not a rail (W9e/R6)."""
+    return ParityFloors(
+        tolerance=PARITY_TOLERANCE,
+        min_checked=int(control_number(PARITY_MIN_CHECKED_SETTING, args, control,
+                                       float(PARITY_MIN_CHECKED), rescope)),
+        min_checked_share=control_number(PARITY_MIN_SHARE_SETTING, args, control,
+                                         PARITY_MIN_CHECKED_SHARE, rescope),
+        max_age_days=control_number(CALIBRATION_AGE_SETTING, args, control,
+                                    CALIBRATION_MAX_AGE_DAYS, rescope),
+        max_unknown_pop_share=control_number(PARITY_UNKNOWN_POP_SETTING, args, control,
+                                             PARITY_MAX_UNKNOWN_POP_SHARE, rescope),
+    )
+
+
+def parity_gate(conn: Any, generation: str, control: Mapping[str, Any],
+                args: Mapping[str, str], floors: ParityFloors,
+                built_at: Any = None) -> dict[str, Any]:
+    """The permanent rail: no pass runs on facts that are not the export's (E91).
+
+    A generation with no baseline is refused rather than waved through — the baseline is cut by
+    the seed at the same moment as the calibration, so its absence means this generation was
+    seeded before the gate existed and nothing has ever checked its facts."""
+    payload = control.get(parity_baseline_key(generation))
+    if isinstance(payload, str):
+        payload = json.loads(payload or "{}")
+    if not isinstance(payload, Mapping) or "rows" not in payload:
+        raise SystemExit(
+            f"PARITY GATE: generation {generation!r} carries no fact baseline "
+            f"(autodedup.settings {parity_baseline_key(generation)}) — it was seeded before "
+            "the gate existed, so nothing has ever checked that the live lane reads the "
+            "export's facts (E91). Re-seed it "
+            "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
+            "backfill=true,reseed=true`). Nothing was written and no cursor moved.")
+    # The knob may only RAISE the sample (E82's lesson at a rail one dispatch argument could
+    # otherwise have turned into a formality): `rt_parity_sample=1` cannot weaken the gate.
+    try:
+        asked = _setting_number(args.get(PARITY_SAMPLE_SETTING,
+                                         control.get(PARITY_SAMPLE_SETTING)),
+                                float(PARITY_PASS_SAMPLE))
+    except ScopeError as exc:
+        raise SystemExit(f"{PARITY_SAMPLE_SETTING}: {exc}") from exc
+    report = check_parity(conn, generation, payload,
+                          max(PARITY_PASS_SAMPLE, int(asked)))
+    report["floors"] = floors_json(floors)
+    report["calibration_built_age_days"] = age_days(built_at)
+    # The W9f defect itself FIRST, because it is the specific diagnosis of what the sample is
+    # about to report generically: a frozen population that HAD rows when the generation was
+    # seeded and has none now is the table emptied under a running lane.
+    at_seed = int(report.get("phash_pop_rows_at_seed") or 0)
+    if at_seed and not int(report.get("phash_pop_rows") or 0):
+        raise SystemExit(
+            f"PARITY GATE: autodedup.phash_pop is EMPTY and generation {generation!r} was "
+            f"seeded with {at_seed} hashes in it (E91). Every image would read an unknown "
+            "population, every catalog_ratio would go absent and no K-C certificate could "
+            "fire. Nothing was written and no cursor moved — re-seed the generation.")
+    # The EXPORT's age has to be knowable for the age rail to mean anything (E95). A baseline
+    # that cannot say when its cohort was cut is a baseline the rail cannot read, so it is
+    # refused rather than waved through on a missing field.
+    if report.get("age_days") is None:
+        raise SystemExit(
+            f"PARITY GATE: generation {generation!r}'s baseline carries no `exported_at`, so "
+            "the calibration-age rail cannot be evaluated and a frozen population of unknown "
+            "age would be read as fresh (E95). Re-seed the generation. Nothing was written "
+            "and no cursor moved.")
+    refused = parity_verdict(report, generation=generation, floors=floors,
+                             what="the scheduled pass")
+    if refused:
+        raise SystemExit(refused)
+    report["ok"] = True
+    return report
+
+
+# --- WHICH SCORER (E90a) -----------------------------------------------------------------
+
+
+def named_config(args: Mapping[str, str], *, what: str
+                 ) -> tuple[Settings, LogisticModel, str, str]:
+    """The settings row and the model a dispatch NAMES — and silence is not a name.
+
+    W9f's seed and its first live pass both ran on empty arguments, so `Settings()` and the
+    uncalibrated `hand_initialised()` prior scored a generation the operator believed was the
+    batch pass's `w8` + `w6_gold` (t_lo 0.30 against 0.1823, t_hi 0.97 against 1.0, no
+    per-stratum ceiling, no bridge, no context rule). That is 5,888 of 7,878 shared pairs
+    scored differently and 1,039 pairs merged that the batch generation bands — and no
+    argument was mis-typed, because `settings=w8` would have been read as a PATH and found no
+    file. Both halves are fixed: the name resolves inside the repo (`harness.named_settings`),
+    and choosing the defaults is spelled `settings=default,model=prior`."""
+    settings_name = str(args.get("settings") or "").strip()
+    model_name = str(args.get("model") or "").strip()
+    if not settings_name or not model_name:
+        raise SystemExit(
+            f"{what} needs settings=<row in autodedup/settings> and model=<file in "
+            f"autodedup/models> — a generation is scored by ONE scorer and every stored "
+            f"decision is stamped with it. The batch generation g6 is "
+            f"`settings=w8,model=w6_gold`; the uncalibrated defaults are "
+            f"`settings={DEFAULT_SETTINGS_NAME},model={PRIOR_MODEL_NAME}`, which is a choice "
+            "this lane will not make on your behalf again (E90a).")
+    return (named_settings(settings_name), named_model(model_name),
+            settings_name, model_name)
+
+
+def pass_config(args: Mapping[str, str], recorded: Any, model_version: Any,
+                generation: str) -> tuple[Settings, LogisticModel]:
+    """The GENERATION's scorer, read back from its frozen calibration row.
+
+    The seed writes both columns and W9's pass read neither, so the schedule scored with
+    whatever the dispatch happened to carry. Now the row decides and a dispatch argument may
+    only AGREE with it: changing a generation's scorer is a re-seed, because every decision
+    already in the store was taken under the old one."""
+    if recorded is None:
+        raise SystemExit(
+            f"generation {generation!r} carries no settings on its frozen calibration — it "
+            "was seeded before the scorer was recorded (E90a). Re-seed it "
+            "(`-f mode=rt_seed -f args=export_run=<id>,settings=w8,model=w6_gold,"
+            "reseed=true`) before the schedule runs.")
+    try:
+        settings = Settings.from_dict(dict(recorded))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"generation {generation!r} carries settings this build cannot read ({exc}) — "
+            "re-seed it.") from exc
+    model = model_of_version(str(model_version) if model_version else None)
+    asked_settings = str(args.get("settings") or "").strip()
+    asked_model = str(args.get("model") or "").strip()
+    if asked_settings:
+        chosen = named_settings(asked_settings)
+        if chosen != settings:
+            moved = {key: {"generation": settings.to_dict().get(key), "dispatch": value}
+                     for key, value in chosen.to_dict().items()
+                     if settings.to_dict().get(key) != value}
+            raise SystemExit(
+                f"settings={asked_settings} is not what generation {generation!r} was seeded "
+                f"with: {json.dumps(moved, sort_keys=True, default=str)}. A pass may name the "
+                "generation's scorer, never a different one — re-seed to change it.")
+    if asked_model and named_model(asked_model).version != model.version:
+        raise SystemExit(
+            f"model={asked_model} is not generation {generation!r}'s model "
+            f"({model.version}) — re-seed to change it.")
+    return settings, model
+
+
+# --- the frozen pHash population (E91) ----------------------------------------------------
+
+
+def phash_pop_rows(conn: Any) -> int:
+    return int(_rows(conn, RT_PHASH_POP_COUNT_SQL)[0][0] or 0)
+
+
+def write_population(conn: Any, dataset: Any) -> dict[str, Any]:
+    """Materialise the calibration's own pHash population into `autodedup.phash_pop`.
+
+    The number is the artifact's: `COHORT_PHASH_POP_SQL` counted `count(DISTINCT listing_id)`
+    over `public.images` when the cohort was exported, and every image record carries it. So
+    the seed copies it rather than recounting it — zero blocks of `public`, and the live lane
+    then joins against EXACTLY the statistic the batch engine scored with. What that buys and
+    what it costs: the population is frozen at export time (E70), it can only have grown since,
+    and a hash the export never saw stays unknown until the next export and re-seed."""
+    population: dict[int, int] = {}
+    images = with_phash = 0
+    for image in dataset.all_images():
+        images += 1
+        if image.phash is None:
+            continue
+        with_phash += 1
+        if image.pop is None:
+            continue
+        population[int(image.phash)] = max(population.get(int(image.phash), 0), int(image.pop))
+    if with_phash and not population:
+        raise SystemExit(
+            "the cohort artifact carries no MEASURED pHash population (`phash_pop_ok` false: "
+            "the export's population probe timed out) — seeding from it would freeze a "
+            "generation in which every catalog_ratio is absent and no K-C certificate can "
+            "ever fire (E91). Re-run the export first.")
+    rows = [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())]
+    # Chunked like the score lane's writes: the trial cohort carries 41,791 distinct hashes and
+    # one `executemany` of that many bound parameters is megabytes in a single call.
+    for start in range(0, len(rows), POP_CHUNK):
+        _exec_many(conn, RT_PHASH_POP_WRITE_SQL, rows[start:start + POP_CHUNK])
+    return {"images": images, "images_with_phash": with_phash,
+            "hashes_written": len(population),
+            "hashes_at_or_above_2": sum(1 for n in population.values() if n >= 2)}
+
+
+# --- the parity gate (E91) ----------------------------------------------------------------
+
+
+def parity_baseline_key(generation: str) -> str:
+    return f"{PARITY_BASELINE_SETTING}:{generation}"
+
+
+def drifted_since(conn: Any, ids: Sequence[int], exported_at: Any) -> set[int]:
+    """The sampled listings whose CONTENT changed after the export — genuine drift, never a
+    parity breach (rule #2: a snapshot row is appended only when the content hash moves)."""
+    cut = _stamp(exported_at)
+    if cut is None or not ids:
+        return set()
+    out: set[int] = set()
+    for row in _rows(conn, RT_PARITY_CHANGE_SQL, {"ids": list(ids)}):
+        stamp = _stamp(row[1])
+        if stamp is not None and stamp > cut:
+            out.add(int(row[0]))
+    return out
+
+
+def _stamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T", 1))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def parity_sample(rows: Mapping[str, Any], k: int) -> list[int]:
+    """A fresh slice of the baseline each pass, so a day of passes covers all of it."""
+    ids = sorted(int(key) for key in rows)
+    if len(ids) <= k:
+        return ids
+    return sorted(random.sample(ids, k))
+
+
+def check_parity(conn: Any, generation: str, payload: Mapping[str, Any], k: int,
+                 facts: "SqlFacts | None" = None) -> dict[str, Any]:
+    """Re-read a slice of the seeded baseline through `SqlFacts` and compare the digests."""
+    rows = payload.get("rows") or {}
+    sample = parity_sample(rows, k)
+    reader = facts or SqlFacts(conn)
+    live: dict[int, tuple[Listing, list[Image]]] = {}
+    for start in range(0, len(sample), 100):
+        live.update(reader.facts(sample[start:start + 100]))
+    drifted = drifted_since(conn, sample, payload.get("exported_at"))
+    report = parity_compare(
+        {str(i): rows[str(i)] for i in sample},
+        {i: value[0] for i, value in live.items()},
+        {i: value[1] for i, value in live.items()},
+        drifted)
+    report["sampled"] = len(sample)
+    report["baseline_listings"] = len(rows)
+    report["baseline_cut_at"] = payload.get("cut_at")
+    report["exported_at"] = payload.get("exported_at")
+    report["tolerance"] = PARITY_TOLERANCE
+    report["phash_pop_rows"] = phash_pop_rows(conn)
+    report["phash_pop_rows_at_seed"] = payload.get("phash_pop_rows")
+    # The two staleness readouts every pass owes (E95): how old the EXPORT the calibration was
+    # cut from is, and how much of what this gate just read the frozen population could not
+    # measure. Reported whether or not they refuse, so the drift is watchable before it bites.
+    report["age_days"] = age_days(payload.get("exported_at"))
+    report["images_with_phash"] = reader.images_with_phash
+    report["images_unmeasured"] = reader.images_unmeasured
+    report["unknown_pop_share"] = _unknown_share(reader)
+    report["statements"] = reader.statements + 2
+    return report
+
+
 def run_incremental(
     conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path
 ) -> dict[str, Any]:
@@ -1402,8 +1936,6 @@ def run_incremental(
     if not env_enabled():
         return {"skipped": "dark", "reason": f"{ENV_FLAG} is not true", "spent_usd": 0.0}
 
-    settings = load_settings(args.get("settings") or None)
-    model = load_model(args.get("model") or None)
     holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()
     leased = False
@@ -1429,7 +1961,12 @@ def run_incremental(
         rescope = str(args.get(RESCOPE_ARG) or "").strip().lower() == "true"
         scope_key = scope_setting_key(generation)
         control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
-                                       RETIRE_SETTING, SCAN_CAP_SETTING, INTERVAL_SETTING])
+                                       RETIRE_SETTING, SCAN_CAP_SETTING, INTERVAL_SETTING,
+                                       PARITY_SAMPLE_SETTING, PARITY_MIN_CHECKED_SETTING,
+                                       PARITY_MIN_SHARE_SETTING,
+                                       PARITY_UNKNOWN_POP_SETTING, CALIBRATION_AGE_SETTING,
+                                       EVIDENCE_HORIZON_SETTING, EVIDENCE_SLICE_SETTING,
+                                       parity_baseline_key(generation)])
         try:
             # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
             # the operator has to ask for by name (W9d-2). The row is PER GENERATION (W9e/R4).
@@ -1447,6 +1984,11 @@ def run_incremental(
             max_enter_scans = control_number(SCAN_CAP_SETTING, args, control,
                                              float(MAX_ENTER_SCANS_PER_DAY), rescope)
             intervals = enter_intervals(args, control, rescope)
+            evidence_horizon = control_number(EVIDENCE_HORIZON_SETTING, args, control,
+                                              EVIDENCE_HORIZON_HOURS, rescope)
+            evidence_slice = control_number(EVIDENCE_SLICE_SETTING, args, control,
+                                            float(EVIDENCE_SLICE), rescope)
+            floors = resolve_floors(args, control, rescope)
         except ScopeError as exc:
             raise SystemExit(str(exc)) from exc
         try:
@@ -1465,7 +2007,15 @@ def run_incremental(
         payload = rows[0][3]
         calibration = Calibration.from_json(
             payload if isinstance(payload, dict) else json.loads(payload or "{}"))
-        store = SqlStore(conn, generation, store_floor=settings.store_floor)
+        # The scorer is the GENERATION's, read off the row the seed wrote (E90a).
+        settings, model = pass_config(args, rows[0][5], rows[0][6], generation)
+        # THE GATE (E91). Before the lease's transaction, before a single write: a slice of the
+        # seeded baseline re-read through the same `SqlFacts` the pass is about to score with.
+        # A breach stops the pass — non-zero, nothing written, no cursor moved.
+        parity = parity_gate(conn, generation, control, args, floors, rows[0][7])
+        store = SqlStore(conn, generation, store_floor=settings.store_floor,
+                         model_version=model.version,
+                         calibration_digest=calibration.digest())
         facts = SqlFacts(conn)
         work = SqlWork(conn, scope, generation,
                        lag=int(args.get("settle_lag") or SETTLE_LAG_S),
@@ -1476,7 +2026,9 @@ def run_incremental(
                        enter_slice=int(args.get("enter_slice") or ENTER_SLICE),
                        parents=parents, max_retire_fraction=max_retire_fraction,
                        enter_interval_hours=intervals,
-                       max_enter_scans_per_day=int(max_enter_scans))
+                       max_enter_scans_per_day=int(max_enter_scans),
+                       evidence_slice=int(evidence_slice),
+                       evidence_horizon_hours=evidence_horizon)
         result = None
         try:
             with _transaction(conn):
@@ -1496,9 +2048,15 @@ def run_incremental(
                     _exec(conn, RT_CURSOR_WRITE_SQL, {
                         "name": CURSOR_ENTER, "last_listing_id": 0,
                         "last_snapshot_id": 0, "watermark": None})
+                # E93's clock. The hold exists only where there IS one: the batch engine
+                # has none, so the replay's default is no hold and the equivalence proof is
+                # untouched by it.
+                pass_now = time.time()
                 result = run_pass_bounded(store, facts, work, settings, model, calibration,
                                           limits=limits, generation=generation,
-                                          now=time.time())
+                                          now=pass_now,
+                                          hold=EvidenceHold(pass_now,
+                                                            evidence_horizon * 3600.0))
                 if result.aborted:
                     # Nothing this pass wrote survives a refusal, and no cursor moved.
                     raise _Refused()
@@ -1509,7 +2067,27 @@ def run_incremental(
             raise SystemExit(str(exc)) from exc
         summary = result.to_json() if result is not None else {"aborted": "unknown"}
         summary["fact_reads"] = facts.reads
-        summary["statements"] = store.statements + facts.statements + work.statements
+        summary["statements"] = (store.statements + facts.statements + work.statements
+                                 + int(parity.get("statements") or 0))
+        summary["parity"] = parity
+        summary["settings"] = settings.to_dict()
+        summary["model_version"] = model.version
+        # What this pass could not measure: images whose hash the frozen population does not
+        # carry (E91). Zero on a generation whose seed and export are the same cut; it grows
+        # with every photograph that arrived after the export, and it is the number that says
+        # when the generation is due a re-export and re-seed.
+        summary["population"] = {
+            "phash_pop_rows": parity.get("phash_pop_rows"),
+            "images_with_phash": facts.images_with_phash,
+            "images_unmeasured": facts.images_unmeasured,
+            "hashes_unmeasured": len(facts.hashes_unmeasured),
+            # COVERAGE, the number the age rail is a proxy for: the share of the photographs
+            # this pass actually scored that the frozen population could measure (E95).
+            "coverage": (None if not facts.images_with_phash else round(
+                1.0 - facts.images_unmeasured / float(facts.images_with_phash), 6)),
+            "gate_unknown_share": parity.get("unknown_pop_share"),
+            "max_unknown_share": floors.max_unknown_pop_share,
+        }
         summary["calibration_n_listings"] = int(rows[0][2] or 0)
         summary["store_rows"] = int(
             _rows(conn, RT_FP_COUNT_SQL, {"generation": generation})[0][0])
@@ -1522,6 +2100,22 @@ def run_incremental(
         summary["enter_scan"] = dict(work.enter_scan)
         summary["enter_interval_hours"] = dict(intervals)
         summary["max_enter_scans_per_day"] = int(max_enter_scans)
+        # The seventh feed and the hold it serves (E92/E93): what the sweep probed on
+        # `public.images`, what it found moved, and how many merges are waiting.
+        summary["evidence"] = {
+            **dict(work.evidence),
+            "held_this_pass": result.held if result is not None else 0,
+            "released_this_pass": result.released if result is not None else 0,
+            "redecided": result.redecided if result is not None else 0,
+        }
+        # The staleness readout E95 owes every pass, refused above and REPORTED here.
+        summary["calibration"] = {
+            "digest": calibration.digest(),
+            "built_at": _iso(rows[0][7]),
+            "built_age_days": age_days(rows[0][7]),
+            "export_age_days": parity.get("age_days"),
+            "max_age_days": floors.max_age_days,
+        }
         summary["retention"] = {"store_floor": settings.store_floor,
                                 "pairs_retained": store.pairs_retained,
                                 "pairs_evicted": store.pairs_evicted}
@@ -1587,10 +2181,10 @@ def run_rt_seed(
         raise SystemExit(
             "rt_seed needs export_run=<the export lane's run id> or artifact=<cohort.jsonl.gz>")
     generation = (args.get("generation") or "").strip() or GENERATION
-    settings = load_settings(args.get("settings") or None)
-    model = load_model(args.get("model") or None)
+    settings, model, settings_name, model_name = named_config(args, what="rt_seed")
     backfill = str(args.get("backfill") or "").strip().lower() == "true"
     reseed = str(args.get("reseed") or "").strip().lower() == "true"
+    parity_n = int(_setting_number(args.get("parity_n"), float(PARITY_BASELINE_N)))
 
     conn = conn_factory()
     try:
@@ -1605,7 +2199,13 @@ def run_rt_seed(
                 "calibration every stored decision of this generation was taken under. Pass "
                 "reseed=true to mean it, or seed a new generation.")
         scope_key = scope_setting_key(generation)
-        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING])
+        control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
+                                       PARITY_MIN_CHECKED_SETTING, PARITY_MIN_SHARE_SETTING,
+                                       CALIBRATION_AGE_SETTING, PARITY_UNKNOWN_POP_SETTING])
+        # The same four floors the scheduled pass is held to (E94/E95). A seed cut from an
+        # export already past the age rail would be refused by the first pass anyway; it is
+        # refused HERE, where the recipe that fixes it is one re-export away.
+        floors = resolve_floors({}, control)
         try:
             scope = resolve_scope(args.get(SCOPE_SETTING),
                                   read_scope_setting(control, generation))
@@ -1638,6 +2238,11 @@ def run_rt_seed(
         payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
         written = 0
         with _transaction(conn):
+            # THE FROZEN POPULATION FIRST (E91). Everything below — the parity gate included —
+            # reads galleries through `SqlFacts`, which joins this table, so it has to be
+            # written before anything looks at an image.
+            population = write_population(conn, ds)
+            parity = seed_parity(conn, ds, in_scope, generation, parity_n, floors)
             _exec(conn, RT_CALIBRATION_WRITE_SQL, {
                 "generation": generation, "digest": calibration.digest(),
                 "n_listings": calibration.n_listings,
@@ -1665,8 +2270,16 @@ def run_rt_seed(
             _exec(conn, RT_SETTING_WRITE_SQL, {
                 "key": scope_key, "value": json.dumps(scope.as_json()),
                 "updated_by": f"{LANE_NAME}:rt_seed"})
+            # The gate's baseline, cut at the same moment as the calibration and stored where
+            # the lane already reads its control rows — a settings row needs no migration (E91).
+            _exec(conn, RT_SETTING_WRITE_SQL, {
+                "key": parity_baseline_key(generation),
+                "value": json.dumps(parity["baseline"], sort_keys=True, default=str),
+                "updated_by": f"{LANE_NAME}:rt_seed"})
             if backfill:
-                store = SqlStore(conn, generation, store_floor=settings.store_floor)
+                store = SqlStore(conn, generation, store_floor=settings.store_floor,
+                                 model_version=model.version,
+                                 calibration_digest=calibration.digest())
                 keyer = Keyer(settings, calibration)
                 for listing_id in sorted(fps):
                     fp = fps[listing_id]
@@ -1677,7 +2290,11 @@ def run_rt_seed(
                                        fp.area_m2, fp.disposition, fp.floor),
                               fp_digest(fp, ds.images(listing_id)),
                               address_block_key(listing), category_group(listing),
-                              bool(listing.is_active)),
+                              bool(listing.is_active),
+                              # What the COHORT's own decision rested on (E92). A backfilled
+                              # listing whose artifact gallery was already hashed is complete
+                              # and never enters the evidence sweep.
+                              evidence_of(ds.images(listing_id))),
                         keyer.index_keys(fp))
                     store.bump_cell(listing)
                     written += 1
@@ -1686,6 +2303,13 @@ def run_rt_seed(
             "generation": generation,
             "calibration_digest": calibration.digest(),
             "calibration_n_listings": calibration.n_listings,
+            "settings_name": settings_name,
+            "model_name": model_name,
+            "model_version": model.version,
+            "population": population,
+            "parity": parity["report"],
+            "floors": floors_json(floors),
+            "evidence_horizon_hours": EVIDENCE_HORIZON_HOURS,
             "cursors": {CURSOR_NEW: int(seeded[0]), CURSOR_CHANGED: int(seeded[1]),
                         CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0, CURSOR_SCOPE: 0},
             "backfilled": written,

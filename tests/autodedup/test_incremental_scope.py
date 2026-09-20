@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace as dc_replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from autodedup.incremental_lane import (
     BUDGET_SETTING,
     CURSOR_CHANGED,
     CURSOR_ENTER,
+    CURSOR_EVIDENCE,
     CURSOR_FLIPPED,
     CURSOR_NEW,
     CURSOR_SCOPE,
@@ -34,6 +35,7 @@ from autodedup.incremental_lane import (
     RetireRefusal,
     SqlStore,
     SqlWork,
+    parity_baseline_key,
     resolve_scope_parents,
     run_incremental,
     scope_setting_key,
@@ -69,18 +71,42 @@ def _place(db: FakePg, listing_id: int, *, obec: int | None = None,
     db.locations[int(listing_id)] = {"obec_kod": obec, "cast_obce_kod": cast_obce}
 
 
+def _baseline(db: FakePg, generation: str = GEN) -> None:
+    """The parity gate (E91) refuses a generation with no fact baseline. A fixture that
+    hand-writes the calibration row hand-writes the baseline too — an empty one, because its
+    `public` holds no cohort listing to compare against, and with W9h's vacuity floors (E94)
+    an empty baseline now REFUSES unless the rail is switched off by name. These fixtures
+    switch it off and say so: they test the scope, the feeds and the seed's mechanics, and
+    what the gate is FOR is proved end to end in `test_rt_gate.py`, `test_shipped_w9h.py`
+    and `test_parity.py`."""
+    db.settings[parity_baseline_key(generation)] = {
+        "rows": {}, "exported_at": db.now.isoformat(), "n": 0}
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
+
 def _calibrated(db: FakePg, generation: str = GEN) -> FakePg:
     """A SEEDED generation. A pass over an unseeded one is a green skip (W9e/R1), so every
     test about what a pass REFUSES has to seed it first."""
     db.calibration[generation] = {"digest": "d", "n_listings": 3, "payload": {},
-                                  "artifact_url": None, "settings": {}, "model_version": "m"}
+                                  "artifact_url": None, "settings": {},
+                                  "model_version": "hand_v1"}
+    _baseline(db, generation)
     return db
+
+
+# A SETTLED store row: its photographs were counted when the generation decided it, long
+# enough ago that the evidence sweep (E92) has no business in it. A hand-written row that left
+# these NULL would be claimed by the sweep on every pass — unmeasured is not the same as
+# nothing to measure — which is what `test_shipped_w9h.py` proves it does.
+_SETTLED = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _fp_row(is_active: bool = True) -> dict:
     return {"category_main": None, "category_type": None, "area_m2": None,
             "disposition": None, "floor": None, "fp_digest": "d",
-            "cell_key": "o1", "cell_group": "byt", "is_active": is_active}
+            "cell_key": "o1", "cell_group": "byt", "is_active": is_active,
+            "ev_images": 0, "ev_phash": 0, "ev_clip": 0, "ev_tags": 0,
+            "ev_complete": True, "first_decided_at": _SETTLED}
 
 
 # ------------------------------------------------------------------- the scope as data
@@ -292,7 +318,11 @@ def test_a_refused_pass_advances_no_cursor_even_across_an_empty_window() -> None
     work = SqlWork(db, SCOPE, GEN, max_retire_fraction=1.0)
     work.claim(50)
     work.commit([])  # E75: the pair budget refused this claim
-    assert db.cursors == {CURSOR_NEW: {"last_listing_id": 50}}, "the fixture's own row only"
+    # The evidence sweep's pointer is a ROUND-ROBIN position over a read-only probe, not a
+    # watermark over work: it handed nothing over, so nothing it could have skipped was
+    # skipped, and a short slice wraps it to 0. Every real watermark is where it was.
+    assert db.cursors == {CURSOR_NEW: {"last_listing_id": 50},
+                          CURSOR_EVIDENCE: {"last_listing_id": 0}}
 
 
 # --------------------------------------------------------------- leaving the scope
@@ -414,7 +444,9 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, 
     conn = FakePg()
     conn.schema_bytes = 64 * 1_048_576
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     monkeypatch.setenv(ENV_FLAG, "true")
     out = run_incremental(lambda: conn, {SCOPE_SETTING: "obec:563510"}, tmp_path)
@@ -494,7 +526,9 @@ def test_a_handful_of_departures_is_still_retired() -> None:
 def test_the_lane_stops_loudly_when_the_drift_sweep_refuses(tmp_path, monkeypatch) -> None:
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     conn.settings[SCOPE_SETTING] = [{"grain": "obec", "code": 563510}]
     for listing_id in range(1, 101):
         conn.rt_fp[(GEN, listing_id)] = _fp_row()
@@ -512,7 +546,9 @@ def test_the_lane_stops_loudly_when_the_drift_sweep_refuses(tmp_path, monkeypatc
 def _seeded(scope_json: Any) -> FakePg:
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     conn.settings[SCOPE_SETTING] = scope_json
     return conn
 
@@ -554,7 +590,9 @@ def test_a_seeded_generation_with_no_scope_row_is_a_hard_error(tmp_path, monkeyp
     """Never a silent fall back to the default: the row IS the generation's scope."""
     conn = FakePg()
     conn.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {},
-                             "artifact_url": None, "settings": {}, "model_version": "m"}
+                             "artifact_url": None, "settings": {},
+                             "model_version": "hand_v1"}
+    _baseline(conn, GEN)
     monkeypatch.setenv(ENV_FLAG, "true")
     with pytest.raises(SystemExit) as raised:
         run_incremental(lambda: conn, {"generation": GEN}, tmp_path)

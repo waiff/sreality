@@ -355,7 +355,7 @@
       "inputs": [
         {
           "name": "args",
-          "description": "Pass arguments as k=v,k=v — generation (default rt), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings, model. The rails (rt_max_schema_mb, rt_max_retire_fraction, rt_enter_max_scans_per_day, rt_enter_interval_hours) are autodedup.settings rows and are accepted here only beside rt_rescope=true.",
+          "description": "Pass arguments as k=v,k=v — generation (default rt), rt_parity_sample (how many baseline listings the gate re-checks, default 25), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings and model (a pass may NAME the generation's own scorer, never a different one — changing it is a re-seed). The rails (rt_max_schema_mb, rt_max_retire_fraction, rt_enter_max_scans_per_day, rt_enter_interval_hours) are autodedup.settings rows and are accepted here only beside rt_rescope=true.",
           "required": false,
           "type": "string",
           "default": "",

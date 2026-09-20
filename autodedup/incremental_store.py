@@ -17,6 +17,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup.dataset import Listing
 from autodedup.hazard_context import ContextStamp, address_block_key, category_group
+from dataclasses import replace
+
 from autodedup.incremental import (
     SET_CAP,
     CellRow,
@@ -34,7 +36,11 @@ def shape_token(listing: Listing) -> str:
 
 
 class MemoryStore:
-    def __init__(self) -> None:
+    def __init__(self, now: float | None = None) -> None:
+        # The twin's clock, for `first_decided_at` (E92). Production reads the server's; a
+        # replay that never sets one leaves the stamp NULL, which is what keeps the plain
+        # replay byte-for-byte what it was before the evidence horizon existed.
+        self.now = now
         self.postings: dict[tuple[str, str], list[int]] = {}
         self.keys: dict[int, list[tuple[str, str]]] = {}
         self.fp: dict[int, FpRow] = {}
@@ -57,7 +63,14 @@ class MemoryStore:
     def put_listing(self, listing_id: int, row: FpRow,
                     keys: Sequence[tuple[str, str]]) -> None:
         self._drop_keys(listing_id)
-        self.fp[listing_id] = row
+        # `first_decided_at` is the STORE's to stamp and never a pass's to fabricate, exactly
+        # as `RT_FP_UPSERT_SQL` coalesces it server-side: a refresh keeps the first stamp.
+        held = self.fp.get(listing_id)
+        stamped = (held.first_decided_at if held is not None and held.first_decided_at
+                   is not None else row.first_decided_at)
+        if stamped is None:
+            stamped = self.now
+        self.fp[listing_id] = replace(row, first_decided_at=stamped)
         self.keys[listing_id] = list(keys)
         for key in keys:
             bucket = self.postings.setdefault(key, [])

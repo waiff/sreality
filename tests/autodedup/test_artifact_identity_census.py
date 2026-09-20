@@ -30,6 +30,7 @@ LANE_WRITERS: tuple[str, ...] = (
     "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
     "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
+    "parity.py",
     "progress_sql.py", "replay.py", "score_lane.py", "score_sql.py", "seals.py",
     "structural_truth.py",
 )
@@ -86,7 +87,7 @@ def test_the_lane_writer_census_covers_the_package() -> None:
         "cohort.py", "dataset.py", "decide.py", "development.py", "ensembles.py",
             "family.py", "features.py",
         "fingerprint.py", "guards.py", "hazard_context.py", "incremental.py",
-        "incremental_scope.py", "incremental_store.py",
+        "incremental_scope.py", "incremental_store.py", "parity_digest.py",
         "model.py", "normalize.py", "oss_pod.py", "settings.py", "stock.py",
             "text_facts.py",
         "ui_sql.py", "verdict_reasons.py",

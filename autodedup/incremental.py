@@ -109,6 +109,89 @@ def guard_row(fp: Fingerprint) -> GuardRow:
 
 
 @dataclass(slots=True, frozen=True)
+class Evidence:
+    """The PHOTOGRAPHIC evidence a stored decision rested on, as four counts (E92).
+
+    A real-time arrival is claimed 5–15 minutes after `first_seen_at`; its images land about a
+    minute in, but `phash` is written by an hourly job and the CLIP vector and tags by another
+    (measured p50 2.47 h, p90 4.51 h to a first tag). So ~80% of arrivals are decided with
+    every `phash` NULL, and nothing in W9's six feeds was keyed on a hash or a vector
+    ARRIVING — the listing was decided once, on photographs that were not evidence yet, and
+    never looked at again. These counts are what the evidence sweep compares a bounded probe
+    of `public.images` against."""
+
+    n_images: int = 0
+    n_phash: int = 0
+    n_clip: int = 0
+    n_tags: int = 0
+
+    @property
+    def pending(self) -> bool:
+        """Photographs exist and NONE of them is hashed yet — the state E93 holds a merge in.
+
+        Narrower than `complete` on purpose: a gallery with one unhashed frame still carries
+        photo evidence, a gallery with none carries none at all."""
+        return self.n_images > 0 and self.n_phash <= 0
+
+    @property
+    def complete(self) -> bool:
+        return self.n_images <= 0 or (self.n_phash >= self.n_images
+                                      and self.n_clip >= self.n_images
+                                      and self.n_tags >= self.n_images)
+
+    def to_json(self) -> dict[str, int]:
+        return {"n_images": self.n_images, "n_phash": self.n_phash,
+                "n_clip": self.n_clip, "n_tags": self.n_tags}
+
+
+def evidence_of(images: Sequence[Image]) -> Evidence:
+    """What a gallery's producers have delivered, counted off the facts the pass just read."""
+    return Evidence(
+        n_images=len(images),
+        n_phash=sum(1 for img in images if img.phash is not None),
+        n_clip=sum(1 for img in images if img.clip is not None),
+        n_tags=sum(1 for img in images if img.tags),
+    )
+
+
+# The reason a MERGE wears while it waits for photographs, and the certificates that need
+# none: K-B is the re-post (one portal, one broker, one body, disjoint live windows) and K-R
+# is a shared agency order code. Both are text-and-clock facts, so a pass holds neither.
+EVIDENCE_HOLD_REASON: str = "evidence_pending"
+PHOTO_FREE_CERTIFICATES: frozenset[str] = frozenset({"K-B", "K-R"})
+
+
+@dataclass(slots=True, frozen=True)
+class EvidenceHold:
+    """E93: do not act on evidence you do not have yet.
+
+    A merge that rests on photographs is HELD in the band — reason `evidence_pending` — while
+    either side's gallery exists and carries no hash at all, and only while that side is still
+    inside the horizon the producers are expected to answer within. Rejects are never held: a
+    pair the engine refuses on text, price or geometry is refused on evidence it HAS.
+
+    The hold is a LATENCY policy and not a decision one, which is why it is an argument rather
+    than a setting: the batch engine has no clock, so a pass given no hold behaves exactly as
+    W9's did and the replay-equivalence proof stays exact. What the hold changes is WHEN the
+    state is reached, never which state — the horizon expires, the pair is re-decided, and the
+    withheld-evidence replay is what proves the final state is still the batch engine's."""
+
+    now: float
+    horizon_s: float
+
+    def young(self, first_decided_at: float | None) -> bool:
+        """A listing this generation has never decided is young by definition — this pass IS
+        its first decision."""
+        if first_decided_at is None:
+            return True
+        return (self.now - float(first_decided_at)) < self.horizon_s
+
+    def holds(self, evidence: Evidence | None, first_decided_at: float | None) -> bool:
+        return bool(evidence is not None and evidence.pending
+                    and self.young(first_decided_at))
+
+
+@dataclass(slots=True, frozen=True)
 class FpRow:
     """What the store keeps about ONE listing: the guard columns, the re-score digest, the
     census cell it is counted in and the activity flag.
@@ -124,6 +207,12 @@ class FpRow:
     cell_key: str
     cell_group: str
     is_active: bool
+    # What this generation's stored decision rested on photographically, and when it was FIRST
+    # taken (E92). Both are written by the store, never fabricated by a pass: the SQL store
+    # stamps `first_decided_at` with the server's clock and coalesces it on every later
+    # refresh, and the twin does the same with its own.
+    evidence: Evidence = Evidence()
+    first_decided_at: float | None = None
 
     @property
     def cell(self) -> tuple[str, str]:
@@ -440,6 +529,11 @@ class WorkItem:
     # without it. Half-indexed is worse than unindexed — every neighbour would go on
     # retrieving it through postings nothing maintains.
     retire: bool = False
+    # The evidence sweep claimed this listing because its PHOTOGRAPHS moved, not its content
+    # (E92). Its fingerprint digest may be identical — a CLIP vector reaches no fingerprint
+    # field — and a hold whose horizon has passed moves no fact at all, so the idempotence
+    # short-circuit has to be bypassed for exactly these rows or nothing would be re-decided.
+    redecide: bool = False
 
 
 class WorkSource(Protocol):
@@ -556,6 +650,11 @@ class PassResult:
     clusters_written: int = 0
     clusters_dropped: int = 0
     retired: int = 0
+    # Merges this pass HELD in the band for want of photographs (E93), and listings the
+    # evidence sweep re-claimed because their photographs moved (E92).
+    held: int = 0
+    released: int = 0
+    redecided: int = 0
     rail: dict[str, int] = field(default_factory=dict)
     zones: dict[str, int] = field(default_factory=dict)
     certificates: dict[str, int] = field(default_factory=dict)
@@ -585,6 +684,9 @@ class PassResult:
                 "clusters_written": self.clusters_written,
                 "clusters_dropped": self.clusters_dropped,
                 "retired": self.retired,
+                "held": self.held,
+                "released": self.released,
+                "redecided": self.redecided,
                 "wanted_pairs": self.wanted_pairs,
                 "attempts": self.attempts,
             },
@@ -809,6 +911,7 @@ def run_pass(
     limits: Limits | None = None,
     generation: str = GENERATION,
     now: float | None = None,
+    hold: EvidenceHold | None = None,
 ) -> PassResult:
     """One bounded, idempotent incremental pass. Re-running it on an unchanged corpus is a no-op.
 
@@ -865,6 +968,9 @@ def run_pass(
     # A listing claimed for RETIREMENT is never also refreshed, whichever feed saw it: the
     # scope no longer holds it, so there is nothing to refresh it into.
     retire_ids = {item.listing_id for item in items if item.retire}
+    # The evidence sweep's rows (E92): re-decided even when nothing a digest can see moved.
+    redecide = {item.listing_id for item in items
+                if item.redecide and item.listing_id not in retire_ids}
     claimed = [item.listing_id for item in items
                if item.listing_id not in retire_ids
                and not (item.listing_id in seen_ids or seen_ids.add(item.listing_id))]
@@ -931,7 +1037,8 @@ def run_pass(
         # share a pHash band, and the posting list is a set — a pass that read that difference
         # as a change would re-score the whole corpus on every drain.
         new_keys = sorted(set(keyer.index_keys(fp)))
-        if old is not None and old.digest == digest and old_keys == new_keys:
+        if (old is not None and old.digest == digest and old_keys == new_keys
+                and listing_id not in redecide):
             continue  # idempotence: an unchanged listing costs a digest, not a pass
         cell = (address_block_key(listing), category_group(listing))
         if old is not None:
@@ -941,7 +1048,12 @@ def run_pass(
             touched_blocks.add(old.cell_key)
         view.put_listing(
             listing_id,
-            FpRow(guard_row(fp), digest, cell[0], cell[1], bool(listing.is_active)),
+            FpRow(guard_row(fp), digest, cell[0], cell[1], bool(listing.is_active),
+                  evidence_of(working.images.get(listing_id, ())),
+                  # The FIRST decision's stamp is carried, never restamped: the evidence
+                  # horizon is measured from it, and a refresh that reset it would hold a
+                  # merge for ever (E92). The store coalesces it on the way down too.
+                  old.first_decided_at if old is not None else None),
             new_keys, old_keys,
         )
         view.bump_cell(listing)
@@ -1039,7 +1151,12 @@ def run_pass(
                for i in endpoints if i in working.fps}
     ctx = context_for(calibration, settings, working.fps, working.listings)
     census = _census(store, working.listings, working.images)
+    # E93's two inputs, batched for the whole pass: what each endpoint's photographs ARE right
+    # now (off the facts this pass read) and when this generation first decided it.
+    decided_at = ({i: row.first_decided_at for i, row in view.rows(sorted(endpoints)).items()}
+                  if hold is not None else {})
     rows: list[PairRow] = []
+    result.redecided = len(redecide)
     for (lo, hi) in sorted(wanted):
         entry = wanted[(lo, hi)]
         if lo not in working.fps or hi not in working.fps:
@@ -1062,18 +1179,34 @@ def run_pass(
                                      working.images.get(hi, ()), ctx, settings)
         decision = decide_pair(fa, fb, la, lb, feats, entry["probes"], model, settings, census)
         result.pairs_scored += 1
-        result.zones[decision.zone] = result.zones.get(decision.zone, 0) + 1
-        if decision.certificate:
-            result.certificates[decision.certificate] = (
-                result.certificates.get(decision.certificate, 0) + 1)
         evidence = dict(decision.evidence)
         if decision.certificate == "K-R":
             evidence["ref_codes"] = ",".join(ctx.shared_codes(lo, hi))
+        # E93: a MERGE that does not rest on a photograph-free certificate waits while either
+        # side's gallery exists and carries no hash at all. The zone written is the BAND — the
+        # engine's own "look again" verdict — and what the pass decided is kept beside it so a
+        # release is a re-decision and not a reconstruction.
+        zone, reason, certificate = decision.zone, decision.reason, decision.certificate
+        if (hold is not None and zone == "merge"
+                and (certificate or "") not in PHOTO_FREE_CERTIFICATES
+                and (hold.holds(evidence_of(working.images.get(lo, ())), decided_at.get(lo))
+                     or hold.holds(evidence_of(working.images.get(hi, ())),
+                                   decided_at.get(hi)))):
+            evidence = {**evidence, "held_zone": "merge", "held_reason": decision.reason,
+                        "held_certificate": certificate or ""}
+            zone, reason, certificate = "band", EVIDENCE_HOLD_REASON, None
+            result.held += 1
+        elif previous is not None and previous.reason == EVIDENCE_HOLD_REASON:
+            result.released += 1
+        result.zones[zone] = result.zones.get(zone, 0) + 1
+        if certificate:
+            result.certificates[certificate] = (
+                result.certificates.get(certificate, 0) + 1)
         rows.append(PairRow(
             lo=lo, hi=hi, probes=sorted(entry["probes"]),
             from_lo=bool(entry["from_lo"]), from_hi=bool(entry["from_hi"]),
-            zone=decision.zone, score=decision.score, families=sorted(decision.families),
-            certificate=decision.certificate, veto=decision.veto, reason=decision.reason,
+            zone=zone, score=decision.score, families=sorted(decision.families),
+            certificate=certificate, veto=decision.veto, reason=reason,
             evidence=evidence,
             # `block` is not part of PairContext: it is the per-block cap E64 counts on,
             # and the rail needs it off the stored row rather than off a live re-read.
@@ -1139,6 +1272,7 @@ def run_pass_bounded(
     now: float | None = None,
     shrink: int = 4,
     attempts: int = 5,
+    hold: EvidenceHold | None = None,
 ) -> PassResult:
     """`run_pass`, re-claiming a SMALLER slice when the pair budget refused the last one.
 
@@ -1147,12 +1281,13 @@ def run_pass_bounded(
     single-listing claim will not fit, the lane STOPS: a neighbourhood that alone exceeds the
     budget is a block worth an operator's eye, not a number to quietly truncate."""
     caps = limits or Limits()
-    result = run_pass(store, facts, work, settings, model, calibration, caps, generation, now)
+    result = run_pass(store, facts, work, settings, model, calibration, caps, generation, now,
+                      hold)
     tries = 1
     while result.aborted and tries < attempts and caps.max_listings > 1:
         caps = replace(caps, max_listings=max(1, caps.max_listings // shrink))
         result = run_pass(store, facts, work, settings, model, calibration, caps, generation,
-                          now)
+                          now, hold)
         tries += 1
     result.attempts = tries
     return result
@@ -1234,38 +1369,90 @@ def _census(
     )
 
 
+class _Reach:
+    """Union-find over the merge edges one pass walks, so the whole seed set is expanded
+    TOGETHER rather than one component at a time."""
+
+    def __init__(self) -> None:
+        self.parent: dict[int, int] = {}
+        self.count: dict[int, int] = {}
+
+    def add(self, item: int) -> int:
+        if item not in self.parent:
+            self.parent[item] = item
+            self.count[item] = 1
+        return self.find(item)
+
+    def find(self, item: int) -> int:
+        parent = self.parent
+        root = parent.setdefault(item, item)
+        self.count.setdefault(item, 1)
+        while root != parent[root]:
+            parent[root] = parent[parent[root]]
+            root = parent[root]
+        parent[item] = root
+        return root
+
+    def union(self, left: int, right: int) -> None:
+        a, b = self.find(left), self.find(right)
+        if a == b:
+            return
+        small, large = (a, b) if self.count[a] < self.count[b] else (b, a)
+        self.parent[small] = large
+        self.count[large] += self.count[small]
+
+    def size(self, item: int) -> int:
+        return self.count[self.find(item)]
+
+    def groups(self) -> dict[int, list[int]]:
+        out: dict[int, list[int]] = {}
+        for item in self.parent:
+            out.setdefault(self.find(item), []).append(item)
+        return {root: sorted(members) for root, members in out.items()}
+
+
 def _components(
     store: Store, seeds: Iterable[int], max_size: int
 ) -> tuple[list[list[int]], list[int]]:
     """Connected components of the merge-edge graph reachable from the seeds, BFS-bounded.
 
+    ONE `merge_neighbours` per BFS LEVEL for the whole seed set, not one per level per seed
+    (E74). W9f's first live pass walked 700 components this way and paid 7,131 serial
+    statements at ~96 ms of Frankfurt round trip each — 682 s of a 876 s pass — and the shape
+    is per-pass, not per-cold-store: a rescope, a re-seed or a large delist batch moves the
+    merge graph at that scale again.
+
     A component larger than the cap is NOT silently clustered from a partial member set — it is
     named on the pass summary and left to the cohort lane, because a partial component is the
-    one input that would make E72's result differ from the batch pass's."""
+    one input that would make E72's result differ from the batch pass's. It also stops growing
+    the moment it passes the cap, which is what bounds this walk."""
+    wanted = sorted(set(seeds))
+    if not wanted:
+        return [], []
+    reach = _Reach()
+    for seed in wanted:
+        reach.add(seed)
+    frontier = set(wanted)
     seen: set[int] = set()
+    while frontier:
+        seen |= frontier
+        found: set[int] = set()
+        for listing_id, others in store.merge_neighbours(sorted(frontier)).items():
+            reach.add(listing_id)
+            for other in others:
+                reach.add(other)
+                reach.union(listing_id, other)
+            found |= others
+        frontier = {i for i in (found - seen) if reach.size(i) <= max_size}
     out: list[list[int]] = []
     oversized: list[int] = []
-    for seed in sorted(set(seeds)):
-        if seed in seen:
+    inside = set(wanted)
+    for members in sorted(reach.groups().values()):
+        if len(members) > max_size:
+            oversized.extend(i for i in members if i in inside)
             continue
-        frontier = {seed}
-        members: set[int] = set()
-        overflow = False
-        while frontier:
-            members |= frontier
-            if len(members) > max_size:
-                overflow = True
-                break
-            nxt: set[int] = set()
-            for listing_id, others in store.merge_neighbours(frontier).items():
-                nxt |= others
-            frontier = nxt - members
-        seen |= members
-        if overflow:
-            oversized.append(seed)
-            continue
-        out.append(sorted(members))
-    return out, oversized
+        out.append(members)
+    return out, sorted(oversized)
 
 
 def _recluster(
@@ -1278,13 +1465,35 @@ def _recluster(
     result: PassResult,
     operator_mnl: frozenset[tuple[int, int]] | set[tuple[int, int]] | None = None,
 ) -> None:
+    """Re-cluster every touched component, in a fixed number of statements (E74).
+
+    The per-component spelling cost ~10 serial round trips each — a fact read, `pairs_within`,
+    `clusters_touching` and up to six writes — so a pass that moved 700 components spent its
+    whole budget on latency. The components are computed in memory; the four reads and the one
+    write are batched across all of them. A pair whose two sides fell in DIFFERENT components
+    is nobody's edge (a merge edge would have joined them), which is exactly what the
+    per-component `pairs_within` used to answer."""
     components, oversized = _components(store, seeds, caps.max_component)
     result.oversized_components = sorted(set(result.oversized_components) | set(oversized))
     result.components += len(components)
     operator_mnl = store.must_not_link() if operator_mnl is None else operator_mnl
-    for members in components:
-        working.ensure(members)
-        pairs = store.pairs_within(members)
+    if not components:
+        return
+    every = sorted({i for members in components for i in members})
+    working.ensure(every)
+    of_component = {i: index for index, members in enumerate(components) for i in members}
+    edges: list[list[PairRow]] = [[] for _ in components]
+    for row in store.pairs_within(every):
+        index = of_component.get(row.lo)
+        if index is not None and index == of_component.get(row.hi):
+            edges[index].append(row)
+    touched = store.clusters_touching(every)
+
+    rows: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    keep: set[int] = set()
+    for index, members in enumerate(components):
+        pairs = edges[index]
         decisions = [row.decision() for row in pairs]
         vetoed = {(row.lo, row.hi) for row in pairs if row.veto == UNIT_DESIGNATOR_VETO}
         inside = set(members)
@@ -1294,20 +1503,22 @@ def _recluster(
         fps = {i: working.fps[i] for i in members if i in working.fps}
         listings = {i: working.listings[i] for i in members if i in working.listings}
         clustered = cluster_pairs(decisions, listings, fps, settings, mnl)
-        rows = cluster_rows(clustered, decisions, fps)
-        existing = store.clusters_touching(members)
-        keep = set(clustered.clusters)
-        drop = [key for key in existing if key not in keep]
+        rows.extend(cluster_rows(clustered, decisions, fps))
+        keep |= set(clustered.clusters)
         # Refused unions AND refused bridges: §8 calls these the highest-value rows in the UI,
         # because a conflict is evidence in two directions. An APPLIED bridge is a union and
         # has nothing left to show.
-        conflicts = [{**conflict, "kind": "invariant", "generation": result.generation}
-                     for conflict in clustered.conflicts]
+        conflicts += [{**conflict, "kind": "invariant", "generation": result.generation}
+                      for conflict in clustered.conflicts]
         conflicts += [{**bridge, "kind": "bridge", "generation": result.generation}
                       for bridge in clustered.bridges if not bridge.get("applied")]
-        store.write_clusters(drop, rows, conflicts)
-        result.clusters_written += len(rows)
-        result.clusters_dropped += len(drop)
+    # A stale cluster is dropped once, by the WHOLE pass: the per-component spelling let one
+    # component drop a key another had just kept, so which of the two ran last decided whether
+    # the cluster survived.
+    drop = sorted(key for key in touched if key not in keep)
+    store.write_clusters(drop, rows, conflicts)
+    result.clusters_written += len(rows)
+    result.clusters_dropped += len(drop)
 
 
 def _run_rail(
