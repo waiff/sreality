@@ -293,6 +293,12 @@ class JudgeArgs:
     # Replace the LLM id on every vote of the plan, keeping tier, prompt and frames: how a
     # rented open-weights model is raced against the paid one on the identical question.
     llm_model: str | None
+    # Redact every agency order code from the description before it is digested. A DIAGNOSTIC,
+    # not a production shape: `pos_ref_*` structural positives are certified BY that code and
+    # 69.3 % of them carry it into the 1,200-character window, so an arm's recall on them is
+    # partly a string match the prompt handed it. Run under its own judge_version — E29 caches
+    # on that key and a masked pass and an unmasked one are two different questions.
+    mask_codes: bool = False
 
 
 def _int_arg(args: dict[str, str], name: str, default: int) -> int:
@@ -414,6 +420,7 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         model=(args.get("model") or "").strip() or None,
         presentation=(args.get("presentation") or "").strip() or None,
         llm_model=(args.get("llm_model") or "").strip() or None,
+        mask_codes=_flag(args, "mask_codes"),
     )
 
 
@@ -578,11 +585,18 @@ def feats_of(row: dict[str, Any]) -> dict[str, tuple[float, bool]]:
     return out
 
 
-def scrubbed(listing: Listing) -> Listing:
-    """E28's defensive second pass — scrub, THEN truncate, so a half-cut phone cannot survive."""
+def scrubbed(listing: Listing, mask_codes: bool = False) -> Listing:
+    """E28's defensive second pass — scrub, THEN truncate, so a half-cut phone cannot survive.
+
+    Masking runs BEFORE the truncation, so a code the window would have clipped cannot come
+    back through a shifted cut."""
     from autodedup.export import scrub_description
 
     text = scrub_description(listing.description)
+    if mask_codes:
+        from autodedup.structural_truth import mask_codes as redact
+
+        text = redact(text)
     if text and len(text) > DESCRIPTION_MAX:
         text = text[:DESCRIPTION_MAX]
     return replace(listing, description=text)
@@ -1480,6 +1494,7 @@ def run_judge(
         "pairs_file_requested": pairs_file_requested,
         "pairs_file_missing": pairs_file_missing,
         "gold_version": parsed.gold_version,
+        "mask_codes": parsed.mask_codes,
         "pairs_without_gold_dropped": gold_restricted,
         "sample_strata": sample["strata"],
         "engine": {
@@ -1721,7 +1736,8 @@ def _estimate(judge: Any, dataset: Any, jobs: list[PairJob],
     cost = 0.0
     for job in jobs:
         la, lb = dataset.listings[job.lo], dataset.listings[job.hi]
-        digests, evidence = _inputs(judge, job, la, lb, settings)
+        digests, evidence = _inputs(judge, job, la, lb, settings,
+                                    parsed.mask_codes)
         for vote in job.votes:
             calls += 1
             cost += vote.est_usd
@@ -1785,14 +1801,16 @@ def pin_distance_m(la: Listing, lb: Listing) -> float | None:
 
 
 def _inputs(
-    judge: Any, job: PairJob, la: Listing, lb: Listing, settings: Settings | None = None
+    judge: Any, job: PairJob, la: Listing, lb: Listing, settings: Settings | None = None,
+    mask_codes: bool = False,
 ) -> tuple[Any, str]:
     """The prompt's view of the pair, built through the SAME settings row the engine ran.
 
     `attribute_conflicts` reads `vocabulary_attr_keys`: a slot the engine refuses to count must
     not be listed to the judge as a conflict either, or the labels come back arguing against a
     contradiction the engine never raised."""
-    digests = (judge.listing_digest(scrubbed(la)), judge.listing_digest(scrubbed(lb)))
+    digests = (judge.listing_digest(scrubbed(la, mask_codes)),
+               judge.listing_digest(scrubbed(lb, mask_codes)))
     evidence = judge.evidence_digest(
         feats_of(job.row),
         job.row.get("probes") or [],
@@ -1899,7 +1917,7 @@ def _run_job(
 ) -> None:
     pacing = pacing or build_pacing(parsed)
     la, lb = dataset.listings[job.lo], dataset.listings[job.hi]
-    digests, evidence = _inputs(judge, job, la, lb, settings)
+    digests, evidence = _inputs(judge, job, la, lb, settings, parsed.mask_codes)
     votes: list[Any] = []
     used: list[Vote] = []
     results: list[dict[str, Any]] = []

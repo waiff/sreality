@@ -586,11 +586,11 @@ def test_a_pair_that_raises_before_the_call_is_counted_not_lost(
     real = judge_lane._inputs
     seen: list[int] = []
 
-    def exploding(judge_mod, job, la, lb, settings=None):
+    def exploding(judge_mod, job, la, lb, settings=None, mask_codes=False):
         seen.append(job.lo)
         if len(seen) == 1:
             raise ValueError("digest blew up")
-        return real(judge_mod, job, la, lb, settings)
+        return real(judge_mod, job, la, lb, settings, mask_codes)
 
     monkeypatch.setattr(judge_lane, "_inputs", exploding)
     summary = lane(out, export_run="1", tier="text", n=6, max_usd=5, workers=1)
