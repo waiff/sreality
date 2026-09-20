@@ -47,6 +47,7 @@ from typing import Any, Callable
 from autodedup import iterations
 from autodedup.census import run_census, run_probes, write_json
 from autodedup.export import run_export
+from autodedup.incremental_lane import run_incremental
 from autodedup.iterations import run_record
 from autodedup.judge_lane import run_judge
 from autodedup.labels_lane import run_labels
@@ -60,10 +61,16 @@ MODES: dict[str, Mode] = {
     "export": run_export,
     "judge": run_judge,
     "score": run_score,
+    "incremental": run_incremental,
     "labels": run_labels,
     "record": run_record,
 }
 
+# `incremental` is deliberately ABSENT below, so it runs unwrapped. It is a `*/10` schedule:
+# a ledger row per pass would file 144 iterations a day, and `autodedup.iterations` is the
+# operator's NARRATIVE of the program (one line per unit of work a person can read), not a
+# machine log — `autodedup.runs` and the workflow's own run summary carry the per-pass detail.
+#
 # What each mode's ledger row says: the wave it belongs to, the sentence the progress page
 # shows, and the "Tools used" chips PROGRAM.md section 14 lists per wave. A mode missing
 # from here runs unwrapped — `record`, which files its own row on the way in and, with

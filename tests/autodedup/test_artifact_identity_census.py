@@ -27,9 +27,11 @@ PACKAGE = Path(labels_lane.__file__).resolve().parent
 # The modules that produce a file under `out/`, and the statements they run to fill it.
 LANE_WRITERS: tuple[str, ...] = (
     "census.py", "compare.py", "errors.py", "evaluate.py", "export.py", "export_sql.py",
-    "harness.py", "iterations.py", "judge.py", "judge_lane.py", "judge_prompts.py",
+    "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
+    "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
-    "progress_sql.py", "score_lane.py", "score_sql.py", "seals.py", "structural_truth.py",
+    "progress_sql.py", "replay.py", "score_lane.py", "score_sql.py", "seals.py",
+    "structural_truth.py",
 )
 
 # Columns and claim names that identify a PERSON — the operator or a broker.
@@ -82,7 +84,8 @@ def test_the_lane_writer_census_covers_the_package() -> None:
     exempt = {
         "__init__.py", "agreement.py", "blocking.py", "candidates.py", "cluster.py",
         "cohort.py", "dataset.py", "decide.py", "ensembles.py", "features.py",
-        "fingerprint.py", "guards.py", "hazard_context.py",
+        "fingerprint.py", "guards.py", "hazard_context.py", "incremental.py",
+        "incremental_store.py",
         "model.py", "normalize.py", "oss_pod.py", "settings.py", "text_facts.py",
         "ui_sql.py", "verdict_reasons.py",
     }
