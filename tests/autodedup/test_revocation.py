@@ -1,6 +1,6 @@
-"""E96: the standing check that E95's acceptance has not been revoked.
+"""E111: the standing check that E110's acceptance has not been revoked.
 
-E95 accepts the honest clock on one operator ruling about one development and names the event
+E110 accepts the honest clock on one operator ruling about one development and names the event
 that takes it back — an operator NEGATIVE inside a K-B family. These tests pin the event's
 definition: the operator tier only, the family read off the CERTIFICATE, and both adverts of
 the pair in the SAME component.
@@ -50,7 +50,7 @@ def test_an_operator_negative_inside_a_family_revokes_e95() -> None:
     )
     assert report.revoked and report.negatives == ((1, 3),)
     assert report.operator_labelled_inside == 1
-    assert "E95 IS REVOKED" in report.line() and "1 x 3" in report.line()
+    assert "E110 IS REVOKED" in report.line() and "1 x 3" in report.line()
     assert report.to_json()["revoked"] is True
 
 
@@ -76,7 +76,7 @@ def test_a_negative_touching_a_family_from_outside_does_not_revoke_it() -> None:
 
 
 def test_only_the_OPERATOR_tier_counts() -> None:
-    """D31 (vii): gold contradicts the operator on 5 of 10 same-family positives, and E95 is
+    """D31 (vii): gold contradicts the operator on 5 of 10 same-family positives, and E110 is
     the ruling that gold lost. A gold negative here measures the judge, not the engine."""
     report = revocation.check_rows(rows((1, 2)), {})
     assert not report.revoked and report.families == 1 and report.members == 2
@@ -87,7 +87,7 @@ def test_an_operator_POSITIVE_inside_a_family_is_counted_and_holds() -> None:
         rows((1, 2), (2, 3)), operator(ruled((1, 2), "same"), ruled((1, 3), "same"))
     )
     assert not report.revoked and report.operator_labelled_inside == 2
-    assert "E95 holds" in report.line()
+    assert "E110 holds" in report.line()
     assert report.to_json() == {
         "families": 1, "members": 3, "operator_labelled_inside": 2,
         "negatives": [], "revoked": False,

@@ -16,7 +16,7 @@
   "circularity": "none new: no refit, no threshold moved, no rule chosen on the seal this wave opened."
  },
  "operator_ruling": {
-  "what": "the ruling E95's acceptance rests on, and the whole of what changed between W11's refusal and this promotion",
+  "what": "the ruling E110's acceptance rests on, and the whole of what changed between W11's refusal and this promotion",
   "decided_at_utc": "2026-09-20T19:30Z",
   "decided_by": "op:0871b32a9d227f60",
   "grain": "pair",
@@ -129,7 +129,7 @@
    "note": "'nothing is lost anywhere' is exactly true of LABELLED RELIABLE duplicates and not of merges in general (M133)."}
  },
  "e96_revocation_check": {
-  "rule": "E96 — an operator NEGATIVE inside a K-B family revokes E95, and the event is a COUNT something runs rather than a thing to remember",
+  "rule": "E111 — an operator NEGATIVE inside a K-B family revokes E110, and the event is a COUNT something runs rather than a thing to remember",
   "implementation": "autodedup/revocation.py, printed by `harness evaluate` on every run",
   "today": {"kb_families": 173, "members": 500, "operator_labelled_pairs_inside": 196, "negatives": 0, "revoked": false},
   "note": "the verifier reported 182 families for the same 196 pairs and the same 0 negatives; 173 is the count under `family.kb_families` — components of the pairs K-B CERTIFIED — which is the program's one definition and the one the check uses (M134)."
@@ -164,7 +164,7 @@
   "operator_pairs": {
    "file": "autodedup/pairs/w13_operator_owed.json",
    "pairs": [
-    {"pair": [145827, 11648789], "why": "ruled ONE UNIT by the build and independently by the verification (a Jablonec villa's only ground-floor 3+kk 70 m², one campaign replaced on idnes AND sreality within ten hours on 07-27, structured area 70.0 on all four rows, price monotone 17,500 → 16,000 → 14,300). It MERGES under g7 as K-B. An operator `different` here would be a negative inside a K-B family, which is exactly what E95 says revokes the acceptance."},
+    {"pair": [145827, 11648789], "why": "ruled ONE UNIT by the build and independently by the verification (a Jablonec villa's only ground-floor 3+kk 70 m², one campaign replaced on idnes AND sreality within ten hours on 07-27, structured area 70.0 on all four rows, price monotone 17,500 → 16,000 → 14,300). It MERGES under g7 as K-B. An operator `different` here would be a negative inside a K-B family, which is exactly what E110 says revokes the acceptance."},
     {"pair": [16438, 92824], "why": "K Botiči's 47,6 m² south-balcony unit against bezrealitky's 46,6 m² north-balcony one. It merges in BOTH arms, so it does not differentiate g7 — it is an incumbent question nobody has ruled."}
    ]
   },

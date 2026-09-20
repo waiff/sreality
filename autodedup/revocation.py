@@ -1,6 +1,6 @@
-"""E96: the standing check that E95's acceptance still holds.
+"""E111: the standing check that E110's acceptance still holds.
 
-E95 accepts the honest live-window clock on ONE operator ruling about ONE development, and it
+E110 accepts the honest live-window clock on ONE operator ruling about ONE development, and it
 names what takes the acceptance back: an operator NEGATIVE inside a K-B family — a pair the
 operator rules is two units, whose two adverts sit in one component of the pairs K-B certified
 under the honest clock. A rule that names its own revoking event and then leaves the event to
@@ -13,7 +13,7 @@ which operator-labelled pairs sit inside one of those components, and how many o
 negatives.
 
 Only the OPERATOR tier counts. Gold saying `different` inside a K-B family is exactly the
-reading E95 overturned (D31 vii: gold contradicts the operator on 5 of 10 same-family
+reading E110 overturned (D31 vii: gold contradicts the operator on 5 of 10 same-family
 positives), so a gold negative here is evidence about the judge, not about the engine. A
 `must_not_link` is a negative whatever else it carries — it is the operator's strongest form
 of "these are two things".
@@ -67,16 +67,16 @@ class Revocation:
 
     def line(self) -> str:
         head = (
-            f"E96 revocation check: {len(self.negatives)} operator negative(s) inside "
+            f"E111 revocation check: {len(self.negatives)} operator negative(s) inside "
             f"{self.families} K-B families ({self.operator_labelled_inside} operator-labelled "
             f"pairs inside them)"
         )
         if not self.revoked:
-            return head + " — E95 holds"
+            return head + " — E110 holds"
         named = ", ".join(f"{lo} x {hi}" for lo, hi in self.negatives[:5])
         return (
             head
-            + f" — E95 IS REVOKED by {named}"
+            + f" — E110 IS REVOKED by {named}"
             + (" …" if len(self.negatives) > 5 else "")
             + ": put certificate_b_min_images back and the W9 arm returns"
         )

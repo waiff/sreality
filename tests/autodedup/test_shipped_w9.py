@@ -49,7 +49,7 @@ def test_the_honest_clock_arm_carries_the_floor_and_the_incumbents_cuts() -> Non
 
 
 def test_the_w9_arm_still_carries_its_floor_although_e95_no_longer_demands_one() -> None:
-    """W9's arm is a RECORD of what was measured with the floor at (1, 1); E95 (W13) makes the
+    """W9's arm is a RECORD of what was measured with the floor at (1, 1); E110 (W13) makes the
     floor optional, so dropping it now builds — and builds the W13 arm, which is a different
     row with its own sealed read behind it."""
     floorless = Settings.from_dict({**ARM.to_dict(), "certificate_b_min_images": 0.0,

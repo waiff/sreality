@@ -44,7 +44,7 @@ def test_the_shipped_row_runs_the_detection_clock_and_no_guard() -> None:
 
 
 def test_every_row_under_settings_is_constructible_and_the_refuted_arm_stays_refuted() -> None:
-    """E87 kept refuted rows out of `settings/` AND unbuildable; E95 keeps only the first half.
+    """E87 kept refuted rows out of `settings/` AND unbuildable; E110 keeps only the first half.
 
     The honest clock's price is E84 now, so the W11 candidate constructs again. What makes it
     refuted is M100 — 0 sealed duplicates gained, 0 lost — and the `refuted/` directory is

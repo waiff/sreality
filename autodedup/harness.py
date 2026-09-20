@@ -1044,7 +1044,7 @@ def cmd_evaluate(args: argparse.Namespace, out: Any) -> int:
     print(f"evaluate {run_dir}  judgements {', '.join(paths) or '(none)'}", file=out)
     print(f"  labels {len(labels)} over {len(rows)} stored pairs   sample {sample_note}", file=out)
     print(f"  model {model_note}", file=out)
-    # E96: E95 names the event that revokes it, so every evaluation COUNTS that event rather
+    # E111: E110 names the event that revokes it, so every evaluation COUNTS that event rather
     # than leaving it to be remembered. The check reports; it never decides.
     print("  " + revocation.check_rows(rows, per_tier.get(OPERATOR_TIER, {})).line(), file=out)
     print("", file=out)

@@ -81,7 +81,7 @@ def test_the_three_w12_rows_are_records_outside_settings() -> None:
     """E87's precedent, applied to E89's refutation: `settings/` holds rows a scoring run may
     be pointed at, and a refuted arm keeps its record beside it under `settings/refuted/`.
 
-    E95 (W13) retires the half of that precedent that made the rows UNBUILDABLE — the honest
+    E110 (W13) retires the half of that precedent that made the rows UNBUILDABLE — the honest
     clock's price is E84, which these rows carry — so what keeps them refuted is M105 and M110,
     the two measurements, and the `off` default they never reach."""
     for name in ("w12_candidate", "w12_narrow", "w12_wide"):
@@ -147,7 +147,7 @@ def test_the_seal_that_decided_W11_stays_registered_spent() -> None:
 
 
 def test_the_honest_clock_now_runs_on_the_e84_rail_alone() -> None:
-    """Superseded by E95 (W13). The gate kept asking for a price because no sealed read had
+    """Superseded by E110 (W13). The gate kept asking for a price because no sealed read had
     measured one; W11's seal had already measured this exact arm, and the single reliable false
     merge that refused it is a pair the operator ruled a duplicate on 2026-09-20."""
     Settings(live_window_from_sighting=True, certificate_b_min_gap_days=1.0 / 1440.0)

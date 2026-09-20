@@ -93,7 +93,7 @@ class Settings:
     # 1,110 K-B merges carrying 169 reliable labelled duplicates and 0 labelled negatives, so
     # the default is OFF — the floor is the HONEST clock's price, not a free tightening, and
     # `validate` refuses to run the honest clock without it.
-    # E95 (W13): `validate` no longer refuses the honest clock without this floor. The floor's
+    # E110 (W13): `validate` no longer refuses the honest clock without this floor. The floor's
     # whole case was the two gold negatives of the ceskereality Rezidence K Botici families,
     # and on 2026-09-20 the operator ruled both pairs `same`; the price the honest clock pays
     # is now E84 alone. The rows stay live and `certificate_b` still enforces them, so
@@ -212,7 +212,7 @@ class Settings:
     # the benchmark always uses; the engine defaults to False because the truer clock is the
     # looser one for every co-live test it feeds — see `features.window_end_stamp` for the
     # measurement and the refit debt.
-    # E95 (W13): the price `validate` asks for it is E84's pair-gap rail and nothing else,
+    # E110 (W13): the price `validate` asks for it is E84's pair-gap rail and nothing else,
     # because W11's seal measured exactly that arm (347 of 406 against g6's 300, gained 47,
     # lost 0) and the one reliable false merge it carried is a pair the OPERATOR has since
     # ruled a duplicate. Still False by default: promoting it is a generation decision.
@@ -367,7 +367,7 @@ class Settings:
                 "matched set is a subset of the smaller gallery "
                 f"({self.certificate_b_min_matched_images} > {self.certificate_b_min_images})"
             )
-        # E95 (W13): the honest clock's price is E84, and it is a price a SEALED read has
+        # E110 (W13): the honest clock's price is E84, and it is a price a SEALED read has
         # measured. E87 and E89 both refused a widening because the arm behind it had never
         # been read on a holdout; this one has. W11's seal read exactly this arm — the honest
         # clock, the E84 one-minute pair gap, NO image floor, no family guard, no hold — and

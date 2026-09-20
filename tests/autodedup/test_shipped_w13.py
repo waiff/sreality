@@ -1,4 +1,4 @@
-"""What W13 built: the honest clock priced by E84 alone (E95), and the numbers behind it.
+"""What W13 built: the honest clock priced by E84 alone (E110), and the numbers behind it.
 
 The two pairs that refused the arm in W11 — `522698 x 13221982` and its dev-side twin
 `555448 x 18626270`, both inside the ceskereality Rezidence K Botiči families — were ruled
@@ -8,7 +8,7 @@ price E87/E89 kept asking for. `settings/w13.json` is that row.
 
 The wave PROMOTES (D36): generation g7 is `settings/w13.json` + `models/w6_gold.json`,
 evidenced by `settings/w13_strata.json`, on the verifier's single sealed read of `510db099…`
-(seed 20260927, now registered SPENT). E96 turns E95's revoking event into a check something
+(seed 20260927, now registered SPENT). E111 turns E110's revoking event into a check something
 runs rather than a sentence somebody remembers.
 """
 
@@ -124,7 +124,7 @@ def test_the_honest_clock_is_not_only_a_k_b_channel() -> None:
 
 def test_the_two_contested_pairs_are_operator_positives_now() -> None:
     """M125: the W13 labels export carries both rulings, explicit, verdict `same`. They are the
-    whole of what E95 rests on, which is why the rule names what revokes it."""
+    whole of what E110 rests on, which is why the rule names what revokes it."""
     export = (Path("/home/hejtm/autodedup-artifacts/w13/labels/"
                    "autodedup-labels-35532695459/operator_labels.jsonl"))
     if not export.is_file():  # the artifact lives outside the repo
@@ -171,7 +171,7 @@ def test_every_row_under_settings_is_constructible() -> None:
 
 
 def test_the_real_time_lane_still_refuses_every_guard_this_wave_did_not_ship() -> None:
-    """E95 changes the gate, not the lane: `incremental.run_pass` still raises on E83, E85 and
+    """E110 changes the gate, not the lane: `incremental.run_pass` still raises on E83, E85 and
     E88, because none of them has the family index its rail needs."""
     from autodedup import incremental
 
@@ -227,7 +227,7 @@ def test_exactly_one_merge_is_lost_and_the_claim_is_scoped_to_labelled_duplicate
 
 
 def test_the_two_pairs_owed_to_the_operator_are_committed_as_a_pair_list() -> None:
-    """D36 (iv). E95 is revoked by an operator NEGATIVE inside a K-B family, and these are the
+    """D36 (iv). E110 is revoked by an operator NEGATIVE inside a K-B family, and these are the
     only two nameable candidates in the cohort — one that g7 merges as K-B and reads as ONE
     unit (M130), one that merges in BOTH arms and is therefore an incumbent question."""
     owed = json.loads((ROOT / "pairs/w13_operator_owed.json").read_text(encoding="utf-8"))
@@ -241,13 +241,13 @@ def test_the_two_pairs_owed_to_the_operator_are_committed_as_a_pair_list() -> No
 
 def test_e96_counts_the_event_that_revokes_e95_and_it_reads_zero_today() -> None:
     """M134. The rule names its own revoking event; the check is what keeps that from being a
-    sentence nobody re-derives. It reports — revoking E95 is a settings change, not a code one."""
+    sentence nobody re-derives. It reports — revoking E110 is a settings change, not a code one."""
     from autodedup import revocation
 
     today = STRATA["e96_revocation_check"]["today"]
     assert today["negatives"] == 0 and today["revoked"] is False
     assert today["operator_labelled_pairs_inside"] == 196
-    # And the check that produced it still refuses to be fooled by the tier E95 overturned.
+    # And the check that produced it still refuses to be fooled by the tier E110 overturned.
     report = revocation.check_rows([{"lo": 1, "hi": 2, "certificate": "K-B"}], {})
     assert not report.revoked and report.families == 1
 
@@ -285,4 +285,4 @@ def test_the_operator_ruling_is_recorded_with_its_date() -> None:
     assert ruling["source"] == "explicit" and ruling["grain"] == "pair"
     # The sensitivity of the whole safety case to those two clicks, stated rather than hidden.
     reverted = STRATA["sensitivity"]["gold_wins_on_the_two_ruled_pairs"]["g7"]
-    assert reverted["pair"] == 2, "E95 names exactly this, and E96 counts it"
+    assert reverted["pair"] == 2, "E110 names exactly this, and E111 counts it"

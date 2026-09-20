@@ -167,7 +167,7 @@ def test_off_is_inert() -> None:
 # --- the gates ---------------------------------------------------------------------------
 
 def test_the_hold_is_still_refuted_although_the_gate_no_longer_refuses_it() -> None:
-    """E95 (W13) retires the price gate E87/E89 policed; E89's VERDICT on the hold stands.
+    """E110 (W13) retires the price gate E87/E89 policed; E89's VERDICT on the hold stands.
 
     The hold was refused by two measurements, not by `validate`: the pre-stated dev rule named
     no candidate (212 and 297 against a budget of 55) and the W12 seal read NARROW at 145 of
