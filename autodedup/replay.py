@@ -40,11 +40,13 @@ from autodedup.incremental import (
     WorkItem,
     run_pass_bounded,
 )
+from autodedup.incremental_scope import Scope, parse_scope
 from autodedup.incremental_store import MemoryStore
 from autodedup.blocking import generate_pairs
 from autodedup.cluster import cluster_pairs
 from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.model import LogisticModel
+from autodedup.score_lane import storable
 from autodedup.settings import Settings
 
 
@@ -260,6 +262,13 @@ def compare_clusters(left: dict[int, list[int]], right: dict[int, list[int]]) ->
     }
 
 
+def _stored(
+    pairs: dict[tuple[int, int], dict[str, Any]], store_floor: float
+) -> dict[tuple[int, int], dict[str, Any]]:
+    """What the lane's store keeps of a decided set — the batch lane's own predicate."""
+    return {key: row for key, row in pairs.items() if storable(row, store_floor)}
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="autodedup.replay")
     parser.add_argument("--artifact", required=True)
@@ -270,11 +279,27 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-component", type=int, default=400)
     parser.add_argument("--max-pairs", type=int, default=Limits().max_pairs)
     parser.add_argument("--shuffle-seed", type=int, default=None)
+    # The real-time lane holds only `rt_scope` (E74), so the honest equivalence claim is over
+    # the scope: the SAME listings on both sides, the batch pass included. Passing it here
+    # restricts the dataset once, before either path sees it.
+    parser.add_argument("--scope", default=None)
     ns = parser.parse_args(argv)
 
     settings = load_settings(ns.settings)
     model = load_model(ns.model)
     ds = load(ns.artifact)
+    scope: Scope | None = parse_scope(ns.scope) if ns.scope else None
+    if scope is not None and not scope.whole_corpus:
+        kept = {i for i, listing in ds.listings.items() if scope.holds(listing)}
+        if not kept:
+            raise SystemExit(f"scope {scope.label()!r} holds none of this cohort")
+        ds = Dataset(
+            meta=ds.meta,
+            listings={i: listing for i, listing in ds.listings.items() if i in kept},
+            images_by_listing={i: images for i, images in ds.images_by_listing.items()
+                               if i in kept},
+            integrity=ds.integrity,
+        )
     out_dir = Path(ns.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -294,6 +319,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     report: dict[str, Any] = {
         "artifact": str(ns.artifact),
+        "scope": scope.as_json() if scope is not None else None,
         "n_listings": len(ds.listings),
         "settings": settings.to_dict(),
         "model_version": model.version,
@@ -303,6 +329,11 @@ def run(argv: Sequence[str] | None = None) -> int:
         "batch": {"pairs": len(reference), "clusters": len(batch_clusters), **timings},
         "incremental": stats,
         "pairs": compare_pairs(reference, pairs),
+        # The STORED grain as well as the decided one: the SQL store keeps what
+        # `score_lane.storable` keeps (merge, band, and the reject tail at or above
+        # `store_floor`), so the retention rule is proved equivalent rather than assumed.
+        "stored_pairs": compare_pairs(_stored(reference, settings.store_floor),
+                                      _stored(pairs, settings.store_floor)),
         "clusters": compare_clusters(batch_clusters, clusters),
     }
 

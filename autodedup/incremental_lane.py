@@ -70,6 +70,13 @@ from autodedup.incremental import (
     key_token,
     run_pass_bounded,
 )
+from autodedup.incremental_scope import (
+    CORPUS_PROJECTION_MB,
+    Scope,
+    ScopeError,
+    guard_agrees,
+    resolve_scope,
+)
 from autodedup.incremental_sql import (
     RT_CALIBRATION_READ_SQL,
     RT_CALIBRATION_WRITE_SQL,
@@ -108,8 +115,14 @@ from autodedup.incremental_sql import (
     RT_PAIRS_TOUCHING_SQL,
     RT_PAIRS_WITHIN_SQL,
     RT_REVIVED_SQL,
+    RT_ROW_CENSUS_SQL,
+    RT_ROW_ESTIMATE_SQL,
+    RT_SCHEMA_SIZE_SQL,
+    RT_SCOPE_DRIFT_SQL,
     RT_SEED_CURSORS_SQL,
     RT_SETTING_SQL,
+    RT_SETTING_WRITE_SQL,
+    RT_SETTINGS_MANY_SQL,
     RT_STAMPED_MERGES_SQL,
     RT_STATEMENT_GUARD_SQL,
     RT_STORE_PRESENT_SQL,
@@ -120,6 +133,7 @@ from autodedup.score_lane import (
     families_bitmask,
     families_of_bitmask,
     present_features,
+    storable,
 )
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 
@@ -131,8 +145,12 @@ CURSOR_NEW: str = "rt_new"
 CURSOR_CHANGED: str = "rt_changed"
 CURSOR_FLIPPED: str = "rt_flipped"
 CURSOR_REVIVE: str = "rt_revive"
+CURSOR_SCOPE: str = "rt_scope_drift"
 ENV_FLAG: str = "AUTODEDUP_REALTIME_ENABLED"
 DB_FLAG: str = "realtime_enabled"
+SCOPE_SETTING: str = "rt_scope"
+BUDGET_SETTING: str = "rt_max_schema_mb"
+STORAGE_WATERMARK: str = "rt_storage_last"
 
 # How long a row must have existed before the lane will claim it (E68). Portal writes commit in
 # seconds; a transaction still open after five minutes would have to be a stuck one, and the
@@ -143,6 +161,19 @@ STRAGGLER_WINDOW: int = 5000
 # One round-robin slice of the revive sweep. 434k inactive rows at 20k a pass is a full cycle
 # every ~22 passes (~3.7 h at the `*/10` cadence), which is the lane's revival latency.
 REVIVE_SLICE: int = 20000
+# How many rows of its OWN cursor index a forward feed reads before the scope is resolved for
+# them (E74). Measured on the live corpus: the three feeds together take 23,234 rows a day —
+# 161 in a ten-minute pass — so 1,000 a feed is >6x headroom on the corpus rate and >200x on
+# the scope's own. It is a bound on work, not on progress: whatever the window holds, the
+# cursor crosses it in one pass.
+FEED_WINDOW: int = 1000
+# One round-robin slice of the scope-drift sweep, over this generation's own fingerprint rows.
+# Under the trial scope (4,969 listings) one slice covers the whole store every pass.
+DRIFT_SLICE: int = 20000
+# The storage budget, in megabytes of schema `autodedup` (pg_total_relation_size, indexes and
+# TOAST included). The schema is ~148 MB today and the operator pays for it; a lane that has
+# not been watched for a week must not be able to double it.
+MAX_SCHEMA_MB: float = 400.0
 STATEMENT_TIMEOUT_MS: int = 120_000
 IDLE_TIMEOUT_MS: int = 300_000
 _EPOCH: str = "epoch"
@@ -190,9 +221,15 @@ class SqlStore:
     unchanged corpus costs **4**, where the per-listing spelling cost ~17,700 for a 166-listing
     claim."""
 
-    def __init__(self, conn: Any, generation: str = GENERATION) -> None:
+    def __init__(self, conn: Any, generation: str = GENERATION,
+                 store_floor: float = 0.02) -> None:
         self.conn = conn
         self.generation = generation
+        # The batch lane's own retention floor, carried here so the two stores keep the same
+        # rows. It comes from the pass's settings, never from a constant of this module.
+        self.store_floor = float(store_floor)
+        self.pairs_retained = 0
+        self.pairs_evicted = 0
         self.statements = 0
         self._pending: dict[int, tuple[FpRow, list[tuple[str, str]]]] = {}
         self._lookups: dict[tuple[str, str], list[int]] = {}
@@ -374,6 +411,25 @@ class SqlStore:
         return out
 
     def upsert_pairs(self, rows: Sequence[PairRow]) -> None:
+        # RETENTION (E74), and it is the batch lane's rule rather than a new one:
+        # `score_lane.persist` writes only `storable(row, store_floor)` — the whole merge and
+        # band zones whatever they scored, plus the reject tail at or above `store_floor`
+        # (0.02 at w8) — so the store grows with duplicates and not with comparisons. Measured
+        # on the scoped cohort: 13,043 of 44,724 decisions are storable (the live `pairs` table
+        # says the same of the batch generations: 15,811 of 48,908 over the whole cohort), so
+        # this is a 3.4x saving and not a rounding. A pair that falls BELOW the floor is
+        # deleted, not left behind, and being re-decided next pass costs CPU rather than bytes.
+        keep: list[PairRow] = []
+        evicted: list[tuple[int, int]] = []
+        for row in rows:
+            if storable({"zone": row.zone, "score": row.score}, self.store_floor):
+                keep.append(row)
+            else:
+                evicted.append((row.lo, row.hi))
+        self.pairs_retained += len(keep)
+        self.pairs_evicted += len(evicted)
+        if evicted:
+            self.delete_pairs(evicted)
         self._run_many(RT_PAIR_UPSERT_SQL, [{
             "generation": self.generation,
             "listing_lo": row.lo, "listing_hi": row.hi, "probes": list(row.probes),
@@ -394,7 +450,7 @@ class SqlStore:
             "calibration_digest": row.evidence.get("_calibration"),
             "feature_version": FEATURE_VERSION,
             "model_version": row.evidence.get("_model"),
-        } for row in rows])
+        } for row in keep])
 
     def delete_pairs(self, keys: Sequence[tuple[int, int]]) -> None:
         self._run_many(RT_PAIR_DELETE_SQL, [
@@ -660,42 +716,62 @@ class SqlFacts:
 
 
 class SqlWork:
-    """The four bounded watermark feeds, and the rule that a cursor moves only over what a pass
-    actually decided.
+    """The five bounded watermark feeds, restricted to `rt_scope`, and the rule that a cursor
+    moves only over what a pass actually decided.
 
     Every feed is settle-lagged and paged on its FULL key (E68), because neither of the two
     things that look like watermarks here is monotone on its own: `id` is assigned at INSERT
     (so overlapping batch transactions commit out of order) and `inactive_at` is the
     transaction timestamp (so a `mark_inactive` batch shares one stamp — 189 live tie groups
-    are larger than one pass's share, the largest 5,534 rows)."""
+    are larger than one pass's share, the largest 5,534 rows).
 
-    def __init__(self, conn: Any, generation: str = GENERATION,
+    **The scope is what a cursor steps OVER, not what it stops at (E74).** The lane holds ~0.6%
+    of the corpus, so each forward feed reads a bounded WINDOW off its own index, resolves the
+    scope for that window through `listing_location_pkey`, and advances to the window's end
+    even when nothing in it was in scope — a feed that advanced only over survivors would need
+    as many passes as the corpus has arrivals to reach the handful that matter. When more rows
+    survive than the claim's share, the list is cut and the cursor stops at the last row taken,
+    so the invariant survives the optimisation: no cursor passes a row this pass did not decide.
+
+    `scope` has no default on purpose. An unscoped `SqlWork` is the whole-corpus lane the
+    operator refused, and the cheapest way to keep it unwritten is to keep it unconstructible."""
+
+    def __init__(self, conn: Any, scope: Scope, generation: str = GENERATION,
                  lag: int = SETTLE_LAG_S, straggler_window: int = STRAGGLER_WINDOW,
-                 revive_slice: int = REVIVE_SLICE) -> None:
+                 revive_slice: int = REVIVE_SLICE, window: int = FEED_WINDOW,
+                 drift_slice: int = DRIFT_SLICE) -> None:
         self.conn = conn
+        self.scope = scope
         self.generation = generation
         self.lag = lag
         self.straggler_window = straggler_window
         self.revive_slice = revive_slice
+        self.window = window
+        self.drift_slice = drift_slice
         self.statements = 0
-        self._revive_next: int | None = None
+        self.windows: dict[str, int] = {}
+        self._pending: dict[str, Any] = {}
+        self._claimed: dict[str, set[int]] = {}
 
     def _query(self, sql: str, params: Mapping[str, Any]) -> list[tuple]:
         self.statements += 1
         return _rows(self.conn, sql, params)
 
     def cursors(self) -> dict[str, tuple[int, int, Any]]:
-        out = {name: (0, 0, _EPOCH) for name in
-               (CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE)}
-        for row in self._query(RT_CURSOR_READ_SQL, {
-                "names": [CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE]}):
+        names = [CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE, CURSOR_SCOPE]
+        out = {name: (0, 0, _EPOCH) for name in names}
+        for row in self._query(RT_CURSOR_READ_SQL, {"names": names}):
             out[str(row[0])] = (int(row[1] or 0), int(row[2] or 0), row[3] or _EPOCH)
         return out
 
     def claim(self, limit: int) -> list[WorkItem]:
         cursors = self.cursors()
-        share = max(1, limit // 4)
+        share = max(1, limit // 5)
+        scope = self.scope.params()
         items: list[WorkItem] = []
+        self._pending = {}
+        self.windows = {}
+        self._claimed = {}
 
         after_new = cursors[CURSOR_NEW][0]
         # The straggler sweep FIRST: a row that committed after the cursor passed its id is
@@ -704,70 +780,218 @@ class SqlWork:
         if after_new and self.straggler_window:
             for row in self._query(RT_NEW_STRAGGLERS_SQL, {
                     "after_id": after_new, "window": self.straggler_window,
-                    "generation": self.generation, "limit": share}):
+                    "generation": self.generation, "limit": share, **scope}):
                 items.append(WorkItem(int(row[0]), "straggler", _epoch(row[1]), None))
-        for row in self._query(RT_NEW_LISTINGS_SQL, {
-                "after_id": after_new, "lag": self.lag, "limit": share}):
-            items.append(WorkItem(int(row[0]), "new", _epoch(row[1]), int(row[0])))
-        for row in self._query(RT_CHANGED_LISTINGS_SQL, {
-                "after_id": cursors[CURSOR_CHANGED][1], "lag": self.lag, "limit": share}):
-            items.append(WorkItem(int(row[1]), "changed", _epoch(row[2]), int(row[0])))
-        for row in self._query(RT_FLIPPED_LISTINGS_SQL, {
+
+        end, size, ids, stamps = _window(self._query(RT_NEW_LISTINGS_SQL, {
+            "after_id": after_new, "lag": self.lag, "window": self.window, **scope}), after_new)
+        self.windows["new"] = size
+        if size:
+            taken = min(len(ids), share)
+            self._pending[CURSOR_NEW] = (int(ids[taken - 1]) if taken < len(ids) else int(end))
+            for listing_id, stamp in zip(ids[:taken], stamps[:taken]):
+                items.append(WorkItem(int(listing_id), "new", _epoch(stamp), None))
+
+        after_changed = cursors[CURSOR_CHANGED][1]
+        end, size, ids, stamps, snapshot_ids = _window(self._query(RT_CHANGED_LISTINGS_SQL, {
+            "after_id": after_changed, "lag": self.lag, "window": self.window, **scope}),
+            after_changed, extra=True)
+        self.windows["changed"] = size
+        if size:
+            taken = min(len(ids), share)
+            self._pending[CURSOR_CHANGED] = (int(snapshot_ids[taken - 1])
+                                             if taken < len(ids) else int(end))
+            for listing_id, stamp in zip(ids[:taken], stamps[:taken]):
+                items.append(WorkItem(int(listing_id), "changed", _epoch(stamp), None))
+
+        stamp_end, id_end, size, ids, stamps = _flip_window(self._query(
+            RT_FLIPPED_LISTINGS_SQL, {
                 "after": cursors[CURSOR_FLIPPED][2], "after_id": cursors[CURSOR_FLIPPED][0],
-                "lag": self.lag, "limit": share}):
-            items.append(WorkItem(int(row[0]), "flipped", _epoch(row[1]),
-                                  (row[1], int(row[0]))))
+                "lag": self.lag, "window": self.window, **scope}))
+        self.windows["flipped"] = size
+        if size:
+            taken = min(len(ids), share)
+            self._pending[CURSOR_FLIPPED] = ((stamps[taken - 1], int(ids[taken - 1]))
+                                             if taken < len(ids)
+                                             else (stamp_end, int(id_end)))
+            for listing_id, stamp in zip(ids[:taken], stamps[:taken]):
+                items.append(WorkItem(int(listing_id), "flipped", _epoch(stamp), None))
 
         if self.revive_slice:
             after_revive = cursors[CURSOR_REVIVE][0]
             rows = self._query(RT_REVIVED_SQL, {
                 "generation": self.generation, "after_id": after_revive,
-                "limit": self.revive_slice})
+                "limit": self.revive_slice, **scope})
             slice_max, slice_size, revived = (
                 (int(rows[0][0]), int(rows[0][1]), list(rows[0][2] or ()))
                 if rows else (after_revive, 0, []))
             # A short slice is the end of the sweep, so the cursor wraps and the next pass
             # starts the cycle again.
-            self._revive_next = 0 if slice_size < self.revive_slice else slice_max
+            self._pending[CURSOR_REVIVE] = 0 if slice_size < self.revive_slice else slice_max
             for listing_id in revived:
                 items.append(WorkItem(int(listing_id), "revived", None, None))
+
+        # The fifth feed (E74): the rows of this generation the scope has stopped holding.
+        if self.drift_slice:
+            after_scope = cursors[CURSOR_SCOPE][0]
+            rows = self._query(RT_SCOPE_DRIFT_SQL, {
+                "generation": self.generation, "after_id": after_scope,
+                "limit": self.drift_slice, **scope})
+            slice_max, slice_size, departed = (
+                (int(rows[0][0]), int(rows[0][1]), list(rows[0][2] or ()))
+                if rows else (after_scope, 0, []))
+            self._pending[CURSOR_SCOPE] = 0 if slice_size < self.drift_slice else slice_max
+            for listing_id in departed[:share]:
+                items.append(WorkItem(int(listing_id), "drifted", None, None, retire=True))
+        for item in items:
+            self._claimed.setdefault(item.feed, set()).add(item.listing_id)
         return items
 
     def commit(self, done: Sequence[WorkItem]) -> dict[str, Any]:
-        """Advance each feed to the maximum of what THIS pass decided, and no further."""
-        by_feed: dict[str, list[Any]] = {}
-        for item in done:
-            if item.cursor is not None:
-                by_feed.setdefault(item.feed, []).append(item.cursor)
+        """Advance each feed to the end of the window THIS pass decided, and no further.
+
+        The cursor VALUES were fixed at claim time, because a feed's watermark is its window's
+        end and a window that yielded no in-scope row still has one. What `done` decides is
+        whether they are written at all: a feed advances only when every item it handed over
+        comes back decided, so a refused pass (E70) — which hands back nothing — advances
+        nothing, while an all-out-of-scope window still crosses."""
         out: dict[str, Any] = {}
-        if by_feed.get("new"):
-            value = int(max(by_feed["new"]))
+        pending, self._pending = self._pending, {}
+        claimed, self._claimed = self._claimed, {}
+        decided = {item.listing_id for item in done}
+        for feed, name in (("new", CURSOR_NEW), ("changed", CURSOR_CHANGED),
+                           ("flipped", CURSOR_FLIPPED), ("revived", CURSOR_REVIVE),
+                           ("drifted", CURSOR_SCOPE)):
+            if not claimed.get(feed, set()) <= decided:
+                pending.pop(name, None)
+        if CURSOR_NEW in pending:
+            value = int(pending[CURSOR_NEW])
             self.statements += 1
             _exec(self.conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_NEW, "last_listing_id": value,
                 "last_snapshot_id": None, "watermark": None})
             out[CURSOR_NEW] = value
-        if by_feed.get("changed"):
-            value = int(max(by_feed["changed"]))
+        if CURSOR_CHANGED in pending:
+            value = int(pending[CURSOR_CHANGED])
             self.statements += 1
             _exec(self.conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_CHANGED, "last_listing_id": None,
                 "last_snapshot_id": value, "watermark": None})
             out[CURSOR_CHANGED] = value
-        if by_feed.get("flipped"):
-            stamp, listing_id = max(by_feed["flipped"])
+        if CURSOR_FLIPPED in pending:
+            stamp, listing_id = pending[CURSOR_FLIPPED]
             self.statements += 1
             _exec(self.conn, RT_CURSOR_WRITE_SQL, {
                 "name": CURSOR_FLIPPED, "last_listing_id": int(listing_id),
                 "last_snapshot_id": None, "watermark": stamp})
             out[CURSOR_FLIPPED] = [str(stamp), int(listing_id)]
-        if self._revive_next is not None:
-            self.statements += 1
-            _exec(self.conn, RT_CURSOR_SET_SQL, {
-                "name": CURSOR_REVIVE, "last_listing_id": int(self._revive_next)})
-            out[CURSOR_REVIVE] = int(self._revive_next)
-            self._revive_next = None
+        for name in (CURSOR_REVIVE, CURSOR_SCOPE):
+            if name in pending:
+                self.statements += 1
+                _exec(self.conn, RT_CURSOR_SET_SQL, {
+                    "name": name, "last_listing_id": int(pending[name])})
+                out[name] = int(pending[name])
         return out
+
+
+def _window(rows: Sequence[Sequence[Any]], after: int, extra: bool = False) -> tuple:
+    """A window feed's single row: its end, its size, the in-scope ids and their stamps."""
+    if not rows:
+        return (after, 0, [], [], []) if extra else (after, 0, [], [])
+    row = rows[0]
+    end = int(row[0] if row[0] is not None else after)
+    size = int(row[1] or 0)
+    ids = [int(value) for value in (row[2] or ())]
+    stamps = list(row[3] or ())
+    if extra:
+        return end, size, ids, stamps, [int(value) for value in (row[4] or ())]
+    return end, size, ids, stamps
+
+
+def _flip_window(rows: Sequence[Sequence[Any]]) -> tuple[Any, Any, int, list[int], list[Any]]:
+    """The flip feed's window end is the LAST row of `(inactive_at, id)` order, never the
+    maximum of either column on its own."""
+    if not rows or not int(rows[0][2] or 0):
+        return (None, 0, 0, [], [])
+    row = rows[0]
+    return (row[0], int(row[1] or 0), int(row[2] or 0),
+            [int(value) for value in (row[3] or ())], list(row[4] or ()))
+
+
+class StorageRefusal(Exception):
+    """The schema is already over budget. The lane exits non-zero with nothing written."""
+
+
+def lane_settings(conn: Any, keys: Sequence[str]) -> dict[str, Any]:
+    """The lane's own control rows out of `autodedup.settings` — one statement, not one each."""
+    out: dict[str, Any] = {}
+    for row in _rows(conn, RT_SETTINGS_MANY_SQL, {"keys": list(keys)}):
+        out[str(row[0])] = row[1]
+    return out
+
+
+def _setting_number(value: Any, fallback: float) -> float:
+    if isinstance(value, Mapping):
+        value = value.get("value", value.get("mb"))
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def schema_bytes(conn: Any) -> int:
+    return int(_rows(conn, RT_SCHEMA_SIZE_SQL)[0][0] or 0)
+
+
+def rt_rows(conn: Any, generation: str, scope: Scope) -> dict[str, int]:
+    """What the generation holds, by table. Exact while the scope is small — which is the
+    point of a scope — and the planner's estimate when there is none to keep it cheap."""
+    sql = RT_ROW_ESTIMATE_SQL if scope.whole_corpus else RT_ROW_CENSUS_SQL
+    params = None if scope.whole_corpus else {"generation": generation}
+    return {str(row[0]): int(row[1] or 0) for row in _rows(conn, sql, params)}
+
+
+def storage_guard(conn: Any, generation: str, scope: Scope,
+                  max_schema_mb: float) -> dict[str, Any]:
+    """Read what schema `autodedup` costs BEFORE the pass writes anything, and refuse over
+    budget (E74).
+
+    The operator pays for this store by the megabyte, and the failure this guards is not a
+    crash but a silent one: a lane nobody watches for a week, adding rows at 10-minute
+    cadence. So the check is a REFUSAL — non-zero, cursor unmoved, nothing written — and never
+    a warning in a log line. It also holds the second half of the whole-corpus gate: `all` is a
+    scope only when the budget could hold what `all` costs."""
+    bytes_now = schema_bytes(conn)
+    mb = bytes_now / 1_048_576.0
+    previous = lane_settings(conn, [STORAGE_WATERMARK]).get(STORAGE_WATERMARK) or {}
+    last = previous.get("bytes") if isinstance(previous, Mapping) else None
+    report: dict[str, Any] = {
+        "schema_mb": round(mb, 2),
+        "max_schema_mb": round(float(max_schema_mb), 2),
+        "rows": rt_rows(conn, generation, scope),
+        "growth_mb": (round((bytes_now - int(last)) / 1_048_576.0, 3)
+                      if last is not None else None),
+        "scope": scope.as_json(),
+    }
+    if mb > float(max_schema_mb):
+        raise StorageRefusal(
+            f"schema autodedup is {mb:.1f} MB, over the {float(max_schema_mb):.0f} MB "
+            f"{BUDGET_SETTING} budget — refusing to write. Prune a generation or raise the "
+            "setting; nothing was written and no cursor moved.")
+    if not guard_agrees(scope, max_schema_mb):
+        raise StorageRefusal(
+            f"rt_scope=all needs {BUDGET_SETTING} >= {CORPUS_PROJECTION_MB} MB (the measured "
+            f"whole-corpus projection) and it is {float(max_schema_mb):.0f} — refusing. A "
+            "whole-corpus generation is a budget decision, not a scope one.")
+    return report
+
+
+def record_storage(conn: Any, generation: str, bytes_now: int) -> None:
+    _exec(conn, RT_SETTING_WRITE_SQL, {
+        "key": STORAGE_WATERMARK,
+        "value": json.dumps({"bytes": int(bytes_now), "generation": generation,
+                             "at": datetime.now(timezone.utc).isoformat()}),
+        "updated_by": LANE_NAME})
 
 
 def env_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -837,6 +1061,17 @@ def run_incremental(
         if not db_enabled(conn):
             return {"skipped": "dark", "reason": f"autodedup.settings {DB_FLAG} is false",
                     "spent_usd": 0.0}
+        control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING])
+        try:
+            scope = resolve_scope(args.get(SCOPE_SETTING), control.get(SCOPE_SETTING))
+        except ScopeError as exc:
+            raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
+        max_schema_mb = _setting_number(
+            args.get(BUDGET_SETTING, control.get(BUDGET_SETTING)), MAX_SCHEMA_MB)
+        try:
+            storage = storage_guard(conn, generation, scope, max_schema_mb)
+        except StorageRefusal as exc:
+            raise SystemExit(str(exc)) from exc
         if not take_lease(conn, holder):
             return {"skipped": "leased", "reason": "another pass holds the lease",
                     "spent_usd": 0.0}
@@ -851,12 +1086,14 @@ def run_incremental(
         payload = rows[0][3]
         calibration = Calibration.from_json(
             payload if isinstance(payload, dict) else json.loads(payload or "{}"))
-        store = SqlStore(conn, generation)
+        store = SqlStore(conn, generation, store_floor=settings.store_floor)
         facts = SqlFacts(conn)
-        work = SqlWork(conn, generation,
+        work = SqlWork(conn, scope, generation,
                        lag=int(args.get("settle_lag") or SETTLE_LAG_S),
                        straggler_window=int(args.get("straggler_window") or STRAGGLER_WINDOW),
-                       revive_slice=int(args.get("revive_slice") or REVIVE_SLICE))
+                       revive_slice=int(args.get("revive_slice") or REVIVE_SLICE),
+                       window=int(args.get("feed_window") or FEED_WINDOW),
+                       drift_slice=int(args.get("drift_slice") or DRIFT_SLICE))
         result = None
         try:
             with _transaction(conn):
@@ -874,6 +1111,22 @@ def run_incremental(
         summary["calibration_n_listings"] = int(rows[0][2] or 0)
         summary["store_rows"] = int(
             _rows(conn, RT_FP_COUNT_SQL, {"generation": generation})[0][0])
+        summary["scope"] = scope.as_json()
+        summary["windows"] = dict(work.windows)
+        summary["retention"] = {"store_floor": settings.store_floor,
+                                "pairs_retained": store.pairs_retained,
+                                "pairs_evicted": store.pairs_evicted}
+        # The storage readout is taken AFTER the pass, against the reading taken before it, so
+        # "growth" is this pass's own growth and not the last one's.
+        after_bytes = schema_bytes(conn)
+        summary["storage"] = {
+            **storage,
+            "schema_mb_after": round(after_bytes / 1_048_576.0, 2),
+            "pass_growth_mb": round(
+                (after_bytes / 1_048_576.0) - float(storage["schema_mb"]), 3),
+            "rows_after": rt_rows(conn, generation, scope),
+        }
+        record_storage(conn, generation, after_bytes)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         (Path(out_dir) / "incremental.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
@@ -914,14 +1167,36 @@ def run_rt_seed(
     model = load_model(args.get("model") or None)
     backfill = str(args.get("backfill") or "").strip().lower() == "true"
 
-    ds = load(artifact)
-    fps = build_all(ds, settings)
-    calibration = Calibration.build(fps, ds.listings, settings, generation)
     conn = conn_factory()
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
             raise SystemExit("autodedup realtime store absent — migration 539 not applied")
+        control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING])
+        try:
+            scope = resolve_scope(args.get(SCOPE_SETTING), control.get(SCOPE_SETTING))
+        except ScopeError as exc:
+            raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
+        try:
+            storage = storage_guard(conn, generation, scope, _setting_number(
+                args.get(BUDGET_SETTING, control.get(BUDGET_SETTING)), MAX_SCHEMA_MB))
+        except StorageRefusal as exc:
+            raise SystemExit(str(exc)) from exc
+
+        ds = load(artifact)
+        # The artifact is the BATCH cohort and carries the assembled negative control, which
+        # has no arrival feed and is therefore outside every real-time scope (E74). The seed
+        # drops it here rather than backfilling rows the lane could never maintain — and the
+        # frozen calibration is cut over what the generation will actually HOLD, because every
+        # statistic in it is cohort-relative.
+        in_scope = sorted(i for i, listing in ds.listings.items() if scope.holds(listing))
+        if not in_scope:
+            raise SystemExit(
+                f"{SCOPE_SETTING} {scope.label()!r} holds none of the {len(ds.listings)} "
+                f"listings in {artifact} — seeding it would freeze an empty calibration")
+        fps = {i: fp for i, fp in build_all(ds, settings).items() if i in set(in_scope)}
+        calibration = Calibration.build(
+            fps, {i: ds.listings[i] for i in in_scope}, settings, generation)
         payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
         written = 0
         with _transaction(conn):
@@ -943,8 +1218,15 @@ def run_rt_seed(
                 "name": CURSOR_FLIPPED, "last_listing_id": int(seeded[3]),
                 "last_snapshot_id": None, "watermark": seeded[2]})
             _exec(conn, RT_CURSOR_SET_SQL, {"name": CURSOR_REVIVE, "last_listing_id": 0})
+            _exec(conn, RT_CURSOR_SET_SQL, {"name": CURSOR_SCOPE, "last_listing_id": 0})
+            # The generation's scope, written where the lane reads it: a pass dispatched
+            # without an argument then runs the scope this generation was seeded for, and can
+            # never quietly widen to one it has no fingerprints for.
+            _exec(conn, RT_SETTING_WRITE_SQL, {
+                "key": SCOPE_SETTING, "value": json.dumps(scope.as_json()),
+                "updated_by": f"{LANE_NAME}:rt_seed"})
             if backfill:
-                store = SqlStore(conn, generation)
+                store = SqlStore(conn, generation, store_floor=settings.store_floor)
                 keyer = Keyer(settings, calibration)
                 for listing_id in sorted(fps):
                     fp = fps[listing_id]
@@ -965,8 +1247,12 @@ def run_rt_seed(
             "calibration_digest": calibration.digest(),
             "calibration_n_listings": calibration.n_listings,
             "cursors": {CURSOR_NEW: int(seeded[0]), CURSOR_CHANGED: int(seeded[1]),
-                        CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0},
+                        CURSOR_FLIPPED: str(seeded[2]), CURSOR_REVIVE: 0, CURSOR_SCOPE: 0},
             "backfilled": written,
+            "scope": scope.as_json(),
+            "artifact_listings": len(ds.listings),
+            "in_scope_listings": len(in_scope),
+            "storage": storage,
             "spent_usd": 0.0,
         }
         Path(out_dir).mkdir(parents=True, exist_ok=True)

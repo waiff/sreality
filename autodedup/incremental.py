@@ -435,10 +435,15 @@ class WorkItem:
     # `(inactive_at, id)` pair. The watermark is the MAXIMUM over the items a pass committed,
     # so a claim that was refused advances nothing.
     cursor: Any = None
+    # The scope no longer holds this listing (E74). It is RETIRED rather than refreshed: its
+    # postings, its fingerprint row and its pairs go, and the neighbours it linked re-cluster
+    # without it. Half-indexed is worse than unindexed — every neighbour would go on
+    # retrieving it through postings nothing maintains.
+    retire: bool = False
 
 
 class WorkSource(Protocol):
-    """The watermark feeds, bounded. Four index-served cursors in production; an arrival
+    """The watermark feeds, bounded. Five index-served cursors in production; an arrival
     schedule in the replay."""
 
     def claim(self, limit: int) -> list[WorkItem]: ...
@@ -550,6 +555,7 @@ class PassResult:
     components: int = 0
     clusters_written: int = 0
     clusters_dropped: int = 0
+    retired: int = 0
     rail: dict[str, int] = field(default_factory=dict)
     zones: dict[str, int] = field(default_factory=dict)
     certificates: dict[str, int] = field(default_factory=dict)
@@ -578,6 +584,7 @@ class PassResult:
                 "components": self.components,
                 "clusters_written": self.clusters_written,
                 "clusters_dropped": self.clusters_dropped,
+                "retired": self.retired,
                 "wanted_pairs": self.wanted_pairs,
                 "attempts": self.attempts,
             },
@@ -681,6 +688,8 @@ class _Overlay:
         self.dropped: dict[tuple[str, str], set[int]] = {}
         self.cell_rows: dict[tuple[str, str], CellRow] = {}
         self.ops: list[tuple[str, Any]] = []
+        # Retired listings (E74), held back like everything else until the budget agrees.
+        self.gone: set[int] = set()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.store, name)
@@ -698,6 +707,18 @@ class _Overlay:
         for key in fresh:
             self.added.setdefault(key, set()).add(listing_id)
             self.dropped.get(key, set()).discard(listing_id)
+
+    def drop_listing(self, listing_id: int, old_keys: Sequence[tuple[str, str]] = ()) -> None:
+        """Retire a listing the scope no longer holds. The caller has already read its keys,
+        so they are passed in rather than re-read."""
+        listing_id = int(listing_id)
+        for key in self.keys.pop(listing_id, ()):
+            self.added.get(key, set()).discard(listing_id)
+        self.fp.pop(listing_id, None)
+        for key in old_keys:
+            self.dropped.setdefault(key, set()).add(listing_id)
+            self.added.get(key, set()).discard(listing_id)
+        self.gone.add(listing_id)
 
     def bump_cell(self, listing: Listing) -> None:
         cell = (address_block_key(listing), category_group(listing))
@@ -738,17 +759,17 @@ class _Overlay:
         wanted = list(ids)
         out = dict(self.store.rows([i for i in wanted if i not in self.fp]))
         out.update({i: self.fp[i] for i in wanted if i in self.fp})
-        return out
+        return {i: row for i, row in out.items() if i not in self.gone}
 
     def known(self, ids: Iterable[int]) -> set[int]:
         wanted = set(ids)
-        return self.store.known(wanted) | (wanted & set(self.fp))
+        return (self.store.known(wanted) | (wanted & set(self.fp))) - self.gone
 
     def keys_many(self, ids: Iterable[int]) -> dict[int, list[tuple[str, str]]]:
         wanted = list(ids)
         out = dict(self.store.keys_many(wanted))
         out.update({i: list(self.keys[i]) for i in wanted if i in self.keys})
-        return out
+        return {i: keys for i, keys in out.items() if i not in self.gone}
 
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]:
         wanted = list(keys)
@@ -758,6 +779,10 @@ class _Overlay:
 
     # --------------------------------------------------------------------------- the gate
     def apply(self) -> None:
+        # Retirements first: a store that dropped a listing AFTER re-writing its postings
+        # would have written rows it then has to find again.
+        for listing_id in sorted(self.gone):
+            self.store.drop_listing(listing_id)
         for listing_id in sorted(self.keys):
             self.store.put_listing(listing_id, self.fp[listing_id], self.keys[listing_id])
         for verb, payload in self.ops:
@@ -771,6 +796,7 @@ class _Overlay:
         self.dropped.clear()
         self.cell_rows.clear()
         self.ops.clear()
+        self.gone.clear()
 
 
 def run_pass(
@@ -798,12 +824,16 @@ def run_pass(
 
     items = list(work.claim(caps.max_listings))
     seen_ids: set[int] = set()
+    # A listing claimed for RETIREMENT is never also refreshed, whichever feed saw it: the
+    # scope no longer holds it, so there is nothing to refresh it into.
+    retire_ids = {item.listing_id for item in items if item.retire}
     claimed = [item.listing_id for item in items
-               if not (item.listing_id in seen_ids or seen_ids.add(item.listing_id))]
+               if item.listing_id not in retire_ids
+               and not (item.listing_id in seen_ids or seen_ids.add(item.listing_id))]
     result.claimed = list(claimed)
     for item in items:
         result.feeds[item.feed] = result.feeds.get(item.feed, 0) + 1
-    if not claimed:
+    if not claimed and not retire_ids:
         # An idle pass is still the only moment an operator's must-not-link row can be
         # honoured: it moves no pair, so nothing else would ever seed its component (E73).
         operator_mnl = store.must_not_link()
@@ -830,6 +860,27 @@ def run_pass(
     changed: set[int] = set()
     touched_keys: list[tuple[str, str]] = []
     touched_blocks: set[str] = set()
+
+    # --- 1a. E74: retire what the scope no longer holds ------------------------------------
+    # A retired listing's keys are TOUCHED keys, so step 2 widens to everything that could
+    # retrieve it; its stored pairs are then absent from the wanted set, which is what deletes
+    # them, and step 6 re-clusters the components those edges held together.
+    retired: set[int] = set()
+    if retire_ids:
+        departed = sorted(view.known(retire_ids))
+        gone_rows = view.rows(departed)
+        gone_keys = view.keys_many(departed)
+        for listing_id in departed:
+            old = gone_rows.get(listing_id)
+            old_keys = sorted(set(gone_keys.get(listing_id, ())))
+            if old is not None:
+                view.unbump_cell(old.cell)
+                touched_blocks.add(old.cell_key)
+            touched_keys.extend(old_keys)
+            view.drop_listing(listing_id, old_keys)
+            retired.add(listing_id)
+    result.retired = len(retired)
+
     for listing_id in claimed:
         fp = working.fps.get(listing_id)
         if fp is None:
@@ -896,7 +947,7 @@ def run_pass(
 
     # --- 4. the pair set: either side retrieving the other keeps it ------------------------
     clock = time.perf_counter()
-    stored = store.pairs_touching(dirty)
+    stored = store.pairs_touching(set(dirty) | retired)
     wanted: dict[tuple[int, int], dict[str, Any]] = {}
     for listing_id, found in cand.items():
         for other, probes in found.items():
@@ -908,8 +959,12 @@ def run_pass(
                 entry["from_lo"] = True
             else:
                 entry["from_hi"] = True
-    # A pair with one clean side keeps the clean side's own direction, which did not move.
+    # A pair with one clean side keeps the clean side's own direction, which did not move —
+    # unless that side was RETIRED, in which case the clean direction is the stale one and
+    # keeping it would resurrect the pair the retirement exists to drop.
     for (lo, hi), row in stored.items():
+        if lo in retired or hi in retired:
+            continue
         entry = wanted.get((lo, hi))
         if lo not in cand and row.from_lo:
             entry = entry or {"probes": set(), "from_lo": False, "from_hi": False}
@@ -1009,6 +1064,10 @@ def run_pass(
             seeds |= set(key)
     operator_mnl = store.must_not_link()
     seeds |= _mnl_seeds(store, operator_mnl)
+    # A retired listing is not a seed: it has no postings, no pairs and no cell any more. Its
+    # ex-partners are already seeds (they are the other side of every dropped edge), and they
+    # are the component that has to re-cluster without it.
+    seeds -= retired
     _recluster(store, facts, settings, working, seeds, caps, result, operator_mnl)
     result.timings["cluster_s"] = time.perf_counter() - clock
 

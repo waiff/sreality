@@ -88,7 +88,7 @@ update autodedup.rt_lease
 
 # ------------------------------------------------------------------ the watermark feeds
 #
-# FOUR bounded feeds, all read-only (D4):
+# FIVE bounded feeds, all read-only (D4) and all restricted to `rt_scope` (E74):
 #   * new       — `listings_pkey`, paged on `id`, settle-lagged, plus a straggler anti-join.
 #   * changed   — `listing_snapshots_pkey`. Rule #2 makes that table an append-on-content-change
 #                 feed, so it is exactly "a listing whose content moved", with no column of its
@@ -99,23 +99,62 @@ update autodedup.rt_lease
 #                 (rule #2), so a revived advert is invisible to all three cursors above. The
 #                 fourth feed is a bounded round-robin sweep of the rows this lane itself
 #                 believes are inactive, anti-joined against the live flag.
+#   * drifted   — a listing the geocoder MOVES out of the scope touches no cursor either. The
+#                 fifth feed sweeps this generation's own fingerprint rows against the scope
+#                 and hands back the ones that left, to be retired.
+# WINDOW FIRST, SCOPE SECOND — and the cursor advances over the WINDOW (E74). The lane holds
+# only the listings of `rt_scope`, ~0.6% of the corpus, so a feed that filtered BY the scope
+# would either seq-scan `listing_location` (there is no index on `cast_obce_kod`, and D8
+# forbids adding one) or crawl. Each feed reads a bounded window off its OWN cursor index,
+# left-joins that window's ids to `listing_location` through `listing_location_pkey` — one
+# index probe per window row, the scope never the driving side — and returns the survivors
+# beside the window's own end. The caller advances the cursor to that end even when nothing
+# survived, which is what lets a feed cross a 99.4% out-of-scope corpus at window speed rather
+# than at arrival speed. Nothing is skipped: when MORE rows survive than the claim's share, the
+# caller cuts the list and advances only as far as the last row it took.
+#
+# `%(all_scope)s` is the `rt_scope = all` case, and it sits in the FILTER rather than in the
+# join so that a whole-corpus run also keeps the listings with no `listing_location` row.
 RT_NEW_LISTINGS_SQL = """
-select l.id, l.first_seen_at
-  from public.listings l
- where l.id > %(after_id)s::bigint
-   and (l.first_seen_at is null
-        or l.first_seen_at <= now() - make_interval(secs => %(lag)s))
- order by l.id
- limit %(limit)s
+with win as (
+  select l.id as id, l.first_seen_at as first_seen_at
+    from public.listings l
+   where l.id > %(after_id)s::bigint
+     and (l.first_seen_at is null
+          or l.first_seen_at <= now() - make_interval(secs => %(lag)s))
+   order by l.id
+   limit %(window)s
+)
+select coalesce(max(w.id), %(after_id)s::bigint) as window_max,
+       count(*)                                  as window_size,
+       coalesce(array_agg(w.id order by w.id)
+                filter (where %(all_scope)s::boolean or ll.listing_id is not null),
+                '{}'::bigint[])                  as ids,
+       coalesce(array_agg(w.first_seen_at order by w.id)
+                filter (where %(all_scope)s::boolean or ll.listing_id is not null),
+                '{}'::timestamptz[])             as stamps
+  from win w
+  left join public.listing_location ll
+         on ll.listing_id = w.id
+        and (ll.obec_kod = any(%(obec)s::bigint[])
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
 """
 
 # The proof rather than the assumption: any id at or below the cursor that this generation has
-# no fingerprint row for was committed after the pass that stepped over it (E68).
+# no fingerprint row for was committed after the pass that stepped over it (E68). Under a scope
+# the anti-join ALONE would answer with out-of-scope ids for ever — almost nothing in the
+# window has a fingerprint row, and almost nothing should — so the scope is part of this
+# statement rather than a filter over its answer.
 RT_NEW_STRAGGLERS_SQL = """
 select l.id, l.first_seen_at
   from public.listings l
+  left join public.listing_location ll
+         on ll.listing_id = l.id
+        and (ll.obec_kod = any(%(obec)s::bigint[])
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
  where l.id > %(after_id)s::bigint - %(window)s::bigint
    and l.id <= %(after_id)s::bigint
+   and (%(all_scope)s::boolean or ll.listing_id is not null)
    and not exists (
          select 1
            from autodedup.rt_fp f
@@ -126,24 +165,63 @@ select l.id, l.first_seen_at
 """
 
 RT_CHANGED_LISTINGS_SQL = """
-select s.id, s.listing_id, s.scraped_at
-  from public.listing_snapshots s
- where s.id > %(after_id)s::bigint
-   and s.listing_id is not null
-   and (s.scraped_at is null
-        or s.scraped_at <= now() - make_interval(secs => %(lag)s))
- order by s.id
- limit %(limit)s
+with win as (
+  select s.id as snapshot_id, s.listing_id as listing_id, s.scraped_at as scraped_at
+    from public.listing_snapshots s
+   where s.id > %(after_id)s::bigint
+     and s.listing_id is not null
+     and (s.scraped_at is null
+          or s.scraped_at <= now() - make_interval(secs => %(lag)s))
+   order by s.id
+   limit %(window)s
+)
+select coalesce(max(w.snapshot_id), %(after_id)s::bigint) as window_max,
+       count(*)                                           as window_size,
+       coalesce(array_agg(w.listing_id order by w.snapshot_id)
+                filter (where %(all_scope)s::boolean or ll.listing_id is not null),
+                '{}'::bigint[])                           as ids,
+       coalesce(array_agg(w.scraped_at order by w.snapshot_id)
+                filter (where %(all_scope)s::boolean or ll.listing_id is not null),
+                '{}'::timestamptz[])                      as stamps,
+       coalesce(array_agg(w.snapshot_id order by w.snapshot_id)
+                filter (where %(all_scope)s::boolean or ll.listing_id is not null),
+                '{}'::bigint[])                           as cursors
+  from win w
+  left join public.listing_location ll
+         on ll.listing_id = w.listing_id
+        and (ll.obec_kod = any(%(obec)s::bigint[])
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
 """
 
+# The flip feed pages on the FULL key, so its window END is a pair and not the maximum of
+# either half: `inactive_at` is the transaction timestamp and a `mark_inactive` batch shares
+# one, so the last row of the ordered window is the only honest watermark.
 RT_FLIPPED_LISTINGS_SQL = """
-select l.id, l.inactive_at
-  from public.listings l
- where l.inactive_at is not null
-   and (l.inactive_at, l.id) > (%(after)s::timestamptz, %(after_id)s::bigint)
-   and l.inactive_at <= now() - make_interval(secs => %(lag)s)
- order by l.inactive_at, l.id
- limit %(limit)s
+with win as (
+  select l.id as id, l.inactive_at as inactive_at
+    from public.listings l
+   where l.inactive_at is not null
+     and (l.inactive_at, l.id) > (%(after)s::timestamptz, %(after_id)s::bigint)
+     and l.inactive_at <= now() - make_interval(secs => %(lag)s)
+   order by l.inactive_at, l.id
+   limit %(window)s
+)
+select (select w2.inactive_at from win w2
+         order by w2.inactive_at desc, w2.id desc limit 1) as window_stamp,
+       (select w2.id from win w2
+         order by w2.inactive_at desc, w2.id desc limit 1) as window_id,
+       count(*)                                            as window_size,
+       coalesce(array_agg(w.id order by w.inactive_at, w.id)
+                filter (where %(all_scope)s::boolean or ll.listing_id is not null),
+                '{}'::bigint[])                            as ids,
+       coalesce(array_agg(w.inactive_at order by w.inactive_at, w.id)
+                filter (where %(all_scope)s::boolean or ll.listing_id is not null),
+                '{}'::timestamptz[])                       as stamps
+  from win w
+  left join public.listing_location ll
+         on ll.listing_id = w.id
+        and (ll.obec_kod = any(%(obec)s::bigint[])
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
 """
 
 # One row back, never the slice: the sweep reads a bounded window of this generation's inactive
@@ -151,9 +229,10 @@ select l.id, l.inactive_at
 RT_REVIVED_SQL = """
 select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
        count(*)                                          as slice_size,
-       coalesce(array_remove(array_agg(
-           case when l.id is not null then f.listing_id end), null),
-           '{}'::bigint[])                               as revived
+       coalesce(array_agg(f.listing_id order by f.listing_id)
+                filter (where l.id is not null
+                          and (%(all_scope)s::boolean or ll.listing_id is not null)),
+                '{}'::bigint[])                          as revived
   from (select listing_id
           from autodedup.rt_fp
          where generation = %(generation)s::text
@@ -164,6 +243,90 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
   left join public.listings l
          on l.id = f.listing_id
         and l.is_active
+  left join public.listing_location ll
+         on ll.listing_id = f.listing_id
+        and (ll.obec_kod = any(%(obec)s::bigint[])
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+"""
+
+# The FIFTH feed, and the one the scope owes (E74): a listing the operator's geocoder MOVES —
+# an obec correction, a resolved část — leaves the scope without touching any cursor the other
+# four page over. The sweep is the revive sweep's twin: a bounded round-robin slice of THIS
+# generation's own fingerprint rows, left-joined to the scope, returning the ids the scope no
+# longer holds. They are RETIRED (postings, fingerprint row, pairs) rather than left
+# half-indexed — a listing whose postings are stale is a listing every neighbour retrieves
+# wrongly. Under a scope the store is small enough that one slice covers it whole; the cursor
+# wraps when the slice runs short, exactly as the revive sweep's does.
+RT_SCOPE_DRIFT_SQL = """
+select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
+       count(*)                                          as slice_size,
+       coalesce(array_agg(f.listing_id order by f.listing_id)
+                filter (where not %(all_scope)s::boolean and ll.listing_id is null),
+                '{}'::bigint[])                          as departed
+  from (select listing_id
+          from autodedup.rt_fp
+         where generation = %(generation)s::text
+           and listing_id > %(after_id)s::bigint
+         order by listing_id
+         limit %(limit)s) f
+  left join public.listing_location ll
+         on ll.listing_id = f.listing_id
+        and (ll.obec_kod = any(%(obec)s::bigint[])
+             or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
+"""
+
+# ------------------------------------------------------------------ the storage budget (E74)
+#
+# The operator pays for this store by the megabyte, so a pass reads what the schema already
+# costs BEFORE it writes anything and refuses to run over the budget. `pg_total_relation_size`
+# already counts a table's indexes and its TOAST, so the sum runs over base relations only
+# (`r`/`p`/`m`) — adding index relations would double-count them.
+RT_SCHEMA_SIZE_SQL = """
+select coalesce(sum(pg_total_relation_size(c.oid)), 0)::bigint as bytes
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'autodedup'
+   and c.relkind in ('r', 'p', 'm')
+"""
+
+# What the generation holds, exactly. Cheap while the scope is small — which is the point of
+# having a scope — and replaced by the planner's estimate when `rt_scope = all`.
+RT_ROW_CENSUS_SQL = """
+select 'fp_key' as table_name, count(*) as n
+  from autodedup.fp_key where generation = %(generation)s::text
+union all
+select 'rt_fp', count(*) from autodedup.rt_fp where generation = %(generation)s::text
+union all
+select 'pairs', count(*) from autodedup.pairs where generation = %(generation)s::text
+union all
+select 'rt_block_cell', count(*)
+  from autodedup.rt_block_cell where generation = %(generation)s::text
+"""
+
+RT_ROW_ESTIMATE_SQL = """
+select c.relname as table_name, greatest(c.reltuples, 0)::bigint as n
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'autodedup'
+   and c.relname in ('fp_key', 'rt_fp', 'pairs', 'rt_block_cell')
+"""
+
+RT_SETTINGS_MANY_SQL = """
+select s.key, s.value
+  from autodedup.settings s
+ where s.key = any(%(keys)s::text[])
+"""
+
+# The growth readout's own watermark. An OBSERVATION row rather than a knob: the lane writes
+# it, nothing reads it but the next pass's summary, and it lives in `autodedup.settings`
+# because a new key there needs no migration (528).
+RT_SETTING_WRITE_SQL = """
+insert into autodedup.settings (key, value, updated_at, updated_by)
+values (%(key)s::text, %(value)s::jsonb, now(), %(updated_by)s::text)
+on conflict (key) do update set
+    value      = excluded.value,
+    updated_at = now(),
+    updated_by = excluded.updated_by
 """
 
 RT_CURSOR_READ_SQL = """

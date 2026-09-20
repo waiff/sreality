@@ -70,6 +70,9 @@ class FakePg:
         self.statements: list[str] = []
         self.transactions = 0
         self.rolled_back = 0
+        # What `pg_total_relation_size` over schema `autodedup` answers — the storage guard's
+        # one input (E74). Tests move it to put the lane over budget.
+        self.schema_bytes = 64 * 1_048_576
 
     # ------------------------------------------------------------------ psycopg surface
     def cursor(self) -> "_Cursor":
@@ -152,11 +155,38 @@ def _aliases(sql: str) -> list[str]:
     return re.findall(r"\bAS\s+(\w+)", sql, re.I)
 
 
+def _in_scope(db: FakePg, listing_id: Any, p: Mapping[str, Any]) -> bool:
+    """The scope predicate the feeds spell in SQL: `listing_location` by primary key, then the
+    two code lists. `all_scope` holds everything, a location row included or not."""
+    if p.get("all_scope"):
+        return True
+    location = db.locations.get(int(listing_id)) or {}
+    obec = location.get("obec_kod")
+    cast_obce = location.get("cast_obce_kod")
+    return ((obec is not None and obec in set(p.get("obec") or ()))
+            or (cast_obce is not None and cast_obce in set(p.get("cast_obce") or ())))
+
+
 def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noqa: C901
     gen = str(p.get("generation") or "")
 
     if sql == S.RT_STORE_PRESENT_SQL:
         return [(True,)]
+    if sql == S.RT_SCHEMA_SIZE_SQL:
+        return [(int(db.schema_bytes),)]
+    if sql == S.RT_ROW_CENSUS_SQL:
+        return [("fp_key", sum(1 for row in db.fp_key if row[0] == gen)),
+                ("rt_fp", sum(1 for g, _i in db.rt_fp if g == gen)),
+                ("pairs", sum(1 for g, _lo, _hi in db.pairs if g == gen)),
+                ("rt_block_cell", sum(1 for g, _k, _c in db.cells if g == gen))]
+    if sql == S.RT_ROW_ESTIMATE_SQL:
+        return [("fp_key", len(db.fp_key)), ("rt_fp", len(db.rt_fp)),
+                ("pairs", len(db.pairs)), ("rt_block_cell", len(db.cells))]
+    if sql == S.RT_SETTINGS_MANY_SQL:
+        return [(key, db.settings[key]) for key in p["keys"] if key in db.settings]
+    if sql == S.RT_SETTING_WRITE_SQL:
+        db.settings[str(p["key"])] = _jsonb(p["value"])
+        return []
     if sql in (S.RT_STATEMENT_GUARD_SQL, S.RT_IDLE_GUARD_SQL):
         return [("set",)]
     if sql == S.RT_SETTING_SQL:
@@ -424,36 +454,55 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     # ---------------------------------------------------------------- the public feeds
     if sql == S.RT_NEW_LISTINGS_SQL:
         cut = db.now - timedelta(seconds=int(p["lag"]))
-        rows = [(i, row["first_seen_at"]) for i, row in sorted(db.listings.items())
-                if i > int(p["after_id"])
-                and (row["first_seen_at"] is None or row["first_seen_at"] <= cut)]
-        return rows[:int(p["limit"])]
+        win = [(i, row["first_seen_at"]) for i, row in sorted(db.listings.items())
+               if i > int(p["after_id"])
+               and (row["first_seen_at"] is None or row["first_seen_at"] <= cut)
+               ][:int(p["window"])]
+        keep = [(i, stamp) for i, stamp in win if _in_scope(db, i, p)]
+        return [(max((i for i, _s in win), default=int(p["after_id"])), len(win),
+                 [i for i, _s in keep], [stamp for _i, stamp in keep])]
     if sql == S.RT_NEW_STRAGGLERS_SQL:
         low = int(p["after_id"]) - int(p["window"])
         rows = [(i, row["first_seen_at"]) for i, row in sorted(db.listings.items())
-                if low < i <= int(p["after_id"]) and (gen, i) not in db.rt_fp]
+                if low < i <= int(p["after_id"]) and (gen, i) not in db.rt_fp
+                and _in_scope(db, i, p)]
         return rows[:int(p["limit"])]
     if sql == S.RT_CHANGED_LISTINGS_SQL:
         cut = db.now - timedelta(seconds=int(p["lag"]))
-        rows = [(row["id"], row["listing_id"], row["scraped_at"])
-                for row in sorted(db.snapshots, key=lambda r: r["id"])
-                if row["id"] > int(p["after_id"]) and row["listing_id"] is not None
-                and (row["scraped_at"] is None or row["scraped_at"] <= cut)]
-        return rows[:int(p["limit"])]
+        win = [(row["id"], row["listing_id"], row["scraped_at"])
+               for row in sorted(db.snapshots, key=lambda r: r["id"])
+               if row["id"] > int(p["after_id"]) and row["listing_id"] is not None
+               and (row["scraped_at"] is None or row["scraped_at"] <= cut)
+               ][:int(p["window"])]
+        keep = [row for row in win if _in_scope(db, row[1], p)]
+        return [(max((row[0] for row in win), default=int(p["after_id"])), len(win),
+                 [row[1] for row in keep], [row[2] for row in keep],
+                 [row[0] for row in keep])]
     if sql == S.RT_FLIPPED_LISTINGS_SQL:
         cut = db.now - timedelta(seconds=int(p["lag"]))
         after = p["after"]
         after_key = (datetime.min.replace(tzinfo=timezone.utc)
                      if after == "epoch" else after, int(p["after_id"]))
-        rows = sorted((row["inactive_at"], i) for i, row in db.listings.items()
-                      if row.get("inactive_at") and row["inactive_at"] <= cut
-                      and (row["inactive_at"], i) > after_key)
-        return [(i, stamp) for stamp, i in rows[:int(p["limit"])]]
+        win = sorted((row["inactive_at"], i) for i, row in db.listings.items()
+                     if row.get("inactive_at") and row["inactive_at"] <= cut
+                     and (row["inactive_at"], i) > after_key)[:int(p["window"])]
+        keep = [(stamp, i) for stamp, i in win if _in_scope(db, i, p)]
+        end_stamp, end_id = win[-1] if win else (None, 0)
+        return [(end_stamp, end_id, len(win),
+                 [i for _s, i in keep], [stamp for stamp, _i in keep])]
+    # The fifth feed: this generation's own rows the scope no longer holds (E74).
+    if sql == S.RT_SCOPE_DRIFT_SQL:
+        slice_ids = sorted(i for g, i in db.rt_fp
+                           if g == gen and i > int(p["after_id"]))[:int(p["limit"])]
+        departed = [i for i in slice_ids if not _in_scope(db, i, p)]
+        return [(max(slice_ids) if slice_ids else int(p["after_id"]),
+                 len(slice_ids), departed)]
     if sql == S.RT_REVIVED_SQL:
         slice_ids = sorted(i for g, i in db.rt_fp
                            if g == gen and not db.rt_fp[(g, i)]["is_active"]
                            and i > int(p["after_id"]))[:int(p["limit"])]
-        revived = [i for i in slice_ids if db.listings.get(i, {}).get("is_active")]
+        revived = [i for i in slice_ids if db.listings.get(i, {}).get("is_active")
+                   and _in_scope(db, i, p)]
         return [(max(slice_ids) if slice_ids else int(p["after_id"]),
                  len(slice_ids), revived)]
 

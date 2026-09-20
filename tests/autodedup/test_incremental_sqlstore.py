@@ -30,6 +30,7 @@ from autodedup.incremental_lane import (
     CURSOR_FLIPPED,
     CURSOR_NEW,
     CURSOR_REVIVE,
+    CURSOR_SCOPE,
     LEASE_TTL_S,
     SqlStore,
     SqlWork,
@@ -37,6 +38,7 @@ from autodedup.incremental_lane import (
 )
 from autodedup.dataset import Dataset, Image, Listing, Location, Meta
 from autodedup.hazard_context import ContextStamp
+from autodedup.incremental_scope import Scope, ScopeBlock
 from autodedup.incremental_store import MemoryStore
 from autodedup.model import hand_initialised
 from autodedup.replay import DatasetFacts, ScheduleWork, arrival_order, batch_state
@@ -51,6 +53,16 @@ from tests.autodedup.test_incremental import (
 )
 
 GEN = "rt"
+# The trial scope's first block, and the thing every feed test now has to state: a listing the
+# scope does not hold is a listing no feed may claim (E74).
+SCOPE = Scope((ScopeBlock("obec", 563510),))
+
+
+def _place(db: FakePg, *listing_ids: int, obec: int | None = 563510,
+           cast_obce: int | None = None) -> None:
+    """Put listings on the map, which is what puts them in (or out of) the scope."""
+    for listing_id in listing_ids:
+        db.locations[int(listing_id)] = {"obec_kod": obec, "cast_obce_kod": cast_obce}
 
 
 def _twins_dataset(pairs: int = 3) -> Dataset:
@@ -88,7 +100,10 @@ def _twins_dataset(pairs: int = 3) -> Dataset:
 def _sql_drain(ds, settings, calibration, order, batch: int = 5, db: FakePg | None = None,
                limits: Limits | None = None):
     conn = db or FakePg()
-    store = SqlStore(conn, GEN)
+    # A floor of zero keeps every decided pair, because THIS comparison is about the adapter
+    # and not about retention (E74, which has its own test): a store that dropped the sub-floor
+    # rejects would make "the SQL store equals the twin" a weaker claim than it reads as.
+    store = SqlStore(conn, GEN, store_floor=0.0)
     facts = DatasetFacts(ds)
     work = ScheduleWork(list(order))
     model = hand_initialised()
@@ -282,6 +297,7 @@ def _flip_db(n: int, stamp: datetime) -> FakePg:
         db.listings[100 + index] = {
             "first_seen_at": db.now - timedelta(days=30),
             "inactive_at": stamp, "is_active": False}
+    _place(db, *db.listings)
     return db
 
 
@@ -290,7 +306,7 @@ def test_a_delisting_tie_group_larger_than_the_share_is_never_skipped() -> None:
     stamp. Paging on the timestamp alone skipped every row past the limit for ever."""
     stamp = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)
     db = _flip_db(9, stamp)
-    work = SqlWork(db, GEN, revive_slice=0)
+    work = SqlWork(db, SCOPE, GEN, revive_slice=0)
     seen: list[int] = []
     for _ in range(12):
         items = work.claim(4)  # share = 1
@@ -307,12 +323,13 @@ def test_a_straggler_that_committed_after_the_cursor_is_still_claimed() -> None:
     for listing_id in (10, 11, 12):
         db.listings[listing_id] = {"first_seen_at": db.now - timedelta(hours=1),
                                    "inactive_at": None, "is_active": True}
+    _place(db, 10, 11, 12)
     db.cursors[CURSOR_NEW] = {"last_listing_id": 12}
     db.rt_fp[(GEN, 11)] = {"category_main": None, "category_type": None, "area_m2": None,
                            "disposition": None, "floor": None, "fp_digest": "d",
                            "cell_key": "o1", "cell_group": "byt", "is_active": True}
-    work = SqlWork(db, GEN, revive_slice=0)
-    items = work.claim(8)
+    work = SqlWork(db, SCOPE, GEN, revive_slice=0)
+    items = work.claim(10)  # five feeds, so a share of two
     stragglers = {item.listing_id for item in items if item.feed == "straggler"}
     assert stragglers == {10, 12}
     # A straggler carries no cursor value: it is behind the watermark by definition.
@@ -325,7 +342,8 @@ def test_a_row_younger_than_the_settle_lag_is_left_for_the_next_pass() -> None:
     db.listings[1] = {"first_seen_at": db.now - timedelta(hours=1), "inactive_at": None,
                       "is_active": True}
     db.listings[2] = {"first_seen_at": db.now, "inactive_at": None, "is_active": True}
-    work = SqlWork(db, GEN, revive_slice=0)
+    _place(db, 1, 2)
+    work = SqlWork(db, SCOPE, GEN, revive_slice=0)
     items = work.claim(8)
     assert [item.listing_id for item in items if item.feed == "new"] == [1]
 
@@ -336,10 +354,11 @@ def test_a_revived_listing_reaches_the_lane() -> None:
     db = FakePg()
     db.listings[7] = {"first_seen_at": db.now - timedelta(days=9), "inactive_at": None,
                       "is_active": True}
+    _place(db, 7)
     db.rt_fp[(GEN, 7)] = {"category_main": None, "category_type": None, "area_m2": None,
                           "disposition": None, "floor": None, "fp_digest": "d",
                           "cell_key": "o1", "cell_group": "byt", "is_active": False}
-    work = SqlWork(db, GEN)
+    work = SqlWork(db, SCOPE, GEN)
     items = work.claim(8)
     assert [item.listing_id for item in items if item.feed == "revived"] == [7]
     cursors = work.commit(items)
@@ -351,7 +370,8 @@ def test_each_feed_advances_only_its_own_cursor() -> None:
     db.listings[5] = {"first_seen_at": db.now - timedelta(hours=2), "inactive_at": None,
                       "is_active": True}
     db.snapshots.append({"id": 99, "listing_id": 5, "scraped_at": db.now - timedelta(hours=2)})
-    work = SqlWork(db, GEN, revive_slice=0)
+    _place(db, 5)
+    work = SqlWork(db, SCOPE, GEN, revive_slice=0)
     items = work.claim(8)
     out = work.commit(items)
     assert out[CURSOR_NEW] == 5
@@ -363,7 +383,8 @@ def test_a_refused_pass_advances_no_cursor() -> None:
     db = FakePg()
     db.listings[5] = {"first_seen_at": db.now - timedelta(hours=2), "inactive_at": None,
                       "is_active": True}
-    work = SqlWork(db, GEN, revive_slice=0)
+    _place(db, 5)
+    work = SqlWork(db, SCOPE, GEN, revive_slice=0)
     work.claim(8)
     work.commit([])  # the pair budget refused this claim
     assert db.cursors.get(CURSOR_NEW, {}).get("last_listing_id") is None
