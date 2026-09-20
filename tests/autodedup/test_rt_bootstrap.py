@@ -151,6 +151,20 @@ def test_fresh_without_reseed_is_refused(tmp_path, monkeypatch) -> None:
     assert (GEN, 11, 12) in db.pairs, "a refused seed writes nothing"
 
 
+def test_fresh_refuses_a_generation_this_lane_never_seeded(tmp_path, monkeypatch) -> None:
+    """The reset deletes by generation NAME. A batch generation (g4..g7) carries no real-time
+    calibration, so `generation=g7 reseed=true fresh=true` would otherwise empty the pass the
+    operator reviewed."""
+    monkeypatch.delenv(ENV_FLAG, raising=False)
+    db = _populated(FakePg())
+    db.calibration.pop(OTHER, None)  # a BATCH generation: pairs and clusters, no calibration
+    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
+    with pytest.raises(SystemExit, match="never seeded by this lane"):
+        run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "generation": OTHER,
+                                 "fresh": "true", "reseed": "true", **SCORER}, tmp_path)
+    assert [key for key in db.pairs if key[0] == OTHER], "a refused seed deletes nothing"
+
+
 def test_a_fresh_seed_reports_what_it_removed(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv(ENV_FLAG, raising=False)
     db = _populated(FakePg())

@@ -52,6 +52,8 @@ from autodedup.incremental_sql import (
 
 EQUIVALENCE_FILE: str = "rt_equivalence.json"
 MAX_EXAMPLES: int = 8
+# The largest score movement tolerated while the decision stays the same (see the verdict).
+SCORE_ONLY_MAX: float = 0.05
 # What "the same score" means. The two sides compute the same features with the same model in
 # the same process-local float64, so a difference above this is a difference in the INPUTS, not
 # in the arithmetic — which is the whole point of the comparison.
@@ -285,11 +287,26 @@ def run_equivalence(
     by_field: dict[str, int] = {}
     differing_examples: list[dict[str, Any]] = []
     differing = 0
+    # A DECISION that moved (zone, certificate, guard veto) is a different answer. A score that
+    # moved with the same decision is a different input to the same answer, and it is expected:
+    # the batch pass calibrates over its whole cohort (negative control included) while the
+    # real-time generation calibrates over its scope, and corpus token frequencies reach the
+    # features (measured 2026-09-20: 61 score-only differences, max 0.0158, 0 zone moves).
+    decisions_moved = 0
+    score_only = 0
+    score_only_max = 0.0
     for key in both:
         moved = differences(live_pairs[key], batch_pairs[key], tol)
         if not moved:
             continue
         differing += 1
+        if moved == ["score"]:
+            score_only += 1
+            a, b = live_pairs[key].score, batch_pairs[key].score
+            if a is not None and b is not None:
+                score_only_max = max(score_only_max, abs(a - b))
+        else:
+            decisions_moved += 1
         for field in moved:
             by_field[field] = by_field.get(field, 0) + 1
         if len(differing_examples) < MAX_EXAMPLES:
@@ -314,8 +331,13 @@ def run_equivalence(
     batch_versions = sorted({p.model_version for p in batch_pairs.values()
                              if p.model_version is not None})
     reasons: list[str] = []
-    if differing:
-        reasons.append(f"{differing} of {len(both)} shared pairs differ")
+    if not both:
+        reasons.append("no pair is stored on both sides, so nothing was compared")
+    if decisions_moved:
+        reasons.append(f"{decisions_moved} of {len(both)} shared pairs differ in their DECISION")
+    if score_only_max > SCORE_ONLY_MAX:
+        reasons.append(f"a score-only difference of {score_only_max:.4f} exceeds "
+                       f"{SCORE_ONLY_MAX} with the decision unchanged")
     if causes.get("unexplained"):
         reasons.append(f"{causes['unexplained']} one-sided pairs have no cause")
     if not clusters["member_sets_identical"]:
@@ -343,6 +365,9 @@ def run_equivalence(
             "both": len(both),
             "identical": differing == 0,
             "differing": differing,
+            "decisions_moved": decisions_moved,
+            "score_only": score_only,
+            "score_only_max": round(score_only_max, 6),
             "by_field": by_field,
             "differing_examples": differing_examples,
             "only_live": len(only_live),

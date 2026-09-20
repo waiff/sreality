@@ -106,7 +106,6 @@ def test_the_mode_writes_nothing(tmp_path) -> None:
 @pytest.mark.parametrize("field,changed", [
     ("zone", {"zone": "band", "decision": "band"}),
     ("certificate", {"certificate": "K-B"}),
-    ("score", {"score": 0.9 + 1e-3}),
 ])
 def test_a_decision_that_moved_is_counted_by_field(tmp_path, field, changed) -> None:
     db = _db()
@@ -116,9 +115,44 @@ def test_a_decision_that_moved_is_counted_by_field(tmp_path, field, changed) -> 
     out = _run(db, tmp_path)
 
     assert out["pairs"]["differing"] == 1
+    assert out["pairs"]["decisions_moved"] == 1
     assert out["pairs"]["by_field"][field] == 1
     assert out["verdict"]["ok"] is False
     assert out["pairs"]["differing_examples"][0]["moved"] == [field]
+
+
+def test_a_score_that_moved_under_the_same_decision_is_reported_not_failed(tmp_path) -> None:
+    """The batch pass calibrates over its whole cohort and the real-time generation over its
+    scope, so scores differ a little under identical decisions (measured: 61 pairs, max 0.0158)."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.9 + 1e-3)
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["differing"] == 1
+    assert out["pairs"]["decisions_moved"] == 0
+    assert out["pairs"]["score_only"] == 1
+    assert out["verdict"]["ok"] is True
+
+
+def test_a_large_score_movement_fails_even_with_the_decision_unchanged(tmp_path) -> None:
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(score=0.99)
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.90)
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["score_only_max"] > 0.05
+    assert out["verdict"]["ok"] is False
+
+
+def test_two_empty_stores_do_not_pass(tmp_path) -> None:
+    """Every other criterion is true of two empty stores; a comparison of nothing is not a pass."""
+    out = _run(_db(), tmp_path)
+
+    assert out["pairs"]["both"] == 0
+    assert out["verdict"]["ok"] is False
 
 
 def test_a_score_inside_the_tolerance_is_not_a_difference(tmp_path) -> None:
@@ -159,6 +193,8 @@ def test_a_batch_pair_outside_the_scope_is_explained(tmp_path) -> None:
     db = _db()
     db.listings[900] = {"id": 900, "first_seen_at": EXPORTED - timedelta(days=5)}
     db.pairs[(BATCH, 1, 900)] = _pair()
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair()
 
     out = _run(db, tmp_path)
 
@@ -188,6 +224,8 @@ def test_a_pair_on_a_listing_that_arrived_after_the_export_is_explained(tmp_path
     db.rt_fp[(LIVE, 9)] = _fp_row()
     db.listings[9] = {"id": 9, "first_seen_at": EXPORTED + timedelta(hours=3)}
     db.pairs[(LIVE, 1, 9)] = _pair()
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair()
 
     out = _run(db, tmp_path)
 
@@ -203,6 +241,8 @@ def test_the_store_floor_and_retention_explain_the_reject_tail(tmp_path) -> None
     db = _db()
     db.pairs[(LIVE, 1, 2)] = _pair(score=0.05, zone="reject", certificate=None)
     db.pairs[(BATCH, 3, 4)] = _pair(score=0.004, zone="reject", certificate=None)
+    db.pairs[(LIVE, 2, 3)] = _pair()
+    db.pairs[(BATCH, 2, 3)] = _pair()
 
     out = _run(db, tmp_path)
 

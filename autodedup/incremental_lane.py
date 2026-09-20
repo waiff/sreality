@@ -2467,6 +2467,14 @@ def run_rt_seed(
                 f"{str(existing[0][1])!r}, cut {existing[0][2]}) — a re-seed re-cuts the frozen "
                 "calibration every stored decision of this generation was taken under. Pass "
                 "reseed=true to mean it, or seed a new generation.")
+        if fresh and not existing:
+            # The reset deletes pairs, clusters, members and conflicts BY GENERATION NAME. A
+            # batch generation (g4..g7) has no rt_calibration row, so without this refusal
+            # `generation=g7 reseed=true fresh=true` would empty the operator's reviewed pass.
+            raise SystemExit(
+                f"fresh=true refused: generation {generation!r} carries no real-time "
+                "calibration, so it was never seeded by this lane and is not this lane's to "
+                "empty. Seed it first (without fresh), or name the real-time generation.")
         scope_key = scope_setting_key(generation)
         control = lane_settings(conn, [scope_key, SCOPE_SETTING, BUDGET_SETTING,
                                        PARITY_MIN_CHECKED_SETTING, PARITY_MIN_SHARE_SETTING,
