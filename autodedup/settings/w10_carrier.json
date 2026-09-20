@@ -1,0 +1,25 @@
+{
+ "bridge_apply": true,
+ "bridge_min_score": 0.999,
+ "catalog_carrier_area_tol": 0.01,
+ "catalog_carrier_aware": true,
+ "catalog_carrier_combine": "any",
+ "catalog_carrier_coverage_min": 1.0,
+ "catalog_min_block_carriers": 2,
+ "catalog_min_broker_carriers": 2,
+ "catalog_min_source_carriers": 2,
+ "certificate_kr_enabled": true,
+ "context_rule_enabled": true,
+ "live_window_from_sighting": false,
+ "store_floor": 0.02,
+ "t_hi": 1.0,
+ "t_hi_by_stratum": {
+  "K-A|cross": null,
+  "K-A|same": null,
+  "K-C|same": null,
+  "model|cross": 0.9788,
+  "model|same": null
+ },
+ "t_lo": 0.1823495333100157,
+ "unit_designator_veto": true
+}

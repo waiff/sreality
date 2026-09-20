@@ -28,6 +28,26 @@ class Settings:
     area_reject_pct: float = 0.08
     area_band_pct: float = 0.03
     catalog_df: int = 8
+    # E83 (W10): E9's population test cannot tell a marketing catalogue from a broker re-posting
+    # ONE advert nine times, so a frame is stock only when its carriers are several PARTIES.
+    # Each limb is a settings row because each costs differently; `combine` says whether one limb
+    # clearing its bar is enough to call a frame stock (`any`, the conservative reading — more
+    # frames stay subtracted) or every configured limb must (`all`).
+    # `catalog_carrier_coverage_min` is the honest rail: carrier identity is observable only
+    # inside the cohort while `pop` is corpus-wide, so a frame the cohort holds less than this
+    # share of the population of stays subtracted. OFF by default — E9 is what g6 shipped with,
+    # and every relaxation of it adds image evidence and therefore adds merges.
+    catalog_carrier_aware: bool = False
+    catalog_min_broker_carriers: int | None = None
+    catalog_min_source_carriers: int | None = None
+    catalog_min_block_carriers: int | None = None
+    catalog_carrier_combine: str = "any"
+    catalog_carrier_coverage_min: float = 1.0
+    # E83's purity rail, E60's restated for a photograph: carriers that print two dispositions
+    # or stated areas further apart than this hold the PROJECT's material, not one advert's.
+    # 0.01 is K-B's own `CERT_B_AREA` — the certificate already demands the two sides agree
+    # within 1 %, so the frame that carries it may not span more.
+    catalog_carrier_area_tol: float = 0.01
     anchor_images: int = 3
     max_block_size: int = 200
     max_candidates_per_listing: int = 60
@@ -214,6 +234,35 @@ class Settings:
         unknown_units = sorted(set(self.numeral_conflict_units) - set(NUMERAL_TOLERANCE))
         if unknown_units:
             raise ValueError(f"numeral_conflict_units names no slot: {', '.join(unknown_units)}")
+        from autodedup.stock import COMBINE_MODES, MIN_CARRIER_BAR
+
+        if self.catalog_carrier_combine not in COMBINE_MODES:
+            raise ValueError(
+                f"catalog_carrier_combine must be one of {COMBINE_MODES}: "
+                f"{self.catalog_carrier_combine}"
+            )
+        if not 0.0 <= self.catalog_carrier_area_tol < 1.0:
+            raise ValueError(
+                f"catalog_carrier_area_tol must be in [0, 1): {self.catalog_carrier_area_tol}"
+            )
+        if not 0.0 < self.catalog_carrier_coverage_min <= 1.0:
+            raise ValueError(
+                "catalog_carrier_coverage_min must be in (0, 1]: "
+                f"{self.catalog_carrier_coverage_min}"
+            )
+        limbs = ("catalog_min_broker_carriers", "catalog_min_source_carriers",
+                 "catalog_min_block_carriers")
+        for name in limbs:
+            value = getattr(self, name)
+            # A bar of one is vacuous: every frame has a carrier, so nothing would ever be stock.
+            if value is not None and value < MIN_CARRIER_BAR:
+                raise ValueError(f"{name} must be at least {MIN_CARRIER_BAR} or null: {value}")
+        if self.catalog_carrier_aware and not any(getattr(self, name) is not None
+                                                  for name in limbs):
+            raise ValueError(
+                "catalog_carrier_aware needs at least one carrier limb: with none configured "
+                "the switch is inert and E9 runs exactly as it does with it off"
+            )
         for name in ("certificate_b_min_images", "certificate_b_min_matched_images"):
             if getattr(self, name) < 0.0:
                 raise ValueError(f"{name} must not be negative: {getattr(self, name)}")
