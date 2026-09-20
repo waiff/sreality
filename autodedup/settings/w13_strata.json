@@ -1,0 +1,174 @@
+{
+ "what": "W13 promotion evidence for generation g7 (D36): `settings/w13.json` = w8 + the HONEST live-window clock (E62) + the E84 one-minute pair-gap rail, with no E65 image floor, no E83 carrier-aware stock, no E85 family guard and no E88 development hold. The model is `models/w6_gold.json`, unrefitted — the arm moves the CLOCK and never a cut, so every zone difference against g6 is the clock's.",
+ "provenance": {
+  "cohort_export_run": "35200225251",
+  "cohort_listings": 5687,
+  "settings": "autodedup/settings/w13.json",
+  "model": "autodedup/models/w6_gold.json (weights identical to w5_gold — no refit anywhere in this wave)",
+  "operator_labels_artifact_run": "35532695459",
+  "split_seal": "510db099bed2d473827257ebc2211f00bbbf0beceff23906d3567e3c7f0dd6c1",
+  "split_seed": 20260927,
+  "spend_usd": 0.0,
+  "lane_runs": ["mode=labels args=generation=g6 (run 35532695459, $0)"],
+  "judge_calls": 0,
+  "measured_by": "/home/hejtm/autodedup-artifacts/w13/build/{arms.json,summary.json} (build) and /home/hejtm/autodedup-artifacts/w13/verify/out/{arm_table.json,sealed_read.json,new_merge_census.json,missed.json,random40.json} (independent re-run, bit-identical)",
+  "truth": "reliable = operator > gold, minus every pair touching the DISPUTED operator card 18705144 and minus the gold-only labels still inside the two K Botiči families (M127). The cheap vision/text tiers are reported as `pooled` and never scored (D16).",
+  "circularity": "none new: no refit, no threshold moved, no rule chosen on the seal this wave opened."
+ },
+ "operator_ruling": {
+  "what": "the ruling E110's acceptance rests on, and the whole of what changed between W11's refusal and this promotion",
+  "decided_at_utc": "2026-09-20T19:30Z",
+  "decided_by": "op:0871b32a9d227f60",
+  "grain": "pair",
+  "source": "explicit",
+  "pairs": [
+   {"pair": [522698, 13221982], "verdict": "same", "relation": "same_property", "decided_at_utc": "2026-09-20T19:30:29Z", "was": "W11's ONE reliable sealed false merge (a gold negative)"},
+   {"pair": [555448, 18626270], "verdict": "same", "relation": "same_property", "decided_at_utc": "2026-09-20T19:30:55Z", "was": "its dev-side twin"}
+  ],
+  "families": ["F518656", "F521778"],
+  "block": "ruian:22672176 — Rezidence K Botiči, two ceskereality serial-poster families of one broker (166d3dce)",
+  "independently_confirmed_on_the_adverts": "the 47 m² unit is advertised at two headline prices because the body quotes a co-op transfer separately from its anuita: 3,399,000 + 5,126,000 = 8,525,000 exactly, and a full body diff of the two rows returns three character-level edits. The 27 m² @5,499,000 chain is 21 adverts with ZERO overlapping windows and the 47 m² @8,525,000 chain is 13 with zero — sequential campaigns, not units being bumped. The engine still REJECTS the genuinely distinct sreality twins in that block (16439 x 16442, co-live for months).",
+  "label_export_delta_since_w6": {"explicit_before": 444, "explicit_after": 446, "verdict_changes": 0, "explicit_withdrawn": 0, "implied_drift_only": {"out": 80, "in": 6}}
+ },
+ "promotion_bar": {
+  "zero_reliable_false_merges_at_every_grain": {
+   "dev_and_validation": {"g6": {"pair": 0, "block": 0, "family": 0, "cluster": 1}, "g7": {"pair": 0, "block": 0, "family": 0, "cluster": 0}},
+   "sealed": {"g6": {"pair": 0, "block": 0, "family": 0, "cluster": 0}, "g7": {"pair": 0, "block": 0, "family": 0, "cluster": 0}},
+   "g6_cluster_grain_pair": [445691, 15427866],
+   "met": true,
+   "note": "the clause that refused W11 when the count was 1. It is now the INCUMBENT that carries one on dev, not the candidate."
+  },
+  "sealed_recall_above_g6_with_mcnemar_in_its_favour": {
+   "seal": "510db099bed2d473827257ebc2211f00bbbf0beceff23906d3567e3c7f0dd6c1",
+   "reliable_labelled_pairs_on_test": 342,
+   "labelled_duplicates_on_test": 250,
+   "g6": {"merged": 164, "recall": 0.656, "wilson95": [0.5952, 0.7121], "precision": 1.0},
+   "g7": {"merged": 204, "recall": 0.816, "wilson95": [0.7633, 0.8591], "precision": 1.0, "precision_wilson95": [0.9815, 1.0]},
+   "mcnemar": {"gained": 40, "lost": 0, "p_two_sided": 1.82e-12},
+   "by_tier": {
+    "operator": {"g6": 117, "g7": 139, "gained": 22, "lost": 0, "p_two_sided": 4.77e-07, "labelled_duplicates": 153},
+    "gold_only": {"g6": 59, "g7": 77, "gained": 18, "lost": 0, "p_two_sided": 7.63e-06, "labelled_duplicates": 110}
+   },
+   "met": true,
+   "note": "the candidate beats the incumbent even under GOLD alone — the tier whose negative refused it in W11."
+  },
+  "band_not_larger_than_g6": {"g6": 4907, "g7": 4524, "met": true},
+  "zero_different_unit_merges_in_the_verifier_reading": {
+   "new_merges_total": 469,
+   "read_by_hand": 68,
+   "blocks_read": 24,
+   "kb_families_read": 23,
+   "different_unit_merges_found": 0,
+   "wilson95_upper": {"pair": 0.0535, "block": 0.138, "family": 0.1431},
+   "met": true,
+   "note": "absence at a measured precision, never proof — D30 (vii)'s residual risk is unchanged."
+  }
+ },
+ "zones": {
+  "scope": "dev + validation of seal 510db099, `w6_gold` unrefitted",
+  "g6": {"merge": 4690, "band": 4907, "reject": 39266, "veto": 45, "clusters": 939, "stored_pairs": 15856, "certificates": {"K-B": 1110, "K-C": 1993, "K-R": 189}, "e63": 273},
+  "g7": {"merge": 5158, "band": 4524, "reject": 39181, "veto": 45, "clusters": 980, "stored_pairs": 15968, "certificates": {"K-B": 1597, "K-C": 1973, "K-R": 189}, "e63": 241}
+ },
+ "recall": {
+  "reliable": {"g6": {"hit": 839, "n": 1175, "recall": 0.714}, "g7": {"hit": 979, "n": 1175, "recall": 0.8332}, "mcnemar": {"gained": 140, "lost": 0, "p_two_sided": 1.43e-42}},
+  "reliable_common_denominator": {"g6": 0.6997, "g7": 0.8165, "n": 1199},
+  "operator_only": {"g6": {"hit": 550, "n": 666, "recall": 0.8258}, "g7": {"hit": 596, "n": 666, "recall": 0.8949}, "mcnemar": {"gained": 46, "lost": 0, "p_two_sided": 2.84e-14}},
+  "gold_only": {"g6": 0.5789, "g7": 0.7688, "mcnemar": {"gained": 106, "lost": 0}},
+  "no_contested_exclusion_at_all": {"g6": 0.7139, "g7": 0.8336, "mcnemar": {"gained": 141, "lost": 0}},
+  "pooled_incl_cheap_judges": {"g6": 0.6662, "g7": 0.7589},
+  "merge_zone_precision_g7": {"labelled": 979, "neg": 0, "precision": 1.0, "wilson95": [0.9961, 1.0]}
+ },
+ "sensitivity": {
+  "what": "the whole safety case is the two operator rulings, so the arm is scored with them taken back as well",
+  "gold_wins_on_the_two_ruled_pairs": {"g7": {"pair": 2, "block": 1, "family": 2, "cluster": 1}, "g6": {"pair": 0, "block": 0, "family": 0, "cluster": 1}, "g7_recall": 0.8329},
+  "contested_class_is_a_no_op": {"rows": 3, "negatives": 0, "all_gold_only_positives": true, "dropping_the_exclusion_changes_no_false_merge_count": true},
+  "pooled_pair_grain_negatives": {"g6": 80, "g7": 90, "delta_read_by_hand": 10, "inside_the_two_k_botici_families": 8, "outside_and_verified_true_re_posts": [[323232, 15043313], [469815, 13175489]]}
+ },
+ "new_merges": {
+  "total": 469,
+  "by_source": {"K-B": 448, "model": 13, "E63": 7, "K-R": 1},
+  "non_kb": 21,
+  "non_kb_cross_portal": 14,
+  "non_kb_with_a_reliable_positive": 16,
+  "non_kb_with_a_reliable_negative": 0,
+  "note": "M111's boundary re-measured: 21 of the new merges arrive through the model (every one at the model|cross cut 0.9788), E63 and K-R, so any successor to E88 must act on the SCORE and not only on the certificate.",
+  "development_census": {
+   "dense_blocks_ge10_same_category": 102,
+   "new_merges_inside_one": 429,
+   "reliable_negatives_among_them": 0,
+   "with_project_vocabulary": 418,
+   "with_coop_vocabulary": 274,
+   "with_a_unit_designator": 5,
+   "unit_designators_all_AGREE": true
+  },
+  "decisive_reads": {
+   "ruian:83094172 (Lofty Kolbenova, 50 listings)": "the four new merges are a correct BIJECTION — each ceskereality advert joins the sreality advert of the SAME area and disposition, with a consistent +1 sreality floor offset across all eleven unit types; the price gaps are the project's June→August repricing. No two different areas are ever joined.",
+   "ruian:22545140 (KOLMÁ 5)": "the developer's whole sreality catalogue rolled over at one timestamp (last seen 08-10 12:17, recreated 08-10 14:19) with identical area, floor and price; every other unit has a unique (area, floor, price) triple. A re-post, not two units.",
+   "ruian:25852205": "a commercial office building (250 m² and 974 m² offices) — again cross-portal twins of one advert."
+  }
+ },
+ "what_is_still_missed": {
+  "operator_confirmed_duplicates_dev": 683,
+  "merged": 596,
+  "missed": 87,
+  "by_cause": {"band": 60, "reject": 10, "not_stored": 9, "outside_the_cohort": 8},
+  "lost_from_g6_labelled_reliable": 0,
+  "co_clustered_anyway": 22,
+  "cross_portal": 61,
+  "different_address_block": 41,
+  "floor_disagreement": 31,
+  "floor_offset_exactly_one": 28,
+  "of_those_sreality_x_another_portal": 20,
+  "reliable_tier": {"duplicates": 1199, "missed": 220, "band": 178, "reject": 18, "not_stored": 24},
+  "note": "the residual gap is LOCATION and the floor convention, not the clock."
+ },
+ "losses": {
+  "labelled_reliable_duplicates_lost_vs_g6": 0,
+  "merges_lost_vs_g6": 1,
+  "the_one": {"pair": [531470, 18717549], "portals": "ceskereality × mmreality", "facts": "2+1 64 m² @14,500 Riegrova Jablonec, byte-identical body, disjoint windows", "what_happened": "0.9788 → 0.9545, into the band", "labelled_by": "no tier", "reading": "a true cross-portal duplicate",
+   "note": "'nothing is lost anywhere' is exactly true of LABELLED RELIABLE duplicates and not of merges in general (M133)."}
+ },
+ "e96_revocation_check": {
+  "rule": "E111 — an operator NEGATIVE inside a K-B family revokes E110, and the event is a COUNT something runs rather than a thing to remember",
+  "implementation": "autodedup/revocation.py, printed by `harness evaluate` on every run",
+  "today": {"kb_families": 173, "members": 500, "operator_labelled_pairs_inside": 196, "negatives": 0, "revoked": false},
+  "note": "the verifier reported 182 families for the same 196 pairs and the same 0 negatives; 173 is the count under `family.kb_families` — components of the pairs K-B CERTIFIED — which is the program's one definition and the one the check uses (M134)."
+ },
+ "seal": {
+  "id": "510db099bed2d473827257ebc2211f00bbbf0beceff23906d3567e3c7f0dd6c1",
+  "seed": 20260927,
+  "listings": 4456,
+  "groups": 664,
+  "construction": "g6's merge components, the honest arm's merge components, all 1,597 K-B certified pairs of the honest arm (so no K-B family straddles the split) and all 4,172 labelled pairs of four tiers, with the W13 operator export in place of W6's",
+  "map_digest": "reproduces W11's map exactly (the FIXPOINT of M108), so the seal is named by map AND seed per E88",
+  "seed_rule": "pre-stated: 20260926 failed at 14.1 % validation (< 15 %); 20260927 passes at 58.4 / 26.4 / 15.2, every share within 8 points of 60/20/20",
+  "labelled_pairs_per_split": {"train": 2437, "validation": 1102, "test": 633},
+  "opened": "ONCE, by the W13 verification, to adjudicate D36",
+  "spent": true,
+  "contested_pairs_on_test": 0,
+  "holdout_independence": {
+   "also_test_under_W11_seed_20260923": {"n": 18, "of": 342, "fraction": 0.0526},
+   "also_test_under_W12_seed_20260925": {"n": 122, "of": 342, "fraction": 0.3567},
+   "note": "about a third of the pairs adjudicating this promotion were already test under W12's seed, where this same honest arm's number was reported (M110). No search was run there, so it is confirmation overlap and not a tuning leak — recorded rather than netted out."
+  }
+ },
+ "real_time_lane": {
+  "run_pass_refuses": ["catalog_carrier_aware", "development_hold_mode != off", "family_guard_mode != off"],
+  "w13_sets_all_three_to_the_accepted_value": true,
+  "consequence": "the honest clock is a CLOCK and a pair-level rail, so the shadow lane carries g7 with no new index and no new rail",
+  "replay_equivalence": {"pairs": {"n": 48908, "differing": 0}, "stored_pairs": {"n": 15923, "differing": 0}, "clusters": {"batch": 980, "incremental": 980, "member_sets_identical": true}},
+  "order_insensitivity_shuffle_seed_7": {"pairs_differing": 0, "cluster_member_sets_identical": true},
+  "must_not_link": {"operator_pairs": 246, "merged_by_g6": 1, "merged_by_g7": 1, "the_one": [18705144, 18706836], "note": "the standing DISPUTED listing, identical in both arms; the production score lane and the incremental lane both read and apply must_not_link, the offline arm build simply does not pass it."}
+ },
+ "owed": {
+  "operator_pairs": {
+   "file": "autodedup/pairs/w13_operator_owed.json",
+   "pairs": [
+    {"pair": [145827, 11648789], "why": "ruled ONE UNIT by the build and independently by the verification (a Jablonec villa's only ground-floor 3+kk 70 m², one campaign replaced on idnes AND sreality within ten hours on 07-27, structured area 70.0 on all four rows, price monotone 17,500 → 16,000 → 14,300). It MERGES under g7 as K-B. An operator `different` here would be a negative inside a K-B family, which is exactly what E110 says revokes the acceptance."},
+    {"pair": [16438, 92824], "why": "K Botiči's 47,6 m² south-balcony unit against bezrealitky's 46,6 m² north-balcony one. It merges in BOTH arms, so it does not differentiate g7 — it is an incumbent question nobody has ruled."}
+   ]
+  },
+  "floor_convention": "sreality counts floors 1-based where the other portals count 0-based. Confirmed three independent ways (the Lofty Kolbenova bijection, the Jablonec villa, and 28 of 31 floor disagreements among missed operator duplicates being exactly ±1, 20 of them sreality × another portal). It drives 842 `floor_spread` cluster-edge refusals in g7 (839 in g6) and is the largest nameable residual recall cause. Owed to W14 (D36 iv).",
+  "d30_vii_residual_risk": "UNCHANGED and unmeasured by this wave: a developer posting N distinct units serially under one broker key at one price, one area and one gallery is still merged into one property. 68 hand-read new merges across 102 dense blocks found no instance; Wilson95 upper 0.0535 at pair grain is absence of evidence at a measured precision."
+ }
+}

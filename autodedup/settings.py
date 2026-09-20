@@ -93,6 +93,11 @@ class Settings:
     # 1,110 K-B merges carrying 169 reliable labelled duplicates and 0 labelled negatives, so
     # the default is OFF — the floor is the HONEST clock's price, not a free tightening, and
     # `validate` refuses to run the honest clock without it.
+    # E110 (W13): `validate` no longer refuses the honest clock without this floor. The floor's
+    # whole case was the two gold negatives of the ceskereality Rezidence K Botici families,
+    # and on 2026-09-20 the operator ruled both pairs `same`; the price the honest clock pays
+    # is now E84 alone. The rows stay live and `certificate_b` still enforces them, so
+    # restoring the W9 arm is one number.
     certificate_b_min_images: float = 0.0
     certificate_b_min_matched_images: float = 0.0
     # E84 (W10): K-B's disjointness clause reads a PAIR of windows, so it has to be read at the
@@ -207,6 +212,10 @@ class Settings:
     # the benchmark always uses; the engine defaults to False because the truer clock is the
     # looser one for every co-live test it feeds — see `features.window_end_stamp` for the
     # measurement and the refit debt.
+    # E110 (W13): the price `validate` asks for it is E84's pair-gap rail and nothing else,
+    # because W11's seal measured exactly that arm (347 of 406 against g6's 300, gained 47,
+    # lost 0) and the one reliable false merge it carried is a pair the OPERATOR has since
+    # ruled a duplicate. Still False by default: promoting it is a generation decision.
     live_window_from_sighting: bool = False
     # E63 (W8): the band promotion the W8 verification endorsed, and the ONLY one it endorsed.
     # W8a proposed merging band pairs inside a "safe" hazard context; verification refuted that
@@ -358,29 +367,27 @@ class Settings:
                 "matched set is a subset of the smaller gallery "
                 f"({self.certificate_b_min_matched_images} > {self.certificate_b_min_images})"
             )
-        # E87 (W11 verification): the gate takes back the payment it briefly accepted from E85.
-        # The W11 seal measured the guard INERT against the same arm without it — 0 sealed
-        # labelled duplicates gained, 0 lost, every sealed demotion unlabelled (M100) — so it
-        # buys the honest clock nothing and cannot stand as its price. E65 is the only payment
-        # a sealed read has measured, and the honest clock's true price is an open question
-        # D30 (vii) owes, not a row this gate may assume.
-        # E88 (W12) briefly widened that payment by one alternative — the new-development HOLD,
-        # aimed at the hazard instead of at every K-B pair — and E89 takes it back the same way
-        # E87 took back E85's, on the same seal's test side: the NARROW hold merges 145 of 238
-        # reliable sealed duplicates against g6's 177 (McNemar gained 7, lost 39, p < 1e-5) and
-        # removes 0 sealed false merges, so it is a NEGATIVE price, not a price. E65 is still
-        # the only payment a sealed read has measured, and the honest clock's true price stays
-        # the open question D30 (vii) / D32 (v) owes, not a row this gate may assume.
-        if self.live_window_from_sighting and self.certificate_b_min_images <= 0.0:
-            raise ValueError(
-                "live_window_from_sighting needs a price: the E65 image floor "
-                "(certificate_b_min_images). The honest clock is what lets a developer's serial "
-                "template re-posts satisfy every clause of K-B, and without that floor the "
-                "certificate rests on no observation of the unit (E87: the E85 family guard is "
-                "measurably inert on the W11 seal and does not pay for it; E89: the E88 "
-                "new-development hold is measurably NEGATIVE on the W12 seal and does not "
-                "either)"
-            )
+        # E110 (W13): the honest clock's price is E84, and it is a price a SEALED read has
+        # measured. E87 and E89 both refused a widening because the arm behind it had never
+        # been read on a holdout; this one has. W11's seal read exactly this arm — the honest
+        # clock, the E84 one-minute pair gap, NO image floor, no family guard, no hold — and
+        # measured 347 of 406 sealed reliable labelled duplicates merged against g6's 300,
+        # McNemar gained 47 lost 0 (p ~ 7.1e-15), band 4,524 against 4,907, with ONE reliable
+        # false merge at pair, block and family grain: the sealed gold negative
+        # 522698 x 13221982 (M98/D30 i). On 2026-09-20 the OPERATOR ruled that pair, and its
+        # dev-side twin 555448 x 18626270, `same` in the validation UI — and operator labels
+        # outrank gold everywhere in this program — so the one number that refused the arm is
+        # gone and the sealed read stands as its price. The E65 image floor is no longer
+        # required: it withheld 89% of the one-unit re-post chains' merges for a hazard the
+        # operator has now ruled is not one (M96, D24 ii).
+        #
+        # What this acceptance RESTS ON, stated so a later session can revoke it without
+        # re-deriving it: one operator ruling about ONE development, the two ceskereality
+        # Rezidence K Botici serial-poster families F518656 and F521778. What REVOKES it: an
+        # operator NEGATIVE inside a K-B family — a pair the operator rules is two units that
+        # K-B certifies under the honest clock. That is a settings change, not a code change:
+        # the floor rows are still read, `certificate_b` still enforces them, and putting a
+        # number back in `certificate_b_min_images` restores the W9 arm exactly.
         if self.live_window_from_sighting and self.certificate_b_min_gap_days <= 0.0:
             raise ValueError(
                 "live_window_from_sighting needs the E84 gap rail: under the honest clock a "

@@ -43,16 +43,20 @@ def test_the_shipped_row_runs_the_detection_clock_and_no_guard() -> None:
     assert Settings().family_guard_mode == "off"
 
 
-def test_every_row_under_settings_is_constructible_and_the_refuted_arm_is_not_one() -> None:
-    """E87: `settings/` holds rows the engine can build; the refuted arm is a record beside it."""
+def test_every_row_under_settings_is_constructible_and_the_refuted_arm_stays_refuted() -> None:
+    """E87 kept refuted rows out of `settings/` AND unbuildable; E110 keeps only the first half.
+
+    The honest clock's price is E84 now, so the W11 candidate constructs again. What makes it
+    refuted is M100 — 0 sealed duplicates gained, 0 lost — and the `refuted/` directory is
+    where that verdict is recorded, not a second gate."""
     for path in sorted((ROOT / "settings").glob("*.json")):
         if path.name.endswith("_strata.json"):
             continue
         Settings.from_json(path)
     record = ROOT / "settings/refuted/w11_candidate.json"
     assert json.loads(record.read_text(encoding="utf-8"))["family_guard_mode"] == "cell"
-    with pytest.raises(ValueError, match="E87"):
-        Settings.from_json(record)
+    assert not (ROOT / "settings/w11_candidate.json").exists()
+    assert Settings.from_json(record).family_guard_mode == "cell"
 
 
 def test_the_sealed_split_that_decided_the_wave_is_registered_spent() -> None:
