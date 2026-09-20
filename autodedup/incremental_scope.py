@@ -5,7 +5,7 @@ four blocks (ruling D1). The real-time lane has no artifact, so without this mod
 feeds claim the arrivals of the WHOLE corpus — ~178,000 new listings in 30 days against a
 store the operator pays for by the megabyte. `rt_scope` is therefore a REQUIRED lane setting
 rather than a tuning knob: an empty, separator-only or missing scope is a hard error, a scope
-with no blocks is not constructible at all (D1), and a whole-corpus run has to be spelled `all`
+with no blocks is not constructible at all (W9d-1), and a whole-corpus run has to be spelled `all`
 AND fit the storage guard (`incremental_lane.storage_guard`). A PASS goes further still: its
 scope is the one `rt_seed` PERSISTED, and a dispatch argument that differs is a re-scope the
 operator has to ask for by name (`resolve_pass_scope`, D2).
@@ -57,7 +57,7 @@ class ScopeBlock:
 @dataclass(frozen=True, slots=True)
 class Scope:
     """A scope with no blocks is not "everything" and not "nothing" — it is the NULL scope W9c
-    shipped, whose drift sweep reports every row of the store as departed (D1). It cannot be
+    shipped, whose drift sweep reports every row of the store as departed (W9d-1). It cannot be
     built: `all` is spelled `whole_corpus`, and everything else needs at least one block."""
 
     blocks: tuple[ScopeBlock, ...] = ()
@@ -124,14 +124,19 @@ DEFAULT_SCOPE: Scope = Scope(tuple(
     ScopeBlock(_GRAIN_OF[block.grain], int(block.code))
     for block in cohort.BLOCKS if block.grain in _GRAIN_OF))
 
-# What a whole-corpus generation would COST, measured rather than feared (W9c). 17.596 index
-# keys a listing (measured over the scoped cohort) across 872,604 listings is 15.4M `fp_key`
-# rows; at the per-row on-disk costs this schema itself shows — 210 B for a narrow keyed row,
-# 2,869 B for a pair row (136 MB / 47,523 live rows) — seeding the corpus costs ~9.6 GB and its
-# arrivals add ~3.4 GB every 30 days (5,940 new listings a day x 17.6 keys x 5.34 stored
-# pairs). 17,000 MB is that seed plus two months. `rt_scope = all` is refused unless
-# `rt_max_schema_mb` is at least this, so "run the whole corpus" and "pay for the whole corpus"
-# are ONE decision and not two.
+# What a whole-corpus generation would COST, on the only per-row costs this schema can actually
+# be MEASURED for (W9d corrects W9c's arithmetic note, not its headline). Neither `fp_key` nor
+# `rt_fp` exists yet — 539 is unapplied — so their cost is carried from the narrowest table that
+# does: `autodedup.cluster_members`, 1,695,744 B over 7,162 rows = **236.8 B a row** with its
+# index and its bloat in it; a pair row is measured directly at **2,869 B** (136,347,648 B /
+# 47,523 rows). W9c scaled a "representative tuple" by 3.53x instead and could not reproduce its
+# own two numbers — the multiplier is not a constant, it is that same measured 236.8 B over
+# whichever tuple is called representative. At 17.596 index keys a listing across 872,604
+# listings (15.4M `fp_key` rows) and 2.67 stored pairs a listing, seeding the corpus costs
+# **9.8-10.2 GB** and its arrivals add **3.3 GB every 30 days** (112-114 MB a day). 17,000 MB is
+# that seed plus about two months of it. `rt_scope = all` is refused unless `rt_max_schema_mb`
+# is at least this, so "run the whole corpus" and "pay for the whole corpus" are ONE decision
+# and not two. (`/home/hejtm/autodedup-artifacts/w9d/projection_correction.json`.)
 CORPUS_PROJECTION_MB: int = 17000
 
 
@@ -223,7 +228,7 @@ def resolve_pass_scope(arg: Any = None, setting: Any = None,
     """A PASS's scope: the persisted one, and a dispatch argument only as an explicit RE-SCOPE.
 
     `resolve_scope` is the SEED's resolution order, where an argument chooses the scope the
-    generation is cut for. A pass is the other way round (D2): the `rt_scope` row `rt_seed`
+    generation is cut for. A pass is the other way round (W9d-2): the `rt_scope` row `rt_seed`
     wrote is what the store was built under, and a narrower argument is DESTRUCTIVE — the drift
     sweep retires everything the argument leaves out, one dispatch, no undo, and the next
     scheduled pass reads the wider row again with nothing to re-add the retired listings. So a

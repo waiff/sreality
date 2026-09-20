@@ -567,7 +567,7 @@ def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, 
     artifact = _write(tmp_path / "cohort.jsonl.gz", RECORDS)
     conn = FakePg()
     # The default scope holds a QUARTER, and the entrant sweep reaches one only through its
-    # parent obec — so the seed proves the register can place it (D3), live: 490245 -> 554782.
+    # parent obec — so the seed proves the register can place it (W9d-3), live: 490245 -> 554782.
     conn.admin_parents[490245] = 554782
     conn.listings[9_001] = {"first_seen_at": conn.now, "inactive_at": None, "is_active": True}
     conn.snapshots.append({"id": 4_242, "listing_id": 9_001, "scraped_at": conn.now})

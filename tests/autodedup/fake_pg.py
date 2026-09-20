@@ -69,11 +69,11 @@ class FakePg:
         self.phash_pop: dict[int, int] = {}
         self.statements: list[str] = []
         # Which statements the pass issued INSIDE its transaction. `set_config(..., true)` is
-        # only a guard where the transaction can see it (D4), and over the transaction-mode
+        # only a guard where the transaction can see it (W9d-4), and over the transaction-mode
         # pooler that is the only place it survives.
         self.statements_in_tx: list[str] = []
         self.in_transaction = False
-        # `public.ruian_admin_units`: cast_obce code -> parent obec code (D3).
+        # `public.ruian_admin_units`: cast_obce code -> parent obec code (W9d-3).
         self.admin_parents: dict[int, int] = {}
         self.transactions = 0
         self.rolled_back = 0
@@ -473,7 +473,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return [(max((i for i, _s in win), default=int(p["after_id"])), len(win),
                  [i for i, _s in keep], [stamp for _i, stamp in keep])]
     if sql == S.RT_NEW_STRAGGLERS_SQL:
-        # The last N ROWS by id, never an id range (D3).
+        # The last N ROWS by id, never an id range (W9d-3).
         win = sorted((i for i in db.listings if i <= int(p["after_id"])),
                      reverse=True)[:int(p["window"])]
         rows = [(i, db.listings[i]["first_seen_at"]) for i in sorted(win)
@@ -509,7 +509,7 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         departed = [i for i in slice_ids if not _in_scope(db, i, p)]
         return [(max(slice_ids) if slice_ids else int(p["after_id"]),
                  len(slice_ids), departed)]
-    # The sixth feed: what the scope has started holding and no cursor ever saw (D3).
+    # The sixth feed: what the scope has started holding and no cursor ever saw (W9d-3).
     if sql == S.RT_SCOPE_ENTER_SQL:
         obec, cast_obce = p["obec"], p.get("cast_obce")
         slice_ids = sorted(

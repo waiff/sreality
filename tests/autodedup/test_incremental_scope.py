@@ -210,7 +210,7 @@ def test_every_feed_claims_only_what_the_scope_holds() -> None:
     _place(db, 9, obec=563510)
     _place(db, 8, obec=999999)
 
-    # Half this fixture's store is out of scope on purpose, so D1's rail is opened for it:
+    # Half this fixture's store is out of scope on purpose, so W9d-1's rail is opened for it:
     # what is under test here is WHICH feed may name an out-of-scope listing.
     items = SqlWork(db, SCOPE, GEN, max_retire_fraction=1.0).claim(50)
     by_feed = {feed: sorted(item.listing_id for item in items if item.feed == feed)
@@ -429,7 +429,7 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth(tmp_path, 
 
 def _empty_scope() -> Scope:
     """An empty scope the constructor now refuses, built around it — the drift sweep's own
-    refusal has to stand on its own feet (D1)."""
+    refusal has to stand on its own feet (W9d-1)."""
     scope = object.__new__(Scope)
     object.__setattr__(scope, "blocks", ())
     object.__setattr__(scope, "whole_corpus", False)
@@ -447,7 +447,7 @@ def test_a_separator_only_scope_is_a_hard_error_not_a_null_scope() -> None:
 
 
 def test_the_drift_sweep_refuses_to_retire_more_than_the_safety_fraction() -> None:
-    """The D1 scenario end to end: a scope that holds nothing would report the WHOLE store as
+    """The W9d-1 scenario end to end: a scope that holds nothing would report the WHOLE store as
     departed. The sweep refuses rather than retiring it, and no cursor moves."""
     db = FakePg()
     for listing_id in range(1, 101):

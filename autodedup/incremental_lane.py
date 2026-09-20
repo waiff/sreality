@@ -178,11 +178,11 @@ FEED_WINDOW: int = 1000
 # One round-robin slice of the scope-drift sweep, over this generation's own fingerprint rows.
 # Under the trial scope (4,969 listings) one slice covers the whole store every pass.
 DRIFT_SLICE: int = 20000
-# One round-robin slice of the ENTRANT sweep (D3), over ONE of the scope's blocks a pass. The
+# One round-robin slice of the ENTRANT sweep (W9d-3), over ONE of the scope's blocks a pass. The
 # trial scope's largest block is Praha-Vysočany at 1,439 rows, so a slice covers a block whole
 # and the sweep cycles the scope every len(blocks) passes — 30 minutes at the `*/10` cadence.
 ENTER_SLICE: int = 20000
-# The share of the store one pass's drift sweep may retire before the lane STOPS instead (D1).
+# The share of the store one pass's drift sweep may retire before the lane STOPS instead (W9d-1).
 # A geocode correction moves a listing or two; a scope that has gone wrong moves everything, and
 # the difference between those two is the only thing standing between a hand-edited settings row
 # and a store that has to be re-seeded. Data, not a constant: `rt_max_retire_fraction`.
@@ -871,7 +871,7 @@ class SqlWork:
             for listing_id in departed[:share]:
                 items.append(WorkItem(int(listing_id), "drifted", None, None, retire=True))
 
-        # The sixth feed (D3): the rows the scope has started holding and no cursor has ever
+        # The sixth feed (W9d-3): the rows the scope has started holding and no cursor has ever
         # seen, because `listing_location` is written after the listing is.
         if self.enter_slice and self.enter_blocks:
             index = cursors[CURSOR_ENTER][1] % len(self.enter_blocks)
@@ -901,7 +901,7 @@ class SqlWork:
         return items
 
     def _guard_retirement(self, departed: Sequence[Any]) -> None:
-        """Refuse a drift sweep that is not drift (D1).
+        """Refuse a drift sweep that is not drift (W9d-1).
 
         The sweep reads the scope as a PREDICATE, so a scope that holds nothing — a settings
         row hand-written as `","`, a rescope that lost its blocks — reports the whole store as
@@ -1014,7 +1014,7 @@ class StorageRefusal(Exception):
 
 
 class RetireRefusal(Exception):
-    """The drift sweep wants to retire more of the store than drift ever could (D1)."""
+    """The drift sweep wants to retire more of the store than drift ever could (W9d-1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1043,7 +1043,7 @@ def _enter_blocks(scope: Scope, parents: Mapping[int, int]) -> tuple[EnterBlock,
 
 
 def resolve_scope_parents(conn: Any, scope: Scope) -> dict[int, int]:
-    """Each quarter block's parent obec, read once a pass from the RÚIAN register (D3).
+    """Each quarter block's parent obec, read once a pass from the RÚIAN register (W9d-3).
 
     A quarter the register cannot place is a hard error rather than a block the entrant sweep
     quietly never walks — silent partial coverage is the defect this feed exists to close."""
@@ -1202,7 +1202,7 @@ def run_incremental(
         control = lane_settings(conn, [SCOPE_SETTING, BUDGET_SETTING, RETIRE_SETTING])
         try:
             # The PERSISTED scope is the generation's, and a dispatch argument is a re-scope
-            # the operator has to ask for by name (D2).
+            # the operator has to ask for by name (W9d-2).
             scope, rescoped = resolve_pass_scope(
                 args.get(SCOPE_SETTING), control.get(SCOPE_SETTING),
                 rescope=str(args.get(RESCOPE_ARG) or "").strip().lower() == "true")
@@ -1243,7 +1243,7 @@ def run_incremental(
         try:
             with _transaction(conn):
                 # The three bounds are the transaction's first statements and LOCAL to it
-                # (D4): over the transaction-mode pooler a session-level guard may belong to
+                # (W9d-4): over the transaction-mode pooler a session-level guard may belong to
                 # a backend this transaction never runs on.
                 _exec(conn, RT_STATEMENT_GUARD_SQL,
                       {"statement_timeout_ms": STATEMENT_TIMEOUT_MS})
@@ -1251,7 +1251,7 @@ def run_incremental(
                 _exec(conn, RT_IDLE_GUARD_SQL, {"idle_timeout_ms": IDLE_TIMEOUT_MS})
                 if rescoped:
                     # A rescope is PERSISTED, not applied for one pass, and the entrant sweep
-                    # restarts so everything the new scope holds is (re)claimed (D2).
+                    # restarts so everything the new scope holds is (re)claimed (W9d-2).
                     _exec(conn, RT_SETTING_WRITE_SQL, {
                         "key": SCOPE_SETTING, "value": json.dumps(scope.as_json()),
                         "updated_by": f"{LANE_NAME}:rescope"})
@@ -1341,7 +1341,7 @@ def run_rt_seed(
         try:
             scope = resolve_scope(args.get(SCOPE_SETTING), control.get(SCOPE_SETTING))
             # Proved at SEED time rather than at the first pass: a quarter the register cannot
-            # place is a scope whose entrant sweep could never walk it (D3).
+            # place is a scope whose entrant sweep could never walk it (W9d-3).
             resolve_scope_parents(conn, scope)
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc

@@ -17,9 +17,10 @@ name: "AUTODEDUP: realtime shadow lane"
 # can see one — a round-robin sweep for listings the geocoder MOVED out of the scope, which
 # are retired rather than left half-indexed, and its mirror image: a round-robin sweep, one
 # scope block a pass, for listings whose location resolved INTO the scope after their arrival
-# window had already passed (D3 — `listing_location` is written asynchronously from the scrape).
+# window had already passed (W9d-3 — `listing_location` is written asynchronously from the scrape).
 # The retiring direction carries a rail of its own: a sweep that wants more than
-# `rt_max_retire_fraction` of the generation in one pass stops the lane instead (D1). Each forward feed reads a bounded WINDOW off its own
+# `rt_max_retire_fraction` of the generation in one pass stops the lane instead (W9d-1).
+# Each forward feed reads a bounded WINDOW off its own
 # index, resolves the scope for that window through `listing_location_pkey`, and advances its
 # cursor over the window rather than over the survivors. Before any of it, the pass reads what
 # schema `autodedup` costs and REFUSES over `rt_max_schema_mb` (default 400). Every feed ignores rows younger than a settle lag and the new-row feed carries an
@@ -45,7 +46,7 @@ name: "AUTODEDUP: realtime shadow lane"
 #
 # The scope and the budget are `autodedup.settings` rows (`rt_scope`, `rt_max_schema_mb`), so
 # neither needs a migration and neither needs a deploy to change; `--mode rt_seed` writes the
-# scope it seeded, and that row — not the dispatch argument — is what a pass runs under (D2).
+# scope it seeded, and that row — not the dispatch argument — is what a pass runs under (W9d-2).
 # An empty scope is a hard error, never a whole-corpus run, and a dispatch argument that differs
 # from the seeded scope is refused unless `rt_rescope=true` moves the generation to it.
 #

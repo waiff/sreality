@@ -45,7 +45,7 @@ select to_regclass('autodedup.fp_key')         is not null
 # A pass is one transaction (E75) and a statement that runs away is a lease held past its TTL,
 # so all three bounds are set as the transaction's FIRST statements. `SET` is a utility
 # statement and takes no parameter, so each goes through `set_config` — same effect, one
-# PREPARE-able statement each — and every one is LOCAL (D4): `db.connect` speaks to Supabase's
+# PREPARE-able statement each — and every one is LOCAL (W9d-4): `db.connect` speaks to Supabase's
 # transaction-mode pooler, which rebinds the connection between queries, so a guard set on the
 # session is a guard the pass's own transaction may never see (and one a later, unrelated
 # consumer of that backend may inherit). `is_local = true` binds it to this transaction and
@@ -96,7 +96,7 @@ update autodedup.rt_lease
 
 # ------------------------------------------------------------------ the watermark feeds
 #
-# FIVE bounded feeds, all read-only (D4) and all restricted to `rt_scope` (E79):
+# SIX bounded feeds, all read-only (D4) and all restricted to `rt_scope` (E79):
 #   * new       — `listings_pkey`, paged on `id`, settle-lagged, plus a straggler anti-join.
 #   * changed   — `listing_snapshots_pkey`. Rule #2 makes that table an append-on-content-change
 #                 feed, so it is exactly "a listing whose content moved", with no column of its
@@ -109,7 +109,13 @@ update autodedup.rt_lease
 #                 believes are inactive, anti-joined against the live flag.
 #   * drifted   — a listing the geocoder MOVES out of the scope touches no cursor either. The
 #                 fifth feed sweeps this generation's own fingerprint rows against the scope
-#                 and hands back the ones that left, to be retired.
+#                 and hands back the ones that left, to be retired — under a rail, because a
+#                 scope that has gone wrong reports the WHOLE store as departed (W9d-1).
+#   * entered   — and the mirror image, which W9c owed and W9d-3 pays: `listing_location` is
+#                 written after the listing is, so an in-scope listing can be out of scope when
+#                 its arrival window passes and in scope an hour later, with every forward
+#                 cursor already past it. The sixth feed round-robins the SCOPE's own listing
+#                 ids, one block a pass, and claims the ones with no fingerprint row.
 # WINDOW FIRST, SCOPE SECOND — and the cursor advances over the WINDOW (E79). The lane holds
 # only the listings of `rt_scope`, ~0.6% of the corpus, so a feed that filtered BY the scope
 # would either seq-scan `listing_location` (there is no index on `cast_obce_kod`, and D8
@@ -153,7 +159,7 @@ select coalesce(max(w.id), %(after_id)s::bigint) as window_max,
 # the anti-join ALONE would answer with out-of-scope ids for ever — almost nothing in the
 # window has a fingerprint row, and almost nothing should — so the scope is part of this
 # statement rather than a filter over its answer.
-# The look-back is a ROW count and not an id range (D3). Ids are sparse and unevenly so —
+# The look-back is a ROW count and not an id range (W9d-3). Ids are sparse and unevenly so —
 # measured live, the last 5,000 id UNITS hold 1,482 rows near the head and ~230 in older id
 # space, against a constant whose comment always meant 5,000 ROWS. `order by id desc limit N`
 # off `listings_pkey` is the honest spelling of "the last N rows", and it is a backwards index
@@ -293,7 +299,7 @@ select coalesce(max(f.listing_id), %(after_id)s::bigint) as slice_max,
              or ll.cast_obce_kod = any(%(cast_obce)s::bigint[]))
 """
 
-# The SIXTH feed, and the one the scope owes in the other direction (D3): `listing_location` is
+# The SIXTH feed, and the one the scope owes in the other direction (W9d-3): `listing_location` is
 # written asynchronously from the scrape, so an in-scope listing can carry no `obec_kod` at all
 # when its arrival window passes. The forward feed correctly skips it — it is not yet in scope —
 # and the cursor steps over it; when the geocoder resolves it an hour later NOTHING claims it
