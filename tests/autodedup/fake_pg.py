@@ -25,6 +25,7 @@ from typing import Any, Mapping, Sequence
 
 from autodedup import export_sql as E
 from autodedup import incremental_sql as S
+from autodedup import parity as P
 from autodedup.decide import CERTIFICATES
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.score_lane import CLUSTER_INSERT_SQL, CLUSTER_MEMBER_INSERT_SQL
@@ -434,6 +435,23 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
     if sql == S.RT_PHASH_POP_SQL:
         wanted = set(p["hashes"])
         return sorted((h, n) for h, n in db.phash_pop.items() if h in wanted)
+
+    # --------------------------------------------- the read-only parity instrument
+    if sql == P.PARITY_PRESENT_SQL:
+        return [(i,) for i in sorted(set(p["ids"]) & set(db.listings))]
+    if sql == P.PARITY_CHANGE_SQL:
+        wanted = set(p["ids"])
+        seen: dict[int, list[Any]] = {}
+        for row in db.snapshots:
+            listing_id = row.get("listing_id")
+            if listing_id not in wanted:
+                continue
+            bucket = seen.setdefault(listing_id, [])
+            bucket.append(row.get("scraped_at") or db.now)
+        return [(listing_id, max(stamps), len(stamps))
+                for listing_id, stamps in sorted(seen.items())]
+    if sql == P.PARITY_PHASH_POP_SQL:
+        return [(len(db.phash_pop),)]
 
     if sql == S.RT_MUST_NOT_LINK_SQL:
         return sorted(db.mnl)

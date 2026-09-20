@@ -184,6 +184,21 @@ name: "AUTODEDUP: engine lane"
 #             read these files with --operator-labels instead of an ad-hoc query nobody can
 #             re-run the same way twice. Every statement is a SELECT.
 #
+#   rt_parity - READS ONLY, and writes NOTHING - not a `public` row, not an `autodedup` row,
+#             not even a ledger row. The instrument that asks whether the real-time lane's
+#             FACTS are the batch engine's facts. The replay-equivalence proof feeds the
+#             incremental path from an export ARTIFACT while the live lane reads through
+#             `SqlFacts`, so a difference between those two readings is invisible to it - and
+#             the first live pass issued zero K-C certificates against the batch pass's 1,771.
+#             For a seeded, source-stratified sample of listings present both in an export
+#             run's cohort artifact and in the live database (`export_run=<run id>` or
+#             `cohort=<path>`, `n=200`, `seed=1`), it builds each Listing and its gallery
+#             twice - once from the artifact, once through SqlFacts - and diffs them field by
+#             field, reporting a listing whose content changed after the export as DRIFT
+#             rather than as a defect. It then scores `pairs=400` sampled pairs from both fact
+#             sets under one settings/model/calibration and reports every feature, score, zone
+#             and certificate that moved. out/parity.json is the deliverable.
+#
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
 #             row from its arguments, for work that happened outside a lane run (a migration
 #             applied by apply_migration.yml, an operator review session, a wave that closed
