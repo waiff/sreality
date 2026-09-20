@@ -409,7 +409,9 @@ on conflict (generation, listing_lo, listing_hi) do update set
     from_hi            = excluded.from_hi,
     families           = excluded.families,
     certificate        = excluded.certificate,
-    features           = excluded.features,
+    -- A probe-only update carries no vector; it must not erase the one the decision
+    -- was taken on.
+    features           = coalesce(excluded.features, autodedup.pairs.features),
     fp_lo              = excluded.fp_lo,
     fp_hi              = excluded.fp_hi,
     score              = excluded.score,

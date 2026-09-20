@@ -268,7 +268,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", default="out/")
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--max-component", type=int, default=400)
-    parser.add_argument("--max-pairs", type=int, default=20000)
+    parser.add_argument("--max-pairs", type=int, default=Limits().max_pairs)
     parser.add_argument("--shuffle-seed", type=int, default=None)
     ns = parser.parse_args(argv)
 
@@ -298,6 +298,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         "settings": settings.to_dict(),
         "model_version": model.version,
         "calibration_digest": calibration.digest(),
+        "max_pairs": ns.max_pairs,
+        "batch_size": ns.batch_size,
         "batch": {"pairs": len(reference), "clusters": len(batch_clusters), **timings},
         "incremental": stats,
         "pairs": compare_pairs(reference, pairs),

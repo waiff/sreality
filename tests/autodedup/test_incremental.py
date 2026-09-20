@@ -297,7 +297,9 @@ def test_no_statement_of_this_lane_writes_outside_schema_autodedup() -> None:
     for name in dir(incremental_sql):
         if not name.endswith("_SQL"):
             continue
-        sql = getattr(incremental_sql, name)
+        # Comments are stripped first: prose about an update is not an update.
+        statement = getattr(incremental_sql, name)
+        sql = "\n".join(line.split("--")[0] for line in statement.splitlines())
         for verb, table in writes.findall(sql):
             seen += 1
             assert table.startswith("autodedup."), f"{name} writes {verb} {table}"

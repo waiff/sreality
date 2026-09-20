@@ -417,7 +417,7 @@ def test_the_bounded_runner_shrinks_the_claim_before_it_gives_up() -> None:
                               calibration, limits=Limits(max_listings=16, max_pairs=1),
                               generation=GEN)
     assert work.asked == [16, 4, 1], "each refusal must re-claim a smaller slice"
-    assert result.attempts == 3
+    assert result.attempts == 3, "the ladder stops at a one-listing claim"
     # The third attempt fits — one arrival against an empty store has no candidate at all —
     # so the watermark moves over exactly that one listing and over nothing that was refused.
     assert not result.aborted
@@ -533,3 +533,34 @@ def test_the_store_serves_a_fingerprint_row_it_has_not_flushed_yet() -> None:
     assert store.rows([5])[5] == row
     assert store.lookup("img", "t1") == [5]
     assert store.known([5]) == {5}
+
+
+# ------------------------------------------------------------- E71: seeding a generation
+
+
+def test_rt_seed_cuts_the_calibration_and_starts_the_cursors_at_today(tmp_path, monkeypatch):
+    """Without the seed the lane has no calibration at all and would walk history from id 0."""
+    from autodedup.incremental_lane import ENV_FLAG, CURSOR_REVIVE, run_rt_seed
+    from tests.autodedup.test_dataset import RECORDS, _write
+
+    artifact = _write(tmp_path / "cohort.jsonl.gz", RECORDS)
+    conn = FakePg()
+    conn.listings[9_001] = {"first_seen_at": conn.now, "inactive_at": None, "is_active": True}
+    conn.snapshots.append({"id": 4_242, "listing_id": 9_001, "scraped_at": conn.now})
+    monkeypatch.setenv(ENV_FLAG, "true")
+
+    out = run_rt_seed(lambda: conn, {"artifact": str(artifact), "backfill": "true"}, tmp_path)
+
+    assert out["calibration_digest"] and out["calibration_n_listings"] >= 1
+    assert out["backfilled"] >= 1
+    # The cursors start at the corpus's maxima, not at zero.
+    assert conn.cursors[CURSOR_NEW]["last_listing_id"] == 9_001
+    assert conn.cursors[CURSOR_CHANGED]["last_snapshot_id"] == 4_242
+    assert conn.cursors[CURSOR_REVIVE]["last_listing_id"] == 0
+    # The calibration is readable back as the one the lane would run under.
+    stored = conn.calibration[GEN]
+    assert stored["digest"] == out["calibration_digest"]
+    assert conn.rt_fp and conn.fp_key
+    # And it is dark like everything else in this lane.
+    monkeypatch.delenv(ENV_FLAG, raising=False)
+    assert run_rt_seed(lambda: conn, {"artifact": str(artifact)}, tmp_path)["skipped"] == "dark"

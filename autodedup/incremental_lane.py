@@ -108,6 +108,7 @@ from autodedup.score_lane import (
     CLUSTER_MEMBER_INSERT_SQL,
     families_bitmask,
     families_of_bitmask,
+    present_features,
 )
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 
@@ -173,8 +174,10 @@ class SqlStore:
     """`incremental.Store` over Postgres. Every write is inside schema `autodedup` (D4).
 
     Three things are buffered rather than written statement by statement (E69): the fingerprint
-    rows and postings of one pass, the census cells, and the lookups already answered. A pass
-    that claims 166 listings issued ~17,700 statements before this and issues ~40 now."""
+    rows and postings of one pass, the census cells, and the lookups already answered. Measured:
+    a whole 24-listing cohort decided in one pass costs **14 statements** and a pass over an
+    unchanged corpus costs **4**, where the per-listing spelling cost ~17,700 for a 166-listing
+    claim."""
 
     def __init__(self, conn: Any, generation: str = GENERATION) -> None:
         self.conn = conn
@@ -369,7 +372,7 @@ class SqlStore:
             # here — W9's third blocker — stored {IMG} as ATTR and {IMG,TXT} as PRICE.
             "families": families_bitmask(row.families),
             "certificate": row.certificate,
-            "features": json.dumps(_present_features(row), ensure_ascii=False, sort_keys=True),
+            "features": _features_json(row),
             "fp_lo": row.fp_lo, "fp_hi": row.fp_hi,
             "score": float(row.score),
             # The table's CHECK knows three zones; a veto is a reject that names its rule.
@@ -503,14 +506,17 @@ class SqlStore:
         self._cells_dirty.clear()
 
 
-def _present_features(row: PairRow) -> dict[str, Any]:
-    """What the UI reads off a pair row: the evidence strings the decision named.
+def _features_json(row: PairRow) -> str | None:
+    """The pair's feature vector in the score lane's shape — one definition, not two (E12).
 
-    The engine's feature vector is not stored here — the cohort lane stores that, and this lane
-    re-derives it in process on every re-score — so the column carries the pair's evidence
-    rather than a duplicate of the two fingerprint digests, which have columns of their own."""
-    return {str(key): str(value) for key, value in row.evidence.items()
-            if not str(key).startswith("_")}
+    A row re-read from the store carries no vector (nothing re-scored it), and the upsert
+    coalesces, so a probe-only update keeps the vector the decision was taken on rather than
+    replacing it with an empty object."""
+    if not row.feats:
+        return None
+    present = present_features({"feats": {name: list(value) for name, value in
+                                          row.feats.items()}})
+    return json.dumps(present, ensure_ascii=False, sort_keys=True)
 
 
 def _cluster_params(row: Mapping[str, Any], generation: str) -> dict[str, Any]:
@@ -810,7 +816,7 @@ def run_incremental(
     generation = (args.get("generation") or "").strip() or GENERATION
     limits = Limits(
         max_listings=int(args.get("max_listings") or 500),
-        max_pairs=int(args.get("max_pairs") or 20000),
+        max_pairs=int(args.get("max_pairs") or Limits().max_pairs),
         max_component=int(args.get("max_component") or 400),
     )
     if not env_enabled():

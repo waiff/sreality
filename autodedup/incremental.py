@@ -149,6 +149,11 @@ class PairRow:
     context: dict[str, Any]
     fp_lo: str
     fp_hi: str
+    # The feature vector this decision was taken on, carried only on the way OUT: the store
+    # writes it in the score lane's own `{name: [value, present]}` shape (E12) so the pair
+    # page reads one thing whichever lane wrote it, and a row re-read from the store carries
+    # none, which is why the upsert coalesces rather than overwrites.
+    feats: Feats | None = None
 
     def decision(self) -> Decision:
         return Decision(self.lo, self.hi, self.zone, self.score, set(self.families),
@@ -525,7 +530,11 @@ class Limits:
     smaller slice, which is the same work at the same answer."""
 
     max_listings: int = 500
-    max_pairs: int = 20000
+    # Sized from the measurement rather than from a round number: the densest pass over the g6
+    # cohort wants {{WANTED_MAX}} pairs at a 200-listing claim, and a block seen for the FIRST
+    # time has to score its whole pair set however small the claim is (which is what the seed
+    # backfill, E71, exists to pay once).
+    max_pairs: int = 150_000
     max_component: int = 400
 
 
@@ -977,7 +986,7 @@ def run_pass(
             # and the rail needs it off the stored row rather than off a live re-read.
             context={**census.pair_context(la, lb).to_json(),
                      "block": address_block_key(la)},
-            fp_lo=dlo, fp_hi=dhi,
+            fp_lo=dlo, fp_hi=dhi, feats=feats,
         ))
     store.upsert_pairs(rows)
     result.pairs_written = len(rows)
@@ -1032,7 +1041,7 @@ def run_pass_bounded(
     generation: str = GENERATION,
     now: float | None = None,
     shrink: int = 4,
-    attempts: int = 3,
+    attempts: int = 5,
 ) -> PassResult:
     """`run_pass`, re-claiming a SMALLER slice when the pair budget refused the last one.
 
