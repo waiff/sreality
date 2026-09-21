@@ -300,7 +300,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string",
       "pg_column": null,
       "default": null,
-      "description": "The single cohort lifecycle selector. `active` = is_active=true (plus the max_age_days freshness gate when set); `delisted` = is_active=false (closed deals only — rough proxy for transacted listings); `all` = both. Unset means no is_active gate (the raw-tool default); the estimation path seeds `active` from `default_lifecycle`.",
+      "description": "The single cohort lifecycle selector. `active` = is_active=true (plus the max_age_days freshness gate when set); `delisted` = is_active=false — the advertisement ended, which is not a sale and carries no transacted price; `all` = both. Unset means no is_active gate (the raw-tool default); the estimation path seeds `active` from `default_lifecycle`.",
       "category": "Status",
       "ui_control": "single_select",
       "agendas": [

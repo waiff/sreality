@@ -1,0 +1,166 @@
+{
+ "pageProps": {
+  "adsListParams": {
+   "estateTypes": [
+    "flat",
+    "house",
+    "building_parcel",
+    "recreational_building"
+   ],
+   "bounds": {
+    "southWestLatitude": 17.112315,
+    "southWestLongitude": 49.503969,
+    "northEastLatitude": 17.389485,
+    "northEastLongitude": 49.683631
+   },
+   "page": 1,
+   "limit": 100,
+   "includeCount": true,
+   "linkedToTransfer": false,
+   "sort": "newest"
+  },
+  "adsListResult": {
+   "success": true,
+   "data": [
+    {
+     "_id": "6aaff5c464dccaba5b486341",
+     "point": {
+      "type": "Point",
+      "coordinates": [
+       17.2385808,
+       49.5963223
+      ]
+     },
+     "formattedAddress": "Olomouc, Nová Ulice, Před lipami 129/1",
+     "formattedLocation": "Před lipami 129/1, Olomouc - Nová Ulice",
+     "imagesWithMetadata": [
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/listings/images/b3a0f2a74dcd-9014960.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/listings/images/8bce366fbf79-9014960.jpg"
+      },
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/listings/images/9e6fc689ef9c-9014961.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/listings/images/a4db805aa2b1-9014961.jpg"
+      },
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/listings/images/2e2ecc3452b1-9014962.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/listings/images/4d1606cd6ab4-9014962.jpg"
+      }
+     ],
+     "type": "flat",
+     "subType": "flat",
+     "originalPrice": 0,
+     "disposition": "4+kk",
+     "floorArea": 0,
+     "utilityArea": 128,
+     "displayArea": 128,
+     "hot": false,
+     "link": "https://www.reas.cz/prodej/byty/4+kk/olomouc-500496/ulice-pred-lipami-330540/inzerat-6aaff5c464dccaba5b486341",
+     "cadastralAreaId": 710717,
+     "municipalityId": 500496,
+     "streetId": 330540,
+     "cadastralAreaSlug": "nova-ulice",
+     "municipalitySlug": "olomouc",
+     "streetSlug": "pred-lipami",
+     "firstVisibleAt": "2026-09-20T15:04:11.125Z"
+    },
+    {
+     "_id": "6aabd703e18baaa3630d655f",
+     "point": {
+      "type": "Point",
+      "coordinates": [
+       17.2885397939241,
+       49.622446579972
+      ]
+     },
+     "formattedAddress": "Chaloupky, Olomouc",
+     "formattedLocation": "Chaloupky, Olomouc",
+     "imagesWithMetadata": [
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates/5c029b4bc68f-bcbf.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates-preview/cf2768d25dcb-bcbf.jpg",
+       "order": 1
+      },
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates/e451a5ce600b-7c50.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates-preview/d8a5e7513547-7c50.jpg",
+       "order": 4
+      },
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates/72c4073bf24c-83d6.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates-preview/fae17772ad9a-83d6.jpg",
+       "order": 5
+      }
+     ],
+     "type": "building",
+     "subType": "family_house",
+     "originalPrice": 0,
+     "utilityArea": 157,
+     "landArea": 636,
+     "displayArea": 157,
+     "hot": false,
+     "link": "https://www.reas.cz/prodej/domy/olomouc-500496/ulice-chaloupky-328413/inzerat-6aabd703e18baaa3630d655f",
+     "cadastralAreaId": 772411,
+     "municipalityId": 500496,
+     "streetId": 328413,
+     "cadastralAreaSlug": "tynecek",
+     "municipalitySlug": "olomouc",
+     "streetSlug": "chaloupky",
+     "firstVisibleAt": "2026-09-17T12:03:52.408Z"
+    },
+    {
+     "_id": "6aaabe299bb72e9124383cf5",
+     "point": {
+      "type": "Point",
+      "coordinates": [
+       17.148997,
+       49.558406
+      ]
+     },
+     "formattedAddress": "Na Sídlišti 296, Lutín",
+     "formattedLocation": "Na Sídlišti 296, Lutín",
+     "imagesWithMetadata": [
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates/619ae51b58e5-583b.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates-preview/653210b234b4-583b.jpg",
+       "order": 1
+      },
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates/21b3a3318b43-f587.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates-preview/e18e86a45375-f587.jpg",
+       "order": 4
+      },
+      {
+       "original": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates/8c1ded785c65-3b60.jpg",
+       "preview": "https://storage.googleapis.com/reas-prod-catalog/public/ad-estates-preview/f99303d4dbe7-3b60.jpg",
+       "order": 5
+      }
+     ],
+     "type": "flat",
+     "subType": "flat",
+     "price": 3990000,
+     "originalPrice": 3990000,
+     "disposition": "2+1",
+     "floorArea": 44,
+     "utilityArea": 44,
+     "displayArea": 44,
+     "hot": false,
+     "link": "https://www.reas.cz/prodej/byty/2+1/lutin-503657/ulice-na-sidlisti-325597/inzerat-6aaabe299bb72e9124383cf5",
+     "cadastralAreaId": 689122,
+     "municipalityId": 503657,
+     "streetId": 325597,
+     "cadastralAreaSlug": "lutin",
+     "municipalitySlug": "lutin",
+     "streetSlug": "na-sidlisti",
+     "firstVisibleAt": "2026-09-16T16:05:12.226Z"
+    }
+   ],
+   "count": 32,
+   "page": 1,
+   "limit": 100,
+   "nextPage": null,
+   "possibleCount": 410
+  }
+ },
+ "__N_SSP": true
+}

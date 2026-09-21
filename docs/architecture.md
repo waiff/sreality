@@ -374,6 +374,52 @@ robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-dem
 (`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
 preview — a separate entry point unchanged by the scheduled scraper.
 
+**Data source (reas.cz sold transactions) — NOT a portal.** The tenth source is not a tenth
+portal: it is a feed of **registered sales**, and a sale is an account-less external FACT, not a
+listing. Its north star: one row per sale under the sale's own cadastral identity, fetched per
+municipality cell and only where the deal pipeline has a live card, read through ONE SQL
+definition — never a `listings` row, never linked to a `property`, never mixed with asking
+prices, never adjusted, never shown without saying where it came from and when we last looked.
+It therefore has its OWN store (`sold_transactions` + the append-only `sold_transaction_fetches`
+ledger, migration 542) and touches none of the listings contract: no `listing_snapshots`, no
+`is_active`, no `listing_detail_queue`, no `portals` row, no `images` rows (photos are hot-linked
+from the source's public URLs), no `property_id` — rules #2/#3/#15/#19 are about listings and do
+not reach here. What it DOES share is the vocabulary: the attribute columns carry the same names
+and types as their `listings` twins, so `measure_price_per_m2` / `plot_area_m2` and
+`scraper/area.derive_headline_area` apply with zero new code (rules 21/23).
+Ingest shape: the SSR HTML of `https://www.reas.cz/prodane/...` carries the whole page in
+`<script id="__NEXT_DATA__">` → `props.pageProps.adsListResult`; `scraper/reas_parser.py` is a pure
+payload→rows function (no I/O, no `requests`). The natural key is `mapPointerId`
+(`<transferId>_unit_<buildingId>-<čp>-<unitNo>` or `<transferId>_building_<buildingId>`) — the
+cadastre transfer id, which survives the source re-creating its own ad record. Three refusals, each
+a measured silent-failure class: the `_next/data/<buildId>/prodane/…` JSON route answers **200 with
+the ACTIVE catalogue** and no sold price on any record (`adsListParams.linkedToTransfer` is THE
+discriminator and is checked before a row is read); a record whose transferId is neither a number
+nor an ObjectId has no cadastral identity; a `type` outside flat|building is a contract change (the
+sold catalogue is byty + domy only, proven by the sold sitemap, by zero parcels in 308 records
+despite the query asking for them, and by the source's own four-member filter enum). Records whose
+transferId is a Mongo ObjectId are the source's **self-reported** ~1%, so they are dropped and
+counted, not stored and not raised on. The envelope is read as the source's own two numbers:
+`count`, the cell inside the query's date window (what a completed walk takes, so it can never
+measure what we miss), and `possibleCount`, the same cell without it — the second is what the
+ledger's `source_total` records, so the table can always say how much it is NOT seeing (Olomouc 89
+of 625, Praha 1,082 of 7,545).
+**Deliberately absent, and each for a reason that has been measured:** `displayArea` (the source's
+own headline, `min(utility, floor)` on a flat against our usable-first precedence — a 30% area and
+43% per-m² gap on 3% of flats, in one direction), `histogramPrice` (`soldPrice` indexed to today:
+identity within 12 months, ×1.10–1.28 beyond), `originalPrice` (corrupt — one record carries 1 Kč),
+and seller/broker identity (dropped at parse time by key SHAPE —
+`seller|company|agent|broker|contact|phone|email|owner|user` — not by a list of today's names,
+because `raw` keeps every other key the source invents and would otherwise quietly start storing
+the next one). None of the four is in `raw` either, so a future session is never one mapping away
+from the defect. Two more: there is no `price_kind` column (asking
+vs realized is PROVENANCE, and the table identity is the discriminator) and no widened
+`DISPOSITION_OPTIONS` — the source's `larger` and `atypic` become NULL rather than push two
+sold-only values into Browse, the watchdog matcher and the comparables agent for 0.68% of one
+source. `mapPointerPublishedAt` (= `soldAt` + 27–31 days) is the only correct crawl watermark: a
+sale is a state change on an arbitrarily old ad record, so the freshest sale the feed can show is
+~30 days old. Waves and sequencing: `roadmap/sold-comps.md`.
+
 ## Territories — deep rationale
 
 The three-territory summary is in `CLAUDE.md`; the full per-territory rules and rationale
