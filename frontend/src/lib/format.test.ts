@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtArea, fmtMeasuredPricePerM2, fmtPct, fmtPP } from './format';
+import { fmtArea, fmtDistanceM, fmtMeasuredPricePerM2, fmtPct, fmtPP } from './format';
 
 const NBSP = ' ';
 
@@ -125,5 +125,22 @@ describe('fmtArea', () => {
   it('names the plot denominator when asked', () => {
     expect(fmtArea(1_200, 'plot')).toBe(`1\u00a0200${NBSP}m²${NBSP}pozemku`);
     expect(fmtArea(62, 'usable')).toBe(`62${NBSP}m²`);
+  });
+});
+
+describe('fmtDistanceM', () => {
+  /* Metres below a kilometre: 80 m and 900 m from the subject are the same
+     street and a different neighbourhood, and rounding both to "0,1 km" and
+     "0,9 km" would hide that. */
+  it('renders metres under a kilometre and kilometres above it', () => {
+    expect(fmtDistanceM(84)).toBe(`84${NBSP}m`);
+    expect(fmtDistanceM(999)).toBe(`999${NBSP}m`);
+    expect(fmtDistanceM(1_000)).toBe(`1,0${NBSP}km`);
+    expect(fmtDistanceM(4_820)).toBe(`4,8${NBSP}km`);
+  });
+
+  it('renders the gap for a missing distance', () => {
+    expect(fmtDistanceM(null)).toBe('—');
+    expect(fmtDistanceM(Number.NaN)).toBe('—');
   });
 });

@@ -14,7 +14,8 @@ export type Agenda =
   | "estimation"
   | "velocity"
   | "neighborhood"
-  | "defaults";
+  | "defaults"
+  | "sold";
 
 export type UiControl =
   | "range_slider"
@@ -90,7 +91,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     "estimation",
     "velocity",
     "neighborhood",
-    "defaults"
+    "defaults",
+    "sold"
   ],
   "categories": [
     "Spatial",
@@ -288,6 +290,27 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "constraints": {
         "min": 1,
         "max": 365
+      },
+      "unit": "days",
+      "basis": null,
+      "enum_values": null,
+      "aliases": [],
+      "nullable": false
+    },
+    {
+      "id": "max_sold_age_days",
+      "type": "int",
+      "pg_column": "sold_age_days",
+      "default": null,
+      "description": "Drop registered sales whose `sold_at` is older than N days. Reads `sold_age_days`, the whole-day age `sold_comparables` computes from `sold_at` (migration 545) — an integer, so the bound is the same `.lte` predicate every other `max_` filter emits: no date control, no hand-coded translation. One-sided by design; a lower bound on a comparable's age answers nothing. The bounds are the SOURCE's, not a preference: a sale is published about 30 days after the transfer, so 60 is the first window that can answer at all, and reas.cz publishes 24 months, so 730 is the whole corpus — a wider bound would only promise history the source does not carry.",
+      "category": "Velocity",
+      "ui_control": "number_input",
+      "agendas": [
+        "sold"
+      ],
+      "constraints": {
+        "min": 60,
+        "max": 730
       },
       "unit": "days",
       "basis": null,
@@ -680,6 +703,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "multiselect",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": null,
@@ -801,6 +825,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "multiselect",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": null,
@@ -871,6 +896,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "multiselect",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": null,
@@ -1870,6 +1896,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "range_inputs",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": {
@@ -1896,6 +1923,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "range_inputs",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": {
@@ -1986,6 +2014,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "defaults",
         "estimation",
         "neighborhood",
+        "sold",
         "velocity",
         "watchdog"
       ],
@@ -2016,6 +2045,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "defaults",
         "estimation",
         "neighborhood",
+        "sold",
         "velocity",
         "watchdog"
       ],

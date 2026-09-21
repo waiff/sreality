@@ -74,6 +74,9 @@ const CurationBlock = lazyChunk(
 const ManualEstimatesBlock = lazyChunk(
   () => import('@/components/listing-detail/ManualEstimatesBlock'),
 );
+const SoldCompsBlock = lazyChunk(
+  () => import('@/components/listing-detail/SoldCompsBlock'),
+);
 const EstimationsBlock = lazyChunk(
   () => import('@/components/listing-detail/EstimationsBlock'),
 );
@@ -484,6 +487,27 @@ export default function ListingDetail() {
             listing. Curation below is property-grain and stays rendered. */}
         {listing.sreality_id != null && (
           <ManualEstimatesBlock sreality_id={listing.sreality_id} />
+        )}
+      </Suspense>
+      <Hairline />
+      <Suspense fallback={<Skeleton height={160} />}>
+        {/* The only REALIZED prices on the page — registered sales near this
+            point, which is why they sit beside the estimates rather than with
+            the portal history above. Needs the listing's point and nothing
+            else: a sale is never linked to a property (rule #15 does not reach
+            a transactions fact). */}
+        {listing.lat != null && listing.lng != null && (
+          /* Keyed on the listing: every listing route renders the SAME
+             <ListingDetail> element, so listing → listing reuses this instance,
+             and the block's radius and its category seed are mount-time state.
+             Without the key a new subject is answered with the previous one's
+             cohort. */
+          <SoldCompsBlock
+            key={listing.id}
+            categoryMain={listing.category_main}
+            lat={listing.lat}
+            lng={listing.lng}
+          />
         )}
       </Suspense>
       <Hairline />

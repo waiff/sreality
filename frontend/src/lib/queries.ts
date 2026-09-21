@@ -19,7 +19,7 @@ import {
   FURNISHED_CANONICAL,
   OWNERSHIP_CANONICAL,
 } from './filters';
-import { applyRegistryFilters } from './registryQueryBuilder';
+import { applyAgendaFilters, applyRegistryFilters } from './registryQueryBuilder';
 import {
   applyKeyset,
   nextCursorFrom,
@@ -46,6 +46,8 @@ import type {
   Ppm2Box,
   ScrapeRun,
   ScraperHealthChecks,
+  SoldComparable,
+  SoldCoverage,
 } from './types';
 import type { BorderCase } from './api';
 
@@ -1867,6 +1869,73 @@ export const fetchImagesByListing = async (
 ): Promise<ImagePublic[]> => {
   const byListing = await fetchImagesForListingIds([listing_id], Infinity);
   return byListing.get(listing_id) ?? [];
+};
+
+/* -------------------------------------------------------------------------- */
+/* Registered sales — migration 545's sold_comparables / sold_coverage.       */
+/* `sold_comparables` is an inlinable SQL function, so the predicates, ORDER BY */
+/* and LIMIT below reach the GiST index exactly as they would against a table:  */
+/* the narrowing happens in Postgres, never in the browser.                     */
+/* -------------------------------------------------------------------------- */
+
+/* What the block RENDERS, and nothing else. The function returns more — the
+ * RÚIAN codes, the sale's own point, `sold_age_days`, the secondary areas — but
+ * those are there to be FILTERED on, and a PostgREST predicate does not need
+ * its column selected. Carrying them would be dead weight on up to 200 rows per
+ * listing open, and a standing invitation to assume the block plots them. */
+const SOLD_COMP_COLS =
+  'source,source_record_id,sold_at,price_czk,asking_last_czk,listed_at,' +
+  'category_main,category_type,subtype,disposition,area_m2,area_basis,' +
+  'address_text,photo_urls,source_url,fetched_at,' +
+  /* The function's own derivation, plus migration 425's measure AND its
+   * published basis label — read, never re-derived (lib/measure's north star). */
+  'distance_m,price_per_m2,price_per_m2_basis';
+
+/* A radius over a dense town can hold thousands of sales, so the read is
+ * capped — and the cap cuts the FAR end: nearest first, so a truncated cohort
+ * is still the neighbourhood rather than a scatter across the whole circle.
+ * `source_record_id` is the final tiebreak because two flats in one building
+ * share a point exactly (the source geocodes the building), and an order with
+ * ties reshuffles between reads.
+ *
+ * The fetch asks for ONE row more than the cap: a full page is not the same
+ * fact as a cohort that happens to hold exactly 200 sales, and the block says
+ * "200+" only when the extra row proves there is more. */
+export const SOLD_COMPS_LIMIT = 200;
+
+export const fetchSoldComparables = async (
+  lat: number,
+  lng: number,
+  radiusM: number,
+  filters: Record<string, unknown>,
+): Promise<SoldComparable[]> => {
+  const q = supabase
+    .rpc('sold_comparables', { p_lat: lat, p_lng: lng, p_radius_m: radiusM }, { get: true })
+    .select(SOLD_COMP_COLS)
+    .order('distance_m', { ascending: true })
+    .order('sold_at', { ascending: false })
+    .order('source_record_id', { ascending: true })
+    .limit(SOLD_COMPS_LIMIT + 1);
+  const { data, error } = await applyAgendaFilters(q, 'sold', (id) => filters[id]);
+  if (error) throw error;
+  return (data ?? []) as unknown as SoldComparable[];
+};
+
+export const fetchSoldCoverage = async (
+  lat: number,
+  lng: number,
+): Promise<SoldCoverage | null> => {
+  const { data, error } = await supabase
+    .rpc('sold_coverage', { p_lat: lat, p_lng: lng }, { get: true })
+    .select(
+      'obec_kod,obec_name,fetched_at,record_count,source_total,truncated,' +
+        'last_attempt_at,last_attempt_status',
+    );
+  if (error) throw error;
+  /* No row means the point is in no municipality we hold a boundary for; a row
+   * with a null `fetched_at` means nobody has ever successfully looked there.
+   * Both differ from `record_count: 0`, and the block says which. */
+  return ((data ?? []) as unknown as SoldCoverage[])[0] ?? null;
 };
 
 /* -------------------------------------------------------------------------- */

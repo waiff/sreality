@@ -41,7 +41,7 @@ table still honest when it is empty?
   `api/schemas.py` and — the copy the operator actually reads, on `/settings` — the seeded
   `app_settings.default_lifecycle` description (migration 543). No network, no runtime
   change, shippable alone; 543 is the one statement to apply.
-- **W2** — 🟡 in progress. The fetch path, SHIPPING DARK: `scraper/reas_client.py` (a
+- **W2** — ✅ shipped (#1550, migration 544 applied). The fetch path, SHIPPING DARK: `scraper/reas_client.py` (a
   `BasePortalClient` subclass on the shared rate ledger at one request per 5 s),
   `scraper/sold_db.py` (cell box, work-list, batched upsert, ledger row),
   `scraper/sold_fetch.py` (`fetch_cell`, which never raises — a cell attempt always ends
@@ -53,12 +53,27 @@ table still honest when it is empty?
   `_lane_loop` contract. The cell is the obec's `admin_boundaries` envelope (its `id` IS
   the RÚIAN kód) widened by 5,000 m — the read surface's largest radius, so any subject
   inside the obec is covered by construction.
-- **W3** — the read surface: a definer-style view + a three-arg inlinable SQL function
-  (lat, lng, radius — `language sql stable`, SECURITY INVOKER, NO `SET` clause, which is
-  what keeps it inlined and on the geography index), `Agenda.SOLD` filter defs, and a
-  `SoldCompsBlock` on ListingDetail. Deletes the reas chip path. Its radius options are
-  1 / 3 / 5 km against `sold_db.MAX_READ_RADIUS_M` — the same constant, or the box stops
-  covering the read.
+- **W3** — 🟡 built, migration NOT yet applied. The read surface (migration 545): the SALES behind
+  definer-style `sold_transactions_public`, read by `sold_comparables(lat, lng, radius)` —
+  `language sql stable`, SECURITY INVOKER, NO `SET` clause, which is what keeps it inlined and on
+  the geography index. The fetch LEDGER gets NO view: which cells were fetched is a projection of
+  which towns hold a live pipeline card, so it stays admin-only and its one reader is
+  `sold_coverage(lat, lng)` — SECURITY DEFINER, scoped to the obec that CONTAINS the point (cells
+  are obec envelopes + 5 km and overlap heavily, so "newest box containing the point" would answer
+  with whichever town was walked last), returning that town's name, its newest successful fetch and
+  its newest attempt of ANY status. `Agenda.SOLD` re-tags the existing area /
+  category / disposition / subtype defs and adds one `max_sold_age_days` — an integer day-count, so
+  the sold-date bound is the `.lte` path the registry already had (no date control, no hand-coded
+  escape); `applyRegistryFilters` became agenda-generic (`applyAgendaFilters`) rather than gaining a
+  second copy. `SoldCompsBlock` on ListingDetail carries the coverage sentence in its four honest
+  states (never checked / tried and FAILED / checked-and-empty / N held from the source's 24-month
+  window against the all-time count it declares — two populations, never a shortfall), the ~30-day
+  lag and reas's minority match of the register, a 1–3–5 km radius, the registry filter row, the
+  table on W0's `Th`, and row → dialog with the hot-linked photos. The headline median holds the
+  0–30 m² band out (a denominator defect, not a market fact) and refuses a flats-and-houses cohort.
+  `reasSoldUrl`, the reas chip and their tests are deleted; the Cenová-mapa chip stays.
+  **Migration 545 must be applied BEFORE this PR merges** — the SPA shipping with it calls both
+  functions, which is exactly the migration-438 gap.
 - **W4** — folded into W2 (above).
 - **W5** — pay the rest: delete `FilterChip.tsx` (+ its test), `POST /tools/find_comparables`
   (+ schema) and `ComparableFilters.category_sub_cb`.

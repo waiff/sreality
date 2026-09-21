@@ -1,5 +1,5 @@
-/* The five external chips under the header map. Cheap surface, but the parts
-   that silently rot are the ones pinned here: that all five render, that each
+/* The four external chips under the header map. Cheap surface, but the parts
+   that silently rot are the ones pinned here: that all four render, that each
    opens in a new tab without leaking the referrer, that the hrefs carry THIS
    listing's place rather than a default view of Czechia — and that the one chip
    needing a lookup (Cenová mapa) is a working link whatever the lookup does. */
@@ -56,13 +56,6 @@ describe('<ExternalMapLinks>', () => {
       'https://ikatastr.cz/#kde=50.081234,14.428765,18&mapa=zakladni' +
         '&vrstvy=parcelybudovy&info=50.081234,14.428765',
     );
-    // The box maths is geoLinks' to test; here, that the chip carries it.
-    expect(screen.getByRole('link', { name: /Reas\.cz/ })).toHaveAttribute(
-      'href',
-      expect.stringMatching(
-        /^https:\/\/www\.reas\.cz\/prodane\/nemovitosti\?bounds=50\.0\d+,14\.4\d+,50\.0\d+,14\.4\d+$/,
-      ),
-    );
     await waitFor(() => expect(priceMapLink()).toHaveAttribute('href', STREET_URL));
     expect(lookup).toHaveBeenCalledWith(LABEL, 50.081234, 14.428765, expect.anything());
     expect(priceMapLink()).toHaveAttribute('title', expect.stringContaining('ulice Popelky Biliánové'));
@@ -72,7 +65,7 @@ describe('<ExternalMapLinks>', () => {
     renderLinks({ lat: 50, lng: 14, label: LABEL });
 
     const links = screen.getAllByRole('link');
-    expect(links).toHaveLength(5);
+    expect(links).toHaveLength(4);
     for (const a of links) {
       expect(a).toHaveAttribute('target', '_blank');
       expect(a.getAttribute('rel')).toBe('noopener noreferrer');
@@ -112,14 +105,25 @@ describe('<ExternalMapLinks>', () => {
     expect(priceMapLink()).toHaveAttribute('href', 'https://www.sreality.cz/cenova-mapa');
   });
 
-  /* Where it is vs what it sells for — two rows, so five chips never share the
+  /* Where it is vs what it sells for — two rows, so four chips never share the
      400px map column. */
   it('splits the chips into a place row and a price row', () => {
     renderLinks({ lat: 50, lng: 14, label: LABEL });
 
     const rowOf = (name: RegExp) => screen.getByRole('link', { name }).parentElement;
     expect(rowOf(/Mapy\.cz/)).toBe(rowOf(/Katastr/));
-    expect(rowOf(/Reas\.cz/)).toBe(rowOf(/Cenová mapa/));
-    expect(rowOf(/Mapy\.cz/)).not.toBe(rowOf(/Reas\.cz/));
+    expect(rowOf(/Mapy\.cz/)).not.toBe(rowOf(/Cenová mapa/));
+  });
+
+  /* Registered sales moved in-app (SoldCompsBlock), so the source is no longer
+     linked out to — a chip that opens what we now hold would be a second,
+     un-synced answer to the same question. */
+  it('no longer links out to reas.cz', () => {
+    renderLinks({ lat: 50, lng: 14, label: LABEL });
+
+    expect(screen.queryByRole('link', { name: /Reas/i })).toBeNull();
+    for (const a of screen.getAllByRole('link')) {
+      expect(a.getAttribute('href')).not.toContain('reas.cz');
+    }
   });
 });

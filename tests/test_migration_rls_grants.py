@@ -385,6 +385,14 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "autodedup.resolve_queue",
     "autodedup.scan_cursor",
     "autodedup.judge_queue",
+    # The sold-transaction fetch LEDGER (migration 542). The sales themselves are market
+    # data behind `sold_transactions_public`; the ledger is not. A cell is fetched only
+    # where some account holds a live deal-pipeline card, so its obec set is a projection
+    # of tenant state — publishing it would hand every signed-in account the map and the
+    # cadence of every other account's deal sourcing. NO `_public` view; the ONE reader
+    # is migration 545's `sold_coverage`, a SECURITY DEFINER point lookup that answers
+    # about a single municipality and is annotated `ci-allow-ungated` there.
+    "sold_transaction_fetches",
 })
 
 _CREATE_GATED_OBJ = re.compile(

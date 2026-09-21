@@ -72,6 +72,21 @@ export const fmtArea = (
     ? '—'
     : `${czNumber.format(Math.round(n))}${NBSP}m²${areaKind === 'plot' ? `${NBSP}pozemku` : ''}`;
 
+/* Distance from a subject point. Metres under a kilometre — the difference
+ * between 80 m and 900 m is the difference between the same street and a
+ * different neighbourhood — and one decimal of a kilometre above it, where the
+ * metres would be false precision: the point they are measured from is a street
+ * or municipality centroid for most listings (see lib/geoLinks). */
+export const fmtDistanceM = (n: number | null | undefined): string => {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return n < 1000
+    ? `${czNumber.format(Math.round(n))}${NBSP}m`
+    : `${(n / 1000).toLocaleString('cs-CZ', {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      })}${NBSP}km`;
+};
+
 /* THE percentage formatter. Czech typography puts a NON-BREAKING space before
  * the sign (`4,2 %`, never `4.2%`) and uses a comma decimal separator — this
  * replaced three hand-rolled variants that disagreed on all three counts, one
