@@ -60,7 +60,11 @@ from typing import Mapping, Sequence
 
 from autodedup.body_align import aligned_difference, rounding_equal_values
 from autodedup.dataset import Listing
-from autodedup.demonstrate import area_readings, body_headline_areas
+from autodedup.demonstrate import (
+    area_readings,
+    body_headline_areas,
+    sequential_postings,
+)
 from autodedup.features import STREET_GRAIN_RANK, haversine_m, plot_area, rel_diff
 from autodedup.floor_convention import (
     convention_ambiguous,
@@ -345,6 +349,13 @@ def two_unit_signature(a: Listing, b: Listing, settings: Settings | None = None)
     if rel_diff(float(a.price), float(b.price)) <= cfg.d43_two_unit_price_tol:
         return False
     if price_paths_agree(a, b, cfg.d43_price_path_tol):
+        return False
+    # E165: "an advert has one area and one price AT ANY MOMENT" is the whole argument, and it
+    # says nothing about two adverts that were never on sale at one moment. A re-post at a cut
+    # price whose area one portal re-parsed carries both halves of the signature and is one unit
+    # by the standing ruling — four of the region skeptic's twelve named false splits are
+    # exactly that. A co-live pair is untouched: there the two numbers ARE simultaneous.
+    if cfg.d43_two_unit_requires_colive and sequential_postings(a, b, cfg):
         return False
     return not _stated_areas_meet(a, b, cfg.d43_two_unit_stated_tol)
 

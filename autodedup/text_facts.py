@@ -169,10 +169,15 @@ def unit_designators(text: str | None) -> set[str]:
 # is never a conflict.
 _UNIT_NOUN: str = (
     r"(?:byt\w*|jednotk\w*|apartman\w*|mezonet\w*|atelier\w*|studi[ou]"
-    r"|dum|domu|domek\w*|domku|vil[aey]|rd|radovk\w*"
+    r"|dum|domu|domek\w*|domku|vil[aeuy]\w{0,2}|rd|radovk\w*"
     r"|parcel\w*|pozemk\w*|pozemek|garaz\w*|\bstani\b|chat[ay]|chalup\w*)"
 )
-_UNIT_MARKER: str = r"(?:s\s+)?(?:oznacen\w{0,4}\s+)?(?:c\.?\s*|cislo\s+)?"
+# `byt 3+kk č. 2.07`: the disposition sits between the noun and the code, and it is the only
+# thing that legitimately does — a longer gap is a sentence and the code belongs to something
+# else. `pdl\d+` is `body_align`'s storey token and is never a unit's name.
+_UNIT_MARKER: str = (
+    r"(?:\d\s?\+\s?(?:kk|\d)\s+)?(?:s\s+)?(?:oznacen\w{0,4}\s+)?(?:c\.?\s*|cislo\s+)?"
+)
 _UNIT_CODE_BODY: str = (
     r"([a-z]{1,2}\s?\d{1,3}(?:\s?[.\-/]\s?\d{1,3}){1,3}|\d{1,3}(?:\.\d{1,3}){1,3})"
 )

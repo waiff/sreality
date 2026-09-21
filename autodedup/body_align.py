@@ -85,8 +85,9 @@ _MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #   * a RANGE — `cca 150-180 m²` against the same advert on a portal that dropped the hyphen.
 #     Masking ONE side is enough: a one-sided token is never read (E12).
 _CHARGE_WORD: str = (
-    r"(?:naklad\w*|inkaso|zaloh\w*|sluzb\w*|poplat\w*|kauc\w*|jistot\w*|provi\w*"
-    r"|najemn\w*|najem|energi\w*|elektrin\w*|vodn\w*|stocn\w*|topen\w*|odpad\w*)"
+    r"(?:naklad\w*(?:\s+na\s+bydlen\w*)?|inkaso|zaloh\w*|sluzb\w*|poplat\w*|kauc\w*"
+    r"|jistot\w*|provi\w*(?:\s+rk)?|najemn\w*|najem|rent\w*|energi\w*|elektrin\w*"
+    r"|vodn\w*|stocn\w*|topen\w*|odpad\w*)"
 )
 _CODE_WORD: str = (
     r"(?:ev\.?\s*c\w*|evidencn\w*|zakazk\w*|nabidk\w*|referenc\w*|ref\.?\s*c\w*|id\s*c\w*)"
@@ -98,6 +99,7 @@ _HEAL_MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("[DEN]", re.compile(_DATE_WORD + r"\s+\d{1,2}\.\s?\d{1,2}\.?(?!\d)")),
     ("[KOD]", re.compile(_CODE_WORD + r"\W{0,4}(?:\[kod\]\W{0,4})?[a-z]{0,3}\s?\d[\d/-]{0,12}")),
     ("[CENA]", re.compile(r"\b\d[\d.]*\d\s*[.,]\s?-")),
+    ("[CENA]", re.compile(r"\b(?:kc|czk)\s*\d[\d.,]*")),
     ("[CENA]", re.compile(r"\b\d+(?:[.,]\d+)?\s*tis\.?\s*(?:kc|czk)?")),
     ("[CENA]", re.compile(_CHARGE_WORD + r"\W{0,4}\d[\d.,]*")),
     ("[DOBA]", re.compile(r"\b\d{1,3}\s*(?:mesic\w*|let\b|lety\b|rok\w*)")),
@@ -113,8 +115,13 @@ _PATRO = re.compile(r"\b(\d{1,2})\.?\s*patr\w*")
 
 
 def _storey(level: int) -> str:
-    """The storey as a LETTER sentinel: `[np]` carrying a digit would read as a quantity."""
-    return f" [np{chr(ord('a') + min(max(level, 0), 25))}] "
+    """The storey on ONE scale, written as a token the reader still reads.
+
+    Not a `[...]` sentinel: `3. NP` against `4. NP` is two flats of Solné mlýny and must stay a
+    difference. `pdl3` has the shape of a unit code, so the two are compared whole and exactly —
+    `2. NP` and `1. patro` both become `pdl2` and read as equal."""
+    return f" pdl{min(max(level, 0), 60)} "
+
 
 _TOKEN = re.compile(r"[a-z0-9]+(?:[./,-][a-z0-9]+)*|\[[a-z]+\]")
 _DIGIT = re.compile(r"\d")
@@ -179,17 +186,25 @@ def _decimals(text: str) -> int:
     return len(body.split(".", 1)[1]) if "." in body else 0
 
 
-def _is_code(text: str) -> bool:
-    if not _CODE.match(text):
+# E163: a code's later segments must STATE something. `D5. Více` and `D5 více` are one motorway
+# and one sentence boundary, and the tokeniser glues the first into `d5.vice` — which the wide
+# form reads as a code that `d5` does not contain, so one advert's full stop split three certain
+# duplicates. A segment of pure letters is prose the tokeniser swallowed, never a unit's name.
+_CODE_HEALED = re.compile(
+    r"^(?:[a-z]{1,3}\d{1,4}(?:[./-][a-z]{0,2}\d{1,4})*|\d{1,5}(?:[./-]\d{1,4})+)$")
+
+
+def _is_code(text: str, heal: bool = False) -> bool:
+    if not (_CODE_HEALED if heal else _CODE).match(text):
         return False
     prefix = _CODE_PREFIX.match(text)
     return not (prefix and prefix.group(0) in _NOT_CODE_PREFIX)
 
 
-def _numbers_of(segment: list[Token]) -> list[tuple[str, float, int]]:
+def _numbers_of(segment: list[Token], heal: bool = False) -> list[tuple[str, float, int]]:
     out: list[tuple[str, float, int]] = []
     for token in segment:
-        if not token.digit or _is_code(token.text):
+        if not token.digit or _is_code(token.text, heal):
             continue
         for match in _NUMBER_IN.finditer(_UNIT_SYMBOL.sub(" ", token.text)):
             raw = match.group(0)
@@ -200,10 +215,11 @@ def _numbers_of(segment: list[Token]) -> list[tuple[str, float, int]]:
     return out
 
 
-def _reading(segment: list[Token]) -> tuple[frozenset[str], list[tuple[float, int]]]:
+def _reading(segment: list[Token], heal: bool = False
+             ) -> tuple[frozenset[str], list[tuple[float, int]]]:
     codes = frozenset(token.text for token in segment
-                      if token.digit and _is_code(token.text))
-    return codes, [(value, decimals) for _, value, decimals in _numbers_of(segment)]
+                      if token.digit and _is_code(token.text, heal))
+    return codes, [(value, decimals) for _, value, decimals in _numbers_of(segment, heal)]
 
 
 def rounding_equal_values(left: float, left_decimals: int,
@@ -233,7 +249,7 @@ def rounding_equal(left: str, right: str) -> bool:
 def body_numbers(text: str, heal: bool = False) -> tuple[tuple[float, int], ...]:
     """Every number the whole body states, whatever position it sits in."""
     return tuple(sorted({(value, decimals)
-                         for _, value, decimals in _numbers_of(list(tokens(text, heal)))}))
+                         for _, value, decimals in _numbers_of(list(tokens(text, heal)), heal)}))
 
 
 def _stated_elsewhere(values: list[tuple[float, int]],
@@ -250,7 +266,8 @@ def _stated_elsewhere(values: list[tuple[float, int]],
 
 def _differ_digit(left: list[Token], right: list[Token],
                   left_body: tuple[tuple[float, int], ...] = (),
-                  right_body: tuple[tuple[float, int], ...] = ()) -> tuple[str, str] | None:
+                  right_body: tuple[tuple[float, int], ...] = (),
+                  heal: bool = False) -> tuple[str, str] | None:
     """What the two sides SAY at one position, when it is not the same thing.
 
     A token is not its spelling. `140m2` and `140m` are one area, `2.nadzemní` and `2` are one
@@ -260,8 +277,8 @@ def _differ_digit(left: list[Token], right: list[Token],
     the numbers it contains with the unit symbols removed. Codes are compared exactly and
     numbers by the rounding rule, and each comparison is a conflict only when BOTH sides state
     something and the two states share nothing."""
-    left_codes, left_numbers = _reading(left)
-    right_codes, right_numbers = _reading(right)
+    left_codes, left_numbers = _reading(left, heal)
+    right_codes, right_numbers = _reading(right, heal)
     if left_codes and right_codes:
         if left_codes & right_codes:
             return None
@@ -276,8 +293,8 @@ def _differ_digit(left: list[Token], right: list[Token],
     if (_stated_elsewhere(left_numbers, right_body)
             or _stated_elsewhere(right_numbers, left_body)):
         return None
-    return (" ".join(sorted(text for text, _, _ in _numbers_of(left))),
-            " ".join(sorted(text for text, _, _ in _numbers_of(right))))
+    return (" ".join(sorted(text for text, _, _ in _numbers_of(left, heal))),
+            " ".join(sorted(text for text, _, _ in _numbers_of(right, heal))))
 
 
 def aligned_difference(
@@ -316,7 +333,8 @@ def aligned_difference(
             continue
         segment_left, segment_right = list(left[i1:i2]), list(right[j1:j2])
         found = _differ_digit(segment_left, segment_right,
-                              body_numbers(left_text, heal), body_numbers(right_text, heal))
+                              body_numbers(left_text, heal), body_numbers(right_text, heal),
+                              heal)
         if found is not None:
             return found
     return None

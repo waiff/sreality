@@ -210,6 +210,11 @@ def _sequential(a: Listing, b: Listing, settings: Settings, overlap: float | Non
     return overlap <= settings.demonstrate_price_colive_fraction * shortest
 
 
+def sequential_postings(a: Listing, b: Listing, settings: Settings) -> bool:
+    """Were these two adverts never really on sale together? `_sequential` read from outside."""
+    return _sequential(a, b, settings, overlap_days_local(a, b))
+
+
 def price_demonstrated(
     a: Listing,
     b: Listing,
@@ -353,19 +358,29 @@ def _new_build(listing: Listing) -> bool:
 
 
 def _names_a_unit(listing: Listing, settings: Settings) -> bool:
-    from autodedup.text_facts import printed_unit_codes, unit_designators
+    """Does the advert print a whole unit CODE? `unit_designators` is deliberately not read —
+    `byt č. 3` is how half the corpus writes a flat number and it is not a project marker."""
+    from autodedup.text_facts import printed_unit_codes
 
-    return bool(printed_unit_codes(listing.description, settings.d43_unit_codes_wide)
-                or unit_designators(listing.description))
+    return bool(printed_unit_codes(listing.description, settings.d43_unit_codes_wide))
 
 
 def development_context(a: Listing, b: Listing, settings: Settings) -> bool:
     """Are these two adverts inside one seller's development?
 
-    `vocab` is `in_development`, kept so the two readings can be measured against each other.
-    `narrow` asks for all of: the new-build vocabulary on BOTH sides, and either the project
-    NAMING its units (a printed unit code or designator on either side) or admitting to a price
-    list (`ceny od …`) or the two bodies being one template that was on sale twice at once."""
+    `vocab` is `in_development` — `PROJECT_TERMS` on EITHER side — kept so the three readings
+    can be measured against each other; the skeptic put it at 41.8 % of cohort-3 certain pairs,
+    which is a blanket rather than a context.
+
+    `narrow` is the reading W17 ships: the new-build vocabulary on BOTH sides, and the project
+    NAMING a unit (a whole printed code on either side) or admitting to a price list. Measured
+    on the certain duplicates of three cohorts it is 3.8 % / 1.1 % / 1.6 % where `vocab` is
+    41.8 % / 27.7 % / 16.8 %, and the one-sided limb it gates costs 23 times less.
+
+    `template` adds the shape the narrow reading leaves out — two co-live adverts written from
+    one template. It is the strongest hazard signal and by far the widest: 3,574 of the 5,062
+    both-vocabulary certain pairs of cohort 4 carry it, because a re-post carries a template
+    too. Measured, named, not shipped."""
     mode = settings.development_context_mode
     if mode == "off":
         return False
@@ -379,6 +394,8 @@ def development_context(a: Listing, b: Listing, settings: Settings) -> bool:
 
     if states_from_price(a.description) and states_from_price(b.description):
         return True
+    if mode != "template":
+        return False
     if _sequential(a, b, settings, overlap_days_local(a, b)):
         return False
     return _one_template(a, b, settings)
@@ -420,7 +437,11 @@ def onesided_fact(a: Listing, b: Listing, settings: Settings) -> str | None:
     printed on one side only — so there the silent side fails closed.
 
     A side that prints a DIFFERENT value is not this rule's business: that is already a fact
-    (`unit_code`, `floor`, `printed_area`), read in every mode and outside every context."""
+    (`unit_code`, `floor`, `printed_area`), read in every mode and outside every context.
+
+    Only what the BODY states is read. The stored floor COLUMN is not: one portal fills it and
+    another does not, which is a difference between two portals and not a silence of the advert
+    — it is one-sided on 3,304 of cohort 4's and 4,525 of the region's certain duplicates."""
     if not development_context(a, b, settings):
         return None
     from autodedup.text_facts import printed_unit_codes
@@ -436,9 +457,6 @@ def onesided_fact(a: Listing, b: Listing, settings: Settings) -> str | None:
     land = LAND_CATEGORY in (a.category_main, b.category_main)
     if bool(body_headline_areas(a, land)) != bool(body_headline_areas(b, land)):
         return "area"
-    floors = (a.floor, b.floor)
-    if (floors[0] is None) != (floors[1] is None):
-        return "floor"
     return None
 
 

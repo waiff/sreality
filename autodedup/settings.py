@@ -533,6 +533,9 @@ class Settings:
     demonstrate_recover_missing: bool = False
     demonstrate_recover_min_photos: float = 3.0
     demonstrate_recover_body_containment: float = 0.98
+    # E165: E143's two-unit signature reads two numbers as SIMULTANEOUS. Two sequential
+    # postings never were, and a price cut plus a re-parsed area is what a re-post looks like.
+    d43_two_unit_requires_colive: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
@@ -666,9 +669,9 @@ class Settings:
             raise ValueError("corroboration needs demonstrate_identity")
         if self.demonstrate_cluster_price and not self.demonstrate_identity:
             raise ValueError("demonstrate_cluster_price needs demonstrate_identity")
-        if self.development_context_mode not in ("off", "vocab", "narrow"):
+        if self.development_context_mode not in ("off", "vocab", "narrow", "template"):
             raise ValueError(
-                "development_context_mode must be off/vocab/narrow: "
+                "development_context_mode must be off/vocab/narrow/template: "
                 f"{self.development_context_mode}"
             )
         if not 0.0 <= self.demonstrate_price_exact_tol < 1.0:
