@@ -151,6 +151,48 @@ def unit_designators(text: str | None) -> set[str]:
     }
 
 
+# The compass direction a body PRINTS as this unit's: `Orientace je na východ`, `byt je
+# orientovaný na jihozápad`, `situovaný na sever`. Longest stem first, because `jihovýchod`
+# contains `východ` and a shorter match would read one flat's south-east as another's east.
+# The keyword is mandatory — a body also names the direction of the motorway and of the park.
+_COMPASS_STEMS: tuple[str, ...] = (
+    "severovychod", "severozapad", "jihovychod", "jihozapad",
+    "sever", "jih", "vychod", "zapad",
+)
+_ORIENTATION_KEYWORD = re.compile(r"orientac\w*|orientovan\w*|situovan\w*")
+_ORIENTATION_WINDOW: int = 44
+_COMPASS_WORD = re.compile(
+    r"\b(severovychod\w*|severozapad\w*|jihovychod\w*|jihozapad\w*"
+    r"|sever\w*|jizni|jih|vychod\w*|zapad\w*)\b"
+)
+
+
+def orientations(text: str | None) -> set[str]:
+    """Every compass direction the body states as this unit's, normalised to one stem.
+
+    The clause after the keyword is read WHOLE, not to its first direction: `orientaci na jih
+    i na sever` is a through-flat naming two, and a rule that stopped at `jih` would read it
+    as one. Abbreviations (`na J/Z`) are deliberately not read — a two-letter token is a coin
+    flip against street names and room labels, and the rule would rather abstain than guess."""
+    if not text:
+        return set()
+    folded = fold(text)
+    out: set[str] = set()
+    for keyword in _ORIENTATION_KEYWORD.finditer(folded):
+        clause = folded[keyword.end(): keyword.end() + _ORIENTATION_WINDOW]
+        clause = re.split(r"[.;!?]", clause, maxsplit=1)[0]
+        for match in _COMPASS_WORD.finditer(clause):
+            word = match.group(1)
+            if word == "jizni":
+                out.add("jih")
+                continue
+            for stem in _COMPASS_STEMS:
+                if word.startswith(stem):
+                    out.add(stem)
+                    break
+    return out
+
+
 def _area_value(raw: str) -> float | None:
     cleaned = raw.replace(" ", "").replace(" ", "")
     if re.fullmatch(r"\d{1,3}(?:[.]\d{3})+", cleaned):  # 10.500 = ten and a half thousand

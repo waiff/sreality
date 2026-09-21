@@ -88,6 +88,7 @@ def test_the_lane_writer_census_covers_the_package() -> None:
         "cohort.py", "dataset.py", "decide.py", "development.py", "ensembles.py",
             "family.py", "features.py",
         "fingerprint.py", "guards.py", "hazard_context.py", "incremental.py",
+            "indistinguishable.py",
         "incremental_scope.py", "incremental_store.py", "parity_digest.py",
         "model.py", "normalize.py", "oss_pod.py", "revocation.py", "settings.py",
         "stock.py", "store_score.py",
