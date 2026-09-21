@@ -47,6 +47,7 @@ from typing import Any, Callable
 from autodedup import iterations
 from autodedup.census import run_census, run_probes, write_json
 from autodedup.export import run_export
+from autodedup.fact_cards_lane import run_facts
 from autodedup.incremental_lane import run_incremental, run_rt_seed
 from autodedup.iterations import run_record
 from autodedup.judge_lane import run_judge
@@ -63,6 +64,7 @@ MODES: dict[str, Mode] = {
     "probes": run_probes,
     "export": run_export,
     "judge": run_judge,
+    "facts": run_facts,
     "score": run_score,
     "incremental": run_incremental,
     "rt_seed": run_rt_seed,
@@ -104,6 +106,21 @@ ITERATION_META: dict[str, dict[str, Any]] = {
             "posture — paid for once rather than once per censused block."
         ),
         "tools": ["autodedup.census", "autodedup.lane", "GitHub Actions"],
+    },
+    "facts": {
+        "wave": "W14",
+        "title": "Unit identity cards",
+        "approach": (
+            "One LLM EXTRACTION per listing — never a verdict — filling a structured unit "
+            "identity card from the advert's own prose, every field null when not stated. "
+            "O(listings) and cacheable for ever, where a judge is O(pairs) and was measured "
+            "answering 'same' across development twins; two cards are then compared field by "
+            "field in plain code, so the model reads and the engine decides."
+        ),
+        "tools": [
+            "autodedup.fact_cards", "autodedup.fact_cards_lane", "autodedup.lane",
+            "api.llm_client", "GitHub Actions",
+        ],
     },
     "judge": {
         "wave": "W3",

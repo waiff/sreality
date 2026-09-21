@@ -142,6 +142,47 @@ name: "AUTODEDUP: engine lane"
 #             the agreement between the arms themselves - as compare.md and compare.json. It
 #             reads files only and costs nothing.
 #
+#   facts   - THE SECOND PAID MODE, and a different question entirely. It never asks whether
+#             two adverts match. It asks ONE model, ONCE PER LISTING, to fill a small
+#             structured UNIT IDENTITY CARD from that advert's own prose - unit code exactly
+#             as printed, floor normalised with ground = 0 plus the raw string, the headline
+#             area the BODY prints (not the stored column, which bazos fills with the
+#             terrace), other labelled areas, parcel numbers, plot number, street and house
+#             number, locality, project, building/block, disposition, rooms or persons
+#             offered, numbered accessories, orientation, whether the advert is a MENU of
+#             several units, whether it markets a new-build development - every field null
+#             when the advert does not state it, each non-null field carrying the verbatim
+#             span it was read from. `autodedup.fact_cards.card_conflicts` then compares two
+#             cards field by field in PLAIN CODE, and a conflict needs both sides non-null;
+#             the model reads, the engine decides, and nothing here can merge anything.
+#             Why not the judge: a per-PAIR judge is O(pairs) and was measured on this
+#             programme's own cohorts answering `same` across development twins - the hazard
+#             the operator ranked first. A card is O(listings) and cacheable for ever on
+#             (listing_id, content hash, prompt version), which is the only shape that fits
+#             ~180,000 new listings a month inside the rollout budget.
+#             args: `listings=<name>` (REQUIRED - a JSON list of listing ids committed under
+#             autodedup/listings/<name>.json, because the set a pass ran over is the only way
+#             read its numbers again), `arm=` (nano = gpt-5-nano, the cheapest text model this
+#             repo prices; luna = gpt-5.6-luna, the judge's own text model as the quality
+#             reference; qwen-flash = qwen3.7-flash and qwen-30b = qwen3-vl-30b-a3b-instruct
+#             through the DashScope path the judge lane opened - both at one worker with a
+#             spacing floor, because W6 lost two Qwen arms to 429s at three and six workers),
+#             `max_usd` (REQUIRED, E31, under D2's $25 hard cap), `workers`, `max_chars` (the
+#             runaway guard on advert length, default 6000 - a card is paid once and cached,
+#             so it is NOT truncated to a judge's per-pair token budget), `limit`, and
+#             `model=` / `provider=` to point an arm at something else (which CLEARS that
+#             arm's price forecast rather than quoting the wrong one).
+#             No table, no migration: out/cards.jsonl IS the result, one JSON object per
+#             listing carrying the card, the tokens, the billed cost and the llm_calls id,
+#             with out/facts.json as the summary. Every call goes through LLMClient.call, so
+#             each lands one `llm_calls` row and the spend is READ BACK from there (E32). The
+#             `called_for` is deliberately the judge's existing `autodedup_judge_text`: a
+#             production value (`autodedup_facts`) is a CHECK-constraint change, i.e. a
+#             migration this experiment is not entitled to open, and `llm_calls.model` plus
+#             this run's summary are what tell the two apart in the ledger.
+#             NO personal data crosses the wire: the advert text is scrubbed by the judge's
+#             OWN scrubber (E28, one copy of the PII rules) before a prompt is built.
+#
 #   score   - READS the artifact, WRITES the engine's own schema. Downloads a finished
 #             `export` run's cohort artifact (same `gh run download` path as judge, which is
 #             why the job asks for `actions: read`), runs the whole engine over it in-process
@@ -372,7 +413,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; facts = the paid per-LISTING unit-identity-card extraction (O(listings), cacheable, the model reads and the engine decides); record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one."
         required: true
         default: "census"
         type: string

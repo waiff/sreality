@@ -27,6 +27,7 @@ PACKAGE = Path(labels_lane.__file__).resolve().parent
 # The modules that produce a file under `out/`, and the statements they run to fill it.
 LANE_WRITERS: tuple[str, ...] = (
     "census.py", "compare.py", "errors.py", "evaluate.py", "export.py", "export_sql.py",
+    "fact_cards.py", "fact_cards_lane.py",
     "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
     "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
@@ -54,6 +55,12 @@ DECLARED: dict[str, frozenset[str]] = {
     # E28's broker rail: two columns selected as hash inputs, one never selected at all.
     "export.py": frozenset({"broker_email", "broker_phone"}),
     "export_sql.py": frozenset({"broker_name", "broker_email", "broker_phone"}),
+    # `mode=facts` reads adverts through the EXPORT lane's own statement, which selects the
+    # two broker columns because the export hashes them into its salted key. The card lane
+    # wants neither: `read_listings` keeps an explicit allowlist of columns and the two are
+    # dropped on the way out of the cursor, so they never enter a dict that could be written
+    # to `cards.jsonl` or sent to a provider. The names appear in that rule and nowhere else.
+    "fact_cards_lane.py": frozenset({"broker_email", "broker_phone"}),
 }
 
 
