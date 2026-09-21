@@ -363,7 +363,7 @@ def test_an_unseeded_generation_is_refused(tmp_path) -> None:
 def test_a_certificate_column_the_batch_lane_never_wrote_is_a_DEFECT(tmp_path) -> None:
     """M171, reproduced. `rt_base_w13` held 0 certificates in the column and named one in
     `decision` on 3,866 rows, so the instrument read 'K-C' against NULL and called 3,462
-    shared pairs moved DECISIONS. The column is the definition (D40); the string is the
+    shared pairs moved DECISIONS. The column is the definition (D41); the string is the
     witness that it should have been written. It is a defect of the STORE, and the pairs it
     touches are attributed to it rather than counted as disagreements."""
     db = _db()

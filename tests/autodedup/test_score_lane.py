@@ -54,7 +54,7 @@ REALTIME_MIGRATION = MIGRATIONS / "539_autodedup_realtime_lane.sql"
 # booleans, the strings a rule refused on, the census a promotion was taken under, the two
 # fingerprint digests an idempotent re-score compares and the frozen calibration's digest. The
 # batch pass has no equivalent of any of them. `certificate` is deliberately NOT here: the
-# clustering ORDERS on it, so both lanes write it (D40).
+# clustering ORDERS on it, so both lanes write it (D41).
 REALTIME_ONLY = {"from_lo", "from_hi", "evidence", "context", "fp_lo", "fp_hi",
                  "calibration_digest"}
 
@@ -368,7 +368,7 @@ def test_pair_upsert_params_match_migration_528(lane, tmp_path: Path) -> None:
     # `decided_at` is `now()` in the statement; `applied_merge_group` belongs to the write
     # path (E40) and shadow mode never names it; `REALTIME_ONLY` is the other lane's
     # bookkeeping. Everything else the table holds, this lane writes — including
-    # `certificate`, which `cluster.edge_rank` reads first (D40, M171).
+    # `certificate`, which `cluster.edge_rank` reads first (D41, M171).
     assert set(rows[0]) == columns - {"decided_at", "applied_merge_group"} - REALTIME_ONLY
     assert "certificate" in set(rows[0])
     for row in rows:

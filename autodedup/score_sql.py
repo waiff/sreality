@@ -26,7 +26,7 @@ only when the operator asks for it by name (`keep_generations`).
 the write path's own column (E40) and shadow mode leaves it alone; naming it in the upsert
 would let a re-score silently clear a stamp the engine did not place.
 
-`certificate` IS listed, and has been since W9m (E117, D40). Migration 539 added it for the
+`certificate` IS listed, and has been since W9m (E117, D41). Migration 539 added it for the
 real-time lane and this one did not write it, so a batch generation held NULL on every row
 while its `decision` strings named a certificate on 3,866 — and since `cluster.edge_rank`
 reads the certificate FIRST, that generation was not re-clusterable from its own store. Every

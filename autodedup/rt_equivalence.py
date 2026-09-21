@@ -337,7 +337,7 @@ def asymmetric_fields(live: Mapping[Any, Pair],
     comparison. The signature of the real thing is a side whose `decision` STRINGS name a
     certificate while the column holds none on every row — which is exactly what
     `rt_base_w13` looked like: 0 of 16,751 rows carrying the column, 3,866 of them naming one
-    in `decision` (M171). The column is the definition (D40) and the string is the witness."""
+    in `decision` (M171). The column is the definition (D41) and the string is the witness."""
     out: list[dict[str, Any]] = []
     for name, store in (("live", live), ("batch", batch)):
         column = sum(1 for pair in store.values() if pair.certificate is not None)

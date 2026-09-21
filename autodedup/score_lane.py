@@ -297,7 +297,7 @@ def pair_params(
         "score": float(row.get("score") or 0.0),
         "zone": ZONE_OF.get(str(row.get("zone") or ""), "reject"),
         "decision": str(row.get("reason") or row.get("decision") or "") or None,
-        # The certificate is a COLUMN on both lanes (migration 539, D40). `decision` is lossy
+        # The certificate is a COLUMN on both lanes (migration 539, D41). `decision` is lossy
         # about it — E63 re-promotes a certified pair under a `context_rule:` reason — and
         # `cluster.edge_rank` reads it first, so a generation that stored NULL here was not
         # re-clusterable from its own rows (M171).

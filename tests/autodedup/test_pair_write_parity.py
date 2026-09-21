@@ -1,4 +1,4 @@
-"""W9m — both lanes write the same pair, and the store is the definition (E117, D40).
+"""W9m — both lanes write the same pair, and the store is the definition (E117, D41).
 
 Migration 539 gave `autodedup.pairs` a `certificate` COLUMN, and said in its own comment why:
 `E63 can re-promote a certified pair under a context_rule reason, so the decision string is
@@ -23,7 +23,7 @@ from autodedup.score_sql import PAIR_UPSERT_SQL
 from tests.autodedup.test_store_precision import SETTINGS, _edges, _world
 
 # What `cluster.edge_rank` and `cluster_pairs` read off a stored row. Every lane that writes a
-# pair writes all of these, or a generation is not re-clusterable from its own store (D40).
+# pair writes all of these, or a generation is not re-clusterable from its own store (D41).
 CLUSTERING_COLUMNS: frozenset[str] = frozenset(
     {"score", "zone", "certificate", "guard_veto", "families"}
 )
