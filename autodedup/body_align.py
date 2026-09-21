@@ -61,6 +61,8 @@ _MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("[DEN]", re.compile(r"\b\d{1,2}\s*/\s*(?:19|20)\d{2}\b")),
     ("[ROK]", re.compile(r"\b(?:19|20)\d{2}\b")),
     ("[PCT]", re.compile(r"\b\d{1,3}(?:[.,]\d+)?\s?%")),
+    # `8 km od Olomouce` against `5 min autem` is one house two brokers placed two ways.
+    ("[VZDAL]", re.compile(r"\b\d{1,3}(?:[.,]\d+)?\s*(?:km|min|minut\w*|hodin\w*)\b")),
     ("[FOTO]", re.compile(r"\b\d{1,3}\s*(?:fotek|fotografi\w*|obrazk\w*)\b")),
 )
 

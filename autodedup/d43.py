@@ -4,6 +4,11 @@ The pairwise gate is not enough on its own. A group is built transitively, so A-
 each carry no distinguishing fact while A and C differ on the floor; without this limb the
 relaxed arms carry real negatives and bad groups, with it they carry none.
 
+E157's price limb is read here too, behind `demonstrate_cluster_price`, for the same reason
+the facts are: three houses of one Hlubočky parcelling at 9,650,000 / 9,750,000 / 9,850,000 sit
+on six portals, the pairwise filter refuses every ceskereality pair among them, and the group
+still closes through a sixth portal whose 5 % cross-portal slack covers the 2 % between them.
+
 The relation is memoised because the clusterer asks the same question many times: every union
 re-reads the merged member set, and a 32-member group is 496 pairs. A pair the engine never
 scored carries no feature row, so the two image facts simply do not apply to it — the same
@@ -16,7 +21,13 @@ from __future__ import annotations
 from typing import Iterable, Mapping, Sequence
 
 from autodedup.dataset import Listing
-from autodedup.indistinguishable import CLUSTER, distinguishing_facts
+from autodedup.demonstrate import price_conflict
+from autodedup.indistinguishable import (
+    CLUSTER,
+    distinguishing_facts,
+    overlap_days,
+    price_paths_agree,
+)
 from autodedup.settings import Settings
 
 Feats = Mapping[str, tuple[float, bool]]
@@ -47,6 +58,11 @@ class ClusterRelation:
                 # A member the pass cannot read is not a member this rule may refuse.
                 return True
             hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings, CLUSTER)
+            if hit and self._settings.demonstrate_cluster_price:
+                hit = not price_conflict(
+                    a, b, self._settings,
+                    price_paths_agree(a, b, self._settings.d43_price_path_tol),
+                    overlap_days(a, b))
             self._memo[key] = hit
         return hit
 

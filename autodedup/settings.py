@@ -490,6 +490,12 @@ class Settings:
     # list; `development_only` asks for `unit` inside a development and nothing outside one.
     # Every mode is a SUPERSET of `unit`, which is what makes S ⊆ M ⊆ L an identity rather than
     # a measurement.
+    # E157 at CLUSTER grain, price limb only. A group is built transitively, so a pairwise
+    # filter alone lets two co-live prices into one group through a third advert. Only the
+    # price limb travels here: the others already have a fact of their own at this grain, and
+    # only this one has D49's ratio mechanism to keep it away from the co-op share and the
+    # dražba figure.
+    demonstrate_cluster_price: bool = False
     corroboration: str = "off"
     corroboration_body_containment: float = 0.80
     corroboration_min: int = 2
@@ -624,6 +630,8 @@ class Settings:
         # demonstration it refines, or S ⊆ M ⊆ L would stop being an identity (E159).
         if self.corroboration != "off" and not self.demonstrate_identity:
             raise ValueError("corroboration needs demonstrate_identity")
+        if self.demonstrate_cluster_price and not self.demonstrate_identity:
+            raise ValueError("demonstrate_cluster_price needs demonstrate_identity")
         if self.floor_camps_reads not in ("off", "joint", "slack", "strict"):
             raise ValueError(
                 f"floor_camps_reads must be off/joint/slack/strict: {self.floor_camps_reads}"

@@ -195,6 +195,33 @@ def price_demonstrated(
     return _sequential(a, b, settings, overlap)
 
 
+# A co-live price difference WIDER than this is not two units. D49 refused the co-live price
+# contradiction on a mechanism: one Czech advert legitimately carries two prices for one unit at
+# the same time — a Harrachov flat at a freehold 8,350,000 and a co-operative SHARE of 1,670,000,
+# a 357 m² plot at an exekutorská-dražba 5,400 and an asking 17,000. Every one of those is a
+# RATIO, not a margin. Three houses of one Hlubočky parcelling are 9,650,000 / 9,750,000 /
+# 9,850,000 — 2 % apart, co-live for 82 days, one body. The small gap is the neighbouring unit.
+PRICE_COLIVE_MAX_GAP: float = 0.20
+
+
+def price_conflict(
+    a: Listing,
+    b: Listing,
+    settings: Settings,
+    paths_agree: bool,
+    overlap: float | None,
+) -> bool:
+    """Two prices both adverts STATE, never reconciled, and too close to be two prices of one
+    unit. The cluster-grain half of E157's price limb: the pairwise filter stops a promotion,
+    and a group is built transitively, so without this the three Hlubočky houses still meet
+    through a sixth portal whose 5 % cross-portal slack covers the 2 % between them."""
+    if price_demonstrated(a, b, settings, paths_agree, overlap):
+        return False
+    if not (a.price and b.price):
+        return False
+    return rel_diff(float(a.price), float(b.price)) <= PRICE_COLIVE_MAX_GAP
+
+
 def demonstration_gap(
     a: Listing,
     b: Listing,

@@ -40,6 +40,7 @@
  "d43_two_unit_price_tol": 0.005,
  "d43_two_unit_signature": true,
  "d43_two_unit_stated_tol": 0.005,
+ "demonstrate_cluster_price": false,
  "demonstrate_identity": false,
  "demonstrate_price_colive_days": 3.0,
  "demonstrate_price_colive_fraction": 0.25,

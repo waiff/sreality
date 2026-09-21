@@ -15,6 +15,7 @@ import pytest
 from autodedup.dataset import Listing, Location
 from autodedup.decide import demonstration_refusal
 from autodedup.demonstrate import (
+    price_conflict,
     area_demonstrated,
     corroboration_warrant,
     demonstration_gap,
@@ -150,6 +151,20 @@ def test_l_asks_for_no_demonstration_at_all() -> None:
 def test_corroboration_cannot_be_asked_for_without_the_demonstration_it_refines() -> None:
     with pytest.raises(ValueError, match="corroboration needs demonstrate_identity"):
         Settings(corroboration="unit")
+    with pytest.raises(ValueError, match="demonstrate_cluster_price needs"):
+        Settings(demonstrate_cluster_price=True)
+
+
+def test_a_small_co_live_price_gap_is_two_units_and_a_large_one_is_two_prices() -> None:
+    """D49 refused the co-live price CONTRADICTION on a mechanism: one advert legitimately
+    carries a freehold price and a co-operative SHARE at the same time. Every one of its
+    counter-examples is a RATIO. Three Hlubočky houses are 2 % apart for 82 days."""
+    settings = Settings(demonstrate_identity=True, demonstrate_cluster_price=True)
+    near = listing(1, price=9_650_000.0, source="ceskereality")
+    same_project = listing(2, price=9_850_000.0, source="ceskereality")
+    coop_share = listing(3, price=1_670_000.0, source="sreality")
+    assert price_conflict(near, same_project, settings, False, 82.4)
+    assert not price_conflict(listing(4), coop_share, settings, False, 82.4)
 
 
 # --------------------------------------------------------------- E159 the ladder, as it ships
@@ -159,11 +174,15 @@ def test_the_three_arms_are_one_reader_set_and_two_extra_questions() -> None:
     for reader in READERS:
         assert all(row[reader] is True for row in raw.values()), reader
     assert raw["l"]["demonstrate_identity"] is False
-    assert raw["m"]["demonstrate_identity"] is True and raw["m"]["corroboration"] == "two_of"
+    assert raw["m"]["demonstrate_identity"] is True
+    assert raw["m"]["corroboration"] == "development_only"
     assert raw["s"]["demonstrate_identity"] is True and raw["s"]["corroboration"] == "unit"
     changed = {key for key in set(raw["m"]) | set(raw["s"])
                if raw["m"].get(key) != raw["s"].get(key)}
     assert changed == {"corroboration"}
+    # L asks neither extra question, so the cluster-grain price limb is M and S's alone.
+    assert raw["l"]["demonstrate_cluster_price"] is False
+    assert raw["m"]["demonstrate_cluster_price"] is True
 
 
 def test_w16_is_w15_plus_the_readers_and_nothing_else() -> None:
@@ -176,7 +195,7 @@ def test_w16_is_w15_plus_the_readers_and_nothing_else() -> None:
         "d43_body_align_min_ratio", "demonstrate_identity", "demonstrate_price_colive_days",
         "demonstrate_price_colive_fraction", "demonstrate_require_disposition",
         "demonstrate_require_obec", "corroboration", "corroboration_body_containment",
-        "corroboration_min",
+        "corroboration_min", "demonstrate_cluster_price",
     }
     assert Settings.from_json(ROOT / "w16_l.json").demonstrate_identity is False
 
@@ -189,6 +208,7 @@ def test_the_earlier_generations_read_none_of_it() -> None:
             assert getattr(settings, reader) is False, (name, reader)
         assert settings.demonstrate_identity is False
         assert settings.corroboration == "off"
+        assert settings.demonstrate_cluster_price is False
 
 
 def test_the_defaults_are_off_so_an_unset_row_is_g8bs_reading() -> None:
@@ -197,3 +217,4 @@ def test_the_defaults_are_off_so_an_unset_row_is_g8bs_reading() -> None:
         assert getattr(default, reader) is False, reader
     assert default.demonstrate_identity is False
     assert default.corroboration == "off"
+    assert default.demonstrate_cluster_price is False
