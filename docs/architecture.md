@@ -674,7 +674,8 @@ rules. Identify which one a task belongs to before you start.
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
   deal-pipeline control (bookmark; once in, change stage via a native `<select>`, and remove
   behind the panel's two-step confirm — rule #22: no surface removes a card on one click)
-  + a monitoring/collection toggle (rule #18) + **operator notes** (list existing + add a new
+  + a save-to-collection control (rule #18 — the SPA header's "Uložit do kolekce": a checklist of
+  every collection, monitored first) + **operator notes** (list existing + add a new
   one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
   the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA page
   (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
@@ -1365,6 +1366,10 @@ renumber.** Navigate by area:
     renamed or deleted) ships monitoring on. The "add to collection" affordance lives on the
     Browse card (a layers control ADJACENT to the pipeline funnel — rule #22 keeps the funnel the
     sole pipeline affordance), the listing-detail `CurationBlock`, and the Chrome-extension panel.**
+    The panel's control is the SPA header's `CollectionSaveToggle` + `CollectionSaveMenu` reproduced
+    by value (a bookmark button opening a checklist of EVERY collection, monitored ones first and
+    bell-marked); it replaced a one-click "Sledovat" bell that could only reach the single
+    monitoring collection, so the panel and the app now offer the same verb over the same set.
     **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
     existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are

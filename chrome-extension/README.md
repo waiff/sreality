@@ -8,7 +8,7 @@ maxima, remax, mmreality, ceskereality).
 
 - **Detail pages** get a floating panel (closed shadow root). For **any**
   listing we have, it shows a **deal-pipeline control** (bookmark, then change
-  stage / remove), a monitoring/collection toggle, **operator notes** (see the
+  stage / remove), a **save-to-collection** control, **operator notes** (see the
   existing notes + add a new one), and an **"Otevřít v aplikaci"** deep-link to
   that listing's page in our app (`/listing/{sreality_id}`) plus its subject
   facts. For **apartments for sale** it additionally shows the Výnos MF headline +
@@ -32,6 +32,22 @@ maxima, remax, mmreality, ceskereality).
     membership (incl. the current `stage_id`) comes back on the
     `POST /listings/lookup` response and the stage list from `GET /pipeline/stages`.
     Hidden only while a freshly-scraped listing has no property yet (a few minutes).
+  - The **save-to-collection control** is property-grain (rule #18) and is the
+    SPA listing header's "Uložit do kolekce": it reads **"Uložit do kolekce"**
+    while the property is in no collection and **"V kolekci"** /
+    **"V kolekcích · N"** once it is (hovering names them). A click opens a
+    checklist of **every** collection, monitored ones first and bell-marked,
+    where one click adds or removes the property through the same bearer-gated
+    `POST/DELETE /collections/{id}/properties` the SPA uses. Membership rides on
+    `POST /listings/lookup` (`collection_ids`); the list comes from
+    `GET /collections` and is re-read whenever the checklist opens, so a
+    collection made in the app appears without reloading the portal page.
+    Creating, renaming and monitoring settings stay in the app ("Spravovat
+    kolekce →"). It replaced a one-click "Sledovat" bell that could only reach
+    the single monitoring collection.
+  - The panel **scrolls** when it is taller than the window (it is pinned to
+    the bottom edge and grows upward), keeping its scroll position across
+    re-renders.
   - The **hide control** ("Skrýt" / "Skryto", migration 536) dismisses the
     property from the app's discovery surfaces (Browse, notifications) and undoes
     it, one click either way, through the same `POST/DELETE /dismissals` the SPA's

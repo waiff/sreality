@@ -452,6 +452,29 @@ deal closed into a terminal stage can be dismissed.
   covers free text today), and an "only dismissed" review lens if the reveal
   proves too coarse for reviewing the pile.
 
+### Phase U-EXT-COLL: Every collection from the extension panel (done, 2026-09-21)
+Operator ask: use any collection from the portal page the way the app's
+listing page does. The panel could only reach ONE collection — a "Sledovat"
+bell hard-wired to the system monitoring collection (else the first monitored
+one); every other collection needed a trip to the app.
+- The bell is replaced by the SPA header's control reproduced by value
+  (`CollectionSaveToggle` + `CollectionSaveMenu`): "Uložit do kolekce" /
+  "V kolekci" / "V kolekcích · N", opening a checklist of every collection,
+  monitored first and bell-marked, one click to add or remove. Same routes as
+  the SPA; no API change, no migration.
+- The list is re-read whenever the checklist opens (it was cached for the life
+  of the tab, so a collection made in the app never appeared), and both
+  account-scoped caches (collections, stages) are dropped on sign-out.
+- Two panel-wide fixes the checklist needed: the panel now scrolls when taller
+  than the window (pinned to the bottom edge, it grew off the top of short
+  screens), keeping its scroll position across re-renders; and focus survives a
+  re-render again — current Chrome fires `blur` on a removed element, which had
+  silently disabled the panel's focus restore (the note box too).
+- Verified by driving the built `content.js` in headless Chromium with mocked
+  `chrome.*` APIs (35 checks: order, writes, revert on error, keyboard,
+  Escape, a 620px window). Not built: creating a collection from the panel
+  (the app's listing page doesn't either — "Spravovat kolekce →" links there).
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

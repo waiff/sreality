@@ -17,9 +17,9 @@ one call it already makes — the toggle then writes through the existing
 bearer-gated `POST/DELETE /pipeline/cards` (the same path the SPA uses). The
 pipeline is property-grain, so membership is read off `l.property_id`. It
 likewise returns the property's **collection memberships** (`collection_ids`,
-rule #18) so the panel's one-click monitoring toggle knows whether the property
-is already in the monitoring collection, writing through the existing
-bearer-gated `POST/DELETE /collections/{id}/properties`. And whether the caller
+rule #18) so the panel's save-to-collection control knows which collections the
+property is already in, writing through the existing bearer-gated
+`POST/DELETE /collections/{id}/properties`. And whether the caller
 has **dismissed** the property (`dismissed`, migration 536), for the panel's
 hide toggle, which writes through `POST/DELETE /dismissals`.
 
@@ -300,7 +300,7 @@ def lookup_portal_listings(
             else None
         )
         # Collection memberships are property-grain (rule #18) — same NULL-until-
-        # attached posture as pipeline above; the panel's monitoring toggle reads it.
+        # attached posture as pipeline above; the panel's save-to-collection control reads it.
         entry["collection_ids"] = (
             list(acct.get("collection_ids") or []) if row["property_id"] is not None else None
         )

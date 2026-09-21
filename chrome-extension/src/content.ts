@@ -149,10 +149,19 @@ interface PanelState {
   pipelineConfirmRemove: boolean;
   /* Operator-curated stage list for the stage `<select>` (null = not loaded). */
   stages: PipelineStage[] | null;
-  /* Operator-curated collection list for the monitoring toggle (null = not loaded). */
+  /* The caller's collections, for the save-to-collection checklist (null = not
+   * loaded). */
   collections: ExtCollection[] | null;
-  /* True while a collection add/remove is in flight (disables the control). */
+  /* True once every retry of the collection-list read failed while there was no
+   * list to show — the checklist says so instead of "Načítám…" forever. */
+  collectionsFailed: boolean;
+  /* True while the checklist under the action bar is open. */
+  collectionsOpen: boolean;
+  /* True while a collection add/remove is in flight (disables the checklist). */
   collectionBusy: boolean;
+  /* The last add/remove failure, shown inside the checklist beside the row the
+   * operator just clicked — not at the foot of the panel. */
+  collectionError: string | null;
   /* True while a dismiss / undo is in flight (disables the control). */
   dismissBusy: boolean;
   /* The property's operator notes (null = not loaded). Per-property, not cached. */
@@ -298,30 +307,52 @@ function withCollections(
   return { ...prev, listing: { ...prev.listing, collection_ids } };
 }
 
-/* Pick the single collection the one-click monitoring toggle targets: the
- * system "monitoring" collection if present (`is_system`), else the first
- * monitoring-enabled collection. null = the operator hasn't set monitoring up,
- * so the toggle renders nothing. */
-function monitoringTarget(collections: ExtCollection[] | null): ExtCollection | null {
-  if (collections == null) return null;
-  return (
-    collections.find((c) => c.is_system)
-    ?? collections.find((c) => c.monitoring_enabled)
-    ?? null
+/* The trigger's name and the checklist's, in the SPA's words
+ * (CollectionSaveMenu's COLLECTION_SAVE_LABEL) — one verb on both surfaces. */
+const COLLECTION_SAVE_LABEL = 'Uložit do kolekce';
+const COLLECTION_MENU_ID = 'collection-menu';
+
+/* The checklist's order, the SPA menu's: monitored collections first, then by
+ * name. Never the server's order — GET /collections sorts by updated_at, which
+ * every add/remove bumps, so the row just clicked would jump to the top. */
+function sortCollections(collections: ExtCollection[]): ExtCollection[] {
+  return [...collections].sort(
+    (a, b) =>
+      Number(b.monitoring_enabled) - Number(a.monitoring_enabled)
+      || a.name.localeCompare(b.name),
   );
 }
 
-/* A bell glyph for the monitoring affordance — DISTINCT from the funnel so the
- * two adjacent controls read differently (the funnel = deal pipeline, the bell =
- * watch / monitoring). Filled body = being monitored. Hand-coded inline SVG (no
- * React import — separate territory), like funnelIconSvg above. */
-function bellIconSvg(filled: boolean): string {
+/* The collection list as the panel draws it — compared this way rather than as
+ * whole API rows, which also carry an `updated_at` that every add/remove bumps
+ * (no reason to redraw anything). */
+function collectionsKey(collections: ExtCollection[]): string {
+  return JSON.stringify(
+    sortCollections(collections).map((c) => [c.id, c.name, c.monitoring_enabled]),
+  );
+}
+
+/* The SPA's <CollectionMark> (a bookmark; filled = in at least one collection)
+ * hand-reproduced — the collection glyph on every surface, and deliberately not
+ * the funnel: collections are many-to-many groupings, the pipeline is the one
+ * deal state (rule #22), and the two must never look alike. */
+function bookmarkIconSvg(filled: boolean): string {
   const f = filled ? 'currentColor' : 'none';
   return (
-    '<svg class="collection-icon" viewBox="0 0 24 24" fill="none" ' +
+    `<svg class="collection-icon" viewBox="0 0 16 16" fill="${f}" ` +
+    'stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M4 2.5 H12 V13.5 L8 10.75 L4 13.5 Z" stroke-linecap="round"/></svg>'
+  );
+}
+
+/* The bell that marks a MONITORED collection in the checklist (the SPA menu's
+ * BellGlyph): membership there is what turns into change alerts. */
+function bellIconSvg(): string {
+  return (
+    '<svg class="coll-bell-icon" viewBox="0 0 24 24" fill="none" ' +
     'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
     'stroke-linejoin="round" aria-hidden="true">' +
-    `<path d="M6 9 a6 6 0 0 1 12 0 c0 5 1.5 6.5 2.5 7.5 H3.5 C4.5 15.5 6 14 6 9 Z" fill="${f}"/>` +
+    '<path d="M6 9 a6 6 0 0 1 12 0 c0 5 1.5 6.5 2.5 7.5 H3.5 C4.5 15.5 6 14 6 9 Z"/>' +
     '<path d="M10 20 a2 2 0 0 0 4 0"/></svg>'
   );
 }
@@ -609,7 +640,9 @@ function mountPanel(): {
   panel.className = 'panel';
   shadow.appendChild(panel);
 
-  let lastFocusedKey: 'rent' | 'cost' | 'price' | 'renovation' | 'note' | 'note-edit' | null = null;
+  let lastFocusedKey:
+    | 'rent' | 'cost' | 'price' | 'renovation' | 'note' | 'note-edit'
+    | 'coll-toggle' | `coll-${number}` | null = null;
 
   /* The ledger header band: a small copper index-mark + product wordmark, and
    * the close control. The wordmark is the shared product brand (APP_NAME) —
@@ -727,8 +760,27 @@ function mountPanel(): {
     return s;
   }
 
+  /* Every state change rebuilds the panel wholesale (build below), which would
+   * snap both scrollers — the panel itself and the collection checklist — back
+   * to the top on every click in them. Keep where the operator was. */
   const render = (state: PanelState): void => {
+    const panelTop = panel.scrollTop;
+    const listTop = panel.querySelector<HTMLElement>('.coll-list')?.scrollTop ?? 0;
+    build(state);
+    panel.scrollTop = panelTop;
+    const list = panel.querySelector<HTMLElement>('.coll-list');
+    if (list != null) list.scrollTop = listTop;
+  };
+
+  const build = (state: PanelState): void => {
+    /* Chrome fires `blur` on a focused element as it is REMOVED, so clearing
+     * the panel runs that element's blur handler, which forgets lastFocusedKey
+     * — and the restore at the end of the build then has nothing to restore
+     * (typing in the note box lost focus whenever a background load re-rendered
+     * the panel). A removal is not the operator leaving the field: keep it. */
+    const keepFocusKey = lastFocusedKey;
     panel.innerHTML = '';
+    lastFocusedKey = keepFocusKey;
     /* Minimized collapses every phase to the tiny bar EXCEPT error (a failure
      * should stay fully visible). The minimize control itself only shows once
      * there's a full panel worth collapsing (active phase). */
@@ -789,7 +841,7 @@ function mountPanel(): {
         `[data-key="${lastFocusedKey}"]`,
       );
       if (target != null) {
-        target.focus();
+        target.focus({ preventScroll: true });  // render() restores the scroll itself
         const v = target.value;
         try { target.setSelectionRange(v.length, v.length); } catch { /* */ }
       }
@@ -856,10 +908,11 @@ function mountPanel(): {
     const row = document.createElement('div');
     row.className = 'actions-bar';
     renderPipelineToggle(row, state);       // the funnel — sole pipeline affordance (rule #22)
-    renderMonitoringToggle(row, state);     // separate, adjacent collections/monitoring control
+    renderCollectionToggle(row, state);     // save to any collection (rule #18)
     renderDismissToggle(row, state);        // hide from discovery (migration 536)
     renderAppLink(row, state);
     if (row.childElementCount > 0) body.appendChild(row);
+    renderCollectionMenu(body, state);      // the checklist opens full-width under the row
   }
 
   function renderAppLink(container: HTMLElement, state: PanelState): void {
@@ -991,60 +1044,177 @@ function mountPanel(): {
     }
   }
 
-  /* Collections / monitoring control for the listing's property (rule #18) — a
-   * SEPARATE, adjacent affordance to the pipeline funnel (rule #22: the funnel
-   * is the sole pipeline control, never merged with this). One-click monitoring:
-   * out of the monitoring collection → a "Sledovat" bell button; in → a filled
-   * "Sledováno" pill with a ✕ to stop. Property-grain, shown only when we have a
-   * property AND the operator has a monitoring collection set up. */
-  function renderMonitoringToggle(container: HTMLElement, state: PanelState): void {
+  /* The save-to-collection control for the listing's property (rule #18) — the
+   * SPA listing header's CollectionSaveToggle: "Uložit do kolekce" while the
+   * property is in no collection, "V kolekci" / "V kolekcích · N" once it is,
+   * and a click opens the checklist of EVERY collection below the row. It
+   * replaced a one-click "Sledovat" bell that could only reach one hard-picked
+   * collection; the monitored collections now lead that checklist, bell-marked,
+   * exactly as in the app. A separate affordance from the pipeline funnel
+   * (rule #22). Neutral while unsaved: copper is the pipeline's accent, and only
+   * the SAVED state borrows the soft copper tint. */
+  function renderCollectionToggle(container: HTMLElement, state: PanelState): void {
     const l = state.listing;
     if (l == null || !l.found || l.property_id == null) return;
-    const target = monitoringTarget(state.collections);
-    if (target == null) return;  // not loaded yet, or no monitoring collection
-    const inColl = l.collection_ids?.includes(target.id) ?? false;
+    const memberIds = l.collection_ids ?? [];
+    const count = memberIds.length;
 
-    if (!inColl) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'collection-toggle';
-      btn.disabled = state.collectionBusy;
-      btn.setAttribute('aria-pressed', 'false');
-      btn.title = `Sledovat (${target.name})`;
-      btn.innerHTML = bellIconSvg(false);
-      const label = document.createElement('span');
-      label.textContent = 'Sledovat';
-      btn.appendChild(label);
-      btn.onclick = () => { void onToggleMonitoring(); };
-      container.appendChild(btn);
-      return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'collection-toggle' + (count > 0 ? ' collection-toggle--saved' : '');
+    btn.dataset.key = 'coll-toggle';
+    btn.setAttribute('aria-expanded', String(state.collectionsOpen));
+    if (state.collectionsOpen) btn.setAttribute('aria-controls', COLLECTION_MENU_ID);
+    /* No aria-label: the visible text IS the name (the SPA's label-in-name rule).
+     * The verb and — once the list is loaded — WHICH collections live in the
+     * title, so a hover answers "in what?" without opening the checklist. */
+    const names = (state.collections ?? [])
+      .filter((c) => memberIds.includes(c.id))
+      .map((c) => c.name);
+    btn.title = count === 0
+      ? COLLECTION_SAVE_LABEL
+      : names.length > 0
+        ? `${COLLECTION_SAVE_LABEL} — ${names.join(', ')}`
+        : `${COLLECTION_SAVE_LABEL} — v ${count} ${count === 1 ? 'kolekci' : 'kolekcích'}`;
+    btn.innerHTML = bookmarkIconSvg(count > 0);
+    const label = document.createElement('span');
+    label.textContent = count === 0
+      ? COLLECTION_SAVE_LABEL
+      : count === 1 ? 'V kolekci' : `V kolekcích · ${count}`;
+    btn.appendChild(label);
+    const caret = document.createElement('span');
+    caret.className = 'collection-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    caret.textContent = '▾';
+    btn.appendChild(caret);
+    btn.addEventListener('focus', () => { lastFocusedKey = 'coll-toggle'; });
+    btn.addEventListener('blur', () => { if (lastFocusedKey === 'coll-toggle') lastFocusedKey = null; });
+    btn.onclick = () => onToggleCollectionsMenu();
+    btn.onkeydown = (e) => {
+      if (e.key !== 'Escape' || !state.collectionsOpen) return;
+      e.stopPropagation();  // ours, not the portal's (lightboxes close on Escape too)
+      onCloseCollectionsMenu();
+    };
+    container.appendChild(btn);
+  }
+
+  /* The checklist the save control opens — the SPA's CollectionSaveMenu: every
+   * collection as a checkable row, monitored ones first and bell-marked, one
+   * click adds or removes the property. It stays open across clicks (a property
+   * can sit in several collections) and closes from its trigger or Escape. It
+   * opens IN the panel's flow rather than floating over it: the panel re-renders
+   * wholesale on every state change and is pinned to the viewport's bottom
+   * edge, so an inline slip is the shape that survives both. */
+  function renderCollectionMenu(body: HTMLElement, state: PanelState): void {
+    const l = state.listing;
+    if (!state.collectionsOpen || l == null || !l.found || l.property_id == null) return;
+    const memberIds = new Set(l.collection_ids ?? []);
+
+    const menu = document.createElement('div');
+    menu.className = 'coll-menu';
+    menu.id = COLLECTION_MENU_ID;
+    menu.setAttribute('role', 'group');
+    menu.setAttribute('aria-label', COLLECTION_SAVE_LABEL);
+    menu.onkeydown = (e) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      onCloseCollectionsMenu();
+    };
+
+    const eyebrow = document.createElement('p');
+    eyebrow.className = 'coll-eyebrow';
+    eyebrow.textContent = COLLECTION_SAVE_LABEL;
+    menu.appendChild(eyebrow);
+
+    if (state.collections == null) {
+      /* A failed read is NOT an empty one — "no collections yet" would tell an
+       * operator whose collections exist that they have none. */
+      const p = document.createElement('p');
+      p.className = 'coll-state';
+      if (state.collectionsFailed) {
+        p.textContent = 'Kolekce se nepodařilo načíst. ';
+        const retry = document.createElement('a');
+        retry.href = '#';
+        retry.className = 'coll-link';
+        retry.textContent = 'Zkusit znovu';
+        retry.onclick = (e) => { e.preventDefault(); void loadCollections(true); };
+        p.appendChild(retry);
+      } else {
+        p.textContent = 'Načítám kolekce…';
+        p.classList.add('note--loading');
+      }
+      menu.appendChild(p);
+    } else if (state.collections.length === 0) {
+      const p = document.createElement('p');
+      p.className = 'coll-state';
+      p.textContent = 'Zatím nemáte žádnou kolekci.';
+      menu.appendChild(p);
+    } else {
+      const list = document.createElement('ul');
+      list.className = 'coll-list';
+      for (const c of sortCollections(state.collections)) {
+        const member = memberIds.has(c.id);
+        const li = document.createElement('li');
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'coll-row' + (member ? ' coll-row--member' : '');
+        row.disabled = state.collectionBusy;
+        row.setAttribute('aria-pressed', String(member));
+        const key = `coll-${c.id}` as const;
+        row.dataset.key = key;
+        row.addEventListener('focus', () => { lastFocusedKey = key; });
+        row.addEventListener('blur', () => { if (lastFocusedKey === key) lastFocusedKey = null; });
+
+        const box = document.createElement('span');
+        box.className = 'coll-check';
+        box.setAttribute('aria-hidden', 'true');
+        box.textContent = '✓';
+        row.appendChild(box);
+
+        const name = document.createElement('span');
+        name.className = 'coll-name';
+        name.textContent = c.name;
+        name.title = c.name;
+        row.appendChild(name);
+
+        if (c.monitoring_enabled) {
+          const bell = document.createElement('span');
+          bell.className = 'coll-bell';
+          bell.title = 'Sledovaná — upozorní na změny';
+          bell.innerHTML = bellIconSvg();
+          row.appendChild(bell);
+        }
+
+        row.onclick = () => { void onToggleCollection(c.id); };
+        li.appendChild(row);
+        list.appendChild(li);
+      }
+      menu.appendChild(list);
     }
 
-    const pill = document.createElement('div');
-    pill.className = 'collection-pill' + (state.collectionBusy ? ' collection-pill--busy' : '');
-    pill.title = `Sledováno (${target.name})`;
+    if (state.collectionError != null) {
+      const err = document.createElement('p');
+      err.className = 'coll-error';
+      err.setAttribute('role', 'alert');
+      err.textContent = state.collectionError;
+      menu.appendChild(err);
+    }
 
-    const icon = document.createElement('span');
-    icon.className = 'collection-pill-icon';
-    icon.innerHTML = bellIconSvg(true);
-    pill.appendChild(icon);
+    /* Creating, renaming and monitoring settings stay in the app, as they do on
+     * its listing page — the checklist only files the property. */
+    if (APP_BASE_URL) {
+      const manage = document.createElement('a');
+      manage.className = 'coll-link coll-manage';
+      manage.href = `${APP_BASE_URL}/collections`;
+      manage.target = '_blank';
+      manage.rel = 'noopener';
+      manage.textContent = state.collections?.length === 0
+        ? 'Založit kolekci v aplikaci →'
+        : 'Spravovat kolekce →';
+      menu.appendChild(manage);
+    }
 
-    const label = document.createElement('span');
-    label.className = 'collection-pill-label';
-    label.textContent = 'Sledováno';
-    pill.appendChild(label);
-
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'collection-remove';
-    remove.disabled = state.collectionBusy;
-    remove.title = 'Přestat sledovat';
-    remove.setAttribute('aria-label', 'Přestat sledovat');
-    remove.textContent = '✕';
-    remove.onclick = () => { void onToggleMonitoring(); };
-    pill.appendChild(remove);
-
-    container.appendChild(pill);
+    body.appendChild(menu);
   }
 
   /* Dismiss control for the listing's property (migration 536) — the SPA's
@@ -1846,37 +2016,62 @@ function applyCollectionsIf(
       : prev;
 }
 
-/* Add / remove the listing's property to/from the monitoring collection (rule
- * #18). Optimistic flip → reconcile from the server; revert + surface the reason
- * on failure. Mirrors onTogglePipeline's flow + error handling. Writes through
- * the SAME bearer-gated /collections/{id}/properties routes the SPA uses. */
-async function onToggleMonitoring(): Promise<void> {
+/* Open / close the save-to-collection checklist. Opening also re-reads the
+ * collection list in the background: the list is cached for the life of the
+ * portal tab, so a collection created in the app since then would otherwise
+ * be missing until a reload. The cached rows show meanwhile. */
+function onToggleCollectionsMenu(): void {
+  const opening = !state.collectionsOpen;
+  setState((prev) => ({ ...prev, collectionsOpen: opening, collectionError: null }));
+  if (opening) void loadCollections(true);
+}
+
+/* Escape: close, and hand focus back to the trigger — the row that had it was
+ * just removed with the checklist. */
+function onCloseCollectionsMenu(): void {
+  setState((prev) => ({ ...prev, collectionsOpen: false, collectionError: null }));
+  panelShadow?.querySelector<HTMLElement>('.collection-toggle')?.focus();
+}
+
+/* Add the listing's property to one collection, or take it out (rule #18).
+ * Optimistic flip → reconcile; revert + say why on failure. One write at a
+ * time (collectionBusy disables every row, as the SPA menu does), so `prior`
+ * is always the truth being reverted to. Writes through the SAME bearer-gated
+ * /collections/{id}/properties routes the SPA uses, which resolve a
+ * merged-away property to its survivor server-side. */
+async function onToggleCollection(collectionId: number): Promise<void> {
   const l = state.listing;
-  if (l == null || l.property_id == null) return;
-  const target = monitoringTarget(state.collections);
-  if (target == null) return;
+  if (l == null || l.property_id == null || state.collectionBusy) return;
   const propertyId = l.property_id;
   const prior = l.collection_ids ?? [];
-  const wasIn = prior.includes(target.id);
+  const wasIn = prior.includes(collectionId);
   const optimistic = wasIn
-    ? prior.filter((id) => id !== target.id)
-    : [...prior, target.id];
+    ? prior.filter((id) => id !== collectionId)
+    : [...prior, collectionId];
 
   setState(applyCollectionsIf(
-    propertyId, optimistic, { collectionBusy: true, errorMessage: null },
+    propertyId, optimistic, { collectionBusy: true, collectionError: null },
   ));
 
   const res = await call<CollectionWriteResult>({
     type: wasIn ? 'remove_from_collection' : 'add_to_collection',
-    collection_id: target.id,
+    collection_id: collectionId,
     property_id: propertyId,
   });
 
   if (!res.ok) {
     setState(applyCollectionsIf(
       propertyId, prior,
-      { collectionBusy: false, errorMessage: `Sledování se nepodařilo uložit: ${friendlyDetail(res.detail)}` },
+      {
+        collectionBusy: false,
+        collectionError: wasIn
+          ? `Odebrání z kolekce se nepodařilo: ${friendlyDetail(res.detail)}`
+          : `Uložení do kolekce se nepodařilo: ${friendlyDetail(res.detail)}`,
+      },
     ));
+    /* The likeliest cause is a collection deleted in the app since the list
+     * loaded (a 404) — re-read it so the dead row goes away. */
+    void loadCollections(true);
     return;
   }
 
@@ -1968,15 +2163,18 @@ async function loadStages(): Promise<void> {
   }
 }
 
-/* The operator-curated collection list — loaded once per page, cached at module
- * scope and reused across panel re-opens, exactly like loadStages above (the
- * monitoring toggle needs it to pick a target collection). Same bounded retry +
- * self-heal-on-next-open posture. */
+/* The caller's collection list — loaded once per page, cached at module scope
+ * and reused across panel re-opens, exactly like loadStages above (the save
+ * control names the property's collections from it, the checklist lists it).
+ * `refresh` re-reads it even when cached: opening the checklist does, so a
+ * collection made in the app since the tab loaded shows up. Same bounded retry;
+ * when every attempt fails with nothing to show, the checklist says so and
+ * offers a retry instead of loading forever. */
 let cachedCollections: ExtCollection[] | null = null;
 let collectionsLoading = false;
 
-async function loadCollections(): Promise<void> {
-  if (cachedCollections != null) {
+async function loadCollections(refresh = false): Promise<void> {
+  if (cachedCollections != null && !refresh) {
     if (state.collections == null) {
       setState((prev) => ({ ...prev, collections: cachedCollections }));
     }
@@ -1984,15 +2182,27 @@ async function loadCollections(): Promise<void> {
   }
   if (collectionsLoading) return;  // a load is already in flight — dedupe across opens
   collectionsLoading = true;
+  if (state.collectionsFailed) setState((prev) => ({ ...prev, collectionsFailed: false }));
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await call<ExtCollection[]>({ type: 'list_collections' });
       if (res.ok) {
+        const changed = cachedCollections == null
+          || collectionsKey(cachedCollections) !== collectionsKey(res.data);
         cachedCollections = res.data;
-        setState((prev) => ({ ...prev, collections: cachedCollections }));
+        /* The usual refresh changes nothing, and it lands just as the checklist
+         * opened — a wholesale rebuild then, under the pointer, can swallow the
+         * click the operator is making. Only a real change re-renders. */
+        if (changed || state.collections == null || state.collectionsFailed) {
+          setState((prev) => ({ ...prev, collections: cachedCollections, collectionsFailed: false }));
+        }
         return;
       }
       await new Promise((r) => setTimeout(r, 1500));  // transient blip → back off + retry
+    }
+    // A failed REFRESH keeps the list it already had; only an empty panel fails.
+    if (state.collections == null) {
+      setState((prev) => ({ ...prev, collectionsFailed: true }));
     }
   } finally {
     collectionsLoading = false;
@@ -2170,8 +2380,13 @@ async function onSignIn(): Promise<void> {
 
 async function onSignOut(): Promise<void> {
   await call<undefined>({ type: 'sign_out' });
+  /* Both lists belong to the account that just left. The next sign-in on this
+   * tab may be a different account, which must not be offered these rows. */
+  cachedCollections = null;
+  cachedStages = null;
   setState((prev) => ({
     ...prev, phase: 'signed_out', authEmail: null, listing: null, errorMessage: null,
+    collections: null, stages: null, collectionsOpen: false,
   }));
 }
 
@@ -2195,7 +2410,8 @@ export async function openPanel(
     renovationTouched: false,
     rent: null, costPerM2: null, price: null, renovation: null, busy: false,
     pipelineBusy: false, pipelineConfirmRemove: false, stages: cachedStages,
-    collections: cachedCollections, collectionBusy: false, dismissBusy: false,
+    collections: cachedCollections, collectionsFailed: false, collectionsOpen: false,
+    collectionBusy: false, collectionError: null, dismissBusy: false,
     notes: null, noteBusy: false, quota: null, errorMessage: null,
     noteEditingId: null, noteConfirmDeleteId: null, noteRowBusy: false,
   };
@@ -2257,8 +2473,8 @@ export async function openPanel(
   if (saleApt !== false) void loadQuota();
 
   /* For a property we have, load the stage list so the in-pipeline control can
-   * offer stage changes, and the collection list so the monitoring toggle can
-   * pick a target (both non-blocking; cached across panel opens). */
+   * offer stage changes, and the collection list so the save control can name
+   * the property's collections (both non-blocking; cached across panel opens). */
   if (listing?.found && listing.property_id != null) {
     void loadStages();
     void loadCollections();
