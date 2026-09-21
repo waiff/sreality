@@ -58,8 +58,13 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from autodedup.dataset import Listing
-from autodedup.features import plot_area, rel_diff
-from autodedup.guards import LAND_CATEGORY, area_relation
+from autodedup.features import STREET_GRAIN_RANK, plot_area, rel_diff
+from autodedup.floor_convention import (
+    convention_known,
+    floor_gap,
+    joint_convention_shift,
+)
+from autodedup.guards import LAND_CATEGORY, area_rel_diff, area_relation
 from autodedup.settings import Settings
 from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
@@ -91,6 +96,14 @@ ROOM_CLIP_FLOOR: float = 0.90
 FLOORPLAN_ROOM_CLIP_FLOOR: float = 0.90
 
 FLAT_CATEGORY: str = "byt"
+
+# The only feature slots this module reads. A caller that has to carry a feature row for every
+# pair (the cluster relation does) carries these three and nothing else.
+FEATURE_SLOTS: tuple[str, ...] = (
+    "floorplan_conflict",
+    "tag_room_clip_min2",
+    "phash_tight_matches",
+)
 
 # Every name this module can return, so a caller can tabulate without discovering them.
 FACT_NAMES: tuple[str, ...] = (
@@ -137,17 +150,65 @@ def _present(feats: Feats | None, name: str) -> float | None:
     return float(slot[0])  # type: ignore[arg-type]
 
 
+def _price_points(listing: Listing) -> list[float]:
+    """Every amount this advert has ever printed, the current one included (E134/N2)."""
+    points: list[float] = []
+    for _stamp, price in listing.price_history or ():
+        if price is not None and float(price) > 0.0:
+            points.append(float(price))
+    if listing.price and float(listing.price) > 0.0:
+        points.append(float(listing.price))
+    return points
+
+
+def price_paths_agree(a: Listing, b: Listing, tol: float) -> bool:
+    """True when the two price PATHS ever name the same amount within `tol` (E134/N2).
+
+    A dead advert holds the price of the day it died while the live one moved on, so two
+    current numbers are two moments, not two statements. Paths name a common amount on 90.4 %
+    of known duplicates against 51.4 % of the one-project-two-units hazard class.
+    """
+    left, right = _price_points(a), _price_points(b)
+    if not left or not right:
+        return False
+    return any(rel_diff(x, y) <= tol for x in left for y in right)
+
+
+def _windows_overlap(a: Listing, b: Listing) -> bool:
+    """Both adverts were on sale at the same time, read off the export's own stamps."""
+    starts = (a.first_seen_at, b.first_seen_at)
+    ends = (a.inactive_at or a.last_seen_at, b.inactive_at or b.last_seen_at)
+    if any(value is None for value in starts + ends):
+        return False
+    return starts[0] <= ends[1] and starts[1] <= ends[0]  # type: ignore[operator]
+
+
+def _at_street_grain(listing: Listing) -> bool:
+    rank = listing.location.granularity_rank
+    return rank is not None and rank >= STREET_GRAIN_RANK
+
+
+def tight_photo_match(feats: Feats | None) -> bool:
+    """At least one tight NON-CATALOGUE frame in common (E9 already subtracted the stock)."""
+    return (_present(feats, "phash_tight_matches") or 0.0) >= 1.0
+
+
 def distinguishing_facts(
     a: Listing,
     b: Listing,
     feats: Feats | None = None,
     settings: Settings | None = None,
+    gate: bool = False,
 ) -> list[Fact]:
     """Every stated fact that differs between two adverts. Empty list = indistinguishable.
 
     `feats` is one row of the engine's own feature vector, and is the only way the image facts
     can be read — this module computes no image evidence of its own. Passing None simply drops
     those two facts, which is the correct reading of an advert whose photographs nobody paired.
+
+    `gate=True` is the PERMISSIVE reading of E136: the caller is about to overrule positive
+    evidence the engine already certified (demote a merge, refuse a union), so the area bar is
+    the engine's own merge-grade guard rather than promotion's stricter one.
     """
     cfg = settings or Settings()
     out: list[Fact] = []
@@ -164,7 +225,14 @@ def distinguishing_facts(
     if not category_main_compatible(a.category_main, b.category_main):
         add("category_main", a.category_main, b.category_main)
 
-    if area_relation(a.area_m2, b.area_m2, cfg) not in ("support", "unknown"):
+    # E136/N3: promotion reads the strict three-way verdict; the gate reads the wider bar the
+    # merge already cleared, so a parse gap in the 3-8 % band cannot split a certified merge.
+    gate_area_tol = cfg.d43_gate_area_tol if gate else None
+    if gate_area_tol is not None:
+        gap = area_rel_diff(a.area_m2, b.area_m2)
+        if gap is not None and gap > gate_area_tol:
+            add("area", a.area_m2, b.area_m2)
+    elif area_relation(a.area_m2, b.area_m2, cfg) not in ("support", "unknown"):
         add("area", a.area_m2, b.area_m2)
 
     areas_a = stated_areas(a.description, a.area_m2)
@@ -177,15 +245,20 @@ def distinguishing_facts(
             and a.disposition != b.disposition):
         add("disposition", a.disposition, b.disposition)
 
-    if a.floor is not None and b.floor is not None:
-        delta = abs(a.floor - b.floor)
-        # A one-floor gap means two different things on the two sides of a portal boundary, so
-        # it counts only within one portal — `features.floor_stated_conflict`, same rule.
-        if delta >= 2 or (delta == 1 and a.source is not None and a.source == b.source):
+    # E133/N1: the floor gap with the portal's ground-floor convention taken out. Where the
+    # camps place BOTH sources the residual gap is real and any of it is a fact; where a camp
+    # is unknown (bazos posts both ways) a one-floor gap stays the vocabulary difference it is
+    # on 45 % of cross-portal known duplicates. With no camp table this is g7's rule exactly.
+    gap = floor_gap(cfg.floor_camps, a.source, a.floor, b.source, b.floor)
+    if gap is not None:
+        known = convention_known(cfg.floor_camps, a.source, b.source)
+        if (gap != 0) if known else (abs(gap) >= 2):
             add("floor", a.floor, b.floor)
 
     if (a.total_floors is not None and b.total_floors is not None
-            and a.total_floors != b.total_floors):
+            and a.total_floors != b.total_floors
+            and not joint_convention_shift(cfg.floor_camps, a.source, a.floor, a.total_floors,
+                                           b.source, b.floor, b.total_floors)):
         add("total_floors", a.total_floors, b.total_floors)
 
     plot_a, plot_b = plot_area(a), plot_area(b)
@@ -193,9 +266,19 @@ def distinguishing_facts(
         add("plot_area", plot_a, plot_b)
 
     if a.price and b.price and a.price > 0 and b.price > 0:
-        gap = rel_diff(float(a.price), float(b.price))
+        price_gap = rel_diff(float(a.price), float(b.price))
         cross = a.source is not None and b.source is not None and a.source != b.source
-        if gap > (PRICE_CROSS_TOL if cross else PRICE_SAME_SOURCE_TOL):
+        over = price_gap > (PRICE_CROSS_TOL if cross else PRICE_SAME_SOURCE_TOL)
+        if cfg.d43_price_path:
+            agree = price_paths_agree(a, b, cfg.d43_price_path_tol)
+            # E134: the momentary gap is excused by an agreeing path; a CONTRADICTION — two
+            # adverts on sale at the same time that never named one another's price — is a
+            # fact at the cross-portal bar whether or not they share a portal.
+            contradiction = (cfg.d43_price_colive_contradiction and not agree
+                             and price_gap > PRICE_CROSS_TOL and _windows_overlap(a, b))
+            if (over and not agree) or contradiction:
+                add("price", a.price, b.price)
+        elif over:
             add("price", a.price, b.price)
 
     # WHERE the advert says the unit is. Only the two coarse keys are read. The finer ones were
@@ -203,7 +286,16 @@ def distinguishing_facts(
     # number on 3.7 %, because one building has several entrances and two portals geocode one
     # advert to two of them — while both catch 2 of 64 hazard-class pairs, which is nothing.
     # The obec never differs on a known duplicate (0 of 1,317) and the street differs on 1.7 %.
-    if (a.location.obec_kod is not None and b.location.obec_kod is not None
+    # E135/M199: the town separates two adverts only when BOTH sides are resolved at street
+    # grain or finer. Over 140 obce, 533 of 22,421 structurally certain duplicates are recorded
+    # under two towns — a village against the district town it is advertised under — and EVERY
+    # one of them has a side known only to the obec or the quarter. Conditioned on both sides
+    # at street grain the cost is 0 of 2,905. The trial cohort cannot see this: it is SELECTED
+    # by obec, so its 0-of-1,317 is a selection effect, not a measurement.
+    obec_reads = not cfg.d43_obec_street_grain_only or (
+        _at_street_grain(a) and _at_street_grain(b)
+    )
+    if (obec_reads and a.location.obec_kod is not None and b.location.obec_kod is not None
             and a.location.obec_kod != b.location.obec_kod):
         add("obec", a.location.obec_name or a.location.obec_kod,
             b.location.obec_name or b.location.obec_kod)
@@ -239,6 +331,91 @@ def indistinguishable(
     b: Listing,
     feats: Feats | None = None,
     settings: Settings | None = None,
+    gate: bool = False,
 ) -> bool:
     """D43's predicate: no stated fact tells these two units apart."""
-    return not distinguishing_facts(a, b, feats, settings)
+    return not distinguishing_facts(a, b, feats, settings, gate)
+
+
+# The nine comparable attributes an operator can check by reading the two adverts. Absence of a
+# fact is cheap when an advert states almost nothing, so this is the direct measure of what the
+# model score was proxying for — and unlike a score it is a sentence: "they state and agree on
+# street and area, and neither contradicts the other".
+AGREEING_ATTRIBUTES: tuple[str, ...] = (
+    "area",
+    "disposition",
+    "floor",
+    "total_floors",
+    "price",
+    "street",
+    "stated_area",
+    "orientation",
+    "room_photo",
+)
+
+
+def agreeing_attributes(
+    a: Listing,
+    b: Listing,
+    feats: Feats | None = None,
+    settings: Settings | None = None,
+) -> list[str]:
+    """Which of `AGREEING_ATTRIBUTES` both adverts STATE and agree on."""
+    cfg = settings or Settings()
+    out: list[str] = []
+    if a.area_m2 and b.area_m2 and area_relation(a.area_m2, b.area_m2, cfg) == "support":
+        out.append("area")
+    if a.disposition and b.disposition and a.disposition == b.disposition:
+        out.append("disposition")
+    # Both floors STATED is the agreement here: whether they read equal is the convention's
+    # business (E133), and the predicate has already refused the pair if the residual is a fact.
+    if a.floor is not None and b.floor is not None:
+        out.append("floor")
+    if (a.total_floors is not None and b.total_floors is not None
+            and (a.total_floors == b.total_floors
+                 or joint_convention_shift(cfg.floor_camps, a.source, a.floor, a.total_floors,
+                                           b.source, b.floor, b.total_floors))):
+        out.append("total_floors")
+    if a.price and b.price:
+        out.append("price")
+    if a.location.street_key and b.location.street_key and (
+        a.location.street_key == b.location.street_key
+    ):
+        out.append("street")
+    areas_a, areas_b = stated_areas(a.description, a.area_m2), stated_areas(b.description,
+                                                                           b.area_m2)
+    if areas_a and areas_b and (areas_a & areas_b):
+        out.append("stated_area")
+    dirs_a, dirs_b = orientations(a.description), orientations(b.description)
+    if len(dirs_a) == 1 and len(dirs_b) == 1 and dirs_a == dirs_b:
+        out.append("orientation")
+    room_clip = _present(feats, "tag_room_clip_min2")
+    if room_clip is not None and room_clip >= ROOM_CLIP_FLOOR:
+        out.append("room_photo")
+    return out
+
+
+def promotion_warrant(
+    a: Listing,
+    b: Listing,
+    feats: Feats | None = None,
+    settings: Settings | None = None,
+) -> str | None:
+    """E131: why this band pair may be promoted, or None when it may not.
+
+    `predicate` is the bare rule — no stated fact, nothing else asked. `agree:<n>` is the
+    evidence rail. `photo` is the rail's alternative: one tight non-catalogue frame in common
+    says the two galleries photographed one home, which is what counting stated fields stands
+    in for — and it does not penalise the portals whose adverts are prose.
+    """
+    cfg = settings or Settings()
+    if distinguishing_facts(a, b, feats, cfg):
+        return None
+    bar = cfg.d43_promote_min_agreeing
+    if bar <= 0:
+        return "predicate"
+    if len(agreeing_attributes(a, b, feats, cfg)) >= bar:
+        return f"agree:{bar}"
+    if cfg.d43_promote_photo_alternative and tight_photo_match(feats):
+        return "photo"
+    return None

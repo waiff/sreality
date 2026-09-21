@@ -1,0 +1,74 @@
+"""E132: D43 read at CLUSTER grain — a property is a set of adverts no stated fact separates.
+
+The pairwise gate is not enough on its own. A group is built transitively, so A-B and B-C can
+each carry no distinguishing fact while A and C differ on the floor; without this limb the
+relaxed arms carry real negatives and bad groups, with it they carry none.
+
+The relation is memoised because the clusterer asks the same question many times: every union
+re-reads the merged member set, and a 32-member group is 496 pairs. A pair the engine never
+scored carries no feature row, so the two image facts simply do not apply to it — the same
+reading `distinguishing_facts(..., feats=None)` gives, and the permissive direction, stated
+here so nobody reads this class as a strict bound.
+"""
+
+from __future__ import annotations
+
+from typing import Iterable, Mapping, Sequence
+
+from autodedup.dataset import Listing
+from autodedup.indistinguishable import distinguishing_facts
+from autodedup.settings import Settings
+
+Feats = Mapping[str, tuple[float, bool]]
+
+
+class ClusterRelation:
+    """`ok(a, b)` = no stated fact separates the two adverts, memoised per unordered pair."""
+
+    __slots__ = ("_listings", "_feats", "_settings", "_memo")
+
+    def __init__(
+        self,
+        listings: Mapping[int, Listing],
+        feats: Mapping[tuple[int, int], Feats] | None = None,
+        settings: Settings | None = None,
+    ) -> None:
+        self._listings = listings
+        self._feats = feats or {}
+        self._settings = settings or Settings()
+        self._memo: dict[tuple[int, int], bool] = {}
+
+    def ok(self, left: int, right: int) -> bool:
+        key = (left, right) if left < right else (right, left)
+        hit = self._memo.get(key)
+        if hit is None:
+            a, b = self._listings.get(key[0]), self._listings.get(key[1])
+            if a is None or b is None:
+                # A member the pass cannot read is not a member this rule may refuse.
+                return True
+            hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings, gate=True)
+            self._memo[key] = hit
+        return hit
+
+    def violating_pair(self, ids: Sequence[int]) -> tuple[int, int] | None:
+        """The first pair of the member set a stated fact separates, in id order."""
+        members = sorted(ids)
+        for index, left in enumerate(members):
+            for right in members[index + 1:]:
+                if not self.ok(left, right):
+                    return (left, right)
+        return None
+
+    def consistent(self, ids: Iterable[int]) -> bool:
+        return self.violating_pair(list(ids)) is None
+
+
+def relation_for(
+    settings: Settings,
+    listings: Mapping[int, Listing],
+    feats: Mapping[tuple[int, int], Feats] | None = None,
+) -> ClusterRelation | None:
+    """The relation when the settings row asks for the limb, else None — one place to ask."""
+    if not settings.d43_cluster_invariant:
+        return None
+    return ClusterRelation(listings, feats, settings)

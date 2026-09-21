@@ -272,6 +272,70 @@ class Settings:
     clip_sample: int = 8
     phash_sample: int = 30
 
+    # ---------------------------------------------------------------- D43 (W14, 2026-09-21)
+    #
+    # The operator's ruling redefines a false merge: two adverts are INDISTINGUISHABLE when no
+    # stated fact tells the units apart, and merging those is the WANTED outcome; a false merge
+    # is a merge ACROSS a stated fact. Every dial below is OFF by default, because g7 must stay
+    # byte-replayable under `settings/w13.json` — `test_g7_replay_parity` pins it.
+    #
+    # E130: the gate. A merge carrying a stated fact is demoted to the band.
+    d43_gate: bool = False
+    # E131: the promotion. A band pair carrying no stated fact is promoted to merge.
+    d43_promote: bool = False
+    # E131's evidence rail: how many comparable attributes both adverts must STATE and AGREE on
+    # before an ABSENCE of facts is allowed to merge them. 0 is the bare predicate (G8-B), 2 is
+    # the rail (G8-A). The predicate is weakest exactly where both adverts say almost nothing,
+    # and this is the direct measure of what the model score was proxying.
+    d43_promote_min_agreeing: int = 0
+    # G8-A2: one tight non-catalogue photo match is an ALTERNATIVE to the attribute count. A
+    # shared frame is the evidence a presence count stands in for, and it does not penalise the
+    # prose portals (bazos) the way counting stated fields does.
+    d43_promote_photo_alternative: bool = False
+    # E132: the CLUSTER-grain invariant. A group is transitive, so a pairwise gate alone lets
+    # A-B and B-C both pass while A and C differ on the floor; without this limb the relaxed
+    # arms carry real negatives and bad groups.
+    d43_cluster_invariant: bool = False
+    # E132's retired limbs. D43 reads both pairwise with a measured tolerance, so keeping them
+    # at cluster grain charges one difference twice — `floor_spread` alone refused 842 of g7's
+    # 858 rejected unions, because two portals disagree about `přízemí`.
+    cluster_floor_spread: bool = True
+    cluster_disposition: bool = True
+    # E133 (N1): the portal ground-floor camps, `source -> level`. Level 1 counts the ground
+    # floor, level 0 does not, and a source absent from the table has no known convention.
+    # DERIVED from data by `floor_convention.measure_camps` — never hard-coded — and an empty
+    # table turns the whole reading off.
+    floor_camps: dict[str, int] = field(default_factory=dict)
+    # E134 (N2): the asking price read as a PATH. Two adverts whose price histories ever name
+    # the same amount are not told apart by a momentary gap; the tolerance is what "the same
+    # amount" means.
+    d43_price_path: bool = False
+    d43_price_path_tol: float = 0.005
+    # E134's other half: two adverts live at the same time whose paths never name one another's
+    # price contradict each other, and that IS a fact even on one portal.
+    d43_price_colive_contradiction: bool = False
+    # E135 (M199): the obec tells two adverts apart only when BOTH sides are resolved at street
+    # grain or finer. Measured over 140 obce: 533 of 22,421 structurally certain duplicates are
+    # recorded under two towns (a village against the district town it is advertised under), and
+    # every one of them has at least one side known only to the obec or the quarter.
+    d43_obec_street_grain_only: bool = False
+    # E136 (N3): the area tolerance is ASYMMETRIC on purpose. Promotion — merging on the ABSENCE
+    # of evidence — reads `area_band_pct` (3%). The gate and the cluster invariant — overruling
+    # positive evidence the engine already certified — read this wider bar, the engine's own
+    # merge-grade guard (`area_reject_pct`, 8%). None = the strict definition on both sides.
+    d43_gate_area_tol: float | None = None
+    # E137: the re-partitioner. A component the invariants cannot make one group is cut into
+    # maximal consistent sub-groups rather than left where greedy arrival order dropped it. Off
+    # = E33/E37's constrained union-find, unchanged.
+    repartition: bool = False
+    repartition_max_rounds: int = 4
+    # E11 as a dial rather than a module constant, so an arm can open it without a monkeypatch.
+    min_evidence_families: int = 2
+    # E27/N4: the batch build loads the operator's permanent negatives. g7 did not — its
+    # `n_must_not_link = 45` is the E61 designator veto set and nothing else — so a pass that
+    # loads none now has to say so out loud instead of looking identical to one that did.
+    operator_must_not_link: bool = True
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -280,6 +344,8 @@ class Settings:
             str(key): (None if value is None else float(value))
             for key, value in dict(self.t_hi_by_stratum).items()
         }
+        self.floor_camps = {str(key): int(value)
+                            for key, value in dict(self.floor_camps).items()}
         self.validate()
 
     def validate(self) -> None:
@@ -313,6 +379,36 @@ class Settings:
             raise ValueError(f"cluster_area_spread must be positive: {self.cluster_area_spread}")
         if self.rare_token_df < 0 or self.text_min_chars < 0:
             raise ValueError("rare_token_df and text_min_chars must not be negative")
+        if self.min_evidence_families < 1:
+            raise ValueError(
+                f"min_evidence_families must be at least 1: {self.min_evidence_families}"
+            )
+        if self.d43_promote_min_agreeing < 0:
+            raise ValueError(
+                f"d43_promote_min_agreeing must not be negative: "
+                f"{self.d43_promote_min_agreeing}"
+            )
+        if not 0.0 < self.d43_price_path_tol < 1.0:
+            raise ValueError(
+                f"d43_price_path_tol must be in (0, 1): {self.d43_price_path_tol}"
+            )
+        if self.d43_gate_area_tol is not None and not (
+            self.area_band_pct <= self.d43_gate_area_tol <= self.area_reject_pct
+        ):
+            # The gate is the PERMISSIVE side of E136: wider than promotion reads, and never
+            # wider than the guard that let the merge through in the first place.
+            raise ValueError(
+                f"d43_gate_area_tol must lie in [area_band_pct, area_reject_pct]: "
+                f"{self.d43_gate_area_tol}"
+            )
+        if self.repartition_max_rounds < 1:
+            raise ValueError(
+                f"repartition_max_rounds must be at least 1: {self.repartition_max_rounds}"
+            )
+        if self.d43_promote_photo_alternative and not self.d43_promote:
+            raise ValueError("d43_promote_photo_alternative needs d43_promote")
+        if set(self.floor_camps.values()) - {0, 1}:
+            raise ValueError(f"floor_camps levels must be 0 or 1: {sorted(set(self.floor_camps.values()))}")
         from autodedup.features import ATTR_KEYS, CONFLATED_ATTR_KEYS, NUMERAL_TOLERANCE
 
         unknown_attrs = sorted(
