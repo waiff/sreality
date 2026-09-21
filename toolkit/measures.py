@@ -520,16 +520,10 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         "as a total is what made mmreality dum read ~5 700 CZK per m².",
     ),
     # -- Python: heal, watch, consume ---------------------------------------
-    RegisteredSite(
-        path="scripts/backfill_idnes_areas.py",
-        arm="unit",
-        hits=1,
-        measure="ppm2",
-        kind=KIND_GUARDS,
-        why="A one-shot repair of the denominator (idnes areas parsed as 403 "
-        "instead of 2403). The literal is the docstring stating what the "
-        "defect did to every per-m² figure computed from those rows.",
-    ),
+    # `scripts/backfill_idnes_areas.py` was registered here until the one re-parse
+    # seam (`scripts/reparse.py`) replaced the heal family. The seam re-derives the
+    # denominator by CALLING the portal's own parser over the stored page, so it
+    # spells no per-m² literal of its own and is not a site.
     RegisteredSite(
         path="scripts/verify_pipeline.py",
         arm="unit",
