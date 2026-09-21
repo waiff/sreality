@@ -2595,3 +2595,66 @@ def test_sreality_probe_seam_stops_on_its_wall_clock_deadline(monkeypatch: Any) 
         assert "wall-clock budget" in str(exc)
     else:  # pragma: no cover - the guard is the point of the test
         raise AssertionError("the seam never tripped its deadline")
+
+
+# --- field_fill_matrix (field capture W1) ----------------------------------
+
+
+class _MatrixConn(_ShapeDriftConn):
+    """`_fetchall` wants transaction() + cursor(); _ShapeDriftConn already has both."""
+
+
+def test_field_fill_matrix_is_registered() -> None:
+    from scripts.verify_pipeline import _CHECKS, check_field_fill_matrix
+
+    assert ("field_fill_matrix", check_field_fill_matrix) in _CHECKS
+
+
+def test_field_fill_matrix_reproduces_the_known_zero_cells() -> None:
+    """The gate this wave is measured by: a cell whose parser reads a key its portal
+    has never emitted is named in the report, on a run that is otherwise green."""
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    out = check_field_fill_matrix(
+        _MatrixConn([(1000, "remax", "has_balcony", 0, 0, 0, None, None, None)]), T)
+    assert out["status"] == "ok"
+    assert {
+        "remax/has_balcony", "mmreality/has_balcony", "ceskereality/has_parking",
+        "ceskereality/garage", "ceskereality/terrace", "ceskereality/parking_lots",
+        "ceskereality/total_floors", "realitymix/has_lift",
+    } <= set(out["details"]["known_zero_cells"])
+
+
+def test_field_fill_matrix_runs_under_the_per_check_statement_timeout() -> None:
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    conn = _MatrixConn([(1000, "remax", "has_balcony", 0, 0, 0, None, None, None)])
+    check_field_fill_matrix(conn, T)
+    assert any("statement_timeout" in s for s in conn.executed)
+    assert any("jsonb_each_text" in s for s in conn.executed)
+
+
+def test_field_fill_matrix_fails_when_a_blessed_cell_collapses() -> None:
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    # idnes `condition` is blessed at 88.7% fill; a parser that stopped writing it.
+    out = check_field_fill_matrix(
+        _MatrixConn([(1000, "idnes", "condition", 0, 0, 0, None, None, None)]), T)
+    assert out["status"] == "fail"
+    assert out["value"] == 1
+    assert "idnes/condition" in out["details"]["offenders"][0]
+
+
+def test_field_fill_matrix_warns_on_a_stale_census(monkeypatch: Any) -> None:
+    """Stale census = a portal could have renamed a key and every gate built on the
+    census would still agree with itself. A warn here, never a calendar-keyed CI red."""
+    import scripts.verify_pipeline as vp
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    monkeypatch.setattr(
+        vp.field_census, "load_censuses",
+        lambda: [{"portal": "remax", "generated_at": "2020-01-01T00:00:00+00:00"}])
+    out = check_field_fill_matrix(
+        _MatrixConn([(1000, "remax", "has_balcony", 0, 0, 0, None, None, None)]), T)
+    assert out["status"] == "warn"
+    assert out["details"]["stale_census"] and "remax" in out["message"]
