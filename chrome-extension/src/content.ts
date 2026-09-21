@@ -299,14 +299,6 @@ function withPipeline(
   return { ...prev, listing: { ...prev.listing, pipeline: membership } };
 }
 
-/* Immutably set the listing's collection memberships on a state update. */
-function withCollections(
-  prev: PanelState, collection_ids: PortalListing['collection_ids'],
-): PanelState {
-  if (prev.listing == null) return prev;
-  return { ...prev, listing: { ...prev.listing, collection_ids } };
-}
-
 /* The trigger's name and the checklist's, in the SPA's words
  * (CollectionSaveMenu's COLLECTION_SAVE_LABEL) — one verb on both surfaces. */
 const COLLECTION_SAVE_LABEL = 'Uložit do kolekce';
@@ -760,27 +752,55 @@ function mountPanel(): {
     return s;
   }
 
-  /* Every state change rebuilds the panel wholesale (build below), which would
-   * snap both scrollers — the panel itself and the collection checklist — back
-   * to the top on every click in them. Keep where the operator was. */
+  /* Every state change rebuilds the panel wholesale (build below). Around it,
+   * keep what a rebuild would otherwise take from the operator mid-action:
+   *   - focus (by data-key) and the caret/selection inside it — so typing in
+   *     the note box or keyboarding down the collection checklist isn't
+   *     interrupted by a background load landing;
+   *   - both scroll positions — the panel's own and the checklist's — which
+   *     would otherwise snap to the top on every click in them. */
   const render = (state: PanelState): void => {
     const panelTop = panel.scrollTop;
     const listTop = panel.querySelector<HTMLElement>('.coll-list')?.scrollTop ?? 0;
+    /* Chrome fires `blur` on a focused element as it is REMOVED, so the clear
+     * inside build() runs its blur handler and forgets lastFocusedKey — which
+     * had silently disabled this restore. Carry the key across, but only while
+     * focus really is in the panel: a key carried after the operator moved on
+     * to the page would pull focus back out of it on some later render. */
+    const active = shadow.activeElement;
+    const focusKey = active != null ? lastFocusedKey : null;
+    const selection = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : null;
+
     build(state);
+
+    lastFocusedKey = focusKey;
+    if (focusKey != null) {
+      const target = shadow.querySelector<HTMLElement>(`[data-key="${focusKey}"]`);
+      target?.focus({ preventScroll: true });  // the scroll is restored below
+      if (target == null || shadow.activeElement !== target) {
+        /* Gone from this render, or disabled: forget it, for the same reason
+         * the carry above is conditional. */
+        lastFocusedKey = null;
+      } else if (
+        (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)
+        && target.selectionStart != null  // null = an input type without a caret
+      ) {
+        const n = target.value.length;
+        target.setSelectionRange(
+          Math.min(selection?.start ?? n, n), Math.min(selection?.end ?? n, n),
+        );
+      }
+    }
+
     panel.scrollTop = panelTop;
     const list = panel.querySelector<HTMLElement>('.coll-list');
     if (list != null) list.scrollTop = listTop;
   };
 
   const build = (state: PanelState): void => {
-    /* Chrome fires `blur` on a focused element as it is REMOVED, so clearing
-     * the panel runs that element's blur handler, which forgets lastFocusedKey
-     * — and the restore at the end of the build then has nothing to restore
-     * (typing in the note box lost focus whenever a background load re-rendered
-     * the panel). A removal is not the operator leaving the field: keep it. */
-    const keepFocusKey = lastFocusedKey;
     panel.innerHTML = '';
-    lastFocusedKey = keepFocusKey;
     /* Minimized collapses every phase to the tiny bar EXCEPT error (a failure
      * should stay fully visible). The minimize control itself only shows once
      * there's a full panel worth collapsing (active phase). */
@@ -833,19 +853,7 @@ function mountPanel(): {
     }
     renderNotes(body, state);  // any listing we have a property for
     if (state.errorMessage != null) body.appendChild(errorLine(state.errorMessage));
-
-    /* Restore focus after a full re-render so typing isn't interrupted (the
-     * estimation inputs AND the note textarea both carry data-key). */
-    if (lastFocusedKey != null) {
-      const target = shadow.querySelector<HTMLInputElement | HTMLTextAreaElement>(
-        `[data-key="${lastFocusedKey}"]`,
-      );
-      if (target != null) {
-        target.focus({ preventScroll: true });  // render() restores the scroll itself
-        const v = target.value;
-        try { target.setSelectionRange(v.length, v.length); } catch { /* */ }
-      }
-    }
+    // Focus + scroll are restored by render(), around this build.
   };
 
   function note(text: string, variant = ''): HTMLElement {
@@ -1158,7 +1166,10 @@ function mountPanel(): {
         const row = document.createElement('button');
         row.type = 'button';
         row.className = 'coll-row' + (member ? ' coll-row--member' : '');
-        row.disabled = state.collectionBusy;
+        /* aria-disabled, not `disabled`: a disabled button can't hold focus, so
+         * the row being saved would drop keyboard focus to the page for the
+         * length of the write. onToggleCollection ignores clicks while busy. */
+        if (state.collectionBusy) row.setAttribute('aria-disabled', 'true');
         row.setAttribute('aria-pressed', String(member));
         const key = `coll-${c.id}` as const;
         row.dataset.key = key;
@@ -2001,20 +2012,35 @@ async function onToggleDismiss(): Promise<void> {
   setState(applyDismissedIf(propertyId, !wasOn, { dismissBusy: false }));
 }
 
-/* Apply a collection-membership update only if the panel STILL represents the
- * property the write was started for — the same identity guard as the pipeline
- * toggle (the panel state is a module global that openPanel replaces wholesale,
- * so a re-open for a different card mid-request must not bleed this result). */
-function applyCollectionsIf(
+/* One collection write, applied as a single add/remove to whatever the panel
+ * shows NOW — never as a whole list captured at click time: the panel can be
+ * re-opened for the same property while the write is in flight (a fresh
+ * lookup, a fresh state), and overwriting that with a stale copy would drop
+ * what was saved since. Guarded by property like the other toggles, so a panel
+ * showing a different property is left alone (the panel state is a module
+ * global that openPanel replaces wholesale). `member` is the membership this
+ * step establishes; `patch` sees the state it lands on. */
+function applyCollectionWriteIf(
   propertyId: number,
-  collection_ids: PortalListing['collection_ids'],
-  patch: Partial<PanelState>,
+  collectionId: number,
+  member: boolean,
+  patch: (prev: PanelState) => Partial<PanelState>,
 ): (prev: PanelState) => PanelState {
-  return (prev) =>
-    prev.listing?.property_id === propertyId
-      ? withCollections({ ...prev, ...patch }, collection_ids)
-      : prev;
+  return (prev) => {
+    const l = prev.listing;
+    if (l == null || l.property_id !== propertyId) return prev;
+    const ids = l.collection_ids ?? [];
+    const next = ids.includes(collectionId) === member
+      ? ids
+      : member ? [...ids, collectionId] : ids.filter((id) => id !== collectionId);
+    return { ...prev, ...patch(prev), listing: { ...l, collection_ids: next } };
+  };
 }
+
+/* Bumped by every collection write. collectionBusy serialises the writes of
+ * one panel, but a write can outlive its panel: one landing after a re-open
+ * must not clear the busy flag of a newer write it knows nothing about. */
+let collectionWriteSeq = 0;
 
 /* Open / close the save-to-collection checklist. Opening also re-reads the
  * collection list in the background: the list is cached for the life of the
@@ -2034,48 +2060,48 @@ function onCloseCollectionsMenu(): void {
 }
 
 /* Add the listing's property to one collection, or take it out (rule #18).
- * Optimistic flip → reconcile; revert + say why on failure. One write at a
- * time (collectionBusy disables every row, as the SPA menu does), so `prior`
- * is always the truth being reverted to. Writes through the SAME bearer-gated
+ * Optimistic, then reconciled; on failure the step is undone and the reason
+ * shown. One write at a time per panel (every row reads busy meanwhile, as in
+ * the SPA menu). Writes through the SAME bearer-gated
  * /collections/{id}/properties routes the SPA uses, which resolve a
  * merged-away property to its survivor server-side. */
 async function onToggleCollection(collectionId: number): Promise<void> {
   const l = state.listing;
   if (l == null || l.property_id == null || state.collectionBusy) return;
   const propertyId = l.property_id;
-  const prior = l.collection_ids ?? [];
-  const wasIn = prior.includes(collectionId);
-  const optimistic = wasIn
-    ? prior.filter((id) => id !== collectionId)
-    : [...prior, collectionId];
+  const add = !(l.collection_ids ?? []).includes(collectionId);
+  const seq = ++collectionWriteSeq;
+  const settled = (): Partial<PanelState> =>
+    seq === collectionWriteSeq ? { collectionBusy: false } : {};
 
-  setState(applyCollectionsIf(
-    propertyId, optimistic, { collectionBusy: true, collectionError: null },
+  setState(applyCollectionWriteIf(
+    propertyId, collectionId, add, () => ({ collectionBusy: true, collectionError: null }),
   ));
 
   const res = await call<CollectionWriteResult>({
-    type: wasIn ? 'remove_from_collection' : 'add_to_collection',
+    type: add ? 'add_to_collection' : 'remove_from_collection',
     collection_id: collectionId,
     property_id: propertyId,
   });
 
   if (!res.ok) {
-    setState(applyCollectionsIf(
-      propertyId, prior,
-      {
-        collectionBusy: false,
-        collectionError: wasIn
-          ? `Odebrání z kolekce se nepodařilo: ${friendlyDetail(res.detail)}`
-          : `Uložení do kolekce se nepodařilo: ${friendlyDetail(res.detail)}`,
-      },
-    ));
+    const message = add
+      ? `Uložení do kolekce se nepodařilo: ${friendlyDetail(res.detail)}`
+      : `Odebrání z kolekce se nepodařilo: ${friendlyDetail(res.detail)}`;
+    /* Say it where it can be seen: in the checklist when it is open, else on
+     * the panel's own error line — it may have been closed mid-write, and an
+     * error inside a closed checklist is a revert nobody is told about. */
+    setState(applyCollectionWriteIf(propertyId, collectionId, !add, (prev) => ({
+      ...settled(),
+      ...(prev.collectionsOpen ? { collectionError: message } : { errorMessage: message }),
+    })));
     /* The likeliest cause is a collection deleted in the app since the list
      * loaded (a 404) — re-read it so the dead row goes away. */
     void loadCollections(true);
     return;
   }
 
-  setState(applyCollectionsIf(propertyId, optimistic, { collectionBusy: false }));
+  setState(applyCollectionWriteIf(propertyId, collectionId, add, settled));
 }
 
 /* Change the deal stage of the in-pipeline property. The SAME audited PATCH the
@@ -2141,6 +2167,12 @@ async function onMoveStage(stageId: number): Promise<void> {
 let cachedStages: PipelineStage[] | null = null;
 let stagesLoading = false;
 
+/* Bumped on sign-out. A list read still in flight then was authorised as the
+ * account that just left: it must neither refill a cache the next account
+ * starts from, nor keep holding the loading flag that would turn that
+ * account's own read away as a duplicate. */
+let sessionGen = 0;
+
 async function loadStages(): Promise<void> {
   if (cachedStages != null) {
     if (state.stages == null) setState((prev) => ({ ...prev, stages: cachedStages }));
@@ -2148,18 +2180,21 @@ async function loadStages(): Promise<void> {
   }
   if (stagesLoading) return;  // a load is already in flight — dedupe across opens
   stagesLoading = true;
+  const gen = sessionGen;
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await call<PipelineStage[]>({ type: 'list_pipeline_stages' });
+      if (gen !== sessionGen) return;
       if (res.ok) {
         cachedStages = res.data;
         setState((prev) => ({ ...prev, stages: cachedStages }));
         return;
       }
       await new Promise((r) => setTimeout(r, 1500));  // transient blip → back off + retry
+      if (gen !== sessionGen) return;
     }
   } finally {
-    stagesLoading = false;
+    if (gen === sessionGen) stagesLoading = false;
   }
 }
 
@@ -2182,10 +2217,12 @@ async function loadCollections(refresh = false): Promise<void> {
   }
   if (collectionsLoading) return;  // a load is already in flight — dedupe across opens
   collectionsLoading = true;
+  const gen = sessionGen;
   if (state.collectionsFailed) setState((prev) => ({ ...prev, collectionsFailed: false }));
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await call<ExtCollection[]>({ type: 'list_collections' });
+      if (gen !== sessionGen) return;
       if (res.ok) {
         const changed = cachedCollections == null
           || collectionsKey(cachedCollections) !== collectionsKey(res.data);
@@ -2199,13 +2236,14 @@ async function loadCollections(refresh = false): Promise<void> {
         return;
       }
       await new Promise((r) => setTimeout(r, 1500));  // transient blip → back off + retry
+      if (gen !== sessionGen) return;
     }
     // A failed REFRESH keeps the list it already had; only an empty panel fails.
     if (state.collections == null) {
       setState((prev) => ({ ...prev, collectionsFailed: true }));
     }
   } finally {
-    collectionsLoading = false;
+    if (gen === sessionGen) collectionsLoading = false;
   }
 }
 
@@ -2379,11 +2417,15 @@ async function onSignIn(): Promise<void> {
 }
 
 async function onSignOut(): Promise<void> {
-  await call<undefined>({ type: 'sign_out' });
-  /* Both lists belong to the account that just left. The next sign-in on this
-   * tab may be a different account, which must not be offered these rows. */
+  /* Both lists belong to the account that is leaving. The next sign-in on this
+   * tab may be a different account, which must not be offered these rows —
+   * nor have them refilled by a read still in flight (see sessionGen). */
+  sessionGen++;
   cachedCollections = null;
   cachedStages = null;
+  collectionsLoading = false;
+  stagesLoading = false;
+  await call<undefined>({ type: 'sign_out' });
   setState((prev) => ({
     ...prev, phase: 'signed_out', authEmail: null, listing: null, errorMessage: null,
     collections: null, stages: null, collectionsOpen: false,

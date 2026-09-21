@@ -470,10 +470,21 @@ one); every other collection needed a trip to the app.
   screens), keeping its scroll position across re-renders; and focus survives a
   re-render again — current Chrome fires `blur` on a removed element, which had
   silently disabled the panel's focus restore (the note box too).
+- An independent review before merge found that re-enabled focus restore could
+  also STEAL focus: a row being saved dropped focus to the page, and when the
+  save landed the panel pulled it back from the portal's search box, so the
+  next Space undid the save (reproduced on the pre-fix build). Now focus is
+  carried only while it is still in the panel, busy rows stay focusable
+  (`aria-disabled`), a write is applied as one add/remove to the CURRENT state
+  (a panel re-opened mid-write keeps newer saves), a failure with the checklist
+  closed surfaces on the panel's error line, and a sign-out invalidates list
+  reads still in flight (`sessionGen`).
 - Verified by driving the built `content.js` in headless Chromium with mocked
-  `chrome.*` APIs (35 checks: order, writes, revert on error, keyboard,
-  Escape, a 620px window). Not built: creating a collection from the panel
-  (the app's listing page doesn't either — "Spravovat kolekce →" links there).
+  `chrome.*` APIs — 44 checks (order, writes, revert on error, keyboard,
+  Escape, a 620px window, and one regression check per review finding, each
+  shown to fail on the pre-fix build). Not built: creating a collection from
+  the panel (the app's listing page doesn't either — "Spravovat kolekce →"
+  links there).
 
 ### Phase U-ME: Manual rental estimates (next)
 

@@ -596,8 +596,8 @@
   transition: background 120ms ease;
 }
 
-.coll-row:hover:not(:disabled) { background: var(--copper-soft); }
-.coll-row:disabled { opacity: 0.6; cursor: wait; }
+.coll-row:hover:not([aria-disabled="true"]) { background: var(--copper-soft); }
+.coll-row[aria-disabled="true"] { opacity: 0.6; cursor: wait; }
 .coll-row:focus-visible { outline: 2px solid var(--copper); outline-offset: -2px; }
 
 .coll-check {
