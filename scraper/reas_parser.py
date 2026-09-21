@@ -30,8 +30,9 @@ rule that is not ours — `min(utility, floor)` on a flat against our usable-fir
 precedence, a 30% area gap on 3% of flats and so a 43% per-m² gap), `histogramPrice`
 (`soldPrice` indexed to today: identity within 12 months, ×1.10–1.28 beyond it) and
 `originalPrice` (corrupt — one observed record carries 1 Kč against a 1,190,000 Kč
-asking price). Seller and broker identity is dropped at parse time for the same reason
-a committed fixture is scrubbed: we do not hold it.
+asking price). Seller and broker identity is dropped at parse time — by key SHAPE, not by
+a list of today's names — for the same reason a committed fixture is scrubbed: we do not
+hold it.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from scraper.area import derive_headline_area
+from scraper.area import MAX_SIDE_AREA_M2, derive_headline_area
 from toolkit.filter_registry import DISPOSITION_OPTIONS
 
 SOURCE = "reas"
@@ -73,11 +74,18 @@ _DISPOSITIONS: frozenset[str] = frozenset(option.value for option in DISPOSITION
 
 _OBJECT_ID_RE = re.compile(r"[0-9a-f]{24}\Z")
 
-# Dropped before the record is read, so they reach neither a column nor `raw`.
+# Dropped before the record is read, so they reach neither a column nor `raw`: the
+# three modelled numbers this module refuses to hold, by name.
 _NEVER_STORED: frozenset[str] = frozenset({
-    "sellerDetails", "companyDetails",
     "displayArea", "histogramPrice", "originalPrice",
 })
+
+# Identity is dropped by SHAPE, not by name. `sellerDetails` and `companyDetails` are
+# what the feed ships today, but `raw` keeps every other key the source invents, so a
+# name-by-name list would quietly start storing the next one (`agentName`, `ownerPhone`).
+_IDENTITY_KEY_RE = re.compile(
+    r"seller|company|agent|broker|contact|phone|email|owner|user", re.IGNORECASE
+)
 
 
 class ReasPayloadError(ValueError):
@@ -124,6 +132,11 @@ class SoldPage:
 
     rows: list[SoldTransaction]
     count: int
+    # What the same cell holds WITHOUT the query's `soldDateRange` window — the source's
+    # own second number, and the only one that can fill the ledger's `source_total`
+    # honestly: `count` equals what a completed walk took, so it can never say how much
+    # of the cell we are not seeing (Olomouc 89 of 625, Praha 1,082 of 7,545).
+    possible_count: int | None
     next_page: int | None
     dropped_broker_reported: int
 
@@ -180,8 +193,13 @@ def parse_sold_payload(payload: Mapping[str, Any]) -> SoldPage:
             dropped += 1
         else:
             rows.append(row)
+    possible_count = result.get("possibleCount")
     return SoldPage(
-        rows=rows, count=count, next_page=next_page, dropped_broker_reported=dropped
+        rows=rows,
+        count=count,
+        possible_count=possible_count if isinstance(possible_count, int) else None,
+        next_page=next_page,
+        dropped_broker_reported=dropped,
     )
 
 
@@ -253,20 +271,25 @@ def _row(record: Mapping[str, Any]) -> SoldTransaction | None:
         ulice_kod=_code(record.get("streetId")),
         photo_urls=_photo_urls(record.get("imagesWithMetadata")),
         source_url=_text(record.get("link")),
-        raw={k: v for k, v in record.items() if k not in _NEVER_STORED},
+        raw={
+            k: v for k, v in record.items()
+            if k not in _NEVER_STORED and not _IDENTITY_KEY_RE.search(k)
+        },
     )
 
 
 def _photo_urls(images: Any) -> list[str]:
-    """The source's own public URLs, in the order the source renders them."""
+    """The source's own public URLs, in the order the source renders them.
+
+    The array's own order IS that order (308/308 records); the `order` key beside it is
+    absent on 60 of them, so sorting on it would invent a cover photo for those.
+    """
     if not isinstance(images, Sequence) or isinstance(images, (str, bytes)):
         return []
-    usable = [
-        image for image in images
+    return [
+        image["original"] for image in images
         if isinstance(image, Mapping) and isinstance(image.get("original"), str)
     ]
-    usable.sort(key=lambda image: image.get("order") if isinstance(image.get("order"), int) else 0)
-    return [image["original"] for image in usable]
 
 
 def _instant(value: Any) -> datetime | None:
@@ -279,7 +302,14 @@ def _instant(value: Any) -> datetime | None:
 
 
 def _number(value: Any) -> float | None:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    """A side-column area, bounded exactly as `PortalAreas` bounds the listings twins.
+
+    0 m² is a form placeholder and a value at `numeric(9,1)`'s ceiling cannot be stored
+    at all; the sold path builds no `PortalAreas`, so the bound has to be applied here.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    return float(value) if 0.0 < value < MAX_SIDE_AREA_M2 else None
 
 
 def _code(value: Any) -> int | None:

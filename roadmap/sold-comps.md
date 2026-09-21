@@ -2,8 +2,9 @@
 
 Opened 2026-09-21. The estimator has never seen a realized price: every comparable it
 reads is an ASKING price, and `lifecycle='delisted'` was documented as a "transacted-price
-proxy" it is not (a delisting is the advertisement ending — migration 453's header says so;
-that claim is deleted in W1). This track adds the missing half as what it actually is.
+proxy" it is not (a delisting is the advertisement ending — migration 453's header, on
+70,130 long-unseen rows: not "probably sold": unknown; that claim is deleted in W1). This
+track adds the missing half as what it actually is.
 
 ## North star
 
@@ -35,9 +36,11 @@ table still honest when it is empty?
   `sold_transactions` + the `sold_transaction_fetches` ledger, RLS-on/no-policy + explicit
   revokes, GiST on `(geom::geography)`), `scraper/reas_parser.py` (pure payload→rows, three
   refusals, broker-reported rows dropped and counted), fixtures + hermetic tests, and the
-  deletion of the false "delisted = closed deals / transacted-price proxy" claim in
-  `toolkit/comparables.py`, `toolkit/filter_registry.py` and `api/schemas.py`. No network,
-  no runtime change, shippable alone.
+  deletion of the false "delisted = closed deals / transacted-price proxy" claim from all
+  four places it is written: `toolkit/comparables.py`, `toolkit/filter_registry.py`,
+  `api/schemas.py` and — the copy the operator actually reads, on `/settings` — the seeded
+  `app_settings.default_lifecycle` description (migration 543). No network, no runtime
+  change, shippable alone; 543 is the one statement to apply.
 - **W2** — `scraper/reas_client.py` (a `BasePortalClient` subclass on a shared rate
   ledger) + the DB writer + CLI `python -m scraper.reas_main --obec <kod> [--dry-run]`.
   One HTML GET per cell at `listPerPage=100`; re-fetch only while `nextPage` is non-null.

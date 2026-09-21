@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from scraper.area import MAX_SIDE_AREA_M2
 from scraper.reas_parser import (
     ReasPayloadError,
     SoldTransaction,
@@ -75,6 +76,15 @@ def test_envelope_is_the_sources_own_numbers_not_derived_from_data():
     assert page.count == 89
     assert page.next_page == 2
     assert len(page.rows) == 11
+
+
+def test_possible_count_is_the_cell_beyond_our_date_window():
+    """`count` is the cell inside the query's `soldDateRange`, which a completed walk
+    takes in full — so it can never say how much the table is NOT seeing. `possibleCount`
+    is the same cell without that window (89 of 625 here, 1,082 of 7,545 in Praha), and
+    it is the only number that can fill the ledger's `source_total` honestly."""
+    assert _page().possible_count == 625
+    assert parse_sold_payload(_payload([])).possible_count is None
 
 
 # --- the refusals -----------------------------------------------------------
@@ -222,6 +232,19 @@ def test_land_area_lands_in_estate_area_and_only_on_houses():
             assert row.estate_area is None, row.source_record_id
 
 
+def test_a_zero_or_unstorable_side_area_is_not_a_measurement():
+    """Every listings parser reaches `usable_area` / `estate_area` through `PortalAreas`,
+    whose construction NULLs a 0 m² form placeholder and anything `numeric(9,1)` cannot
+    hold. The sold path builds no `PortalAreas`, so the same bound is applied where the
+    number is read: a stored 0 would report a 0 m² plot instead of "unknown", and an
+    out-of-range one would kill a whole batch INSERT rather than one record."""
+    record = dict(_record(_OLOMOUC_RECORD), utilityArea=0, landArea=MAX_SIDE_AREA_M2)
+    (row,) = parse_sold_payload(_payload([record])).rows
+    assert row.usable_area is None
+    assert row.estate_area is None
+    assert row.area_m2 is None
+
+
 # --- price, date, point -----------------------------------------------------
 
 
@@ -262,6 +285,19 @@ def test_photo_urls_are_the_sources_own_urls_in_its_own_order():
     assert all(url.startswith("https://") for url in row.photo_urls)
 
 
+def test_the_array_order_is_the_order_even_where_an_image_has_no_order_key():
+    """60 of 308 records carry images with no `order` key. Sorting on it would send those
+    to the front and make a bathroom detail the cover photo; the array is already in
+    render order on 308/308, so it is read as it arrives."""
+    images = [
+        {"original": "https://example.invalid/facade.jpg", "order": 1},
+        {"original": "https://example.invalid/bathroom.jpg"},
+    ]
+    record = dict(_record(_OLOMOUC_RECORD), imagesWithMetadata=images)
+    (row,) = parse_sold_payload(_payload([record])).rows
+    assert row.photo_urls == [image["original"] for image in images]
+
+
 # --- what is never stored ---------------------------------------------------
 
 
@@ -300,6 +336,20 @@ def test_a_record_that_arrives_with_identity_still_loses_it():
     (row,) = parse_sold_payload(_payload([record])).rows
     assert not set(row.raw) & {"sellerDetails", "companyDetails"}
     assert "Novák" not in json.dumps(row.raw, ensure_ascii=False)
+
+
+def test_identity_is_dropped_by_shape_not_by_a_list_of_names():
+    """`raw` keeps every other key the source invents, so a name-by-name denylist would
+    start storing the next identity field the feed grows — and nothing would fail."""
+    record = dict(
+        _record(_OLOMOUC_RECORD),
+        agentName="Jan Novák",
+        ownerPhone="+420 777 123 456",
+        contactEmail="jan@example.invalid",
+    )
+    (row,) = parse_sold_payload(_payload([record])).rows
+    assert not set(row.raw) & {"agentName", "ownerPhone", "contactEmail"}
+    assert row.raw["soldPrice"] == record["soldPrice"]
 
 
 # --- the row IS the table ---------------------------------------------------

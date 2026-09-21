@@ -101,8 +101,9 @@ create index if not exists sold_transactions_geog_gist
 -- One row per (cell, attempt). A ZERO-YIELD fetch writes a row too: "we asked this cell
 -- and it held nothing" is a fact, and it is the only thing that makes an empty result
 -- distinguishable from a lane that never ran. `source_total` is what the source declared
--- the cell holds, against `record_count` for what we took — so the table can always say
--- how much it is NOT seeing.
+-- the cell holds WITHOUT our date window (reas's `possibleCount`), against `record_count`
+-- for what we took — the source's own `count` equals what a completed walk took, so only
+-- the wider number can say how much the table is NOT seeing (Olomouc 89 of 625).
 create table if not exists sold_transaction_fetches (
   id           bigserial   primary key,
   source       text        not null,

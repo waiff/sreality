@@ -70,9 +70,9 @@ class ComparableFilters:
     # The single lifecycle selector. `active` = is_active=true (plus the
     # max_age_days recency gate when set); `delisted` = is_active=false —
     # the ADVERTISEMENT ended, which is not a sale and carries no
-    # transacted price (migration 453's header: absence nominates, the
-    # page decides). Registered sales are their own store,
-    # `sold_transactions`. `all` / None = no is_active gate. Rendered by
+    # transacted price (migration 453's header, on 70,130 long-unseen
+    # rows: not "probably sold": unknown). Registered sales are their own
+    # store, `sold_transactions`. `all` / None = no is_active gate. Rendered by
     # `_lifecycle_where`, the one place Toolkit rule #4's "active"
     # definition lives.
     lifecycle: Literal["active", "delisted", "all"] | None = None

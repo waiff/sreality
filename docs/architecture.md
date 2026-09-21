@@ -399,13 +399,20 @@ nor an ObjectId has no cadastral identity; a `type` outside flat|building is a c
 sold catalogue is byty + domy only, proven by the sold sitemap, by zero parcels in 308 records
 despite the query asking for them, and by the source's own four-member filter enum). Records whose
 transferId is a Mongo ObjectId are the source's **self-reported** ~1%, so they are dropped and
-counted, not stored and not raised on.
+counted, not stored and not raised on. The envelope is read as the source's own two numbers:
+`count`, the cell inside the query's date window (what a completed walk takes, so it can never
+measure what we miss), and `possibleCount`, the same cell without it — the second is what the
+ledger's `source_total` records, so the table can always say how much it is NOT seeing (Olomouc 89
+of 625, Praha 1,082 of 7,545).
 **Deliberately absent, and each for a reason that has been measured:** `displayArea` (the source's
 own headline, `min(utility, floor)` on a flat against our usable-first precedence — a 30% area and
 43% per-m² gap on 3% of flats, in one direction), `histogramPrice` (`soldPrice` indexed to today:
 identity within 12 months, ×1.10–1.28 beyond), `originalPrice` (corrupt — one record carries 1 Kč),
-and seller/broker identity (dropped at parse time). None of the four is in `raw` either, so a future
-session is never one mapping away from the defect. Two more: there is no `price_kind` column (asking
+and seller/broker identity (dropped at parse time by key SHAPE —
+`seller|company|agent|broker|contact|phone|email|owner|user` — not by a list of today's names,
+because `raw` keeps every other key the source invents and would otherwise quietly start storing
+the next one). None of the four is in `raw` either, so a future session is never one mapping away
+from the defect. Two more: there is no `price_kind` column (asking
 vs realized is PROVENANCE, and the table identity is the discriminator) and no widened
 `DISPOSITION_OPTIONS` — the source's `larger` and `atypic` become NULL rather than push two
 sold-only values into Browse, the watchdog matcher and the comparables agent for 0.68% of one
