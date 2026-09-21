@@ -106,7 +106,7 @@ def test_a2_ignored_entries_are_real_and_reasoned() -> None:
 
 def test_a3_no_unmapped_value(censuses: dict[str, dict]) -> None:
     """Every enum value the census records resolves in the vocabulary."""
-    vocabulary.UNMAPPED.clear()
+    vocabulary.take_unmapped()
     for portal, census in sorted(censuses.items()):
         keys = census.get("keys") or {}
         for field in _ENUM_FIELDS:
@@ -125,7 +125,7 @@ def test_a3_no_unmapped_value(censuses: dict[str, dict]) -> None:
     # A refusal ("neuvedeno", "jiné") is a decision and stays silent; only a label
     # NOTHING names is counted, and every one of those is a column cell that would go
     # NULL on the next scrape.
-    unmapped = vocabulary.unmapped_events()
+    unmapped = vocabulary.take_unmapped()
     assert not unmapped, (
         f"{len(unmapped)} live value(s) no vocabulary entry names — map each one or "
         f"declare it a refusal: {unmapped}"

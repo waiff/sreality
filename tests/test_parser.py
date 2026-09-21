@@ -271,19 +271,22 @@ def test_furnished_reads_the_label_not_the_code():
 def test_the_unset_dropdown_is_absence_not_a_value():
     # sreality spells the empty option of every dropdown with a leading dash. It is a
     # declared sentinel, so it yields None WITHOUT being counted as an unmapped label.
-    vocabulary.UNMAPPED.clear()
+    vocabulary.take_unmapped()
     row = parse_listing(_estate(furnished={"name": "- vyber vybavení", "value": 0}))
     assert row["furnished"] is None
-    assert vocabulary.unmapped_events() == []
+    assert vocabulary.take_unmapped() == []
 
 
 def test_a_label_nothing_maps_is_null_and_counted():
-    vocabulary.UNMAPPED.clear()
+    vocabulary.take_unmapped()
     row = parse_listing(_estate(ownership={"name": "Spoluvlastnický podíl", "value": 99}))
     assert row["ownership"] is None
-    assert vocabulary.unmapped_events() == [
+    assert vocabulary.take_unmapped() == [
         ("ownership/sreality/spoluvlastnicky_podil", 1)
     ]
+    # Drained: the always-on worker reads this once per pass, so a label counted on one
+    # pass must not be re-reported on the next.
+    assert vocabulary.take_unmapped() == []
 
 
 def test_amenities_missing_returns_none():

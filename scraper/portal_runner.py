@@ -886,7 +886,7 @@ def run_detail_drain(
         except Exception as exc:
             LOG.warning("DRAIN teardown: conn.close() failed (ignored): %r", exc)
 
-    unmapped = vocabulary.unmapped_events()
+    unmapped = vocabulary.take_unmapped()
     LOG.info(
         "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d errors=%d claimed=%d "
         "unmapped=%d",

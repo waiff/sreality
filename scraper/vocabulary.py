@@ -8,7 +8,7 @@ other half: turning what a portal WROTE into one of those values.
   * `fold` — one diacritic/whitespace/`… stav` normalisation, replacing the nine
     near-identical `_strip_diacritics(...).lower()` chains.
   * `canonical` — ONE `(field, portal label) -> canonical` registry. A label no entry
-    names is NULL **and a counted event** (`unmapped_events`), never a passthrough: the
+    names is NULL **and a counted event** (`take_unmapped`), never a passthrough: the
     passthrough `.get(key, key)` idiom is how 13 `condition` spellings and 15
     `building_type` values reached a column whose filter offers 6 and 8.
   * `disposition` / `energy_rating` — ONE grammar each, replacing nine disposition
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from threading import Lock
 from typing import Iterable, Mapping
 from unicodedata import combining, normalize
 
@@ -150,11 +151,17 @@ _LABELS: dict[str, dict[str, str]] = {
         "statni": "statni", "obecni": "statni", "statni_obecni": "statni",
         "statni_obecni_jine": "statni",
     },
+    # Both stems in both genders: the five deleted `_norm_furnished` matchers keyed on the
+    # substrings "zariz" / "vybav" / "castec", so every inflection a portal renders had to
+    # land here or a label that used to map would start writing NULL.
     "furnished": {
-        "ano": "ano", "zarizeny": "ano", "zarizeno": "ano", "vybaveny": "ano",
-        "ne": "ne", "nezarizeny": "ne", "nezarizeno": "ne", "nevybaveny": "ne",
+        "ano": "ano", "zarizeny": "ano", "zarizeno": "ano",
+        "vybaveny": "ano", "vybaveno": "ano",
+        "ne": "ne", "nezarizeny": "ne", "nezarizeno": "ne",
+        "nevybaveny": "ne", "nevybaveno": "ne",
         "castecne": "castecne", "castecne_zarizeny": "castecne",
         "castecne_zarizeno": "castecne", "castecne_vybaveny": "castecne",
+        "castecne_vybaveno": "castecne",
     },
 }
 
@@ -176,7 +183,12 @@ _PORTAL_LABELS: dict[tuple[str, str], dict[str, str]] = {
     ("realitymix", "ownership"): {"jine": "jine"},
 }
 
+# Per-PASS, not per-process: `take_unmapped` drains it, because the always-on worker calls
+# `run_detail_drain` in one long-lived process, once per source, every pass — a counter that
+# only ever grew would report portal A's stale label on portal B's summary forever. The lock
+# is the drain's parse fan-out (`ThreadPoolExecutor`), where `+= 1` can lose an increment.
 UNMAPPED: Counter[str] = Counter()
+_UNMAPPED_LOCK = Lock()
 
 
 def canonical(field: str, portal: str, label: str | None) -> str | None:
@@ -200,7 +212,8 @@ def canonical(field: str, portal: str, label: str | None) -> str | None:
     if value is not None:
         return value
     if not _is_refusal(field, key):
-        UNMAPPED[f"{field}/{portal}/{key}"] += 1
+        with _UNMAPPED_LOCK:
+            UNMAPPED[f"{field}/{portal}/{key}"] += 1
     return None
 
 
@@ -215,9 +228,12 @@ def _is_refusal(field: str, key: str) -> bool:
             or key.startswith("-") or "vyber" in key or "nezadano" in key)
 
 
-def unmapped_events() -> list[tuple[str, int]]:
-    """`(field/portal/label, count)` for this process, worst first."""
-    return UNMAPPED.most_common()
+def take_unmapped() -> list[tuple[str, int]]:
+    """`(field/portal/label, count)` since the last call, worst first, then reset."""
+    with _UNMAPPED_LOCK:
+        events = UNMAPPED.most_common()
+        UNMAPPED.clear()
+    return events
 
 
 # --- the two grammars ------------------------------------------------------
