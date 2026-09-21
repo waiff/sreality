@@ -98,17 +98,20 @@ table still honest when it is empty?
   generated tool schema; stored watchdog specs and filter presets drop unknown keys SILENTLY, so a
   watchdog pinned to a sub-code would WIDEN; and migration 537's Browse SRF still takes it. The
   prerequisite is `subtype` on the comparables agenda + a stored-blob census — its own program.
-  **`POST /tools/find_comparables` is parked (draft PR) behind an OPERATOR answer**: nothing in the
-  repo calls it, but it is a bearer-gated public route as old as the API, and only the operator
-  knows whether an outside consumer (ClickUp) does. `FindComparablesIn` stays either way — it is
-  the base class of the two surviving comparables bodies.
+  **`POST /tools/find_comparables` STAYS — operator ruling (2026-09-21, PR #1553 closed).** Nothing
+  in the repo calls it, but an outside automation, agent or plugin may; checked on production it
+  answers as it should (200 + the standard envelope, 401 without the token, 422 without the
+  required category). `FindComparablesIn` is the base class of the two other comparables bodies.
   **Honest ledger:** the program is net-ADDITIVE. W0 measured −21 lines (not the ~470 the research
   estimated — the copies were 3–8 lines each), W5 −131; the feature itself is ~+4,500 lines, more
   than half of it tests and fixtures. What was subtracted is paths, not lines: no portal row, no
   listings rows, no queue, no failures/runs table, no link table, no R2 copy, no flag, no hook.
-- **Next** — the operator turns the lane on (Settings → `realtime_sold_comps_interval_seconds`,
-  e.g. 21600). Before that, one SELECT worth running: which live `pipeline_stages` rows carry
-  `is_terminal` — the lane skips closed deals on that flag alone.
+- **The lane is ON** since 2026-09-21: `realtime_sold_comps_interval_seconds = 3600`, set from
+  /settings on the operator's instruction. Hourly, because a town is re-asked only every 35 days
+  either way — an idle tick is one SELECT, and a new pipeline card's town is read within the hour.
+  First pass verified on production: Šumperk, 31 sales in the 24-month window of 233 all-time,
+  12 within 1 km of the pipeline listing. Still worth one SELECT: which live `pipeline_stages`
+  rows carry `is_terminal` — the lane skips closed deals on that flag alone.
 
 ## Standing constraints
 
