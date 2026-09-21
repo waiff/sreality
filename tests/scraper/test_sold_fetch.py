@@ -9,6 +9,7 @@ nothing.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -41,12 +42,19 @@ def _record(**over: Any) -> dict[str, Any]:
     return record
 
 
-def _page(records: list[dict[str, Any]], *, next_page: int | None = None) -> str:
+def _page(
+    records: list[dict[str, Any]],
+    *,
+    next_page: int | None = None,
+    count: int | None = None,
+) -> str:
+    # `count` is the source's total for the whole BOX inside the sold window, not
+    # the page's own length — it is the denominator a truncated walk reports against.
     payload = {"props": {"pageProps": {
         "adsListParams": {"linkedToTransfer": True},
         "adsListResult": {
-            "data": records, "count": len(records), "possibleCount": 625,
-            "nextPage": next_page,
+            "data": records, "count": len(records) if count is None else count,
+            "possibleCount": 625, "nextPage": next_page,
         },
     }}}
     return f'<script id="__NEXT_DATA__">{json.dumps(payload)}</script>'
@@ -100,7 +108,8 @@ def cell(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(sold_db, "obec_cell_box", lambda conn, kod: _BOX)
     monkeypatch.setattr(
         sold_db, "upsert_sold_transactions",
-        lambda conn, rows: captured["upserts"].append(list(rows)) or len(rows),
+        lambda conn, rows: (captured["upserts"].append(list(rows))
+                            or (len(rows), len(rows))),
     )
     monkeypatch.setattr(
         sold_db, "record_fetch",
@@ -119,7 +128,7 @@ def test_a_single_page_cell_asks_once_and_records_one_ok_row(cell):
     assert (out["records"], out["pages"], out["source_total"]) == (1, 1, 625)
     assert cell["ledger"] == [{
         "source": "reas", "obec_kod": 500496, "bbox": _BOX.ewkt, "status": "ok",
-        "record_count": 1, "source_total": 625, "pages": 1,
+        "record_count": 1, "source_total": 625, "pages": 1, "error": None,
     }]
 
 
@@ -137,17 +146,68 @@ def test_the_walk_follows_next_page_until_the_source_says_stop(cell):
     assert cell["ledger"][0]["pages"] == 3
 
 
-def test_the_page_cap_bounds_a_runaway_cell(cell):
-    # Every page claims another one; the cap is what ends the walk, and `pages` in
-    # the ledger is the only tell that it bound.
+def test_the_page_cap_bounds_a_runaway_cell_and_the_ok_row_admits_it(cell):
+    # Every page claims another one; the cap is what ends the walk. The rows taken
+    # are all true and they are not all of them, so the `ok` row carries the
+    # shortfall — a clean `ok` would suppress this cell for 35 days while silently
+    # holding an unknown fraction of it.
     client = _FakeClient({n: _page([_record(mapPointerId=f"{n}_building_{n}")],
-                                   next_page=n + 1) for n in range(1, 10)})
+                                   next_page=n + 1, count=900)
+                          for n in range(1, 10)})
 
     out = sold_fetch.fetch_cell(_FakeConn(), client, 500496, max_pages=4)
 
     assert out["pages"] == 4
     assert [page for _, page in client.asked] == [1, 2, 3, 4]
     assert cell["ledger"][0]["status"] == "ok"
+    assert cell["ledger"][0]["error"] == "truncated: took 4 of 900 in 4 pages"
+    assert out["error"] == cell["ledger"][0]["error"]
+
+
+def test_a_complete_walk_is_an_ok_row_with_no_error_at_all(cell):
+    client = _FakeClient({
+        1: _page([_record(mapPointerId="1_building_1")], next_page=2),
+        2: _page([_record(mapPointerId="2_building_2")]),
+    })
+
+    sold_fetch.fetch_cell(_FakeConn(), client, 500496, max_pages=4)
+
+    assert cell["ledger"][0]["error"] is None
+
+
+def test_a_next_page_that_does_not_advance_ends_the_walk_as_truncated(cell):
+    # A pinned edge cache or a source-side pagination bug: page 2 points back at
+    # itself. Without the progress check the cap would be spent re-fetching one
+    # page, and the ledger would call the result a full cell.
+    client = _FakeClient({
+        1: _page([_record(mapPointerId="1_building_1")], next_page=2),
+        2: _page([_record(mapPointerId="2_building_2")], next_page=2),
+    })
+
+    out = sold_fetch.fetch_cell(_FakeConn(), client, 500496)
+
+    assert [page for _, page in client.asked] == [1, 2]
+    assert out["status"] == "ok"
+    assert "truncated" in cell["ledger"][0]["error"]
+
+
+def test_the_ledger_counts_sales_stored_not_records_parsed(cell, monkeypatch):
+    # The page boundary shifted mid-walk, so one transfer was parsed on both pages.
+    # The upsert dedupes on the natural key; `record_count` must say what was
+    # written, or the ledger over-reports against its own table.
+    monkeypatch.setattr(
+        sold_db, "upsert_sold_transactions",
+        lambda conn, rows: (len({r.source_record_id for r in rows}), 0),
+    )
+    client = _FakeClient({
+        1: _page([_record(mapPointerId="1_building_1")], next_page=2),
+        2: _page([_record(mapPointerId="1_building_1")]),
+    })
+
+    out = sold_fetch.fetch_cell(_FakeConn(), client, 500496)
+
+    assert out["records"] == 1
+    assert cell["ledger"][0]["record_count"] == 1
 
 
 def test_a_zero_yield_cell_still_writes_its_ledger_row(cell):
@@ -220,16 +280,22 @@ def test_a_cell_with_no_polygon_is_skipped_without_a_ledger_row(monkeypatch):
     assert written == []
 
 
-def test_a_failing_ledger_write_never_escapes_the_cell(monkeypatch):
+def test_a_failing_ledger_write_never_escapes_the_cell_but_is_shouted_about(
+        monkeypatch, caplog):
     monkeypatch.setattr(sold_db, "obec_cell_box", lambda conn, kod: _BOX)
 
     def boom(*a: Any, **k: Any) -> None:
         raise RuntimeError("pooler gone")
 
-    monkeypatch.setattr(sold_db, "upsert_sold_transactions", lambda conn, rows: 0)
+    monkeypatch.setattr(
+        sold_db, "upsert_sold_transactions", lambda conn, rows: (0, 0))
     monkeypatch.setattr(sold_db, "record_fetch", boom)
 
-    out = sold_fetch.fetch_cell(
-        _FakeConn(), _FakeClient({1: _page([_record()])}), 500496)
+    with caplog.at_level(logging.ERROR, logger="scraper.sold_fetch"):
+        out = sold_fetch.fetch_cell(
+            _FakeConn(), _FakeClient({1: _page([_record()])}), 500496)
 
     assert out["status"] == "failed"
+    # The cell WAS fetched over HTTP and the ledger does not know, so it will be
+    # re-walked next pass instead of in six hours. This line is the only trace.
+    assert any("left no ledger row" in r.message for r in caplog.records)

@@ -14,7 +14,6 @@ import argparse
 import logging
 
 from scraper import reas_client, sold_db, sold_fetch
-from scraper.reas_parser import SoldTransaction
 
 LOG = logging.getLogger(__name__)
 
@@ -30,14 +29,14 @@ def _parse_bbox(text: str) -> tuple[float, float, float, float]:
     return (sw_lat, sw_lng, ne_lat, ne_lng)
 
 
-def _report(
-    rows: list[SoldTransaction], pages: int, source_total: int | None, dropped: int
-) -> None:
+def _report(walk: sold_fetch.SoldWalk) -> None:
     LOG.info(
-        "SOLD preview records=%d pages=%d source_total=%s dropped=%d",
-        len(rows), pages, source_total, dropped,
+        "SOLD preview records=%d pages=%d count=%s source_total=%s dropped=%d "
+        "truncated=%s",
+        len(walk.rows), walk.pages, walk.count, walk.source_total, walk.dropped,
+        walk.truncated,
     )
-    for row in rows[:3]:
+    for row in walk.rows[:3]:
         LOG.info(
             "  %s %s %s %s %s Kč %s m² (%s) %s",
             row.source_record_id, row.sold_at, row.category_main,
@@ -51,7 +50,6 @@ def main(argv: list[str] | None = None) -> int:
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--obec", type=int, help="RÚIAN obec kód")
     target.add_argument("--bbox", type=_parse_bbox, help="swLat,swLng,neLat,neLng")
-    parser.add_argument("--max-pages", type=int, default=sold_fetch.MAX_PAGES)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if args.bbox and not args.dry_run:
@@ -63,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     client = reas_client.build_client()
 
     if args.bbox:
-        _report(*sold_fetch.walk_bounds(client, args.bbox, max_pages=args.max_pages))
+        _report(sold_fetch.walk_bounds(client, args.bbox))
         return 0
 
     conn = sold_db.connect()
@@ -74,12 +72,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         bounds = (box.sw_lat, box.sw_lng, box.ne_lat, box.ne_lng)
         LOG.info("SOLD cell obec=%s bounds=%s", args.obec, bounds)
-        _report(*sold_fetch.walk_bounds(client, bounds, max_pages=args.max_pages))
+        _report(sold_fetch.walk_bounds(client, bounds))
         return 0
 
-    result = sold_fetch.fetch_cell(
-        conn, client, args.obec, max_pages=args.max_pages
-    )
+    result = sold_fetch.fetch_cell(conn, client, args.obec)
     LOG.info(
         "SOLD cell obec=%s status=%s records=%d new=%d pages=%d source_total=%s "
         "dropped=%d %ss %s",

@@ -68,8 +68,12 @@ def test_the_built_client_shares_one_politeness_budget(monkeypatch):
         lambda source, rate, shared, lease_n: built.append(
             (source, rate, shared, lease_n)) or object(),
     )
-    build_client()
+    client = build_client()
     source, rate, shared, lease_n = built[0]
     assert (source, shared) == ("reas", True)
     assert rate <= 0.2, "one request per five seconds is the politeness budget"
     assert lease_n <= 5, "a cell is a handful of requests, not a drain"
+    # 403 and 429 are RETRYABLE_STATUS, so the base class's default of 3 would ask a
+    # page the site is refusing FOUR times. A 35-day-TTL fact feed does not knock
+    # again after being told no.
+    assert client.max_retries == 1

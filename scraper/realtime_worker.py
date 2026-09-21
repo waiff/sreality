@@ -119,8 +119,7 @@ from typing import Any
 from psycopg.types.json import Jsonb
 
 from scraper import (
-    db, image_storage, portal_factory, portal_runner, reas_client, reas_parser,
-    sold_db, sold_fetch,
+    db, image_storage, portal_factory, portal_runner, sold_db, sold_fetch,
 )
 from scraper.portal import PortalConfig, default_config, load_portal_config
 
@@ -363,6 +362,15 @@ SOLD_COMPS_FIRST_DELAY_SECONDS = 300.0
 # log-once-per-process guard: migration 542's store is absent (a branch database, or
 # main before the apply).
 _SOLD_COMPS_STORE_WARNED = False
+# The lane's own mutual exclusion, INSIDE this process (the location_resolve lane's
+# reason, and this lane has no lease to fall back on). A pass abandoned at
+# LANE_PASS_TIMEOUT_SECONDS keeps running — Python cannot kill the thread — and it
+# has written no ledger row yet, so the freshness subtraction cannot stop the next
+# tick handing the SAME cells to a second walk. Under the rate limiter's 8x penalty
+# factor a five-cell pass can exceed the timeout, which is exactly when a second
+# walk is least welcome. Held for the whole pass.
+_SOLD_COMPS_PASS_LOCK = threading.Lock()
+_SOLD_COMPS_WEDGE_LOGGED = False
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -1696,41 +1704,56 @@ async def _location_refetch_pass(
 def _sold_comps_sync() -> dict[str, Any]:
     """One tick: the stalest pipeline obec cells, fetched from the source and stored.
 
-    No lease and no in-process lock, for the location_refetch lane's reason plus one
-    of its own: the pass is one SELECT and a handful of idempotent cell writes, and a
-    second caller would re-ask cells the ledger has just marked fresh — wasteful, not
-    wrong. `fetch_cell` never raises, so one bad cell costs its own ledger row.
+    No lease (the location_refetch lane's reason: one SELECT and a handful of
+    idempotent cell writes), but one in-process lock — an abandoned pass has written
+    no ledger row, so nothing else can stop the next tick re-walking its cells beside
+    it. `fetch_cell` never raises, so one bad cell costs its own ledger row.
     """
-    global _SOLD_COMPS_STORE_WARNED
+    global _SOLD_COMPS_STORE_WARNED, _SOLD_COMPS_WEDGE_LOGGED
 
     started = time.monotonic()
-    conn = db.connect()
+    if not _SOLD_COMPS_PASS_LOCK.acquire(blocking=False):
+        if not _SOLD_COMPS_WEDGE_LOGGED:
+            _SOLD_COMPS_WEDGE_LOGGED = True
+            LOG.warning(
+                "SOLD_COMPS lane skipped: the previous pass was abandoned and its "
+                "thread is still walking cells")
+        return {"ran": False, "reason": "previous_pass_running",
+                "seconds": round(time.monotonic() - started, 1)}
     try:
-        cells = sold_db.sold_comp_cells(
-            conn, reas_parser.SOURCE, cap=SOLD_COMPS_CELL_CAP)
-        if cells is None:
-            if not _SOLD_COMPS_STORE_WARNED:
-                _SOLD_COMPS_STORE_WARNED = True
-                LOG.warning(
-                    "SOLD_COMPS: sold_transactions is absent on this database; the "
-                    "lane has nothing to write and skips every tick")
-            return {"ran": False, "reason": "store_missing",
-                    "seconds": round(time.monotonic() - started, 1)}
-        results: list[dict[str, Any]] = []
-        if cells:
-            client = reas_client.build_client()
-            results = [sold_fetch.fetch_cell(conn, client, kod) for kod in cells]
-        return {
-            "ran": True,
-            "cells": len(results),
-            "records": sum(r["records"] for r in results),
-            "new": sum(r["new"] for r in results),
-            "failed": sum(1 for r in results if r["status"] == "failed"),
-            "seconds": round(time.monotonic() - started, 1),
-        }
+        conn = db.connect()
+        try:
+            cells = sold_db.sold_comp_cells(
+                conn, sold_fetch.SOURCE, cap=SOLD_COMPS_CELL_CAP)
+            if cells is None:
+                if not _SOLD_COMPS_STORE_WARNED:
+                    _SOLD_COMPS_STORE_WARNED = True
+                    LOG.warning(
+                        "SOLD_COMPS: sold_transactions is absent on this database; "
+                        "the lane has nothing to write and skips every tick")
+                return {"ran": False, "reason": "store_missing",
+                        "seconds": round(time.monotonic() - started, 1)}
+            results: list[dict[str, Any]] = []
+            if cells:
+                client = sold_fetch.build_client()
+                results = [sold_fetch.fetch_cell(conn, client, kod) for kod in cells]
+            return {
+                "ran": True,
+                "cells": len(results),
+                "records": sum(r["records"] for r in results),
+                "new": sum(r["new"] for r in results),
+                "failed": sum(1 for r in results if r["status"] == "failed"),
+                # A cell that could not be boxed writes no ledger row, so if one ever
+                # reaches the lane again the heartbeat — not the ledger — is the only
+                # place it can show. Counted so it can never read as a quiet pass.
+                "skipped": sum(1 for r in results if r["status"] == "skipped"),
+                "seconds": round(time.monotonic() - started, 1),
+            }
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
     finally:
-        with contextlib.suppress(Exception):
-            conn.close()
+        _SOLD_COMPS_PASS_LOCK.release()
 
 
 async def _sold_comps_pass(
@@ -1740,9 +1763,9 @@ async def _sold_comps_pass(
         return
     last = await asyncio.to_thread(_sold_comps_sync)
     LOG.info(
-        "SOLD_COMPS lane cells=%s records=%s new=%s failed=%s %ss",
+        "SOLD_COMPS lane cells=%s records=%s new=%s failed=%s skipped=%s %ss",
         last.get("cells", 0), last.get("records", 0), last.get("new", 0),
-        last.get("failed", 0), last.get("seconds"),
+        last.get("failed", 0), last.get("skipped", 0), last.get("seconds"),
     )
     _record_pass(state, "sold_comps", last)
 

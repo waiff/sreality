@@ -427,16 +427,23 @@ by construction, with no second fetch). `admin_boundaries.id` IS the ČÚZK/RÚI
 directly to `listing_location.obec_kod` and to the source's `municipalityId` — three spellings of one
 number. The work-list (`sold_db.sold_comp_cells`) is a QUERY, not a queue: the obec cells of
 properties carrying ANY account's pipeline card at a non-terminal, non-archived stage, active,
-`byt`/`dum`, with a resolved point — DISTINCT over accounts, minus the cells whose NEWEST
-`sold_transaction_fetches` row is `ok` within 35 days or `failed` within 6 hours. Terminal stages
-leave the REFRESH, never the READ: stopping the re-fetch is the politeness lever, and a closed deal is
-exactly where the stored comps must survive. `sold_fetch.fetch_cell` never raises — every cell attempt
-ends in the ledger, because a cell that failed silently is indistinguishable from a cell that holds no
-sales — and a page the parser REFUSES fails the whole cell rather than storing 90% of it (a
-half-truth in a fact table that nothing could later audit). Politeness: one request per five seconds
-on the shared `portal_rate_state` ledger, an identifying User-Agent, `listPerPage=100`, and a walk
-that follows `nextPage` alone under a 25-page runaway cap — Praha, the one cell that paginates at all,
-is 11 pages. The scheduler is the `sold_comps` worker lane, dark behind one integer
+`byt`/`dum`, with a resolved point, **and an `admin_boundaries` polygon** — DISTINCT over accounts,
+minus the cells whose NEWEST `sold_transaction_fetches` row is `ok` within 35 days or `failed` within
+6 hours. That last join is load-bearing: a cell with no polygon cannot be boxed, so a fetch can only
+skip it, a skip writes no ledger row, and `ORDER BY fetched_at NULLS FIRST` would then re-offer it
+first on every pass for ever. Terminal stages leave the REFRESH, never the READ: stopping the
+re-fetch is the politeness lever, and a closed deal is exactly where the stored comps must survive.
+`sold_fetch.fetch_cell` never raises — every cell attempt ends in the ledger, because a cell that
+failed silently is indistinguishable from a cell that holds no sales — a page the parser REFUSES
+fails the whole cell rather than storing 90% of it (a half-truth in a fact table that nothing could
+later audit), and an `ok` row whose walk was cut short by the page cap or a non-advancing `nextPage`
+says so in `error` (`truncated: took N of M in P pages`), so "we looked" never silently means "we
+looked at part". Politeness: one request per five seconds on the shared `portal_rate_state` ledger,
+an identifying User-Agent, `listPerPage=100`, ONE retry (403/429 are retryable in `portal_base`, and
+a 35-day-TTL fact feed does not knock four times), and a walk that follows `nextPage` alone under a
+25-page runaway cap — Praha, the one cell measured to paginate at all, is 11 pages of its BARE
+envelope, while a cell sends that envelope +5 km, which is why truncation is recorded rather than
+assumed impossible. The scheduler is the `sold_comps` worker lane, dark behind one integer
 (`realtime_sold_comps_interval_seconds`, migration 544, seeded 0) that is cadence AND kill switch: no
 boolean flag, no env var, no workflow YAML. Waves and sequencing: `roadmap/sold-comps.md`.
 

@@ -300,12 +300,11 @@ the selector targets only listings whose resolved kraj (`listing_location.kraj_k
 (`listings.condition_levels_propagated_from` records provenance) before every submit/backfill,
 so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope.
 
-**Images** stay decoupled across four workflows (both halves of the scrape split pass
-`--no-image-downloads`; the drain only records image-URL rows — bytes land in R2 via these jobs).
-sreality comes through their `SQUARE_1800_JPG` template (`res,1800,1800,1|shr,,20|jpg,80`: whole frame,
-≤1800px), an exact-template allowlist, so a stored legacy chain is NORMALISED onto it (only `rot` survives)
-and every row is stamped `rendition` + `stored_width`/`stored_height` (mig 496): **phash/CLIP compare only
-WITHIN a rendition**. Timeout guard = `--image-max-seconds`, NOT the count cap (~11k/hr basis predates it).
+**Images** stay decoupled across four workflows (both halves of the scrape split pass `--no-image-downloads`; the drain only
+records image-URL rows — bytes land in R2 via these jobs). sreality comes through their `SQUARE_1800_JPG` template
+(`res,1800,1800,1|shr,,20|jpg,80`: whole frame, ≤1800px), an exact-template allowlist, so a stored legacy chain is NORMALISED
+onto it (only `rot` survives) and every row is stamped `rendition` + `stored_width`/`stored_height` (mig 496): **phash/CLIP
+compare only WITHIN a rendition**. Timeout guard = `--image-max-seconds`, NOT the count cap (~11k/hr basis predates it).
 - `images.yml` (2-hourly) — THE deep backlog drain across ALL portals, **sharded into 4 parallel jobs**
   (`--image-shard k/4` = the `image_id mod 4` slice), each with its own cap, breaker and runner IP.
 - `images_fresh.yml` (`*/15` + self-chaining via `SCRAPE_CHAIN_TOKEN` while work remains) — newest
@@ -316,17 +315,16 @@ WITHIN a rendition**. Timeout guard = `--image-max-seconds`, NOT the count cap (
   variable — the kill-switch, dispatch always runs) — re-downloads `rendition IS NULL` rows at the master template,
   OVERWRITING each R2 object under its stored key; dead URLs re-resolve from live detail. Final: `REMASTER done …`.
 
-**Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
-while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled
-workflows, so effective cadence is slower; Health liveness/freshness thresholds are **per-portal
-cadence-aware** (`portals.scrape_cadence_minutes`, migration 114): `scraper_health_checks` scales
-liveness warn at 1.5× / fail at 3× the portal's cadence, and freshness warn at 1× / fail at 3×.
-sreality's cadence (60 min, ~hourly real cadence) reproduces the original 90/180 + 60/180; the 6h
-pilots (bazos/bezrealitky/idnes, cadence 360) get proportional thresholds so they aren't falsely
-red between runs. Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long
-run is never killed mid-batch; the next tick queues behind it. Per-category nominations are
-queued immediately after each category's walk, so even a timed-out index walk leaves a
-consistent partial result.
+**Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast, while
+the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled workflows, so effective
+cadence is slower; Health liveness/freshness thresholds are **per-portal cadence-aware**
+(`portals.scrape_cadence_minutes`, migration 114): `scraper_health_checks` scales liveness warn at 1.5× /
+fail at 3× the portal's cadence, freshness warn at 1× / fail at 3×. sreality (cadence 60, ~hourly real)
+reproduces the original 90/180 + 60/180; the 6h pilots (bazos/bezrealitky/idnes, cadence 360) get
+proportional thresholds so they aren't falsely red between runs. Concurrency: each workflow has its own
+group with `cancel-in-progress: false` — a long run is never killed mid-batch, the next tick queues behind
+it. Per-category nominations are queued immediately after each category's walk, so even a timed-out index
+walk leaves a consistent partial result.
 
 The detail-drain writes `scrape_runs` rows too (`run_type='detail'`), but only the **index walk** sets `index_pages>0` — so "last scrape", the liveness check, and reconciliation track the index walk specifically, while the 24h new/updated/error counters sum across the drain's `index_pages=0` rows too (see `scraper_health_checks()`, migration 105). The image backfill (`--images-only`) deliberately writes NO `scrape_runs` row — recording it once polluted liveness/reconciliation with `index_pages=0` noise.
 **The lifecycle around both phases lives in ONE place, `portal_runner.run_phase`** (rule #21; never re-add a per-portal copy): `ended_at` means the phase COMPLETED, so a phase that raises bumps `errors` and deliberately leaves `ended_at` NULL, lighting up both the `stuck` and `err_pct` health arms instead of neither. That same crash path is W3's failure-signature producer (`ops_incidents`, migration 462). **The crash contract, the signature grammar and the log-tail backstop: `references/pipeline-verification.md`.**
@@ -387,15 +385,17 @@ Lanes shipped so far:
   the rest, and a bazos dead ad delists on the same fetch. Heartbeat
   `details.location_refetch.last` = `{candidates, queued, sources:{src:{candidates,queued,backlog}},
   min_age_s, cap, seconds}`; no audit view = skip + one warning.
-- **Sold-comps lane** (sold-comps W2, migration 544) — registered sales from reas.cz (an external
-  FACT feed, NOT a tenth portal) for ≤5 obec cells a pass: the towns where the deal pipeline holds
-  a live card, stalest first, minus cells whose newest `sold_transaction_fetches` row is `ok`
-  within 35 d or `failed` within 6 h. Ships **DARK** behind ONE integer,
-  `realtime_sold_comps_interval_seconds` (seeded 0, editable on /settings) — cadence AND kill
-  switch, no `*_enabled` flag, no env var, no workflow. Cell box = the obec's `admin_boundaries`
-  envelope +5 km; `sold_fetch.fetch_cell` never raises, so every attempt with a box ends in the
-  ledger; 1 req/5 s on the shared rate ledger. Heartbeat `details.sold_comps.last` = `{ran, cells,
-  records, new, failed, seconds}`; no store (pre-migration DB) = `ran: false` + one warning.
+- **Sold-comps lane** (sold-comps W2, migration 544) — registered sales from reas.cz (an external FACT
+  feed, NOT a tenth portal) for ≤5 obec cells a pass: towns where the deal pipeline holds a live card AND
+  the obec has an `admin_boundaries` polygon (an unboxable cell writes no ledger row, so it would sit at
+  the queue's head for ever), stalest first, minus cells whose newest `sold_transaction_fetches` row is
+  `ok` within 35 d or `failed` within 6 h. Ships **DARK** behind ONE integer,
+  `realtime_sold_comps_interval_seconds` (seeded 0, editable on /settings) — cadence AND kill switch, no
+  `*_enabled` flag, no env var, no workflow. Box = that polygon's envelope +5 km; `fetch_cell` never
+  raises, so every attempt with a box ends in the ledger, and an `ok` row whose walk the 25-page cap (or a
+  non-advancing `nextPage`) cut short carries `truncated: …` in `error`; 1 req/5 s + ONE retry on the
+  shared rate ledger; one in-process pass lock. Heartbeat `details.sold_comps.last` = `{ran, cells,
+  records, new, failed, skipped, seconds}`; no store (pre-migration DB) = `ran: false` + one warning.
 
 ## Pipeline verification (migration 274)
 

@@ -85,3 +85,11 @@ table still honest when it is empty?
   that moved, a fifth `type` — and storing the good 90% of such a page would bake a
   half-truth into a fact table with nothing able to say which rows were lost. The cell
   gets a `failed` ledger row carrying the parser's message and is retried in 6 hours.
+- An `ok` ledger row says what it COVERED. A walk the 25-page cap — or a `nextPage` that does
+  not advance — cut short carries `truncated: took N of M in P pages` in `error`, and
+  `record_count` is what the upsert wrote, not what the pages parsed. That row suppresses the
+  cell for 35 days, so a clean `ok` over part of an answer would be the same half-truth by
+  another door, and W3's coverage header would state it as fact.
+- A cell that cannot be BOXED is not work: the work-list joins `admin_boundaries`. A skipped
+  cell writes no ledger row, so `ORDER BY fetched_at NULLS FIRST` would re-offer it at the head
+  of every pass for ever — starving the lane while the heartbeat read perfectly healthy.

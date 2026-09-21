@@ -299,22 +299,36 @@ one `app_settings` integer, `realtime_sold_comps_interval_seconds`, seeded 0 by 
   fail-safe reason, sharpened here: a settings blip must not spend another site's bandwidth.
 - **The work-list is a query, not a queue** (`sold_db.sold_comp_cells`): obec cells of properties
   holding ANY account's pipeline card at a non-terminal, non-archived stage, active, `byt`/`dum`,
-  with a resolved point, minus the cells whose NEWEST ledger row is `ok` within 35 days or `failed`
-  within 6 hours; stalest first, 5 cells a pass. The source republishes a transfer ~30 days after
-  the sale, so 35 days is not a guess — asking sooner cannot find anything new.
+  with a resolved point AND an `admin_boundaries` polygon, minus the cells whose NEWEST ledger row
+  is `ok` within 35 days or `failed` within 6 hours; stalest first, 5 cells a pass. The source
+  republishes a transfer ~30 days after the sale, so 35 days is not a guess — asking sooner cannot
+  find anything new. The boundary join is the one clause that is about the QUEUE rather than the
+  work: an unboxable cell can only be skipped, a skip writes no ledger row, and `NULLS FIRST` would
+  then hand back the same starved cell at the head of every pass for ever.
 - **The cell is the unit, and the ledger is the run record.** The box is the obec's
   `admin_boundaries` envelope widened by 5,000 m (`sold_db.MAX_READ_RADIUS_M` = the read surface's
   largest radius). `sold_fetch.fetch_cell` NEVER raises: ok, failed or skipped, every attempt that
   has a box ends as a `sold_transaction_fetches` row — a cell that failed silently would be
-  indistinguishable from a cell that holds no sales.
-- **No lease, no in-process lock.** One SELECT plus a handful of idempotent cell writes; a second
-  caller would re-ask cells the ledger just marked fresh — wasteful, not wrong. A missing store (a
-  branch database, or `main` before the apply) skips the tick with ONE warning per process.
+  indistinguishable from a cell that holds no sales. And an `ok` row says what it COVERED: a walk
+  the page cap or a non-advancing `nextPage` cut short carries `truncated: took N of M in P pages`
+  in `error`, because a clean `ok` would suppress the cell for 35 days over part of an answer.
+  `record_count` is what the upsert wrote, not what the pages parsed, so it cannot over-report
+  against its own table when a shifting page boundary serves one transfer twice.
+- **No lease, but ONE in-process lock.** The pass is one SELECT plus idempotent cell writes, so no
+  lease — but a pass abandoned at `LANE_PASS_TIMEOUT_SECONDS` keeps running with no ledger row
+  written yet, so freshness cannot stop the next tick re-walking its cells beside it (reachable:
+  under the limiter's 8x penalty factor a five-cell pass can outlast the timeout).
+  `_SOLD_COMPS_PASS_LOCK` is taken non-blocking for the whole pass — the `location_resolve`
+  precedent above. A missing store (a branch database, or `main` before the apply) skips the tick
+  with ONE warning per process.
 - **Politeness.** One request per five seconds on the shared `portal_rate_state` ledger (no seed
   row, no `portal_configs` entry — a non-portal source needs neither), an identifying User-Agent,
-  `listPerPage=100`, and a walk that follows `nextPage` alone under a 25-page runaway cap. Every
-  page is SSR-computed and served `no-store`, so ~1.9 MB is real origin work; Praha, the one cell
-  that paginates at all, is 11 pages.
+  `listPerPage=100`, ONE retry rather than `portal_base`'s three (403/429 are in `RETRYABLE_STATUS`,
+  and this feed's failures already come back in six hours), and a walk that follows `nextPage` alone
+  under a 25-page runaway cap. Every page is SSR-computed and served `no-store`, so ~1.9 MB is real
+  origin work; Praha, the one cell measured to paginate at all, is 11 pages — of its BARE envelope,
+  not of the +5 km box a cell actually sends, which is why the cap records truncation instead of
+  being assumed generous.
 
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as

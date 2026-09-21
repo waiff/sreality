@@ -71,6 +71,12 @@ _OBEC_CELL_BOX_SQL = """
 # Freshness is subtracted from the NEWEST ledger row per (source, obec_kod) — the
 # ledger is append-only, so "the cell's state" is its last row and nothing else. A
 # cell that has never been looked at sorts first.
+#
+# The `admin_boundaries` join is not decoration. A cell with no polygon has no box,
+# so a fetch can only skip it — and a skip writes no ledger row, which leaves
+# `fetched_at` NULL, which sorts that cell FIRST again on the very next pass. One
+# obec missing from the boundary ingest would hold a slot of the cap for ever. A
+# cell that cannot be boxed is not work, so it is never offered.
 _SOLD_COMP_CELLS_SQL = """
     WITH cells AS (
         SELECT DISTINCT ll.obec_kod AS obec_kod
@@ -79,6 +85,8 @@ _SOLD_COMP_CELLS_SQL = """
           ON ps.account_id = pp.account_id AND ps.id = pp.stage_id
         JOIN properties p ON p.id = pp.property_id
         JOIN listing_location ll ON ll.listing_id = p.repr_listing_ref_id
+        JOIN admin_boundaries ab
+          ON ab.level = 'obec' AND ab.id = ll.obec_kod
         WHERE p.status = 'active'
           AND p.is_active
           AND p.category_main IN ('byt', 'dum')
@@ -216,20 +224,23 @@ def sold_comp_cells(
 
 def upsert_sold_transactions(
     conn: psycopg.Connection, rows: Sequence[SoldTransaction]
-) -> int:
-    """Write a cell's rows in one statement. Returns how many were NEW.
+) -> tuple[int, int]:
+    """Write a cell's rows in one statement -> (sales stored, of which new).
 
     Deduped on the natural key first: `ON CONFLICT` cannot touch one row twice in
     a single statement, and a page that carried the same transfer twice would
-    otherwise abort the whole write.
+    otherwise abort the whole write. STORED is what the statement actually wrote,
+    which is what the ledger must count — a walk whose page boundary shifted
+    mid-flight parses one sale twice and would otherwise be recorded as two.
     """
     if not rows:
-        return 0
+        return 0, 0
     deduped: dict[str, SoldTransaction] = {r.source_record_id: r for r in rows}
     payload: list[dict[str, Any]] = [asdict(r) for r in deduped.values()]
     with conn.cursor() as cur:
         cur.execute(_UPSERT_SOLD_SQL, {"rows": Jsonb(payload)})
-        return sum(1 for (inserted,) in cur.fetchall() if inserted)
+        written = cur.fetchall()
+    return len(written), sum(1 for (inserted,) in written if inserted)
 
 
 def record_fetch(

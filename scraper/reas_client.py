@@ -70,5 +70,11 @@ def build_client() -> ReasClient:
     ledger falls back to per-process pacing at the same rate.
     """
     return ReasClient(
-        limiter=build_rate_limiter(SOURCE, RATE_PER_S, shared=True, lease_n=_LEASE_N)
+        limiter=build_rate_limiter(SOURCE, RATE_PER_S, shared=True, lease_n=_LEASE_N),
+        # ONE retry, not the base class's three. 403 and 429 are RETRYABLE_STATUS, so
+        # a page the site is actively refusing would otherwise be asked four times
+        # (and `penalize()` four times) — while a sold cell is a 35-day-TTL fact feed
+        # whose failures already come back in six hours. Nothing here is urgent
+        # enough to justify knocking again after being told no.
+        max_retries=1,
     )

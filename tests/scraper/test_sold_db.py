@@ -140,6 +140,14 @@ def test_the_work_list_means_a_live_card_on_an_active_flat_or_house():
     assert "ll.listing_id = p.repr_listing_ref_id" in sql
 
 
+def test_a_cell_that_cannot_be_boxed_is_never_offered_as_work():
+    # An obec absent from the boundary ingest has no box, so a fetch can only skip
+    # it — writing no ledger row, leaving `fetched_at` NULL, and sorting FIRST again
+    # on every pass for ever. Excluding it in SQL is what bounds that.
+    sql = " ".join(sold_db._SOLD_COMP_CELLS_SQL.split())
+    assert "JOIN admin_boundaries ab ON ab.level = 'obec' AND ab.id = ll.obec_kod" in sql
+
+
 def test_freshness_is_subtracted_from_the_newest_ledger_row_per_cell():
     sql = " ".join(sold_db._SOLD_COMP_CELLS_SQL.split())
     # The ledger is append-only, so a cell's state is its LAST row and nothing else.
@@ -153,7 +161,7 @@ def test_freshness_is_subtracted_from_the_newest_ledger_row_per_cell():
 
 def test_nothing_is_written_for_an_empty_cell():
     conn = _FakeConn()
-    assert sold_db.upsert_sold_transactions(conn, []) == 0
+    assert sold_db.upsert_sold_transactions(conn, []) == (0, 0)
     assert conn.executed == []
 
 
@@ -172,12 +180,15 @@ def test_a_page_that_carries_one_sale_twice_still_writes():
     # record would abort the whole cell rather than lose one row.
     conn = _FakeConn([(True,)])
 
-    sold_db.upsert_sold_transactions(
+    stored, new = sold_db.upsert_sold_transactions(
         conn, [_row(price_czk=1), _row(price_czk=2)])
 
     payload = conn.executed[0][1]["rows"]
     assert isinstance(payload, Jsonb)
     assert [r["price_czk"] for r in payload.obj] == [2], "last sighting wins"
+    # Two records parsed, ONE sale stored. The ledger counts this number, so a walk
+    # whose page boundary shifted cannot over-report against the table it wrote.
+    assert (stored, new) == (1, 1)
 
 
 def test_a_re_seen_sale_overwrites_and_restamps_when_we_last_looked():

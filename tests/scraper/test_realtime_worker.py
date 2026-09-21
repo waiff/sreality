@@ -1744,8 +1744,11 @@ def _patch_sold_comps(
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
     monkeypatch.setattr(rw.sold_db, "sold_comp_cells", fake_cells)
     monkeypatch.setattr(rw.sold_fetch, "fetch_cell", fake_fetch)
-    monkeypatch.setattr(rw.reas_client, "build_client", fake_client)
+    # The worker knows the sold-comps LANE, never the source: `sold_fetch` composes
+    # the client and owns `SOURCE`, so `realtime_worker` imports no reas module.
+    monkeypatch.setattr(rw.sold_fetch, "build_client", fake_client)
     monkeypatch.setattr(rw, "_SOLD_COMPS_STORE_WARNED", False)
+    monkeypatch.setattr(rw, "_SOLD_COMPS_WEDGE_LOGGED", False)
     captured["conn_obj"] = conn
     return captured
 
@@ -1784,8 +1787,33 @@ def test_sold_comps_tick_fetches_the_capped_cell_list_on_one_client(
     # One client per pass: the politeness ledger is shared, the session need not be.
     assert captured["clients"] == 1
     assert out == {"ran": True, "cells": 2, "records": 4, "new": 2, "failed": 0,
-                   "seconds": out["seconds"]}
+                   "skipped": 0, "seconds": out["seconds"]}
     assert captured["conn_obj"].closed is True
+
+
+def test_the_worker_names_the_lane_never_the_source() -> None:
+    # A shared module that imports one data source's client/parser makes the second
+    # sold source an edit to the worker rather than to `sold_fetch`.
+    src = inspect.getsource(rw)
+    assert "reas_client" not in src and "reas_parser" not in src
+
+
+def test_an_abandoned_pass_is_not_walked_a_second_time(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps running and has written no
+    # ledger row yet, so the freshness subtraction cannot stop the next tick handing
+    # it the SAME cells. This lock is what does.
+    captured = _patch_sold_comps(monkeypatch, [554782])
+    rw._SOLD_COMPS_PASS_LOCK.acquire()
+    try:
+        out = rw._sold_comps_sync()
+    finally:
+        rw._SOLD_COMPS_PASS_LOCK.release()
+
+    assert out["ran"] is False and out["reason"] == "previous_pass_running"
+    assert captured["fetched"] == []
+    # And the lock is released on the normal path, or one pass would wedge the lane.
+    assert rw._sold_comps_sync()["ran"] is True
 
 
 def test_sold_comps_tick_opens_no_client_when_no_cell_is_due(
@@ -1811,6 +1839,21 @@ def test_a_failed_cell_is_counted_and_never_stops_the_tick(
 
     assert captured["fetched"] == [1, 2], "one bad cell does not cost the next one"
     assert (out["failed"], out["records"], out["new"]) == (1, 5, 5)
+
+
+def test_a_cell_that_could_not_be_boxed_never_reads_as_a_quiet_pass(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The work-list's admin_boundaries join means the lane should never see one; if
+    # it ever does, `skipped` is the only place it can show, because a skip writes
+    # no ledger row either.
+    _patch_sold_comps(monkeypatch, [1], results=[
+        {"obec_kod": 1, "status": "skipped", "records": 0, "new": 0, "pages": 0,
+         "source_total": None, "dropped": 0, "error": "obec has no boundary polygon"},
+    ])
+
+    out = rw._sold_comps_sync()
+
+    assert (out["cells"], out["skipped"], out["failed"]) == (1, 1, 0)
 
 
 def test_sold_comps_tick_skips_when_the_store_is_missing(
