@@ -221,10 +221,10 @@ def _row(record: Mapping[str, Any]) -> SoldTransaction | None:
     if category_main is None:
         raise ReasPayloadError(f"unknown reas type {reas_type!r}")
 
-    price_czk = record.get("soldPrice")
-    if not isinstance(price_czk, int) or price_czk <= 0:
+    price_czk = _koruna(record.get("soldPrice"))
+    if price_czk is None:
         raise ReasPayloadError(
-            f"{map_pointer_id}: soldPrice is {price_czk!r} on a sold record"
+            f"{map_pointer_id}: soldPrice is {record.get('soldPrice')!r} on a sold record"
         )
 
     sold_at = _instant(record.get("soldAt"))
@@ -253,7 +253,7 @@ def _row(record: Mapping[str, Any]) -> SoldTransaction | None:
         source_record_id=map_pointer_id,
         sold_at=sold_at.date(),
         price_czk=price_czk,
-        asking_last_czk=record.get("price") if isinstance(record.get("price"), int) else None,
+        asking_last_czk=_koruna(record.get("price")),
         listed_at=_instant(record.get("firstVisibleAt")),
         published_at=_instant(record.get("mapPointerPublishedAt")),
         category_main=category_main,
@@ -310,6 +310,20 @@ def _number(value: Any) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     return float(value) if 0.0 < value < MAX_SIDE_AREA_M2 else None
+
+
+_PRICE_MAX = 2_147_483_647  # sold_transactions.price_czk is a Postgres integer
+
+
+def _koruna(value: Any) -> int | None:
+    """A price in whole koruna. The register records some prices with haléře
+    (6347459.08), and `price_czk` is `integer` as on `listings`, so they round half up;
+    a value `integer` cannot hold is no price at all."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if not 0 < value < _PRICE_MAX:
+        return None
+    return int(value + 0.5)
 
 
 def _code(value: Any) -> int | None:

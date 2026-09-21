@@ -256,6 +256,23 @@ def test_the_price_is_the_sold_price_and_the_asking_price_is_labelled_as_one():
     assert row.asking_last_czk == 29990000
 
 
+def test_a_price_recorded_with_haler_rounds_to_whole_koruna():
+    """The register records some prices with haléře. Refusing them failed the WHOLE town
+    on production — Praha and Humpolec, on `6347459.08` and `1638375.56` — because a
+    refused record fails its cell, and the 308-record research corpus held none."""
+    record = dict(_record(_OLOMOUC_RECORD), soldPrice=6347459.08, price=6349999.5)
+    row = parse_sold_payload(_payload([record])).rows[0]
+    assert (row.price_czk, row.asking_last_czk) == (6347459, 6350000)
+    assert isinstance(row.price_czk, int) and isinstance(row.asking_last_czk, int)
+
+
+def test_a_price_that_is_no_price_is_still_refused():
+    for bad in (None, 0, -5, True, "6347459", float("nan"), 3_000_000_000):
+        record = dict(_record(_OLOMOUC_RECORD), soldPrice=bad)
+        with pytest.raises(ReasPayloadError):
+            parse_sold_payload(_payload([record]))
+
+
 def test_sold_at_is_a_date():
     """The source sends a full ISO UTC timestamp whose time component is its
     batch-ingest clock (03:00-17:00 UTC, Czech business hours), not a legal-effects

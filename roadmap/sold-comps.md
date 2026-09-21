@@ -110,7 +110,10 @@ table still honest when it is empty?
   /settings on the operator's instruction. Hourly, because a town is re-asked only every 35 days
   either way — an idle tick is one SELECT, and a new pipeline card's town is read within the hour.
   First pass verified on production: Šumperk, 31 sales in the 24-month window of 233 all-time,
-  12 within 1 km of the pipeline listing. Still worth one SELECT: which live `pipeline_stages`
+  12 within 1 km of the pipeline listing. The first two passes also FAILED Praha and Humpolec on a
+  price recorded with haléře (`soldPrice: 6347459.08`) — the parser took whole numbers only, a
+  refused record fails its cell, and the 308-record research corpus held none. Prices now round
+  to whole koruna; the failed cells retry on their own 6 h after the failure. Still worth one SELECT: which live `pipeline_stages`
   rows carry `is_terminal` — the lane skips closed deals on that flag alone.
 
 ## Standing constraints
