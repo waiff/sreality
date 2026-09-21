@@ -190,13 +190,12 @@ PARCEL_MAX_PER_ADVERT: int = 12
 # FAIL-SAFE in both directions: an empty set is never a conflict, so the narrow reader's
 # silence costs protection rather than precision, and a wider one can only add protection.
 _PARCEL_KEYWORD_WIDE = re.compile(
-    r"(?:parceln\w*\s*cisl\w*"
-    r"|parcel\w*\s*(?:c\.|cisl\w*)"
-    r"|parc\.?\s*(?:c\.|cisl\w*)"
-    r"|c\.\s*parc\w*"
+    r"(?:parceln\w*\s*\.?\s*cisl\w*"
     r"|pod\s+cisl\w*\s+parcel\w*"
-    r"|na\s+parcele"
-    r"|\bparcela"
+    r"|na\s+parcel[aeiu]"
+    r"|c\.?\s*parc\w*\s*\.?"
+    r"|parc\w*\s*\.?\s*(?:c\.|cisl\w*)"
+    r"|parcel[aeuy]\b"
     r"|pozemk\w*\s*(?:c\.|cisl\w*)"
     r"|pozemek\s*(?:c\.|cisl\w*)"
     r"|\b(?:st\.?\s*)?p\.?\s*(?:p\.?\s*)?c\.?)"
