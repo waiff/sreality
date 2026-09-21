@@ -110,6 +110,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from scraper import db
+from toolkit.browse_read_model import sync_browse_list
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -687,6 +688,17 @@ def _drain_dirty(
             break
         ids = [int(r[0]) for r in claimed]
         _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": ids})
+        # Browse reads `browse_list`, not `properties`, and pg_cron rebuilds it
+        # wholesale only every 15 min — so without this a recompute reached Browse
+        # a measured 11.7 min later on average (94 rebuilds / 24 h: best 2.3,
+        # worst 36.6). Patching here, the one place that knows which properties
+        # just changed, puts it on this lane's own cadence instead. Ordered BEFORE
+        # the dirty delete so a crash between the two replays both. Cheap at this
+        # grain (200 ids = 46 ms, 1.9k buffers) and it cannot fight the wholesale
+        # rebuild: that one builds `browse_list_next` and swaps by rename, and
+        # sync_browse_list is best-effort in a SAVEPOINT — a patch that lands on
+        # the table being swapped out logs and is reconciled by the swap itself.
+        sync_browse_list(conn, ids)
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})
         total += len(ids)
@@ -886,7 +898,9 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """ONE incremental property-maintenance pass — THE shared implementation
     behind the GH cron (property_maintenance.yml) and the realtime worker's
     maintenance lane: attach new stragglers (skip the legacy native-id
-    backfill) + recompute the dirty set.
+    backfill) + recompute the dirty set + patch `browse_list` for exactly the
+    properties it recomputed, so a change reaches Browse on this lane's cadence
+    rather than at the next */15 wholesale rebuild.
     Serialized by the maintenance lease; a caller that
     finds the lease held returns {"skipped": True} — the concurrent pass is
     doing the same work, and the next tick is seconds away. A pass normally

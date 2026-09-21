@@ -106,3 +106,29 @@ def test_all_identity_and_asset_mutations_call_sync():
             f"but does not patch browse_list — Browse would go stale for up to a "
             f"rebuild interval (see docs/design/browse-merge-consistency.md)."
         )
+
+
+def test_the_incremental_maintenance_pass_patches_what_it_recomputed():
+    """A15. `browse_projection` reads `properties`, so a post-publication column fill is
+    invisible to Browse until `properties` is recomputed AND `browse_list` is
+    re-materialized. The dirty-set lane does the first every ~2 min; the second used to
+    wait for the */15 wholesale rebuild (measured mean 11.7 min, worst 36.6). The patch
+    belongs HERE and nowhere upstream: any earlier caller would re-materialize from a
+    `properties` row that has not been recomputed yet."""
+    from scripts import recompute_property_stats as rps
+
+    drain = inspect.getsource(rps._drain_dirty)
+    assert "sync_browse_list(conn, ids)" in drain
+    assert drain.index("_RECOMPUTE_SCOPED_SQL") < drain.index("sync_browse_list"), (
+        "the patch must follow the recompute, or it materializes the stale row"
+    )
+    assert drain.index("sync_browse_list") < drain.index("_DELETE_DIRTY_SQL"), (
+        "dequeue last, so a crash between the two replays both (each is idempotent)"
+    )
+    # The daily full sweep must NOT patch: it recomputes every property, and the
+    # wholesale rebuild is already that job's read-model half. One call site, in the
+    # dirty-set drain.
+    calls = [ln for ln in inspect.getsource(rps).splitlines()
+             if "sync_browse_list(" in ln and not ln.lstrip().startswith("#")
+             and not ln.startswith("from ")]
+    assert calls == ["        sync_browse_list(conn, ids)"], calls

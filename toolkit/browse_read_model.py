@@ -8,6 +8,12 @@ operator-initiated identity change: a merge / unmerge / split must show in
 Browse the instant the API returns, not up to a rebuild-interval later (the
 "merge did nothing, then fixed itself after ~2 min" report — docs/design/browse-merge-consistency.md). This
 patches exactly the touched rows; the periodic rebuild stays the backstop.
+
+Second caller since W6 (docs/design/field-capture/PROGRAM.md, A15): the dirty-set
+maintenance drain, for the properties it just recomputed. Same argument, different
+writer — a post-publication attribute fill reaches `properties` in ~2 min and then
+waited a measured 11.7 min on average (94 rebuilds over 24 h; worst 36.6) for the
+wholesale rebuild to carry it into Browse.
 """
 
 from __future__ import annotations
