@@ -288,12 +288,24 @@ class Counters:
             self.errors = []
 
 
+# Hybrid DashScope models reason before the forced tool call unless told not to: measured on
+# the first smoke, qwen3.7-flash wrote 4,258 output tokens and took 44 s per card.
+NO_THINKING_MODELS: frozenset[str] = frozenset({"qwen3.7-flash"})
+
+
 def llm_client(conn: Any) -> Any:
     from api.llm_client import LLMClient
     from api.providers.openai import OpenAIProvider
     from api.providers.qwen import QwenProvider
 
-    return LLMClient(conn, providers={"openai": OpenAIProvider(), "qwen": QwenProvider()})
+    class ExtractionQwen(QwenProvider):
+        def _chat_body(self, **kwargs: Any) -> dict[str, Any]:
+            body = super()._chat_body(**kwargs)
+            if kwargs.get("model") in NO_THINKING_MODELS:
+                body["enable_thinking"] = False
+            return body
+
+    return LLMClient(conn, providers={"openai": OpenAIProvider(), "qwen": ExtractionQwen()})
 
 
 def est_call_usd(arm: Arm, text_chars: int) -> float:
