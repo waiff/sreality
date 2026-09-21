@@ -42,6 +42,15 @@ DEGENERATE_RATIO: float = 3.0
 
 # The evidence that is about THIS UNIT rather than about the building it stands in.
 UNIT_EVIDENCE: tuple[str, ...] = ("photo", "body", "code")
+# And INSIDE a development the body is not one of them. `features` already says so about the
+# feature — "a broker's reused boilerplate is exactly what high containment looks like between
+# two units of one development" — and the Černovírské zahrady parcelling proves it: three idnes
+# adverts posted two seconds apart, three distinct detail URLs, BYTE-IDENTICAL bodies, each
+# 282 m² at 1,580,000, for a project the body itself calls "tři samostatné parcely". Every key
+# fact agrees because the three plots are identical; the body agrees because it is the
+# developer's, not the plot's. What is left that only one unit has: its photographs and its
+# order code.
+UNIT_EVIDENCE_IN_DEVELOPMENT: tuple[str, ...] = ("photo", "code")
 # What M may count two of instead. A shared address point and an identical price path are
 # strong, but a whole floor of one development shares both.
 WIDER_EVIDENCE: tuple[str, ...] = UNIT_EVIDENCE + ("pin", "price_path")
@@ -282,11 +291,13 @@ def corroboration_warrant(
     if mode == "off":
         return "off"
     found = corroborations(a, b, feats, settings)
-    unit = [name for name in UNIT_EVIDENCE if name in found]
+    development = in_development(a, b)
+    grade = UNIT_EVIDENCE_IN_DEVELOPMENT if development else UNIT_EVIDENCE
+    unit = [name for name in grade if name in found]
     if unit:
         return unit[0]
     if mode == "unit":
         return None
     if mode == "two_of":
         return "+".join(found) if len(found) >= settings.corroboration_min else None
-    return None if in_development(a, b) else "outside_development"
+    return None if development else "outside_development"

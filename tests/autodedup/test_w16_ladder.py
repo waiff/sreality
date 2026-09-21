@@ -143,6 +143,23 @@ def test_every_corroboration_mode_answers_unit_first() -> None:
         assert corroboration_warrant(listing(1), listing(2), feats, settings) == "photo"
 
 
+def test_a_shared_body_is_not_unit_grade_inside_a_development() -> None:
+    """Černovírské zahrady: three idnes adverts posted two seconds apart, three distinct detail
+    URLs, BYTE-IDENTICAL bodies, each 282 m² at 1,580,000, for a project the body itself calls
+    `tři samostatné parcely`. The body agrees because it is the developer's, not the plot's."""
+    project = ("Nabízíme k prodeji rekreační pozemek o výměře cca 282 m² v rámci projektu "
+               "Černovírské zahrady v Olomouci-Černovíře. Pozemek je součástí komorního "
+               "projektu zahrnujícího tři samostatné parcely s vlastní komunikací.")
+    plain = "Prodej pozemku 282 m² v klidné části obce, veškeré sítě na hranici pozemku."
+    feats = _feats(containment_max=1.0)
+    a, b = listing(1, description=project), listing(2, description=project)
+    assert corroboration_warrant(a, b, feats, S) is None
+    assert corroboration_warrant(a, b, feats, M) is None
+    assert corroboration_warrant(a, b, _feats(phash_tight_matches=1.0), S) == "photo"
+    outside = listing(3, description=plain), listing(4, description=plain)
+    assert corroboration_warrant(*outside, feats, S) == "body"
+
+
 def test_l_asks_for_no_demonstration_at_all() -> None:
     assert demonstration_refusal(listing(1), listing(2, price=None), {}, L) is None
     assert demonstration_refusal(listing(1), listing(2, price=None), {}, M) == "A:price"
