@@ -392,14 +392,6 @@ def index_price(text: str | None) -> int | None:
     return _to_int(text)
 
 
-# The estate-object keys `areas_from_params` below reads. EXPORTED so the W19 heal can
-# project exactly these out of `raw_json` without respelling them (rule 21): a heal that
-# names its own key list is a second copy of the key order, one field at a time.
-# `tests/scripts/test_backfill_area_spaced_thousands.py` proves the set is sufficient —
-# an object carrying only these keys still yields every area column.
-AREA_OBJECT_KEYS: tuple[str, ...] = ("usableArea", "parcelArea", "gardenArea")
-
-
 def areas_from_params(
     obj: Mapping[str, Any],
     *,
@@ -410,8 +402,8 @@ def areas_from_params(
     `obj` is the embedded `:property` estate object, which `parse_detail` stores whole
     under `listings.raw_json` (`raw = dict(obj)`), so these are TOP-LEVEL raw_json keys
     rather than the `params` spec-cell map the HTML portals carry. `parse_detail` reads it
-    off a live page and `scripts/backfill_area_spaced_thousands` off that stored reading of
-    the same page — one key order, read twice (rule 21).
+    off a live page and `scripts/reparse.py` replays `parse_detail` over the stored page —
+    one key order, read twice (rule 21).
 
     THE PARCEL IS `parcelArea` ("Plocha parcely"), and that is the whole of W21 here. The
     chain this replaced read `landArea or plotArea or totalArea`: on 14,417 stored rows

@@ -504,8 +504,7 @@ def areas_from_params(
 
     Keys are the lowercased spec-`<dl>` labels `_detail_params` produces, which is also how
     `parse_detail` stores them in `raw_json['params']`: the live parse reads this off the
-    page and `scripts/backfill_area_spaced_thousands` off that stored reading of the same
-    page. Two copies of a key order is the same defect as two copies of the number grammar,
+    page, and `scripts/reparse.py` replays `parse_detail` over the stored page. Two copies of a key order is the same defect as two copies of the number grammar,
     one level up (rule 21).
 
     `usable_area` IS THE "UŽITNÁ PLOCHA" CELL AND NOTHING ELSE (W21): a page stating only

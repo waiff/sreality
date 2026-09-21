@@ -475,9 +475,8 @@ def areas_from_params(
 ) -> PortalAreas:
     """ceskereality's area slots — the KEYS are the contract's, this owns the measure.
 
-    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
-    reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. The headline goes through the shared resolver on SEPARATE measures.
+    `parse_detail` reads it off a live page, and `scripts/reparse.py` replays `parse_detail`
+    over the stored page, so there is one reading of these keys. The headline goes through the shared resolver on SEPARATE measures.
 
     `usable_area` IS THE "PLOCHA UŽITNÁ" CELL AND NOTHING ELSE (W21): a page carrying only
     the bare "Plocha" — the total — must not write that number into the column every

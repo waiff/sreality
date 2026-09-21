@@ -448,10 +448,10 @@ def areas_from_params(
 ) -> PortalAreas:
     """realitymix's area slots — the KEYS are the contract's, this owns the measure.
 
-    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
-    reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. realitymix renders its spec values UNSPACED, so the truncation this heal
-    repairs reached its rows through the title fallback below.
+    `parse_detail` reads it off a live page, and `scripts/reparse.py` replays `parse_detail`
+    over the stored page, so there is one reading of these keys. realitymix renders its spec
+    values UNSPACED, so the spaced-thousands truncation (healed 2026-09) reached its rows
+    through the title fallback below.
 
     The `plocha pozemku` / `výměra pozemku` / `podlahová plocha` fallbacks and the
     `plocha zahrady` garden read are gone: realitymix emits none of them on any row of the

@@ -547,8 +547,7 @@ def areas_from_params(
 
     Keys are diacritics-stripped by `_norm_key`, which is also how they are stored in
     `raw_json['params']`: `parse_detail` reads this off a live page, and
-    `scripts/backfill_area_spaced_thousands` reads it off that stored reading of the same
-    page. remax renders every spec value's thousands group with a no-break space, which is
+    `scripts/reparse.py` replays it over the stored page. remax renders every spec value's thousands group with a no-break space, which is
     what the naive grammar truncated.
 
     remax spells the parcel "Plocha parcely" — not the "plocha pozemku" the other portals

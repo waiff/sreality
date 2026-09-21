@@ -335,9 +335,8 @@ def areas_from_params(
 ) -> PortalAreas:
     """maxima's area slots — the KEYS are the contract's, this owns the measure.
 
-    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
-    reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. maxima renders a no-break space around its unit and inside a thousands
+    `parse_detail` reads it off a live page, and `scripts/reparse.py` replays `parse_detail`
+    over the stored page, so there is one reading of these keys. maxima renders a no-break space around its unit and inside a thousands
     group alike, which is what the naive grammar truncated.
 
     The `užitná plocha` / `podlahová plocha` second spellings and `plocha zahrady` are

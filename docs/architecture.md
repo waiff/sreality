@@ -2047,11 +2047,9 @@ renumber.** Navigate by area:
     rows corpus-wide** (5 byt, 2 komerční, 11 dum and one inactive pozemek) whose page states
     neither input, and nothing on land, where `parcelArea` equals `totalArea` on every one of
     4,568 rows. mmreality is a JSON-object portal, so its function takes the estate
-    object (`raw_json` IS that object) rather than a `params` map and no title; it exported
-    `AREA_OBJECT_KEYS` so the deleted heal could project exactly the keys the parser reads
-    instead of respelling them. The seam replays `parse_detail` over the stored page instead,
-    so that export now has no consumer (handed to the field-capture W2 wave, which owns
-    `scraper/*_parser.py`).
+    object (`raw_json` IS that object) rather than a `params` map and no title; the
+    re-parse seam replays `parse_detail` over the stored page, so no second copy of that key
+    list exists anywhere.
 
     *`usable_area` is the "užitná plocha" label and nothing else.* idnes
     (`užitná or podlahová or plocha`) and ceskereality (`plocha užitná or užitná plocha or
