@@ -47,6 +47,8 @@ def test_find_comparables_relaxed_passes_target_and_filters(client, monkeypatch)
     def fake(conn, target, filters, *, min_results, relaxation_ladder):
         captured["target"] = target
         captured["filters"] = filters
+        captured["min_results"] = min_results
+        captured["relaxation_ladder"] = relaxation_ladder
         return {"data": {"listings": []},
                 "metadata": {"tool": "find_comparables_relaxed"}}
     monkeypatch.setattr(api_main, "find_comparables_relaxed", fake)
@@ -60,6 +62,8 @@ def test_find_comparables_relaxed_passes_target_and_filters(client, monkeypatch)
             "has_lift": True,
             "category_main": "byt",
             "category_type": "pronajem",
+            "min_results": 12,
+            "relaxation_ladder": ["radius_x1.5", "disposition_loose"],
         },
     )
     assert res.status_code == 200
@@ -70,6 +74,25 @@ def test_find_comparables_relaxed_passes_target_and_filters(client, monkeypatch)
     assert captured["filters"].has_lift is True
     assert captured["filters"].category_main == "byt"
     assert captured["filters"].category_type == "pronajem"
+    # The two fields that make this route different from the strict one it
+    # replaced — they must reach the toolkit, not a hard-coded default.
+    assert captured["min_results"] == 12
+    assert captured["relaxation_ladder"] == ["radius_x1.5", "disposition_loose"]
+
+
+def test_find_comparables_relaxed_min_results_bounds_enforced(client):
+    """min_results is Field(ge=1, le=50); out of range must 422, never
+    reach the ladder."""
+    body = {
+        "target": {"lat": 50.0, "lng": 14.0},
+        "category_main": "byt",
+        "category_type": "prodej",
+    }
+    for bad in (0, 51):
+        res = client.post(
+            "/tools/find_comparables_relaxed", json={**body, "min_results": bad},
+        )
+        assert res.status_code == 422
 
 
 def test_find_comparables_relaxed_requires_category(client):
