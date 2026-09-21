@@ -127,33 +127,57 @@ because it reads a key the portal never emits (remax `balkon`/`lodzie`, ceskerea
 `počet podlaží`). `scraper/field_census.py` owns both SQL statements and both pure reductions, so
 the live check and the re-bless can never measure different things.
 
-**Sampled, on purpose.** The full-table form of either measurement does not return inside the
-lane's per-check budget — the `data_quality_by_source` capture takes ~173 s when it succeeds at
-all. Both read the newest `SAMPLE_ROWS` (1,000) ACTIVE rows per source through
-`listings_first_seen_source_idx`: measured 1.08 s for all nine portals, well inside the 45 s
-per-check budget. Newest-first is also the right cohort — a regression is ~100 % of what arrived
-since it shipped but only churn-fraction of the stock.
+**The matrix reads the whole active stock; only the census samples.** A census is evidence about a
+payload's key space, so the newest 1,000 rows per portal answer it (~1 s). The matrix is compared
+against a file blessed weeks earlier, and a SAMPLED cohort cannot be compared with itself: the
+newest-1,000 slice is a time window whose category mix rotates with whatever a portal's walk
+happened to cover. Measured on the shipped code before this was fixed — mmreality's window went
+from a balanced mix to 73 % commercial rentals in two days, moving `cellar` 40.2 % → 8.2 % and
+`disposition` 41.4 % → 6.3 % with no parser touched, twice over the fail tier. So the matrix is one
+aggregate pass over every `is_active` row: measured 12.2 s for all nine portals, inside the 45 s
+per-check budget, and registered second-to-last in `_CHECKS` so the lane's cheap checks are never
+the ones that go unrun. It never expands a row into (field, value) pairs — that form costs 32 s
+over the stock; per-value counts come from `count(*) filter (where col = '<canonical value>')`
+interpolated from `toolkit/filter_registry`, which is also where the statutory `energy_rating` 'G'
+share per portal comes from (R11 makes it a vocabulary member of its own). A field with no canon
+is counted, not enumerated — W5 gives `price_unit` one, and its values appear that day.
 
-**Both arms are RELATIVE to a blessed baseline** (`data/field_capture/fill_baseline.json`), never
+**The arms are RELATIVE to a blessed baseline** (`data/field_capture/fill_baseline.json`), never
 to an absolute floor, because a floor cannot see a legitimately-zero cell or a partial break
-(ceskereality's `furnished` key mismatch would sit at ~2.5 %, not 0 %). Sizing, against the
-worst-case binomial SE of 0.5/sqrt(1000) = 1.6 pp: a fill drop ≥ 10 pp warns (6.3 sigma) and
-≥ 20 pp fails (12.6 sigma), both only where the baseline itself was ≥ 10 % filled; below that the
-relative arm binds instead — a cell with 50+ blessed filled rows keeping under a quarter of them
-fails (> 5 sigma at any baseline share). An off-canon share rising ≥ 5 pp warns, ≥ 15 pp fails.
-The check carries NO `pipeline_check_thresholds` entries: the numbers are properties of the
-sample, and the program adds no settings.
+(ceskereality's `furnished` key mismatch would sit at ~2.5 %, not 0 %). Sizing is the MEASURED
+drift of that cohort, never a binomial SE (the stock is the population, not a draw): comparing
+each cell's fill with the same fill over the rows already active a week earlier, across 90 cells
+on 2026-09-21, the worst moved 4.1 pp in a WEEK (bezrealitky `disposition` 55.0 → 50.9) and the
+median under 1 pp — a 6-hourly run sees ~0.15 pp of that. A fill drop ≥ 10 pp warns and ≥ 20 pp
+fails, both only where the baseline was ≥ 10 % filled; below that the collapse arm binds instead —
+a cell with 50+ blessed filled rows keeping under a quarter of them fails. An off-canon share
+rising ≥ 5 pp warns, ≥ 15 pp fails. A cell that drifts past a threshold honestly is a re-bless,
+and the message says so. The check carries NO `pipeline_check_thresholds` entries: the numbers
+belong to the cohort, not to a taste, and the program adds no settings.
+
+**A blessed cell that stops being measured is an offender.** The spine comes from
+`portals.is_enabled` and from a source having active rows, so a portal disabled during an incident
+would otherwise take its 26 cells out of the denominator and leave the check certifying the
+silence — `ppm2_measure_coverage`'s lesson, applied here as: a whole source missing FAILS, a single
+missing cell warns, and the message carries `cells_measured` of `cells_blessed`.
 
 **Known, not judged.** The baseline records today's zeros, so the check is green on day one and
-still names them every run (`details.known_zero_cells`) until W2's attribute contract declares a
-producer for each. Boolean cells never written `false` are reported the same way
+still names them every run (`details.zero_fill_cells`) until W2's attribute contract declares a
+producer for each. That list is computed from the LIVE matrix, so the run that repairs a cell is
+the run that stops naming it. Boolean cells never written `false` are reported the same way
 (`details.booleans_never_false`) — whether silence means `false` or `unknown` is an absence
 semantics the contract declares, so there is nothing yet to be right or wrong against.
+
+**Who owns which field**, so the two fill instruments can never be read against each other:
+`data_quality_by_source` keeps the seven probes with no attribute column (`geom`, `locality`,
+`street`, `property_grouped`, `source_url`, the two condition levels), `field_fill_matrix` owns
+the 26 `LISTING_COLUMNS` attributes, and the 19 they share are the view's to lose in a later wave.
+Both now read every active row, so a shared cell cannot report two different numbers.
 
 **The census half** is checked in per portal under `data/field_capture/census/` and re-blessed
 with `python -m scraper.field_census --bless` — a reviewed diff, like the location contract's
 golden. A stale census is the known blind spot (a portal renames a key and every gate built on the
-census still agrees with itself), so staleness > 30 d is this check's second arm, a WARN. It is
+census still agrees with itself), so staleness > 30 d is this check's last arm, a WARN. It is
 deliberately NOT a pytest: a test keyed on the calendar reds `main` on a date, on a branch that
 touched nothing.
 

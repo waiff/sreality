@@ -2604,6 +2604,23 @@ class _MatrixConn(_ShapeDriftConn):
     """`_fetchall` wants transaction() + cursor(); _ShapeDriftConn already has both."""
 
 
+def _live_matrix_rows(**moved: int) -> list[tuple[Any, ...]]:
+    """One row per BLESSED cell, mirroring the baseline unless `moved` says otherwise.
+
+    Every test here builds the whole matrix, because a blessed cell missing from the live
+    read is now an offender in its own right — a partial matrix is a finding, not a
+    fixture shortcut."""
+    from scraper import field_census
+
+    rows: list[tuple[Any, ...]] = []
+    for key, cell in field_census.load_baseline()["cells"].items():
+        source, field = key.split("/", 1)
+        rows.append((source, cell["n"], field, moved.get(key.replace("/", "__"),
+                                                         cell["filled"]),
+                     None, None, 0, 0, None, None))
+    return rows
+
+
 def test_field_fill_matrix_is_registered() -> None:
     from scripts.verify_pipeline import _CHECKS, check_field_fill_matrix
 
@@ -2615,31 +2632,46 @@ def test_field_fill_matrix_reproduces_the_known_zero_cells() -> None:
     has never emitted is named in the report, on a run that is otherwise green."""
     from scripts.verify_pipeline import check_field_fill_matrix
 
-    out = check_field_fill_matrix(
-        _MatrixConn([(1000, "remax", "has_balcony", 0, 0, 0, None, None, None)]), T)
+    out = check_field_fill_matrix(_MatrixConn(_live_matrix_rows()), T)
     assert out["status"] == "ok"
     assert {
         "remax/has_balcony", "mmreality/has_balcony", "ceskereality/has_parking",
         "ceskereality/garage", "ceskereality/terrace", "ceskereality/parking_lots",
         "ceskereality/total_floors", "realitymix/has_lift",
-    } <= set(out["details"]["known_zero_cells"])
+    } <= set(out["details"]["zero_fill_cells"])
+    assert out["details"]["cells_measured"] == out["details"]["cells_blessed"]
+
+
+def test_field_fill_matrix_fails_when_a_whole_source_stops_being_measured() -> None:
+    """The denominator arm: a portal disabled in `portals`, or one whose stock has gone
+    inactive, drops out of the matrix spine — and a check that walked only live cells
+    would report `ok` over a shrinking denominator."""
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    rows = [r for r in _live_matrix_rows() if r[0] != "remax"]
+    out = check_field_fill_matrix(_MatrixConn(rows), T)
+    assert out["status"] == "fail"
+    assert "remax: 26 blessed cell(s) absent" in out["details"]["offenders"][0]
+    assert out["details"]["cells_measured"] < out["details"]["cells_blessed"]
 
 
 def test_field_fill_matrix_runs_under_the_per_check_statement_timeout() -> None:
     from scripts.verify_pipeline import check_field_fill_matrix
 
-    conn = _MatrixConn([(1000, "remax", "has_balcony", 0, 0, 0, None, None, None)])
+    conn = _MatrixConn(_live_matrix_rows())
     check_field_fill_matrix(conn, T)
     assert any("statement_timeout" in s for s in conn.executed)
-    assert any("jsonb_each_text" in s for s in conn.executed)
+    # The cohort is the whole active stock, not a newest-N slice of it.
+    assert any("where l.is_active" in s and "first_seen_at" not in s
+               for s in conn.executed)
 
 
 def test_field_fill_matrix_fails_when_a_blessed_cell_collapses() -> None:
     from scripts.verify_pipeline import check_field_fill_matrix
 
-    # idnes `condition` is blessed at 88.7% fill; a parser that stopped writing it.
+    # idnes `condition` is blessed at 65.4% fill; a parser that stopped writing it.
     out = check_field_fill_matrix(
-        _MatrixConn([(1000, "idnes", "condition", 0, 0, 0, None, None, None)]), T)
+        _MatrixConn(_live_matrix_rows(idnes__condition=0)), T)
     assert out["status"] == "fail"
     assert out["value"] == 1
     assert "idnes/condition" in out["details"]["offenders"][0]
@@ -2654,7 +2686,6 @@ def test_field_fill_matrix_warns_on_a_stale_census(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         vp.field_census, "load_censuses",
         lambda: [{"portal": "remax", "generated_at": "2020-01-01T00:00:00+00:00"}])
-    out = check_field_fill_matrix(
-        _MatrixConn([(1000, "remax", "has_balcony", 0, 0, 0, None, None, None)]), T)
+    out = check_field_fill_matrix(_MatrixConn(_live_matrix_rows()), T)
     assert out["status"] == "warn"
     assert out["details"]["stale_census"] and "remax" in out["message"]

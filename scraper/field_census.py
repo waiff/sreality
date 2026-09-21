@@ -8,15 +8,21 @@ measure different things:
     is the evidence a parser is read against: `remax`'s parser reads `balkon` / `lodzie`
     and the portal has never emitted either, which is why `has_balcony` is 0/0 on every
     active remax row while the parser's own hand-authored fixtures stay green.
-  * the **fill + validity matrix** — per (source, field), how many sampled ACTIVE rows
-    carry a value, and for the fields whose canon `toolkit.filter_registry` defines, how
-    many carry a value OUTSIDE it. Fill alone cannot see a wrong value (the lesson the
-    per-m2 checks were built on); the value histogram is what makes validity measurable.
+  * the **fill + validity matrix** — per (source, field), how many ACTIVE rows carry a
+    value, and for the fields whose canon `toolkit.filter_registry` defines, how many
+    carry a value OUTSIDE it. Fill alone cannot see a wrong value (the lesson the per-m2
+    checks were built on); the value histogram is what makes validity measurable.
 
-Both are SAMPLED over the newest active rows per source: the full-table form of either
-does not return inside the verification lane's per-check budget, and the newest slice is
-the cohort that reflects what the parsers write TODAY — a regression is ~100% of what
-arrived since it shipped, but only churn-fraction of the stock.
+The two read different cohorts, and the difference is the point. The census is EVIDENCE
+about a payload's key space, so it samples the newest rows — what the portal ships today.
+The matrix is an ALARM compared against a blessed baseline, so it reads EVERY active row:
+a sampled cohort cannot be compared to itself a week later. The newest-N slice rotates
+with whatever a portal's walk happened to cover (mmreality's newest 1,000 went from a
+balanced mix to 73% commercial rentals inside two days, moving `cellar` fill 40% -> 8%
+with no parser touched), and no threshold can separate that from a regression.
+
+Both halves are aggregates: the matrix never expands a row into (field, value) pairs over
+the whole stock, which costs ~32 s against ~12 s for the aggregate form.
 
 Neither measurement reads `listing_description_enrichments`: that ledger still records
 cells a later detail re-fetch wiped as filled.
@@ -29,6 +35,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -42,9 +49,9 @@ BASELINE_PATH = _ROOT / "data" / "field_capture" / "fill_baseline.json"
 
 BLESS_COMMAND = "python -m scraper.field_census --bless"
 
-# How many of the newest ACTIVE rows per source each measurement reads. 1,000 keeps the
-# worst-case binomial standard error of a share at 1.6 pp, which every threshold below is
-# sized against, and keeps the census query at ~1 s on the widest payload (sreality).
+# How many of the newest ACTIVE rows per source the CENSUS reads (the matrix reads all of
+# them). 1,000 keeps the census query at ~1 s on the widest payload (sreality) and is deep
+# enough for a key on 1% of pages to appear ten times.
 SAMPLE_ROWS = 1000
 # Values are recorded only for a key/field with at most this many distinct values in the
 # sample, and then ALL of them are — a partial list of a vocabulary is not evidence about
@@ -58,11 +65,16 @@ RARE_KEY_PCT = 1.0
 SAMPLE_PREDICATE = (
     f"the newest {SAMPLE_ROWS} rows per source with is_active, by first_seen_at desc"
 )
+MATRIX_COHORT = "every is_active row of every enabled scraper portal"
 
 # jsonb has a null of its own, and it is the defect shape idnes shows: the key is present
 # and its value is null, so a key-presence census and a column-fill matrix disagree. Give
 # it a name rather than dropping it.
 JSON_NULL = "(json null)"
+
+# The canon is interpolated into the matrix SQL as literals, so a registry label that is
+# not a bare one is refused at import rather than becoming broken SQL at 03:30.
+_SQL_SAFE_VALUE = re.compile(r"[A-Za-z0-9_+]+")
 
 # `description` is the substrate of the post-publication text lane, not a portal-stated
 # attribute; `published_at` and `source_url` are identity, kept out of every content hash.
@@ -130,93 +142,73 @@ select (select count(*) from sampled) as n_sampled,
 
 
 def _matrix_sql() -> str:
-    """The matrix SQL, with the field list interpolated from `ATTRIBUTE_FIELDS`.
+    """The matrix SQL, one aggregate pass over the active stock, generated from
+    `ATTRIBUTE_FIELDS` and the canon.
 
     The field list is the scraper's own column contract, never a second hard-coded list —
     a second list is what let `data_quality_by_source` drift out of step with what the
     parsers write. `tests.sql_corpus` resolves a composed `*_SQL` constant by import, so
     this stays inside the placeholder guard and the PREPARE sweep.
 
-    The off-canon count is computed HERE, over every distinct value, not from the value
-    rows: those are capped, and an off-canon spelling sitting outside the cap would read
-    as perfect validity.
+    Every number is an aggregate over the whole stock, so nothing here is an estimate:
+    the off-canon count is over every row, and a canon-bearing field also gets a count
+    per canonical value (which is where the statutory `energy_rating` 'G' share and the
+    live `condition` spellings come from) plus the NAMES of whatever sits outside the
+    canon. `x::text = 'true'` is how a boolean is recognised without a second type table:
+    it is false for every other column type, so a field is boolean exactly where the two
+    counts add up to the filled count.
     """
-    cols = ", ".join(f"l.{c}" for c in ATTRIBUTE_FIELDS)
-    spine = ", ".join(f"'{c}'" for c in ATTRIBUTE_FIELDS)
+    aggs: list[str] = []
+    cells: list[str] = []
+    for i, field in enumerate(ATTRIBUTE_FIELDS):
+        aggs.append(f"count(l.{field}) as n{i}")
+        aggs.append(f"count(*) filter (where l.{field}::text = 'true') as t{i}")
+        aggs.append(f"count(*) filter (where l.{field}::text = 'false') as x{i}")
+        values = canonical_values(field)
+        if values is None:
+            cells.append(
+                f"('{field}', a.n{i}, null::bigint, null::bigint, a.t{i}, a.x{i}, "
+                "null::jsonb, null::text[])"
+            )
+            continue
+        members = sorted(values)
+        if any(not _SQL_SAFE_VALUE.fullmatch(v) for v in members):
+            raise ValueError(f"canonical value for {field} is not a bare label: {members}")
+        canon = json.dumps(members)
+        off = f"l.{field} is not null and not '{canon}'::jsonb ? l.{field}::text"
+        pairs = ", ".join(
+            f"'{v}', count(*) filter (where l.{field}::text = '{v}')" for v in members
+        )
+        aggs.append(f"count(distinct l.{field}::text) as d{i}")
+        aggs.append(f"count(*) filter (where {off}) as o{i}")
+        aggs.append(f"array_agg(distinct l.{field}::text) filter (where {off}) as ov{i}")
+        aggs.append(f"jsonb_build_object({pairs}) as vv{i}")
+        cells.append(
+            f"('{field}', a.n{i}, a.d{i}, a.o{i}, a.t{i}, a.x{i}, a.vv{i}, a.ov{i})"
+        )
+    agg_list = ",\n           ".join(aggs)
+    cell_list = ",\n           ".join(cells)
     return f"""
 with src as (
     select source from portals where kind = 'scraper' and is_enabled
 ),
-sampled as (
-    select src.source, s.*
-      from src,
-           lateral (select {cols}
-                      from listings l
-                     where l.source = src.source and l.is_active
-                     order by l.first_seen_at desc
-                     limit %(sample)s) s
-),
-totals as (
-    select source, count(*)::bigint as n_sampled from sampled group by 1
-),
-cells as (
-    select sampled.source, kv.key as field, left(kv.value, 60) as value
-      from sampled, lateral jsonb_each_text(to_jsonb(sampled)) kv
-     where kv.key <> 'source' and kv.value is not null
-),
-counted as (
-    select source, field, value, count(*)::bigint as n from cells group by 1, 2, 3
-),
-per_value as (
-    select c.source, c.field, c.value, c.n,
-           coalesce(jsonb_typeof(%(canon)s::jsonb -> c.field) = 'array'
-                    and not (%(canon)s::jsonb -> c.field) ? c.value, false) as off_canon
-      from counted c
-),
-filled as (
-    select source, field, sum(n)::bigint as n_filled, count(*)::bigint as n_distinct,
-           coalesce(sum(n) filter (where off_canon), 0)::bigint as n_off_canon
-      from per_value group by 1, 2
-),
-ranked as (
-    select source, field, value, n, off_canon,
-           row_number() over (partition by source, field order by n desc, value) as rn,
-           row_number() over (partition by source, field, off_canon
-                              order by n desc, value) as rn_off
-      from per_value
-),
-spine as (
-    select t.source, f.field from totals t cross join unnest(array[{spine}]) f(field)
+agg as (
+    select l.source, count(*)::bigint as n_active,
+           {agg_list}
+      from listings l
+      join src on src.source = l.source
+     where l.is_active
+     group by 1
 )
-select t.n_sampled, sp.source, sp.field,
-       coalesce(fl.n_filled, 0) as n_filled, coalesce(fl.n_distinct, 0) as n_distinct,
-       coalesce(fl.n_off_canon, 0) as n_off_canon,
-       r.value, r.n, r.off_canon
-  from spine sp
-  join totals t on t.source = sp.source
-  left join filled fl on fl.source = sp.source and fl.field = sp.field
-  left join ranked r
-    on r.source = sp.source and r.field = sp.field
-   and ((fl.n_distinct <= %(max_distinct)s and r.rn <= %(max_distinct)s)
-        or (r.off_canon and r.rn_off <= %(max_distinct)s))
- order by sp.source, sp.field, r.n desc nulls last, r.value
+select a.source, a.n_active, c.field, c.n_filled, c.n_distinct, c.n_off_canon,
+       c.n_true, c.n_false, c.value_counts, c.off_canon_values
+  from agg a
+  cross join lateral (values
+           {cell_list}
+       ) c(field, n_filled, n_distinct, n_off_canon, n_true, n_false,
+           value_counts, off_canon_values)
+ order by a.source, c.field
 """
-
-
-FIELD_MATRIX_SQL = _matrix_sql()
-
-
-def canon_param() -> str:
-    """The canon as one jsonb argument: {field: [canonical values]} for every attribute
-    field a filter constrains. Fields absent from it are counted, never judged."""
-    return json.dumps(
-        {
-            field: sorted(values)
-            for field in ATTRIBUTE_FIELDS
-            if (values := canonical_values(field)) is not None
-        },
-        sort_keys=True,
-    )
 
 
 def census_params(**extra: Any) -> dict[str, Any]:
@@ -238,6 +230,11 @@ def canonical_values(field: str) -> frozenset[str] | None:
         if option.value != filter_registry.UNKNOWN_FILTER_VALUE
     }
     return frozenset(values) or None
+
+
+# Built once at import, after the canon is readable: the statement is a pure function of
+# the column contract and the filter registry, so it cannot drift from what is measured.
+FIELD_MATRIX_SQL = _matrix_sql()
 
 
 # --- pure reductions (unit-tested with no DB) ------------------------------
@@ -285,66 +282,62 @@ def cell_key(source: str, field: str) -> str:
 def reduce_matrix(
     rows: Sequence[Sequence[Any]], *, generated_at: _dt.datetime
 ) -> dict[str, Any]:
-    """(n_sampled, source, field, n_filled, n_distinct, n_off_canon, value, n, off_canon)
-    rows -> the (source, field) fill + validity matrix."""
+    """(source, n_active, field, n_filled, n_distinct, n_off_canon, n_true, n_false,
+    value_counts, off_canon_values) rows -> the (source, field) fill + validity matrix."""
     cells: dict[str, dict[str, Any]] = {}
     fields: dict[str, str] = {}
-    values: dict[str, dict[str, int]] = {}
-    off_values: dict[str, dict[str, int]] = {}
-    for n_sampled, source, field, n_filled, n_distinct, n_off, value, n, off in rows:
+    booleans: dict[str, tuple[int, int]] = {}
+    boolean_fields: set[str] = set()
+    for (source, n_active, field, n_filled, n_distinct, n_off,
+         n_true, n_false, value_counts, off_values) in rows:
         key = cell_key(source, field)
         fields[key] = field
-        cells.setdefault(
-            key,
-            {"n": int(n_sampled), "filled": int(n_filled),
-             "fill": round(int(n_filled) / int(n_sampled), 4) if n_sampled else 0.0,
-             "distinct": int(n_distinct),
-             "off_canon": round(int(n_off) / int(n_filled), 4) if n_filled else 0.0},
-        )
-        if n is None:
-            continue
-        label = JSON_NULL if value is None else value
-        (off_values if off else values).setdefault(key, {})[label] = int(n)
-    # A field is boolean when SOME source's sample shows nothing but true/false. Derived
-    # from the data, not from a type table: a cell with zero fill has no values to read,
-    # and that cell is exactly the one the check must still report as a boolean zero.
-    boolean_fields = {
-        fields[key] for key, seen in values.items() if seen and set(seen) <= {"true", "false"}
-    }
-    out: dict[str, dict[str, Any]] = {}
-    for key in sorted(cells):
-        cell = cells[key]
-        field = fields[key]
-        seen = values.get(key, {})
-        if canonical_values(field) is None:
-            # No canon to judge against, so the vocabulary itself is the evidence — this
-            # is how `price_unit`'s four live spellings and `area_basis` stay visible.
-            cell.pop("off_canon")
-            if seen and cell["distinct"] <= MAX_DISTINCT_FOR_VALUES:
-                cell["values"] = seen
-        elif off_values.get(key):
-            cell["off_canon_values"] = sorted(off_values[key])
-        if field in boolean_fields:
-            cell["true"] = seen.get("true", 0)
-            cell["false"] = seen.get("false", 0)
-        out[key] = cell
+        n_active, n_filled = int(n_active), int(n_filled)
+        cell: dict[str, Any] = {
+            "n": n_active, "filled": n_filled,
+            "fill": round(n_filled / n_active, 4) if n_active else 0.0,
+        }
+        if n_distinct is not None:
+            cell["distinct"] = int(n_distinct)
+        if n_off is not None:
+            cell["off_canon"] = round(int(n_off) / n_filled, 4) if n_filled else 0.0
+        if off_values:
+            cell["off_canon_values"] = sorted(off_values)
+        kept = {v: int(n) for v, n in (value_counts or {}).items() if int(n)}
+        if kept:
+            cell["values"] = dict(sorted(kept.items(), key=lambda kv: (-kv[1], kv[0])))
+        booleans[key] = (int(n_true), int(n_false))
+        # A field is boolean where SOME source's rows are nothing but true/false. Derived
+        # from the data, not from a type table: a cell with zero fill has no values to
+        # read, and that cell is exactly the one the check must report as a boolean zero.
+        if n_filled and int(n_true) + int(n_false) == n_filled:
+            boolean_fields.add(field)
+        cells[key] = cell
+    for key, cell in cells.items():
+        if fields[key] in boolean_fields:
+            cell["true"], cell["false"] = booleans[key]
     return {
         "generated_at": _iso(generated_at),
-        "sample": {"n_rows_per_source": SAMPLE_ROWS, "predicate": SAMPLE_PREDICATE},
-        "cells": out,
+        "cohort": MATRIX_COHORT,
+        "cells": {key: cells[key] for key in sorted(cells)},
     }
 
 
 # --- the regression arms (pure; verify_pipeline turns these into a status) ---
 
-# Sized against the sample, not against taste. The worst-case standard error of a share
-# at n=1,000 is 0.5/sqrt(1000) = 1.6 pp, so:
-#   * a 10 pp fall is 6.3 sigma and a 20 pp fall 12.6 sigma — neither is sampling noise;
+# Sized against the MEASURED drift of the cohort, not against a binomial SE (the stock is
+# not a draw, it is the population). Measured 2026-09-21 over 90 (source, field) cells,
+# comparing each cell's fill over every active row against the same fill over the rows
+# that were already active a week earlier: worst cell 4.1 pp (bezrealitky `disposition`),
+# median under 1 pp. A week of arrivals is ~2%/day of the stock, so between two 6-hourly
+# runs the same drift is ~0.15 pp. So:
+#   * a 10 pp fall is over twice the worst WEEK of honest drift, and 20 pp five times it;
 #   * the relative arm catches a partial break the absolute one cannot (ceskereality's
 #     `furnished` key mismatch would sit at ~2.5%, not 0%): a cell that had 50+ filled
-#     rows and keeps under a quarter of them is >5 sigma at any baseline share.
+#     rows and keeps under a quarter of them cannot get there by drift at any share.
 # The `>= 0.10` floor on the absolute arm keeps a cell that was always near-zero from
-# ringing on a one-row wobble; the relative arm covers those instead.
+# ringing on a handful of rows; the relative arm covers those instead. A cell that drifts
+# past a threshold honestly is a re-bless, which is why both arms name the command.
 FILL_DROP_WARN_PP = 0.10
 FILL_DROP_FAIL_PP = 0.20
 FILL_DROP_MIN_BASELINE = 0.10
@@ -365,11 +358,26 @@ def compare_to_baseline(
     """(fail offenders, warn offenders) for the live matrix against the blessed one.
 
     A cell the baseline does not carry is never an offender — a new portal or a new
-    column arrives green and is blessed into the baseline by the next re-bless."""
+    column arrives green and is blessed into the baseline by the next re-bless. The
+    reverse is: a blessed cell the live matrix no longer produces is the STRONGEST form
+    of "this portal stopped writing its fields", and without an arm of its own it reads
+    as perfect health — the matrix spine comes from `portals.is_enabled` and from having
+    active rows, so one flag flip can take 26 cells out of the measurement."""
     fails: list[str] = []
     warns: list[str] = []
     base_cells: Mapping[str, Any] = baseline.get("cells") or {}
-    for key, cell in sorted((live.get("cells") or {}).items()):
+    live_cells: Mapping[str, Any] = live.get("cells") or {}
+    live_sources = {key.split("/", 1)[0] for key in live_cells}
+    missing: dict[str, list[str]] = {}
+    for key in sorted(set(base_cells) - set(live_cells)):
+        missing.setdefault(key.split("/", 1)[0], []).append(key.split("/", 1)[1])
+    for source, gone in sorted(missing.items()):
+        line = (
+            f"{source}: {len(gone)} blessed cell(s) absent from the live matrix "
+            f"({', '.join(gone[:4])}{', ...' if len(gone) > 4 else ''})"
+        )
+        (warns if source in live_sources else fails).append(line)
+    for key, cell in sorted(live_cells.items()):
         was = base_cells.get(key)
         if not isinstance(was, Mapping):
             continue
@@ -399,18 +407,21 @@ def compare_to_baseline(
     return fails, warns
 
 
-def known_zero_cells(baseline: Mapping[str, Any]) -> list[str]:
-    """Cells the blessed baseline recorded as never filled. They cannot fall further, so
-    they are green by construction — and they are the whole reason this wave exists, so
-    the check names them on every run until W2's contract declares a producer for each."""
+def zero_fill_cells(matrix: Mapping[str, Any]) -> list[str]:
+    """Cells with no value at all. They cannot fall further, so they are green by
+    construction — and they are the whole reason this wave exists, so the check names
+    them on every run until W2's contract declares a producer for each.
+
+    Read from the LIVE matrix, never from the baseline: a cell a later wave repairs must
+    stop being named the run it is repaired, not the day someone re-blesses."""
     return sorted(
-        key for key, cell in (baseline.get("cells") or {}).items()
+        key for key, cell in (matrix.get("cells") or {}).items()
         if isinstance(cell, Mapping) and int(cell.get("filled", 0)) == 0
     )
 
 
 def booleans_never_false(matrix: Mapping[str, Any]) -> list[str]:
-    """Boolean cells with a true count and no false, ever, in the sample.
+    """Boolean cells with a true count and no false, ever, in the active stock.
 
     Reported as a NUMBER, never as a verdict: whether silence means `false` or `unknown`
     is the absence semantics the W2 attribute contract declares per (portal, field), and
@@ -490,7 +501,7 @@ def write_baseline(matrix: Mapping[str, Any]) -> Path:
 
 def fetch_matrix(conn: Any, *, generated_at: _dt.datetime) -> dict[str, Any]:
     with conn.cursor() as cur:
-        cur.execute(FIELD_MATRIX_SQL, census_params(canon=canon_param()))
+        cur.execute(FIELD_MATRIX_SQL)
         rows = cur.fetchall()
     return reduce_matrix(rows, generated_at=generated_at)
 

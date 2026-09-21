@@ -18,7 +18,8 @@ test / log helpers: `scripts/test-summary.sh` and `scripts/logs.sh <run-id> [pat
 3. Add it to `scraper/db.py` `LISTING_COLUMNS` + `_LISTING_COLUMN_PGTYPE` (covers BOTH write paths) and,
    for crawler portals, `scraped_listing._LISTING_FIELDS`; `_PRESERVE_IF_NULL_COLUMNS` only if a NULL must never erase.
 4. Backfill old rows from NARROW typed columns via a `scripts/backfill_*.py` dispatch job (never a
-   `raw_json` pass — ~62 KB/row detoast); NULL is acceptable for a nullable column.
+   `raw_json` pass — ~62 KB/row detoast); NULL is acceptable for a nullable column. The new cell reaches
+   `field_fill_matrix` only once the OPERATOR re-blesses (`--bless` needs the prod DB).
 
 ## Refreshing per-source HTML fixtures
 
@@ -394,24 +395,22 @@ Lanes shipped so far:
   raises, so every attempt with a box ends in the ledger, and an `ok` row whose walk the 25-page cap (or a
   non-advancing `nextPage`) cut short carries `truncated: …` in `error`; 1 req/5 s + ONE retry on the
   shared rate ledger; one in-process pass lock. Heartbeat `details.sold_comps.last` = `{ran, cells,
-  records, new, failed, skipped, seconds}`; no store (pre-migration DB) = `ran: false` + one warning.
+  records, new, failed, skipped, seconds}`; no store = `ran: false` + one warning.
 
 ## Pipeline verification (migration 274)
 
 **No publication gate any more.** Migration 273's `properties.published_at` gate died with the
-dedup engine in the 2026-08 cutoff (rule #15) — inert first, then removed from code and views;
-the columns are frozen history and Watchdog's "new property" cursor is back on
-`listings.first_seen_at`. The durable lesson: a `SECURITY DEFINER` function in a view's `WHERE`
-must be wrapped in a scalar subquery, never called bare — `database` skill, InitPlan gotcha.
+dedup engine in the 2026-08 cutoff (rule #15); the columns are frozen history and Watchdog's "new
+property" cursor is back on `listings.first_seen_at`. Durable lesson: a `SECURITY DEFINER` function
+in a view's `WHERE` needs a scalar subquery, never a bare call — `database` skill, InitPlan gotcha.
 
 **Pipeline verification harness** (`scripts/verify_pipeline.py`, migration 274, PR #703) — a
-scheduled job that writes one `pipeline_check_results` row per health metric (`ok`/`warn`/`fail`)
-and is the origin of the notification system's third producer, `system_health` (see
-`docs/architecture.md` rule #16) — a `fail` rings the same in-app bell the SPA nav badge polls,
-once per INCIDENT — onset, then 6h/24h/72h/weekly while red, then one recovery (W3.4's ladder +
-flap cooldown in `toolkit/system_alerts`, inherited by every check; reference below). Born from
-the 2026-07 two-day silent stall (Anthropic credit exhaustion, 38k+ failed LLM calls) whose only
-alarm was a cron the operator happened to miss.
+scheduled job that writes one `pipeline_check_results` row per health metric (`ok`/`warn`/`fail`) and
+is the origin of the notification system's third producer, `system_health` (`docs/architecture.md`
+rule #16) — a `fail` rings the same in-app bell the SPA nav badge polls, once per INCIDENT: onset,
+then 6h/24h/72h/weekly while red, then one recovery (W3.4's ladder + flap cooldown in
+`toolkit/system_alerts`, inherited by every check). Born from the 2026-07 two-day silent stall
+(Anthropic credit exhaustion, 38k+ failed LLM calls) whose only alarm was a cron the operator missed.
 Two lanes: `llm_health.yml` hourly (the acute checks, `--only ... --exit-nonzero-on-fail`, so a
 `fail` also reds the run and emails) and `verify_pipeline.yml` 6-hourly (everything). Live checks:
 `llm_errors`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
@@ -433,14 +432,15 @@ COMPLETED index run's `by_category`, plus a truncation arm (categories walked vs
 7-day best) because a budget-stopped walk leaves no entry for the categories it never reached and
 so makes the gap look BETTER. remax and maxima derive their total as `len(seen)` and mmreality
 reports none — all three are reported `verifiable: false` rather than 100%. **`worker_lane_stall`** closes the gap `worker_liveness` structurally cannot see — a worker that is ALIVE with a wedged lane. The realtime worker beat every 30 s for nine hours while its drain lane completed ONE pass and its images lane completed 486; a pass was recorded only on COMPLETION, so a hung lane and an idle lane published byte-identical state. The worker now stamps when a pass BEGINS and the heartbeat resolves it to `in_flight_s`, and `_lane_loop` bounds every pass with `LANE_PASS_TIMEOUT_SECONDS` (1800) — containment, not a diagnosis: it stops one hang costing every later pass, and repeated timeouts on one lane are themselves the diagnosis. Caveat worth knowing: a pass blocked inside `asyncio.to_thread` keeps running after cancellation (Python cannot kill a thread), so the lane is freed but the thread is not. **`migration_drift`** closes a different silent gap: it probes the live catalog for the objects the newest 25 migrations declare, so a migration merged but never applied is caught in one tick instead of the 29 h it took on 2026-08-25 (see the `database` skill). **`workflow_poller_liveness`** (W0.1, registered in the 6h lane only for now — promote it into `llm_health.yml`'s `--only` list after a soak) keys on the AGE of `app_settings.workflow_failures_cursor`: `record_workflow_failures.py` excludes its own runs from `workflow_failures`, so a dead poller cannot appear in the table it feeds — it just stops adding rows, which is byte-identical to a quiet week. **Three rules the harness now enforces on itself** (W0 of `docs/design/reliability-program.md`; evidence in the reference below): **silence is not recovery** — a failure is superseded only by a newer SUCCESS, never by elapsed time, so never reintroduce a recency window into a state check; **a zero is ambiguous, so name the arm** — `llm_burn_rate` carries `details.arm` (`starved`/`idle`/`runaway`/`ok`), evaluated per `called_for`; and **results are persisted AND alerted per check as each completes**, under a per-check budget and a 120s `_LANE_BUDGET_S` out of the acute job's 300s timeout that any new check must fit (an overrun is `warn` "timed out", an unreached check `warn` "not run" — neither is ever `ok`). **`field_fill_matrix`** (field capture W1) reads the VALUES, not just presence — the half
-`data_quality_by_source` structurally cannot see: per (source, field) over the newest 1,000 active
-rows it rings when fill collapses against the blessed baseline in `data/field_capture/`, or when
-the off-canon share against `toolkit/filter_registry` rises; today's zeros (remax `has_balcony`,
-ceskereality `total_floors`, …) are blessed KNOWN, so it is green on day one and names them every
-run. Re-bless is a reviewed diff: `python -m scraper.field_census --bless`. Its second arm warns
-on a census older than 30 d — a CI test there would red `main` on a date, not on a defect. It
-carries no thresholds, being sized on its own sample; every other check's live in
-`app_settings.pipeline_check_thresholds` over code defaults in `DEFAULT_THRESHOLDS`.
+`data_quality_by_source` structurally cannot see: per (source, field) over EVERY active row — a
+sampled cohort cannot be compared with itself a week later, the newest-1,000 slice rotated 30+ pp on
+untouched parsers — it rings when fill collapses against the blessed baseline in
+`data/field_capture/`, when the off-canon share against `toolkit/filter_registry` rises, or when a
+blessed cell stops being measured at all; today's zeros are blessed KNOWN and named on every run, and
+a census older than 30 d warns (a CI test would red `main` on a date, not on a defect). Re-blessing is
+the OPERATOR's (step 4 above), both goldens' tests are subset assertions so an unblessed new field or
+portal reds nothing, and it owns no thresholds (sized on that cohort's measured drift) — every other
+check's live in `app_settings.pipeline_check_thresholds` over code defaults in `DEFAULT_THRESHOLDS`.
 **Per-check rationale, incidents and threshold sizing: `references/pipeline-verification.md`.**
 
 ## Reading the logs
