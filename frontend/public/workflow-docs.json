@@ -3733,7 +3733,7 @@
         },
         {
           "name": "allow_snapshot_deferral",
-          "description": "Acknowledge that writing a HASHED column defers one snapshot per live row to its next detail fetch",
+          "description": "Acknowledge what history does after a HASHED column is written: one snapshot per live row at its next detail fetch on eight portals — and NONE ever on sreality, which hashes the raw payload, so column and history diverge for good",
           "required": false,
           "type": "boolean",
           "default": "false",

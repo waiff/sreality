@@ -76,18 +76,15 @@ def test_the_category_argument_is_declared_only_where_the_parser_demands_it() ->
 # --- what may be healed ------------------------------------------------------
 
 
-def test_healable_is_every_listing_column_but_the_two_preserve_if_null_ones() -> None:
-    assert set(mod.HEALABLE) == set(LISTING_COLUMNS) - _PRESERVE_IF_NULL_COLUMNS
+def test_the_two_registries_still_describe_the_live_contract() -> None:
+    """Both are DERIVED from their one definition (`_PRESERVE_IF_NULL_COLUMNS`,
+    `_HASH_FIELDS`), so a new column extends the deferral gate on its own and there is no
+    copy to drift. What still needs pinning is the shape the docstring and the gate argue
+    from: exactly two preserve-if-null columns, and `area_basis` as the ONE healable column
+    outside the content hash — the only one whose heal churns no snapshot anywhere."""
     assert _PRESERVE_IF_NULL_COLUMNS == {"published_at", "source_url"}
-
-
-def test_the_hashed_declaration_still_agrees_with_the_hash_contract() -> None:
-    """The import-time assertion lifted from scripts/reextract.py, one field at a time no
-    longer: adding a column to _HASH_FIELDS without updating the seam must refuse to import
-    rather than silently downgrade the deferred-snapshot guarantee."""
-    assert mod.HASHED_COLUMNS == set(mod.HEALABLE) & set(_HASH_FIELDS)
-    # area_basis is the one healable column outside the hash, so healing it churns nothing.
-    assert set(mod.HEALABLE) - mod.HASHED_COLUMNS == {"area_basis"}
+    assert set(mod.HEALABLE) == set(LISTING_COLUMNS) - _PRESERVE_IF_NULL_COLUMNS
+    assert set(mod.HEALABLE) - set(_HASH_FIELDS) == {"area_basis"}
 
 
 def test_fields_is_validated_against_the_registry() -> None:
@@ -125,6 +122,38 @@ def test_the_whole_module_names_neither_history_nor_the_sighting_clock() -> None
 
     assert "listing_snapshots" not in code
     assert "last_seen_at" not in code
+
+
+def test_the_write_is_a_compare_and_set_on_every_column_it_touches() -> None:
+    """The re-derive happens in Python between the SELECT and the UPDATE while the drain
+    keeps writing, and this seam leaves no trace (no snapshot, no `last_seen_at`), so a
+    reversion would be invisible. Each chosen column therefore carries the value this pass
+    read; a row someone else moved in the window keeps their value."""
+    sql = mod._update_sql(("has_lift", "area_m2"))
+
+    assert "AND l.has_lift IS NOT DISTINCT FROM u.was_has_lift" in sql
+    assert "AND l.area_m2 IS NOT DISTINCT FROM u.was_area_m2" in sql
+    # the read-back array goes in as the COLUMN's own type, so the compare is exact
+    assert "%(was_area_m2)s::numeric[]" in sql
+
+
+def test_every_built_statement_survives_psycopgs_placeholder_tokenizer() -> None:
+    """The seam's SQL is built, not a module-level `*_SQL` constant, so neither the offline
+    placeholder guard nor the schema-aware PREPARE sweep discovers it — a stray literal `%`
+    (a `LIKE 'rebuild\\_%'`, a prose `~2%` in a comment) would raise `incomplete
+    placeholder` only on a live dispatch. Run the same checker over what is executed."""
+    from tests.test_sql_placeholders import _invalid_placeholder
+
+    fields = ("has_lift", "area_m2", "description", "parking_lots")
+    for source in mod.SUBSTRATE:
+        for missing in (False, True):
+            built = mod._select_sql(source, fields, missing=missing)
+            assert _invalid_placeholder(built) is None, f"{source} select: {built}"
+    for missing in (False, True):
+        assert _invalid_placeholder(mod._count_sql(fields, missing=missing)) is None
+    assert _invalid_placeholder(mod._update_sql(fields)) is None
+    for guard in (*mod._BATCH_GUARDS, mod._STATEMENT_TIMEOUT_SQL):
+        assert _invalid_placeholder(guard) is None
 
 
 def test_the_write_enqueues_dirty_properties_in_the_same_statement() -> None:
@@ -319,7 +348,28 @@ def test_writing_a_hashed_column_refuses_without_the_deferral_acknowledgement(
         "sys.argv", ["reparse", "--source", "idnes", "--fields", "has_lift", "--write"])
 
     assert mod.main() == 2
-    assert "--allow-snapshot-deferral" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "--allow-snapshot-deferral" in err
+    assert "next detail scrape" in err
+
+
+def test_the_gate_states_srealitys_opposite_consequence_not_the_fleet_default(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """sreality's drain hashes the RAW payload (`scraper/main.py`), not the parsed fields
+    (`scraper.db.write_details`), so a column heal changes no hash and its next detail fetch
+    appends NOTHING — ever. Acknowledging "the snapshot is deferred" there would be
+    acknowledging a consequence that never arrives; the architecture doc records the same
+    asymmetry for the W17 land heal's 44,237 sreality rows."""
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://never-used")
+    monkeypatch.setattr(
+        "sys.argv",
+        ["reparse", "--source", "sreality", "--fields", "condition", "--write"])
+
+    assert mod.main() == 2
+    err = capsys.readouterr().err
+    assert "NO snapshot is ever appended" in err
+    assert "next detail scrape" not in err
 
 
 def test_an_unhashed_column_needs_no_acknowledgement(
@@ -396,6 +446,28 @@ def test_a_dry_run_reads_the_substrate_and_writes_nothing(
     assert not any("UPDATE listings" in s for s in conn.executed)
     assert "cellar           would change=1" in caplog.text
     assert "cellar: None -> True" in caplog.text
+
+
+def test_a_substrate_that_cannot_be_parsed_is_warned_about_not_counted_quietly(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """sreality's oldest rows hold the pre-unwrap payload — no `hash_id`, no `id` — so
+    `parse_listing` raises on every one of them (234 of the 1,000 lowest ids carry a usable
+    key, measured 2026-09-21). They are skipped per row, which is right, but a clean exit
+    that mentions them only inside one INFO line would read as "this portal is done"."""
+    page = [(11, 7, None, None, "https://www.sreality.cz/detail/x",
+             {"_embedded": {}, "items": [], "locality": {}}, None)]
+    conn = _Conn([page])
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://never-used")
+    monkeypatch.setattr(mod.db, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr("sys.argv",
+                        ["reparse", "--source", "sreality", "--fields", "condition"])
+
+    with caplog.at_level("INFO"):
+        assert mod.main() == 0
+
+    assert "could not be parsed from their stored substrate" in caplog.text
+    assert any(r.levelname == "WARNING" for r in caplog.records)
 
 
 def _refuse(*args: Any, **kwargs: Any) -> int:

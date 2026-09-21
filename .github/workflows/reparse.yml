@@ -11,9 +11,13 @@ name: "Ops: re-parse stored rows through the portal's own parser"
 # `fields` is REQUIRED and is the whole safety story: the run writes exactly the columns you
 # name and reads the rest only to leave them alone, so healing `has_lift` can never restate
 # a price. It never blanks a value the re-derive could not produce, never writes a
-# `listing_snapshots` row (a hashed column's one genuine snapshot is DEFERRED to that
-# listing's next natural detail fetch — an inactive row never gets one), never touches
-# `last_seen_at`, and enqueues `dirty_properties` in the same statement as the UPDATE.
+# `listing_snapshots` row (on the eight portals hashing the PARSED fields a hashed column's
+# one genuine snapshot is DEFERRED to that listing's next natural detail fetch, and an
+# inactive row never gets one; on SREALITY, which hashes the raw payload, no snapshot is
+# ever appended at all and the column diverges from its history for good), never touches
+# `last_seen_at`, enqueues `dirty_properties` in the same statement as the UPDATE, and
+# writes a row only while it still holds the value the run read (compare-and-set), so a
+# concurrent detail write is never reverted.
 #
 # dry_run=true (the default) reports per-field would-change counts and examples and writes
 # nothing. The real write needs dry_run=false AND confirm=APPLY, and — for any column in the
@@ -54,7 +58,7 @@ on:
         default: ""
         type: string
       allow_snapshot_deferral:
-        description: Acknowledge that writing a HASHED column defers one snapshot per live row to its next detail fetch
+        description: "Acknowledge what history does after a HASHED column is written: one snapshot per live row at its next detail fetch on eight portals — and NONE ever on sreality, which hashes the raw payload, so column and history diverge for good"
         required: false
         default: false
         type: boolean
@@ -138,8 +142,12 @@ jobs:
           IN_VERBOSE: ${{ inputs.verbose }}
         run: |
           set -euo pipefail
+          # "has_lift, cellar" is the natural way to type this; the script accepts the
+          # spaces but an unquoted expansion below would word-split them into a stray
+          # positional, so drop them before the guard rather than after the dispatch.
+          IN_FIELDS="${IN_FIELDS// /}"
           case "$IN_FIELDS" in
-            *[!a-z0-9_,\ ]*) echo "::error::fields may only contain a-z 0-9 _ and commas"; exit 1 ;;
+            *[!a-z0-9_,]*) echo "::error::fields may only contain a-z 0-9 _ and commas"; exit 1 ;;
           esac
           ARGS="--source $IN_SOURCE --fields $IN_FIELDS"
           ARGS="$ARGS --after ${IN_AFTER:-0} --batch-size ${IN_BATCH_SIZE:-200}"

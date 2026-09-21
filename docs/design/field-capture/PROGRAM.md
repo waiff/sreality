@@ -92,7 +92,19 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   assertion (`reextract.py` keeps only the two NON-column recoveries: `images` child rows and the `raw_json.broker`
   block) and reuses `scripts/backfill_support.py`. Every heal obeys: never write `listing_snapshots`; never blank a
   value a re-derive cannot produce; never touch `last_seen_at` (rule #4); enqueue `dirty_properties` in the same
-  statement (rule #20); idempotent re-derive, never arithmetic (`floor = floor - 1`).
+  statement (rule #20); idempotent re-derive, never arithmetic (`floor = floor - 1`); and write a row only while it
+  still holds the value the pass read (compare-and-set per named column — the seam leaves no snapshot and no
+  `last_seen_at` behind, so reverting a concurrent detail write would be invisible).
+  **Two measured limits the waves that heal must plan around.** (i) *The deferred snapshot is not universal.* On the
+  eight portals hashing the PARSED fields the healed row's next detail fetch appends the one genuine snapshot; on
+  **sreality** the hash is the RAW payload (`scraper.hashing.content_hash`, `scraper/main.py`), which a column heal
+  never touches, so NO snapshot is ever appended and column and history diverge permanently — the asymmetry
+  `docs/architecture.md` already records for the W17 land heal's 44,237 sreality rows. `--allow-snapshot-deferral`
+  states whichever consequence the chosen portal will actually have. (ii) *The sreality raw_json arm does not reach
+  that portal's oldest rows.* `parse_listing` needs `hash_id`/`id`; rows stored before the client unwrapped the estate
+  object hold the wrapped response and carry neither, so they raise. Measured 2026-09-21: 234/1,000 rows at id ≤ 1,000
+  carry a usable key, 609/1,001 at id ≈ 30k, 597/1,001 at id ≈ 60k, 1,001/1,001 from id ≈ 90k up. The run counts them
+  as `parse_errors` and WARNs with the share, so a heal cannot exit clean over a population it never touched.
 - **R10 — Text-lane scope: bazos first; expand by evidence** — another (portal, field) only when the census shows the
   portal never states it AND a panel passes R7. **Model: cost/benefit bake-off in ONE run** — gpt-5.6-luna vs
   open-source models served on RunPod (Gemma 4, Qwen 3 72B-class, or better candidates) via the existing `oss`
@@ -135,7 +147,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | **W0** | Stop the dead lane pretending | ~2,380 LOC: 4 scripts, 2 workflows, 3 test files, 2 empty tables | ~5 LOC + this doc | — |
 | **W1** | Measurement before change: per-portal key census + fill **and validity** matrix; the flaky data-quality capture REPAIRED (the Health page reads it) | — (the one wave that only adds: it is the instrument) | ~2,200 incl. census + baseline JSON | — |
 | **W2** | Vocabulary module + contract table + CI gates — identity-preserving | ~1,000 LOC (33 fns, 18 dicts, key chains, planted tests, 6 dead reads) | ~750 | W1 |
-| **W3** | The one re-parse seam — SHIPPED | 3,322 LOC (**4** backfill scripts, **4** workflows, **3** tests; two of the six named candidates survive on evidence — see R9) | 1,475 incl. the regenerated workflow-docs asset | W1 |
+| **W3** | The one re-parse seam — SHIPPED | 2,887 LOC across 11 deleted files (**4** backfill scripts, **4** workflows, **3** tests; two of the six named candidates survive on evidence — see R9) | 1,264 in the four new files; the branch's own total is +1,492 / −3,329 incl. the regenerated workflow-docs asset | W1 |
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |
 | **W6** | Close the wipe (R4); property rollup stops letting an inferred `true` beat a stated `false`; fills reach Browse in minutes | the `bool_or` special case | ~15 | W1 |
@@ -170,9 +182,12 @@ unchanged ± 0.1 pp. Prompt/tool-schema drift check = 0.
 substrate itself rather than by two live dry runs: pass one writes what the parse produced, pass two compares the same
 parse against it and reports no movement, per portal over its committed fixture. A re-derive yielding None cannot
 overwrite a stored value (unit test, on a boolean + a number + an enum at once). `listing_snapshots` and
-`last_seen_at` appear nowhere in the seam's executable half — asserted over the module source, which is stronger than
-counting rows after a heal — and the `dirty_properties` enqueue is in the SAME CTE as the UPDATE, asserted on the
-built statement. Substrate proof: the seam re-derives `cellar` and `has_balcony` as `true` from a stored idnes page
+`last_seen_at` appear nowhere in the seam's executable half — asserted over the module source AND over the built
+statement, which needs one precondition the SQL text cannot show: `listings` carries no trigger and no rule (verified
+2026-09-21, only RI constraint triggers), so nothing can mint a snapshot behind the statement. **The first wave that
+actually heals owes the empirical half**: `count(*) listing_snapshots` identical across its batch and rows whose
+`last_seen_at` moved = 0. The `dirty_properties` enqueue is in the SAME CTE as the UPDATE, asserted on the built
+statement, which also carries an `IS NOT DISTINCT FROM` compare-and-set per named column. Substrate proof: the seam re-derives `cellar` and `has_balcony` as `true` from a stored idnes page
 whose `raw_json['params']` carries both keys with a JSON null. `has_lift` is the same mechanism on a key no committed
 fixture carries; live, over the 3,000 newest active idnes byt rows (2026-09-21): 'výtah' present on 1,328, text
 non-null on 0, `has_lift` true on 1,328, false on 0. **No production row was healed** — W3 ships the seam, not a heal.

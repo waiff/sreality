@@ -39,9 +39,15 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       seven HTML portals (100 % coverage incl. inactive, staged in the drain transaction so
       it cannot lag the row) and `listings.raw_json` on sreality + bezrealitky, which stage
       no body. Never writes a snapshot, never blanks what a re-derive cannot produce, never
-      bumps `last_seen_at`, enqueues `dirty_properties` in the same CTE; `--fields` is
-      required and dry-run is the default. Absorbs `reextract.py`'s registry, deferral gate
-      and hash assertion (now over all 27 healable columns) plus its `description` arm;
+      bumps `last_seen_at`, enqueues `dirty_properties` in the same CTE, and writes a row
+      only while it still holds what the pass read (compare-and-set, so a concurrent detail
+      write is never reverted); `--fields` is required and dry-run is the default. **Two
+      limits W4/W5/W8 must plan around:** on sreality, which hashes the RAW payload, a heal
+      defers no snapshot — it appends NONE, ever — and `parse_listing` cannot read that
+      portal's oldest rows at all (234 of the 1,000 lowest ids carry a usable key), which the
+      run WARNs about instead of exiting clean. Absorbs `reextract.py`'s registry, deferral
+      gate and hash assertion (now derived, over all 27 healable columns) plus its
+      `description` arm;
       deletes four area heals, their four workflows and three test files. **Two of the six
       named backfills survive, with evidence:** `backfill_unit_price_masquerade` QUARANTINES
       a price (`price_czk → NULL`), which never-blank forbids by design, and 794 realitymix

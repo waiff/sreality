@@ -19,12 +19,23 @@ the split is measured, not assumed:
     can never regress a price the portal has since changed. Coverage measured 2026-09-21:
     100 % of listings on all seven, INACTIVE rows included (bazos 153,040/153,040, idnes
     249,338/249,338, ceskereality 101,081, realitymix 85,369, remax 14,125, mmreality
-    14,787, maxima 556).
+    14,787, maxima 556). ONE measured exception to "the page the row was parsed from":
+    bazos bodies staged before PR #1451 taught the client to recognise a deleted advert are
+    the portal's gone-ad page, stamped 200 like any other (migration 519's population) —
+    53 of the 300 oldest INACTIVE bazos rows carry it. They parse to all-None today (that
+    page has no breadcrumb category segment), so never-blank is what contains them; a wave
+    healing a column the gone page's own chrome CAN produce must select against them first.
   * `listings.raw_json` for sreality (the v1 estate object) and bezrealitky (the GraphQL
     advert). Neither stages a body at all — `portal_raw_pages` holds ZERO detail rows for
     both — so raw_json is not a preference there, it is the only substrate, and each has a
     public entry point that takes that object (`parser.parse_listing`,
-    `bezrealitky_parser.parse_advert`).
+    `bezrealitky_parser.parse_advert`). **The sreality arm does not reach that portal's
+    oldest rows**: `parse_listing` derives the id from `hash_id`/`id`, and rows stored
+    before the client unwrapped the estate object hold the WRAPPED response
+    (`_embedded`/`items`/`locality`/`seo`…), which carries neither key and raises. Measured
+    2026-09-21: 234 of 1,000 rows at id ≤ 1,000 carry a usable key, 609/1,001 at id ≈ 30k,
+    597/1,001 at id ≈ 60k, 1,001/1,001 from id ≈ 90k up. Those rows are counted as
+    `parse_errors`, the report WARNs on them, and no heal can reach them.
 
 `portal_raw_payloads` is NOT this seam's substrate and the two are easy to confuse: that one
 is the append-on-change R2-backed archive with a 7-day per-listing floor, whose staleness
@@ -53,12 +64,24 @@ Every write obeys the standing heal rules (R9):
     successful detail fetch computes a hash differing from its latest snapshot and appends
     exactly ONE genuine snapshot, spread over the normal cadence — deferred, never skipped.
     An inactive row is never refetched, so the heal is the only write it gets, and its
-    column and its last snapshot disagree from then on. `--allow-snapshot-deferral` is
-    required for a hashed column so that is an explicit choice.
+    column and its last snapshot disagree from then on. **sreality is the exception, and
+    it is the biggest portal**: it hashes the RAW payload (`scraper.hashing.content_hash`,
+    `scraper/main.py`), which a column heal never touches, so no snapshot is EVER appended
+    there — column and history diverge permanently, live rows included. That is the
+    asymmetry `docs/architecture.md` already records for the W17 land heal's 44,237 rows.
+    `--allow-snapshot-deferral` is required for a hashed column so that is an explicit
+    choice, and it states the consequence that portal will actually have.
   * **Never blanks a stored value.** A column the re-derive cannot produce is not a change
     and is not written. A shape drift must never turn a stored fact into NULL — and on the
     page substrate that rule is what makes a partial parse failure harmless.
   * **Never touches `last_seen_at`** (rule 4): a replay is not a sighting.
+  * **Writes only rows that still hold what it read.** The re-derive runs in Python between
+    the SELECT and the UPDATE while the drain keeps writing underneath, so every chosen
+    column carries an `IS NOT DISTINCT FROM` predicate on the value this pass read: a row
+    a fresh detail write changed in that window is left alone instead of being reverted to
+    a stale reading. It matters here more than on the sibling heals because the seam writes
+    no snapshot and no `last_seen_at` — a revert would leave no trace anywhere. A skipped
+    row is simply healed by the next pass.
   * **Enqueues `dirty_properties` in the SAME statement** (rule 20), so the mark cannot
     survive a rolled-back write and the rollup/read model catch up on the next pass.
   * **Idempotent by comparison, never by arithmetic.** Every value is rounded to its
@@ -93,7 +116,11 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from scraper import db
-from scraper.db import LISTING_COLUMNS, _LISTING_COLUMN_PGTYPE
+from scraper.db import (
+    LISTING_COLUMNS,
+    _LISTING_COLUMN_PGTYPE,
+    _PRESERVE_IF_NULL_COLUMNS,
+)
 from scraper.scraped_listing import ScrapedListing, _HASH_FIELDS
 from scripts.backfill_support import (
     _STATEMENT_TIMEOUT_SQL,
@@ -138,33 +165,17 @@ SUBSTRATE: dict[str, PortalSubstrate] = {
     "sreality": PortalSubstrate(RAW_JSON, "scraper.parser", "parse_listing", False),
 }
 
-# Both are preserve-if-null at the ingest boundary (scraper.db._PRESERVE_IF_NULL_COLUMNS):
-# an absent value means "the parser could not read it", never "the portal withdrew it".
-# Clearing or restating either is a deliberate act, never a heal's.
-_NOT_HEALABLE: frozenset[str] = frozenset({"published_at", "source_url"})
+# Derived from the two definitions that already exist, never restated (rule 21): a column
+# preserve-if-null at the ingest boundary is not a heal's to clear (an absent value there
+# means "the parser could not read it", never "the portal withdrew it"), and a column in the
+# content hash defers a snapshot to the row's next detail fetch, which
+# `--allow-snapshot-deferral` makes explicit. `area_basis` is the one healable column
+# outside the hash (a provenance stamp, migration 423), so healing it churns nothing. A
+# column joining either definition extends the gate here on its own.
+HEALABLE: tuple[str, ...] = tuple(
+    c for c in LISTING_COLUMNS if c not in _PRESERVE_IF_NULL_COLUMNS)
 
-HEALABLE: tuple[str, ...] = tuple(c for c in LISTING_COLUMNS if c not in _NOT_HEALABLE)
-
-# DECLARED, then checked against the hash contract below. Writing one of these defers a
-# snapshot to the row's next detail fetch, which `--allow-snapshot-deferral` makes explicit;
-# `area_basis` is the one healable column outside the hash (a provenance stamp, migration
-# 423), so it churns nothing. If a column joins _HASH_FIELDS later, this set stops agreeing
-# and the module refuses to import rather than silently downgrading the guarantee.
-HASHED_COLUMNS: frozenset[str] = frozenset({
-    "category_main", "category_type", "price_czk", "price_unit", "area_m2", "disposition",
-    "floor", "total_floors", "has_balcony", "has_parking", "has_lift", "building_type",
-    "condition", "energy_rating", "estate_area", "usable_area", "garden_area",
-    "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
-    "parking_lots", "ownership", "description",
-})
-
-_expected_hashed = frozenset(HEALABLE) & frozenset(_HASH_FIELDS)
-if HASHED_COLUMNS != _expected_hashed:
-    raise RuntimeError(
-        "reparse HASHED_COLUMNS drifted from _HASH_FIELDS: "
-        f"missing={sorted(_expected_hashed - HASHED_COLUMNS)} "
-        f"extra={sorted(HASHED_COLUMNS - _expected_hashed)}"
-    )
+HASHED_COLUMNS: frozenset[str] = frozenset(HEALABLE) & frozenset(_HASH_FIELDS)
 
 # Every numeric LISTING_COLUMN is an area at numeric(*,1), so round HALF-UP (Postgres's own
 # numeric rounding, not round()'s banker's) before comparing AND before writing — otherwise
@@ -183,7 +194,9 @@ _ARRAY_TYPE: dict[str, str] = {
 
 # ONE statement per page: the columns and the property enqueue in a single CTE, so the dirty
 # mark cannot survive a rolled-back write (rule 20). `listing_snapshots` and `last_seen_at`
-# appear nowhere in it, by construction rather than by guard.
+# appear nowhere in it, by construction rather than by guard. The `was_` arrays carry what
+# the SELECT read, so the write is a compare-and-set: a row another writer moved while this
+# page was being parsed keeps that writer's value instead of being reverted.
 _UPDATE_SQL_TEMPLATE = """
     WITH fresh AS (
         SELECT * FROM unnest(
@@ -193,7 +206,7 @@ _UPDATE_SQL_TEMPLATE = """
         UPDATE listings AS l
         SET {sets}
         FROM fresh AS u
-        WHERE l.id = u.id
+        WHERE l.id = u.id{cas}
         RETURNING l.property_id
     )
     INSERT INTO dirty_properties (property_id)
@@ -263,12 +276,18 @@ def _count_sql(fields: tuple[str, ...], *, missing: bool) -> str:
 
 
 def _update_sql(fields: tuple[str, ...]) -> str:
+    # The fresh values travel as the wire type psycopg builds from Python; the `was_` values
+    # came straight out of the column and go back in its own type, so the compare is exact.
     casts = "".join(
         f",\n            %({c})s::{_ARRAY_TYPE[_LISTING_COLUMN_PGTYPE[c]]}[]" for c in fields)
+    casts += "".join(
+        f",\n            %(was_{c})s::{_LISTING_COLUMN_PGTYPE[c]}[]" for c in fields)
     return _UPDATE_SQL_TEMPLATE.format(
         casts=casts,
-        cols="".join(f", {c}" for c in fields),
+        cols="".join(f", {c}" for c in fields) + "".join(f", was_{c}" for c in fields),
         sets=",\n            ".join(f"{c} = u.{c}" for c in fields),
+        cas="".join(
+            f"\n          AND l.{c} IS NOT DISTINCT FROM u.was_{c}" for c in fields),
     )
 
 
@@ -371,10 +390,12 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Actually write. Without it this only reports.")
     parser.add_argument(
         "--allow-snapshot-deferral", action="store_true",
-        help="Required to WRITE a column in _HASH_FIELDS: acknowledges that setting it "
-             "changes the content hash, so one snapshot per LIVE listing is appended on "
-             "its next natural detail scrape (deferred, never skipped) and an inactive "
-             "row never gets one — see the module docstring.")
+        help="Required to WRITE a column in _HASH_FIELDS: acknowledges what history does "
+             "afterwards. On the eight portals hashing the PARSED fields, one snapshot per "
+             "LIVE listing is appended on its next natural detail scrape (deferred, never "
+             "skipped) and an inactive row never gets one. On sreality the hash is the RAW "
+             "payload, which a column heal does not touch, so NO snapshot is ever appended "
+             "and the column diverges from its history for good.")
     parser.add_argument("--rebuild-wait-seconds", type=float, default=900.0,
                         help="How long a WRITING pass waits for a read-model rebuild to "
                              "finish before starting anyway. A dry run never waits.")
@@ -394,6 +415,14 @@ def _report(source: str, fields: tuple[str, ...], counts: Counter,
         LOG.info("REPARSE   %-16s %s=%d", column, verb, per_field[column])
         for line in examples.get(column, ()):
             LOG.info("REPARSE     %s", line)
+    # A clean exit must not read as "this portal is done" when the substrate never reached
+    # part of it — sreality's oldest rows hold the pre-unwrap payload and always raise.
+    if counts["parse_errors"]:
+        share = 100.0 * counts["parse_errors"] / max(counts["examined"], 1)
+        LOG.warning("REPARSE %s: %d of %d rows examined (%.1f%%) could not be parsed from "
+                    "their stored substrate and were NOT healed — re-run with --verbose to "
+                    "see which. No heal can reach them.",
+                    source, counts["parse_errors"], counts["examined"], share)
 
 
 def main() -> int:
@@ -404,20 +433,29 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
+    source: str = args.source
     fields: tuple[str, ...] = args.fields
     hashed = tuple(c for c in fields if c in HASHED_COLUMNS)
     if hashed and not args.dry_run and not args.allow_snapshot_deferral:
-        print(f"ERROR: {list(hashed)} are in _HASH_FIELDS, so writing them changes the "
-              "content hash and defers one snapshot per live listing to its next detail "
-              "scrape. Re-run with --allow-snapshot-deferral to acknowledge.",
-              file=sys.stderr)
+        # sreality is the one portal whose drain hashes the RAW payload
+        # (scraper/main.py) instead of the parsed fields (scraper/db.write_details), so
+        # its consequence is the opposite of every other portal's and has to be said.
+        consequence = (
+            "sreality hashes the RAW payload, which this heal does not touch, so NO "
+            "snapshot is ever appended — the column and its history diverge permanently, "
+            "live rows included."
+            if source == "sreality" else
+            "writing them changes the content hash and defers one snapshot per live "
+            "listing to its next detail scrape; an inactive row never gets one."
+        )
+        print(f"ERROR: {list(hashed)} are in _HASH_FIELDS. On {source}, {consequence} "
+              "Re-run with --allow-snapshot-deferral to acknowledge.", file=sys.stderr)
         return 2
 
     if not os.environ.get("SUPABASE_DB_URL"):
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
-    source: str = args.source
     select_sql = _select_sql(source, fields, missing=args.missing)
     update_sql = _update_sql(fields)
     counts: Counter = Counter()
@@ -456,7 +494,7 @@ def main() -> int:
                     complete = True
                     break
 
-                updates: list[tuple[int, dict[str, Any]]] = []
+                updates: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
                 for row in rows:
                     listing_id, _property_id, cat_main, cat_type, ref, body = row[:6]
                     stored = dict(zip(fields, row[6:]))
@@ -480,12 +518,13 @@ def main() -> int:
                             examples[column].append(
                                 f"id={listing_id} {column}: {stored[column]!r} -> "
                                 f"{fresh[column]!r}")
-                    updates.append((int(listing_id), fresh))
+                    updates.append((int(listing_id), fresh, stored))
 
                 if updates and not args.dry_run:
-                    params: dict[str, Any] = {"ids": [i for i, _ in updates]}
+                    params: dict[str, Any] = {"ids": [i for i, _, _ in updates]}
                     for column in fields:
-                        params[column] = [f[column] for _, f in updates]
+                        params[column] = [f[column] for _, f, _ in updates]
+                        params[f"was_{column}"] = [s[column] for _, _, s in updates]
                     try:
                         enqueued = execute_with_lock_retry(
                             conn, update_sql, params, label="REPARSE " + source,
