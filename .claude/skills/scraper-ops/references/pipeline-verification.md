@@ -231,9 +231,10 @@ a poll that reached back past `since`, and the page budget doubled to 10 pages /
 traffic continuously (dedup vision on the always-on worker) … p99 inter-call gap is ~1 min,
 so the 4h default never trips in normal operation." That premise died on **2026-08-06**, when
 the dedup decision engine was removed wholesale (rule 15) and took the continuous vision
-traffic with it. The threshold stayed. The only recurring LLM producer left is bazos
-description enrichment (`enrich_bazos.yml`) — condition scoring is paused and every other LLM
-workflow is dispatch-only — so the healthy inter-call gap stopped being a minute and became a
+traffic with it. The threshold stayed. The only recurring LLM producer left THEN was bazos
+description enrichment (`enrich_bazos.yml`, itself deleted a month later — see below) —
+condition scoring paused and every other LLM workflow dispatch-only — so the healthy
+inter-call gap stopped being a minute and became a
 cron period stretched by the Actions throttle (observed run-to-run gaps of 2.4–15.0 h over
 Aug 27-30). The check has **no warn tier**, so every overshoot is a hard red: it fired
 `fail value=4.195` and reddened "Monitoring: acute health (hourly)" **8 times between Aug 27
