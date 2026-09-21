@@ -452,7 +452,7 @@ deal closed into a terminal stage can be dismissed.
   covers free text today), and an "only dismissed" review lens if the reveal
   proves too coarse for reviewing the pile.
 
-### Phase U-EXT-COLL: Every collection from the extension panel (done, 2026-09-21)
+### Phase U-EXT-COLL: Every collection from the extension panel (done, #1562, 2026-09-21)
 Operator ask: use any collection from the portal page the way the app's
 listing page does. The panel could only reach ONE collection — a "Sledovat"
 bell hard-wired to the system monitoring collection (else the first monitored
