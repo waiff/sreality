@@ -12,8 +12,8 @@
  *     select for the whole group, and moving it moves every advert in it;
  *   * the two shortcuts set the letters and store NOTHING — the operator still
  *     presses save, because every crossing pair is a permanent must-not-link;
- *   * the save names every advert of the card exactly once, and the relation of
- *     every unit pair travels named;
+ *   * the save names every advert of the card exactly once and names NO
+ *     relation at all (D39): the letters are the whole statement;
  *   * blind mode: no judge artefact reaches the card;
  *   * the stored ruling is read back off the members' pair verdicts, so a reload
  *     shows the partition that exists rather than a blank one;
@@ -262,10 +262,12 @@ describe('<AutodedupResidual> · po skupinách', () => {
   it('starts the units APART, because the engine did not merge them', async () => {
     const row = await renderCard();
     /* One select per UNIT — not one per advert: the merged group moves together.
-     * (The third combobox on the card is the A↔B relation, not a letter.) */
+     * TWO selects on the whole card and no third: since D39 the letters are the
+     * only question, so there is no relation control beside them. */
     const lone = within(row).getByLabelText('Jednotka #50') as HTMLSelectElement;
     const locked = within(row).getByLabelText('Jednotka celé skupiny') as HTMLSelectElement;
-    expect(within(row).getAllByRole('combobox')).toHaveLength(3);
+    expect(within(row).getAllByRole('combobox')).toHaveLength(2);
+    expect(within(row).queryByLabelText(/Vztah/)).toBeNull();
     expect(lone.value).toBe('A');
     expect(locked.value).toBe('B');
     expect(within(row).getByText(/nesloučil/)).toBeTruthy();
@@ -315,7 +317,7 @@ describe('<AutodedupResidual> · po skupinách', () => {
 
   /* -------------------------------------------------------------- the save */
 
-  it('the save names every advert of the card, and every unit pair', async () => {
+  it('the save names every advert of the card, and no relation at all', async () => {
     const user = userEvent.setup();
     const row = await renderCard();
     await user.click(within(row).getByRole('button', { name: 'Uložit rozhodnutí' }));
@@ -325,25 +327,24 @@ describe('<AutodedupResidual> · po skupinách', () => {
     /* The pass the CARD came from, never the queue's. */
     expect(body.generation).toBe('g4');
     expect(body.units.map((u) => u.listing_id).sort((a, b) => a - b)).toEqual([50, 201, 202, 203]);
-    expect(body.relations).toEqual([
-      { unit_a: 'A', unit_b: 'B', relation: 'same_project_different_unit' },
-    ]);
+    /* Two letters are two properties and the body says nothing more (D39): the
+     * server defaults the missing relation to `different`. */
+    expect('relation' in body).toBe(false);
+    expect('relations' in body).toBe(false);
     /* NO reason chips: a candidate split writes no cluster row to carry them,
      * and the server answers 400 rather than dropping them silently. */
     expect('reasons' in body).toBe(false);
   });
 
-  it('the relation of a unit pair is a control, and it travels', async () => {
+  it('saves with no note and no chips — an annotation is never required', async () => {
     const user = userEvent.setup();
     const row = await renderCard();
-    await user.selectOptions(
-      within(row).getByLabelText('Vztah A ↔ B'),
-      'same_building_different_unit',
-    );
     await user.click(within(row).getByRole('button', { name: 'Uložit rozhodnutí' }));
     await waitFor(() => expect(api.postAutodedupCandidateSplitVerdict).toHaveBeenCalled());
     const body = vi.mocked(api.postAutodedupCandidateSplitVerdict).mock.calls[0][0];
-    expect(body.relations?.[0].relation).toBe('same_building_different_unit');
+    /* The note rides along as null rather than blocking the save: the operator
+     * annotates sometimes, not every time. */
+    expect(body.note).toBeNull();
   });
 
   it('a 409 keeps the letters on screen and arms the save', async () => {

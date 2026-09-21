@@ -112,6 +112,12 @@ const SORTS: ReadonlyArray<GroupFilterState['sort']> = [
   'random',
 ];
 
+/* WHAT THE FILTER ASKS FOR, which since D39 is what the page OFFERS: three
+ * verdicts, not the five the store may hold. `different` is widened server-side
+ * over the two finer values migration 532 wrote (`autodedup/ui_sql.py`
+ * `NEGATIVE_VERDICTS`), so a ruling taken last week is still in its own queue —
+ * and a bookmarked link naming one of those values falls back to "vše" like any
+ * other value outside the vocabulary. */
 export const VERDICTS: readonly string[] = [
   '',
   'unreviewed',
@@ -121,8 +127,6 @@ export const VERDICTS: readonly string[] = [
   'changed',
   'same',
   'different',
-  'same_building_different_unit',
-  'same_project_different_unit',
   'unsure',
 ];
 

@@ -212,7 +212,7 @@ describe('<AutodedupPair>', () => {
     /* The ENGINE's record is untouched — it is not what is being validated. */
     expect(screen.getByText('area_rel_diff')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'This IS a duplicate' }));
+    await user.click(screen.getByRole('button', { name: 'Stejné' }));
     await waitFor(() => expect(screen.getByText(/judge: same property/)).toBeInTheDocument());
   });
 
@@ -237,7 +237,7 @@ describe('<AutodedupPair>', () => {
     await screen.findByText('area_rel_diff');
     await user.click(await screen.findByRole('button', { name: 'Číslo jednotky' }));
     await user.type(screen.getByLabelText('Poznámka'), 'byt 4 vs byt 7');
-    await user.click(screen.getByRole('button', { name: 'This IS a duplicate' }));
+    await user.click(screen.getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'pair',
       listing_lo: 101,
@@ -326,9 +326,9 @@ describe('<AutodedupPair>', () => {
     const user = userEvent.setup();
     renderPair();
     await screen.findByText('area_rel_diff');
-    await user.click(screen.getByRole('button', { name: 'Correctly separate' }));
+    await user.click(screen.getByRole('button', { name: 'Různé' }));
     expect(api.postAutodedupVerdict).not.toHaveBeenCalled();
-    await user.click(screen.getByRole('button', { name: 'Click again to confirm' }));
+    await user.click(screen.getByRole('button', { name: 'Klikněte znovu pro potvrzení' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'pair',
       listing_lo: 101,
@@ -338,7 +338,7 @@ describe('<AutodedupPair>', () => {
       note: null,
     });
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Correctly separate' })).toHaveAttribute(
+      expect(screen.getByRole('button', { name: 'Různé' })).toHaveAttribute(
         'aria-pressed',
         'true',
       ),

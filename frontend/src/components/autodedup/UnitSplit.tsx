@@ -1,33 +1,36 @@
 /* AUTODEDUP · the unit split, shared by every surface that rules on a set of adverts.
  *
  * A GROUP IS NOT ALWAYS ONE ANSWER. The engine proposes a set, and the operator
- * regularly finds two of its adverts are one flat, a third is the house next
- * door and a fourth is a different unit of the same development. Whole-set
- * buttons cannot say that, so every member carries a UNIT LABEL: members sharing
- * a letter are one property, members in different letters are the relation named
- * for THOSE TWO LETTERS — and every pair across letters becomes a permanent
- * must-not-link, which is why the relation is named rather than assumed, and
- * named per unit pair rather than once for the whole set (two units of one
- * building and a third building of the same development are routinely in one
- * group, and one value cannot say both).
+ * regularly finds two of its adverts are one flat and the other two are not.
+ * Whole-set buttons cannot say that, so every member carries a UNIT LETTER:
+ * members sharing a letter are one property, members in different letters are
+ * different properties — and every pair across letters becomes a permanent
+ * must-not-link.
+ *
+ * LETTERS ONLY, SINCE D39. The split used to ask, per unit pair, WHICH kind of
+ * different — same building, same development project, unrelated. The engine
+ * consumes all three identically (one permanent must-not-link, one negative
+ * calibration label), so the question bought no decision and cost a select per
+ * unit pair. The client names no relation at all now; the server defaults a
+ * missing one to `different` and still obeys an older client that sends one.
  *
  * THE STORED RULING IS READ BACK, NOT REMEMBERED. A split lives in the store as
  * pair verdicts, and `deriveSplit` rebuilds the assignment from them before the
- * operator can act on it. Page state that a reload throws away would show "A"
- * over every member of a group that was partitioned last week — and the next
- * save would re-derive all pairs as one unit and retract the permanent
- * must-not-links the first save wrote.
+ * operator can act on it — including from the finer values a ruling taken
+ * before D39 carries, which are negatives like any other. Page state that a
+ * reload throws away would show "A" over every member of a group that was
+ * partitioned last week — and the next save would re-derive all pairs as one
+ * unit and retract the permanent must-not-links the first save wrote.
  *
  * TWO CALLERS, ONE MACHINE. The proposed-cluster card sends `cluster_key`; the
  * candidate card sends `candidate_key` and no reason chips (there is no cluster
- * row to carry them — §9). Everything else — the letters, the relations, the
- * summary line, the 409 — is identical, and lives here once.
+ * row to carry them — §9). Everything else — the letters, the summary line, the
+ * 409 — is identical, and lives here once.
  */
 
 import type {
   AutodedupCandidateSplitInput,
   AutodedupSplitInput,
-  AutodedupSplitRelation,
   AutodedupSplitResult,
   AutodedupSplitUnit,
   AutodedupVerdictRow,
@@ -39,7 +42,7 @@ import VerdictNotes, {
   annotationInput,
   type VerdictAnnotation,
 } from '@/components/autodedup/VerdictNotes';
-import { FILTER_CONTROL, FILTER_LABEL } from '@/components/autodedup/FilterBar';
+import { NEGATIVE_VERDICTS } from '@/components/autodedup/VerdictButtons';
 
 /* A unit is a LETTER, not a free-text label: the operator is partitioning the
  * members of one small group, and a typed name would only add a way to spell the
@@ -52,44 +55,11 @@ export const UNIT_LETTERS: readonly string[] = Array.from({ length: 26 }, (_, i)
   String.fromCharCode(65 + i),
 );
 
-/* Two units, in one order — the key both the relation map and the matrix read. */
-export const unitPairKey = (a: string, b: string): string =>
-  a <= b ? `${a}|${b}` : `${b}|${a}`;
-
 export interface SplitState {
   units: UnitMap;
-  /* The FILL for a unit pair the operator has not named, not the answer for all
-   * of them: see `relations`. */
-  relation: AutodedupSplitRelation;
-  /* THE RELATION IS PER UNIT PAIR. A group regularly holds two units of one
-   * BUILDING and a third advert from a different building of the same
-   * development. One value for the whole split would stamp a shared building
-   * onto the adverts that do not share one, or throw the building away for the
-   * ones that do — and both are written as permanent must-not-links AND as
-   * calibration labels, corrupting the one distinction the developer rails are
-   * measured against. */
-  relations: Record<string, AutodedupSplitRelation>;
 }
 
-/* The wording the operator reads is the relation BETWEEN two units, which is why
- * "same" is not on offer: two different units are never one property. */
-export const SPLIT_RELATIONS: ReadonlyArray<AutodedupSplitRelation> = [
-  'same_building_different_unit',
-  'same_project_different_unit',
-  'different',
-];
-
-export const SPLIT_RELATION_LABELS: Record<AutodedupSplitRelation, string> = {
-  same_building_different_unit: 'stejná budova, jiné jednotky',
-  same_project_different_unit: 'stejný projekt, jiné jednotky',
-  different: 'nesouvisí',
-};
-
-/* The default is the SHAPE THIS FEATURE WAS BUILT FOR: the operator's group was
- * one development with several buildings. The other two are one click away. */
-export const DEFAULT_RELATION: AutodedupSplitRelation = 'same_project_different_unit';
-
-export const EMPTY_SPLIT: SplitState = { units: {}, relation: DEFAULT_RELATION, relations: {} };
+export const EMPTY_SPLIT: SplitState = { units: {} };
 
 /* An unassigned member is in unit A — the whole group is one property until the
  * operator says otherwise, which is exactly what the engine proposed. (The
@@ -97,27 +67,11 @@ export const EMPTY_SPLIT: SplitState = { units: {}, relation: DEFAULT_RELATION, 
  * so its adverts start on separate letters.) */
 export const unitOf = (units: UnitMap, listingId: number): string => units[listingId] ?? 'A';
 
-export const relationOf = (
-  state: SplitState,
-  unitA: string,
-  unitB: string,
-): AutodedupSplitRelation => state.relations[unitPairKey(unitA, unitB)] ?? state.relation;
-
 export function distinctUnits(
   members: ReadonlyArray<{ listing_id: number }>,
   units: UnitMap,
 ): string[] {
   return Array.from(new Set(members.map((m) => unitOf(units, m.listing_id)))).sort();
-}
-
-/* Every unordered pair of the units in play — one row of the relation matrix
- * each, and one wire entry each. */
-export function unitPairs(units: readonly string[]): Array<[string, string]> {
-  const out: Array<[string, string]> = [];
-  for (let i = 0; i < units.length; i += 1) {
-    for (let j = i + 1; j < units.length; j += 1) out.push([units[i], units[j]]);
-  }
-  return out;
 }
 
 /* `A: 101,202 · B: 303` — the assignment in one line, so the card says what it is
@@ -148,11 +102,11 @@ export function unitsSummary(units: ReadonlyArray<AutodedupSplitUnit>): string {
 }
 
 /* THE STORED RULING, READ BACK. A split lives in the store as pair verdicts —
- * members ruled `same` are one unit, a negative pair verdict is the relation
- * between two units — so the assignment is DERIVED from them rather than kept in
- * page state that a reload throws away. Without this the card shows "A" over
- * every member of a group it knows was split, and the next save quietly retracts
- * the permanent must-not-links the first one wrote.
+ * members ruled `same` are one unit, a NEGATIVE pair verdict separates two —
+ * so the assignment is DERIVED from them rather than kept in page state that a
+ * reload throws away. Without this the card shows "A" over every member of a
+ * group it knows was split, and the next save quietly retracts the permanent
+ * must-not-links the first one wrote.
  *
  * Null means nobody has ruled on any pair of this group: there is nothing stored
  * to show, which is a different statement from "everything is one unit". */
@@ -168,9 +122,9 @@ export function deriveSplit(
     const lo = v.listing_lo;
     const hi = v.listing_hi;
     if (lo == null || hi == null || !inside.has(lo) || !inside.has(hi)) continue;
-    if (v.verdict !== 'same' && !SPLIT_RELATIONS.includes(v.verdict as AutodedupSplitRelation)) {
-      continue; /* "unsure" says nothing about the partition. */
-    }
+    /* `unsure` says nothing about the partition; the two finer values a ruling
+     * taken before D39 carries separate two units exactly as `different` does. */
+    if (v.verdict !== 'same' && !NEGATIVE_VERDICTS.includes(v.verdict)) continue;
     const key = `${lo}:${hi}`;
     if (!latest.has(key)) latest.set(key, v.verdict);
   }
@@ -205,43 +159,26 @@ export function deriveSplit(
     if (!letterOf.has(root)) letterOf.set(root, UNIT_LETTERS[letterOf.size] ?? 'A');
     units[m.listing_id] = letterOf.get(root)!;
   }
-
-  const relations: Record<string, AutodedupSplitRelation> = {};
-  for (const [key, verdict] of latest) {
-    if (verdict === 'same') continue;
-    const [lo, hi] = key.split(':').map(Number);
-    const pair = unitPairKey(units[lo], units[hi]);
-    if (!(pair in relations)) relations[pair] = verdict as AutodedupSplitRelation;
-  }
-  return { units, relation: DEFAULT_RELATION, relations };
+  return { units };
 }
 
 /* The half of the body both surfaces send: EVERY member travels, including the
  * ones a card counted rather than showed (the server requires the assignment to
  * name the whole set, and a card that sent only its visible members would be
- * refused — rightly), and the relation of every unit pair travels named rather
- * than left to the server's fill. */
+ * refused — rightly). NO relation travels: two letters mean two properties, and
+ * the server's default says the same thing (D39). */
 export function splitBody(
   members: ReadonlyArray<{ listing_id: number }>,
   state: SplitState,
   confirmRetract = false,
 ): {
   units: AutodedupSplitUnit[];
-  relation: AutodedupSplitRelation;
-  relations: Array<{ unit_a: string; unit_b: string; relation: AutodedupSplitRelation }>;
   confirm_retract?: true;
 } {
-  const units = distinctUnits(members, state.units);
   return {
     units: members.map((m) => ({
       listing_id: m.listing_id,
       unit: unitOf(state.units, m.listing_id),
-    })),
-    relation: state.relation,
-    relations: unitPairs(units).map(([unit_a, unit_b]) => ({
-      unit_a,
-      unit_b,
-      relation: relationOf(state, unit_a, unit_b),
     })),
     ...(confirmRetract ? { confirm_retract: true as const } : {}),
   };
@@ -260,7 +197,8 @@ export function splitInput(
     generation,
     ...splitBody(members, state, confirmRetract),
     /* ONE set for the whole split: it is one ruling, and the server stamps it on
-     * every pair row and on the cluster row. */
+     * every pair row and on the cluster row. Empty is ordinary — the chips and
+     * the note are optional. */
     ...annotationInput(annotation),
   };
 }
@@ -291,36 +229,18 @@ export interface SplitError {
 }
 
 export interface SplitReceipt {
-  input: { units: AutodedupSplitUnit[]; relations?: ReadonlyArray<{
-    unit_a: string;
-    unit_b: string;
-    relation: AutodedupSplitRelation;
-  }> };
+  input: { units: AutodedupSplitUnit[] };
   result: AutodedupSplitResult;
 }
 
-/* How much two adverts have in common, weakest first — the server's own order.
- * A split that says different things about different unit pairs is summarised on
- * the CLUSTER by its weakest claim, the only statement true of the whole group,
- * so the optimistic badge has to agree with the row that is about to land. */
-const RELATION_STRENGTH: Record<AutodedupSplitRelation, number> = {
-  different: 0,
-  same_project_different_unit: 1,
-  same_building_different_unit: 2,
-};
-
+/* What the CLUSTER row will say: one letter is one property, two letters are
+ * two, and the page has no finer word for the second (D39) — which is what the
+ * server is about to store, so the optimistic badge agrees with the row that
+ * lands. */
 export function clusterVerdictOf(input: {
   units: ReadonlyArray<AutodedupSplitUnit>;
-  relation: AutodedupSplitRelation;
-  relations?: ReadonlyArray<{ relation: AutodedupSplitRelation }>;
 }): AutodedupVerdictValue {
-  const used = new Set(input.units.map((u) => u.unit));
-  if (used.size < 2) return 'same';
-  const relations = (input.relations ?? []).map((r) => r.relation);
-  if (relations.length === 0) return input.relation;
-  return relations.reduce((weakest, r) =>
-    RELATION_STRENGTH[r] < RELATION_STRENGTH[weakest] ? r : weakest,
-  );
+  return new Set(input.units.map((u) => u.unit)).size < 2 ? 'same' : 'different';
 }
 
 /* What a card or a dialog needs to edit ONE assignment. Bundled rather than
@@ -329,14 +249,14 @@ export function clusterVerdictOf(input: {
 export interface SplitControls {
   state: SplitState;
   setUnit: (listingId: number, unit: string) => void;
-  setRelation: (unitA: string, unitB: string, relation: AutodedupSplitRelation) => void;
   save: (members: ReadonlyArray<{ listing_id: number }>, confirmRetract?: boolean) => void;
   pending: boolean;
-  /* WHY this split — the chips and the note, sent with the save. NOT hydrated
-   * from the stored cluster verdict the way a plain verdict's is: the server
-   * writes the ASSIGNMENT into that note (`A: 11,12 | B: 13`), with the
-   * operator's own words merely in front of it, so reading it back into the
-   * input and re-posting would store the summary twice. */
+  /* WHY this split — the chips and the note, sent with the save, and OPTIONAL:
+   * nothing blocks a save that carries neither. NOT hydrated from the stored
+   * cluster verdict the way a plain verdict's is: the server writes the
+   * ASSIGNMENT into that note (`A: 11,12 | B: 13`), with the operator's own
+   * words merely in front of it, so reading it back into the input and
+   * re-posting would store the summary twice. */
   annotation: VerdictAnnotation;
   setAnnotation: (next: VerdictAnnotation) => void;
   error?: SplitError;
@@ -389,17 +309,17 @@ export function UnitSelect({
 }
 
 /* THE SPLIT. It appears once the operator has actually separated something — a
- * relation select over a group nobody has split is a question with no subject —
- * AND it stays once the group carries a stored split, however the operator then
+ * split row over a group nobody has split is a statement with no subject — AND
+ * it stays once the group carries a stored split, however the operator then
  * assigns the letters. That second half is not a detail: putting every member
  * back into one unit is the UNDO, the one assignment the server implements as
  * "every pair same, every veto retracted", and a row that vanished at one unit
- * made it unreachable from this page. The whole-group "Confirm" is not that
+ * made it unreachable from this page. The whole-group "Stejné" is not that
  * undo either — it writes `same` on the cluster and leaves the pair vetoes
  * standing, a contradiction visible on no surface at all.
  *
- * Every pair across two units becomes a permanent must-not-link, so the row says
- * so in words before the click rather than in a toast after it. */
+ * Every pair across two letters becomes a permanent must-not-link, so the row
+ * says so in words before the click rather than in a toast after it. */
 export function SplitRow({
   members,
   split,
@@ -428,7 +348,6 @@ export function SplitRow({
   const units = distinctUnits(members, split.state.units);
   const one = units.length < 2;
   if (one && !split.stored && !split.receipt && !alwaysOpen) return null;
-  const pairs = unitPairs(units);
   const confirm = split.error?.needsConfirm ?? false;
   return (
     <div className="rounded-[var(--radius-sm)] border border-dashed border-[var(--color-rule-strong)] bg-[var(--color-paper)] px-3 py-2 space-y-2">
@@ -442,8 +361,10 @@ export function SplitRow({
         ) : (
           <>
             Rozdělit na {units.length} jednotky —{' '}
-            <span className="font-mono">{splitSummary(members, split.state.units)}</span>.
-            Každá dvojice napříč jednotkami dostane trvalý zákaz spojení.
+            <span className="font-mono">{splitSummary(members, split.state.units)}</span>. Stejné
+            písmeno znamená <strong>stejnou jednotku</strong>, různá písmena{' '}
+            <strong>různé jednotky</strong>: každá dvojice napříč písmeny se uloží jako „různé" a
+            dostane trvalý zákaz spojení.
           </>
         )}
       </p>
@@ -454,29 +375,6 @@ export function SplitRow({
           Uloženo dříve:{' '}
           <span className="font-mono">{splitSummary(members, split.stored.units)}</span>
         </p>
-      )}
-      {pairs.length > 0 && (
-        <div className="flex flex-wrap items-end gap-2">
-          {/* One relation PER UNIT PAIR: a group can hold two units of one
-            * building and a third advert from a different building of the same
-            * development, and one value cannot say both. */}
-          {pairs.map(([a, b]) => (
-            <label key={unitPairKey(a, b)} className="block">
-              <span className={FILTER_LABEL}>{`Vztah ${a} ↔ ${b}`}</span>
-              <select
-                className={`${FILTER_CONTROL} w-auto`}
-                value={relationOf(split.state, a, b)}
-                onChange={(e) => split.setRelation(a, b, e.target.value as AutodedupSplitRelation)}
-              >
-                {SPLIT_RELATIONS.map((relation) => (
-                  <option key={relation} value={relation}>
-                    {SPLIT_RELATION_LABELS[relation]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ))}
-        </div>
       )}
       <div className="flex flex-wrap items-center gap-2">
         <button
@@ -501,9 +399,10 @@ export function SplitRow({
         </button>
         <span className="text-[0.62rem] text-[var(--color-ink-4)]">generace {generation}</span>
       </div>
-      {/* The split's own reasons — one set for the whole ruling. There is no
-        * "Uložit poznámku" here: the split IS the save button above, and a
-        * second one would write a second, different ruling. The toggle NAMES its
+      {/* The split's own reasons — one set for the whole ruling, and optional
+        * like every annotation on this program's surfaces. There is no "Uložit
+        * poznámku" here: the split IS the save button above, and a second one
+        * would write a second, different ruling. The toggle NAMES its
         * destination: a card can show this picker and the cluster verdict's at
         * once, and two identical labels over two different drafts silently drop
         * whichever set the operator did not then save. */}
@@ -517,25 +416,12 @@ export function SplitRow({
       />
       {split.receipt && (
         <p className="text-[0.68rem] text-[var(--color-ink-2)]">
-          Uloženo: {receiptRelations(split.receipt.input)} ·{' '}
-          {split.receipt.result.n_pairs_same} dvojic jako stejná jednotka,{' '}
-          {split.receipt.result.n_pairs_negative} oddělených ·{' '}
+          Uloženo: {split.receipt.result.n_pairs_same} dvojic jako stejná jednotka,{' '}
+          {split.receipt.result.n_pairs_negative} jako různé ·{' '}
           <span className="font-mono">{unitsSummary(split.receipt.input.units)}</span>
         </p>
       )}
       {split.error && <ErrorBanner message={split.error.message} />}
     </div>
   );
-}
-
-/* The relations of the SUBMITTED split, in the receipt's own words: `A ↔ B:
- * stejná budova…`, or the single relation when the split said one thing. */
-export function receiptRelations(input: SplitReceipt['input']): string {
-  const relations = input.relations ?? [];
-  if (relations.length === 0) return 'jedna jednotka';
-  const distinct = new Set(relations.map((r) => r.relation));
-  if (distinct.size === 1) return SPLIT_RELATION_LABELS[relations[0].relation];
-  return relations
-    .map((r) => `${r.unit_a} ↔ ${r.unit_b}: ${SPLIT_RELATION_LABELS[r.relation]}`)
-    .join(' · ');
 }

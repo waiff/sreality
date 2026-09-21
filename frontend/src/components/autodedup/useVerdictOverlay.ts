@@ -26,7 +26,6 @@ import {
   postAutodedupVerdict,
   type AutodedupEnvelope,
   type AutodedupSplitInput,
-  type AutodedupSplitRelation,
   type AutodedupSplitResult,
   type AutodedupSplitUnit,
   type AutodedupVerdictInput,
@@ -58,8 +57,6 @@ function optimisticVerdict(
  * the receipt, whichever endpoint it is bound for. */
 export interface SplitLike {
   units: AutodedupSplitUnit[];
-  relation: AutodedupSplitRelation;
-  relations?: Array<{ unit_a: string; unit_b: string; relation: AutodedupSplitRelation }>;
 }
 
 export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(

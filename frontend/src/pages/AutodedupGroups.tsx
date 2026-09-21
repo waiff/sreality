@@ -59,7 +59,7 @@ import {
   GenerationNotice,
   useAutodedupGenerations,
 } from '@/components/autodedup/GenerationSelect';
-import VerdictButtons, { GROUP_LABELS } from '@/components/autodedup/VerdictButtons';
+import VerdictButtons from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
   useVerdictAnnotations,
@@ -89,7 +89,6 @@ import {
   UnitSelect,
   deriveSplit,
   splitInput,
-  unitPairKey,
   type SplitControls,
   type SplitState,
 } from '@/components/autodedup/UnitSplit';
@@ -113,23 +112,16 @@ export {
   type GroupFilterState,
 } from '@/components/autodedup/filterState';
 export {
-  DEFAULT_RELATION,
   EMPTY_SPLIT,
-  SPLIT_RELATIONS,
-  SPLIT_RELATION_LABELS,
   SplitRow,
   UNIT_LETTERS,
   UnitSelect,
   clusterVerdictOf,
   deriveSplit,
   distinctUnits,
-  receiptRelations,
-  relationOf,
   splitInput,
   splitSummary,
   unitOf,
-  unitPairKey,
-  unitPairs,
   unitsSummary,
   type SplitControls,
   type SplitError,
@@ -262,11 +254,6 @@ export default function AutodedupGroups() {
       state: base,
       setUnit: (listingId, unit) =>
         edit((current) => ({ ...current, units: { ...current.units, [listingId]: unit } })),
-      setRelation: (unitA, unitB, relation) =>
-        edit((current) => ({
-          ...current,
-          relations: { ...current.relations, [unitPairKey(unitA, unitB)]: relation },
-        })),
       save: (members, confirmRetract = false) =>
         submitSplit(
           key,
@@ -618,7 +605,6 @@ function GroupCard({
         verdict={verdict}
         onVerdict={onVerdict}
         pending={pending}
-        labels={GROUP_LABELS}
         annotation={notes.annotationOf(noteKey, verdict)}
       />
       <VerdictNotes

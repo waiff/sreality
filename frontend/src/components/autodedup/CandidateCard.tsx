@@ -43,7 +43,6 @@ import { fmtCount } from '@/lib/format';
 import { Chip, fmtScore } from '@/components/autodedup/EvidenceChips';
 import MemberGrid from '@/components/autodedup/MemberGrid';
 import {
-  DEFAULT_RELATION,
   SplitRow,
   UNIT_LETTERS,
   UnitSelect,
@@ -62,7 +61,7 @@ export function candidateDefaultSplit(units: ReadonlyArray<AutodedupCandidateUni
     const letter = UNIT_LETTERS[index] ?? UNIT_LETTERS[UNIT_LETTERS.length - 1];
     for (const listingId of unit.listing_ids) map[listingId] = letter;
   });
-  return { units: map, relation: DEFAULT_RELATION, relations: {} };
+  return { units: map };
 }
 
 /* A STORED RULING CAN DISAGREE WITH A LOCK. The assignment is read back off the

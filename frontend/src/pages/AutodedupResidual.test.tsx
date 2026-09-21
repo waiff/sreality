@@ -247,7 +247,7 @@ describe('<AutodedupResidual>', () => {
     expect(within(row).getByText('img_best_hamming')).toBeInTheDocument();
     expect(row).toHaveTextContent('Only one evidence family was present');
 
-    await user.click(within(row).getByRole('button', { name: 'This IS a duplicate' }));
+    await user.click(within(row).getByRole('button', { name: 'Stejné' }));
     await waitFor(() =>
       expect(within(row).getByText(/judge: not enough evidence/)).toBeInTheDocument(),
     );
@@ -359,11 +359,11 @@ describe('<AutodedupResidual>', () => {
     const user = userEvent.setup();
     renderPage();
     const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
-    const separate = within(row).getByRole('button', { name: 'Correctly separate' });
+    const separate = within(row).getByRole('button', { name: 'Různé' });
     await user.click(separate);
     /* Armed, not written: this verdict outlives every recalibration. */
     expect(api.postAutodedupVerdict).not.toHaveBeenCalled();
-    const armed = within(row).getByRole('button', { name: 'Click again to confirm' });
+    const armed = within(row).getByRole('button', { name: 'Klikněte znovu pro potvrzení' });
     await user.click(armed);
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'pair',
@@ -374,7 +374,7 @@ describe('<AutodedupResidual>', () => {
       verdict: 'different',
     });
     await waitFor(() =>
-      expect(within(row).getByRole('button', { name: 'Correctly separate' })).toHaveAttribute(
+      expect(within(row).getByRole('button', { name: 'Různé' })).toHaveAttribute(
         'aria-pressed',
         'true',
       ),
@@ -385,7 +385,7 @@ describe('<AutodedupResidual>', () => {
     const user = userEvent.setup();
     renderPage();
     const row = (await screen.findByText(/Why it wasn't merged/)).closest('li')!;
-    await user.click(within(row).getByRole('button', { name: 'This IS a duplicate' }));
+    await user.click(within(row).getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'pair', verdict: 'same' }),
     );
@@ -654,7 +654,7 @@ describe('<AutodedupResidual>', () => {
     await user.click(chip);
     await waitFor(() => expect(chip).toHaveAttribute('aria-pressed', 'true'));
     await user.type(within(row).getByLabelText('Poznámka'), 'jiny byt');
-    await user.click(within(row).getByRole('button', { name: 'This IS a duplicate' }));
+    await user.click(within(row).getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'pair',
       listing_lo: 101,

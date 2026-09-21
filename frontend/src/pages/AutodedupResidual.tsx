@@ -51,7 +51,6 @@ import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import { EvidenceLegend } from '@/components/autodedup/EvidenceChips';
 import PairCard from '@/components/autodedup/PairCard';
-import { PAIR_LABELS } from '@/components/autodedup/VerdictButtons';
 import { annotationInput, useVerdictAnnotations } from '@/components/autodedup/VerdictNotes';
 import { parseBlockValue } from '@/components/autodedup/BlockSelect';
 import {
@@ -80,7 +79,6 @@ import {
   EMPTY_SPLIT,
   candidateSplitInput,
   deriveSplit,
-  unitPairKey,
   type SplitControls,
   type SplitState,
   type UnitMap,
@@ -362,11 +360,6 @@ export default function AutodedupResidual() {
       state: base,
       setUnit: (listingId, unit) =>
         edit((current) => ({ ...current, units: { ...current.units, [listingId]: unit } })),
-      setRelation: (unitA, unitB, relation) =>
-        edit((current) => ({
-          ...current,
-          relations: { ...current.relations, [unitPairKey(unitA, unitB)]: relation },
-        })),
       save: (members, confirmRetract = false) =>
         candidates.submitSplit(
           key,
@@ -390,10 +383,8 @@ export default function AutodedupResidual() {
     };
   };
 
-  /* A shortcut sets the LETTERS and nothing else: the relations the operator
-   * named — or the ones read back off the store — are kept, because rewriting
-   * them to the default fill would silently change what the save is about to
-   * write as permanent must-not-links. */
+  /* A shortcut sets the LETTERS, which is all a split now says: same letter,
+   * same unit; different letters, different units (D39). */
   const setCandidateUnits = (key: string, units: UnitMap) =>
     setCandidateSplits((all) => ({
       ...all,
@@ -682,7 +673,6 @@ export default function AutodedupResidual() {
                 verdict={stored}
                 pending={pendingKey === key}
                 eager={i < 2}
-                labels={PAIR_LABELS}
                 evidenceHref={pairHref(row.listing_lo, row.listing_hi, generation ?? '', blind)}
                 annotation={notes.annotationOf(key, stored)}
                 onAnnotationChange={(next) => notes.setAnnotation(key, next)}

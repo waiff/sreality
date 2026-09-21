@@ -3,11 +3,13 @@
  * Hermetic: every API read and the one write are mocked.
  *
  * Pins:
- *   * the page says the trial merges nothing — "Confirm" must never read as
+ *   * the page says the trial merges nothing — "Stejné" must never read as
  *     "merge now";
  *   * a card carries its cluster key, its size, its members and the weakest
  *     edge, and shows at most four members with the rest COUNTED, not cropped;
  *   * a filter control sends a KEY on the query, and resets the keyset;
+ *   * the verdict control offers exactly three answers, and a stored finer
+ *     value reads back as "Různé";
  *   * a verdict click posts the cluster verdict and the badge flips to it
  *     optimistically — with no second confirm, because a cluster verdict writes
  *     nothing permanent;
@@ -19,9 +21,10 @@
  *     split is stored, so the one-unit assignment — the undo — can be sent;
  *   * Save sends EVERY member of the group, each with a control of its own,
  *     including the ones the card counted rather than showed;
- *   * the relation is named per UNIT PAIR, the stored ruling is read back off
- *     the members' pair verdicts, and a save that would take back an earlier
- *     ruling asks before it does;
+ *   * the split is LETTERS ONLY (D39) — no relation control, no relation on the
+ *     wire — while the stored ruling is read back off the members' pair
+ *     verdicts, including the finer values a pre-D39 ruling carries, and a save
+ *     that would take back an earlier ruling asks before it does;
  *   * the receipt reports what was STORED, not what the selects say afterwards;
  *   * no interactive control is nested inside another.
  */
@@ -383,7 +386,7 @@ describe('<AutodedupGroups>', () => {
       ]),
     );
     renderPage();
-    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await user.click(await screen.findByRole('button', { name: 'Stejné' }));
     await waitFor(() => expect(screen.queryByTestId('stale-verdict-notice')).toBeNull());
   });
 
@@ -438,7 +441,7 @@ describe('<AutodedupGroups>', () => {
     await waitFor(() => expect(screen.queryByText('judged 1')).toBeNull());
     expect(screen.getByTestId('search').textContent).toContain('blind=1');
     /* And it comes back the moment the group carries the operator's ruling. */
-    await user.click(within(card).getByRole('button', { name: 'Confirm' }));
+    await user.click(within(card).getByRole('button', { name: 'Stejné' }));
     await waitFor(() => expect(screen.getByText('judged 1')).toBeInTheDocument());
   });
 
@@ -451,7 +454,7 @@ describe('<AutodedupGroups>', () => {
     /* Collapsed on a queue card, like the residual rows. */
     await user.click(within(card).getByRole('button', { name: '+ důvod verdiktu' }));
     await user.click(within(card).getByRole('button', { name: 'Stejný projekt' }));
-    await user.click(within(card).getByRole('button', { name: 'Confirm' }));
+    await user.click(within(card).getByRole('button', { name: 'Stejné' }));
     expect(api.postAutodedupVerdict).toHaveBeenCalledWith({
       kind: 'cluster',
       cluster_key: 7,
@@ -587,7 +590,7 @@ describe('<AutodedupGroups>', () => {
     const user = userEvent.setup();
     renderPage();
     const card = (await screen.findByText('#7')).closest('li')!;
-    const confirm = within(card).getByRole('button', { name: 'Confirm' });
+    const confirm = within(card).getByRole('button', { name: 'Stejné' });
     expect(confirm).toHaveAttribute('aria-pressed', 'false');
     await user.click(confirm);
     /* A cluster verdict writes nothing permanent, so it never arms a second
@@ -606,12 +609,46 @@ describe('<AutodedupGroups>', () => {
     expect(within(card).getByText(/operator@example.invalid/)).toBeInTheDocument();
   });
 
+  /* ---------------------------------------- D39: three answers, not five */
+
+  it('offers exactly three answers on a group card', async () => {
+    renderPage();
+    const card = (await screen.findByText('#7')).closest('li')!;
+    for (const word of ['Stejné', 'Různé', 'Nevím']) {
+      expect(within(card).getByRole('button', { name: word })).toBeInTheDocument();
+    }
+    /* The finer breakdown bought no decision — every negative writes the same
+     * permanent must-not-link — so it is off the card, not hidden on it. */
+    expect(within(card).queryByRole('button', { name: /budova/i })).toBeNull();
+    expect(within(card).queryByRole('button', { name: /projekt/i })).toBeNull();
+  });
+
+  it('shows a ruling taken under the older vocabulary as "Různé"', async () => {
+    const old = group({
+      cluster_key: 14,
+      verdict: { ...STORED, cluster_key: 14, verdict: 'same_project_different_unit' },
+    });
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([old]));
+    renderPage();
+    const card = (await screen.findByText('#14')).closest('li')!;
+    /* Nothing is rewritten in the database: the row still says
+     * `same_project_different_unit`, and the page says what it MEANS. */
+    expect(within(card).getByRole('button', { name: 'Různé' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(card).getByRole('button', { name: 'Stejné' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
   it('rolls the badge back when the write fails', async () => {
     const user = userEvent.setup();
     vi.mocked(api.postAutodedupVerdict).mockRejectedValue(new Error('nope'));
     renderPage();
     const card = (await screen.findByText('#7')).closest('li')!;
-    const confirm = within(card).getByRole('button', { name: 'Confirm' });
+    const confirm = within(card).getByRole('button', { name: 'Stejné' });
     await user.click(confirm);
     await waitFor(() => expect(confirm).toHaveAttribute('aria-pressed', 'false'));
   });
@@ -909,12 +946,14 @@ describe('<AutodedupGroups>', () => {
     expect(within(card).getByText(/A: 101 · B: 202/)).toBeInTheDocument();
   });
 
-  it('posts the assignment, the relation and every member', async () => {
+  it('posts the assignment and every member, and names NO relation (D39)', async () => {
     const user = userEvent.setup();
     renderPage();
     const card = (await screen.findByText('#7')).closest('li')!;
     await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
     await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    /* The whole body: two letters are two properties, and that is the entire
+     * statement — the server defaults the relation to `different`. */
     expect(api.postAutodedupSplitVerdict).toHaveBeenCalledWith({
       cluster_key: 7,
       generation: 'g1',
@@ -922,25 +961,39 @@ describe('<AutodedupGroups>', () => {
         { listing_id: 101, unit: 'A' },
         { listing_id: 202, unit: 'B' },
       ],
-      /* The default is the shape this was built for: one development, several
-       * buildings. The other two relations are one select away. */
-      relation: 'same_project_different_unit',
-      /* Every unit PAIR is named rather than left to the server's fill: one
-       * value for a whole split cannot describe a group that holds two units of
-       * one building and a third advert from a different building of it. */
-      relations: [
-        { unit_a: 'A', unit_b: 'B', relation: 'same_project_different_unit' },
-      ],
       reasons: [],
       note: null,
     });
-    /* The stored cluster verdict lands on the badge, like any other verdict. */
+    /* The stored cluster verdict lands on the badge, in the page's own three
+     * words — the server answered with a pre-D39 value and it reads "Různé". */
     await waitFor(() =>
-      expect(
-        within(card).getByRole('button', { name: 'Same project, different unit' }),
-      ).toHaveAttribute('aria-pressed', 'true'),
+      expect(within(card).getByRole('button', { name: 'Různé' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      ),
     );
-    expect(within(card).getByText(/1 oddělených/)).toBeInTheDocument();
+    expect(within(card).getByText(/1 jako různé/)).toBeInTheDocument();
+  });
+
+  it('offers NO relation control anywhere on the split', async () => {
+    const user = userEvent.setup();
+    const three = group({
+      cluster_key: 9,
+      size: 3,
+      members: [101, 202, 303].map((id) => member({ listing_id: id })),
+    });
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([three]));
+    renderPage();
+    const card = (await screen.findByText('#9')).closest('li')!;
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
+    await user.selectOptions(within(card).getByLabelText('Jednotka #303'), 'C');
+    /* Three unit pairs, and not one select among them: the operator says which
+     * adverts are one unit, never what KIND of different two units are. */
+    expect(within(card).queryByLabelText(/Vztah/)).toBeNull();
+    await user.click(within(card).getByRole('button', { name: 'Save split' }));
+    const sent = vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0];
+    expect(sent).not.toHaveProperty('relation');
+    expect(sent).not.toHaveProperty('relations');
   });
 
   it('sends the members the card counted rather than showed', async () => {
@@ -960,45 +1013,6 @@ describe('<AutodedupGroups>', () => {
      * rightly: the two hidden members would otherwise be ruled on by omission. */
     expect(sent.units.map((u) => u.listing_id)).toEqual([101, 202, 303, 404, 505, 606]);
     expect(sent.units.filter((u) => u.unit === 'A')).toHaveLength(5);
-  });
-
-  it('sends the relation the operator picked', async () => {
-    const user = userEvent.setup();
-    renderPage();
-    const card = (await screen.findByText('#7')).closest('li')!;
-    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
-    await user.selectOptions(within(card).getByLabelText('Vztah A ↔ B'), 'different');
-    await user.click(within(card).getByRole('button', { name: 'Save split' }));
-    expect(vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0].relations).toEqual([
-      { unit_a: 'A', unit_b: 'B', relation: 'different' },
-    ]);
-  });
-
-  it('names a relation PER UNIT PAIR, not one for the whole split', async () => {
-    const user = userEvent.setup();
-    const three = group({
-      cluster_key: 9,
-      size: 3,
-      members: [101, 202, 303].map((id) => member({ listing_id: id })),
-    });
-    vi.mocked(api.getAutodedupGroups).mockResolvedValue(page([three]));
-    renderPage();
-    const card = (await screen.findByText('#9')).closest('li')!;
-    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'B');
-    await user.selectOptions(within(card).getByLabelText('Jednotka #303'), 'C');
-    /* A and B are two units of ONE building; C is a different building of the
-     * same development. One value would stamp a shared building onto adverts
-     * that do not share one — permanently, and as a calibration label. */
-    await user.selectOptions(
-      within(card).getByLabelText('Vztah A ↔ B'),
-      'same_building_different_unit',
-    );
-    await user.click(within(card).getByRole('button', { name: 'Save split' }));
-    expect(vi.mocked(api.postAutodedupSplitVerdict).mock.calls[0][0].relations).toEqual([
-      { unit_a: 'A', unit_b: 'B', relation: 'same_building_different_unit' },
-      { unit_a: 'A', unit_b: 'C', relation: 'same_project_different_unit' },
-      { unit_a: 'B', unit_b: 'C', relation: 'same_project_different_unit' },
-    ]);
   });
 
   it('gives EVERY member a unit control, including the ones it only counted', async () => {
@@ -1039,9 +1053,6 @@ describe('<AutodedupGroups>', () => {
     expect(within(card).getByLabelText('Jednotka #101')).toHaveValue('A');
     expect(within(card).getByLabelText('Jednotka #202')).toHaveValue('A');
     expect(within(card).getByLabelText('Jednotka #303')).toHaveValue('B');
-    expect(within(card).getByLabelText('Vztah A ↔ B')).toHaveValue(
-      'same_building_different_unit',
-    );
     expect(within(card).getByText(/Uloženo dříve/)).toHaveTextContent('A: 101,202 · B: 303');
   });
 
@@ -1059,7 +1070,7 @@ describe('<AutodedupGroups>', () => {
     await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'A');
     /* The one-unit assignment is what the server implements as "every pair same,
      * every veto retracted". A row that vanished here made the undo unreachable,
-     * and the whole-group "Confirm" is not it: that writes `same` on the cluster
+     * and the whole-group "Stejné" is not it: that writes `same` on the cluster
      * and leaves the pair vetoes standing. */
     const undo = within(card).getByRole('button', { name: 'Sloučit zpět' });
     await user.click(undo);
@@ -1068,7 +1079,7 @@ describe('<AutodedupGroups>', () => {
       { listing_id: 101, unit: 'A' },
       { listing_id: 202, unit: 'A' },
     ]);
-    expect(sent.relations).toEqual([]);
+    expect(sent).not.toHaveProperty('relations');
   });
 
   it('asks before taking back an earlier ruling, then sends the confirmation', async () => {
@@ -1098,12 +1109,11 @@ describe('<AutodedupGroups>', () => {
     await user.click(within(card).getByRole('button', { name: 'Save split' }));
     const receipt = await within(card).findByText(/Uloženo:/);
     expect(receipt).toHaveTextContent('A: 101 · B: 202');
-    /* Touching a select after the save must not rewrite the confirmation of a
+    expect(receipt).toHaveTextContent('1 jako různé');
+    /* Touching a letter after the save must not rewrite the confirmation of a
      * ruling that WAS sent — with the server's own counts lending it authority. */
-    await user.selectOptions(within(card).getByLabelText('Vztah A ↔ B'), 'different');
-    expect(within(card).getByText(/Uloženo:/)).toHaveTextContent(
-      'stejný projekt, jiné jednotky',
-    );
+    await user.selectOptions(within(card).getByLabelText('Jednotka #202'), 'A');
+    expect(within(card).getByText(/Uloženo:/)).toHaveTextContent('A: 101 · B: 202');
   });
 
   it('keeps the operator\'s letters when the split is refused', async () => {

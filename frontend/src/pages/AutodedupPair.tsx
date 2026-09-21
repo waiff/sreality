@@ -41,7 +41,7 @@ import Spinner from '@/components/Spinner';
 import AttrDiffTable, { memberDiffRows } from '@/components/autodedup/AttrDiffTable';
 import EvidenceChips, { Chip, fmtScore } from '@/components/autodedup/EvidenceChips';
 import MemberText from '@/components/autodedup/MemberText';
-import VerdictButtons, { PAIR_LABELS } from '@/components/autodedup/VerdictButtons';
+import VerdictButtons from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
   useVerdictAnnotations,
@@ -167,7 +167,6 @@ export default function AutodedupPair() {
               kind="pair"
               verdict={stored}
               pending={pendingKey === key}
-              labels={PAIR_LABELS}
               annotation={notes.annotationOf(key, stored)}
               onVerdict={(value, annotation) =>
                 submit(key, {
