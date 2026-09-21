@@ -368,13 +368,13 @@ def test_update_iteration_refuses_an_unknown_status() -> None:
 def test_every_mode_is_registered() -> None:
     assert set(lane.MODES) == {"census", "probes", "export", "judge", "score", "labels",
                                "record", "incremental", "rt_seed", "rt_parity",
-                               "rt_equivalence"}
+                               "rt_equivalence", "town"}
     # `record` writes its own terminal row, so wrapping it would file the same iteration twice;
     # `incremental` is a `*/10` schedule and a ledger row per pass would file 144 narrative
     # iterations a day over work `autodedup.runs` and the workflow summary already carry, and
     # `rt_seed` is the operator's one-off cut of a generation's calibration. `rt_parity` is
     # the READ-ONLY instrument — an `iterations` row would be the one write it promises never
-    # to make, and `rt_equivalence` makes the same promise.
+    # to make, and `rt_equivalence` and `town` make the same promise.
     assert set(lane.ITERATION_META) == {"census", "probes", "export", "judge", "score",
                                         "labels"}
     for meta in lane.ITERATION_META.values():

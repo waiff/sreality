@@ -33,7 +33,7 @@ LANE_WRITERS: tuple[str, ...] = (
     "parity.py",
     "progress_sql.py", "replay.py", "rt_equivalence.py", "score_lane.py", "score_sql.py",
     "seals.py",
-    "structural_truth.py",
+    "structural_truth.py", "town_probe.py",
 )
 
 # Columns and claim names that identify a PERSON — the operator or a broker.
