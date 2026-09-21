@@ -182,26 +182,37 @@ _RECOMPUTE_BATCH_SQL = """
       JOIN batch b ON b.id = l.property_id
       GROUP BY l.property_id
     ),
-    -- GOLDEN RECORD (field-level survivorship). Amenity booleans use bool_or =
-    -- three-valued OR-union (any reliable TRUE wins; else any explicit FALSE; else
-    -- NULL) — the right rule because a portal that simply doesn't parse an amenity
-    -- leaves it NULL, which the MF calc reads as "absent"; presence-wins recovers
-    -- it from a sibling that did parse it (validated: of cross-child lift
-    -- disagreements only ~2 percent are true-vs-false, the rest NULL-vs-known).
-    -- (Keep a literal percent sign out of this comment: psycopg parses the whole
-    -- query string for placeholders on every parameterized execute, so a stray
-    -- one raises ProgrammingError — see tests/test_sql_placeholders.py.) Scalars
-    -- take the best NON-NULL value in source-trust order via
-    -- (array_agg(x ORDER BY rank) FILTER (WHERE x IS NOT NULL))[1].
+    -- GOLDEN RECORD (field-level survivorship): ONE rule for every field — the best
+    -- NON-NULL value in source-trust order, (array_agg(x ORDER BY rank) FILTER (WHERE x
+    -- IS NOT NULL))[1]. The amenity booleans used to be a second rule, bool_or, whose
+    -- stated reason was that a portal which simply does not parse an amenity leaves it
+    -- NULL and a sibling that did parse it should recover the fact. Best-non-null
+    -- recovers it identically — it skips NULLs too — so the two rules differ ONLY where
+    -- children disagree true-vs-false, and there presence-wins let the LEAST trusted
+    -- child decide: a bazos text guess beat sreality's stated false. W6/R3: provenance is
+    -- the contract row and rank is source_trust_rank, so the arbiter must be the same one
+    -- at both grains.
     golden AS (
       SELECT
         k.property_id AS pid,
-        bool_or(k.has_lift)     AS has_lift,
-        bool_or(k.has_balcony)  AS has_balcony,
-        bool_or(k.has_parking)  AS has_parking,
-        bool_or(k.terrace)      AS terrace,
-        bool_or(k.garage)       AS garage,
-        bool_or(k.cellar)       AS cellar,
+        (array_agg(k.has_lift ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.has_lift IS NOT NULL))[1]     AS has_lift,
+        (array_agg(k.has_balcony ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.has_balcony IS NOT NULL))[1]  AS has_balcony,
+        (array_agg(k.has_parking ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.has_parking IS NOT NULL))[1]  AS has_parking,
+        (array_agg(k.terrace ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.terrace IS NOT NULL))[1]      AS terrace,
+        (array_agg(k.garage ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.garage IS NOT NULL))[1]       AS garage,
+        (array_agg(k.cellar ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.cellar IS NOT NULL))[1]       AS cellar,
         (array_agg(k.usable_area ORDER BY k.src_rank, k.is_active DESC,
             k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
             FILTER (WHERE k.usable_area IS NOT NULL))[1]  AS usable_area,

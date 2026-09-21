@@ -916,3 +916,40 @@ def test_every_singleton_creation_path_stamps_the_basis():
     for name, sql in sources.items():
         assert "price_per_m2_source_listing_id" in sql, f"{name} drops the stamp"
         assert "price_per_m2_source_id(" in sql, f"{name} restates the validity bound"
+
+
+def test_one_survivorship_rule_for_every_golden_record_field():
+    """W6/R3: the amenity booleans lost their `bool_or` special case.
+
+    Presence-wins and best-non-null both skip NULLs, so they differ only where two
+    children disagree true-vs-false — and there bool_or let the LEAST trusted child win
+    (a bazos text guess over sreality's stated false). The arbiter is now
+    source_trust_rank at both grains, the one the scalars have always used. `is_active`
+    keeps its own bool_or: a property is live while ANY child is."""
+    import re
+
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    booleans = ("has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar")
+    golden = _RECOMPUTE_BATCH_SQL.split("golden AS (", 1)[1].split("\n    ),", 1)[0]
+    for column in booleans:
+        assert f"bool_or(k.{column})" not in _RECOMPUTE_BATCH_SQL
+        assert re.search(
+            rf"array_agg\(k\.{column} ORDER BY k\.src_rank,.*?"
+            rf"FILTER \(WHERE k\.{column} IS NOT NULL\)\)\[1\]",
+            golden, re.S,
+        ), f"{column} must take the best non-NULL value in source-trust order"
+    assert "bool_or(l.is_active)" in _RECOMPUTE_BATCH_SQL
+
+    # The other two writers of these columns are SINGLETON paths (one child, or
+    # `agg.cnt = 1`), where the two rules are identical by construction — so there is no
+    # second survivorship rule to keep in step, and none may appear.
+    import inspect
+
+    from scraper import db
+    from toolkit.property_identity import _SPLIT_INSERT_ONE_SQL
+
+    for mirror in (inspect.getsource(db._cheap_property_rollup), _SPLIT_INSERT_ONE_SQL):
+        for column in booleans:
+            assert f"bool_or({column})" not in mirror
+            assert f"bool_or(l.{column})" not in mirror
