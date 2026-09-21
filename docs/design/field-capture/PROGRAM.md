@@ -171,7 +171,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | **W3** | The one re-parse seam — SHIPPED | 2,887 LOC across 11 deleted files (**4** backfill scripts, **4** workflows, **3** tests; two of the six named candidates survive on evidence — see R9) | 1,383 in the four new files; the branch's own total is +1,663 / −3,358 incl. the regenerated workflow-docs asset | W1 |
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |
-| **W6** | Close the wipe (R4); property rollup stops letting an inferred `true` beat a stated `false`; fills reach Browse in minutes | the `bool_or` special case | ~15 | W1 |
+| **W6 — SHIPPED** | Close the wipe (R4); property rollup stops letting a lower-trust `true` beat a higher-trust `false`; fills reach Browse in minutes | the `bool_or` special case; the per-listing re-render of the upsert statement | 114 / −38 across three files (most of it the WHY comments) + 156 test lines | W1 |
 | **W7** | The text lane on the realtime worker; bake-off; per-field gates | duplicate tool enums; the old cache key | ~170 | W0, W2, W3, W6 |
 | **W8** | Floor: ground = 0 everywhere — six portals re-derived; the SPA names the convention | 5 floor regexes, 4 inline FE expressions | ~60 | W2, W3, R12 hand-over |
 | **W9** | Patchwork sweep (non-autodedup), one small PR each | stale docs, a dead rung or a dead path | — | — |
