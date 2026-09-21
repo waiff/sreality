@@ -33,9 +33,15 @@ never guessed at:
                    realitymix's own `_detail_price_text` so the selector stays
                    in one place.
 
+WHY THIS SURVIVED THE ONE RE-PARSE SEAM. `scripts/reparse.py` replaced the
+re-derive family, but it can never do this: its standing rule is that a
+re-derive which yields nothing must not blank a stored value, and a quarantine
+is exactly that blanking. It also writes only typed columns, never the
+`raw_json.unit_price_quarantined_czk` receipt that makes this reversible.
+
 This writes NO snapshot (rule #2 governs source-content changes; correcting our
-own mis-parse of the SAME staged state is a data-quality fix — the
-backfill_idnes_areas posture). `price_czk` IS in the content hash, so each
+own mis-parse of the SAME staged state is a data-quality fix — the posture the
+whole heal family shared). `price_czk` IS in the content hash, so each
 quarantined listing's NEXT successful detail refetch computes a differing hash
 and appends ONE genuine snapshot — bounded, correct, self-limiting.
 
@@ -44,8 +50,7 @@ refactor's Gate 2, `sreality_id` is NULL on 17,296 / 27,107 / 11,850 of the
 ceskereality / bazos / realitymix rows, so a sreality_id cursor would walk past
 roughly a fifth of the damage without saying so.
 
-Idempotent + resumable WITHOUT a marker column, which is the second place this
-diverges from backfill_idnes_areas: the selection requires `price_czk IS NOT
+Idempotent + resumable WITHOUT a marker column: the selection requires `price_czk IS NOT
 NULL`, so a quarantined row drops out of the next run by construction, and a
 kept row is re-examined and kept again at zero writes. `--after` resumes from a
 `listings.id` cursor. That spares ~136k unchanged rows a pointless raw_json
