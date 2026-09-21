@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Iterable, Mapping, Sequence
 
 from autodedup.dataset import Listing
-from autodedup.indistinguishable import distinguishing_facts
+from autodedup.indistinguishable import CLUSTER, distinguishing_facts
 from autodedup.settings import Settings
 
 Feats = Mapping[str, tuple[float, bool]]
@@ -46,7 +46,7 @@ class ClusterRelation:
             if a is None or b is None:
                 # A member the pass cannot read is not a member this rule may refuse.
                 return True
-            hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings, gate=True)
+            hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings, CLUSTER)
             self._memo[key] = hit
         return hit
 

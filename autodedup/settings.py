@@ -306,6 +306,16 @@ class Settings:
     # DERIVED from data by `floor_convention.measure_camps` — never hard-coded — and an empty
     # table turns the whole reading off.
     floor_camps: dict[str, int] = field(default_factory=dict)
+    # How far the camps are trusted when reading the FLOOR itself. A camp is a majority
+    # behaviour (84-94 % on this corpus), not a law, so the three readings are a real choice:
+    #   `off`    — no joint reading at all: `floor` and `total_floors` are two facts, which is
+    #              exactly the predicate `truth/labels_d43.jsonl` was built with.
+    #   `joint`  — the camps power the joint `floor`+`total_floors` excuse; the floor fact keeps
+    #              g7's rule, which already excuses a one-floor gap across portals.
+    #   `slack`  — the floor gap is read with the convention taken out, and a residual of one
+    #              is still vocabulary.
+    #   `strict` — where the camps place both sources, any residual gap is a fact.
+    floor_camps_reads: str = "off"
     # E134 (N2): the asking price read as a PATH. Two adverts whose price histories ever name
     # the same amount are not told apart by a momentary gap; the tolerance is what "the same
     # amount" means.
@@ -324,6 +334,25 @@ class Settings:
     # positive evidence the engine already certified — read this wider bar, the engine's own
     # merge-grade guard (`area_reject_pct`, 8%). None = the strict definition on both sides.
     d43_gate_area_tol: float | None = None
+    # E138: the GATE's own reading, and the generalisation of E136. Demoting a merge means
+    # overruling positive evidence the engine already certified, so the gate does not demote on
+    # a difference that is INFERRED rather than stated, nor on one a known vocabulary or geocode
+    # ambiguity explains. Promotion keeps reading every fact strictly — it has no positive
+    # evidence to fall back on. Each limb names a measured loss class of the W14 arms:
+    #   image facts   — `interior` and `floorplan` are a CLIP similarity and a model flag, not
+    #                   anything either advert states (9 labelled duplicates).
+    #   street metres — two names for one corner building, pins 0.1-4 m apart (3 duplicates,
+    #                   and the town probe's `street_kills_a_merge` worked example).
+    #   total floors  — a one-storey gap across a boundary the camps cannot place is the same
+    #                   ground-floor ambiguity `floor` is already read with (3 duplicates).
+    d43_gate_image_facts: bool = True
+    # The same limb at CLUSTER grain, and it stays ON: the invariant is the only thing between
+    # a development and one big group. Measured on the chosen arm, dropping it recovers 9
+    # labelled duplicates and builds 4 groups holding a pair a judge called different on
+    # exactly that evidence — the one trade this wave refuses.
+    d43_cluster_image_facts: bool = True
+    d43_street_min_distance_m: float | None = None
+    d43_gate_total_floors_slack: bool = False
     # E137: the re-partitioner. A component the invariants cannot make one group is cut into
     # maximal consistent sub-groups rather than left where greedy arrival order dropped it. Off
     # = E33/E37's constrained union-find, unchanged.
@@ -401,12 +430,22 @@ class Settings:
                 f"d43_gate_area_tol must lie in [area_band_pct, area_reject_pct]: "
                 f"{self.d43_gate_area_tol}"
             )
+        if (self.d43_street_min_distance_m is not None
+                and not 0.0 < self.d43_street_min_distance_m <= 250.0):
+            raise ValueError(
+                f"d43_street_min_distance_m must be in (0, 250] metres: "
+                f"{self.d43_street_min_distance_m}"
+            )
         if self.repartition_max_rounds < 1:
             raise ValueError(
                 f"repartition_max_rounds must be at least 1: {self.repartition_max_rounds}"
             )
         if self.d43_promote_photo_alternative and not self.d43_promote:
             raise ValueError("d43_promote_photo_alternative needs d43_promote")
+        if self.floor_camps_reads not in ("off", "joint", "slack", "strict"):
+            raise ValueError(
+                f"floor_camps_reads must be off/joint/slack/strict: {self.floor_camps_reads}"
+            )
         if set(self.floor_camps.values()) - {0, 1}:
             raise ValueError(f"floor_camps levels must be 0 or 1: {sorted(set(self.floor_camps.values()))}")
         from autodedup.features import ATTR_KEYS, CONFLATED_ATTR_KEYS, NUMERAL_TOLERANCE

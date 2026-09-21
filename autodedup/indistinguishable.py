@@ -58,8 +58,9 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 from autodedup.dataset import Listing
-from autodedup.features import STREET_GRAIN_RANK, plot_area, rel_diff
+from autodedup.features import STREET_GRAIN_RANK, haversine_m, plot_area, rel_diff
 from autodedup.floor_convention import (
+    convention_ambiguous,
     convention_known,
     floor_gap,
     joint_convention_shift,
@@ -96,6 +97,12 @@ ROOM_CLIP_FLOOR: float = 0.90
 FLOORPLAN_ROOM_CLIP_FLOOR: float = 0.90
 
 FLAT_CATEGORY: str = "byt"
+
+# The three readings, named so a caller cannot pass a boolean and mean the wrong one.
+PROMOTE: str = "promote"
+GATE: str = "gate"
+CLUSTER: str = "cluster"
+MODES: tuple[str, ...] = (PROMOTE, GATE, CLUSTER)
 
 # The only feature slots this module reads. A caller that has to carry a feature row for every
 # pair (the cluster relation does) carries these three and nothing else.
@@ -183,6 +190,27 @@ def _windows_overlap(a: Listing, b: Listing) -> bool:
     return starts[0] <= ends[1] and starts[1] <= ends[0]  # type: ignore[operator]
 
 
+def _pins_together(a: Listing, b: Listing, within_m: float | None) -> bool:
+    """Two street names, one place: the pins are metres apart (E138).
+
+    Read only under E16's own precision gate — below street grain the coordinate is an
+    administrative centroid, and the distance between two town halls says nothing about two
+    flats. A corner building carries two street names and one point.
+    """
+    if within_m is None:
+        return False
+    left, right = a.location, b.location
+    if not (left.has_point() and right.has_point()):
+        return False
+    if left.granularity_rank is None or right.granularity_rank is None:
+        return False
+    if (left.granularity_rank < STREET_GRAIN_RANK
+            or right.granularity_rank < STREET_GRAIN_RANK):
+        return False
+    return haversine_m(float(left.lat), float(left.lon),
+                       float(right.lat), float(right.lon)) <= within_m
+
+
 def _at_street_grain(listing: Listing) -> bool:
     rank = listing.location.granularity_rank
     return rank is not None and rank >= STREET_GRAIN_RANK
@@ -198,7 +226,7 @@ def distinguishing_facts(
     b: Listing,
     feats: Feats | None = None,
     settings: Settings | None = None,
-    gate: bool = False,
+    mode: str = PROMOTE,
 ) -> list[Fact]:
     """Every stated fact that differs between two adverts. Empty list = indistinguishable.
 
@@ -206,9 +234,13 @@ def distinguishing_facts(
     can be read — this module computes no image evidence of its own. Passing None simply drops
     those two facts, which is the correct reading of an advert whose photographs nobody paired.
 
-    `gate=True` is the PERMISSIVE reading of E136: the caller is about to overrule positive
-    evidence the engine already certified (demote a merge, refuse a union), so the area bar is
-    the engine's own merge-grade guard rather than promotion's stricter one.
+    THE THREE READINGS (E136/E138). `promote` is strict: merging on the ABSENCE of a fact is
+    the one place the engine has no positive evidence to fall back on. `gate` is permissive —
+    it is about to demote a merge the engine already certified, so it does not demote on a
+    difference that is INFERRED rather than stated, nor on one a known vocabulary or geocode
+    ambiguity explains. `cluster` is `gate` with the image facts PUT BACK: the invariant is the
+    only thing standing between a development and one big group, and dropping its best
+    hazard-cell discriminator costs four bad groups where dropping it at the gate costs none.
     """
     cfg = settings or Settings()
     out: list[Fact] = []
@@ -227,7 +259,8 @@ def distinguishing_facts(
 
     # E136/N3: promotion reads the strict three-way verdict; the gate reads the wider bar the
     # merge already cleared, so a parse gap in the 3-8 % band cannot split a certified merge.
-    gate_area_tol = cfg.d43_gate_area_tol if gate else None
+    lenient = mode in (GATE, CLUSTER)
+    gate_area_tol = cfg.d43_gate_area_tol if lenient else None
     if gate_area_tol is not None:
         gap = area_rel_diff(a.area_m2, b.area_m2)
         if gap is not None and gap > gate_area_tol:
@@ -249,17 +282,26 @@ def distinguishing_facts(
     # camps place BOTH sources the residual gap is real and any of it is a fact; where a camp
     # is unknown (bazos posts both ways) a one-floor gap stays the vocabulary difference it is
     # on 45 % of cross-portal known duplicates. With no camp table this is g7's rule exactly.
-    gap = floor_gap(cfg.floor_camps, a.source, a.floor, b.source, b.floor)
+    reads = cfg.floor_camps_reads
+    gap = floor_gap(cfg.floor_camps if reads != "joint" else None,
+                    a.source, a.floor, b.source, b.floor)
     if gap is not None:
-        known = convention_known(cfg.floor_camps, a.source, b.source)
-        if (gap != 0) if known else (abs(gap) >= 2):
+        same_source = a.source is not None and a.source == b.source
+        strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
+        if (gap != 0) if strict else (abs(gap) >= 2 or (abs(gap) == 1 and same_source)):
             add("floor", a.floor, b.floor)
 
-    if (a.total_floors is not None and b.total_floors is not None
-            and a.total_floors != b.total_floors
-            and not joint_convention_shift(cfg.floor_camps, a.source, a.floor, a.total_floors,
-                                           b.source, b.floor, b.total_floors)):
-        add("total_floors", a.total_floors, b.total_floors)
+    if a.total_floors is not None and b.total_floors is not None:
+        delta_total = abs(a.total_floors - b.total_floors)
+        joint = reads != "off" and joint_convention_shift(
+            cfg.floor_camps, a.source, a.floor, a.total_floors,
+            b.source, b.floor, b.total_floors)
+        # E138: one storey across a boundary the camps cannot place is the ground-floor
+        # ambiguity again — the same slack `floor` already carries across every portal pair.
+        ambiguous = (lenient and cfg.d43_gate_total_floors_slack and delta_total == 1
+                     and convention_ambiguous(cfg.floor_camps, a.source, b.source))
+        if delta_total and not joint and not ambiguous:
+            add("total_floors", a.total_floors, b.total_floors)
 
     plot_a, plot_b = plot_area(a), plot_area(b)
     if plot_a and plot_b and rel_diff(plot_a, plot_b) > PLOT_TOL:
@@ -300,7 +342,8 @@ def distinguishing_facts(
         add("obec", a.location.obec_name or a.location.obec_kod,
             b.location.obec_name or b.location.obec_kod)
     if (a.location.street_key and b.location.street_key
-            and a.location.street_key != b.location.street_key):
+            and a.location.street_key != b.location.street_key
+            and not (lenient and _pins_together(a, b, cfg.d43_street_min_distance_m))):
         add("street", a.location.street_key, b.location.street_key)
 
     # The compass direction, which is what separates two otherwise identical flats in one
@@ -315,6 +358,10 @@ def distinguishing_facts(
             and address_block_key(a) == address_block_key(b)):
         add("unit_designator", next(iter(units_a)), next(iter(units_b)))
 
+    if mode == GATE and not cfg.d43_gate_image_facts:
+        return out
+    if mode == CLUSTER and not cfg.d43_cluster_image_facts:
+        return out
     floorplan_conflict = _present(feats, "floorplan_conflict")
     room_clip = _present(feats, "tag_room_clip_min2")
     if (floorplan_conflict == 1.0 and room_clip is not None
@@ -331,10 +378,10 @@ def indistinguishable(
     b: Listing,
     feats: Feats | None = None,
     settings: Settings | None = None,
-    gate: bool = False,
+    mode: str = PROMOTE,
 ) -> bool:
     """D43's predicate: no stated fact tells these two units apart."""
-    return not distinguishing_facts(a, b, feats, settings, gate)
+    return not distinguishing_facts(a, b, feats, settings, mode)
 
 
 # The nine comparable attributes an operator can check by reading the two adverts. Absence of a
@@ -373,8 +420,10 @@ def agreeing_attributes(
         out.append("floor")
     if (a.total_floors is not None and b.total_floors is not None
             and (a.total_floors == b.total_floors
-                 or joint_convention_shift(cfg.floor_camps, a.source, a.floor, a.total_floors,
-                                           b.source, b.floor, b.total_floors))):
+                 or (cfg.floor_camps_reads != "off"
+                     and joint_convention_shift(cfg.floor_camps, a.source, a.floor,
+                                                a.total_floors, b.source, b.floor,
+                                                b.total_floors)))):
         out.append("total_floors")
     if a.price and b.price:
         out.append("price")

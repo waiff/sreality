@@ -26,7 +26,7 @@ from autodedup.features import Feats, evidence_families, parse_ts, window_end_st
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
 from autodedup.hazard_context import ContextIndex, PairContext, fungible_catalogue
-from autodedup.indistinguishable import distinguishing_facts, promotion_warrant
+from autodedup.indistinguishable import GATE, distinguishing_facts, promotion_warrant
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
@@ -544,7 +544,7 @@ def apply_d43_rule(
     not about the rule floor that says they cannot be compared at all.
     """
     if decision.zone == "merge" and settings.d43_gate:
-        facts = distinguishing_facts(la, lb, feats, settings, gate=True)
+        facts = distinguishing_facts(la, lb, feats, settings, GATE)
         if facts:
             return Decision(
                 decision.lo, decision.hi, "band", decision.score, decision.families,

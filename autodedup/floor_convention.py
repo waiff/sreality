@@ -84,6 +84,15 @@ def convention_known(
     return camp_offset(camps, source_a, source_b) is not None
 
 
+def convention_ambiguous(
+    camps: CampTable | None, source_a: str | None, source_b: str | None
+) -> bool:
+    """True across a portal boundary the camps cannot place — the both-ways case (bazos)."""
+    if source_a is None or source_b is None or source_a == source_b:
+        return False
+    return camp_offset(camps, source_a, source_b) is None
+
+
 def joint_convention_shift(
     camps: CampTable | None,
     source_a: str | None,
