@@ -78,6 +78,8 @@ import type {
   SkillRefinement,
   Trace,
 } from '@/lib/types';
+import { Hairline, SectionLabel } from '@/components/section';
+import { Th } from '@/components/table';
 
 const ComparablesMap = lazyChunk(
   () => import('@/components/estimation/ComparablesMap'),
@@ -332,18 +334,6 @@ export function RunDetailModal({
 /* -------------------------------------------------------------------------- */
 /* Layout primitives                                                          */
 /* -------------------------------------------------------------------------- */
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
-  );
-}
 
 export function ConfidencePill({ confidence }: { confidence: Confidence | null }) {
   if (confidence == null) return null;
@@ -1208,13 +1198,13 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
         <table className="w-full text-sm">
           <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
             <tr>
-              <Th align="left">ID</Th>
-              <Th align="right">Price</Th>
-              <Th align="right">Area</Th>
-              <Th align="left">Disp.</Th>
-              <Th align="left">Summary</Th>
-              <Th align="left">Why kept</Th>
-              <Th align="right">Age</Th>
+              <Th align="left" size="xs">ID</Th>
+              <Th align="right" size="xs">Price</Th>
+              <Th align="right" size="xs">Area</Th>
+              <Th align="left" size="xs">Disp.</Th>
+              <Th align="left" size="xs">Summary</Th>
+              <Th align="left" size="xs">Why kept</Th>
+              <Th align="right" size="xs">Age</Th>
             </tr>
           </thead>
           <tbody>
@@ -1386,20 +1376,6 @@ function ExcludedComparables({
 function sortedComparables(comps: ComparableUsed[]): ComparableUsed[] {
   return [...comps].sort(
     (a, b) => (a.data_age_days ?? Infinity) - (b.data_age_days ?? Infinity),
-  );
-}
-
-function Th({ align, children }: { align: 'left' | 'right'; children: React.ReactNode }) {
-  return (
-    <th
-      scope="col"
-      className={[
-        'px-3 py-2 text-[0.65rem] tracking-[0.14em] uppercase font-medium text-[var(--color-ink-3)]',
-        align === 'right' ? 'text-right' : 'text-left',
-      ].join(' ')}
-    >
-      {children}
-    </th>
   );
 }
 

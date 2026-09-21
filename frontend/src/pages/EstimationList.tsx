@@ -28,6 +28,7 @@ import { buildRerunPayload, canRerun } from '@/lib/rerun';
 import { ControlGroup } from '@/components/controls';
 import { useNewEstimationModal } from '@/components/NewEstimationModal';
 import { listingPath } from '@/lib/listingUrl';
+import { Th } from '@/components/table';
 
 interface EstimationPage {
   rows: EstimationRun[];
@@ -288,20 +289,6 @@ function RunsTable({
         </p>
       </div>
     </div>
-  );
-}
-
-function Th({ align, children }: { align: 'left' | 'right'; children: React.ReactNode }) {
-  return (
-    <th
-      scope="col"
-      className={[
-        'px-4 py-2.5 text-[0.7rem] tracking-[0.14em] uppercase font-medium text-[var(--color-ink-3)]',
-        align === 'right' ? 'text-right' : 'text-left',
-      ].join(' ')}
-    >
-      {children}
-    </th>
   );
 }
 

@@ -19,6 +19,7 @@ import { buildRerunPayload, type RerunInput } from '@/lib/rerun';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import { ConfidencePill, RunBody, SourceBadge } from '@/components/estimation/RunPanel';
 import type { EstimationRun, ListingPublic } from '@/lib/types';
+import { Hairline } from '@/components/section';
 
 export default function EstimationDetail() {
   const { id: idParam } = useParams();
@@ -177,10 +178,6 @@ function subjectAsListing(run: EstimationRun): ListingPublic | null {
 
 function Page({ children }: { children: React.ReactNode }) {
   return <div className="px-6 py-8 max-w-5xl mx-auto">{children}</div>;
-}
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
 }
 
 function Crumb() {

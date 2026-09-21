@@ -27,17 +27,10 @@ import {
   type ManualEstimateSourceKind,
   type ManualRentalEstimate,
 } from '@/lib/types';
+import { SectionLabel } from '@/components/section';
 
 const RENT_MIN = 1000;
 const RENT_MAX = 1_000_000;
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
-  );
-}
 
 export default function ManualEstimatesBlock({
   sreality_id,

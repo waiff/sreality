@@ -15,6 +15,7 @@ import ImageTagBadge from '@/components/ImageTagBadge';
 import { portalShort } from '@/lib/portals';
 import { listingPath } from '@/lib/listingUrl';
 import Dialog, { DialogClose } from '@/components/Dialog';
+import { Hairline, SectionLabel } from '@/components/section';
 
 /* The comparable's detail card, opened from a row of the estimation-detail
  * comparables table — which is itself inside a dialog, so this is the app's
@@ -65,32 +66,20 @@ export default function ComparableModal({
 
       <div className="p-6">
         <Header listing={listing} titleId={titleId} />
-        <Hairline />
+        <Hairline tight />
         <Carousel images={images} isActive={listing.is_active} />
-        <Hairline />
+        <Hairline tight />
         <SummarySection
           summary={summary}
           error={summaryError}
           loading={summaryLoading}
         />
-        <Hairline />
+        <Hairline tight />
         <Facts listing={listing} />
-        <Hairline />
+        <Hairline tight />
         <Footer listing={listing} />
       </div>
     </Dialog>
-  );
-}
-
-function Hairline() {
-  return <div className="my-5 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
   );
 }
 

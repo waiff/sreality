@@ -63,6 +63,7 @@ import CollectionSaveToggle from '@/components/listing-detail/CollectionSaveTogg
 import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
 import { lazyChunk } from '@/lib/lazyChunk';
+import { Hairline, SectionLabel } from '@/components/section';
 
 const PriceLineChart = lazyChunk(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -783,18 +784,6 @@ function MapPinGlyph() {
       />
       <circle cx="8" cy="6" r="1.6" stroke="currentColor" strokeWidth="1.2" />
     </svg>
-  );
-}
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
   );
 }
 
