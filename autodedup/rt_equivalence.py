@@ -247,12 +247,18 @@ def known_listings(conn: Any, generation: str, ids: Sequence[int]) -> set[int]:
                                          {"generation": generation, "ids": list(ids)})}
 
 
-def clock_facts(conn: Any, ids: Sequence[int]) -> tuple[dict[int, Any], dict[int, ClockFacts]]:
-    """`first_seen_at` (the arrival cause) and the four facts every clock feature reads."""
+def clock_facts(conn: Any,
+                ids: Sequence[int]) -> tuple[dict[int, Any], dict[int, ClockFacts], int]:
+    """`first_seen_at` (the arrival cause) and the four facts every clock feature reads.
+
+    Returns the statement count as well, because this mode's promise is that it is cheap and
+    read-only, and a promise nobody counts is a promise."""
     seen: dict[int, Any] = {}
     facts: dict[int, ClockFacts] = {}
+    statements = 0
     wanted = sorted({int(i) for i in ids})
     for start in range(0, len(wanted), FACTS_CHUNK):
+        statements += 1
         for row in _rows(conn, RT_EQUIV_CLOCK_FACTS_SQL,
                          {"ids": wanted[start:start + FACTS_CHUNK]}):
             listing_id = int(row[0])
@@ -261,7 +267,7 @@ def clock_facts(conn: Any, ids: Sequence[int]) -> tuple[dict[int, Any], dict[int
                 first_seen_at=_iso(row[1]), last_seen_at=_iso(row[2]),
                 inactive_at=_iso(row[3]), is_active=bool(row[4]),
             )
-    return seen, facts
+    return seen, facts, statements
 
 
 def _iso(value: Any) -> str | None:
@@ -489,7 +495,10 @@ def run_equivalence(
         both = sorted(set(live_pairs) & set(batch_pairs))
         differing_keys = [key for key in both
                           if differences(live_pairs[key], batch_pairs[key], tol)]
-        statements = 10
+        # The nine this mode always runs: the calibration, the control settings, the scope
+        # snapshot, the score column's type, the batch pass's settings, two pair reads and two
+        # membership reads. Everything after it is bounded by what actually differs.
+        statements = 9
         statements += read_features(conn, generation, differing_keys, live_pairs)
         statements += read_features(conn, batch, differing_keys, batch_pairs)
 
@@ -499,8 +508,9 @@ def run_equivalence(
         endpoints |= {i for key in differing_keys for i in key}
         endpoints |= cluster_diff["listings"]
         known = known_listings(conn, generation, sorted(endpoints))
-        seen, facts = clock_facts(conn, sorted(endpoints)) if endpoints else ({}, {})
-        statements += (1 if endpoints else 0) * 2
+        seen, facts, fact_statements = (clock_facts(conn, sorted(endpoints)) if endpoints
+                                        else ({}, {}, 0))
+        statements += (1 if endpoints else 0) + fact_statements
     finally:
         close = getattr(conn, "close", None)
         if callable(close):
@@ -728,6 +738,11 @@ def _cluster_components(
     left, right = _trim(live, in_scope), _trim(batch, in_scope)
     of_listing_left = _membership(left)
     of_listing_right = _membership(right)
+    # Indexed once per side: a component's edge set is then the size of the component, not of
+    # the generation. A live scope holds tens of thousands of pairs and the 2026-09-21
+    # comparison had 47 components to ask about.
+    edges_left = _merge_index(live_pairs)
+    edges_right = _merge_index(batch_pairs)
     differing = sorted(
         listing_id for listing_id in in_scope
         if of_listing_left.get(listing_id, frozenset({listing_id}))
@@ -752,8 +767,8 @@ def _cluster_components(
             "listings": sorted(member_set),
             "live": sorted(sorted(s) for s in _sets_over(of_listing_left, member_set)),
             "batch": sorted(sorted(s) for s in _sets_over(of_listing_right, member_set)),
-            "live_edges": _merge_edges(live_pairs, member_set),
-            "batch_edges": _merge_edges(batch_pairs, member_set),
+            "live_edges": _merge_edges(edges_left, member_set),
+            "batch_edges": _merge_edges(edges_right, member_set),
         })
     return {
         "left": left, "right": right, "components": components,
@@ -770,10 +785,22 @@ def _sets_over(of_listing: Mapping[int, frozenset[int]],
     return {of_listing.get(listing_id, frozenset({listing_id})) for listing_id in members}
 
 
-def _merge_edges(pairs: Mapping[tuple[int, int], Pair],
-                 members: set[int]) -> list[list[int]]:
-    return sorted([key[0], key[1]] for key, pair in pairs.items()
-                  if pair.zone == "merge" and key[0] in members and key[1] in members)
+def _merge_index(pairs: Mapping[tuple[int, int], Pair]) -> dict[int, set[int]]:
+    """`listing -> the listings it holds a MERGE edge to`, both directions."""
+    out: dict[int, set[int]] = {}
+    for (lo, hi), pair in pairs.items():
+        if pair.zone != "merge":
+            continue
+        out.setdefault(lo, set()).add(hi)
+        out.setdefault(hi, set()).add(lo)
+    return out
+
+
+def _merge_edges(index: Mapping[int, set[int]], members: set[int]) -> list[list[int]]:
+    return sorted([listing_id, other]
+                  for listing_id in members
+                  for other in index.get(listing_id, ())
+                  if listing_id < other and other in members)
 
 
 def _attribute_clusters(diff: Mapping[str, Any], seen: Mapping[int, Any], exported_at: Any,
