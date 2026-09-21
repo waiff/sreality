@@ -265,6 +265,9 @@ def price_demonstrated(
 # RATIO, not a margin. Three houses of one Hlubočky parcelling are 9,650,000 / 9,750,000 /
 # 9,850,000 — 2 % apart, co-live for 82 days, one body. The small gap is the neighbouring unit.
 PRICE_COLIVE_MAX_GAP: float = 0.20
+# E164's floor: below this an advert is a headline, and a headline demonstrates nothing. It is
+# `Settings.text_min_chars`, the same bar the engine uses to decide a body is readable at all.
+RECOVER_MIN_BODY_CHARS: int = 200
 
 
 def price_conflict(
@@ -534,12 +537,19 @@ def strong_corroboration(
 
     A CONTRADICTION is never waived: two adverts that state two different areas are two
     statements, and no photograph outvotes a statement."""
+    # The seller's own order code names ONE object and needs no prose beside it.
+    if (_slot(feats, "ref_code_shared") or 0.0) >= 1.0:
+        return "code"
+    # Everything else needs both adverts to have SAID something. One ceskereality row of a
+    # Slavonín house carries an empty body and no price at all, and recovering it on shared
+    # photographs alone put it — and 39 cross-g7 pairs with it — inside cohort 3's confirmed
+    # Františka Řeháka fusion. An advert that states nothing has demonstrated nothing.
+    if min(len(a.description or ""), len(b.description or "")) < RECOVER_MIN_BODY_CHARS:
+        return None
     photos = _slot(feats, "phash_tight_matches") or 0.0
     rooms = _slot(feats, "tag_room_clip_min2")
     if photos >= settings.demonstrate_recover_min_photos and (rooms is None or rooms >= 0.90):
         return f"photos:{photos:.0f}"
-    if (_slot(feats, "ref_code_shared") or 0.0) >= 1.0:
-        return "code"
     contained = _slot(feats, "containment_max") or 0.0
     if (contained >= settings.demonstrate_recover_body_containment
             and not development_context(a, b, settings)

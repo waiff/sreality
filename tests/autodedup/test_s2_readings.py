@@ -368,25 +368,38 @@ def test_a_missing_reading_is_named_as_missing() -> None:
     assert shortfall == ("price", "missing")
 
 
+BODY = "Prodej bytu 3+kk v cihlovém domě po celkové rekonstrukci. " * 6
+
+
 def test_three_tight_photo_files_recover_a_missing_reading() -> None:
     cfg = s2()
-    a = listing(1, description="Prodej bytu 3+kk.")
-    b = listing(2, description="Prodej bytu 3+kk.")
+    a = listing(1, description=BODY)
+    b = listing(2, description=BODY)
     assert strong_corroboration(a, b, _feats(phash_tight_matches=3.0), cfg) == "photos:3"
     assert strong_corroboration(a, b, _feats(phash_tight_matches=2.0), cfg) is None
 
 
 def test_a_weak_interior_match_refuses_the_photo_recovery() -> None:
     cfg = s2()
-    a, b = listing(1), listing(2)
+    a, b = listing(1, description=BODY), listing(2, description=BODY)
     feats = _feats(phash_tight_matches=4.0, tag_room_clip_min2=0.5)
     assert strong_corroboration(a, b, feats, cfg) is None
 
 
+def test_an_advert_that_states_nothing_demonstrates_nothing() -> None:
+    """One ceskereality row of a Slavonín house carries an empty body and no price."""
+    cfg = s2()
+    a = listing(1, description=BODY)
+    b = listing(2, description="")
+    assert strong_corroboration(a, b, _feats(phash_tight_matches=6.0), cfg) is None
+    # ...but the seller's own order code names ONE object and needs no prose beside it.
+    assert strong_corroboration(a, b, _feats(ref_code_shared=1.0), cfg) == "code"
+
+
 def test_a_shared_order_code_recovers_a_missing_reading() -> None:
     cfg = s2()
-    assert strong_corroboration(listing(1), listing(2), _feats(ref_code_shared=1.0),
-                                cfg) == "code"
+    assert strong_corroboration(listing(1, description=BODY), listing(2, description=BODY),
+                                _feats(ref_code_shared=1.0), cfg) == "code"
 
 
 def test_a_shared_body_recovers_only_outside_a_development() -> None:
