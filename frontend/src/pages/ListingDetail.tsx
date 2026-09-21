@@ -507,6 +507,7 @@ export default function ListingDetail() {
             categoryMain={listing.category_main}
             lat={listing.lat}
             lng={listing.lng}
+            propertyId={propPid}
           />
         )}
       </Suspense>

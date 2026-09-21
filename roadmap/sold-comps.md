@@ -62,7 +62,7 @@ table still honest when it is empty?
   are obec envelopes + 5 km and overlap heavily, so "newest box containing the point" would answer
   with whichever town was walked last), returning that town's name, its newest successful fetch and
   its newest attempt of ANY status. `Agenda.SOLD` re-tags the existing area /
-  category / disposition / subtype defs and adds one `max_sold_age_days` — an integer day-count, so
+  category / disposition defs and adds one `max_sold_age_days` — an integer day-count, so
   the sold-date bound is the `.lte` path the registry already had (no date control, no hand-coded
   escape); `applyRegistryFilters` became agenda-generic (`applyAgendaFilters`) rather than gaining a
   second copy. `SoldCompsBlock` on ListingDetail carries the coverage sentence in its four honest
@@ -71,6 +71,16 @@ table still honest when it is empty?
   lag and reas's minority match of the register, a 1–3–5 km radius, the registry filter row, the
   table on W0's `Th`, and row → dialog with the hot-linked photos. The headline median holds the
   0–30 m² band out (a denominator defect, not a market fact) and refuses a flats-and-houses cohort.
+  The radius, the filter panel and the "no match" line belong to a town that HAS been read, or to a
+  cohort that came back holding sales — an unchecked town with nothing nearby shows the coverage
+  sentence alone. The cohort read itself always runs: a cell is an obec envelope + 5 km, so sales
+  sit around towns whose own coverage row is NULL, and gating the read on coverage would hide rows
+  we hold. That sentence asks for a pipeline card only when the property holds none, and only where
+  the FETCHER would act on one — a card at a terminal stage is skipped by the work-list (`NOT
+  ps.is_terminal`), so it is told to move the card; with no obec resolved, no advice at all
+  (membership read from the members map the page already caches).
+  Type offers Byty / Domy alone and there is no Sub-type row: reas covers flats and houses, so the
+  rest were filters that could only ever return nothing.
   `reasSoldUrl`, the reas chip and their tests are deleted; the Cenová-mapa chip stays.
   `sold_coverage` pins `search_path = public, extensions`: PostGIS is in `public` on the CI replay
   but in `extensions` on the Supabase database, so pinning `public` alone passed every CI gate and

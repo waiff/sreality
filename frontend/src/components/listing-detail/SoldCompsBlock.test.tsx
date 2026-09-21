@@ -18,20 +18,36 @@ vi.mock('@/lib/queries', async (orig) => ({
   ...(await orig<typeof import('@/lib/queries')>()),
   fetchSoldComparables: vi.fn(),
   fetchSoldCoverage: vi.fn(),
+  fetchPipelineMembers: vi.fn(),
 }));
 
 import {
+  fetchPipelineMembers,
   fetchSoldComparables,
   fetchSoldCoverage,
   SOLD_COMPS_LIMIT,
+  type PipelineMembership,
 } from '@/lib/queries';
 import SoldCompsBlock from './SoldCompsBlock';
 
 const comps = vi.mocked(fetchSoldComparables);
 const coverage = vi.mocked(fetchSoldCoverage);
+const members = vi.mocked(fetchPipelineMembers);
 
 const LAT = 50.081234;
 const LNG = 14.428765;
+const PROPERTY_ID = 5;
+
+const card = (over: Partial<PipelineMembership> = {}): PipelineMembership => ({
+  property_id: PROPERTY_ID,
+  stage_id: 1,
+  stage_label: 'Zajímavé',
+  stage_color: null,
+  stage_code: null,
+  stage_position: 0,
+  is_terminal: false,
+  ...over,
+});
 
 const COVERAGE: SoldCoverage = {
   obec_kod: 554782,
@@ -42,6 +58,19 @@ const COVERAGE: SoldCoverage = {
   truncated: false,
   last_attempt_at: '2026-09-18T04:10:00+00:00',
   last_attempt_status: 'ok',
+};
+
+/* The normal "nobody has fetched this town" answer: `sold_coverage` resolves the
+   obec from the point and the ledger joins bring back nulls. A null ROW is the
+   different, rarer case — the point is in no obec boundary we hold. */
+const NEVER_CHECKED: SoldCoverage = {
+  ...COVERAGE,
+  fetched_at: null,
+  record_count: null,
+  source_total: null,
+  truncated: null,
+  last_attempt_at: null,
+  last_attempt_status: null,
 };
 
 const sale = (over: Partial<SoldComparable> = {}): SoldComparable => ({
@@ -71,7 +100,12 @@ function renderBlock(categoryMain = 'byt') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <SoldCompsBlock categoryMain={categoryMain} lat={LAT} lng={LNG} />
+      <SoldCompsBlock
+        categoryMain={categoryMain}
+        lat={LAT}
+        lng={LNG}
+        propertyId={PROPERTY_ID}
+      />
     </QueryClientProvider>,
   );
 }
@@ -80,15 +114,116 @@ describe('<SoldCompsBlock> coverage states', () => {
   beforeEach(() => {
     comps.mockReset();
     coverage.mockReset();
+    members.mockReset();
     comps.mockResolvedValue([]);
-    coverage.mockResolvedValue(null);
+    coverage.mockResolvedValue(NEVER_CHECKED);
+    members.mockResolvedValue(new Map());
   });
 
   it('says nobody has ever looked here when there is no coverage row', async () => {
+    coverage.mockResolvedValue(null);
     renderBlock();
 
     expect(await screen.findByText(/has not been checked yet/)).toBeInTheDocument();
     expect(screen.getByText(/deal pipeline has a live card/)).toBeInTheDocument();
+  });
+
+  /* Zero rows from a town nobody fetched: a filter panel, a radius control and
+     "no registered sale matches these filters" all claim we looked, and they
+     contradict the sentence directly above them — they used to render there,
+     under a "(0)" no read backed. The READ still runs: coverage answers about
+     one obec, the cohort is a radius over every sale we hold, and those are
+     different questions (see the next test). */
+  it('offers no filters and claims no empty result over a town nobody checked', async () => {
+    renderBlock();
+
+    await screen.findByText(/has not been checked yet/);
+    await waitFor(() => expect(comps).toHaveBeenCalled());
+    expect(screen.queryByText(/No registered sale within/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '1 km' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: /Sold within/ })).toBeNull();
+    expect(screen.queryByText('(0)')).toBeNull();
+  });
+
+  /* A fetched cell is the obec's envelope plus 5 km, so the store holds sales
+     around towns whose own coverage row is still NULL. Those are facts we have;
+     gating the cohort read on coverage would hide them on the one surface that
+     shows realized prices. */
+  it('shows the sales it holds even where the town was never fetched', async () => {
+    comps.mockResolvedValue([sale(), sale(), sale()]);
+    renderBlock();
+
+    expect(await screen.findByRole('table')).toBeInTheDocument();
+    expect(screen.getAllByRole('row')).toHaveLength(4);
+    expect(screen.getByText(/has not been checked yet/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1 km' })).toBeInTheDocument();
+  });
+
+  /* Narrowing a filter to nothing must not take away the control that narrowed
+     it: once the cohort has answered with sales here, the panel stays. */
+  it('keeps the panel after a filter narrows the cohort to nothing', async () => {
+    const user = userEvent.setup();
+    comps.mockResolvedValue([sale()]);
+    renderBlock();
+    await screen.findByRole('table');
+
+    comps.mockResolvedValue([]);
+    await user.type(screen.getByRole('textbox', { name: /Sold within/ }), '1');
+
+    expect(
+      await screen.findByText(/No registered sale within 1 km/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: /Sold within/ })).toBeInTheDocument();
+  });
+
+  /* The advice was wrong for exactly the properties most likely to be read:
+     the ones the operator is already tracking. Membership comes from the
+     members map the page's PipelineToggle has in cache — no extra read. */
+  it('tells a property already in the pipeline that its town is on the list', async () => {
+    members.mockResolvedValue(new Map([[PROPERTY_ID, card()]]));
+    renderBlock();
+
+    const line = await screen.findByText(/has not been checked yet/);
+    expect(line).toHaveTextContent(/its town is on the fetch list/);
+    expect(line).not.toHaveTextContent(/Add this property to the pipeline/);
+  });
+
+  /* The fetcher's work-list is `NOT ps.is_terminal`, and rule #22 closes deals
+     INTO a terminal stage — so "the town is on the list" is false for exactly
+     the cards an operator has finished with. */
+  it('does not promise a fetch for a card at a closed stage', async () => {
+    members.mockResolvedValue(
+      new Map([[PROPERTY_ID, card({ is_terminal: true, stage_label: 'Koupeno' })]]),
+    );
+    renderBlock();
+
+    const line = await screen.findByText(/has not been checked yet/);
+    expect(line).toHaveTextContent(/card is at a closed stage/);
+    expect(line).toHaveTextContent(/move it to a live stage/);
+    expect(line).not.toHaveTextContent(/on the fetch list\./);
+    expect(line).not.toHaveTextContent(/Add this property to the pipeline/);
+  });
+
+  it('tells a property outside the pipeline to add it', async () => {
+    renderBlock();
+
+    const line = await screen.findByText(/has not been checked yet/);
+    expect(line).toHaveTextContent(/Add this property to the pipeline/);
+    expect(line).not.toHaveTextContent(/on the fetch list\./);
+  });
+
+  /* With no coverage row the point is in no obec boundary we hold — and the
+     fetcher resolves a cell through that same boundary table, so nothing about
+     its work-list is knowable here. No advice is better than wrong advice. */
+  it('advises nothing when it cannot even resolve a town', async () => {
+    coverage.mockResolvedValue(null);
+    members.mockResolvedValue(new Map([[PROPERTY_ID, card()]]));
+    renderBlock();
+
+    const line = await screen.findByText(/has not been checked yet/);
+    expect(line).toHaveTextContent(/This area has not been checked yet/);
+    expect(line).not.toHaveTextContent(/fetch list/);
+    expect(line).not.toHaveTextContent(/Add this property to the pipeline/);
   });
 
   /* The two numbers are different POPULATIONS — what reas publishes inside its
@@ -128,7 +263,9 @@ describe('<SoldCompsBlock> coverage states', () => {
     renderBlock();
 
     expect(await screen.findByText(/reas\.cz · checked/)).toBeInTheDocument();
-    expect(screen.getByText(/No registered sale within 1 km/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/No registered sale within 1 km/),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/has not been checked yet/)).toBeNull();
   });
 
@@ -146,10 +283,15 @@ describe('<SoldCompsBlock> coverage states', () => {
 
     expect(await screen.findByText(/the fetch failed/)).toBeInTheDocument();
     expect(screen.queryByText(/has not been checked yet/)).toBeNull();
+    /* Nothing has been read here either, so the same silence applies. */
+    expect(screen.queryByText(/No registered sale within/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '1 km' })).toBeNull();
   });
 
   /* An unanswered coverage read is not "nobody has looked here" — that sentence
-     is the one claim about the world this block makes from an absence. */
+     is the one claim about the world this block makes from an absence. Nor is
+     it licence to assert an empty market: with coverage unknown and no rows,
+     the error line is all there is to say. */
   it('claims nothing about coverage when the coverage read fails', async () => {
     coverage.mockRejectedValue(new Error('function sold_coverage does not exist'));
     comps.mockResolvedValue([]);
@@ -157,6 +299,19 @@ describe('<SoldCompsBlock> coverage states', () => {
 
     expect(await screen.findByText(/Coverage unavailable/)).toBeInTheDocument();
     expect(screen.queryByText(/has not been checked yet/)).toBeNull();
+    await waitFor(() => expect(comps).toHaveBeenCalled());
+    expect(screen.queryByText(/No registered sale within/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '1 km' })).toBeNull();
+  });
+
+  /* A broken coverage function must not hide sales we hold either. */
+  it('still shows the sales it holds when the coverage read fails', async () => {
+    coverage.mockRejectedValue(new Error('function sold_coverage does not exist'));
+    comps.mockResolvedValue([sale()]);
+    renderBlock();
+
+    expect(await screen.findByRole('table')).toBeInTheDocument();
+    expect(screen.getByText(/Coverage unavailable/)).toBeInTheDocument();
   });
 
   /* A failed cohort read must never render as "there are no sales here", and
@@ -176,7 +331,26 @@ describe('<SoldCompsBlock> what it refuses to show', () => {
   beforeEach(() => {
     comps.mockReset();
     coverage.mockReset();
+    members.mockReset();
     coverage.mockResolvedValue(COVERAGE);
+    members.mockResolvedValue(new Map());
+  });
+
+  /* reas.cz publishes byty and domy and the parser refuses the rest, so
+     Komerční / Pozemky / Ostatní were three filters that could only ever
+     return nothing — and Sub-type was twenty more (it is no longer a SOLD
+     filter at all: a flat has no subtype). */
+  it('offers only the two categories the source can answer for', async () => {
+    comps.mockResolvedValue([sale()]);
+    renderBlock();
+
+    await screen.findByRole('table');
+    expect(screen.getByRole('button', { name: 'Byty' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Domy' })).toBeInTheDocument();
+    for (const gone of ['Komerční', 'Pozemky', 'Ostatní', 'Kancelář', 'Sklad']) {
+      expect(screen.queryByRole('button', { name: gone })).toBeNull();
+    }
+    expect(screen.queryByText('Sub-type')).toBeNull();
   });
 
   it('renders one honest line, and no query, for a listing reas does not cover', () => {
@@ -259,8 +433,10 @@ describe('<SoldCompsBlock> query plumbing', () => {
   beforeEach(() => {
     comps.mockReset();
     coverage.mockReset();
+    members.mockReset();
     coverage.mockResolvedValue(COVERAGE);
     comps.mockResolvedValue([sale()]);
+    members.mockResolvedValue(new Map());
   });
 
   it('asks for 1 km around the point, seeded with the subject kind', async () => {
@@ -274,9 +450,8 @@ describe('<SoldCompsBlock> query plumbing', () => {
   it('re-asks the server when the radius changes — no client-side narrowing', async () => {
     const user = userEvent.setup();
     renderBlock();
-    await waitFor(() => expect(comps).toHaveBeenCalled());
 
-    await user.click(screen.getByRole('button', { name: '3 km' }));
+    await user.click(await screen.findByRole('button', { name: '3 km' }));
 
     await waitFor(() =>
       expect(comps).toHaveBeenCalledWith(LAT, LNG, 3000, { category_main_in: ['byt'] }),
@@ -303,9 +478,9 @@ describe('<SoldCompsBlock> query plumbing', () => {
   it('sends a registry filter to the server under its registry id', async () => {
     const user = userEvent.setup();
     renderBlock();
-    await waitFor(() => expect(comps).toHaveBeenCalled());
+    const box = await screen.findByRole('textbox', { name: /Sold within/ });
 
-    await user.type(screen.getByRole('textbox', { name: /Sold within/ }), '730');
+    await user.type(box, '730');
 
     await waitFor(() =>
       expect(comps).toHaveBeenCalledWith(

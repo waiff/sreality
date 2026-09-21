@@ -374,7 +374,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
                   onChange={(next) =>
                     handleRegistryChange([{ id: 'subtype', value: next }])
                   }
-                  cols={2}
                 />
               </ControlGroup>
             );

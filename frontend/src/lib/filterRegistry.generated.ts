@@ -698,7 +698,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "category_main",
       "default": null,
-      "description": "Multi-select top-level category for Browse + Watchdog cohorts: a listing matches if its `category_main` is in the list (`byt` apartments, `dum` houses, `komercni` commercial, `pozemek` land, `ostatni` other). Empty list / null = no constraint. The analytical surfaces (comparables / estimation / velocity / neighborhood) use the SCALAR `category_main` instead — an estimate is for one property of one category, so a multi-value category is meaningless there. Mirrors the dispositions / disposition_match split.",
+      "description": "Multi-select top-level category for Browse + Watchdog cohorts: a listing matches if its `category_main` is in the list (`byt` apartments, `dum` houses, `komercni` commercial, `pozemek` land, `ostatni` other). Empty list / null = no constraint. The analytical surfaces (comparables / estimation / velocity / neighborhood) use the SCALAR `category_main` instead — an estimate is for one property of one category, so a multi-value category is meaningless there. Mirrors the dispositions / disposition_match split. On Agenda.SOLD only `byt` and `dum` can ever match — reas.cz publishes those two and the parser refuses the rest — so the block offers that pair and no more.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -891,12 +891,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "subtype",
       "default": null,
-      "description": "Portal-agnostic property sub-type (multi-select). Only meaningful for category_main in (dum, komercni): houses (rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, zemedelska_usedlost, na_klic, pamatka_jine) and commercial (kancelar, sklad, obchodni_prostor, vyroba, ubytovani, restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, virtualni_kancelar, ostatni). A listing matches if its subtype is in the list. Normalized across portals — distinct from the sreality-only numeric category_sub_cb. The Browse sidebar renders the group matching the selected category_main (dum / komercni) and hides it otherwise.",
+      "description": "Portal-agnostic property sub-type (multi-select). Only meaningful for category_main in (dum, komercni): houses (rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, zemedelska_usedlost, na_klic, pamatka_jine) and commercial (kancelar, sklad, obchodni_prostor, vyroba, ubytovani, restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, virtualni_kancelar, ostatni). A listing matches if its subtype is in the list. Normalized across portals — distinct from the sreality-only numeric category_sub_cb. The Browse sidebar renders the group matching the selected category_main (dum / komercni) and hides it otherwise. NOT an Agenda.SOLD filter: reas.cz publishes byty and domy only (the parser refuses any other type), so every commercial member of this taxonomy is a cohort that can only ever be empty there, and a flat has no subtype at all.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
         "browse",
-        "sold",
         "watchdog"
       ],
       "constraints": null,

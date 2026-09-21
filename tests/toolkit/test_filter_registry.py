@@ -438,8 +438,13 @@ def test_category_main_multiselect_split():
 # must name a column `sold_comparables` returns (asserted in
 # tests/test_sold_comps_read_surface.py), and the relation is NOT listings-grain, so
 # most of the registry cannot apply to it at all.
+#
+# `subtype` is deliberately absent and must not come back: reas.cz publishes byty and
+# domy (the parser refuses every other type), so the taxonomy's commercial half is
+# unreachable there and a flat has no subtype at all — twenty options that could only
+# ever return zero rows. `category_main_in` stays, narrowed to byt/dum at the block.
 _SOLD_FILTER_IDS = frozenset({
-    "category_main_in", "dispositions", "subtype",
+    "category_main_in", "dispositions",
     "min_area_m2", "max_area_m2",
     "min_usable_area", "max_usable_area",
     "max_sold_age_days",
