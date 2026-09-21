@@ -53,7 +53,7 @@ table still honest when it is empty?
   `_lane_loop` contract. The cell is the obec's `admin_boundaries` envelope (its `id` IS
   the RÚIAN kód) widened by 5,000 m — the read surface's largest radius, so any subject
   inside the obec is covered by construction.
-- **W3** — 🟡 built, migration NOT yet applied. The read surface (migration 545): the SALES behind
+- **W3** — ✅ shipped (#1551, migration 545 applied, verified in a real browser on production). The read surface (migration 545): the SALES behind
   definer-style `sold_transactions_public`, read by `sold_comparables(lat, lng, radius)` —
   `language sql stable`, SECURITY INVOKER, NO `SET` clause, which is what keeps it inlined and on
   the geography index. The fetch LEDGER gets NO view: which cells were fetched is a projection of
@@ -72,11 +72,33 @@ table still honest when it is empty?
   table on W0's `Th`, and row → dialog with the hot-linked photos. The headline median holds the
   0–30 m² band out (a denominator defect, not a market fact) and refuses a flats-and-houses cohort.
   `reasSoldUrl`, the reas chip and their tests are deleted; the Cenová-mapa chip stays.
-  **Migration 545 must be applied BEFORE this PR merges** — the SPA shipping with it calls both
-  functions, which is exactly the migration-438 gap.
+  `sold_coverage` pins `search_path = public, extensions`: PostGIS is in `public` on the CI replay
+  but in `extensions` on the Supabase database, so pinning `public` alone passed every CI gate and
+  failed the production apply (`type "geography" does not exist`).
 - **W4** — folded into W2 (above).
-- **W5** — pay the rest: delete `FilterChip.tsx` (+ its test), `POST /tools/find_comparables`
-  (+ schema) and `ComparableFilters.category_sub_cb`.
+- **W5** — pay the rest. **`FilterChip.tsx` + its test are deleted.** It had zero importers: its
+  five call sites (`Dedup`, `DedupAuditHistory`, `EligibilityMatrix`, `ClipAudit`,
+  `LocationAudit`) all died with the legacy-dedup frontend teardown (b69da0d8, #967), and
+  `Datasets.tsx` declares its own read-only `FilterChips` badges locally — a different shape,
+  never an import. The `onRemove` split toggle+trash variant goes with it; nothing has used it
+  since that teardown and git history holds it if it is ever wanted back.
+  **`ComparableFilters.category_sub_cb` is NOT deleted — refused by an independent skeptic.** Its
+  stated replacement `subtype` is not on `Agenda.COMPARABLES`/`ESTIMATION`, so removal would strip
+  the estimator's only house/commercial sub-type narrowing; it is a live knob in the agent's
+  generated tool schema; stored watchdog specs and filter presets drop unknown keys SILENTLY, so a
+  watchdog pinned to a sub-code would WIDEN; and migration 537's Browse SRF still takes it. The
+  prerequisite is `subtype` on the comparables agenda + a stored-blob census — its own program.
+  **`POST /tools/find_comparables` is parked (draft PR) behind an OPERATOR answer**: nothing in the
+  repo calls it, but it is a bearer-gated public route as old as the API, and only the operator
+  knows whether an outside consumer (ClickUp) does. `FindComparablesIn` stays either way — it is
+  the base class of the two surviving comparables bodies.
+  **Honest ledger:** the program is net-ADDITIVE. W0 measured −21 lines (not the ~470 the research
+  estimated — the copies were 3–8 lines each), W5 −131; the feature itself is ~+4,500 lines, more
+  than half of it tests and fixtures. What was subtracted is paths, not lines: no portal row, no
+  listings rows, no queue, no failures/runs table, no link table, no R2 copy, no flag, no hook.
+- **Next** — the operator turns the lane on (Settings → `realtime_sold_comps_interval_seconds`,
+  e.g. 21600). Before that, one SELECT worth running: which live `pipeline_stages` rows carry
+  `is_terminal` — the lane skips closed deals on that flag alone.
 
 ## Standing constraints
 
