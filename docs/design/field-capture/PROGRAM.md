@@ -65,7 +65,7 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 - **R3 — ONE producer per (portal, field)**: `structured | text | derived | none`. No precedence rule, no
   per-row provenance column — provenance IS the contract row. A `structured` cell also declares its source-key
   order, its **absence semantics** (missing key ⇒ `false` | `unknown`) and its **default sentinels** (values read
-  as absent). *(W2 correction: the three-value set was short by one. Declaring all 9 × 26 cells found 32 that are
+  as absent). *(W2 correction: the three-value set was short by one. Declaring all 9 × 26 cells found 36 that are
   written from something that is not a payload attribute key at all — `category_main` from a URL segment or a
   breadcrumb, `subtype` from an SEO title, `price_unit` restated from `category_type` on seven portals,
   `area_basis` stamped by `scraper.area`. Calling those `structured` would have named keys that do not exist and
@@ -152,7 +152,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | --- | --- | --- | --- | --- |
 | **W0** | Stop the dead lane pretending | ~2,380 LOC: 4 scripts, 2 workflows, 3 test files, 2 empty tables | ~5 LOC + this doc | — |
 | **W1** | Measurement before change: per-portal key census + fill **and validity** matrix; the flaky data-quality capture REPAIRED (the Health page reads it) | — (the one wave that only adds: it is the instrument) | ~2,200 incl. census + baseline JSON | — |
-| **W2** | Vocabulary module + contract table + CI gates — identity-preserving | 34 fns, 17 dicts, 9 disposition + 7 PENB regexes, the key chains, 8 planted tests, 26 dead reads | one module + one table + 3 gates | W1 |
+| **W2** | Vocabulary module + contract table + CI gates — identity-preserving | 51 per-parser fns, 22 dicts, 13 regexes, the key chains, 8 planted tests, 26 dead reads | one module + one 234-cell table + 3 gates | W1 |
 | **W3** | The one re-parse seam — SHIPPED | 2,887 LOC across 11 deleted files (**4** backfill scripts, **4** workflows, **3** tests; two of the six named candidates survive on evidence — see R9) | 1,383 in the four new files; the branch's own total is +1,663 / −3,358 incl. the regenerated workflow-docs asset | W1 |
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |
@@ -183,7 +183,7 @@ between the two instruments is written in that migration's header.
 6**: the six the investigation named were the ones a live census had been run against, and declaring all nine
 portals' cells against the checked-in census found 26 (ceskereality 9, remax 6, realitymix 5, idnes 4, maxima 2).
 Gate A2 (no unread emission ≥ 5 %) — every such key is mapped or on the explicit `IGNORED` list with a reason
-(217 entries, of which 14 name the census key W4 wires). Gate A3 (no unmapped value). **Identity proof:** the
+(294 entries, and 14 of the 50 `none` cells name the census key W4 wires). Gate A3 (no unmapped value). **Identity proof:** the
 characterisation goldens in `tests/fixtures/field_capture/golden/` — 33 real detail payloads, 1,321 probes over
 every (portal, key, live value) the census records, 33 source-key-chain probes — recorded from the parsers BEFORE
 the module existed and byte-identical after, except four synthetic chain probes that exercise only deleted dead
