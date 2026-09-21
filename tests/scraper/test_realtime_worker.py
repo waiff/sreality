@@ -1702,3 +1702,212 @@ def test_the_daily_lane_never_reads_as_a_stalled_one() -> None:
     src = inspect.getsource(verify_pipeline.check_worker_lane_stall)
     assert "if elapsed is None:\n            continue" in src
     assert "last_pass_at" not in src
+
+
+# --- sold_comps lane (sold-comps W2) ------------------------------------------
+
+
+def _patch_sold_comps(
+    monkeypatch: pytest.MonkeyPatch,
+    cells: list[int] | None,
+    results: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Stub the work-list and the cell fetch; capture what the lane asked for."""
+    captured: dict[str, Any] = {"kwargs": {}, "fetched": [], "clients": 0}
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    conn = _Conn()
+    scripted = list(results or [])
+
+    def fake_cells(c: Any, source: str, **kwargs: Any) -> list[int] | None:
+        captured["source"] = source
+        captured["kwargs"] = kwargs
+        return cells
+
+    def fake_fetch(c: Any, client: Any, obec_kod: int, **kw: Any) -> dict[str, Any]:
+        captured["fetched"].append(obec_kod)
+        if scripted:
+            return scripted.pop(0)
+        return {"obec_kod": obec_kod, "status": "ok", "records": 2, "new": 1,
+                "pages": 1, "source_total": 625, "dropped": 0, "error": None}
+
+    def fake_client() -> object:
+        captured["clients"] += 1
+        return object()
+
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
+    monkeypatch.setattr(rw.sold_db, "sold_comp_cells", fake_cells)
+    monkeypatch.setattr(rw.sold_fetch, "fetch_cell", fake_fetch)
+    # The worker knows the sold-comps LANE, never the source: `sold_fetch` composes
+    # the client and owns `SOURCE`, so `realtime_worker` imports no reas module.
+    monkeypatch.setattr(rw.sold_fetch, "build_client", fake_client)
+    monkeypatch.setattr(rw, "_SOLD_COMPS_STORE_WARNED", False)
+    monkeypatch.setattr(rw, "_SOLD_COMPS_WEDGE_LOGGED", False)
+    captured["conn_obj"] = conn
+    return captured
+
+
+def test_sold_comps_lane_registered_and_dark_by_default(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # ONE integer is the cadence AND the kill switch: no `*_enabled` flag, no env
+    # var. An absent row reads 0, so the lane is dark until the operator sets it.
+    src = inspect.getsource(rw._amain)
+    assert '("sold_comps"' in src
+    monkeypatch.setattr(rw, "_read_setting", lambda key: None)
+    assert rw._read_sold_comps_interval() == 0
+    monkeypatch.setattr(rw, "_read_setting", lambda key: 3600)
+    assert rw._read_sold_comps_interval() == 3600
+
+
+def test_sold_comps_lane_stays_dark_when_the_settings_read_fails() -> None:
+    # _lane_loop keeps default_interval when read_interval() RAISES. A positive
+    # fallback would spend an external site's bandwidth on an app_settings blip
+    # while the operator believes the lane is off.
+    lane = inspect.getsource(rw._amain).split('("sold_comps"', 1)[1].split(")),", 1)[0]
+    assert "default_interval=0" in lane
+    assert "first_delay_seconds=SOLD_COMPS_FIRST_DELAY_SECONDS" in lane
+    assert rw.SOLD_COMPS_FIRST_DELAY_SECONDS > 0
+
+
+def test_sold_comps_tick_fetches_the_capped_cell_list_on_one_client(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _patch_sold_comps(monkeypatch, [554782, 500496])
+
+    out = rw._sold_comps_sync()
+
+    assert captured["source"] == "reas"
+    assert captured["kwargs"] == {"cap": rw.SOLD_COMPS_CELL_CAP}
+    assert captured["fetched"] == [554782, 500496]
+    # One client per pass: the politeness ledger is shared, the session need not be.
+    assert captured["clients"] == 1
+    assert out == {"ran": True, "cells": 2, "records": 4, "new": 2, "failed": 0,
+                   "skipped": 0, "seconds": out["seconds"]}
+    assert captured["conn_obj"].closed is True
+
+
+def test_the_worker_names_the_lane_never_the_source() -> None:
+    # A shared module that imports one data source's client/parser makes the second
+    # sold source an edit to the worker rather than to `sold_fetch`.
+    src = inspect.getsource(rw)
+    assert "reas_client" not in src and "reas_parser" not in src
+
+
+def test_an_abandoned_pass_is_not_walked_a_second_time(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # A pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps running and has written no
+    # ledger row yet, so the freshness subtraction cannot stop the next tick handing
+    # it the SAME cells. This lock is what does.
+    captured = _patch_sold_comps(monkeypatch, [554782])
+    rw._SOLD_COMPS_PASS_LOCK.acquire()
+    try:
+        out = rw._sold_comps_sync()
+    finally:
+        rw._SOLD_COMPS_PASS_LOCK.release()
+
+    assert out["ran"] is False and out["reason"] == "previous_pass_running"
+    assert captured["fetched"] == []
+    # And the lock is released on the normal path, or one pass would wedge the lane.
+    assert rw._sold_comps_sync()["ran"] is True
+
+
+def test_sold_comps_tick_opens_no_client_when_no_cell_is_due(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _patch_sold_comps(monkeypatch, [])
+
+    out = rw._sold_comps_sync()
+
+    assert (out["ran"], out["cells"]) == (True, 0)
+    assert captured["clients"] == 0, "an idle tick must not touch the source at all"
+
+
+def test_a_failed_cell_is_counted_and_never_stops_the_tick(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _patch_sold_comps(monkeypatch, [1, 2], results=[
+        {"obec_kod": 1, "status": "failed", "records": 0, "new": 0, "pages": 0,
+         "source_total": None, "dropped": 0, "error": "TimeoutError: x"},
+        {"obec_kod": 2, "status": "ok", "records": 5, "new": 5, "pages": 1,
+         "source_total": 625, "dropped": 0, "error": None},
+    ])
+
+    out = rw._sold_comps_sync()
+
+    assert captured["fetched"] == [1, 2], "one bad cell does not cost the next one"
+    assert (out["failed"], out["records"], out["new"]) == (1, 5, 5)
+
+
+def test_a_cell_that_could_not_be_boxed_never_reads_as_a_quiet_pass(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # The work-list's admin_boundaries join means the lane should never see one; if
+    # it ever does, `skipped` is the only place it can show, because a skip writes
+    # no ledger row either.
+    _patch_sold_comps(monkeypatch, [1], results=[
+        {"obec_kod": 1, "status": "skipped", "records": 0, "new": 0, "pages": 0,
+         "source_total": None, "dropped": 0, "error": "obec has no boundary polygon"},
+    ])
+
+    out = rw._sold_comps_sync()
+
+    assert (out["cells"], out["skipped"], out["failed"]) == (1, 1, 0)
+
+
+def test_sold_comps_tick_skips_when_the_store_is_missing(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    captured = _patch_sold_comps(monkeypatch, None)
+
+    with caplog.at_level(logging.WARNING, logger="scraper.realtime_worker"):
+        first = rw._sold_comps_sync()
+        second = rw._sold_comps_sync()
+
+    assert first["ran"] is False and first["reason"] == "store_missing"
+    assert second["ran"] is False
+    assert captured["fetched"] == [], "nothing is fetched without somewhere to put it"
+    # Once per process, not once a tick.
+    assert sum("sold_transactions is absent" in r.message for r in caplog.records) == 1
+
+
+def test_sold_comps_pass_records_the_heartbeat_shape(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_sold_comps(monkeypatch, [554782])
+    state = rw._new_state()
+    rw._record_pass_start(state, "sold_comps")
+
+    asyncio.run(rw._sold_comps_pass(asyncio.Event(), state))
+
+    lane = state["lanes"]["sold_comps"]
+    assert lane["passes"] == 1
+    assert lane["started_at"] is None
+    assert lane["last"]["cells"] == 1
+    assert lane["last"]["new"] == 1
+    assert "seconds" in lane["last"]
+    # Jsonb-able: the heartbeat writes this dict straight into worker_heartbeats.
+    Jsonb(rw._lane_snapshot(state["lanes"]))
+
+
+def test_sold_comps_pass_records_a_skipped_tick_too(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    # _record_pass on EVERY path, or a skipping lane reads as one that never ran.
+    _patch_sold_comps(monkeypatch, None)
+    state = rw._new_state()
+
+    asyncio.run(rw._sold_comps_pass(asyncio.Event(), state))
+
+    assert state["lanes"]["sold_comps"]["last"]["ran"] is False
+
+
+def test_sold_comps_pass_returns_early_when_stopping(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    def never() -> dict[str, Any]:
+        raise AssertionError("a stopping worker must not open a tick")
+
+    monkeypatch.setattr(rw, "_sold_comps_sync", never)
+    stop = asyncio.Event()
+    stop.set()
+    state = rw._new_state()
+    asyncio.run(rw._sold_comps_pass(stop, state))
+    assert "sold_comps" not in state["lanes"]
