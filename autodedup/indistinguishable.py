@@ -444,7 +444,8 @@ def distinguishing_facts(
             # E134: the momentary gap is excused by an agreeing path; a CONTRADICTION — two
             # adverts on sale at the same time that never named one another's price — is a
             # fact at the cross-portal bar whether or not they share a portal.
-            contradiction = (cfg.d43_price_colive_contradiction and not agree
+            colive_side = not cfg.d43_price_colive_same_source_only or not cross
+            contradiction = (cfg.d43_price_colive_contradiction and not agree and colive_side
                              and price_gap > PRICE_CROSS_TOL
                              and _co_live(a, b, cfg.d43_price_colive_min_overlap_days))
             if (over and not agree) or contradiction:

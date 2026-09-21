@@ -401,8 +401,13 @@ class Settings:
     d43_two_unit_price_tol: float = 0.005
     d43_two_unit_stated_tol: float = 0.005
     # E144: E134's co-live limb needs an overlap BAR. Windows that merely touch are a re-post
-    # boundary — 38 of the 63 raw pairs — and a 3-day bar removes every one of them.
+    # boundary — 38 of the 63 raw pairs — and a 3-day bar removes every one of them. It also
+    # needs a SIDE: all 25 contradictions the W14 group attack found are same-portal, and
+    # across portals the limb only ever overrules E134's own price-path excuse, which is where
+    # its cost lives (7 dev and 3 sealed labelled duplicates, against 0 for the same-portal
+    # reading).
     d43_price_colive_min_overlap_days: float = 0.0
+    d43_price_colive_same_source_only: bool = False
     # E145: WHOSE ground-floor convention is it? N1's same-portal clause assumes one portal is
     # one convention, and the data refuses that: among same-portal KNOWN duplicates a one-storey
     # gap runs at 7.5 % on sreality, 6.8 % on ceskereality, 15 % on realitymix and 23.5 % on
