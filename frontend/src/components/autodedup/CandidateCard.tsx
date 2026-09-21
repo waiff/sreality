@@ -89,8 +89,7 @@ export function respectLocks(
   return changed ? { ...state, units: map } : state;
 }
 
-/* Every letter in play on this card — what the shortcuts write and what the
- * relation matrix is built from. */
+/* Every letter in play on this card — what the two shortcuts write. */
 export function allOneUnit(units: ReadonlyArray<AutodedupCandidateUnit>): UnitMap {
   const map: UnitMap = {};
   for (const unit of units) for (const id of unit.listing_ids) map[id] = 'A';

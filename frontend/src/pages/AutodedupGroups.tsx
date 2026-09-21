@@ -15,8 +15,8 @@
  * value is the server's 400 rather than this page's problem.
  *
  * A GROUP IS NOT ALWAYS ONE ANSWER, so every member carries a unit letter and
- * two letters raise the split row. The machinery — the letters, the relation per
- * unit pair, the stored ruling read back off the members' pair verdicts — is
+ * two letters raise the split row. The machinery — the letters and the stored
+ * ruling read back off the members' pair verdicts — is
  * `components/autodedup/UnitSplit`, shared with the candidate-group view on
  * /autodedup/residual, which rules on the adverts the engine did NOT merge using
  * this same card. The pieces this page used to own and now shares (the filter
