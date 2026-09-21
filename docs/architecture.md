@@ -445,7 +445,25 @@ a 35-day-TTL fact feed does not knock four times), and a walk that follows `next
 envelope, while a cell sends that envelope +5 km, which is why truncation is recorded rather than
 assumed impossible. The scheduler is the `sold_comps` worker lane, dark behind one integer
 (`realtime_sold_comps_interval_seconds`, migration 544, seeded 0) that is cadence AND kill switch: no
-boolean flag, no env var, no workflow YAML. Waves and sequencing: `roadmap/sold-comps.md`.
+boolean flag, no env var, no workflow YAML.
+
+**Read surface (migration 545).** ONE SQL definition reaches the browser: `sold_transactions_public`
+and `sold_transaction_fetches_public` are definer-style views (the base tables are RLS-deny-all, so
+the single `grant select … to authenticated` on each view IS the dissemination switch), and over them
+sit two SECURITY INVOKER `language sql stable` single-SELECT functions with NO `SET` clause — so the
+planner INLINES them and PostgREST's filters / ORDER BY / LIMIT reach the `(geom::geography)` GiST
+index (migration 537's contract; migration 109 is the anti-pattern — never an optional filter
+parameter here). `sold_comparables(p_lat, p_lng, p_radius_m)` returns the sale's columns plus
+`distance_m`, `sold_age_days` (which is what makes the date filter a plain integer `.lte`) and
+migration 425's `price_per_m2` + `price_per_m2_basis`. `sold_coverage(p_lat, p_lng)` returns the
+newest `ok` ledger row whose cell contains the point, and ZERO rows there means "nobody has ever
+looked here" — a different answer from `record_count = 0`, and the surface must say which. The
+filter vocabulary is `Agenda.SOLD` (existing area / category / disposition / subtype defs re-tagged,
+plus `max_sold_age_days`), dispatched to PostgREST by the shared `applyAgendaFilters` with no
+hand-coded escape. The SPA reads it in `frontend/src/components/listing-detail/SoldCompsBlock.tsx` —
+the listing page's only REALIZED prices, carrying the coverage sentence, the ~30-day publication lag
+and the `record_count`-of-`source_total` gap on screen. The reas.cz outbound chip was deleted in the
+same wave (the Cenová-mapa chip stays). Waves and sequencing: `roadmap/sold-comps.md`.
 
 ## Territories — deep rationale
 

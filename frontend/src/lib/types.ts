@@ -1681,3 +1681,61 @@ export interface PropertyStatusEventPublic {
   is_active: boolean;
   event_at: string;
 }
+
+/* One registered sale, as `sold_comparables(p_lat, p_lng, p_radius_m)` answers
+ * it (migration 545). NOT a listing and never joined to one: a sale is an
+ * account-less external fact under its own cadastral identity, so the key is
+ * `(source, source_record_id)` — the cadastre transfer id — and there is no
+ * `listing_id`, no `property_id` and no `is_active`.
+ *
+ * The attribute columns are spelled exactly as `listings` spells them, which is
+ * what lets `price_per_m2` / `price_per_m2_basis` be migration 425's measure
+ * rather than a second per-m² definition for sold data. `distance_m` and
+ * `sold_age_days` are the function's own derivations (metres from the point it
+ * was asked about; whole days since `sold_at`). */
+export interface SoldComparable {
+  source: string;
+  source_record_id: string;
+  /* A DATE: the source's time component is its batch clock, not a legal time. */
+  sold_at: string;
+  price_czk: number;
+  /* The last ASKING price. Only ever rendered as a discount against the sale
+   * price — it is never itself a comparable. */
+  asking_last_czk: number | null;
+  listed_at: string | null;
+  published_at: string | null;
+  category_main: string;
+  category_type: string;
+  subtype: string | null;
+  disposition: Disposition | null;
+  area_m2: number | null;
+  area_basis: string | null;
+  usable_area: number | null;
+  estate_area: number | null;
+  lat: number | null;
+  lng: number | null;
+  address_text: string | null;
+  obec_kod: number | null;
+  ku_kod: number | null;
+  ulice_kod: number | null;
+  photo_urls: string[] | null;
+  source_url: string | null;
+  fetched_at: string;
+  distance_m: number;
+  sold_age_days: number;
+  price_per_m2: number | null;
+  price_per_m2_basis: string | null;
+}
+
+/* The newest successful fetch whose cell contains a point — `sold_coverage`
+ * (migration 545). NULL (no row) and a row with `record_count: 0` are DIFFERENT
+ * answers: "nobody has ever looked here" against "we looked on `fetched_at` and
+ * this cell held nothing". `source_total` is what the source said the cell
+ * holds against `record_count` for what we took, i.e. how much we are NOT
+ * seeing. */
+export interface SoldCoverage {
+  fetched_at: string;
+  obec_kod: number | null;
+  record_count: number;
+  source_total: number | null;
+}

@@ -626,6 +626,20 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         "which is the north star's visible gap.",
     ),
     RegisteredSite(
+        path="frontend/src/components/listing-detail/SoldCompsBlock.tsx",
+        arm="unit",
+        hits=1,
+        measure="ppm2",
+        kind=KIND_LABELS,
+        why="The sold-comp dialog's per-m² caption. The FIGURE beside it is "
+        "migration 545's `price_per_m2`, which is migration 425's measure "
+        "unchanged (the sold columns are spelled like `listings` precisely so "
+        "no second per-m² definition is needed), and it is rendered through "
+        "fmtMeasuredPricePerM2 with the row's published "
+        "`price_per_m2_basis` — the caption names the column, it does not "
+        "label the number.",
+    ),
+    RegisteredSite(
         path="chrome-extension/src/content.ts",
         arm="unit",
         hits=1,
@@ -661,6 +675,18 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         "byte-for-byte copy of the sale one: a plot rate and a floor rate are "
         "different denominators and must not share a label. Also pins the "
         "rounding and the non-breaking space.",
+    ),
+    RegisteredSite(
+        path="frontend/src/components/listing-detail/SoldCompsBlock.test.tsx",
+        arm="unit",
+        hits=2,
+        measure="ppm2",
+        kind=KIND_GUARDS,
+        why="Pins the two halves of the sold block's per-m² honesty: the "
+        "median summary renders the exact sale-basis string, and a row whose "
+        "published basis is NULL renders NO per-m² figure at all rather than a bare "
+        "number — the ~300x ambiguity this program exists to end, on a "
+        "surface whose whole claim is that its prices are realized ones.",
     ),
     RegisteredSite(
         path="frontend/src/lib/growthChoropleth.test.ts",

@@ -53,12 +53,20 @@ table still honest when it is empty?
   `_lane_loop` contract. The cell is the obec's `admin_boundaries` envelope (its `id` IS
   the RÚIAN kód) widened by 5,000 m — the read surface's largest radius, so any subject
   inside the obec is covered by construction.
-- **W3** — the read surface: a definer-style view + a three-arg inlinable SQL function
-  (lat, lng, radius — `language sql stable`, SECURITY INVOKER, NO `SET` clause, which is
-  what keeps it inlined and on the geography index), `Agenda.SOLD` filter defs, and a
-  `SoldCompsBlock` on ListingDetail. Deletes the reas chip path. Its radius options are
-  1 / 3 / 5 km against `sold_db.MAX_READ_RADIUS_M` — the same constant, or the box stops
-  covering the read.
+- **W3** — 🟡 built, migration NOT yet applied. The read surface (migration 545): definer-style
+  `sold_transactions_public` + `sold_transaction_fetches_public` over the deny-all tables, and two
+  inlinable functions over those views — `sold_comparables(lat, lng, radius)` and
+  `sold_coverage(lat, lng)`, both `language sql stable`, SECURITY INVOKER, NO `SET` clause, which is
+  what keeps them inlined and on the geography index. `Agenda.SOLD` re-tags the existing area /
+  category / disposition / subtype defs and adds one `max_sold_age_days` — an integer day-count, so
+  the sold-date bound is the `.lte` path the registry already had (no date control, no hand-coded
+  escape); `applyRegistryFilters` became agenda-generic (`applyAgendaFilters`) rather than gaining a
+  second copy. `SoldCompsBlock` on ListingDetail carries the coverage sentence in its three honest
+  states (never checked / checked-and-empty / N of M taken), a 1–3–5 km radius, the registry filter
+  row, the table on W0's `Th`, and row → dialog with the hot-linked photos. `reasSoldUrl`, the reas
+  chip and their tests are deleted; the Cenová-mapa chip stays.
+  **Migration 545 must be applied BEFORE this PR merges** — the SPA shipping with it calls both
+  functions, which is exactly the migration-438 gap.
 - **W4** — folded into W2 (above).
 - **W5** — pay the rest: delete `FilterChip.tsx` (+ its test), `POST /tools/find_comparables`
   (+ schema) and `ComparableFilters.category_sub_cb`.
