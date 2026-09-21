@@ -326,10 +326,12 @@ def yes_no(value: object) -> bool | None:
     return None
 
 
-def present(value: str | None) -> bool | None:
+def present(value: object) -> bool | None:
     """A cell whose LABEL is the amenity and whose value is its size ("Balkon: 4 m²").
 
-    Present means true unless the value negates it; absent is the contract's call."""
+    Present means true unless the value negates it; absent is the contract's call. The
+    size arrives as text on the HTML portals and as a JSON number on bezrealitky and
+    mmreality, which is why this takes an object and folds it rather than a `str`."""
     if value is None:
         return None
     key = fold(value)
