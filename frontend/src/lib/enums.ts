@@ -25,6 +25,22 @@ export const OWNERSHIP_LABELS: Record<Ownership, string> = {
   statni: 'Státní/obecní',
 };
 
+/* What an area figure is the area OF — `scraper/area.py`'s vocabulary, which is
+ * stamped on every row it derives a headline area for. `unknown` gets no label
+ * on purpose: the source carried neither of the two areas, so the honest render
+ * is nothing at all rather than the word "unknown", which reads as if the
+ * measurement were missing. */
+const AREA_BASIS_LABELS: Record<string, string> = {
+  usable: 'užitná',
+  floor: 'podlahová',
+  total: 'celková',
+  plot: 'pozemek',
+};
+
+export function areaBasisLabel(basis: string | null | undefined): string | null {
+  return (basis && AREA_BASIS_LABELS[basis]) || null;
+}
+
 /* Czech singular label for a listing's `category_main` (the property type).
  * The single source for the type word shown on cards + the listing tab title. */
 export const CATEGORY_MAIN_LABELS: Record<string, string> = {

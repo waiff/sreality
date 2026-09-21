@@ -497,7 +497,13 @@ export default function ListingDetail() {
             else: a sale is never linked to a property (rule #15 does not reach
             a transactions fact). */}
         {listing.lat != null && listing.lng != null && (
+          /* Keyed on the listing: every listing route renders the SAME
+             <ListingDetail> element, so listing → listing reuses this instance,
+             and the block's radius and its category seed are mount-time state.
+             Without the key a new subject is answered with the previous one's
+             cohort. */
           <SoldCompsBlock
+            key={listing.id}
             categoryMain={listing.category_main}
             lat={listing.lat}
             lng={listing.lng}

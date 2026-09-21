@@ -13,9 +13,11 @@ Three invariant families:
    function un-inlinable, generically planned, and it timed out. Adding a filter as a
    parameter here is the failure this class guards.
 
-2. POSTURE — the views are definer-style (security_invoker UNSET) over deny-all RLS
-   tables, browser roles get SELECT/EXECUTE and nothing more, and the public view
-   publishes every stored column EXCEPT `raw`.
+2. POSTURE — the sales view is definer-style (security_invoker UNSET) over a deny-all
+   RLS table, browser roles get SELECT/EXECUTE and nothing more, and it publishes every
+   stored column EXCEPT `raw`. The fetch LEDGER gets no view at all: which cells were
+   fetched is a projection of tenant pipeline state, so its one reader is a SECURITY
+   DEFINER function scoped to the municipality containing the point asked about.
 
 3. CONTRACT — every column an `Agenda.SOLD` filter names is actually returned by
    `sold_comparables`. Without this a sold filter would be a PostgREST 400 (or worse, a
@@ -120,21 +122,18 @@ def test_sold_comparables_takes_the_point_and_the_radius_and_nothing_else() -> N
     assert params == ["p_lat", "p_lng", "p_radius_m"], params
 
 
-def test_sold_reads_are_inlinable() -> None:
+def test_sold_comparables_is_inlinable() -> None:
     """STABLE + SECURITY INVOKER + single SELECT + no SET clause = inlined, so
     PostgREST's filters, ORDER BY and LIMIT reach sold_transactions_geog_gist
-    (migration 537's contract)."""
-    sql = _sql(SURFACE)
-    for name in ("sold_comparables", "sold_coverage"):
-        block = _function_block(sql, name)
-        assert "language sql" in block, f"{name}: not language sql"
-        assert re.search(r"\bstable\b", block), f"{name}: not stable"
-        assert "security definer" not in block, f"{name}: must run as the caller"
-        header = block.split("$$", 1)[0]
-        assert not re.search(r"\bset\s+\w+\s*(to|=)", header), (
-            f"{name}: a SET clause blocks inlining"
-        )
-        assert _body(block).count("select") == 1, f"{name}: not a single SELECT"
+    (migration 537's contract). `sold_coverage` is deliberately outside this contract —
+    it is a definer-scoped one-row point lookup, and inlining buys it nothing."""
+    block = _function_block(_sql(SURFACE), "sold_comparables")
+    assert "language sql" in block
+    assert re.search(r"\bstable\b", block)
+    assert "security definer" not in block, "sold_comparables must run as the caller"
+    header = block.split("$$", 1)[0]
+    assert not re.search(r"\bset\s+\w+\s*(to|=)", header), "a SET clause blocks inlining"
+    assert _body(block).count("select") == 1, "not a single SELECT"
 
 
 def test_sold_spatial_predicates_cast_to_geography() -> None:
@@ -153,8 +152,8 @@ def test_sold_spatial_predicates_cast_to_geography() -> None:
 # --- 2. posture -----------------------------------------------------------
 
 
-def test_the_sold_views_are_definer_style() -> None:
-    """Both base tables are RLS-on with zero policies (deny-all). A view with
+def test_the_sold_view_is_definer_style() -> None:
+    """The base table is RLS-on with zero policies (deny-all). A view with
     `security_invoker = true` — migration 536's TENANT shape — would return zero rows
     to every signed-in account."""
     headers = re.findall(r"create or replace view\s+\w+(.*?)\bas\b", _sql(SURFACE))
@@ -172,22 +171,21 @@ def test_the_public_view_publishes_every_stored_column_but_raw() -> None:
     )
 
 
-def test_the_ledger_view_withholds_our_own_error_text() -> None:
-    """The coverage read answers "when did we last look here, and how much did the
-    source say we were not seeing". Our failure strings and page counts answer neither
-    and have no business in a browser payload."""
-    published = set(_view_columns(_sql(SURFACE), "sold_transaction_fetches_public", "f"))
-    assert published == {
-        "source", "obec_kod", "bbox", "fetched_at",
-        "status", "record_count", "source_total",
-    }, sorted(published)
+def test_the_fetch_ledger_is_never_published_to_a_browser_role() -> None:
+    """A cell is fetched only where SOME account holds a live deal-pipeline card, so the
+    ledger's obec set is a projection of tenant state — a browser-readable ledger would
+    hand every signed-in account the map and the cadence of every other account's deal
+    sourcing. Its one reader is `sold_coverage`, scoped to a single municipality."""
+    sql = _sql(SURFACE)
+    assert "sold_transaction_fetches_public" not in sql
+    assert "sold_transaction_fetches" in _body(_function_block(sql, "sold_coverage"))
 
 
 def test_browser_roles_get_read_access_and_nothing_else() -> None:
     sql = _sql(SURFACE)
-    for view in ("sold_transactions_public", "sold_transaction_fetches_public"):
-        assert f"revoke all on {view} from anon, authenticated;" in sql, view
-        assert f"grant select on {view} to authenticated;" in sql, view
+    view = "sold_transactions_public"
+    assert f"revoke all on {view} from anon, authenticated;" in sql
+    assert f"grant select on {view} to authenticated;" in sql
     for name in ("sold_comparables", "sold_coverage"):
         assert re.search(
             rf"revoke execute on function public\.{name}\([^)]*\)\s*from public, anon;",
@@ -200,9 +198,31 @@ def test_browser_roles_get_read_access_and_nothing_else() -> None:
         ), name
 
 
-def test_sold_coverage_answers_the_four_coverage_facts() -> None:
-    cols = _returns_table_columns(_function_block(_sql(SURFACE), "sold_coverage"))
-    assert cols == ["fetched_at", "obec_kod", "record_count", "source_total"], cols
+def test_sold_coverage_answers_about_the_points_own_municipality() -> None:
+    """The fetched cell is the obec envelope expanded by 5 km, so cells overlap heavily
+    and "the newest box containing the point" would answer with whichever town happened
+    to be walked last — a village's counts over a Prague address. The point is resolved
+    through `admin_boundaries` instead, and the obec NAME comes back so the sentence can
+    name the town it is about."""
+    block = _function_block(_sql(SURFACE), "sold_coverage")
+    cols = _returns_table_columns(block)
+    assert cols == [
+        "obec_kod", "obec_name", "fetched_at", "record_count", "source_total",
+        "last_attempt_at", "last_attempt_status",
+    ], cols
+    body = _body(block)
+    assert "admin_boundaries" in body and "level = 'obec'" in body
+    assert "bbox" not in body, "coverage must not be inferred from the margin-expanded box"
+    assert "security definer" in block and "set search_path = public" in block
+
+
+def test_sold_coverage_distinguishes_a_failing_lane_from_an_unasked_cell() -> None:
+    """A cell that has only ever FAILED is not a cell nobody asked for: collapsing the
+    two renders a broken fetch lane as operator inaction ("add this property to the
+    pipeline") on the only surface that reads this ledger."""
+    body = _body(_function_block(_sql(SURFACE), "sold_coverage"))
+    assert body.count("f.status = 'ok'") == 1, "the successful fetch is one of two arms"
+    assert "try.status" in body, "the newest attempt of ANY status must come back too"
 
 
 # --- 3. contract: the registry and the function agree --------------------

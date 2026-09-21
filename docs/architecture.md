@@ -447,23 +447,34 @@ assumed impossible. The scheduler is the `sold_comps` worker lane, dark behind o
 (`realtime_sold_comps_interval_seconds`, migration 544, seeded 0) that is cadence AND kill switch: no
 boolean flag, no env var, no workflow YAML.
 
-**Read surface (migration 545).** ONE SQL definition reaches the browser: `sold_transactions_public`
-and `sold_transaction_fetches_public` are definer-style views (the base tables are RLS-deny-all, so
-the single `grant select … to authenticated` on each view IS the dissemination switch), and over them
-sit two SECURITY INVOKER `language sql stable` single-SELECT functions with NO `SET` clause — so the
-planner INLINES them and PostgREST's filters / ORDER BY / LIMIT reach the `(geom::geography)` GiST
-index (migration 537's contract; migration 109 is the anti-pattern — never an optional filter
-parameter here). `sold_comparables(p_lat, p_lng, p_radius_m)` returns the sale's columns plus
-`distance_m`, `sold_age_days` (which is what makes the date filter a plain integer `.lte`) and
-migration 425's `price_per_m2` + `price_per_m2_basis`. `sold_coverage(p_lat, p_lng)` returns the
-newest `ok` ledger row whose cell contains the point, and ZERO rows there means "nobody has ever
-looked here" — a different answer from `record_count = 0`, and the surface must say which. The
-filter vocabulary is `Agenda.SOLD` (existing area / category / disposition / subtype defs re-tagged,
-plus `max_sold_age_days`), dispatched to PostgREST by the shared `applyAgendaFilters` with no
-hand-coded escape. The SPA reads it in `frontend/src/components/listing-detail/SoldCompsBlock.tsx` —
-the listing page's only REALIZED prices, carrying the coverage sentence, the ~30-day publication lag
-and the `record_count`-of-`source_total` gap on screen. The reas.cz outbound chip was deleted in the
-same wave (the Cenová-mapa chip stays). Waves and sequencing: `roadmap/sold-comps.md`.
+**Read surface (migration 545).** ONE SQL definition reaches the browser. The SALES get a
+definer-style view, `sold_transactions_public` (the base table is RLS-deny-all, so the single
+`grant select … to authenticated` on it IS the dissemination switch), and over it a SECURITY INVOKER
+`language sql stable` single-SELECT function with NO `SET` clause — so the planner INLINES it and
+PostgREST's filters / ORDER BY / LIMIT reach the `(geom::geography)` GiST index (migration 537's
+contract; migration 109 is the anti-pattern — never an optional filter parameter here).
+`sold_comparables(p_lat, p_lng, p_radius_m)` returns the sale's columns plus `distance_m`,
+`sold_age_days` (which is what makes the date filter a plain integer `.lte`) and migration 425's
+`price_per_m2` + `price_per_m2_basis`. The fetch LEDGER gets no view at all: a cell is fetched only
+where some account holds a live deal-pipeline card, so the set of fetched cells is a projection of
+tenant state, not market data — `sold_transaction_fetches` is registered in
+`tests/test_migration_rls_grants.py::_ADMIN_ONLY_RELATIONS`. Its one reader is
+`sold_coverage(p_lat, p_lng)`, SECURITY DEFINER and scoped to the MUNICIPALITY containing the point,
+resolved through the same `admin_boundaries` obec polygon W2 builds the cell from: the cell is that
+polygon's envelope expanded by 5 km, so overlapping boxes would otherwise answer with whichever town
+happened to be walked last. It returns that obec's name, its newest successful fetch (`fetched_at`,
+`record_count`, `source_total`) and its newest attempt of ANY status, so the surface can separate
+four answers — never looked, tried and FAILED (our outage, not operator inaction), looked and found
+nothing, looked and hold N. The filter vocabulary is `Agenda.SOLD` (existing area / category /
+disposition / subtype defs re-tagged, plus `max_sold_age_days`, bounded 60–730 by the source's own
+~30-day publication lag and 24-month window), dispatched to PostgREST by the shared
+`applyAgendaFilters` with no hand-coded escape. The SPA reads it in
+`frontend/src/components/listing-detail/SoldCompsBlock.tsx` — the listing page's only REALIZED
+prices. `record_count` and `source_total` render as what they are, two populations (the source's
+24-month window against all-time) and never as a shortfall; the ~30-day lag and reas's minority
+match of the register are on screen; and the headline median holds out the 0–30 m² band, whose
+Kč/m² is a denominator defect rather than a market fact. The reas.cz outbound chip was deleted in
+the same wave (the Cenová-mapa chip stays). Waves and sequencing: `roadmap/sold-comps.md`.
 
 ## Territories — deep rationale
 

@@ -31,15 +31,14 @@ toolkit work.
   and iKatastr lat,lon — the swap is pinned by tests); `components/listing-detail/ExternalMapLinks`
   renders the row. Same coordinate gate as the map itself: no coordinate, no row. Precision is
   inherited, never implied — a street-level pin opens the wrong building on all three, by design.
-- **+ Reas.cz (2026-09-16):** a fourth chip opens reas.cz's sold-properties search ("prodané
-  nemovitosti" — actual sale prices) for a ~2 km box around the point: `?bounds=swLat,swLng,neLat,neLng`,
-  LAT FIRST — reas also parses lng-first without complaint and then opens an empty map elsewhere
-  (its own payload stores longitude in the field it calls `southWestLatitude`). The box, not reas's
-  `/<obec>-<RÚIAN obec kód>` path form, because `listings_public` carries no RÚIAN codes and a box is
-  the neighbourhood across municipal borders; ±1 km because ±500 m showed nothing around a small-town
-  listing. The row is a 2×2 grid below `sm` (four equal chips truncated "Mapy.cz" at 360px).
+- **~~+ Reas.cz (2026-09-16)~~ — DELETED 2026-09-21 (sold-comps W3).** The fourth chip sent the
+  operator to reas.cz's own sold-properties map for a ±1 km box. The sales are now IN the app, under
+  one SQL definition with a coverage sentence saying when we last looked:
+  `components/listing-detail/SoldCompsBlock`. `reasSoldUrl`, the `'reas'` link entry and its tests
+  are gone; a chip that answers the same question a second way is exactly what the block replaces.
 - **+ sreality Cenová mapa (2026-09-17):** a fifth chip, and the row splits in two — WHERE (Mapy.cz,
-  Google, Katastr) over what it SELLS for (Reas.cz, Cenová mapa). The price map addresses places by
+  Google, Katastr) over what it SELLS for (Cenová mapa; Reas.cz was the other member until W3 above
+  deleted it). The price map addresses places by
   Seznam's own locality ids (`/cenova-mapa/hledani/byty/<kraj>-<id>/<okres>-<id>/<obec>-<id>`,
   `?ulice=` for a street, a path segment for a part of town) and never by a coordinate, so
   `GET /maps/sreality-price-map` (`api/sreality_price_map.py`) looks the listing's `display_label` up in

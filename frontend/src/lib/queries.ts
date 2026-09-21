@@ -1873,27 +1873,34 @@ export const fetchImagesByListing = async (
 
 /* -------------------------------------------------------------------------- */
 /* Registered sales — migration 545's sold_comparables / sold_coverage.       */
-/* Both are inlinable SQL functions, so the predicates, ORDER BY and LIMIT    */
-/* below reach the GiST index exactly as they would against a table: the      */
-/* narrowing happens in Postgres, never in the browser.                        */
+/* `sold_comparables` is an inlinable SQL function, so the predicates, ORDER BY */
+/* and LIMIT below reach the GiST index exactly as they would against a table:  */
+/* the narrowing happens in Postgres, never in the browser.                     */
 /* -------------------------------------------------------------------------- */
 
+/* What the block RENDERS, and nothing else. The function returns more — the
+ * RÚIAN codes, the sale's own point, `sold_age_days`, the secondary areas — but
+ * those are there to be FILTERED on, and a PostgREST predicate does not need
+ * its column selected. Carrying them would be dead weight on up to 200 rows per
+ * listing open, and a standing invitation to assume the block plots them. */
 const SOLD_COMP_COLS =
-  'source,source_record_id,sold_at,price_czk,asking_last_czk,listed_at,published_at,' +
-  'category_main,category_type,subtype,disposition,' +
-  'area_m2,area_basis,usable_area,estate_area,' +
-  'lat,lng,address_text,obec_kod,ku_kod,ulice_kod,' +
-  'photo_urls,source_url,fetched_at,' +
-  /* The function's own derivations, plus migration 425's measure AND its
+  'source,source_record_id,sold_at,price_czk,asking_last_czk,listed_at,' +
+  'category_main,category_type,subtype,disposition,area_m2,area_basis,' +
+  'address_text,photo_urls,source_url,fetched_at,' +
+  /* The function's own derivation, plus migration 425's measure AND its
    * published basis label — read, never re-derived (lib/measure's north star). */
-  'distance_m,sold_age_days,price_per_m2,price_per_m2_basis';
+  'distance_m,price_per_m2,price_per_m2_basis';
 
 /* A radius over a dense town can hold thousands of sales, so the read is
  * capped — and the cap cuts the FAR end: nearest first, so a truncated cohort
  * is still the neighbourhood rather than a scatter across the whole circle.
  * `source_record_id` is the final tiebreak because two flats in one building
  * share a point exactly (the source geocodes the building), and an order with
- * ties reshuffles between reads. */
+ * ties reshuffles between reads.
+ *
+ * The fetch asks for ONE row more than the cap: a full page is not the same
+ * fact as a cohort that happens to hold exactly 200 sales, and the block says
+ * "200+" only when the extra row proves there is more. */
 export const SOLD_COMPS_LIMIT = 200;
 
 export const fetchSoldComparables = async (
@@ -1908,7 +1915,7 @@ export const fetchSoldComparables = async (
     .order('distance_m', { ascending: true })
     .order('sold_at', { ascending: false })
     .order('source_record_id', { ascending: true })
-    .limit(SOLD_COMPS_LIMIT);
+    .limit(SOLD_COMPS_LIMIT + 1);
   const { data, error } = await applyAgendaFilters(q, 'sold', (id) => filters[id]);
   if (error) throw error;
   return (data ?? []) as unknown as SoldComparable[];
@@ -1920,10 +1927,14 @@ export const fetchSoldCoverage = async (
 ): Promise<SoldCoverage | null> => {
   const { data, error } = await supabase
     .rpc('sold_coverage', { p_lat: lat, p_lng: lng }, { get: true })
-    .select('fetched_at,obec_kod,record_count,source_total');
+    .select(
+      'obec_kod,obec_name,fetched_at,record_count,source_total,' +
+        'last_attempt_at,last_attempt_status',
+    );
   if (error) throw error;
-  /* No row is the honest "nobody has ever looked here" — a different answer
-   * from a row whose record_count is 0, and the block says which. */
+  /* No row means the point is in no municipality we hold a boundary for; a row
+   * with a null `fetched_at` means nobody has ever successfully looked there.
+   * Both differ from `record_count: 0`, and the block says which. */
   return ((data ?? []) as unknown as SoldCoverage[])[0] ?? null;
 };
 

@@ -2,18 +2,30 @@
 --
 -- Migration 542 put registered sales in `sold_transactions` + their fetch ledger in
 -- `sold_transaction_fetches`, both deny-all to browser roles. This file is the ONE way
--- those facts reach a browser: two definer-style views, and two INVOKER functions over
--- them — "the sales within N metres of this point" and "when did we last look here".
+-- those facts reach a browser: one definer-style view over the SALES with an INVOKER
+-- function on it ("the sales within N metres of this point"), and one narrow SECURITY
+-- DEFINER function over the LEDGER ("when did we last look in this municipality").
 --
--- WHY DEFINER-STYLE VIEWS + INVOKER FUNCTIONS. Both base tables carry `enable row level
--- security` with ZERO policies, so `authenticated` sees nothing on them. A plain view
--- (security_invoker UNSET) runs as its OWNER and bypasses that deny-all — the standing
--- shape for MARKET data here, `properties_public` being the template (migration 508).
--- Migration 536's `security_invoker = true` is the TENANT shape and would return zero
--- rows. The functions then stay SECURITY INVOKER (the default), which is why they must
--- read the VIEWS and never the tables.
+-- WHY DEFINER-STYLE VIEW + INVOKER FUNCTION, FOR THE SALES. `sold_transactions` carries
+-- `enable row level security` with ZERO policies, so `authenticated` sees nothing on it.
+-- A plain view (security_invoker UNSET) runs as its OWNER and bypasses that deny-all —
+-- the standing shape for MARKET data here, `properties_public` being the template
+-- (migration 508). Migration 536's `security_invoker = true` is the TENANT shape and
+-- would return zero rows. `sold_comparables` then stays SECURITY INVOKER (the default),
+-- which is why it must read the VIEW and never the table.
 --
--- WHY NO `SET` CLAUSE, AND WHY THREE ARGS. A set-returning SQL function that is STABLE,
+-- WHY THE LEDGER GETS NO VIEW AT ALL. A cell is fetched only for a municipality where
+-- SOME account holds a live deal-pipeline card, so the ledger's obec set is a projection
+-- of tenant state (`property_pipeline`, RLS-scoped per account). A browser-readable
+-- ledger would therefore hand every signed-in account the mappable list of towns every
+-- OTHER account is working, and the cadence of it — market data it is not. So the ledger
+-- has no `_public` view: `sold_coverage` is SECURITY DEFINER over the table, takes a
+-- point, and answers about exactly ONE municipality — the one that contains the point —
+-- with four facts and no cell list. It is registered in the admin-only relation registry
+-- (tests/test_migration_rls_grants.py) so the next reader of that table has to say why.
+--
+-- WHY NO `SET` CLAUSE, AND WHY THREE ARGS — `sold_comparables` only. A set-returning
+-- SQL function that is STABLE,
 -- SECURITY INVOKER, a single SELECT and carries NO `SET` clause is INLINED by the
 -- planner, so PostgREST's own filters, ORDER BY and LIMIT reach the GiST index on
 -- `(geom::geography)` exactly as they would against the view (migration 537's contract).
@@ -22,12 +34,14 @@
 -- null-guarded filter params made that function un-inlinable, generically planned and
 -- timed out. `sold_comparables` therefore takes the point and the radius and NOTHING
 -- else — every other narrowing is a PostgREST predicate on the returned columns, and no
--- future filter may arrive here as an optional parameter.
+-- future filter may arrive here as an optional parameter. `sold_coverage` is deliberately
+-- OUTSIDE that contract: a definer function never inlines anyway, and it is a one-row
+-- indexed point lookup, so there is nothing for inlining to buy.
 --
 -- MULTI-TENANT NOTE. There is no `account_id` anywhere in this surface: a registered sale
--- is market data, not user state. The single `grant select ... to authenticated` on each
--- view (and `grant execute` on each function) IS the dissemination switch — revoke it and
--- the whole dataset goes dark to every signed-in account at once.
+-- is market data, not user state. The single `grant select ... to authenticated` on
+-- `sold_transactions_public` (and `grant execute` on each function) IS the dissemination
+-- switch — revoke it and the whole dataset goes dark to every signed-in account at once.
 --
 -- CAST AT EVERY CALL SITE: `geom` is geometry, so an uncast ST_DWithin/ST_Distance
 -- measures DEGREES and silently answers a different question (migration 507's rail).
@@ -78,33 +92,7 @@ revoke all on sold_transactions_public from anon, authenticated;
 grant select on sold_transactions_public to authenticated;
 
 ------------------------------------------------------------------
--- 2. the fetch ledger, browser-readable — only what "have we looked?" needs
-------------------------------------------------------------------
-
--- Narrower than its table ON PURPOSE: `error` is our own failure text and `pages`/`id`
--- are lane bookkeeping. Neither answers the block's one question, and neither belongs in
--- a browser payload. `bbox` stays because the coverage read matches the point against it.
-create or replace view sold_transaction_fetches_public as
-select
-    f.source,
-    f.obec_kod,
-    f.bbox,
-    f.fetched_at,
-    f.status,
-    f.record_count,
-    f.source_total
-from sold_transaction_fetches f;
-
-comment on view sold_transaction_fetches_public is
-  'The sold-transaction fetch ledger, browser-readable through `sold_coverage`. Narrower '
-  'than the table: no `error` (our failure text), no `pages`/`id` (lane bookkeeping). '
-  'Definer-style for the same reason as sold_transactions_public.';
-
-revoke all on sold_transaction_fetches_public from anon, authenticated;
-grant select on sold_transaction_fetches_public to authenticated;
-
-------------------------------------------------------------------
--- 3. the one read: sales within N metres of a point
+-- 2. the one read: sales within N metres of a point
 ------------------------------------------------------------------
 
 -- The point is answered as `lat`/`lng`, not as `geom`: a geometry column reaches the
@@ -205,39 +193,91 @@ grant execute on function public.sold_comparables(double precision, double preci
   to authenticated, service_role;
 
 ------------------------------------------------------------------
--- 4. coverage: when did we last look here, and what did we find?
+-- 3. coverage: when did we last look HERE, and what did we find?
 ------------------------------------------------------------------
 
--- Without this the block cannot tell "we looked on <date> and this area holds no
+-- Without this the block cannot tell "we looked on <date> and this municipality holds no
 -- registered sales" from "nobody has ever looked here" — the two read identically as an
 -- empty table, and only one of them is honest. `source_total` is what the source said
--- the cell holds against `record_count` for what we took, so the block can say how much
--- it is NOT seeing. Newest `ok` attempt whose cell contains the point wins.
+-- the cell holds WITHOUT its 24-month window, against `record_count` for what a complete
+-- walk took inside it — two populations, not a shortfall.
+--
+-- SCOPED BY MUNICIPALITY, NOT BY THE CELL BOX. The fetched cell is the obec envelope
+-- expanded by the block's largest radius (5 km), so in Czech settlement density one
+-- point sits inside many cells' boxes at once; "newest box containing the point" would
+-- answer with whichever town happened to be walked last, and the block would print a
+-- village's counts over a Prague address. The subject's own obec is the only cell whose
+-- coverage is a statement about this point, so the point is resolved through the same
+-- `admin_boundaries` obec polygon the cell was built from, and the obec NAME comes back
+-- so the sentence can say which town it is about.
+--
+-- ANY-STATUS LAST ATTEMPT, TOO. A cell that has only ever FAILED is not a cell nobody
+-- asked for: the first reads "we tried and could not", the second "add this property to
+-- the pipeline". Collapsing them would render a broken fetch lane as operator inaction
+-- on the only surface that reads this ledger.
+--
+-- ci-allow-ungated: sold_coverage — reads an admin-only relation on purpose and WITHOUT
+-- is_platform_admin(): the operator's own listing page has to be able to say when we
+-- last looked. It is narrow by construction — SECURITY DEFINER, a point in, four facts
+-- about one municipality out, no cell list, no bbox, no `error`, no `pages`.
 create or replace function public.sold_coverage(
   p_lat double precision,
   p_lng double precision
 )
 returns table (
-  fetched_at   timestamptz,
-  obec_kod     bigint,
-  record_count integer,
-  source_total integer
+  obec_kod            bigint,
+  obec_name           text,
+  fetched_at          timestamptz,
+  record_count        integer,
+  source_total        integer,
+  last_attempt_at     timestamptz,
+  last_attempt_status text
 )
 language sql
 stable
+security definer
+set search_path = public
 as $$
-  select f.fetched_at, f.obec_kod, f.record_count, f.source_total
-  from sold_transaction_fetches_public f
-  where f.status = 'ok'
-    and st_contains(f.bbox, st_setsrid(st_makepoint(p_lng, p_lat), 4326))
-  order by f.fetched_at desc
-  limit 1
+  with cell as (
+    select b.id as obec_kod, b.name as obec_name
+    from admin_boundaries b
+    where b.level = 'obec'
+      and st_covers(b.geom, st_setsrid(st_makepoint(p_lng, p_lat), 4326)::geography)
+    limit 1
+  )
+  select c.obec_kod, c.obec_name,
+         ok.fetched_at, ok.record_count, ok.source_total,
+         try.fetched_at, try.status
+  from cell c
+  left join lateral (
+    select f.fetched_at, f.record_count, f.source_total
+    from sold_transaction_fetches f
+    where f.obec_kod = c.obec_kod and f.status = 'ok'
+    order by f.fetched_at desc
+    limit 1
+  ) ok on true
+  left join lateral (
+    select f.fetched_at, f.status
+    from sold_transaction_fetches f
+    where f.obec_kod = c.obec_kod
+    order by f.fetched_at desc
+    limit 1
+  ) try on true
 $$;
 
+-- The access path this migration introduces: the ledger is read by obec, and migration
+-- 542's only index leads with `source`, which a btree cannot skip.
+create index if not exists sold_transaction_fetches_obec_idx
+  on sold_transaction_fetches (obec_kod, fetched_at desc);
+
 comment on function public.sold_coverage(double precision, double precision) is
-  'The newest successful sold-transaction fetch whose cell contains (p_lat, p_lng). '
-  'Zero rows means we have never looked here -- which is NOT the same answer as '
-  '"we looked and found nothing" (record_count = 0), and the block must say which.';
+  'Coverage of the municipality containing (p_lat, p_lng): the newest successful fetch '
+  'of that obec (fetched_at/record_count/source_total) plus the newest attempt of ANY '
+  'status. Zero rows means the point is in no known obec; a row with a null fetched_at '
+  'means nobody has ever successfully looked there -- neither is the same answer as '
+  '"we looked and found nothing" (record_count = 0), and the block must say which. '
+  'SECURITY DEFINER over a table no browser role may read: the set of fetched cells is '
+  'a projection of which towns some account has a live pipeline card in.';
 
 revoke execute on function public.sold_coverage(double precision, double precision)
   from public, anon;

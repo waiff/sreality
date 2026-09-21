@@ -8,12 +8,18 @@
  * a sale is an external fact and stays one.
  *
  * WHAT THE BLOCK MUST SAY OUT LOUD, because an empty table is otherwise a lie:
- *   - we have never looked here (no coverage row) — fetching is gated on the
- *     deal pipeline, so "empty" usually means "not asked for";
- *   - we looked on <date> and this cell held nothing;
- *   - we looked and took N of the M sales the source says the cell holds.
- * Plus the source's own ~30-day publication lag, which caps how fresh the
- * freshest possible row is.
+ *   - we have never looked in this municipality — fetching is gated on the deal
+ *     pipeline, so "empty" usually means "not asked for";
+ *   - we tried and the fetch FAILED, which is our outage and not an empty
+ *     market;
+ *   - we looked on <date> and this municipality held nothing;
+ *   - we looked and hold N sales from the source's 24-month window, against the
+ *     M it says have ever been registered there — two populations, never
+ *     rendered as a shortfall.
+ * Plus the two limits of the source itself: a ~30-day publication lag, which
+ * caps how fresh the freshest possible row is, and the fact that reas.cz
+ * matches only a minority of registered transfers, which makes every cohort
+ * here a sample rather than the register.
  *
  * Photos are HOT-LINKED from reas.cz (no R2 copy, no `images` rows), so they
  * are plain URLs through ImageCarousel's `TaggedImageUrl[]` path and carry
@@ -29,7 +35,7 @@ import Dialog, { DialogClose } from '@/components/Dialog';
 import ImageCarousel from '@/components/ImageCarousel';
 import { Hairline, SectionLabel } from '@/components/section';
 import { Th } from '@/components/table';
-import { categoryMainLabel, listingKindLabel } from '@/lib/enums';
+import { areaBasisLabel, categoryMainLabel, listingKindLabel } from '@/lib/enums';
 import {
   fmtArea,
   fmtCzk,
@@ -59,6 +65,14 @@ const COVERED_CATEGORIES = new Set(['byt', 'dum']);
 
 /* A median over four sales is a number pretending to be a statistic. */
 const SUMMARY_MIN_ROWS = 5;
+
+/* Sales under this area are held OUT of the median (never out of the table:
+ * each row is an honest fact). Their Kč/m² is a denominator defect, not a
+ * market fact — a small transfer routinely bundles a cellar or a parking share,
+ * or states the unit's own floor area rather than the area transferred. It is
+ * measured, not assumed: Prague flats 0–30 m² median 239,600 Kč/m² against
+ * 144,506 in the 60–80 m² band (design/verify-reas-field-mapping.md). */
+const SMALL_UNIT_M2 = 30;
 
 /* The registry's ids prettify to "Category main in" / "Min area m2". */
 const FILTER_LABELS: Record<string, string> = {
@@ -124,17 +138,28 @@ function SoldComps({
     staleTime: 5 * 60_000,
   });
 
-  const rows = rowsQ.data ?? [];
-  const summary = summarize(rows);
+  /* The fetcher asks for one row past the cap, so a full page PROVES there is
+   * more rather than merely suggesting it — and that extra row is not part of
+   * the cohort, so it is dropped before anything counts or renders. */
+  const page = rowsQ.data ?? [];
+  const truncated = page.length > SOLD_COMPS_LIMIT;
+  const rows = truncated ? page.slice(0, SOLD_COMPS_LIMIT) : page;
+  const summary = rowsQ.isSuccess ? summarize(rows) : null;
 
   return (
     <div>
       <div className="flex items-baseline justify-between gap-4">
         <SectionLabel>
           <span>Registered sales</span>
-          <span className="ml-2 font-mono tabular-nums text-[var(--color-ink-4)] tracking-normal">
-            ({rows.length})
-          </span>
+          {/* Only once the read has ANSWERED: a "(0)" beside the heading while
+              the query is in flight — or after it failed — is the loudest
+              number on the block asserting the one thing it does not know. */}
+          {rowsQ.isSuccess && (
+            <span className="ml-2 font-mono tabular-nums text-[var(--color-ink-4)] tracking-normal">
+              ({rows.length}
+              {truncated && '+'})
+            </span>
+          )}
         </SectionLabel>
         <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)]">
           realized prices, not asking prices
@@ -170,15 +195,7 @@ function SoldComps({
         />
       </div>
 
-      {summary && (
-        <p className="mt-4 text-sm text-[var(--color-ink-2)]">
-          <span className="font-mono tabular-nums">{summary.n}</span> sales ·
-          median{' '}
-          <span className="font-mono tabular-nums text-[var(--color-ink)]">
-            {fmtMeasuredPricePerM2(summary.medianPpm2, summary.basis)}
-          </span>
-        </p>
-      )}
+      {summary && <SummaryLine summary={summary} truncated={truncated} />}
 
       {rowsQ.isLoading ? (
         <p className="mt-4 text-sm text-[var(--color-ink-3)]">Loading…</p>
@@ -218,12 +235,20 @@ function SoldComps({
               </tbody>
             </table>
           </div>
-          {rows.length === SOLD_COMPS_LIMIT && (
+          {truncated && (
             <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
               The {SOLD_COMPS_LIMIT} nearest — narrow the radius or the filters
               to see the rest.
             </p>
           )}
+          {/* The distance column is what the operator ranks relevance by, so
+              say what it is measured between. The sale's point is its BUILDING
+              (units in one building share it exactly); this listing's own point
+              can be a street or a municipality centroid. */}
+          <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
+            Distances run between geocoded points: the sale's is its building,
+            this listing's own may be street- or town-grain.
+          </p>
         </>
       )}
 
@@ -233,7 +258,7 @@ function SoldComps({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Coverage — the three answers an empty table can have                       */
+/* Coverage — the four answers an empty table can have                        */
 /* -------------------------------------------------------------------------- */
 
 function Coverage({
@@ -255,23 +280,39 @@ function Coverage({
       </p>
     );
   }
-  if (!coverage) {
+  const where = coverage ? `${coverage.obec_name} ` : '';
+  /* A cell that has only ever FAILED is our outage, not operator inaction —
+   * telling them to add a card they may already hold would hide a broken lane
+   * on the one surface that reads this ledger. */
+  if (coverage && coverage.fetched_at == null && coverage.last_attempt_at) {
     return (
-      <p className="mt-2 text-sm text-[var(--color-ink-3)]">
-        Not checked yet — registered sales are fetched only for towns where the
-        deal pipeline has a live card. Add this property to the pipeline and
-        this area gets looked up.
+      <p className="mt-2 text-sm text-[var(--color-brick)]">
+        {where}was last tried on {fmtShortDate(coverage.last_attempt_at)} and
+        the fetch failed — nothing has been read here yet, and that is our side,
+        not an empty market.
       </p>
     );
   }
-  const taken =
-    coverage.source_total != null
-      ? `${coverage.record_count} of the ${coverage.source_total} sales the source lists for this area`
-      : `${coverage.record_count} sales for this area`;
+  if (!coverage || coverage.fetched_at == null) {
+    return (
+      <p className="mt-2 text-sm text-[var(--color-ink-3)]">
+        {where}has not been checked yet — registered sales are fetched only for
+        towns where the deal pipeline has a live card. Add this property to the
+        pipeline and this area gets looked up.
+      </p>
+    );
+  }
   return (
     <p className="mt-2 text-sm text-[var(--color-ink-3)]">
-      reas.cz · checked {fmtShortDate(coverage.fetched_at)} · we hold {taken} ·
-      a sale reaches the source about 30 days after the transfer.
+      {coverage.obec_name} · reas.cz · checked{' '}
+      {fmtShortDate(coverage.fetched_at)} · we hold all {coverage.record_count}{' '}
+      sales it publishes here from the last 24 months
+      {coverage.source_total != null && (
+        <> — it says {coverage.source_total} have ever been registered here</>
+      )}
+      . A sale reaches the source about 30 days after the transfer, and reas.cz
+      matches only a minority of registered transfers: this is a sample, not the
+      register.
     </p>
   );
 }
@@ -315,9 +356,9 @@ function SoldRow({ row, onOpen }: { row: SoldComparable; onOpen: () => void }) {
       </td>
       <td className="px-3 py-2 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {fmtArea(row.area_m2)}
-        {row.area_basis && (
+        {areaBasisLabel(row.area_basis) && (
           <span className="block text-[0.7rem] text-[var(--color-ink-4)] font-normal">
-            {row.area_basis}
+            {areaBasisLabel(row.area_basis)}
           </span>
         )}
       </td>
@@ -433,7 +474,9 @@ function SoldDialog({ row, onClose }: { row: SoldComparable; onClose: () => void
               ppm2BasisFromToken(row.price_per_m2_basis),
             )}
           </Fact>
-          <Fact label={`Area${row.area_basis ? ` (${row.area_basis})` : ''}`}>
+          <Fact
+            label={`Area${areaBasisLabel(row.area_basis) ? ` (${areaBasisLabel(row.area_basis)})` : ''}`}
+          >
             {fmtArea(row.area_m2)}
           </Fact>
           <Fact label="Type">
@@ -495,32 +538,90 @@ function askToSoldPct(row: SoldComparable): number | null {
   return ((row.price_czk - ask) / ask) * 100;
 }
 
+/* Null — not 0 — when the interval runs backwards. A re-listed advertisement or
+ * a source backfill can date the sale before the listing, and clamping that to
+ * zero would manufacture "sold the day it hit the market", the single most
+ * attention-grabbing velocity claim this table can make, out of bad data. */
 function daysListed(row: SoldComparable): number | null {
   if (!row.listed_at) return null;
   const ms = new Date(row.sold_at).getTime() - new Date(row.listed_at).getTime();
-  if (!Number.isFinite(ms)) return null;
-  return Math.max(0, Math.round(ms / 86_400_000));
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  return Math.round(ms / 86_400_000);
 }
+
+type Summary = {
+  /* The sales the median is OF — not the cohort's size. */
+  n: number;
+  /* Held out for being under SMALL_UNIT_M2, and said out loud. */
+  heldOut: number;
+  medianPpm2: number | null;
+  basis: Ppm2Basis | null;
+  /* Flats and houses sell at different Kč/m² (measured: 114,519 against
+   * 50,000), so one median over both is not a statistic about either. */
+  mixedKinds: boolean;
+};
 
 /* The cohort's per-m² basis is READ from the rows' published basis token, never
  * re-derived: one token means that basis, more than one means 'mixed', which
  * `fmtMeasuredPricePerM2` refuses to put a unit on. */
-function summarize(
-  rows: readonly SoldComparable[],
-): { n: number; medianPpm2: number | null; basis: Ppm2Basis | null } | null {
-  if (rows.length < SUMMARY_MIN_ROWS) return null;
-  const tokens = new Set(rows.map((r) => r.price_per_m2_basis));
+function summarize(rows: readonly SoldComparable[]): Summary | null {
+  const kept = rows.filter((r) => r.area_m2 == null || r.area_m2 >= SMALL_UNIT_M2);
+  if (kept.length < SUMMARY_MIN_ROWS) return null;
+  const tokens = new Set(kept.map((r) => r.price_per_m2_basis));
   const basis =
     tokens.size === 1
       ? ppm2BasisFromToken([...tokens][0])
       : ('mixed' as Ppm2Basis);
-  const values = rows
+  const shape = {
+    n: kept.length,
+    heldOut: rows.length - kept.length,
+    basis,
+    mixedKinds: new Set(rows.map((r) => r.category_main)).size > 1,
+  };
+  const values = kept
     .map((r) => r.price_per_m2)
     .filter((v): v is number => v != null)
     .sort((a, b) => a - b);
-  if (values.length === 0) return { n: rows.length, medianPpm2: null, basis };
+  if (values.length === 0) return { ...shape, medianPpm2: null };
   const mid = Math.floor(values.length / 2);
-  const medianPpm2 =
-    values.length % 2 === 1 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
-  return { n: rows.length, medianPpm2, basis };
+  return {
+    ...shape,
+    n: values.length,
+    medianPpm2:
+      values.length % 2 === 1 ? values[mid] : (values[mid - 1] + values[mid]) / 2,
+  };
+}
+
+function SummaryLine({
+  summary,
+  truncated,
+}: {
+  summary: Summary;
+  truncated: boolean;
+}) {
+  if (summary.mixedKinds) {
+    return (
+      <p className="mt-4 text-sm text-[var(--color-ink-2)]">
+        No median: these sales are flats and houses together, and the two trade
+        at different Kč/m². Filter to one kind.
+      </p>
+    );
+  }
+  return (
+    <p className="mt-4 text-sm text-[var(--color-ink-2)]">
+      median{' '}
+      <span className="font-mono tabular-nums text-[var(--color-ink)]">
+        {fmtMeasuredPricePerM2(summary.medianPpm2, summary.basis)}
+      </span>{' '}
+      over {summary.n} sales
+      {truncated && ` — the ${SOLD_COMPS_LIMIT} nearest, not the whole cohort`}
+      {summary.heldOut > 0 && (
+        <span className="text-[var(--color-ink-3)]">
+          {' '}
+          · {summary.heldOut} under {SMALL_UNIT_M2} m² held out: a small unit's
+          stated area is often not the area transferred
+        </span>
+      )}
+    </p>
+  );
 }

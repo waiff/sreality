@@ -628,16 +628,18 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
     RegisteredSite(
         path="frontend/src/components/listing-detail/SoldCompsBlock.tsx",
         arm="unit",
-        hits=1,
+        hits=2,
         measure="ppm2",
         kind=KIND_LABELS,
-        why="The sold-comp dialog's per-m² caption. The FIGURE beside it is "
-        "migration 545's `price_per_m2`, which is migration 425's measure "
-        "unchanged (the sold columns are spelled like `listings` precisely so "
-        "no second per-m² definition is needed), and it is rendered through "
-        "fmtMeasuredPricePerM2 with the row's published "
-        "`price_per_m2_basis` — the caption names the column, it does not "
-        "label the number.",
+        why="The sold-comp dialog's per-m² caption, and the summary's refusal "
+        "to take ONE median over flats and houses — they trade at different "
+        "per-m² levels, and naming the unit is how that refusal is explained. "
+        "Every FIGURE on the surface is migration 545's `price_per_m2`, which is "
+        "migration 425's measure unchanged (the sold columns are spelled like "
+        "`listings` precisely so no second per-m² definition is needed), "
+        "rendered through fmtMeasuredPricePerM2 with the row's published "
+        "`price_per_m2_basis`. These two name a column and a cohort; neither "
+        "labels a number.",
     ),
     RegisteredSite(
         path="chrome-extension/src/content.ts",
@@ -679,14 +681,17 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
     RegisteredSite(
         path="frontend/src/components/listing-detail/SoldCompsBlock.test.tsx",
         arm="unit",
-        hits=2,
+        hits=3,
         measure="ppm2",
         kind=KIND_GUARDS,
-        why="Pins the two halves of the sold block's per-m² honesty: the "
-        "median summary renders the exact sale-basis string, and a row whose "
-        "published basis is NULL renders NO per-m² figure at all rather than a bare "
-        "number — the ~300x ambiguity this program exists to end, on a "
-        "surface whose whole claim is that its prices are realized ones.",
+        why="Pins the sold block's per-m² honesty in three places: the "
+        "median summary renders the exact sale-basis string (twice — once "
+        "plain, once with the 0–30 m² band held out, since a small unit's "
+        "stated area is often not the area transferred, so its per-m² figure "
+        "is a denominator defect), and a row whose published basis is NULL renders "
+        "NO per-m² figure at all rather than a bare number — the ~300x "
+        "ambiguity this program exists to end, on a surface whose whole claim "
+        "is that its prices are realized ones.",
     ),
     RegisteredSite(
         path="frontend/src/lib/growthChoropleth.test.ts",

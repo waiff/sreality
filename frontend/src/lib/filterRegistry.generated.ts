@@ -302,15 +302,15 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "int",
       "pg_column": "sold_age_days",
       "default": null,
-      "description": "Drop registered sales whose `sold_at` is older than N days. Reads `sold_age_days`, the whole-day age `sold_comparables` computes from `sold_at` (migration 545) — an integer, so the bound is the same `.lte` predicate every other `max_` filter emits: no date control, no hand-coded translation. One-sided by design; a lower bound on a comparable's age answers nothing. A sale reaches the source roughly a month after the transfer, so a window under ~60 days is near-empty whatever the market did.",
+      "description": "Drop registered sales whose `sold_at` is older than N days. Reads `sold_age_days`, the whole-day age `sold_comparables` computes from `sold_at` (migration 545) — an integer, so the bound is the same `.lte` predicate every other `max_` filter emits: no date control, no hand-coded translation. One-sided by design; a lower bound on a comparable's age answers nothing. The bounds are the SOURCE's, not a preference: a sale is published about 30 days after the transfer, so 60 is the first window that can answer at all, and reas.cz publishes 24 months, so 730 is the whole corpus — a wider bound would only promise history the source does not carry.",
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
         "sold"
       ],
       "constraints": {
-        "min": 30,
-        "max": 3650
+        "min": 60,
+        "max": 730
       },
       "unit": "days",
       "basis": null,
