@@ -71,9 +71,10 @@ def _max_last_seen(listings: list[dict[str, Any]]) -> str | None:
 
 # Lazy re-exports (PEP 562). This package historically eager-imported every
 # submodule here, which coupled EVERY consumer to the UNION of all submodule
-# dependencies — a slim `from toolkit.bazos_enrichment import ...` paid for
+# dependencies — a slim `from toolkit.broker_sources import ...` paid for
 # boto3/Pillow/vision/etc. at import time and broke when one was missing (the
-# enrich_bazos outage). Importing `toolkit` now costs nothing; each re-exported
+# outage tests/test_import_hygiene.py pins). Importing `toolkit` now costs
+# nothing; each re-exported
 # symbol's submodule is imported on first access and cached into globals().
 # Submodule imports (`from toolkit.x import y`) resolve through normal import
 # machinery and never reach __getattr__, so they are unaffected.

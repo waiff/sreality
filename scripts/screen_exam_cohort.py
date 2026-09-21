@@ -28,14 +28,14 @@ LOG = logging.getLogger("screen_exam_cohort")
 
 CALLED_FOR = "screen_exam_image"
 
-# 4096, matching the value toolkit/bazos_enrichment.py settled on for the same
-# model, and NOT the ~300 a one-line JSON answer appears to need.
+# 4096 for gpt-5-mini, NOT the ~300 a one-line JSON answer appears to need.
 #
 # MEASURED THE HARD WAY, twice. gpt-5-mini spends output tokens on reasoning BEFORE
 # it writes anything, so a budget sized for the answer is consumed entirely by the
 # thinking and the call returns an EMPTY STRING — billed in full, with nothing to
-# parse. This lane's first calibration run failed 5 of 10 that way; the enrichment
-# lane hit the identical wall at 512 in July. The reply is ~30 tokens; essentially
+# parse. This lane's first calibration run failed 5 of 10 that way; the (since
+# retired) description-enrichment lane hit the identical wall at 512 in July
+# 2026. The reply is ~30 tokens; essentially
 # all of this ceiling is headroom for reasoning, and that is the point.
 MAX_TOKENS = 4096
 

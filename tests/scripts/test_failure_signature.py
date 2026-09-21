@@ -146,9 +146,9 @@ def test_a_real_exception_outranks_the_check_line() -> None:
 
 
 def test_self_caught_errors_are_readable_without_a_traceback() -> None:
-    """The bazos enrichment lane (14% of the corpus) prints its own error and exits 1
-    with no traceback at all; without this tier the biggest LLM-outage signature is
-    invisible to both producers."""
+    """A script that catches its own errors prints them and exits 1 with no traceback
+    at all (the bazos enrichment lane, 14% of the corpus, was the worked example);
+    without this tier a self-caught LLM outage is invisible to both producers."""
     aborting = _actions_log(
         "ENRICH id=771 error=openai call failed: HTTP 429 rate limited",
         "ENRICH aborting: 5 consecutive errors (provider outage?)",

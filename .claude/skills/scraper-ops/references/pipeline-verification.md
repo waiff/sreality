@@ -15,7 +15,7 @@ polls. A `SECURITY DEFINER` dead-man-switch pg_cron function fires if the hourly
 running (the migration-136 exception-guarded pg_cron pattern). This exists because the pipeline
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
 the only alarm was a failing GH Actions cron the operator happened to miss. The live checks are
-`llm_errors`, `llm_liveness`, `llm_burn_rate`, `long_open_transaction` (6-hourly only, from
+`llm_errors`, `llm_burn_rate`, `long_open_transaction` (6-hourly only, from
 migration 437: warns when the oldest `pg_stat_activity.xact_start` passes an hour, because
 `refresh_llm_cost_rollups`' 3-hour trailing re-scan only absorbs a late arrival whose
 transaction was shorter than that — `called_at` defaults to now() = transaction START; the
@@ -159,8 +159,9 @@ six portals that fell over on 2026-08-26 showed no error count anywhere
 **1. Silence is not recovery.** `llm_errors` derives `currently_failing` purely from state:
 `last_ok_at < last_err_at`. It used to additionally `and` in a 90-minute staleness window
 (`min_live_at`), on the theory that a lone old error with no traffic since is not a live
-outage. That is backwards. The producers here have circuit breakers — the enrichment loop
-aborts at exactly 5 consecutive errors — so once an outage is *total* the traffic stops, the
+outage. That is backwards. The producers here have circuit breakers — `toolkit/vision_batch.py`
+stops the labelling pass on the first fatal provider error, and the autodedup judge lane aborts
+its pass the same way — so once an outage is *total* the traffic stops, the
 last error ages out of the window, and the check reads `ok`. Measured: OpenAI was
 credit-exhausted for 11 days (63,547 error rows, **zero** successful calls) and the check read
 `ok` for most of it, flipping `fail` at 14:02 and `ok` at 14:58 on unchanged inputs. Because
@@ -180,7 +181,7 @@ $150 fail), and `_record_failure` writes `cost_usd=0.0`, so a **total outage dri
 to the maximally healthy number**: it reported `ok value=0.0` throughout the 11-day outage. It
 now carries `details.arm`:
 - `starved` → `fail`: a `called_for` lane with `attempts > 0 AND successes == 0 AND spend == 0`.
-- `idle` → `ok`: nothing attempted at all. Silence is `llm_liveness`'s axis, not this one.
+- `idle` → `ok`: nothing attempted at all. No check judges silence (see §4).
 - `runaway`/`ok`: the pre-existing spend arms.
 
 **Evaluated per `called_for`, and that is load-bearing.** A 24h aggregate arm is defeated by a
@@ -231,9 +232,10 @@ a poll that reached back past `since`, and the page budget doubled to 10 pages /
 traffic continuously (dedup vision on the always-on worker) … p99 inter-call gap is ~1 min,
 so the 4h default never trips in normal operation." That premise died on **2026-08-06**, when
 the dedup decision engine was removed wholesale (rule 15) and took the continuous vision
-traffic with it. The threshold stayed. The only recurring LLM producer left is bazos
-description enrichment (`enrich_bazos.yml`) — condition scoring is paused and every other LLM
-workflow is dispatch-only — so the healthy inter-call gap stopped being a minute and became a
+traffic with it. The threshold stayed. The only recurring LLM producer left THEN was bazos
+description enrichment (`enrich_bazos.yml`, itself deleted a month later — see below) —
+condition scoring paused and every other LLM workflow dispatch-only — so the healthy
+inter-call gap stopped being a minute and became a
 cron period stretched by the Actions throttle (observed run-to-run gaps of 2.4–15.0 h over
 Aug 27-30). The check has **no warn tier**, so every overshoot is a hard red: it fired
 `fail value=4.195` and reddened "Monitoring: acute health (hourly)" **8 times between Aug 27
@@ -244,10 +246,20 @@ cadence plus throttle slack, still inside one 6 h lane tick of a genuinely dead 
 The transferable rule: **a threshold is a claim about a workload, so deleting the workload
 invalidates the threshold.** When a producer is retired, grep the health harness for the
 numbers that were sized on it — `DEFAULT_THRESHOLDS` carries its own rationale per key for
-exactly this reason. `llm_silence_fail_hours` is **not** in the migration-274 seed and no
-later migration adds it, so it resolves from the code default; if an operator ever adds it to
-`app_settings.pipeline_check_thresholds`, that row wins over the code (`load_thresholds`
-merges the DB over the defaults) and the deploy alone will not move it.
+exactly this reason.
+
+**And the second time, the check went with it.** Field-capture W0 (2026-09-21) deleted the
+enrichment lane itself, leaving NO recurring LLM producer: everything left (autodedup judging,
+labelling, estimations, URL parsing) is dispatch-driven or on demand. Measured over the 30 days
+to 2026-09-21 the longest gap between `llm_calls` rows excluding that lane was **143.8 h**, and
+`llm_liveness` had already logged 52 fails in 349 runs against a healthy pipeline. Re-sizing
+13 h → 144 h would have bought a check that only speaks after six days of normal weekend quiet,
+so `check_llm_liveness`, `_status_for_llm_silence` and `llm_silence_fail_hours` were all
+deleted. The replacement is not a global recency threshold at all: field-capture R8 makes each
+lane's health check read the lane's OWN eligibility predicate (oldest eligible-unextracted age
+per source), which needs no historical baseline — the same shape as `check_acquisition_lag`.
+Until W7 ships it, `llm_errors` still catches "calls are failing" (from state, not recency) and
+`llm_burn_rate`'s starvation arm still catches "attempting and never succeeding".
 
 ---
 

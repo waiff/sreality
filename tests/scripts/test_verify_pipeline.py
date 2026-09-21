@@ -25,7 +25,6 @@ from scripts.verify_pipeline import (
     _status_for_cron,
     _status_for_burn,
     _status_for_llm_errors,
-    _status_for_llm_silence,
     _status_for_worker,
     load_thresholds,
     run_checks,
@@ -69,34 +68,6 @@ def test_llm_errors_rate_only_fails_while_live() -> None:
 def test_llm_errors_clean_is_ok() -> None:
     clean = [{"called_for": "parse_url", "total": 100, "errors": 1}]
     assert _status_for_llm_errors(clean, False, True, T) == ("ok", [])
-
-
-def test_llm_silence_fails_when_stale_or_absent() -> None:
-    fail_h = T["llm_silence_fail_hours"]
-    assert _status_for_llm_silence(0.02, fail_h) == "ok"      # ~1 min ago (normal)
-    assert _status_for_llm_silence(fail_h, fail_h) == "ok"    # exactly at threshold, not over
-    assert _status_for_llm_silence(fail_h + 0.1, fail_h) == "fail"  # silent past threshold
-    assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
-
-
-def test_llm_silence_default_is_sized_for_the_enrichment_cron_not_dedup_vision() -> None:
-    """W0.5: pin the default and the boundary it moved to.
-
-    4h was sized for dedup vision on the always-on worker (p99 inter-call gap ~1 min),
-    a workload deleted 2026-08-06 with the decision engine (rule 15). The recurring
-    producer left is the 6h-nominal description-enrichment cron, which the Actions
-    throttle stretches past 7h — so 4h red the acute lane 8 times over Aug 27-30 while
-    the pipeline was healthy (595 ok / 0 error calls in 24h, $1.53 spend). This check has
-    no warn tier, so every one of those was a hard false red.
-    """
-    fail_h = T["llm_silence_fail_hours"]
-    assert fail_h == 13.0
-    # The gaps that produced the false reds are now ok, up to and including the boundary.
-    for healthy in (4.195, 6.0, 7.5, 12.9, 13.0):
-        assert _status_for_llm_silence(healthy, fail_h) == "ok"
-    # Past 13h it still fails: a genuinely dead pipeline is caught within one 6h lane tick.
-    assert _status_for_llm_silence(13.01, fail_h) == "fail"
-    assert _status_for_llm_silence(24.0, fail_h) == "fail"
 
 
 def test_burn_rate_thresholds() -> None:
@@ -565,8 +536,8 @@ def test_thresholds_partial_override_merges_over_defaults() -> None:
 
 
 def test_thresholds_json_string_is_parsed() -> None:
-    merged = load_thresholds(_ThresholdConn(json.dumps({"llm_silence_fail_hours": 6})))
-    assert merged["llm_silence_fail_hours"] == 6
+    merged = load_thresholds(_ThresholdConn(json.dumps({"llm_error_rate_warn": 0.5})))
+    assert merged["llm_error_rate_warn"] == 0.5
 
 
 def test_thresholds_ignores_non_numeric_values() -> None:
@@ -640,8 +611,8 @@ def test_live_state_a_newer_success_clears_it() -> None:
 
 
 def test_live_state_stale_failure_with_no_traffic_since_is_still_failing() -> None:
-    """The regression. A total outage stops producing traffic (the enrichment loop
-    breaks at 5 consecutive errors), so the last error ages past the old 90-minute
+    """The regression. A total outage stops producing traffic (every LLM lane aborts
+    its pass on a fatal provider error), so the last error ages past the old 90-minute
     window and the check flipped to `ok` — 11 days of real outage read healthy, and
     edge-triggered alerting emitted 114 alerts alternating onset with a literal
     'Recovered' for something that never recovered. Silence is not recovery."""
@@ -710,7 +681,7 @@ def test_check_llm_errors_reds_on_a_days_old_credit_outage() -> None:
     from scripts.verify_pipeline import check_llm_errors
 
     conn = _LlmErrorsConn(
-        rates=[("enrich_listing_description", 500, 500)],
+        rates=[("extract_location_claims", 500, 500)],
         credit_count=63547,
         live_row=(_t(hours=-30), _t(hours=-40), _t(hours=-30)),
     )
@@ -728,7 +699,7 @@ def test_check_llm_errors_is_ok_once_a_success_lands() -> None:
     from scripts.verify_pipeline import check_llm_errors
 
     conn = _LlmErrorsConn(
-        rates=[("enrich_listing_description", 500, 400)],
+        rates=[("extract_location_claims", 500, 400)],
         credit_count=63547,          # still in the 24h window, but superseded
         live_row=(_t(hours=-30), _t(minutes=-2), None),
     )
@@ -743,12 +714,12 @@ def test_check_llm_errors_is_ok_once_a_success_lands() -> None:
 def test_burn_starvation_arm_fails_a_lane_that_spends_nothing() -> None:
     from scripts.verify_pipeline import _status_for_burn_lanes
 
-    lanes = [{"called_for": "enrich_listing_description",
+    lanes = [{"called_for": "extract_location_claims",
               "attempts": 5000, "successes": 0, "spend": 0.0}]
     status, arm, starved = _status_for_burn_lanes(lanes, 0.0, T["llm_spend_24h_warn_usd"],
                                                   T["llm_spend_24h_fail_usd"])
     assert status == "fail" and arm == "starved"
-    assert starved == ["enrich_listing_description"]
+    assert starved == ["extract_location_claims"]
 
 
 def test_burn_starvation_is_per_lane_so_one_cheap_success_cannot_mask_it() -> None:
@@ -758,18 +729,18 @@ def test_burn_starvation_is_per_lane_so_one_cheap_success_cannot_mask_it() -> No
     from scripts.verify_pipeline import _status_for_burn_lanes
 
     lanes = [
-        {"called_for": "enrich_listing_description", "attempts": 5000,
+        {"called_for": "extract_location_claims", "attempts": 5000,
          "successes": 0, "spend": 0.0},
         {"called_for": "summarize_region_dispositions", "attempts": 1,
          "successes": 1, "spend": 0.01},
     ]
     status, arm, starved = _status_for_burn_lanes(lanes, 0.01, 90, 150)
     assert status == "fail" and arm == "starved"
-    assert starved == ["enrich_listing_description"]
+    assert starved == ["extract_location_claims"]
 
 
 def test_burn_idle_is_ok_and_flagged_not_starved() -> None:
-    """No attempts is a different axis (llm_liveness owns it), not a burn failure."""
+    """No attempts is not a burn failure — every producer is dispatch-driven."""
     from scripts.verify_pipeline import _status_for_burn_lanes
 
     status, arm, starved = _status_for_burn_lanes([], 0.0, 90, 150)

@@ -89,7 +89,7 @@ def _build_providers() -> dict[str, Any]:
         # (migration 302) — but NOTHING constructed the provider, and an unregistered
         # provider raises in `LLMClient.call` BEFORE the try/except that writes the
         # failure row, so a qwen misroute left ZERO llm_calls evidence and was invisible
-        # to llm_errors, llm_burn_rate and llm_liveness alike. Lazy key (QWEN_API_KEY).
+        # to llm_errors and llm_burn_rate alike. Lazy key (QWEN_API_KEY).
         "qwen":      QwenProvider(),
         # Our own vLLM pod (autodedup/oss_pod.py), routed by the `oss:` id prefix. Its
         # base_url is an EPHEMERAL pod URL read from OSS_LLM_BASE_URL, so constructing it

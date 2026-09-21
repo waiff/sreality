@@ -1,7 +1,7 @@
 """verify_pipeline.py — scheduled pipeline-health harness.
 
-Computes a fixed set of pipeline-health metrics (LLM error rate + liveness + burn
-rate, DB saturation, worker liveness, dual-write parity, property maintenance,
+Computes a fixed set of pipeline-health metrics (LLM error rate + burn rate, DB
+saturation, worker liveness, dual-write parity, property maintenance,
 broker-resolution freshness),
 writes one `pipeline_check_results` row per check, and rings the in-app bell once per
 INCIDENT (toolkit.system_alerts.emit_transition_alerts): at onset, again at 6h / 24h /
@@ -16,6 +16,21 @@ job makes that loud and durable.
 Each check is isolated (one failing check writes a `fail` row with the error in
 `details`, never kills the run). Thresholds live in
 `app_settings.pipeline_check_thresholds` with the code defaults below as fallbacks.
+
+There is deliberately NO total-silence check any more. `llm_liveness` measured hours
+since the newest `llm_calls` row against a threshold sized to "the one recurring
+producer" — bazos description enrichment, deleted with its lane in field-capture W0.
+Every producer left (autodedup judging, labelling, estimations, URL parsing) is
+dispatch-driven or on demand, so silence is the normal resting state: the longest gap
+in the 30 days to 2026-09-21 was 143.8 h, and the check was already 52 fails / 347 runs
+against a healthy pipeline. A fixed hours threshold over an on-demand workload is a
+false-red generator, and the fix is not a bigger number — it is a per-lane instrument
+with its own baseline (field-capture R8: oldest eligible-unextracted age per source,
+ships with the W7 text lane). Until then `llm_errors` still catches "calls are failing"
+(state, not recency) and `llm_burn_rate`'s starvation arm still catches "attempting and
+never succeeding". The gap that leaves, stated plainly: both derive from rows that
+EXIST, so a total stop — zero `llm_calls` rows at all, e.g. the key unset on every
+runner — reads `ok` on every remaining check until R8 lands.
 
 Each result is persisted AND alerted the moment its check completes, under a per-check
 and a whole-lane wall-clock budget (`_LANE_BUDGET_S`). The lane runs inside a job with
@@ -85,22 +100,10 @@ LOG = logging.getLogger("verify_pipeline")
 
 # Code fallbacks. The pipeline_check_thresholds seed (migration 274) is merged OVER
 # these in load_thresholds, so a key present here but not in the DB seed (e.g.
-# llm_silence_fail_hours, added with the WS4 alerting rebuild) is served from this
+# long_open_txn_warn_minutes, added with the llm-cost rollup) is served from this
 # default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "llm_error_rate_warn": 0.2,
-    # Sized to the workload that ACTUALLY runs (W0.5). The old 4h was sized for
-    # dedup vision on the always-on worker — a p99 inter-call gap of ~1 minute —
-    # and that workload was deleted on 2026-08-06 with the decision engine (rule
-    # 15). The only recurring producer left is bazos description enrichment
-    # (`enrich_bazos.yml`); every other LLM workflow is dispatch-only or paused.
-    # Its schedule reads `20 */3` but its own name still says "every 6h", and
-    # under the Actions cron throttle the observed run-to-run gaps over Aug 27-30
-    # were 2.4-15.0h. 13h = 2x the 6h nominal cadence plus throttle slack: above
-    # every gap this check has actually fired on (the false reds were 4.2-7h+)
-    # while still catching a genuinely dead pipeline within one 6h lane tick.
-    # This check has no warn tier, so a too-tight number is pure false red.
-    "llm_silence_fail_hours": 13.0,
     "llm_spend_24h_warn_usd": 90,
     "llm_spend_24h_fail_usd": 150,
     # The llm-cost rollup (migration 437) absorbs late arrivals by re-scanning the
@@ -453,9 +456,11 @@ def _llm_live_state(
     last_err_at`. It used to additionally require the failure to be newer than a
     90-minute window (`min_live_at`), which is wrong for a reason worth stating —
     **silence is not recovery.** A failure is superseded only by a newer SUCCESS,
-    never by elapsed time. The producers here have circuit breakers (the enrichment
-    loop aborts at 5 consecutive errors), so once an outage is total the traffic
-    stops, the last error ages past the window, and the check reads `ok`.
+    never by elapsed time. The producers here have circuit breakers (`toolkit/
+    vision_batch.py` stops the labelling pass on the first fatal provider error;
+    the autodedup judge lane aborts its pass the same way), so once an outage is
+    total the traffic stops, the last error ages past the window, and the check
+    reads `ok`.
 
     Measured: OpenAI was credit-exhausted for 11 days (63,547 error rows, zero
     successes) and `llm_errors` read `ok` for most of it, flapping `fail` -> `ok`
@@ -473,13 +478,6 @@ def _llm_live_state(
         and (last_ok_at is None or last_credit_err_at > last_ok_at)
     )
     return currently_failing, credit_live
-
-
-def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
-    """Fail when the newest llm_call is older than `fail_hours` (or there are none at all)."""
-    if hours is None or hours > fail_hours:
-        return "fail"
-    return "ok"
 
 
 def _status_for_poller_staleness(
@@ -541,7 +539,9 @@ def _status_for_burn_lanes(
     it is the maximally healthy number AND the signature of a total outage:
       - `starved`: some lane has attempts but zero successes and zero spend -> fail.
         `_record_failure` writes `cost_usd=0.0`, so a total outage drives spend DOWN.
-      - `idle`: nothing was attempted at all -> ok. Silence is llm_liveness's axis.
+      - `idle`: nothing was attempted at all -> ok. Every LLM producer left is
+        dispatch-driven or on demand, so silence is the normal resting state and
+        no check judges it (see the module docstring's note on llm_liveness).
       - `runaway`/`ok`: the existing upper spend arms.
     The arm is carried in `details.arm` so a red or green zero is legible in logs.
     """
@@ -972,7 +972,7 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
         message = (
             "LLM calls are failing with credit-balance errors right now — the provider "
             "account is out of credit. Every paid LLM path (estimations, summaries, "
-            "listing enrichment, URL parsing) is down "
+            "autodedup judging, image labelling, location claims, URL parsing) is down "
             f"({credit_errors} credit errors in 24h, no successful call since)."
         )
     elif offenders:
@@ -997,53 +997,6 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
             "offending_called_for": offenders,
             "per_called_for": per_called_for,
         },
-        "message": message,
-    }
-
-
-_LLM_SILENCE_SQL = """
-select extract(epoch from (now() - max(called_at))) / 3600.0 as hours_since_last
-from llm_calls
-"""
-
-
-def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Total-silence guard: a stretch with ZERO llm_calls means the paid pipeline is dead —
-    key unset, provider unreachable, or an outage so hard nothing is even attempted. This is
-    the failure mode error-rate checks are structurally blind to (no calls → no errors → false
-    green).
-
-    **The threshold is sized to the cadence of the one recurring producer, not to a
-    continuous stream** (W0.5). This check used to document itself as "p99 inter-call gap is
-    ~1 min, so the 4h default never trips in normal operation" — true only while dedup vision
-    ran on the always-on worker, which was deleted on 2026-08-06 with the decision engine
-    (rule 15). Nothing has run continuously since. The recurring producer today is bazos
-    description enrichment (`enrich_bazos.yml`, the only LLM workflow still on a schedule —
-    condition scoring is paused and the rest are dispatch-only), so the healthy inter-call gap
-    is a CRON PERIOD stretched by the Actions throttle, not a minute. At 4h that made the
-    check a false-red generator: it fired `fail value=4.195` and reds against a perfectly
-    healthy pipeline. See `llm_silence_fail_hours` in DEFAULT_THRESHOLDS for the 13h sizing.
-
-    Folds in the unique liveness intent of the retired check_llm_health.py, but UNGATED — the
-    old probe hid behind a condition-scoring `pending` gate that is dead while scoring is paused."""
-    fail_hours = float(thresholds["llm_silence_fail_hours"])
-    row = _fetchone(conn, _LLM_SILENCE_SQL)
-    hours = float(row[0]) if row and row[0] is not None else None
-    status = _status_for_llm_silence(hours, fail_hours)
-    if hours is None:
-        message = f"No LLM calls on record at all — the LLM pipeline looks dead (threshold {fail_hours:.0f}h)."
-    elif status == "fail":
-        message = (
-            f"No LLM calls in {hours:.1f}h (> {fail_hours:.0f}h) — the LLM pipeline is silent "
-            "(worker down / key unset / hard outage). No paid path is running."
-        )
-    else:
-        message = f"LLM pipeline live (last call {hours:.2f}h ago)."
-    return {
-        "check_key": "llm_liveness",
-        "status": status,
-        "value": round(hours, 3) if hours is not None else None,
-        "details": {"hours_since_last_call": hours, "fail_hours": fail_hours},
         "message": message,
     }
 
@@ -1101,7 +1054,7 @@ def check_llm_burn_rate(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
     elif arm == "idle":
         message = (
             "No LLM calls attempted in 24h — nothing to bill and nothing to judge. "
-            "Whether that silence is itself wrong is llm_liveness's call."
+            "Every producer is dispatch-driven or on demand, so silence is normal."
         )
     elif status == "fail":
         message = (
@@ -3039,7 +2992,6 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # never be the measurement a slower check starves — and it is one indexed join.
     ("location_town_coverage", check_location_town_coverage),
     ("llm_errors", check_llm_errors),
-    ("llm_liveness", check_llm_liveness),
     ("llm_burn_rate", check_llm_burn_rate),
     ("long_open_transaction", check_long_open_transaction),
     ("db_saturation", check_db_saturation),
@@ -3231,7 +3183,7 @@ def main() -> int:
                              "-week health heartbeat (idempotent: the workflow appends "
                              "this to all four of Monday's runs).")
     parser.add_argument("--only", default="",
-                        help="Comma-separated check keys to run (e.g. 'llm_errors,llm_liveness' "
+                        help="Comma-separated check keys to run (e.g. 'llm_errors,llm_burn_rate' "
                              "for the hourly LLM lane). Empty = all checks.")
     parser.add_argument("--exit-nonzero-on-fail", action="store_true",
                         help="Exit 1 if any run check is 'fail' — so the hourly LLM lane's "
