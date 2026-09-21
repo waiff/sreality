@@ -79,7 +79,18 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   The LLM never overwrites a regex value unless a labelled panel proves it better for that cell.
 - **R4 — The wipe is closed inside the one shared SET builder** (`_listing_update_set_sql`), driven by the contract:
   a parser NULL preserves the stored value for `text` cells of that source; `structured` cells still clear normally.
-  Zero extra statements on the ingest path.
+  Zero extra statements on the ingest path. *(W6 correction: the preserving set was short by one producer, and
+  `derived` needed naming. The split is whether the PARSE has an opinion. `structured` and `derived` cells are its
+  verdict — the portal stopped stating the key, the breadcrumb stopped yielding it — so both still clear. `text` and
+  `none` are silence: the ingest grammar speaks only when the prose does, and nothing in the parse ever looks at a
+  `none` cell. `none` is not optional here — the measured wipe this ruling exists to close, 2,949 of 24,621
+  `condition` fills, is on bazos, where the contract declares `condition` producer `none`, not `text`; a text-only
+  rule would have left it growing. Evidence the contract is right about `none`: over active rows, every `none` cell
+  on the eight structured portals is 0-filled (bezrealitky 2, mmreality 3, ceskereality 11, idnes 1, maxima 6,
+  realitymix 6, remax 5 cells, all zero), so the rule is a no-op for the parsers and protects only post-publication
+  producers. Residual, accepted: the ingest grammar can no longer CLEAR a `text` cell it stops matching (bazos
+  `area_m2` 42,352, `disposition` 18,839, `floor` 14,588 active rows) — the same trade already accepted for
+  `published_at` / `source_url`, with `scripts/reparse.py` (R9) as the sanctioned clear path.)*
 - **R5 — The canon stays in `toolkit/filter_registry.py`.** `scraper/vocabulary.py` holds only the producer side:
   diacritic fold, ONE `(field, portal_label) → canonical` registry, ONE disposition grammar, ONE boolean helper.
   An unmapped label is NULL + a counted event, never a passthrough enum. LLM tool schemas and the DB-resident prompts
@@ -308,10 +319,24 @@ subscriptions come back.
 `count(distinct price_unit)` = 2; building_type `jina` ≈ 8,203 retained; per-value Browse membership delta published
 before each batch; impossible dispositions (0+1, 8+7…) refused and counted, never silent.
 
-**W6.** The preserved-cell rule is contract-driven (unit-tested per source); a synthetic re-fetch with parser NULL
-leaves a text cell intact and clears a structured one. After one refetch cycle the wiped-cell count stops growing
-(today 2,949 on `condition`). Property rollup: a stated `false` beats an inferred `true`. Seen-to-Browse p50 measured
-before/after the `run_incremental_pass → sync_browse_list` change.
+**W6 — met offline; two gates are post-merge by nature.** The preserved-cell rule is contract-driven and rendered per
+source in `tests/scraper/test_listing_write_preserve.py`: for all nine portals every `text`/`none` cell is
+`COALESCE(EXCLUDED.c, listings.c)` and every `structured`/`derived` cell is `= EXCLUDED.c`, `published_at` /
+`source_url` unchanged, `description` (not a contract cell) still clears. Both write paths are proven to carry the
+identical fragment — the per-item statement for each portal and, for sreality, `_BATCH_UPSERT_SQL` too. Two further
+rails: a fifth producer cannot silently fall through to "clears", and a source outside the contract keeps the pre-R4
+rule. **Property rollup:** the `bool_or` special case is deleted; the six amenity booleans take the same trust-ordered
+best-non-null as every scalar. Its stated reason (recover a fact from the sibling that parsed it) survives — that rule
+skips NULLs too — so the two differ only on a true-vs-false disagreement. Measured over the 23,641 active multi-child
+properties: has_parking 1,384 flips, cellar 486, has_balcony 212, garage 162, terrace 140, has_lift 64, all
+one-directional true→false. **Honest reading of those flips:** only a minority are the "inferred `true`" this ruling
+names — 1,027 of the 1,384 parking flips are an idnes-STATED true losing to a sreality-STATED false, which is the
+declared `source_trust` policy rather than a provenance fix. The provenance fix is the same change seen forward: when
+W7's lane fills bazos booleans at 50k-row scale, presence-wins would hand every one of them a veto over sreality's
+stated false. **Seen-to-Browse baseline (2026-09-21, 94 succeeded rebuilds in 24 h):** mean 11.7 min from
+properties-row-ready to visible in `browse_list`, best case 2.3, worst 36.6, p90-of-worst 22.0, rebuild duration
+4.1 min average. Post-merge: the same measure after `run_incremental_pass → sync_browse_list`, and the wiped-cell
+count on `condition` (today 2,949) stops growing after one refetch cycle.
 
 **W7.** `OPENAI_API_KEY` (and the RunPod route) verified on the worker before merge — no lane on that worker has ever
 made an LLM call. Lane visible in `worker_heartbeats`. Bake-off: all candidates on the same labelled panel in ONE run;
