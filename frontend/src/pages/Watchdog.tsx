@@ -33,6 +33,7 @@ import type {
   WatchdogSeenFilter,
   WatchdogSubscription,
 } from '@/lib/types';
+import { Th } from '@/components/table';
 
 const PAGE_SIZE = 50;
 
@@ -449,26 +450,6 @@ function DispatchesTable({
   );
 }
 
-function Th({
-  align,
-  children,
-}: {
-  align: 'left' | 'right';
-  children: React.ReactNode;
-}) {
-  return (
-    <th
-      scope="col"
-      className={[
-        'px-4 py-2.5 text-[0.7rem] tracking-[0.14em] uppercase font-medium text-[var(--color-ink-3)]',
-        align === 'right' ? 'text-right' : 'text-left',
-      ].join(' ')}
-    >
-      {children}
-    </th>
-  );
-}
-
 function Row({
   dispatch,
   onKickoff,
@@ -755,4 +736,3 @@ function EmptyState({
     </div>
   );
 }
-

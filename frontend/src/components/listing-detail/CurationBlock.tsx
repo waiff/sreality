@@ -46,6 +46,7 @@ import type { Collection, Note, Tag, TagColor } from '@/lib/types';
 import TagColorPicker from '@/components/TagColorPicker';
 import TagEditPopover from '@/components/curation/TagEditPopover';
 import { PencilIcon, TrashIcon } from '@/components/icons';
+import { SectionLabel } from '@/components/section';
 
 export default function CurationBlock({
   property_id,
@@ -72,14 +73,6 @@ export default function CurationBlock({
       <TagsRow property_id={property_id} />
       <NotesRow property_id={property_id} sreality_id={sreality_id} listing_id={listing_id} />
     </div>
-  );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
   );
 }
 

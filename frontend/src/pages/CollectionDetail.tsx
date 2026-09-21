@@ -31,6 +31,8 @@ import type {
   CollectionPropertyRow,
   CollectionWithProperties,
 } from '@/lib/types';
+import { Hairline } from '@/components/section';
+import { Th } from '@/components/table';
 
 export default function CollectionDetail() {
   const { id: idParam } = useParams();
@@ -110,10 +112,6 @@ function Crumb() {
       <span>All collections</span>
     </Link>
   );
-}
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -387,15 +385,15 @@ function PropertiesBlock({
             <table className="w-full text-sm">
               <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
                 <tr>
-                  <Th align="left">ID</Th>
-                  <Th align="left">District</Th>
-                  <Th align="left">Type</Th>
-                  <Th align="right">Area</Th>
-                  <Th align="right">Price</Th>
-                  <Th align="left">Last seen</Th>
-                  <Th align="left">Status</Th>
-                  <Th align="left">Added</Th>
-                  <Th align="right">{''}</Th>
+                  <Th align="left" size="sm">ID</Th>
+                  <Th align="left" size="sm">District</Th>
+                  <Th align="left" size="sm">Type</Th>
+                  <Th align="right" size="sm">Area</Th>
+                  <Th align="right" size="sm">Price</Th>
+                  <Th align="left" size="sm">Last seen</Th>
+                  <Th align="left" size="sm">Status</Th>
+                  <Th align="left" size="sm">Added</Th>
+                  <Th align="right" size="sm">{''}</Th>
                 </tr>
               </thead>
               <tbody>
@@ -412,26 +410,6 @@ function PropertiesBlock({
         </div>
       )}
     </div>
-  );
-}
-
-function Th({
-  align,
-  children,
-}: {
-  align: 'left' | 'right';
-  children: React.ReactNode;
-}) {
-  return (
-    <th
-      scope="col"
-      className={[
-        'px-3 py-2.5 text-[0.7rem] tracking-[0.14em] uppercase font-medium text-[var(--color-ink-3)]',
-        align === 'right' ? 'text-right' : 'text-left',
-      ].join(' ')}
-    >
-      {children}
-    </th>
   );
 }
 

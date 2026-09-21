@@ -14,6 +14,7 @@
 import { useMemo, useState } from 'react';
 import type { PriceBandVelocityRow, TomBox } from '@/lib/queries';
 import { fmtCount, fmtCzk } from '@/lib/format';
+import { StatTd, StatTh } from '@/components/table';
 
 interface Props {
   rows: ReadonlyArray<PriceBandVelocityRow>;
@@ -414,14 +415,14 @@ function NumericTable({ rows }: { rows: ReadonlyArray<PriceBandVelocityRow> }) {
             <th className="px-3 py-2 font-medium text-left text-[var(--color-ink-3)] tracking-wide uppercase text-[0.65rem]">
               Price range
             </th>
-            <Th>n</Th>
-            <Th>share</Th>
-            <Th>min</Th>
-            <Th>p25</Th>
-            <Th>median</Th>
-            <Th>mean</Th>
-            <Th>p75</Th>
-            <Th>max</Th>
+            <StatTh>n</StatTh>
+            <StatTh>share</StatTh>
+            <StatTh>min</StatTh>
+            <StatTh>p25</StatTh>
+            <StatTh>median</StatTh>
+            <StatTh>mean</StatTh>
+            <StatTh>p75</StatTh>
+            <StatTh>max</StatTh>
           </tr>
         </thead>
         <tbody>
@@ -440,25 +441,25 @@ function NumericTable({ rows }: { rows: ReadonlyArray<PriceBandVelocityRow> }) {
                 <td className="px-3 py-1.5 text-[var(--color-ink-2)]">
                   {fmtRange(r.price_min, r.price_max)}
                 </td>
-                <Td>{fmtCount(r.n)}</Td>
-                <Td>{r.pct_share != null ? `${r.pct_share.toFixed(1)}%` : '—'}</Td>
+                <StatTd>{fmtCount(r.n)}</StatTd>
+                <StatTd>{r.pct_share != null ? `${r.pct_share.toFixed(1)}%` : '—'}</StatTd>
                 {r.tom_box ? (
                   <>
-                    <Td>{fmtDays(r.tom_box.min)}</Td>
-                    <Td>{fmtDays(r.tom_box.p25)}</Td>
-                    <Td bold>{fmtDays(r.tom_box.median)}</Td>
-                    <Td>{fmtDays(r.tom_box.mean)}</Td>
-                    <Td>{fmtDays(r.tom_box.p75)}</Td>
-                    <Td>{fmtDays(r.tom_box.max)}</Td>
+                    <StatTd>{fmtDays(r.tom_box.min)}</StatTd>
+                    <StatTd>{fmtDays(r.tom_box.p25)}</StatTd>
+                    <StatTd bold>{fmtDays(r.tom_box.median)}</StatTd>
+                    <StatTd>{fmtDays(r.tom_box.mean)}</StatTd>
+                    <StatTd>{fmtDays(r.tom_box.p75)}</StatTd>
+                    <StatTd>{fmtDays(r.tom_box.max)}</StatTd>
                   </>
                 ) : (
                   <>
-                    <Td>—</Td>
-                    <Td>—</Td>
-                    <Td>—</Td>
-                    <Td>—</Td>
-                    <Td>—</Td>
-                    <Td>—</Td>
+                    <StatTd>—</StatTd>
+                    <StatTd>—</StatTd>
+                    <StatTd>—</StatTd>
+                    <StatTd>—</StatTd>
+                    <StatTd>—</StatTd>
+                    <StatTd>—</StatTd>
                   </>
                 )}
               </tr>
@@ -467,25 +468,5 @@ function NumericTable({ rows }: { rows: ReadonlyArray<PriceBandVelocityRow> }) {
         </tbody>
       </table>
     </div>
-  );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th className="px-3 py-2 font-medium text-right text-[var(--color-ink-3)] tracking-wide uppercase text-[0.65rem]">
-      {children}
-    </th>
-  );
-}
-
-function Td({ children, bold }: { children: React.ReactNode; bold?: boolean }) {
-  return (
-    <td
-      className={`px-3 py-1.5 text-right ${
-        bold ? 'font-medium text-[var(--color-ink)]' : 'text-[var(--color-ink-2)]'
-      }`}
-    >
-      {children}
-    </td>
   );
 }

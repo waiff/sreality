@@ -15,6 +15,7 @@ import { watchdogKeys } from '@/lib/queries';
 import { fmtAbsolute, fmtCount, fmtRelative } from '@/lib/format';
 import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
 import type { WatchdogFilterSpec, WatchdogSubscription } from '@/lib/types';
+import { Th } from '@/components/table';
 
 export default function WatchdogManage() {
   const qc = useQueryClient();
@@ -232,26 +233,6 @@ function SubRow({
         </button>
       </td>
     </tr>
-  );
-}
-
-function Th({
-  align,
-  children,
-}: {
-  align: 'left' | 'right';
-  children: React.ReactNode;
-}) {
-  return (
-    <th
-      scope="col"
-      className={[
-        'px-4 py-2.5 text-[0.7rem] tracking-[0.14em] uppercase font-medium text-[var(--color-ink-3)]',
-        align === 'right' ? 'text-right' : 'text-left',
-      ].join(' ')}
-    >
-      {children}
-    </th>
   );
 }
 

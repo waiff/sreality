@@ -17,6 +17,7 @@ import {
   FactsList,
   AmenityChips,
 } from '@/lib/listingFacts';
+import { Hairline, SectionLabel } from '@/components/section';
 
 const DetailMap = lazyChunk(() => import('@/components/listing-detail/DetailMap'));
 const Gallery = lazyChunk(() => import('@/components/listing-detail/Gallery'));
@@ -62,22 +63,6 @@ export function ListingOverview({
         loading={imagesLoading}
       />
     </>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Layout primitives                                                          */
-/* -------------------------------------------------------------------------- */
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
   );
 }
 
