@@ -214,7 +214,9 @@ def test_sold_coverage_answers_about_the_points_own_municipality() -> None:
     assert "admin_boundaries" in body and "level = 'obec'" in body
     assert "bbox" not in body, "coverage must not be inferred from the margin-expanded box"
     assert "f.error is not null as truncated" in body, "a capped walk must not read as complete"
-    assert "security definer" in block and "set search_path = public" in block
+    # PostGIS is in `public` on the CI replay and in `extensions` on Supabase: pinning
+    # `public` alone passes every CI gate and fails the production apply.
+    assert "security definer" in block and "set search_path = public, extensions" in block
 
 
 def test_sold_coverage_distinguishes_a_failing_lane_from_an_unasked_cell() -> None:

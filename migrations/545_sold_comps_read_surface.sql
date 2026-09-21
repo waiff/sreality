@@ -29,8 +29,11 @@
 -- SECURITY INVOKER, a single SELECT and carries NO `SET` clause is INLINED by the
 -- planner, so PostgREST's own filters, ORDER BY and LIMIT reach the GiST index on
 -- `(geom::geography)` exactly as they would against the view (migration 537's contract).
--- A `SET search_path` would forfeit that; PostGIS lives in `public` here (migration 001),
--- so none is needed. Migration 109 is the anti-pattern this avoids: ~50 optional
+-- A `SET search_path` would forfeit that, and none is needed: an invoker function resolves
+-- PostGIS through the CALLER's path. `sold_coverage` below is SECURITY DEFINER and must pin
+-- one, and it pins `public, extensions`: migration 001 installs PostGIS unqualified, which
+-- lands in `public` on the CI replay but in `extensions` on the Supabase database — pinning
+-- `public` alone applies in CI and fails in production with `type "geography" does not exist`. Migration 109 is the anti-pattern this avoids: ~50 optional
 -- null-guarded filter params made that function un-inlinable, generically planned and
 -- timed out. `sold_comparables` therefore takes the point and the radius and NOTHING
 -- else — every other narrowing is a PostgREST predicate on the returned columns, and no
@@ -237,7 +240,7 @@ returns table (
 language sql
 stable
 security definer
-set search_path = public
+set search_path = public, extensions
 as $$
   with cell as (
     select b.id as obec_kod, b.name as obec_name
