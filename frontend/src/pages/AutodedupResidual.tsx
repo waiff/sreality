@@ -238,8 +238,8 @@ export function toCandidateQuery(
     block: block.block,
     block_grain: block.block_grain,
     zone: f.zone || null,
-    /* Two values, not the five verdicts: a card is reviewed when every pair
-     * inside it carries one. */
+    /* Two values, not the operator's three: a card is reviewed when every
+     * pair inside it carries a verdict. */
     verdict:
       f.verdict === 'reviewed' || f.verdict === 'unreviewed' ? f.verdict : null,
     sort:

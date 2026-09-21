@@ -4,7 +4,7 @@
  * are the same real-world property. Nothing has been applied: the whole trial is
  * shadow mode (D4), so this page collects an opinion and writes it into the
  * program's own schema. That is said on the page, not left to be inferred —
- * "Confirm" must never read as "merge now".
+ * "Stejné" must never read as "merge now".
  *
  * WEAKEST EDGE FIRST IS THE DEFAULT SORT, because a cluster is only as right as
  * its worst link: a five-member group joined by one 0.52 edge is where the false

@@ -4460,7 +4460,7 @@ export const postAutodedupSplitVerdict = (
  * being asked, and one save rules many pairs.
  *
  * THE CARD IS THE GROUPS CARD. Same member shape, same galleries, same unit
- * letters, same relation-per-unit-pair split. Two differences, both because the
+ * letters, same letters-only split (D39). Two differences, both because the
  * engine did NOT merge these: the adverts of one already-merged group are locked
  * to one letter, and the letters start apart rather than all on A.
  * ------------------------------------------------------------------------- */
@@ -4568,8 +4568,8 @@ export const getAutodedupCandidate = async (
   );
 
 /* THE CANDIDATE SPLIT. The cluster split's body minus the cluster: the same unit
- * assignment, the same relation per unit pair, the same 409 when it would take
- * back a veto the operator wrote earlier.
+ * assignment, no relation at all (D39), the same 409 when it would take back a
+ * veto the operator wrote earlier.
  *
  * It carries NO `reasons`. A split stamps its reason chips on the cluster row,
  * and there is no cluster row here — stamping them on the pairwise fan-out

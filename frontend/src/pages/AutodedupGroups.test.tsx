@@ -365,6 +365,34 @@ describe('<AutodedupGroups>', () => {
     }
   });
 
+  it('names a STALE ruling in the vocabulary the page speaks', async () => {
+    /* A stale verdict is by definition an older ruling, so it is exactly where
+     * the two retired values turn up — and „verdikt same_project_different_unit"
+     * is a word no button on this page says any more (D39). */
+    vi.mocked(api.getAutodedupGroups).mockResolvedValue(
+      page([
+        group({
+          cluster_key: 7,
+          verdict: null,
+          stale_verdict: {
+            verdict: 'same_project_different_unit',
+            note: null,
+            decided_by: 'operator@example.invalid',
+            decided_at: '2026-09-18T10:00:00Z',
+            generation: 'g4',
+            member_ids: [101],
+            added: [202],
+            removed: [],
+          },
+        }),
+      ]),
+    );
+    renderPage();
+    const notice = await screen.findByTestId('stale-verdict-notice');
+    expect(notice.textContent).toContain('verdikt Různé');
+    expect(notice.textContent).not.toContain('same_project_different_unit');
+  });
+
   it('hides the notice once this session has ruled the group again', async () => {
     const user = userEvent.setup();
     vi.mocked(api.getAutodedupGroups).mockResolvedValue(
@@ -814,6 +842,19 @@ describe('<AutodedupGroups>', () => {
     expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
       expect.objectContaining({ verdict: null }),
     );
+  });
+
+  it('folds a link written in the older verdict vocabulary onto „různé"', async () => {
+    /* D39 dropped the two finer values from the SELECT, not from the store — so
+     * a bookmark asking for them is asking for negatives, and handing it the
+     * whole queue would silently widen a saved question. The server widens
+     * `different` over all three, so the fold loses nothing. */
+    renderPage('/autodedup/groups?verdict=same_project_different_unit');
+    await screen.findByText('#7');
+    expect(api.getAutodedupGroups).toHaveBeenLastCalledWith(
+      expect.objectContaining({ verdict: 'different' }),
+    );
+    expect(screen.getByLabelText('Verdict')).toHaveValue('different');
   });
 
   it('keeps the filter working when the block vocabulary cannot be read', async () => {

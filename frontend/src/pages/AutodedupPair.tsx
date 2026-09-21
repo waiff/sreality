@@ -41,7 +41,10 @@ import Spinner from '@/components/Spinner';
 import AttrDiffTable, { memberDiffRows } from '@/components/autodedup/AttrDiffTable';
 import EvidenceChips, { Chip, fmtScore } from '@/components/autodedup/EvidenceChips';
 import MemberText from '@/components/autodedup/MemberText';
-import VerdictButtons from '@/components/autodedup/VerdictButtons';
+import VerdictButtons, {
+  VERDICT_LABELS,
+  displayVerdict,
+} from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
   useVerdictAnnotations,
@@ -302,7 +305,10 @@ export default function AutodedupPair() {
               <ul className="mt-2 space-y-1 text-[0.72rem] text-[var(--color-ink-2)]">
                 {data.verdicts.map((v) => (
                   <li key={v.id}>
-                    {v.verdict} · {v.decided_by}
+                    {/* The audit trail speaks the operator's vocabulary too
+                      * (D39): a ruling stored under the finer values reads as
+                      * "Různé", which is what it always meant to the engine. */}
+                    {VERDICT_LABELS[displayVerdict(v.verdict)]} · {v.decided_by}
                     {v.note ? ` · ${v.note}` : ''}
                   </li>
                 ))}

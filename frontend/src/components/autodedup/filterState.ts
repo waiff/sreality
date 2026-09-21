@@ -116,8 +116,9 @@ const SORTS: ReadonlyArray<GroupFilterState['sort']> = [
  * verdicts, not the five the store may hold. `different` is widened server-side
  * over the two finer values migration 532 wrote (`autodedup/ui_sql.py`
  * `NEGATIVE_VERDICTS`), so a ruling taken last week is still in its own queue —
- * and a bookmarked link naming one of those values falls back to "vše" like any
- * other value outside the vocabulary. */
+ * and a bookmarked link naming one of those values is FOLDED onto `different`
+ * rather than dropped: the link meant "show me the negatives", and answering it
+ * with the whole queue ("vše") would silently widen a saved question. */
 export const VERDICTS: readonly string[] = [
   '',
   'unreviewed',
@@ -130,9 +131,18 @@ export const VERDICTS: readonly string[] = [
   'unsure',
 ];
 
+/* The two values the page stopped offering at D39, as the word it offers now.
+ * The SERVER still accepts them (the store still holds them), so this is about
+ * the link keeping its meaning, not about avoiding a 400. */
+const FOLDED_VERDICTS: Record<string, string> = {
+  same_building_different_unit: 'different',
+  same_project_different_unit: 'different',
+};
+
 export function sanitizeGroupFilters<T extends GroupFilterState>(raw: T): T {
   const sort = SORTS.includes(raw.sort) ? raw.sort : 'weakest';
-  const verdict = VERDICTS.includes(raw.verdict) ? raw.verdict : '';
+  const folded = FOLDED_VERDICTS[raw.verdict] ?? raw.verdict;
+  const verdict = VERDICTS.includes(folded) ? folded : '';
   /* The server 400s a seed outside its charset, and a red banner over the queue
    * is the wrong answer to a hand-edited link: an unusable seed means the
    * default sample, exactly as an unusable number means "no filter". */
