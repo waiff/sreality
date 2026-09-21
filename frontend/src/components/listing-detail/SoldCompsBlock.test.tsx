@@ -39,6 +39,7 @@ const COVERAGE: SoldCoverage = {
   fetched_at: '2026-09-18T04:10:00+00:00',
   record_count: 89,
   source_total: 625,
+  truncated: false,
   last_attempt_at: '2026-09-18T04:10:00+00:00',
   last_attempt_status: 'ok',
 };
@@ -104,6 +105,19 @@ describe('<SoldCompsBlock> coverage states', () => {
     expect(line).toHaveTextContent('625 have ever been registered here');
     expect(line).toHaveTextContent('about 30 days after the transfer');
     expect(line).toHaveTextContent(/minority of registered transfers/);
+  });
+
+  /* W2 records a walk the page cap cut short as `ok` + a truncation note; "all N"
+     over such a town would be the one false sentence on the block. */
+  it('says a capped walk is incomplete instead of claiming all sales', async () => {
+    coverage.mockResolvedValue({ ...COVERAGE, record_count: 2500, truncated: true });
+    comps.mockResolvedValue([sale()]);
+    renderBlock();
+
+    const line = await screen.findByText(/reas\.cz · checked/);
+    expect(line).toHaveTextContent('we hold 2500 of the sales it publishes here');
+    expect(line).toHaveTextContent('this town is incomplete');
+    expect(line).not.toHaveTextContent('all 2500');
   });
 
   /* "We looked and this cell held nothing" is a DIFFERENT answer from "nobody

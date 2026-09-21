@@ -1928,7 +1928,7 @@ export const fetchSoldCoverage = async (
   const { data, error } = await supabase
     .rpc('sold_coverage', { p_lat: lat, p_lng: lng }, { get: true })
     .select(
-      'obec_kod,obec_name,fetched_at,record_count,source_total,' +
+      'obec_kod,obec_name,fetched_at,record_count,source_total,truncated,' +
         'last_attempt_at,last_attempt_status',
     );
   if (error) throw error;

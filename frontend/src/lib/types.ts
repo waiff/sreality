@@ -1740,6 +1740,7 @@ export interface SoldCoverage {
   fetched_at: string | null;
   record_count: number | null;
   source_total: number | null;
+  truncated: boolean | null;
   last_attempt_at: string | null;
   last_attempt_status: string | null;
 }

@@ -208,11 +208,12 @@ def test_sold_coverage_answers_about_the_points_own_municipality() -> None:
     cols = _returns_table_columns(block)
     assert cols == [
         "obec_kod", "obec_name", "fetched_at", "record_count", "source_total",
-        "last_attempt_at", "last_attempt_status",
+        "truncated", "last_attempt_at", "last_attempt_status",
     ], cols
     body = _body(block)
     assert "admin_boundaries" in body and "level = 'obec'" in body
     assert "bbox" not in body, "coverage must not be inferred from the margin-expanded box"
+    assert "f.error is not null as truncated" in body, "a capped walk must not read as complete"
     assert "security definer" in block and "set search_path = public" in block
 
 

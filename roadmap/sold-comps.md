@@ -41,7 +41,7 @@ table still honest when it is empty?
   `api/schemas.py` and — the copy the operator actually reads, on `/settings` — the seeded
   `app_settings.default_lifecycle` description (migration 543). No network, no runtime
   change, shippable alone; 543 is the one statement to apply.
-- **W2** — 🟡 in progress. The fetch path, SHIPPING DARK: `scraper/reas_client.py` (a
+- **W2** — ✅ shipped (#1550, migration 544 applied). The fetch path, SHIPPING DARK: `scraper/reas_client.py` (a
   `BasePortalClient` subclass on the shared rate ledger at one request per 5 s),
   `scraper/sold_db.py` (cell box, work-list, batched upsert, ledger row),
   `scraper/sold_fetch.py` (`fetch_cell`, which never raises — a cell attempt always ends

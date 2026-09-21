@@ -305,8 +305,10 @@ function Coverage({
   return (
     <p className="mt-2 text-sm text-[var(--color-ink-3)]">
       {coverage.obec_name} · reas.cz · checked{' '}
-      {fmtShortDate(coverage.fetched_at)} · we hold all {coverage.record_count}{' '}
-      sales it publishes here from the last 24 months
+      {fmtShortDate(coverage.fetched_at)} ·{' '}
+      {coverage.truncated
+        ? `we hold ${coverage.record_count} of the sales it publishes here from the last 24 months — our page cap cut that walk short, so this town is incomplete`
+        : `we hold all ${coverage.record_count} sales it publishes here from the last 24 months`}
       {coverage.source_total != null && (
         <> — it says {coverage.source_total} have ever been registered here</>
       )}

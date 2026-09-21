@@ -230,6 +230,7 @@ returns table (
   fetched_at          timestamptz,
   record_count        integer,
   source_total        integer,
+  truncated           boolean,
   last_attempt_at     timestamptz,
   last_attempt_status text
 )
@@ -246,11 +247,12 @@ as $$
     limit 1
   )
   select c.obec_kod, c.obec_name,
-         ok.fetched_at, ok.record_count, ok.source_total,
+         ok.fetched_at, ok.record_count, ok.source_total, ok.truncated,
          try.fetched_at, try.status
   from cell c
   left join lateral (
-    select f.fetched_at, f.record_count, f.source_total
+    -- an `ok` row carries `error` only when the page cap cut its walk short (sold_fetch)
+    select f.fetched_at, f.record_count, f.source_total, f.error is not null as truncated
     from sold_transaction_fetches f
     where f.obec_kod = c.obec_kod and f.status = 'ok'
     order by f.fetched_at desc
@@ -272,7 +274,8 @@ create index if not exists sold_transaction_fetches_obec_idx
 
 comment on function public.sold_coverage(double precision, double precision) is
   'Coverage of the municipality containing (p_lat, p_lng): the newest successful fetch '
-  'of that obec (fetched_at/record_count/source_total) plus the newest attempt of ANY '
+  'of that obec (fetched_at/record_count/source_total, and truncated = the page cap cut '
+  'that walk short so record_count is NOT all the source holds) plus the newest attempt of ANY '
   'status. Zero rows means the point is in no known obec; a row with a null fetched_at '
   'means nobody has ever successfully looked there -- neither is the same answer as '
   '"we looked and found nothing" (record_count = 0), and the block must say which. '
