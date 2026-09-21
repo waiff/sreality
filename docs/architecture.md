@@ -486,8 +486,8 @@ per-filter widget override rather than growing per-agenda option machinery. The 
 prices. `record_count` and `source_total` render as what they are, two populations (the source's
 24-month window against all-time) and never as a shortfall; the ~30-day lag and reas's minority
 match of the register are on screen; and the headline median holds out the 0–30 m² band, whose
-Kč/m² is a denominator defect rather than a market fact. The reas.cz outbound chip was deleted in
-the same wave (the Cenová-mapa chip stays). Waves and sequencing: `roadmap/sold-comps.md`.
+Kč/m² is a denominator defect rather than a market fact. The reas.cz and Cenová-mapa outbound chips both stay beside it: the
+table holds only reas.cz's anonymous 24-month window. Waves and sequencing: `roadmap/sold-comps.md`.
 
 ## Territories — deep rationale
 

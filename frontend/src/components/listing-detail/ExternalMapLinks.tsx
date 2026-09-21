@@ -1,10 +1,8 @@
 /* The external rows under the listing header map, in two questions. WHERE is
  * this: Mapy.cz, Google Maps and iKatastr opened at the listing's resolved point.
- * What does it SELL for: sreality's Cenová mapa for its street / part of town /
- * town. Sits directly below "Explore area" (our own market view of the asking
- * side). Reas.cz was the second price chip until its registered sales became a
- * table on this page (SoldCompsBlock) — a link out to a source we now read is
- * one more place to keep in step, so it went with the wave that read it.
+ * What does it SELL for: Reas.cz's sold prices for a box around it, and sreality's
+ * Cenová mapa for its street / part of town / town. Sits directly below "Explore
+ * area" (our own market view of the asking side).
  *
  * Rendered only where a coordinate exists (same gate as the map itself). The
  * point carries the resolver's precision and no more — see lib/geoLinks. The
@@ -40,14 +38,14 @@ export default function ExternalMapLinks({
     retry: false,
   });
   const links = [...externalMapLinks(lat, lng), srealityPriceMapLink(priceMapQ.data)];
-  /* Two rows rather than one: four equal chips don't fit the 400px map column
+  /* Two rows rather than one: five equal chips don't fit the 400px map column
    * ("Mapy.cz" already truncated at four across on a 360px phone, measured), and
    * the split is the one the operator reads in anyway. Literal class names, so
    * Tailwind sees them. */
   return (
     <div className="space-y-1.5">
       <ChipRow links={links.filter((l) => l.group === 'place')} className="grid-cols-3" />
-      <ChipRow links={links.filter((l) => l.group === 'price')} className="grid-cols-1" />
+      <ChipRow links={links.filter((l) => l.group === 'price')} className="grid-cols-2" />
     </div>
   );
 }

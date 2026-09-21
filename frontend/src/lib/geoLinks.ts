@@ -11,14 +11,15 @@
  * resolver landed on for this listing — an address point for a minority of rows,
  * otherwise a street or municipality centroid. A street-level pin will open the
  * WRONG building on all three services, by construction; that is the accepted
- * trade for having the links at all.
+ * trade for having the links at all. Reas (sold prices, below) opens a box
+ * around the point rather than the point, so it tolerates that best.
  *
  * Coordinate ORDER differs per service and a swapped pair fails silently (it
  * just lands somewhere else), so the order is pinned by tests: Mapy.cz takes
- * lon,lat — Google Maps and iKatastr take lat,lon. */
+ * lon,lat — Google Maps, iKatastr and Reas take lat,lon. */
 
 export type ExternalMapLink = {
-  key: 'mapy' | 'google' | 'katastr' | 'cenova-mapa';
+  key: 'mapy' | 'google' | 'katastr' | 'reas' | 'cenova-mapa';
   /* Which row the chip sits in: where the place is, or what it sells for. */
   group: 'place' | 'price';
   /* Chip text — short, because the footer shares a ~300px map column. */
@@ -59,8 +60,30 @@ export function iKatastrPointUrl(lat: number, lng: number, zoom = 18): string {
   return `https://ikatastr.cz/#kde=${point},${zoom}&mapa=zakladni&vrstvy=parcelybudovy&info=${point}`;
 }
 
+/* Metres per degree of latitude — close enough everywhere in Czechia. */
+const M_PER_DEG_LAT = 111_320;
+
+/* reas.cz's sold-properties search ("prodané nemovitosti": registered sale
+ * prices) for a box around the point. `bounds` is swLat,swLng,neLat,neLng —
+ * LAT FIRST, measured, not guessed: reas's own payload stores the longitude in
+ * the field it calls `southWestLatitude`, and the lng-first order parses fine
+ * but opens an empty map somewhere else (pinned by tests). Without `bounds` the
+ * page is the whole country; its path form (`/<obec>-<RÚIAN obec kód>`) would
+ * need codes the public view doesn't carry, and a box beats a town anyway —
+ * it's the neighbourhood, whichever side of a municipal border it falls on.
+ *
+ * 1 km each way: a ~2 km square. Measured on production data — ±500 m around a
+ * small-town listing (Králův Dvůr) showed no sales at all, ±1 km showed the
+ * town; in Prague ±1 km is still the neighbourhood. */
+export function reasSoldUrl(lat: number, lng: number, halfSideM = 1000): string {
+  const dLat = halfSideM / M_PER_DEG_LAT;
+  const dLng = halfSideM / (M_PER_DEG_LAT * Math.cos((lat * Math.PI) / 180));
+  const bounds = [lat - dLat, lng - dLng, lat + dLat, lng + dLng].map(coord).join(',');
+  return `https://www.reas.cz/prodane/nemovitosti?bounds=${bounds}`;
+}
+
 /* The row, in the order the operator reads it: Czech detail → street view →
- * cadastre. */
+ * cadastre → what nearby properties actually sold for. */
 export function externalMapLinks(lat: number, lng: number): ExternalMapLink[] {
   return [
     {
@@ -83,6 +106,13 @@ export function externalMapLinks(lat: number, lng: number): ExternalMapLink[] {
       label: 'Katastr',
       title: 'Open this point on iKatastr.cz — cadastre parcel and building',
       url: iKatastrPointUrl(lat, lng),
+    },
+    {
+      key: 'reas',
+      group: 'price',
+      label: 'Reas.cz',
+      title: 'Sold properties around this point on reas.cz — a ~2 km box, actual sale prices',
+      url: reasSoldUrl(lat, lng),
     },
   ];
 }
