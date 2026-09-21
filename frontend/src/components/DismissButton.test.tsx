@@ -3,7 +3,8 @@
  * The behaviours this file exists for: one click hides, the property leaves
  * every cached list that hides dismissed properties at once (and is restored
  * if the write fails), a revealed list keeps it, the undo offer works, and the
- * control is absent while the property is in the pipeline.
+ * control is absent while the property is a LIVE deal — but present for a deal
+ * closed into a terminal stage, which is exactly what dismissing is for.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -125,15 +126,28 @@ describe('<DismissButton>', () => {
     expect(api.dismissProperty).not.toHaveBeenCalled();
   });
 
-  it('is absent while the property is in the pipeline', async () => {
+  it('is absent while the property is a live deal', async () => {
     vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(
-      new Map([[42, { property_id: 42 }]]) as never,
+      new Map([[42, { property_id: 42, is_terminal: false }]]) as never,
     );
     setup();
     await waitFor(() => expect(queries.fetchPipelineMembers).toHaveBeenCalled());
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: 'Skrýt nemovitost' })).toBeNull(),
     );
+  });
+
+  it('stays for a deal closed into a terminal stage, and dismisses it', async () => {
+    // "Passed" is "reviewed it, didn't like it": the closed card must not hide
+    // the control, or the operator can never get a rejected deal out of Browse.
+    vi.mocked(queries.fetchPipelineMembers).mockResolvedValue(
+      new Map([[42, { property_id: 42, is_terminal: true }]]) as never,
+    );
+    setup();
+    await waitFor(() => expect(queries.fetchPipelineMembers).toHaveBeenCalled());
+    const button = await live('Skrýt nemovitost');
+    fireEvent.click(button);
+    await waitFor(() => expect(api.dismissProperty).toHaveBeenCalledWith(42));
   });
 
   it('does nothing until it knows the state', async () => {

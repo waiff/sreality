@@ -1050,11 +1050,11 @@ function mountPanel(): {
   /* Dismiss control for the listing's property (migration 536) — the SPA's
    * DismissButton, one click either way (hiding destroys nothing). Absent when
    * there is no property, when the API predates the field, and while the
-   * property is in the pipeline (the two are mutually exclusive server-side). */
+   * property is a LIVE deal; a deal closed into a terminal stage keeps it. */
   function renderDismissToggle(container: HTMLElement, state: PanelState): void {
     const l = state.listing;
     if (l == null || !l.found || l.property_id == null) return;
-    if (l.dismissed == null || l.pipeline?.in_pipeline) return;
+    if (l.dismissed == null || isLiveDeal(state)) return;
     const on = l.dismissed;
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -1770,8 +1770,21 @@ async function onTogglePipeline(): Promise<void> {
         },
     { pipelineBusy: false, pipelineConfirmRemove: false },
   ));
-  // Adding a card lifts the caller's dismissal server-side (the pipeline wins).
+  // A new card is live (the entry stage can't be terminal), and a live deal lifts
+  // the caller's dismissal server-side — mirror it.
   if (!wasIn) setState(applyDismissedIf(propertyId, false, {}));
+}
+
+/* A LIVE deal and a dismissal never coexist: the API refuses the dismissal, and
+ * any write that leaves a card live lifts it. Liveness is read off the stage list
+ * — the one place `is_terminal` lives — so a stage move needs no second flag kept
+ * in sync. Until that list has loaded an in-pipeline card counts as live: the
+ * conservative answer, and the server's own for a live deal. */
+function isLiveDeal(state: PanelState): boolean {
+  const p = state.listing?.pipeline;
+  if (!p?.in_pipeline) return false;
+  const stage = state.stages?.find((s) => s.id === p.stage_id);
+  return stage == null || !stage.is_terminal;
 }
 
 /* Apply a dismissal update only if the panel STILL represents the property the
@@ -1920,6 +1933,8 @@ async function onMoveStage(stageId: number): Promise<void> {
     },
     { pipelineBusy: false },
   ));
+  // Re-opening a closed deal makes it live, which lifts its dismissal server-side.
+  if (target != null && !target.is_terminal) setState(applyDismissedIf(propertyId, false, {}));
 }
 
 /* The operator-curated stage list, loaded once per page and cached at module

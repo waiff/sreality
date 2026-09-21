@@ -393,7 +393,8 @@ North star: a dismissal is ONE durable, account-scoped fact about a property
 (Browse, notification feed + delivery) hides it by default, non-destructively
 (lift, never delete), enforced server-side once, rendered by one shared
 control. Not a special collection (collections are m2m groupings; see
-`docs/architecture.md` rule 18). The pipeline always wins over a dismissal.
+`docs/architecture.md` rule 18). A LIVE deal always wins over a dismissal; a
+deal closed into a terminal stage can be dismissed.
 - **W1 — store, merge carry, API** (done, #1515): migration 536
   (`property_dismissals` + `property_dismissals_public`), `POST /dismissals`,
   `DELETE /dismissals/{property_id}` (lift), 409 for a piped property,
@@ -418,6 +419,16 @@ control. Not a special collection (collections are m2m groupings; see
   toggle beside the monitoring bell, state as `dismissed` on
   `POST /listings/lookup`, writes on `/dismissals`; the panel mirrors the
   lift when a card is added.
+- **W6 — closed deals can be dismissed** (done, 2026-09-21): the rule narrowed
+  from "any pipeline card blocks a dismissal" to "a LIVE card does". Under the
+  old rule a deal moved to "Passed" stayed in Browse forever with no Skrýt
+  button — 44 closed cards (29 Passed, 15 Lost) were stuck, and the 409's own
+  advice ("close the deal there instead") hid nothing. One statement,
+  `lift_dismissals_of_live_deals`, decides from the data after every write that
+  can leave a card live (add, a stage move, a stage re-opened); the merge
+  reconciler states the same rule per account. The SPA and the extension read
+  liveness off the stage (`is_terminal`). No migration, no backfill: 0 active
+  dismissals sat on a carded property.
 - **Next (not built):** a dismissal *reason* (a small operator taxonomy — the
   label set a future ranking/scoring model would learn from; `property_notes`
   covers free text today), and an "only dismissed" review lens if the reveal

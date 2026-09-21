@@ -5,9 +5,12 @@
  * offers Vrátit); on a dismissed property, shown under Browse's reveal or on
  * its own page, one click restores it.
  *
- * Absent while the property is in the caller's pipeline: the two are mutually
- * exclusive (the API refuses the dismissal), and the funnel already says the
- * operator is pursuing it. The members read is the one every funnel shares.
+ * Absent while the property is a LIVE deal — a card at a non-terminal stage: a
+ * live deal and a dismissal never coexist (the API refuses it), and the funnel
+ * already says the operator is pursuing it. A deal closed into a terminal stage
+ * ("Passed", "Lost") is history, not pursuit, so it keeps the control — hiding a
+ * rejected deal from Browse is exactly what dismissing is for. The members read
+ * is the one every funnel shares, and it carries each card's `is_terminal`.
  */
 
 import { useQuery } from '@tanstack/react-query';
@@ -31,7 +34,7 @@ export default function DismissButton({ property_id, variant = 'overlay' }: Dism
   });
   const { dismissed, dismiss, restore, pending } = useDismissal(property_id);
 
-  if (membersQ.data?.has(property_id)) return null;
+  if (membersQ.data?.get(property_id)?.is_terminal === false) return null;
 
   const on = dismissed === true;
   const label = on ? 'Skryto — znovu zobrazit' : 'Skrýt nemovitost';

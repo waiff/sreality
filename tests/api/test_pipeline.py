@@ -270,11 +270,12 @@ def test_add_card_locks_entry_stage_before_computing_board_position():
     assert lock_params == (1,)  # the resolved entry stage id, not the property id
 
 
-def test_add_card_lifts_the_callers_dismissal_even_when_already_carded():
-    # The pipeline always wins over a dismissal (migration 536). The lift is
-    # RLS-scoped (no account predicate) and lands on the resolved survivor, in the
-    # same transaction as the card — also on the idempotent path, so a card that
-    # predates the rule still clears a stale dismissal.
+def test_add_card_asks_the_live_deal_rule_on_both_paths():
+    # A live deal and a dismissal never coexist (migration 536). add_card asks the
+    # rule on the resolved survivor, in the card's own transaction, on the new AND
+    # the idempotent path — and the rule decides from the data: a new card sits at
+    # the entry stage (never terminal, migration 357) so its dismissal lifts, while
+    # an existing card closed into "Passed" keeps its dismissal.
     for inserted in ([(42,)], []):
         conn = _FakeConn([
             (lambda q: "RECURSIVE chain" in q, [(99, 42)]),
@@ -285,11 +286,10 @@ def test_add_card_lifts_the_callers_dismissal_even_when_already_carded():
         ])
         pipeline_module.add_card(conn, s.AddPipelineCardIn(property_id=99), account_id=_ACCT)
         lifts = [(q, p) for q, p in conn.executed if "UPDATE property_dismissals" in q]
-        assert lifts == [(
-            "UPDATE property_dismissals SET lifted_at = now(), lift_reason = %s "
-            "WHERE property_id = %s AND lifted_at IS NULL",
-            ("pipeline", 42),
-        )]
+        assert len(lifts) == 1
+        sql, params = lifts[0]
+        assert "NOT ps.is_terminal" in sql  # only a LIVE card lifts
+        assert params == ([42],)            # the survivor, not the stale 99
 
 
 def test_add_card_no_active_survivor_is_422():
@@ -349,6 +349,60 @@ def test_move_card_redirects_merged_away_to_survivor():
     assert locks and locks[0] == (42, _ACCT)
     evs = [p for q, p in conn.executed if "INSERT INTO property_pipeline_events" in q]
     assert evs and evs[0][0] == 42
+
+
+def test_move_card_stage_change_asks_the_live_deal_rule():
+    """Re-opening a closed, dismissed deal makes it live — the lift must follow.
+    A move INTO a closed stage runs the same statement; the data says no-op."""
+    conn = _FakeConn([
+        (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(9,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
+         [(42, 2, "call", "For Call", 2, None, None, None, "2", "teal")]),
+    ])
+    pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=2), account_id=_ACCT)
+    lifts = [p for q, p in conn.executed if "UPDATE property_dismissals" in q]
+    assert lifts == [([42],)]
+
+
+def test_move_card_reorder_only_leaves_dismissals_alone():
+    conn = _FakeConn([
+        (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(1,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
+         [(42, 1, "interested", "Zájem", 3, None, None, None, "1", "copper")]),
+    ])
+    pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=1, board_position=2.5), account_id=_ACCT)
+    assert not any("property_dismissals" in q for q, _ in conn.executed)
+
+
+def test_reopening_a_closed_stage_lifts_its_cards_dismissals():
+    """A stage flipped terminal -> live re-opens every card on it at once."""
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, is_terminal FROM pipeline_stages" in q, [(False, True)]),
+        (lambda q: "UPDATE pipeline_stages SET" in q,
+         [(9, "passed", "9. Passed", 9, "slate", False, False, "9")]),
+        (lambda q: "SELECT property_id FROM property_pipeline WHERE stage_id" in q, [(42,), (43,)]),
+    ])
+    pipeline_module.update_stage(conn, 9, s.UpdateStageIn(is_terminal=False), account_id=_ACCT)
+    reads = [p for q, p in conn.executed if "SELECT property_id FROM property_pipeline" in q]
+    assert reads == [(9, _ACCT)]  # this account's cards only
+    lifts = [p for q, p in conn.executed if "UPDATE property_dismissals" in q]
+    assert lifts == [([42, 43],)]
+
+
+def test_stage_edits_that_reopen_nothing_leave_dismissals_alone():
+    for current_terminal, patch in [
+        (True, s.UpdateStageIn(label="9. Passed (old)")),   # still closed
+        (False, s.UpdateStageIn(is_terminal=True)),         # closing, not re-opening
+        (False, s.UpdateStageIn(label="For Call")),         # live stays live
+    ]:
+        conn = _FakeConn([
+            (lambda q: "SELECT is_entry, is_terminal FROM pipeline_stages" in q,
+             [(False, current_terminal)]),
+            (lambda q: "UPDATE pipeline_stages SET" in q,
+             [(9, "x", "x", 9, "slate", True, False, "9")]),
+        ])
+        pipeline_module.update_stage(conn, 9, patch, account_id=_ACCT)
+        assert not any("property_dismissals" in q for q, _ in conn.executed), patch
 
 
 def test_move_card_reorder_only_logs_no_event():

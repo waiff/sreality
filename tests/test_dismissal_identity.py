@@ -43,10 +43,18 @@ def test_collision_lifts_the_retired_active_row_per_account_first():
     )
 
 
-def test_pipeline_card_on_the_survivor_lifts_that_accounts_dismissal():
+def test_live_card_on_the_survivor_lifts_that_accounts_dismissal():
     *_, pipeline = _run()
     assert pipeline.startswith(
         "UPDATE property_dismissals d SET lifted_at = now(), lift_reason = 'pipeline'"
     )
     assert "d.property_id = %(s)s AND d.lifted_at IS NULL" in pipeline
     assert "pp.property_id = d.property_id AND pp.account_id = d.account_id" in pipeline
+
+
+def test_only_a_live_card_on_the_survivor_lifts_a_dismissal():
+    """A card closed into a terminal stage ("Passed") keeps its dismissal through a
+    merge — the same live-deal rule api.dismissals states on the tenant connection."""
+    *_, pipeline = _run()
+    assert "JOIN pipeline_stages ps ON ps.id = pp.stage_id" in pipeline
+    assert "AND NOT ps.is_terminal" in pipeline

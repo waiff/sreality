@@ -36,7 +36,9 @@ maxima, remax, mmreality, ceskereality).
     property from the app's discovery surfaces (Browse, notifications) and undoes
     it, one click either way, through the same `POST/DELETE /dismissals` the SPA's
     `DismissButton` uses; the state rides on `POST /listings/lookup` (`dismissed`).
-    Absent while the property is in the pipeline — adding a card lifts a dismissal.
+    Absent while the property is a LIVE deal (a card at a non-terminal stage); a
+    deal closed into "Passed"/"Lost" keeps it. Adding a card, or moving one back
+    into a live stage, lifts the dismissal.
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
   on-demand estimation by that card's own URL.
