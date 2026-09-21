@@ -2629,16 +2629,30 @@ def test_field_fill_matrix_is_registered() -> None:
 
 def test_field_fill_matrix_reproduces_the_known_zero_cells() -> None:
     """The gate this wave is measured by: a cell whose parser reads a key its portal
-    has never emitted is named in the report, on a run that is otherwise green."""
+    has never emitted is named in the report.
+
+    W4 split the list in two, and the split is the wave's own receipt. The cells it
+    WIRED no longer carry a gap marker, so replaying the pre-W4 baseline as if it were
+    today's live matrix reports them as zeros that should be filling — which is exactly
+    what production says between this merge and the heal that lands the values. The
+    cells left declared are the ones the portal genuinely never states."""
     from scripts.verify_pipeline import check_field_fill_matrix
 
     out = check_field_fill_matrix(_MatrixConn(_live_matrix_rows()), T)
-    assert out["status"] == "ok"
+    details = out["details"]
     assert {
-        "remax/has_balcony", "mmreality/has_balcony", "ceskereality/has_parking",
-        "ceskereality/garage", "ceskereality/terrace", "ceskereality/parking_lots",
-        "ceskereality/total_floors", "realitymix/has_lift",
-    } <= set(out["details"]["zero_fill_cells"])
+        "remax/has_balcony", "ceskereality/parking_lots", "ceskereality/total_floors",
+        "ceskereality/has_lift", "ceskereality/cellar", "remax/terrace",
+    } <= set(details["zero_fill_known_gaps"])
+    # Wired by W4 and still 0% on the pre-heal corpus: the heal's to-do list.
+    assert set(details["zero_fill_undeclared"]) == {
+        "ceskereality/garage", "ceskereality/has_parking", "ceskereality/terrace",
+        "maxima/furnished", "mmreality/furnished", "mmreality/has_balcony",
+        "mmreality/terrace", "realitymix/cellar", "realitymix/garden_area",
+        "realitymix/has_lift", "realitymix/parking_lots", "remax/parking_lots",
+    }
+    assert out["status"] == "warn"
+    assert "should be filling and is not" in out["message"]
     assert out["details"]["cells_measured"] == out["details"]["cells_blessed"]
 
 

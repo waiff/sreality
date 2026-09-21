@@ -148,6 +148,7 @@ HOUSE_DETAIL_HTML = """
   <dt>Terasa</dt><dd><span class="icon icon--check"></span></dd>
   <dt>Lodžie</dt><dd><span class="icon icon--check"></span></dd>
   <dt>Dvojgaráž</dt><dd><span class="icon icon--check"></span></dd>
+  <dt>Počet podlaží</dt><dd>3 podlaží</dd>
   <dt>Parkování</dt><dd>parkování na pozemku</dd>
   <dt>Počet parkovacích míst</dt><dd>2</dd>
   <dt>Vybavení domu</dt><dd>částečně zařízený</dd>
@@ -209,10 +210,12 @@ def test_parse_detail_full():
     assert listing.has_balcony is True
     assert listing.has_lift is True
     assert listing.cellar is True
-    assert listing.has_parking is True
+    # R11: has_parking is a space or right BELONGING to the property. "Parkování:
+    # parkování na ulici" is the street, so the filled multi-select is evidence of NO
+    # parking of the listing's own — a real `false`, not unknown.
+    assert listing.has_parking is False
     assert listing.terrace is None      # absent row -> unknown, not guessed False
-    # "Parkování: parkování na ulici" is a filled multi-select WITHOUT garáž —
-    # that is evidence of no garage, not unknown.
+    # The same cell without garáž is evidence of no garage, not unknown.
     assert listing.garage is False
     assert listing.parking_lots is None
     assert listing.description.startswith("Nabízíme")
@@ -341,11 +344,16 @@ def test_parse_detail_house_labels_and_amenities():
     assert listing.condition == "velmi_dobry"
     assert listing.furnished == "castecne"
     assert listing.terrace is True
-    assert listing.has_balcony is True       # terasa/lodžie fold into the legacy combined bool
+    # R11: balcony OR loggia. The terrace has its own column and no longer sets this.
+    assert listing.has_balcony is True       # from the icon-only "Lodžie" row
     assert listing.garage is True            # icon-only "Dvojgaráž" row
     assert listing.parking_lots == 2
     assert listing.has_parking is True
     assert listing.estate_area == 1033.0
+    # W4. A HOUSE page labels the row "Počet podlaží"; only a flat's says "Počet podlaží
+    # budovy", and the parser read the flat spelling alone — 29,756 active idnes houses
+    # carried total_floors NULL with the number on the page.
+    assert listing.total_floors == 3
 
 
 # Mirrors the live pozemek detail markup verified against 5,773 staged pages

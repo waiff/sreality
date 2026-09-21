@@ -13,12 +13,17 @@ other half: turning what a portal WROTE into one of those values.
     `building_type` values reached a column whose filter offers 6 and 8.
   * `disposition` / `energy_rating` — ONE grammar each, replacing nine disposition
     regexes and seven energy-class regexes.
-  * `yes_no` / `present` / `states` / `contains` / `mentions` — the five boolean
-    readings a portal actually uses, from an `Ano` cell to a set of accessory names.
-    They differ in what SILENCE means, which is a live fact per portal and not a thing to
-    unify by fiat: W4 is where the readings converge. What a MISSING KEY means is not
-    decided here at all — absence is a per-(portal, field) fact the attribute contract
-    declares, because only sreality and bezrealitky ever write an explicit `false`.
+  * `yes_no` / `present` / `contains` / `mentions` / `parking` — the five boolean readings
+    a portal actually uses, from an `Ano` cell to a set of accessory names. They differ in what
+    SILENCE means, which is a live fact per portal and not a thing to unify by fiat. What
+    a MISSING KEY means is not decided here at all — absence is a per-(portal, field) fact
+    the attribute contract declares, because only sreality and bezrealitky ever write an
+    explicit `false`.
+  * `any_true` — the ONE union over those readings (W4). `has_balcony` is balcony OR
+    loggia and `has_parking` is a space or right BELONGING to the property, on all nine
+    portals; which KEYS carry those facts is the contract's business, and combining them
+    was previously four separate definitions (`parser._any_of`, `idnes._any_true`, and the
+    `or` chains in maxima and remax that turned an explicit `False` into NULL).
 
 **Identity, until W5.** Every value a parser emits today is still emitted today. The
 off-canon spellings live rows carry (`ve_vystavbe_(hruba_stavba)`, `urceny_k_demolici`,
@@ -181,6 +186,12 @@ _REFUSED: dict[str, frozenset[str]] = {
 # has always been stored as `jine` (73 active rows). W5 is where those two agree.
 _PORTAL_LABELS: dict[tuple[str, str], dict[str, str]] = {
     ("realitymix", "ownership"): {"jine": "jine"},
+    # mmreality states `equipment` as 1|2|3 and renders no "Vybavení" row on the page, so
+    # the codebook was settled against the ads' own words on the rental slice (n=1,246):
+    # code 1 reads "plně/kompletně vybaven" on 29.8% of its rows, code 2 "nevybaven" on
+    # 4.9%, code 3 "částečně vybaven" on 9.0% — each code's modal cue, and each the
+    # maximum for that cue across the three codes.
+    ("mmreality", "furnished"): {"1": "ano", "2": "ne", "3": "castecne"},
 }
 
 # Per-PASS, not per-process: `take_unmapped` drains it, because the always-on worker calls
@@ -226,6 +237,17 @@ def _is_refusal(field: str, key: str) -> bool:
     already ruled on, and must not be counted as an unmapped label."""
     return (key in _REFUSED.get(field, frozenset())
             or key.startswith("-") or "vyber" in key or "nezadano" in key)
+
+
+def refuse(field: str, portal: str, label: str) -> None:
+    """Count a stated value the parse REFUSES rather than stores.
+
+    The same channel as an unmapped label, because it is the same event: a value the
+    portal published that reaches no column, visible in the run summary instead of
+    silently gone. bezrealitky's EUR rents are the first customer (W4) — a non-CZK amount
+    in `price_czk` reads ~25x low, and converting it would invent an exchange rate."""
+    with _UNMAPPED_LOCK:
+        UNMAPPED[f"{field}/{portal}/{fold(label)}"] += 1
 
 
 def take_unmapped() -> list[tuple[str, int]]:
@@ -318,18 +340,6 @@ def present(value: str | None) -> bool | None:
     return True
 
 
-def states(text: str | None, *needles: str) -> bool | None:
-    """A multi-value cell ("Balkon, Lodžie, Terasa") read for any of `needles`."""
-    key = fold(text)
-    if not key:
-        return None
-    # Negation FIRST: "Bez balkonu" states the absence of the very thing the needle
-    # matches, and reading the needle first would turn it into a True.
-    if key.startswith(_NEGATION):
-        return False
-    return True if any(n in key for n in needles) else None
-
-
 def contains(text: str | None, *needles: str) -> bool | None:
     """A STATED list read for one of its members ("garáž , parkování na ulici").
 
@@ -354,12 +364,66 @@ def mentions(names: Iterable[str] | str | None, *needles: str) -> bool | None:
     return True if any(n in folded for n in needles) else None
 
 
-def accessory_names(groups: Iterable[Mapping[str, object]] | None) -> set[str]:
-    """mmreality states its amenities as `accessoryGroups[].accessories[].name`."""
+# R11's ONE reading of `has_parking`: a space or right BELONGING to the property. Every
+# portal states its parking as a facility OF THE LISTING, so the discriminator is not a
+# per-portal inclusion list but the explicit not-ours qualifier the four live vocabularies
+# share — the street, a car park merely nearby, and mmreality's literal "Není".
+_PARKING_WORDS = ("parkov", "garaz", "stani", "pristresek")
+_PARKING_NOT_OURS = ("na_ulici", "pobliz", "v_okoli", "neni")
+
+
+def parking(members: Iterable[str] | str | None) -> bool | None:
+    """Whether the property's OWN parking is among the stated facilities.
+
+    `members` is one portal's stated parking: a multi-value cell ("Garáž, Parkování na
+    ulici"), a set of accessory names, or a single label. Split on the comma BEFORE
+    folding, because `fold` turns both the separator and the spaces into `_`. None when
+    the portal stated nothing; False when it listed its facilities and none of them comes
+    with the unit — which is the only way six of the nine portals can say "no parking"."""
+    if members is None:
+        return None
+    parts = members.split(",") if isinstance(members, str) else list(members)
+    listed = [key for key in (fold(p) for p in parts) if key]
+    if not listed:
+        return None
+    return any(
+        any(w in key for w in _PARKING_WORDS)
+        and not any(q in key for q in _PARKING_NOT_OURS)
+        for key in listed
+    )
+
+
+def any_true(*values: bool | None) -> bool | None:
+    """The ONE union of related boolean signals: None only while every one is silent.
+
+    A `False` among them is a stated absence and must survive — `a or b` collapses
+    `False or None` to None, which is how remax and maxima turned "Parkování: Ne" into
+    "nobody said"."""
+    if all(v is None for v in values):
+        return None
+    return any(v is True for v in values)
+
+
+def accessory_names(
+    groups: Iterable[Mapping[str, object]] | None, *, group: str | None = None,
+) -> set[str] | None:
+    """mmreality's `accessoryGroups[].accessories[].name`, optionally ONE group's.
+
+    The group is half the fact: the portal files "Parkování na ulici" and "Parkoviště
+    poblíž" (street / a nearby car park) under `Parkování`, and "Parkety" (parquet
+    FLOORING) under `Podlahy` — a flattened name search read all three as parking. With a
+    group named, None means the portal did not state that group at all, and an empty set
+    means it stated the group and listed nothing our reading recognises."""
+    if groups is None:
+        return None
     names: set[str] = set()
-    for group in groups or []:
-        for accessory in (group or {}).get("accessories") or []:  # type: ignore[union-attr]
+    seen_group = group is None
+    for entry in groups or []:
+        if group is not None and fold((entry or {}).get("name")) != fold(group):
+            continue
+        seen_group = True
+        for accessory in (entry or {}).get("accessories") or []:  # type: ignore[union-attr]
             name = fold((accessory or {}).get("name"))  # type: ignore[union-attr]
             if name:
                 names.add(name)
-    return names
+    return names if seen_group else None

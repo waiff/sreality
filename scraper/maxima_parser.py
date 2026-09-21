@@ -447,11 +447,19 @@ def parse_detail(
             vocabulary.energy_rating(read("energy_rating"))
             or _penb_from_text(_page_text(tree))
         ),
-        has_balcony=vocabulary.yes_no(read("has_balcony")),
+        # R11: balcony OR loggia, and parking-stání OR garage. maxima renders each as
+        # its own "Ano"-or-absent row, so the union must not lose a stated "Ne" — which
+        # is what `a or b` did (`False or None` is None).
+        has_balcony=vocabulary.any_true(
+            *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_balcony", params))
+        ),
         has_lift=vocabulary.yes_no(read("has_lift")),
         terrace=vocabulary.yes_no(read("terrace")),
         garage=vocabulary.yes_no(read("garage")),
-        has_parking=vocabulary.yes_no(read("has_parking")) or vocabulary.yes_no(read("garage")),
+        has_parking=vocabulary.any_true(
+            *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_parking", params))
+        ),
+        furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,
         description=description,

@@ -600,9 +600,16 @@ def parse_detail(
         lat=lat,
         lon=lon,
         floor=_parse_floor(read("floor")),
-        # "Balkóny" is one multi-value cell ("Balkon, Lodžie, Terasa"), so the union is
-        # read out of it rather than out of three rows.
-        has_balcony=vocabulary.states(read("has_balcony"), "balk", "lod"),
+        # "Balkóny" is one multi-value cell ("Balkon, Lodžie, Terasa"), so has_balcony
+        # (R11: balcony OR loggia) and `terrace` are both read out of it — and a list
+        # that names neither is the portal stating their absence, which is why this
+        # portal can carry a real `false` where a per-amenity row portal cannot.
+        has_balcony=vocabulary.contains(read("has_balcony"), "balk", "lod"),
+        terrace=vocabulary.contains(read("terrace"), "teras"),
+        # "Parkování" is the same shape ("Garáž, Vlastní parkovací stání, Parkoviště,
+        # Parkování na ulici") and nothing read it: has_parking was 0.0% on 48,620 rows.
+        has_parking=vocabulary.parking(read("has_parking")),
+        garage=vocabulary.contains(read("garage"), "garaz"),
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
         condition=vocabulary.canonical("condition", SOURCE, read("condition")),
         ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),

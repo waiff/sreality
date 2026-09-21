@@ -93,6 +93,9 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     read = partial(source_value, SOURCE, params=raw)
     label = partial(source_label, SOURCE, params=raw)
     estate_area = _numeric_or_none(raw.get("estate_area"))
+    # `parking_lots` is the BOOLEAN and `parking` the count — the payload's names are the
+    # opposite way round from the columns'. All three arms are the property's own (R11).
+    lots_flag, garage_flag, parking_count = source_values(SOURCE, "has_parking", raw)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=_numeric_or_none(raw.get("usable_area")),
@@ -112,8 +115,13 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         ),
         "floor": _int_or_none(read("floor")),
         "total_floors": _int_or_none(read("total_floors")),
-        "has_balcony": _any_of(source_values(SOURCE, "has_balcony", raw)),
-        "has_parking": _any_of(source_values(SOURCE, "has_parking", raw)),
+        "has_balcony": vocabulary.any_true(
+            *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_balcony", raw))
+        ),
+        "has_parking": vocabulary.any_true(
+            vocabulary.yes_no(lots_flag), vocabulary.yes_no(garage_flag),
+            None if (count := _int_or_none(parking_count)) is None else count > 0,
+        ),
         "has_lift": vocabulary.yes_no(label("has_lift")),
         "building_type": vocabulary.canonical("building_type", SOURCE, label("building_type")),
         "condition": vocabulary.canonical("condition", SOURCE, label("condition")),
@@ -176,13 +184,6 @@ def _cb_name(obj: Any) -> str | None:
         name = obj.get("name")
         return name if isinstance(name, str) else None
     return obj if isinstance(obj, str) else None
-
-
-def _any_of(values: tuple[Any, ...]) -> bool | None:
-    """The legacy combined boolean: None while every signal is silent, else any-true."""
-    if all(v is None for v in values):
-        return None
-    return any(bool(v) for v in values)
 
 
 def _cb_value(obj: Any) -> int | None:

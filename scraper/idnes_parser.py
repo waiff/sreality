@@ -379,14 +379,6 @@ def _truthy_field(dd: Node | None) -> bool | None:
     return True if _text(dd) else None
 
 
-def _any_true(*vals: bool | None) -> bool | None:
-    """Combine related amenity signals the way parser._has_balcony does for
-    sreality: None only when every signal is unknown, else any-True."""
-    if all(v is None for v in vals):
-        return None
-    return any(v is True for v in vals)
-
-
 def parse_index(html: str) -> IndexPage:
     tree = HTMLParser(html)
     total = _parse_total(_page_text(tree))
@@ -589,7 +581,7 @@ def parse_detail(
     parking_text = _text(parking_field)
     parking_lots = _parse_int(_text(lots_node))
     double_garage, garage_parking = source_values(SOURCE, "garage", params)
-    garage = _any_true(
+    garage = vocabulary.any_true(
         _truthy_field(double_garage),
         vocabulary.contains(_text(garage_parking), "garaz"),
     )
@@ -641,18 +633,21 @@ def parse_detail(
         ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
         furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
         energy_rating=vocabulary.energy_rating(read("energy_rating")),
-        # Legacy combined boolean — balcony|terrace|loggia, mirroring
-        # parser._has_balcony so the cross-portal filter agrees with sreality.
-        has_balcony=_any_true(
+        # R11: balcony OR loggia. `terasa` used to be a third arm and is its own
+        # column — dropping it takes ~570 terrace-only rows back to unknown.
+        has_balcony=vocabulary.any_true(
             *(_truthy_field(n) for n in source_values(SOURCE, "has_balcony", params))
         ),
         has_lift=_truthy_field(source_value(SOURCE, "has_lift", params)),
         cellar=_truthy_field(source_value(SOURCE, "cellar", params)),
         terrace=terrace,
         garage=garage,
-        # Legacy combined boolean — parking|garage|lots, mirroring parser._has_parking.
-        has_parking=_any_true(
-            _truthy_field(parking_field),
+        # R11: a space or right BELONGING to the property. idnes's "Parkování" cell
+        # lists the KINDS it has, so `_truthy_field` on it means "some parking is
+        # stated" — including "parkování na ulici", which the portal files under the
+        # listing's own facilities rather than as a neighbourhood note.
+        has_parking=vocabulary.any_true(
+            vocabulary.parking(parking_text),
             garage,
             (parking_lots > 0) if parking_lots is not None else None,
         ),

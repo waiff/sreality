@@ -20,8 +20,10 @@ Each cell carries four axes:
     portal's checked-in census (gate A1: no dead read).
   * **absence** — what a MISSING key means: `false` or `unknown`. Not derivable and not a
     helper's decision: remax emits `garaz` as "Ano" or not at all, so absence there is
-    unknown, while bezrealitky's `parking` is a real boolean and its `has_parking` has
-    always read a missing key as false.
+    unknown. **No cell declares `false` after W4**: bezrealitky was the one that did, and
+    its census refutes it — `parking` and `garage` are on 100 % of adverts, so what looked
+    like a missing key is a JSON null, which is the API saying "not stated". A portal that
+    genuinely omits a key to mean "no" declares it here rather than in a parser branch.
   * **sentinels** — values to read as absent ("neuvedeno", sreality's "- nezadáno").
 
 A cell with nothing behind it carries `gap=` naming the census key W4 will wire, or
@@ -81,9 +83,13 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "disposition": _cell("structured", "category_sub_cb", "advert_name"),
         "floor": _cell("structured", "floor_number"),
         "total_floors": _cell("structured", "floors"),
-        "has_balcony": _cell("structured", "balcony", "terrace", "loggia"),
+        # R11: balcony OR loggia. `terrace` was a third arm here and is its own column —
+        # dropping it flips ~5,100 active rows (4.9% of the portal) from true to false.
+        "has_balcony": _cell("structured", "balcony", "loggia"),
         # `parking_lots` is a BOOLEAN in sreality's payload and `parking` the count — the
-        # opposite of what the column names suggest. W4 owns that; this records it.
+        # opposite of what the column names suggest. Verified live (8,000 newest active
+        # rows): `parking_lots` is boolean on 1,813+491, `parking` a number 1..9 on 491.
+        # Both are the property's own, so both belong to has_parking under R11.
         "has_parking": _cell("structured", "parking_lots", "garage", "parking"),
         "has_lift": _cell("structured", "elevator", sentinels=_SREALITY_UNSET),
         "building_type": _cell("structured", "building_type", sentinels=_SREALITY_UNSET),
@@ -113,11 +119,13 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "disposition": _cell("structured", "disposition"),
         "floor": _cell("structured", "etage"),
         "total_floors": _cell("structured", "totalFloors"),
-        "has_balcony": _cell("structured", "balconySurface", "terraceSurface",
-                             "loggiaSurface"),
-        # The one cell on any portal whose absence has always meant false: both keys are
-        # real booleans, and the parser has always read a missing pair as "no parking".
-        "has_parking": _cell("structured", "parking", "garage", absence="false"),
+        # R11: balcony OR loggia. `terraceSurface` was a third arm here and is its own
+        # column — dropping it takes 395 of 1,417 true rows back to unknown.
+        "has_balcony": _cell("structured", "balconySurface", "loggiaSurface"),
+        # Both keys are real booleans the API sends on every advert, so a MISSING one is
+        # a JSON null — "not stated", not a false. Reading absence as false fabricated it
+        # on 78 active rows and locked the NULL-only text lane out of them for good.
+        "has_parking": _cell("structured", "parking", "garage"),
         "has_lift": _cell("structured", "lift"),
         "building_type": _cell("structured", "construction", sentinels=("UNDEFINED",)),
         "condition": _cell("structured", "condition", sentinels=("UNDEFINED",)),
@@ -147,10 +155,15 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "disposition": _cell("structured", "type", "title"),
         "floor": _cell("structured", "floor"),
         "total_floors": _cell("structured", "overgroundFloors", "undergroundFloors"),
-        "has_balcony": _cell("structured", "accessoryGroups",
-                             gap="balcony", note="W4: the structured balcony/loggia "
-                             "booleans are on 34% of rows and no accessory name has ever "
-                             "matched, so this cell is 0/0 on every active row"),
+        # R11: balcony OR loggia, from the two top-level booleans the portal actually
+        # publishes (34% of rows each, with a real `false`). The accessory-name search
+        # this replaces matched NOTHING on any live row — 0/0 on all 10,317.
+        "has_balcony": _cell("structured", "balcony", "loggia"),
+        # `parkingPlaces` is the property's own count; the accessory group named
+        # "Parkování" is a closed 15-member list of which only the members BELONGING to
+        # the property count (R11) — "Parkování na ulici", "Parkoviště poblíž" and the
+        # literal "Není" do not, and "Parkety" (parquet flooring) is in another group
+        # entirely, which is how a flattened name search read it as parking.
         "has_parking": _cell("structured", "parkingPlaces", "accessoryGroups"),
         "has_lift": _cell("structured", "lift"),
         "building_type": _cell("structured", "construction", sentinels=("neuvedeno",)),
@@ -160,11 +173,19 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "usable_area": _cell("structured", "usableArea"),
         "garden_area": _cell("structured", "gardenArea"),
         "category_sub_cb": _cell("none", gap=None),
-        "subtype": _cell("none", gap="type"),
-        "furnished": _cell("none", gap="equipment"),
-        "terrace": _cell("structured", "accessoryGroups", gap="accessoryGroups"),
+        "subtype": _cell("none", gap="type",
+                         note="a closed `{id,name}` codebook (Rodinný dům, Chata, "
+                              "Chalupa…) with no mapping onto SUBTYPE_OPTIONS written "
+                              "anywhere yet — an operator vocabulary call, not a W4 wire"),
+        # `equipment` is 1|2|3 and the page renders no "Vybavení" row, so the codebook was
+        # settled against the ads' own words on the rental slice (n=1,246): code 1 reads
+        # "plně/kompletně vybaven" on 29.8%, code 2 reads "nevybaven" on 4.9%, code 3
+        # reads "částečně vybaven" on 9.0% — each code's modal cue, and each the maximum
+        # for that cue across the three.
+        "furnished": _cell("structured", "equipment"),
+        "terrace": _cell("structured", "terraceArea"),
         "cellar": _cell("structured", "cellar", "accessoryGroups"),
-        "garage": _cell("structured", "accessoryGroups"),
+        "garage": _cell("structured", "garage", "accessoryGroups"),
         "parking_lots": _cell("structured", "parkingPlaces"),
         "ownership": _cell("structured", "ownership", sentinels=("neuvedeno",)),
     },
@@ -182,8 +203,15 @@ CONTRACT: dict[str, dict[str, Cell]] = {
                              "`dispozice` cell on any page of a 1,000-row census"),
         "floor": _cell("structured", "patro"),
         "total_floors": _cell("none", gap=None),
+        # "Balkóny" is ONE multi-value cell ("Balkon, Lodžie, Terasa"): the union is read
+        # out of it, and a list that does not name the thing is the portal saying it is
+        # absent — which is why this portal can carry a real `false`.
         "has_balcony": _cell("structured", "balkóny"),
-        "has_parking": _cell("none", gap="parkování"),
+        # "Parkování" is the same shape: {Garáž, Vlastní parkovací stání, Parkoviště,
+        # Parkování na ulici} on 28.3% of rows, and nothing read it — has_parking was
+        # 0.0% on all 48,620. R11's rule applies to the members: everything the listing
+        # states as its own facility counts except the street (95 of 283 census cells).
+        "has_parking": _cell("structured", "parkování"),
         "has_lift": _cell("none", gap=None),
         "building_type": _cell("structured", "konstrukce"),
         "condition": _cell("structured", "stav nemovitosti"),
@@ -193,11 +221,17 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "garden_area": _cell("none", gap=None),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None),
-        "furnished": _cell("none", gap="vybavení pronájem"),
-        "terrace": _cell("none", gap="balkóny"),
+        # `vybavení pronájem` is NOT this column: it is an appliance list ("Kuchyňská
+        # linka, Myčka, Lednice"), not the ano/ne/castecne state, and a kitchen unit is
+        # not a furnished flat. Measured over 6,000 active rows — every value is a list of
+        # appliances. W2 recorded it as W4's to wire; the data says there is nothing here.
+        "furnished": _cell("none", gap=None),
+        "terrace": _cell("structured", "balkóny"),
         "cellar": _cell("none", gap=None),
-        "garage": _cell("none", gap="parkování"),
-        "parking_lots": _cell("none", gap="parkování"),
+        "garage": _cell("structured", "parkování"),
+        # "Parkování" names the KINDS of parking, never a count — no key on this portal
+        # carries one, so there is nothing for W4 or any later wave to wire.
+        "parking_lots": _cell("none", gap=None),
         "ownership": _cell("structured", "vlastnictví"),
     },
     # --- idnes: the `<dl>` spec rows ---------------------------------------
@@ -212,8 +246,13 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "area_basis": _cell("derived"),
         "disposition": _cell("derived", note="the h1 title"),
         "floor": _cell("structured", "podlaží"),
-        "total_floors": _cell("structured", "počet podlaží budovy"),
-        "has_balcony": _cell("structured", "balkon", "lodžie", "terasa"),
+        # A flat's page labels the row "Počet podlaží budovy"; a HOUSE's page labels it
+        # "Počet podlaží" — 29.7k active dum rows had total_floors NULL for want of the
+        # second spelling (35.7% of a 1,000-row census carries it).
+        "total_floors": _cell("structured", "počet podlaží budovy", "počet podlaží"),
+        # R11: balcony OR loggia. `terasa` was a third arm here and is its own column —
+        # dropping it takes ~570 terrace-only rows back to unknown.
+        "has_balcony": _cell("structured", "balkon", "lodžie"),
         "has_parking": _cell("structured", "parkování", "počet parkovacích míst"),
         "has_lift": _cell("structured", "výtah"),
         "building_type": _cell("structured", "konstrukce budovy"),
@@ -244,7 +283,8 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "disposition": _cell("derived", note="the h3 title"),
         "floor": _cell("structured", "podlaží"),
         "total_floors": _cell("structured", "podlaží"),
-        "has_balcony": _cell("structured", "balkón"),
+        # R11: balcony OR loggia. maxima states them as two "Ano"-or-absent rows.
+        "has_balcony": _cell("structured", "balkón", "lodžie"),
         "has_parking": _cell("structured", "parkovací stání", "garáž"),
         "has_lift": _cell("structured", "výtah"),
         "building_type": _cell("structured", "budova"),
@@ -257,7 +297,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None,
                          note="operator ruling: `typ domu` is structural, not a subtype"),
-        "furnished": _cell("none", gap="vybavení"),
+        "furnished": _cell("structured", "vybavení"),
         "terrace": _cell("structured", "terasa"),
         "cellar": _cell("none", gap=None),
         "garage": _cell("structured", "garáž"),
@@ -278,23 +318,28 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "floor": _cell("structured", "číslo podlaží v domě"),
         "total_floors": _cell("structured", "počet podlaží objektu"),
         "has_balcony": _cell("structured", "balkon", "lodžie"),
+        # `ostatní` is the building's stated amenity list ("Bezbarierový přístup, Garáž,
+        # Výtah, Parkoviště") — the portal's only lift/parking signal, and every member
+        # of it belongs to the property (it offers no street-parking option at all).
         "has_parking": _cell("structured", "ostatní"),
-        "has_lift": _cell("none", gap=None),
+        "has_lift": _cell("structured", "ostatní"),
         "building_type": _cell("structured", "druh objektu"),
         "condition": _cell("structured", "stav objektu"),
         "energy_rating": _cell("structured", "energetická náročnost budovy"),
         "estate_area": _cell("structured", "plocha parcely"),
         "usable_area": _cell("structured", "užitná plocha"),
         # The live key is `zahrada`; `areas_from_params` used to read `plocha zahrady`,
-        # which realitymix emits on no row, so the column is 0-filled on all 48,757 (W4).
-        "garden_area": _cell("none", gap="zahrada"),
+        # which realitymix emits on no row, so the column was 0-filled on all 48,757. The
+        # cell is "4.3% of rows", not "4.3% of rows with a number": ~40% of them say "ano"
+        # with no measure, which stays NULL here (a size column, not a flag).
+        "garden_area": _cell("structured", "zahrada"),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None),
         "furnished": _cell("structured", "vybaveno"),
         "terrace": _cell("structured", "terasa"),
-        "cellar": _cell("none", gap="sklep"),
+        "cellar": _cell("structured", "sklep"),
         "garage": _cell("structured", "ostatní"),
-        "parking_lots": _cell("none", gap="počet míst k parkování"),
+        "parking_lots": _cell("structured", "počet míst k parkování"),
         "ownership": _cell("structured", "vlastnictví"),
     },
     # --- remax: the `pd-detail-info__row` spec rows ------------------------
@@ -313,7 +358,10 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "total_floors": _cell("structured", "pocet podlazi v objektu"),
         "has_balcony": _cell("none", gap=None,
                              note="no balcony/loggia key in a 1,000-row census"),
-        "has_parking": _cell("structured", "garaz"),
+        # `parkovani` is not a key this portal has ever emitted, so has_parking was
+        # identical to `garage` on all 9,086 active rows. The count row is the signal it
+        # was missing: both arms are the property's own (R11).
+        "has_parking": _cell("structured", "garaz", "pocet parkovacich mist"),
         "has_lift": _cell("structured", "vytah"),
         "building_type": _cell("structured", "druh objektu"),
         "condition": _cell("structured", "stav objektu"),
@@ -327,7 +375,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "terrace": _cell("none", gap=None),
         "cellar": _cell("none", gap=None),
         "garage": _cell("structured", "garaz"),
-        "parking_lots": _cell("none", gap="pocet parkovacich mist"),
+        "parking_lots": _cell("structured", "pocet parkovacich mist"),
         "ownership": _cell("structured", "vlastnictvi"),
     },
     # --- bazos: no spec table at all; the ad's own words -------------------
@@ -423,7 +471,11 @@ IGNORED: dict[str, dict[str, str]] = {
         "gps": "location", "ruianId": "location (the R0 rung, owed to that program)",
         "id": "identity", "uri": "identity", "title": "identity",
         "active": "lifecycle", "isDiscounted": "no column",
-        "originalPrice": "no column", "charges": "no column", "currency": "CZK only",
+        "originalPrice": "no column", "charges": "no column",
+        # Read by the parse as a GUARD, not as a cell's source key: 31 active rows hold
+        # EUR rents, which read ~25x low in a CZK column. Refused (None + a counted
+        # event), never converted — this program does not invent an exchange rate.
+        "currency": "a price_czk guard: a non-CZK amount is refused, never converted",
         "timeActivated": "published_at", "timeDeactivated": "lifecycle",
         "mainImage": "images phase", "publicImages": "images phase",
         "image_urls": "images phase", "description": "the text lane's substrate",
@@ -448,10 +500,7 @@ IGNORED: dict[str, dict[str, str]] = {
         "marginIncluded": "no column", "pricePerMeter": "no column",
         "pricePeriod": "price_unit is derived from the category", "priceNote": "no column",
         "swimmingPool": "no column", "wheelchairAccess": "no column",
-        "equipment": "W4 wires it to furnished",
-        "garage": "W4 wires it to garage; today the accessory names are read instead",
-        "balcony": "W4 wires it to has_balcony", "loggia": "W4 wires it to has_balcony",
-        "terraceArea": "no column", "balconyArea": "no column", "loggiaArea": "no column",
+        "balconyArea": "no column", "loggiaArea": "no column",
     },
     "ceskereality": {
         "id nemovitosti": "the portal's own reference number",
@@ -461,8 +510,9 @@ IGNORED: dict[str, dict[str, str]] = {
         "inženýrské sítě": "no column", "způsoby vytápění": "no column",
         "vytápění podrobnosti": "no column", "cena nezahrnuje": "no column",
         "druhy bytů": "no column", "okna": "no column", "zateplení": "no column",
-        "wc": "no column", "parkování": "W4 wires it to has_parking / garage",
-        "vybavení pronájem": "W4 wires it to furnished",
+        "wc": "no column",
+        "vybavení pronájem": "an APPLIANCE list (Kuchyňská linka, Myčka, Lednice), "
+                             "not the ano/ne/castecne state `furnished` holds",
         "plocha obytná": "no column (a living area, not the užitná measure)",
         "plocha celková": "no column (a whole-building total, not the užitná measure)",
         "plocha zastavěná": "no column (a built-up area, not a headline measure)",
@@ -471,7 +521,6 @@ IGNORED: dict[str, dict[str, str]] = {
         "číslo zakázky": "the portal's own reference number",
         "spočítej stěhování": "a CTA, always json null",
         "spočítej vyklizení": "a CTA, always json null",
-        "počet podlaží": "W4 wires it to total_floors on houses (29.7k rows)",
         "datum nastěhování": "no column", "topení": "no column",
         "topné těleso": "no column", "zdroj vytápění": "no column",
         "zdroj ohřevu vody": "no column", "plyn": "no column", "voda": "no column",
@@ -495,8 +544,6 @@ IGNORED: dict[str, dict[str, str]] = {
         "voda": "no column", "odpad": "no column", "plyn": "no column",
         "elektřina": "no column", "doprava": "no column", "typ domu": "no column",
         "poloha domu": "no column", "bazén": "no column",
-        "lodžie": "W4: has_balcony reads `balkón` only",
-        "vybavení": "W4 wires it to furnished",
     },
     "realitymix": {
         "doprava": "no column", "elektřina": "no column", "voda": "no column",
@@ -514,10 +561,9 @@ IGNORED: dict[str, dict[str, str]] = {
         "bezbariérový byt": "no column", "nízkoenergetický": "no column",
         "fotovoltaika": "no column", "typ internetového připojení": "no column",
         "typ pronájmu": "no column", "občanská vybavenost": "no column",
-        "popis vybavení": "no column", "sklep": "W4 wires it to cellar",
+        "popis vybavení": "no column",
         "zastavěná plocha": "no column (a built-up area, not a headline measure)",
         "celková plocha": "no column (a whole-building total, not the užitná measure)",
-        "zahrada": "W4 wires it to garden_area",
     },
     "remax": {
         "cislo zakazky": "the portal's own reference number",
@@ -533,7 +579,6 @@ IGNORED: dict[str, dict[str, str]] = {
         "umisteni v chranenych lokalitach": "no column",
         "vybaveni kancelari": "no column", "plocha kancelari": "no column",
         "merna vypoctena rocni spotreba energie v kwh/m²/rok": "no column",
-        "pocet parkovacich mist": "W4 wires it to parking_lots",
         "zastavena plocha": "no column (a built-up area, not a headline measure)",
     },
     "bazos": {

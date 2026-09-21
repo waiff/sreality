@@ -78,6 +78,7 @@ DETAIL_HTML = """
     <tr class="border-bottom"><th class="slider_label align-middle">podlaží</th><td class="text-right slider_value">3./6.</td></tr>
     <tr class="border-bottom"><th class="slider_label align-middle">plocha podlahová</th><td class="text-right slider_value">114&nbsp;m<sup>2</sup></td></tr>
     <tr class="border-bottom"><th class="slider_label align-middle">balkón</th><td class="text-right slider_value">Ano</td></tr>
+    <tr class="border-bottom"><th class="slider_label align-middle">vybavení</th><td class="text-right slider_value">Ano</td></tr>
     <tr class="border-bottom"><th class="slider_label align-middle">parkovací&nbsp;stání</th><td class="text-right slider_value">Ano</td></tr>
     <tr class="border-bottom"><th class="slider_label align-middle">garáž</th><td class="text-right slider_value">Ano</td></tr>
     <tr class="border-bottom"><th class="slider_label align-middle">výtah</th><td class="text-right slider_value">Ano</td></tr>
@@ -182,6 +183,7 @@ def test_parse_detail_full():
     assert listing.ownership == "osobni"
     assert listing.energy_rating == "B"
     assert listing.has_balcony is True
+    assert listing.furnished == "ano"    # W4: the `vybavení` row was read by nothing
     assert listing.has_parking is True
     assert listing.garage is True
     assert listing.has_lift is True
@@ -280,3 +282,25 @@ def test_spaced_thousands_in_a_spec_cell_is_one_number():
     listing = parse_detail(html, source_url=_DETAIL_URL,
                            category_main="byt", category_type="prodej")
     assert listing.area_m2 == 1114.0
+
+
+def test_a_loggia_alone_is_a_balcony_and_a_stated_no_survives_the_union():
+    """R11: has_balcony is balcony OR loggia. maxima publishes `lodžie` on 14.3% of a
+    1,000-row census and nothing read it, and `_yes_no(a) or _yes_no(b)` collapsed a
+    stated "Ne" on the first row into NULL (`False or None` is None)."""
+    loggia_only = DETAIL_HTML.replace(
+        '>balkón</th><td class="text-right slider_value">Ano<',
+        '>balkón</th><td class="text-right slider_value">Ne<',
+    ).replace(
+        '>výtah</th>',
+        '>lodžie</th><td class="text-right slider_value">Ano</td></tr>'
+        '<tr class="border-bottom"><th class="slider_label align-middle">výtah</th>',
+    )
+    listing = parse_detail(loggia_only, source_url=_DETAIL_URL)
+    assert listing.has_balcony is True
+
+    no_balcony = DETAIL_HTML.replace(
+        '>balkón</th><td class="text-right slider_value">Ano<',
+        '>balkón</th><td class="text-right slider_value">Ne<',
+    )
+    assert parse_detail(no_balcony, source_url=_DETAIL_URL).has_balcony is False

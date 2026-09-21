@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from scraper import vocabulary
 from scraper.bezrealitky_parser import parse_advert
 from scraper.vocabulary import disposition_code
 
@@ -118,7 +119,7 @@ def test_wood_construction_canonicalises_to_drevo():
 
 def test_surface_derived_flags():
     listing = parse_advert(_advert())
-    # loggiaSurface=3 -> the legacy combined balcony flag is true
+    # R11: balcony OR loggia — loggiaSurface=3 alone is enough.
     assert listing.has_balcony is True
     # cellarSurface=4 -> cellar true; terraceSurface null -> terrace unknown
     assert listing.cellar is True
@@ -253,3 +254,31 @@ def test_ruian_identity_fields_reach_raw():
     assert listing.raw["ruianId"] == 22349995
     assert listing.raw["addressInput"].startswith("Poděbradská")
     assert listing.raw["regionTree"][0]["subType"] == "REGION"
+
+
+def test_a_terrace_alone_is_not_a_balcony():
+    """R11: has_balcony is balcony OR loggia, and the terrace has its own column.
+
+    bezrealitky folded `terraceSurface` into the combined flag as well, so 395 of its
+    1,417 true rows were terraces — and the same listing's `terrace` said so already."""
+    listing = parse_advert(_advert(loggiaSurface=None, terraceSurface=6))
+    assert listing.terrace is True
+    assert listing.has_balcony is None
+
+
+def test_has_parking_can_be_unknown_and_a_stated_false_survives():
+    """`bool(parking or garage)` could not return None at all, so a JSON null read as a
+    stated "no parking" — and the NULL-only text lane could never revise it."""
+    assert parse_advert(_advert(parking=None, garage=None)).has_parking is None
+    assert parse_advert(_advert(parking=None, garage=False)).has_parking is False
+    assert parse_advert(_advert(parking=False, garage=True)).has_parking is True
+
+
+def test_a_non_czk_price_is_refused_never_converted():
+    """price_czk is a CZK total by contract on all nine portals. 31 active rows quote
+    the rent in EUR; stored as CZK a 1,124 EUR Prague rent reads as 1,124 CZK."""
+    vocabulary.take_unmapped()
+    listing = parse_advert(_advert(price=1124, currency="EUR"))
+    assert listing.price_czk is None
+    assert vocabulary.take_unmapped() == [("price_czk/bezrealitky/eur", 1)]
+    assert parse_advert(_advert(price=1124, currency="CZK")).price_czk == 1124

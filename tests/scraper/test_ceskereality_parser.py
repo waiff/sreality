@@ -97,6 +97,7 @@ DETAIL_HTML = """
     <div class="i-info"><span class="i-info__title">Plocha užitná</span><span class="i-info__value"> 41 m² </span></div>
     <div class="i-info"><span class="i-info__title">Konstrukce</span><span class="i-info__value"> Cihlová </span></div>
     <div class="i-info"><span class="i-info__title">Balkóny</span><span class="i-info__value"> Balkon </span></div>
+    <div class="i-info"><span class="i-info__title">Parkování</span><span class="i-info__value"> Garáž, Parkování na ulici </span></div>
   </div>
   <div class="g-info__col">
     <div class="i-info"><span class="i-info__title">Stav nemovitosti</span><span class="i-info__value"> Dobrý </span></div>
@@ -185,6 +186,14 @@ def test_parse_detail_full():
     assert listing.ownership == "osobni"
     assert listing.energy_rating == "E"
     assert listing.has_balcony is True
+    # W4. Both facts come out of ONE multi-value cell each, and a list that does not
+    # name the thing is the portal stating its absence — which is how this portal gets a
+    # real `false` at all. has_parking / garage / terrace were 0.0% on 48,620 rows while
+    # `parkování` sat unread in raw_json on 28.3% of them.
+    assert listing.terrace is False          # "Balkóny: Balkon" names no terrace
+    assert listing.garage is True            # "Parkování: Garáž, …"
+    # R11: the garage belongs to the property; the street does not.
+    assert listing.has_parking is True
     assert listing.description.startswith("Prodej bytu 1+1")
     # Broker: stable profile id + agency slug from the contact anchors, name +
     # phone from JSON-LD (idnes-shaped raw["broker"] block for resolve_brokers).
@@ -492,3 +501,19 @@ def test_spaced_thousands_in_a_spec_cell_is_one_number():
     )
     assert listing.usable_area == 5870.0
     assert (listing.area_m2, listing.area_basis) == (5870.0, "usable")
+
+
+_STREET_ONLY = DETAIL_HTML.replace("Garáž, Parkování na ulici", "Parkování na ulici")
+
+
+def test_street_parking_is_not_the_property_s_own_parking():
+    """R11: has_parking is a space or right BELONGING to the property.
+
+    The street is the one member of this cell's vocabulary that plainly does not come
+    with the unit, and the cell being FILLED makes that a stated `false`, not unknown —
+    95 of the 283 parking cells in a 1,000-row census say exactly this."""
+    listing = parse_detail(
+        _STREET_ONLY, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert listing.has_parking is False
+    assert listing.garage is False

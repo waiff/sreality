@@ -79,6 +79,7 @@ DETAIL_HTML = """
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Typ nemovitosti:</div><div class="pd-detail-info__value">Byty</div></div>
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Výtah:</div><div class="pd-detail-info__value">Ano</div></div>
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Vybaveno:</div><div class="pd-detail-info__value">Ano</div></div>
+  <div class="pd-detail-info__row"><div class="pd-detail-info__label">Počet parkovacích míst:</div><div class="pd-detail-info__value">2</div></div>
   <div class="pd-detail-info__row"><div class="pd-detail-info__label">Energetická náročnost budovy:</div><div class="pd-detail-info__value">C</div></div>
 </div>
 <div class="pd-base-info__content-collapse-inner"><div ref="content-inner">K prodeji nabízíme byt 2+kk v žádané lokalitě.<br><br>Byt je po rekonstrukci.</div></div>
@@ -276,6 +277,12 @@ def test_parse_detail_full():
     assert listing.ownership == "osobni"
     assert listing.energy_rating == "C"
     assert listing.has_lift is True
+    # W4. `parkovani` is a key remax has never emitted, so has_parking used to be
+    # identical to `garage` (1,375 == 1,375 live) while the count row it does publish on
+    # 17.9% of a 1,000-row census reached no column at all.
+    assert listing.parking_lots == 2
+    assert listing.has_parking is True
+    assert listing.garage is None
     # `sklep` / `terasa` are not remax rows at all — a 1,000-row census of the live
     # portal carries neither, so both cells are unknown, never a guessed False.
     assert listing.cellar is None
