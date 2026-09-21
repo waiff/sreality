@@ -1030,7 +1030,7 @@ export const fetchListingsForTable = async (
   if (pre.empty) return { rows: [], nextCursor: null };
   /* browse_list (migration 276): the compact snapshot read model — a STABLE
    * relation under the scroll (the live table mutates last_seen_at every
-   * scrape cycle), rebuilt every 5 min from browse_projection. Single-portal
+   * scrape cycle), rebuilt every 15 min from browse_projection. Single-portal
    * mode swaps in listing_feed_public; that one IS the live table, so a row
    * whose last_seen_at is bumped mid-scroll can shift — harmless here because
    * the mirror's sort key (portal_sort_key) is immutable after first write. */
