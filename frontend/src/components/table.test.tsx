@@ -54,9 +54,13 @@ describe('<Th>', () => {
 
 describe('<StatTh> / <StatTd>', () => {
   it('keeps the numeric-summary header right-aligned with its tighter tracking', () => {
-    expect(head(<StatTh>median</StatTh>).getAttribute('class')).toBe(
+    const th = head(<StatTh>median</StatTh>);
+    expect(th.getAttribute('class')).toBe(
       'px-3 py-2 font-medium text-right text-[var(--color-ink-3)] tracking-wide uppercase text-[0.65rem]',
     );
+    /* Unlike <Th>, both originals omitted scope; adding it restyles nothing but
+     * changes the DOM of two live tables. */
+    expect(th).not.toHaveAttribute('scope');
   });
 
   it('marks the emphasised cell with ink, the rest with ink-2', () => {
