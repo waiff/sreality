@@ -2689,3 +2689,24 @@ def test_field_fill_matrix_warns_on_a_stale_census(monkeypatch: Any) -> None:
     out = check_field_fill_matrix(_MatrixConn(_live_matrix_rows()), T)
     assert out["status"] == "warn"
     assert out["details"]["stale_census"] and "remax" in out["message"]
+
+
+def test_full_lane_budget_owes_every_check_its_own_budget() -> None:
+    from scripts import verify_pipeline as vp
+
+    assert vp.full_lane_budget_s(weekly=False) == len(vp._CHECKS) * vp._CHECK_BUDGET_S
+    assert vp.full_lane_budget_s(weekly=True) == (
+        (len(vp._CHECKS) + len(vp._WEEKLY_CHECKS)) * vp._CHECK_BUDGET_S)
+
+
+def test_full_lane_budget_fits_its_job() -> None:
+    """A registry that outgrows verify_pipeline.yml's timeout must fail HERE, not go quiet
+    in production: the shared 120 s budget left 7-17 of 24 checks unrun for weeks."""
+    import re
+    from pathlib import Path
+
+    from scripts import verify_pipeline as vp
+
+    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/verify_pipeline.yml"
+    minutes = int(re.search(r"timeout-minutes:\s*(\d+)", workflow.read_text()).group(1))
+    assert vp.full_lane_budget_s(weekly=True) + vp._JOB_HEADROOM_S <= minutes * 60

@@ -262,8 +262,11 @@ therefore wrote **zero rows and fired zero alerts** — blinding `db_saturation`
 result is inserted and alerted the instant its check returns (the transition baseline,
 `latest_statuses`, is captured once before the first write, so per-check
 `emit_transition_alerts` calls stay equivalent to the old batch call). Budgets:
-`_CHECK_BUDGET_S` (45s) per check, capped by whatever remains of `_LANE_BUDGET_S` (**120s of
-the job's 300s** — the rest is headroom for W2/W3's checks; this wave owns the number).
+`_CHECK_BUDGET_S` (45s) per check, capped by whatever remains of the LANE budget: the acute
+lane's `_LANE_BUDGET_S` (**120s of `llm_health.yml`'s 300s job**), or for the 6-hourly full lane
+`full_lane_budget_s` = one per-check budget per registered check. The full lane shared the 120 s
+until 2026-09-22, and in 13 of the 15 runs before that 7-17 of its 24 checks were `not_run` —
+`test_full_lane_budget_fits_its_job` now fails CI if the registry outgrows the 30-minute job.
 Enforcement is **server-side** via `SET LOCAL statement_timeout`: the connection is autocommit
 and shared by every check, so a thread we cannot cancel or a signal raised mid-query would
 leave it wedged for everyone downstream. Postgres cancelling its own query is the only
@@ -560,8 +563,7 @@ template from sreality's own frontend and update `IMAGE_TRANSFORM_OPS`.
 
 **Its own lane.** `.github/workflows/sreality_image_canary.yml` runs it daily
 (`--only sreality_image_template --exit-nonzero-on-fail`): it is registered LAST so a slow CDN
-can never starve a database check, and for the same reason the 6-hourly verify lane routinely
-exhausts its 120 s budget before reaching it (observed on its first run: `lane budget 120s
-exhausted; check sreality_image_template not run`). A CDN 403/429 (sreality's throttle) or a
+can never starve a database check (the 6-hourly lane used to exhaust a shared 120 s budget
+before reaching it; it now owes every check its own budget, and this lane stays the daily guarantee). A CDN 403/429 (sreality's throttle) or a
 5xx is a `warn` that verified nothing — only a 4xx refusal, a non-image body or a downgraded
 frame is a `fail`.

@@ -33,7 +33,8 @@ EXIST, so a total stop — zero `llm_calls` rows at all, e.g. the key unset on e
 runner — reads `ok` on every remaining check until R8 lands.
 
 Each result is persisted AND alerted the moment its check completes, under a per-check
-and a whole-lane wall-clock budget (`_LANE_BUDGET_S`). The lane runs inside a job with
+and a whole-lane wall-clock budget (the acute lane's `_LANE_BUDGET_S`; the full lane's
+`full_lane_budget_s`, one per-check budget per registered check). The acute lane runs inside a job with
 `timeout-minutes: 5`, and it used to compute every result before writing any — so a
 timeout wrote zero rows and fired zero alerts, blinding `db_saturation` and
 `worker_liveness` at exactly the moment DB saturation would make the checks slow. A
@@ -372,15 +373,24 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 # saturation) that made the checks slow in the first place. Results are now persisted as
 # each check completes, and these budgets keep one slow check from eating the lane.
 #
-# 120s of the job's 300s. The remaining 180s is deliberate headroom: process start, the
-# threshold read, alert emission, and the checks W2/W3 will add. This wave owns the number;
-# later waves spend against it.
+# THE ACUTE LANE's budget: 120s of llm_health.yml's 300s job. The remaining 180s is
+# deliberate headroom for process start, the threshold read and alert emission.
 _LANE_BUDGET_S = 120.0
 # No single check may hold the lane for more than this. The slowest today is the shared
 # measure_plausibility read at ~12s, so 45s is ~4x headroom over the known worst case.
 _CHECK_BUDGET_S = 45.0
+# Process start, threshold read and alert emission, reserved out of every job's timeout.
+_JOB_HEADROOM_S = 180.0
 # Outside run_checks (ad-hoc use, tests) keep the historical 10-minute ceiling.
 _DEFAULT_STATEMENT_TIMEOUT_MS = 600_000
+
+
+def full_lane_budget_s(*, weekly: bool) -> float:
+    """The FULL lane owes every registered check its own budget, so no check can starve
+    another. It used to share the acute lane's 120 s: over the 15 runs to 2026-09-21, 13
+    left 7-17 of the 24 checks `not_run`. A registry that outgrows verify_pipeline.yml's
+    job timeout fails CI (test_full_lane_budget_fits_its_job) instead of going quiet."""
+    return (len(_CHECKS) + (len(_WEEKLY_CHECKS) if weekly else 0)) * _CHECK_BUDGET_S
 
 
 class _LaneBudget:
@@ -3079,8 +3089,8 @@ def check_sreality_image_template(conn: Any, thresholds: dict[str, Any]) -> dict
 
 
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
-    # FIRST, and the position is the point: the lane runs _CHECKS in order under a 120 s
-    # budget and stamps whatever it did not reach `not_run` (2026-09-11 21:02 lost the last
+    # FIRST, and the position is the point: a lane runs _CHECKS in order under its budget
+    # and stamps whatever it did not reach `not_run` (2026-09-11 21:02 lost the last
     # seven, this one among them). The invariant the location programme is measured by must
     # never be the measurement a slower check starves — and it is one indexed join.
     ("location_town_coverage", check_location_town_coverage),
@@ -3345,7 +3355,9 @@ def main() -> int:
                 counts[kind] += emitted[kind]
 
         results = run_checks(
-            conn, thresholds, weekly=args.weekly, only=only, on_result=_persist)
+            conn, thresholds, weekly=args.weekly, only=only, on_result=_persist,
+            lane_budget_s=(
+                _LANE_BUDGET_S if only else full_lane_budget_s(weekly=args.weekly)))
         if args.dry_run:
             LOG.info("dry-run: %d checks computed, no rows written", len(results))
             return 0
