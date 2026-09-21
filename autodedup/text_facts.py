@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from html import unescape
 from typing import Iterable, Iterator, Mapping, TYPE_CHECKING
 
 from autodedup.normalize import fact_text
@@ -149,6 +150,139 @@ def unit_designators(text: str | None) -> set[str]:
         for pattern in _UNIT_PATTERNS
         for match in pattern.finditer(folded)
     }
+
+
+# --- printed land-register parcels (E140) --------------------------------------------------
+# A Czech land or house advert prints the parcel the object stands on, and that number IS the
+# object's identity in the land register: two adverts printing disjoint parcels are two
+# objects, whatever else they look like. The keyword is mandatory and a digit must follow it,
+# because a bare number in a body is a price, a year or a house number.
+_PARCEL_KEYWORD = re.compile(
+    r"(?:parceln\w*\s*cisl\w*"
+    r"|parcel\w*\s*(?:c\.|cisl\w*)"
+    r"|parc\.?\s*(?:c\.|cisl\w*)"
+    r"|\b(?:st\.?\s*)?p\.?\s*(?:p\.?\s*)?c\.?)"
+    r"\s*:?\s*(?=\d)"
+)
+# One advert may print several parcels (`parcelní čísla 3217, 3097, 3341`), and the run ends at
+# the first token that is not another number: `parcelní číslo 3255, podíl 1/1` prints ONE
+# parcel and a share, and reading the share as a second parcel would make every share-advert
+# of one seller look alike. The list separator must therefore carry a comma, a `+` or the word
+# `a`/`i` — a bare space is not one, or `parc. č. 123, 2 393 m²` would read the AREA as a
+# second parcel (idnes 166968, and the spaced-thousands trap the portal parsers carry).
+_PARCEL_NUMBER = re.compile(r"\d{1,5}(?:/\d{1,4})?")
+_PARCEL_SEPARATOR = re.compile(r"\s*(?:[,;+]|\ba\b|\bi\b)[\s,;+]*")
+_AREA_UNIT_AFTER = re.compile(r"\s*m2\b")
+# Spaced thousands are collapsed first, so `2 393 m²` is one token the area guard can refuse
+# rather than two tokens the list reader accepts.
+_SPACED_THOUSANDS = re.compile(r"(?<=\d) (?=\d{3}(?!\d))")
+PARCEL_MAX_PER_ADVERT: int = 12
+
+
+def parcel_numbers(text: str | None) -> set[str]:
+    """Every land-register parcel the body prints, as `934/11` / `1633` strings.
+
+    HTML entities are unescaped first: one sreality broker publishes an entity-escaped body and
+    its parcel line would otherwise read as prose. Capped per advert — a body listing a whole
+    estate's parcels is a seller's inventory, not this object's identity."""
+    if not text:
+        return set()
+    folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
+    out: set[str] = set()
+    for keyword in _PARCEL_KEYWORD.finditer(folded):
+        position = keyword.end()
+        while True:
+            number = _PARCEL_NUMBER.match(folded, position)
+            if number is None or _AREA_UNIT_AFTER.match(folded, number.end()):
+                break
+            out.add(number.group(0))
+            separator = _PARCEL_SEPARATOR.match(folded, number.end())
+            if separator is None:
+                break
+            position = separator.end()
+    return out if len(out) <= PARCEL_MAX_PER_ADVERT else set()
+
+
+# --- printed accessory designators (E141) --------------------------------------------------
+# The parking space, the cellar and the garage a flat comes WITH, named by their number. A
+# developer's adverts inside one building are near-identical by construction (E61), and where
+# no unit number is printed the accessory number is the next thing the building itself names.
+# `stání` is matched as a whole word so `stanice metra` can never become a parking space, and
+# `pokoj č. 2` is deliberately not read: that is a room inside one flat, not an accessory.
+_ACCESSORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("stani", re.compile(r"\bstani\b\s*(?:pro\s+auto\s*)?(?:c\.|cislo)\s*(\d{1,4})\b")),
+    ("sklep", re.compile(r"\bsklep\w*\s*(?:koj\w*\s*)?(?:c\.|cislo)\s*(\d{1,4})\b")),
+    ("sklep", re.compile(r"\bkoj\w*\s*(?:c\.|cislo)\s*(\d{1,4})\b")),
+    ("garaz", re.compile(r"\bgaraz\w*\s*(?:c\.|cislo)\s*(\d{1,4})\b")),
+)
+ACCESSORY_KINDS: tuple[str, ...] = ("stani", "sklep", "garaz")
+ACCESSORY_MAX_PER_KIND: int = 6
+
+
+def accessory_designators(text: str | None) -> dict[str, frozenset[str]]:
+    """`kind -> the numbers this advert prints for it`: `stání č. 47`, `sklepní kóje č. 25`.
+
+    A kind whose run is longer than `ACCESSORY_MAX_PER_KIND` is a building's price list rather
+    than one flat's accessories and is dropped."""
+    if not text:
+        return {}
+    folded = fact_text(unescape(text))
+    found: dict[str, set[str]] = {}
+    for kind, pattern in _ACCESSORY_PATTERNS:
+        for match in pattern.finditer(folded):
+            found.setdefault(kind, set()).add(match.group(1))
+    return {kind: frozenset(values) for kind, values in found.items()
+            if len(values) <= ACCESSORY_MAX_PER_KIND}
+
+
+# --- the offered product tier (E142) -------------------------------------------------------
+# A serviced-office operator sells the SAME room as several products — "kancelář pro 1 osobu"
+# at 10,890 Kč and "kancelář pro 2 pracovní místa" at 15,590 Kč, both printing the building's
+# generic 50 m² and the building's address. The capacity is the only thing that tells the two
+# apart, and it is stated only in prose. The office noun is mandatory: a bare `pro 2 osoby` is
+# a service-charge line or a flat's suitability on residential adverts and fires on both.
+_OFFER_NOUN = re.compile(r"kancelar\w*|coworking\w*|open\s?space|pracovi\w*|zasedac\w*")
+_CAPACITY = re.compile(
+    r"pro\s+(\d{1,3})\s*(?:osob\w*|pracovni\w*\s+mist\w*|mist\w*|zamestnan\w*|clen\w*)"
+)
+CAPACITY_WINDOW: int = 60
+
+
+def capacity_counts(text: str | None) -> set[int]:
+    """How many people the offered WORKSPACE is for, when an office noun carries the phrase."""
+    if not text:
+        return set()
+    folded = fact_text(text)
+    out: set[int] = set()
+    for match in _CAPACITY.finditer(folded):
+        window = folded[max(0, match.start() - CAPACITY_WINDOW): match.start()]
+        if _OFFER_NOUN.search(window):
+            out.add(int(match.group(1)))
+    return out
+
+
+# The EXTENT of a room let: "Pronajmu pokoj" against "Pronajmu 2 spojené pokoje" is one room
+# against two, in one house, at two prices. The offer verb is mandatory — "v domě je jen 6
+# pokojů" describes the house, not what is on offer — and the count window is short so an
+# adjective (`2 spojené pokoje`) fits and a sentence does not.
+_OFFER_VERB = re.compile(r"\b(?:pronajmu|pronajimam|nabizim|nabizime|pronajem|k\s+pronajmu)\b")
+_ROOM_EXTENT = re.compile(r"(?:(\d{1,2})\s+)?(?:\w+\s+){0,1}?pokoj(?:e|u|ich|em)?\b")
+EXTENT_WINDOW: int = 34
+
+
+def offered_room_counts(text: str | None) -> set[int]:
+    """How many ROOMS a room let offers, read only where an offer verb carries the phrase."""
+    if not text:
+        return set()
+    folded = fact_text(text)
+    out: set[int] = set()
+    for verb in _OFFER_VERB.finditer(folded):
+        clause = folded[verb.end(): verb.end() + EXTENT_WINDOW]
+        match = _ROOM_EXTENT.match(clause.lstrip())
+        if match is None:
+            continue
+        out.add(int(match.group(1)) if match.group(1) else 1)
+    return out
 
 
 # The compass direction a body PRINTS as this unit's: `Orientace je na východ`, `byt je

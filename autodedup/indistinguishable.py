@@ -55,6 +55,7 @@ REFUSED by the same measurement, and named so nobody re-proposes them:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Mapping, Sequence
 
 from autodedup.dataset import Listing
@@ -69,8 +70,12 @@ from autodedup.guards import LAND_CATEGORY, area_rel_diff, area_relation
 from autodedup.settings import Settings
 from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
+    accessory_designators,
     address_block_key,
+    capacity_counts,
+    offered_room_counts,
     orientations,
+    parcel_numbers,
     stated_areas,
     unit_designators,
 )
@@ -127,6 +132,10 @@ FACT_NAMES: tuple[str, ...] = (
     "street",
     "orientation",
     "unit_designator",
+    "parcel",
+    "accessory",
+    "extent",
+    "two_unit",
     "floorplan",
     "interior",
 )
@@ -181,6 +190,38 @@ def price_paths_agree(a: Listing, b: Listing, tol: float) -> bool:
     return any(rel_diff(x, y) <= tol for x in left for y in right)
 
 
+def _stamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def overlap_days(a: Listing, b: Listing) -> float | None:
+    """How long the two adverts were BOTH on sale, in days, or None when a stamp is missing.
+
+    E144: the co-live limb reads a DURATION, not a boolean. Two windows that merely touch are a
+    re-post boundary — the old advert's last sighting and the new one's first sighting hours
+    apart — and 38 of the 63 raw price contradictions g8 carried were exactly that.
+    """
+    starts = [_stamp(a.first_seen_at), _stamp(b.first_seen_at)]
+    ends = [_stamp(a.inactive_at or a.last_seen_at), _stamp(b.inactive_at or b.last_seen_at)]
+    if any(value is None for value in starts + ends):
+        return None
+    span = min(ends) - max(starts)  # type: ignore[type-var, operator]
+    return max(0.0, span.total_seconds() / 86400.0)
+
+
+def _co_live(a: Listing, b: Listing, min_days: float) -> bool:
+    """Simultaneously on sale for at least `min_days` — 0 keeps `_windows_overlap` exactly."""
+    if min_days <= 0.0:
+        return _windows_overlap(a, b)
+    days = overlap_days(a, b)
+    return days is not None and days >= min_days
+
+
 def _windows_overlap(a: Listing, b: Listing) -> bool:
     """Both adverts were on sale at the same time, read off the export's own stamps."""
     starts = (a.first_seen_at, b.first_seen_at)
@@ -219,6 +260,93 @@ def _at_street_grain(listing: Listing) -> bool:
 def tight_photo_match(feats: Feats | None) -> bool:
     """At least one tight NON-CATALOGUE frame in common (E9 already subtracted the stock)."""
     return (_present(feats, "phash_tight_matches") or 0.0) >= 1.0
+
+
+def _same_feed(a: Listing, b: Listing, mode: str) -> bool:
+    """E145: are these two adverts known to carry the same ground-floor convention?
+
+    `portal` is g7/g8's answer — one portal, one convention. The data refuses it: among
+    same-portal KNOWN duplicates a one-storey gap runs at 7.5 % on sreality and 23.5 % on
+    bazos, because the number is written by the BROKER whose feed the portal republishes.
+    `broker` therefore asks for the feed itself, and an advert with no broker key (bazos,
+    bezrealitky) is never known to share one with anybody.
+    """
+    if a.source is None or a.source != b.source:
+        return False
+    if mode != "broker":
+        return True
+    return a.broker_key is not None and a.broker_key == b.broker_key
+
+
+def headline_area(listing: Listing) -> float | None:
+    """The size this advert is sold BY: the headline area, or the parcel when there is none."""
+    if listing.area_m2 and float(listing.area_m2) > 0.0:
+        return float(listing.area_m2)
+    parcel = plot_area(listing)
+    return float(parcel) if parcel else None
+
+
+def _stated_areas_meet(a: Listing, b: Listing, tol: float) -> bool:
+    """Both BODIES print a common floor area — the stored gap is then a basis difference."""
+    left = stated_areas(a.description, a.area_m2)
+    right = stated_areas(b.description, b.area_m2)
+    if not left or not right:
+        return False
+    return any(rel_diff(x, y) <= tol for x in left for y in right)
+
+
+def two_unit_signature(a: Listing, b: Listing, settings: Settings | None = None) -> bool:
+    """E143: area AND price both moved, so these are two units rather than one at two moments.
+
+    An advert has one area and one price at any moment. A re-post carries a NEW price at the
+    SAME area; a second portal carries the same price at a ROUNDED area; a developer's next
+    unit carries both, one or two per cent apart — which is exactly the window the engine's
+    3 % / 5 % / 60 % tolerances cannot see into.
+    """
+    cfg = settings or Settings()
+    area_a, area_b = headline_area(a), headline_area(b)
+    if area_a is None or area_b is None:
+        return False
+    if not (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0):
+        return False
+    if rel_diff(area_a, area_b) <= cfg.d43_two_unit_area_tol:
+        return False
+    if rel_diff(float(a.price), float(b.price)) <= cfg.d43_two_unit_price_tol:
+        return False
+    if price_paths_agree(a, b, cfg.d43_price_path_tol):
+        return False
+    return not _stated_areas_meet(a, b, cfg.d43_two_unit_stated_tol)
+
+
+def _set_conflict(left: frozenset[str] | set[str], right: frozenset[str] | set[str]) -> bool:
+    """Two non-empty printed sets that name nothing in common. A subset is NOT a conflict —
+    an advert also names the access road, the neighbour's plot and the extra parking space."""
+    return bool(left and right and not (left & right))
+
+
+def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> tuple[str, str] | None:
+    """E142: the two adverts offer a different QUANTITY of the same kind of thing.
+
+    Three spellings, one fact. The capacity and room-count limbs need the conjunction that
+    isolates a real product tier from a template's prose: the prices must differ and the two
+    adverts must have been on sale at the same time. The parcel limb needs neither — an
+    enumerated inventory one advert offers strictly more of is a different offer outright.
+    """
+    cfg = settings or Settings()
+    parcels_a, parcels_b = parcel_numbers(a.description), parcel_numbers(b.description)
+    if parcels_a and parcels_b and parcels_a != parcels_b and (
+        parcels_a < parcels_b or parcels_b < parcels_a
+    ):
+        return (f"parcels={sorted(parcels_a)}", f"parcels={sorted(parcels_b)}")
+    priced = (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0
+              and rel_diff(float(a.price), float(b.price)) > cfg.d43_offered_extent_price_tol)
+    if not priced or not _co_live(a, b, cfg.d43_price_colive_min_overlap_days):
+        return None
+    for reader, label in ((capacity_counts, "capacity"), (offered_room_counts, "rooms")):
+        left, right = reader(a.description), reader(b.description)
+        if left and right and left != right:
+            return (f"{label}={sorted(left)}", f"{label}={sorted(right)}")
+    return None
 
 
 def distinguishing_facts(
@@ -286,9 +414,9 @@ def distinguishing_facts(
     gap = floor_gap(cfg.floor_camps if reads != "joint" else None,
                     a.source, a.floor, b.source, b.floor)
     if gap is not None:
-        same_source = a.source is not None and a.source == b.source
+        same_feed = _same_feed(a, b, cfg.floor_same_source_feed)
         strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
-        if (gap != 0) if strict else (abs(gap) >= 2 or (abs(gap) == 1 and same_source)):
+        if (gap != 0) if strict else (abs(gap) >= 2 or (abs(gap) == 1 and same_feed)):
             add("floor", a.floor, b.floor)
 
     if a.total_floors is not None and b.total_floors is not None:
@@ -317,7 +445,8 @@ def distinguishing_facts(
             # adverts on sale at the same time that never named one another's price — is a
             # fact at the cross-portal bar whether or not they share a portal.
             contradiction = (cfg.d43_price_colive_contradiction and not agree
-                             and price_gap > PRICE_CROSS_TOL and _windows_overlap(a, b))
+                             and price_gap > PRICE_CROSS_TOL
+                             and _co_live(a, b, cfg.d43_price_colive_min_overlap_days))
             if (over and not agree) or contradiction:
                 add("price", a.price, b.price)
         elif over:
@@ -357,6 +486,33 @@ def distinguishing_facts(
     if (len(units_a) == 1 and len(units_b) == 1 and units_a != units_b
             and address_block_key(a) == address_block_key(b)):
         add("unit_designator", next(iter(units_a)), next(iter(units_b)))
+
+    # E140/E141/E142/E143: the four W15 readings. Every one of them is a fact the advert
+    # PRINTS (or, for the signature, two numbers the portal prints for it), so all three modes
+    # read them — E138's "inferred rather than stated" exemption does not reach any of them.
+    if cfg.d43_parcel_numbers:
+        parcels_a = parcel_numbers(a.description)
+        parcels_b = parcel_numbers(b.description)
+        if _set_conflict(parcels_a, parcels_b):
+            add("parcel", sorted(parcels_a), sorted(parcels_b))
+
+    if cfg.d43_accessory_designators:
+        acc_a = accessory_designators(a.description)
+        acc_b = accessory_designators(b.description)
+        for kind in sorted(set(acc_a) & set(acc_b)):
+            if _set_conflict(acc_a[kind], acc_b[kind]):
+                add("accessory", f"{kind}={sorted(acc_a[kind])}",
+                    f"{kind}={sorted(acc_b[kind])}")
+                break
+
+    if cfg.d43_offered_extent:
+        extent = offered_extent(a, b, cfg)
+        if extent is not None:
+            add("extent", extent[0], extent[1])
+
+    if cfg.d43_two_unit_signature and two_unit_signature(a, b, cfg):
+        add("two_unit", f"{headline_area(a)} m2 / {a.price}",
+            f"{headline_area(b)} m2 / {b.price}")
 
     if mode == GATE and not cfg.d43_gate_image_facts:
         return out

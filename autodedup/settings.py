@@ -358,6 +358,58 @@ class Settings:
     # = E33/E37's constrained union-find, unchanged.
     repartition: bool = False
     repartition_max_rounds: int = 4
+
+    # ------------------------------------------------------- W15 (g8b, 2026-09-21): the repairs
+    #
+    # W14's adversarial read of g8 found merges ACROSS facts the predicate could not see. Each
+    # row below is one of them, read as a general fact a Czech estate agent would recognise
+    # rather than as a patch for the listings that exposed it. All OFF by default so
+    # `settings/w13.json` (g7) and `settings/w14.json` (g8) keep replaying byte-for-byte.
+    #
+    # E140: the land-register parcel. A pozemek or dům advert prints the parcel the object
+    # stands on, and that number IS the object's identity in the register. DISJOINT printed
+    # sets are two objects; a subset is not a conflict, because an advert also names the access
+    # road and the neighbour's plot. Measured on the 140-town region cohort: 1 of 22,421
+    # structurally certain duplicates — and that one is two of three building plots in Paceřice
+    # that share one photo set, so the reference is wrong there, not the rule — against 235 of
+    # 7,354 structural negatives and 8 of the 18 groups g8 fused.
+    d43_parcel_numbers: bool = False
+    # E141: the accessory the flat comes WITH — parking space, cellar, garage, by number. E61
+    # already reads the UNIT designator; where a developer prints none, the building's own
+    # numbering of its accessories is the next thing that separates two identical flats.
+    # 6 of 22,421 region certain duplicates, and all six are the ONE Turnov pair the blind
+    # hand-read called different ("stání č. 47" against "stání č. 32 + kóje č. 25").
+    d43_accessory_designators: bool = False
+    # E142: the offered EXTENT. Three spellings of one fact — a serviced-office capacity
+    # ("kancelář pro 1 osobu" at 10,890 Kč against "pro 2 pracovní místa" at 15,590), a room
+    # let's room count ("Pronajmu pokoj" at 8,500 against "2 spojené pokoje" at 12,000), and a
+    # parcel inventory one advert offers strictly more of than the other. The first two need
+    # the price and overlap conjunction: a bare capacity regex fires on service-charge lines
+    # and on "byt se hodí pro 1 osobu", and 5 of its 7 g8 hits were exactly those.
+    d43_offered_extent: bool = False
+    d43_offered_extent_price_tol: float = 0.05
+    # E143: the two-unit signature. One advert has ONE area and ONE price at any moment, so two
+    # adverts whose area AND price BOTH differ beyond rounding are two units — this is what the
+    # 3 % / 5 % / 60 % tolerances cannot see, because neighbouring units of one project sit
+    # 0.5-2 % apart. Two rails keep it honest: an agreeing price PATH (E134) excuses a moment,
+    # and a floor area BOTH bodies print excuses a stored-column basis difference (`užitná 51
+    # m² (podlahová 55 m²)` against `podlahová 55 m² (užitná 51 m²)`). Measured: 58 of 22,421
+    # region certain duplicates, 0 of the 1,415 carrying a shared agency ORDER code, 0 of any
+    # operator-tier labelled duplicate, and 16 of the 18 fused groups.
+    d43_two_unit_signature: bool = False
+    d43_two_unit_area_tol: float = 0.005
+    d43_two_unit_price_tol: float = 0.005
+    d43_two_unit_stated_tol: float = 0.005
+    # E144: E134's co-live limb needs an overlap BAR. Windows that merely touch are a re-post
+    # boundary — 38 of the 63 raw pairs — and a 3-day bar removes every one of them.
+    d43_price_colive_min_overlap_days: float = 0.0
+    # E145: WHOSE ground-floor convention is it? N1's same-portal clause assumes one portal is
+    # one convention, and the data refuses that: among same-portal KNOWN duplicates a one-storey
+    # gap runs at 7.5 % on sreality, 6.8 % on ceskereality, 15 % on realitymix and 23.5 % on
+    # bazos. The convention belongs to the FEED, and the feed is the broker. `portal` is g7/g8's
+    # reading; `broker` makes the same-portal clause need a shared `broker_key`, which is what a
+    # broker-feed aggregator needs and what stops the V Aleji 131 m² 4+1 being cut in two.
+    floor_same_source_feed: str = "portal"
     # E11 as a dial rather than a module constant, so an arm can open it without a monkeypatch.
     min_evidence_families: int = 2
     # E27/N4: the batch build loads the operator's permanent negatives. g7 did not — its
@@ -439,6 +491,28 @@ class Settings:
         if self.repartition_max_rounds < 1:
             raise ValueError(
                 f"repartition_max_rounds must be at least 1: {self.repartition_max_rounds}"
+            )
+        for name in ("d43_two_unit_area_tol", "d43_two_unit_price_tol",
+                     "d43_two_unit_stated_tol", "d43_offered_extent_price_tol"):
+            value = getattr(self, name)
+            if not 0.0 < value < 1.0:
+                raise ValueError(f"{name} must be in (0, 1): {value}")
+        # The signature's whole case is that it sees BELOW the engine's own area guard: a
+        # tolerance at or above `area_band_pct` reads nothing the `area` fact does not already.
+        if self.d43_two_unit_area_tol >= self.area_band_pct:
+            raise ValueError(
+                "d43_two_unit_area_tol must sit below area_band_pct — above it the signature "
+                f"is the `area` fact spelled twice: {self.d43_two_unit_area_tol} >= "
+                f"{self.area_band_pct}"
+            )
+        if self.d43_price_colive_min_overlap_days < 0.0:
+            raise ValueError(
+                "d43_price_colive_min_overlap_days must not be negative: "
+                f"{self.d43_price_colive_min_overlap_days}"
+            )
+        if self.floor_same_source_feed not in ("portal", "broker"):
+            raise ValueError(
+                f"floor_same_source_feed must be portal/broker: {self.floor_same_source_feed}"
             )
         if self.d43_promote_photo_alternative and not self.d43_promote:
             raise ValueError("d43_promote_photo_alternative needs d43_promote")
