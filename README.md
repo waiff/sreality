@@ -29,7 +29,7 @@ tests/              pytest suite
   content hash changes; mark unseen listings `is_active=false`.
 - Image bytes mirrored to Cloudflare R2 (originally deferred; live since v1.5)
   so listings retain their photos after sreality's CDN expires them.
-- Analytical toolkit (`find_comparables`, `analyze_distribution`,
+- Analytical toolkit (`find_comparables_relaxed`, `analyze_distribution`,
   `verify_listing_freshness`, `compare_snapshots`) exposed as a FastAPI
   service with a composite `/estimate_yield` endpoint. Bearer-token
   gated via `API_TOKEN`.

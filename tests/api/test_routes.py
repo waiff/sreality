@@ -38,16 +38,21 @@ def test_health_endpoint(client, monkeypatch):
     assert client.get("/health").json()["image_storage"] == "configured"
 
 
-def test_find_comparables_passes_target_and_filters(client, monkeypatch):
+# `POST /tools/find_comparables` was deleted (sold-comps W5). These three
+# assert `_build_comparables_inputs` and the required-category 422 — both
+# shared by the two surviving comparables routes — so they moved onto the
+# relaxed route rather than dying with the deleted one.
+def test_find_comparables_relaxed_passes_target_and_filters(client, monkeypatch):
     captured = {}
-    def fake(conn, target, filters):
+    def fake(conn, target, filters, *, min_results, relaxation_ladder):
         captured["target"] = target
         captured["filters"] = filters
-        return {"data": {"listings": []}, "metadata": {"tool": "find_comparables"}}
-    monkeypatch.setattr(api_main, "find_comparables", fake)
+        return {"data": {"listings": []},
+                "metadata": {"tool": "find_comparables_relaxed"}}
+    monkeypatch.setattr(api_main, "find_comparables_relaxed", fake)
 
     res = client.post(
-        "/tools/find_comparables",
+        "/tools/find_comparables_relaxed",
         json={
             "target": {"lat": 50.087, "lng": 14.42, "disposition": "2+kk"},
             "radius_m": 1500,
@@ -67,11 +72,11 @@ def test_find_comparables_passes_target_and_filters(client, monkeypatch):
     assert captured["filters"].category_type == "pronajem"
 
 
-def test_find_comparables_requires_category(client):
+def test_find_comparables_relaxed_requires_category(client):
     """Category is required now — omitting it must 422, not silently
     default to apartments-for-rent."""
     res = client.post(
-        "/tools/find_comparables",
+        "/tools/find_comparables_relaxed",
         json={"target": {"lat": 50.0, "lng": 14.0}},
     )
     assert res.status_code == 422
@@ -82,17 +87,18 @@ def test_find_comparables_requires_category(client):
     assert ("body", "category_type") in missing
 
 
-def test_find_comparables_non_byt_category_flows_through(client, monkeypatch):
+def test_find_comparables_relaxed_non_byt_category_flows_through(client, monkeypatch):
     """A house-for-sale request must carry dum/prodej into the filters,
     not get overwritten by an apartment default."""
     captured = {}
-    def fake(conn, target, filters):
+    def fake(conn, target, filters, *, min_results, relaxation_ladder):
         captured["filters"] = filters
-        return {"data": {"listings": []}, "metadata": {"tool": "find_comparables"}}
-    monkeypatch.setattr(api_main, "find_comparables", fake)
+        return {"data": {"listings": []},
+                "metadata": {"tool": "find_comparables_relaxed"}}
+    monkeypatch.setattr(api_main, "find_comparables_relaxed", fake)
 
     res = client.post(
-        "/tools/find_comparables",
+        "/tools/find_comparables_relaxed",
         json={
             "target": {"lat": 49.2, "lng": 16.6},
             "category_main": "dum",
@@ -503,7 +509,7 @@ def test_listings_summaries_batch_empty_items(client):
 
 def test_invalid_body_returns_422(client):
     res = client.post(
-        "/tools/find_comparables",
+        "/tools/find_comparables_relaxed",
         json={"target": {"lat": "not a number", "lng": 14.0}},
     )
     assert res.status_code == 422
@@ -511,7 +517,7 @@ def test_invalid_body_returns_422(client):
 
 def test_unsupported_disposition_match_rejected(client):
     res = client.post(
-        "/tools/find_comparables",
+        "/tools/find_comparables_relaxed",
         json={
             "target": {"lat": 50.0, "lng": 14.0},
             "disposition_match": "wibble",

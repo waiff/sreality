@@ -92,7 +92,6 @@ from toolkit import (
     compute_walkability,
     describe_neighborhood,
     find_anchor_amenities,
-    find_comparables,
     find_comparables_along_axis,
     find_comparables_relaxed,
     find_distribution_outliers,
@@ -408,16 +407,6 @@ def post_maps_resolve_names(
             for name, context in pairs
         ]
     }
-
-
-@app.post("/tools/find_comparables")
-def post_find_comparables(
-    body: s.FindComparablesIn,
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
-) -> dict[str, Any]:
-    target, filters = _build_comparables_inputs(body)
-    return find_comparables(conn, target, filters)
 
 
 @app.post("/tools/find_comparables_relaxed")

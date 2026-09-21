@@ -81,7 +81,47 @@ table still honest when it is empty?
   `Datasets.tsx` declares its own read-only `FilterChips` badges locally — a different shape,
   never an import. The `onRemove` split toggle+trash variant goes with it; nothing has used it
   since that teardown and git history holds it if it is ever wanted back.
-  Still to pay: `POST /tools/find_comparables` and `ComparableFilters.category_sub_cb`.
+  **`POST /tools/find_comparables` is deleted too** — the strict route, not the function. The
+  SPA and the extension never call any `/tools/*` comparables route; the estimation agent
+  registers `find_comparables_relaxed` and calls the toolkit function directly, never its own
+  HTTP surface; `api/estimate_yield.py` imports the function from `toolkit`. The two surviving
+  routes (`_relaxed`, `_along_axis`) had **no route test and no auth-census entry of their own**,
+  so the five deleted-route tests and the `require_token` census row were RETARGETED onto
+  `_relaxed` rather than deleted — `_build_comparables_inputs` and the required-category 422 are
+  shared live code and keep their only route-level coverage.
+  **The `(+ schema)` half of this bullet was wrong**: `FindComparablesIn` is the base class of
+  `FindComparablesRelaxedIn` and `FindComparablesAlongAxisIn` and the declared type of
+  `_build_comparables_inputs`, so it stays verbatim and saves zero lines. W5 therefore pays less
+  than budgeted.
+  **Merge gate (repo cannot settle it):** the route has existed since the first API commit
+  (d6070f5a) and anything holding `API_TOKEN` could call it. In-repo the risk is as low as it
+  can be read — the ClickUp integration is listed *Out of scope until explicitly opened*
+  (`ROADMAP.md`), and `.claude/skills/toolkit-api` records a live check (2026-08-04) that it has
+  **zero** historical rows and has never called the HTTP API with the static token; there is no
+  `.http`/Postman/OpenAPI artifact or `curl` anywhere in the tree. The operator still confirms
+  "nothing outside the repo calls it" before merge. `_relaxed` is **not** a drop-in substitute
+  (it runs the relaxation ladder and stamps a different `metadata.tool`), so a silent 404 would
+  be an outage, not payment.
+- **W5 — `ComparableFilters.category_sub_cb`: REFUSED, deliberately left.** Deleting it is not
+  subtraction, it is a behaviour change with an unpayable prerequisite. (1) The stated
+  replacement does not exist: `subtype` is declared for `BROWSE`/`WATCHDOG`/`SOLD` only, not for
+  `Agenda.COMPARABLES` or `Agenda.ESTIMATION`, so removing this field strips the
+  comparables/estimation cohorts of their only house/commercial sub-type narrowing
+  (`disposition_match` covers `byt` alone). Promoting `subtype` onto those agendas is an
+  ADDITION, so it cannot be the justified deletion that pays for one. (2) It is a live knob in
+  the estimation agent's generated tool schema (`api/agent.py`, `_FCR_OVERRIDE_FIELDS`) with a
+  description telling the model when to use it — deleting it changes what the agent can do to a
+  cohort. (3) Stored blobs would silently WIDEN, not fail: `WatchdogFilterSpec` loads with
+  pydantic `extra='ignore'` and `coerceStoredFilters` drops unknown keys, so a watchdog pinned
+  to a house sub-code would start emitting dispatches for chaty/vily — clearing that needs two
+  SELECTs over `notification_subscriptions.filter_spec` and `filter_presets`, and this wave has
+  no DB. (4) A bookmarked Browse URL carrying `?subcat=` widens the same way. (5) It could not
+  be *complete* anyway: migration 537's Browse SRF keeps `category_sub_cb_filter`, and dropping
+  that is a destructive migration needing operator confirmation plus a `pg_dump`.
+  The defensible cheap alternative, if the operator wants it later: narrow the `FilterDef`'s
+  agendas from `_ALL_AGENDAS` to the analytical set — dropping `BROWSE` + `WATCHDOG` removes an
+  unusable control (`enum_values` is null, so `FilterForm` renders an options-less dropdown)
+  while leaving the agent knob intact. Still subject to (3) and (4).
 
 ## Standing constraints
 

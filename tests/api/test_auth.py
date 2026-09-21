@@ -52,8 +52,9 @@ def client(monkeypatch):
         tenant_pool, "resolve_account_id", lambda conn, claims: _ACCT,
     )
 
-    def fake_find(conn, target, filters):
-        return {"data": {"listings": []}, "metadata": {"tool": "find_comparables"}}
+    def fake_find(conn, target, filters, *, min_results, relaxation_ladder):
+        return {"data": {"listings": []},
+                "metadata": {"tool": "find_comparables_relaxed"}}
 
     def fake_dist(listings, field):
         return {"data": {"n": 0}, "metadata": {"tool": "analyze_distribution"}}
@@ -108,7 +109,7 @@ def client(monkeypatch):
             "in_database": False,
         }
 
-    monkeypatch.setattr(api_main, "find_comparables", fake_find)
+    monkeypatch.setattr(api_main, "find_comparables_relaxed", fake_find)
     monkeypatch.setattr(api_main, "analyze_distribution", fake_dist)
     monkeypatch.setattr(api_main, "verify_listing_freshness", fake_verify)
     monkeypatch.setattr(api_main, "compare_snapshots", fake_compare)
@@ -260,7 +261,7 @@ _PIPELINE_CARD_BODY = {"property_id": 1}
 
 def _gated_calls(client) -> list:
     return [
-        ("POST", "/tools/find_comparables", _FIND_BODY),
+        ("POST", "/tools/find_comparables_relaxed", _FIND_BODY),
         ("POST", "/tools/analyze_distribution", _DIST_BODY),
         ("POST", "/tools/verify_listing_freshness", _VERIFY_BODY),
         ("POST", "/tools/compare_snapshots", _COMPARE_BODY),
@@ -391,7 +392,9 @@ def test_malformed_authorization_header_rejected(client, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
     headers = {"Authorization": "secret-token-xyz"}
 
-    res = client.post("/tools/find_comparables", json=_FIND_BODY, headers=headers)
+    res = client.post(
+        "/tools/find_comparables_relaxed", json=_FIND_BODY, headers=headers,
+    )
     assert res.status_code == 401
 
 
