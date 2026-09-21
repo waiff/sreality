@@ -18,20 +18,35 @@ vi.mock('@/lib/queries', async (orig) => ({
   ...(await orig<typeof import('@/lib/queries')>()),
   fetchSoldComparables: vi.fn(),
   fetchSoldCoverage: vi.fn(),
+  fetchPipelineMembers: vi.fn(),
 }));
 
 import {
+  fetchPipelineMembers,
   fetchSoldComparables,
   fetchSoldCoverage,
   SOLD_COMPS_LIMIT,
+  type PipelineMembership,
 } from '@/lib/queries';
 import SoldCompsBlock from './SoldCompsBlock';
 
 const comps = vi.mocked(fetchSoldComparables);
 const coverage = vi.mocked(fetchSoldCoverage);
+const members = vi.mocked(fetchPipelineMembers);
 
 const LAT = 50.081234;
 const LNG = 14.428765;
+const PROPERTY_ID = 5;
+
+const card = (): PipelineMembership => ({
+  property_id: PROPERTY_ID,
+  stage_id: 1,
+  stage_label: 'Zajímavé',
+  stage_color: null,
+  stage_code: null,
+  stage_position: 0,
+  is_terminal: false,
+});
 
 const COVERAGE: SoldCoverage = {
   obec_kod: 554782,
@@ -71,7 +86,12 @@ function renderBlock(categoryMain = 'byt') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
-      <SoldCompsBlock categoryMain={categoryMain} lat={LAT} lng={LNG} />
+      <SoldCompsBlock
+        categoryMain={categoryMain}
+        lat={LAT}
+        lng={LNG}
+        propertyId={PROPERTY_ID}
+      />
     </QueryClientProvider>,
   );
 }
@@ -80,8 +100,10 @@ describe('<SoldCompsBlock> coverage states', () => {
   beforeEach(() => {
     comps.mockReset();
     coverage.mockReset();
+    members.mockReset();
     comps.mockResolvedValue([]);
     coverage.mockResolvedValue(null);
+    members.mockResolvedValue(new Map());
   });
 
   it('says nobody has ever looked here when there is no coverage row', async () => {
@@ -89,6 +111,42 @@ describe('<SoldCompsBlock> coverage states', () => {
 
     expect(await screen.findByText(/has not been checked yet/)).toBeInTheDocument();
     expect(screen.getByText(/deal pipeline has a live card/)).toBeInTheDocument();
+  });
+
+  /* A filter panel, a radius control and "no registered sale matches these
+     filters" all claim we looked. Over a town nobody has fetched they
+     contradict the sentence directly above them — and they used to render
+     there, under a "(0)" the block had no read to back. */
+  it('offers no filters and claims no empty result over a town nobody checked', async () => {
+    renderBlock();
+
+    await screen.findByText(/has not been checked yet/);
+    expect(screen.queryByText(/No registered sale within/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '1 km' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: /Sold within/ })).toBeNull();
+    expect(screen.queryByText('(0)')).toBeNull();
+    /* And no cohort read is even issued: the answer is already known. */
+    expect(comps).not.toHaveBeenCalled();
+  });
+
+  /* The advice was wrong for exactly the properties most likely to be read:
+     the ones the operator is already tracking. Membership comes from the
+     members map the page's PipelineToggle has in cache — no extra read. */
+  it('tells a property already in the pipeline that its town is queued', async () => {
+    members.mockResolvedValue(new Map([[PROPERTY_ID, card()]]));
+    renderBlock();
+
+    const line = await screen.findByText(/has not been checked yet/);
+    expect(line).toHaveTextContent(/the town is queued/);
+    expect(line).not.toHaveTextContent(/Add this property to the pipeline/);
+  });
+
+  it('tells a property outside the pipeline to add it', async () => {
+    renderBlock();
+
+    const line = await screen.findByText(/has not been checked yet/);
+    expect(line).toHaveTextContent(/Add this property to the pipeline/);
+    expect(line).not.toHaveTextContent(/queued/);
   });
 
   /* The two numbers are different POPULATIONS — what reas publishes inside its
@@ -128,7 +186,11 @@ describe('<SoldCompsBlock> coverage states', () => {
     renderBlock();
 
     expect(await screen.findByText(/reas\.cz · checked/)).toBeInTheDocument();
-    expect(screen.getByText(/No registered sale within 1 km/)).toBeInTheDocument();
+    /* The cohort read starts once coverage says the town WAS checked, so the
+       empty line arrives a tick later than the coverage sentence. */
+    expect(
+      await screen.findByText(/No registered sale within 1 km/),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/has not been checked yet/)).toBeNull();
   });
 
@@ -146,6 +208,9 @@ describe('<SoldCompsBlock> coverage states', () => {
 
     expect(await screen.findByText(/the fetch failed/)).toBeInTheDocument();
     expect(screen.queryByText(/has not been checked yet/)).toBeNull();
+    /* Nothing has been read here either, so the same silence applies. */
+    expect(screen.queryByText(/No registered sale within/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '1 km' })).toBeNull();
   });
 
   /* An unanswered coverage read is not "nobody has looked here" — that sentence
@@ -176,7 +241,26 @@ describe('<SoldCompsBlock> what it refuses to show', () => {
   beforeEach(() => {
     comps.mockReset();
     coverage.mockReset();
+    members.mockReset();
     coverage.mockResolvedValue(COVERAGE);
+    members.mockResolvedValue(new Map());
+  });
+
+  /* reas.cz publishes byty and domy and the parser refuses the rest, so
+     Komerční / Pozemky / Ostatní were three filters that could only ever
+     return nothing — and Sub-type was twenty more (it is no longer a SOLD
+     filter at all: a flat has no subtype). */
+  it('offers only the two categories the source can answer for', async () => {
+    comps.mockResolvedValue([sale()]);
+    renderBlock();
+
+    await screen.findByRole('table');
+    expect(screen.getByRole('button', { name: 'Byty' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Domy' })).toBeInTheDocument();
+    for (const gone of ['Komerční', 'Pozemky', 'Ostatní', 'Kancelář', 'Sklad']) {
+      expect(screen.queryByRole('button', { name: gone })).toBeNull();
+    }
+    expect(screen.queryByText('Sub-type')).toBeNull();
   });
 
   it('renders one honest line, and no query, for a listing reas does not cover', () => {
@@ -259,8 +343,10 @@ describe('<SoldCompsBlock> query plumbing', () => {
   beforeEach(() => {
     comps.mockReset();
     coverage.mockReset();
+    members.mockReset();
     coverage.mockResolvedValue(COVERAGE);
     comps.mockResolvedValue([sale()]);
+    members.mockResolvedValue(new Map());
   });
 
   it('asks for 1 km around the point, seeded with the subject kind', async () => {

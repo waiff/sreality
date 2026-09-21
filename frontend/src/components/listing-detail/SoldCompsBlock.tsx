@@ -29,13 +29,19 @@
 import { useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
-import { FilterForm, type FilterState } from '@/components/FilterForm';
+import {
+  FilterForm,
+  type CustomFilterWidget,
+  type FilterState,
+} from '@/components/FilterForm';
+import { MultiselectChips } from '@/components/filter-controls';
 import { Field, Segmented } from '@/components/controls';
 import Dialog, { DialogClose } from '@/components/Dialog';
 import ImageCarousel from '@/components/ImageCarousel';
 import { Hairline, SectionLabel } from '@/components/section';
 import { Th } from '@/components/table';
 import { areaBasisLabel, categoryMainLabel, listingKindLabel } from '@/lib/enums';
+import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import {
   fmtArea,
   fmtCzk,
@@ -47,8 +53,10 @@ import {
 } from '@/lib/format';
 import { ppm2BasisFromToken, type Ppm2Basis } from '@/lib/measure';
 import {
+  fetchPipelineMembers,
   fetchSoldComparables,
   fetchSoldCoverage,
+  pipelineKeys,
   SOLD_COMPS_LIMIT,
 } from '@/lib/queries';
 import type { SoldComparable, SoldCoverage } from '@/lib/types';
@@ -78,21 +86,50 @@ const SMALL_UNIT_M2 = 30;
 const FILTER_LABELS: Record<string, string> = {
   category_main_in: 'Type',
   dispositions: 'Disposition',
-  subtype: 'Sub-type',
   min_area_m2: 'Area',
   min_usable_area: 'Usable area',
   max_sold_age_days: 'Sold within',
+};
+
+/* Type, narrowed to the two categories that can answer. The registry's
+ * five-member option list is shared with Browse and Watchdog, which read
+ * `listings` and really do hold land and commercial rows; here the other three
+ * are filters that can only ever return nothing. The options are still the
+ * REGISTRY's — filtered to the set this block already owns — handed to
+ * FilterForm through its existing per-filter widget override, so there is no
+ * second spelling of the labels and no per-agenda option machinery to build.
+ * `subtype` needed no mechanism at all: it is simply not an Agenda.SOLD filter
+ * any more — a flat has no subtype and reas publishes no commercial building. */
+const COVERED_TYPE_OPTIONS = (
+  FILTER_REGISTRY.filters.find((f) => f.id === 'category_main_in')?.enum_values ?? []
+)
+  .filter((o) => COVERED_CATEGORIES.has(String(o.value)))
+  .map((o) => ({ value: String(o.value), label: o.label_cs }));
+
+const FILTER_WIDGETS: Record<string, CustomFilterWidget> = {
+  category_main_in: ({ value, onChange }) => (
+    <MultiselectChips
+      value={(value as string[] | null) ?? []}
+      options={COVERED_TYPE_OPTIONS}
+      onChange={(next) => onChange(next.length === 0 ? null : next)}
+    />
+  ),
 };
 
 export default function SoldCompsBlock({
   categoryMain,
   lat,
   lng,
+  propertyId,
 }: {
   categoryMain: string | null;
   /* The listing's resolved point — the caller gates on both being present. */
   lat: number;
   lng: number;
+  /* Only to answer "does this property already hold a pipeline card", which is
+   * what the never-checked sentence must know before it tells the operator to
+   * add one. Read from the members map this page already has in cache. */
+  propertyId: number | null;
 }) {
   if (!COVERED_CATEGORIES.has(categoryMain ?? '')) {
     return (
@@ -105,17 +142,26 @@ export default function SoldCompsBlock({
       </div>
     );
   }
-  return <SoldComps categoryMain={categoryMain as string} lat={lat} lng={lng} />;
+  return (
+    <SoldComps
+      categoryMain={categoryMain as string}
+      lat={lat}
+      lng={lng}
+      propertyId={propertyId}
+    />
+  );
 }
 
 function SoldComps({
   categoryMain,
   lat,
   lng,
+  propertyId,
 }: {
   categoryMain: string;
   lat: number;
   lng: number;
+  propertyId: number | null;
 }) {
   const [radiusM, setRadiusM] = useState<RadiusM>(RADII_M[0]);
   /* Seeded with the subject's own kind — a flat's comparables are flats — and
@@ -132,10 +178,35 @@ function SoldComps({
     staleTime: 5 * 60_000,
   });
 
+  /* The SAME members query every funnel on this page reads — PipelineToggle's
+   * key and its staleTime — so this is a cache hit, not a second read. */
+  const membersQ = useQuery({
+    queryKey: pipelineKeys.members,
+    queryFn: fetchPipelineMembers,
+    staleTime: 30_000,
+    enabled: propertyId != null,
+  });
+  /* null = not answerable, so the advice clause is left unwritten: either the
+   * members read is still in flight, or this listing carries no property row
+   * and therefore no card to hold. */
+  const inPipeline =
+    propertyId == null || !membersQ.data
+      ? null
+      : membersQ.data.get(propertyId) != null;
+
+  /* Whether anyone has LOOKED in this municipality — which is what a filter
+   * panel and a "no match" line silently assert. A coverage read that hasn't
+   * answered, or that failed, claims neither way: the cohort read is a fact of
+   * its own, so it still runs and a broken coverage function cannot hide sales
+   * we actually hold. */
+  const looked = coverageQ.data?.fetched_at != null;
+  const asked = looked || coverageQ.isError;
+
   const rowsQ = useQuery<SoldComparable[], Error>({
     queryKey: ['sold-comps', lat, lng, radiusM, filters],
     queryFn: () => fetchSoldComparables(lat, lng, radiusM, filters),
     staleTime: 5 * 60_000,
+    enabled: asked,
   });
 
   /* The fetcher asks for one row past the cap, so a full page PROVES there is
@@ -170,85 +241,99 @@ function SoldComps({
         coverage={coverageQ.data ?? null}
         pending={coverageQ.isLoading}
         error={coverageQ.error}
+        inPipeline={inPipeline}
       />
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Field label="Radius">
-          <Segmented
-            options={RADII_M.map((m) => ({ value: m, label: `${m / 1000} km` }))}
-            value={radiusM}
-            onChange={setRadiusM}
-          />
-        </Field>
-        <FilterForm
-          scope="sold"
-          state={filters}
-          labels={FILTER_LABELS}
-          flat
-          onChange={(updates) =>
-            setFilters((prev) => {
-              const next = { ...prev };
-              for (const u of updates) next[u.id] = u.value;
-              return next;
-            })
-          }
-        />
-      </div>
-
-      {summary && <SummaryLine summary={summary} truncated={truncated} />}
-
-      {rowsQ.isLoading ? (
-        <p className="mt-4 text-sm text-[var(--color-ink-3)]">Loading…</p>
-      ) : rowsQ.error ? (
-        <p className="mt-4 text-sm text-[var(--color-brick)]">
-          Failed to load: {rowsQ.error.message}
-        </p>
-      ) : rows.length === 0 ? (
-        <p className="mt-4 text-sm text-[var(--color-ink-3)]">
-          No registered sale within {radiusM / 1000} km matches these filters.
-        </p>
-      ) : (
+      {/* Everything below belongs to a municipality somebody has READ. A radius
+          control, a filter panel and "no registered sale matches these filters"
+          are three ways of saying we looked and found nothing — over a town
+          nobody has fetched, that contradicts the sentence above it. */}
+      {asked && (
         <>
-          <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
-                <tr>
-                  <Th size="xs">Photo</Th>
-                  <Th size="xs" align="right">Sold for</Th>
-                  <Th size="xs" align="right">Area</Th>
-                  <Th size="xs">Type</Th>
-                  <Th size="xs" align="right">Sold</Th>
-                  <Th size="xs" align="right">Distance</Th>
-                  <Th size="xs" align="right">Ask → sold</Th>
-                  <Th size="xs" align="right">Listed</Th>
-                  <Th size="xs">Source</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <SoldRow
-                    key={`${row.source}:${row.source_record_id}`}
-                    row={row}
-                    onOpen={() => setActive(row)}
-                  />
-                ))}
-              </tbody>
-            </table>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Radius">
+              <Segmented
+                options={RADII_M.map((m) => ({
+                  value: m,
+                  label: `${m / 1000} km`,
+                }))}
+                value={radiusM}
+                onChange={setRadiusM}
+              />
+            </Field>
+            <FilterForm
+              scope="sold"
+              state={filters}
+              labels={FILTER_LABELS}
+              customWidgets={FILTER_WIDGETS}
+              flat
+              onChange={(updates) =>
+                setFilters((prev) => {
+                  const next = { ...prev };
+                  for (const u of updates) next[u.id] = u.value;
+                  return next;
+                })
+              }
+            />
           </div>
-          {truncated && (
-            <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
-              The {SOLD_COMPS_LIMIT} nearest — narrow the radius or the filters
-              to see the rest.
+
+          {summary && <SummaryLine summary={summary} truncated={truncated} />}
+
+          {rowsQ.isLoading ? (
+            <p className="mt-4 text-sm text-[var(--color-ink-3)]">Loading…</p>
+          ) : rowsQ.error ? (
+            <p className="mt-4 text-sm text-[var(--color-brick)]">
+              Failed to load: {rowsQ.error.message}
             </p>
+          ) : rows.length === 0 ? (
+            <p className="mt-4 text-sm text-[var(--color-ink-3)]">
+              No registered sale within {radiusM / 1000} km matches these
+              filters.
+            </p>
+          ) : (
+            <>
+              <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
+                    <tr>
+                      <Th size="xs">Photo</Th>
+                      <Th size="xs" align="right">Sold for</Th>
+                      <Th size="xs" align="right">Area</Th>
+                      <Th size="xs">Type</Th>
+                      <Th size="xs" align="right">Sold</Th>
+                      <Th size="xs" align="right">Distance</Th>
+                      <Th size="xs" align="right">Ask → sold</Th>
+                      <Th size="xs" align="right">Listed</Th>
+                      <Th size="xs">Source</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => (
+                      <SoldRow
+                        key={`${row.source}:${row.source_record_id}`}
+                        row={row}
+                        onOpen={() => setActive(row)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {truncated && (
+                <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
+                  The {SOLD_COMPS_LIMIT} nearest — narrow the radius or the
+                  filters to see the rest.
+                </p>
+              )}
+              {/* The distance column is what the operator ranks relevance by,
+                  so say what it is measured between. The sale's point is its
+                  BUILDING (units in one building share it exactly); this
+                  listing's own point can be a street or a town centroid. */}
+              <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
+                Distances run between geocoded points: the sale's is its
+                building, this listing's own may be street- or town-grain.
+              </p>
+            </>
           )}
-          {/* The distance column is what the operator ranks relevance by, so
-              say what it is measured between. The sale's point is its BUILDING
-              (units in one building share it exactly); this listing's own point
-              can be a street or a municipality centroid. */}
-          <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
-            Distances run between geocoded points: the sale's is its building,
-            this listing's own may be street- or town-grain.
-          </p>
         </>
       )}
 
@@ -265,10 +350,15 @@ function Coverage({
   coverage,
   pending,
   error,
+  inPipeline,
 }: {
   coverage: SoldCoverage | null;
   pending: boolean;
   error: Error | null;
+  /* null while the pipeline members read is still in flight — the advice half
+   * of the never-checked sentence is then not written at all, rather than
+   * guessed at. */
+  inPipeline: boolean | null;
 }) {
   /* Never render "not checked yet" from a read that hasn't answered: that is
    * the one sentence here that would be a claim about the world. */
@@ -294,11 +384,18 @@ function Coverage({
     );
   }
   if (!coverage || coverage.fetched_at == null) {
+    /* What to DO about it depends on something this page already knows.
+     * Telling an operator to add a card that is on screen, already added, is
+     * the block giving a wrong instruction about its own mechanism. */
     return (
       <p className="mt-2 text-sm text-[var(--color-ink-3)]">
         {where}has not been checked yet — registered sales are fetched only for
-        towns where the deal pipeline has a live card. Add this property to the
-        pipeline and this area gets looked up.
+        towns where the deal pipeline has a live card.
+        {inPipeline === true &&
+          ' This property holds one, so the town is queued: the fetcher reads' +
+            ' it on one of its next passes.'}
+        {inPipeline === false &&
+          ' Add this property to the pipeline and this area gets looked up.'}
       </p>
     );
   }

@@ -672,7 +672,6 @@ function MultiselectRow({
       value={value}
       options={opts}
       onChange={(next) => onChange(next.length === 0 ? null : next)}
-      cols={Math.min(opts.length, 5)}
     />
   );
 }

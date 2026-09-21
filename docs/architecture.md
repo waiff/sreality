@@ -465,10 +465,16 @@ polygon's envelope expanded by 5 km, so overlapping boxes would otherwise answer
 happened to be walked last. It returns that obec's name, its newest successful fetch (`fetched_at`,
 `record_count`, `source_total`) and its newest attempt of ANY status, so the surface can separate
 four answers — never looked, tried and FAILED (our outage, not operator inaction), looked and found
-nothing, looked and hold N. The filter vocabulary is `Agenda.SOLD` (existing area / category /
-disposition / subtype defs re-tagged, plus `max_sold_age_days`, bounded 60–730 by the source's own
-~30-day publication lag and 24-month window), dispatched to PostgREST by the shared
-`applyAgendaFilters` with no hand-coded escape. The SPA reads it in
+nothing, looked and hold N. Only the last two carry a radius control, a filter panel and a "no
+registered sale matches these filters" line: all three say WE LOOKED, and over a town nobody has
+fetched they contradict the coverage sentence directly above them (the cohort read is not even
+issued there). The filter vocabulary is `Agenda.SOLD` (existing area / category / disposition defs
+re-tagged, plus `max_sold_age_days`, bounded 60–730 by the source's own ~30-day publication lag and
+24-month window), dispatched to PostgREST by the shared `applyAgendaFilters` with no hand-coded
+escape. `subtype` is deliberately NOT in it, and Type offers `byt` / `dum` only: reas publishes
+flats and houses and the parser refuses the rest, so every other option is a cohort that can only
+ever be empty — the block narrows the registry's OWN option list through FilterForm's existing
+per-filter widget override rather than growing per-agenda option machinery. The SPA reads it in
 `frontend/src/components/listing-detail/SoldCompsBlock.tsx` — the listing page's only REALIZED
 prices. `record_count` and `source_total` render as what they are, two populations (the source's
 24-month window against all-time) and never as a shortfall; the ~30-day lag and reas's minority

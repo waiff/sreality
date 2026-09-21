@@ -851,7 +851,10 @@ def _build_registry() -> dict[str, FilterDef]:
                 "estimation / velocity / neighborhood) use the SCALAR "
                 "`category_main` instead — an estimate is for one property of "
                 "one category, so a multi-value category is meaningless there. "
-                "Mirrors the dispositions / disposition_match split."
+                "Mirrors the dispositions / disposition_match split. On "
+                "Agenda.SOLD only `byt` and `dum` can ever match — reas.cz "
+                "publishes those two and the parser refuses the rest — so the "
+                "block offers that pair and no more."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
@@ -930,11 +933,15 @@ def _build_registry() -> dict[str, FilterDef]:
                 "subtype is in the list. Normalized across portals — distinct "
                 "from the sreality-only numeric category_sub_cb. The Browse "
                 "sidebar renders the group matching the selected category_main "
-                "(dum / komercni) and hides it otherwise."
+                "(dum / komercni) and hides it otherwise. NOT an Agenda.SOLD "
+                "filter: reas.cz publishes byty and domy only (the parser "
+                "refuses any other type), so every commercial member of this "
+                "taxonomy is a cohort that can only ever be empty there, and a "
+                "flat has no subtype at all."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG, Agenda.SOLD}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             enum_values=SUBTYPE_OPTIONS,
         ),
         FilterDef(
