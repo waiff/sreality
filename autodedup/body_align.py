@@ -37,6 +37,8 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import lru_cache
 
+from html import unescape
+
 from autodedup.text_facts import BODY_CACHE, mask_codes
 
 # Below this many tokens a body is a headline, and two headlines align on nothing meaningful.
@@ -143,7 +145,13 @@ def _fold(text: str) -> str:
 
 def mask(text: str, heal: bool = False) -> str:
     """The body with every field that legitimately moves between two postings blanked."""
-    out = _SPACED_THOUSANDS.sub("", _fold(mask_codes(text) or ""))
+    source = mask_codes(text) or ""
+    # E163: one realitymix body publishes `m&#178;` — the entity, not the character — and the
+    # metre mask then reads `20,6 m` as a dimension and leaves `178` standing as a number. Every
+    # other reader in this package unescapes first (`text_facts.fact_text`); this one did not.
+    if heal:
+        source = unescape(source)
+    out = _SPACED_THOUSANDS.sub("", _fold(source))
     out = out.replace("[kod]", " [kod] ")
     if heal:
         out = _NP.sub(lambda m: _storey(int(m.group(1))), out)

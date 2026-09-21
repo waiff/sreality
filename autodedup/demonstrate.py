@@ -146,27 +146,41 @@ def _areas_meet(left: frozenset[tuple[float, int]],
     return any(rounding_equal_values(a, da, b, db) for a, da in left for b, db in right)
 
 
+def _has_decimal(readings: frozenset[tuple[float, int]]) -> bool:
+    return any(decimals >= 1 for _, decimals in readings)
+
+
+def decimals_decide(a: Listing, b: Listing, land: bool) -> bool:
+    """E160: do the two BODIES both print the unit's size to a decimal?
+
+    That, exactly, is the operator's rule: two printed DECIMALS that differ are two areas. The
+    union of body and column is what lets 75,52 m² meet 75,64 m² — both portals store 76, and a
+    0-decimal 76 meets every number that rounds to it — so where both sides have printed a
+    decimal the column is a coarser copy of one of them and may not overrule the pair.
+
+    Two printed INTEGERS are a different case and stay on the union: one idnes body prints
+    `62 m²` for a flat whose column, and the other advert's body, both say 54, and the operator
+    has confirmed that pair. An integer carries no claim about its own last digit."""
+    left, right = body_headline_areas(a, land), body_headline_areas(b, land)
+    return bool(left) and bool(right) and _has_decimal(left) and _has_decimal(right)
+
+
 def deciding_areas(listing: Listing, land: bool, printed_decides: bool
                    ) -> frozenset[tuple[float, int]]:
-    """E160: what the advert actually states its size to be.
-
-    `area_readings` is the stored column UNION what the body prints, and the union is what lets
-    75,52 m² meet 75,64 m²: both portals store 76, and a 0-decimal 76 meets every number that
-    rounds to it. Two bodies that each print a two-decimal figure have SAID what the unit is;
-    the column is a coarser copy of one of them and cannot overrule the pair. So where a body
-    prints anything, the printed readings decide, and the column is the reading only where the
-    body is silent — which is still the whole point of E153."""
-    if not printed_decides:
-        return area_readings(listing, land)
-    printed = body_headline_areas(listing, land)
-    return printed if printed else area_readings(listing, land)
+    """What this advert's size is read off, given whether the printed decimals decide."""
+    if printed_decides:
+        printed = body_headline_areas(listing, land)
+        if printed:
+            return printed
+    return area_readings(listing, land)
 
 
 def area_demonstrated(a: Listing, b: Listing, printed_decides: bool = False) -> bool:
     """Both sides state a headline area and the two agree within rounding."""
     land = LAND_CATEGORY in (a.category_main, b.category_main)
-    left = deciding_areas(a, land, printed_decides)
-    right = deciding_areas(b, land, printed_decides)
+    decides = printed_decides and decimals_decide(a, b, land)
+    left = deciding_areas(a, land, decides)
+    right = deciding_areas(b, land, decides)
     return bool(left) and bool(right) and _areas_meet(left, right)
 
 
@@ -280,8 +294,9 @@ CONTRADICTION: str = "contradiction"
 
 def _area_kind(a: Listing, b: Listing, printed_decides: bool) -> str:
     land = LAND_CATEGORY in (a.category_main, b.category_main)
-    left = deciding_areas(a, land, printed_decides)
-    right = deciding_areas(b, land, printed_decides)
+    decides = printed_decides and decimals_decide(a, b, land)
+    left = deciding_areas(a, land, decides)
+    right = deciding_areas(b, land, decides)
     return MISSING if not left or not right else CONTRADICTION
 
 

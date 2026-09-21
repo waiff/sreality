@@ -63,6 +63,7 @@ from autodedup.dataset import Listing
 from autodedup.demonstrate import (
     area_readings,
     body_headline_areas,
+    decimals_decide,
     sequential_postings,
 )
 from autodedup.features import STREET_GRAIN_RANK, haversine_m, plot_area, rel_diff
@@ -367,7 +368,7 @@ def printed_area_conflict_cfg(a: Listing, b: Listing, settings: Settings | None 
     land = LAND_CATEGORY in (a.category_main, b.category_main)
     if not body_headline_areas(a, land) or not body_headline_areas(b, land):
         return None
-    if not cfg.d43_printed_area_decimals_decide:
+    if not (cfg.d43_printed_area_decimals_decide and decimals_decide(a, b, land)):
         return printed_area_conflict(a, b)
     # E160: where both bodies PRINT, the printed figures decide. `75,52` against `75,64` is two
     # flats of one Chotěšov row, and the only thing that made them meet was the stored 76 both
