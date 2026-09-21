@@ -152,7 +152,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | --- | --- | --- | --- | --- |
 | **W0** | Stop the dead lane pretending | ~2,380 LOC: 4 scripts, 2 workflows, 3 test files, 2 empty tables | ~5 LOC + this doc | — |
 | **W1** | Measurement before change: per-portal key census + fill **and validity** matrix; the flaky data-quality capture REPAIRED (the Health page reads it) | — (the one wave that only adds: it is the instrument) | ~2,200 incl. census + baseline JSON | — |
-| **W2** | Vocabulary module + contract table + CI gates — identity-preserving | 51 per-parser fns, 22 dicts, 13 regexes, the key chains, 8 planted tests, 26 dead reads | one module + one 234-cell table + 3 gates | W1 |
+| **W2** | Vocabulary module + contract table + CI gates — identity-preserving | 52 per-parser fns, 19 dicts, 13 regexes, the key chains, 11 planted tests, 39 dead reads | one module + one 234-cell table + 3 gates | W1 |
 | **W3** | The one re-parse seam — SHIPPED | 2,887 LOC across 11 deleted files (**4** backfill scripts, **4** workflows, **3** tests; two of the six named candidates survive on evidence — see R9) | 1,383 in the four new files; the branch's own total is +1,663 / −3,358 incl. the regenerated workflow-docs asset | W1 |
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |

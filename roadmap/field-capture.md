@@ -30,8 +30,8 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       that only adds: it is the instrument every later wave is judged by. First run: 46 zero-fill
       cells of 234; `condition` off-canon on all nine portals; census in `data/field_capture/`.
 - [x] **W2 — vocabulary module + the attribute contract table + CI gates.** Identity-
-      preserving and proven so: 51 per-parser normaliser functions, 22 mapping dicts, 13
-      regexes and 8 planted-fixture tests collapse onto `scraper/vocabulary.py` (the
+      preserving and proven so: 52 per-parser normaliser functions, 19 mapping dicts, 13
+      regexes and 11 planted-fixture tests collapse onto `scraper/vocabulary.py` (the
       producer side; the canon stays in `toolkit/filter_registry.py` and is imported) plus
       `scraper/attribute_contract.py` (all 9 × 26 cells: producer, key precedence, absence
       semantics, sentinels, known gaps). Gates A1 / A2 / A3 run over the checked-in census —
