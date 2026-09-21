@@ -53,8 +53,8 @@ _EXC_LINE_RE = re.compile(
 _CHECK_LINE_RE = re.compile(r"\bCHECK (?P<key>[a-z0-9_]+) status=(?P<status>\w+)")
 
 # Scripts that catch their own errors exit 1 with no traceback (the bazos enrichment
-# lane is 14% of the corpus). Without this tier the single biggest LLM-outage
-# signature is invisible to both producers.
+# lane, 14% of the corpus when this tier was added, was the worked example). Without
+# this tier a self-caught LLM outage is invisible to both producers.
 _ABORTING_RE = re.compile(r"\baborting:\s*(?P<msg>\S.*)$", re.MULTILINE | re.IGNORECASE)
 _ERROR_KV_RE = re.compile(r"\berror=(?P<msg>\S.*)$", re.MULTILINE)
 

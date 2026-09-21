@@ -145,12 +145,11 @@ cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is **cade
 like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combined run starves the
 drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
 mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
-`45 * * * *`, bounded `--max-seconds`); a third job, `bazos_description_enrichment.yml`, backfills
-free-text description enrichment every 3h — bazos's ad text needs a pass the other portals'
-structured pages don't. Its tool (`toolkit/bazos_enrichment.py`) carries the 8 fields it consumes
-with the LLM call's `tool_choice` FORCED and caches a `no_extraction` result too (prose instead of
-a tool call wrote no cache row and re-billed forever), and the driving script aborts red after 5
-consecutive provider errors rather than finishing green on a dead key. The bezrealitky scrape is
+`45 * * * *`, bounded `--max-seconds`). Bazos's ad text needs a post-publication pass the other
+portals' structured pages don't; the LLM lane that did it was deleted in field-capture W0 (keyed
+on `sreality_id`, which Gate 2 leaves NULL on every non-sreality row, so it reached ~0.4% of
+bazos while reading green) and returns in W7 — `docs/design/field-capture/PROGRAM.md`.
+The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
 `scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the
@@ -214,7 +213,7 @@ failures", cron `*/30` — records failed / timed-out / startup-failed runs into
 so the Health page can list them, since GitHub only emails about failed *scheduled* runs; a
 never-started supersession cancel is distinguished from a genuine failure, and the run's cursor +
 whether a timeout killed it are captured) and `llm_health.yml` ("Monitoring: acute health", hourly
-— verify_pipeline's acute lane: `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`,
+— verify_pipeline's acute lane: `llm_errors`, `llm_burn_rate`, `db_saturation`,
 `worker_liveness`, `property_maintenance`, `broker_resolution_freshness`, with
 `--exit-nonzero-on-fail` so any `fail` goes red and emails). A credit-balance error alarms
 immediately, and the LLM failure probe is INDEPENDENT of pending work — that blind spot kept a
@@ -419,7 +418,7 @@ the 2026-07 two-day silent stall (Anthropic credit
 exhaustion, 38k+ failed LLM calls) whose only alarm was a cron the operator happened to miss.
 Two lanes: `llm_health.yml` hourly (the acute checks, `--only ... --exit-nonzero-on-fail`, so a
 `fail` also reds the run and emails) and `verify_pipeline.yml` 6-hourly (everything). Live checks:
-`llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
+`llm_errors`, `llm_burn_rate`, `db_saturation`, `worker_liveness`,
 `dual_write_parity`, `property_maintenance`, `broker_resolution_freshness`,
 `broker_merge_suppression`, and two 6-hourly-only groups — from migration 437,
 `long_open_transaction` (warn-only: the llm-cost rollup's 3h trailing re-scan stops

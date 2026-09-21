@@ -1,6 +1,6 @@
 ---
 name: llm-pipelines
-description: Use when working on any LLM-backed path — the on-demand URL parser (source_dispatcher + per-source parsers), the cached analytical vision/text tools (summarize_listing, compare_listing_images, score_listing_condition, extract_building_units, read_floor_plan, discover_condition_markers, summarize_region_dispositions, enrich_listing_description), the unified vision downscaling tiers, or the MF Cenová mapa nájemného reference-rent calc/ingest and gross-yield filter. Triggers on: parse_url, source_parsers, app_settings prompt/model, llm_calls, called_for, vision, max_edge downscale, reference_rent, rent map, mf_gross_yield, Gemini, provider, tool schema, additionalProperties.
+description: Use when working on any LLM-backed path — the on-demand URL parser (source_dispatcher + per-source parsers), the cached analytical vision/text tools (summarize_listing, compare_listing_images, score_listing_condition, extract_building_units, read_floor_plan, discover_condition_markers, summarize_region_dispositions), the unified vision downscaling tiers, or the MF Cenová mapa nájemného reference-rent calc/ingest and gross-yield filter. Triggers on: parse_url, source_parsers, app_settings prompt/model, llm_calls, called_for, vision, max_edge downscale, reference_rent, rent map, mf_gross_yield, Gemini, provider, tool schema, additionalProperties.
 ---
 
 # LLM pipelines
@@ -80,10 +80,12 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   names the unit AND the period from it, and without one the model narrates bare Kč/m² and
   cannot tell a ~91 535 capital figure from a ~319 monthly one. Browse skips the call
   entirely for a cohort whose basis is mixed rather than sending an unlabelled payload.
-- `enrich_listing_description` (`toolkit/bazos_enrichment.py`) — pulls structured fields out of
-  a free-text portal description (bazos above all, whose ads carry no field grid). Driven by
-  `scripts/enrich_listing_descriptions.py` (sync) or the Batches lane
-  (`scripts/submit_enrich_batch.py` + `ingest_enrich_batch.py`).
+- `enrich_listing_description` — the description→attributes lane. **No code produces it today**:
+  the `sreality_id`-keyed lane was deleted in field-capture W0 (Gate 2 leaves that column NULL on
+  every non-sreality row, so it reached ~0.4% of bazos while three health checks read green). The
+  `called_for` value, the 37,754-row `listing_description_enrichments` cache and
+  `app_settings.enrichment_model` are kept for W7, which rebuilds the lane on the realtime worker
+  keyed `(listing_id, description-hash, extractor_version)` — `docs/design/field-capture/PROGRAM.md`.
 
 **Vision image downscaling is unified in `toolkit/vision_images.py` — one helper, two
 tiers.** Every image→LLM call routes R2 bytes through `image_block(r2, key, max_edge)`

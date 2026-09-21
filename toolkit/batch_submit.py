@@ -1,11 +1,9 @@
 """Provider-agnostic primitives shared by every batch-submit lane (dedup,
-condition scoring, description enrichment). Each lane owns its own tables and
-persist logic (they key on different things: pair+room for dedup, snapshot for
-condition/enrichment), but the chunk-sizing rule, the batch-discount constant,
-and the transient-retry loop around `provider.submit_batch` are identical —
-this module is the one place that logic lives, instead of one lane copying
-another's script (submit_enrich_batch previously imported these constants
-straight from submit_condition_batch).
+condition scoring). Each lane owns its own tables and persist logic (they key
+on different things: pair+room for dedup, snapshot for condition), but the
+chunk-sizing rule, the batch-discount constant, and the transient-retry loop
+around `provider.submit_batch` are identical — this module is the one place
+that logic lives, instead of one lane copying another's script.
 """
 
 from __future__ import annotations

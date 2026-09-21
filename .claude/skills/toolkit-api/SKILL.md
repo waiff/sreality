@@ -201,7 +201,7 @@ it (`api/`). They do not apply to the scraper.
     script's own provider map: no script under `scripts/` uses `get_providers()`, and a
     model whose provider is unregistered raises in `LLMClient.call` BEFORE the try/except
     that writes the failure row, so a misroute leaves ZERO `llm_calls` evidence and is
-    invisible to `llm_errors`, `llm_burn_rate` and `llm_liveness` alike. `LLMClient` is the audit orchestrator — every call
+    invisible to `llm_errors` and `llm_burn_rate` alike. `LLMClient` is the audit orchestrator — every call
     writes one row to `llm_calls` with provider, model, tokens, USD cost, and a `called_for`
     tag. An unmapped model id records `cost_usd=0` rather than raising — silent, not loud;
     check `api/providers/gemini.py`'s `_PRICES` table after any Gemini model bump.

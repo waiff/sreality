@@ -1,0 +1,113 @@
+-- 546_drop_enrichment_batch_tables.sql
+-- FIELD CAPTURE W0 -- the description-enrichment Batches lane's two tables go.
+--
+-- ===========================================================================
+-- DESTRUCTIVE. Do not apply without the operator's explicit word and a
+-- pg_dump first (architecture rule 1). Operator OK recorded 2026-09-21 in
+-- docs/design/field-capture/PROGRAM.md section 2, "Approved destructive
+-- steps" (i).
+--
+--   pg_dump "$SUPABASE_DB_URL" --no-owner --no-acl \
+--     -t public.listing_description_enrichment_batches \
+--     -t public.listing_description_enrichment_batch_requests \
+--     -f w0-pre-drop-$(date -u +%Y%m%dT%H%M%SZ).sql
+--
+-- Both tables are EMPTY, verified immediately before this file was written:
+--
+--   select (select count(*) from listing_description_enrichment_batches)      as batches,
+--          (select count(*) from listing_description_enrichment_batch_requests) as batch_requests,
+--          now() as checked_at;
+--   -> batches=0, batch_requests=0, checked_at=2026-09-21 18:26:13Z
+--
+-- The lane was submitted-to never: migration 305 created the pair on
+-- 2026-06-27 and its two drivers (scripts/submit_enrich_batch.py,
+-- scripts/ingest_enrich_batch.py) never ran against production -- their
+-- workflow, enrich_bazos_batch.yml, shipped with its crons commented out. The
+-- dump above is therefore a formality, taken anyway.
+--
+-- WHY. The whole sreality_id-keyed description-enrichment lane is deleted in
+-- this PR. Its selector guarded `sreality_id IS NOT NULL`, and listing-identity
+-- Gate 2 leaves that column NULL on every non-sreality row, so the lane could
+-- reach 223 of ~50,205 active bazos rows (0.4%) while three LLM health checks
+-- read green. The replacement (field-capture W7) is a realtime-worker lane
+-- keyed `(listing_id, description-hash, extractor_version)` and has no batch
+-- submit/ingest step at all, so these two tables have no future reader either.
+--
+-- RUN ORDER -- DEPLOY THE CODE FIRST, THEN APPLY THIS FILE.
+-- Nothing in the deployed image references these tables once the PR merges,
+-- but the image running *before* the merge still carries the two scripts that
+-- INSERT into them. Applying first would leave a dispatchable script pointing
+-- at a table that no longer exists. So:
+--   1. merge the PR -> Railway rolls out API + realtime-worker + SPA,
+--   2. confirm the rollout (gh api repos/{owner}/{repo}/commits/<sha>/status),
+--   3. re-run the 0-row check above,
+--   4. pg_dump,
+--   5. apply this file.
+--
+-- WHAT RECREATES THEM: migration 305 (the only one that ever did;
+-- 299_listing_description_enrichment_batches.sql is the same file under the
+-- number it collided on -- it was renumbered to 305 and never applied).
+--
+-- DEPENDENTS, enumerated live 2026-09-21 -- all of them internal to the pair:
+--   FKs:      batch_requests.batch_id -> batches(id) ON DELETE CASCADE. No
+--             other table references either, in either direction.
+--   indexes:  the two pkeys, the two UNIQUEs (provider_batch_id;
+--             batch_id+custom_id), batches_status_idx,
+--             batch_requests_batch_status_idx. All dropped with their table.
+--   sequences: batches_id_seq, batch_requests_id_seq -- OWNED BY the id
+--             columns, so DROP TABLE takes them; no explicit drop needed, and
+--             no separate sequence GRANT exists to revoke.
+--   RLS:      enabled on both since 305, with ZERO policies (deny-all to
+--             anon/authenticated; service_role and postgres bypass).
+--   grants:   authenticated SELECT + the service_role/postgres full set, all
+--             dropped with the table.
+--   views / matviews / triggers / publications: none.
+--   code:     zero references after this PR (toolkit/listing_identity.py's
+--             backfill registry names listing_description_enrichments, the
+--             KEPT cache, not these two).
+--
+-- WHAT STAYS, deliberately -- W7 needs all three and none has a reader in
+-- code today, so this is the note a future reader will look for:
+--   listing_description_enrichments (37,754 rows, migration 124, listing_id
+--     added by 321) -- W7 re-keys it onto (listing_id, description-hash,
+--     extractor_version) rather than recreating it.
+--   llm_calls.called_for = 'enrich_listing_description' -- W7 reuses the
+--     value, and the frontend cost pages (frontend/src/lib/llmCosts.ts) keep
+--     their 60-day series only while it exists. The CHECK constraint already
+--     permits it, so no migration is needed either way.
+--   app_settings.enrichment_model ('gpt-5-mini') -- W7's one model switch
+--     (ruling R10). Deleting it would force a hardcoded model id, which is an
+--     addition, not a subtraction.
+--
+-- APPLY PATH: `apply_migration.yml` (`psql -X -q -v ON_ERROR_STOP=1 -f`), NOT
+-- the Supabase MCP. Statements autocommit -- there is NO begin/commit in this
+-- file and there must not be. The `set` below is a plain SET, never SET LOCAL
+-- (outside a transaction SET LOCAL is a silent no-op).
+-- ===========================================================================
+
+set lock_timeout = '5s';
+
+-- 1. The pair. Child first, though the FK cascades either way.
+drop table if exists listing_description_enrichment_batch_requests;
+drop table if exists listing_description_enrichment_batches;
+
+-- 2. The retired llm_liveness check's result rows.
+--
+-- Not schema, but the same deletion: this PR removes check_llm_liveness from
+-- verify_pipeline (there is no recurring LLM producer left to be silent about
+-- -- the longest gap between llm_calls rows in the 30 days to 2026-09-21,
+-- excluding the deleted lane, was 143.8 h, and the check had already logged 52
+-- fails in 349 runs against a healthy pipeline). `pipeline_checks_public`
+-- serves the LATEST row per check_key with no recency filter, and this key's
+-- latest row is a `fail` -- so leaving the rows would pin a permanently red
+-- check on the Health page and a permanently red rollup badge above it, with
+-- no producer that could ever turn it green again. pipeline_check_results is
+-- observability, not history (the history table is listing_snapshots).
+--
+-- Six OTHER retired keys already sit there frozen since 2026-08-06
+-- (geo_debt, merge_latency, eligibility_funnel, engine_health, street_debt,
+-- merge_precision_sample -- the removed dedup decision engine's). This file
+-- deliberately leaves them alone: three of them are `warn`, so they are a
+-- pre-existing wart, not a regression this PR introduces, and they belong to
+-- another program's territory (architecture rule 15).
+delete from pipeline_check_results where check_key = 'llm_liveness';

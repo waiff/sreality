@@ -3,14 +3,15 @@
 The toolkit package must be importable under a *slim* install — psycopg +
 requests only — without the optional cloud/vision wheels (boto3, Pillow,
 anthropic, google-genai). Many scheduled workflows install just that slim set
-and import one lightweight toolkit module (e.g. `toolkit.bazos_enrichment`);
-the toolkit package __init__ must not drag a heavy, optional dependency in at
-import time.
+and reach a lightweight toolkit module (e.g. every scrape run: `scraper.db`
+top-level-imports `toolkit.broker_sources`); the toolkit package __init__ must
+not drag a heavy, optional dependency in at import time.
 
 This pins the fix where `scraper.image_storage` imports boto3 lazily (inside
 `R2Client.__init__`) rather than at module top. If anyone re-adds a top-level
 `import boto3` to a module on the toolkit import path, this test fails loudly —
-catching the exact regression that left `enrich_bazos.yml` broken for 3 weeks.
+catching the exact regression that once left a slim-install workflow broken for
+3 weeks.
 
 Run in a subprocess so a real, clean interpreter resolves the imports (the test
 process itself has boto3 installed via the [dev,api,geo] CI extras).
@@ -58,7 +59,7 @@ _PROBE = textwrap.dedent(
     # The package __init__ runs first on ANY `from toolkit.X import ...`, so a
     # heavy top-level import anywhere in the eager closure would fail here.
     import toolkit  # noqa: F401
-    from toolkit.bazos_enrichment import enrich_listing_description  # noqa: F401
+    from toolkit.broker_sources import BROKER_SOURCE_NAMES  # noqa: F401
 
     print("OK")
     """
@@ -86,10 +87,10 @@ def test_toolkit_imports_without_optional_heavy_wheels() -> None:
 
 
 def test_boto3_specifically_is_not_import_time() -> None:
-    """The exact dependency that broke enrich_bazos for 3 weeks."""
+    """The exact dependency that broke a slim-install workflow for 3 weeks."""
     result = _run_probe(("boto3", "botocore"))
     assert result.returncode == 0, (
         "boto3 is imported at toolkit import time again — regression of the "
-        "enrich_bazos outage.\n\n"
+        "slim-install outage.\n\n"
         f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
     )
