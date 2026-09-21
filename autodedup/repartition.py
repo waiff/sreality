@@ -168,30 +168,26 @@ def _reconcile(
 ) -> bool:
     """E156: put back every separation no fact justifies. True when something moved.
 
-    Two passes, both in `edge.rank` order so the result is a function of the edge SET: whole
-    cells are re-joined where their union holds, then a single member is returned to a cell it
-    has an edge to when that union holds. A member the invariants refuse everywhere stays
-    where the search left it — the rule is "no fact, no separation", not "no separation"."""
+    A REPAIR, not a second optimisation. The local search has already chosen a partition; this
+    pass only asks, of each merge edge still cut, whether the invariants can hold the two ends
+    together — and if they can, puts the one end back. It never moves a whole cell: re-joining
+    cells wholesale re-opens the search's own choices, and measured on the trial cohort that
+    cost more duplicates than it recovered (one Prostějov component came out with its certified
+    member in a cell of three instead of the cell of fourteen it has certificates into).
+
+    Edges are read in `edge.rank` order and each member moves at most once per round, so the
+    result is a function of the edge SET and the rounds terminate. A member the invariants
+    refuse everywhere stays where the search left it — the rule is "no fact, no separation",
+    not "no separation"."""
     moved = False
-    for edge in ordered:
-        left, right = home[edge.lo], home[edge.hi]
-        if left == right:
-            continue
-        merged = sorted(cells[left] + cells[right])
-        if invariants(merged) is not None:
-            continue
-        source, target = max(left, right), min(left, right)
-        for member in cells[source]:
-            home[member] = target
-        cells[target].extend(cells[source])
-        cells[target].sort()
-        cells[source] = []
-        moved = True
+    touched: set[int] = set()
     for edge in ordered:
         left, right = home[edge.lo], home[edge.hi]
         if left == right:
             continue
         for member, target in ((edge.lo, right), (edge.hi, left)):
+            if member in touched:
+                continue
             current = home[member]
             if current == target:
                 continue
@@ -201,6 +197,7 @@ def _reconcile(
             cells[target].append(member)
             cells[target].sort()
             home[member] = target
+            touched.add(member)
             moved = True
             break
     return moved

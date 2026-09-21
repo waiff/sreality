@@ -565,7 +565,11 @@ def _prose_streets(text: str) -> frozenset[str]:
             if _STREET_STOPWORD.match(word):
                 break
             kept.append(word)
-            out.add(" ".join(kept))
+            # `tř. 20. dubna` numbers its street, and `20.` alone names nothing: a prefix is a
+            # name only once it carries a word. Without this the numeral becomes the only
+            # street on its side and refuses every advert that names a real one.
+            if any(len(word) > 2 and word.isalpha() for word in kept):
+                out.add(" ".join(kept))
     return frozenset(out)
 
 

@@ -60,6 +60,7 @@ from typing import Mapping, Sequence
 
 from autodedup.body_align import aligned_difference, rounding_equal_values
 from autodedup.dataset import Listing
+from autodedup.demonstrate import area_readings, body_headline_areas
 from autodedup.features import STREET_GRAIN_RANK, haversine_m, plot_area, rel_diff
 from autodedup.floor_convention import (
     convention_ambiguous,
@@ -78,7 +79,6 @@ from autodedup.text_facts import (
     offered_room_counts,
     orientations,
     parcel_numbers,
-    printed_areas,
     prose_streets,
     stated_areas,
     streets_agree,
@@ -295,6 +295,18 @@ def _same_feed(a: Listing, b: Listing, mode: str, unknown_closed: bool = False) 
     return a.broker_key is not None and a.broker_key == b.broker_key
 
 
+def _feed_known(a: Listing, b: Listing) -> bool:
+    """Do both adverts name the feed they came from?"""
+    return a.broker_key is not None and b.broker_key is not None
+
+
+def _prices_meet(a: Listing, b: Listing, tol: float) -> bool:
+    """One asking price, written twice."""
+    if not (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0):
+        return False
+    return rel_diff(float(a.price), float(b.price)) <= tol
+
+
 def headline_area(listing: Listing) -> float | None:
     """The size this advert is sold BY: the headline area, or the parcel when there is none."""
     if listing.area_m2 and float(listing.area_m2) > 0.0:
@@ -335,39 +347,37 @@ def two_unit_signature(a: Listing, b: Listing, settings: Settings | None = None)
     return not _stated_areas_meet(a, b, cfg.d43_two_unit_stated_tol)
 
 
-def _unit_areas(listing: Listing, land: bool) -> frozenset[tuple[float, int]]:
-    scopes = {"unit", "land"} if land else {"unit"}
-    return frozenset((value, decimals)
-                     for value, decimals, scope in printed_areas(listing.description)
-                     if scope in scopes)
-
-
 def printed_area_conflict(a: Listing, b: Listing) -> tuple[str, str] | None:
-    """E153: both bodies print a headline area and no two of them agree within rounding.
+    """E153: both adverts state a headline area and no two readings agree within rounding.
 
-    Scoped: the terrace's size is the terrace's and a bedroom's is the bedroom's, so what is
-    compared is the size the advert is sold BY. Land reads the parcel as its headline. A body
+    The readings are the body's SCOPED figures (the terrace's size is the terrace's, a
+    bedroom's is the bedroom's) together with the stored column, which is dropped only where
+    the body says it is not this unit's size. Keeping the column in is what tells `47,6 m²`
+    against `46,6 m²` — two portals measuring one flat, both storing 47 — from `76,1` against
+    `77,8`, where bazos stores the terrace for both and the column has nothing to say. A body
     that prints two numbers for one unit (`užitná 51 m² / podlahová 55 m²`) meets the other
-    side on whichever it shares, which is the basis-difference rail E143 already carries."""
+    side on whichever it shares, which is the basis difference E143 already carries."""
     land = LAND_CATEGORY in (a.category_main, b.category_main)
-    left, right = _unit_areas(a, land), _unit_areas(b, land)
-    if not left or not right:
+    # Both BODIES must print one, or this reader has nothing to say. A stored column alone is
+    # already the `area` fact at the tolerance a stored column deserves; re-reading it here at
+    # rounding precision would refuse every pair one portal rounded 58,9 down to 58.
+    if not body_headline_areas(a, land) or not body_headline_areas(b, land):
         return None
+    left, right = area_readings(a, land), area_readings(b, land)
     if any(rounding_equal_values(x, dx, y, dy) for x, dx in left for y, dy in right):
         return None
     return (str(sorted(value for value, _ in left)),
             str(sorted(value for value, _ in right)))
 
 
-def _street_names(listing: Listing) -> frozenset[str]:
-    printed = prose_streets(listing.description)
-    key = listing.location.street_key
-    return printed | ({key} if key else frozenset())
-
-
 def prose_street_conflict(a: Listing, b: Listing) -> tuple[str, str] | None:
-    """E151: both adverts name a street and they name no street in common."""
-    left, right = _street_names(a), _street_names(b)
+    """E151: both BODIES name a street and they name no street in common.
+
+    Prose against prose only. The resolved `street_key` has its own fact (`street`, at
+    `d43_street_min_distance_m`); reading it here as well turns every gap in the geocoder into
+    a refusal — one Čelakovského advert whose neighbour's key resolved elsewhere, one bazos row
+    whose body was the only side that named anything at all."""
+    left, right = prose_streets(a.description), prose_streets(b.description)
     if not left or not right or streets_agree(left, right):
         return None
     return (",".join(sorted(left)), ",".join(sorted(right)))
@@ -492,6 +502,15 @@ def distinguishing_facts(
     if gap is not None:
         same_feed = _same_feed(a, b, cfg.floor_same_source_feed,
                                cfg.floor_feed_unknown_closed)
+        # E154, the other half: with the feed UNKNOWN the one-storey gap is read closed, and a
+        # storey typed two ways then looks exactly like two flats. The asking price is what
+        # separates them. One 131 m² 4+1 in a Jablonec vila is re-posted on ceskereality at
+        # 6,988,000 and 6,980,000 with its storey written both 1. NP and 2. NP; THE FIZZ's
+        # floors 5 and 6 are 11,290 and 12,025. Neither signal is a fact alone; together they
+        # are, and it is the price that makes the difference a unit's rather than a typist's.
+        if (same_feed and abs(gap) == 1 and cfg.floor_feed_unknown_closed
+                and not _feed_known(a, b) and _prices_meet(a, b, cfg.d43_price_path_tol)):
+            same_feed = False
         strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
         if (gap != 0) if strict else (abs(gap) >= 2 or (abs(gap) == 1 and same_feed)):
             add("floor", a.floor, b.floor)

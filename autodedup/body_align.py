@@ -56,6 +56,9 @@ _MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("[TEL]", re.compile(r"(?:\+\s?420\s?)?\b\d{3}\s?\d{3}\s?\d{3}\b")),
     ("[CENA]", re.compile(r"\b\d[\d  .]*\d\s*(?:kc|czk|,-|kč)")),
     ("[CENA]", re.compile(r"\b\d{6,}\b")),
+    # `k dispozici od 06/2026` against `od 07/2026` is one flat available a month apart, not two
+    # flats. The month/year form has to go before [ROK] eats the year out from under it.
+    ("[DEN]", re.compile(r"\b\d{1,2}\s*/\s*(?:19|20)\d{2}\b")),
     ("[ROK]", re.compile(r"\b(?:19|20)\d{2}\b")),
     ("[PCT]", re.compile(r"\b\d{1,3}(?:[.,]\d+)?\s?%")),
     ("[FOTO]", re.compile(r"\b\d{1,3}\s*(?:fotek|fotografi\w*|obrazk\w*)\b")),
@@ -106,9 +109,52 @@ def tokens(text: str) -> tuple[Token, ...]:
     )
 
 
+# A token that NAMES a unit: a building-and-flat code (`B1.2.2`, `F2.103`), a land-register
+# parcel (`934/11`), or a short block label (`G3`, `C2`). These are compared as whole strings,
+# because `B1.2.2` and `B2.2.2` state the same three numbers in a different order.
+_CODE = re.compile(r"^(?:[a-z]{1,3}\d{1,4}(?:[./-][a-z0-9]{1,4})*|\d{1,5}(?:[./-]\d{1,4})+)$")
+# The unit symbols the tokeniser cannot help carrying a digit: `m2`, `m³`, an HTML `<sup>2</sup>`
+# that survived as `sup2`. They state no quantity of their own.
+_UNIT_SYMBOL = re.compile(r"(?:sup\d|m\d|km\d)")
+_NUMBER_IN = re.compile(r"\d+(?:[.,]\d+)?")
+# `m2` and `sup2` have the shape of a block label and are a unit symbol. The letters decide.
+_NOT_CODE_PREFIX = frozenset((
+    "m", "km", "cm", "mm", "dm", "sup", "kc", "czk", "ks", "np", "pp", "kw", "kwh", "ha",
+    "tel", "www", "id", "cca", "tj", "obr",
+))
+_CODE_PREFIX = re.compile(r"^[a-z]+")
+
+
 def _decimals(text: str) -> int:
     body = text.replace(",", ".")
     return len(body.split(".", 1)[1]) if "." in body else 0
+
+
+def _is_code(text: str) -> bool:
+    if not _CODE.match(text):
+        return False
+    prefix = _CODE_PREFIX.match(text)
+    return not (prefix and prefix.group(0) in _NOT_CODE_PREFIX)
+
+
+def _numbers_of(segment: list[Token]) -> list[tuple[str, float, int]]:
+    out: list[tuple[str, float, int]] = []
+    for token in segment:
+        if not token.digit or _is_code(token.text):
+            continue
+        for match in _NUMBER_IN.finditer(_UNIT_SYMBOL.sub(" ", token.text)):
+            raw = match.group(0)
+            try:
+                out.append((raw, float(raw.replace(",", ".")), _decimals(raw)))
+            except ValueError:
+                continue
+    return out
+
+
+def _reading(segment: list[Token]) -> tuple[frozenset[str], list[tuple[float, int]]]:
+    codes = frozenset(token.text for token in segment
+                      if token.digit and _is_code(token.text))
+    return codes, [(value, decimals) for _, value, decimals in _numbers_of(segment)]
 
 
 def rounding_equal_values(left: float, left_decimals: int,
@@ -134,17 +180,63 @@ def rounding_equal(left: str, right: str) -> bool:
     return rounding_equal_values(a, _decimals(left), b, _decimals(right))
 
 
-def _differ(left: list[Token], right: list[Token], attribute: str) -> tuple[str, str] | None:
-    """The two sides' significant tokens at one position, when they are not the same set."""
-    lefts = [token.text for token in left if getattr(token, attribute)]
-    rights = [token.text for token in right if getattr(token, attribute)]
-    if not lefts or not rights:
-        return None
-    if len(lefts) == 1 and len(rights) == 1 and rounding_equal(lefts[0], rights[0]):
-        return None
-    if set(lefts) == set(rights):
+def _differ_street(left: list[Token], right: list[Token]) -> tuple[str, str] | None:
+    lefts = [token.text for token in left if token.street]
+    rights = [token.text for token in right if token.street]
+    if not lefts or not rights or set(lefts) == set(rights):
         return None
     return (" ".join(lefts), " ".join(rights))
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def body_numbers(text: str) -> tuple[tuple[float, int], ...]:
+    """Every number the whole body states, whatever position it sits in."""
+    return tuple(sorted({(value, decimals)
+                         for _, value, decimals in _numbers_of(list(tokens(text)))}))
+
+
+def _stated_elsewhere(values: list[tuple[float, int]],
+                      elsewhere: tuple[tuple[float, int], ...]) -> bool:
+    """Does the OTHER advert print this number somewhere else of its own?
+
+    `48,4 m² podlahová` against `52,4 m² užitná` is one flat measured two ways, and the second
+    advert prints both figures — so the position where they differ is a difference of BASIS,
+    not of unit. A number the other side never writes at all is the real thing."""
+    return any(rounding_equal_values(value, decimals, other, other_decimals)
+               for value, decimals in values
+               for other, other_decimals in elsewhere)
+
+
+def _differ_digit(left: list[Token], right: list[Token],
+                  left_body: tuple[tuple[float, int], ...] = (),
+                  right_body: tuple[tuple[float, int], ...] = ()) -> tuple[str, str] | None:
+    """What the two sides SAY at one position, when it is not the same thing.
+
+    A token is not its spelling. `140m2` and `140m` are one area, `2.nadzemní` and `2` are one
+    storey, `pronajmu.2` and `2` are one number the tokeniser glued to different neighbours —
+    every one of these was a false split before this function read through the spelling. So a
+    token is reduced to what it states: a unit CODE (`B1.2.2`, `F2.103`, `G3`, `934/11`), or
+    the numbers it contains with the unit symbols removed. Codes are compared exactly and
+    numbers by the rounding rule, and each comparison is a conflict only when BOTH sides state
+    something and the two states share nothing."""
+    left_codes, left_numbers = _reading(left)
+    right_codes, right_numbers = _reading(right)
+    if left_codes and right_codes:
+        if left_codes & right_codes:
+            return None
+        return (" ".join(sorted(left_codes)), " ".join(sorted(right_codes)))
+    if left_codes or right_codes:
+        return None
+    if not left_numbers or not right_numbers:
+        return None
+    if any(rounding_equal_values(a, da, b, db)
+           for a, da in left_numbers for b, db in right_numbers):
+        return None
+    if (_stated_elsewhere(left_numbers, right_body)
+            or _stated_elsewhere(right_numbers, left_body)):
+        return None
+    return (" ".join(sorted(text for text, _, _ in _numbers_of(left))),
+            " ".join(sorted(text for text, _, _ in _numbers_of(right))))
 
 
 def aligned_difference(
@@ -181,8 +273,10 @@ def aligned_difference(
         if after is None or after[0] != "equal" or after[2] - after[1] < CONTEXT_TOKENS:
             continue
         segment_left, segment_right = list(left[i1:i2]), list(right[j1:j2])
-        for attribute in ("digit", "street"):
-            found = _differ(segment_left, segment_right, attribute)
-            if found is not None:
-                return found
+        found = _differ_digit(segment_left, segment_right,
+                              body_numbers(left_text), body_numbers(right_text))
+        if found is None:
+            found = _differ_street(segment_left, segment_right)
+        if found is not None:
+            return found
     return None
