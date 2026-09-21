@@ -32,7 +32,7 @@ table still honest when it is empty?
 - **W0 · `cleanup/shared-table-primitives`** — collapse the duplicated `Th` (8),
   `SectionLabel` (7) and `Hairline` (7) frontend copies into shared primitives. Pure
   refactor, pixel/class parity, no sold code.
-- **W1 · `feature/sold-comps-store`** — 🟡 in progress. Migration 542 (store only:
+- **W1 · `feature/sold-comps-store`** — ✅ shipped. Migration 542 (store only:
   `sold_transactions` + the `sold_transaction_fetches` ledger, RLS-on/no-policy + explicit
   revokes, GiST on `(geom::geography)`), `scraper/reas_parser.py` (pure payload→rows, three
   refusals, broker-reported rows dropped and counted), fixtures + hermetic tests, and the
@@ -41,15 +41,25 @@ table still honest when it is empty?
   `api/schemas.py` and — the copy the operator actually reads, on `/settings` — the seeded
   `app_settings.default_lifecycle` description (migration 543). No network, no runtime
   change, shippable alone; 543 is the one statement to apply.
-- **W2** — `scraper/reas_client.py` (a `BasePortalClient` subclass on a shared rate
-  ledger) + the DB writer + CLI `python -m scraper.reas_main --obec <kod> [--dry-run]`.
-  One HTML GET per cell at `listPerPage=100`; re-fetch only while `nextPage` is non-null.
+- **W2** — 🟡 in progress. The fetch path, SHIPPING DARK: `scraper/reas_client.py` (a
+  `BasePortalClient` subclass on the shared rate ledger at one request per 5 s),
+  `scraper/sold_db.py` (cell box, work-list, batched upsert, ledger row),
+  `scraper/sold_fetch.py` (`fetch_cell`, which never raises — a cell attempt always ends
+  in the ledger), the CLI `python -m scraper.reas_main --obec <kód> [--dry-run]`
+  (`--bbox … --dry-run` for a no-DB smoke) and the `sold_comps` worker lane. One HTML GET
+  per cell page at `listPerPage=100`; re-fetch only while `nextPage` is non-null, hard cap
+  25 pages. **W4's lane landed here** rather than as its own PR: a fetch path with no
+  scheduler is a feature nobody can turn on, and the lane is ~40 lines over the existing
+  `_lane_loop` contract. The cell is the obec's `admin_boundaries` envelope (its `id` IS
+  the RÚIAN kód) widened by 5,000 m — the read surface's largest radius, so any subject
+  inside the obec is covered by construction.
 - **W3** — the read surface: a definer-style view + a three-arg inlinable SQL function
   (lat, lng, radius — `language sql stable`, SECURITY INVOKER, NO `SET` clause, which is
   what keeps it inlined and on the geography index), `Agenda.SOLD` filter defs, and a
-  `SoldCompsBlock` on ListingDetail. Deletes the reas chip path.
-- **W4** — the realtime-worker lane, shipping dark: one `app_settings` interval int with
-  `default_interval=0` as the fail-safe. No flag, no workflow YAML, no registry row.
+  `SoldCompsBlock` on ListingDetail. Deletes the reas chip path. Its radius options are
+  1 / 3 / 5 km against `sold_db.MAX_READ_RADIUS_M` — the same constant, or the box stops
+  covering the read.
+- **W4** — folded into W2 (above).
 - **W5** — pay the rest: delete `FilterChip.tsx` (+ its test), `POST /tools/find_comparables`
   (+ schema) and `ComparableFilters.category_sub_cb`.
 
@@ -65,4 +75,13 @@ table still honest when it is empty?
 - No enum member is added anywhere. `larger` / `atypic` become NULL.
 - A ~30-day publication embargo on `mapPointerPublishedAt` is the crawl watermark, so the
   freshest sale this source can ever show is about a month old. Any surface that renders a
-  sold comp says that.
+  sold comp says that. It is also why a cell that fetched cleanly is left alone for 35
+  days: re-asking sooner cannot find anything new.
+- Fetching is gated on the deal pipeline; READING never is. Terminal and archived stages
+  drop out of the work-list, because stopping the re-fetch is the politeness lever — but a
+  closed deal is exactly where the stored comps must survive, so nothing is ever deleted.
+- A page the parser refuses fails the WHOLE cell (W1's open issue, decided in W2). The
+  refusals are contract failures — the active catalogue under a 200, an identity grammar
+  that moved, a fifth `type` — and storing the good 90% of such a page would bake a
+  half-truth into a fact table with nothing able to say which rows were lost. The cell
+  gets a `failed` ledger row carrying the parser's message and is retried in 6 hours.

@@ -288,6 +288,34 @@ lag, a 45 s budget and 2 000-row batches. Env knobs on the Railway service:
 - **A daily lane is not a dead lane.** `check_worker_lane_stall` reads `in_flight_s` — a pass
   RUNNING too long — and skips a lane that is idle between passes, so no threshold changed.
 
+**Sold-comps lane (sold-comps W2, ships DARK):** fetch registered sales from reas.cz — an external
+FACT feed, not a tenth portal — for the towns the operator is actually working in. The interval is
+one `app_settings` integer, `realtime_sold_comps_interval_seconds`, seeded 0 by migration 544.
+
+- **One integer, no flag.** `_lane_loop` treats `interval <= 0` as idle-not-dead, so the setting is
+  the cadence AND the kill switch. This is deliberately LESS than the estimation and
+  location-resolve lanes, which each carry a boolean setting on top of an interval — that pairing
+  is the variant not to copy. Registered with `default_interval=0` for the resolve lane's
+  fail-safe reason, sharpened here: a settings blip must not spend another site's bandwidth.
+- **The work-list is a query, not a queue** (`sold_db.sold_comp_cells`): obec cells of properties
+  holding ANY account's pipeline card at a non-terminal, non-archived stage, active, `byt`/`dum`,
+  with a resolved point, minus the cells whose NEWEST ledger row is `ok` within 35 days or `failed`
+  within 6 hours; stalest first, 5 cells a pass. The source republishes a transfer ~30 days after
+  the sale, so 35 days is not a guess — asking sooner cannot find anything new.
+- **The cell is the unit, and the ledger is the run record.** The box is the obec's
+  `admin_boundaries` envelope widened by 5,000 m (`sold_db.MAX_READ_RADIUS_M` = the read surface's
+  largest radius). `sold_fetch.fetch_cell` NEVER raises: ok, failed or skipped, every attempt that
+  has a box ends as a `sold_transaction_fetches` row — a cell that failed silently would be
+  indistinguishable from a cell that holds no sales.
+- **No lease, no in-process lock.** One SELECT plus a handful of idempotent cell writes; a second
+  caller would re-ask cells the ledger just marked fresh — wasteful, not wrong. A missing store (a
+  branch database, or `main` before the apply) skips the tick with ONE warning per process.
+- **Politeness.** One request per five seconds on the shared `portal_rate_state` ledger (no seed
+  row, no `portal_configs` entry — a non-portal source needs neither), an identifying User-Agent,
+  `listPerPage=100`, and a walk that follows `nextPage` alone under a 25-page runaway cap. Every
+  page is SSR-computed and served `no-store`, so ~1.9 MB is real origin work; Praha, the one cell
+  that paginates at all, is 11 pages.
+
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as
 % of portal size — line ~264), close silent-greens (image-pipeline liveness, dedup

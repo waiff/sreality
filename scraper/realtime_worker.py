@@ -76,6 +76,14 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              ever re-read it; the drain does the rest (a bazos category page
              raises ListingGoneError and delists instead). LIVE by default
              (`LOCATION_REFETCH_ENABLED=0` idles it).
+- sold_comps: every `realtime_sold_comps_interval_seconds` (DARK: the seeded row is
+             0), fetch registered sales from reas.cz for up to 5 obec cells — the
+             towns where the deal pipeline holds a live card, stalest first, minus
+             the cells whose newest `sold_transaction_fetches` row is younger than
+             35 days (ok) or 6 hours (failed). One integer is cadence AND kill
+             switch; no boolean flag, no env var, no queue. A cell attempt always
+             ends in the ledger (`scraper.sold_fetch.fetch_cell` never raises), and
+             an unmigrated database skips with one warning.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook.
 
@@ -110,7 +118,10 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from scraper import db, image_storage, portal_factory, portal_runner
+from scraper import (
+    db, image_storage, portal_factory, portal_runner, reas_client, reas_parser,
+    sold_db, sold_fetch,
+)
 from scraper.portal import PortalConfig, default_config, load_portal_config
 
 LOG = logging.getLogger("scraper.realtime_worker")
@@ -336,6 +347,22 @@ LOCATION_REFETCH_CAP_DEFAULT = 500
 LOCATION_REFETCH_FIRST_DELAY_SECONDS = 300.0
 # log-once-per-process guard: the audit matview is absent (a branch database).
 _LOCATION_REFETCH_VIEW_WARNED = False
+
+# sold_comps lane (sold-comps W2): REGISTERED SALES FOR THE TOWNS THE OPERATOR IS
+# ACTUALLY WORKING IN. A sale is an external fact with no account and no listing, so
+# the lane has no queue: its work-list is a query (`sold_db.sold_comp_cells`) over the
+# obec cells where the deal pipeline holds a live card, minus the cells whose newest
+# ledger row is still fresh. The source republishes a transfer ~30 days after the
+# sale, so a cell that succeeded is not worth re-asking for weeks — which makes five
+# cells a pass generous rather than tight.
+SOLD_COMPS_INTERVAL_SETTING = "realtime_sold_comps_interval_seconds"
+SOLD_COMPS_CELL_CAP = 5
+# The cheapest cell is still a ~1.9 MB SSR page against a politeness budget of one
+# request per five seconds, so this lane does not race the container's first minute.
+SOLD_COMPS_FIRST_DELAY_SECONDS = 300.0
+# log-once-per-process guard: migration 542's store is absent (a branch database, or
+# main before the apply).
+_SOLD_COMPS_STORE_WARNED = False
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -605,6 +632,14 @@ def _read_location_refetch_min_age() -> int:
 def _read_location_refetch_cap() -> int:
     return _env_int(LOCATION_REFETCH_CAP_ENV, LOCATION_REFETCH_CAP_DEFAULT,
                     minimum=1, maximum=10000)
+
+
+def _read_sold_comps_interval() -> int:
+    # ONE integer is the cadence AND the kill switch (interval<=0 = idle-not-dead), so
+    # this lane carries no `*_enabled` flag. Default 0 twice over: the seeded row ships
+    # at 0, and an absent row reads as 0 — the lane is dark until the operator sets it
+    # on /settings.
+    return _read_int(SOLD_COMPS_INTERVAL_SETTING, 0)
 
 
 def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
@@ -1658,6 +1693,60 @@ async def _location_refetch_pass(
     _record_pass(state, "location_refetch", last)
 
 
+def _sold_comps_sync() -> dict[str, Any]:
+    """One tick: the stalest pipeline obec cells, fetched from the source and stored.
+
+    No lease and no in-process lock, for the location_refetch lane's reason plus one
+    of its own: the pass is one SELECT and a handful of idempotent cell writes, and a
+    second caller would re-ask cells the ledger has just marked fresh — wasteful, not
+    wrong. `fetch_cell` never raises, so one bad cell costs its own ledger row.
+    """
+    global _SOLD_COMPS_STORE_WARNED
+
+    started = time.monotonic()
+    conn = db.connect()
+    try:
+        cells = sold_db.sold_comp_cells(
+            conn, reas_parser.SOURCE, cap=SOLD_COMPS_CELL_CAP)
+        if cells is None:
+            if not _SOLD_COMPS_STORE_WARNED:
+                _SOLD_COMPS_STORE_WARNED = True
+                LOG.warning(
+                    "SOLD_COMPS: sold_transactions is absent on this database; the "
+                    "lane has nothing to write and skips every tick")
+            return {"ran": False, "reason": "store_missing",
+                    "seconds": round(time.monotonic() - started, 1)}
+        results: list[dict[str, Any]] = []
+        if cells:
+            client = reas_client.build_client()
+            results = [sold_fetch.fetch_cell(conn, client, kod) for kod in cells]
+        return {
+            "ran": True,
+            "cells": len(results),
+            "records": sum(r["records"] for r in results),
+            "new": sum(r["new"] for r in results),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "seconds": round(time.monotonic() - started, 1),
+        }
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+async def _sold_comps_pass(
+    stop_event: asyncio.Event, state: dict[str, Any],
+) -> None:
+    if stop_event.is_set():
+        return
+    last = await asyncio.to_thread(_sold_comps_sync)
+    LOG.info(
+        "SOLD_COMPS lane cells=%s records=%s new=%s failed=%s %ss",
+        last.get("cells", 0), last.get("records", 0), last.get("new", 0),
+        last.get("failed", 0), last.get("seconds"),
+    )
+    _record_pass(state, "sold_comps", last)
+
+
 def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     """The lane state as written to the heartbeat, with elapsed time resolved.
 
@@ -1877,6 +1966,16 @@ async def _amain() -> int:
             state,
             default_interval=LOCATION_REFETCH_INTERVAL_DEFAULT,
             first_delay_seconds=LOCATION_REFETCH_FIRST_DELAY_SECONDS)),
+        # default_interval=0 for the location_resolve lane's reason above: the
+        # interval IS the kill switch, so a settings-read failure must not wake a
+        # lane the operator deliberately left dark — and this one spends an external
+        # site's bandwidth when it wakes.
+        ("sold_comps", lambda: _lane_loop(
+            "sold_comps", stop_event, _read_sold_comps_interval,
+            lambda: _sold_comps_pass(stop_event, state),
+            state,
+            default_interval=0,
+            first_delay_seconds=SOLD_COMPS_FIRST_DELAY_SECONDS)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

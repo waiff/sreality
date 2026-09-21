@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast/sold-comps lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -146,13 +146,11 @@ like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combine
 drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
 mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
 `45 * * * *`, bounded `--max-seconds`); a third job, `bazos_description_enrichment.yml`, backfills
-free-text description enrichment every 3h (PR #733) — bazos's ad text needs a separate enrichment
-pass the other portals' structured pages don't. Its tool (`toolkit/bazos_enrichment.py`) was
-slimmed to the 8 fields it actually consumes with the LLM call's `tool_choice` FORCED (PR #768) —
-the prior full-schema tool let ~27% of calls return prose instead of a tool call, which wrote no
-cache row and re-billed forever; a `no_extraction` result now also caches, and the driving script
-aborts (exit 1, red workflow) after 5 consecutive provider errors instead of finishing green on a
-dead API key. The bezrealitky scrape is
+free-text description enrichment every 3h — bazos's ad text needs a pass the other portals'
+structured pages don't. Its tool (`toolkit/bazos_enrichment.py`) carries the 8 fields it consumes
+with the LLM call's `tool_choice` FORCED and caches a `no_extraction` result too (prose instead of
+a tool call wrote no cache row and re-billed forever), and the driving script aborts red after 5
+consecutive provider errors rather than finishing green on a dead key. The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
 `scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the
@@ -213,24 +211,19 @@ not a write; a listing's place is `listing_location` (join on `listing_id`).
 
 Monitor/alerting workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow
 failures", cron `*/30` — records failed / timed-out / startup-failed runs into `workflow_failures`
-so the Health page can list them; GitHub only emails about failed *scheduled* runs; it now
-distinguishes a never-started supersession cancel from a genuine failure so cancelled-by-newer-run
-doesn't inflate the failure count, and captures the run's cursor + whether it was killed by
-timeout, PR #767/#738) and `llm_health.yml` ("Monitoring: acute health", hourly — runs
-verify_pipeline's acute lane: `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`,
+so the Health page can list them, since GitHub only emails about failed *scheduled* runs; a
+never-started supersession cancel is distinguished from a genuine failure, and the run's cursor +
+whether a timeout killed it are captured) and `llm_health.yml` ("Monitoring: acute health", hourly
+— verify_pipeline's acute lane: `llm_errors`, `llm_liveness`, `llm_burn_rate`, `db_saturation`,
 `worker_liveness`, `property_maintenance`, `broker_resolution_freshness`, with
-`--exit-nonzero-on-fail` so any `fail` goes red
-and emails; it replaced the standalone `check_llm_health.py` in the WS4 alerting rebuild). A
-credit-balance error alarms immediately; the LLM failure probe is INDEPENDENT of pending work — it closes
-the blind spot where a credit-exhausted account stayed green for ~8h because condition scoring
-happened to be quiet. `LLMClient` records the failure row on every provider exception; the check
-needs no Anthropic key of its own). Two more alerting layers were added on top: `llm_burn_rate`
-(PR #739, warn threshold operator-tuned via `pipeline_check_thresholds`, currently 130 — PR #766)
-watches daily LLM spend for the recurring credit-depletion pattern (see the
-`llm-credit-outage-health-gap` memory if you need the incident history) — its rows land in the
-same `pipeline_check_results` table the verification harness below writes to; and a broader
-edge-triggered-alerts / blind-spot-detector rework (PR #732, WS4 tracks A/B/C) consolidates related
-LLM alerts instead of firing one per symptom. Run any directly:
+`--exit-nonzero-on-fail` so any `fail` goes red and emails). A credit-balance error alarms
+immediately, and the LLM failure probe is INDEPENDENT of pending work — that blind spot kept a
+credit-exhausted account green for ~8h while condition scoring happened to be quiet; `LLMClient`
+records the failure row on every provider exception, so the check needs no key of its own.
+`llm_burn_rate` watches daily LLM spend for the recurring credit-depletion pattern (warn threshold
+operator-tuned via `pipeline_check_thresholds`, currently 130; incident history in the
+`llm-credit-outage-health-gap` memory) and lands its rows in the same `pipeline_check_results`
+table the verification harness below writes to. Run any directly:
 - CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
   Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
@@ -371,11 +364,10 @@ Lanes shipped so far:
   `realtime_location_resolve_{interval_seconds,max_seconds,batch_size}` (15/240/250), interval `0`
   idles. Since W2-a5 a pass drains **`LOCATION_RESOLVE_WORKERS`** slices concurrently (env on the
   Railway service, default 4, clamped 1–8; one thread + one session connection each, disjoint by
-  SKIP LOCKED) — the heartbeat's `workers`/`failed_batches` say what actually ran. A failed
-  batch costs one slice (rolled back, rows stay queued, 2s→30s backoff); five consecutive, or a
-  lost connection after one reconnect, stop a worker. Prefetch ceiling 90 s
-  (`LOCATION_RESOLVE_PREFETCH_TIMEOUT_S`). The GH lane stays single-connection. Exclusion, budgets, lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it
-  had to be idled before is gone with the pin-collision engine, W2-a.)
+  SKIP LOCKED) — the heartbeat's `workers`/`failed_batches` say what actually ran; the GH lane
+  stays single-connection. Per-slice failure/backoff, the 90 s prefetch ceiling, exclusion,
+  budgets and lease/lock: `docs/design/realtime-scrapers.md`. (The `epoch_job` it had to be idled
+  before is gone with the pin-collision engine, W2-a.)
 - **Location-intake-fast lane** (W7-a) — THE claim lane's change-driven listing scan
   (`claims_intake.run`, `mode="incremental"`; JSON half first, then a bodies pass on the
   remainder — cap `LOCATION_INTAKE_FAST_BODIES_CAP` 300, R2 width 8, ONE 2-wide `ExtractionPool`
@@ -386,7 +378,6 @@ Lanes shipped so far:
   Projects the portal contracts from the image once at lane start (warn, never fail); no `R2_*` =
   warn once, JSON only. Heartbeat `details.location_intake_fast.last` = `{listings,
   claims_inserted, enqueued, bodies_mined, bodies_complete, seconds, cursor, bodies_cursor}`.
-
 - **Location-refetch lane** (W8) — once a day (`LOCATION_REFETCH_INTERVAL_S` 86400, first tick 5 min
   after start; `LOCATION_REFETCH_ENABLED=0` idles) queue the audit page's active "no data" rows
   (`location_pin_audit_mv` `state='unresolved'`+`quality='active_no_claims'`, joined to `listings` by
@@ -396,6 +387,15 @@ Lanes shipped so far:
   the rest, and a bazos dead ad delists on the same fetch. Heartbeat
   `details.location_refetch.last` = `{candidates, queued, sources:{src:{candidates,queued,backlog}},
   min_age_s, cap, seconds}`; no audit view = skip + one warning.
+- **Sold-comps lane** (sold-comps W2, migration 544) — registered sales from reas.cz (an external
+  FACT feed, NOT a tenth portal) for ≤5 obec cells a pass: the towns where the deal pipeline holds
+  a live card, stalest first, minus cells whose newest `sold_transaction_fetches` row is `ok`
+  within 35 d or `failed` within 6 h. Ships **DARK** behind ONE integer,
+  `realtime_sold_comps_interval_seconds` (seeded 0, editable on /settings) — cadence AND kill
+  switch, no `*_enabled` flag, no env var, no workflow. Cell box = the obec's `admin_boundaries`
+  envelope +5 km; `sold_fetch.fetch_cell` never raises, so every attempt with a box ends in the
+  ledger; 1 req/5 s on the shared rate ledger. Heartbeat `details.sold_comps.last` = `{ran, cells,
+  records, new, failed, seconds}`; no store (pre-migration DB) = `ran: false` + one warning.
 
 ## Pipeline verification (migration 274)
 
