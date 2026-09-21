@@ -101,8 +101,8 @@ export interface PipelineCardResult {
 
 /* One operator-curated collection (GET /collections). Property-grain
  * (rule #18); `monitoring_enabled` marks it as a watchlist, `is_system` marks
- * the default "monitoring" collection. The panel reads these to pick a single
- * monitoring target for its one-click toggle. */
+ * the default "monitoring" collection. The panel lists every one in its
+ * save-to-collection checklist, monitored ones first. */
 export interface ExtCollection {
   id: number;
   name: string;

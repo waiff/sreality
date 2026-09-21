@@ -235,9 +235,8 @@ export async function listPipelineStages(): Promise<ApiResult<PipelineStage[]>> 
   return { ok: true, data: res.data.data };
 }
 
-/* GET /collections — the operator-curated collections (rule #18). The panel
- * reads `monitoring_enabled` + `is_system` to pick a monitoring target for its
- * one-click toggle. Returns `{data:[...]}`; we unwrap to the array. */
+/* GET /collections — the caller's collections (rule #18), for the panel's
+ * save-to-collection checklist. Returns `{data:[...]}`; we unwrap to the array. */
 export async function listCollections(): Promise<ApiResult<ExtCollection[]>> {
   const res = await request<{ data: ExtCollection[] }>('/collections');
   if (!res.ok) return res;
@@ -245,7 +244,7 @@ export async function listCollections(): Promise<ApiResult<ExtCollection[]>> {
 }
 
 /* POST /collections/:id/properties — add the property to a collection (rule #18).
- * The SAME bearer-gated route the SPA's Collection page uses; idempotent
+ * The SAME bearer-gated route the SPA's CollectionSaveMenu uses; idempotent
  * server-side (ON CONFLICT DO NOTHING). Returns `{added, skipped}`. */
 export async function addToCollection(
   collection_id: number,

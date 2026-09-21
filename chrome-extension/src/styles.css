@@ -48,6 +48,14 @@
   bottom: 1.25rem;
   width: 21rem;
   max-width: calc(100vw - 2.5rem);
+  /* Pinned to the viewport's bottom edge, the panel grows UPWARD — past the top
+     of a short window once the collection checklist or a few notes are open,
+     where its header and headline could no longer be reached. It scrolls
+     instead; render() keeps the position across its wholesale rebuilds. */
+  max-height: calc(100vh - 2.5rem);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   font-size: 0.82rem;
   line-height: 1.45;
@@ -497,31 +505,37 @@
 .confirm-yes:disabled,
 .confirm-no:disabled { cursor: wait; opacity: 0.6; }
 
-/* ---- monitoring toggle (collections) -------------------------------- */
-/* A SEPARATE, adjacent affordance to the pipeline funnel (rule #22). Mirrors
-   the .pipeline-toggle / .pipeline-pill rules by value — same copper accent +
-   sizing — distinguished only by the bell glyph + "Sledovat" wording. */
+/* ---- save to collection (rule #18) ---------------------------------- */
+/* The SPA listing header's CollectionSaveToggle: the same geometry as the
+   pipeline button beside it, but neutral until the property is saved — copper
+   is the pipeline's accent, and only the SAVED state borrows its soft tint. */
 
 .collection-toggle {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.32rem 0.55rem;
+  padding: 0.32rem 0.5rem 0.32rem 0.55rem;
   font: inherit;
   font-size: 0.7rem;
   font-weight: 600;
   line-height: 1;
   letter-spacing: 0.01em;
-  color: var(--copper);
+  color: var(--ink-3);
   background: var(--paper);
-  border: 1px solid var(--copper);
+  border: 1px solid var(--rule-strong);
   cursor: pointer;
   transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
-.collection-toggle:hover { background: var(--copper-soft); }
+.collection-toggle:hover { color: var(--copper); border-color: var(--copper); }
 
-.collection-toggle:disabled { opacity: 0.55; cursor: wait; }
+.collection-toggle--saved {
+  color: var(--copper);
+  background: var(--copper-soft);
+  border-color: var(--copper);
+}
+
+.collection-toggle--saved:hover { color: var(--copper-deep); border-color: var(--copper-deep); }
 
 .collection-icon {
   width: 0.9rem;
@@ -529,45 +543,130 @@
   flex-shrink: 0;
 }
 
-/* Being-monitored: a soft-tinted pill carrying the bell + label + a remove ✕. */
-.collection-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.18rem 0.3rem 0.18rem 0.45rem;
-  font-size: 0.7rem;
-  font-weight: 600;
+.collection-caret {
+  font-size: 0.6rem;
   line-height: 1;
-  color: var(--copper);
-  background: var(--copper-soft);
-  border: 1px solid var(--copper);
+  transition: transform 120ms ease;
 }
 
-.collection-pill--busy { opacity: 0.6; }
+.collection-toggle[aria-expanded="true"] .collection-caret { transform: rotate(180deg); }
 
-.collection-pill-icon {
-  display: inline-flex;
-  flex-shrink: 0;
+/* The checklist: an inset slip under the action row, like the estimate and
+   notes slips — every collection a checkable row (the SPA's CollectionSaveMenu). */
+.coll-menu {
+  margin-top: 0.6rem;
+  padding: 0.55rem 0.55rem 0.6rem;
+  background: var(--bg-sunk);
+  border: 1px solid var(--rule);
 }
 
-.collection-remove {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.05rem;
-  height: 1.05rem;
+.coll-eyebrow {
+  margin: 0 0 0.35rem 0.15rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--ink-3);
+}
+
+.coll-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  max-height: 11rem;
+  margin: 0;
   padding: 0;
-  font-size: 0.72rem;
-  line-height: 1;
-  color: var(--copper);
+  overflow-y: auto;
+  list-style: none;
+}
+
+.coll-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.34rem 0.4rem;
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1.25;
+  text-align: left;
+  color: var(--ink);
   background: transparent;
   border: 0;
   cursor: pointer;
-  transition: color 120ms ease;
+  transition: background 120ms ease;
 }
 
-.collection-remove:hover { color: #b34730; }  /* brick — destructive hint */
-.collection-remove:disabled { cursor: wait; opacity: 0.6; }
+.coll-row:hover:not([aria-disabled="true"]) { background: var(--copper-soft); }
+.coll-row[aria-disabled="true"] { opacity: 0.6; cursor: wait; }
+.coll-row:focus-visible { outline: 2px solid var(--copper); outline-offset: -2px; }
+
+.coll-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  font-size: 0.6rem;
+  line-height: 1;
+  color: transparent;
+  background: var(--paper);
+  border: 1px solid var(--ink-4);
+  border-radius: 2px;
+}
+
+.coll-row--member .coll-check {
+  color: #fff;
+  background: var(--copper);
+  border-color: var(--copper);
+}
+
+.coll-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coll-bell {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--copper);
+}
+
+.coll-bell-icon { width: 0.8rem; height: 0.8rem; }
+
+.coll-state {
+  margin: 0.1rem 0.15rem;
+  font-size: 0.74rem;
+  color: var(--ink-3);
+}
+
+.coll-error {
+  margin: 0.35rem 0.15rem 0;
+  font-size: 0.7rem;
+  line-height: 1.35;
+  color: #b34730;
+}
+
+.coll-link {
+  font-weight: 600;
+  color: var(--copper);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.coll-link:hover { color: var(--copper-deep); text-decoration: underline; }
+
+.coll-manage {
+  display: inline-block;
+  margin: 0.45rem 0 0 0.15rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
 
 .app-link {
   margin-left: auto;  /* right-aligned whether or not the toggle is present */
@@ -912,7 +1011,7 @@
 .panel--muted .p-word { color: var(--ink-4); }
 
 /* ---- dismiss toggle (migration 536) ------------------------------------ */
-/* Same geometry as .collection-toggle, in ink rather than copper: hiding a
+/* Same geometry and neutral ink as an unsaved .collection-toggle: hiding a
    property is triage, not an action on the deal. */
 
 .dismiss-toggle {
