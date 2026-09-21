@@ -33,6 +33,7 @@ from api.location_filter import (
     district_code_plan,
     district_where,
 )
+from tests.migration_defs import latest_definition
 
 REPO = Path(__file__).resolve().parents[1]
 MIGRATIONS = REPO / "migrations"
@@ -87,21 +88,16 @@ def test_the_ts_module_declares_the_same_levels_and_columns() -> None:
 
 _W3_S3 = "504_location_w3_one_code_predicate.sql"
 # The latest definition of both RPCs. 537 carried 504's bodies forward verbatim
-# plus one `hide_dismissed` clause; re-read the chip arms when this moves again.
-_LATEST_RPC_DEFINITION = "537_browse_hides_dismissed.sql"
-
-
-def _latest_definition(func: str) -> Path:
-    pat = re.compile(rf"create or replace function (?:public\.)?{func}\s*\(", re.IGNORECASE)
-    hits = [p for p in MIGRATIONS.glob("*.sql") if pat.search(p.read_text(encoding="utf-8"))]
-    assert hits, f"no migration defines {func}"
-    return max(hits, key=lambda p: int(p.name.split("_", 1)[0]))
+# plus one `hide_dismissed` clause; 547 carried 537's forward verbatim except the
+# two estate-area predicates, which now read the plot MEASURE column. Re-read the
+# chip arms when this moves again.
+_LATEST_RPC_DEFINITION = "547_browse_aggregates_read_the_plot_measure.sql"
 
 
 def _function_body(func: str) -> str:
     """Just this function's statement — 504 defines two, so a whole-file scan
     would silently mix their CASE blocks together."""
-    sql = _latest_definition(func).read_text(encoding="utf-8")
+    sql = latest_definition(func).read_text(encoding="utf-8")
     at = re.search(
         rf"create or replace function (?:public\.)?{func}\s*\(", sql, re.IGNORECASE
     ).start()
@@ -146,7 +142,7 @@ def test_the_rpc_bodies_compile_the_same_level_map(func: str) -> None:
     """RED by: an RPC arm pointed at a different column than the API/SPA use, or
     a level served in one RPC and not the other — the Stats tab and the map
     would then answer for different cohorts under the same chips."""
-    assert _latest_definition(func).name == _LATEST_RPC_DEFINITION
+    assert latest_definition(func).name == _LATEST_RPC_DEFINITION
     for arms in _chip_case_arms(func):
         # `locality` is compiled, not stored: a street pick filters at its obec.
         assert arms == {**LEVEL_COLUMN, "locality": LEVEL_COLUMN["obec"]}
@@ -194,7 +190,7 @@ def test_the_rpc_signatures_only_grew_hide_dismissed() -> None:
         ("browse_stats_properties", "436_city_quality_obec_key.sql"),
         ("browse_map_cells", "439_browse_map_cells.sql"),
     ):
-        new = _params_of(_latest_definition(func).read_text(encoding="utf-8"), func)
+        new = _params_of(latest_definition(func).read_text(encoding="utf-8"), func)
         old = _params_of((MIGRATIONS / previous).read_text(encoding="utf-8"), func)
         assert new == [*old, "hide_dismissed"], f"{func}: parameter list changed"
         for chip_param in (
