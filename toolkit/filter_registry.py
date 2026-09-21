@@ -56,6 +56,7 @@ class Agenda(StrEnum):
     VELOCITY = "velocity"         # compute_market_velocity
     NEIGHBORHOOD = "neighborhood" # describe_neighborhood
     DEFAULTS = "defaults"         # Settings → app_settings tunables
+    SOLD = "sold"                 # ListingDetail sold-comps block (sold_comparables)
 
 
 class UiControl(StrEnum):
@@ -411,7 +412,14 @@ CATEGORY_COHORT = "Cohort tuning"
 CATEGORY_CITY_QUALITY = "City quality"
 
 
-_ALL_AGENDAS = frozenset(Agenda)
+# Every agenda over the LISTINGS vocabulary. Agenda.SOLD is deliberately NOT a
+# member: it reads a different relation (`sold_comparables` over
+# `sold_transactions_public`, migration 545), which publishes only a subset of
+# these columns, so a filter reaches it by naming SOLD and no other way. Spelling
+# this `frozenset(Agenda)` would have tagged ~30 filters onto columns that
+# relation does not have, and each one would 400 at PostgREST the moment it was
+# set.
+_ALL_AGENDAS = frozenset(Agenda) - frozenset({Agenda.SOLD})
 _BACKEND_AGENDAS = frozenset({
     Agenda.COMPARABLES, Agenda.ESTIMATION,
     Agenda.VELOCITY, Agenda.NEIGHBORHOOD,
@@ -588,6 +596,29 @@ def _build_registry() -> dict[str, FilterDef]:
                 Agenda.DEFAULTS,
             }),
             constraints={"min": 1, "max": 365},
+            unit="days",
+        ),
+        FilterDef(
+            id="max_sold_age_days",
+            type=FilterType.INT,
+            pg_column="sold_age_days",
+            default=None,
+            description=(
+                "Drop registered sales whose `sold_at` is older than N "
+                "days. Reads `sold_age_days`, the whole-day age "
+                "`sold_comparables` computes from `sold_at` (migration "
+                "545) — an integer, so the bound is the same `.lte` "
+                "predicate every other `max_` filter emits: no date "
+                "control, no hand-coded translation. One-sided by design; "
+                "a lower bound on a comparable's age answers nothing. A "
+                "sale reaches the source roughly a month after the "
+                "transfer, so a window under ~60 days is near-empty "
+                "whatever the market did."
+            ),
+            category=CATEGORY_VELOCITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.SOLD}),
+            constraints={"min": 30, "max": 3650},
             unit="days",
         ),
         FilterDef(
@@ -822,7 +853,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG, Agenda.SOLD}),
             enum_values=CATEGORY_MAIN_OPTIONS,
         ),
         FilterDef(
@@ -878,7 +909,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG, Agenda.SOLD}),
             enum_values=DISPOSITION_OPTIONS,
         ),
         FilterDef(
@@ -901,7 +932,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG, Agenda.SOLD}),
             enum_values=SUBTYPE_OPTIONS,
         ),
         FilterDef(
@@ -1333,7 +1364,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG, Agenda.SOLD}),
             constraints={"min": 0, "max": 300, "step": 5},
             unit="m²",
             aliases=("area_min", "areaMin"),
@@ -1349,7 +1380,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG, Agenda.SOLD}),
             constraints={"min": 0, "max": 300, "step": 5},
             unit="m²",
             aliases=("area_max", "areaMax"),
@@ -1414,7 +1445,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
-            agendas=_ALL_AGENDAS,
+            agendas=_ALL_AGENDAS | {Agenda.SOLD},
             constraints={"min": 0, "max": 500, "step": 5},
             unit="m²",
             aliases=("usable_min",),
@@ -1427,7 +1458,7 @@ def _build_registry() -> dict[str, FilterDef]:
             description="Upper bound on usable_area in m². See `min_usable_area`.",
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
-            agendas=_ALL_AGENDAS,
+            agendas=_ALL_AGENDAS | {Agenda.SOLD},
             constraints={"min": 0, "max": 500, "step": 5},
             unit="m²",
             aliases=("usable_max",),
