@@ -93,7 +93,14 @@ class _UnionFind:
 
 
 def edge_rank(decision: Decision) -> tuple[int, float, int, int]:
-    """Certificates first (structural precision), then descending score, then ids (E33)."""
+    """Certificates first (structural precision), then descending score, then ids (E33).
+
+    This is the whole reason `cluster_pairs` is a pure function of the edge SET: it is a total
+    order, so the order the edges arrive in cannot reach the partition. Which makes both keys
+    load-bearing for anything that re-clusters from STORED rows — `autodedup.pairs.certificate`
+    is written by every lane (E117) and `pairs.score` is `double precision` (E115, migration
+    541), because a store that loses either collapses the order into `(lo, hi)` and the
+    invariants then refuse different unions."""
     return (0 if decision.certificate else 1, -decision.score, decision.lo, decision.hi)
 
 

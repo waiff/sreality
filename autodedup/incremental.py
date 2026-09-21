@@ -1472,7 +1472,14 @@ def _recluster(
     whole budget on latency. The components are computed in memory; the four reads and the one
     write are batched across all of them. A pair whose two sides fell in DIFFERENT components
     is nobody's edge (a merge edge would have joined them), which is exactly what the
-    per-component `pairs_within` used to answer."""
+    per-component `pairs_within` used to answer.
+
+    The batch pass is reproduced BY CONSTRUCTION rather than by resemblance: a touched
+    component is re-clustered from ALL of its stored edges through `cluster_pairs`, which
+    sorts them by `edge_rank` before it unions anything and offers the refused bridges once in
+    that same order — so nothing here grows a cluster edge by edge in arrival order, and the
+    claim size a pass took cannot reach the partition. That holds exactly as far as
+    `edge_rank` is a total order over the STORED rows (E115, E117)."""
     components, oversized = _components(store, seeds, caps.max_component)
     result.oversized_components = sorted(set(result.oversized_components) | set(oversized))
     result.components += len(components)
