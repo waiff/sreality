@@ -46,8 +46,10 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
    `toolkit/filter_registry.py` (it generates the SPA + API schema under a CI gate).
 5. **`listings.floor` is a ~50/50 mixed column**: ground = 0 on idnes, bazos, ceskereality; ground = 1 on sreality,
    realitymix, mmreality, remax, bezrealitky, maxima (sibling-pair proof, §5 W8).
-6. **Nothing measures per-portal × per-field fill or validity**; the `data_quality_snapshots` pg_cron capture has
-   failed since 2026-09-15 (no `statement_timeout` prefix) and no check reads it.
+6. **Nothing measures per-portal × per-field fill or validity.** The `data_quality_snapshots` pg_cron capture is
+   FLAKY, not dead (31 of 40 runs cancelled in ten days — its command carries no `statement_timeout` prefix), it
+   cannot see a wrong value, and no `verify_pipeline` check reads it — though the Health page does, through
+   `scraper_health_checks_mv`.
 7. The real area defect is **measure ambiguity**, not coverage: first-m²-token semantics store the parcel as the
    headline on ~1 in 6 bazos houses; `area_basis` is NULL on ~half the corpus and unbackfillable by design.
 
@@ -126,7 +128,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | Wave | Goal | Deletes | Adds | Depends |
 | --- | --- | --- | --- | --- |
 | **W0** | Stop the dead lane pretending | ~2,380 LOC: 4 scripts, 2 workflows, 3 test files, 2 empty tables | ~5 LOC + this doc | — |
-| **W1** | Measurement before change: per-portal key census + fill **and validity** matrix | the dead `data_quality_snapshots` capture | ~700 incl. census JSON | — |
+| **W1** | Measurement before change: per-portal key census + fill **and validity** matrix; the flaky data-quality capture REPAIRED (the Health page reads it) | — (the one wave that only adds: it is the instrument) | ~2,200 incl. census + baseline JSON | — |
 | **W2** | Vocabulary module + contract table + CI gates — identity-preserving | ~1,000 LOC (33 fns, 18 dicts, key chains, planted tests, 6 dead reads) | ~750 | W1 |
 | **W3** | The one re-parse seam | ~3,800 LOC (6 backfill scripts, 6 workflows, 4 tests) | ~950 | W1 |
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
@@ -142,11 +144,17 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 immediately before the DROP; per-source non-NULL counts of the 8 formerly-enriched columns unchanged the day after.
 `listing_description_enrichments` (37,754 rows) is **kept** — W7 re-keys it.
 
-**W1.** 9/9 portals have a census with `generated_at`; staleness > 30 d is itself a failure. The matrix reproduces the
-known zeros (remax `has_balcony` 0/0, mmreality `has_balcony` 0/0, ceskereality parking/garage/terrace/parking_lots 0
-and `total_floors` 0, realitymix `has_lift` 0) and the validity half flags mmreality `has_parking`. Fill is computed
-from `listings` columns (sampled — the full-table form does not return in 90 s), never from the enrichment ledger
-(which still records wiped cells as filled). No active `capture-data-quality` cron row.
+**W1.** 9/9 portals have a census with `generated_at`; staleness > 30 d is a `verify_pipeline` WARNING, never a CI
+failure (a calendar-keyed test reds `main` on a branch that touched nothing). The matrix (`field_fill_matrix`) is
+computed over the whole ACTIVE stock in aggregate form (12 s measured; a newest-N window rotates with cohort mix and
+flaps) from `listings` columns — never from the enrichment ledger, which still records wiped cells as filled — and is
+scored against a blessed baseline: a collapsed cell, a rising off-canon share, or a source missing from the matrix
+rings; zero-fill cells and never-false booleans are reported from the LIVE matrix. It reproduces the known zeros
+(remax `has_balcony`, mmreality `has_balcony`, ceskereality parking/garage/terrace/parking_lots/`total_floors`,
+realitymix `has_lift`) and reports the statutory "G" share per portal. W2 replaces "known in the baseline" with the
+contract's declared producer. The `capture-data-quality` job is repaired with a 900 s `statement_timeout`
+(migration 548), not retired: the Health page's `field_null_drift` rung reads its series; the split of ownership
+between the two instruments is written in that migration's header.
 
 **W2.** Gate A1 (no dead read) fails on the 6 seeded dead reads, passes after removal. Gate A2 (no unread emission
 ≥ 5 %) — every such key is mapped or on an explicit `ignored:` list with a reason. Gate A3 (no unmapped value).
