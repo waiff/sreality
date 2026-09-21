@@ -339,7 +339,8 @@ class CreateEstimationIn(BaseModel):
 
     # Cohort lifecycle. None (default) inherits `default_lifecycle`
     # ("active and recently-seen"); "delisted" restricts to
-    # is_active=false (likely closed deals); "all" applies no filter.
+    # is_active=false (the advertisement ended, not a sale); "all"
+    # applies no filter.
     lifecycle: Literal["active", "delisted", "all"] | None = None
 
     url: str | None = None

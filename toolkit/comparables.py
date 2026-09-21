@@ -68,10 +68,13 @@ class ComparableFilters:
     # deterministic estimator both pass these on demand.
     max_age_days: int | None = None
     # The single lifecycle selector. `active` = is_active=true (plus the
-    # max_age_days recency gate when set); `delisted` = is_active=false
-    # (closed deals — the estimator's transacted-price proxy); `all` /
-    # None = no is_active gate. Rendered by `_lifecycle_where`, the one
-    # place Toolkit rule #4's "active" definition lives.
+    # max_age_days recency gate when set); `delisted` = is_active=false —
+    # the ADVERTISEMENT ended, which is not a sale and carries no
+    # transacted price (migration 453's header: absence nominates, the
+    # page decides). Registered sales are their own store,
+    # `sold_transactions`. `all` / None = no is_active gate. Rendered by
+    # `_lifecycle_where`, the one place Toolkit rule #4's "active"
+    # definition lives.
     lifecycle: Literal["active", "delisted", "all"] | None = None
     floor_band: int | None = None
     portals: list[str] | None = None
