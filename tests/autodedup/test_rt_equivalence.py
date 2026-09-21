@@ -26,7 +26,9 @@ from autodedup.rt_equivalence import (
     EQUIVALENCE_FILE,
     SCORE_DEFECT,
     SCORE_ONLY_MAX,
+    Pair,
     run_equivalence,
+    score_from_vector,
 )
 from autodedup.store_score import narrow
 from tests.autodedup.fake_pg import FakePg
@@ -760,6 +762,22 @@ def test_a_float4_store_does_not_excuse_a_score_that_does_not_follow(tmp_path) -
     assert [defect["defect"] for defect in out["defects"]] == ["store_score_precision",
                                                                SCORE_DEFECT]
     assert out["verdict"]["ok"] is False
+
+
+@pytest.mark.parametrize("stored", [float("nan"), None])
+def test_a_score_that_is_not_a_number_does_not_read_as_ok(stored) -> None:
+    """Asked of the rule directly, because neither row reaches it through a comparison: a NaN
+    compares False against every tolerance (`differences` does not call it a difference
+    either), and a NULL score is no answer at all. So the "ok" branch is the one that has to
+    be EARNED — `gap <= tol` — rather than the defect branch being the one that has to fire."""
+    pair = Pair([1, 2, stored, "merge", None, "model", None, 3, MODEL])
+    pair.features = {"tfidf_cos": 0.4}
+
+    status, recomputed, _ = score_from_vector(
+        pair, score_type="double precision", tol=1e-6, models={})
+
+    assert status == SCORE_DEFECT
+    assert recomputed == pytest.approx(_score_of(_feats(tfidf_cos=0.4)))
 
 
 def test_the_report_says_how_many_rows_were_checked_and_how_many_were_exempt(tmp_path):

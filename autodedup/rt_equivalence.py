@@ -402,7 +402,10 @@ def score_from_vector(pair: Pair, *, score_type: str, tol: float,
     if pair.score is None:
         return SCORE_DEFECT, recomputed, None
     gap = abs(recomputed - _narrowed(pair.score, score_type))
-    return (SCORE_DEFECT if gap > tol else "ok"), recomputed, gap
+    # The "ok" branch is the one that has to be EARNED (`gap <= tol`) rather than the defect
+    # branch (`gap > tol`): a NaN compares False both ways, and a stored NaN reading "ok" is
+    # exactly the silent pass this rule exists to stop.
+    return ("ok" if gap <= tol else SCORE_DEFECT), recomputed, gap
 
 
 def score_self_consistency(keys: Sequence[tuple[int, int]], live: Mapping[Any, Pair],
