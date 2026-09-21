@@ -227,6 +227,29 @@ def _printed_unit_codes(text: str, wide: bool) -> frozenset[str]:
     return frozenset(out) if len(out) <= UNIT_CODE_MAX_PER_ADVERT else frozenset()
 
 
+# --- the storey the BODY prints (E166) -----------------------------------------------------
+# `1. NP` is the Czech ground floor and `1. patro` stands above it, so the two vocabularies are
+# one scale with an offset of one. Read from the prose because the stored column is null on one
+# side of a third of the corpus — and read as a set, because a body names the building's storeys
+# as well as this unit's.
+_PROSE_NP = re.compile(r"\b(\d{1,2})\.?\s*(?:np\b|nadzemnim?\s+podlazi)")
+_PROSE_PATRO = re.compile(r"\b(\d{1,2})\.?\s*patr")
+PROSE_FLOOR_MAX: int = 40
+
+
+def printed_floors(text: str | None) -> frozenset[int]:
+    """Every storey the body prints, on the NP scale (`1` is the ground floor)."""
+    return _printed_floors(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_floors(text: str) -> frozenset[int]:
+    folded = fold(text)
+    out = {int(match.group(1)) for match in _PROSE_NP.finditer(folded)}
+    out |= {int(match.group(1)) + 1 for match in _PROSE_PATRO.finditer(folded)}
+    return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
+
+
 # --- printed land-register parcels (E140) --------------------------------------------------
 # A Czech land or house advert prints the parcel the object stands on, and that number IS the
 # object's identity in the land register: two adverts printing disjoint parcels are two

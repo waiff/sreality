@@ -239,9 +239,6 @@ HEALED = (
 )
 
 STILL_READ = (
-    # Two flats of Solné mlýny: the storeys really differ.
-    ("Byt o výměře 52 m2, balkón, se nachází ve 3.NP domu B s výtahem a je orientován na jih.",
-     "Byt o výměře 52 m2, balkón, se nachází ve 4.NP domu B s výtahem a je orientován na jih."),
     # Two plots of one parcelling.
     ("Nabízíme k prodeji stavební pozemek s označením 8 o výměře 1081 m2, který vznikne.",
      "Nabízíme k prodeji stavební pozemek s označením 9 o výměře 1081 m2, který vznikne."),
@@ -272,6 +269,37 @@ def test_the_heal_closes_the_named_false_splits(left: str, right: str) -> None:
 def test_the_heal_keeps_every_reading_that_names_a_unit(left: str, right: str) -> None:
     left, right = _pad(left), _pad(right)
     assert aligned_difference(left, right, 0.6, heal=True) is not None
+
+
+def test_the_storey_is_left_to_its_own_fact() -> None:
+    """E166: reading a storey inside `body_align` newly split 126 certain duplicates."""
+    left = _pad("Byt o výměře 52 m2, balkón, se nachází ve 3.NP domu B s výtahem.")
+    right = _pad("Byt o výměře 52 m2, balkón, se nachází ve 4.NP domu B s výtahem.")
+    assert aligned_difference(left, right, 0.6, heal=True) is None
+    a = listing(1, description=left, source="idnes")
+    b = listing(2, description=right, source="idnes")
+    names = {fact.name for fact in distinguishing_facts(a, b, None, s2())}
+    assert "prose_floor" in names
+    assert "prose_floor" not in {
+        fact.name for fact in distinguishing_facts(a, b, None, shipped())
+    }
+
+
+def test_np_and_patro_are_one_storey_for_the_prose_fact() -> None:
+    a = listing(1, description=_pad("Byt se nachází ve 2. NP cihlového domu s výtahem."))
+    b = listing(2, description=_pad("Byt se nachází v 1. patře cihlového domu s výtahem."))
+    assert "prose_floor" not in {
+        fact.name for fact in distinguishing_facts(a, b, None, s2())
+    }
+
+
+def test_a_one_storey_gap_across_portals_is_vocabulary_not_a_fact() -> None:
+    a = listing(1, description=_pad("Byt se nachází ve 2. NP cihlového domu."), source="idnes")
+    b = listing(2, description=_pad("Byt se nachází ve 3. NP cihlového domu."),
+                source="bezrealitky")
+    assert "prose_floor" not in {
+        fact.name for fact in distinguishing_facts(a, b, None, s2())
+    }
 
 
 def test_the_heal_leaves_square_metres_alone() -> None:
@@ -410,7 +438,7 @@ def test_every_shipped_arm_is_unchanged_by_the_w17_fields() -> None:
         "demonstrate_price_exact", "demonstrate_area_printed_decides",
         "d43_printed_area_decimals_decide", "d43_unit_codes", "d43_unit_codes_wide",
         "demonstrate_onesided", "d43_body_align_heal", "demonstrate_recover_missing",
-        "d43_two_unit_requires_colive",
+        "d43_two_unit_requires_colive", "d43_prose_floor",
     )
     for name in ("w13", "w14", "w15", "w16_s", "w16_m", "w16_l"):
         row = json.loads((SETTINGS_DIR / f"{name}.json").read_text())
@@ -431,6 +459,7 @@ def test_w17_is_the_s_arm_plus_the_new_readings() -> None:
                 "d43_printed_area_decimals_decide", "d43_unit_codes", "d43_unit_codes_wide",
                 "demonstrate_onesided", "development_context_mode", "d43_body_align_heal",
                 "demonstrate_recover_missing", "d43_two_unit_requires_colive",
+                "d43_prose_floor",
             }, key
     cfg = Settings.from_json(SETTINGS_DIR / "w17.json")
     assert cfg.development_context_mode == "narrow"

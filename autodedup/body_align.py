@@ -37,8 +37,6 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import lru_cache
 
-from html import unescape
-
 from autodedup.text_facts import BODY_CACHE, mask_codes
 
 # Below this many tokens a body is a headline, and two headlines align on nothing meaningful.
@@ -107,7 +105,7 @@ _HEAL_MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("[DOBA]", re.compile(r"\b\d{1,3}\s*(?:mesic\w*|let\b|lety\b|rok\w*)")),
     ("[POCET]", re.compile(r"\b\d{1,2}\s?x\b")),
     ("[ROZSAH]", re.compile(r"\b\d{1,5}(?:[.,]\d+)?\s*[-–]\s*\d{1,5}(?:[.,]\d+)?")),
-    ("[ROZMER]", re.compile(r"\b\d{1,4}(?:[.,]\d+)?\s*m\b(?!2)")),
+    ("[ROZMER]", re.compile(r"\b\d{1,4}(?:[.,]\d+)?\s*m\b(?!2|\s*&)")),
 )
 # One storey, two vocabularies. `2. NP` and `1. patro` are the same floor of one flat — the
 # Czech ground floor is `1. NP` and `přízemí`, and the first `patro` stands above it. Normalised
@@ -117,12 +115,16 @@ _PATRO = re.compile(r"\b(\d{1,2})\.?\s*patr\w*")
 
 
 def _storey(level: int) -> str:
-    """The storey on ONE scale, written as a token the reader still reads.
+    """The storey as a sentinel this reader does not read.
 
-    Not a `[...]` sentinel: `3. NP` against `4. NP` is two flats of Solné mlýny and must stay a
-    difference. `pdl3` has the shape of a unit code, so the two are compared whole and exactly —
-    `2. NP` and `1. patro` both become `pdl2` and read as equal."""
-    return f" pdl{min(max(level, 0), 60)} "
+    A storey is the `floor` fact's business, and E133/E145 measured what reading it RAW costs:
+    45 % of cross-portal known duplicates carry a one-storey gap, because two portals disagree
+    about `přízemí`. Normalising `2. NP` and `1. patro` onto one scale and leaving the token
+    READABLE newly split 53 cohort-3 and 73 cohort-4 certain duplicates on nothing but a
+    storey — more than the whole heal closed. So the sentinel carries the level (two adverts
+    whose storeys differ no longer align as equal) and carries no digit, and the storey the
+    BODY prints is read by `prose_floor`, under the same convention rule as the column."""
+    return f" [np{chr(ord('a') + min(max(level, 0), 25))}] "
 
 
 _TOKEN = re.compile(r"[a-z0-9]+(?:[./,-][a-z0-9]+)*|\[[a-z]+\]")
@@ -145,13 +147,7 @@ def _fold(text: str) -> str:
 
 def mask(text: str, heal: bool = False) -> str:
     """The body with every field that legitimately moves between two postings blanked."""
-    source = mask_codes(text) or ""
-    # E163: one realitymix body publishes `m&#178;` — the entity, not the character — and the
-    # metre mask then reads `20,6 m` as a dimension and leaves `178` standing as a number. Every
-    # other reader in this package unescapes first (`text_facts.fact_text`); this one did not.
-    if heal:
-        source = unescape(source)
-    out = _SPACED_THOUSANDS.sub("", _fold(source))
+    out = _SPACED_THOUSANDS.sub("", _fold(mask_codes(text) or ""))
     out = out.replace("[kod]", " [kod] ")
     if heal:
         out = _NP.sub(lambda m: _storey(int(m.group(1))), out)

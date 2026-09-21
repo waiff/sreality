@@ -35,6 +35,7 @@
  "d43_promote": true,
  "d43_promote_min_agreeing": 2,
  "d43_promote_photo_alternative": true,
+ "d43_prose_floor": true,
  "d43_prose_obec": true,
  "d43_prose_street": true,
  "d43_street_min_distance_m": 15.0,

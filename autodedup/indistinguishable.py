@@ -85,6 +85,7 @@ from autodedup.text_facts import (
     orientations,
     parcel_numbers,
     prose_streets,
+    printed_floors,
     stated_areas,
     streets_agree,
     printed_unit_codes,
@@ -154,6 +155,7 @@ FACT_NAMES: tuple[str, ...] = (
     "obec_prose",
     "printed_area",
     "unit_code",
+    "prose_floor",
 )
 
 
@@ -656,6 +658,20 @@ def distinguishing_facts(
     # a keyword and truncates at the word boundary, so `B2.2.1` against `B1.2.1` read B2 against
     # B1 under a keyword and nothing at all without one. Two segments minimum — a bare `B2` is
     # a building and every flat in it shares it — and an empty set is never a conflict.
+    # E166: the storey the BODY prints, read under the SAME rule as the column — a gap of two
+    # is a fact anywhere, a gap of one only inside one feed, because `přízemí` is written both
+    # ways and 45 % of cross-portal known duplicates carry a one-storey gap for that reason. It
+    # is read because the stored column is null on one side of a third of the corpus, and
+    # because `body_align` must not read a storey (E163: doing so newly split 126 certain
+    # duplicates of two cohorts on nothing else).
+    if cfg.d43_prose_floor:
+        floors_a, floors_b = printed_floors(a.description), printed_floors(b.description)
+        if floors_a and floors_b and not (floors_a & floors_b):
+            prose_gap = min(abs(x - y) for x in floors_a for y in floors_b)
+            feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
+            if prose_gap >= 2 or (prose_gap == 1 and feed):
+                add("prose_floor", sorted(floors_a), sorted(floors_b))
+
     if cfg.d43_unit_codes:
         codes_a = printed_unit_codes(a.description, cfg.d43_unit_codes_wide)
         codes_b = printed_unit_codes(b.description, cfg.d43_unit_codes_wide)

@@ -536,6 +536,8 @@ class Settings:
     # E165: E143's two-unit signature reads two numbers as SIMULTANEOUS. Two sequential
     # postings never were, and a price cut plus a re-parsed area is what a re-post looks like.
     d43_two_unit_requires_colive: bool = False
+    # E166: the storey the BODY prints, read under the same convention rule as the column.
+    d43_prose_floor: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.

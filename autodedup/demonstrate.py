@@ -432,15 +432,10 @@ def _one_template(a: Listing, b: Listing, settings: Settings) -> bool:
 
 
 def _printed_floors(listing: Listing) -> frozenset[int]:
-    """Every storey the BODY prints as this unit's, `1. NP` and `1. patro` on one scale."""
-    import re
+    """Every storey the BODY prints as this unit's — `text_facts.printed_floors`, one spelling."""
+    from autodedup.text_facts import printed_floors
 
-    text = fold(listing.description or "")
-    out = {int(match.group(1))
-           for match in re.finditer(r"\b(\d{1,2})\.?\s*(?:np\b|nadzemnim?\s+podlazi)", text)}
-    out |= {int(match.group(1)) + 1
-            for match in re.finditer(r"\b(\d{1,2})\.?\s*patr", text)}
-    return frozenset(value for value in out if 0 < value <= 40)
+    return printed_floors(listing.description)
 
 
 def onesided_fact(a: Listing, b: Listing, settings: Settings) -> str | None:
