@@ -147,6 +147,21 @@ def _label(value: str) -> str:
     return value
 
 
+def test_the_contract_declares_every_typed_column_of_every_portal() -> None:
+    """The contract's own shape. Asserted here and not at import time because
+    `field_census` reaches `scraper.db`, which pulls psycopg, and every parser imports the
+    contract — a parse must not need a database driver (CLAUDE.md's file split)."""
+    assert set(contract.CONTRACT) == set(contract.IGNORED), (
+        "a portal is missing from one of the two tables"
+    )
+    fields = set(field_census.ATTRIBUTE_FIELDS)
+    for portal, cells in sorted(contract.CONTRACT.items()):
+        assert set(cells) == fields, (
+            f"{portal}: the contract must declare every typed column "
+            f"({sorted(fields ^ set(cells))})"
+        )
+
+
 def test_known_gaps_cover_every_declared_zero() -> None:
     """A cell with no producer declares whether a census key would fill it."""
     gaps = contract.known_gaps()

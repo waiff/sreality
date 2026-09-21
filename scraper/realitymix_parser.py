@@ -39,7 +39,7 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import street, vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
-from scraper.attribute_contract import source_value
+from scraper.attribute_contract import source_value, source_values
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 
@@ -446,33 +446,33 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """realitymix's area cells, in ITS precedence — spelled here once and nowhere else.
+    """realitymix's area slots — the KEYS are the contract's, this owns the measure.
 
     `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
     reads it off `raw_json['params']`, which is this parser's own latest reading of the
     same page. realitymix renders its spec values UNSPACED, so the truncation this heal
     repairs reached its rows through the title fallback below.
+
+    The `plocha pozemku` / `výměra pozemku` / `podlahová plocha` fallbacks and the
+    `plocha zahrady` garden read are gone: realitymix emits none of them on any row of the
+    checked-in census or of 3,700 stored rows sampled at both ends of the corpus. The
+    garden measure it DOES publish is spelled `zahrada` and is W4's to wire (gate A1).
     """
-    usable_area = parse_area_text(params.get("užitná plocha"))
-    estate_area = parse_area_text(
-        params.get("plocha parcely")
-        or params.get("plocha pozemku")
-        or params.get("výměra pozemku")
-    )
+    usable_text, floor_text, total_text, plot_text = source_values(
+        SOURCE, "area_m2", params)
+    usable_area = parse_area_text(usable_text)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=usable_area,
-        floor=parse_area_text(
-            params.get("celková podlahová plocha") or params.get("podlahová plocha")
-        ),
-        total=parse_area_text(params.get("plocha")),
+        floor=parse_area_text(floor_text),
+        total=parse_area_text(total_text),
         plot=estate_area,
         fallback=parse_area_text(title),
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis, usable_area=usable_area,
-        estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        estate_area=estate_area, garden_area=None,
     )
 
 
@@ -485,9 +485,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
 
     title = _text(tree.css_first("h1")) or ""
 
-    price_czk, price_unit = _parse_price(
-        params.get("cena") or _detail_price_text(tree), category_type,
-    )
+    price_czk, price_unit = _parse_price(_detail_price_text(tree), category_type)
 
     lat, lon, coord_provenance = _resolve_coords(html)
     street_raw, obec, okres, full_address = _address_parts(html)

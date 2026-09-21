@@ -36,7 +36,7 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import street, vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
-from scraper.attribute_contract import source_value
+from scraper.attribute_contract import source_value, source_values
 from scraper.price_text import is_per_area_price
 from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
@@ -473,35 +473,34 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """ceskereality's area cells, in ITS precedence — spelled here once and nowhere else.
+    """ceskereality's area slots — the KEYS are the contract's, this owns the measure.
 
     `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
     reads it off `raw_json['params']`, which is this parser's own latest reading of the
     same page. The headline goes through the shared resolver on SEPARATE measures.
 
-    `usable_area` IS THE "PLOCHA UŽITNÁ" CELL AND NOTHING ELSE (W21). It used to end
-    `... or params.get("plocha")`, so a page carrying only the bare "Plocha" — the total —
-    wrote that number into the column every consumer reads as the užitná measure: the same
-    collapse the headline resolver exists to prevent, one column over. "Plocha" still
-    reaches the headline through its own `total` slot, stamped `'total'`; what it no longer
-    does is impersonate a užitná in a side column. (The two spellings that DO stay are one
-    label: ceskereality renders it "Plocha užitná" on some templates and "Užitná plocha" on
-    others.)
+    `usable_area` IS THE "PLOCHA UŽITNÁ" CELL AND NOTHING ELSE (W21): a page carrying only
+    the bare "Plocha" — the total — must not write that number into the column every
+    consumer reads as the užitná measure.
+
+    The `užitná plocha`, `plocha` and `plocha zahrady` fallbacks this used to carry are
+    gone: ceskereality emits none of the three on any row of the checked-in census or of
+    4,500 stored rows sampled at both ends of the corpus, so the `total` slot and the
+    garden column were unreachable, and the contract now names only the two keys that are
+    real (gate A1).
     """
-    usable = parse_area_text(
-        params.get("plocha užitná") or params.get("užitná plocha"))
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    usable_text, plot_text = source_values(SOURCE, "area_m2", params)
+    usable = parse_area_text(usable_text)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=usable,
-        total=parse_area_text(params.get("plocha")),
         plot=estate_area,
         fallback=parse_area_text(title),
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
-        usable_area=usable, estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        usable_area=usable, estate_area=estate_area, garden_area=None,
     )
 
 

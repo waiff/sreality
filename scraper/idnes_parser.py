@@ -500,7 +500,7 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """idnes's area cells, in ITS precedence — spelled here once and nowhere else.
+    """idnes's area slots — the KEYS are the contract's, this owns the measure.
 
     Keys are the lowercased spec-`<dl>` labels `_detail_params` produces, which is also how
     `parse_detail` stores them in `raw_json['params']`: the live parse reads this off the
@@ -508,12 +508,11 @@ def areas_from_params(
     page. Two copies of a key order is the same defect as two copies of the number grammar,
     one level up (rule 21).
 
-    `usable_area` IS THE "UŽITNÁ PLOCHA" CELL AND NOTHING ELSE (W21). It used to be
-    `užitná or podlahová or plocha` — the same collapse the headline resolver exists to
-    prevent, one column over: a page stating only "Podlahová plocha" or a bare "Plocha"
-    wrote that number into the column every consumer reads as the užitná measure. Those two
-    labels still reach the headline through their own typed slots, carrying their own basis;
-    what they no longer do is impersonate a third label in a side column.
+    `usable_area` IS THE "UŽITNÁ PLOCHA" CELL AND NOTHING ELSE (W21): a page stating only
+    "Podlahová plocha" or a bare "Plocha" must not write that number into the column every
+    consumer reads as the užitná measure. Neither label reaches the headline any more
+    either — idnes emits neither on any row of the checked-in census or of the newest 2,500
+    stored rows, so those two slots were unreachable and the contract drops them (gate A1).
 
     "Plocha pozemku" is the parcel: it reaches the resolver as `plot` (before W17 it went
     only to `estate_area`, so 5,292 land rows whose title states no area carried no headline
@@ -523,20 +522,19 @@ def areas_from_params(
     `MAX_AREA_M2` and `PortalAreas` bounds the three side columns at `MAX_SIDE_AREA_M2` —
     both BEFORE the content hash, which is the whole point (rules 2/8).
     """
-    usable = parse_area_text(params.get("užitná plocha"))
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    usable_text, plot_text = source_values(SOURCE, "area_m2", params)
+    usable = parse_area_text(usable_text)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=usable,
-        floor=parse_area_text(params.get("podlahová plocha")),
-        total=parse_area_text(params.get("plocha")),
         plot=estate_area,
         fallback=parse_area_text(title),
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
         usable_area=usable, estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        garden_area=parse_area_text(source_value(SOURCE, "garden_area", params)),
     )
 
 

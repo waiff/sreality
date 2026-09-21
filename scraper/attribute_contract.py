@@ -35,8 +35,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping
 
-from scraper.db import LISTING_COLUMNS
-from scraper.field_census import ATTRIBUTE_FIELDS
 from scraper.vocabulary import fold
 
 Producer = Literal["structured", "text", "derived", "none"]
@@ -63,18 +61,13 @@ def _cell(producer: Producer, *keys: str, absence: Absence = "unknown",
 # sold advert, and spells "not specified" as a leading dash. Both are absence, not value.
 _SREALITY_UNSET = ("- nezadáno", "- vyber", "Rezervováno", "Prodáno")
 
-# The areas every portal's `areas_from_params` reads. Declared so the A2 gate sees them as
-# READ (they are — by `scraper.area`, which owns the measure) without this table claiming
-# to own the area grammar.
-_CR_AREAS = ("plocha užitná", "plocha obytná", "plocha celková", "plocha pozemku",
-             "plocha zastavěná")
-_RM_AREAS = ("užitná plocha", "celková podlahová plocha", "celková plocha",
-             "plocha parcely", "plocha")
-_RX_AREAS = ("uzitna plocha", "celkova plocha", "plocha parcely", "zastavena plocha",
-             "plocha zahrady")
-_MX_AREAS = ("plocha užitná", "plocha podlahová", "plocha pozemku")
-_ID_AREAS = ("užitná plocha", "celková plocha", "plocha pozemku", "zastavěná plocha",
-             "plocha zahrady")
+# `area_m2` on the HTML portals is the one cell whose keys are a SLOT ORDER rather than a
+# precedence: `scraper.area.derive_headline_area` takes the portal's užitná, its floor or
+# total measure and its parcel as separate arguments and picks between them by category.
+# Each `areas_from_params` unpacks `source_values(SOURCE, "area_m2", params)` in exactly
+# the order declared below, so the cell is the only declaration of those keys. The shared
+# tuples this replaced were a hand-written restatement that named seven keys no parser read
+# (laundering them past gate A2) while omitting five it did.
 
 CONTRACT: dict[str, dict[str, Cell]] = {
     # --- sreality: its own flattened JSON estate ---------------------------
@@ -182,7 +175,8 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "price_czk": _cell("structured", "cena",
                            note="the JSON-LD offer wins where it is present"),
         "price_unit": _cell("derived"),
-        "area_m2": _cell("structured", *_CR_AREAS),
+        "area_m2": _cell("structured", "plocha užitná", "plocha pozemku",
+                         note="the (usable, plot) slot order derive_headline_area takes"),
         "area_basis": _cell("derived"),
         "disposition": _cell("derived", note="the h1 title; the portal ships no "
                              "`dispozice` cell on any page of a 1,000-row census"),
@@ -194,8 +188,8 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "konstrukce"),
         "condition": _cell("structured", "stav nemovitosti"),
         "energy_rating": _cell("structured", "energetická náročnost"),
-        "estate_area": _cell("structured", *_CR_AREAS),
-        "usable_area": _cell("structured", *_CR_AREAS),
+        "estate_area": _cell("structured", "plocha pozemku"),
+        "usable_area": _cell("structured", "plocha užitná"),
         "garden_area": _cell("none", gap=None),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None),
@@ -213,7 +207,8 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "price_czk": _cell("structured", "cena",
                            note="the .b-detail__price element wins where it is present"),
         "price_unit": _cell("derived"),
-        "area_m2": _cell("structured", *_ID_AREAS),
+        "area_m2": _cell("structured", "užitná plocha", "plocha pozemku",
+                         note="the (usable, plot) slot order derive_headline_area takes"),
         "area_basis": _cell("derived"),
         "disposition": _cell("derived", note="the h1 title"),
         "floor": _cell("structured", "podlaží"),
@@ -224,9 +219,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "konstrukce budovy"),
         "condition": _cell("structured", "stav bytu", "stav budovy"),
         "energy_rating": _cell("structured", "penb"),
-        "estate_area": _cell("structured", *_ID_AREAS),
-        "usable_area": _cell("structured", *_ID_AREAS),
-        "garden_area": _cell("structured", *_ID_AREAS),
+        "estate_area": _cell("structured", "plocha pozemku"),
+        "usable_area": _cell("structured", "užitná plocha"),
+        "garden_area": _cell("structured", "plocha zahrady"),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("derived", note="a keyword match over the og:title"),
         "furnished": _cell("structured", "vybavení", "vybavení domu"),
@@ -242,7 +237,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "category_type": _cell("derived"),
         "price_czk": _cell("derived", note="the div.price element"),
         "price_unit": _cell("derived"),
-        "area_m2": _cell("structured", *_MX_AREAS),
+        "area_m2": _cell("structured", "plocha užitná", "plocha podlahová",
+                         "plocha pozemku",
+                         note="the (usable, floor, plot) slot order"),
         "area_basis": _cell("derived"),
         "disposition": _cell("derived", note="the h3 title"),
         "floor": _cell("structured", "podlaží"),
@@ -254,8 +251,8 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "condition": _cell("structured", "stav objektu"),
         "energy_rating": _cell("structured", "penb",
                                note="a whole-page `PENB: X` scan is the last resort"),
-        "estate_area": _cell("structured", *_MX_AREAS),
-        "usable_area": _cell("structured", *_MX_AREAS),
+        "estate_area": _cell("structured", "plocha pozemku"),
+        "usable_area": _cell("structured", "plocha užitná"),
         "garden_area": _cell("none", gap=None),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None,
@@ -273,7 +270,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "category_type": _cell("derived"),
         "price_czk": _cell("derived", note="the short-props price row"),
         "price_unit": _cell("derived"),
-        "area_m2": _cell("structured", *_RM_AREAS),
+        "area_m2": _cell("structured", "užitná plocha", "celková podlahová plocha",
+                         "plocha", "plocha parcely",
+                         note="the (usable, floor, total, plot) slot order"),
         "area_basis": _cell("derived"),
         "disposition": _cell("structured", "dispozice bytu"),
         "floor": _cell("structured", "číslo podlaží v domě"),
@@ -284,10 +283,10 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "druh objektu"),
         "condition": _cell("structured", "stav objektu"),
         "energy_rating": _cell("structured", "energetická náročnost budovy"),
-        "estate_area": _cell("structured", *_RM_AREAS),
-        "usable_area": _cell("structured", *_RM_AREAS),
-        # `areas_from_params` reads `plocha zahrady`, which realitymix does not emit —
-        # the live key is `zahrada`, and the column is 0-filled on all 48,757 rows (W4).
+        "estate_area": _cell("structured", "plocha parcely"),
+        "usable_area": _cell("structured", "užitná plocha"),
+        # The live key is `zahrada`; `areas_from_params` used to read `plocha zahrady`,
+        # which realitymix emits on no row, so the column is 0-filled on all 48,757 (W4).
         "garden_area": _cell("none", gap="zahrada"),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None),
@@ -305,7 +304,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "price_czk": _cell("derived",
                            note="data-advert-price, else the .pd-table price cell"),
         "price_unit": _cell("derived"),
-        "area_m2": _cell("structured", *_RX_AREAS),
+        "area_m2": _cell("structured", "uzitna plocha", "celkova plocha",
+                         "plocha parcely",
+                         note="the (usable, total, plot) slot order"),
         "area_basis": _cell("derived"),
         "disposition": _cell("structured", "dispozice"),
         "floor": _cell("structured", "cislo podlazi"),
@@ -317,9 +318,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "building_type": _cell("structured", "druh objektu"),
         "condition": _cell("structured", "stav objektu"),
         "energy_rating": _cell("structured", "energeticka narocnost budovy"),
-        "estate_area": _cell("structured", *_RX_AREAS),
-        "usable_area": _cell("structured", *_RX_AREAS),
-        "garden_area": _cell("structured", *_RX_AREAS),
+        "estate_area": _cell("structured", "plocha parcely"),
+        "usable_area": _cell("structured", "uzitna plocha"),
+        "garden_area": _cell("structured", "plocha zahrady"),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("structured", "typ nemovitosti"),
         "furnished": _cell("structured", "vybaveno"),
@@ -462,6 +463,9 @@ IGNORED: dict[str, dict[str, str]] = {
         "druhy bytů": "no column", "okna": "no column", "zateplení": "no column",
         "wc": "no column", "parkování": "W4 wires it to has_parking / garage",
         "vybavení pronájem": "W4 wires it to furnished",
+        "plocha obytná": "no column (a living area, not the užitná measure)",
+        "plocha celková": "no column (a whole-building total, not the užitná measure)",
+        "plocha zastavěná": "no column (a built-up area, not a headline measure)",
     },
     "idnes": {
         "číslo zakázky": "the portal's own reference number",
@@ -484,6 +488,7 @@ IGNORED: dict[str, dict[str, str]] = {
         "podlaží umístění": "a duplicate of `podlaží` (W8 territory)",
         "počet podzemních podlaží": "no column",
         "připojení k internetu": "no column",
+        "zastavěná plocha": "no column (a built-up area, not a headline measure)",
     },
     "maxima": {
         "id zakázky": "the portal's own reference number", "topení": "no column",
@@ -511,6 +516,7 @@ IGNORED: dict[str, dict[str, str]] = {
         "typ pronájmu": "no column", "občanská vybavenost": "no column",
         "popis vybavení": "no column", "sklep": "W4 wires it to cellar",
         "zastavěná plocha": "no column (a built-up area, not a headline measure)",
+        "celková plocha": "no column (a whole-building total, not the užitná measure)",
         "zahrada": "W4 wires it to garden_area",
     },
     "remax": {
@@ -528,6 +534,7 @@ IGNORED: dict[str, dict[str, str]] = {
         "vybaveni kancelari": "no column", "plocha kancelari": "no column",
         "merna vypoctena rocni spotreba energie v kwh/m²/rok": "no column",
         "pocet parkovacich mist": "W4 wires it to parking_lots",
+        "zastavena plocha": "no column (a built-up area, not a headline measure)",
     },
     "bazos": {
         "id": "identity", "title": "the text lane's substrate",
@@ -536,19 +543,6 @@ IGNORED: dict[str, dict[str, str]] = {
         "views": "no column", "image_urls": "images phase",
     },
 }
-
-# Every census key is a key, an ignored key, or a gate failure. `listings.description` is
-# the census's own probe for the description column, not a portal key.
-CENSUS_NON_KEYS: frozenset[str] = frozenset({"listings.description"})
-
-assert set(CONTRACT) == set(IGNORED), "a portal is missing from one of the two tables"
-for _portal, _cells in CONTRACT.items():
-    assert set(_cells) == set(ATTRIBUTE_FIELDS), (
-        f"{_portal}: the contract must declare every typed column "
-        f"({sorted(set(ATTRIBUTE_FIELDS) ^ set(_cells))})"
-    )
-assert set(ATTRIBUTE_FIELDS) <= set(LISTING_COLUMNS)
-
 
 def cell(portal: str, field: str) -> Cell:
     return CONTRACT[portal][field]

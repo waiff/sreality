@@ -32,7 +32,7 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
-from scraper.attribute_contract import source_value
+from scraper.attribute_contract import source_value, source_values
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -333,16 +333,18 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """maxima's area cells, in ITS precedence — spelled here once and nowhere else.
+    """maxima's area slots — the KEYS are the contract's, this owns the measure.
 
     `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
     reads it off `raw_json['params']`, which is this parser's own latest reading of the
     same page. maxima renders a no-break space around its unit and inside a thousands
     group alike, which is what the naive grammar truncated.
+
+    The `užitná plocha` / `podlahová plocha` second spellings and `plocha zahrady` are
+    gone: maxima emits none of them on any of its 556 stored rows (gate A1).
     """
-    usable_text = params.get("plocha užitná") or params.get("užitná plocha")
-    floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    usable_text, floor_text, plot_text = source_values(SOURCE, "area_m2", params)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=parse_area_text(usable_text),
@@ -353,7 +355,7 @@ def areas_from_params(
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
         usable_area=parse_area_text(usable_text), estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        garden_area=None,
     )
 
 

@@ -338,11 +338,12 @@ def test_uzitna_beats_bare_plocha_and_says_so():
     assert (listing.area_m2, listing.area_basis) == (41.0, "usable")
 
 
-def test_bare_plocha_alone_is_a_total_not_an_uzitna():
-    # The pre-collapse the resolver exists to prevent: ceskereality's usable_area
-    # column has always folded "Plocha užitná" / "Plocha" into ONE string, so a page
-    # carrying only the bare "Plocha" used to reach area_m2 stamped as an interior
-    # užitná. Separate slots, separate labels.
+def test_a_bare_plocha_reaches_no_column_at_all():
+    # W21 guarded the collapse where a bare "Plocha" (the total) impersonated a užitná.
+    # The key is DEAD on this portal — absent from the census, from 4,500 stored rows
+    # sampled at both ends of the corpus, and from `area_basis`, which has never held
+    # `total` on any of 101,127 ceskereality rows — so it is no longer read at all and
+    # the collapse is closed by construction (gate A1).
     cell = '<div class="i-info"><span class="i-info__title">{}</span>' \
            '<span class="i-info__value"> {} </span></div>'
     html = DETAIL_HTML.replace(
@@ -351,12 +352,8 @@ def test_bare_plocha_alone_is_a_total_not_an_uzitna():
     listing = parse_detail(
         html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
     )
-    assert (listing.area_m2, listing.area_basis) == (58.0, "total")
-    # W21: and it does not reach `usable_area` either. That column used to end
-    # `... or params.get("plocha")`, which is the same collapse one column over — the
-    # bare total impersonating a užitná in the field every consumer reads as the
-    # interior measure. It reaches the HEADLINE under its own basis; nothing else.
     assert listing.usable_area is None
+    assert listing.area_basis != "usable"
 
 
 def _with_cena(cell_text: str) -> str:

@@ -43,7 +43,7 @@ from scraper.area import (
     derive_headline_area,
     parse_area_text,
 )
-from scraper.attribute_contract import source_value
+from scraper.attribute_contract import source_value, source_values
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -543,7 +543,7 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """remax's area cells, in ITS precedence — spelled here once and nowhere else.
+    """remax's area slots — the KEYS are the contract's, this owns the measure.
 
     Keys are diacritics-stripped by `_norm_key`, which is also how they are stored in
     `raw_json['params']`: `parse_detail` reads this off a live page, and
@@ -554,11 +554,12 @@ def areas_from_params(
     remax spells the parcel "Plocha parcely" — not the "plocha pozemku" the other portals
     use, which appears on NO remax page (0 of 13,806 stored rows; the parcel label carries
     4,339 of them), so the plot arrived NULL on every listing and land got its headline from
-    the title instead of its own measure. One key, no dead fallback (W20).
+    the title instead of its own measure. One key, no dead fallback (W20) — and the bare
+    `plocha` the total slot used to fall back on is gone with it, absent from the census and
+    from the newest 2,500 stored rows alike (gate A1).
     """
-    usable_text = params.get("uzitna plocha")
-    total_text = params.get("celkova plocha") or params.get("plocha")
-    estate_area = parse_area_text(params.get("plocha parcely"))
+    usable_text, total_text, plot_text = source_values(SOURCE, "area_m2", params)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=parse_area_text(usable_text),
@@ -569,7 +570,7 @@ def areas_from_params(
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
         usable_area=parse_area_text(usable_text), estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        garden_area=parse_area_text(source_value(SOURCE, "garden_area", params)),
     )
 
 
