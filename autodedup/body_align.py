@@ -9,9 +9,9 @@ What does NOT change is the shape of the hazard: two adverts for two units of on
 written from ONE template, so they are word-identical everywhere except at the few positions
 that name the unit. So this module knows no form at all. It aligns the two token streams, and
 where the alignment says "here one says X and the other says Y", with agreeing context on both
-sides, it reads X and Y. A position is a fact only when at least one side carries a DIGIT or a
-code-like token, or is a street name — the alignment tells us WHERE to look and the token
-tells us whether what is written there can name a unit.
+sides, it reads X and Y. A position is a fact only when what stands there can NAME a unit — a
+code compared whole, or the numbers a token carries compared by the rounding rule. The
+alignment says WHERE to look and the token says whether what is written there can be a name.
 
 THE FOUR WAYS THIS COULD FIRE ON ONE UNIT, and what stops each:
 
@@ -67,16 +67,15 @@ _MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _TOKEN = re.compile(r"[a-z0-9]+(?:[./,-][a-z0-9]+)*|\[[a-z]+\]")
 _DIGIT = re.compile(r"\d")
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?$")
-# The street keyword, read on the FOLDED stream: the token that follows it is a name.
-_STREET_KEYWORD = re.compile(r"^(?:ulice|ulici|ulicich|ul|tride|trida|tr|namesti|nam)$")
-STREET_LOOKAHEAD: int = 2
+# The STREET is read by E151 (`text_facts.prose_streets`) and not here. This module works on a
+# folded stream with no capitals, so "the two tokens after `ulice`" was an adjective as often
+# as a name — `mimořádně` against `velmi` split one 120 m² flat two portals both carried.
 
 
 @dataclass(frozen=True, slots=True)
 class Token:
     text: str
     digit: bool
-    street: bool
 
 
 def _fold(text: str) -> str:
@@ -94,18 +93,10 @@ def mask(text: str) -> str:
 
 @lru_cache(maxsize=BODY_CACHE)
 def tokens(text: str) -> tuple[Token, ...]:
-    """The masked body as tokens, each carrying whether it can NAME a unit."""
-    raw = [match.group(0) for match in _TOKEN.finditer(mask(text))]
-    street_at: set[int] = set()
-    for index, word in enumerate(raw):
-        if _STREET_KEYWORD.match(word):
-            for offset in range(1, STREET_LOOKAHEAD + 1):
-                if index + offset < len(raw):
-                    street_at.add(index + offset)
+    """The masked body as tokens, each carrying whether it states a quantity or a code."""
     return tuple(
-        Token(word, bool(_DIGIT.search(word)) and not word.startswith("["),
-              index in street_at and not _DIGIT.search(word) and len(word) > 2)
-        for index, word in enumerate(raw)
+        Token(word, bool(_DIGIT.search(word)) and not word.startswith("["))
+        for word in (match.group(0) for match in _TOKEN.finditer(mask(text)))
     )
 
 
@@ -178,14 +169,6 @@ def rounding_equal(left: str, right: str) -> bool:
     except ValueError:
         return False
     return rounding_equal_values(a, _decimals(left), b, _decimals(right))
-
-
-def _differ_street(left: list[Token], right: list[Token]) -> tuple[str, str] | None:
-    lefts = [token.text for token in left if token.street]
-    rights = [token.text for token in right if token.street]
-    if not lefts or not rights or set(lefts) == set(rights):
-        return None
-    return (" ".join(lefts), " ".join(rights))
 
 
 @lru_cache(maxsize=BODY_CACHE)
@@ -275,8 +258,6 @@ def aligned_difference(
         segment_left, segment_right = list(left[i1:i2]), list(right[j1:j2])
         found = _differ_digit(segment_left, segment_right,
                               body_numbers(left_text), body_numbers(right_text))
-        if found is None:
-            found = _differ_street(segment_left, segment_right)
         if found is not None:
             return found
     return None

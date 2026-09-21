@@ -98,18 +98,34 @@ def _decimals_of(value: float) -> int:
     return len(text.split(".", 1)[1]) if "." in text else 0
 
 
+def degenerate_column(listing: Listing, land: bool) -> bool:
+    """Is the stored headline a number the body says belongs to something else?
+
+    bazos stores `area_m2 = 10.0` for a 76 m² apartment because it parsed `terasou o velikosti
+    10 m²`, and every reader that goes through the stored column is then blind to the 76. The
+    signature is exact and has to stay exact: the stored figure is one the body prints for an
+    ACCESSORY, and the body also prints a headline several times larger. A house whose body
+    names its 450 m² plot is not this — the column there is right and the plot is extra."""
+    stored = stored_headline_area(listing)
+    if stored is None:
+        return False
+    printed = body_headline_areas(listing, land)
+    if not printed or max(value for value, _ in printed) < stored * DEGENERATE_RATIO:
+        return False
+    return any(abs(value - stored) <= 0.5 * 10.0 ** -decimals
+               for value, decimals, scope in printed_areas(listing.description)
+               if scope == "accessory")
+
+
 def area_readings(listing: Listing, land: bool) -> frozenset[tuple[float, int]]:
     """Every TRUSTWORTHY reading of this advert's headline area, or empty when there is none.
 
-    The stored column is dropped wherever the body says it is not this unit's size — that is
+    The stored column is dropped only where the body says it is not this unit's size — that is
     the only way past the `stated_areas` clamp, which hides the body's own number behind a
     window centred on the very column that is wrong."""
     printed = body_headline_areas(listing, land)
     stored = stored_headline_area(listing)
-    if stored is None:
-        return printed
-    degenerate = bool(printed) and max(value for value, _ in printed) >= stored * DEGENERATE_RATIO
-    if degenerate:
+    if stored is None or degenerate_column(listing, land):
         return printed
     return printed | {(stored, _decimals_of(stored))}
 
