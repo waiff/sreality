@@ -235,3 +235,33 @@ def test_the_defaults_are_off_so_an_unset_row_is_g8bs_reading() -> None:
     assert default.demonstrate_identity is False
     assert default.corroboration == "off"
     assert default.demonstrate_cluster_price is False
+
+
+# ------------------------------------------------- the dev numbers, and what they must stay
+# Trial cohort dev side, `rebuild/trial16.json`, all three arms through the shipping package.
+TRIAL = {
+    "g8b": {"groups": 1310, "duplicates": 1490, "losses": 38, "operator_losses": 22},
+    "L": {"groups": 1311, "duplicates": 1472, "losses": 54, "operator_losses": 24},
+    "M": {"groups": 1246, "duplicates": 1405, "losses": 69, "operator_losses": 24},
+    "S": {"groups": 1251, "duplicates": 1396, "losses": 68, "operator_losses": 23},
+}
+# Cohort 3's 24 hand-confirmed FUSED groups still held WHOLE, and the certain duplicates each
+# arm keeps as a share of g8b's (`rebuild/cohort3/arms16.json`, `rebuild/region/arms16.json`).
+FUSED_STILL_WHOLE = {"g8b": 24, "L": 9, "M": 1, "S": 0}
+RECALL_PCT = {"L": (99.46, 98.83), "M": (94.61, 92.67), "S": (94.71, 92.90)}
+# 20 shuffles of the decision list AND of the rows it is built from (`rebuild/order16.json`).
+ORDER_INDEPENDENT = {"L": 1311, "M": 1246, "S": 1251}
+
+
+def test_the_ladder_is_ordered_by_what_it_refuses_and_by_what_it_costs() -> None:
+    """Whatever the numbers move to, the ORDER is the claim: every step down the ladder holds
+    fewer of cohort 3's confirmed fusions and keeps fewer duplicates."""
+    assert FUSED_STILL_WHOLE["g8b"] > FUSED_STILL_WHOLE["L"] > FUSED_STILL_WHOLE["M"] \
+        >= FUSED_STILL_WHOLE["S"]
+    assert TRIAL["g8b"]["duplicates"] > TRIAL["L"]["duplicates"] > TRIAL["M"]["duplicates"] \
+        > TRIAL["S"]["duplicates"]
+    for arm in ("L", "M", "S"):
+        assert TRIAL[arm]["operator_losses"] <= 30, arm
+        assert ORDER_INDEPENDENT[arm] == TRIAL[arm]["groups"], arm
+        region, cohort3 = RECALL_PCT[arm]
+        assert 90.0 < cohort3 <= region <= 100.0, arm
