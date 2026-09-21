@@ -835,7 +835,8 @@ def _score_defects(consistency: Mapping[str, Any]) -> list[dict[str, Any]]:
         out.append({
             "defect": SCORE_DEFECT, "side": side, "rows": rows,
             "checked": consistency["checked"], "max_gap": consistency["max_gap"],
-            "reason": f"{rows} of {consistency['checked']} {side} pair rows carry a score "
+            "reason": f"{rows} pair rows on the {side} side (of "
+                      f"{consistency['checked']} rows re-scored in all) carry a score "
                       "their own stored feature vector does not reproduce (max gap "
                       f"{consistency['max_gap']:.6g} against a tolerance of "
                       f"{consistency['tolerance']:.6g}) — `decide_pair` sets the score from "
