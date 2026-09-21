@@ -36,7 +36,9 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
    the snapshot rule and `dirty_properties`, and ~$65 of ~$207 was spent re-extracting on price-only snapshot churn.
    Its accuracy was never measured: floor ≈ 73 %, has_lift precision 92.9 %, `false` written from silence.
 3. **Structured portals drop facts they publish** — parser key mismatches certified by tests over hand-authored
-   fixtures: ceskereality reads `vybavení` / `počet podlaží` (never emitted; the live key is `vybavení pronájem`) and
+   fixtures: ceskereality reads `vybavení` / `počet podlaží` (never emitted; W4 measured the nearest live key,
+   `vybavení pronájem`, and it is an APPLIANCE list — "Kuchyňská linka, Myčka" — not the ano/ne/castecne state, so
+   that column stays a genuine portal gap) and
    ignores `parkování` (~27 % of pages); remax reads `balkon` / `lodzie` (never emitted) and ignores
    `pocet parkovacich mist`; realitymix never sets lift/cellar; idnes drops `total_floors` on 29.7k houses; mmreality
    `has_parking` (73.5 % true) matches "Parkety" (parquet flooring) and street parking.
@@ -65,7 +67,9 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 - **R3 — ONE producer per (portal, field)**: `structured | text | derived | none`. No precedence rule, no
   per-row provenance column — provenance IS the contract row. A `structured` cell also declares its source-key
   order, its **absence semantics** (missing key ⇒ `false` | `unknown`) and its **default sentinels** (values read
-  as absent). *(W2 correction: the three-value set was short by one. Declaring all 9 × 26 cells found 36 that are
+  as absent). *(W4 correction: no cell declares `false` any more. bezrealitky was the only one that did, and its
+  census refutes it — `parking` and `garage` are on 100 % of adverts, so the "missing key" was a JSON null, which is
+  the API saying "not stated". The axis stays as the declaration slot the next such portal needs.)* *(W2 correction: the three-value set was short by one. Declaring all 9 × 26 cells found 36 that are
   written from something that is not a payload attribute key at all — `category_main` from a URL segment or a
   breadcrumb, `subtype` from an SEO title, `price_unit` restated from `category_type` on seven portals,
   `area_basis` stamped by `scraper.area`. Calling those `structured` would have named keys that do not exist and
@@ -185,7 +189,8 @@ portals' cells against the checked-in census found 26 (ceskereality 9, remax 6, 
 A further **13** were outside A1's reach until review, because `areas_from_params` and realitymix's price fallback
 kept their own key chains and the contract merely restated them: 39 dead reads in all, and the five area chains now
 consume the contract so the gate covers them. Gate A2 (no unread emission ≥ 5 %) — every such key is mapped or on
-the explicit `IGNORED` list with a reason (300 entries, and 12 of the 50 `none` cells name the census key W4 wires).
+the explicit `IGNORED` list with a reason (300 entries, and 12 of the 50 `none` cells named the census key W4 wires —
+after W4, one does: mmreality `subtype`, which needs a vocabulary ruling, not a wire).
 Gate A3 (no unmapped value). **Identity proof:** the characterisation goldens in
 `tests/fixtures/field_capture/golden/` — 35 real detail payloads (one of which records a raise), 1,254 label probes,
 33 source-key-chain probes — recorded from the parsers BEFORE the module existed and byte-identical after, except
@@ -213,10 +218,46 @@ whose `raw_json['params']` carries both keys with a JSON null. `has_lift` is the
 fixture carries; live, over the 3,000 newest active idnes byt rows (2026-09-21): 'výtah' present on 1,328, text
 non-null on 0, `has_lift` true on 1,328, false on 0. **No production row was healed** — W3 ships the seam, not a heal.
 
-**W4.** Every `structured` cell > 0 %. Zero active rows with `terrace = true` and `has_balcony` not true under the new
-definition (today 2,471 + 572 + 37). mmreality `has_parking` falls to the group-qualified rate; a 300-row audit shows
-0 matches on "Parkety" / "Parkoviště poblíž" / "Parkování na ulici". ceskereality `has_parking` rises from 0 %.
-**Watchdog safety proven with SQL before any fill:** a first-time attribute fill cannot mint a `:new:` dispatch.
+**W4 (SHIPPED, pre-heal).** Every `structured` cell has a producer the census proves; the twelve cells still at 0 %
+are the heal's to-do list and `field_fill_matrix` names them (`zero_fill_undeclared`) until it lands.
+**The gate as first written was the wrong measure and R11 supersedes it.** "Zero active rows with `terrace = true`
+and `has_balcony` not true" is unreachable under `has_balcony = balcony OR loggia`: excluding the terrace arm *raises*
+that count, because the three portals that folded a terrace into the flag (sreality, bezrealitky, idnes) stop doing so.
+The honest measure is **zero active rows where `has_balcony` disagrees with `balcony OR loggia`** — i.e. no portal
+makes a terrace-only listing a balcony match, and none drops a stated loggia. Measured moves, all deliberate:
+sreality −4.9 pp of the active corpus from true to false (388 of 8,000 sampled), bezrealitky 395 of 1,417 true rows
+back to unknown, idnes ~569, and maxima +14.3 pp of rows gained from the `lodžie` key nothing read.
+mmreality `has_parking` falls from 73.5 % true to 59.1 % under the group-qualified reading (2,363 of 4,000 sampled),
+with 886 stated `false` where it could previously only say "unknown"; "Parkety" is in the group `Podlahy` and
+"Parkoviště poblíž" / "Parkování na ulici" are named exclusions, so none of the three can match. ceskereality
+`has_parking` rises from 0 % to ≈ 18.8 % true / 9.5 % false. **Watchdog safety proven with SQL before any fill:** a
+first-time attribute fill cannot mint a `:new:` dispatch — see § 5a.
+
+**W4a — watchdog safety, established in code + read-only SQL before any heal (no notification code changed).**
+A heal through the W3 seam writes only the named `listings` columns and a `dirty_properties` mark. It cannot mint a
+`:new:` dispatch for an existing listing, on three independent grounds:
+
+1. **The `:new:` window is keyed on arrival, not on content.** `api/notifications.match_once` evaluates
+   `properties_public` where `first_seen_at > last_matched_first_seen_at` for that subscription, plus a re-scan of
+   `first_seen_at <= cursor AND > now() - lookback`, where `lookback = max(60, 2 × notifications_new_requires_image_
+   timeout_minutes)` — 60 minutes on today's settings (neither image-gate key is set in `app_settings`, so both
+   defaults apply). `properties.first_seen_at` is `min(child.first_seen_at)` (`scripts/recompute_property_stats.py`
+   :179) and no heal writes `listings.first_seen_at`, so a property older than the window cannot re-enter it however
+   its columns move. 685 of 461k active properties were inside that 60-minute window at the time of measurement.
+2. **The dedupe key is once-ever per property.** `wd:{sub}:new:{property_id}`, UNIQUE, `ON CONFLICT DO NOTHING`
+   (:1420) — a property already dispatched to a subscription can never fire `new` again.
+3. **`:price_drop:` needs a snapshot with a LOWER price.** Its grain is `wd:{sub}:price_drop:{snapshot_id}` over
+   `listing_snapshots` rows with `price_czk < lag(price_czk)`. The seam writes no snapshot at all, and the one
+   deferred snapshot a healed live row's next detail fetch appends carries the CURRENT price, so it is a drop only
+   if the portal actually cut it. The same holds for `collection_monitor`, whose every detector is anchored on
+   `monitor_since` over `listing_snapshots.scraped_at`, `first_seen_at` or `inactive_at` — none of which a heal moves.
+
+The residual, stated rather than hidden: a property first seen INSIDE the 60-minute window that did not match a
+saved filter before the heal and does match after it fires a genuinely-new dispatch. That is the filter seeing a fact
+it should always have seen, bounded by one hour of ingest, and it is the reason the heal is run in one pass rather
+than trickled. Live at the time of writing, `notification_subscriptions` has **0 active rows** and one monitored
+collection, so the live blast radius of this wave's heal is zero; the mechanism above is what makes it safe when
+subscriptions come back.
 
 **W5.** Unmapped-value rate = 0 for condition, building_type, ownership, price_unit, disposition;
 `count(distinct price_unit)` = 2; building_type `jina` ≈ 8,203 retained; per-value Browse membership delta published

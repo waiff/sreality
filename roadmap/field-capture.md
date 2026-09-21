@@ -58,10 +58,16 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       a price (`price_czk → NULL`), which never-blank forbids by design, and 794 realitymix
       rows still await it; `backfill_idnes_brokers` writes `raw_json`, which the seam does
       not, and 637 of the 20,000 oldest idnes rows still carry no broker block.
-- [ ] **W4 — close every structured gap the census proves.** ceskereality `parkování`,
-      remax `pocet parkovacich mist`, realitymix lift/cellar, idnes `total_floors` on
-      houses, mmreality's "Parkety" false positives; one `has_balcony` / `has_parking`
-      definition each.
+- [x] **W4 — close every structured gap the census proves.** ceskereality `parkování` +
+      `balkóny` (has_parking/garage/terrace, 0.0% → real on 48,620 rows), remax
+      `pocet parkovacich mist`, realitymix lift/cellar/garden/lots, idnes `total_floors`
+      on 29.7k houses, mmreality's typed balcony/loggia/garage/equipment keys and a
+      group-qualified has_parking (73.5% → 59.1%, "Parkety" gone), bezrealitky's EUR
+      prices refused. ONE `has_balcony` (balcony OR loggia) and `has_parking` (a space
+      BELONGING to the property) definition, four union helpers collapsed into
+      `vocabulary.any_true`. **Values land on stored rows when the operator dispatches
+      the W3 seam** — the twelve cells still at 0% are named by `field_fill_matrix`
+      until then.
 - [ ] **W5 — apply the vocabulary collapses to stored rows**, one counted batch each;
       `price_unit` 4 → 2; ~14k + ~8.3k rows become reachable by a Browse filter.
 - [ ] **W6 — close the wipe (R4).** A detail re-fetch stops erasing text-derived cells
