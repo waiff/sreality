@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Mapping, Sequence
 
+from autodedup.body_align import aligned_difference, rounding_equal_values
 from autodedup.dataset import Listing
 from autodedup.features import STREET_GRAIN_RANK, haversine_m, plot_area, rel_diff
 from autodedup.floor_convention import (
@@ -73,10 +74,14 @@ from autodedup.text_facts import (
     accessory_designators,
     address_block_key,
     capacity_counts,
+    fold,
     offered_room_counts,
     orientations,
     parcel_numbers,
+    printed_areas,
+    prose_streets,
     stated_areas,
+    streets_agree,
     unit_designators,
 )
 from toolkit.room_taxonomy import category_main_compatible
@@ -138,6 +143,10 @@ FACT_NAMES: tuple[str, ...] = (
     "two_unit",
     "floorplan",
     "interior",
+    "body_align",
+    "street_prose",
+    "obec_prose",
+    "printed_area",
 )
 
 
@@ -262,19 +271,27 @@ def tight_photo_match(feats: Feats | None) -> bool:
     return (_present(feats, "phash_tight_matches") or 0.0) >= 1.0
 
 
-def _same_feed(a: Listing, b: Listing, mode: str) -> bool:
+def _same_feed(a: Listing, b: Listing, mode: str, unknown_closed: bool = False) -> bool:
     """E145: are these two adverts known to carry the same ground-floor convention?
 
     `portal` is g7/g8's answer — one portal, one convention. The data refuses it: among
     same-portal KNOWN duplicates a one-storey gap runs at 7.5 % on sreality and 23.5 % on
     bazos, because the number is written by the BROKER whose feed the portal republishes.
-    `broker` therefore asks for the feed itself, and an advert with no broker key (bazos,
-    bezrealitky) is never known to share one with anybody.
+    `broker` therefore asks for the feed itself.
+
+    E154: and it must fail CLOSED. As shipped, an advert with no broker key was "never known
+    to share a feed with anybody", which SILENCES the same-portal one-storey fact — and bazos,
+    bezrealitky and maxima are 100 % null, so floors 3 and 4 of one bezrealitky new-build
+    fused. A null key is UNKNOWN, and unknown is not a licence: with `unknown_closed` the fact
+    stands unless both keys are known AND different.
     """
     if a.source is None or a.source != b.source:
         return False
     if mode != "broker":
         return True
+    if unknown_closed:
+        return not (a.broker_key is not None and b.broker_key is not None
+                    and a.broker_key != b.broker_key)
     return a.broker_key is not None and a.broker_key == b.broker_key
 
 
@@ -318,6 +335,62 @@ def two_unit_signature(a: Listing, b: Listing, settings: Settings | None = None)
     return not _stated_areas_meet(a, b, cfg.d43_two_unit_stated_tol)
 
 
+def _unit_areas(listing: Listing, land: bool) -> frozenset[tuple[float, int]]:
+    scopes = {"unit", "land"} if land else {"unit"}
+    return frozenset((value, decimals)
+                     for value, decimals, scope in printed_areas(listing.description)
+                     if scope in scopes)
+
+
+def printed_area_conflict(a: Listing, b: Listing) -> tuple[str, str] | None:
+    """E153: both bodies print a headline area and no two of them agree within rounding.
+
+    Scoped: the terrace's size is the terrace's and a bedroom's is the bedroom's, so what is
+    compared is the size the advert is sold BY. Land reads the parcel as its headline. A body
+    that prints two numbers for one unit (`užitná 51 m² / podlahová 55 m²`) meets the other
+    side on whichever it shares, which is the basis-difference rail E143 already carries."""
+    land = LAND_CATEGORY in (a.category_main, b.category_main)
+    left, right = _unit_areas(a, land), _unit_areas(b, land)
+    if not left or not right:
+        return None
+    if any(rounding_equal_values(x, dx, y, dy) for x, dx in left for y, dy in right):
+        return None
+    return (str(sorted(value for value, _ in left)),
+            str(sorted(value for value, _ in right)))
+
+
+def _street_names(listing: Listing) -> frozenset[str]:
+    printed = prose_streets(listing.description)
+    key = listing.location.street_key
+    return printed | ({key} if key else frozenset())
+
+
+def prose_street_conflict(a: Listing, b: Listing) -> tuple[str, str] | None:
+    """E151: both adverts name a street and they name no street in common."""
+    left, right = _street_names(a), _street_names(b)
+    if not left or not right or streets_agree(left, right):
+        return None
+    return (",".join(sorted(left)), ",".join(sorted(right)))
+
+
+def prose_obec_conflict(a: Listing, b: Listing) -> bool:
+    """E152: each body PRINTS its own town's name and neither prints the other's.
+
+    E135 suppresses the resolved obec below street grain because a village is routinely
+    advertised under its district town — but that ambiguity is in the GEOCODE, not in the
+    prose. An advert that writes "Oplocany u Tovačova" and never writes "Droždín" has stated
+    which town it is in."""
+    left, right = a.location.obec_name, b.location.obec_name
+    if not left or not right or a.location.obec_kod == b.location.obec_kod:
+        return False
+    if a.location.obec_kod is None or b.location.obec_kod is None:
+        return False
+    body_a, body_b = fold(a.description or ""), fold(b.description or "")
+    name_a, name_b = fold(left), fold(right)
+    return (name_a in body_a and name_b in body_b
+            and name_a not in body_b and name_b not in body_a)
+
+
 def _set_conflict(left: frozenset[str] | set[str], right: frozenset[str] | set[str]) -> bool:
     """Two non-empty printed sets that name nothing in common. A subset is NOT a conflict —
     an advert also names the access road, the neighbour's plot and the extra parking space."""
@@ -333,7 +406,8 @@ def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> 
     enumerated inventory one advert offers strictly more of is a different offer outright.
     """
     cfg = settings or Settings()
-    parcels_a, parcels_b = parcel_numbers(a.description), parcel_numbers(b.description)
+    parcels_a = parcel_numbers(a.description, cfg.d43_parcel_forms_wide)
+    parcels_b = parcel_numbers(b.description, cfg.d43_parcel_forms_wide)
     if parcels_a and parcels_b and parcels_a != parcels_b and (
         parcels_a < parcels_b or parcels_b < parcels_a
     ):
@@ -416,7 +490,8 @@ def distinguishing_facts(
     gap = floor_gap(cfg.floor_camps if reads != "joint" else None,
                     a.source, a.floor, b.source, b.floor)
     if gap is not None:
-        same_feed = _same_feed(a, b, cfg.floor_same_source_feed)
+        same_feed = _same_feed(a, b, cfg.floor_same_source_feed,
+                               cfg.floor_feed_unknown_closed)
         strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
         if (gap != 0) if strict else (abs(gap) >= 2 or (abs(gap) == 1 and same_feed)):
             add("floor", a.floor, b.floor)
@@ -494,8 +569,8 @@ def distinguishing_facts(
     # PRINTS (or, for the signature, two numbers the portal prints for it), so all three modes
     # read them — E138's "inferred rather than stated" exemption does not reach any of them.
     if cfg.d43_parcel_numbers:
-        parcels_a = parcel_numbers(a.description)
-        parcels_b = parcel_numbers(b.description)
+        parcels_a = parcel_numbers(a.description, cfg.d43_parcel_forms_wide)
+        parcels_b = parcel_numbers(b.description, cfg.d43_parcel_forms_wide)
         if _set_conflict(parcels_a, parcels_b):
             add("parcel", sorted(parcels_a), sorted(parcels_b))
 
@@ -516,6 +591,32 @@ def distinguishing_facts(
     if cfg.d43_two_unit_signature and two_unit_signature(a, b, cfg):
         add("two_unit", f"{headline_area(a)} m2 / {a.price}",
             f"{headline_area(b)} m2 / {b.price}")
+
+    # E153: the area the BODY prints, read WITHOUT the stored column and compared by the
+    # ROUNDING rule. This is the only reader that can see into the 16 % of the corpus whose
+    # stored headline is a terrace, a cellar or the plot.
+    if cfg.d43_printed_area:
+        printed = printed_area_conflict(a, b)
+        if printed is not None:
+            add("printed_area", printed[0], printed[1])
+
+    # E151/E152: the street and the town the BODY names, for the adverts whose resolved
+    # location cannot separate them — two Olomouc office blocks with no street key, a Droždín
+    # plot against one in Oplocany u Tovačova.
+    if cfg.d43_prose_street:
+        streets = prose_street_conflict(a, b)
+        if streets is not None:
+            add("street_prose", streets[0], streets[1])
+    if cfg.d43_prose_obec and prose_obec_conflict(a, b):
+        add("obec_prose", a.location.obec_name or "", b.location.obec_name or "")
+
+    # E150: the reader that knows no form. Last, because it is the most expensive — the other
+    # readers have already answered for every pair whose form somebody wrote down.
+    if cfg.d43_body_align:
+        aligned = aligned_difference(a.description, b.description,
+                                     cfg.d43_body_align_min_ratio)
+        if aligned is not None:
+            add("body_align", aligned[0], aligned[1])
 
     if mode == GATE and not cfg.d43_gate_image_facts:
         return out

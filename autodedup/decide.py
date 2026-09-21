@@ -22,11 +22,18 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from autodedup.dataset import Listing
+from autodedup.demonstrate import corroboration_warrant, demonstration_gap
 from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
 from autodedup.hazard_context import ContextIndex, PairContext, fungible_catalogue
-from autodedup.indistinguishable import GATE, distinguishing_facts, promotion_warrant
+from autodedup.indistinguishable import (
+    GATE,
+    distinguishing_facts,
+    overlap_days,
+    price_paths_agree,
+    promotion_warrant,
+)
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
@@ -51,6 +58,8 @@ CONTEXT_RULE_NEVER_OVERRIDES: tuple[str, ...] = ("developer_signature", "develop
 # merge exists and WHICH fact demoted each g7 merge, without re-running the pass.
 D43_GATE_REASON: str = "d43_gate"
 D43_PROMOTE_REASON: str = "d43_promote"
+# D50/E157/E158: and WHY a pair no fact separates was still not promoted.
+D43_DEMONSTRATE_REASON: str = "d43_demonstrate"
 
 CERT_A_AREA: float = 0.02
 CERT_B_AREA: float = 0.01
@@ -556,14 +565,44 @@ def apply_d43_rule(
         return decision
     if decision.zone == "band" and settings.d43_promote:
         warrant = promotion_warrant(la, lb, feats, settings)
-        if warrant is not None:
+        if warrant is None:
+            return decision
+        refusal = demonstration_refusal(la, lb, feats, settings)
+        if refusal is not None:
             return Decision(
-                decision.lo, decision.hi, "merge", decision.score, decision.families,
+                decision.lo, decision.hi, "band", decision.score, decision.families,
                 decision.certificate, None,
-                f"{D43_PROMOTE_REASON}:{warrant}",
-                {**decision.evidence, "d43_banded_as": decision.reason},
+                f"{decision.reason}:{D43_DEMONSTRATE_REASON}:{refusal}",
+                {**decision.evidence, D43_DEMONSTRATE_REASON: refusal},
             )
+        return Decision(
+            decision.lo, decision.hi, "merge", decision.score, decision.families,
+            decision.certificate, None,
+            f"{D43_PROMOTE_REASON}:{warrant}",
+            {**decision.evidence, "d43_banded_as": decision.reason},
+        )
     return decision
+
+
+def demonstration_refusal(
+    la: Listing, lb: Listing, feats: Feats, settings: Settings
+) -> str | None:
+    """D50 (E157/E158): why a band pair no fact separates may still NOT be promoted.
+
+    The absence of a distinguishing fact is what the readers happened to see, and three
+    cohorts have each produced a form they had never seen. So promotion asks for the positive
+    case instead: `A:<fact>` names the key fact the two adverts do not demonstrably agree on,
+    `B` that nothing corroborates them at unit grade. Both are pure filters ON PROMOTION —
+    the merge zone is untouched — which is what makes S ⊆ M ⊆ L an identity (E159)."""
+    if not settings.demonstrate_identity:
+        return None
+    paths_agree = price_paths_agree(la, lb, settings.d43_price_path_tol)
+    gap = demonstration_gap(la, lb, settings, paths_agree, overlap_days(la, lb))
+    if gap is not None:
+        return f"A:{gap}"
+    if corroboration_warrant(la, lb, feats, settings) is None:
+        return "B"
+    return None
 
 
 def decide_pair(

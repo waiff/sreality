@@ -430,6 +430,70 @@ class Settings:
     # loads none now has to say so out loud instead of looking identical to one that did.
     operator_must_not_link: bool = True
 
+    # ------------------------------------------ W16 (g8c, 2026-09-21): identity is DEMONSTRATED
+    #
+    # D50. g8b promotes a band pair unless a reader FINDS a distinguishing fact, and that is
+    # fail-open: its safety is bounded by how much Czech prose the readers cover, and every new
+    # cohort has produced a form none of them knew — `B1.2.2` against `B1.2.3`, plots 7/8/9 of
+    # one parcelling, a garage block G3 against G4, 58,90 m² against 58,70 m². Silence is not
+    # evidence. Everything below is OFF by default so w13/w14/w15 keep replaying byte-for-byte.
+    #
+    # E150: the reader that knows no form. Two adverts for two units of one project are written
+    # from ONE template, so they align everywhere except where the unit is named; the alignment
+    # says WHERE to look and the token says whether what is written there can name a unit.
+    d43_body_align: bool = False
+    # How much of the two bodies must align before any position is read. 0.60 is where the
+    # Rokytná pair (one shared first sentence, then two different paragraphs) still aligns.
+    d43_body_align_min_ratio: float = 0.60
+    # E151: the street the BODY names, for the adverts whose resolved street key is missing —
+    # two Olomouc office blocks, one on Litovelská and one on třída 28. října, same obec, no
+    # street key on either side, and the prose is the only place either street is written.
+    d43_prose_street: bool = False
+    # E152: the obec the BODY names. E135 suppresses the obec fact below street grain, which is
+    # right for a village advertised under its district town and wrong for two adverts that each
+    # PRINT their own different town (Droždín against Oplocany u Tovačova). Reading the printed
+    # name restores the fact without re-opening the 533 recorded-under-two-towns duplicates.
+    d43_prose_obec: bool = False
+    # E153: the printed headline area, read WITHOUT the stored column. 16 % of the corpus prints
+    # a headline area outside `stated_areas`' stored-column window, because the portal stored a
+    # terrace, a cellar or the plot. Equality is the ROUNDING rule, not a tolerance: two numbers
+    # agree when they agree within half of the coarser one's last printed digit.
+    d43_printed_area: bool = False
+    # E154: E145 fails CLOSED. `floor_same_source_feed="broker"` drops the same-portal one-storey
+    # fact wherever a broker key is null — and bazos, bezrealitky and maxima are 100 % null — so
+    # floors 3 and 4 of one new-build fuse. A null key is UNKNOWN, not "a different feed": the
+    # fact stands unless both keys are known AND different.
+    floor_feed_unknown_closed: bool = False
+    # E155: the parcel forms the narrow keyword misses. Fail-safe in both directions.
+    d43_parcel_forms_wide: bool = False
+    # E156: the re-partitioner may not drop a member that carries NO fact against the group it
+    # is being separated from. Measured on the region cohort: 8 of g8b's 38 lost certain
+    # duplicates are exactly that — Penzion Horálka, same 374 m², same price, same body, one
+    # side sreality and one mmreality, cut to two singletons by a conflict elsewhere.
+    repartition_keep_factless: bool = False
+
+    # E157 (A): the key facts must be POSITIVELY EQUAL before a band pair may be promoted.
+    demonstrate_identity: bool = False
+    # A price gap the two adverts never reconcile is only excusable when they were never on sale
+    # together: a cut between two sequential postings is one unit, two co-live prices are two.
+    demonstrate_price_colive_days: float = 3.0
+    # And the slack must be read RELATIVE to the two lives. Two Okružní garages at 1,190,000 and
+    # 1,240,000 were first sighted seven minutes apart and the cheaper one died two days later:
+    # its whole life overlapped the other's, and "1.59 days" made that look like a re-post tail.
+    # A re-post boundary is a small fraction of both windows; a shared life is all of one.
+    demonstrate_price_colive_fraction: float = 0.25
+    demonstrate_require_disposition: bool = True
+    demonstrate_require_obec: bool = True
+    # E158 (B): unit-grade corroboration, the positive evidence that these two galleries or
+    # bodies are of ONE home. `unit` is the strict reading (a tight non-catalogue photo file, a
+    # near-identical body, or a shared rare order code); `two_of` also accepts two of the wider
+    # list; `development_only` asks for `unit` inside a development and nothing outside one.
+    # Every mode is a SUPERSET of `unit`, which is what makes S ⊆ M ⊆ L an identity rather than
+    # a measurement.
+    corroboration: str = "off"
+    corroboration_body_containment: float = 0.80
+    corroboration_min: int = 2
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -529,6 +593,37 @@ class Settings:
             )
         if self.d43_promote_photo_alternative and not self.d43_promote:
             raise ValueError("d43_promote_photo_alternative needs d43_promote")
+        if self.corroboration not in ("off", "unit", "two_of", "development_only"):
+            raise ValueError(
+                "corroboration must be off/unit/two_of/development_only: "
+                f"{self.corroboration}"
+            )
+        if not 0.0 < self.d43_body_align_min_ratio <= 1.0:
+            raise ValueError(
+                f"d43_body_align_min_ratio must be in (0, 1]: {self.d43_body_align_min_ratio}"
+            )
+        if not 0.0 < self.corroboration_body_containment <= 1.0:
+            raise ValueError(
+                "corroboration_body_containment must be in (0, 1]: "
+                f"{self.corroboration_body_containment}"
+            )
+        if self.corroboration_min < 1:
+            raise ValueError(f"corroboration_min must be at least 1: {self.corroboration_min}")
+        if self.demonstrate_price_colive_days < 0.0:
+            raise ValueError(
+                "demonstrate_price_colive_days must not be negative: "
+                f"{self.demonstrate_price_colive_days}"
+            )
+        if not 0.0 <= self.demonstrate_price_colive_fraction <= 1.0:
+            raise ValueError(
+                "demonstrate_price_colive_fraction must be in [0, 1]: "
+                f"{self.demonstrate_price_colive_fraction}"
+            )
+        # The ladder is nested by CONSTRUCTION, and the constructor is where that is enforced:
+        # corroboration is a filter on promotion, so it cannot be asked for without the
+        # demonstration it refines, or S ⊆ M ⊆ L would stop being an identity (E159).
+        if self.corroboration != "off" and not self.demonstrate_identity:
+            raise ValueError("corroboration needs demonstrate_identity")
         if self.floor_camps_reads not in ("off", "joint", "slack", "strict"):
             raise ValueError(
                 f"floor_camps_reads must be off/joint/slack/strict: {self.floor_camps_reads}"

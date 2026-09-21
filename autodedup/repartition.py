@@ -72,11 +72,20 @@ def partition(
     edges: Sequence[Edge],
     invariants: Invariants,
     max_rounds: int = 4,
+    keep_factless: bool = False,
 ) -> list[list[int]]:
     """Cut one component into consistent groups, maximising the merge evidence kept inside.
 
     Every returned group satisfies `invariants`; a member no group can hold comes back as a
     singleton, and the caller drops those exactly as the union-find pass does.
+
+    E156: `keep_factless` adds the reconciliation the local search cannot reach on its own.
+    The search moves ONE member at a time and only on a strict gain, so two adverts joined by
+    a merge edge that carries no fact at all can end in two cells because a conflict elsewhere
+    in the component broke their cell up first — Penzion Horálka, same 374 m², same price,
+    same body, sreality against mmreality, cut to two singletons by a conflict neither of them
+    was party to. A member separated from a group it has an edge to must carry a fact AGAINST
+    that group; where it does not, and the union holds, it goes back.
     """
     ordered = sorted(edges, key=lambda edge: edge.rank)
     home: dict[int, int] = {member: index for index, member in enumerate(sorted(members))}
@@ -143,4 +152,55 @@ def partition(
         if not moved:
             break
 
+    if keep_factless:
+        for _round in range(max_rounds):
+            if not _reconcile(ordered, home, cells, invariants):
+                break
+
     return [sorted(cell) for cell in cells if cell]
+
+
+def _reconcile(
+    ordered: Sequence[Edge],
+    home: dict[int, int],
+    cells: list[list[int]],
+    invariants: Invariants,
+) -> bool:
+    """E156: put back every separation no fact justifies. True when something moved.
+
+    Two passes, both in `edge.rank` order so the result is a function of the edge SET: whole
+    cells are re-joined where their union holds, then a single member is returned to a cell it
+    has an edge to when that union holds. A member the invariants refuse everywhere stays
+    where the search left it — the rule is "no fact, no separation", not "no separation"."""
+    moved = False
+    for edge in ordered:
+        left, right = home[edge.lo], home[edge.hi]
+        if left == right:
+            continue
+        merged = sorted(cells[left] + cells[right])
+        if invariants(merged) is not None:
+            continue
+        source, target = max(left, right), min(left, right)
+        for member in cells[source]:
+            home[member] = target
+        cells[target].extend(cells[source])
+        cells[target].sort()
+        cells[source] = []
+        moved = True
+    for edge in ordered:
+        left, right = home[edge.lo], home[edge.hi]
+        if left == right:
+            continue
+        for member, target in ((edge.lo, right), (edge.hi, left)):
+            current = home[member]
+            if current == target:
+                continue
+            if invariants(sorted(cells[target] + [member])) is not None:
+                continue
+            cells[current].remove(member)
+            cells[target].append(member)
+            cells[target].sort()
+            home[member] = target
+            moved = True
+            break
+    return moved
