@@ -26,7 +26,7 @@ def test_column_is_wired_into_listing_columns() -> None:
 def test_update_set_preserves_source_url_if_incoming_null() -> None:
     assert "source_url" in db._PRESERVE_IF_NULL_COLUMNS
     expected = "source_url = COALESCE(EXCLUDED.source_url, listings.source_url)"
-    assert db._listing_update_set_sql().count(expected) == 1
+    assert db._listing_update_set_sql("sreality").count(expected) == 1
     assert expected in db._BATCH_UPSERT_SQL
 
 
