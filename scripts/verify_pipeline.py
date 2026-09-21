@@ -65,7 +65,7 @@ from urllib.parse import urlencode
 import requests
 
 from location_data import location_steps
-from scraper import media as _media
+from scraper import field_census, media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
 from scraper.parser import parse_images
@@ -692,7 +692,7 @@ def _status_for_worker(
 # --- per-m2 measure plausibility (W9) --------------------------------------
 #
 # The four checks below exist because the OTHER health surfaces cannot see the
-# defects the per-m2 program fixed. `data_quality_by_source` tests 29 fields for
+# defects the per-m2 program fixed. `data_quality_by_source` tests 26 fields for
 # IS NOT NULL; both defects produce 100% non-NULL values. A null-check cannot see
 # a plot area sitting in a floor-area column, and it cannot see 136 Kc sitting in
 # a price column. These read `measure_plausibility_by_source` (migration 427)
@@ -2216,6 +2216,99 @@ def check_walk_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
     }
 
 
+# --- what every portal STATES vs what we STORED (field capture W1) ----------
+#
+# `data_quality_by_source` tests 26 fields for IS NOT NULL and nothing else, so it
+# cannot see the defect class this program exists to fix: a value that is present and
+# outside every canonical option list (13 live `condition` spellings against a filter
+# list of 6), or a cell that has read 0.0% since the parser was written because it
+# reads a key the portal never emits (remax `balkon`, ceskereality `vybavení`). This
+# check measures BOTH halves per (source, field), against a blessed baseline in
+# `data/field_capture/` rather than against a threshold tuned per cell.
+#
+# The two instruments read the SAME cohort (every active row) on purpose, so they can
+# never report two different fill rates for one cell. Who owns what: the view keeps the
+# seven probes with no `listings` column of their own (`geom`, `locality`, `street`,
+# `property_grouped`, the two condition levels, `source_url`); this check owns the 26
+# LISTING_COLUMNS attributes; the 19 they share are the view's to lose in a later wave.
+#
+# It carries no `pipeline_check_thresholds` entries on purpose: its numbers are sized
+# against the measured drift of that cohort (the arithmetic is in `scraper.field_census`),
+# and the field-capture program adds no settings.
+
+
+def check_field_fill_matrix(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Per (source, field): did fill COLLAPSE, or did off-canon validity get WORSE?
+
+    Both arms are relative to the blessed baseline, never to an absolute floor, because
+    a floor cannot see either live shape: a cell that is legitimately 0% (remax has no
+    balcony key to read) or a partial break (ceskereality's `furnished` key mismatch
+    would sit at ~2.5%, not 0%). The baseline records today's zeros and today's off-canon
+    values as KNOWN, so day one is green and still says them out loud.
+
+    A blessed cell the live matrix no longer produces is an offender of its own — the
+    denominator arm the ppm2 checks learned to carry, because the spine comes from
+    `portals.is_enabled` and from a source HAVING active rows, so the loudest possible
+    failure (a portal stops writing everything) would otherwise subtract itself from the
+    measurement and read as health.
+
+    Third arm, free of SQL: the checked-in per-portal key census going stale. A portal
+    that renames a key leaves the census — and every contract gate W2 will build on it —
+    agreeing with itself about a key space that no longer exists. That is a warn here,
+    deliberately not a CI test: a test keyed on the calendar reds `main` on a date rather
+    than on a defect."""
+    now = _dt.datetime.now(_dt.timezone.utc)
+    rows = _fetchall(conn, field_census.FIELD_MATRIX_SQL)
+    live = field_census.reduce_matrix(rows, generated_at=now)
+    baseline = field_census.load_baseline()
+    fails, warns = field_census.compare_to_baseline(live, baseline)
+    stale = field_census.stale_censuses(field_census.load_censuses(), now=now)
+    zero_fill = field_census.zero_fill_cells(live)
+    never_false = field_census.booleans_never_false(live)
+    measured, blessed = len(live["cells"]), len(baseline.get("cells") or {})
+
+    status = "fail" if fails else ("warn" if warns or stale else "ok")
+    if fails or warns:
+        message = (
+            f"{len(fails) + len(warns)} (source, field) cell(s) moved against the blessed "
+            f"baseline ({measured} measured of {blessed} blessed): "
+            + "; ".join((fails + warns)[:6])
+            + f" — re-bless with `{field_census.BLESS_COMMAND}` only once the move is "
+            "confirmed to be a fix, not a regression."
+        )
+    elif stale:
+        message = (
+            "Fill and validity are stable, but the key census is stale: "
+            + "; ".join(stale)
+            + f" — re-run `{field_census.BLESS_COMMAND}`; a renamed portal key is invisible "
+            "until it does."
+        )
+    else:
+        message = (
+            f"Fill and validity stable across {measured} of {blessed} blessed "
+            f"(source, field) cells. {len(zero_fill)} cell(s) carry no value at all and "
+            f"{len(never_false)} boolean cell(s) have never been written false — both "
+            "recorded, neither judged: which of them is a gap needs W2's contract."
+        )
+    return {
+        "check_key": "field_fill_matrix",
+        "status": status,
+        "value": len(fails) + len(warns),
+        "details": {
+            "offenders": fails + warns,
+            "stale_census": stale,
+            "cells_measured": measured,
+            "cells_blessed": blessed,
+            # The wave's whole point, reported every run until a contract claims them.
+            # Both lists are LIVE, so a cell a later wave repairs stops being named.
+            "zero_fill_cells": zero_fill,
+            "booleans_never_false": never_false,
+            "baseline_generated_at": baseline.get("generated_at"),
+        },
+        "message": message,
+    }
+
+
 # --- migration drift: merged is not applied (2026-08-25 outage) -------------
 #
 # Applying a migration is a SEPARATE act from merging it, and nothing connected
@@ -3019,6 +3112,12 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # Portal-URL contract: absolute count of active rows with no page URL. 6h lane +
     # in-app bell; not in the hourly --only list (ship, soak, then promote).
     ("outbound_url_coverage", check_outbound_url_coverage),
+    # The other ingest checks ask whether rows ARRIVE; this one asks whether their fields
+    # are filled and in-vocabulary. Second to last deliberately: at ~12s over the whole
+    # active stock it is the most expensive DB check in the lane, so it queues behind the
+    # cheap ones rather than spending their budget. 6h lane + in-app bell; not in
+    # llm_health.yml's hourly --only list (ship, soak, promote — the ppm2 ladder).
+    ("field_fill_matrix", check_field_fill_matrix),
     # LAST deliberately: the only check that makes an outbound request, so if the
     # lane budget runs out it is the one that goes unrun, never a DB check. 6h lane
     # + in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).

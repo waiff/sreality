@@ -23,11 +23,12 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       `check_llm_liveness`, whose threshold was sized on "the one recurring producer" that
       no longer exists. Kept for W7: `listing_description_enrichments` (37,754 rows), the
       `enrich_listing_description` called_for, `app_settings.enrichment_model`.
-- [ ] **W1 — measurement before change.** Per-portal key census (9/9, checked in; staleness
+- [x] **W1 — measurement before change.** Per-portal key census (9/9, checked in; staleness
       is a verify_pipeline warning) + a (portal, field) fill **and validity** matrix over the
       whole active stock, scored against a blessed baseline. Repairs the flaky
       `capture-data-quality` job (mig 548) — the Health page reads its series. The one wave
-      that only adds: it is the instrument every later wave is judged by.
+      that only adds: it is the instrument every later wave is judged by. First run: 46 zero-fill
+      cells of 234; `condition` off-canon on all nine portals; census in `data/field_capture/`.
 - [ ] **W2 — vocabulary module + the attribute contract table + CI gates.** Identity-
       preserving: 33 normaliser functions, 18 mapping dicts and the planted-fixture tests
       collapse onto one `scraper/vocabulary.py` producer side; the canon stays in
