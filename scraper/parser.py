@@ -11,7 +11,6 @@ is `hash_id`.
 
 from __future__ import annotations
 
-import re
 from functools import partial
 from typing import Any
 from unicodedata import combining, normalize

@@ -10,7 +10,6 @@ straight from `gps` (precise per-listing), so no geocoding step is needed.
 
 from __future__ import annotations
 
-import re
 from functools import partial
 from typing import Any
 
