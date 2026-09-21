@@ -65,7 +65,7 @@ from urllib.parse import urlencode
 import requests
 
 from location_data import location_steps
-from scraper import field_census, media as _media
+from scraper import attribute_contract, field_census, media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
 from scraper.parser import parse_images
@@ -2266,8 +2266,14 @@ def check_field_fill_matrix(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
     zero_fill = field_census.zero_fill_cells(live)
     never_false = field_census.booleans_never_false(live)
     measured, blessed = len(live["cells"]), len(baseline.get("cells") or {})
+    # Which of the live zeros are KNOWN comes from the attribute contract's gap marker
+    # and nowhere else — one declaration, not a baseline flag saying the same thing in a
+    # second place. A zero whose cell still claims a producer is the loud case: the
+    # portal states the fact, the contract says we read it, and nothing arrives.
+    gaps = attribute_contract.known_gaps()
+    undeclared = sorted(key for key in zero_fill if key not in gaps)
 
-    status = "fail" if fails else ("warn" if warns or stale else "ok")
+    status = "fail" if fails else ("warn" if warns or stale or undeclared else "ok")
     if fails or warns:
         message = (
             f"{len(fails) + len(warns)} (source, field) cell(s) moved against the blessed "
@@ -2276,12 +2282,17 @@ def check_field_fill_matrix(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
             + f" — re-bless with `{field_census.BLESS_COMMAND}` only once the move is "
             "confirmed to be a fix, not a regression."
         )
-    elif stale:
+    elif stale or undeclared:
+        notes = list(stale)
+        if undeclared:
+            notes.append(
+                f"{len(undeclared)} zero-fill cell(s) whose contract cell still claims a "
+                f"live producer ({', '.join(undeclared[:4])})"
+            )
         message = (
-            "Fill and validity are stable, but the key census is stale: "
-            + "; ".join(stale)
-            + f" — re-run `{field_census.BLESS_COMMAND}`; a renamed portal key is invisible "
-            "until it does."
+            "Fill and validity are stable, but: " + "; ".join(notes)
+            + f" — a stale census is re-run with `{field_census.BLESS_COMMAND}`; an "
+            "undeclared zero is a cell that should be filling and is not."
         )
     else:
         message = (
@@ -2302,6 +2313,10 @@ def check_field_fill_matrix(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
             # The wave's whole point, reported every run until a contract claims them.
             # Both lists are LIVE, so a cell a later wave repairs stops being named.
             "zero_fill_cells": zero_fill,
+            # Split by the contract, so "W4 will wire it" and "this should be filling
+            # and is not" stop reading the same.
+            "zero_fill_known_gaps": {k: gaps[k] for k in zero_fill if k in gaps},
+            "zero_fill_undeclared": undeclared,
             "booleans_never_false": never_false,
             "baseline_generated_at": baseline.get("generated_at"),
         },

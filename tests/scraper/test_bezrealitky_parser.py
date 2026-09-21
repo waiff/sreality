@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from scraper.bezrealitky_parser import _disposition, parse_advert
+from scraper.bezrealitky_parser import parse_advert
+from scraper.vocabulary import disposition_code
 
 
 def _advert(**over):
@@ -229,7 +230,7 @@ def test_published_at_from_time_activated_when_present():
     (None, None),
 ])
 def test_disposition_mapping(enum, expected):
-    assert _disposition(enum) == expected
+    assert disposition_code(enum) == expected
 
 
 def test_ruian_identity_fields_reach_raw():

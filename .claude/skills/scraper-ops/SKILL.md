@@ -14,7 +14,10 @@ test / log helpers: `scripts/test-summary.sh` and `scripts/logs.sh <run-id> [pat
 
 1. Add the column with a new numbered migration (`alter table listings add column ...`). Never
    touch `001_initial.sql`.
-2. Update the parser in `scraper/parser.py` to extract the field.
+2. Declare the cell in `scraper/attribute_contract.py` for EVERY portal (producer, source-key
+   precedence, absence semantics, sentinels) and read it in the parser through `source_value` /
+   `source_label`; a label→value mapping belongs in `scraper/vocabulary.py`, never in the parser.
+   Gates A1–A3 (`tests/scraper/test_attribute_contract.py`) read the checked-in key census.
 3. Add it to `scraper/db.py` `LISTING_COLUMNS` + `_LISTING_COLUMN_PGTYPE` (covers BOTH write paths) and,
    for crawler portals, `scraped_listing._LISTING_FIELDS`; `_PRESERVE_IF_NULL_COLUMNS` only if a NULL must never erase.
 4. Backfill old rows from NARROW typed columns via a `scripts/backfill_*.py` dispatch job (never a
@@ -28,13 +31,11 @@ The LLM-driven parsers (`scraper/source_parsers/`) are tested against saved list
 months the fixtures need a refresh. Don't fetch live in tests — that would burn LLM credit and
 break offline runs.
 
-Refresh (CLI, fastest): `gh workflow run fetch-fixtures.yml --ref <branch>` (add `-f`
-inputs to override URLs). Or via the browser: GitHub repo → **Actions** → **Fetch + anonymize
-source HTML fixtures** → **Run workflow** → pick branch / optional URLs → **Run workflow**. It
-fetches each URL, runs the anonymization in `scripts/fetch_and_anonymize_fixtures.py`, and
-commits the resulting `*_sample.html` files back to the same branch. The skipif tests in
-`tests/scraper/test_source_parsers/test_real_fixtures.py` light up automatically once the files
-exist.
+Refresh (CLI, fastest): `gh workflow run fetch-fixtures.yml --ref <branch>` (add `-f` inputs to
+override URLs), or Actions → **Fetch + anonymize source HTML fixtures** → **Run workflow**. It
+fetches each URL, scrubs via `scripts/fetch_and_anonymize_fixtures.py` and commits the
+`*_sample.html` files back to the branch; the skipif tests in
+`tests/scraper/test_source_parsers/test_real_fixtures.py` light up once they exist.
 
 Anonymization scope: phones → `+420 XXX XXX XXX`, emails → `agent@example.cz`, street numbers
 (`123/45`) → `XXX/YY`. Listing prices and the surrounding HTML structure are preserved — public

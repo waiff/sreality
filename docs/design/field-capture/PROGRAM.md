@@ -62,9 +62,15 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   The location contract is location-by-construction (closed 11-member `CLAIM_TYPES`, mandatory `obec_name`), its
   governed sha would turn one label edit into a re-mine of 10.9M location claims (PR #1209 precedent: 14 dead intake
   runs), and `location_data` imports `scraper`, not the reverse. Never add a seventh top-level key to those YAML files.
-- **R3 — ONE producer per (portal, field)**: `structured | text | none`. No precedence rule, no per-row provenance
-  column — provenance IS the contract row. A `structured` cell also declares its source-key order, its **absence
-  semantics** (missing key ⇒ `false` | `unknown`) and its **default sentinels** (values read as absent).
+- **R3 — ONE producer per (portal, field)**: `structured | text | derived | none`. No precedence rule, no
+  per-row provenance column — provenance IS the contract row. A `structured` cell also declares its source-key
+  order, its **absence semantics** (missing key ⇒ `false` | `unknown`) and its **default sentinels** (values read
+  as absent). *(W2 correction: the three-value set was short by one. Declaring all 9 × 26 cells found 32 that are
+  written from something that is not a payload attribute key at all — `category_main` from a URL segment or a
+  breadcrumb, `subtype` from an SEO title, `price_unit` restated from `category_type` on seven portals,
+  `area_basis` stamped by `scraper.area`. Calling those `structured` would have named keys that do not exist and
+  failed gate A1; calling them `none` would have declared a 100 %-filled column empty. `derived` is the honest
+  fourth member and is not a producer W7's text lane may ever write.)*
   Within a `text` cell the ingest-time grammar (regex) writes first; the post-publication lane fills **only NULLs**.
   The LLM never overwrites a regex value unless a labelled panel proves it better for that cell.
 - **R4 — The wipe is closed inside the one shared SET builder** (`_listing_update_set_sql`), driven by the contract:
@@ -146,7 +152,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | --- | --- | --- | --- | --- |
 | **W0** | Stop the dead lane pretending | ~2,380 LOC: 4 scripts, 2 workflows, 3 test files, 2 empty tables | ~5 LOC + this doc | — |
 | **W1** | Measurement before change: per-portal key census + fill **and validity** matrix; the flaky data-quality capture REPAIRED (the Health page reads it) | — (the one wave that only adds: it is the instrument) | ~2,200 incl. census + baseline JSON | — |
-| **W2** | Vocabulary module + contract table + CI gates — identity-preserving | ~1,000 LOC (33 fns, 18 dicts, key chains, planted tests, 6 dead reads) | ~750 | W1 |
+| **W2** | Vocabulary module + contract table + CI gates — identity-preserving | 34 fns, 17 dicts, 9 disposition + 7 PENB regexes, the key chains, 8 planted tests, 26 dead reads | one module + one table + 3 gates | W1 |
 | **W3** | The one re-parse seam — SHIPPED | 2,887 LOC across 11 deleted files (**4** backfill scripts, **4** workflows, **3** tests; two of the six named candidates survive on evidence — see R9) | 1,383 in the four new files; the branch's own total is +1,663 / −3,358 incl. the regenerated workflow-docs asset | W1 |
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |
@@ -173,10 +179,17 @@ contract's declared producer. The `capture-data-quality` job is repaired with a 
 (migration 548), not retired: the Health page's `field_null_drift` rung reads its series; the split of ownership
 between the two instruments is written in that migration's header.
 
-**W2.** Gate A1 (no dead read) fails on the 6 seeded dead reads, passes after removal. Gate A2 (no unread emission
-≥ 5 %) — every such key is mapped or on an explicit `ignored:` list with a reason. Gate A3 (no unmapped value).
-**Identity proof:** `count(distinct condition)` = 13 and `count(distinct building_type)` = 15 unchanged; per-cell fill
-unchanged ± 0.1 pp. Prompt/tool-schema drift check = 0.
+**W2 (SHIPPED).** Gate A1 (no dead read) fails on the seeded dead reads, passes after removal — **26 of them, not
+6**: the six the investigation named were the ones a live census had been run against, and declaring all nine
+portals' cells against the checked-in census found 26 (ceskereality 9, remax 6, realitymix 5, idnes 4, maxima 2).
+Gate A2 (no unread emission ≥ 5 %) — every such key is mapped or on the explicit `IGNORED` list with a reason
+(217 entries, of which 14 name the census key W4 wires). Gate A3 (no unmapped value). **Identity proof:** the
+characterisation goldens in `tests/fixtures/field_capture/golden/` — 33 real detail payloads, 1,321 probes over
+every (portal, key, live value) the census records, 33 source-key-chain probes — recorded from the parsers BEFORE
+the module existed and byte-identical after, except four synthetic chain probes that exercise only deleted dead
+reads. `count(distinct condition)` = 13 and `count(distinct building_type)` = 15 hold by construction: every
+off-canon live value is an explicit LEGACY registry entry mapped to itself. The two LLM tool-schema enums are
+generated from the canon; the nine DB-resident prompts are NOT reachable from CI and stay W7's (§7).
 
 **W3 — met, with the gates restated as what is actually provable offline.** Idempotence is proven on the stored
 substrate itself rather than by two live dry runs: pass one writes what the parse produced, pass two compares the same
@@ -282,5 +295,9 @@ different gate — coupling two lifecycles is not a subtraction); unifying the t
   pass sizing (≤ 1,000 rows), not by a kill.
 - Two files will be called "the per-portal contract" (attributes: Python; location: YAML). Distinct names + a refusal
   note at `location_data/contracts.py` `_TOP_LEVEL_KEYS`.
+- **The census is the only evidence gate A1 has, and it samples 1,000 rows.** A source key a portal emits on under
+  ~0.1 % of pages is invisible to it, so W2 deleted 26 reads on that evidence. A key that turns out to be real
+  returns as a re-blessed census diff plus a contract line; the cost of being wrong is a cell that was already
+  0-filled staying 0-filled, never a value that moves.
 - A fill-rate move > 5 pp on any portal changes cohort predicates and dedup features fitted under the old missingness
   — each such wave publishes its delta to the autodedup program (R12) and re-runs a fixed comparables basket.

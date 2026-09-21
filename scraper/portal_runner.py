@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from scraper import db
+from scraper import db, vocabulary
 from scraper.portal import deadline_reached, walk_coverage
 from scraper.rate_ledger import build_rate_limiter
 from scraper.rate_limit import RateLimiter
@@ -886,11 +886,21 @@ def run_detail_drain(
         except Exception as exc:
             LOG.warning("DRAIN teardown: conn.close() failed (ignored): %r", exc)
 
+    unmapped = vocabulary.unmapped_events()
     LOG.info(
-        "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d errors=%d claimed=%d",
+        "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d errors=%d claimed=%d "
+        "unmapped=%d",
         counts["new"], counts["updated"], counts["unchanged"],
         counts["gone"], counts["errors"], total_claimed,
+        sum(n for _, n in unmapped),
     )
+    if unmapped:
+        # A label no vocabulary entry names wrote NULL into a typed column. Named here
+        # rather than in a table of its own: the run summary is where a portal that
+        # relabelled a dropdown has to become visible, and the next census re-bless is
+        # where it gets an entry.
+        LOG.warning("RUN unmapped labels: %s", "; ".join(
+            f"{label}={n}" for label, n in unmapped[:10]))
     scrape_agg: dict[str, Any] = {
         "index_pages":          0,
         "listings_found_new":   counts["new"],

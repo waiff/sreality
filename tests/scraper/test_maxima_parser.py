@@ -81,7 +81,6 @@ DETAIL_HTML = """
     <tr class="border-bottom"><th class="slider_label align-middle">parkovací&nbsp;stání</th><td class="text-right slider_value">Ano</td></tr>
     <tr class="border-bottom"><th class="slider_label align-middle">garáž</th><td class="text-right slider_value">Ano</td></tr>
     <tr class="border-bottom"><th class="slider_label align-middle">výtah</th><td class="text-right slider_value">Ano</td></tr>
-    <tr class="border-bottom"><th class="slider_label align-middle">sklep</th><td class="text-right slider_value">Ne</td></tr>
   </table>
   <div class="collapse-partial">
     <div class="collapse mb-3" id="collapse-inzerat-text">
@@ -186,7 +185,9 @@ def test_parse_detail_full():
     assert listing.has_parking is True
     assert listing.garage is True
     assert listing.has_lift is True
-    assert listing.cellar is False
+    # `sklep` is not a maxima row at all — a 1,000-row census of the live portal
+    # carries no such key, so the cell is unknown, never a guessed False.
+    assert listing.cellar is None
     assert listing.terrace is None       # absent row -> unknown, not guessed False
     assert listing.description.startswith("K prodeji")
     assert listing.raw["maxima_ref"] == "B50087758"

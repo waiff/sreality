@@ -29,21 +29,26 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from html import unescape
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper import vocabulary
 from scraper.area import (
     AREA_TEXT_RE,
     PortalAreas,
     derive_headline_area,
     parse_area_text,
 )
+from scraper.attribute_contract import source_value
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
+
+SOURCE = "remax"
 
 # Detail "Typ nemovitosti" value (diacritics-stripped, lowercased) -> canonical
 # category_main. The live 2026 vocabulary is SEVEN coarse marketing groups
@@ -144,22 +149,6 @@ CATEGORY_BY_TITLE: tuple[tuple[str, str], ...] = (
 )
 
 # Construction labels -> the canonical codes the sreality parser emits.
-BUILDING_TYPE: dict[str, str] = {
-    "panelova": "panel",
-    "cihlova": "cihla",
-    "smisena": "smisena",
-    "skeletova": "skelet",
-    "drevena": "drevo",
-    "kamenna": "kamen",
-    "montovana": "montovana",
-    "nizkoenergeticka": "nizkoenergeticka",
-}
-OWNERSHIP: dict[str, str] = {
-    "osobni": "osobni",
-    "druzstevni": "druzstevni",
-    "statni": "statni",
-    "obecni": "statni",
-}
 
 # Czech-bbox guard: a coordinate outside it (a swapped lat/lon, or a stray pin) is
 # dropped rather than stored as geom.
@@ -167,7 +156,6 @@ _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
 _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 _ID_RE = re.compile(r"/reality/detail/(\d+)")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(-?\d+)")
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # data-gps DMS pair: "50°05'26.1"N,14°29'33.4"E" (entities already unescaped).
@@ -393,73 +381,11 @@ def _parse_total(html: str) -> int | None:
     return int(digits) if digits else None
 
 
-def _parse_disposition(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _DISPOSITION_RE.search(text)
-    if not m:
-        return None
-    return f"{m.group(1)}+{m.group(2).lower()}"
-
-
 def _parse_int(text: str | None) -> int | None:
     if not text:
         return None
     m = _INT_RE.search(text)
     return int(m.group(1)) if m else None
-
-
-def _yes_no(text: str | None) -> bool | None:
-    low = _norm_key(text)
-    if not low:
-        return None
-    if low.startswith("ano"):
-        return True
-    if low.startswith("ne"):
-        return False
-    return None
-
-
-def _norm_condition(text: str | None) -> str | None:
-    key = _norm_key(text)
-    if not key:
-        return None
-    key = re.sub(r"\s+stav$", "", key)
-    key = re.sub(r"\s+", "_", key)
-    return key or None
-
-
-def _norm_ownership(text: str | None) -> str | None:
-    # Map to the canonical sreality codes; drop anything unmapped (e.g.
-    # "ostatni") to NULL rather than leaking a non-canonical label through.
-    key = _norm_key(text)
-    return OWNERSHIP.get(key) if key else None
-
-
-def _norm_furnished(text: str | None) -> str | None:
-    # Canonical sreality codes (parser.FURNISHED): ano / ne / castecne.
-    yn = _yes_no(text)
-    if yn is True:
-        return "ano"
-    if yn is False:
-        return "ne"
-    if "castec" in _norm_key(text):
-        return "castecne"
-    return None
-
-
-def _norm_building_type(text: str | None) -> str | None:
-    key = _norm_key(text)
-    if not key:
-        return None
-    return BUILDING_TYPE.get(key, key)
-
-
-def _energy_rating(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = re.search(r"\b([A-G])\b", text)
-    return m.group(1).upper() if m else None
 
 
 def _full_image(url: str) -> str:
@@ -660,8 +586,9 @@ def parse_detail(
     h1 = tree.css_first("h1")
     title = _text(h1) or _text(tree.css_first("title")) or ""
     params = _detail_params(tree)
+    read = partial(source_value, SOURCE, params=params)
 
-    category_main = category_main or category_of(params.get("typ nemovitosti"), title)
+    category_main = category_main or category_of(read("category_main"), title)
     category_type = category_type or type_of(title) or type_of(source_url) or "prodej"
 
     price_match = _ADVERT_PRICE_RE.search(html)
@@ -759,39 +686,33 @@ def parse_detail(
     }
 
     return ScrapedListing(
-        source="remax",
+        source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
         category_main=category_main,
         category_type=category_type,
-        subtype=subtype_of(params.get("typ nemovitosti"), source_url),
+        subtype=subtype_of(read("subtype"), source_url),
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=_parse_disposition(params.get("dispozice")) or _parse_disposition(title),
+        disposition=vocabulary.disposition(read("disposition"), title),
         locality=locality,
         district=district,
         street=street,
         lat=lat,
         lon=lon,
-        floor=_parse_int(params.get("cislo podlazi")),
-        total_floors=_parse_int(params.get("pocet podlazi v objektu")),
-        building_type=_norm_building_type(params.get("druh objektu")),
-        condition=_norm_condition(params.get("stav objektu")),
-        ownership=_norm_ownership(params.get("vlastnictvi")),
-        energy_rating=(
-            _energy_rating(params.get("energeticka narocnost budovy"))
-            or _energy_rating(params.get("energeticka narocnost"))
-        ),
-        has_balcony=_yes_no(params.get("balkon")) or _yes_no(params.get("lodzie")),
-        has_lift=_yes_no(params.get("vytah")),
-        cellar=_yes_no(params.get("sklep")),
-        terrace=_yes_no(params.get("terasa")),
-        garage=_yes_no(params.get("garaz")),
-        has_parking=_yes_no(params.get("parkovani")) or _yes_no(params.get("garaz")),
-        furnished=_norm_furnished(params.get("vybaveno")),
+        floor=_parse_int(read("floor")),
+        total_floors=_parse_int(read("total_floors")),
+        building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
+        condition=vocabulary.canonical("condition", SOURCE, read("condition")),
+        ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
+        energy_rating=vocabulary.energy_rating(read("energy_rating")),
+        has_lift=vocabulary.yes_no(read("has_lift")),
+        garage=vocabulary.yes_no(read("garage")),
+        has_parking=vocabulary.yes_no(read("has_parking")),
+        furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,
         description=_description(tree),

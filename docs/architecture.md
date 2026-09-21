@@ -18,6 +18,30 @@ which workflows run each portal, their crons, dispatch inputs, and log lines —
 `scraper-ops` skill; cross-source grouping is rule #15 (and, for the rebuild in progress,
 `docs/design/new-dedup/PROGRAM.md`).
 
+**Where a typed attribute comes from is DECLARED, not discovered (field-capture W2).** Every
+narrative below says its typed fields are "normalised to the same canonical labels sreality
+emits". That is now one table and one module rather than nine copies of each:
+
+- **`scraper/attribute_contract.py`** — the ATTRIBUTE contract: one cell per (portal, typed
+  column), all 9 × 26 declared, carrying the producer (`structured` = named payload keys,
+  `text` = mined from the ad prose, `derived` = the URL/breadcrumb/title, `none`), the source-key
+  PRECEDENCE (replacing the inline `params.get(a) or params.get(b)` chains), what a MISSING key
+  means (`false` on bezrealitky's real booleans, `unknown` everywhere else), the default
+  sentinels, and — for a cell nothing fills — the census key a later wave will wire.
+  Not to be confused with the LOCATION contract in `contracts/portals/*.yaml`: that one is
+  governed by a hash tied to a re-minable claim corpus, and typed attributes are deliberately
+  NOT a seventh top-level key there (`location_data/contracts.py` `_TOP_LEVEL_KEYS`).
+- **`scraper/vocabulary.py`** — the producer side of the vocabulary: one diacritic fold, one
+  `(field, portal label) → canonical` registry, one disposition grammar, one PENB grammar and
+  the boolean readings. The CANON stays in `toolkit/filter_registry.py` and is imported, never
+  restated; the LLM tool schema's enums are generated from it. A label no entry names is NULL
+  **plus a counted event** in the run summary (`RUN done … unmapped=N`), never a passthrough.
+- The evidence both answer to is the checked-in per-portal key census in
+  `data/field_capture/census/`, through gates A1 (no dead read), A2 (no unread emission ≥ 5%
+  that is neither mapped nor ignored with a reason) and A3 (no unmapped live value), plus the
+  characterisation goldens in `tests/fixtures/field_capture/golden/` — recorded from the
+  parsers as they stood before the module existed, so a value that moves is visible.
+
 **Data source (sreality v1 API).** In 2026 sreality rebuilt their site on Next.js and
 removed the old `/api/cs/v2/estates` API the scraper was born on. The scraper now
 reads the public JSON v1 API: `GET /api/v1/estates/search` (filters `category_main_cb`

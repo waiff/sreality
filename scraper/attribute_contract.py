@@ -69,7 +69,7 @@ _SREALITY_UNSET = ("- nezadáno", "- vyber", "Rezervováno", "Prodáno")
 _CR_AREAS = ("plocha užitná", "plocha obytná", "plocha celková", "plocha pozemku",
              "plocha zastavěná")
 _RM_AREAS = ("užitná plocha", "celková podlahová plocha", "celková plocha",
-             "plocha parcely", "zastavěná plocha", "zahrada", "plocha")
+             "plocha parcely", "plocha")
 _RX_AREAS = ("uzitna plocha", "celkova plocha", "plocha parcely", "zastavena plocha",
              "plocha zahrady")
 _MX_AREAS = ("plocha užitná", "plocha podlahová", "plocha pozemku")
@@ -286,7 +286,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "energy_rating": _cell("structured", "energetická náročnost budovy"),
         "estate_area": _cell("structured", *_RM_AREAS),
         "usable_area": _cell("structured", *_RM_AREAS),
-        "garden_area": _cell("structured", *_RM_AREAS),
+        # `areas_from_params` reads `plocha zahrady`, which realitymix does not emit —
+        # the live key is `zahrada`, and the column is 0-filled on all 48,757 rows (W4).
+        "garden_area": _cell("none", gap="zahrada"),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None),
         "furnished": _cell("structured", "vybaveno"),
@@ -508,6 +510,8 @@ IGNORED: dict[str, dict[str, str]] = {
         "fotovoltaika": "no column", "typ internetového připojení": "no column",
         "typ pronájmu": "no column", "občanská vybavenost": "no column",
         "popis vybavení": "no column", "sklep": "W4 wires it to cellar",
+        "zastavěná plocha": "no column (a built-up area, not a headline measure)",
+        "zahrada": "W4 wires it to garden_area",
     },
     "remax": {
         "cislo zakazky": "the portal's own reference number",
@@ -606,5 +610,5 @@ def known_gaps() -> dict[str, str | None]:
         f"{portal}/{field}": declared.gap
         for portal, cells in CONTRACT.items()
         for field, declared in cells.items()
-        if declared.producer == "none"
+        if declared.gap is not None or declared.producer == "none"
     }

@@ -10,9 +10,6 @@ from __future__ import annotations
 
 from scraper.realitymix_parser import (
     _category_from_slug,
-    _norm_building_type,
-    _norm_condition,
-    _norm_ownership,
     category_from_breadcrumb,
     index_price,
     parse_detail,
@@ -328,17 +325,6 @@ def test_mapbearing_listing_keeps_rich_data_address_locality():
     assert listing.locality == "Luční, Nupaky, okres Praha-východ"
 
 
-def test_enum_normalization_aligned_to_sreality_vocabulary():
-    assert _norm_condition("velmi dobrý") == "velmi_dobry"
-    assert _norm_condition("Dobrý") == "dobry"
-    assert _norm_condition("Bezvadný") == "velmi_dobry"
-    assert _norm_condition("K rekonstrukci") == "pred_rekonstrukci"
-    assert _norm_condition("Novostavba") == "novostavba"
-    assert _norm_building_type("cihlová") == "cihla"
-    assert _norm_building_type("Smíšená") == "smisena"
-    assert _norm_building_type("Panelová") == "panel"
-    assert _norm_ownership("osobní") == "osobni"
-    assert _norm_ownership("Družstevní") == "druzstevni"
 
 
 def test_content_hash_and_to_row_bridge_to_ingest():

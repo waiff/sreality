@@ -7,7 +7,6 @@ detail <dl> spec table, the fancybox gallery, and the embedded map config
 from __future__ import annotations
 
 from scraper.idnes_parser import (
-    _norm_ownership,
     category_from_url,
     index_price,
     parse_detail,
@@ -457,13 +456,6 @@ def test_price_per_m2_never_masquerades_as_absolute():
     assert index_price("4 990 000 Kč (4 008 Kč/m² )") == 4_990_000
 
 
-def test_norm_ownership_canonical_only():
-    assert _norm_ownership("Osobní") == "osobni"
-    assert _norm_ownership("Družstevní") == "druzstevni"
-    # idnes free-text outside the canonical filter set must not leak through
-    assert _norm_ownership("Jiné") is None
-    assert _norm_ownership("s.r.o.") is None
-    assert _norm_ownership("Podílové") is None
 
 
 def test_parse_detail_strips_mortgage_cta_from_raw_price_fields():

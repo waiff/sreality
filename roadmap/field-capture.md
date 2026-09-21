@@ -29,11 +29,14 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       `capture-data-quality` job (mig 548) — the Health page reads its series. The one wave
       that only adds: it is the instrument every later wave is judged by. First run: 46 zero-fill
       cells of 234; `condition` off-canon on all nine portals; census in `data/field_capture/`.
-- [ ] **W2 — vocabulary module + the attribute contract table + CI gates.** Identity-
-      preserving: 33 normaliser functions, 18 mapping dicts and the planted-fixture tests
-      collapse onto one `scraper/vocabulary.py` producer side; the canon stays in
-      `toolkit/filter_registry.py`. Gates A1 (no dead read) / A2 (no unread emission ≥ 5%)
-      / A3 (no unmapped value).
+- [x] **W2 — vocabulary module + the attribute contract table + CI gates.** Identity-
+      preserving and proven so: 34 normaliser functions, 17 mapping dicts, 9 disposition and
+      7 PENB regexes and 8 planted-fixture tests collapse onto `scraper/vocabulary.py` (the
+      producer side; the canon stays in `toolkit/filter_registry.py` and is imported) plus
+      `scraper/attribute_contract.py` (all 9 × 26 cells: producer, key precedence, absence
+      semantics, sentinels, known gaps). Gates A1 / A2 / A3 run over the checked-in census —
+      A1 found **26** dead reads, not the 6 the investigation named. The identity rail is
+      `tests/fixtures/field_capture/golden/`, recorded from the unchanged parsers.
 - [x] **W3 — the one re-parse seam.** `scripts/reparse.py` replays the portal's OWN parse
       entry point over a substrate declared once per portal: `portal_raw_pages.html` on the
       seven HTML portals (100 % coverage incl. inactive, staged in the drain transaction so
