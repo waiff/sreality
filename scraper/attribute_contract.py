@@ -67,7 +67,7 @@ _SREALITY_UNSET = ("- nezadáno", "- vyber", "Rezervováno", "Prodáno")
 # Each `areas_from_params` unpacks `source_values(SOURCE, "area_m2", params)` in exactly
 # the order declared below, so the cell is the only declaration of those keys. The shared
 # tuples this replaced were a hand-written restatement that named seven keys no parser read
-# (laundering them past gate A2) while omitting five it did.
+# (laundering them past gate A2) while omitting thirteen it did — all thirteen dead.
 
 CONTRACT: dict[str, dict[str, Cell]] = {
     # --- sreality: its own flattened JSON estate ---------------------------

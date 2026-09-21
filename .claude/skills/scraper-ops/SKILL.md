@@ -122,7 +122,7 @@ fatal — so **a broken archive looks like a healthy scrape**: `portal_raw_pages
 `select source, count(*) filter (where contract_version is null) from portal_raw_payloads
 where page_kind = 'detail' group by 1;` is the backlog the lane's hash gate is working through.
 
-**One area rule per column (W19/W21).** `scraper.area.parse_area_text` is the ONLY area regex; ONE `areas_from_params` per portal (bazos `areas_from_text`; mmreality takes the estate OBJECT) that only `parse_detail` calls — never a second copy of a key order.
+**One area rule per column (W19/W21).** `scraper.area.parse_area_text` is the ONLY area regex; ONE `areas_from_params` per portal (bazos `areas_from_text`; mmreality takes the estate OBJECT) that only `parse_detail` calls — never a second copy of a key order. The KEYS are `attribute_contract`'s: the HTML portals unpack `source_values(SOURCE, "area_m2", params)` in the slot order (usable, floor, total, plot) the cell declares.
 mmreality's parcel is `parcelArea` (`landArea`/`plotArea` never filled; `totalArea` is DERIVED per category — never read it). `usable_area` = the "užitná plocha" label ONLY. Plot area for a READER is the `plot_area_m2` MEASURE (mig 534) — a COLUMN on browse_list/map_mv/listing_feed_public (mig 535), never `estate_area`.
 Heal via `reparse.yml` (`--source <portal> --fields area_m2,estate_area,usable_area,garden_area --allow-snapshot-deferral`), which replays `parse_detail` over the stored detail page: dispatch-only, dry-run default, one source per run, no R2. It NEVER blanks a stored value.
 

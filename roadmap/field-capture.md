@@ -35,7 +35,9 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       producer side; the canon stays in `toolkit/filter_registry.py` and is imported) plus
       `scraper/attribute_contract.py` (all 9 × 26 cells: producer, key precedence, absence
       semantics, sentinels, known gaps). Gates A1 / A2 / A3 run over the checked-in census —
-      A1 found **26** dead reads, not the 6 the investigation named. The identity rail is
+      A1 found **26** dead reads, not the 6 the investigation named, and review found **13**
+      more hiding in the five `areas_from_params` key chains the contract had only restated
+      (now consumed, so the gate covers them). The identity rail is
       `tests/fixtures/field_capture/golden/`, recorded from the unchanged parsers.
 - [x] **W3 — the one re-parse seam.** `scripts/reparse.py` replays the portal's OWN parse
       entry point over a substrate declared once per portal: `portal_raw_pages.html` on the

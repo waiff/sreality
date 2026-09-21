@@ -182,14 +182,22 @@ between the two instruments is written in that migration's header.
 **W2 (SHIPPED).** Gate A1 (no dead read) fails on the seeded dead reads, passes after removal — **26 of them, not
 6**: the six the investigation named were the ones a live census had been run against, and declaring all nine
 portals' cells against the checked-in census found 26 (ceskereality 9, remax 6, realitymix 5, idnes 4, maxima 2).
-Gate A2 (no unread emission ≥ 5 %) — every such key is mapped or on the explicit `IGNORED` list with a reason
-(294 entries, and 14 of the 50 `none` cells name the census key W4 wires). Gate A3 (no unmapped value). **Identity proof:** the
-characterisation goldens in `tests/fixtures/field_capture/golden/` — 33 real detail payloads, 1,321 probes over
-every (portal, key, live value) the census records, 33 source-key-chain probes — recorded from the parsers BEFORE
-the module existed and byte-identical after, except four synthetic chain probes that exercise only deleted dead
-reads. `count(distinct condition)` = 13 and `count(distinct building_type)` = 15 hold by construction: every
-off-canon live value is an explicit LEGACY registry entry mapped to itself. The two LLM tool-schema enums are
-generated from the canon; the nine DB-resident prompts are NOT reachable from CI and stay W7's (§7).
+A further **13** were outside A1's reach until review, because `areas_from_params` and realitymix's price fallback
+kept their own key chains and the contract merely restated them: 39 dead reads in all, and the five area chains now
+consume the contract so the gate covers them. Gate A2 (no unread emission ≥ 5 %) — every such key is mapped or on
+the explicit `IGNORED` list with a reason (300 entries, and 12 of the 50 `none` cells name the census key W4 wires).
+Gate A3 (no unmapped value). **Identity proof:** the characterisation goldens in
+`tests/fixtures/field_capture/golden/` — 35 real detail payloads (one of which records a raise), 1,254 label probes,
+33 source-key-chain probes — recorded from the parsers BEFORE the module existed and byte-identical after, except
+four synthetic chain probes that exercise only deleted dead reads. The label corpus is one probe per (portal, key,
+live value) **the census records a value for**, which `field_census.MAX_DISTINCT_FOR_VALUES = 12` caps: a key with
+more than 12 distinct values gets no probe, so realitymix/idnes `balkon`/`terasa`, idnes `sklep` and sreality
+`advert_name` are characterised by the page corpus alone. `count(distinct condition)` = 13 and
+`count(distinct building_type)` = 15 hold by construction: every off-canon live value is an explicit LEGACY registry
+entry mapped to itself. The LLM tool schema's enums are generated from `vocabulary.known_values` — canon PLUS the
+legacy spellings, because that parser writes the same columns the scrapers do — except `disposition`, which keeps a
+described free string: `DISPOSITION_OPTIONS` is the Browse filter pill list, stops at 5+1, and cannot name the 937
+active rows above it. The nine DB-resident prompts are NOT reachable from CI and stay W7's (§7).
 
 **W3 — met, with the gates restated as what is actually provable offline.** Idempotence is proven on the stored
 substrate itself rather than by two live dry runs: pass one writes what the parse produced, pass two compares the same

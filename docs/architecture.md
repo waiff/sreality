@@ -34,8 +34,12 @@ emits". That is now one table and one module rather than nine copies of each:
 - **`scraper/vocabulary.py`** — the producer side of the vocabulary: one diacritic fold, one
   `(field, portal label) → canonical` registry, one disposition grammar, one PENB grammar and
   the boolean readings. The CANON stays in `toolkit/filter_registry.py` and is imported, never
-  restated; the LLM tool schema's enums are generated from it. A label no entry names is NULL
-  **plus a counted event** in the run summary (`RUN done … unmapped=N`), never a passthrough.
+  restated; the LLM tool schema's enums are generated from `known_values` (canon plus the
+  legacy spellings the columns still hold until W5) — except `disposition`, whose contract is
+  the grammar, not the Browse filter's pill list. A label no entry names is NULL **plus a
+  counted event** in the run summary (`RUN done … unmapped=N`), never a passthrough; the
+  counter is drained per drain pass, because the always-on worker runs every source's drain
+  in one long-lived process.
 - The evidence both answer to is the checked-in per-portal key census in
   `data/field_capture/census/`, through gates A1 (no dead read), A2 (no unread emission ≥ 5%
   that is neither mapped nor ignored with a reason) and A3 (no unmapped live value), plus the
@@ -1966,7 +1970,13 @@ renumber.** Navigate by area:
     that order is the same defect as a second copy of the grammar. So each parser exposes
     `areas_from_params(params, title=, category_main=)` (bazos, which has no spec table:
     `areas_from_text`) returning `scraper.area.PortalAreas`, and its own `parse_detail` calls
-    it. That is what makes the heal possible without a second implementation.
+    it. That is what makes the heal possible without a second implementation. Since W2 the
+    KEYS in that order are the attribute contract's: the five HTML-table portals unpack
+    `source_values(SOURCE, "area_m2", params)` in the slot order (usable, floor, total, plot)
+    the `area_m2` cell declares, so the gates can prove every one of them is a key the portal
+    emits — the restatement it replaced named seven keys no parser reads (which let the
+    portals go on publishing them unread) and omitted thirteen the parsers did read, every
+    one of the thirteen dead.
 
     `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) healed the
     stored rows **from `listings.raw_json` — the parser's own latest reading of the live
