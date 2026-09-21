@@ -106,6 +106,14 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 0-row batch tables; (ii) re-key `listing_description_enrichments`; (iii) clear the OLD lane's cells that failed
 measurement (LLM-written floor, silence-based `false`) — only cells that lane wrote, never a portal-stated value.
 
+**Awaiting the operator's word, carried in migration 546 as a severable second statement:** delete the retired
+`llm_liveness` check's 1,162 `pipeline_check_results` rows (122 fails, oldest 2026-07-10, newest 2026-09-21 17:00Z).
+Not covered by (i). It is the only way the Health page stops showing a red check with no producer left to green it
+(`pipeline_checks_public` serves the latest row per key with no recency filter); the cost is the series the W0 report
+and the `pipeline-verification` reference cite. Backup is a `\copy` of those rows, not the pg_dump in the same header.
+The matching bell incident (`sys:llm_liveness:onset:2026-09-21T10:38:34Z`, re-escalated 17:00Z) can never receive a
+recovery row and is marked seen by hand — `notification_dispatches` is append-only (rule #16).
+
 ## 3. What this program never does
 
 - Puts an LLM, a cache probe, or any per-row statement between a sighting and publication.
@@ -201,7 +209,16 @@ today). Conversion = idempotent re-derive, `floor ≥ 1` only; 4,700 rows at 0 a
   output feeds `street_from_locality(..., require_morphology=True, lat=…, lon=…)` — a street-vs-village
   disambiguation decided by a coordinate that can be kilometres off. Own PR, because the honest fix needs a
   decision the item does not contain: the OpenLayers feature reader lives in `location_data`, and R2 forbids
-  `scraper` importing it.
+  `scraper` importing it. **Blast radius, measured 2026-09-21:** narrower than the item implies — `listings`
+  has no coordinate column (W4-c dropped `geom`) and `claims_common.COORDINATE_RULES["maxima"]` is
+  `geom_column`, so the RESOLVER re-reads the pin from the archived page and never arbitrates the scraper's
+  number. What the wrong coordinate decides is that one street-vs-village call plus the `raw_json.coords`
+  provenance stamp. The open decision is the LineString branch: `location_data.page_readers.
+  _openlayers_geometry` walks to the HALF-LENGTH point, so a naive midpoint in `scraper/` would be a second
+  definition of the same point — the PR either ports that walk or returns no hint for a LineString and says why.
+  Note for whoever takes it: `tests/scraper/test_maxima_parser.py`'s map fixture is hand-authored and carries
+  `center` with NO `features` key at all, so it certifies today's behaviour; re-author it from the real shape in
+  `tests/fixtures/location_w2/maxima_detail.html` (`{"center":[…],"zoom":15,"features":[{"type":"Point",…}]}`).
 - ⏳ **bezrealitky `ruianId` rung — the evidence says FEED IT.** 2,836 of 5,716 active bezrealitky rows carry a
   non-empty `ruianId`, yet `location_claims` holds exactly **1** `address_point_id` claim from that portal and no
   portal contract declares the type at all — so bind.py's R0 rung ("the prize") has never fired. Of those 2,836

@@ -27,13 +27,32 @@
 -- (md5 0b646802ae780b5850ae7f3eb084ba36 for browse_stats_properties,
 -- 2bf2e0ab194d089b7a9801a549d1681d for browse_map_cells).
 --
--- APPLY BEFORE MERGING. The SPA shipping with this file starts SENDING the
--- seven size filters it has never sent (`estate_area_*`, `usable_area_*`,
--- `garden_area_*`, `parking_lots_min`) -- the parameters have existed since
--- migration 133/439 and the predicates were already there, dark for want of a
--- caller. Applying first means no window in which the new caller meets an old
--- predicate; applying after is also safe (the old predicate simply answers the
--- old way), so this is the ordinary order, not a hard gate.
+-- DRIFT GATE -- RUN THIS IMMEDIATELY BEFORE APPLYING, not only when the file was
+-- written. This is a whole-body CREATE OR REPLACE, so a parallel branch that
+-- redefined either function first would be silently REVERTED by it (same
+-- parameter list, no error, no ACL change). These two are the repo's most
+-- rewritten RPCs -- 504 -> 537 -> 547 in two months, three programs:
+--
+--   select proname, md5(prosrc) from pg_proc p
+--     join pg_namespace n on n.oid = p.pronamespace
+--    where n.nspname = 'public'
+--      and proname in ('browse_stats_properties','browse_map_cells');
+--
+-- Abort unless the two md5s are still the ones above. If they differ, someone
+-- else's definition is live: regenerate this file from the NEW bodies (re-apply
+-- the same four-line swap) instead of applying it as written.
+--
+-- APPLY BEFORE MERGING -- and here that IS the order, not a preference. The SPA
+-- shipping with this file starts SENDING the seven size filters it has never
+-- sent (`estate_area_*`, `usable_area_*`, `garden_area_*`, `parking_lots_min`)
+-- -- the parameters have existed since migration 133/439 and the predicates were
+-- already there, dark for want of a caller. Applying after the deploy does not
+-- preserve today's behaviour; it opens a NEW divergence in the opposite
+-- direction: `estate_area_min_filter` would reach the bare `l.estate_area`
+-- column, which is NULL on 27,555 of 99,691 active `pozemek` rows that state
+-- the plot as `area_m2` (measured 2026-09-21; migration 534's header counted
+-- 32,626 on 09-17), so Stats and the map would be STRICTER than the list
+-- beside them until this file lands.
 
 CREATE OR REPLACE FUNCTION public.browse_stats_properties(districts_filter text[] DEFAULT NULL::text[], dispositions_filter text[] DEFAULT NULL::text[], price_min_filter integer DEFAULT NULL::integer, price_max_filter integer DEFAULT NULL::integer, area_min_filter integer DEFAULT NULL::integer, area_max_filter integer DEFAULT NULL::integer, active_only_filter boolean DEFAULT false, last_seen_min_days integer DEFAULT NULL::integer, last_seen_max_days integer DEFAULT NULL::integer, first_seen_min_days integer DEFAULT NULL::integer, first_seen_max_days integer DEFAULT NULL::integer, tom_days_min integer DEFAULT NULL::integer, tom_days_max integer DEFAULT NULL::integer, has_balcony_filter boolean DEFAULT NULL::boolean, has_lift_filter boolean DEFAULT NULL::boolean, has_parking_filter boolean DEFAULT NULL::boolean, inactive_only_filter boolean DEFAULT false, furnished_filter text[] DEFAULT NULL::text[], terrace_filter boolean DEFAULT NULL::boolean, cellar_filter boolean DEFAULT NULL::boolean, garage_filter boolean DEFAULT NULL::boolean, category_sub_cb_filter integer DEFAULT NULL::integer, building_type_filter text[] DEFAULT NULL::text[], tag_ids bigint[] DEFAULT NULL::bigint[], category_main_filter text[] DEFAULT NULL::text[], category_type_filter text DEFAULT NULL::text, bbox_west double precision DEFAULT NULL::double precision, bbox_south double precision DEFAULT NULL::double precision, bbox_east double precision DEFAULT NULL::double precision, bbox_north double precision DEFAULT NULL::double precision, ownership_filter text[] DEFAULT NULL::text[], estate_area_min_filter double precision DEFAULT NULL::double precision, estate_area_max_filter double precision DEFAULT NULL::double precision, usable_area_min_filter double precision DEFAULT NULL::double precision, usable_area_max_filter double precision DEFAULT NULL::double precision, parking_lots_min_filter integer DEFAULT NULL::integer, garden_area_min_filter double precision DEFAULT NULL::double precision, garden_area_max_filter double precision DEFAULT NULL::double precision, condition_match_filter text[] DEFAULT NULL::text[], districts_context_filter text[] DEFAULT NULL::text[], city_index_rules jsonb DEFAULT NULL::jsonb, city_pop_min integer DEFAULT NULL::integer, city_pop_max integer DEFAULT NULL::integer, city_proximity jsonb DEFAULT NULL::jsonb, price_per_m2_min double precision DEFAULT NULL::double precision, price_per_m2_max double precision DEFAULT NULL::double precision, portal_filter text[] DEFAULT NULL::text[], mf_gross_yield_pct_min double precision DEFAULT NULL::double precision, mf_gross_yield_pct_max double precision DEFAULT NULL::double precision, near_pop_5km_min integer DEFAULT NULL::integer, near_pop_15km_min integer DEFAULT NULL::integer, near_jobs_5km_min double precision DEFAULT NULL::double precision, near_jobs_15km_min double precision DEFAULT NULL::double precision, near_youth_5km_min double precision DEFAULT NULL::double precision, near_youth_15km_min double precision DEFAULT NULL::double precision, near_overall_5km_min double precision DEFAULT NULL::double precision, near_overall_15km_min double precision DEFAULT NULL::double precision, districts_excluded_filter boolean[] DEFAULT NULL::boolean[], subtype_filter text[] DEFAULT NULL::text[], recently_added_days integer DEFAULT NULL::integer, recently_changed_days integer DEFAULT NULL::integer, obec_ids_filter bigint[] DEFAULT NULL::bigint[], districts_levels text[] DEFAULT NULL::text[], districts_ids bigint[] DEFAULT NULL::bigint[], building_condition_level_min integer DEFAULT NULL::integer, building_condition_level_max integer DEFAULT NULL::integer, apartment_condition_level_min integer DEFAULT NULL::integer, apartment_condition_level_max integer DEFAULT NULL::integer, price_change_count_min integer DEFAULT NULL::integer, price_change_window_days integer DEFAULT NULL::integer, total_price_change_pct_filter double precision DEFAULT NULL::double precision, with_estimates boolean DEFAULT false, include_no_price boolean DEFAULT false, property_ids_filter bigint[] DEFAULT NULL::bigint[], hide_dismissed boolean DEFAULT false)
  RETURNS jsonb

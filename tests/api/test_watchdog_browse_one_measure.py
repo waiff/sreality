@@ -32,6 +32,7 @@ from toolkit.comparables import (
     _shared_filter_where,
     build_query,
 )
+from tests.migration_defs import latest_definition
 from toolkit.measures import per_m2_sql, plot_area_sql
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -118,17 +119,6 @@ def test_neither_site_reads_the_bare_plot_column():
 _BROWSE_RPCS = ("browse_stats_properties", "browse_map_cells")
 
 
-def _latest_rpc_sql(func: str) -> str:
-    """The newest migration that (re)defines `func`, as text."""
-    pat = re.compile(rf"create or replace function (?:public\.)?{func}\s*\(", re.I)
-    files = sorted(
-        (p for p in (_ROOT / "migrations").glob("*.sql") if pat.search(p.read_text())),
-        key=lambda p: int(p.name.split("_", 1)[0]),
-    )
-    assert files, f"no migration defines {func}"
-    return files[-1].read_text()
-
-
 def test_the_browse_aggregate_rpcs_bound_the_plot_measure():
     """The third site, and the one that got away: `browse_stats_properties` and
     `browse_map_cells` bounded `l.estate_area` while the Browse LIST beside them
@@ -140,7 +130,7 @@ def test_the_browse_aggregate_rpcs_bound_the_plot_measure():
     for func in _BROWSE_RPCS:
         # One file may carry both definitions, so this reads every estate bound in it.
         bounds = [
-            line for line in _latest_rpc_sql(func).splitlines()
+            line for line in latest_definition(func).read_text().splitlines()
             if ("estate_area_min_filter" in line or "estate_area_max_filter" in line)
             and (">=" in line or "<=" in line)
         ]

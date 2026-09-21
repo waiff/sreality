@@ -22,13 +22,15 @@ since the newest `llm_calls` row against a threshold sized to "the one recurring
 producer" — bazos description enrichment, deleted with its lane in field-capture W0.
 Every producer left (autodedup judging, labelling, estimations, URL parsing) is
 dispatch-driven or on demand, so silence is the normal resting state: the longest gap
-in the 30 days to 2026-09-21 was 143.8 h, and the check was already 52 fails / 349 runs
+in the 30 days to 2026-09-21 was 143.8 h, and the check was already 52 fails / 347 runs
 against a healthy pipeline. A fixed hours threshold over an on-demand workload is a
 false-red generator, and the fix is not a bigger number — it is a per-lane instrument
 with its own baseline (field-capture R8: oldest eligible-unextracted age per source,
 ships with the W7 text lane). Until then `llm_errors` still catches "calls are failing"
 (state, not recency) and `llm_burn_rate`'s starvation arm still catches "attempting and
-never succeeding".
+never succeeding". The gap that leaves, stated plainly: both derive from rows that
+EXIST, so a total stop — zero `llm_calls` rows at all, e.g. the key unset on every
+runner — reads `ok` on every remaining check until R8 lands.
 
 Each result is persisted AND alerted the moment its check completes, under a per-check
 and a whole-lane wall-clock budget (`_LANE_BUDGET_S`). The lane runs inside a job with
@@ -454,9 +456,11 @@ def _llm_live_state(
     last_err_at`. It used to additionally require the failure to be newer than a
     90-minute window (`min_live_at`), which is wrong for a reason worth stating —
     **silence is not recovery.** A failure is superseded only by a newer SUCCESS,
-    never by elapsed time. The producers here have circuit breakers (the enrichment
-    loop aborts at 5 consecutive errors), so once an outage is total the traffic
-    stops, the last error ages past the window, and the check reads `ok`.
+    never by elapsed time. The producers here have circuit breakers (`toolkit/
+    vision_batch.py` stops the labelling pass on the first fatal provider error;
+    the autodedup judge lane aborts its pass the same way), so once an outage is
+    total the traffic stops, the last error ages past the window, and the check
+    reads `ok`.
 
     Measured: OpenAI was credit-exhausted for 11 days (63,547 error rows, zero
     successes) and `llm_errors` read `ok` for most of it, flapping `fail` -> `ok`
@@ -968,7 +972,7 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
         message = (
             "LLM calls are failing with credit-balance errors right now — the provider "
             "account is out of credit. Every paid LLM path (estimations, summaries, "
-            "listing enrichment, URL parsing) is down "
+            "autodedup judging, image labelling, location claims, URL parsing) is down "
             f"({credit_errors} credit errors in 24h, no successful call since)."
         )
     elif offenders:

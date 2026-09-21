@@ -611,8 +611,8 @@ def test_live_state_a_newer_success_clears_it() -> None:
 
 
 def test_live_state_stale_failure_with_no_traffic_since_is_still_failing() -> None:
-    """The regression. A total outage stops producing traffic (the enrichment loop
-    breaks at 5 consecutive errors), so the last error ages past the old 90-minute
+    """The regression. A total outage stops producing traffic (every LLM lane aborts
+    its pass on a fatal provider error), so the last error ages past the old 90-minute
     window and the check flipped to `ok` — 11 days of real outage read healthy, and
     edge-triggered alerting emitted 114 alerts alternating onset with a literal
     'Recovered' for something that never recovered. Silence is not recovery."""

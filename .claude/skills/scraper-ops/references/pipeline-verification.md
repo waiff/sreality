@@ -159,8 +159,9 @@ six portals that fell over on 2026-08-26 showed no error count anywhere
 **1. Silence is not recovery.** `llm_errors` derives `currently_failing` purely from state:
 `last_ok_at < last_err_at`. It used to additionally `and` in a 90-minute staleness window
 (`min_live_at`), on the theory that a lone old error with no traffic since is not a live
-outage. That is backwards. The producers here have circuit breakers — the enrichment loop
-aborts at exactly 5 consecutive errors — so once an outage is *total* the traffic stops, the
+outage. That is backwards. The producers here have circuit breakers — `toolkit/vision_batch.py`
+stops the labelling pass on the first fatal provider error, and the autodedup judge lane aborts
+its pass the same way — so once an outage is *total* the traffic stops, the
 last error ages out of the window, and the check reads `ok`. Measured: OpenAI was
 credit-exhausted for 11 days (63,547 error rows, **zero** successful calls) and the check read
 `ok` for most of it, flipping `fail` at 14:02 and `ok` at 14:58 on unchanged inputs. Because
