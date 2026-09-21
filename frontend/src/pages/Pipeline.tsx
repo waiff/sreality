@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   DndContext,
@@ -435,34 +435,107 @@ function BoardSkeleton({
     stages.length > 0 ? stages : [null, null, null];
   const geo = PIPELINE_CARD_GEOMETRY[size];
   return (
-    <div className="mt-6 flex items-stretch gap-4 overflow-x-auto pb-4" aria-busy="true">
+    <BoardFrame
+      busy
+      header={columns.map((s, i) => (
+        <StageHeader key={s?.id ?? `skeleton-${i}`} stage={s} size={size} />
+      ))}
+    >
       {columns.map((s, i) => (
-        <div
+        <ul
           key={s?.id ?? `skeleton-${i}`}
-          className={`flex shrink-0 flex-col ${geo.column}`}
+          className={`shrink-0 space-y-2 p-1 ${geo.column} ${geo.dropZoneMin}`}
         >
-          <div
-            className="flex items-baseline justify-between px-1 pb-2 border-b-2"
-            style={{ borderColor: s ? stageColor(s) : 'var(--color-rule)' }}
-          >
-            <span
-              className="text-[0.72rem] tracking-[0.14em] uppercase font-medium"
-              style={{ color: s ? stageColor(s) : 'var(--color-ink-4)' }}
-            >
-              {s?.label ?? ' '}
-            </span>
-          </div>
-          <ul className={`mt-3 grow space-y-2 p-1 ${geo.dropZoneMin}`}>
-            {[0, 1].map((n) => (
-              <li
-                key={n}
-                className={`${geo.skeletonRow} rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] opacity-60`}
-              />
-            ))}
-          </ul>
-        </div>
+          {[0, 1].map((n) => (
+            <li
+              key={n}
+              className={`${geo.skeletonRow} rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] opacity-60`}
+            />
+          ))}
+        </ul>
       ))}
       <span className="sr-only">Načítání pipeline…</span>
+    </BoardFrame>
+  );
+}
+
+/* The board's two rows: the stage headers, pinned under the top bar while the
+ * page scrolls, above the columns, which scroll sideways.
+ *
+ * The headers cannot simply be `sticky` inside their columns. `overflow-x:
+ * auto` forces `overflow-y` to auto as well, so the column row is its own
+ * scroll container, and a sticky header inside it pins against that row —
+ * which never scrolls vertically — instead of against the page. So the headers
+ * live in a row OUTSIDE the scroller and follow it by copying its scrollLeft.
+ * Both rows lay out the same column widths and gaps, so their scroll ranges
+ * are identical and any clamp (a smaller card size, a narrower window) lands
+ * on both alike: a scroll of the columns is the one thing to mirror.
+ *
+ * `top-14` is the Shell's top-bar height (Shell.tsx lists every site pinned to
+ * it). `z-10` keeps the row above the cards but below the Lokalita dropdown
+ * (z-20), which can hang down over the board. */
+function BoardFrame({
+  header,
+  busy,
+  children,
+}: {
+  header: ReactNode;
+  busy?: boolean;
+  children: ReactNode;
+}) {
+  const headerRow = useRef<HTMLDivElement>(null);
+  return (
+    <div className="mt-3" aria-busy={busy || undefined}>
+      <div
+        ref={headerRow}
+        className="sticky top-14 z-10 flex gap-4 overflow-hidden bg-[var(--color-paper)] pt-3"
+      >
+        {header}
+      </div>
+      {/* items-stretch: every column is as tall as the tallest, so each stage's
+          drop zone spans the whole board height instead of ending at its last
+          card. */}
+      <div
+        onScroll={(e) => {
+          if (headerRow.current) headerRow.current.scrollLeft = e.currentTarget.scrollLeft;
+        }}
+        className="mt-3 flex items-stretch gap-4 overflow-x-auto pb-4"
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* A stage's label and rule in its colour, plus its card count once the board
+ * has loaded. The skeleton's stand-in columns (stages still cold) pass no
+ * stage and draw a neutral rule; the no-break space holds the label's line
+ * height so the row doesn't collapse. */
+function StageHeader({
+  stage,
+  count,
+  size,
+}: {
+  stage: PipelineStage | null;
+  count?: number;
+  size: PipelineCardSize;
+}) {
+  return (
+    <div
+      className={`flex shrink-0 items-baseline justify-between px-1 pb-2 border-b-2 ${PIPELINE_CARD_GEOMETRY[size].column}`}
+      style={{ borderColor: stage ? stageColor(stage) : 'var(--color-rule)' }}
+    >
+      <span
+        className="text-[0.72rem] tracking-[0.14em] uppercase font-medium"
+        style={{ color: stage ? stageColor(stage) : 'var(--color-ink-4)' }}
+      >
+        {stage?.label ?? ' '}
+      </span>
+      {count != null && (
+        <span className="font-mono tabular-nums text-[0.7rem] text-[var(--color-ink-4)]">
+          {count}
+        </span>
+      )}
     </div>
   );
 }
@@ -563,9 +636,16 @@ function Board({
         if (plan) move.mutate(plan);
       }}
     >
-      {/* items-stretch: every column is as tall as the tallest, so each stage's
-          drop zone spans the whole board height instead of a header-high sliver. */}
-      <div className="mt-6 flex items-stretch gap-4 overflow-x-auto pb-4">
+      <BoardFrame
+        header={stages.map((s) => (
+          <StageHeader
+            key={s.id}
+            stage={s}
+            count={byStage.get(s.id)?.length ?? 0}
+            size={size}
+          />
+        ))}
+      >
         {stages.map((s) => (
           <StageColumn
             key={s.id}
@@ -576,7 +656,7 @@ function Board({
             onRemove={(propertyId) => remove.mutate(propertyId)}
           />
         ))}
-      </div>
+      </BoardFrame>
       {/* dropAnimation={null}: the optimistic move already places the card in
           the target column on release, so the default "fly back to origin"
           drop animation would show the ghost sliding home before the card
@@ -876,45 +956,33 @@ function StageColumn({
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `${STAGE_PREFIX}${stage.id}` });
   const geo = PIPELINE_CARD_GEOMETRY[size];
+  /* The stage's header lives in BoardFrame's pinned row, not above this list,
+     so the list names its stage itself — otherwise a screen reader meets every
+     header first and then a run of unlabelled lists. */
   return (
-    <div className={`flex shrink-0 flex-col ${geo.column}`}>
-      <div
-        className="flex items-baseline justify-between px-1 pb-2 border-b-2"
-        style={{ borderColor: stageColor(stage) }}
-      >
-        <span
-          className="text-[0.72rem] tracking-[0.14em] uppercase font-medium"
-          style={{ color: stageColor(stage) }}
-        >
-          {stage.label}
-        </span>
-        <span className="font-mono tabular-nums text-[0.7rem] text-[var(--color-ink-4)]">
-          {cards.length}
-        </span>
-      </div>
-      <ul
-        ref={setNodeRef}
-        className={`mt-3 grow space-y-2 rounded-[var(--radius-md)] p-1 transition-colors ${geo.dropZoneMin} ${
-          isOver
-            ? 'bg-[var(--color-inset)] outline outline-1 outline-[var(--color-rule-strong)]'
-            : ''
-        }`}
-      >
-        {cards.length === 0 ? (
-          <li className="px-1 py-2 text-sm text-[var(--color-ink-4)]">—</li>
-        ) : (
-          cards.map((c) => (
-            <li key={c.property_id}>
-              <BoardCard
-                card={c}
-                cityQuality={cityQuality}
-                size={size}
-                onRemove={onRemove}
-              />
-            </li>
-          ))
-        )}
-      </ul>
-    </div>
+    <ul
+      ref={setNodeRef}
+      aria-label={stage.label}
+      className={`shrink-0 space-y-2 rounded-[var(--radius-md)] p-1 transition-colors ${geo.column} ${geo.dropZoneMin} ${
+        isOver
+          ? 'bg-[var(--color-inset)] outline outline-1 outline-[var(--color-rule-strong)]'
+          : ''
+      }`}
+    >
+      {cards.length === 0 ? (
+        <li className="px-1 py-2 text-sm text-[var(--color-ink-4)]">—</li>
+      ) : (
+        cards.map((c) => (
+          <li key={c.property_id}>
+            <BoardCard
+              card={c}
+              cityQuality={cityQuality}
+              size={size}
+              onRemove={onRemove}
+            />
+          </li>
+        ))
+      )}
+    </ul>
   );
 }

@@ -6,9 +6,11 @@
  * deliberately separate from `BoardCard` — the drag overlay renders the face
  * without the drag/remove chrome, and the two must never drift.
  *
- * Reading order on the card, densest-first, because the operator is triaging:
- *   price + how it moved  →  place  →  disposition/area + yield  →  broker
- *   →  the municipality's civic indexes
+ * Reading order on the card:
+ *   place (the card's link)  →  price + how it moved  →  disposition/area +
+ *   yield  →  broker  →  the municipality's civic indexes
+ * The place leads and carries the link because it NAMES the property, the way
+ * a Browse card's title does; the price describes it.
  */
 
 import { useState } from 'react';
@@ -90,7 +92,7 @@ export function CardFace({
   const broker = brokerFor(card.listing_id);
 
   const inactive = !card.is_active;
-  const priceColor = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
+  const inkColor = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   /* ONE label, composed server-side from the property's display listing
      (migration 503) — the same string Browse, the map and the extension print.
      The board used to hand-roll `[street, district]`, then placePrimary(); both
@@ -124,9 +126,7 @@ export function CardFace({
       <div className={stacked ? 'flex flex-col gap-2' : 'flex gap-2.5'}>
         <CardThumb url={cover} inactive={inactive} size={size} />
         <div className="min-w-0 flex-1">
-          {/* Price and its movement are one typographic unit — the delta sits on
-              the price's own baseline rather than reading as a separate badge. */}
-          <div className="flex items-baseline gap-1.5">
+          <p className={`truncate text-sm ${place ? inkColor : 'text-[var(--color-ink-4)]'}`}>
             {/* listingRowPath is canonical-first (source + source_id_native from
                 properties_public), so the card links straight to the clean
                 /listing/{source}/{native} URL; it falls back to the legacy/property
@@ -138,16 +138,30 @@ export function CardFace({
                 link to the browser rather than navigating, so the new document
                 starts with no history state and ListingDetail resolves the
                 natural key itself (one round trip, the price of keeping the
-                board open). */}
+                board open).
+
+                The link is the card's ONLY way to its listing, so a property
+                whose place is unresolved still gets words to click rather than
+                the bare em-dash other surfaces print for a missing label. The
+                title carries the full place because the line truncates. */}
             <Link
               to={listingRowPath(card)}
               target="_blank"
               rel="noopener"
-              title={inactive ? 'Neaktivní inzerát' : undefined}
-              className={`font-mono tabular-nums text-sm hover:text-[var(--color-copper)] hover:underline underline-offset-2 ${priceColor}`}
+              title={[place, inactive ? 'neaktivní inzerát' : null]
+                .filter(Boolean)
+                .join(' · ') || undefined}
+              className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
             >
-              {fmtCzk(card.price_czk)}
+              {place || 'Lokalita neurčena'}
             </Link>
+          </p>
+          {/* Price and its movement are one typographic unit — the delta sits on
+              the price's own baseline rather than reading as a separate badge. */}
+          <div className="mt-0.5 flex items-baseline gap-1.5">
+            <span className={`font-mono tabular-nums text-sm ${inkColor}`}>
+              {fmtCzk(card.price_czk)}
+            </span>
             {/* The board is deal-agnostic (rule 22), so a monthly rent and a
                 capital sum sit in one column. Same marker the Browse table and
                 the Browse cards use. */}
@@ -160,9 +174,6 @@ export function CardFace({
               muted={inactive}
             />
           </div>
-          {place && (
-            <p className="mt-0.5 truncate text-xs text-[var(--color-ink-2)]">{place}</p>
-          )}
           <div className="mt-0.5 flex items-center justify-between gap-2">
             <span className="truncate font-mono tabular-nums text-xs text-[var(--color-ink-4)]">
               {dims || '—'}
