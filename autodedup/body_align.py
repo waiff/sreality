@@ -66,6 +66,56 @@ _MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("[FOTO]", re.compile(r"\b\d{1,3}\s*(?:fotek|fotografi\w*|obrazk\w*)\b")),
 )
 
+# E163: what the shipped mask set still let through, every class taken from a certain duplicate
+# the reader split on the two dev cohorts. None of these names a unit; all of them move between
+# two postings of one, which is why they concentrate on SAME-PORTAL re-posts (remax 25 %,
+# bezrealitky 12.5 %, realitymix 10.9 %, sreality 10.6 %, idnes 7.7 % of certain pairs).
+#
+#   * a charge — `Náklady na bydlení: 5500` against `4000`, `Provize RK: 12.000.- Kč` against
+#     `13.200.-` (the shipped `[CENA]` wants `,-` and this broker writes `.-`), `19tis.kč`
+#     against `20tis.kč`, `nájem 3750 inkaso zálohy` against `4800 1200 záloha`.
+#   * the TERM of the contract — `minimální délka nájmu činí 3 měsíce` against `12 měsíců`,
+#     `anuita … nastavena na 35 let` against `30 let`.
+#   * a date with no year — `k nastěhování od 1.7.` against `od 1.10.`, `prohlídky v termínu
+#     23.6` against `25.9`. Anchored on the date word, because a bare `5.13` is a unit code.
+#   * an order code the population cap is too short to mask — `ev.č. 0831` against `0883`.
+#   * an inventory multiplier — `6x pokoj` against `5x`, which counts a whole house's rooms.
+#   * a length in metres — `objekt je dlouhý 79 m` against `80 m`, a garage door `2,2 m` wide
+#     against `2,3 m`. `m2` is untouched: `m\b` cannot match where a `2` follows.
+#   * a RANGE — `cca 150-180 m²` against the same advert on a portal that dropped the hyphen.
+#     Masking ONE side is enough: a one-sided token is never read (E12).
+_CHARGE_WORD: str = (
+    r"(?:naklad\w*|inkaso|zaloh\w*|sluzb\w*|poplat\w*|kauc\w*|jistot\w*|provi\w*"
+    r"|najemn\w*|najem|energi\w*|elektrin\w*|vodn\w*|stocn\w*|topen\w*|odpad\w*)"
+)
+_CODE_WORD: str = (
+    r"(?:ev\.?\s*c\w*|evidencn\w*|zakazk\w*|nabidk\w*|referenc\w*|ref\.?\s*c\w*|id\s*c\w*)"
+)
+_DATE_WORD: str = (
+    r"(?:od|do|dne|termin\w*|prohlidk\w*|nastehovani|dispozici|volny|volna|volne|uvolnen\w*)"
+)
+_HEAL_MASKS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("[DEN]", re.compile(_DATE_WORD + r"\s+\d{1,2}\.\s?\d{1,2}\.?(?!\d)")),
+    ("[KOD]", re.compile(_CODE_WORD + r"\W{0,4}(?:\[kod\]\W{0,4})?[a-z]{0,3}\s?\d[\d/-]{0,12}")),
+    ("[CENA]", re.compile(r"\b\d[\d.]*\d\s*[.,]\s?-")),
+    ("[CENA]", re.compile(r"\b\d+(?:[.,]\d+)?\s*tis\.?\s*(?:kc|czk)?")),
+    ("[CENA]", re.compile(_CHARGE_WORD + r"\W{0,4}\d[\d.,]*")),
+    ("[DOBA]", re.compile(r"\b\d{1,3}\s*(?:mesic\w*|let\b|lety\b|rok\w*)")),
+    ("[POCET]", re.compile(r"\b\d{1,2}\s?x\b")),
+    ("[ROZSAH]", re.compile(r"\b\d{1,5}(?:[.,]\d+)?\s*[-–]\s*\d{1,5}(?:[.,]\d+)?")),
+    ("[ROZMER]", re.compile(r"\b\d{1,4}(?:[.,]\d+)?\s*m\b(?!2)")),
+)
+# One storey, two vocabularies. `2. NP` and `1. patro` are the same floor of one flat — the
+# Czech ground floor is `1. NP` and `přízemí`, and the first `patro` stands above it. Normalised
+# to one sentinel so the pair reads as equal while `3. NP` against `4. NP` stays two flats.
+_NP = re.compile(r"\b(\d{1,2})\.?\s*(?:np\b|nadzemnim?\s+podlazi\w*)")
+_PATRO = re.compile(r"\b(\d{1,2})\.?\s*patr\w*")
+
+
+def _storey(level: int) -> str:
+    """The storey as a LETTER sentinel: `[np]` carrying a digit would read as a quantity."""
+    return f" [np{chr(ord('a') + min(max(level, 0), 25))}] "
+
 _TOKEN = re.compile(r"[a-z0-9]+(?:[./,-][a-z0-9]+)*|\[[a-z]+\]")
 _DIGIT = re.compile(r"\d")
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)?$")
@@ -84,21 +134,27 @@ def _fold(text: str) -> str:
     return _ACCENTS.sub("", unicodedata.normalize("NFKD", text)).lower()
 
 
-def mask(text: str) -> str:
+def mask(text: str, heal: bool = False) -> str:
     """The body with every field that legitimately moves between two postings blanked."""
     out = _SPACED_THOUSANDS.sub("", _fold(mask_codes(text) or ""))
     out = out.replace("[kod]", " [kod] ")
+    if heal:
+        out = _NP.sub(lambda m: _storey(int(m.group(1))), out)
+        out = _PATRO.sub(lambda m: _storey(int(m.group(1)) + 1), out)
     for sentinel, pattern in _MASKS:
         out = pattern.sub(sentinel, out)
+    if heal:
+        for sentinel, pattern in _HEAL_MASKS:
+            out = pattern.sub(sentinel, out)
     return out
 
 
 @lru_cache(maxsize=BODY_CACHE)
-def tokens(text: str) -> tuple[Token, ...]:
+def tokens(text: str, heal: bool = False) -> tuple[Token, ...]:
     """The masked body as tokens, each carrying whether it states a quantity or a code."""
     return tuple(
         Token(word, bool(_DIGIT.search(word)) and not word.startswith("["))
-        for word in (match.group(0) for match in _TOKEN.finditer(mask(text)))
+        for word in (match.group(0) for match in _TOKEN.finditer(mask(text, heal)))
     )
 
 
@@ -174,10 +230,10 @@ def rounding_equal(left: str, right: str) -> bool:
 
 
 @lru_cache(maxsize=BODY_CACHE)
-def body_numbers(text: str) -> tuple[tuple[float, int], ...]:
+def body_numbers(text: str, heal: bool = False) -> tuple[tuple[float, int], ...]:
     """Every number the whole body states, whatever position it sits in."""
     return tuple(sorted({(value, decimals)
-                         for _, value, decimals in _numbers_of(list(tokens(text)))}))
+                         for _, value, decimals in _numbers_of(list(tokens(text, heal)))}))
 
 
 def _stated_elsewhere(values: list[tuple[float, int]],
@@ -228,6 +284,7 @@ def aligned_difference(
     left_text: str | None,
     right_text: str | None,
     min_ratio: float = 0.75,
+    heal: bool = False,
 ) -> tuple[str, str] | None:
     """The first position two near-identical bodies fill differently, or None.
 
@@ -235,7 +292,7 @@ def aligned_difference(
     refused is a sentence an operator can check against the two adverts."""
     if not left_text or not right_text:
         return None
-    left, right = tokens(left_text), tokens(right_text)
+    left, right = tokens(left_text, heal), tokens(right_text, heal)
     if len(left) < MIN_TOKENS or len(right) < MIN_TOKENS:
         return None
     left_words = [token.text for token in left]
@@ -259,7 +316,7 @@ def aligned_difference(
             continue
         segment_left, segment_right = list(left[i1:i2]), list(right[j1:j2])
         found = _differ_digit(segment_left, segment_right,
-                              body_numbers(left_text), body_numbers(right_text))
+                              body_numbers(left_text, heal), body_numbers(right_text, heal))
         if found is not None:
             return found
     return None

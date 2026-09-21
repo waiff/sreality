@@ -500,6 +500,40 @@ class Settings:
     corroboration_body_containment: float = 0.80
     corroboration_min: int = 2
 
+    # --- W17 / S2: exactness where identity is CLAIMED (E160-E165) -------------------------
+    # E160: "price equal" at promotion is EXACT, or one price on the other's recorded path.
+    # 5 % is the width of two portals carrying one order; it is also the width of a developer's
+    # next unit (Kozolupy 11,250,000 against 11,500,000, 2.2 %, one cluster of 25). A tolerance
+    # that cannot tell those apart is not a demonstration of identity.
+    demonstrate_price_exact: bool = False
+    # What a portal's ROUNDING costs, and nothing more: 0.2 % covers 11,250,000 written as
+    # `11,25 mil.` and still refuses `11,5`.
+    demonstrate_price_exact_tol: float = 0.002
+    # E160: "area equal" is decided by what the two BODIES print whenever both print anything.
+    # A stored integer column rescues 75,52 against 75,64 — both portals store 76 — and that is
+    # the Chotěšov twin. The column stays the reading only where a body states nothing.
+    demonstrate_area_printed_decides: bool = False
+    d43_printed_area_decimals_decide: bool = False
+    # E161: the printed unit code, read WHOLE and in the bare form. `wide` adds the Roman
+    # numeral, the number word and the single letter, each behind an explicit marker.
+    d43_unit_codes: bool = False
+    d43_unit_codes_wide: bool = False
+    # E162: a fact ONE side prints and the other is silent about. Outside a development that is
+    # E12's missing datum and no refusal; inside one it is the whole hazard, so the silent side
+    # fails closed. `development_context_mode` says how narrowly "inside" is read — `vocab` is
+    # `PROJECT_TERMS` on either side (the skeptic measured that at 41.8 % of all pairs, which is
+    # not a context), `narrow` asks for the vocabulary on BOTH sides AND a second marker.
+    demonstrate_onesided: bool = False
+    development_context_mode: str = "off"
+    # E163: the healed generic reader — charges, contract terms, year-less dates, short order
+    # codes, inventory multipliers, metre dimensions, ranges, and NP against patro.
+    d43_body_align_heal: bool = False
+    # E164: 87 % of the A-limb's refusals are a MISSING reading, not a disagreement. A missing
+    # reading may be waived where the pair carries evidence only one unit has.
+    demonstrate_recover_missing: bool = False
+    demonstrate_recover_min_photos: float = 3.0
+    demonstrate_recover_body_containment: float = 0.98
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -632,6 +666,26 @@ class Settings:
             raise ValueError("corroboration needs demonstrate_identity")
         if self.demonstrate_cluster_price and not self.demonstrate_identity:
             raise ValueError("demonstrate_cluster_price needs demonstrate_identity")
+        if self.development_context_mode not in ("off", "vocab", "narrow"):
+            raise ValueError(
+                "development_context_mode must be off/vocab/narrow: "
+                f"{self.development_context_mode}"
+            )
+        if not 0.0 <= self.demonstrate_price_exact_tol < 1.0:
+            raise ValueError(
+                "demonstrate_price_exact_tol must be in [0, 1): "
+                f"{self.demonstrate_price_exact_tol}"
+            )
+        if self.demonstrate_onesided and self.development_context_mode == "off":
+            raise ValueError("demonstrate_onesided needs a development_context_mode")
+        for name in ("demonstrate_price_exact", "demonstrate_area_printed_decides",
+                     "demonstrate_onesided", "demonstrate_recover_missing"):
+            if getattr(self, name) and not self.demonstrate_identity:
+                raise ValueError(f"{name} needs demonstrate_identity")
+        if self.d43_unit_codes_wide and not self.d43_unit_codes:
+            raise ValueError("d43_unit_codes_wide needs d43_unit_codes")
+        if self.d43_body_align_heal and not self.d43_body_align:
+            raise ValueError("d43_body_align_heal needs d43_body_align")
         if self.floor_camps_reads not in ("off", "joint", "slack", "strict"):
             raise ValueError(
                 f"floor_camps_reads must be off/joint/slack/strict: {self.floor_camps_reads}"

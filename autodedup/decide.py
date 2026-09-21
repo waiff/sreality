@@ -22,7 +22,12 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from autodedup.dataset import Listing
-from autodedup.demonstrate import corroboration_warrant, demonstration_gap
+from autodedup.demonstrate import (
+    MISSING,
+    corroboration_warrant,
+    demonstration_shortfall,
+    strong_corroboration,
+)
 from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
@@ -597,9 +602,16 @@ def demonstration_refusal(
     if not settings.demonstrate_identity:
         return None
     paths_agree = price_paths_agree(la, lb, settings.d43_price_path_tol)
-    gap = demonstration_gap(la, lb, settings, paths_agree, overlap_days(la, lb))
-    if gap is not None:
-        return f"A:{gap}"
+    shortfall = demonstration_shortfall(la, lb, settings, paths_agree, overlap_days(la, lb))
+    if shortfall is not None:
+        gap, kind = shortfall
+        # E164: a reading NOBODY states is not a disagreement. Where the pair carries evidence
+        # only one unit has — three tight photo files with the interiors holding, the seller's
+        # own order code, or a body one advert essentially IS outside a development — the
+        # missing reading is waived. A CONTRADICTION never is.
+        if not (settings.demonstrate_recover_missing and kind == MISSING
+                and strong_corroboration(la, lb, feats, settings) is not None):
+            return f"A:{gap}"
     if corroboration_warrant(la, lb, feats, settings) is None:
         return "B"
     return None

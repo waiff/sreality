@@ -146,10 +146,27 @@ def _areas_meet(left: frozenset[tuple[float, int]],
     return any(rounding_equal_values(a, da, b, db) for a, da in left for b, db in right)
 
 
-def area_demonstrated(a: Listing, b: Listing) -> bool:
+def deciding_areas(listing: Listing, land: bool, printed_decides: bool
+                   ) -> frozenset[tuple[float, int]]:
+    """E160: what the advert actually states its size to be.
+
+    `area_readings` is the stored column UNION what the body prints, and the union is what lets
+    75,52 m² meet 75,64 m²: both portals store 76, and a 0-decimal 76 meets every number that
+    rounds to it. Two bodies that each print a two-decimal figure have SAID what the unit is;
+    the column is a coarser copy of one of them and cannot overrule the pair. So where a body
+    prints anything, the printed readings decide, and the column is the reading only where the
+    body is silent — which is still the whole point of E153."""
+    if not printed_decides:
+        return area_readings(listing, land)
+    printed = body_headline_areas(listing, land)
+    return printed if printed else area_readings(listing, land)
+
+
+def area_demonstrated(a: Listing, b: Listing, printed_decides: bool = False) -> bool:
     """Both sides state a headline area and the two agree within rounding."""
     land = LAND_CATEGORY in (a.category_main, b.category_main)
-    left, right = area_readings(a, land), area_readings(b, land)
+    left = deciding_areas(a, land, printed_decides)
+    right = deciding_areas(b, land, printed_decides)
     return bool(left) and bool(right) and _areas_meet(left, right)
 
 
@@ -207,7 +224,13 @@ def price_demonstrated(
     if not (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0):
         return False
     cross = a.source is not None and b.source is not None and a.source != b.source
-    tol = PRICE_CROSS_TOL if cross else settings.d43_price_path_tol
+    # E160: EXACT, or on the other's recorded path. 5 % is what two portals carrying one order
+    # look like — and also what a developer's next unit looks like, which is why it cannot be
+    # the bar where identity is being CLAIMED rather than merely not contradicted.
+    if settings.demonstrate_price_exact:
+        tol = settings.demonstrate_price_exact_tol
+    else:
+        tol = PRICE_CROSS_TOL if cross else settings.d43_price_path_tol
     if rel_diff(float(a.price), float(b.price)) <= tol:
         return True
     if paths_agree:
@@ -243,6 +266,20 @@ def price_conflict(
     return rel_diff(float(a.price), float(b.price)) <= PRICE_COLIVE_MAX_GAP
 
 
+# E164: which of the A-limb's refusals is a DISAGREEMENT and which is only a silence. On the
+# two dev cohorts 87 % of arm M's A-limb losses are the second kind — no price on one side, an
+# area no reader can make out — and 814 of 818 of them already carry unit-grade corroboration.
+MISSING: str = "missing"
+CONTRADICTION: str = "contradiction"
+
+
+def _area_kind(a: Listing, b: Listing, printed_decides: bool) -> str:
+    land = LAND_CATEGORY in (a.category_main, b.category_main)
+    left = deciding_areas(a, land, printed_decides)
+    right = deciding_areas(b, land, printed_decides)
+    return MISSING if not left or not right else CONTRADICTION
+
+
 def demonstration_gap(
     a: Listing,
     b: Listing,
@@ -251,14 +288,35 @@ def demonstration_gap(
     overlap: float | None,
 ) -> str | None:
     """(A) The first key fact the two adverts do not POSITIVELY agree on, or None."""
-    if not area_demonstrated(a, b):
-        return "area"
+    return (demonstration_shortfall(a, b, settings, paths_agree, overlap) or (None, None))[0]
+
+
+def demonstration_shortfall(
+    a: Listing,
+    b: Listing,
+    settings: Settings,
+    paths_agree: bool,
+    overlap: float | None,
+) -> tuple[str, str] | None:
+    """(A) as `(fact, kind)`: WHICH key fact, and whether the two adverts disagree or one is
+    silent. Nothing about the order or the tests changes — `demonstration_gap` is this function
+    read for its first half, which is what every arm before W17 asked for."""
+    printed = settings.demonstrate_area_printed_decides
+    if not area_demonstrated(a, b, printed):
+        return ("area", _area_kind(a, b, printed))
     if settings.demonstrate_require_disposition and not disposition_demonstrated(a, b):
-        return "disposition"
+        kind = MISSING if (a.disposition is None or b.disposition is None) else CONTRADICTION
+        return ("disposition", kind)
     if not price_demonstrated(a, b, settings, paths_agree, overlap):
-        return "price"
+        priced = bool(a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0)
+        return ("price", CONTRADICTION if priced else MISSING)
     if settings.demonstrate_require_obec and not obec_demonstrated(a, b):
-        return "obec"
+        known = a.location.obec_kod is not None and b.location.obec_kod is not None
+        return ("obec", CONTRADICTION if known else MISSING)
+    if settings.demonstrate_onesided:
+        one_sided = onesided_fact(a, b, settings)
+        if one_sided is not None:
+            return (f"onesided_{one_sided}", CONTRADICTION)
     return None
 
 
@@ -273,6 +331,115 @@ def in_development(a: Listing, b: Listing) -> bool:
         if any(term in text for term in PROJECT_TERMS):
             return True
     return False
+
+
+# E162: the NARROW development context. `in_development` is `PROJECT_TERMS` on EITHER side, and
+# the skeptic measured that at 41.8 % of all cohort-3 pairs — `novostavba` and `projekt` are how
+# a Czech advert says "new" and "the plan", so a rule resting on it is not a context but a
+# blanket. What makes a pair a development hazard is not the words but the SHAPE: the two
+# adverts are written from one seller's template, they are on sale together, and the seller is
+# selling units of a thing — which he admits by naming them, or by quoting a price list.
+NEW_BUILD_TERMS: tuple[str, ...] = (
+    "novostavb", "developer", "rezidenc", "etap", "kolaudac", "projekt",
+)
+# How much of the two bodies must be word-identical before they are one template. The body_align
+# bar, deliberately: one number, one meaning.
+TEMPLATE_MIN_RATIO: float = 0.60
+
+
+def _new_build(listing: Listing) -> bool:
+    text = fold(listing.description or "")
+    return any(term in text for term in NEW_BUILD_TERMS)
+
+
+def _names_a_unit(listing: Listing, settings: Settings) -> bool:
+    from autodedup.text_facts import printed_unit_codes, unit_designators
+
+    return bool(printed_unit_codes(listing.description, settings.d43_unit_codes_wide)
+                or unit_designators(listing.description))
+
+
+def development_context(a: Listing, b: Listing, settings: Settings) -> bool:
+    """Are these two adverts inside one seller's development?
+
+    `vocab` is `in_development`, kept so the two readings can be measured against each other.
+    `narrow` asks for all of: the new-build vocabulary on BOTH sides, and either the project
+    NAMING its units (a printed unit code or designator on either side) or admitting to a price
+    list (`ceny od …`) or the two bodies being one template that was on sale twice at once."""
+    mode = settings.development_context_mode
+    if mode == "off":
+        return False
+    if mode == "vocab":
+        return in_development(a, b)
+    if not (_new_build(a) and _new_build(b)):
+        return False
+    if _names_a_unit(a, settings) or _names_a_unit(b, settings):
+        return True
+    from autodedup.text_facts import states_from_price
+
+    if states_from_price(a.description) and states_from_price(b.description):
+        return True
+    if _sequential(a, b, settings, overlap_days_local(a, b)):
+        return False
+    return _one_template(a, b, settings)
+
+
+def _one_template(a: Listing, b: Listing, settings: Settings) -> bool:
+    from autodedup.body_align import tokens
+
+    left = tokens(a.description or "", settings.d43_body_align_heal)
+    right = tokens(b.description or "", settings.d43_body_align_heal)
+    if not left or not right:
+        return False
+    from difflib import SequenceMatcher
+
+    matcher = SequenceMatcher(None, [t.text for t in left], [t.text for t in right],
+                              autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return 2.0 * matched / (len(left) + len(right)) >= TEMPLATE_MIN_RATIO
+
+
+def _printed_floors(listing: Listing) -> frozenset[int]:
+    """Every storey the BODY prints as this unit's, `1. NP` and `1. patro` on one scale."""
+    import re
+
+    text = fold(listing.description or "")
+    out = {int(match.group(1))
+           for match in re.finditer(r"\b(\d{1,2})\.?\s*(?:np\b|nadzemnim?\s+podlazi)", text)}
+    out |= {int(match.group(1)) + 1
+            for match in re.finditer(r"\b(\d{1,2})\.?\s*patr", text)}
+    return frozenset(value for value in out if 0 < value <= 40)
+
+
+def onesided_fact(a: Listing, b: Listing, settings: Settings) -> str | None:
+    """E162: a unit-level fact one advert PRINTS and the other never states.
+
+    Outside a development that is E12's missing datum and no reason to refuse anything: an
+    advert that does not print its floor has contradicted nobody. INSIDE one it is the whole
+    hazard — the S arm's residue is new-development unit twins whose code, floor or area is
+    printed on one side only — so there the silent side fails closed.
+
+    A side that prints a DIFFERENT value is not this rule's business: that is already a fact
+    (`unit_code`, `floor`, `printed_area`), read in every mode and outside every context."""
+    if not development_context(a, b, settings):
+        return None
+    from autodedup.text_facts import printed_unit_codes
+
+    wide = settings.d43_unit_codes_wide
+    for name, left, right in (
+        ("code", printed_unit_codes(a.description, wide),
+         printed_unit_codes(b.description, wide)),
+        ("floor", _printed_floors(a), _printed_floors(b)),
+    ):
+        if bool(left) != bool(right):
+            return name
+    land = LAND_CATEGORY in (a.category_main, b.category_main)
+    if bool(body_headline_areas(a, land)) != bool(body_headline_areas(b, land)):
+        return "area"
+    floors = (a.floor, b.floor)
+    if (floors[0] is None) != (floors[1] is None):
+        return "floor"
+    return None
 
 
 def corroborations(a: Listing, b: Listing, feats: Feats | None, settings: Settings) -> list[str]:
@@ -318,3 +485,36 @@ def corroboration_warrant(
     if mode == "two_of":
         return "+".join(found) if len(found) >= settings.corroboration_min else None
     return None if development else "outside_development"
+
+
+def strong_corroboration(
+    a: Listing, b: Listing, feats: Feats | None, settings: Settings
+) -> str | None:
+    """E164: evidence strong enough that a MISSING reading need not be demonstrated.
+
+    (B)'s `unit` grade asks for ONE tight photo file, ONE order code or a contained body. That
+    is the right bar for a pair whose key facts are all known and equal; it is not the bar for
+    waiving one of those facts. What is admitted here is the sub-class the four cohorts show to
+    be clean:
+
+      * several tight non-catalogue photo FILES in common, with the galleries' weakest-but-one
+        shared room above the interior floor where anything is known about it — a developer
+        reuses the exterior render, not three interiors;
+      * a shared rare order code, which is the seller's own name for ONE object;
+      * a body one advert essentially IS — outside a development, where a shared body is the
+        developer's template rather than this unit's (the Černovírské zahrady parcelling).
+
+    A CONTRADICTION is never waived: two adverts that state two different areas are two
+    statements, and no photograph outvotes a statement."""
+    photos = _slot(feats, "phash_tight_matches") or 0.0
+    rooms = _slot(feats, "tag_room_clip_min2")
+    if photos >= settings.demonstrate_recover_min_photos and (rooms is None or rooms >= 0.90):
+        return f"photos:{photos:.0f}"
+    if (_slot(feats, "ref_code_shared") or 0.0) >= 1.0:
+        return "code"
+    contained = _slot(feats, "containment_max") or 0.0
+    if (contained >= settings.demonstrate_recover_body_containment
+            and not development_context(a, b, settings)
+            and min(len(a.description or ""), len(b.description or "")) >= 300):
+        return "body"
+    return None

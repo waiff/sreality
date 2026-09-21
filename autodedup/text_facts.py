@@ -157,6 +157,71 @@ def unit_designators(text: str | None) -> set[str]:
     }
 
 
+# --- the printed unit CODE, read whole and in the bare form (E161) --------------------------
+# `_UNIT_PATTERNS` reads `oznacen\w*\s+([a-z]\d{1,3})` and stops at the word boundary, so
+# `s označením B2.2.1` reads `B2` and `s označením B1.2.2` reads `B1` — and B1 against B1 is no
+# conflict at all. The bare form `byt B1.2.1 o dispozici` (no keyword) reads nothing. That is
+# how b1.2.1 and b2.2.1 of Slavonínské zahrady ended in one cluster of every W16 arm.
+#
+# So this reader is anchored on the unit NOUN rather than on a keyword, and the code is kept
+# WHOLE. Two segments is the whole point: a bare `B2` is a BUILDING and every flat in it shares
+# it, so a single segment is never read — that is the fail-safe direction, because an empty set
+# is never a conflict.
+_UNIT_NOUN: str = (
+    r"(?:byt\w*|jednotk\w*|apartman\w*|mezonet\w*|atelier\w*|studi[ou]"
+    r"|dum|domu|domek\w*|domku|vil[aey]|rd|radovk\w*"
+    r"|parcel\w*|pozemk\w*|pozemek|garaz\w*|\bstani\b|chat[ay]|chalup\w*)"
+)
+_UNIT_MARKER: str = r"(?:s\s+)?(?:oznacen\w{0,4}\s+)?(?:c\.?\s*|cislo\s+)?"
+_UNIT_CODE_BODY: str = (
+    r"([a-z]{1,2}\s?\d{1,3}(?:\s?[.\-/]\s?\d{1,3}){1,3}|\d{1,3}(?:\.\d{1,3}){1,3})"
+)
+_PRINTED_UNIT_CODE = re.compile(_UNIT_NOUN + r"\s+" + _UNIT_MARKER + _UNIT_CODE_BODY
+                                + r"(?![\d+]|\s*m2)")
+# The three forms the segment reader cannot see. Each needs an EXPLICIT marker, because a bare
+# letter or numeral after a noun is Czech grammar: `dům i zahrada` is a house and a garden, not
+# unit I, and `byt a garáž` is a flat and a garage.
+_ROMAN: str = r"(?:ii|iii|iv|vi|vii|viii|ix|xi|xii)"
+_PRINTED_UNIT_ROMAN = re.compile(_UNIT_NOUN + r"\s+" + _UNIT_MARKER + r"(" + _ROMAN + r")\b")
+_NUMBER_WORDS: dict[str, str] = {
+    "jedna": "I", "dva": "II", "dve": "II", "tri": "III", "ctyri": "IV", "pet": "V",
+    "sest": "VI", "sedm": "VII", "osm": "VIII", "devet": "IX", "deset": "X",
+}
+_PRINTED_UNIT_WORD = re.compile(
+    _UNIT_NOUN + r"\s+(?:s\s+)?(?:oznacen\w{0,4}\s+)?(?:c\.?\s*|cislo\s+)"
+    r"(" + "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True)) + r")\b"
+)
+_PRINTED_UNIT_LETTER = re.compile(
+    _UNIT_NOUN + r"\s+(?:s\s+)?(?:oznacen\w{0,4}\s+|c\.?\s*|cislo\s+)([a-z])\b(?!\s*m2)"
+)
+# More than this many distinct codes in one body is a developer's price list, not this unit's
+# identity — and a price list must never refuse anything (an empty set is not a conflict).
+UNIT_CODE_MAX_PER_ADVERT: int = 4
+
+
+def printed_unit_codes(text: str | None, wide: bool = False) -> frozenset[str]:
+    """Every unit code the body prints as this unit's, whole and normalised.
+
+    `wide` adds the Roman numeral, the number word and the single letter, each of which needs
+    an explicit `označením` / `č.` / `číslo` marker to be read at all."""
+    return _printed_unit_codes(text, wide) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_unit_codes(text: str, wide: bool) -> frozenset[str]:
+    folded = fold(text)
+    out: set[str] = {
+        re.sub(r"\s+", "", match.group(1)).upper().strip(".-/")
+        for match in _PRINTED_UNIT_CODE.finditer(folded)
+    }
+    if wide:
+        out |= {match.group(1).upper() for match in _PRINTED_UNIT_ROMAN.finditer(folded)}
+        out |= {_NUMBER_WORDS[match.group(1)] for match in _PRINTED_UNIT_WORD.finditer(folded)}
+        out |= {match.group(1).upper() for match in _PRINTED_UNIT_LETTER.finditer(folded)}
+    out.discard("")
+    return frozenset(out) if len(out) <= UNIT_CODE_MAX_PER_ADVERT else frozenset()
+
+
 # --- printed land-register parcels (E140) --------------------------------------------------
 # A Czech land or house advert prints the parcel the object stands on, and that number IS the
 # object's identity in the land register: two adverts printing disjoint parcels are two

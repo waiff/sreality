@@ -82,6 +82,7 @@ from autodedup.text_facts import (
     prose_streets,
     stated_areas,
     streets_agree,
+    printed_unit_codes,
     unit_designators,
 )
 from toolkit.room_taxonomy import category_main_compatible
@@ -147,6 +148,7 @@ FACT_NAMES: tuple[str, ...] = (
     "street_prose",
     "obec_prose",
     "printed_area",
+    "unit_code",
 )
 
 
@@ -345,6 +347,25 @@ def two_unit_signature(a: Listing, b: Listing, settings: Settings | None = None)
     if price_paths_agree(a, b, cfg.d43_price_path_tol):
         return False
     return not _stated_areas_meet(a, b, cfg.d43_two_unit_stated_tol)
+
+
+def printed_area_conflict_cfg(a: Listing, b: Listing, settings: Settings | None = None
+                              ) -> tuple[str, str] | None:
+    """`printed_area_conflict` with E160's reading of which numbers decide."""
+    cfg = settings or Settings()
+    land = LAND_CATEGORY in (a.category_main, b.category_main)
+    if not body_headline_areas(a, land) or not body_headline_areas(b, land):
+        return None
+    if not cfg.d43_printed_area_decimals_decide:
+        return printed_area_conflict(a, b)
+    # E160: where both bodies PRINT, the printed figures decide. `75,52` against `75,64` is two
+    # flats of one Chotěšov row, and the only thing that made them meet was the stored 76 both
+    # portals rounded to — a coarser copy of one of the two numbers, overruling both.
+    left, right = body_headline_areas(a, land), body_headline_areas(b, land)
+    if any(rounding_equal_values(x, dx, y, dy) for x, dx in left for y, dy in right):
+        return None
+    return (str(sorted(value for value, _ in left)),
+            str(sorted(value for value, _ in right)))
 
 
 def printed_area_conflict(a: Listing, b: Listing) -> tuple[str, str] | None:
@@ -615,9 +636,19 @@ def distinguishing_facts(
     # ROUNDING rule. This is the only reader that can see into the 16 % of the corpus whose
     # stored headline is a terrace, a cellar or the plot.
     if cfg.d43_printed_area:
-        printed = printed_area_conflict(a, b)
+        printed = printed_area_conflict_cfg(a, b, cfg)
         if printed is not None:
             add("printed_area", printed[0], printed[1])
+
+    # E161: the unit code the body PRINTS, whole and in the bare form. `unit_designator` reads
+    # a keyword and truncates at the word boundary, so `B2.2.1` against `B1.2.1` read B2 against
+    # B1 under a keyword and nothing at all without one. Two segments minimum — a bare `B2` is
+    # a building and every flat in it shares it — and an empty set is never a conflict.
+    if cfg.d43_unit_codes:
+        codes_a = printed_unit_codes(a.description, cfg.d43_unit_codes_wide)
+        codes_b = printed_unit_codes(b.description, cfg.d43_unit_codes_wide)
+        if _set_conflict(codes_a, codes_b):
+            add("unit_code", sorted(codes_a), sorted(codes_b))
 
     # E151/E152: the street and the town the BODY names, for the adverts whose resolved
     # location cannot separate them — two Olomouc office blocks with no street key, a Droždín
@@ -633,7 +664,8 @@ def distinguishing_facts(
     # readers have already answered for every pair whose form somebody wrote down.
     if cfg.d43_body_align:
         aligned = aligned_difference(a.description, b.description,
-                                     cfg.d43_body_align_min_ratio)
+                                     cfg.d43_body_align_min_ratio,
+                                     cfg.d43_body_align_heal)
         if aligned is not None:
             add("body_align", aligned[0], aligned[1])
 
