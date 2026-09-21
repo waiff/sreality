@@ -59,6 +59,8 @@ SAME_PORTAL_ONE_STOREY_RATE = {"sreality": 0.075, "ceskereality": 0.068, "realit
 WIDEST_SAME_PORTAL_GAP = {"trial": 0.55, "region": 0.80}
 COLIVE_SWEEP = {0.0: (1428, 310, 78), 3.0: (1467, 311, 54),
                 7.0: (1483, 311, 46), 14.0: (1483, 311, 46)}
+# 20 shuffles of the decision list and of the rows it is built from (`repair/order_parity.json`).
+ORDER_INDEPENDENT = {"w13_g7": 980, "w14_g8": 1309, "w15_g8b": 1310}
 
 
 def test_w15_is_w14_plus_the_five_readings_and_the_cap_and_nothing_else() -> None:
@@ -146,3 +148,10 @@ def test_the_55_percent_price_ceiling_was_a_trial_cohort_statistic() -> None:
         assert duplicates < TRIAL["g8b"]["duplicates_co"]
         assert sealed <= TRIAL["g8b"]["sealed"]
         assert losses > TRIAL["g8b"]["losses"]
+
+
+def test_all_three_generations_are_a_function_of_the_edge_set() -> None:
+    """E72/E86/E137 at cluster grain: 20 shuffles, one partition and one KEYED partition each."""
+    assert ORDER_INDEPENDENT["w15_g8b"] == TRIAL["g8b"]["groups"]
+    assert ORDER_INDEPENDENT["w14_g8"] == TRIAL["g8"]["groups"]
+    assert ORDER_INDEPENDENT["w13_g7"] == TRIAL["g7"]["groups"]
