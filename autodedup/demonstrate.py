@@ -46,10 +46,12 @@ UNIT_EVIDENCE: tuple[str, ...] = ("photo", "body", "code")
 # feature — "a broker's reused boilerplate is exactly what high containment looks like between
 # two units of one development" — and the Černovírské zahrady parcelling proves it: three idnes
 # adverts posted two seconds apart, three distinct detail URLs, BYTE-IDENTICAL bodies, each
-# 282 m² at 1,580,000, for a project the body itself calls "tři samostatné parcely". Every key
-# fact agrees because the three plots are identical; the body agrees because it is the
-# developer's, not the plot's. What is left that only one unit has: its photographs and its
-# order code.
+# 282 m² at 1,580,000, for a project the body itself calls "tři samostatné parcely", ALL THREE
+# on sale together for three months. Every key fact agrees because the three plots are
+# identical; the body agrees because it is the developer's, not the plot's. What is left that
+# only one unit has: its photographs and its order code. Two SEQUENTIAL postings are exempt —
+# a re-post is one advert, and ninety bazos rows of one Slatinice house, one per day, have
+# nothing else.
 UNIT_EVIDENCE_IN_DEVELOPMENT: tuple[str, ...] = ("photo", "code")
 # What M may count two of instead. A shared address point and an identical price path are
 # strong, but a whole floor of one development shares both.
@@ -164,6 +166,16 @@ def obec_demonstrated(a: Listing, b: Listing) -> bool:
     """Both adverts are resolved to a town and it is the same town."""
     left, right = a.location.obec_kod, b.location.obec_kod
     return left is not None and left == right
+
+
+def overlap_days_local(a: Listing, b: Listing) -> float | None:
+    """How long the two adverts were BOTH on sale. `indistinguishable.overlap_days` computes the
+    same thing; it is repeated here because this module may not import that one."""
+    starts = [_stamp(a.first_seen_at), _stamp(b.first_seen_at)]
+    ends = [_stamp(a.inactive_at or a.last_seen_at), _stamp(b.inactive_at or b.last_seen_at)]
+    if any(value is None for value in starts + ends):
+        return None
+    return max(0.0, (min(ends) - max(starts)).total_seconds() / 86400.0)  # type: ignore[operator]
 
 
 def _sequential(a: Listing, b: Listing, settings: Settings, overlap: float | None) -> bool:
@@ -292,7 +304,12 @@ def corroboration_warrant(
         return "off"
     found = corroborations(a, b, feats, settings)
     development = in_development(a, b)
-    grade = UNIT_EVIDENCE_IN_DEVELOPMENT if development else UNIT_EVIDENCE
+    # A body shared by two SEQUENTIAL postings is one advert re-posted, whatever it stands in —
+    # ninety bazos rows of one Slatinice house, one per day, are one unit and the body is all
+    # they have. A body shared by two adverts on sale TOGETHER is the developer's template.
+    grade = UNIT_EVIDENCE
+    if development and not _sequential(a, b, settings, overlap_days_local(a, b)):
+        grade = UNIT_EVIDENCE_IN_DEVELOPMENT
     unit = [name for name in grade if name in found]
     if unit:
         return unit[0]
