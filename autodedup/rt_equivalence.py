@@ -19,6 +19,12 @@ failing on (E119).
     engine: a column one lane writes and the other never does, two generations built under
     different clock rules, a score column that cannot hold the number `cluster.edge_rank`
     ranks on. Each one makes the comparison lie, so each one fails the verdict by itself.
+  * **`score_not_from_vector`** (E121) is the defect at PAIR grain, and it is asked of every
+    row this mode reads a vector for, on BOTH sides, before anything is attributed:
+    `decide_pair` sets `score = model.predict_proba(feats)` in every branch but the veto, so
+    a stored score its own stored vector does not reproduce was not written by this engine and
+    NO cause may excuse it. Without it the attribution below reads green over a real decision
+    bug that happens to ride on a drifted listing — demonstrated, twice, on the shipped code.
   * **Shared pairs** that differ are attributed by reading WHICH FEATURES moved:
     `drifted_since_export` (the clock features moved and the live value is the one that
     matches the facts as they stand now), `calibration_cohort` (the corpus-frequency features
@@ -52,6 +58,7 @@ from autodedup.features import (
     WindowRule,
     clock_features,
 )
+from autodedup.harness import model_of_version
 from autodedup.incremental import GENERATION
 from autodedup.incremental_lane import (
     SCOPE_SETTING,
@@ -74,7 +81,7 @@ from autodedup.incremental_sql import (
     RT_KNOWN_SQL,
     RT_SCOPE_BLOCK_SQL,
 )
-from autodedup.store_score import PAIR_SCORE_SQL_TYPE, is_lossless, store_eps
+from autodedup.store_score import PAIR_SCORE_SQL_TYPE, is_lossless, narrow, store_eps
 
 EQUIVALENCE_FILE: str = "rt_equivalence.json"
 MAX_EXAMPLES: int = 8
@@ -107,6 +114,26 @@ DECISION_FIELDS: tuple[str, ...] = ("zone", "certificate", "guard_veto")
 # reason — which is why the string is the WITNESS that a column should have been written and
 # never the definition of what it should hold.
 CERTIFICATE_PREFIX: str = "certificate:"
+# E121. The one relation between a stored pair's own columns that holds BY CONSTRUCTION:
+# `decide._decide_layers` sets `score = model.predict_proba(feats)` in every branch but the two
+# vetoes, and `apply_context_rule` carries the score through untouched. So a stored score its
+# own stored vector does not reproduce is a defect of that ROW, whatever else moved on the
+# pair. Measured before it was shipped: 46,688 non-veto pairs of the export cohort re-scored
+# from their vectors, max gap 0.0 — exact, so this costs no false positives (M182).
+SCORE_DEFECT: str = "score_not_from_vector"
+# The rows a re-score cannot be ASKED of. Each one is counted and named in the report rather
+# than skipped, because an exemption nobody counts is the hole this rule exists to close:
+#   `guard_veto`        a veto writes 0.0 and never consults the model (`pair_veto`, E61)
+#   `no_feature_vector` the store kept no vector — the upsert coalesces, so a probe-only
+#                       update leaves the vector the decision was taken on, and a row that
+#                       was never scored under this build has none at all
+#   `no_model_version`  the row does not NAME the scorer it was decided by (the shape E97
+#                       wore: 15,923 rows with `model_version` NULL), and inventing one for it
+#                       would be the instrument deciding what the store failed to record
+#   `model_unavailable` the row names a model this build does not carry
+SCORE_EXEMPT: tuple[str, ...] = (
+    "guard_veto", "no_feature_vector", "no_model_version", "model_unavailable")
+_UNREAD: object = object()
 
 
 def _rows(conn: Any, sql: str, params: Mapping[str, Any] | None = None) -> list[tuple]:
@@ -326,6 +353,98 @@ def moved_features(left: Pair, right: Pair, tol: float) -> list[str]:
         elif abs(a - b) > tol:
             moved.append(name)
     return moved
+
+
+def _as_feats(pair: Pair) -> dict[str, tuple[float, bool]]:
+    """The stored vector in the shape the model reads it.
+
+    An absent feature is `(0.0, False)` and a missing key is the same thing to
+    `LogisticModel.score`, so the store's present-only vector (`score_lane.present_features`)
+    reconstructs the model's input exactly — absent is unknown, never a zero (E12)."""
+    return {name: (0.0, False) if value is None else (float(value), True)
+            for name, value in (pair.features or {}).items()}
+
+
+def _narrowed(value: float, score_type: str) -> float:
+    """`value` as the score column would hand it back, or unchanged for a column this build
+    does not know how to narrow — the comparison must not invent a rounding it cannot name."""
+    try:
+        return narrow(float(value), score_type)
+    except ValueError:
+        return float(value)
+
+
+def score_from_vector(pair: Pair, *, score_type: str, tol: float,
+                      models: dict[str, Any]) -> tuple[str, float | None, float | None]:
+    """Does this row's stored score follow from its OWN stored vector? (E121)
+
+    `("ok" | one of SCORE_EXEMPT | SCORE_DEFECT, recomputed, gap)`. The row names its scorer
+    (`model_version`) and `model_of_version` resolves it the way every lane does — one
+    definition (E12) — and the recomputation is then narrowed through the store's own column,
+    so a `real` store is compared as a `real` store instead of being passed by a tolerance
+    wide enough to hide what `real` did to it (E115)."""
+    if pair.guard_veto is not None:
+        return "guard_veto", None, None
+    if pair.features is None:
+        return "no_feature_vector", None, None
+    if pair.model_version is None:
+        return "no_model_version", None, None
+    model = models.get(pair.model_version, _UNREAD)
+    if model is _UNREAD:
+        try:
+            model = model_of_version(pair.model_version)
+        except (SystemExit, OSError, ValueError):
+            model = None
+        models[pair.model_version] = model
+    if model is None:
+        return "model_unavailable", None, None
+    recomputed = _narrowed(model.predict_proba(_as_feats(pair)), score_type)
+    if pair.score is None:
+        return SCORE_DEFECT, recomputed, None
+    gap = abs(recomputed - _narrowed(pair.score, score_type))
+    return (SCORE_DEFECT if gap > tol else "ok"), recomputed, gap
+
+
+def score_self_consistency(keys: Sequence[tuple[int, int]], live: Mapping[Any, Pair],
+                           batch: Mapping[Any, Pair], *, score_type: str,
+                           tol: float) -> dict[str, Any]:
+    """E121 over every row the instrument reads a vector for, on BOTH sides.
+
+    That population is the shared pairs that DIFFER — the rows an attribution would otherwise
+    excuse — and the report says how many were checked and how many were exempt, because a
+    rule whose denominator nobody prints can be passing on nothing at all."""
+    models: dict[str, Any] = {}
+    exempt: dict[str, int] = {}
+    defects = {"live": 0, "batch": 0}
+    examples: list[dict[str, Any]] = []
+    checked = 0
+    max_gap = 0.0
+    for key in keys:
+        for side, store in (("live", live), ("batch", batch)):
+            pair = store.get(key)
+            if pair is None:
+                continue
+            status, recomputed, gap = score_from_vector(
+                pair, score_type=score_type, tol=tol, models=models)
+            if status in SCORE_EXEMPT:
+                exempt[status] = exempt.get(status, 0) + 1
+                continue
+            checked += 1
+            if gap is not None:
+                max_gap = max(max_gap, gap)
+            if status != SCORE_DEFECT:
+                continue
+            defects[side] += 1
+            if len(examples) < MAX_EXAMPLES:
+                examples.append({"side": side, "listing_lo": pair.lo, "listing_hi": pair.hi,
+                                 "model_version": pair.model_version, "stored": pair.score,
+                                 "recomputed": recomputed, "gap": gap})
+    return {"rows": 2 * len(keys), "checked": checked, "exempt": exempt,
+            "defects": defects, "defective": defects["live"] + defects["batch"],
+            "max_gap": max_gap, "tolerance": tol, "score_column": score_type,
+            "models_unavailable": sorted(name for name, model in models.items()
+                                         if model is None),
+            "examples": examples}
 
 
 def asymmetric_fields(live: Mapping[Any, Pair],
@@ -581,7 +700,10 @@ def run_equivalence(
                  for cause in set(causes["live"]) | set(causes["batch"])}
 
     clusters = _attribute_clusters(cluster_diff, seen, exported_at, known)
+    consistency = score_self_consistency(differing_keys, live_pairs, batch_pairs,
+                                         score_type=score_type, tol=tol)
     defects = _defects(asymmetry, one_clock, score_type, live_clock, batch_clock)
+    defects.extend(_score_defects(consistency))
     live_versions = sorted({p.model_version for p in live_pairs.values()
                             if p.model_version is not None})
     batch_versions = sorted({p.model_version for p in batch_pairs.values()
@@ -636,6 +758,7 @@ def run_equivalence(
             "score_only_max": round(score_only_max, 6),
             "score_only_max_unattributed": round(unexplained_score_max, 6),
             "by_field": by_field,
+            "score_self_consistency": consistency,
             "shared_causes": shared_causes,
             "shared_unexplained_examples": shared_unexplained,
             "differing_examples": differing_examples,
@@ -690,6 +813,31 @@ def _defects(asymmetry: Sequence[Mapping[str, Any]], one_clock: bool | None, sco
             "reason": f"`autodedup.pairs.score` is `{score_type}` and `cluster.edge_rank` "
                       "ranks on it, so a generation is not re-clusterable from its own rows "
                       "(migration 541)",
+        })
+    return out
+
+
+def _score_defects(consistency: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The pair-grain defect, one entry per side (E121).
+
+    It is a DEFECT and not a shared cause on purpose: a cause answers "why do the two stores
+    disagree about this pair", and this answers "this ROW is not a decision this engine took"
+    — which is true of the row whether or not the other side holds anything at all, and which
+    no amount of drift or calibration attribution on that pair is allowed to carry."""
+    out: list[dict[str, Any]] = []
+    for side in ("live", "batch"):
+        rows = int(consistency["defects"][side])
+        if not rows:
+            continue
+        out.append({
+            "defect": SCORE_DEFECT, "side": side, "rows": rows,
+            "checked": consistency["checked"], "max_gap": consistency["max_gap"],
+            "reason": f"{rows} of {consistency['checked']} {side} pair rows carry a score "
+                      "their own stored feature vector does not reproduce (max gap "
+                      f"{consistency['max_gap']:.6g} against a tolerance of "
+                      f"{consistency['tolerance']:.6g}) — `decide_pair` sets the score from "
+                      "the vector in every branch but the veto, so such a row was not written "
+                      "by this engine and no cause attributed to that pair can excuse it",
         })
     return out
 

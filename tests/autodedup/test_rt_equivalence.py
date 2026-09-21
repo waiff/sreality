@@ -16,32 +16,48 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
+from autodedup.harness import model_of_version
 from autodedup.incremental_lane import parity_baseline_key, scope_setting_key
 from autodedup.rt_equivalence import (
     EQUIVALENCE_FILE,
+    SCORE_DEFECT,
     SCORE_ONLY_MAX,
     run_equivalence,
 )
+from autodedup.store_score import narrow
 from tests.autodedup.fake_pg import FakePg
 
 LIVE = "rt"
 BATCH = "g6"
+MODEL = "w6_gold"
 NOW = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
 EXPORTED = NOW - timedelta(days=1)
 
 
-def _pair(score: float = 0.9, zone: str = "merge", certificate: str | None = "K-C",
+def _score_of(features: Mapping[str, list[Any]] | None) -> float:
+    """The score the stored vector IMPLIES — the only score a stored row may carry (E121).
+
+    `decide_pair` sets `score = model.predict_proba(feats)` in every branch but the veto, so a
+    fixture that spells a free-floating score is spelling a defect, and the ones below that do
+    it say so."""
+    vector = {name: (float(entry[0]), bool(entry[1]))
+              for name, entry in (features or {}).items()}
+    return model_of_version(MODEL).predict_proba(vector)
+
+
+def _pair(score: float | None = None, zone: str = "merge", certificate: str | None = "K-C",
           **kw: Any) -> dict:
     row = {"probes": ["K1"], "from_lo": True, "from_hi": True, "families": 3,
            "certificate": certificate, "features": {}, "fp_lo": "a", "fp_hi": "b",
-           "score": score, "zone": zone, "decision": zone, "guard_veto": None,
+           "score": 0.0, "zone": zone, "decision": zone, "guard_veto": None,
            "evidence": {}, "context": {}, "calibration_digest": "d",
-           "feature_version": 1, "model_version": "w6_gold", "cluster_key": None}
+           "feature_version": 1, "model_version": MODEL, "cluster_key": None}
     row.update(kw)
+    row["score"] = _score_of(row["features"]) if score is None else score
     return row
 
 
@@ -143,10 +159,12 @@ def test_a_score_that_moved_on_a_corpus_frequency_feature_is_the_calibration_coh
     """The batch pass calibrates over its whole cohort and the real-time generation over its
     scope, so corpus token frequencies reach the features and the scores differ a little under
     identical decisions (measured 2026-09-21: 2,277 pairs move `tfidf_cos`, 61 by enough to
-    move a score, max 0.0212, 0 decision moves). Named, so it does not fail the verdict."""
+    move a score, max 0.0212, 0 decision moves). Named, so it does not fail the verdict.
+
+    Both scores follow from their own vectors — the movement is the INPUT's (E121)."""
     db = _db()
-    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.41))
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.9 + 1e-3, features=_feats(tfidf_cos=0.4))
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.9))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
 
     out = _run(db, tmp_path)
 
@@ -158,7 +176,10 @@ def test_a_score_that_moved_on_a_corpus_frequency_feature_is_the_calibration_coh
 
 
 def test_a_score_that_moved_with_an_IDENTICAL_vector_is_unexplained(tmp_path) -> None:
-    """The sharpest finding the instrument can make: the same inputs reached two answers."""
+    """The sharpest finding the instrument can make: the same inputs reached two answers.
+
+    One vector cannot imply two scores, so E121 names the side that does not follow from it —
+    the two findings are the same defect read at two grains."""
     db = _db()
     db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
     db.pairs[(BATCH, 1, 2)] = _pair(score=0.9 + 1e-3, features=_feats(tfidf_cos=0.4))
@@ -166,11 +187,14 @@ def test_a_score_that_moved_with_an_IDENTICAL_vector_is_unexplained(tmp_path) ->
     out = _run(db, tmp_path)
 
     assert out["pairs"]["shared_causes"] == {"unexplained": 1}
+    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 0, "batch": 1}
     assert out["verdict"]["ok"] is False
     assert "differ with no cause" in " ".join(out["verdict"]["reasons"])
 
 
 def test_a_large_score_movement_fails_even_with_the_decision_unchanged(tmp_path) -> None:
+    """Two free-floating scores over one empty vector: unattributed at pair grain, and two
+    rows that do not follow from their own vectors at row grain (E121)."""
     db = _db()
     db.pairs[(LIVE, 1, 2)] = _pair(score=0.99)
     db.pairs[(BATCH, 1, 2)] = _pair(score=0.90)
@@ -214,7 +238,10 @@ def test_the_2026_09_20_defect_is_what_this_mode_reports(tmp_path) -> None:
     assert out["pairs"]["differing"] == 1
     assert sorted(out["pairs"]["by_field"]) == ["certificate", "score", "zone"]
     assert out["model_version"]["live_pairs"] == []
-    assert out["model_version"]["batch_pairs"] == ["w6_gold"]
+    assert out["model_version"]["batch_pairs"] == [MODEL]
+    # A row that does not NAME its scorer cannot be re-scored, so E121 exempts it BY NAME
+    # rather than inventing a model for it — and the count is in the report.
+    assert out["pairs"]["score_self_consistency"]["exempt"] == {"no_model_version": 1}
     assert out["verdict"]["ok"] is False
 
 
@@ -399,9 +426,9 @@ def test_two_generations_on_different_clocks_are_a_DEFECT(tmp_path) -> None:
     db = _db()
     db.calibration[LIVE]["settings"]["live_window_from_sighting"] = True
     db.score_runs[BATCH] = {"settings": {"live_window_from_sighting": False},
-                            "model_version": "w6_gold"}
-    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(overlap_days=9.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.8, features=_feats(overlap_days=40.0))
+                            "model_version": MODEL}
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
 
     out = _run(db, tmp_path)
 
@@ -451,9 +478,8 @@ def test_a_self_healed_delisting_explains_a_decision_that_moved(tmp_path) -> Non
     db = _db()
     db.listings[1] = _listing(1, last_seen=NOW - timedelta(hours=2))
     db.listings[2] = _listing(2, last_seen=NOW - timedelta(hours=2))
-    db.pairs[(LIVE, 1, 2)] = _pair(score=0.9788, zone="merge",
-                                   features=_feats(both_active=1.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.5545, zone="band", decision="band",
+    db.pairs[(LIVE, 1, 2)] = _pair(zone="merge", features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(zone="band", decision="band",
                                     features=_feats(both_active=0.0))
 
     out = _run(db, tmp_path)
@@ -471,7 +497,7 @@ def test_a_clock_feature_that_matches_NEITHER_side_is_unexplained(tmp_path) -> N
     db.listings[1] = _listing(1, active=False, inactive=NOW - timedelta(days=3))
     db.listings[2] = _listing(2, active=False, inactive=NOW - timedelta(days=3))
     db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.8, features=_feats(both_active=0.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
 
     out = _run(db, tmp_path)
 
@@ -486,8 +512,8 @@ def test_a_large_attributed_score_movement_no_longer_fails_the_verdict(tmp_path)
     db = _db()
     db.listings[1] = _listing(1, last_seen=NOW - timedelta(hours=2))
     db.listings[2] = _listing(2, last_seen=NOW - timedelta(hours=2))
-    db.pairs[(LIVE, 1, 2)] = _pair(score=0.9545, features=_feats(both_active=1.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.5621, features=_feats(both_active=0.0))
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
 
     out = _run(db, tmp_path)
 
@@ -503,7 +529,8 @@ def test_a_feature_outside_the_two_named_causes_is_unexplained(tmp_path) -> None
     check becomes a description."""
     db = _db()
     db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(phash_tight_matches=4.0))
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.8, features=_feats(phash_tight_matches=0.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(zone="band", decision="band",
+                                    features=_feats(phash_tight_matches=0.0))
 
     assert _run(db, tmp_path)["pairs"]["shared_causes"] == {"unexplained": 1}
 
@@ -516,6 +543,9 @@ def test_a_pair_the_store_kept_no_vector_for_cannot_be_attributed(tmp_path) -> N
     out = _run(db, tmp_path)
 
     assert out["pairs"]["shared_causes"] == {"no_feature_vector": 1}
+    # ...and it cannot be re-scored either: no vector, no claim either way (E121).
+    assert out["pairs"]["score_self_consistency"]["exempt"] == {"no_feature_vector": 2}
+    assert out["pairs"]["score_self_consistency"]["checked"] == 0
     assert out["verdict"]["ok"] is False
 
 
@@ -597,3 +627,173 @@ def test_a_component_holding_a_listing_that_arrived_after_the_export_is_an_arriv
 
     assert out["clusters"]["component_causes"] == {"arrival": 1}
     assert out["verdict"]["ok"] is True
+
+
+# --------- R1 / E121: a stored score must follow from its own stored vector (the hole closed)
+
+
+def _drifted(db: FakePg) -> None:
+    """Two listings whose delisting self-healed — the drift M173 measured, and the one an
+    attribution will legitimately name. Every case below rides on exactly this."""
+    db.listings[1] = _listing(1, last_seen=NOW - timedelta(hours=2))
+    db.listings[2] = _listing(2, last_seen=NOW - timedelta(hours=2))
+
+
+def test_a_decision_bug_riding_on_an_EVIDENCED_drift_is_no_longer_excused(tmp_path) -> None:
+    """The hole an adversarial read of the W9m attribution demonstrated, reproduced.
+
+    `shared_cause` classifies by WHICH inputs moved and never asks whether the moved inputs
+    can ACCOUNT for the difference. So a genuine, evidenced clock drift — the live
+    `both_active` IS what today's `public.listings` say — was allowed to carry a zone flip and
+    a corrupted score along with it, and `verdict.ok` stayed TRUE over a real decision bug.
+
+    The drift is still named. What it no longer carries is a score the row's own vector does
+    not imply: R1 is asked first, it is a DEFECT of that row, and no cause outranks it."""
+    db = _db()
+    _drifted(db)
+    db.pairs[(LIVE, 1, 2)] = _pair(score=0.98, zone="reject", decision="model",
+                                   features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["shared_causes"] == {"drifted_since_export": 1}
+    assert out["pairs"]["decisions_moved"] == 1
+    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 1, "batch": 0}
+    assert [defect["defect"] for defect in out["defects"]] == [SCORE_DEFECT]
+    assert out["verdict"]["ok"] is False
+    assert "does not reproduce" in " ".join(out["verdict"]["reasons"])
+
+
+def test_the_rule_reads_BOTH_stores(tmp_path) -> None:
+    """The same corruption on the batch side is the same finding. A comparison that only
+    re-scored the live store would trust whichever generation it was pointed at."""
+    db = _db()
+    _drifted(db)
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.44, features=_feats(both_active=0.0))
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["shared_causes"] == {"drifted_since_export": 1}
+    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 0, "batch": 1}
+    assert out["defects"][0]["side"] == "batch"
+    assert out["verdict"]["ok"] is False
+
+
+def test_a_drift_whose_two_scores_both_follow_from_their_vectors_still_passes(tmp_path):
+    """The other half of the rule: it must not fail an honest drift. Both rows carry the score
+    their own vector implies, they differ because the INPUT moved, and the verdict is ok."""
+    db = _db()
+    _drifted(db)
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
+
+    out = _run(db, tmp_path)
+
+    consistency = out["pairs"]["score_self_consistency"]
+    assert consistency["checked"] == 2 and consistency["defective"] == 0
+    assert consistency["max_gap"] == 0.0
+    assert out["defects"] == []
+    assert out["verdict"]["ok"] is True
+
+
+@pytest.mark.parametrize("reason,changed", [
+    ("guard_veto", {"guard_veto": "unit_designator", "score": 0.0}),
+    ("no_feature_vector", {"features": None}),
+    ("no_model_version", {"model_version": None}),
+    ("model_unavailable", {"model_version": "a_model_this_build_does_not_carry"}),
+])
+def test_a_row_the_rule_cannot_be_asked_of_is_NAMED_not_skipped(tmp_path, reason, changed):
+    """The four exemptions, each one counted in the report. A veto writes 0.0 without
+    consulting the model; a probe-only update coalesces and leaves the vector the decision was
+    taken on, so a row can hold none; a row that does not name its scorer cannot be re-scored
+    without the instrument inventing one; and a model this build does not carry cannot be
+    loaded. Silence on any of them is how a check passes on nothing."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(zone="band", decision="band", **changed)
+    db.pairs[(BATCH, 1, 2)] = _pair()
+
+    consistency = _run(db, tmp_path)["pairs"]["score_self_consistency"]
+
+    assert consistency["exempt"] == {reason: 1}
+    assert consistency["rows"] == 2 and consistency["checked"] == 1
+    assert consistency["defects"] == {"live": 0, "batch": 0}
+    assert consistency["models_unavailable"] == (
+        ["a_model_this_build_does_not_carry"] if reason == "model_unavailable" else [])
+
+
+def test_a_float4_store_is_re_scored_AS_a_float4_store(tmp_path) -> None:
+    """The tolerance accounts for the column's precision instead of assuming float64.
+
+    Before migration 541 `pairs.score` was `real`, so the stored number is the column's image
+    of the model's float64 — the recomputation is narrowed the same way before it is compared
+    (`store_score.narrow`, one definition, E115). A row that IS its own vector's score passes
+    under `real`; it would not if the check pretended the store were exact."""
+    db = _db()
+    _drifted(db)
+    db.score_column_type = "real"
+    vector = _feats(both_active=1.0)
+    db.pairs[(LIVE, 1, 2)] = _pair(score=narrow(_score_of(vector), "real"), features=vector)
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
+
+    consistency = _run(db, tmp_path)["pairs"]["score_self_consistency"]
+
+    assert consistency["score_column"] == "real"
+    assert consistency["checked"] == 2 and consistency["defective"] == 0
+
+
+def test_a_float4_store_does_not_excuse_a_score_that_does_not_follow(tmp_path) -> None:
+    """...and the widened tolerance is the column's resolution, not an amnesty: a score off by
+    a thousandth is still a score its vector does not imply."""
+    db = _db()
+    _drifted(db)
+    db.score_column_type = "real"
+    vector = _feats(both_active=1.0)
+    db.pairs[(LIVE, 1, 2)] = _pair(score=narrow(_score_of(vector), "real") + 1e-3,
+                                   features=vector)
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(both_active=0.0))
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["score_self_consistency"]["defects"] == {"live": 1, "batch": 0}
+    assert [defect["defect"] for defect in out["defects"]] == ["store_score_precision",
+                                                               SCORE_DEFECT]
+    assert out["verdict"]["ok"] is False
+
+
+def test_the_report_says_how_many_rows_were_checked_and_how_many_were_exempt(tmp_path):
+    """The denominator is the deliverable: a rule that re-scored nothing and a rule that
+    re-scored everything both report `defective: 0`, and only the counters tell them apart."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.9))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
+    db.pairs[(LIVE, 3, 4)] = _pair(features=None)
+    db.pairs[(BATCH, 3, 4)] = _pair(zone="band", decision="band", features=None)
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["score_self_consistency"] == {
+        "rows": 4, "checked": 2, "exempt": {"no_feature_vector": 2},
+        "defects": {"live": 0, "batch": 0}, "defective": 0, "max_gap": 0.0,
+        "tolerance": 1e-6, "score_column": "double precision",
+        "models_unavailable": [], "examples": []}
+    assert json.loads((tmp_path / EQUIVALENCE_FILE).read_text())[
+        "pairs"]["score_self_consistency"]["checked"] == 2
+
+
+def test_the_defect_carries_the_example_that_names_the_row(tmp_path) -> None:
+    """A count nobody can chase is a rumour: the report names the pair, the model it claims
+    to have been scored by, what it holds and what its vector implies."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(score=0.98, features=_feats(tfidf_cos=0.4))
+    db.pairs[(BATCH, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
+
+    example = _run(db, tmp_path)["pairs"]["score_self_consistency"]["examples"][0]
+
+    assert example["side"] == "live"
+    assert (example["listing_lo"], example["listing_hi"]) == (1, 2)
+    assert example["model_version"] == MODEL
+    assert example["stored"] == 0.98
+    assert example["recomputed"] == pytest.approx(_score_of(_feats(tfidf_cos=0.4)))
+    assert example["gap"] == pytest.approx(0.98 - _score_of(_feats(tfidf_cos=0.4)))
