@@ -220,25 +220,51 @@ describe('<Pipeline> board', () => {
   it('restyles the board and remembers the card size', async () => {
     renderBoard();
     await screen.findByLabelText('Přetáhnout kartu do jiné fáze');
-    const column = () => document.querySelector('ul')?.parentElement;
+    const column = () => screen.getByRole('list', { name: 'Zájem' });
+    /* The header sits in its own pinned row, apart from its column, so the
+       two only line up while they carry the same width at every size. */
+    const header = () => screen.getByText('Zájem').parentElement;
     /* The cover read is mocked empty, so every card draws the placeholder
        frame — which carries exactly the geometry the photo would. */
     const thumb = () => document.querySelector('ul li div[aria-hidden]');
 
-    expect(column()?.className).toContain('w-72');
+    expect(column().className).toContain('w-72');
+    expect(header()?.className).toContain('w-72');
     expect(thumb()?.className).toContain('h-12 w-12');
 
     fireEvent.click(screen.getByRole('button', { name: 'Velké' }));
-    expect(column()?.className).toContain('w-[26rem]');
+    expect(column().className).toContain('w-[26rem]');
+    expect(header()?.className).toContain('w-[26rem]');
     /* lg is a different card design, not a scaled one: the photo spans the
        card instead of sitting in a fixed square beside the text. */
     expect(thumb()?.className).toContain('aspect-[16/10]');
     expect(localStorage.getItem('sreality.pipeline.cardSize')).toBe('lg');
 
     fireEvent.click(screen.getByRole('button', { name: 'Střední' }));
-    expect(column()?.className).toContain('w-[24rem]');
+    expect(column().className).toContain('w-[24rem]');
+    expect(header()?.className).toContain('w-[24rem]');
     expect(thumb()?.className).toContain('h-24 w-24');
     expect(localStorage.getItem('sreality.pipeline.cardSize')).toBe('md');
+  });
+
+  /* jsdom lays nothing out, so the pin itself was checked in a real browser;
+     what this holds is the wiring. The header row must sit OUTSIDE the
+     sideways scroller (inside it, `sticky` pins to the scroller, never the
+     page), which means it has to be carried along by hand when the columns
+     scroll. */
+  it('pins the stage headers above the columns and scrolls them together', async () => {
+    renderBoard();
+    const headerRow = (await screen.findByText('Zájem')).parentElement!.parentElement!;
+    const columns = screen.getByRole('list', { name: 'Zájem' }).parentElement!;
+
+    expect(headerRow.className).toContain('sticky');
+    expect(columns.contains(headerRow)).toBe(false);
+    expect(headerRow).toHaveTextContent('Nabídka');
+
+    Object.defineProperty(headerRow, 'scrollLeft', { value: 0, writable: true });
+    Object.defineProperty(columns, 'scrollLeft', { value: 240, writable: true });
+    fireEvent.scroll(columns);
+    expect(headerRow.scrollLeft).toBe(240);
   });
 
   it('renders draggable cards with a drag handle + enriched content', async () => {
@@ -267,14 +293,33 @@ describe('<Pipeline> board', () => {
 
   /* The board is a triage surface worked a column at a time, so following a
      card must not unload it — the property link opens in a NEW TAB. `rel` rides
-     along so the opened document can't reach back through `window.opener`. */
-  it('opens the property in a new tab', async () => {
+     along so the opened document can't reach back through `window.opener`.
+     The link is the address, which leads the card; the price below it is a
+     figure, not a second way in. */
+  it('opens the property in a new tab from the address line', async () => {
     renderBoard();
-    const price = await screen.findByText(/5\s*000\s*000/);
-    const link = price.closest('a');
+    const place = await screen.findByText('Sadová, Praha');
+    const link = place.closest('a');
     expect(link).toHaveAttribute('href', '/listing/sreality/111');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
+
+    const price = screen.getByText(/5\s*000\s*000/);
+    expect(price.closest('a')).toBeNull();
+    expect(
+      place.compareDocumentPosition(price) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  /* The address is the card's only link, so a property whose place never
+     resolved must still offer something to click. */
+  it('still links a card whose place is unresolved', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([
+      { ...CARDS[0], display_label: null },
+    ]);
+    renderBoard();
+    const link = (await screen.findByText('Lokalita neurčena')).closest('a');
+    expect(link).toHaveAttribute('href', '/listing/sreality/111');
   });
 
   /* The point of the split, pinned: with BOTH decoration reads hanging

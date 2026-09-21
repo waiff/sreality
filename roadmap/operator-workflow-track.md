@@ -387,6 +387,24 @@ vitest — the numbers below come from Playwright against live data).
   read), NOT part of the URL view state: a shared link carries which deals to
   look at, not how this browser likes its photos.
 
+### Phase U-PIPE Phase 3k: Pinned stage headers + address-led card (done)
+Two operator asks, measured in a real browser (Playwright, local build, a
+98-card fixture board served to the page; nothing written).
+- **Stage headers stay on screen while the page scrolls.** A `sticky` header
+  inside its column cannot work: the board scrolls sideways, `overflow-x: auto`
+  forces `overflow-y` to auto, and a sticky child then pins to the board — which
+  never scrolls vertically — instead of the page. The headers now sit in their
+  own row (`BoardFrame`) outside the horizontal scroller, `sticky top-14` under
+  the top bar, copying the columns' `scrollLeft`; both rows share widths and
+  gaps, so their scroll ranges are identical. Measured: pinned at y=56 after a
+  1,400px scroll; a 700px sideways wheel leaves both rows at 700 with every
+  header 0px off its column; `z-10` stays under the Lokalita dropdown (z-20).
+  Each column list now carries its stage as `aria-label`, since the heading is
+  no longer its neighbour.
+- **The card leads with its address, and the address is the link** (new tab, as
+  before); the price is the plain second line. A card whose place is unresolved
+  links "Lokalita neurčena" rather than losing its only way to the listing.
+
 ### Phase U-DISMISS: Dismiss a property (done)
 North star: a dismissal is ONE durable, account-scoped fact about a property
 ("reviewed, never show it again") with one meaning everywhere — discovery
