@@ -51,11 +51,15 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
 - [ ] **W8 — floor: ground = 0 everywhere.** Six portals re-derived, `is_plausible_floor`
       tightened, the SPA names the convention. Blocked on the R12 hand-over to autodedup
       (their `l0_floor_tolerance` and fitted weights depend on the conversion table).
-- [ ] **W9 — patchwork sweep (non-autodedup), one small PR each.** browse_list cadence
-      docs; Browse Stats/Map `estate_area` → `plot_area_m2` + the five filters
-      `buildBrowseStatsArgs` never sends; maxima coords read the pin not the map centre;
-      the bezrealitky `ruianId` rung (feed it or delete it); `location_data/payloads.py`'s
-      "NOT WIRED" docstring; branch protection on `main` — last, announced first.
+- [~] **W9 — patchwork sweep (non-autodedup).** Done alongside W0: the browse_list cadence
+      comments (`*/15` since migration 413, two said 5 min); `location_data/payloads.py`'s
+      "NOT WIRED" docstring (826,948 rows, nine portals); Browse Stats/Map now send the
+      **seven** size filters they never sent and bound the plot MEASURE (migration 547,
+      plus a rail that covers the two RPCs and not only the two Python sites). Still owed,
+      each its own PR: maxima coords (the defect is in `scraper/maxima_parser`, NOT the
+      contract — it already reads the pin); the bezrealitky `ruianId` rung (**feed it**:
+      732 of the 2,836 ruianId-bearing active rows resolve below `address_point` today;
+      needs contract v4 + a re-mine); branch protection on `main` (operator action).
 
 ## Hand-overs owed to the autodedup program (R12 — this program never edits theirs)
 

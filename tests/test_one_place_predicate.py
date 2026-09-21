@@ -87,8 +87,10 @@ def test_the_ts_module_declares_the_same_levels_and_columns() -> None:
 
 _W3_S3 = "504_location_w3_one_code_predicate.sql"
 # The latest definition of both RPCs. 537 carried 504's bodies forward verbatim
-# plus one `hide_dismissed` clause; re-read the chip arms when this moves again.
-_LATEST_RPC_DEFINITION = "537_browse_hides_dismissed.sql"
+# plus one `hide_dismissed` clause; 547 carried 537's forward verbatim except the
+# two estate-area predicates, which now read the plot MEASURE column. Re-read the
+# chip arms when this moves again.
+_LATEST_RPC_DEFINITION = "547_browse_aggregates_read_the_plot_measure.sql"
 
 
 def _latest_definition(func: str) -> Path:

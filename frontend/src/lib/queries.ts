@@ -1308,6 +1308,21 @@ export const buildBrowseStatsArgs = (
     include_no_price:        f.includeNoPrice,
     area_min_filter:         f.areaMin,
     area_max_filter:         f.areaMax,
+    /* The four Size-group bounds + the parking count. The RPC parameters have
+     * existed since migrations 133/439 and their predicates with them, but no
+     * caller ever sent them — so an operator who set a plot or usable-area
+     * bound got a narrowed LIST beside a Stats panel and a map describing the
+     * whole cohort, with nothing on screen to say so (rule #16: one definition
+     * of "matches"). `estate_area_*` narrows the PLOT MEASURE server-side
+     * (migration 547), the same `plot_area_m2` column the list's registry
+     * dispatcher reads, not the bare `estate_area` column. */
+    estate_area_min_filter:  f.estateAreaMin,
+    estate_area_max_filter:  f.estateAreaMax,
+    usable_area_min_filter:  f.usableAreaMin,
+    usable_area_max_filter:  f.usableAreaMax,
+    garden_area_min_filter:  f.gardenAreaMin,
+    garden_area_max_filter:  f.gardenAreaMax,
+    parking_lots_min_filter: f.parkingLotsMin,
     active_only_filter:      f.status === 'active',
     inactive_only_filter:    f.status === 'inactive',
     last_seen_min_days:      f.lastSeenMinDays,

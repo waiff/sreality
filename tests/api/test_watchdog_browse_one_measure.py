@@ -115,6 +115,41 @@ def test_neither_site_reads_the_bare_plot_column():
         )
 
 
+_BROWSE_RPCS = ("browse_stats_properties", "browse_map_cells")
+
+
+def _latest_rpc_sql(func: str) -> str:
+    """The newest migration that (re)defines `func`, as text."""
+    pat = re.compile(rf"create or replace function (?:public\.)?{func}\s*\(", re.I)
+    files = sorted(
+        (p for p in (_ROOT / "migrations").glob("*.sql") if pat.search(p.read_text())),
+        key=lambda p: int(p.name.split("_", 1)[0]),
+    )
+    assert files, f"no migration defines {func}"
+    return files[-1].read_text()
+
+
+def test_the_browse_aggregate_rpcs_bound_the_plot_measure():
+    """The third site, and the one that got away: `browse_stats_properties` and
+    `browse_map_cells` bounded `l.estate_area` while the Browse LIST beside them
+    narrowed `plot_area_m2` (the registry's declared `pg_column`), so a plot bound
+    made the Stats panel and the map describe a different cohort than the rows —
+    rule 16, silently. Both relations PUBLISH a `plot_area_m2` column (migration 534
+    via `browse_projection`), so here reading the column IS reading the measure.
+    RED by: pointing either predicate back at the bare column."""
+    for func in _BROWSE_RPCS:
+        # One file may carry both definitions, so this reads every estate bound in it.
+        bounds = [
+            line for line in _latest_rpc_sql(func).splitlines()
+            if ("estate_area_min_filter" in line or "estate_area_max_filter" in line)
+            and (">=" in line or "<=" in line)
+        ]
+        assert bounds, f"{func}: no estate-area bound found"
+        for line in bounds:
+            assert "l.plot_area_m2" in line, f"{func} bounds the bare column: {line}"
+            assert "l.estate_area" not in line
+
+
 def test_plot_area_sql_names_the_one_measure():
     assert plot_area_sql("l").startswith("plot_area_m2(")
     for part in ("l.category_main", "l.area_m2::numeric", "l.estate_area::numeric"):

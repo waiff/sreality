@@ -179,12 +179,38 @@ today). Conversion = idempotent re-derive, `floor ≥ 1` only; 4,700 rows at 0 a
 `is_plausible_floor` tightens to `total_floors − 1`. `listing_snapshots`/day stays < 12,500 for 30 days
 (baseline 10,090; ~25k deferred snapshots on the five hashed portals). Hand-over to autodedup delivered first (R12).
 
-**W9.** Each item its own PR: browse_list cadence docs (it is `*/15`, two docs say 5 min); Browse Stats/Map
-`estate_area` → `plot_area_m2` + the five filters `buildBrowseStatsArgs` never sends (rule #16); maxima coords read
-the pin, not the map view-centre (location contract process: version bump, goldens, no partial claim set);
-bezrealitky `ruianId` rung — feed it or delete it, decided on evidence in the PR; `location_data/payloads.py`
-"NOT WIRED" docstring (825k rows live); branch protection on `main` (PR + CI check, no review requirement) — last,
-announced first, because it changes how every parallel session merges.
+**W9.** Each item its own PR (status as of 2026-09-21, worked alongside W0):
+
+- ✅ **browse_list cadence docs.** It is `*/15` since migration 413; `toolkit/browse_read_model.py` and the Browse
+  list query in `frontend/src/lib/queries.ts` said 5 min. Fixed.
+- ✅ **`location_data/payloads.py` "NOT WIRED" docstring.** Live on all nine portals, 826,948 rows, oldest
+  2026-05-28, written through `scraper.db.append_payload_if_enabled`. Fixed.
+- ✅ **Browse Stats/Map `estate_area` → `plot_area_m2`, and the size filters the SPA never sent.** It is **seven**
+  parameters, not five: `estate_area_{min,max}`, `usable_area_{min,max}`, `garden_area_{min,max}`,
+  `parking_lots_min`. All seven have existed on both RPCs since migrations 133/439 with their predicates already
+  written — dark for want of a caller, so a plot or usable-area bound narrowed the list while Stats and the map
+  described the whole cohort. Migration 547 re-points the two estate predicates at `l.plot_area_m2` (the measure
+  `min_estate_area` declares, and the one the list's registry dispatcher reads), and the rail in
+  `tests/api/test_watchdog_browse_one_measure.py` — which covered `api/notifications.py` and
+  `toolkit/comparables.py` but never the RPCs, which is why this survived — now covers them too.
+- ⏳ **maxima coords read the pin, not the map view-centre.** **The item as written was wrong about where it
+  lives.** `contracts/portals/maxima.yaml` ALREADY reads the drawn feature (`/features/0`,
+  `position_branch: portal_pin`) and says so ("never `/center` (the view centre, 9.2 km out on d40031686)"), so no
+  contract version bump, no goldens and no re-mine are involved. The live defect is in the SCRAPER:
+  `scraper/maxima_parser._resolve_coords` matches `_CENTER_RE` (`"center":[lon,lat]`) and nothing else, and its
+  output feeds `street_from_locality(..., require_morphology=True, lat=…, lon=…)` — a street-vs-village
+  disambiguation decided by a coordinate that can be kilometres off. Own PR, because the honest fix needs a
+  decision the item does not contain: the OpenLayers feature reader lives in `location_data`, and R2 forbids
+  `scraper` importing it.
+- ⏳ **bezrealitky `ruianId` rung — the evidence says FEED IT.** 2,836 of 5,716 active bezrealitky rows carry a
+  non-empty `ruianId`, yet `location_claims` holds exactly **1** `address_point_id` claim from that portal and no
+  portal contract declares the type at all — so bind.py's R0 rung ("the prize") has never fired. Of those 2,836
+  rows, **732 resolve below `address_point` today** (390 street, 216 cast_obce_or_quarter, 86 obec, 40
+  street_segment): the rung would lift each of them to an exact RÚIAN address point. Own PR, because feeding it IS
+  the location-contract process (bezrealitky `contract_version` 3 → 4, goldens, a re-mine) that this item wrongly
+  attributed to maxima.
+- ⏳ **Branch protection on `main`** (PR + CI check, no review requirement) — an operator action on a GitHub
+  settings page, not a code change. Last, announced first, because it changes how every parallel session merges.
 
 ## 6. Cut from scope (reported, not built)
 

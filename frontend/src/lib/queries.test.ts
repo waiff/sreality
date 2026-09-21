@@ -564,6 +564,43 @@ describe('dismissed properties are hidden at the source', () => {
   });
 });
 
+/* Rule #16: Stats and the map must describe the cohort the list describes. The
+ * five Size-group controls (plot, usable, garden, parking count) narrowed the
+ * list and were silently dropped on the way to the two aggregate RPCs, whose
+ * parameters have existed since migrations 133/439. */
+describe('buildBrowseStatsArgs sends the size bounds', () => {
+  const resolved = { obec_ids_filter: null, property_ids_filter: null };
+
+  it('passes every Size-group bound through', () => {
+    const args = buildBrowseStatsArgs({
+      ...DEFAULT_FILTERS,
+      estateAreaMin: 400, estateAreaMax: 1200,
+      usableAreaMin: 60, usableAreaMax: 90,
+      gardenAreaMin: 100, gardenAreaMax: 300,
+      parkingLotsMin: 2,
+    }, resolved);
+    expect(args.estate_area_min_filter).toBe(400);
+    expect(args.estate_area_max_filter).toBe(1200);
+    expect(args.usable_area_min_filter).toBe(60);
+    expect(args.usable_area_max_filter).toBe(90);
+    expect(args.garden_area_min_filter).toBe(100);
+    expect(args.garden_area_max_filter).toBe(300);
+    expect(args.parking_lots_min_filter).toBe(2);
+  });
+
+  it('sends null when unset, never undefined (the RPC default is the same)', () => {
+    const args = buildBrowseStatsArgs(DEFAULT_FILTERS, resolved);
+    for (const k of [
+      'estate_area_min_filter', 'estate_area_max_filter',
+      'usable_area_min_filter', 'usable_area_max_filter',
+      'garden_area_min_filter', 'garden_area_max_filter',
+      'parking_lots_min_filter',
+    ]) {
+      expect(args[k]).toBeNull();
+    }
+  });
+});
+
 /* A page of cards asks per property; the view is read once per batch. */
 describe('fetchIsDismissed batches per task', () => {
   afterEach(() => vi.restoreAllMocks());
