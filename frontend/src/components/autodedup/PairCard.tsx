@@ -82,7 +82,6 @@ export interface PairCardProps {
   eager?: boolean;
   /* The full-evidence page for this pair, when the surface is not already it. */
   evidenceHref?: RoutePath | null;
-  labels?: Record<AutodedupVerdictValue, string>;
   onlyDiffs?: boolean;
   /* BLIND (D6). The caller withholds `judgement` itself — one gate, not four —
    * and sets this so the card can SAY the judge is hidden rather than look like
@@ -112,7 +111,6 @@ export default function PairCard({
   pending = false,
   eager = false,
   evidenceHref,
-  labels,
   onlyDiffs = false,
   dense = false,
   blind = false,
@@ -223,7 +221,6 @@ export default function PairCard({
             verdict={verdict ?? null}
             onVerdict={onVerdict}
             pending={pending}
-            labels={labels}
             annotation={annotation}
           />
           {onAnnotationChange && (

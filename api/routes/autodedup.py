@@ -251,27 +251,35 @@ FAMILY_BITS: tuple[tuple[str, int], ...] = (
     ("TIME", 64),
 )
 
+# WHAT THE STORE MAY HOLD, which is no longer what the page offers (D39). The UI asks three
+# questions — same / different / unsure — because the engine consumes every negative
+# identically (one permanent must-not-link, one negative calibration label, §9), so the finer
+# breakdown bought no decision and cost clicks. The two finer values stay VALID here: 532's
+# CHECK is untouched, no row is rewritten, and a ruling taken under the older vocabulary has to
+# keep writing and reading back rather than becoming a 400 against its own history.
 VERDICT_VALUES: tuple[str, ...] = (
     "same",
     "different",
+    # E49, migration 532 — historical, never offered by the page since D39.
     "same_building_different_unit",
-    # E49, migration 532: a DIFFERENT BUILDING of the same development project. `different`
-    # throws the project away, `same_building_different_unit` claims a building the adverts do
-    # not share — and both would lose the one fact the operator actually established.
     "same_project_different_unit",
     "unsure",
 )
 # A negative verdict is what writes the permanent must-not-link (§9): "unsure" is not one.
-NEGATIVE_VERDICTS: frozenset[str] = frozenset(
-    {"different", "same_building_different_unit", "same_project_different_unit"}
-)
+# ONE definition, shared with the SQL that widens the `different` filter over all three.
+NEGATIVE_VERDICTS: frozenset[str] = frozenset(usql.NEGATIVE_VERDICTS)
 # What a whole-cluster SPLIT may say about two members the operator put in different units.
-# "same" is not offered: two different units are never one property (E1).
+# "same" is not offered: two different units are never one property (E1). Since D39 the page
+# sends none of these — two letters mean `different`, full stop — and the vocabulary survives
+# only as the compatibility path for a client that still names one.
 SPLIT_RELATIONS: tuple[str, ...] = (
     "same_building_different_unit",
     "same_project_different_unit",
     "different",
 )
+# What a split means when nobody names a relation: two letters are two properties, and that is
+# the whole statement the page now makes.
+DEFAULT_SPLIT_RELATION = "different"
 # A unit per letter of the alphabet. Past that the operator is not splitting a group, they are
 # rejecting it — and the whole-cluster `different` verdict says that in one click.
 MAX_SPLIT_UNITS = 26
@@ -2362,15 +2370,12 @@ class SplitUnitIn(BaseModel):
 
 
 class SplitRelationIn(BaseModel):
-    """The relation between TWO units of one split.
+    """The relation between TWO units of one split — a COMPATIBILITY PATH since D39.
 
-    One relation for a whole split cannot describe the group the operator actually meets: two
-    adverts are different units of one BUILDING while a third is a different building of the
-    same DEVELOPMENT. Stamping either statement onto the other pair records a building the
-    adverts do not share, or throws the building away — and both land as permanent
-    must-not-links and as calibration labels, corrupting the one distinction the developer
-    rails (§2) are measured against. So the relation is per unit pair, with `relation` as the
-    fill for the pairs the client did not name.
+    The page no longer names one: two letters mean the adverts are different properties, and
+    every negative lands in the store the same way. A client that still sends relations is
+    still obeyed — nothing about the fan-out changed — so a bookmarked extension or an older
+    build cannot start writing a verdict it did not mean.
     """
 
     unit_a: str = Field(max_length=40)
@@ -2382,7 +2387,9 @@ class SplitIn(BaseModel):
     cluster_key: int
     generation: str
     units: list[SplitUnitIn]
-    relation: str
+    # ABSENT MEANS `different` (D39). The page sends no relation at all, so the default is the
+    # ruling and not a fallback; an older client that names one is still obeyed.
+    relation: str = DEFAULT_SPLIT_RELATION
     relations: list[SplitRelationIn] = Field(default_factory=list)
     # Saving a split that drops a veto the operator wrote earlier takes a second, deliberate
     # send: a blank-slate assignment must never silently retract a permanent must-not-link.
@@ -2439,12 +2446,12 @@ def verdict_split(
 
     The operator assigns every member a UNIT LABEL. Two members in the same unit are one
     property (`same`, and any must-not-link the operator wrote earlier is retracted); two in
-    different units are the relation named for THOSE TWO UNITS (E51) — the same building, the
-    same development project, or unrelated — and each such pair takes a permanent `must_not_link`,
-    because a unit the operator has separated must never come back as a merge proposal. The
-    cluster itself is stored as `same` when one unit was used and otherwise as the WEAKEST
-    relation the split used, with the assignment as its note. Everything lands in ONE
-    transaction: a half-applied split would leave the pair rows and the cluster row saying
+    different units are `different` (D39) — or, from a client that still names one, the
+    relation given for THOSE TWO UNITS (E51) — and each such pair takes a permanent
+    `must_not_link`, because a unit the operator has separated must never come back as a merge
+    proposal. The cluster itself is stored as `same` when one unit was used and otherwise as
+    the WEAKEST relation the split used, with the assignment as its note. Everything lands in
+    ONE transaction: a half-applied split would leave the pair rows and the cluster row saying
     different things.
 
     A split that would RETRACT a veto the same operator wrote earlier is refused with a 409
@@ -2651,15 +2658,15 @@ def verdict_split(
 class CandidateSplitIn(BaseModel):
     """The candidate card's one write — the split route's body, minus the cluster.
 
-    Same fields, same meanings, same 409: `units` names every member exactly once, `relations`
-    names each unit pair (E51) with `relation` as the fill, and `confirm_retract` is how a save
-    that takes back an earlier veto says it meant to (E52).
+    Same fields, same meanings, same 409: `units` names every member exactly once, an absent
+    `relation` is `different` (D39) with `relations` surviving as the older client's path, and
+    `confirm_retract` is how a save that takes back an earlier veto says it meant to (E52).
     """
 
     candidate_key: str
     generation: str
     units: list[SplitUnitIn]
-    relation: str
+    relation: str = DEFAULT_SPLIT_RELATION
     relations: list[SplitRelationIn] = Field(default_factory=list)
     confirm_retract: bool = False
     note: str | None = Field(default=None, max_length=2000)
@@ -2683,7 +2690,7 @@ def verdict_candidate_split(
 
     The fan-out, the permanent must-not-links, the retraction of the operator's own vetoes and
     the 409 confirmation are the split route's, unchanged: members sharing a letter are one
-    property, members in different letters are the relation named for THOSE TWO LETTERS.
+    property, members in different letters are `different` (D39).
 
     TWO THINGS ARE DIFFERENT, and both follow from there being no cluster.
     (1) NO CLUSTER VERDICT IS WRITTEN. A candidate group is a packing of this generation's

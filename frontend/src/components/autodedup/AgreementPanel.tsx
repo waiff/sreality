@@ -49,9 +49,12 @@ const pct = new Intl.NumberFormat('cs-CZ', {
 
 export const fmtPct = (n: number | null | undefined): string => (n == null ? '—' : pct.format(n));
 
-/* The judge's four verdicts and the operator's five, in the operator's words —
- * a disagreement table that prints `same_building_different_unit` twice in two
- * different vocabularies is a table nobody reads. */
+/* The judge's four verdicts and the operator's three (D39), each in its own
+ * words — a disagreement table that prints `same_building_different_unit` twice
+ * in two different vocabularies is a table nobody reads. The judge keeps its
+ * finer verdict because it is the JUDGE's vocabulary; the operator's column
+ * says "Různé" for every negative, including the two finer values a ruling
+ * taken before D39 still carries in the store. */
 const JUDGE_WORDS: Record<string, string> = {
   same_property: 'stejná nemovitost',
   different_property: 'jiná nemovitost',
@@ -60,11 +63,11 @@ const JUDGE_WORDS: Record<string, string> = {
 };
 
 const OPERATOR_WORDS: Record<string, string> = {
-  same: 'stejná',
-  different: 'jiná',
-  same_building_different_unit: 'stejná budova, jiná jednotka',
-  same_project_different_unit: 'stejný projekt, jiná budova',
-  unsure: 'nejisté',
+  same: 'Stejné',
+  different: 'Různé',
+  same_building_different_unit: 'Různé',
+  same_project_different_unit: 'Různé',
+  unsure: 'Nevím',
 };
 
 const TIER_WORDS: Record<string, string> = {
@@ -171,10 +174,10 @@ export default function AgreementPanel({ generation }: { generation?: string | n
                   <th className={TH}>Dvojic</th>
                   <th className={TH}>Shoda</th>
                   <th className={TH}>95% interval</th>
-                  <th className={TH} title={'Operátor řekl „stejná“, soudce „jiná“'}>
+                  <th className={TH} title={'Operátor řekl „Stejné“, soudce „jiná“'}>
                     Soudce jiná
                   </th>
-                  <th className={TH} title={'Operátor řekl „jiná“, soudce „stejná“'}>
+                  <th className={TH} title={'Operátor řekl „Různé“, soudce „stejná“'}>
                     Soudce stejná
                   </th>
                   <th className={TH}>Přímé / odvozené</th>

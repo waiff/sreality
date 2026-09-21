@@ -3619,11 +3619,11 @@ export const getAutodedupStats = (): Promise<{
 export type AutodedupVerdictValue =
   | 'same'
   | 'different'
+  /* HISTORICAL, never offered by the page since D39: the finer breakdown
+   * migration 532 wrote. The engine consumes every negative identically, so the
+   * page asks three questions and the STORE keeps what it already holds —
+   * these two read back as "Různé" and no row is rewritten. */
   | 'same_building_different_unit'
-  /* E49 (migration 532): a different BUILDING of the same development project.
-   * `different` throws the project away and `same_building_different_unit`
-   * claims a building the adverts do not share — both lose the one fact the
-   * operator established. Like them, it is a permanent must-not-link. */
   | 'same_project_different_unit'
   | 'unsure';
 
@@ -4400,9 +4400,10 @@ export const postAutodedupVerdict = async (
 };
 
 /* THE UNIT SPLIT (E49). One proposed group, ruled unit by unit: every member
- * carries a unit label, members sharing a label are one property, and members
- * in different labels are `relation` — the same building, the same development
- * project, or unrelated — each pair of them taking a PERMANENT must-not-link.
+ * carries a unit letter, members sharing a letter are one property, and members
+ * in different letters are DIFFERENT properties (D39) — each such pair taking a
+ * PERMANENT must-not-link. No relation travels: the page names no finer kind of
+ * different, and the server defaults a missing `relation` to `different`.
  * The assignment must name every member of the cluster exactly once; the server
  * validates against cluster MEMBERSHIP, not against the scored pairs (a cluster
  * is a union of edges, so two members can share one with no edge between them). */
@@ -4411,40 +4412,21 @@ export interface AutodedupSplitUnit {
   unit: string;
 }
 
-export type AutodedupSplitRelation =
-  | 'same_building_different_unit'
-  | 'same_project_different_unit'
-  | 'different';
-
-/* The relation between TWO units. One value for a whole split cannot describe
- * the group the operator meets — A and B two units of one BUILDING, C a
- * different building of the same development — and stamping either statement
- * onto the other pair records a building the adverts do not share. Both land as
- * permanent must-not-links and as calibration labels. */
-export interface AutodedupSplitRelationEntry {
-  unit_a: string;
-  unit_b: string;
-  relation: AutodedupSplitRelation;
-}
-
 export interface AutodedupSplitInput {
   cluster_key: number;
   generation: string;
   units: AutodedupSplitUnit[];
-  /* The fill for any unit pair `relations` does not name. */
-  relation: AutodedupSplitRelation;
-  relations?: AutodedupSplitRelationEntry[];
   /* A split that drops a veto the operator wrote earlier is refused with a 409
    * until this says the operator meant it. */
   confirm_retract?: boolean;
   note?: string | null;
   /* ONE set for the whole split — it is one ruling — stamped on every pair row
-   * it writes and on the cluster row. */
+   * it writes and on the cluster row. Optional, like every annotation here. */
   reasons?: string[];
 }
 
 /* What the one write reports back: the stored CLUSTER verdict (`same` when the
- * operator used one unit, the relation otherwise) and the fan-out counts, so the
+ * operator used one unit, `different` otherwise) and the fan-out counts, so the
  * page can say "3 pairs separated" rather than "saved". */
 export interface AutodedupSplitResult {
   cluster_verdict: AutodedupVerdictRow | null;
@@ -4478,7 +4460,7 @@ export const postAutodedupSplitVerdict = (
  * being asked, and one save rules many pairs.
  *
  * THE CARD IS THE GROUPS CARD. Same member shape, same galleries, same unit
- * letters, same relation-per-unit-pair split. Two differences, both because the
+ * letters, same letters-only split (D39). Two differences, both because the
  * engine did NOT merge these: the adverts of one already-merged group are locked
  * to one letter, and the letters start apart rather than all on A.
  * ------------------------------------------------------------------------- */
@@ -4586,8 +4568,8 @@ export const getAutodedupCandidate = async (
   );
 
 /* THE CANDIDATE SPLIT. The cluster split's body minus the cluster: the same unit
- * assignment, the same relation per unit pair, the same 409 when it would take
- * back a veto the operator wrote earlier.
+ * assignment, no relation at all (D39), the same 409 when it would take back a
+ * veto the operator wrote earlier.
  *
  * It carries NO `reasons`. A split stamps its reason chips on the cluster row,
  * and there is no cluster row here — stamping them on the pairwise fan-out
@@ -4598,8 +4580,6 @@ export interface AutodedupCandidateSplitInput {
   candidate_key: string;
   generation: string;
   units: AutodedupSplitUnit[];
-  relation: AutodedupSplitRelation;
-  relations?: AutodedupSplitRelationEntry[];
   confirm_retract?: boolean;
   note?: string | null;
 }

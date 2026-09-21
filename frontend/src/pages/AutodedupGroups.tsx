@@ -4,7 +4,7 @@
  * are the same real-world property. Nothing has been applied: the whole trial is
  * shadow mode (D4), so this page collects an opinion and writes it into the
  * program's own schema. That is said on the page, not left to be inferred —
- * "Confirm" must never read as "merge now".
+ * "Stejné" must never read as "merge now".
  *
  * WEAKEST EDGE FIRST IS THE DEFAULT SORT, because a cluster is only as right as
  * its worst link: a five-member group joined by one 0.52 edge is where the false
@@ -15,8 +15,8 @@
  * value is the server's 400 rather than this page's problem.
  *
  * A GROUP IS NOT ALWAYS ONE ANSWER, so every member carries a unit letter and
- * two letters raise the split row. The machinery — the letters, the relation per
- * unit pair, the stored ruling read back off the members' pair verdicts — is
+ * two letters raise the split row. The machinery — the letters and the stored
+ * ruling read back off the members' pair verdicts — is
  * `components/autodedup/UnitSplit`, shared with the candidate-group view on
  * /autodedup/residual, which rules on the adverts the engine did NOT merge using
  * this same card. The pieces this page used to own and now shares (the filter
@@ -59,7 +59,7 @@ import {
   GenerationNotice,
   useAutodedupGenerations,
 } from '@/components/autodedup/GenerationSelect';
-import VerdictButtons, { GROUP_LABELS } from '@/components/autodedup/VerdictButtons';
+import VerdictButtons from '@/components/autodedup/VerdictButtons';
 import VerdictNotes, {
   annotationInput,
   useVerdictAnnotations,
@@ -89,7 +89,6 @@ import {
   UnitSelect,
   deriveSplit,
   splitInput,
-  unitPairKey,
   type SplitControls,
   type SplitState,
 } from '@/components/autodedup/UnitSplit';
@@ -113,23 +112,16 @@ export {
   type GroupFilterState,
 } from '@/components/autodedup/filterState';
 export {
-  DEFAULT_RELATION,
   EMPTY_SPLIT,
-  SPLIT_RELATIONS,
-  SPLIT_RELATION_LABELS,
   SplitRow,
   UNIT_LETTERS,
   UnitSelect,
   clusterVerdictOf,
   deriveSplit,
   distinctUnits,
-  receiptRelations,
-  relationOf,
   splitInput,
   splitSummary,
   unitOf,
-  unitPairKey,
-  unitPairs,
   unitsSummary,
   type SplitControls,
   type SplitError,
@@ -262,11 +254,6 @@ export default function AutodedupGroups() {
       state: base,
       setUnit: (listingId, unit) =>
         edit((current) => ({ ...current, units: { ...current.units, [listingId]: unit } })),
-      setRelation: (unitA, unitB, relation) =>
-        edit((current) => ({
-          ...current,
-          relations: { ...current.relations, [unitPairKey(unitA, unitB)]: relation },
-        })),
       save: (members, confirmRetract = false) =>
         submitSplit(
           key,
@@ -618,7 +605,6 @@ function GroupCard({
         verdict={verdict}
         onVerdict={onVerdict}
         pending={pending}
-        labels={GROUP_LABELS}
         annotation={notes.annotationOf(noteKey, verdict)}
       />
       <VerdictNotes

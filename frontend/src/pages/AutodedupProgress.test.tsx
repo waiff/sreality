@@ -238,6 +238,31 @@ describe('<AutodedupProgress>', () => {
     );
   });
 
+  it('prints a ruling taken under the older vocabulary as "Různé" (D39)', async () => {
+    vi.mocked(api.getAutodedupAgreement).mockResolvedValue({
+      ...AGREEMENT,
+      data: {
+        ...AGREEMENT.data,
+        disagreements: [
+          {
+            ...AGREEMENT.data.disagreements[0],
+            operator_verdict: 'same_building_different_unit' as const,
+          },
+        ],
+      },
+    });
+    renderPage();
+    const panel = (await screen.findByText('Shoda operátor × soudce')).closest('section')!;
+    const row = (await within(panel).findByText('101 · 202')).closest('tr')!;
+    /* The store keeps the finer value; the operator's column speaks the page's
+     * three words, and says nothing about a building or a project. */
+    expect(within(row).getByText('Různé')).toBeInTheDocument();
+    expect(row).not.toHaveTextContent(/budov|projekt/i);
+    /* The JUDGE's own vocabulary is untouched — it is the model's, not the
+     * operator's. */
+    expect(within(panel).getByText('Neshody')).toBeInTheDocument();
+  });
+
   /* The block names live in the cohort module and in each iteration's
    * sample_stats, never in the prose — so nothing here pins them. */
   it('says the trial merges nothing, and shows the mode as a constant', async () => {

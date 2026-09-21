@@ -9,7 +9,7 @@
  * that returns the same list is worse than no select at all — which is why the
  * portal, category and verdict groups are switchable: the residual queue filters
  * by a source PAIR and takes no category keys, and the candidate queue's verdict
- * vocabulary is reviewed/unreviewed rather than the five verdicts.
+ * vocabulary is reviewed/unreviewed rather than the operator's three.
  */
 
 import { type ReactNode } from 'react';
@@ -45,9 +45,10 @@ export function FilterBar<T extends GroupFilterState>({
   /* A control this surface does not SEND must not be rendered. */
   showSource = true,
   showCategory = true,
-  /* The five-verdict select is the GROUPS and PAIRS vocabulary. The candidate
-   * queue has no verdict of its own — a card is reviewed when every pair inside
-   * it is — so it hides this one and offers its own two-value control instead. */
+  /* The three-verdict select is the GROUPS and PAIRS vocabulary (D39). The
+   * candidate queue has no verdict of its own — a card is reviewed when every
+   * pair inside it is — so it hides this one and offers its own two-value
+   * control instead. */
   showVerdict = true,
   /* GROUPS ONLY. "změněno od verdiktu" asks for the groups whose membership has
    * moved since the operator ruled them (E58) — a question only a cluster-grain
@@ -142,15 +143,16 @@ export function FilterBar<T extends GroupFilterState>({
               onChange={(e) => set('verdict', e.target.value as T['verdict'])}
             >
               <option value="">vše</option>
-              <option value="unreviewed">unreviewed</option>
+              <option value="unreviewed">nezkontrolováno</option>
               {showChangedVerdict && (
                 <option value="changed">změněno od verdiktu</option>
               )}
-              <option value="same">same</option>
-              <option value="different">different</option>
-              <option value="same_building_different_unit">same building</option>
-              <option value="same_project_different_unit">same project</option>
-              <option value="unsure">unsure</option>
+              <option value="same">stejné</option>
+              {/* ONE WORD OVER THREE STORED VALUES: the server widens
+                * `different` over the two finer values migration 532 wrote, so a
+                * ruling taken before D39 stays in its own queue. */}
+              <option value="different">různé</option>
+              <option value="unsure">nevím</option>
             </select>
           </label>
         )}
