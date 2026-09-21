@@ -75,8 +75,13 @@ table still honest when it is empty?
   **Migration 545 must be applied BEFORE this PR merges** — the SPA shipping with it calls both
   functions, which is exactly the migration-438 gap.
 - **W4** — folded into W2 (above).
-- **W5** — pay the rest: delete `FilterChip.tsx` (+ its test), `POST /tools/find_comparables`
-  (+ schema) and `ComparableFilters.category_sub_cb`.
+- **W5** — pay the rest. **`FilterChip.tsx` + its test are deleted.** It had zero importers: its
+  five call sites (`Dedup`, `DedupAuditHistory`, `EligibilityMatrix`, `ClipAudit`,
+  `LocationAudit`) all died with the legacy-dedup frontend teardown (b69da0d8, #967), and
+  `Datasets.tsx` declares its own read-only `FilterChips` badges locally — a different shape,
+  never an import. The `onRemove` split toggle+trash variant goes with it; nothing has used it
+  since that teardown and git history holds it if it is ever wanted back.
+  Still to pay: `POST /tools/find_comparables` and `ComparableFilters.category_sub_cb`.
 
 ## Standing constraints
 
