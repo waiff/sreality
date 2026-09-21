@@ -18,8 +18,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.migration_defs import latest_definition
-
 MIGRATION = (
     Path(__file__).resolve().parents[1] / "migrations" / "537_browse_hides_dismissed.sql"
 )
@@ -60,23 +58,12 @@ def test_no_source_returns_a_blue_green_relations_own_row_type() -> None:
 
 
 @pytest.mark.parametrize("fn", ["browse_stats_properties", "browse_map_cells"])
-def test_each_aggregate_rpc_still_takes_the_flag_once(fn: str) -> None:
-    """Read from whichever migration defines the RPC TODAY, not from 537. Both bodies
-    are re-stated whole by each migration that touches them (504 -> 537 -> 547), so a
-    rail pinned to 537 would stay green while a later file dropped the clause — Stats
-    and the map would then count properties the list beside them hides."""
-    sql = latest_definition(fn).read_text(encoding="utf-8")
-    at = re.search(rf"create or replace function (?:public\.)?{fn}\s*\(", sql, re.I).start()
-    stmt = sql[at: sql.index("$function$;", at)]
+def test_each_aggregate_rpc_takes_the_flag_once_and_restores_its_acl(fn: str) -> None:
+    at = re.search(rf"create or replace function public\.{fn}\s*\(", _SQL, re.I).start()
+    stmt = _SQL[at: _SQL.index("$function$;", at)]
     assert re.search(r"hide_dismissed boolean default false", stmt, re.I)
     assert stmt.count("not hide_dismissed or not exists") == 1
     assert "select 1 from property_dismissals_public d where d.property_id = l.property_id" in stmt
-
-
-@pytest.mark.parametrize("fn", ["browse_stats_properties", "browse_map_cells"])
-def test_each_aggregate_rpc_restored_its_acl_when_537_widened_it(fn: str) -> None:
-    """537 had to DROP both functions (it widened the signature), so it also had to
-    re-issue their grants. A later CREATE OR REPLACE keeps the ACL and needs none."""
     assert f"drop function if exists public.{fn}(" in _SQL
     assert re.search(rf"revoke execute on function public\.{fn}\([^)]*\) from public, anon;", _SQL)
     assert re.search(

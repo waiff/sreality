@@ -1,12 +1,11 @@
 """Read-your-writes patch of the Browse read model (`browse_list`).
 
 `browse_list` (migration 276) is an UNLOGGED snapshot of `browse_projection`,
-rebuilt wholesale every 15 min by pg_cron (`rebuild_browse_list`, migration 277;
-the cadence moved 5 -> 15 min in migration 413, which cut the rebuild's duty
-cycle from 142% to 79.7%). That cadence fits organic scrape churn but not an
-operator-initiated identity change: a merge / unmerge / split must show in
-Browse the instant the API returns, not up to a rebuild-interval later (the
-"merge did nothing, then fixed itself after ~2 min" report — docs/design/browse-merge-consistency.md). This
+rebuilt wholesale every 5 min by pg_cron (`rebuild_browse_list`, migration 277).
+That cadence fits organic scrape churn but not an operator-initiated identity
+change: a merge / unmerge / split must show in Browse the instant the API
+returns, not up to a rebuild-interval later (the "merge did nothing, then fixed
+itself after ~2 min" report — docs/design/browse-merge-consistency.md). This
 patches exactly the touched rows; the periodic rebuild stays the backstop.
 """
 

@@ -5,23 +5,12 @@
 -- DESTRUCTIVE. Do not apply without the operator's explicit word and a
 -- pg_dump first (architecture rule 1). Operator OK recorded 2026-09-21 in
 -- docs/design/field-capture/PROGRAM.md section 2, "Approved destructive
--- steps" (i) -- which covers the two DROPs. Statement 2 below deletes
--- 1,162 observability rows and is a SECOND destructive act riding on the
--- same file: it is called out under its own heading there, and it is fine to
--- delete statement 2 and apply the rest if the operator would rather keep
--- the history and live with a permanently red check.
+-- steps" (i) -- which covers exactly the two DROPs below and nothing else.
 --
 --   pg_dump "$SUPABASE_DB_URL" --no-owner --no-acl \
 --     -t public.listing_description_enrichment_batches \
 --     -t public.listing_description_enrichment_batch_requests \
 --     -f w0-pre-drop-$(date -u +%Y%m%dT%H%M%SZ).sql
---
---   psql "$SUPABASE_DB_URL" -c "\copy (select * from pipeline_check_results \
---     where check_key = 'llm_liveness') to 'w0-llm-liveness-results.csv' csv header"
---
--- The second command is the backup for statement 2 -- pg_dump of the two
--- tables does NOT contain those rows, and they are the evidence base (52 fails
--- in 347 runs over 30 days) the retirement argument cites.
 --
 -- Both tables are EMPTY, verified immediately before this file was written:
 --
@@ -102,36 +91,18 @@ set lock_timeout = '5s';
 drop table if exists listing_description_enrichment_batch_requests;
 drop table if exists listing_description_enrichment_batches;
 
--- 2. The retired llm_liveness check's result rows -- A SECOND DESTRUCTIVE ACT,
---    1,162 rows (122 of them `fail`), oldest 2026-07-10 17:05Z, newest
---    2026-09-21 17:00Z, counted 2026-09-21 19:26Z. Back it up with the \copy
---    above; the pg_dump does not cover it. Severable: drop this statement and
---    the rest of the file still does the approved work.
---
--- Not schema, but the same deletion: this PR removes check_llm_liveness from
--- verify_pipeline (there is no recurring LLM producer left to be silent about
--- -- the longest gap between llm_calls rows in the 30 days to 2026-09-21,
--- excluding the deleted lane, was 143.8 h, and the check had already logged 52
--- fails in 347 runs in that window). `pipeline_checks_public`
--- serves the LATEST row per check_key with no recency filter, and this key's
--- latest row is a `fail` -- so leaving the rows would pin a permanently red
--- check on the Health page and a permanently red rollup badge above it, with
--- no producer that could ever turn it green again. pipeline_check_results is
--- observability, not history (the history table is listing_snapshots).
---
--- THE BELL IS THE OTHER HALF, AND IT IS NOT CLEARED HERE. `llm_liveness` has an
--- OPEN incident in notification_dispatches (`sys:llm_liveness:onset:
--- 2026-09-21T10:38:34Z`, re-escalated at 17:00Z, both unseen).
--- `emit_transition_alerts` closes an incident only when a LATER run reports that
--- key `ok`, and there will be no later run -- so no recovery row can ever be
--- written. notification_dispatches is append-only (architecture rule 16), so
--- this file does not touch it: after the rollout the operator marks that thread
--- seen in the in-app bell. Nothing re-opens it.
---
--- Six OTHER retired keys already sit there frozen since 2026-08-06
--- (geo_debt, merge_latency, eligibility_funnel, engine_health, street_debt,
--- merge_precision_sample -- the removed dedup decision engine's). This file
--- deliberately leaves them alone: three of them are `warn`, so they are a
--- pre-existing wart, not a regression this PR introduces, and they belong to
--- another program's territory (architecture rule 15).
-delete from pipeline_check_results where check_key = 'llm_liveness';
+-- NOT IN THIS FILE, ON PURPOSE: the retired llm_liveness check's result rows.
+-- This PR removes check_llm_liveness from verify_pipeline (no recurring LLM
+-- producer is left to be silent about: the longest gap between llm_calls rows
+-- in the 30 days to 2026-09-21, excluding the deleted lane, was 143.8 h, and
+-- the check logged 52 fails in 347 runs in that window). `pipeline_checks_public`
+-- serves the LATEST row per check_key with no recency filter and this key's
+-- latest row is a `fail`, so the Health page keeps one frozen red check until
+-- its 1,162 rows in pipeline_check_results are removed. That is a second
+-- destructive act the recorded approval does not cover, so it waits for the
+-- operator's own word -- together with the six keys the removed dedup engine
+-- left frozen since 2026-08-06 (geo_debt, merge_latency, eligibility_funnel,
+-- engine_health, street_debt, merge_precision_sample), which are the same wart.
+-- The open `sys:llm_liveness` bell incident can never receive a recovery row
+-- either (notification_dispatches is append-only, architecture rule 16): the
+-- operator marks that thread seen in the in-app bell after the rollout.

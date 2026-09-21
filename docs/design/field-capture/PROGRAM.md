@@ -106,12 +106,12 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 0-row batch tables; (ii) re-key `listing_description_enrichments`; (iii) clear the OLD lane's cells that failed
 measurement (LLM-written floor, silence-based `false`) — only cells that lane wrote, never a portal-stated value.
 
-**Awaiting the operator's word, carried in migration 546 as a severable second statement:** delete the retired
-`llm_liveness` check's 1,162 `pipeline_check_results` rows (122 fails, oldest 2026-07-10, newest 2026-09-21 17:00Z).
-Not covered by (i). It is the only way the Health page stops showing a red check with no producer left to green it
-(`pipeline_checks_public` serves the latest row per key with no recency filter); the cost is the series the W0 report
-and the `pipeline-verification` reference cite. Backup is a `\copy` of those rows, not the pg_dump in the same header.
-The matching bell incident (`sys:llm_liveness:onset:2026-09-21T10:38:34Z`, re-escalated 17:00Z) can never receive a
+**Awaiting the operator's word (NOT in migration 546, which carries only the two approved DROPs):** delete the retired
+`llm_liveness` check's 1,162 `pipeline_check_results` rows (122 fails, oldest 2026-07-10, newest 2026-09-21 17:00Z) —
+and, as the same decision, the six keys the removed dedup engine left frozen since 2026-08-06 (`geo_debt`,
+`merge_latency`, `eligibility_funnel`, `engine_health`, `street_debt`, `merge_precision_sample`). Until then the Health
+page shows those checks frozen (`pipeline_checks_public` serves the latest row per key with no recency filter). Backup =
+a `\copy` of the rows. The matching bell incident (`sys:llm_liveness:onset:2026-09-21T10:38:34Z`) can never receive a
 recovery row and is marked seen by hand — `notification_dispatches` is append-only (rule #16).
 
 ## 3. What this program never does

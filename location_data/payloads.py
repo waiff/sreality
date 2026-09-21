@@ -46,16 +46,13 @@ Five properties define the write, and each one is load-bearing:
     floor never suppresses a group's FIRST body and never suppresses an unchanged
     refetch (that collides and writes no row anyway); see `append_floor_cutoff`.
 
-LIVE on all nine portals (826,948 rows as of 2026-09-21, oldest 2026-05-28). Scrapers
-never call `append_payload` directly: the one sanctioned form is
-`scraper.db.append_payload_if_enabled`, a never-raising wrapper called from the
-`portal_raw_pages` chokepoint and from the two scrapers that hold a body outside it
-(`scraper/main.py`, `scraper/bezrealitky_main.py`). It archives `detail` bodies and
-nothing else — the three W2a flags went away on 2026-09-11 when rule 25 made the stored
-detail body the claim lane's second substrate.
+NOT WIRED. Nothing in the scrape calls this yet — W2a-2 adds the dual-write at
+`scraper.db.upsert_portal_raw_page` behind its own flag, and enabling it is gated on
+the churn sign-off. Shipping the library first keeps that PR to one chokepoint edit
+and lets the write path be constraint-tested before it touches live ingest.
 
 `portal_raw_pages` — the existing latest-wins staging table — is NOT this store and is
-never written or deleted here; it is the migration source W2a-4 read.
+never written or deleted here; it is the migration source W2a-4 reads.
 """
 
 from __future__ import annotations
