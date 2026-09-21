@@ -26,6 +26,7 @@ from autodedup.incremental import (
     PairRow,
     key_token,
 )
+from autodedup.store_score import PAIR_SCORE_SQL_TYPE, narrow
 
 
 def shape_token(listing: Listing) -> str:
@@ -36,11 +37,17 @@ def shape_token(listing: Listing) -> str:
 
 
 class MemoryStore:
-    def __init__(self, now: float | None = None) -> None:
+    def __init__(self, now: float | None = None,
+                 score_sql_type: str = PAIR_SCORE_SQL_TYPE) -> None:
         # The twin's clock, for `first_decided_at` (E92). Production reads the server's; a
         # replay that never sets one leaves the stamp NULL, which is what keeps the plain
         # replay byte-for-byte what it was before the evidence horizon existed.
         self.now = now
+        # E116: the twin narrows a score exactly as `autodedup.pairs.score` does, so the
+        # replay proof covers the STORE rather than an idealisation of it. Under the shipped
+        # `double precision` this is the identity; passing `real` reproduces the pre-541
+        # column, which is how W9m's regression arm shows the proof would now catch E114.
+        self.score_sql_type = score_sql_type
         self.postings: dict[tuple[str, str], list[int]] = {}
         self.keys: dict[int, list[tuple[str, str]]] = {}
         self.fp: dict[int, FpRow] = {}
@@ -120,8 +127,9 @@ class MemoryStore:
 
     def upsert_pairs(self, rows: Sequence[PairRow]) -> None:
         for row in rows:
-            self.pairs[(row.lo, row.hi)] = row
-            self._reindex(row)
+            stored = replace(row, score=narrow(row.score, self.score_sql_type))
+            self.pairs[(stored.lo, stored.hi)] = stored
+            self._reindex(stored)
 
     def delete_pairs(self, keys: Sequence[tuple[int, int]]) -> None:
         for key in keys:

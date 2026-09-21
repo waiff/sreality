@@ -218,16 +218,36 @@ name: "AUTODEDUP: engine lane"
 #             left 15,923 pairs of a superseded scorer where they were). So this mode reads
 #             BOTH stores. Given the live generation and `batch=<generation>` scored on the
 #             SAME export under the same settings and model, inside the live generation's own
-#             scope, it compares: the pairs both sides hold (zone, certificate and score
-#             within `tol`, default 1e-6); the pairs only one side holds, each attributed to
-#             a CAUSE the two engines legitimately differ by - `scope` (the batch cohort is
-#             wider), `not_in_live_store` (a listing the build has not reached, which FAILS
-#             the verdict because a mid-build comparison reads as a disagreement),
-#             `arrival_after_export`, `store_floor` and `retention` - with anything left over
-#             counted as `unexplained`; and the clusters, by member set and by key, trimmed to
-#             the scope on both sides. `out/rt_equivalence.json` is the deliverable and it
-#             carries a verdict: ok only when nothing shared differs, nothing one-sided is
-#             unexplained, the member sets agree and the build is finished.
+#             scope, it ATTRIBUTES every difference to a named cause (E119) and fails only on
+#             the ones nobody can name and on DEFECTS (E120).
+#             * Defects make the comparison itself lie, so each one fails on its own:
+#               `store_write_asymmetry` (a side whose `decision` strings name a certificate
+#               while `pairs.certificate` holds none - `score_lane` did not write the column
+#               until W9m, so 3,462 shared pairs read 'K-C' against NULL), `clock_anchor` (the
+#               two generations disagree about `live_window_from_sighting`, read from
+#               `rt_calibration` and from the batch pass's own `autodedup.runs` row) and
+#               `store_score_precision` (`pairs.score` cannot hold the number `edge_rank`
+#               ranks on - migration 541).
+#             * Shared pairs that differ are attributed by reading which FEATURES moved:
+#               `drifted_since_export` (the clock features moved AND the live value is the one
+#               that matches `public.listings` as it stands now, recomputed through the
+#               engine's own `features.clock_features`), `calibration_cohort` (the
+#               corpus-frequency features moved, which two differently-cut calibrations always
+#               do), `clock_anchor`, `store_write_asymmetry` - and `unexplained`.
+#             * One-sided pairs keep their causes - `scope` (the batch cohort is wider),
+#               `not_in_live_store` (a listing the build has not reached, which FAILS the
+#               verdict because a mid-build comparison reads as a disagreement),
+#               `arrival_after_export`, `store_floor`, `retention`, `unexplained` - now
+#               reported PER SIDE as well as summed.
+#             * Clusters are compared by connected COMPONENT: `arrival` (a listing the batch
+#               cohort never had), `upstream_pair` (the two sides hold different merge edges,
+#               so the pair grain already accounted for it) or `unexplained`, which is a
+#               component both sides hold the same edges in and partition differently.
+#             The score tolerance is never finer than the store's own resolution (`tol`,
+#             default 1e-6, raised to 32 units in the score column's last place while that is
+#             coarser). `out/rt_equivalence.json` is the deliverable and it carries a verdict:
+#             ok only when there are no defects, nothing is unexplained at pair, one-sided or
+#             cluster-component grain, and the build is finished.
 #
 #   rt_seed - READS the artifact and `public`, WRITES schema `autodedup` only. Cuts a
 #             generation's FROZEN calibration from an export run's cohort artifact, starts its

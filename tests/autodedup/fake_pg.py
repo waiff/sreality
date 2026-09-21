@@ -86,6 +86,12 @@ class FakePg:
         # What `pg_total_relation_size` over schema `autodedup` answers — the storage guard's
         # one input (E79). Tests move it to put the lane over budget.
         self.schema_bytes = 64 * 1_048_576
+        # The declared type of `autodedup.pairs.score` (migration 541) and the settings each
+        # batch generation's score pass recorded — what `rt_equivalence` reads to say whether
+        # the store can carry the number the clustering ranks on, and whether the two sides
+        # ran the same clock.
+        self.score_column_type = "double precision"
+        self.score_runs: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ psycopg surface
     def cursor(self) -> "_Cursor":
@@ -603,9 +609,22 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
                       if g == gen)
     if sql == S.RT_EQUIV_SCOPE_IDS_SQL:
         return sorted((listing_id,) for (g, _block, listing_id) in db.scope_ids if g == gen)
-    if sql == S.RT_EQUIV_FIRST_SEEN_SQL:
-        return [(int(i), (db.listings.get(int(i)) or {}).get("first_seen_at"))
-                for i in sorted(p["ids"]) if int(i) in db.listings]
+    if sql == S.RT_EQUIV_CLOCK_FACTS_SQL:
+        return [(int(i), row.get("first_seen_at"), row.get("last_seen_at"),
+                 row.get("inactive_at"), bool(row.get("is_active", True)))
+                for i in sorted(p["ids"])
+                for row in [db.listings.get(int(i))] if row is not None]
+    if sql == S.RT_EQUIV_PAIR_FEATURES_SQL:
+        wanted = set(zip([int(v) for v in p["los"]], [int(v) for v in p["his"]]))
+        return [(lo, hi, _jsonb(row.get("features")))
+                for (g, lo, hi), row in sorted(db.pairs.items())
+                if g == gen and (lo, hi) in wanted]
+    if sql == S.RT_EQUIV_SCORE_TYPE_SQL:
+        return [(db.score_column_type, 24 if db.score_column_type == "real" else 53)]
+    if sql == S.RT_EQUIV_BATCH_SETTINGS_SQL:
+        row = db.score_runs.get(gen)
+        return [] if row is None else [(_jsonb(row.get("settings")),
+                                        row.get("model_version"), db.now)]
 
     # ---------------------------------------------------------------- calibration
     if sql == S.RT_CALIBRATION_PRESENT_SQL:

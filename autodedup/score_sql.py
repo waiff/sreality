@@ -25,6 +25,14 @@ only when the operator asks for it by name (`keep_generations`).
 `applied_merge_group` is NEVER listed — not in the insert, not in the `do update set`. It is
 the write path's own column (E40) and shadow mode leaves it alone; naming it in the upsert
 would let a re-score silently clear a stamp the engine did not place.
+
+`certificate` IS listed, and has been since W9m (E117, D41). Migration 539 added it for the
+real-time lane and this one did not write it, so a batch generation held NULL on every row
+while its `decision` strings named a certificate on 3,866 — and since `cluster.edge_rank`
+reads the certificate FIRST, that generation was not re-clusterable from its own store. Every
+lane that writes a pair writes every column the clustering reads; `score` is `double
+precision` for the same reason (migration 541), and the parameter is cast to match, because a
+`::real` cast narrows the value before the column ever sees it.
 """
 
 from __future__ import annotations
@@ -80,11 +88,11 @@ select listing_lo, listing_hi
 PAIR_UPSERT_SQL = """
 insert into autodedup.pairs (
     generation, listing_lo, listing_hi, probes, families, features, score, zone, decision,
-    guard_veto, cluster_key, feature_version, model_version, decided_at
+    certificate, guard_veto, cluster_key, feature_version, model_version, decided_at
 ) values (
     %(generation)s::text, %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(probes)s::text[],
-    %(families)s::smallint, %(features)s::jsonb, %(score)s::real, %(zone)s::text,
-    %(decision)s::text, %(guard_veto)s::text, %(cluster_key)s::bigint,
+    %(families)s::smallint, %(features)s::jsonb, %(score)s::double precision, %(zone)s::text,
+    %(decision)s::text, %(certificate)s::text, %(guard_veto)s::text, %(cluster_key)s::bigint,
     %(feature_version)s::smallint, %(model_version)s::text, now()
 )
 on conflict (generation, listing_lo, listing_hi) do update set
@@ -92,6 +100,7 @@ on conflict (generation, listing_lo, listing_hi) do update set
     families        = excluded.families,
     features        = excluded.features,
     score           = excluded.score,
+    certificate     = excluded.certificate,
     zone            = excluded.zone,
     decision        = excluded.decision,
     guard_veto      = excluded.guard_veto,

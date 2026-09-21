@@ -49,6 +49,14 @@ MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
 MIGRATION = MIGRATIONS / "528_autodedup_foundation.sql"
 BLOCK_GRAIN_MIGRATION = MIGRATIONS / "529_autodedup_cluster_block_grain.sql"
 GENERATION_MIGRATION = MIGRATIONS / "538_autodedup_generation_scoped_store.sql"
+REALTIME_MIGRATION = MIGRATIONS / "539_autodedup_realtime_lane.sql"
+# Columns migration 539 added for the REAL-TIME lane's own bookkeeping: E71's two retrieval
+# booleans, the strings a rule refused on, the census a promotion was taken under, the two
+# fingerprint digests an idempotent re-score compares and the frozen calibration's digest. The
+# batch pass has no equivalent of any of them. `certificate` is deliberately NOT here: the
+# clustering ORDERS on it, so both lanes write it (D41).
+REALTIME_ONLY = {"from_lo", "from_hi", "evidence", "context", "fp_lo", "fp_hi",
+                 "calibration_digest"}
 
 RUN_ID = 77
 
@@ -339,10 +347,16 @@ def _migration_columns(table: str) -> list[str]:
     # Migration 538 adds `generation` to three of these tables; the contract a writer has to
     # satisfy is the CURRENT one, so the added columns are folded in here rather than listed
     # by hand in every test below.
-    added = re.findall(
-        rf"alter table autodedup\.{table}\s+add column if not exists ([a-z_]+)",
-        GENERATION_MIGRATION.read_text(encoding="utf-8"),
-    )
+    # Migration 538 adds `generation` to three of these tables and 539 adds the pair columns
+    # the real-time lane needs; the contract a writer has to satisfy is the CURRENT one, so
+    # every later `add column` is folded in here rather than listed by hand below.
+    added: list[str] = []
+    for path in (GENERATION_MIGRATION, REALTIME_MIGRATION):
+        added += re.findall(
+            rf"add column if not exists ([a-z_]+)",
+            path.read_text(encoding="utf-8").split(f"alter table autodedup.{table}", 1)[-1]
+            .split(";", 1)[0],
+        )
     return columns + [name for name in added if name not in columns]
 
 
@@ -352,8 +366,11 @@ def test_pair_upsert_params_match_migration_528(lane, tmp_path: Path) -> None:
     assert rows
     columns = set(_migration_columns("pairs"))
     # `decided_at` is `now()` in the statement; `applied_merge_group` belongs to the write
-    # path (E40) and shadow mode never names it.
-    assert set(rows[0]) == columns - {"decided_at", "applied_merge_group"}
+    # path (E40) and shadow mode never names it; `REALTIME_ONLY` is the other lane's
+    # bookkeeping. Everything else the table holds, this lane writes — including
+    # `certificate`, which `cluster.edge_rank` reads first (D41, M171).
+    assert set(rows[0]) == columns - {"decided_at", "applied_merge_group"} - REALTIME_ONLY
+    assert "certificate" in set(rows[0])
     for row in rows:
         assert row["listing_lo"] < row["listing_hi"]
         assert row["zone"] in ("merge", "band", "reject")

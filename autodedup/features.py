@@ -1228,7 +1228,78 @@ def _tag_features(
     return feats
 
 
-def window_end_stamp(listing: Listing, settings: "Settings") -> str | None:
+@dataclass(frozen=True, slots=True)
+class ClockFacts:
+    """The four listing facts every CLOCK-dependent feature reads, and nothing else (E115).
+
+    Named so the engine and `rt_equivalence` cannot drift apart about what "now" means: the
+    instrument recomputes `gap_days`, `overlap_days` and `both_active` from CURRENT
+    `public.listings` through `clock_features` — the same function `pair_features` calls — so
+    a difference between two generations is attributable to the facts having moved rather than
+    to the two engines anchoring the window differently. Neither side ever reads `now()`: the
+    window's end is `last_seen_at or inactive_at` under the honest clock and
+    `inactive_at or last_seen_at` without it."""
+
+    first_seen_at: str | None = None
+    last_seen_at: str | None = None
+    inactive_at: str | None = None
+    is_active: bool = True
+
+    @classmethod
+    def of(cls, listing: Listing) -> "ClockFacts":
+        return cls(listing.first_seen_at, listing.last_seen_at, listing.inactive_at,
+                   bool(listing.is_active))
+
+
+@dataclass(frozen=True, slots=True)
+class WindowRule:
+    """The ONE settings field a clock feature reads, on its own.
+
+    `Settings` validates on construction — the honest clock is refused without the E84 gap
+    rail — so an instrument that only wants to recompute `overlap_days` from today's facts
+    cannot build a partial one. `Settings` satisfies this shape too, so `pair_features` passes
+    the real row and nothing has two definitions."""
+
+    live_window_from_sighting: bool = False
+
+
+# The features whose value moves when a listing's sighting stamps or its active flag move —
+# which is every feature an export-to-pass lag can change without anything being wrong.
+CLOCK_FEATURES: frozenset[str] = frozenset({"gap_days", "overlap_days", "both_active"})
+
+# The features whose value depends on the COHORT the calibration was cut over rather than on
+# the pair: corpus and block token frequencies, attribute rarity, pin population and the frozen
+# pHash population behind `catalog_ratio`. Two generations cut over different cohorts move
+# these and agree about everything else.
+CALIBRATION_FEATURES: frozenset[str] = frozenset(
+    {"tfidf_cos", "rare_token_overlap", "attr_agreements_rare", "pin_pop", "catalog_ratio_max"}
+)
+
+
+def clock_features(a: ClockFacts, b: ClockFacts,
+                   settings: "Settings | WindowRule") -> Feats:
+    """`gap_days`, `overlap_days` and `both_active` — the one definition both lanes read."""
+    feats: Feats = {}
+    start_a, end_a = _window(a, settings)
+    start_b, end_b = _window(b, settings)
+    if start_a is not None and start_b is not None:
+        first_end = end_a if start_a <= start_b else end_b
+        later_start = max(start_a, start_b)
+        gap = 0.0 if first_end is None else max(0.0, later_start - first_end)
+        feats["gap_days"] = (gap, True)
+    else:
+        feats["gap_days"] = ABSENT
+    if None not in (start_a, end_a, start_b, end_b):
+        overlap = min(float(end_a), float(end_b)) - max(float(start_a), float(start_b))
+        feats["overlap_days"] = (max(0.0, overlap), True)
+    else:
+        feats["overlap_days"] = ABSENT
+    feats["both_active"] = (1.0 if (a.is_active and b.is_active) else 0.0, True)
+    return feats
+
+
+def window_end_stamp(listing: "Listing | ClockFacts",
+                     settings: "Settings | WindowRule") -> str | None:
     """Which end-of-life stamp the RULE FLOOR reads for this advert (W8).
 
     `dataset.live_end_stamp` is the TRUE end — the last sighting — and the benchmark always
@@ -1245,7 +1316,8 @@ def window_end_stamp(listing: Listing, settings: "Settings") -> str | None:
     return listing.inactive_at or listing.last_seen_at
 
 
-def _window(listing: Listing, settings: "Settings") -> tuple[float | None, float | None]:
+def _window(listing: "Listing | ClockFacts",
+            settings: "Settings | WindowRule") -> tuple[float | None, float | None]:
     start = parse_ts(listing.first_seen_at)
     end = parse_ts(window_end_stamp(listing, settings))
     if start is not None and end is not None and end < start:
@@ -1508,21 +1580,7 @@ def pair_features(
     )
 
     # --- TIME -------------------------------------------------------------------------
-    start_a, end_a = _window(la, settings)
-    start_b, end_b = _window(lb, settings)
-    if start_a is not None and start_b is not None:
-        first_end = end_a if start_a <= start_b else end_b
-        later_start = max(start_a, start_b)
-        gap = 0.0 if first_end is None else max(0.0, later_start - first_end)
-        feats["gap_days"] = (gap, True)
-    else:
-        feats["gap_days"] = ABSENT
-    if None not in (start_a, end_a, start_b, end_b):
-        overlap = min(float(end_a), float(end_b)) - max(float(start_a), float(start_b))
-        feats["overlap_days"] = (max(0.0, overlap), True)
-    else:
-        feats["overlap_days"] = ABSENT
-    feats["both_active"] = (1.0 if (la.is_active and lb.is_active) else 0.0, True)
+    feats.update(clock_features(ClockFacts.of(la), ClockFacts.of(lb), settings))
     feats["same_source"] = _eq(fa.source, fb.source)
 
     # --- v4 room-paired IMG (W5) ------------------------------------------------------
