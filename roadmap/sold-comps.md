@@ -23,8 +23,9 @@ table still honest when it is empty?
   named future source and nothing is built for it.
 - Photos are **hot-linked** from the source's public URLs (`photo_urls text[]`). No R2
   copy, no `images` rows.
-- The Cenová-mapa chip and `api/sreality_price_map.py` STAY. Only the reas.cz chip is
-  deleted, in the wave that ships the read surface.
+- The Cenová-mapa chip and `api/sreality_price_map.py` STAY. The reas.cz chip STAYS too: W3
+  deleted it as superseded and the operator had it restored the same day — the table holds only
+  reas.cz's anonymous 24-month window, the chip opens reas.cz's own map.
 - The shared table/section primitive consolidation ships as its own PR, first.
 
 ## Waves — one PR each
@@ -81,7 +82,7 @@ table still honest when it is empty?
   (membership read from the members map the page already caches).
   Type offers Byty / Domy alone and there is no Sub-type row: reas covers flats and houses, so the
   rest were filters that could only ever return nothing.
-  `reasSoldUrl`, the reas chip and their tests are deleted; the Cenová-mapa chip stays.
+  W3 also deleted `reasSoldUrl` + the reas chip; restored the same day on the operator's ruling.
   `sold_coverage` pins `search_path = public, extensions`: PostGIS is in `public` on the CI replay
   but in `extensions` on the Supabase database, so pinning `public` alone passed every CI gate and
   failed the production apply (`type "geography" does not exist`).
