@@ -13,6 +13,13 @@ counted, because a count cannot be debugged.
 `--shuffle-seed` re-runs the same cohort with arrivals shuffled INSIDE each calendar day and
 compares the two incremental runs with each other: order-insensitivity is a property of the
 mechanism, and the only honest way to show it is to vary the order.
+
+**The LIVE arm is not optional (E116).** For four waves this proof ran the incremental path in
+`first_seen_at` order at a batch size of 200, and a real build claims entrants
+`order by s.listing_id` (`RT_SCOPE_ENTRANTS_SQL`) five hundred at a time — so the proof passed
+while the live path was ordered differently, and when the live store then disagreed there was
+no arm to point at. It now always runs a third arm at the production order and the production
+claim size, against the same batch reference, and reports it beside the others.
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ from autodedup.guards import UNIT_DESIGNATOR_VETO
 from autodedup.model import LogisticModel
 from autodedup.score_lane import storable
 from autodedup.settings import Settings
+from autodedup.store_score import PAIR_SCORE_SQL_TYPE
 
 
 class DatasetFacts:
@@ -156,6 +164,16 @@ class ScheduleWork:
         return self.cursor >= len(self.order)
 
 
+def entrant_order(ds: Dataset) -> list[int]:
+    """The order a real build claims in: ascending listing id (`RT_SCOPE_ENTRANTS_SQL`).
+
+    The bootstrap phase walks `rt_scope_ids` by id, not by arrival, so an existing corpus
+    enters the store in id order however old its adverts are. That is a different edge stream
+    from `first_seen_at` order, and an equivalence proof that never ran it was proving
+    something production does not do (E116)."""
+    return sorted(ds.listings)
+
+
 def arrival_order(ds: Dataset, shuffle_seed: int | None = None) -> list[int]:
     """Listing ids in `first_seen_at` order; a seed shuffles WITHIN each calendar day.
 
@@ -229,8 +247,9 @@ def incremental_state(
     order: Sequence[int],
     batch_size: int,
     limits: Limits,
+    score_column: str = PAIR_SCORE_SQL_TYPE,
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, Any]]:
-    store = MemoryStore()
+    store = MemoryStore(score_sql_type=score_column)
     facts = DatasetFacts(ds)
     work = ScheduleWork(order)
     passes: list[PassResult] = []
@@ -289,6 +308,7 @@ def withheld_state(
     order: Sequence[int],
     batch_size: int,
     limits: Limits,
+    score_column: str = PAIR_SCORE_SQL_TYPE,
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, Any]]:
     """The incremental path run against production's actual evidence timeline (E92/E93).
 
@@ -298,7 +318,7 @@ def withheld_state(
     hold that is still waiting on a gallery the cohort itself never hashed is released on what
     the lane has. The final state must be the batch engine's, exactly — the hold changes WHEN
     a decision is reached, never which one."""
-    store = MemoryStore(now=WITHHELD_T0)
+    store = MemoryStore(now=WITHHELD_T0, score_sql_type=score_column)
     facts = WithheldFacts(ds)
     hold = EvidenceHold(now=WITHHELD_T0, horizon_s=WITHHELD_HORIZON_S)
     passes: list[PassResult] = []
@@ -429,6 +449,14 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-component", type=int, default=400)
     parser.add_argument("--max-pairs", type=int, default=Limits().max_pairs)
     parser.add_argument("--shuffle-seed", type=int, default=None)
+    # The claim size a real pass takes (`rt_claim_limit`; the 2026-09-21 build claimed 500 a
+    # pass). The live arm runs at this size in `RT_SCOPE_ENTRANTS_SQL`'s own order.
+    parser.add_argument("--live-claim-size", type=int, default=500)
+    # The store's numeric resolution for `pairs.score`. `double precision` is what migration
+    # 541 leaves; passing `real` reproduces the column as it was, which is the arm that
+    # reproduces E114 in 50 seconds for $0.
+    parser.add_argument("--score-column", default=PAIR_SCORE_SQL_TYPE,
+                        choices=["double precision", "real"])
     # E92/E93: re-run the same cohort with every listing's photographs WITHHELD at its first
     # claim and delivered afterwards. The final state must still be the batch engine's.
     parser.add_argument("--withhold-photos", action="store_true")
@@ -467,7 +495,15 @@ def run(argv: Sequence[str] | None = None) -> int:
                     max_component=ns.max_component)
     order = arrival_order(ds)
     pairs, clusters, stats = incremental_state(
-        ds, settings, model, calibration, order, ns.batch_size, limits
+        ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column
+    )
+    # The third arm, and it always runs: production's entrant order at production's claim
+    # size, against the same batch reference (E116).
+    live_limits = Limits(max_listings=ns.live_claim_size, max_pairs=ns.max_pairs,
+                         max_component=ns.max_component)
+    live_pairs, live_clusters, live_stats = incremental_state(
+        ds, settings, model, calibration, entrant_order(ds), ns.live_claim_size, live_limits,
+        ns.score_column,
     )
 
     report: dict[str, Any] = {
@@ -488,11 +524,23 @@ def run(argv: Sequence[str] | None = None) -> int:
         "stored_pairs": compare_pairs(_stored(reference, settings.store_floor),
                                       _stored(pairs, settings.store_floor)),
         "clusters": compare_clusters(batch_clusters, clusters),
+        "live_order": {
+            "order": "listing_id ascending (RT_SCOPE_ENTRANTS_SQL)",
+            "claim_size": ns.live_claim_size,
+            "score_column": ns.score_column,
+            "stats": live_stats,
+            "pairs_vs_batch": compare_pairs(reference, live_pairs),
+            "stored_pairs_vs_batch": compare_pairs(
+                _stored(reference, settings.store_floor),
+                _stored(live_pairs, settings.store_floor)),
+            "clusters_vs_batch": compare_clusters(batch_clusters, live_clusters),
+            "clusters_vs_arrival_order": compare_clusters(clusters, live_clusters),
+        },
     }
 
     if ns.withhold_photos:
         w_pairs, w_clusters, w_stats = withheld_state(
-            ds, settings, model, calibration, order, ns.batch_size, limits
+            ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column
         )
         report["withheld_photos"] = {
             "stats": w_stats,
@@ -505,7 +553,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     if ns.shuffle_seed is not None:
         shuffled = arrival_order(ds, ns.shuffle_seed)
         s_pairs, s_clusters, s_stats = incremental_state(
-            ds, settings, model, calibration, shuffled, ns.batch_size, limits
+            ds, settings, model, calibration, shuffled, ns.batch_size, limits, ns.score_column
         )
         report["shuffled"] = {
             "seed": ns.shuffle_seed,

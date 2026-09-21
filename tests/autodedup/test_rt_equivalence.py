@@ -21,7 +21,11 @@ from typing import Any
 import pytest
 
 from autodedup.incremental_lane import parity_baseline_key, scope_setting_key
-from autodedup.rt_equivalence import EQUIVALENCE_FILE, run_equivalence
+from autodedup.rt_equivalence import (
+    EQUIVALENCE_FILE,
+    SCORE_ONLY_MAX,
+    run_equivalence,
+)
 from tests.autodedup.fake_pg import FakePg
 
 LIVE = "rt"
@@ -39,6 +43,20 @@ def _pair(score: float = 0.9, zone: str = "merge", certificate: str | None = "K-
            "feature_version": 1, "model_version": "w6_gold", "cluster_key": None}
     row.update(kw)
     return row
+
+
+def _feats(**values: float | None) -> dict[str, list[Any]]:
+    """The score lane's stored `{name: [value, present]}` shape (E12)."""
+    return {name: ([0.0, False] if value is None else [value, True])
+            for name, value in values.items()}
+
+
+def _listing(listing_id: int, *, first_seen: Any = None, last_seen: Any = None,
+             inactive: Any = None, active: bool = True) -> dict:
+    """A `public.listings` row as psycopg hands it back — timestamps, not strings."""
+    return {"id": listing_id,
+            "first_seen_at": first_seen or EXPORTED - timedelta(days=5),
+            "last_seen_at": last_seen, "inactive_at": inactive, "is_active": active}
 
 
 def _fp_row() -> dict:
@@ -121,19 +139,35 @@ def test_a_decision_that_moved_is_counted_by_field(tmp_path, field, changed) -> 
     assert out["pairs"]["differing_examples"][0]["moved"] == [field]
 
 
-def test_a_score_that_moved_under_the_same_decision_is_reported_not_failed(tmp_path) -> None:
+def test_a_score_that_moved_on_a_corpus_frequency_feature_is_the_calibration_cohort(tmp_path):
     """The batch pass calibrates over its whole cohort and the real-time generation over its
-    scope, so scores differ a little under identical decisions (measured: 61 pairs, max 0.0158)."""
+    scope, so corpus token frequencies reach the features and the scores differ a little under
+    identical decisions (measured 2026-09-21: 2,277 pairs move `tfidf_cos`, 61 by enough to
+    move a score, max 0.0212, 0 decision moves). Named, so it does not fail the verdict."""
     db = _db()
-    db.pairs[(LIVE, 1, 2)] = _pair()
-    db.pairs[(BATCH, 1, 2)] = _pair(score=0.9 + 1e-3)
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.41))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.9 + 1e-3, features=_feats(tfidf_cos=0.4))
 
     out = _run(db, tmp_path)
 
     assert out["pairs"]["differing"] == 1
     assert out["pairs"]["decisions_moved"] == 0
     assert out["pairs"]["score_only"] == 1
+    assert out["pairs"]["shared_causes"] == {"calibration_cohort": 1}
     assert out["verdict"]["ok"] is True
+
+
+def test_a_score_that_moved_with_an_IDENTICAL_vector_is_unexplained(tmp_path) -> None:
+    """The sharpest finding the instrument can make: the same inputs reached two answers."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(tfidf_cos=0.4))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.9 + 1e-3, features=_feats(tfidf_cos=0.4))
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["shared_causes"] == {"unexplained": 1}
+    assert out["verdict"]["ok"] is False
+    assert "differ with no cause" in " ".join(out["verdict"]["reasons"])
 
 
 def test_a_large_score_movement_fails_even_with_the_decision_unchanged(tmp_path) -> None:
@@ -321,3 +355,245 @@ def test_an_unseeded_generation_is_refused(tmp_path) -> None:
     db = FakePg(now=NOW)
     with pytest.raises(SystemExit, match="no frozen calibration"):
         run_equivalence(lambda: db, {"generation": LIVE, "batch": BATCH}, tmp_path)
+
+
+# --------------------------------------------- W9m: the defects the verdict must NAME (E120)
+
+
+def test_a_certificate_column_the_batch_lane_never_wrote_is_a_DEFECT(tmp_path) -> None:
+    """M171, reproduced. `rt_base_w13` held 0 certificates in the column and named one in
+    `decision` on 3,866 rows, so the instrument read 'K-C' against NULL and called 3,462
+    shared pairs moved DECISIONS. The column is the definition (D40); the string is the
+    witness that it should have been written. It is a defect of the STORE, and the pairs it
+    touches are attributed to it rather than counted as disagreements."""
+    db = _db()
+    for key in ((1, 2), (3, 4)):
+        db.pairs[(LIVE, *key)] = _pair(decision="merge certificate:K-C")
+        db.pairs[(BATCH, *key)] = _pair(certificate=None, decision="merge certificate:K-C")
+
+    out = _run(db, tmp_path)
+
+    assert [defect["defect"] for defect in out["defects"]] == ["store_write_asymmetry"]
+    assert out["defects"][0]["side"] == "batch"
+    assert out["defects"][0]["rows_naming_one"] == 2
+    assert out["pairs"]["by_field"] == {"certificate": 2}
+    assert out["pairs"]["shared_causes"] == {"store_write_asymmetry": 2}
+    assert out["verdict"]["ok"] is False
+    assert not [reason for reason in out["verdict"]["reasons"] if "DECISION" in reason]
+
+
+def test_a_generation_that_certified_nothing_is_not_a_defect(tmp_path) -> None:
+    """The guard on the guard: a store with no certificates because the engine issued none
+    looks identical to one that lost them, unless the decision strings are read."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(certificate=None, decision="model")
+    db.pairs[(BATCH, 1, 2)] = _pair(certificate=None, decision="model")
+
+    assert _run(db, tmp_path)["defects"] == []
+
+
+def test_two_generations_on_different_clocks_are_a_DEFECT(tmp_path) -> None:
+    """`live_window_from_sighting` decides whether a window ends at the last sighting or at
+    the delisting stamp, and rule #3's detection lag runs to 70 days. Two generations that do
+    not agree about it are not measuring the same thing, and every co-live feature says so."""
+    db = _db()
+    db.calibration[LIVE]["settings"]["live_window_from_sighting"] = True
+    db.score_runs[BATCH] = {"settings": {"live_window_from_sighting": False},
+                            "model_version": "w6_gold"}
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(overlap_days=9.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.8, features=_feats(overlap_days=40.0))
+
+    out = _run(db, tmp_path)
+
+    assert out["clock"] == {"live": True, "batch": False, "one_definition": False}
+    assert [defect["defect"] for defect in out["defects"]] == ["clock_anchor"]
+    assert out["pairs"]["shared_causes"] == {"clock_anchor": 1}
+    assert out["verdict"]["ok"] is False
+
+
+def test_a_float4_score_column_is_a_DEFECT_and_widens_the_tolerance(tmp_path) -> None:
+    """E114/E115 and M178 in one read. `cluster.edge_rank` ranks on `pairs.score`; while the
+    column was `real` it could not carry the number the engine ranked, and `tol = 1e-6` was
+    ~16 of its ULPs — so the score counter sat on a knife edge as well."""
+    db = _db()
+    db.score_column_type = "real"
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair()
+
+    out = _run(db, tmp_path)
+
+    assert [defect["defect"] for defect in out["defects"]] == ["store_score_precision"]
+    assert out["score_tolerance"]["used"] > out["score_tolerance"]["asked"] == 1e-6
+    assert out["verdict"]["ok"] is False
+
+
+def test_the_shipped_score_column_leaves_the_tolerance_where_it_was_asked(tmp_path) -> None:
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair()
+
+    out = _run(db, tmp_path)
+
+    assert out["defects"] == []
+    assert out["score_tolerance"]["used"] == out["score_tolerance"]["asked"] == 1e-6
+    assert out["verdict"]["ok"] is True
+
+
+# ------------------------------------------- W9m: drift attributed with evidence (E119)
+
+
+def test_a_self_healed_delisting_explains_a_decision_that_moved(tmp_path) -> None:
+    """M173, reproduced. Eleven sreality listings were `is_active=false` in the export and
+    active again by the time the lane read them — rule #3's delisting, self-healed by
+    `touch_listings`. They produced all four decision moves and the 0.3924 score movement that
+    tripped the verdict. The live value is the one that matches the facts as they stand now,
+    so the instrument names it and does not fail."""
+    db = _db()
+    db.listings[1] = _listing(1, last_seen=NOW - timedelta(hours=2))
+    db.listings[2] = _listing(2, last_seen=NOW - timedelta(hours=2))
+    db.pairs[(LIVE, 1, 2)] = _pair(score=0.9788, zone="merge",
+                                   features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.5545, zone="band", decision="band",
+                                    features=_feats(both_active=0.0))
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["shared_causes"] == {"drifted_since_export": 1}
+    assert out["pairs"]["decisions_moved"] == 1
+    assert out["pairs"]["score_only_max_unattributed"] == 0.0
+    assert out["verdict"]["ok"] is True
+
+
+def test_a_clock_feature_that_matches_NEITHER_side_is_unexplained(tmp_path) -> None:
+    """Drift is a claim about the facts, so it has to be checked against them. A live value
+    that is no closer to today's listings than the batch's explains nothing."""
+    db = _db()
+    db.listings[1] = _listing(1, active=False, inactive=NOW - timedelta(days=3))
+    db.listings[2] = _listing(2, active=False, inactive=NOW - timedelta(days=3))
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.8, features=_feats(both_active=0.0))
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["shared_causes"] == {"unexplained": 1}
+    assert out["verdict"]["ok"] is False
+
+
+def test_a_large_attributed_score_movement_no_longer_fails_the_verdict(tmp_path) -> None:
+    """The verdict's old second reason. 0.3924 exceeded the 0.05 bar with the decision
+    unchanged — and every bit of it was the eleven healed listings. An UNATTRIBUTED movement
+    of the same size still fails; this one is carried by its cause."""
+    db = _db()
+    db.listings[1] = _listing(1, last_seen=NOW - timedelta(hours=2))
+    db.listings[2] = _listing(2, last_seen=NOW - timedelta(hours=2))
+    db.pairs[(LIVE, 1, 2)] = _pair(score=0.9545, features=_feats(both_active=1.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.5621, features=_feats(both_active=0.0))
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["score_only_max"] > SCORE_ONLY_MAX
+    assert out["pairs"]["score_only_max_unattributed"] == 0.0
+    assert out["pairs"]["shared_causes"] == {"drifted_since_export": 1}
+    assert out["verdict"]["ok"] is True
+
+
+def test_a_feature_outside_the_two_named_causes_is_unexplained(tmp_path) -> None:
+    """`drifted_since_export` and `calibration_cohort` are the two things that legitimately
+    move an input. A photograph feature that moved is neither, and waving it through is how a
+    check becomes a description."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(features=_feats(phash_tight_matches=4.0))
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.8, features=_feats(phash_tight_matches=0.0))
+
+    assert _run(db, tmp_path)["pairs"]["shared_causes"] == {"unexplained": 1}
+
+
+def test_a_pair_the_store_kept_no_vector_for_cannot_be_attributed(tmp_path) -> None:
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair(features=None)
+    db.pairs[(BATCH, 1, 2)] = _pair(score=0.8, features=None)
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["shared_causes"] == {"no_feature_vector": 1}
+    assert out["verdict"]["ok"] is False
+
+
+# ----------------------------------------------- W9m: the one-sided causes, split by side
+
+
+def test_the_one_sided_causes_are_reported_per_side(tmp_path) -> None:
+    """M178. Summed across both sides, `scope` 3,006 + `store_floor` 14 +
+    `arrival_after_export` 1 = 3,021 read as if it should equal `only_batch` 3,017 when it
+    equalled 3,017 + 4, and the report looked wrong where it was right."""
+    db = _db()
+    db.listings[900] = _listing(900)
+    db.pairs[(BATCH, 1, 900)] = _pair()
+    db.pairs[(LIVE, 1, 2)] = _pair(score=0.05, zone="reject", certificate=None)
+    db.pairs[(LIVE, 2, 3)] = _pair()
+    db.pairs[(BATCH, 2, 3)] = _pair()
+
+    out = _run(db, tmp_path)
+
+    assert out["pairs"]["causes_by_side"] == {"live": {"store_floor": 1},
+                                              "batch": {"scope": 1}}
+    assert out["pairs"]["causes"] == {"store_floor": 1, "scope": 1}
+    assert out["verdict"]["ok"] is True
+
+
+# ---------------------------------------------- W9m: clusters attributed by component (E119)
+
+
+def test_a_component_whose_two_sides_hold_the_SAME_edges_is_unexplained(tmp_path) -> None:
+    """E114's exact shape, and the reason the attribution exists. In scope the merge-edge sets
+    differed by three edges while 305 listings sat in different member sets; 45 of the 47
+    difference components held identical edges on both sides. Three edges cannot move 305
+    listings, and the instrument now says so instead of reporting 81 against 76."""
+    db = _db()
+    for key in ((1, 2), (1, 3), (2, 3)):
+        db.pairs[(LIVE, *key)] = _pair()
+        db.pairs[(BATCH, *key)] = _pair()
+    db.cluster_members.update({(LIVE, 1, 1), (LIVE, 1, 3)})
+    db.cluster_members.update({(BATCH, 2, 2), (BATCH, 2, 3)})
+
+    out = _run(db, tmp_path)
+
+    assert out["clusters"]["components"] == 1
+    assert out["clusters"]["component_causes"] == {"unexplained": 1}
+    # The singletons are reported too: the component's question is where each listing
+    # LANDED, and "2 is on its own here" is half the answer.
+    assert out["clusters"]["component_examples"][0]["live"] == [[1, 3], [2]]
+    assert out["clusters"]["component_examples"][0]["batch"] == [[1], [2, 3]]
+    assert out["verdict"]["ok"] is False
+    assert "partition them differently" in " ".join(out["verdict"]["reasons"])
+
+
+def test_a_component_whose_edges_differ_is_attributed_upstream(tmp_path) -> None:
+    """The pair grain already accounted for it — counting it again would report one cause
+    twice and leave the operator chasing a cluster bug that is a pair difference."""
+    db = _db()
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair(zone="band", decision="band")
+    db.cluster_members.update({(LIVE, 1, 1), (LIVE, 1, 2)})
+
+    out = _run(db, tmp_path)
+
+    assert out["clusters"]["component_causes"] == {"upstream_pair": 1}
+    assert not [reason for reason in out["verdict"]["reasons"]
+                if "partition them differently" in reason]
+
+
+def test_a_component_holding_a_listing_that_arrived_after_the_export_is_an_arrival(tmp_path):
+    db = _db()
+    db.scope_ids[(LIVE, "obec:563510", 9)] = {"resolved_at": NOW}
+    db.rt_fp[(LIVE, 9)] = _fp_row()
+    db.listings[9] = _listing(9, first_seen=EXPORTED + timedelta(hours=3))
+    db.pairs[(LIVE, 1, 9)] = _pair()
+    db.pairs[(LIVE, 1, 2)] = _pair()
+    db.pairs[(BATCH, 1, 2)] = _pair()
+    db.cluster_members.update({(LIVE, 1, 1), (LIVE, 1, 9)})
+
+    out = _run(db, tmp_path)
+
+    assert out["clusters"]["component_causes"] == {"arrival": 1}
+    assert out["verdict"]["ok"] is True

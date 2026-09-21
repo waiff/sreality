@@ -80,11 +80,11 @@ select listing_lo, listing_hi
 PAIR_UPSERT_SQL = """
 insert into autodedup.pairs (
     generation, listing_lo, listing_hi, probes, families, features, score, zone, decision,
-    guard_veto, cluster_key, feature_version, model_version, decided_at
+    certificate, guard_veto, cluster_key, feature_version, model_version, decided_at
 ) values (
     %(generation)s::text, %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(probes)s::text[],
-    %(families)s::smallint, %(features)s::jsonb, %(score)s::real, %(zone)s::text,
-    %(decision)s::text, %(guard_veto)s::text, %(cluster_key)s::bigint,
+    %(families)s::smallint, %(features)s::jsonb, %(score)s::double precision, %(zone)s::text,
+    %(decision)s::text, %(certificate)s::text, %(guard_veto)s::text, %(cluster_key)s::bigint,
     %(feature_version)s::smallint, %(model_version)s::text, now()
 )
 on conflict (generation, listing_lo, listing_hi) do update set
@@ -92,6 +92,7 @@ on conflict (generation, listing_lo, listing_hi) do update set
     families        = excluded.families,
     features        = excluded.features,
     score           = excluded.score,
+    certificate     = excluded.certificate,
     zone            = excluded.zone,
     decision        = excluded.decision,
     guard_veto      = excluded.guard_veto,

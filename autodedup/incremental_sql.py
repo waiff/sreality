@@ -842,7 +842,8 @@ insert into autodedup.pairs (
 ) values (
     %(generation)s::text, %(listing_lo)s::bigint, %(listing_hi)s::bigint, %(probes)s::text[],
     %(from_lo)s::boolean, %(from_hi)s::boolean, %(families)s::smallint, %(certificate)s::text,
-    %(features)s::jsonb, %(fp_lo)s::text, %(fp_hi)s::text, %(score)s::real, %(zone)s::text,
+    %(features)s::jsonb, %(fp_lo)s::text, %(fp_hi)s::text, %(score)s::double precision,
+    %(zone)s::text,
     %(decision)s::text, %(guard_veto)s::text, %(evidence)s::jsonb, %(context)s::jsonb,
     %(calibration_digest)s::text, %(feature_version)s::smallint, %(model_version)s::text, now()
 )
@@ -1170,6 +1171,47 @@ select p.listing_lo, p.listing_hi, p.score, p.zone, p.certificate, p.decision,
  order by p.listing_lo, p.listing_hi
 """
 
+# The feature vectors of the pairs that DIFFER, and only those: a difference is attributed by
+# reading which features moved (E119), and the vector is ~60 keys, so reading it for every
+# shared pair would carry tens of megabytes to answer a question about a few thousand. The two
+# arrays are zipped by `unnest`, never crossed — the shape `JUDGED_EDGES_SQL` documents.
+RT_EQUIV_PAIR_FEATURES_SQL = """
+select p.listing_lo, p.listing_hi, p.features
+  from autodedup.pairs p
+ where p.generation = %(generation)s::text
+   and (p.listing_lo, p.listing_hi) in (
+         select lo, hi
+           from unnest(%(los)s::bigint[], %(his)s::bigint[]) as pair(lo, hi)
+       )
+"""
+
+# What the BATCH generation was scored under. `autodedup.runs` is the authoritative map from a
+# generation to its pass (migration 538's own convention), and a score run records its whole
+# settings blob — so the instrument can say whether the two sides ran the same clock rather
+# than assuming it (E120). The newest successful pass wins: a generation re-scored under new
+# settings IS the newer pass.
+RT_EQUIV_BATCH_SETTINGS_SQL = """
+select r.params -> 'settings' as settings, r.params ->> 'model_version' as model_version,
+       r.finished_at
+  from autodedup.runs r
+ where r.mode = 'score'
+   and r.status = 'success'
+   and r.params ->> 'generation' = %(generation)s::text
+ order by r.id desc
+ limit 1
+"""
+
+# The declared type of the column `cluster.edge_rank` RANKS on. A store that cannot carry the
+# number the engine decides in reorders a component's edges (E114/E115), and that is a defect
+# the instrument must name rather than report as a cluster disagreement.
+RT_EQUIV_SCORE_TYPE_SQL = """
+select c.data_type, c.numeric_precision
+  from information_schema.columns c
+ where c.table_schema = 'autodedup'
+   and c.table_name = 'pairs'
+   and c.column_name = 'score'
+"""
+
 RT_EQUIV_MEMBERS_SQL = """
 select m.cluster_key, m.listing_id
   from autodedup.cluster_members m
@@ -1184,11 +1226,14 @@ select s.listing_id
  order by s.listing_id
 """
 
-# The one read of `public` this mode makes, and it is `listings_pkey`: a pair the live store
-# holds and the batch generation cannot is EXPLAINED when either endpoint arrived after the
-# export the batch generation was scored on.
-RT_EQUIV_FIRST_SEEN_SQL = """
-select l.id, l.first_seen_at
+# The only read of `public` this mode makes, and it is `listings_pkey`. It answers two
+# questions with one statement: a pair the live store holds and the batch generation cannot is
+# EXPLAINED when either endpoint arrived after the export (`first_seen_at`), and a shared pair
+# whose CLOCK features moved is explained when the live value is the one that matches the facts
+# as they stand NOW — which is what the other three columns recompute (E119, `features.
+# clock_features`).
+RT_EQUIV_CLOCK_FACTS_SQL = """
+select l.id, l.first_seen_at, l.last_seen_at, l.inactive_at, l.is_active
   from public.listings l
  where l.id = any(%(ids)s::bigint[])
 """

@@ -297,6 +297,11 @@ def pair_params(
         "score": float(row.get("score") or 0.0),
         "zone": ZONE_OF.get(str(row.get("zone") or ""), "reject"),
         "decision": str(row.get("reason") or row.get("decision") or "") or None,
+        # The certificate is a COLUMN on both lanes (migration 539, D40). `decision` is lossy
+        # about it — E63 re-promotes a certified pair under a `context_rule:` reason — and
+        # `cluster.edge_rank` reads it first, so a generation that stored NULL here was not
+        # re-clusterable from its own rows (M171).
+        "certificate": str(row.get("certificate") or "") or None,
         "guard_veto": row.get("veto") or None,
         # A pair is a cluster's EDGE only when both of its sides landed in that cluster; a
         # merge edge the invariants refused sits across two clusters and carries neither.
@@ -461,7 +466,10 @@ def conflict_params(
             "cluster_key_b": bridge.get("right_cluster"),
             "listing_lo": lo,
             "listing_hi": hi,
-            "invariant": None,
+            # E57 records WHY each bridge was refused (`bridge_score`, `redundant`, or the
+            # invariant the merged set broke). Writing NULL here made the two lanes' refusal
+            # censuses unreadable against each other (M177).
+            "invariant": str(bridge.get("invariant") or "") or None,
             "detail": json.dumps(
                 {
                     "generation": generation,
