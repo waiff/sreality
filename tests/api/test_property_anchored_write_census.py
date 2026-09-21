@@ -45,7 +45,8 @@ THE NAMED BLIND SPOTS — real, and listed so nobody has to rediscover them:
     string literal (or f-string) in the function body. SQL assembled from a list of
     fragments, a module constant, or a helper walks past.
   * HELPER INDIRECTION. A handler that delegates its write to a function taking a
-    cursor is judged at the helper, not the caller — see `lift_dismissals` below.
+    cursor is judged at the helper, not the caller — see `lift_dismissals_of_live_deals`
+    below.
   * TOOLKIT AND SCRAPER WRITES. Only `api/` is scanned. `toolkit/` writes these
     tables too (the merge reconcilers themselves), and must not resolve.
   * READS. A read keyed on a stale id shows an empty list rather than corrupting
@@ -89,11 +90,12 @@ _RESOLVERS = frozenset({"resolve_active_property_id", "resolve_active_property_i
 # Every entry is a deliberate, reviewable decision. The reason must say what makes a
 # RAW property id correct HERE, when it is wrong everywhere else.
 _RAW_ID_ALLOWLIST: dict[str, str] = {
-    "api/dismissals.py::lift_dismissals": (
-        "takes a CURSOR, not a connection, and is called only from paths that have "
-        "already resolved (`dismiss`/`undismiss` here, `add_card` in api/pipeline.py) "
-        "— resolving again would be a second round trip for the same answer, and it "
-        "has no connection to do it with"
+    "api/dismissals.py::lift_dismissals_of_live_deals": (
+        "takes a CURSOR, not a connection, and is only ever handed ids that are "
+        "already survivors — `add_card` / `move_card` resolved theirs, and "
+        "`update_stage` reads them off `property_pipeline`, which merge re-points — "
+        "so resolving again would be a round trip for the same answer, with no "
+        "connection to make it on"
     ),
 }
 

@@ -31,7 +31,7 @@ import psycopg
 from fastapi import HTTPException
 
 from api import schemas as s
-from api.dismissals import lift_dismissals
+from api.dismissals import lift_dismissals_of_live_deals
 from toolkit.property_identity import resolve_active_property_id
 
 
@@ -148,6 +148,16 @@ def update_stage(
                 params,
             )
             row = cur.fetchone()
+            if cur_terminal and not final_terminal:
+                # A closed stage re-opened: every card on it is a live deal again.
+                cur.execute(
+                    "SELECT property_id FROM property_pipeline "
+                    "WHERE stage_id = %s AND account_id = %s",
+                    (stage_id, account_id),
+                )
+                reopened = [int(r[0]) for r in cur.fetchall()]
+                if reopened:
+                    lift_dismissals_of_live_deals(cur, reopened)
         else:
             cur.execute(
                 "SELECT id, key, label, position, color, is_terminal, is_entry, code "
@@ -225,7 +235,9 @@ def add_card(
 ) -> dict[str, Any]:
     """Bookmark a property: insert a card at the entry stage. Idempotent.
 
-    Lifts the caller's dismissal of the property — the pipeline always wins.
+    Lifts the caller's dismissal when the card is live — a new card always is
+    (the entry stage can't be terminal, migration 357); an existing card closed
+    into a terminal stage keeps its dismissal.
 
     A stale property_id (cached by the extension, or from the 5-min browse_list)
     may have been merged away since; resolve it to the live survivor so the card
@@ -278,7 +290,7 @@ def add_card(
                     "VALUES (%s, %s, 'operator', %s)",
                     (pid, entry_stage_id, account_id),
                 )
-            lift_dismissals(cur, pid, reason="pipeline")
+            lift_dismissals_of_live_deals(cur, [pid])
     except psycopg.errors.ForeignKeyViolation:
         # Reachable only from the property_pipeline INSERT's property/account FK
         # (a stale/merged-away property, or an unknown account) — genuinely
@@ -378,6 +390,8 @@ def move_card(
                     "VALUES (%s, %s, %s, 'operator', %s)",
                     (property_id, from_stage_id, body.stage_id, account_id),
                 )
+                # Re-opening a closed, dismissed deal makes it live again.
+                lift_dismissals_of_live_deals(cur, [property_id])
     card = _fetch_card(conn, property_id, account_id)
     assert card is not None
     return card

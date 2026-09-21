@@ -1333,13 +1333,20 @@ renumber.** Navigate by area:
     and nothing deletes one — the table is its own history. `property_dismissals_public`
     (security_invoker, active rows only) is the ONE read definition of "dismissed for the
     caller"; it is plural under RLS, so `DELETE /dismissals/{property_id}` is RLS-only and lifts
-    every row the caller can see, while `POST /dismissals` names its one account. Dismissal and
-    the deal pipeline are mutually exclusive: `POST /dismissals` answers 409 for a property in
-    the caller's pipeline, and `add_card` lifts the caller's dismissal (the pipeline always
-    wins). The row is deliberately absent from `OPERATOR_STATE_TABLES` — a SET collision there
-    DELETEs, which would destroy history — so `toolkit/dismissal_identity.py` carries it across
-    a merge after the pipeline reconciler: a colliding active row is lifted (`merge`), every row
-    re-points, and a survivor holding that account's pipeline card lifts the dismissal
+    every row the caller can see, while `POST /dismissals` names its one account. **A LIVE deal
+    and a dismissal never coexist** — "live" meaning a card at a non-terminal stage.
+    `POST /dismissals` answers 409 for a live deal; every pipeline write that can leave a card
+    live (`add_card`, a `move_card` stage change, `update_stage` re-opening a terminal stage)
+    then calls `api.dismissals.lift_dismissals_of_live_deals`, which lifts (`pipeline`) only
+    where the data shows a live card — so the rule is decided in one statement from the data,
+    not re-derived by each caller. A deal closed into a terminal stage is history, not pursuit,
+    and keeps its dismissal: until 2026-09-21 ANY card blocked dismissing, so a deal the
+    operator had "Passed" on stayed in Browse forever with no way to hide it (29 "Passed" + 15
+    "Lost" cards at the time), while the 409's own advice — "close the deal there instead" —
+    hid nothing. The row is deliberately absent from `OPERATOR_STATE_TABLES` — a SET collision
+    there DELETEs, which would destroy history — so `toolkit/dismissal_identity.py` carries it
+    across a merge after the pipeline reconciler: a colliding active row is lifted (`merge`),
+    every row re-points, and a survivor holding that account's LIVE card lifts the dismissal
     (`pipeline`). Unmerge is best-effort, as for the registry tables.
     **Browse hides dismissed properties by default, server-side (migration 537).** Every other
     Browse prefilter is an id ALLOWLIST sent as `.in(...)` in the GET URL; a dismissed set is an
