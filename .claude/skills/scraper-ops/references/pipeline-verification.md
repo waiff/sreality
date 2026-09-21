@@ -117,6 +117,46 @@ The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their
 `pipeline_check_thresholds` rows.
 
+## `field_fill_matrix` — fill AND validity per (source, field) (field capture W1)
+
+`data_quality_by_source` tests 26 fields for `IS NOT NULL`. That is blind to the two defect
+shapes the field-capture program exists to fix: a value that is PRESENT and outside every
+canonical option list (13 live `condition` spellings against a filter list of 6, ~14k active rows
+unreachable by any Browse filter), and a cell that has read 0.0 % since the parser was written
+because it reads a key the portal never emits (remax `balkon`/`lodzie`, ceskereality `vybavení`,
+`počet podlaží`). `scraper/field_census.py` owns both SQL statements and both pure reductions, so
+the live check and the re-bless can never measure different things.
+
+**Sampled, on purpose.** The full-table form of either measurement does not return inside the
+lane's per-check budget — the `data_quality_by_source` capture takes ~173 s when it succeeds at
+all. Both read the newest `SAMPLE_ROWS` (1,000) ACTIVE rows per source through
+`listings_first_seen_source_idx`: measured 1.08 s for all nine portals, well inside the 45 s
+per-check budget. Newest-first is also the right cohort — a regression is ~100 % of what arrived
+since it shipped but only churn-fraction of the stock.
+
+**Both arms are RELATIVE to a blessed baseline** (`data/field_capture/fill_baseline.json`), never
+to an absolute floor, because a floor cannot see a legitimately-zero cell or a partial break
+(ceskereality's `furnished` key mismatch would sit at ~2.5 %, not 0 %). Sizing, against the
+worst-case binomial SE of 0.5/sqrt(1000) = 1.6 pp: a fill drop ≥ 10 pp warns (6.3 sigma) and
+≥ 20 pp fails (12.6 sigma), both only where the baseline itself was ≥ 10 % filled; below that the
+relative arm binds instead — a cell with 50+ blessed filled rows keeping under a quarter of them
+fails (> 5 sigma at any baseline share). An off-canon share rising ≥ 5 pp warns, ≥ 15 pp fails.
+The check carries NO `pipeline_check_thresholds` entries: the numbers are properties of the
+sample, and the program adds no settings.
+
+**Known, not judged.** The baseline records today's zeros, so the check is green on day one and
+still names them every run (`details.known_zero_cells`) until W2's attribute contract declares a
+producer for each. Boolean cells never written `false` are reported the same way
+(`details.booleans_never_false`) — whether silence means `false` or `unknown` is an absence
+semantics the contract declares, so there is nothing yet to be right or wrong against.
+
+**The census half** is checked in per portal under `data/field_capture/census/` and re-blessed
+with `python -m scraper.field_census --bless` — a reviewed diff, like the location contract's
+golden. A stale census is the known blind spot (a portal renames a key and every gate built on the
+census still agrees with itself), so staleness > 30 d is this check's second arm, a WARN. It is
+deliberately NOT a pytest: a test keyed on the calendar reds `main` on a date, on a branch that
+touched nothing.
+
 ## The `scrape_runs` crash contract (`portal_runner.run_phase`, W0.2)
 
 Both scraper health arms read one row, so what that row records on a bad ending is the whole
