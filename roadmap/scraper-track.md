@@ -5,48 +5,6 @@
 Scraper-specific evolution beyond Phase 1's nightly index walk.
 Independent of the analytical, UI, and map tracks.
 
-### Field capture W1 — the instrument, before any change (2026-09-21, done)
-- Program: `docs/design/field-capture/PROGRAM.md` (W0 lands it). W1 changes no stored value; it
-  makes every later wave judgeable, and it is the one wave that adds more lines than it cuts.
-- **The per-portal KEY CENSUS**, `data/field_capture/census/<portal>.json`, 9/9 — what each
-  portal's stored payload actually CARRIES, sampled over the newest 1,000 active rows. It is the
-  evidence a parser is read against, and it certifies on the first run what the hand-authored
-  fixtures could not: remax emits `garaz` / `vytah` / `pocet parkovacich mist` and has NEVER
-  emitted `balkon`, `lodzie`, `terasa` or `parkovani` — the four keys its parser reads;
-  ceskereality emits `parkování` on 28.3 % of pages with no arm reading it, `vybavení pronájem`
-  on 2.6 % where the parser reads `vybavení`, and no `počet podlaží` at all; mmreality's accessory
-  names include "Parkety" (parquet flooring, 6.5 %) and "Parkování na ulici" (56.1 %), both of
-  which its `has_parking` substring match counts as parking.
-- **The FILL + VALIDITY matrix**, `verify_pipeline`'s new `field_fill_matrix` check — over EVERY
-  active row, not a sample (one aggregate pass, measured 12.2 s for all nine portals). A sampled
-  cohort cannot be compared with a baseline blessed weeks earlier: the newest-1,000 slice rotates
-  with whatever a portal's walk covered, and mmreality's moved `cellar` 40.2 % → 8.2 % in two days
-  on untouched parsers. Fill alone is blind to a wrong value, so the second half counts values
-  outside `toolkit/filter_registry`'s canon, per value: `condition` is off-canon on all nine
-  portals (`spatny` / `projekt` / `ve_vystavbe` / `ve_vystavbe_(hruba_stavba)` / `v_rekonstrukci` /
-  `udrzovany` / `urceny_k_demolici` — with the six canonical members, exactly the 13 live spellings
-  the program's north star cites, now re-derivable from the checked-in artifact); ceskereality
-  `building_type` is 31.1 % off-canon; the statutory PENB `G` placeholder is counted per portal
-  (sreality 36,721 of 62,625) for W5; and `price_unit` has no canon to be judged against at all.
-- **Green on day one, loud anyway.** The blessed baseline records today's zeros as KNOWN, so the
-  check reports rather than reds: remax + mmreality `has_balcony`, ceskereality
-  `has_parking` / `garage` / `terrace` / `parking_lots` / `total_floors`, realitymix `has_lift`
-  (46 zero cells in all). Boolean cells never written `false` (mmreality `has_parking`, 7,583 of
-  10,321 true) are reported as a NUMBER, not a verdict — absence semantics is W2's to declare. A
-  blessed cell the live matrix stops producing is its own offender, so a portal disabled mid
-  incident cannot quietly shrink the denominator and leave the check certifying the silence.
-- **`data_quality_snapshots`: repaired, not retired** (migration 548). The brief called the
-  capture dead; live it is flaky — 9 of 40 runs succeeded in ten days, the last in 172.6 s — and
-  it feeds the `field_null_drift` rung of `scraper_health_checks_mv`, served by the
-  `scraper_health_checks` RPC the SPA's Health page renders (NOT `field_null_drift_stat`, which
-  migration 215 dropped), plus seven probes (geom, locality, street, property_grouped, source_url,
-  the two condition levels) the new matrix has no column for. One missing `set statement_timeout`
-  prefix, so it gets the 900 s the pin-audit refresh carries. The brief's other claim — that its
-  field list names columns migration 508 dropped — is false: it has no field list, it copies the
-  view. Both instruments now read the same cohort, and the migration header says which owns what.
-- Census staleness is a `verify_pipeline` WARN, never a CI test: a test keyed on the calendar
-  reds `main` on a date rather than on a defect.
-
 ### One area grammar for every portal — spaced thousands no longer truncate (2026-09-17, done)
 - **The defect:** five parsers (`ceskereality`, `realitymix`, `remax`, `maxima`, `bazos`) each
   held a private copy of a naive area regex that matched the FIRST bare digit run before an
