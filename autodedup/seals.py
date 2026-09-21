@@ -122,6 +122,28 @@ SPENT_SEALS: dict[str, str] = {
         "limit of 30, and the operator's 60-merge read is outstanding. The next choice needs a "
         "fresh seed again."
     ),
+    "f30684fc41b97f9a3e10b2dd298168fdcf82ca5baa339dae64321a6fe4993f6d": (
+        "W14 phase 3's CONFIRMATION seal: a cluster split over the W1 cohort (4,882 listings, "
+        "661 groups) under a fresh seed 20260931, cut on the merge edges AND the cluster "
+        "memberships of THREE arms — g7 (settings/w13.json), g8 (settings/w14.json) and g8b "
+        "(settings/w15.json). g8b lifts max_cluster_size from 32 to 256 and reaches 33 members "
+        "on this cohort, so a map taken from g7+g8 alone could not promise that no g8b group "
+        "straddles the holdout; 0 clusters of any of the three do. Labelled pairs of every "
+        "tier are unioned in except the structural NEGATIVES, for the same measured reason "
+        "e1d8bb98… recorded. SPENT by ONE read of all three arms (w14/confirm_seal/): 409 of "
+        "460 sealed labelled duplicates co-clustered under g8b against g8's 383 and g7's 267 "
+        "(McNemar g8b vs g7 gained 149 lost 7, p ~ 8.9e-36; operator+structural alone 228 of "
+        "250 against 210 and 161, gained 71 lost 4, p ~ 6.8e-17; g8b vs g8 gained 26 lost 0, "
+        "p ~ 3.0e-8), 0 independent-tier negatives carrying a distinguishing fact under EITHER "
+        "the w14 or the w15 predicate, 0 bad groups under either, 0 operator must-not-link "
+        "pairs merged, and 167 of 665 sealed g7 band pairs left, every one of them carrying a "
+        "fact. That read MET the pre-registered criterion (i) and still did NOT promote g8b: "
+        "the whole-cohort group stress that followed found that E145 "
+        "(floor_same_source_feed='broker') newly merges 27 same-portal one-storey pairs, of "
+        "which 5 in 4 groups are units whose own adverts state different floors — three of "
+        "those groups in new developments (Harfa Living twice, Pod Harfou). The next choice "
+        "needs a fresh seed again."
+    ),
     "fb9df2ea9fd773bf0eda256d00894924ba4b8491cc7559181f2c48da75e59884": (
         "W9's fresh seal (4456 listings, 663 groups), seed 20260922. SPENT because it was read "
         "TWICE: once for the refused g7 refit (D25) and once for W10's verification, which is "
