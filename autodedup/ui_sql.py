@@ -128,10 +128,31 @@ SELECT
     + _CLUSTER_FROM
 )
 
+# THE THREE STORED NEGATIVES, in ONE place (D39). The page offers ONE word for all of them —
+# "Ruzne" — while the store keeps the two finer values migration 532 wrote and rewrites no row,
+# so a filter asking for `different` alone would drop a ruling taken last week out of its own
+# queue. The SQL literal below is built off this tuple rather than typed a second time.
+NEGATIVE_VERDICTS: tuple[str, ...] = (
+    "different",
+    "same_building_different_unit",
+    "same_project_different_unit",
+)
+
+# Does this row carry the verdict the filter asked for? `different` is the widened one; every
+# other value is itself. ONE fragment, so the groups queue and the residual queue cannot come
+# to mean two different things by one word.
+_VERDICT_MATCHES = (
+    "(v.verdict = %(verdict)s::text\n"
+    "           OR (%(verdict)s::text = 'different' AND v.verdict IN ("
+    + ", ".join(f"'{value}'" for value in NEGATIVE_VERDICTS)
+    + ")))"
+)
+
 # `verdict = 'unreviewed'` is the ABSENCE of a row, which is why the verdict filter is one arm
 # of this predicate and not a join condition: filtering in the LATERAL would hand back every
 # cluster with its verdict blanked instead of the clusters that carry that verdict.
-_CLUSTER_WHERE = """
+_CLUSTER_WHERE = (
+    """
 WHERE c.generation = %(generation)s::text
   AND (%(block)s::bigint IS NULL OR c.block_key = %(block)s::bigint)
   -- A BLOCK IS A CODE AND A GRAIN. `block_key` is a bigint and a cast-obce code shares its
@@ -161,8 +182,11 @@ WHERE c.generation = %(generation)s::text
        OR (%(verdict)s::text = 'changed'
            AND v.verdict IS NOT NULL AND NOT v.applies)
        OR (%(verdict)s::text NOT IN ('unreviewed', 'changed')
-           AND v.verdict = %(verdict)s::text AND v.applies))
+           AND """
+    + _VERDICT_MATCHES
+    + """ AND v.applies))
 """
+)
 
 # Default sort: the WEAKEST accepted edge first, because that is where the errors live (§8).
 # `min_edge_score` is nullable (a singleton cluster has no edge), so the sort key coalesces to
@@ -805,7 +829,8 @@ LEFT JOIN LATERAL (
 
 _RESIDUAL_PHOTOS = _residual_photos("a", "listing_lo") + _residual_photos("b", "listing_hi")
 
-_RESIDUAL_FILTERS = """
+_RESIDUAL_FILTERS = (
+    """
 WHERE p.generation = %(generation)s::text
   AND p.score >= %(min_score)s::real
   AND (%(zone)s::text IS NULL OR p.zone = %(zone)s::text)
@@ -820,8 +845,11 @@ WHERE p.generation = %(generation)s::text
        OR (j.verdict IS NOT NULL) = %(has_judgement)s::boolean)
   AND (%(verdict)s::text IS NULL
        OR (%(verdict)s::text = 'unreviewed' AND v.verdict IS NULL)
-       OR v.verdict = %(verdict)s::text)
+       OR """
+    + _VERDICT_MATCHES
+    + """)
 """
+)
 
 # WHAT MAKES A PAIR RESIDUAL, in one place: the two listings are not in ONE cluster of this
 # generation. Its own constant because the validation-progress sample below asks the identical

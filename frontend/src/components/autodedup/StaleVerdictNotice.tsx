@@ -15,6 +15,7 @@
  */
 
 import { type AutodedupStaleVerdict } from '@/lib/api';
+import { VERDICT_LABELS, displayVerdict } from '@/components/autodedup/VerdictButtons';
 
 const IDS = 'font-mono tabular-nums';
 
@@ -47,7 +48,12 @@ export default function StaleVerdictNotice({
     >
       <span className="text-[var(--color-ink)]">{staleVerdictText(stale)}</span>{' '}
       <span className="text-[var(--color-ink-3)]">
-        (verdikt <span className="lowercase">{stale.verdict}</span>
+        {/* THE OPERATOR'S OWN WORD, never the stored identifier (D39): this
+          * notice names a ruling taken in an earlier generation, so it is
+          * exactly where the two historical values turn up — and "verdikt
+          * same_project_different_unit" is a vocabulary no button on this page
+          * speaks any more. */}
+        (verdikt <span className="lowercase">{VERDICT_LABELS[displayVerdict(stale.verdict)]}</span>
         {stale.decided_at ? `, ${stale.decided_at.slice(0, 10)}` : ''}). Skupina je
         vedena jako neposouzená — posuďte ji prosím znovu.
       </span>

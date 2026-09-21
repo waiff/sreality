@@ -5,8 +5,8 @@
  * under a correcting hand causes the mis-clicks it exists to catch.
  *
  * THE SPLIT RIDES THE SAME OVERLAY, because what it stores about a set of
- * adverts is one badge: `same` when the operator used one letter, otherwise the
- * weakest relation the split used. What it does NOT share is the failure
+ * adverts is one badge: `same` when the operator used one letter, `different`
+ * otherwise (D39). What it does NOT share is the failure
  * treatment — a rejected split must leave the operator's letters on screen to
  * correct, so the error is kept per card and shown in place, and a 409 arms the
  * button rather than retrying.
@@ -26,7 +26,6 @@ import {
   postAutodedupVerdict,
   type AutodedupEnvelope,
   type AutodedupSplitInput,
-  type AutodedupSplitRelation,
   type AutodedupSplitResult,
   type AutodedupSplitUnit,
   type AutodedupVerdictInput,
@@ -58,8 +57,6 @@ function optimisticVerdict(
  * the receipt, whichever endpoint it is bound for. */
 export interface SplitLike {
   units: AutodedupSplitUnit[];
-  relation: AutodedupSplitRelation;
-  relations?: Array<{ unit_a: string; unit_b: string; relation: AutodedupSplitRelation }>;
 }
 
 export function useVerdictOverlay<S extends SplitLike = AutodedupSplitInput>(

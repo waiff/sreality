@@ -43,7 +43,6 @@ import { fmtCount } from '@/lib/format';
 import { Chip, fmtScore } from '@/components/autodedup/EvidenceChips';
 import MemberGrid from '@/components/autodedup/MemberGrid';
 import {
-  DEFAULT_RELATION,
   SplitRow,
   UNIT_LETTERS,
   UnitSelect,
@@ -62,7 +61,7 @@ export function candidateDefaultSplit(units: ReadonlyArray<AutodedupCandidateUni
     const letter = UNIT_LETTERS[index] ?? UNIT_LETTERS[UNIT_LETTERS.length - 1];
     for (const listingId of unit.listing_ids) map[listingId] = letter;
   });
-  return { units: map, relation: DEFAULT_RELATION, relations: {} };
+  return { units: map };
 }
 
 /* A STORED RULING CAN DISAGREE WITH A LOCK. The assignment is read back off the
@@ -90,8 +89,7 @@ export function respectLocks(
   return changed ? { ...state, units: map } : state;
 }
 
-/* Every letter in play on this card — what the shortcuts write and what the
- * relation matrix is built from. */
+/* Every letter in play on this card — what the two shortcuts write. */
 export function allOneUnit(units: ReadonlyArray<AutodedupCandidateUnit>): UnitMap {
   const map: UnitMap = {};
   for (const unit of units) for (const id of unit.listing_ids) map[id] = 'A';
