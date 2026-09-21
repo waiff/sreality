@@ -465,10 +465,17 @@ polygon's envelope expanded by 5 km, so overlapping boxes would otherwise answer
 happened to be walked last. It returns that obec's name, its newest successful fetch (`fetched_at`,
 `record_count`, `source_total`) and its newest attempt of ANY status, so the surface can separate
 four answers — never looked, tried and FAILED (our outage, not operator inaction), looked and found
-nothing, looked and hold N. Only the last two carry a radius control, a filter panel and a "no
-registered sale matches these filters" line: all three say WE LOOKED, and over a town nobody has
-fetched they contradict the coverage sentence directly above them (the cohort read is not even
-issued there). The filter vocabulary is `Agenda.SOLD` (existing area / category / disposition defs
+nothing, looked and hold N. A radius control, a filter panel and a "no registered sale matches these
+filters" line all say WE LOOKED, so over a town nobody has fetched they contradict the coverage
+sentence directly above them and are withheld — unless the cohort itself came back holding sales,
+which is the store answering for itself. The cohort READ is never gated on coverage: `sold_coverage`
+answers about the one obec containing the point while `sold_comparables` is a radius query over
+every sale we hold, and a fetched cell is that obec's envelope plus 5 km, so the store routinely
+holds sales around neighbouring towns whose own coverage row is still NULL. That sentence advises a
+pipeline card only where the fetcher would act on one: the work-list takes live stages only (`NOT
+ps.is_terminal`), so a card closed into a terminal stage is told to move it rather than that its
+town is on the list — and where no obec resolves at all, nothing about the work-list is knowable and
+no advice is given. The filter vocabulary is `Agenda.SOLD` (existing area / category / disposition defs
 re-tagged, plus `max_sold_age_days`, bounded 60–730 by the source's own ~30-day publication lag and
 24-month window), dispatched to PostgREST by the shared `applyAgendaFilters` with no hand-coded
 escape. `subtype` is deliberately NOT in it, and Type offers `byt` / `dum` only: reas publishes

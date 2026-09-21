@@ -71,9 +71,14 @@ table still honest when it is empty?
   lag and reas's minority match of the register, a 1–3–5 km radius, the registry filter row, the
   table on W0's `Th`, and row → dialog with the hot-linked photos. The headline median holds the
   0–30 m² band out (a denominator defect, not a market fact) and refuses a flats-and-houses cohort.
-  The radius, the filter panel and the "no match" line belong to a town that HAS been read — an
-  unchecked one shows the coverage sentence alone, and that sentence asks for a pipeline card only
-  when the property does not already hold one (read from the members map the page already caches).
+  The radius, the filter panel and the "no match" line belong to a town that HAS been read, or to a
+  cohort that came back holding sales — an unchecked town with nothing nearby shows the coverage
+  sentence alone. The cohort read itself always runs: a cell is an obec envelope + 5 km, so sales
+  sit around towns whose own coverage row is NULL, and gating the read on coverage would hide rows
+  we hold. That sentence asks for a pipeline card only when the property holds none, and only where
+  the FETCHER would act on one — a card at a terminal stage is skipped by the work-list (`NOT
+  ps.is_terminal`), so it is told to move the card; with no obec resolved, no advice at all
+  (membership read from the members map the page already caches).
   Type offers Byty / Domy alone and there is no Sub-type row: reas covers flats and houses, so the
   rest were filters that could only ever return nothing.
   `reasSoldUrl`, the reas chip and their tests are deleted; the Cenová-mapa chip stays.

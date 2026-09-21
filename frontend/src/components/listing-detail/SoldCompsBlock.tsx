@@ -26,7 +26,7 @@
  * `referrerPolicy="no-referrer"`.
  */
 
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import {
@@ -58,6 +58,7 @@ import {
   fetchSoldCoverage,
   pipelineKeys,
   SOLD_COMPS_LIMIT,
+  type PipelineMembers,
 } from '@/lib/queries';
 import type { SoldComparable, SoldCoverage } from '@/lib/types';
 
@@ -105,6 +106,27 @@ const COVERED_TYPE_OPTIONS = (
 )
   .filter((o) => COVERED_CATEGORIES.has(String(o.value)))
   .map((o) => ({ value: String(o.value), label: o.label_cs }));
+
+/* What the never-checked sentence has to know before it advises anything: not
+ * "is there a card" but "is there a card the FETCHER counts". Its work-list
+ * joins `pipeline_stages` with `AND NOT ps.is_terminal` (scraper/sold_db.py),
+ * and rule #22 closes a deal INTO a terminal stage — so a closed card is a
+ * routine state that earns this town no fetch at all, and telling its operator
+ * the town is on the list would be the same wrong advice, inverted.
+ * null = not answerable yet: the members read is in flight, or this listing
+ * carries no property row and so can hold no card. The clause is then left
+ * unwritten rather than guessed. */
+type CardState = 'none' | 'live' | 'closed';
+
+function cardState(
+  members: PipelineMembers | undefined,
+  propertyId: number | null,
+): CardState | null {
+  if (propertyId == null || !members) return null;
+  const card = members.get(propertyId);
+  if (!card) return 'none';
+  return card.is_terminal ? 'closed' : 'live';
+}
 
 const FILTER_WIDGETS: Record<string, CustomFilterWidget> = {
   category_main_in: ({ value, onChange }) => (
@@ -186,27 +208,25 @@ function SoldComps({
     staleTime: 30_000,
     enabled: propertyId != null,
   });
-  /* null = not answerable, so the advice clause is left unwritten: either the
-   * members read is still in flight, or this listing carries no property row
-   * and therefore no card to hold. */
-  const inPipeline =
-    propertyId == null || !membersQ.data
-      ? null
-      : membersQ.data.get(propertyId) != null;
+  const card = cardState(membersQ.data, propertyId);
 
   /* Whether anyone has LOOKED in this municipality — which is what a filter
    * panel and a "no match" line silently assert. A coverage read that hasn't
-   * answered, or that failed, claims neither way: the cohort read is a fact of
-   * its own, so it still runs and a broken coverage function cannot hide sales
-   * we actually hold. */
+   * answered, or that failed, claims neither way. */
   const looked = coverageQ.data?.fetched_at != null;
-  const asked = looked || coverageQ.isError;
 
+  /* The cohort read is NOT gated on that, and must not be. `sold_coverage`
+   * answers about the ONE obec containing the point, while `sold_comparables`
+   * is a radius query over every sale we hold — and a fetched cell is that
+   * obec's envelope expanded by 5 km (`MAX_READ_RADIUS_M`, migration 545's own
+   * header). So the store routinely holds sales around a neighbouring town
+   * whose coverage row is still NULL. Gating this read on coverage would hide
+   * rows we have, on the one surface that shows realized prices — and would
+   * make two independent reads serial for nothing. */
   const rowsQ = useQuery<SoldComparable[], Error>({
     queryKey: ['sold-comps', lat, lng, radiusM, filters],
     queryFn: () => fetchSoldComparables(lat, lng, radiusM, filters),
     staleTime: 5 * 60_000,
-    enabled: asked,
   });
 
   /* The fetcher asks for one row past the cap, so a full page PROVES there is
@@ -217,6 +237,18 @@ function SoldComps({
   const rows = truncated ? page.slice(0, SOLD_COMPS_LIMIT) : page;
   const summary = rowsQ.isSuccess ? summarize(rows) : null;
 
+  /* The CHROME is what gets gated: a radius control, a filter panel and "no
+   * registered sale matches these filters" are three ways of saying we looked.
+   * Over a town nobody fetched they contradict the sentence above them —
+   * unless the cohort came back holding sales, which is the store answering
+   * for itself. LATCHED, because chrome that vanishes is a trap: a filter
+   * narrowed to nothing (or the re-read it triggers, which empties `data`
+   * while it is in flight) would otherwise pull away the very control that
+   * narrowed it. */
+  const everHeldSales = useRef(false);
+  if (rows.length > 0) everHeldSales.current = true;
+  const showCohort = looked || everHeldSales.current;
+
   return (
     <div>
       <div className="flex items-baseline justify-between gap-4">
@@ -225,7 +257,7 @@ function SoldComps({
           {/* Only once the read has ANSWERED: a "(0)" beside the heading while
               the query is in flight — or after it failed — is the loudest
               number on the block asserting the one thing it does not know. */}
-          {rowsQ.isSuccess && (
+          {rowsQ.isSuccess && showCohort && (
             <span className="ml-2 font-mono tabular-nums text-[var(--color-ink-4)] tracking-normal">
               ({rows.length}
               {truncated && '+'})
@@ -241,16 +273,12 @@ function SoldComps({
         coverage={coverageQ.data ?? null}
         pending={coverageQ.isLoading}
         error={coverageQ.error}
-        inPipeline={inPipeline}
+        card={card}
       />
 
-      {/* Everything below belongs to a municipality somebody has READ. A radius
-          control, a filter panel and "no registered sale matches these filters"
-          are three ways of saying we looked and found nothing — over a town
-          nobody has fetched, that contradicts the sentence above it. */}
-      {asked && (
+      {showCohort && (
         <>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-4 flex flex-wrap items-start gap-x-6 gap-y-4">
             <Field label="Radius">
               <Segmented
                 options={RADII_M.map((m) => ({
@@ -350,7 +378,7 @@ function Coverage({
   coverage,
   pending,
   error,
-  inPipeline,
+  card,
 }: {
   coverage: SoldCoverage | null;
   pending: boolean;
@@ -358,7 +386,7 @@ function Coverage({
   /* null while the pipeline members read is still in flight — the advice half
    * of the never-checked sentence is then not written at all, rather than
    * guessed at. */
-  inPipeline: boolean | null;
+  card: CardState | null;
 }) {
   /* Never render "not checked yet" from a read that hasn't answered: that is
    * the one sentence here that would be a claim about the world. */
@@ -370,14 +398,14 @@ function Coverage({
       </p>
     );
   }
-  const where = coverage ? `${coverage.obec_name} ` : '';
   /* A cell that has only ever FAILED is our outage, not operator inaction —
    * telling them to add a card they may already hold would hide a broken lane
    * on the one surface that reads this ledger. */
   if (coverage && coverage.fetched_at == null && coverage.last_attempt_at) {
     return (
       <p className="mt-2 text-sm text-[var(--color-brick)]">
-        {where}was last tried on {fmtShortDate(coverage.last_attempt_at)} and
+        {coverage.obec_name} was last tried on{' '}
+        {fmtShortDate(coverage.last_attempt_at)} and
         the fetch failed — nothing has been read here yet, and that is our side,
         not an empty market.
       </p>
@@ -386,16 +414,32 @@ function Coverage({
   if (!coverage || coverage.fetched_at == null) {
     /* What to DO about it depends on something this page already knows.
      * Telling an operator to add a card that is on screen, already added, is
-     * the block giving a wrong instruction about its own mechanism. */
+     * the block giving a wrong instruction about its own mechanism.
+     *
+     * The clause says what is true of the fetch LIST, never what a pass will
+     * do: the lane's cadence is one operator setting (migration 544 seeds it
+     * at 0, so it ships dark), and a block whose whole point is not claiming
+     * work it has not done cannot promise a read on its behalf.
+     *
+     * With no coverage row at all the point is in no obec we hold a boundary
+     * for, so nothing about the work-list — which resolves a cell through that
+     * same boundary table — is knowable here, and the clause is dropped. */
+    const advice =
+      coverage == null || card == null
+        ? null
+        : card === 'live'
+          ? ' This property holds one, so its town is on the fetch list.'
+          : card === 'closed'
+            ? " This property's card is at a closed stage, which the fetch" +
+              ' list skips — move it to a live stage to put this town on the' +
+              ' list.'
+            : ' Add this property to the pipeline to put its town on that list.';
     return (
       <p className="mt-2 text-sm text-[var(--color-ink-3)]">
-        {where}has not been checked yet — registered sales are fetched only for
-        towns where the deal pipeline has a live card.
-        {inPipeline === true &&
-          ' This property holds one, so the town is queued: the fetcher reads' +
-            ' it on one of its next passes.'}
-        {inPipeline === false &&
-          ' Add this property to the pipeline and this area gets looked up.'}
+        {coverage ? `${coverage.obec_name} has` : 'This area has'} not been
+        checked yet — registered sales are fetched only for towns where the
+        deal pipeline has a live card.
+        {advice}
       </p>
     );
   }
