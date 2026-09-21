@@ -3,8 +3,9 @@
  * The wiring per surface is pinned on the pages themselves (Residual, Pair,
  * Groups). What is pinned HERE is the component's own contract, because five
  * surfaces depend on it: the chips are a multi-select of aria-pressed buttons,
- * the note is one line, an empty note travels as null rather than '', and the
- * two comparisons that decide whether "Uložit poznámku" is armed.
+ * the note is one line, an empty note travels as null rather than '', the two
+ * comparisons that decide whether "Uložit poznámku" is armed — and that the
+ * whole thing is COLLAPSED and OPTIONAL: neither half is ever required (D39).
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -78,6 +79,21 @@ describe('<VerdictNotes>', () => {
     const onSave = vi.fn();
     renderNotes({ reasons: ['broker'], note: '' }, { dirty: true, onSave });
     await screen.findByRole('button', { name: 'Uložit poznámku' });
+  });
+
+  it('is COLLAPSED by default, and nothing about it is required', async () => {
+    vi.mocked(api.getAutodedupVerdictReasons).mockResolvedValue(REASONS);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <VerdictNotes value={EMPTY} onChange={vi.fn()} />
+      </QueryClientProvider>,
+    );
+    /* One dotted toggle and nothing else: the operator annotates sometimes, so
+     * an open picker per row would be a question asked on every scroll. */
+    expect(screen.getByRole('button', { name: '+ důvod / poznámka' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Jiný půdorys' })).toBeNull();
+    expect(screen.queryByLabelText('Poznámka')).toBeNull();
   });
 
   it('renders the note input even before the registry lands', async () => {

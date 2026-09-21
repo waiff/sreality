@@ -2215,6 +2215,8 @@ def _calls(conn: _FakeConn, sql: str) -> list[dict[str, Any]]:
 
 
 def _split(**over: Any) -> dict[str, Any]:
+    """THE BODY THE PAGE SENDS since D39: letters, and no relation at all. A test that wants
+    the compatibility path names `relation` or `relations` itself."""
     body: dict[str, Any] = {
         "cluster_key": 101,
         "generation": "g1",
@@ -2223,7 +2225,6 @@ def _split(**over: Any) -> dict[str, Any]:
             {"listing_id": 12, "unit": "A"},
             {"listing_id": 13, "unit": "B"},
         ],
-        "relation": "same_project_different_unit",
     }
     body.update(over)
     return body
@@ -2235,7 +2236,7 @@ def split_conn(conn: _FakeConn) -> _FakeConn:
         "group_one": [_cluster()],
         "members": [_member(101, 11), _member(101, 12), _member(101, 13)],
         "verdict_write": [_verdict_row(kind="cluster", cluster_key=101, listing_lo=None,
-                                       listing_hi=None, verdict="same_project_different_unit")],
+                                       listing_hi=None, verdict="different")],
     }
     return conn
 
@@ -2254,14 +2255,14 @@ def test_a_split_rules_on_every_member_pair(admin_client, split_conn):
     }
     assert pairs == {
         (11, 12): "same",
-        (11, 13): "same_project_different_unit",
-        (12, 13): "same_project_different_unit",
+        (11, 13): "different",
+        (12, 13): "different",
     }
     vetoes = {(p["listing_lo"], p["listing_hi"]): p["reason"]
               for p in _calls(split_conn, usql.MUST_NOT_LINK_UPSERT_SQL)}
     assert vetoes == {
-        (11, 13): "operator split: same_project_different_unit",
-        (12, 13): "operator split: same_project_different_unit",
+        (11, 13): "operator split: different",
+        (12, 13): "operator split: different",
     }
     # the same-unit pair has its earlier veto (if any) dropped, never left vetoing
     assert [(p["listing_lo"], p["listing_hi"])
@@ -2274,7 +2275,7 @@ def test_a_split_stores_the_cluster_verdict_with_the_assignment_as_its_note(
     body = admin_client.post("/autodedup/verdict/split", json=_split()).json()
     assert body["data"]["cluster_verdict"]["kind"] == "cluster"
     written = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
-    assert written["verdict"] == "same_project_different_unit"
+    assert written["verdict"] == "different"
     assert written["note"] == "A: 11,12 | B: 13"
     assert written["decided_by"] == "operator@example.com"
 
@@ -2469,9 +2470,64 @@ def test_the_plain_verdict_route_names_the_migration_instead_of_500ing(
     assert all(sql != usql.MUST_NOT_LINK_UPSERT_SQL for sql, _ in conn.calls)
 
 
+def test_a_split_names_no_relation_and_the_server_reads_it_as_different(
+    admin_client, split_conn
+):
+    """D39. The page asks one question of a split — which adverts are ONE unit — so the body
+    carries letters and nothing else. The missing relation is the RULING, not a fallback: two
+    letters are two properties, and that is the whole statement the operator made."""
+    body = _split()
+    assert "relation" not in body and "relations" not in body
+    admin_client.post("/autodedup/verdict/split", json=body)
+    crossing = {
+        (p["listing_lo"], p["listing_hi"]): p["verdict"]
+        for p in _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        if p["verdict"] != "same"
+    }
+    assert crossing == {(11, 13): "different", (12, 13): "different"}
+    assert _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)["verdict"] == "different"
+
+
+def test_an_older_client_that_names_one_relation_is_still_obeyed(admin_client, split_conn):
+    """The compatibility path in its simplest form: a build that predates D39 sends a single
+    `relation` for the whole split, and it still writes exactly what it names."""
+    admin_client.post(
+        "/autodedup/verdict/split",
+        json=_split(relation="same_building_different_unit"),
+    )
+    crossing = {
+        p["verdict"] for p in _calls(split_conn, usql.VERDICT_PAIR_UPSERT_SQL)
+        if p["verdict"] != "same"
+    }
+    assert crossing == {"same_building_different_unit"}
+
+
+def test_a_candidate_split_names_no_relation_either(admin_client, candidate_conn):
+    body = _candidate_split_body(candidate_conn)
+    assert "relation" not in body and "relations" not in body
+    admin_client.post("/autodedup/verdict/candidate-split", json=body)
+    assert {p["verdict"] for p in _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)} == {
+        "different"
+    }
+
+
+def test_a_split_saves_with_neither_chips_nor_note(admin_client, split_conn):
+    """The annotation is OPTIONAL everywhere: the operator uses it sometimes, and a save that
+    carries none is an ordinary save, never a 400 and never a blocked button."""
+    body = _split()
+    assert "reasons" not in body and "note" not in body
+    resp = admin_client.post("/autodedup/verdict/split", json=body)
+    assert resp.status_code == 200
+    written = _last_call(split_conn, usql.VERDICT_CLUSTER_UPSERT_SQL)
+    assert written["reasons"] == []
+    # Only the assignment — the operator's own words are simply absent.
+    assert written["note"] == "A: 11,12 | B: 13"
+
+
 def test_a_split_can_name_a_relation_PER_UNIT_PAIR(admin_client, conn):
-    """One relation for a whole split stamps a building onto adverts that do not share one.
-    A and B are two units of one building; C is a different building of that development."""
+    """THE COMPATIBILITY PATH (D39). The page names no relation any more, but a client that
+    still sends one per unit pair is obeyed exactly as it was — a bookmarked extension or an
+    older build must never start writing a verdict it did not mean."""
     conn.canned = {
         "group_one": [_cluster()],
         "members": [_member(101, 11), _member(101, 12), _member(101, 13)],
@@ -2483,6 +2539,8 @@ def test_a_split_can_name_a_relation_PER_UNIT_PAIR(admin_client, conn):
         json=_split(
             units=[{"listing_id": 11, "unit": "A"}, {"listing_id": 12, "unit": "B"},
                    {"listing_id": 13, "unit": "C"}],
+            # THE COMPATIBILITY PATH (D39): the page sends none of this, an older client may.
+            relation="same_project_different_unit",
             relations=[
                 {"unit_a": "A", "unit_b": "B", "relation": "same_building_different_unit"},
                 {"unit_a": "B", "unit_b": "C", "relation": "same_project_different_unit"},
@@ -2634,6 +2692,31 @@ def test_a_group_detail_reads_the_verdicts_of_UNSCORED_member_pairs_too(client, 
 def test_the_new_verdict_filters_the_group_queue(client, conn):
     client.get("/autodedup/groups", params={"verdict": "same_project_different_unit"})
     assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["verdict"] == "same_project_different_unit"
+
+
+def test_the_different_filter_matches_every_stored_negative(client, conn):
+    """D39. The page offers ONE word for three stored values, so a queue asking for `different`
+    has to hand back the rulings taken under the older vocabulary too — otherwise last week's
+    work disappears out of its own queue. ONE fragment, shared by both queues."""
+    assert usql.NEGATIVE_VERDICTS == (
+        "different", "same_building_different_unit", "same_project_different_unit",
+    )
+    for sql in (usql.GROUPS_WEAKEST_SQL, usql.RESIDUAL_SQL):
+        flat = " ".join(sql.split())
+        assert "%(verdict)s::text = 'different' AND v.verdict IN (" in flat
+        for value in usql.NEGATIVE_VERDICTS:
+            assert f"'{value}'" in flat
+    # `same` stays exactly itself — the widening is the negative's alone.
+    client.get("/autodedup/groups", params={"verdict": "different"})
+    assert _last_call(conn, usql.GROUPS_WEAKEST_SQL)["verdict"] == "different"
+
+
+def test_the_route_still_accepts_a_filter_named_in_the_older_vocabulary(client):
+    """A bookmark written before D39 is a link to a real queue, not a 400: the values stay in
+    the filter vocabulary because the STORE still holds them."""
+    for value in ("same_building_different_unit", "same_project_different_unit"):
+        assert client.get("/autodedup/groups", params={"verdict": value}).status_code == 200
+        assert client.get("/autodedup/residual", params={"verdict": value}).status_code == 200
 
 
 # ------------------------------------------------- the operator's REASONS (migration 533)
@@ -3357,7 +3440,6 @@ def _candidate_split_body(conn: _FakeConn, **over: Any) -> dict[str, Any]:
             {"listing_id": 202, "unit": "B"},
             {"listing_id": 203, "unit": "B"},
         ],
-        "relation": "same_building_different_unit",
     }
     body.update(over)
     return body
@@ -3389,9 +3471,9 @@ def test_a_candidate_split_rules_every_pair_that_crosses_the_units(
         for p in _calls(candidate_conn, usql.VERDICT_PAIR_UPSERT_SQL)
     }
     assert written == {
-        (50, 201): "same_building_different_unit",
-        (50, 202): "same_building_different_unit",
-        (50, 203): "same_building_different_unit",
+        (50, 201): "different",
+        (50, 202): "different",
+        (50, 203): "different",
     }
     vetoes = {
         (p["listing_lo"], p["listing_hi"])
@@ -3732,7 +3814,10 @@ def test_the_groups_queue_filters_on_the_ruling_that_applies(client, conn):
     sql = " ".join(usql.GROUPS_WEAKEST_SQL.split())
     assert "'unreviewed' AND (v.verdict IS NULL OR NOT v.applies)" in sql
     assert "'changed' AND v.verdict IS NOT NULL AND NOT v.applies" in sql
-    assert "v.verdict = %(verdict)s::text AND v.applies" in sql
+    # Every other value both MATCHES and APPLIES — `different` matching the two finer values
+    # the store still holds as well as itself (D39).
+    assert "(v.verdict = %(verdict)s::text" in sql
+    assert ")) AND v.applies)" in sql
     assert client.get("/autodedup/groups", params={"verdict": "changed"}).status_code == 200
     # A pair ruling binds two listings and can never go stale that way, so the residual queue
     # refuses the value rather than silently returning nothing.
