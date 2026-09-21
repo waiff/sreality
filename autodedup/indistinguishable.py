@@ -338,10 +338,12 @@ def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> 
         parcels_a < parcels_b or parcels_b < parcels_a
     ):
         return (f"parcels={sorted(parcels_a)}", f"parcels={sorted(parcels_b)}")
-    priced = (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0
-              and rel_diff(float(a.price), float(b.price)) > cfg.d43_offered_extent_price_tol)
-    if not priced or not _co_live(a, b, cfg.d43_price_colive_min_overlap_days):
-        return None
+    if cfg.d43_offered_extent_requires_price_gap:
+        priced = (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0
+                  and rel_diff(float(a.price),
+                               float(b.price)) > cfg.d43_offered_extent_price_tol)
+        if not priced or not _co_live(a, b, cfg.d43_price_colive_min_overlap_days):
+            return None
     for reader, label in ((capacity_counts, "capacity"), (offered_room_counts, "rooms")):
         left, right = reader(a.description), reader(b.description)
         if left and right and left != right:

@@ -386,7 +386,15 @@ class Settings:
     # parcel inventory one advert offers strictly more of than the other. The first two need
     # the price and overlap conjunction: a bare capacity regex fires on service-charge lines
     # and on "byt se hodí pro 1 osobu", and 5 of its 7 g8 hits were exactly those.
+    # `d43_offered_extent_requires_price_gap` is the conjunction the W14 group attack proposed,
+    # kept as a dial and measured rather than assumed. Its case was that a CAPACITY regex is
+    # noisy — 5 of its 7 hits in g8 were prose — but the noise was the bare regex, and once the
+    # office noun must carry the phrase the reading costs 0 of 22,421 region certain duplicates
+    # and 0 of 2,052 trial labelled ones. The conjunction then only removes real catches: Regus
+    # publishes its 1-person and its 2-desk product at the SAME price (43617 at 16,290 Kč,
+    # 38043 at 15,490), so requiring a price gap merges two products because their prices met.
     d43_offered_extent: bool = False
+    d43_offered_extent_requires_price_gap: bool = False
     d43_offered_extent_price_tol: float = 0.05
     # E143: the two-unit signature. One advert has ONE area and ONE price at any moment, so two
     # adverts whose area AND price BOTH differ beyond rounding are two units — this is what the

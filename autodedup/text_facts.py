@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 from html import unescape
 from typing import Iterable, Iterator, Mapping, TYPE_CHECKING
 
@@ -32,6 +33,10 @@ if TYPE_CHECKING:  # pragma: no cover
 # number rather than an order key: it collides across objects and cannot certify anything.
 MIN_CODE_LEN: int = 5
 MAX_CODE_POPULATION: int = 8
+
+# The cluster invariant asks the same advert's facts once per PAIR, so a 256-member group would
+# re-scan one body 255 times. Keyed on the body text, which is what the readers actually parse.
+BODY_CACHE: int = 65536
 
 CODE_MASK: str = "[KOD]"
 
@@ -185,8 +190,11 @@ def parcel_numbers(text: str | None) -> set[str]:
     HTML entities are unescaped first: one sreality broker publishes an entity-escaped body and
     its parcel line would otherwise read as prose. Capped per advert — a body listing a whole
     estate's parcels is a seller's inventory, not this object's identity."""
-    if not text:
-        return set()
+    return set(_parcel_numbers(text)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parcel_numbers(text: str) -> frozenset[str]:
     folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
     out: set[str] = set()
     for keyword in _PARCEL_KEYWORD.finditer(folded):
@@ -200,7 +208,7 @@ def parcel_numbers(text: str | None) -> set[str]:
             if separator is None:
                 break
             position = separator.end()
-    return out if len(out) <= PARCEL_MAX_PER_ADVERT else set()
+    return frozenset(out) if len(out) <= PARCEL_MAX_PER_ADVERT else frozenset()
 
 
 # --- printed accessory designators (E141) --------------------------------------------------
@@ -219,20 +227,23 @@ ACCESSORY_KINDS: tuple[str, ...] = ("stani", "sklep", "garaz")
 ACCESSORY_MAX_PER_KIND: int = 6
 
 
-def accessory_designators(text: str | None) -> dict[str, frozenset[str]]:
-    """`kind -> the numbers this advert prints for it`: `stání č. 47`, `sklepní kóje č. 25`.
-
-    A kind whose run is longer than `ACCESSORY_MAX_PER_KIND` is a building's price list rather
-    than one flat's accessories and is dropped."""
-    if not text:
-        return {}
+@lru_cache(maxsize=BODY_CACHE)
+def _accessory_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
     folded = fact_text(unescape(text))
     found: dict[str, set[str]] = {}
     for kind, pattern in _ACCESSORY_PATTERNS:
         for match in pattern.finditer(folded):
             found.setdefault(kind, set()).add(match.group(1))
-    return {kind: frozenset(values) for kind, values in found.items()
-            if len(values) <= ACCESSORY_MAX_PER_KIND}
+    return tuple(sorted((kind, frozenset(values)) for kind, values in found.items()
+                        if len(values) <= ACCESSORY_MAX_PER_KIND))
+
+
+def accessory_designators(text: str | None) -> dict[str, frozenset[str]]:
+    """`kind -> the numbers this advert prints for it`: `stání č. 47`, `sklepní kóje č. 25`.
+
+    A kind whose run is longer than `ACCESSORY_MAX_PER_KIND` is a building's price list rather
+    than one flat's accessories and is dropped."""
+    return dict(_accessory_designators(text)) if text else {}
 
 
 # --- the offered product tier (E142) -------------------------------------------------------
@@ -250,15 +261,18 @@ CAPACITY_WINDOW: int = 60
 
 def capacity_counts(text: str | None) -> set[int]:
     """How many people the offered WORKSPACE is for, when an office noun carries the phrase."""
-    if not text:
-        return set()
+    return set(_capacity_counts(text)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _capacity_counts(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
     for match in _CAPACITY.finditer(folded):
         window = folded[max(0, match.start() - CAPACITY_WINDOW): match.start()]
         if _OFFER_NOUN.search(window):
             out.add(int(match.group(1)))
-    return out
+    return frozenset(out)
 
 
 # The EXTENT of a room let: "Pronajmu pokoj" against "Pronajmu 2 spojené pokoje" is one room
@@ -272,8 +286,11 @@ EXTENT_WINDOW: int = 34
 
 def offered_room_counts(text: str | None) -> set[int]:
     """How many ROOMS a room let offers, read only where an offer verb carries the phrase."""
-    if not text:
-        return set()
+    return set(_offered_room_counts(text)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _offered_room_counts(text: str) -> frozenset[int]:
     folded = fact_text(text)
     out: set[int] = set()
     for verb in _OFFER_VERB.finditer(folded):
@@ -282,7 +299,7 @@ def offered_room_counts(text: str | None) -> set[int]:
         if match is None:
             continue
         out.add(int(match.group(1)) if match.group(1) else 1)
-    return out
+    return frozenset(out)
 
 
 # The compass direction a body PRINTS as this unit's: `Orientace je na východ`, `byt je
@@ -365,8 +382,11 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
     available (`od 55 m² do 900 m²`, `10 m², 20 m², 30 m², …`). Neither is a statement about the
     advertised unit, and comparing one side's building with the other side's unit mislabelled
     three same-unit cross-broker pairs as different (W7 benchmark, root cause AREA SCOPE)."""
-    if not text:
-        return set()
+    return set(_stated_areas(text, stored_area_m2)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _stated_areas(text: str, stored_area_m2: float | None) -> frozenset[float]:
     folded = fact_text(text)
     mentions: list[tuple[int, int, float]] = []
     for match in _M2_MENTION.finditer(folded):
@@ -374,7 +394,7 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
         if value is not None:
             mentions.append((match.start(), match.end(), value))
     if not mentions:
-        return set()
+        return frozenset()
     skip = _menu_spans(folded, mentions) + [
         match.span() for match in _BUILDING_TOTAL.finditer(folded)
     ]
@@ -388,7 +408,7 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
             continue
         if low <= value <= high:
             out.add(value)
-    return out
+    return frozenset(out)
 
 
 # A price the advert states as a STARTING price — "ceny od 5 499 000 Kč", "již od 2 750 000".

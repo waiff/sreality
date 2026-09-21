@@ -18,6 +18,7 @@
  "d43_gate_total_floors_slack": true,
  "d43_obec_street_grain_only": true,
  "d43_offered_extent": true,
+ "d43_offered_extent_requires_price_gap": false,
  "d43_parcel_numbers": true,
  "d43_price_colive_contradiction": false,
  "d43_price_path": true,

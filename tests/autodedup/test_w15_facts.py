@@ -129,18 +129,29 @@ def test_offered_rooms_needs_an_offer_verb() -> None:
     assert offered_room_counts("Pronajmu byt 2+kk v centru, 55 m2.") == set()
 
 
-def test_extent_needs_the_price_and_overlap_conjunction() -> None:
-    a = listing(1, category_main="komercni", category_type="pronajem", price=10890.0,
+def test_extent_reads_a_stated_capacity_whatever_the_prices_do() -> None:
+    """43617 and 38043: Regus publishes the 1-person and the 2-desk product at ONE price."""
+    a = listing(1, category_main="komercni", category_type="pronajem", price=16290.0,
                 description="soukromou servisovanou kancelář pro 1 osobu")
-    b = listing(2, category_main="komercni", category_type="pronajem", price=15590.0,
+    b = listing(2, category_main="komercni", category_type="pronajem", price=16290.0,
                 description="soukromou servisovanou kancelář pro 2 pracovní místa")
     assert offered_extent(a, b, W15) is not None
-    # Same tier statement, same price: a template difference, not a product difference.
-    assert offered_extent(a, replace(b, price=10890.0), W15) is None
-    # Sequential windows: a re-post, which the capacity limb may not read.
-    later = replace(b, first_seen_at="2026-10-01T00:00:00+00:00",
+    assert offered_extent(a, replace(b, price=15590.0), W15) is not None
+
+
+def test_extent_conjunction_stays_available_as_a_dial() -> None:
+    """The W14 group attack's reading, kept measurable: a price gap AND a co-live window."""
+    conjunction = replace(W15, d43_offered_extent_requires_price_gap=True)
+    a = listing(1, category_main="komercni", category_type="pronajem", price=16290.0,
+                description="soukromou servisovanou kancelář pro 1 osobu")
+    b = listing(2, category_main="komercni", category_type="pronajem", price=16290.0,
+                description="soukromou servisovanou kancelář pro 2 pracovní místa")
+    assert offered_extent(a, b, conjunction) is None
+    priced = replace(b, price=10890.0)
+    assert offered_extent(a, priced, conjunction) is not None
+    later = replace(priced, first_seen_at="2026-10-01T00:00:00+00:00",
                     last_seen_at="2026-11-01T00:00:00+00:00")
-    assert offered_extent(a, later, W15) is None
+    assert offered_extent(a, later, conjunction) is None
 
 
 def test_extent_reads_a_strictly_larger_parcel_inventory() -> None:
