@@ -34,9 +34,25 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       collapse onto one `scraper/vocabulary.py` producer side; the canon stays in
       `toolkit/filter_registry.py`. Gates A1 (no dead read) / A2 (no unread emission ≥ 5%)
       / A3 (no unmapped value).
-- [ ] **W3 — the one re-parse seam.** Absorbs `scripts/reextract.py` and six backfill
-      scripts + six workflows. Never bulk-writes snapshots, never blanks what a re-derive
-      cannot produce, never bumps `last_seen_at`, always enqueues `dirty_properties`.
+- [x] **W3 — the one re-parse seam.** `scripts/reparse.py` replays the portal's OWN parse
+      entry point over a substrate declared once per portal: `portal_raw_pages.html` on the
+      seven HTML portals (100 % coverage incl. inactive, staged in the drain transaction so
+      it cannot lag the row) and `listings.raw_json` on sreality + bezrealitky, which stage
+      no body. Never writes a snapshot, never blanks what a re-derive cannot produce, never
+      bumps `last_seen_at`, enqueues `dirty_properties` in the same CTE, and writes a row
+      only while it still holds what the pass read (compare-and-set, so a concurrent detail
+      write is never reverted); `--fields` is required and dry-run is the default. **Two
+      limits W4/W5/W8 must plan around:** on sreality, which hashes the RAW payload, a heal
+      defers no snapshot — it appends NONE, ever — and `parse_listing` cannot read that
+      portal's oldest rows at all (234 of the 1,000 lowest ids carry a usable key), which the
+      run WARNs about instead of exiting clean. Absorbs `reextract.py`'s registry, deferral
+      gate and hash assertion (now derived, over all 27 healable columns) plus its
+      `description` arm;
+      deletes four area heals, their four workflows and three test files. **Two of the six
+      named backfills survive, with evidence:** `backfill_unit_price_masquerade` QUARANTINES
+      a price (`price_czk → NULL`), which never-blank forbids by design, and 794 realitymix
+      rows still await it; `backfill_idnes_brokers` writes `raw_json`, which the seam does
+      not, and 637 of the 20,000 oldest idnes rows still carry no broker block.
 - [ ] **W4 — close every structured gap the census proves.** ceskereality `parkování`,
       remax `pocet parkovacich mist`, realitymix lift/cellar, idnes `total_floors` on
       houses, mmreality's "Parkety" false positives; one `has_balcony` / `has_parking`

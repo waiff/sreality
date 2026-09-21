@@ -306,8 +306,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # number. The stock arm can only WARN: the live offenders were the four sreality
     # `pozemek` cells at 100.0% and bezrealitky pozemek/prodej at 99.5% — three parsers
     # kept the parcel out of `area_m2`, which is the only area the measure reads. W17
-    # closed that (the plot reaches `derive_headline_area` from every portal, and
-    # `backfill_land_headline_area` heals the 52,183 stored rows), so those cells should
+    # closed that (the plot reaches `derive_headline_area` from every portal, and a one-off
+    # heal — since replaced by `scripts/reparse.py` — fixed the 52,183 stored rows), so those cells should
     # clear; a land cell with no portal area at all stays a visible gap by charter (a NULL
     # measure is never a guess), amber and named rather than a red tile nobody can clear.
     # The next

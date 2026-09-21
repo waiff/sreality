@@ -1899,11 +1899,14 @@ renumber.** Navigate by area:
     **52,183 land rows** (sreality 44,237 of 44,237, idnes 5,292 of 45,500, bezrealitky 2,654 of
     2,667; ~32.7k active) stored a parcel in `estate_area` and carried `area_m2` NULL — no per-m²
     price and no area for any consumer reading the headline. `scripts/backfill_land_headline_area.py`
-    (+ its dispatch-only workflow) heals exactly that population, active or not, by moving the
-    stored value into the column the one rule would put it in today; it writes **no snapshot**
+    (+ its dispatch-only workflow) healed exactly that population, active or not, by moving the
+    stored value into the column the one rule would put it in today; it wrote **no snapshot**
     (the sanctioned rule-2 exception: our own mis-parse of the SAME stored page, the
-    `backfill_idnes_areas` precedent) and is idempotent because the write empties its own
-    selection. What follows the heal differs by portal: idnes and bezrealitky hash the PARSED
+    `backfill_idnes_areas` precedent) and was idempotent because the write emptied its own
+    selection. **Both scripts were deleted by the field-capture program's W3** — the ONE
+    re-parse seam (`scripts/reparse.py` / `reparse.yml`) is the heal path now, replaying the
+    portal's own parse entry point over its declared substrate under the same rules. What
+    follows a heal differs by portal: idnes and bezrealitky hash the PARSED
     fields, so W17's parser change — not the heal — makes each live row's next detail fetch
     append exactly ONE genuine snapshot; **sreality hashes the RAW payload**
     (`scraper.hashing.content_hash`), which did not change, so its 44,237 rows get no snapshot
@@ -1941,7 +1944,7 @@ renumber.** Navigate by area:
     `areas_from_text`) returning `scraper.area.PortalAreas`, and its own `parse_detail` calls
     it. That is what makes the heal possible without a second implementation.
 
-    `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) heals the
+    `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) healed the
     stored rows **from `listings.raw_json` — the parser's own latest reading of the live
     page**. Each of these parsers stores the detail page's spec cells verbatim under
     `raw_json['params']` plus `raw_json['title']`; bazos keeps its ad body in
@@ -1953,7 +1956,14 @@ renumber.** Navigate by area:
     body skipped **89 % of the population** on the first production dry run (examined=3000,
     would change=85, body_stale=2672), and the heal was very nearly a no-op. `raw_json`
     cannot lag: it is rewritten by the same transaction that writes the areas, so the
-    staleness question does not arise. Same rule-2 posture as the heals above, and it
+    staleness question does not arise. **That script is GONE since the field-capture
+    program's W3** — the same heal is now `reparse.yml --source <portal> --fields
+    area_m2,estate_area,usable_area,garden_area`, which replays the portal's whole
+    `parse_detail` over `portal_raw_pages.html`. That substrate is staged in the SAME drain
+    transaction as the listings row, so it cannot lag either, and it carries the page rather
+    than the parser's spec-cell projection of it; `portal_raw_payloads` stays out of the seam
+    for exactly the 89 %-stale reason recorded above. Same rule-2 posture as the heals above,
+    and it
     **subsumes the W17 land heal on these portals**: that one copied `estate_area` into
     `area_m2`, and on these portals `estate_area` was itself truncated, so the re-derive fixes
     both columns from the same fields in one statement (which also enqueues
@@ -2003,9 +2013,11 @@ renumber.** Navigate by area:
     rows corpus-wide** (5 byt, 2 komerční, 11 dum and one inactive pozemek) whose page states
     neither input, and nothing on land, where `parcelArea` equals `totalArea` on every one of
     4,568 rows. mmreality is a JSON-object portal, so its function takes the estate
-    object (`raw_json` IS that object) rather than a `params` map and no title; it exports
-    `AREA_OBJECT_KEYS` so the heal projects exactly the keys the parser reads instead of
-    respelling them.
+    object (`raw_json` IS that object) rather than a `params` map and no title; it exported
+    `AREA_OBJECT_KEYS` so the deleted heal could project exactly the keys the parser reads
+    instead of respelling them. The seam replays `parse_detail` over the stored page instead,
+    so that export now has no consumer (handed to the field-capture W2 wave, which owns
+    `scraper/*_parser.py`).
 
     *`usable_area` is the "užitná plocha" label and nothing else.* idnes
     (`užitná or podlahová or plocha`) and ceskereality (`plocha užitná or užitná plocha or
@@ -2033,8 +2045,9 @@ renumber.** Navigate by area:
 
     idnes joined the shared shape in the same wave: `idnes.areas_from_params` replaces its
     private `_AREA_M2_MAX` / `_AREA_LARGE_MAX` / `_clamp` with the shared bounds, and both it
-    and mmreality joined `backfill_area_spaced_thousands`'s dispatch — which is why W21 needed
-    no heal of its own. mmreality's arm of that heal walks the portal WHOLE rather than by the
+    and mmreality joined `backfill_area_spaced_thousands`'s dispatch (deleted in W3; the seam
+    is the dispatch now) — which is why W21 needed no heal of its own. mmreality's arm of that
+    heal walked the portal WHOLE rather than by the
     truncation fingerprint: its numbers are typed JSON that never met a regex, and a land row
     carrying the sum as its headline with NULL in every other area column satisfies neither
     fingerprint arm (3,443 of 14,417 rows). It is also FIRST in the default set — the only

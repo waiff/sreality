@@ -78,12 +78,11 @@ it replaced.
 
 ## Recovering a field a parser silently stopped extracting
 
-`scripts/reextract.py --source <portal> --field <media|description|broker> [--since YYYY-MM-DD] --dry-run` replays the
-CURRENT parser over already-stored `portal_raw_pages` HTML — no re-fetch, and it repairs
-**inactive** listings too, which a re-fetch structurally cannot. Snapshot-safe by construction:
-it writes only child media rows, never a `listings` content column, so the content hash cannot
-change (rule #2). Dispatch via the `reextract.yml` workflow; resumable by keyset cursor, so
-re-dispatch until it reports `recovered≈0`.
+**Every typed `listings` column goes through the ONE re-parse seam**, `scripts/reparse.py` / `reparse.yml`: it replays the portal's OWN `parse_detail` / `parse_advert` / `parse_listing` over a substrate declared once per portal — `portal_raw_pages.html` on the seven HTML portals, `listings.raw_json` on sreality + bezrealitky, which stage no body — so a heal cannot disagree with the live scraper. No re-fetch, and it repairs **inactive** listings too, which a re-fetch structurally cannot. `--fields` is REQUIRED (it writes exactly those and reads the rest only to leave them alone); dry-run is the default. It never writes a `listing_snapshots` row, never blanks a value the re-derive could not produce, never touches `last_seen_at`, enqueues `dirty_properties` in the same statement, and writes a row only while it still holds what the pass read.
+
+**Hashed columns.** `--allow-snapshot-deferral` is required for a column in `_HASH_FIELDS`: on the eight portals hashing the PARSED fields the one genuine snapshot is DEFERRED to that row's next detail scrape (an inactive row never gets one). On **sreality**, which hashes the RAW payload, NO snapshot is ever appended and the column diverges from its history for good; its oldest rows also hold the pre-unwrap payload (`hash_id`/`id` absent) and cannot be parsed at all — the run WARNs with the count rather than exiting clean.
+
+`scripts/reextract.py --source <portal> --field <media|broker> [--since YYYY-MM-DD] --dry-run` keeps only the two NON-column recoveries the seam cannot express: `images` child rows and the `raw_json.broker` block. Neither is in `_HASH_FIELDS`, so both are snapshot-free (rule #2), and the module raises at import if either ever joins it. Dispatch via `reextract.yml`; resumable by keyset cursor, so re-dispatch until it reports `recovered≈0`.
 
 For `--field media` it only repairs listings with **zero** image rows. `record_images` upserts on
 `(listing_id, sequence)` = gallery position and refreshes the URL only `WHERE storage_path IS
@@ -91,16 +90,6 @@ NULL`, so re-parsing a listing that already holds photos and now yields more of 
 every later photo's position — downloaded rows keep an old URL at a sequence the new parse means
 for a different photo. Partial-loss recovery therefore needs a stable media identity, not a
 positional one, and is deliberately not attempted here.
-
-**Hashed vs unhashed fields.** The `_FIELDS` registry declares, per field, whether it sits in
-`_HASH_FIELDS`, and the module raises at import if that ever disagrees with
-`scraper.scraped_listing`. An unhashed field (`media`) writes only child rows → zero snapshots.
-A hashed field (`description`) genuinely changes the content hash, so **one snapshot per listing
-is appended on that listing's next natural detail scrape** — deferred, never skipped, and spread
-over the normal cadence instead of landing all at once. `--allow-snapshot-deferral` is required
-so that is a deliberate choice. Hashed fields are written with a targeted single-column UPDATE,
-never by replaying a whole `ScrapedListing`, which would rewrite every other column from a
-possibly-stale stored page and could regress a price the portal has since changed.
 
 ## The payload archive riding the ingest path
 
@@ -132,9 +121,9 @@ fatal — so **a broken archive looks like a healthy scrape**: `portal_raw_pages
 `select source, count(*) filter (where contract_version is null) from portal_raw_payloads
 where page_kind = 'detail' group by 1;` is the backlog the lane's hash gate is working through.
 
-**One area rule per column (W19/W21).** `scraper.area.parse_area_text` is the ONLY area regex; ONE `areas_from_params` per portal (bazos `areas_from_text`; mmreality takes the estate OBJECT + exports `AREA_OBJECT_KEYS`) that `parse_detail` AND the heal call — never a second copy of a key order.
+**One area rule per column (W19/W21).** `scraper.area.parse_area_text` is the ONLY area regex; ONE `areas_from_params` per portal (bazos `areas_from_text`; mmreality takes the estate OBJECT) that only `parse_detail` calls — never a second copy of a key order.
 mmreality's parcel is `parcelArea` (`landArea`/`plotArea` never filled; `totalArea` is DERIVED per category — never read it). `usable_area` = the "užitná plocha" label ONLY. Plot area for a READER is the `plot_area_m2` MEASURE (mig 534) — a COLUMN on browse_list/map_mv/listing_feed_public (mig 535), never `estate_area`.
-Heal via `backfill_area_spaced_thousands.yml` from the row's OWN `raw_json`: dispatch-only, dry-run default, one `--sources` per run, no R2. mmreality FIRST (it shrinks values, by design); idnes wired but not default (forward-only). It NEVER blanks a stored value.
+Heal via `reparse.yml` (`--source <portal> --fields area_m2,estate_area,usable_area,garden_area --allow-snapshot-deferral`), which replays `parse_detail` over the stored detail page: dispatch-only, dry-run default, one source per run, no R2. It NEVER blanks a stored value.
 
 ## How to manually trigger the scrapers
 

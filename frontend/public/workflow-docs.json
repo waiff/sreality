@@ -374,192 +374,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/autodedup_realtime.yml"
     },
     {
-      "filename": "backfill_area_basis.yml",
-      "name": "Backfill area_basis (the provenance stamp migration 423 never filled)",
-      "description": "One-off, dispatch-only backfill for the per-m² measure program's open item 2. Migration 423 added `listings.area_basis` with no backfill, so it fills only as rows are detail-drained — 24.1% of the table, and ZERO rows anywhere carry `plot`, which leaves every gate written on `area_basis` alone inert and reading \"not land\" for every parcel in the database. This does NOT re-derive the headline area: `scraper.area.derive_headline_area` stays the single definition of the precedence and the token vocabulary, and the script CALLS it, feeding it the one measure the stored columns prove was the winner. Three inferences are exact — land (`plot` is a function of area_m2 alone), a NULL area (the function returned no basis), and the `usable_area` column on the six portals that store it un-collapsed, plus bazos whose only arm is `fallback`. idnes and ceskereality are DECLINED by design: both collapse usable/floor/total into that one column, so a match there would fabricate a provenance claim on ~183k rows. Writes nothing but `listings.area_basis`, which is out of every content hash — so NO snapshot, no value change, and neither trigger on `listings` fires. DML, not DDL: no ACCESS EXCLUSIVE, so it cannot head-block a writer; it waits for a read-model rebuild gap before starting, bounded, then proceeds anyway since the contention is I/O and never a lock conflict. Keyset-paginated over a narrow projection that detoasts nothing; idempotent without a marker, and `--after` resumes. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "write",
-          "description": "Actually write. Left false, this only reports what would change.",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "limit",
-          "description": "Max listings examined this run (blank = the whole table)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "after",
-          "description": "Resume from this listings.id cursor (exclusive)",
-          "required": false,
-          "type": "string",
-          "default": "0",
-          "options": null
-        },
-        {
-          "name": "batch_size",
-          "description": "Rows per keyset page",
-          "required": false,
-          "type": "string",
-          "default": "5000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "rebuild_wait_seconds",
-          "description": "How long to wait for a read-model rebuild gap before starting anyway",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "ignore_rebuild",
-          "description": "Start immediately, without waiting for a rebuild gap at all",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "verbose",
-          "description": "Log every individual stamp (DEBUG)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-area-basis",
-      "cancelInProgress": false,
-      "timeoutMinutes": 120,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_area_basis.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_area_basis.yml"
-    },
-    {
-      "filename": "backfill_area_spaced_thousands.yml",
-      "name": "Backfill portal areas from the row's own page fields (W19 + W21)",
-      "description": "One-off, dispatch-only heal, in two generations.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "write",
-          "description": "Actually write. Left false, this only reports what would change.",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "sources",
-          "description": "Comma-separated portals to heal, walked one at a time. Blank = the default set (mmreality, ceskereality, realitymix, remax, maxima, bazos — mmreality first). `idnes` is wired but never walked by default; name it explicitly to run it.",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "limit",
-          "description": "Max listings EXAMINED this run (blank = all of them)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "after",
-          "description": "Resume from this listings.id cursor (exclusive) — PER SOURCE, so pass one portal in `sources`",
-          "required": false,
-          "type": "string",
-          "default": "0",
-          "options": null
-        },
-        {
-          "name": "batch_size",
-          "description": "Rows per keyset page, and per UPDATE statement",
-          "required": false,
-          "type": "string",
-          "default": "500",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = the script's 9000 s default)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "rebuild_wait_seconds",
-          "description": "How long a WRITING pass waits for a read-model rebuild gap before starting anyway",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "ignore_rebuild",
-          "description": "Start immediately, without waiting for a rebuild gap at all",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "verbose",
-          "description": "Log every healed row's before/after areas (DEBUG)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-area-spaced-thousands",
-      "cancelInProgress": false,
-      "timeoutMinutes": 180,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_area_spaced_thousands.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_area_spaced_thousands.yml"
-    },
-    {
       "filename": "backfill_child_listing_ids.yml",
       "name": "Backfill child listing_id (R2)",
       "description": "One-off, dispatch-only backfill for the R2 leg of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 2 A4). Fills the surrogate listings.id onto the 22 carrier tables migrations 320-325 added columns to, for rows written BEFORE dual-write shipped. No re-fetch, no LLM, no snapshots.",
@@ -630,55 +444,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_child_listing_ids.yml"
     },
     {
-      "filename": "backfill_idnes_areas.yml",
-      "name": "Backfill idnes areas (spaced-thousands truncation)",
-      "description": "One-off, dispatch-only backfill for PR #686's parser fix: idnes titles render land area with a Czech spaced-thousands group (\"2 403 m²\") and the old _AREA_RE matched from inside the number, storing area_m2=403 for a 2,403 m² plot (~8.4k active rows). Re-parses each affected listing from its already-staged detail HTML (portal_raw_pages, NO re-fetch of idnes) and heals the area columns in place; only NULLs a price on a genuine per-m² masquerade (zero found in prod). Idempotent + resumable; rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "limit",
-          "description": "Max listings processed per run",
-          "required": false,
-          "type": "string",
-          "default": "40000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "dry_run",
-          "description": "Report the pending count and exit without writing",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-idnes-areas",
-      "cancelInProgress": false,
-      "timeoutMinutes": 90,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_idnes_areas.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_idnes_areas.yml"
-    },
-    {
       "filename": "backfill_idnes_brokers.yml",
       "name": "Data: backfill idnes broker blocks",
       "description": "One-shot backfill: reparse the staged idnes detail HTML (portal_raw_pages) into listings.raw_json.broker via scraper.broker_idnes.parse_idnes_broker. raw_json.broker is OUT of the content hash (_HASH_FIELDS is typed columns only), so this never churns snapshots. The broker resolver then attributes idnes brokers from raw_json.broker like sreality's raw_json.user. No re-fetch, no LLM, no new secrets.",
@@ -718,95 +483,6 @@
       "permissions": "contents: read",
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_idnes_brokers.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_idnes_brokers.yml"
-    },
-    {
-      "filename": "backfill_land_headline_area.yml",
-      "name": "Backfill land headline area (the plot three parsers never handed to the rule)",
-      "description": "One-off, dispatch-only heal for W17 (\"one headline area\"). `listings.area_m2` is polymorphic by design — the interior measure for a dwelling, THE PLOT for `pozemek` — and `scraper.area.derive_headline_area` is the one rule that picks it. Until W17 the sreality, bezrealitky and idnes parsers never handed that rule the plot at all, though each of them DID store it in `estate_area`: 52,183 land rows (sreality 44,237 of 44,237, idnes 5,292 of 45,500, bezrealitky 2,654 of 2,667; ~32.7k of them active) carry a parcel and no headline area, so they have no per-m² price and no area for any consumer that reads the headline — including the NEW DEDUP path C candidate rule. The parser change fixes every future write; this fixes the rows already stored, with the same value the same page already gave us:",
-      "portal": null,
-      "manual": true,
-      "schedules": [],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "write",
-          "description": "Actually write. Left false, this only reports what would change.",
-          "required": false,
-          "type": "choice",
-          "default": "false",
-          "options": [
-            "false",
-            "true"
-          ]
-        },
-        {
-          "name": "limit",
-          "description": "Max listings healed this run (blank = all of them)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "after",
-          "description": "Resume from this listings.id cursor (exclusive)",
-          "required": false,
-          "type": "string",
-          "default": "0",
-          "options": null
-        },
-        {
-          "name": "batch_size",
-          "description": "Rows per keyset page, and per UPDATE statement",
-          "required": false,
-          "type": "string",
-          "default": "5000",
-          "options": null
-        },
-        {
-          "name": "max_seconds",
-          "description": "Wall-clock budget in seconds (blank = no budget)",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "rebuild_wait_seconds",
-          "description": "How long a WRITING pass waits for a read-model rebuild gap before starting anyway",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        },
-        {
-          "name": "ignore_rebuild",
-          "description": "Start immediately, without waiting for a rebuild gap at all",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        },
-        {
-          "name": "verbose",
-          "description": "Log every page's id range and portals (DEBUG)",
-          "required": false,
-          "type": "boolean",
-          "default": "false",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "backfill-land-headline-area",
-      "cancelInProgress": false,
-      "timeoutMinutes": 120,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_land_headline_area.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_land_headline_area.yml"
     },
     {
       "filename": "backfill_render_score.yml",
@@ -3835,7 +3511,7 @@
     {
       "filename": "reextract.yml",
       "name": "Data: re-extract a field from stored pages",
-      "description": "Replays the CURRENT parser over already-stored `portal_raw_pages` HTML to recover a field a parser silently stopped extracting. No re-fetch, no LLM, no new secrets — and it repairs INACTIVE listings too, which a re-fetch structurally cannot.",
+      "description": "Replays the CURRENT parser over already-stored `portal_raw_pages` HTML to recover the two things a portal publishes that are NOT `listings` columns: the `images` child rows and the `raw_json.broker` block. Every typed column is `reparse.yml`'s work. No re-fetch, no LLM, no new secrets — and it repairs INACTIVE listings too, which a re-fetch structurally cannot.",
       "portal": null,
       "manual": true,
       "schedules": [],
@@ -3857,13 +3533,12 @@
         },
         {
           "name": "field",
-          "description": "Field to recover (remax=description|broker; realitymix/idnes=media)",
+          "description": "Field to recover (remax=broker; realitymix/idnes=media)",
           "required": true,
           "type": "choice",
           "default": "media",
           "options": [
             "media",
-            "description",
             "broker"
           ]
         },
@@ -4002,6 +3677,126 @@
       "permissions": null,
       "runsUrl": "https://github.com/waiff/sreality/actions/workflows/refresh_stale_images.yml",
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_stale_images.yml"
+    },
+    {
+      "filename": "reparse.yml",
+      "name": "Ops: re-parse stored rows through the portal's own parser",
+      "description": "The ONE re-parse seam (`scripts/reparse.py`) — the dispatch that carries a parser fix back to rows already in `listings`, replacing the one-off `backfill_*.py` family. It re-runs the portal's OWN `parse_detail` / `parse_advert` / `parse_listing` over the substrate declared for that portal — `portal_raw_pages.html` on the seven HTML portals (100 % coverage, inactive rows included, staged in the same drain transaction that writes the row, so it cannot lag it) and `listings.raw_json` on sreality + bezrealitky, which stage no body at all. No fetch, no R2, no network.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "source",
+          "description": "Portal to replay. Its substrate is declared in the script, not chosen here.",
+          "required": true,
+          "type": "choice",
+          "default": null,
+          "options": [
+            "bazos",
+            "bezrealitky",
+            "ceskereality",
+            "idnes",
+            "maxima",
+            "mmreality",
+            "realitymix",
+            "remax",
+            "sreality"
+          ]
+        },
+        {
+          "name": "fields",
+          "description": "Comma-separated listings columns to re-derive, e.g. has_lift,cellar",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "true = report what would change only. false = write (needs confirm=APPLY).",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "options": null
+        },
+        {
+          "name": "confirm",
+          "description": "Type APPLY to arm the real write. Ignored when dry_run=true.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "allow_snapshot_deferral",
+          "description": "Acknowledge what history does after a HASHED column is written: one snapshot per live row at its next detail fetch on eight portals — and NONE ever on sreality, which hashes the raw payload, so column and history diverge for good",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "missing",
+          "description": "Only rows where EVERY named column is still NULL (the gap class)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        },
+        {
+          "name": "limit",
+          "description": "Max listings EXAMINED this run (blank = all of them)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "after",
+          "description": "Resume from this listings.id cursor (exclusive)",
+          "required": false,
+          "type": "string",
+          "default": "0",
+          "options": null
+        },
+        {
+          "name": "batch_size",
+          "description": "Rows per keyset page, and per UPDATE statement",
+          "required": false,
+          "type": "string",
+          "default": "200",
+          "options": null
+        },
+        {
+          "name": "max_seconds",
+          "description": "Wall-clock budget in seconds (blank = the script's 9000 s default)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "verbose",
+          "description": "DEBUG logging (per-row parse failures)",
+          "required": false,
+          "type": "boolean",
+          "default": "false",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "reparse",
+      "cancelInProgress": false,
+      "timeoutMinutes": 180,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/reparse.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/reparse.yml"
     },
     {
       "filename": "resolve_brokers_full.yml",

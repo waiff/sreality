@@ -190,28 +190,35 @@ def _reextract():
 
 
 def test_reextract_field_registry_agrees_with_the_hash_contract():
-    """A field in _HASH_FIELDS cannot be repaired snapshot-free. The registry declares
-    that per field and the module raises at import on a mismatch, so adding a field to
-    _HASH_FIELDS later can never silently downgrade the backfill's guarantee."""
+    """Both remaining fields are OUTSIDE _HASH_FIELDS — media writes child rows, broker
+    writes raw_json — so this file appends no snapshot and defers none. The registry
+    declares that per field and the module raises at import on a mismatch, so a field that
+    later joins _HASH_FIELDS cannot silently inherit the guarantee; it belongs in
+    scripts/reparse.py, which carries the deferral gate."""
     from scraper.scraped_listing import _HASH_FIELDS
 
     module = _reextract()
 
-    assert module._FIELDS["media"].hashed is False
-    assert module._FIELDS["description"].hashed is True
+    assert set(module._FIELDS) == {"media", "broker"}
     for name, spec in module._FIELDS.items():
+        assert spec.hashed is False
         assert spec.hashed == (name in _HASH_FIELDS)
 
 
-def test_reextract_recovers_remax_description_from_a_stored_page():
-    """The backfill substrate is stored portal_raw_pages HTML — assert the wired
-    extractor actually yields text on a real page, or the run would report a clean
-    'recovered 0' and look like success."""
-    module = _reextract()
+def test_the_typed_columns_moved_to_the_one_re_parse_seam():
+    """`description` used to be re-extracted here. It is a LISTING_COLUMNS member, so it is
+    the seam's work now — over a substrate declared per portal, through remax's own
+    parse_detail rather than a lifted-out private selector."""
+    from scripts import reparse
 
-    text = module._FIELDS["description"].extractors["remax"](_fixture("remax_detail.html"), "")
+    assert "description" in reparse.HEALABLE
+    assert "description" in reparse.HASHED_COLUMNS
+    listing = reparse._derive(
+        "remax", body=_fixture("remax_detail.html"),
+        ref="https://www.remax-czech.cz/reality/detail/445483/x/",
+        category_main=None, category_type=None)
 
-    assert text and len(text) > 500
+    assert listing["description"] and len(listing["description"]) > 500
 
 
 def test_reextract_registry_recovers_media_for_every_wired_portal():

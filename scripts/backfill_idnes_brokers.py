@@ -7,6 +7,11 @@ content hash (_HASH_FIELDS is typed columns only), so it never churns snapshots.
 resolver (scripts.resolve_brokers) then attributes idnes brokers from raw_json.broker
 exactly like sreality's raw_json.user.
 
+WHY THIS SURVIVED THE ONE RE-PARSE SEAM. `scripts/reparse.py` replaced the re-derive
+family, but it writes typed `listings` columns only — the broker block is a `raw_json`
+key, so the seam's write path (one UPDATE of named columns plus a dirty-properties
+enqueue) cannot express it. 637 of the 20,000 oldest idnes rows still carry no block.
+
 Keyset-paginated over portal_raw_pages.id, batched set-based UPDATE, autocommit per
 batch (a timeout/SIGKILL just resumes from the cursor next run). --max-seconds bounds
 the run; re-dispatch until pending=0.
