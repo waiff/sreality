@@ -12,9 +12,12 @@ Contains:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Sequence
 
 import requests
+
+from scraper import vocabulary
+from toolkit.filter_registry import CATEGORY_MAIN_OPTIONS, CATEGORY_TYPE_OPTIONS
 
 LOG = logging.getLogger(__name__)
 
@@ -36,12 +39,19 @@ DEFAULT_HEADERS: dict[str, str] = {
 HTML_CHAR_CAP = 200_000
 
 
-def _field(value_type: str | list[str], description: str) -> dict[str, Any]:
+def _field(value_type: str | list[str], description: str,
+           enum: Sequence[str] | None = None) -> dict[str, Any]:
+    value: dict[str, Any] = {"type": value_type, "description": description}
+    if enum is not None:
+        # A real JSON `enum`, so the provider constrains the string instead of the
+        # description asking nicely. Prose enums are how a CONDITION value ("novostavba")
+        # and a typo ("smisana") reached `building_type`.
+        value["enum"] = [*sorted(enum), None]
     return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "value": {"type": value_type, "description": description},
+            "value": value,
             "confidence": {
                 "type": "string",
                 "enum": ["high", "medium", "low"],
@@ -51,10 +61,17 @@ def _field(value_type: str | list[str], description: str) -> dict[str, Any]:
     }
 
 
-# Field semantics mirror the seeded system prompt verbatim. Keep this
-# in sync with app_settings.llm_parse_system_prompt; if you change the
-# enums or field set, edit the seed via the operator's Settings UI
-# (which writes a history row), not by re-seeding through a migration.
+# Field semantics mirror the seeded system prompt. Every enum below is GENERATED from
+# `scraper.vocabulary`, never restated — widening the vocabulary widens this schema in the
+# same commit. It is `known_values`, not the bare canon: this parser writes the SAME
+# columns the nine scrapers write, and until W5 collapses them those columns legitimately
+# hold the legacy spellings too (`ve_vystavbe`, 7,873 active rows; `jina`, 8,232), so a
+# canon-only enum would leave the two producers of one column disagreeing — the defect R5
+# exists to remove. `disposition` carries NO enum: its contract is `vocabulary.disposition`'s
+# open grammar, while `DISPOSITION_OPTIONS` is the Browse filter pill list, which stops at
+# 5+1 and cannot name the 937 active rows above it (R11 widens the canon in W5). The
+# DB-resident prompt (`app_settings.llm_parse_system_prompt`) is still edited through the
+# Settings UI, and CI cannot reach it; that gap is W7's.
 RECORD_LISTING_TOOL: dict[str, Any] = {
     "name": "record_listing",
     "description": (
@@ -71,7 +88,8 @@ RECORD_LISTING_TOOL: dict[str, Any] = {
                 "celková. For a pozemek (land) report the PLOT area here instead. "
                 "Never a garden/parcel area for a building."),
             "disposition": _field(["string", "null"],
-                "Czech disposition: 1+kk, 1+1, 2+kk, ..., 6+1."),
+                "Czech disposition exactly as the page states it: 1+kk, 1+1, 2+kk, "
+                "… 6+1, 7+2. Never round it down to a listed size."),
             "price_czk": _field(["integer", "null"],
                 "Headline TOTAL price (or monthly rent) in CZK. Strip thousands "
                 "separators. Null if not stated, not in CZK, or if the page quotes "
@@ -83,9 +101,9 @@ RECORD_LISTING_TOOL: dict[str, Any] = {
             "district": _field(["string", "null"],
                 "City or city-district (e.g. 'Praha 2', 'Brno-střed')."),
             "category_main": _field(["string", "null"],
-                "byt | dum | pozemek | komercni | ostatni"),
+                "Property category.", [o.value for o in CATEGORY_MAIN_OPTIONS]),
             "category_type": _field(["string", "null"],
-                "prodej | pronajem | drazba"),
+                "Sale, rent or auction.", [o.value for o in CATEGORY_TYPE_OPTIONS]),
             "floor": _field(["integer", "null"],
                 "Floor number, ground = 0, suterén = -1."),
             "total_floors": _field(["integer", "null"],
@@ -96,13 +114,11 @@ RECORD_LISTING_TOOL: dict[str, Any] = {
             "has_parking": _field(["boolean", "null"],
                 "Garage, parking lot, or parkovací stání."),
             "building_type": _field(["string", "null"],
-                "cihla | panel | smisena | skelet | drevo | kamen | "
-                "montovana | nizkoenergeticka."),
+                "Construction material.", vocabulary.known_values("building_type")),
             "condition": _field(["string", "null"],
-                "novostavba | po rekonstrukci | velmi dobrý stav | "
-                "dobrý stav | před rekonstrukcí | ve výstavbě | k demolici."),
+                "Building condition.", vocabulary.known_values("condition")),
             "energy_rating": _field(["string", "null"],
-                "Single capital letter A through G."),
+                "PENB class.", vocabulary.known_values("energy_rating")),
             "description": _field(["string", "null"],
                 "Seller's free-text description, verbatim, up to 8000 chars."),
             "warnings": {

@@ -61,6 +61,11 @@ MAX_DISTINCT_FOR_VALUES = 12
 # A key carried by fewer than this share of sampled rows folds into a counted `rare`
 # bucket: a census is evidence for a reviewer, not a dump of every one-off key.
 RARE_KEY_PCT = 1.0
+# A recorded value is cut to this many characters. Long enough for every enum label any
+# portal ships, short enough that a prose cell under the distinct cap cannot bloat the
+# file. A value AT this length may be a prefix, so a consumer replaying values back
+# through a parser must skip it (tests/scraper/attribute_probes.py does).
+VALUE_TRUNCATE_CHARS = 60
 
 SAMPLE_PREDICATE = (
     f"the newest {SAMPLE_ROWS} rows per source with is_active, by first_seen_at desc"
@@ -139,6 +144,9 @@ select (select count(*) from sampled) as n_sampled,
     on v.key = k.key and k.key_distinct <= %(max_distinct)s
  order by k.key_rows desc, k.key, v.n desc nulls last, v.value
 """
+assert f"left(kv.value, {VALUE_TRUNCATE_CHARS})" in FIELD_CENSUS_SQL, (
+    "VALUE_TRUNCATE_CHARS drifted from the census SQL"
+)
 
 
 def _matrix_sql() -> str:

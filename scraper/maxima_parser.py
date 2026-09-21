@@ -24,15 +24,20 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
+from scraper.attribute_contract import source_value, source_values
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
+
+SOURCE = "maxima"
 
 # Native-id leading letter -> our canonical category_main (mirrors the sreality
 # parser.CATEGORY_* labels). The letter is the agency's own taxonomy and is the
@@ -61,22 +66,6 @@ CATEGORY_BY_TITLE: tuple[tuple[str, str], ...] = (
 
 # idnes/sreality building-construction labels -> the canonical codes the sreality
 # parser emits, so a cross-portal "panel" filter matches every source.
-BUILDING_TYPE: dict[str, str] = {
-    "panelová": "panel",
-    "cihlová": "cihla",
-    "smíšená": "smisena",
-    "skeletová": "skelet",
-    "dřevěná": "drevo",
-    "kamenná": "kamen",
-    "montovaná": "montovana",
-    "nízkoenergetická": "nizkoenergeticka",
-}
-OWNERSHIP: dict[str, str] = {
-    "osobni": "osobni",
-    "druzstevni": "druzstevni",
-    "statni": "statni",
-    "obecni": "statni",
-}
 
 # Czech-bbox guard: a coordinate outside it (a swapped lat/lon, or a stray pin) is
 # dropped rather than stored as geom.
@@ -87,7 +76,6 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 _ID_RE = re.compile(r"/nemovitosti/([a-z]\d+)/?(?:[?#]|$)")
 _LISTING_HREF_RE = re.compile(r"/nemovitosti/[a-z]\d+/?$")
 _PAGE_RE = re.compile(r"/page/(\d+)/?")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(\d+)")
 # Price runs are Czech "18 878 000" (groups split by ordinary / no-break / thin /
 # zero-width spaces). The first run only is taken so a struck original + current
@@ -244,15 +232,6 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if value <= _PRICE_MAX else None), unit
 
 
-def _parse_disposition(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _DISPOSITION_RE.search(text)
-    if not m:
-        return None
-    return f"{m.group(1)}+{m.group(2).lower()}"
-
-
 def _parse_int(text: str | None) -> int | None:
     if not text:
         return None
@@ -268,51 +247,6 @@ def _parse_floors(text: str | None) -> tuple[int | None, int | None]:
     if m:
         return int(m.group(1)), int(m.group(2))
     return _parse_int(text), None
-
-
-def _yes_no(text: str | None) -> bool | None:
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower().strip()
-    if low.startswith("ano"):
-        return True
-    if low.startswith("ne"):
-        return False
-    return None
-
-
-def _norm_condition(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    key = re.sub(r"\s+stav$", "", key)
-    key = re.sub(r"\s+", "_", key)
-    return key or None
-
-
-def _norm_ownership(text: str | None) -> str | None:
-    if not text:
-        return None
-    # Canonical set only ({osobni, druzstevni, statni}); unmapped labels → None
-    # rather than leaking a value no ownership filter option can match.
-    key = _strip_diacritics(text).lower().strip()
-    return OWNERSHIP.get(key)
-
-
-def _norm_building_type(text: str | None) -> str | None:
-    if not text:
-        return None
-    raw = text.strip().lower()
-    if raw in BUILDING_TYPE:
-        return BUILDING_TYPE[raw]
-    return _strip_diacritics(raw) or None
-
-
-def _energy_rating(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = re.search(r"\b([A-G])\b", text)
-    return m.group(1).upper() if m else None
 
 
 def parse_index(html: str) -> IndexPage:
@@ -399,16 +333,17 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """maxima's area cells, in ITS precedence — spelled here once and nowhere else.
+    """maxima's area slots — the KEYS are the contract's, this owns the measure.
 
-    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
-    reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. maxima renders a no-break space around its unit and inside a thousands
+    `parse_detail` reads it off a live page, and `scripts/reparse.py` replays `parse_detail`
+    over the stored page, so there is one reading of these keys. maxima renders a no-break space around its unit and inside a thousands
     group alike, which is what the naive grammar truncated.
+
+    The `užitná plocha` / `podlahová plocha` second spellings and `plocha zahrady` are
+    gone: maxima emits none of them on any of its 556 stored rows (gate A1).
     """
-    usable_text = params.get("plocha užitná") or params.get("užitná plocha")
-    floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    usable_text, floor_text, plot_text = source_values(SOURCE, "area_m2", params)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=parse_area_text(usable_text),
@@ -419,7 +354,7 @@ def areas_from_params(
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
         usable_area=parse_area_text(usable_text), estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        garden_area=None,
     )
 
 
@@ -436,6 +371,7 @@ def parse_detail(
     title = _text(tree.css_first("h3")) or _text(tree.css_first("title")) or ""
     description = _text(tree.css_first("#collapse-inzerat-text"))
     params = _detail_params(tree)
+    read = partial(source_value, SOURCE, params=params)
 
     # Category is encoded in the title verb (authoritative across both agendas) +
     # the id prefix (sale only); derive it when the caller didn't pass an override.
@@ -443,14 +379,14 @@ def parse_detail(
     category_main = category_main or category_of(source_id, title)
     category_type = category_type or _sale_type_from_title(title) or "prodej"
 
-    price_text = _text(tree.css_first("div.price")) or params.get("cena")
+    price_text = _text(tree.css_first("div.price"))
     price_czk, price_unit = _parse_price(price_text, category_type)
 
     locality = _text(tree.css_first("div.locality"))
     lat, lon, coord_provenance = _resolve_coords(html)
 
     areas = areas_from_params(params, title=title, category_main=category_main)
-    floor, total_floors = _parse_floors(params.get("podlaží"))
+    floor, total_floors = _parse_floors(read("floor"))
 
     source_id_upper = source_id.upper()
     image_urls: list[str] = []
@@ -481,7 +417,7 @@ def parse_detail(
     # rather than infer from the free-text title. NULL still shows at the
     # category level; it only drops out under a specific-subtype filter.
     return ScrapedListing(
-        source="maxima",
+        source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
         category_main=category_main,
@@ -491,7 +427,7 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
+        disposition=vocabulary.disposition(title),
         locality=locality,
         district=None,
         # Street is the LAST comma-segment ("Praha 6, Suchdol, U Hotelu") — the
@@ -504,20 +440,18 @@ def parse_detail(
         lon=lon,
         floor=floor,
         total_floors=total_floors,
-        building_type=_norm_building_type(params.get("budova")),
-        condition=_norm_condition(params.get("stav objektu")),
-        ownership=_norm_ownership(params.get("vlastnictví")),
+        building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
+        condition=vocabulary.canonical("condition", SOURCE, read("condition")),
+        ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
         energy_rating=(
-            _energy_rating(params.get("energetická náročnost"))
-            or _energy_rating(params.get("penb"))
+            vocabulary.energy_rating(read("energy_rating"))
             or _penb_from_text(_page_text(tree))
         ),
-        has_balcony=_yes_no(params.get("balkón")),
-        has_lift=_yes_no(params.get("výtah")),
-        cellar=_yes_no(params.get("sklep")),
-        terrace=_yes_no(params.get("terasa")),
-        garage=_yes_no(params.get("garáž")),
-        has_parking=_yes_no(params.get("parkovací stání")) or _yes_no(params.get("garáž")),
+        has_balcony=vocabulary.yes_no(read("has_balcony")),
+        has_lift=vocabulary.yes_no(read("has_lift")),
+        terrace=vocabulary.yes_no(read("terrace")),
+        garage=vocabulary.yes_no(read("garage")),
+        has_parking=vocabulary.yes_no(read("has_parking")) or vocabulary.yes_no(read("garage")),
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,
         description=description,

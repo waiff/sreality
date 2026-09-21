@@ -21,6 +21,7 @@ from typing import Any
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.floor import floor_from_text
 from scraper.price_text import is_per_area_price
@@ -70,7 +71,6 @@ _ID_RE = re.compile(r"/inzerat/(\d+)/")
 _PSC_RE = re.compile(r"\b(\d{3})\s?(\d{2})\b")
 _MAP_LABEL_RE = re.compile(r"(?i)\bzobrazit na map[ěe]\b")
 _COORD_RE = re.compile(r"(-?\d{1,3}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 # bazos serves /img/N/ (full ~1200px) and /img/Nt/ (thumbnail ~340px) for the same
 # photo; a detail page shows the full cover plus the whole thumbnail strip.
 _BAZOS_THUMB_RE = re.compile(r"/img/(\d+)t/")
@@ -187,13 +187,6 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
         return None, unit
     digits = re.sub(r"\D", "", m.group(0))
     return (int(digits) if digits else None), unit
-
-
-def _parse_disposition(text: str) -> str | None:
-    m = _DISPOSITION_RE.search(text)
-    if not m:
-        return None
-    return f"{m.group(1)}+{m.group(2).lower()}"
 
 
 def _parse_coords(href: str | None) -> tuple[float | None, float | None]:
@@ -572,7 +565,7 @@ def parse_detail(
         price_unit=price_unit,
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
-        disposition=_parse_disposition(haystack),
+        disposition=vocabulary.disposition(haystack),
         floor=floor,
         total_floors=total_floors,
         locality=locality,

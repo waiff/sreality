@@ -7,7 +7,6 @@ detail <dl> spec table, the fancybox gallery, and the embedded map config
 from __future__ import annotations
 
 from scraper.idnes_parser import (
-    _norm_ownership,
     category_from_url,
     index_price,
     parse_detail,
@@ -457,13 +456,6 @@ def test_price_per_m2_never_masquerades_as_absolute():
     assert index_price("4 990 000 Kč (4 008 Kč/m² )") == 4_990_000
 
 
-def test_norm_ownership_canonical_only():
-    assert _norm_ownership("Osobní") == "osobni"
-    assert _norm_ownership("Družstevní") == "druzstevni"
-    # idnes free-text outside the canonical filter set must not leak through
-    assert _norm_ownership("Jiné") is None
-    assert _norm_ownership("s.r.o.") is None
-    assert _norm_ownership("Podílové") is None
 
 
 def test_parse_detail_strips_mortgage_cta_from_raw_price_fields():
@@ -512,11 +504,11 @@ def test_uzitna_beats_podlahova_and_says_so():
     assert listing.usable_area == 69.0
 
 
-def test_podlahova_alone_is_a_floor_area_and_never_a_uzitna():
-    """W21. `usable_area` used to be `užitná or podlahová or plocha`, so a page stating
-    only "Podlahová plocha" wrote that number into the column every consumer reads as
-    the užitná measure. The label still reaches the HEADLINE through its own typed slot,
-    carrying its own basis; what it no longer does is impersonate a third label."""
+def test_a_podlahova_row_reaches_no_column_at_all():
+    """W21 guarded the collapse where "Podlahová plocha" impersonated a užitná. The key
+    is DEAD on this portal — absent from the census, from the newest 2,500 stored rows,
+    and from `area_basis`, which has never held `floor` on any of 249,409 idnes rows —
+    so it is no longer read at all and the collapse is closed by construction (A1)."""
     html = DETAIL_HTML.replace(
         "<dt>Užitná plocha</dt><dd>69 m<sup>2</sup></dd>",
         "<dt>Podlahová plocha</dt><dd>75 m<sup>2</sup></dd>",
@@ -524,8 +516,8 @@ def test_podlahova_alone_is_a_floor_area_and_never_a_uzitna():
     listing = parse_detail(
         html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
     )
-    assert (listing.area_m2, listing.area_basis) == (75.0, "floor")
     assert listing.usable_area is None
+    assert listing.area_basis != "usable"
 
 
 def test_the_area_derivation_is_one_function_both_callers_share():

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from scraper import vocabulary
 from scraper.parser import SUBTYPE, parse_images, parse_listing
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -260,19 +261,32 @@ def test_category_fields(sample):
     assert row["ownership"] == "osobni"
 
 
-def test_furnished_known_code():
-    row = parse_listing(_estate(furnished={"name": "Vybaveno", "value": 1}))
-    assert row["furnished"] == "ano"
+def test_furnished_reads_the_label_not_the_code():
+    # The enum's NAME is what the one vocabulary maps; sreality's own code was a second
+    # spelling of the same three values and is no longer consulted.
+    assert parse_listing(_estate(furnished={"name": "Ano", "value": 1}))["furnished"] == "ano"
+    assert parse_listing(_estate(furnished={"name": "Ne", "value": 2}))["furnished"] == "ne"
 
 
-def test_furnished_unknown_code_returns_none():
-    row = parse_listing(_estate(furnished={"name": "?", "value": 99}))
+def test_the_unset_dropdown_is_absence_not_a_value():
+    # sreality spells the empty option of every dropdown with a leading dash. It is a
+    # declared sentinel, so it yields None WITHOUT being counted as an unmapped label.
+    vocabulary.take_unmapped()
+    row = parse_listing(_estate(furnished={"name": "- vyber vybavení", "value": 0}))
     assert row["furnished"] is None
+    assert vocabulary.take_unmapped() == []
 
 
-def test_ownership_unknown_code_returns_none():
-    row = parse_listing(_estate(ownership={"name": "?", "value": 99}))
+def test_a_label_nothing_maps_is_null_and_counted():
+    vocabulary.take_unmapped()
+    row = parse_listing(_estate(ownership={"name": "Spoluvlastnický podíl", "value": 99}))
     assert row["ownership"] is None
+    assert vocabulary.take_unmapped() == [
+        ("ownership/sreality/spoluvlastnicky_podil", 1)
+    ]
+    # Drained: the always-on worker reads this once per pass, so a label counted on one
+    # pass must not be re-reported on the next.
+    assert vocabulary.take_unmapped() == []
 
 
 def test_amenities_missing_returns_none():

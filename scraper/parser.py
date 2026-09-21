@@ -11,13 +11,16 @@ is `hash_id`.
 
 from __future__ import annotations
 
-import re
+from functools import partial
 from typing import Any
 from unicodedata import combining, normalize
 
-from scraper import sreality_url
+from scraper import sreality_url, vocabulary
 from scraper.area import derive_headline_area
+from scraper.attribute_contract import source_label, source_value, source_values
 from scraper.published import iso_date
+
+SOURCE = "sreality"
 
 CATEGORY_MAIN: dict[int, str] = {
     1: "byt",
@@ -38,21 +41,6 @@ CATEGORY_TYPE: dict[int, str] = {
     4: "podil",
 }
 
-# Sreality enum codes for the structured fields we promote to typed columns.
-# Unknown codes (including 0, which sreality uses for "not specified") return
-# None instead of raising. Czech labels stored without diacritics to match
-# the convention for category_main / category_type values.
-FURNISHED: dict[int, str] = {
-    1: "ano",       # vybaveno
-    2: "ne",        # nevybaveno
-    3: "castecne",  # částečně vybaveno
-}
-
-OWNERSHIP: dict[int, str] = {
-    1: "osobni",      # osobní
-    2: "druzstevni",  # družstevní
-    3: "statni",      # státní/obecní
-}
 
 # Portal-agnostic property sub-type, normalized from sreality's category_sub_cb
 # code. House (dum) and commercial (komercni) codes occupy disjoint integer
@@ -86,27 +74,8 @@ SUBTYPE: dict[int, str] = {
     49: "virtualni_kancelar",   # Virtuální kancelář
 }
 
-_DISPOSITION_RE = re.compile(r"\b(\d\+(?:kk|\d))\b", re.IGNORECASE)
-_ENERGY_CLASS_RE = re.compile(r"\s*([A-G])\b")
 
-_BUILDING_TYPE_TEXT: dict[str, str] = {
-    "cihlova": "cihla",
-    "panelova": "panel",
-    "smisena": "smisena",
-    "skeletova": "skelet",
-    "drevena": "drevo",
-    "drevostavba": "drevo",
-    "kamenna": "kamen",
-    "montovana": "montovana",
-    "nizkoenergeticka": "nizkoenergeticka",
-}
 
-# For a reserved/sold listing sreality overlays the sale STATUS onto the
-# building_condition / building_type param names ("Rezervováno", "Prodáno").
-# Reject it (→ None) so a status label never lands in an attribute column,
-# where it would corrupt the condition / building_type filters and feed
-# garbage into condition scoring. The real value is genuinely absent here.
-_STATUS_OVERLAY: frozenset[str] = frozenset({"rezervovano", "prodano"})
 
 
 def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +90,8 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
     # which it publishes on every land row and this parser used to keep OUT of the
     # headline (44,237 of 44,237 land rows carried area_m2 NULL). Both reach the one
     # resolver; which of them becomes the headline is the resolver's call, not ours.
+    read = partial(source_value, SOURCE, params=raw)
+    label = partial(source_label, SOURCE, params=raw)
     estate_area = _numeric_or_none(raw.get("estate_area"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
@@ -136,26 +107,28 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "price_unit": _price_unit(raw),
         "area_m2": area_m2,
         "area_basis": area_basis,
-        "disposition": _disposition(raw),
-        "floor": _int_or_none(raw.get("floor_number")),
-        "total_floors": _int_or_none(raw.get("floors")),
-        "has_balcony": _has_balcony(raw),
-        "has_parking": _has_parking(raw),
-        "has_lift": _elevator(raw.get("elevator")),
-        "building_type": _building_type(raw.get("building_type")),
-        "condition": _condition(raw.get("building_condition")),
-        "energy_rating": _energy_rating(raw.get("energy_efficiency_rating_cb")),
+        "disposition": vocabulary.disposition(
+            *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
+        ),
+        "floor": _int_or_none(read("floor")),
+        "total_floors": _int_or_none(read("total_floors")),
+        "has_balcony": _any_of(source_values(SOURCE, "has_balcony", raw)),
+        "has_parking": _any_of(source_values(SOURCE, "has_parking", raw)),
+        "has_lift": vocabulary.yes_no(label("has_lift")),
+        "building_type": vocabulary.canonical("building_type", SOURCE, label("building_type")),
+        "condition": vocabulary.canonical("condition", SOURCE, label("condition")),
+        "energy_rating": vocabulary.energy_rating(label("energy_rating")),
         "estate_area": estate_area,
-        "usable_area": _numeric_or_none(raw.get("usable_area")),
-        "garden_area": _numeric_or_none(raw.get("garden_area")),
-        "category_sub_cb": _cb_value(raw.get("category_sub_cb")),
-        "subtype": SUBTYPE.get(_cb_value(raw.get("category_sub_cb"))),
-        "furnished": FURNISHED.get(_cb_value(raw.get("furnished"))),
-        "terrace": _bool_or_none(raw.get("terrace")),
-        "cellar": _bool_or_none(raw.get("cellar")),
-        "garage": _bool_or_none(raw.get("garage")),
-        "parking_lots": _int_or_none(raw.get("parking")),
-        "ownership": OWNERSHIP.get(_cb_value(raw.get("ownership"))),
+        "usable_area": _numeric_or_none(read("usable_area")),
+        "garden_area": _numeric_or_none(read("garden_area")),
+        "category_sub_cb": _cb_value(read("category_sub_cb")),
+        "subtype": SUBTYPE.get(_cb_value(read("subtype"))),
+        "furnished": vocabulary.canonical("furnished", SOURCE, label("furnished")),
+        "terrace": vocabulary.yes_no(read("terrace")),
+        "cellar": vocabulary.yes_no(read("cellar")),
+        "garage": vocabulary.yes_no(read("garage")),
+        "parking_lots": _int_or_none(read("parking_lots")),
+        "ownership": vocabulary.canonical("ownership", SOURCE, label("ownership")),
         "description": _description(raw),
         # sreality exposes no publish date — `edited` (day-granular last-edit,
         # present on ~40% of rows) is the weak fallback bound for publish-to-
@@ -197,6 +170,21 @@ def parse_images(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _cb_name(obj: Any) -> str | None:
+    """A `{name, value}` enum's label, or the string itself (`advert_name`)."""
+    if isinstance(obj, dict):
+        name = obj.get("name")
+        return name if isinstance(name, str) else None
+    return obj if isinstance(obj, str) else None
+
+
+def _any_of(values: tuple[Any, ...]) -> bool | None:
+    """The legacy combined boolean: None while every signal is silent, else any-true."""
+    if all(v is None for v in values):
+        return None
+    return any(bool(v) for v in values)
+
+
 def _cb_value(obj: Any) -> int | None:
     """Integer enum code from a {name, value} object; 0 ('not specified') → None."""
     if isinstance(obj, dict):
@@ -228,89 +216,12 @@ def _price_unit(raw: dict[str, Any]) -> str | None:
     return None
 
 
-def _disposition(raw: dict[str, Any]) -> str | None:
-    for source in (
-        (raw.get("category_sub_cb") or {}).get("name"),
-        raw.get("advert_name"),
-    ):
-        if isinstance(source, str):
-            match = _DISPOSITION_RE.search(source)
-            if match:
-                return match.group(1).lower()
-    return None
-
-
 def _description(raw: dict[str, Any]) -> str | None:
     val = raw.get("advert_description")
     if not isinstance(val, str):
         return None
     val = val.strip()
     return val or None
-
-
-def _has_balcony(raw: dict[str, Any]) -> bool | None:
-    vals = [raw.get(k) for k in ("balcony", "terrace", "loggia")]
-    if all(v is None for v in vals):
-        return None
-    return any(bool(v) for v in vals)
-
-
-def _has_parking(raw: dict[str, Any]) -> bool | None:
-    vals = [raw.get(k) for k in ("parking_lots", "garage", "parking")]
-    if all(v is None for v in vals):
-        return None
-    return any(bool(v) for v in vals)
-
-
-def _elevator(obj: Any) -> bool | None:
-    if not isinstance(obj, dict):
-        return None
-    if _cb_value(obj) is None:  # value 0 / unspecified
-        return None
-    name = _strip_diacritics(str(obj.get("name", "")).lower())
-    if name.startswith("ano"):
-        return True
-    if name.startswith("ne"):
-        return False
-    return None
-
-
-def _building_type(obj: Any) -> str | None:
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    key = _strip_diacritics(name.strip().lower())
-    if key.startswith("-") or "vyber" in key or "nezadano" in key or key in _STATUS_OVERLAY:
-        return None
-    return _BUILDING_TYPE_TEXT.get(key, key)
-
-
-def _condition(obj: Any) -> str | None:
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-    key = _strip_diacritics(name.strip().lower())
-    if key.startswith("-") or "vyber" in key or key in _STATUS_OVERLAY:
-        return None
-    # Diacritic-free, underscore-joined to match the schema convention and the
-    # existing canonical values (e.g. "velmi_dobry", "po_rekonstrukci"); the
-    # legacy condition filter binds against this column.
-    return key.replace(" ", "_")
-
-
-def _energy_rating(obj: Any) -> str | None:
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name")
-    if isinstance(name, str):
-        match = _ENERGY_CLASS_RE.match(name)
-        if match:
-            return match.group(1).upper()
-    return None
 
 
 def _strip_diacritics(text: str) -> str:
@@ -340,12 +251,3 @@ def _numeric_or_none(value: Any) -> float | None:
     return None
 
 
-def _bool_or_none(value: Any) -> bool | None:
-    """Sreality returns true/false (or 0/1) for amenity flags; missing → None."""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return None

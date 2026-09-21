@@ -30,16 +30,20 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from html import unescape
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper import street
+from scraper import street, vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
+from scraper.attribute_contract import source_value, source_values
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
+
+SOURCE = "realitymix"
 
 # realitymix family/offer URL segments -> our canonical labels (mirrors
 # parser.CATEGORY_*). chaty -> dum (sreality lumps chata/chalupa under "dům",
@@ -57,31 +61,6 @@ CATEGORY_MAIN: dict[str, str] = {
     "ostatni": "ostatni",
 }
 
-# realitymix "Druh objektu" labels (diacritics-stripped) -> the SAME canonical
-# construction codes the sreality parser emits. "zděná" -> sreality's dominant
-# solid-masonry "cihla"; unknowns pass through rather than mis-map.
-BUILDING_TYPE: dict[str, str] = {
-    "panelova": "panel",
-    "cihlova": "cihla",
-    "zdena": "cihla",
-    "smisena": "smisena",
-    "skeletova": "skelet",
-    "drevena": "drevo",
-    "kamenna": "kamen",
-    "montovana": "montovana",
-    "nizkoenergeticka": "nizkoenergeticka",
-}
-# realitymix "Stav objektu" labels (diacritics-stripped) -> sreality's canonical
-# condition vocabulary. The already-matching values pass through; only the
-# divergent ones are mapped.
-CONDITION: dict[str, str] = {
-    "bezvadny": "velmi_dobry",
-    "k_rekonstrukci": "pred_rekonstrukci",
-    "rozestaveny": "ve_vystavbe",
-    "ve_vystavbe": "ve_vystavbe",
-    "v_puvodnim_stavu": "dobry",
-}
-
 # Czech-bbox guard: a coordinate outside it — a swapped lat/lon or a bad pin — is
 # dropped rather than stored as geom.
 _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
@@ -89,9 +68,7 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The numeric listing id is the trailing "-1234567.html" of the detail URL.
 _ID_RE = re.compile(r"-(\d{4,})\.html\b")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(-?\d+)")
-_ENERGY_RE = re.compile(r"\b([A-G])\b")
 _PRICE_RUN_RE = re.compile(r"\d[\d\s  ​]*")
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # Result total on the search page ("výsledky 1-20 z celkem 8928 nalezených").
@@ -210,15 +187,6 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if 0 < value <= _PRICE_MAX else None), unit
 
 
-def _parse_disposition(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _DISPOSITION_RE.search(text)
-    if not m:
-        return None
-    return f"{m.group(1)}+{m.group(2).lower()}"
-
-
 def _parse_int(text: str | None) -> int | None:
     if not text:
         return None
@@ -234,70 +202,6 @@ def _parse_floor(text: str | None) -> int | None:
         return 0
     m = _INT_RE.search(low)
     return int(m.group(1)) if m else None
-
-
-def _norm_condition(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    key = re.sub(r"\s+stav$", "", key)
-    key = re.sub(r"[\s,/]+", "_", key).strip("_")
-    return CONDITION.get(key, key or None)
-
-
-def _norm_ownership(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    if "druzstev" in key:
-        return "druzstevni"
-    if "osob" in key or "soukrom" in key:
-        return "osobni"
-    if "statni" in key or "obecni" in key:
-        return "statni"
-    return key or None
-
-
-def _norm_furnished(text: str | None) -> str | None:
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if "castec" in low:
-        return "castecne"
-    if low.startswith("ne") or "neza" in low or "nevyba" in low:
-        return "ne"
-    if low.startswith("ano") or "zariz" in low or "vybav" in low:
-        return "ano"
-    return None
-
-
-def _norm_building_type(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text.strip().lower())
-    return BUILDING_TYPE.get(key, key or None)
-
-
-def _energy_rating(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _ENERGY_RE.search(text)
-    return m.group(1).upper() if m else None
-
-
-def _field_present(params: dict[str, str], *keys: str) -> bool | None:
-    """An amenity realitymix renders as its own labelled spec row ("Balkon: 4 m²")
-    -> True on presence (the label IS the amenity, the value is its size); an
-    explicit "Ne"/"Bez"/"0" value -> False; the row absent -> None (unknown)."""
-    for key in keys:
-        value = params.get(key)
-        if value is None:
-            continue
-        low = _strip_diacritics(value).lower().strip()
-        if low.startswith("ne") or low.startswith("bez") or low in ("0", "0 m2", "0 m²"):
-            return False
-        return True
-    return None
 
 
 def category_from_breadcrumb(html: str) -> tuple[str | None, str | None]:
@@ -542,33 +446,33 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """realitymix's area cells, in ITS precedence — spelled here once and nowhere else.
+    """realitymix's area slots — the KEYS are the contract's, this owns the measure.
 
-    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
-    reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. realitymix renders its spec values UNSPACED, so the truncation this heal
-    repairs reached its rows through the title fallback below.
+    `parse_detail` reads it off a live page, and `scripts/reparse.py` replays `parse_detail`
+    over the stored page, so there is one reading of these keys. realitymix renders its spec
+    values UNSPACED, so the spaced-thousands truncation (healed 2026-09) reached its rows
+    through the title fallback below.
+
+    The `plocha pozemku` / `výměra pozemku` / `podlahová plocha` fallbacks and the
+    `plocha zahrady` garden read are gone: realitymix emits none of them on any row of the
+    checked-in census or of 3,700 stored rows sampled at both ends of the corpus. The
+    garden measure it DOES publish is spelled `zahrada` and is W4's to wire (gate A1).
     """
-    usable_area = parse_area_text(params.get("užitná plocha"))
-    estate_area = parse_area_text(
-        params.get("plocha parcely")
-        or params.get("plocha pozemku")
-        or params.get("výměra pozemku")
-    )
+    usable_text, floor_text, total_text, plot_text = source_values(
+        SOURCE, "area_m2", params)
+    usable_area = parse_area_text(usable_text)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=usable_area,
-        floor=parse_area_text(
-            params.get("celková podlahová plocha") or params.get("podlahová plocha")
-        ),
-        total=parse_area_text(params.get("plocha")),
+        floor=parse_area_text(floor_text),
+        total=parse_area_text(total_text),
         plot=estate_area,
         fallback=parse_area_text(title),
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis, usable_area=usable_area,
-        estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        estate_area=estate_area, garden_area=None,
     )
 
 
@@ -577,12 +481,11 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     source_id = _id_from_href(source_url) or ""
     category_main, category_type = resolve_category(html, source_url)
     params = _detail_params(tree)
+    read = partial(source_value, SOURCE, params=params)
 
     title = _text(tree.css_first("h1")) or ""
 
-    price_czk, price_unit = _parse_price(
-        params.get("cena") or _detail_price_text(tree), category_type,
-    )
+    price_czk, price_unit = _parse_price(_detail_price_text(tree), category_type)
 
     lat, lon, coord_provenance = _resolve_coords(html)
     street_raw, obec, okres, full_address = _address_parts(html)
@@ -602,7 +505,6 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     locality = full_address or obec or _fallback_locality(source_url, street_name)
 
     areas = areas_from_params(params, title=title, category_main=category_main)
-    other = _strip_diacritics(params.get("ostatní", "")).lower()
 
     description = _text(
         tree.css_first("div.advert-description__text-inner-inner")
@@ -622,7 +524,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     }
 
     return ScrapedListing(
-        source="realitymix",
+        source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
         category_main=category_main,
@@ -632,27 +534,26 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=_parse_disposition(params.get("dispozice bytu") or params.get("dispozice"))
-        or _parse_disposition(title),
+        disposition=vocabulary.disposition(read("disposition"), title),
         locality=locality,
         district=okres,
         street=street_name,
         house_number=house_number,
         lat=lat,
         lon=lon,
-        floor=_parse_floor(params.get("číslo podlaží v domě") or params.get("podlaží")),
-        total_floors=_parse_int(params.get("počet podlaží objektu")),
-        has_balcony=_field_present(params, "balkon", "balkón", "lodžie"),
-        terrace=_field_present(params, "terasa"),
-        garage=("garaz" in other) or _field_present(params, "garáž") or None,
-        has_parking=("parkov" in other or "garaz" in other) or None,
-        building_type=_norm_building_type(params.get("druh objektu") or params.get("konstrukce")),
-        condition=_norm_condition(params.get("stav objektu")),
-        ownership=_norm_ownership(params.get("vlastnictví")),
-        furnished=_norm_furnished(params.get("vybaveno") or params.get("vybavení")),
-        energy_rating=_energy_rating(
-            params.get("energetická náročnost budovy") or params.get("energetická náročnost")
-        ),
+        floor=_parse_floor(read("floor")),
+        total_floors=_parse_int(read("total_floors")),
+        # Each amenity is its OWN labelled row whose value is the size ("Balkon: 4 m²"),
+        # so the label is the fact and the value only ever negates it.
+        has_balcony=vocabulary.present(read("has_balcony")),
+        terrace=vocabulary.present(read("terrace")),
+        garage=vocabulary.mentions(read("garage"), "garaz"),
+        has_parking=vocabulary.mentions(read("has_parking"), "parkov", "garaz"),
+        building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
+        condition=vocabulary.canonical("condition", SOURCE, read("condition")),
+        ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
+        furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
+        energy_rating=vocabulary.energy_rating(read("energy_rating")),
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,
         description=description,

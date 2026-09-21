@@ -24,13 +24,16 @@ import html as ihtml
 import json
 import re
 from dataclasses import dataclass, field
+from functools import partial
 from collections.abc import Mapping
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area
+from scraper.attribute_contract import source_label, source_value, source_values
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street, street_from_locality
 
@@ -51,39 +54,7 @@ CATEGORY_MAIN: dict[str, str] = {
     "ostatni": "ostatni",
 }
 
-# Construction labels -> the canonical codes parser._BUILDING_TYPE_TEXT emits,
-# so a cross-portal "panel" filter matches sreality / idnes / mmreality alike.
-BUILDING_TYPE: dict[str, str] = {
-    "panelova": "panel",
-    "cihlova": "cihla",
-    "smisena": "smisena",
-    "skeletova": "skelet",
-    "drevena": "drevo",
-    "kamenna": "kamen",
-    "montovana": "montovana",
-    "nizkoenergeticka": "nizkoenergeticka",
-}
-OWNERSHIP: dict[str, str] = {
-    "osobni": "osobni",
-    "druzstevni": "druzstevni",
-    "statni": "statni",
-    "obecni": "statni",
-}
 
-# Canonical typed-enum vocabularies — the value space the Browse filters, dedup,
-# condition scoring and the MF-yield SQL key on. mmreality's free-text enums are
-# mapped INTO these and anything outside is dropped to None — the same
-# canonical-or-None discipline as _ownership. The lever: mmreality uses the
-# placeholder "neuvedeno" ("not specified") as its sentinel (seen live on
-# `construction`, near-certain on `condition`); the old free-text passthrough
-# leaked it into the typed columns, where it matches no filter option.
-_BUILDING_TYPE_CANON: frozenset[str] = frozenset(BUILDING_TYPE.values())
-# The sreality "Stav objektu" value space (the cross-portal condition vocabulary,
-# verified against the live distribution of listings.condition).
-_CONDITION_CANON: frozenset[str] = frozenset({
-    "novostavba", "velmi_dobry", "dobry", "po_rekonstrukci", "pred_rekonstrukci",
-    "ve_vystavbe", "projekt", "v_rekonstrukci", "spatny", "k_demolici",
-})
 
 # Czech-bbox guard: a coordinate outside it (a swapped lat/lon or a foreign
 # point) is dropped rather than stored as geom.
@@ -91,7 +62,6 @@ _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
 _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 _ID_RE = re.compile(r"/nemovitosti/(\d+)/?")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _PAGE_RE = re.compile(r"[?&]page=(\d+)")
 # The Vue prop is HTML-entity-encoded (&quot;), so the only literal double quotes
 # in the attribute are its delimiters — `[^"]*` captures the whole blob cleanly.
@@ -139,14 +109,6 @@ def _to_float(v: Any) -> float | None:
     return float(m.group(0).replace(",", ".")) if m else None
 
 
-def _to_bool(v: Any) -> bool | None:
-    s = str(v).strip().lower()
-    if s in ("true", "1", "ano"):
-        return True
-    if s in ("false", "0", "ne"):
-        return False
-    return None
-
 
 def _in_cz_bbox(lat: float, lon: float) -> bool:
     return _CZ_LAT_MIN <= lat <= _CZ_LAT_MAX and _CZ_LON_MIN <= lon <= _CZ_LON_MAX
@@ -159,14 +121,18 @@ def _id_from_url(url: str | None) -> str | None:
     return m.group(1) if m else None
 
 
-def _disposition(*texts: str | None) -> str | None:
-    for text in texts:
-        if not text:
-            continue
-        m = _DISPOSITION_RE.search(text)
-        if m:
-            return f"{m.group(1)}+{m.group(2).lower()}"
-    return None
+
+def _name_of(obj: Any) -> str | None:
+    """A `{id, name}` enum's label, or the string itself (`title`)."""
+    if isinstance(obj, dict):
+        name = obj.get("name")
+        return name if isinstance(name, str) else None
+    return obj if isinstance(obj, str) else None
+
+
+def _code_of(obj: Any) -> str | None:
+    """mmreality states the PENB class in `energyClassification.code`, not `.name`."""
+    return str((obj or {}).get("code") or "") or None if isinstance(obj, dict) else None
 
 
 def _category_type(obj: dict[str, Any]) -> str | None:
@@ -191,42 +157,6 @@ def _category_main(obj: dict[str, Any]) -> str | None:
         return "komercni"
     return "ostatni"
 
-
-def _building_type(obj: dict[str, Any]) -> str | None:
-    key = _norm_key((obj.get("construction") or {}).get("name"))
-    if not key:
-        return None
-    # Real values are nouns (Cihla/Panel/Smíšená) that already equal a canonical
-    # code, so .get falls through; the canonical guard then drops "neuvedeno" and
-    # any other non-canonical label instead of leaking it.
-    cand = BUILDING_TYPE.get(key, key)
-    return cand if cand in _BUILDING_TYPE_CANON else None
-
-
-def _condition(obj: dict[str, Any]) -> str | None:
-    key = _norm_key((obj.get("condition") or {}).get("name"))
-    if not key:
-        return None
-    key = re.sub(r"\s+stav$", "", key)   # defensive: match idnes's "… stav" stripping
-    cand = re.sub(r"\s+", "_", key)
-    return cand if cand in _CONDITION_CANON else None
-
-
-def _ownership(obj: dict[str, Any]) -> str | None:
-    key = _norm_key((obj.get("ownership") or {}).get("name"))
-    if not key:
-        return None
-    # Canonical set only ({osobni, druzstevni, statni}); unmapped labels → None
-    # rather than leaking a value no ownership filter option can match.
-    return OWNERSHIP.get(key)
-
-
-def _energy_rating(obj: dict[str, Any]) -> str | None:
-    code = (obj.get("energyClassification") or {}).get("code")
-    if not code:
-        return None
-    m = re.search(r"[A-G]", str(code).upper())
-    return m.group(0) if m else None
 
 
 def _coords(obj: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -312,19 +242,6 @@ def _image_urls(obj: dict[str, Any]) -> list[str]:
             urls.append(url)
     return urls
 
-
-def _accessory_names(obj: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
-    for group in obj.get("accessoryGroups") or []:
-        for acc in (group or {}).get("accessories") or []:
-            key = _norm_key((acc or {}).get("name"))
-            if key:
-                names.add(key)
-    return names
-
-
-def _has_any(names: set[str], *needles: str) -> bool | None:
-    return True if any(n in name for name in names for n in needles) else None
 
 
 class NoPropertyObject(ValueError):
@@ -475,14 +392,6 @@ def index_price(text: str | None) -> int | None:
     return _to_int(text)
 
 
-# The estate-object keys `areas_from_params` below reads. EXPORTED so the W19 heal can
-# project exactly these out of `raw_json` without respelling them (rule 21): a heal that
-# names its own key list is a second copy of the key order, one field at a time.
-# `tests/scripts/test_backfill_area_spaced_thousands.py` proves the set is sufficient —
-# an object carrying only these keys still yields every area column.
-AREA_OBJECT_KEYS: tuple[str, ...] = ("usableArea", "parcelArea", "gardenArea")
-
-
 def areas_from_params(
     obj: Mapping[str, Any],
     *,
@@ -493,8 +402,8 @@ def areas_from_params(
     `obj` is the embedded `:property` estate object, which `parse_detail` stores whole
     under `listings.raw_json` (`raw = dict(obj)`), so these are TOP-LEVEL raw_json keys
     rather than the `params` spec-cell map the HTML portals carry. `parse_detail` reads it
-    off a live page and `scripts/backfill_area_spaced_thousands` off that stored reading of
-    the same page — one key order, read twice (rule 21).
+    off a live page and `scripts/reparse.py` replays `parse_detail` over the stored page —
+    one key order, read twice (rule 21).
 
     THE PARCEL IS `parcelArea` ("Plocha parcely"), and that is the whole of W21 here. The
     chain this replaced read `landArea or plotArea or totalArea`: on 14,417 stored rows
@@ -558,16 +467,19 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     street = clean_street(
         obj.get("street") if isinstance(obj.get("street"), str) else None
     ) or _title_street(obj, locality, district, lat, lon)
-    accessories = _accessory_names(obj)
-    parking_lots = _to_int(obj.get("parkingPlaces"))
-    overground = _to_int(obj.get("overgroundFloors"))
-    underground = _to_int(obj.get("undergroundFloors"))
+    read = partial(source_value, SOURCE, params=obj)
+    label = partial(source_label, SOURCE, params=obj)
+    accessories = vocabulary.accessory_names(obj.get("accessoryGroups"))
+    parking_lots = _to_int(read("parking_lots"))
+    overground, underground = (_to_int(v) for v in
+                               source_values(SOURCE, "total_floors", obj))
     total_floors = (
         (overground or 0) + (underground or 0)
         if overground is not None or underground is not None
         else None
     )
 
+    cellar_flag, _ = source_values(SOURCE, "cellar", obj)
     areas = areas_from_params(obj, category_main=category_main)
 
     image_urls = _image_urls(obj)
@@ -586,7 +498,9 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=_disposition((obj.get("type") or {}).get("name"), obj.get("title")),
+        disposition=vocabulary.disposition(
+            *(_name_of(v) for v in source_values(SOURCE, "disposition", obj))
+        ),
         locality=locality,
         district=district,
         # Structured street first; else the originalTitle "ul. <Street>"
@@ -594,22 +508,23 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         street=street,
         lat=lat,
         lon=lon,
-        floor=_to_int(obj.get("floor")),
+        floor=_to_int(read("floor")),
         total_floors=total_floors,
-        building_type=_building_type(obj),
-        condition=_condition(obj),
-        ownership=_ownership(obj),
-        energy_rating=_energy_rating(obj),
-        has_lift=_to_bool(obj.get("lift")),
+        building_type=vocabulary.canonical("building_type", SOURCE, label("building_type")),
+        condition=vocabulary.canonical("condition", SOURCE, label("condition")),
+        ownership=vocabulary.canonical("ownership", SOURCE, label("ownership")),
+        energy_rating=vocabulary.energy_rating(_code_of(read("energy_rating"))),
+        has_lift=vocabulary.yes_no(read("has_lift")),
         cellar=(
-            _to_bool(obj.get("cellar"))
-            if obj.get("cellar") is not None
-            else _has_any(accessories, "sklep")
+            vocabulary.yes_no(cellar_flag)
+            if cellar_flag is not None
+            else vocabulary.mentions(accessories, "sklep")
         ),
-        has_balcony=_has_any(accessories, "balkon", "lodzie"),
-        terrace=_has_any(accessories, "terasa"),
-        garage=_has_any(accessories, "garaz"),
-        has_parking=(True if parking_lots else _has_any(accessories, "parkov", "garaz")),
+        has_balcony=vocabulary.mentions(accessories, "balkon", "lodzie"),
+        terrace=vocabulary.mentions(accessories, "terasa"),
+        garage=vocabulary.mentions(accessories, "garaz"),
+        has_parking=(True if parking_lots
+                     else vocabulary.mentions(accessories, "parkov", "garaz")),
         parking_lots=parking_lots,
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,

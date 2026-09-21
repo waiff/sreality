@@ -18,6 +18,34 @@ which workflows run each portal, their crons, dispatch inputs, and log lines —
 `scraper-ops` skill; cross-source grouping is rule #15 (and, for the rebuild in progress,
 `docs/design/new-dedup/PROGRAM.md`).
 
+**Where a typed attribute comes from is DECLARED, not discovered (field-capture W2).** Every
+narrative below says its typed fields are "normalised to the same canonical labels sreality
+emits". That is now one table and one module rather than nine copies of each:
+
+- **`scraper/attribute_contract.py`** — the ATTRIBUTE contract: one cell per (portal, typed
+  column), all 9 × 26 declared, carrying the producer (`structured` = named payload keys,
+  `text` = mined from the ad prose, `derived` = the URL/breadcrumb/title, `none`), the source-key
+  PRECEDENCE (replacing the inline `params.get(a) or params.get(b)` chains), what a MISSING key
+  means (`false` on bezrealitky's real booleans, `unknown` everywhere else), the default
+  sentinels, and — for a cell nothing fills — the census key a later wave will wire.
+  Not to be confused with the LOCATION contract in `contracts/portals/*.yaml`: that one is
+  governed by a hash tied to a re-minable claim corpus, and typed attributes are deliberately
+  NOT a seventh top-level key there (`location_data/contracts.py` `_TOP_LEVEL_KEYS`).
+- **`scraper/vocabulary.py`** — the producer side of the vocabulary: one diacritic fold, one
+  `(field, portal label) → canonical` registry, one disposition grammar, one PENB grammar and
+  the boolean readings. The CANON stays in `toolkit/filter_registry.py` and is imported, never
+  restated; the LLM tool schema's enums are generated from `known_values` (canon plus the
+  legacy spellings the columns still hold until W5) — except `disposition`, whose contract is
+  the grammar, not the Browse filter's pill list. A label no entry names is NULL **plus a
+  counted event** in the run summary (`RUN done … unmapped=N`), never a passthrough; the
+  counter is drained per drain pass, because the always-on worker runs every source's drain
+  in one long-lived process.
+- The evidence both answer to is the checked-in per-portal key census in
+  `data/field_capture/census/`, through gates A1 (no dead read), A2 (no unread emission ≥ 5%
+  that is neither mapped nor ignored with a reason) and A3 (no unmapped live value), plus the
+  characterisation goldens in `tests/fixtures/field_capture/golden/` — recorded from the
+  parsers as they stood before the module existed, so a value that moves is visible.
+
 **Data source (sreality v1 API).** In 2026 sreality rebuilt their site on Next.js and
 removed the old `/api/cs/v2/estates` API the scraper was born on. The scraper now
 reads the public JSON v1 API: `GET /api/v1/estates/search` (filters `category_main_cb`
@@ -1942,7 +1970,13 @@ renumber.** Navigate by area:
     that order is the same defect as a second copy of the grammar. So each parser exposes
     `areas_from_params(params, title=, category_main=)` (bazos, which has no spec table:
     `areas_from_text`) returning `scraper.area.PortalAreas`, and its own `parse_detail` calls
-    it. That is what makes the heal possible without a second implementation.
+    it. That is what makes the heal possible without a second implementation. Since W2 the
+    KEYS in that order are the attribute contract's: the five HTML-table portals unpack
+    `source_values(SOURCE, "area_m2", params)` in the slot order (usable, floor, total, plot)
+    the `area_m2` cell declares, so the gates can prove every one of them is a key the portal
+    emits — the restatement it replaced named seven keys no parser reads (which let the
+    portals go on publishing them unread) and omitted thirteen the parsers did read, every
+    one of the thirteen dead.
 
     `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) healed the
     stored rows **from `listings.raw_json` — the parser's own latest reading of the live
@@ -2013,11 +2047,9 @@ renumber.** Navigate by area:
     rows corpus-wide** (5 byt, 2 komerční, 11 dum and one inactive pozemek) whose page states
     neither input, and nothing on land, where `parcelArea` equals `totalArea` on every one of
     4,568 rows. mmreality is a JSON-object portal, so its function takes the estate
-    object (`raw_json` IS that object) rather than a `params` map and no title; it exported
-    `AREA_OBJECT_KEYS` so the deleted heal could project exactly the keys the parser reads
-    instead of respelling them. The seam replays `parse_detail` over the stored page instead,
-    so that export now has no consumer (handed to the field-capture W2 wave, which owns
-    `scraper/*_parser.py`).
+    object (`raw_json` IS that object) rather than a `params` map and no title; the
+    re-parse seam replays `parse_detail` over the stored page, so no second copy of that key
+    list exists anywhere.
 
     *`usable_area` is the "užitná plocha" label and nothing else.* idnes
     (`užitná or podlahová or plocha`) and ceskereality (`plocha užitná or užitná plocha or

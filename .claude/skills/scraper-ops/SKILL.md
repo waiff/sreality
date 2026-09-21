@@ -14,7 +14,10 @@ test / log helpers: `scripts/test-summary.sh` and `scripts/logs.sh <run-id> [pat
 
 1. Add the column with a new numbered migration (`alter table listings add column ...`). Never
    touch `001_initial.sql`.
-2. Update the parser in `scraper/parser.py` to extract the field.
+2. Declare the cell in `scraper/attribute_contract.py` for EVERY portal (producer, source-key
+   precedence, absence semantics, sentinels) and read it in the parser through `source_value` /
+   `source_label`; a label→value mapping belongs in `scraper/vocabulary.py`, never in the parser.
+   Gates A1–A3 (`tests/scraper/test_attribute_contract.py`) read the checked-in key census.
 3. Add it to `scraper/db.py` `LISTING_COLUMNS` + `_LISTING_COLUMN_PGTYPE` (covers BOTH write paths) and,
    for crawler portals, `scraped_listing._LISTING_FIELDS`; `_PRESERVE_IF_NULL_COLUMNS` only if a NULL must never erase.
 4. Backfill old rows from NARROW typed columns via a `scripts/backfill_*.py` dispatch job (never a
@@ -28,13 +31,11 @@ The LLM-driven parsers (`scraper/source_parsers/`) are tested against saved list
 months the fixtures need a refresh. Don't fetch live in tests — that would burn LLM credit and
 break offline runs.
 
-Refresh (CLI, fastest): `gh workflow run fetch-fixtures.yml --ref <branch>` (add `-f`
-inputs to override URLs). Or via the browser: GitHub repo → **Actions** → **Fetch + anonymize
-source HTML fixtures** → **Run workflow** → pick branch / optional URLs → **Run workflow**. It
-fetches each URL, runs the anonymization in `scripts/fetch_and_anonymize_fixtures.py`, and
-commits the resulting `*_sample.html` files back to the same branch. The skipif tests in
-`tests/scraper/test_source_parsers/test_real_fixtures.py` light up automatically once the files
-exist.
+Refresh (CLI, fastest): `gh workflow run fetch-fixtures.yml --ref <branch>` (add `-f` inputs to
+override URLs), or Actions → **Fetch + anonymize source HTML fixtures** → **Run workflow**. It
+fetches each URL, scrubs via `scripts/fetch_and_anonymize_fixtures.py` and commits the
+`*_sample.html` files back to the branch; the skipif tests in
+`tests/scraper/test_source_parsers/test_real_fixtures.py` light up once they exist.
 
 Anonymization scope: phones → `+420 XXX XXX XXX`, emails → `agent@example.cz`, street numbers
 (`123/45`) → `XXX/YY`. Listing prices and the surrounding HTML structure are preserved — public
@@ -121,7 +122,7 @@ fatal — so **a broken archive looks like a healthy scrape**: `portal_raw_pages
 `select source, count(*) filter (where contract_version is null) from portal_raw_payloads
 where page_kind = 'detail' group by 1;` is the backlog the lane's hash gate is working through.
 
-**One area rule per column (W19/W21).** `scraper.area.parse_area_text` is the ONLY area regex; ONE `areas_from_params` per portal (bazos `areas_from_text`; mmreality takes the estate OBJECT) that only `parse_detail` calls — never a second copy of a key order.
+**One area rule per column (W19/W21).** `scraper.area.parse_area_text` is the ONLY area regex; ONE `areas_from_params` per portal (bazos `areas_from_text`; mmreality takes the estate OBJECT) that only `parse_detail` calls — never a second copy of a key order. The KEYS are `attribute_contract`'s: the HTML portals unpack `source_values(SOURCE, "area_m2", params)` in the slot order (usable, floor, total, plot) the cell declares.
 mmreality's parcel is `parcelArea` (`landArea`/`plotArea` never filled; `totalArea` is DERIVED per category — never read it). `usable_area` = the "užitná plocha" label ONLY. Plot area for a READER is the `plot_area_m2` MEASURE (mig 534) — a COLUMN on browse_list/map_mv/listing_feed_public (mig 535), never `estate_area`.
 Heal via `reparse.yml` (`--source <portal> --fields area_m2,estate_area,usable_area,garden_area --allow-snapshot-deferral`), which replays `parse_detail` over the stored detail page: dispatch-only, dry-run default, one source per run, no R2. It NEVER blanks a stored value.
 
