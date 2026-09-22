@@ -2582,7 +2582,8 @@ def check_field_fill_matrix(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
     # second place. A zero whose cell still claims a producer is the loud case: the
     # portal states the fact, the contract says we read it, and nothing arrives.
     gaps = attribute_contract.known_gaps()
-    undeclared = sorted(key for key in zero_fill if key not in gaps)
+    inert = attribute_contract.inert_cells()
+    undeclared = sorted(key for key in zero_fill if key not in gaps and key not in inert)
 
     status = "fail" if fails else ("warn" if warns or stale or undeclared else "ok")
     if fails or warns:
