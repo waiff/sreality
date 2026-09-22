@@ -305,6 +305,9 @@ CESKEREALITY_PAGE: dict[str, Any] = {
     "coords": {"source": "page"},
 }
 
+# The `coords` stamp is the pre-W9 shape: the parser has stopped reading maxima's map, so
+# freshly drained rows carry no such key. Kept as the STRICTER input — a stamped payload
+# must mint nothing either, because maxima declares no payload coordinate entry.
 MAXIMA_PAGE: dict[str, Any] = {
     "id": "d40031686",
     "maxima_ref": "d40031686",

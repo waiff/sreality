@@ -137,9 +137,12 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       comments (`*/15` since migration 413, two said 5 min); `location_data/payloads.py`'s
       "NOT WIRED" docstring (826,948 rows, nine portals); Browse Stats/Map now send the
       **seven** size filters they never sent and bound the plot MEASURE (migration 547,
-      plus a rail that covers the two RPCs and not only the two Python sites). Still owed,
-      each its own PR: maxima coords (the defect is in `scraper/maxima_parser`, NOT the
-      contract — it already reads the pin); the bezrealitky `ruianId` rung (**feed it**:
+      plus a rail that covers the two RPCs and not only the two Python sites); maxima coords
+      (the scraper's view-centre read is DELETED, not re-pointed — the location contract
+      already reads the drawn pin, the second producer never reached `raw_json` on any of
+      557 rows, and its only consumer was an unreachable bbox guard, so 0 of 273 live
+      locality strings change street). Still owed, each its own PR: the bezrealitky
+      `ruianId` rung (**feed it**:
       732 of the 2,836 ruianId-bearing active rows resolve below `address_point` today;
       needs contract v4 + a re-mine); branch protection on `main` (operator action).
 

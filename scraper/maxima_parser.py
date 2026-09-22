@@ -6,10 +6,15 @@ into a `ScrapedListing` (the shared multi-portal contract in
 `scraper.scraped_listing`).
 
 Maxima is a single-agency catalogue (~220 listings) on a WordPress site, but a
-STRUCTURED one: a `<table>` spec block (paired `th.slider_label` / `td.slider_value`),
-a clean `div.price` element, and — when present — precise per-listing coordinates
-embedded in the page's OpenLayers map config (`"center":[lon,lat]`). So coordinates
-come straight from the page when available (some agency listings omit the map).
+STRUCTURED one: a `<table>` spec block (paired `th.slider_label` / `td.slider_value`)
+and a clean `div.price` element.
+
+This parser reads NO coordinate. The page's OpenLayers config carries two of them
+and they are not the same point: `"center"` is where the map is SCROLLED TO (9.2 km
+off the property on d40031686) and `/features/0` is the pin the agency drew. The pin
+is read by `contracts/portals/maxima.yaml` (`mx.det.map_features`) off the archived
+body, so a second reader here could only be a second, worse answer — W9 deleted the
+view-centre read rather than duplicate the contract's geometry walk.
 
 Unlike sreality/idnes, maxima exposes ONE mixed index (no per-category URL); the
 category is encoded in the native id's leading letter (b=byt, d=dum, f=pozemek,
@@ -68,11 +73,6 @@ CATEGORY_BY_TITLE: tuple[tuple[str, str], ...] = (
 # idnes/sreality building-construction labels -> the canonical codes the sreality
 # parser emits, so a cross-portal "panel" filter matches every source.
 
-# Czech-bbox guard: a coordinate outside it (a swapped lat/lon, or a stray pin) is
-# dropped rather than stored as geom.
-_CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
-_CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
-
 # The detail-URL slug is the source_id_native, e.g. /nemovitosti/b50087758/.
 _ID_RE = re.compile(r"/nemovitosti/([a-z]\d+)/?(?:[?#]|$)")
 _LISTING_HREF_RE = re.compile(r"/nemovitosti/[a-z]\d+/?$")
@@ -82,13 +82,6 @@ _PAGE_RE = re.compile(r"/page/(\d+)/?")
 # price never concatenate into an integer-overflowing number.
 _PRICE_RUN_RE = re.compile(r"\d[\d\s ​‌‍⁠]*")
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
-# Map config: "center":[lon, lat]. The map JSON is passed to JSON.parse('…') with
-# the quotes backslash-escaped in the page source (\"center\":[…]), so the quotes
-# are optionally preceded by a backslash. CZ lat/lon ranges don't overlap, so a
-# swap is caught by the bbox guard rather than producing a bogus point.
-_CENTER_RE = re.compile(
-    r'\\?"center\\?"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*[\]\\]'
-)
 # "3./6." -> floor 3 of 6.
 _FLOOR_RE = re.compile(r"(-?\d+)\s*\.\s*/\s*(\d+)\s*\.")
 _PENB_RE = re.compile(r"PENB\s*:?\s*([A-G])\b")
@@ -139,10 +132,6 @@ def _page_text(tree: HTMLParser) -> str:
         return body.text(separator=" ", strip=False)
     root = tree.root
     return root.text(separator=" ", strip=False) if root is not None else ""
-
-
-def _in_cz_bbox(lat: float, lon: float) -> bool:
-    return _CZ_LAT_MIN <= lat <= _CZ_LAT_MAX and _CZ_LON_MIN <= lon <= _CZ_LON_MAX
 
 
 def _id_from_href(href: str | None) -> str | None:
@@ -295,15 +284,6 @@ def _next_page(tree: HTMLParser) -> int | None:
     return None
 
 
-def _resolve_coords(html: str) -> tuple[float | None, float | None, dict[str, Any]]:
-    m = _CENTER_RE.search(html)
-    if m:
-        lon, lat = float(m.group(1)), float(m.group(2))
-        if _in_cz_bbox(lat, lon):
-            return lat, lon, {"source": "page"}
-    return None, None, {"source": None}
-
-
 def _detail_params(tree: HTMLParser) -> dict[str, str]:
     """Map the spec-table row labels (lowercased) to their value text.
 
@@ -379,7 +359,6 @@ def parse_detail(
     price_czk, price_unit = _parse_price(price_text, category_type)
 
     locality = _text(tree.css_first("div.locality"))
-    lat, lon, coord_provenance = _resolve_coords(html)
 
     areas = areas_from_params(params, title=title, category_main=category_main)
     floor_text, total_floors = _split_floors(read("floor"))
@@ -404,7 +383,6 @@ def parse_detail(
         "locality_text": locality,
         "maxima_ref": params.get("id zakázky"),
         "image_urls": image_urls,
-        "coords": coord_provenance,
         "params": params,
     }
 
@@ -430,11 +408,7 @@ def parse_detail(
         # Street is the LAST comma-segment ("Praha 6, Suchdol, U Hotelu") — the
         # opposite order from idnes. require_morphology guards the ambiguous
         # 2-segment case where the last token is a village, not a street.
-        street=street_from_locality(
-            locality, position="last", require_morphology=True, lat=lat, lon=lon
-        ),
-        lat=lat,
-        lon=lon,
+        street=street_from_locality(locality, position="last", require_morphology=True),
         floor=floor,
         total_floors=total_floors,
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
