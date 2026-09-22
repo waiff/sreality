@@ -225,6 +225,12 @@
 /* Map popup — overrides maplibre-gl's default white box so it matches the
  * paper-3 surface, with the agreed map-overlay shadow carve-out. */
 @layer components {
+  /* Above the map's floating panels (count, legend, layer controls). Those are
+   * later siblings of the map container, so a popup without a z-index opened
+   * UNDER them and lost its price line to whichever panel it met. */
+  .maplibregl-popup {
+    z-index: 3;
+  }
   .maplibregl-popup-content {
     background: var(--color-paper-3) !important;
     color: var(--color-ink) !important;
@@ -292,6 +298,12 @@
     margin: 6px 0 0;
     font-size: 0.7rem;
     letter-spacing: 0.02em;
+    color: var(--color-ink-3);
+  }
+  /* How precisely the pin is placed — tight under the place line it qualifies. */
+  .lp-precision {
+    margin: 2px 0 0;
+    font-size: 0.68rem;
     color: var(--color-ink-3);
   }
   .lp-seen {

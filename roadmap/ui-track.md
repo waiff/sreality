@@ -7,6 +7,18 @@ This track runs in parallel with the analytical phases above; the
 toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
+### Browse map: pin precision on request, not under every pin (done, 2026-09-22)
+- Location W3-3 drew a true-metre uncertainty circle under every pin below building level. ~87 % of
+  active pins are below it (street 300 m, část obce 750 m, obec 1 km), so at street zoom the map
+  was stacked discs with the pins and prices buried: "totally unusable" (operator).
+- Now the pin carries the answer: a solid dot for a building / address pin, an open ring for
+  anything coarser, with a legend in the count's row ("Přesná poloha N · Přibližná N"). Clicking a
+  pin draws its one circle for as long as its popup is open, and the popup says it in words
+  ("Přibližná poloha: ulice, ±300 m", the TRUE radius even where the drawn circle is capped at 2 km).
+  Covers Browse, Explore area and the broker explore map (all one `ListingMap`).
+- Two map-chrome fixes found on the way: "Show all" sat under the zoom buttons, and a popup opened
+  under the floating panels and lost its price line (popups now stack above them).
+
 ### Save-to-collection on the listing detail header (done, 2026-09-14)
 - The Browse card's bookmark now has a twin in the listing-detail action bar, between "Přidat do
   pipeline" and "New estimation": out of every collection it reads "Uložit do kolekce"; saved, it

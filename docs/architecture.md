@@ -2932,10 +2932,12 @@ POINT resolves only to obec / okres / kraj and the quarter is placed BY NAME ins
 `browse_projection` re-sources `obec_id` / `okres_id` / `region_id` from
 `ll.obec_kod` / `okres_kod` / `kraj_kod` and `lat` / `lng` from `ST_Y/ST_X(ll.geom)`, and appends
 `cast_obce_id`, `uncertainty_radius_m` and `granularity_rank`. The last two are what the map DRAWS: a
-pin the resolver placed **below building level** (rank < 90, `location_granularity_rank`) gets a
-true-metre translucent circle of its own uncertainty radius under it, so "middle of the village" and
-"this front door" stop looking identical; at or above building level the pin stands alone, and
-clusters and server-side grid cells carry no per-pin radius, so the circle exists only in point mode.
+pin the resolver placed **below building level** (rank < 90, `location_granularity_rank`) is an open
+ring and one at or above it a solid dot, so "middle of the village" and "this front door" stop looking
+identical; clicking a pin draws its true-metre circle of `uncertainty_radius_m` for as long as its
+popup is open, and the popup names the rung and the radius. (W3-3 first drew that circle under every
+such pin at once — with ~87 % of active pins below building level it buried the map, 2026-09-22.)
+Clusters and server-side grid cells carry no per-pin radius, so all of this exists only in point mode.
 **Appending is the only legal edit here** — `browse_list` and `properties_map_mv` materialize
 `select * from browse_projection` and `toolkit/browse_read_model.sync_browse_list` re-inserts
 POSITIONALLY, so anything computed outside the view, or any reordering, writes NULLs into the wrong

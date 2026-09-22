@@ -3,8 +3,12 @@ import {
   BUILDING_GRANULARITY_RANK,
   MAX_DRAWN_CIRCLE_RADIUS_M,
   drawnUncertaintyRadiusM,
+  formatUncertaintyRadius,
+  isPinExact,
+  pinPrecisionLabel,
   uncertaintyCircleRadiusM,
   uncertaintyPixelsAtZoom0,
+  type PinPrecision,
 } from './uncertaintyCircle';
 
 /* The ranks are migration 380's seed. They are spelled out here rather than
@@ -128,5 +132,74 @@ describe('uncertaintyPixelsAtZoom0', () => {
     expect(uncertaintyPixelsAtZoom0(1000, 51)).toBeGreaterThan(
       uncertaintyPixelsAtZoom0(1000, 48),
     );
+  });
+});
+
+describe('isPinExact', () => {
+  it('is solid exactly where the circle rule draws no circle for a known rung', () => {
+    expect(isPinExact({ granularity_rank: RANK.address_point, uncertainty_radius_m: 10 })).toBe(true);
+    expect(isPinExact({ granularity_rank: RANK.building, uncertainty_radius_m: 15 })).toBe(true);
+    expect(isPinExact({ granularity_rank: RANK.parcel, uncertainty_radius_m: 25 })).toBe(false);
+    expect(isPinExact({ granularity_rank: RANK.obec, uncertainty_radius_m: 1000 })).toBe(false);
+  });
+
+  it('never draws an unresolved pin solid -- nobody claimed "exactly here"', () => {
+    expect(isPinExact({ granularity_rank: null, uncertainty_radius_m: null })).toBe(false);
+    // Through the map's vector-tile round trip a NULL property arrives absent.
+    expect(isPinExact({} as PinPrecision)).toBe(false);
+  });
+});
+
+describe('formatUncertaintyRadius', () => {
+  it('prints tens of metres below a kilometre', () => {
+    expect(formatUncertaintyRadius(300)).toBe('±300 m');
+    expect(formatUncertaintyRadius(611.55245496)).toBe('±610 m');
+    expect(formatUncertaintyRadius(3)).toBe('±10 m');
+  });
+
+  it('switches to kilometres with a Czech decimal comma', () => {
+    expect(formatUncertaintyRadius(1000)).toBe('±1 km');
+    expect(formatUncertaintyRadius(996)).toBe('±1 km');
+    expect(formatUncertaintyRadius(4333.78982623)).toBe('±4,3 km');
+    expect(formatUncertaintyRadius(250_000)).toBe('±250 km');
+  });
+});
+
+describe('pinPrecisionLabel', () => {
+  it('names the rung and the radius of an approximate pin', () => {
+    expect(pinPrecisionLabel({ granularity_rank: RANK.street, uncertainty_radius_m: 300 }))
+      .toBe('Přibližná poloha: ulice, ±300 m');
+    expect(pinPrecisionLabel({ granularity_rank: RANK.obec, uncertainty_radius_m: 1000 }))
+      .toBe('Přibližná poloha: obec, ±1 km');
+    expect(
+      pinPrecisionLabel({
+        granularity_rank: RANK.cast_obce_or_quarter,
+        uncertainty_radius_m: '750' as unknown as number,
+      }),
+    ).toBe('Přibližná poloha: část obce, ±750 m');
+  });
+
+  it('prints the TRUE radius where the drawn circle is capped', () => {
+    expect(pinPrecisionLabel({ granularity_rank: 30, uncertainty_radius_m: 25_000 }))
+      .toBe('Přibližná poloha: okres, ±25 km');
+  });
+
+  it('says exact for the building rungs, without a radius', () => {
+    expect(pinPrecisionLabel({ granularity_rank: RANK.address_point, uncertainty_radius_m: 10 }))
+      .toBe('Přesná poloha (adresní bod)');
+    expect(pinPrecisionLabel({ granularity_rank: RANK.building, uncertainty_radius_m: 15 }))
+      .toBe('Přesná poloha (budova)');
+  });
+
+  it('reads a rung inserted between two seeds as the coarser neighbour', () => {
+    expect(pinPrecisionLabel({ granularity_rank: 45, uncertainty_radius_m: 900 }))
+      .toBe('Přibližná poloha: obec, ±900 m');
+  });
+
+  it('drops the figure it does not have, and says so when there is no rung', () => {
+    expect(pinPrecisionLabel({ granularity_rank: RANK.street, uncertainty_radius_m: null }))
+      .toBe('Přibližná poloha: ulice');
+    expect(pinPrecisionLabel({ granularity_rank: null, uncertainty_radius_m: null }))
+      .toBe('Přesnost polohy neznámá');
   });
 });
