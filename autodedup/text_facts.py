@@ -1119,3 +1119,306 @@ def _parcel_divisions(text: str) -> frozenset[float]:
         if value is not None and PROSE_PLOT_MIN_M2 <= value <= STATED_AREA_MAX_M2:
             out.add(value)
     return frozenset(out)
+
+
+# --- W21 / S6 --------------------------------------------------------------------------------
+
+def cross_form_floor_agreement(left: Mapping[str, frozenset[int]],
+                               right: Mapping[str, frozenset[int]]) -> bool:
+    """E210: do the two bodies name ONE storey across the two nouns?
+
+    `same_form_floor_gap` refuses to convert between `patro` and `NP` because a writer who
+    means one and types the other is commonplace. That refusal is about a DISAGREEMENT: it
+    cannot say which storey `3. patro` is when the other body says `3. NP`. An AGREEMENT needs
+    no such judgement — `7. patře` and `8. nadzemním podlaží` are the same storey on the one
+    scale this module already converts to, and one Brno Kobližná office is advertised both ways
+    at the same 57 m² and the same 7,900 Kč. Where the two bodies meet on that scale, the
+    worded reading has nothing left to separate them with.
+    """
+    return bool(frozenset().union(*left.values()) & frozenset().union(*right.values()))
+
+
+# --- the storey the OFFER is, for a let of a whole floor (E212) ------------------------------
+# `subject_floors` needs a placement verb and reads a short window after it, so it sees neither
+# `Pronájem přízemního podlaží` (the offer is the storey, not a unit placed on one) nor `Místo
+# o ploše 14 m² se nachází v nejžádanějším přízemí` (an adjective stands in the window) nor
+# `se nachází v 3 nadzemním podlaží` (the noun is longer than the window). All three name the
+# storey OF THE OFFER as plainly as `v 2.NP` does. Read on the NP scale, where `přízemí` is 1.
+# Two cue families, both narrow. An OFFER verb answers "what is being let" directly. A
+# PLACEMENT verb answers it only when the clause's own subject is the offered object, so the
+# subject noun is named: `vitrínky umístěné v přízemí` is a notice board, not the let.
+_OFFER_SUBJECT: str = (
+    r"misto|mista|stani|prostor\w*|byt|byty|jednotk\w*|kancelar\w*|hala|haly|halu"
+    r"|podlazi|patro|patra|objekt\w*|dum|domu|apartman\w*|atelier\w*|sklad\w*")
+_OFFER_CUE = re.compile(
+    r"(?:\b(?:pronajem|pronajmu|pronajmy|prodej|prodeji|nabizime|nabizim"
+    r"|predmetem\s+pronajmu\s+je|predmetem\s+prodeje\s+je|jedna\s+se\s+o)"
+    r"|\b(?:" + _OFFER_SUBJECT + r")[^.;:]{0,24}?(?:se\s+nachazi|nachazi\s+se"
+    r"|je\s+situovan\w*|je\s+umisten\w*))"
+    r"\s+(?:k\s+pronajmu\s+|k\s+prodeji\s+)?(?:se\s+)?(?:v|ve)?\s*"
+)
+# Two adjectives is what `samostatného 1. patra` and `nejžádanějším přízemí` need; a third
+# starts reading the next clause.
+OFFER_STOREY_ADJECTIVES: int = 2
+_OFFER_STOREY = re.compile(
+    r"(?:\w+\s+){0,%d}?(?:(prizemn\w*\s+(?:podlazi|patr\w*|prostor\w*|cast\w*)|prizemi)"
+    r"|(\d{1,2})\.?\s*(?:np\b|nadzemni\w*\s+podlazi)|(\d{1,2})\.?\s*patr\w*)" % (
+        OFFER_STOREY_ADJECTIVES,)
+)
+OFFER_STOREY_WINDOW: int = 44
+
+
+def offered_storeys(text: str | None) -> frozenset[int]:
+    """The storey an OFFER clause names as the thing on offer, on the NP scale."""
+    return _offered_storeys(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _offered_storeys(text: str) -> frozenset[int]:
+    folded = fact_text(text)
+    out: set[int] = set()
+    for cue in _OFFER_CUE.finditer(folded):
+        match = _OFFER_STOREY.match(folded, cue.end(), cue.end() + OFFER_STOREY_WINDOW)
+        if match is None:
+            continue
+        if match.group(1) is not None:
+            out.add(1)
+        elif match.group(2) is not None:
+            out.add(int(match.group(2)))
+        else:
+            out.add(int(match.group(3)) + 1)
+    return frozenset(v for v in out if 0 < v <= PROSE_FLOOR_MAX)
+
+
+# --- the unit id printed under its own LABEL (E214) ------------------------------------------
+# `printed_unit_codes` requires a digit, because a bare letter is a building and a bare word is
+# prose. A LABEL removes that doubt: an advert that writes `ID jednotky: DOUBLE B` has told us
+# the value identifies the unit, whatever its shape — and one Brno Dornych co-live residence
+# rotates `DOUBLE A`, `DOUBLE B` and `STANDARD` through one idnes slot at one rent.
+_LABELLED_UNIT_ID = re.compile(
+    r"\b(?:id|kod|oznaceni|cislo|c\.|typ)\s+(?:jednotky|jednotka|bytu|apartmanu|pokoje)\s*"
+    r"[:\-]?\s*([a-z0-9][a-z0-9+._/-]{0,19})(?:\s+([a-z0-9+]{1,2})\b)?"
+)
+LABELLED_UNIT_ID_MAX: int = 3
+
+
+def labelled_unit_ids(text: str | None) -> frozenset[str]:
+    """Every value the body prints under an explicit unit-identity LABEL."""
+    return _labelled_unit_ids(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _labelled_unit_ids(text: str) -> frozenset[str]:
+    out: set[str] = set()
+    for match in _LABELLED_UNIT_ID.finditer(fact_text(unescape(text))):
+        head, tail = match.group(1), match.group(2)
+        out.add(f"{head} {tail}" if tail else head)
+    return frozenset(out) if len(out) <= LABELLED_UNIT_ID_MAX else frozenset()
+
+
+# --- the size of the accessory, stated (E215) ------------------------------------------------
+# `printed_area` scopes a cellar's m² OUT of the headline comparison, which is right — a cellar
+# is not what the flat is sold by — and leaves it read by nothing. Two Prague Želivecká 4+kk of
+# one house, same 90 m², same 3.NP, same 10,900,000, live together on two portals: one states
+# `dva sklepy o celkové ploše 9 m²`, the other `Celkem 10 m² úložného prostoru`.
+_ACCESSORY_AREA = re.compile(
+    r"\b(?:sklep\w*|sklepn\w*|koj\w*|komor\w*|ulozn\w*)[^.;:]{0,44}?"
+    r"(?:o\s+)?(?:celkove\s+)?(?:ploche|plose|vymere|vymera|velikosti|rozloze)"
+    r"\s+(?:cca\s+)?" + _AREA_NUMBER + r"\s*m2"
+    r"|\bcelkem\s+" + _AREA_NUMBER + r"\s*m2\s+(?:ulozn|sklep|kojn)\w*"
+)
+ACCESSORY_AREA_MAX_M2: float = 120.0
+
+
+def accessory_areas(text: str | None) -> frozenset[float]:
+    """The cellar/storage size the body states, in m²."""
+    return _accessory_areas(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _accessory_areas(text: str) -> frozenset[float]:
+    out: set[float] = set()
+    for match in _ACCESSORY_AREA.finditer(fact_text(text)):
+        value = _area_value(next(group for group in match.groups() if group))
+        if value is not None and 0.0 < value <= ACCESSORY_AREA_MAX_M2:
+            out.add(value)
+    return frozenset(out)
+
+
+# --- the capacity, written in English (E216) -------------------------------------------------
+# `capacity_counts` is Czech-only, and a serviced-office operator publishes the same building's
+# products in both languages: Regus Spielberk's `soukromá servisovaná kancelář pro 1 osobu` and
+# its `private serviced office space for 2 workstations` both print 50 m² and 8,190 Kč.
+_OFFER_NOUN_EN = re.compile(r"office\w*|workspace\w*|coworking\w*|desk\w*|suite\w*")
+_CAPACITY_EN = re.compile(
+    r"(?:for|suits|suitable\s+for|accommodates|ideal\s+for|up\s+to)\s+(\d{1,3})\s*"
+    r"(?:workstation|desk|person|people|employee|staff|colleague)\w*"
+)
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _capacity_counts_en(text: str) -> frozenset[int]:
+    folded = fact_text(text)
+    out: set[int] = set()
+    for match in _CAPACITY_EN.finditer(folded):
+        window = folded[max(0, match.start() - CAPACITY_WINDOW): match.start()]
+        if _OFFER_NOUN_EN.search(window) or _OFFER_NOUN.search(window):
+            out.add(int(match.group(1)))
+    return frozenset(out)
+
+
+def capacity_counts_english(text: str | None) -> set[int]:
+    """`capacity_counts` for the English half of a bilingual operator's catalogue."""
+    return set(_capacity_counts_en(text)) if text else set()
+
+
+# --- the place the BODY names (E217) ---------------------------------------------------------
+# E135 refuses the raw obec conflict: portals disagree about which municipality a property is
+# in, and a village is routinely filed under its town. The BODY is a different witness — one
+# Brno developer sells one 5+kk design in TWO municipalities, and the advert whose portal
+# locality is Brno-Chrlice is separated from its Újezd u Brna twin only by what the other
+# advert's own body says it is. Capitalisation is the cue, so this reader takes the RAW text.
+_BODY_PLACE = re.compile(
+    r"\b(?:v|ve)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤ"
+    r"ÚŮÝŽ][\w]{2,}(?:\s+u\s+[A-Z][\w]{2,})?)"
+)
+PLACE_STEM: int = 3
+BODY_PLACE_MAX: int = 6
+
+
+def body_localities(text: str | None) -> frozenset[str]:
+    """Every capitalised place the body states the object is IN, folded."""
+    return _body_localities(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _body_localities(text: str) -> frozenset[str]:
+    out = {fact_text(match.group(1)) for match in _BODY_PLACE.finditer(unescape(text))}
+    out.discard("")
+    return frozenset(out) if len(out) <= BODY_PLACE_MAX else frozenset()
+
+
+def place_names_match(left: str, right: str) -> bool:
+    """Do two place names name one place? Czech declines the ending, so the stem decides.
+
+    `v Brně` against the stored `Brno` shares three letters and `v Rebešovicích` against
+    `Rebešovice` shares ten: what a declension changes is the tail, so the shared prefix has to
+    reach within two characters of the shorter name. A match only ever SILENCES this rule, so
+    the loose direction is the safe one.
+    """
+    head_a, head_b = left.split()[0], right.split()[0]
+    shared = 0
+    for char_a, char_b in zip(head_a, head_b):
+        if char_a != char_b:
+            break
+        shared += 1
+    return shared >= PLACE_STEM and shared >= min(len(head_a), len(head_b)) - 2
+
+
+# --- the seller's price list, row by row (E218) ----------------------------------------------
+# E183 reads a parcel CATALOGUE keyed on parcel numbers. One Ochoz u Brna seller's bazos body
+# has no parcel numbers at all — it prices four plots by name (`Obora (4840 m2) ... Cena za
+# pozemek 958.000,- Kč`) — and the portal stores ONE of those prices per advert. The price the
+# row carries is what says which plot this advert is.
+_PRICED_ROW_AREA = re.compile(_AREA_NUMBER + r"\s*m2")
+_PRICED_ROW_PRICE = re.compile(
+    r"cena\s+(?:za\s+\w+\s+)?(\d{1,3}(?:[  .]\d{3})+|\d{4,9})")
+PRICED_ROW_MAX: int = 12
+PRICED_ROW_MIN_M2: float = 20.0
+# How far a row's price may stand from the size it prices. One Ochoz body runs 330 characters
+# of prose between `Obora (4840 m2)` and `Cena za pozemek 958.000,- Kč`; a following SIZE ends
+# the row whatever the distance, which is what keeps the pairing honest.
+PRICED_ROW_WINDOW: int = 600
+
+
+def priced_land_rows(text: str | None) -> tuple[tuple[float, float], ...]:
+    """`(area m², price Kč)` for every plot the body prices as its own line."""
+    return _priced_land_rows(text) if text else ()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _priced_land_rows(text: str) -> tuple[tuple[float, float], ...]:
+    folded = fact_text(text)
+    areas = [(match.start(), _area_value(match.group(1)))
+             for match in _PRICED_ROW_AREA.finditer(folded)]
+    prices = [(match.start(), _area_value(match.group(1)))
+              for match in _PRICED_ROW_PRICE.finditer(folded)]
+    rows: list[tuple[float, float]] = []
+    for index, (start, area) in enumerate(areas):
+        if area is None or area < PRICED_ROW_MIN_M2:
+            continue
+        stop = areas[index + 1][0] if index + 1 < len(areas) else len(folded)
+        stop = min(stop, start + PRICED_ROW_WINDOW)
+        hit = next((value for at, value in prices if start < at < stop and value), None)
+        if hit is not None:
+            rows.append((area, hit))
+    return tuple(sorted(set(rows))) if len(rows) <= PRICED_ROW_MAX else ()
+
+
+# --- the plot, stated the way the portal does not (E218) -------------------------------------
+# `_PROSE_PLOT` wants the measurement word AFTER the noun (`pozemek o výměře 732 m²`). One Brno
+# developer writes it the other way round — `Celková plocha pozemku činí 1.288 m²` — and eight
+# adverts of two Rebešovice semi-detached halves carry `1.288` and `1.294` in prose while every
+# portal stores the same 1,288 in the column.
+_PROSE_PLOT_WIDE = re.compile(
+    r"(?:celkov\w+\s+)?(?:plocha|vymera|rozloha|velikost)\s+(?:pozemku|parcely|arealu)"
+    r"\s*(?:cini|je|:|-)?\s*" + _AREA_NUMBER + r"\s*m2")
+
+
+def prose_plot_areas_wide(text: str | None) -> frozenset[float]:
+    """`prose_plot_areas` plus the measurement-first phrasing."""
+    if not text:
+        return frozenset()
+    return prose_plot_areas(text) | _prose_plot_areas_wide(text)
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _prose_plot_areas_wide(text: str) -> frozenset[float]:
+    out: set[float] = set()
+    for match in _PROSE_PLOT_WIDE.finditer(fact_text(text)):
+        value = _area_value(match.group(1))
+        if value is not None and PROSE_PLOT_MIN_M2 <= value <= STATED_AREA_MAX_M2:
+            out.add(value)
+    return frozenset(out)
+
+
+# --- a second plot on offer, and what is built on this one (E219) ----------------------------
+# Absence is not a statement, and an attribute one body prints and the other does not is never
+# a fact on its own (D63). Two Opatovice adverts make it one: each says a bezprostředně
+# sousedící plot of the same 500 m² is ALSO on offer, so the seller has told us there are two —
+# and only one of them says the electricity connection is already built with a meter fitted.
+_SECOND_PLOT = re.compile(
+    r"(?:sousedic\w*|sousedni\w*|vedlejsi|dalsi|druhy|druhe)\s+(?:\w+\s+){0,2}?"
+    r"(?:stavebni\s+)?(?:pozemek|pozemku|parcel\w*)"
+    r"|\boba\s+pozemky\b|\bobe\s+parcely\b")
+_SECOND_PLOT_OFFER = re.compile(r"nabizen\w*|nabizime|na\s+prodej|k\s+prodeji|koupit|prodava\w*")
+SECOND_PLOT_WINDOW: int = 90
+_BUILT_CONNECTION = re.compile(
+    r"(?:jiz\s+)?vybudovan\w*\s+(?:\w+\s+){0,2}?pripojk\w*"
+    r"|pripojk\w*\s+(?:\w+\s+){0,3}?(?:je|jsou)\s+(?:jiz\s+)?(?:vybudovan|zrizen|hotov)\w*"
+    r"|osazen\w*\s+elektromer\w*|elektromer\w*\s+(?:je\s+)?osazen\w*")
+
+
+def states_second_plot(text: str | None) -> bool:
+    """Does the body say a NEIGHBOURING plot is on offer as well as this one?"""
+    if not text:
+        return False
+    return _states_second_plot(text)
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _states_second_plot(text: str) -> bool:
+    folded = fact_text(text)
+    for match in _SECOND_PLOT.finditer(folded):
+        window = folded[max(0, match.start() - SECOND_PLOT_WINDOW): match.end()
+                        + SECOND_PLOT_WINDOW]
+        if _SECOND_PLOT_OFFER.search(window):
+            return True
+    return False
+
+
+def built_connection(text: str | None) -> bool:
+    """Does the body say a utility connection is already BUILT on this plot?"""
+    if not text:
+        return False
+    return bool(_BUILT_CONNECTION.search(fact_text(text)))
