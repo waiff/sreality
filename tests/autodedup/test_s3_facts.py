@@ -101,14 +101,28 @@ def test_rezidence_prazska_84_two_sreality_adverts_one_storey_apart() -> None:
     assert "floor" in names(a, b, S3)
 
 
-def test_pouchov_realitymix_against_sreality_one_storey_apart() -> None:
-    """G380908: both portals count the ground floor, 27.9 days together at one rent."""
+def test_the_camp_table_is_not_read_as_evidence_of_agreement() -> None:
+    """S3's scope is `source`, not `camp`. G380908's realitymix-against-sreality storey is a
+    fact and the camp scope would read it — but the same scope splits 182 certain duplicates on
+    cohort 5, almost all idnes against ceskereality at one price and one area, one storey
+    apart: the table places both portals at level 0 and the data says their offset is 1. A
+    table fitted to excuse a gap may not be read as proof that there is nothing to excuse.
+    G380908 is separated by E181's worded storey instead."""
     a = listing(380908, source="realitymix", floor=1, category_type="pronajem",
                 price=17_000.0, area_m2=65.0)
     b = listing(12273157, source="sreality", floor=2, category_type="pronajem",
                 price=17_000.0, area_m2=65.0)
-    assert "floor" not in names(a, b, S2)
-    assert "floor" in names(a, b, S3)
+    assert "floor" not in names(a, b, S3)
+    wide = variant(d43_floor_within_camp_scope="camp")
+    assert "floor" in names(a, b, wide)
+
+
+def test_two_low_counting_portals_are_not_known_to_agree() -> None:
+    """112399 x 401485: idnes floor 1 against ceskereality floor 2, 120 m² and 9,490,000 on
+    both sides for 85 days — one flat, and the camp scope splits it."""
+    a = listing(112399, source="idnes", floor=1, area_m2=120.0, price=9_490_000.0)
+    b = listing(401485, source="ceskereality", floor=2, area_m2=120.0, price=9_490_000.0)
+    assert "floor" not in names(a, b, S3)
 
 
 def test_a_storey_across_the_camp_boundary_is_still_the_convention() -> None:

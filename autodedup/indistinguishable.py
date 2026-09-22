@@ -601,7 +601,10 @@ def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> boo
         return True
     if abs(gap) != 1 or not settings.d43_floor_within_camp:
         return False
-    if not same_camp(settings.floor_camps, a.source, b.source):
+    if settings.d43_floor_within_camp_scope == "source":
+        if a.source is None or a.source != b.source:
+            return False
+    elif not same_camp(settings.floor_camps, a.source, b.source):
         return False
     if settings.d43_floor_within_camp_colive and sequential_postings(a, b, settings):
         return False

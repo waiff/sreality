@@ -20,6 +20,7 @@
  "d43_cluster_invariant": true,
  "d43_floor_within_camp": true,
  "d43_floor_within_camp_colive": true,
+ "d43_floor_within_camp_scope": "source",
  "d43_gate": true,
  "d43_gate_area_tol": 0.08,
  "d43_gate_image_facts": false,

@@ -547,6 +547,13 @@ class Settings:
     # advert drift 0/1); two adverts on sale TOGETHER have no such excuse.
     d43_floor_within_camp: bool = False
     d43_floor_within_camp_colive: bool = False
+    # `camp` trusts the table's zero-offset claim BETWEEN two portals; `source` trusts only
+    # what cannot be doubted — that one portal counts one way. The hand read of the 182
+    # certain duplicates the `camp` scope splits on cohort 5 is almost all idnes against
+    # ceskereality at identical price and area, one storey apart: the table places both at 0
+    # and the data says their offset is 1. A camp table fitted for a DIFFERENT question may
+    # not be read as evidence of agreement.
+    d43_floor_within_camp_scope: str = "camp"
     # E181: the storey a PLACEMENT clause states of the offered unit, and the storey written in
     # words rather than digits. Both are read under E180's camp rule; the worded pair is not,
     # because `přízemí` is the ground floor on every portal.
@@ -756,6 +763,9 @@ class Settings:
             )
         if self.d43_floor_within_camp_colive and not self.d43_floor_within_camp:
             raise ValueError("d43_floor_within_camp_colive needs d43_floor_within_camp")
+        if self.d43_floor_within_camp_scope not in ("camp", "source"):
+            raise ValueError("d43_floor_within_camp_scope must be camp/source: "
+                             f"{self.d43_floor_within_camp_scope}")
         if self.d43_plot_exact_abs < 0.0:
             raise ValueError(f"d43_plot_exact_abs must be >= 0: {self.d43_plot_exact_abs}")
         if self.d43_price_sequential_same_feed and not self.d43_price_sequential_path:
