@@ -8,9 +8,9 @@
  * pipeline's accent — out of every collection this button is neutral, and only
  * the SAVED state borrows the soft copper tint the card glyph already uses.
  *
- * Membership reads the per-property key the CurationBlock further down the page
- * already subscribes to, so the two share one query and a save in either place
- * is immediately true in the other.
+ * Membership reads the ONE shared member map (the CurationBlock further down the
+ * page and every Browse card glyph subscribe to the same key), so a save made in
+ * any of them is immediately true in the others.
  */
 
 import { useCallback, useId, useRef, useState } from 'react';
@@ -20,7 +20,7 @@ import CollectionMark from '@/components/CollectionMark';
 import CollectionSaveMenu, {
   COLLECTION_SAVE_LABEL,
 } from '@/components/CollectionSaveMenu';
-import { curationKeys, fetchPropertyCollectionIds } from '@/lib/queries';
+import { curationKeys, fetchPropertyCollectionMemberSet } from '@/lib/queries';
 
 export default function CollectionSaveToggle({
   property_id,
@@ -34,11 +34,11 @@ export default function CollectionSaveToggle({
   const close = useCallback(() => setOpen(false), []);
 
   const membershipQ = useQuery({
-    queryKey: curationKeys.propertyCollections(property_id),
-    queryFn: () => fetchPropertyCollectionIds(property_id),
+    queryKey: curationKeys.propertyCollectionMembers,
+    queryFn: fetchPropertyCollectionMemberSet,
     staleTime: 30_000,
   });
-  const memberIds = new Set(membershipQ.data ?? []);
+  const memberIds = new Set(membershipQ.data?.get(property_id) ?? []);
   const count = memberIds.size;
 
   /* Matches PipelineToggle's skeleton so the two never jump relative to each

@@ -2388,23 +2388,19 @@ export const fetchPropertyTagIds = async (
   return ((data ?? []) as Array<{ tag_id: number }>).map((r) => r.tag_id);
 };
 
-export const fetchPropertyCollectionIds = async (
-  property_id: number,
-): Promise<number[]> => {
-  const { data, error } = await supabase
-    .from('collection_properties_public')
-    .select('collection_id')
-    .eq('property_id', property_id);
-  if (error) throw error;
-  return ((data ?? []) as Array<{ collection_id: number }>).map(
-    (r) => r.collection_id,
-  );
-};
-
 /* All (property_id → collection_ids) memberships in ONE read, shared (React
  * Query dedupes the key) by every Browse-card collection control — the
  * collection analogue of fetchPipelineMemberSet, so Browse fires one query
- * instead of one-per-card. */
+ * instead of one-per-card.
+ *
+ * It is also the ONLY membership read: a per-property `propertyCollections(id)`
+ * key existed alongside it until W1, which meant a writer had two keys to
+ * remember and every writer but the save menu forgot one (the same collapse
+ * pipelineKeys records below). One property's ids are
+ * `members.get(property_id) ?? []`. fetchAllRows REJECTS past expectMax rather
+ * than resolving a truncated map, so an outgrown map can never read as a
+ * smaller one — though consumers still render a REJECTED read as "no
+ * membership", a fail-open that predates W1. */
 export const fetchPropertyCollectionMemberSet = async (): Promise<
   Map<number, number[]>
 > => {
@@ -2453,8 +2449,6 @@ export const curationKeys = {
   tags: ['curation', 'tags'] as const,
   propertyTags: (property_id: number) =>
     ['curation', 'property-tags', property_id] as const,
-  propertyCollections: (property_id: number) =>
-    ['curation', 'property-collections', property_id] as const,
   propertyCollectionMembers: ['curation', 'property-collection-members'] as const,
   propertyNotes: (property_id: number) =>
     ['curation', 'property-notes', property_id] as const,

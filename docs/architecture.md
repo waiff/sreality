@@ -1398,6 +1398,14 @@ renumber.** Navigate by area:
     by value (a bookmark button opening a checklist of EVERY collection, monitored ones first and
     bell-marked); it replaced a one-click "Sledovat" bell that could only reach the single
     monitoring collection, so the panel and the app now offer the same verb over the same set.
+    In the SPA those affordances share ONE membership read (`fetchPropertyCollectionMemberSet`
+    under `curationKeys.propertyCollectionMembers`; one property's ids are `members.get(id)`) and
+    ONE revalidation — `lib/collectionCache.ts`, called by every writer: the menu, the
+    `CurationBlock` row, the collection page's row-remove, BOTH collection DELETEs (migration 202
+    cascades memberships away) and the merge (operator state re-points `collection_properties`, so
+    the map's keys change). The hand-typed key lists it replaced had drifted — every one but the
+    menu forgot the shared map — the same failure `lib/browseInvalidation.ts` records for Browse. The
+    extension holds no such cache, so this is an SPA-scoped claim.
     **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
     existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
