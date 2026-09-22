@@ -1577,7 +1577,27 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_CURATION,
             ui_control=UiControl.MULTISELECT,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            # BROWSE-only: the watchdog matcher has no tag clause (WatchdogFilterSpec has no tag field).
+            agendas=frozenset({Agenda.BROWSE}),
+        ),
+        FilterDef(
+            id="collections",
+            type=FilterType.INT_LIST,
+            pg_column=None,  # prefilter via collection_properties_public (mig 202)
+            default=None,
+            description=(
+                "Operator-curated collection ids. OR-semantics — a property "
+                "matches if it is in ANY collection in the list. Deliberately "
+                "the opposite of `tags` (AND): collections read as folders, so "
+                "two of them mean 'either folder'. Collection ids are "
+                "account-scoped and stable across renames. BROWSE-only, for "
+                "the same reasons as `pipeline`: watching a collection would "
+                "fire on the operator's own clicks, and their groupings must "
+                "never feed back into a valuation."
+            ),
+            category=CATEGORY_CURATION,
+            ui_control=UiControl.MULTISELECT,
+            agendas=frozenset({Agenda.BROWSE}),
         ),
         FilterDef(
             id="pipeline",

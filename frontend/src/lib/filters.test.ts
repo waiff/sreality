@@ -386,6 +386,25 @@ describe('pipeline scope URL codec', () => {
   });
 });
 
+describe('collection scope URL codec', () => {
+  it('round-trips a selection as a CSV of ids', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, collections: [4, 9] };
+    const sp = toSearchParams(f);
+    expect(sp.get('collections')).toBe('4,9');
+    expect(fromSearchParams(sp)).toEqual(f);
+  });
+
+  it('emits nothing when nothing is selected, and parses absence as off', () => {
+    expect(toSearchParams(DEFAULT_FILTERS).has('collections')).toBe(false);
+    expect(fromSearchParams(new URLSearchParams()).collections).toEqual([]);
+  });
+
+  it('drops junk ids rather than inventing a selection', () => {
+    expect(fromSearchParams(new URLSearchParams('collections=4,abc,0')).collections)
+      .toEqual([4]);
+  });
+});
+
 describe('broker scope URL codec', () => {
   it('round-trips a broker id', () => {
     const f: ListingFilters = { ...DEFAULT_FILTERS, brokerId: 527 };
@@ -695,11 +714,13 @@ describe('filtersToWatchdogSpec', () => {
       status: 'active',
       lastSeenMaxDays: 7,
       tags: [3],
+      collections: [4],
       buildingMaterial: ['cihla'],
     });
     expect(unsupported).toContain('listing status');
     expect(unsupported).toContain('last/first-seen date range');
     expect(unsupported).toContain('tags');
+    expect(unsupported).toContain('collections');
     expect(unsupported).toContain('building material');
   });
 
@@ -789,6 +810,17 @@ describe('filter presets', () => {
     expect(filtersEqualForPreset({ ...saved, brokerId: 527 }, saved)).toBe(true);
     expect(
       filtersEqualForPreset({ ...saved, priceMax: 4_000_000, brokerId: 527 }, saved),
+    ).toBe(false);
+  });
+
+  it('treats the collection scope as a lens too: stripped, never dirtying a preset', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 6_000_000, collections: [4] };
+    expect(filtersForPreset(f, false).collections).toEqual([]);
+    expect(filtersForPreset(f, true).collections).toEqual([]);
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000 };
+    expect(filtersEqualForPreset({ ...saved, collections: [4, 9] }, saved)).toBe(true);
+    expect(
+      filtersEqualForPreset({ ...saved, priceMax: 4_000_000, collections: [4] }, saved),
     ).toBe(false);
   });
 

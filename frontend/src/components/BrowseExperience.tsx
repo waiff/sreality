@@ -903,6 +903,7 @@ export default function BrowseExperience({
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
                 pipelineScoped={filters.pipeline != null}
+                collectionScoped={filters.collections.length > 0}
                 hoveredIds={hoveredIds}
                 hoverOrigin={hoverState.origin}
                 onHover={setHoveredFromList}
