@@ -1,7 +1,7 @@
 # FIELD CAPTURE — every typed listing fact, captured properly, on all nine portals
 
 **Program document. This file is the program's source of truth.**
-Status: plan approved by the operator 2026-09-21; W0 in flight.
+Status: **DELIVERED 2026-09-22** — W0–W9 merged and live; the text lane extracts bazos `floor` + `has_lift` on gpt-5.6-luna (first pass: 250 adverts, 96 values, $0.054, 0 errors); branch protection on `main` enabled as the closing step.
 Rulings R1–R12 below are **binding** — they supersede any design text, code comment or docstring that differs.
 
 ---
