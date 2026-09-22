@@ -391,6 +391,17 @@ _UPPER_WORD_ORDINAL = re.compile(
     r"\b(?:v|ve)\s+(?:" + _ORDINAL_ALTERNATION + r")\s+(?:patre|poschodi)\b")
 
 
+# E210: `v posledním podlaží` names a storey as surely as a numeral does, and two adverts of
+# one Karlovy Vary 3+1 at 21,900 Kč both say it while the portal stored the top of a six-storey
+# house as 5 on one re-post and 6 on the next.
+_TOP_STOREY = re.compile(r"\bposledni\w*\s+(?:nadzemni\w*\s+)?(?:podlazi|patre|patro|poschodi)")
+
+
+def states_top_storey(text: str | None) -> bool:
+    """Does the body place the offered unit on the building's TOP storey, in words?"""
+    return bool(_TOP_STOREY.search(fact_text(text))) if text else False
+
+
 def ground_or_upper(text: str | None, words: bool = False) -> frozenset[str]:
     """`{"ground"}`, `{"upper"}`, both, or nothing — the storey named in words, not digits."""
     return _ground_or_upper(text, words) if text else frozenset()
@@ -827,6 +838,11 @@ _AREA_SCOPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 # How far back the scoping noun may sit. `podlahovou plochou 76,1 m² a terasou o velikosti
 # 10 m²` needs ~24 characters; a window much wider starts reading the previous sentence's noun.
 AREA_SCOPE_WINDOW: int = 34
+
+
+def area_ranges(text: str | None) -> bool:
+    """Does the body print a RANGE of sizes — `od 55 m2 do 900 m2`, `20 m2 az 80 m2`?"""
+    return bool(_AREA_RANGE.search(fact_text(text))) if text else False
 
 
 def printed_areas(text: str | None) -> frozenset[tuple[float, int, str]]:

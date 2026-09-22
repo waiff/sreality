@@ -679,6 +679,7 @@ class Settings:
     d43_headline_vs_column: bool = False
     d43_headline_vs_column_colive_only: bool = True
     d43_headline_vs_column_same_source_only: bool = True
+    d43_headline_vs_column_min_gap: float = 0.1
     # E212: the storey a letting states as the OFFER — `přízemní podlaží` against `samostatné
     # 1. patro`. Judged by the storey convention every other reading uses: two storeys anywhere,
     # one only inside one feed.

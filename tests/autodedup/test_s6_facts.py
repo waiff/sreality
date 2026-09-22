@@ -587,3 +587,40 @@ def test_e218_reads_only_the_band_between_the_exact_bar_and_the_tolerance() -> N
                 area_m2=913.0, price=3700000.0,
                 description="Celková plocha pozemku činí 690 m² s příjezdovou cestou 223 m².")
     assert "plot_prose_exact" not in names(a, b, S6)
+
+
+def test_e211_needs_both_sides_commercial() -> None:
+    a = listing(314246, category_main="dum", category_type="prodej", area_m2=190.0,
+                description=("Nabízíme dům se dvěma bytovými jednotkami o celkové ploše cca "
+                             "190 m². přízemí: 4+1, cca 100 m²; patro: 3+1, cca 90 m²."))
+    b = listing(523266, category_type="prodej", area_m2=190.0,
+                description="Nabízíme jednotku 4+1 o ploše cca 100 m² se samostatným vstupem.")
+    assert "headline_area" not in names(a, b, S6)
+
+
+def test_e211_refuses_a_measurement_difference() -> None:
+    a = listing(80313, area_m2=942.0, description="Pronájem haly o ploše 942 m² v areálu.")
+    b = listing(80425, area_m2=942.0, description="Pronájem haly o ploše 940 m² v areálu.")
+    assert "headline_area" not in names(a, b, S6)
+
+
+def test_e211_refuses_a_body_that_prints_a_range() -> None:
+    a = listing(43704, area_m2=20.0,
+                description="Pronájem kancelářských prostor o rozloze 20 m2, třída Vítězství.")
+    b = listing(355738, area_m2=20.0, description=(
+        "Pronájem kancelářských prostor o rozloze 20 m2 až 80 m2, třída Vítězství. Přímo v "
+        "budově nové fitness centrum 700 m2, masáže a sauna."))
+    assert "headline_area" not in names(a, b, S6)
+
+
+def test_e210_reads_the_top_storey_written_in_words() -> None:
+    body = ("Nabízíme k pronájmu nadstandardní byt 3+1 o výměře 100 m² po rekonstrukci, "
+            "situovaný v posledním podlaží udržovaného domu.")
+    a = listing(272930, first=0, last=10, category_main="byt", category_type="pronajem",
+                area_m2=100.0, floor=5, total_floors=6, price=21900.0, broker_key="agent-a",
+                broker_firm_id=4, description=body)
+    b = listing(12520338, first=25, last=35, category_main="byt", category_type="pronajem",
+                area_m2=100.0, floor=6, total_floors=6, price=21900.0, broker_key="agent-b",
+                broker_firm_id=4, description=body)
+    assert "floor" in names(a, b, variant(d43_floor_cross_form_agreement=False))
+    assert "floor" not in names(a, b, S6)

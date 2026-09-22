@@ -93,6 +93,7 @@ from autodedup.settings import Settings
 from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
     CHARGE_KINDS,
+    area_ranges,
     printed_areas,
     accessory_areas,
     accessory_designators,
@@ -108,6 +109,7 @@ from autodedup.text_facts import (
     prose_plot_areas_wide,
     stated_bed_counts,
     states_second_plot,
+    states_top_storey,
     same_form_floor_gap,
     address_block_key,
     capacity_counts,
@@ -896,7 +898,10 @@ def headline_vs_column_conflict(
     860; one Přízřenice advert leads with an 18 m² office and the other with the 291 m² hall,
     under one stored 291 and two rents, 6,500 against 50,000.
     """
-    if COMMERCIAL_CATEGORY not in (a.category_main, b.category_main):
+    # BOTH sides commercial. The one sanctioned cross-type is dům<->komerční, and there the
+    # house side leads with a flat inside the house: one Senice na Hané two-generation house of
+    # 190 m² is met by its own commercial twin leading with the 100 m² ground-floor 4+1.
+    if {a.category_main, b.category_main} != {COMMERCIAL_CATEGORY}:
         return None
     # ONE portal on both sides. idnes prepends its own title — `Pronájem kanceláře 235 m²,
     # Brno` — so its lead is the stored column echoed back rather than anything the seller
@@ -932,6 +937,16 @@ def headline_vs_column_conflict(
     # sreality adverts lead with the 641 m² footprint and the "more than 1,000 m²" of floor —
     # and a contradicting body that ALSO states its column has led with a part while saying so
     # (M444). Measured: with both limbs, this rule costs 0 certain duplicates on eight cohorts.
+    # A measurement difference is not a slice: 940 against 942, or 332 against 330, is one
+    # space written twice. A part is smaller by a margin.
+    small, large = sorted((lead_a[0], lead_b[0]))
+    if small <= 0.0 or small > large * (1.0 - settings.d43_headline_vs_column_min_gap):
+        return None
+    # An advert that prints a RANGE has said its size is variable and the column is one point
+    # in it: `kancelářských prostor o rozloze 20 m2 až 80 m2` opens with a range the area
+    # reader drops, and the next figure in that body is the building's 700 m² fitness centre.
+    if area_ranges(a.description) or area_ranges(b.description):
+        return None
     hit_a = contradicts(lead_a, float(column_a)) and not states_column(a)
     hit_b = contradicts(lead_b, float(column_b)) and not states_column(b)
     if hit_a == hit_b:
@@ -1258,6 +1273,8 @@ def distinguishing_facts(
             subject_a = subject_floors(a.description, cfg.d43_prose_floor_words)
             subject_b = subject_floors(b.description, cfg.d43_prose_floor_words)
             if subject_a and subject_b and (subject_a & subject_b):
+                same_feed = False
+            elif states_top_storey(a.description) and states_top_storey(b.description):
                 same_feed = False
         strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
         within = _rounded_floors(a, b, cfg, gap)
