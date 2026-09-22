@@ -3989,6 +3989,36 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resweep_incoherent.yml"
     },
     {
+      "filename": "runpod_reap.yml",
+      "name": "Ops: terminate a RunPod pod by id",
+      "description": "The bake-off tears its pod down in a `finally`, but a terminate call that times out on RunPod's side (run 35731041090: \"POD MAY STILL BE BILLING\") leaves a pod nobody can reach from a shell without the key. This is the one-input remedy: write the receipt `autodedup.oss_pod --reap` already understands and let it DELETE the pod. Idempotent — an already-gone pod counts as success.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "pod_id",
+          "description": "The RunPod pod id to terminate (from the run log or the artifact's pod.json)",
+          "required": true,
+          "type": "string",
+          "default": null,
+          "options": null
+        }
+      ],
+      "secrets": [
+        "RUNPOD_API_KEY"
+      ],
+      "concurrencyGroup": null,
+      "cancelInProgress": null,
+      "timeoutMinutes": 10,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/runpod_reap.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/runpod_reap.yml"
+    },
+    {
       "filename": "scrape.yml",
       "name": "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)",
       "description": "DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live pipeline is now the cadence split — index_walk.yml (fast, frequent, marks delistings + enqueues) feeds detail_drain.yml (async, batched writes). This combined index+detail walk (_run_full) is kept intact as the instant revert: if the split misbehaves, re-add `schedule: - cron: \"0 * * * *\"` here and disable the two new crons — no code change, the proven pipeline is back. It also remains the way to run an ad-hoc full walk by hand.",

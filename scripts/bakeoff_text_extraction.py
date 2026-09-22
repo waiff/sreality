@@ -63,7 +63,12 @@ DEFAULT_MODELS = ("gpt-5.6-luna", "oss:Qwen/Qwen3-VL-32B-Instruct",
                   "oss:google/gemma-4-26B-A4B-it")
 
 # The portals whose own table labels the panel, with the offset their floor column carries.
-LABEL_SOURCES: dict[str, int] = {"idnes": 0, "sreality": 1}
+# The two structured portals whose stated fields label the panel. `listings.floor` is
+# ground = 0 on every portal since field-capture W8 healed the six ground = 1 portals
+# (2026-09-22), so a label is the stored value itself; the per-source offset this table
+# used to carry made every arm run after that heal score floor against labels one storey
+# off (Gemma, run 35731041090: 82.0 % "floor" was the offset, not the model).
+LABEL_SOURCES: tuple[str, ...] = ("idnes", "sreality")
 PRECISION_GATE = 0.95
 FLOOR_TOLERANCE = 1
 
@@ -137,13 +142,9 @@ def panel_sql(fields: Iterable[str]) -> str:
 
 
 def _label_floor(source: str, stored: Any) -> int | None:
-    """The portal's floor column as a ground = 0 label, or None where it cannot be one."""
-    if stored is None:
-        return None
-    offset = LABEL_SOURCES.get(source, 0)
-    if offset and stored < 1:
-        return None
-    return int(stored) - offset
+    """The portal's floor column IS the ground = 0 label (W8); None where it is unset."""
+    del source  # every portal counts the same way now; the argument stays for the panel rows
+    return None if stored is None else int(stored)
 
 
 def build_panel(conn: Any, *, per_source: int, bazos: int) -> list[dict[str, Any]]:
@@ -265,6 +266,17 @@ def run_model(conn: Any, model: str, panel: list[dict[str, Any]],
     return {"model": model, **score(results)}
 
 
+def _pod_is_gone(client: Any, pod_id: str) -> bool:
+    """True only on RunPod's own word: a 404 (or a pod record that reports a terminal
+    status). A network error is NOT "gone" — that is the failure this exists to catch."""
+    try:
+        pod = client.get_pod(pod_id)
+    except Exception as exc:  # noqa: BLE001 — classified below, never raised
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status == 404
+    return str(pod.get("desiredStatus") or "").upper() in {"EXITED", "TERMINATED"}
+
+
 def run_oss_model(conn: Any, model: str, panel: list[dict[str, Any]],
                   *, cloud: str, max_price: float, out_dir: Path) -> dict[str, Any]:
     """The same arm behind a rented pod. The bill is GPU-hours, not tokens, so the pod's
@@ -299,7 +311,15 @@ def run_oss_model(conn: Any, model: str, panel: list[dict[str, Any]],
             "cloud_type": handle.cloud_type,
             "gpu_hours_usd": oss_pod.pod_cost_usd(handle, time.time()),
         }
-    oss_pod.clear_receipt(out_dir)
+    # The receipt goes only once the pod is CONFIRMED gone. `rented_pod`'s teardown never
+    # raises, so a terminate that timed out on RunPod's side (run 35731041090) used to
+    # reach this line, clear the receipt, and leave the reap step with nothing to reap
+    # while the pod kept billing.
+    if _pod_is_gone(client, handle.pod_id):
+        oss_pod.clear_receipt(out_dir)
+    else:
+        LOG.error("pod %s still answers after teardown — receipt kept for the reap step",
+                  handle.pod_id)
     result["usd_per_1k_adverts"] = round(
         1000 * result["pod"]["gpu_hours_usd"] / max(result["n"], 1), 3)
     return result
