@@ -250,6 +250,111 @@ def _printed_floors(text: str) -> frozenset[int]:
     return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
 
 
+# --- the storey the body predicates of the OFFERED unit (E181) ------------------------------
+# `printed_floors` is a SET of every storey a body names, and a body names the building's as
+# well as the unit's: one Dašice mill advert offers a space `umístěného v 2.NP` and mentions a
+# WC `v 1.NP`, so its set {1, 2} meets the ground-floor advert's {1} and the two storeys never
+# contradict. What separates them is the PLACEMENT clause — the storey stated of the thing
+# being sold. The cue must be a verb of placement and the storey must follow it closely; a
+# storey with no cue in front of it is not read here at all, which is why this reader is
+# strictly narrower than `printed_floors` and never contradicts it.
+_PLACEMENT_CUE = re.compile(
+    r"(?:umisten\w*|situovan\w*|nachazi\s+se|se\s+nachazi|lezici\w*|nabizime?\s+\w{0,12}\s*"
+    r"(?:byt|prostor|jednotk)\w*|(?:byt|prostor|jednotk|apartman|kancelar)\w*)\s+"
+    r"(?:se\s+)?(?:v|ve)\s+"
+)
+# `umístěného v 1.NP` needs 0; `situovaný ve druhém nadzemním podlaží` is spelled out and is not
+# read; the window only has to cover an ordinal and its separator.
+PLACEMENT_WINDOW: int = 12
+
+
+def subject_floors(text: str | None) -> frozenset[int]:
+    """The storeys a PLACEMENT clause states of the offered unit, on the NP scale."""
+    return _subject_floors(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _subject_floors(text: str) -> frozenset[int]:
+    folded = fold(text)
+    out: set[int] = set()
+    for cue in _PLACEMENT_CUE.finditer(folded):
+        window = folded[cue.end(): cue.end() + PLACEMENT_WINDOW]
+        for match in _PROSE_NP.finditer(window):
+            if match.start() == 0:
+                out.add(int(match.group(1)))
+        for match in _PROSE_PATRO.finditer(window):
+            if match.start() == 0:
+                out.add(int(match.group(1)) + 1)
+    return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
+
+
+# --- ground against upper, written without a number (E181) ----------------------------------
+# `v přízemí` and `v patře` name a storey as surely as `1.NP` does and neither carries a digit,
+# so `printed_floors` is blind to both. One HK-Pouchov 3+kk is advertised `s terasou 15 m2 v
+# přízemí novostavby` on one portal and `s balkonem v patře novostavby` on four others at the
+# same rent. The words are portal-independent — `přízemí` is the ground floor on every portal —
+# so unlike the numbered storeys this reading needs no convention table. Both must be stated of
+# the offered unit: the preposition is mandatory, because `v přízemí domu je kočárkárna` is a
+# statement about the building.
+_GROUND_WORD = re.compile(r"\b(?:v|ve)\s+prizemi\b|\bprizemni\s+(?:byt|jednotk|apartman)\w*")
+_UPPER_WORD = re.compile(r"\b(?:v|ve)\s+(?:\d{1,2}\.?\s*)?(?:patre|poschodi)\b")
+
+
+def ground_or_upper(text: str | None) -> frozenset[str]:
+    """`{"ground"}`, `{"upper"}`, both, or nothing — the storey named in words, not digits."""
+    return _ground_or_upper(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _ground_or_upper(text: str) -> frozenset[str]:
+    folded = fold(text)
+    out: set[str] = set()
+    if _GROUND_WORD.search(folded):
+        out.add("ground")
+    if _UPPER_WORD.search(folded):
+        out.add("upper")
+    return frozenset(out)
+
+
+# --- how many units the advert says the object holds (E183) ---------------------------------
+# `Výnosový dům se 2 byty 3+kk` against `Výnosový dům se 4 byty 3+kk`, both live on bazos for
+# 7.3 days at 11,100,000 and 21,500,000. A stated count of flats is a fact about the object,
+# not a tolerance — and it is the only thing that separates those two adverts, whose bodies are
+# otherwise the same seller's template. Instrumental number words are read because that is how
+# Czech writes the phrase; the digit form covers the rest.
+_COUNT_WORDS: dict[str, int] = {
+    "jednim": 1, "dvema": 2, "tremi": 3, "ctyrmi": 4, "peti": 5, "sesti": 6, "sedmi": 7,
+    "osmi": 8, "deviti": 9, "deseti": 10,
+}
+_UNIT_COUNT_DIGIT = re.compile(
+    r"\b(?:se|s)\s+(\d{1,2})\s+(?:byt\w*|bytov\w*\s+jednotk\w*|jednotk\w*)\b"
+    r"|\b(\d{1,2})\s+bytov\w*\s+jednotk\w*"
+)
+_UNIT_COUNT_WORD = re.compile(
+    r"\b(?:se|s)\s+(" + "|".join(sorted(_COUNT_WORDS)) + r")\s+"
+    r"(?:byty|bytov\w*\s+jednotkami|jednotkami)\b"
+)
+UNIT_COUNT_MAX: int = 40
+
+
+def stated_unit_counts(text: str | None) -> frozenset[int]:
+    """How many dwelling units the body says the offered object holds."""
+    return _stated_unit_counts(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _stated_unit_counts(text: str) -> frozenset[int]:
+    folded = fact_text(text)
+    out: set[int] = set()
+    for match in _UNIT_COUNT_DIGIT.finditer(folded):
+        raw = match.group(1) or match.group(2)
+        if raw is not None:
+            out.add(int(raw))
+    for match in _UNIT_COUNT_WORD.finditer(folded):
+        out.add(_COUNT_WORDS[match.group(1)])
+    return frozenset(value for value in out if 0 < value <= UNIT_COUNT_MAX)
+
+
 # --- printed land-register parcels (E140) --------------------------------------------------
 # A Czech land or house advert prints the parcel the object stands on, and that number IS the
 # object's identity in the land register: two adverts printing disjoint parcels are two
@@ -310,6 +415,80 @@ def _parcel_numbers(text: str, wide: bool = False) -> frozenset[str]:
     folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
     out: set[str] = set()
     for keyword in (_PARCEL_KEYWORD_WIDE if wide else _PARCEL_KEYWORD).finditer(folded):
+        position = keyword.end()
+        while True:
+            number = _PARCEL_NUMBER.match(folded, position)
+            if number is None or _AREA_UNIT_AFTER.match(folded, number.end()):
+                break
+            out.add(number.group(0))
+            separator = _PARCEL_SEPARATOR.match(folded, number.end())
+            if separator is None:
+                break
+            position = separator.end()
+    return frozenset(out) if len(out) <= PARCEL_MAX_PER_ADVERT else frozenset()
+
+
+# --- the parcel TABLE, and which of its rows is THIS advert's (E182) ------------------------
+# A parcelling is advertised twice over: one portal's body names the single parcel it sells
+# (`číslo pozemku: 274/9 + 274/14`), another's prints the seller's whole catalogue —
+#
+#     • 277/2 + 277/3 — 1 465 m² — 3 469 000 Kč
+#     • 274/8 + 274/13 — 1 458 m² — 3 459 000 Kč
+#
+# — and `parcel_numbers` then returns fourteen numbers for an advert that sells one plot, so
+# the two sides always share a number and the parcel fact can never fire. The table itself says
+# which row is this advert's: the row whose area and price are the advert's OWN. Each row must
+# carry all three of parcels, area and price, which is what tells a catalogue from prose.
+_PARCEL_TABLE_ROW = re.compile(
+    r"(?P<parcels>\d{1,5}(?:/\d{1,4})?(?:\s*(?:\+|,|\ba\b)\s*\d{1,5}(?:/\d{1,4})?){0,5})"
+    r"\s*[-–—:]\s*(?P<area>\d{2,7})\s*m2"
+    r"\s*[-–—:]\s*(?P<price>\d{4,12})\s*kc"
+)
+PARCEL_TABLE_MIN_ROWS: int = 2
+# The forms the WIDE keyword still misses, and only the table reader needs: the Czech order
+# `číslo pozemku` (the keyword AFTER the noun), which is how idnes writes the one parcel it
+# sells. Fail-safe like every other widening — an empty set is never a conflict.
+_PARCEL_KEYWORD_WIDER = re.compile(
+    r"(?:cisl\w*\s+(?:pozemk\w*|parcel\w*)"
+    r"|parceln\w*\s*\.?\s*cisl\w*"
+    r"|pod\s+cisl\w*\s+parcel\w*"
+    r"|na\s+parcel[aeiu]"
+    r"|c\.?\s*parc\w*\s*\.?"
+    r"|parc\w*\s*\.?\s*(?:c\.|cisl\w*)"
+    r"|parcel[aeuy]\b"
+    r"|pozemk\w*\s*(?:c\.|cisl\w*)"
+    r"|pozemek\s*(?:c\.|cisl\w*)"
+    r"|\b(?:st\.?\s*)?p\.?\s*(?:p\.?\s*)?c\.?)"
+    r"\s*:?\s*(?:st\.?\s*)?(?=\d)"
+)
+
+
+def parcel_table(text: str | None) -> tuple[tuple[frozenset[str], float, float], ...]:
+    """The catalogue rows the body prints, as `(parcels, area m2, price)` — empty when none."""
+    return _parcel_table(text) if text else ()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parcel_table(text: str) -> tuple[tuple[frozenset[str], float, float], ...]:
+    folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
+    rows: list[tuple[frozenset[str], float, float]] = []
+    for match in _PARCEL_TABLE_ROW.finditer(folded):
+        parcels = frozenset(_PARCEL_NUMBER.findall(match.group("parcels")))
+        if parcels:
+            rows.append((parcels, float(match.group("area")), float(match.group("price"))))
+    return tuple(rows) if len(rows) >= PARCEL_TABLE_MIN_ROWS else ()
+
+
+def parcel_numbers_wider(text: str | None) -> set[str]:
+    """`parcel_numbers` under the widest keyword set — E182's reading, behind its own field."""
+    return set(_parcel_numbers_wider(text)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parcel_numbers_wider(text: str) -> frozenset[str]:
+    folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
+    out: set[str] = set()
+    for keyword in _PARCEL_KEYWORD_WIDER.finditer(folded):
         position = keyword.end()
         while True:
             number = _PARCEL_NUMBER.match(folded, position)

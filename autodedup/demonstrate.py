@@ -252,10 +252,65 @@ def price_demonstrated(
         tol = PRICE_CROSS_TOL if cross else settings.d43_price_path_tol
     if rel_diff(float(a.price), float(b.price)) <= tol:
         return True
+    if settings.demonstrate_price_rounding_aware and prices_round_equal(
+            float(a.price), float(b.price)):
+        return True
+    # D57: the PATH is read at the same bar as the price. `price_paths_agree` runs at
+    # `d43_price_path_tol` — 0.5 %, five times the exact bar and twenty-five times the Ráby
+    # packages' 0.1 % — so leaving it alone readmits through the path every pair the exact bar
+    # refuses, and the exactness is then a claim the engine does not keep.
+    if settings.demonstrate_price_path_exact:
+        from autodedup.indistinguishable import price_paths_agree
+
+        paths_agree = price_paths_agree(a, b, tol) or (
+            settings.demonstrate_price_rounding_aware
+            and price_paths_round_equal(a, b))
     if paths_agree:
         return True
     # A cut between two SEQUENTIAL postings is one unit (the standing ruling).
     return _sequential(a, b, settings, overlap)
+
+
+# The unit a printed price was ROUNDED to. `11,25 mil.` is 11,250,000 and its granularity is
+# 10,000; `5 500 000` is granular to 100,000 and `5 499 000` to 1,000. Only powers of ten, and
+# only up to a million — beyond that every asking price in the corpus is "round".
+_PRICE_GRANULARITIES: tuple[float, ...] = (1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0)
+
+
+def price_granularity(value: float) -> float:
+    """The coarsest power of ten this amount is a whole multiple of."""
+    for unit in _PRICE_GRANULARITIES:
+        if abs(value / unit - round(value / unit)) < 1e-9:
+            return unit
+    return 1.0
+
+
+def prices_round_equal(left: float, right: float) -> bool:
+    """D57: is the coarser number the finer one ROUNDED, at the coarser's own granularity?
+
+    This is what "exact, rounding-aware" means, and it is arithmetic rather than a percentage.
+    `5 499 000` against `5 500 000` is one price written twice, because the second is the first
+    rounded to its own hundred thousand. `10 999 000` against `10 988 000` is not: both are
+    granular to a thousand, so at that granularity they are two different numbers — which is
+    exactly what the Ráby price list says they are. A percentage cannot tell those two cases
+    apart: the first gap is 0.018 % and the second 0.1 %, and only the first is a rounding.
+    """
+    if left == right:
+        return True
+    if left <= 0.0 or right <= 0.0:
+        return False
+    unit = max(price_granularity(left), price_granularity(right))
+    if unit <= 1.0:
+        return False
+    return round(left / unit) == round(right / unit)
+
+
+def price_paths_round_equal(a: Listing, b: Listing) -> bool:
+    """`prices_round_equal` over every amount the two adverts have ever printed."""
+    from autodedup.indistinguishable import _price_points
+
+    return any(prices_round_equal(left, right)
+               for left in _price_points(a) for right in _price_points(b))
 
 
 # A co-live price difference WIDER than this is not two units. D49 refused the co-live price

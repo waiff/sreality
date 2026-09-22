@@ -66,12 +66,20 @@ from autodedup.demonstrate import (
     decimals_decide,
     sequential_postings,
 )
-from autodedup.features import STREET_GRAIN_RANK, haversine_m, plot_area, rel_diff
+from autodedup.features import (
+    STREET_GRAIN_RANK,
+    haversine_m,
+    plot_area,
+    plot_reading,
+    plot_residue,
+    rel_diff,
+)
 from autodedup.floor_convention import (
     convention_ambiguous,
     convention_known,
     floor_gap,
     joint_convention_shift,
+    same_camp,
 )
 from autodedup.guards import LAND_CATEGORY, area_rel_diff, area_relation
 from autodedup.settings import Settings
@@ -81,13 +89,18 @@ from autodedup.text_facts import (
     address_block_key,
     capacity_counts,
     fold,
+    ground_or_upper,
     offered_room_counts,
     orientations,
     parcel_numbers,
+    parcel_numbers_wider,
+    parcel_table,
     prose_streets,
     printed_floors,
     stated_areas,
+    stated_unit_counts,
     streets_agree,
+    subject_floors,
     printed_unit_codes,
     unit_designators,
 )
@@ -156,6 +169,9 @@ FACT_NAMES: tuple[str, ...] = (
     "printed_area",
     "unit_code",
     "prose_floor",
+    "subject_floor",
+    "storey_word",
+    "unit_count",
 )
 
 
@@ -442,6 +458,131 @@ def _set_conflict(left: frozenset[str] | set[str], right: frozenset[str] | set[s
     return bool(left and right and not (left & right))
 
 
+def selected_parcels(listing: Listing, settings: Settings) -> set[str]:
+    """E182: the parcels THIS advert sells, not every parcel its body prints.
+
+    A body that prints the seller's whole catalogue says which row is its own, because each row
+    carries an area and a price and the advert carries the same two numbers. One Morašice
+    sreality advert lists seven parcels and is itself the 1,458 m² / 3,459,000 Kč row, parcels
+    274/8 + 274/13; the idnes advert of the NEXT plot prints only `číslo pozemku: 274/9 +
+    274/14`. Read as sets those two share 274/9 and never contradict; read by the row they are
+    two parcels of one parcelling.
+
+    Selection must be UNIQUE — two rows at one price and one area are a catalogue this reader
+    cannot resolve, and it then falls back to the union, which is what every earlier arm read.
+    """
+    if not settings.d43_parcel_table:
+        return parcel_numbers(listing.description, settings.d43_parcel_forms_wide)
+    rows = parcel_table(listing.description)
+    own_area = headline_area(listing)
+    own_price = float(listing.price) if listing.price else None
+    matched = [
+        row for row in rows
+        if (own_area is not None and abs(row[1] - own_area) <= 0.5)
+        or (own_price is not None and abs(row[2] - own_price) <= 0.5)
+    ]
+    if len(matched) == 1:
+        return set(matched[0][0])
+    return parcel_numbers_wider(listing.description)
+
+
+# The categories whose parcel IS the object. A flat's building sits on a plot too, and that
+# plot is the building's, not the unit's — reading it exactly there would split every pair of
+# flats two portals resolved to two entrances of one block.
+PLOT_EXACT_CATEGORIES: frozenset[str] = frozenset({"dum", LAND_CATEGORY})
+
+
+def _plot_conflict(
+    a: Listing, b: Listing, settings: Settings, is_land: bool
+) -> tuple[str, str] | None:
+    """E182: two parcel areas that are not one parcel.
+
+    Two readings change here. The TOLERANCE: 2 % is what two portals printing one parcel look
+    like, and it is also what the next plot of a parcelling looks like — Ráby's packages are
+    981, 998 and 1,001 m², 0.3 % apart, each mirrored unchanged on four portals. Where the
+    object IS the parcel (a house or a plot) the number is read exactly.
+
+    The CARRIER: `plot_area` blanks a source whose parser truncates thousands, which is right
+    for a scored feature and wrong for a fact. A truncation removes leading digit groups and
+    never the last three, so two untrusted numbers still prove two parcels when their residues
+    differ — two ceskereality adverts of Rezidence Loučná at 227 and 191 m², one catalogue
+    price, 82 days together. Where a residue AGREES nothing is claimed: 870 may be 5,870.
+    """
+    exact = (settings.d43_plot_area_exact
+             and {a.category_main, b.category_main} <= PLOT_EXACT_CATEGORIES)
+    tol = settings.d43_plot_exact_tol if exact else PLOT_TOL
+    if not settings.d43_plot_truncation_residue:
+        plot_a, plot_b = plot_area(a), plot_area(b)
+        if plot_a and plot_b and rel_diff(plot_a, plot_b) > tol:
+            return (str(plot_a), str(plot_b))
+        return None
+    left, right = plot_reading(a), plot_reading(b)
+    if left is None or right is None:
+        return None
+    (value_a, trusted_a), (value_b, trusted_b) = left, right
+    if trusted_a and trusted_b:
+        if rel_diff(value_a, value_b) > tol and abs(value_a - value_b) > 0.5:
+            return (str(value_a), str(value_b))
+        return None
+    residue_a, residue_b = plot_residue(value_a), plot_residue(value_b)
+    if abs(residue_a - residue_b) > 0.5:
+        return (f"{value_a}(residue {residue_a})", f"{value_b}(residue {residue_b})")
+    return None
+
+
+def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> bool:
+    """E180: is a `gap`-storey difference a difference the convention cannot explain?
+
+    Two storeys is a fact anywhere and always was. ONE storey is the ground-floor vocabulary
+    only ACROSS camps; inside one camp — and a portal is always inside its own — there is no
+    vocabulary left to blame, so the gap is a storey. `d43_floor_within_camp_colive` keeps the
+    excuse for two postings that were never on sale together: there the gap is one portal's
+    parse drifting between re-posts, and 29 bazos re-posts of one Dašice rent advert do exactly
+    that. Two adverts LIVE TOGETHER have no such excuse.
+    """
+    if abs(gap) >= 2:
+        return True
+    if abs(gap) != 1 or not settings.d43_floor_within_camp:
+        return False
+    if not same_camp(settings.floor_camps, a.source, b.source):
+        return False
+    if settings.d43_floor_within_camp_colive and sequential_postings(a, b, settings):
+        return False
+    return True
+
+
+def _price_sequential_path(
+    a: Listing, b: Listing, feats: Feats | None, settings: Settings
+) -> bool:
+    """E185: a price MOVE between two postings that were never on sale together.
+
+    The standing ruling says a re-post at a new price is the same unit, and `price_demonstrated`
+    has always honoured it — but the `price` FACT never did, so a sreality advert re-listed at
+    13,700,000 after 14,500,000 is split from its own re-post and from every portal that copied
+    either number. The ruling is only safe with an identity beside it: the two postings must not
+    overlap, they must agree on area, disposition and storey, and the bodies or the photographs
+    must be the same advert's. A CO-LIVE pair is untouched — there the two prices are
+    simultaneous, which is D49's whole mechanism.
+    """
+    if not settings.d43_price_sequential_path:
+        return False
+    if not sequential_postings(a, b, settings):
+        return False
+    if settings.d43_price_sequential_same_feed and not _same_feed(a, b, "broker", True):
+        return False
+    if a.disposition is not None and b.disposition is not None and a.disposition != b.disposition:
+        return False
+    if a.floor is not None and b.floor is not None and a.floor != b.floor:
+        return False
+    gap = area_rel_diff(a.area_m2, b.area_m2)
+    if gap is not None and gap > 0.0:
+        return False
+    photos = _present(feats, "phash_tight_matches") or 0.0
+    contained = _present(feats, "containment_max") or 0.0
+    return (photos >= settings.d43_price_sequential_min_photos
+            or contained >= settings.d43_price_sequential_containment)
+
+
 def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> tuple[str, str] | None:
     """E142: the two adverts offer a different QUANTITY of the same kind of thing.
 
@@ -547,7 +688,8 @@ def distinguishing_facts(
                 and not _feed_known(a, b) and _prices_meet(a, b, cfg.d43_price_path_tol)):
             same_feed = False
         strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
-        if (gap != 0) if strict else (abs(gap) >= 2 or (abs(gap) == 1 and same_feed)):
+        within = _rounded_floors(a, b, cfg, gap)
+        if (gap != 0) if strict else (within or (abs(gap) == 1 and same_feed)):
             add("floor", a.floor, b.floor)
 
     if a.total_floors is not None and b.total_floors is not None:
@@ -562,9 +704,9 @@ def distinguishing_facts(
         if delta_total and not joint and not ambiguous:
             add("total_floors", a.total_floors, b.total_floors)
 
-    plot_a, plot_b = plot_area(a), plot_area(b)
-    if plot_a and plot_b and rel_diff(plot_a, plot_b) > PLOT_TOL:
-        add("plot_area", plot_a, plot_b)
+    plot_conflict = _plot_conflict(a, b, cfg, is_land)
+    if plot_conflict is not None:
+        add("plot_area", plot_conflict[0], plot_conflict[1])
 
     if a.price and b.price and a.price > 0 and b.price > 0:
         price_gap = rel_diff(float(a.price), float(b.price))
@@ -579,7 +721,9 @@ def distinguishing_facts(
             contradiction = (cfg.d43_price_colive_contradiction and not agree and colive_side
                              and price_gap > PRICE_CROSS_TOL
                              and _co_live(a, b, cfg.d43_price_colive_min_overlap_days))
-            if (over and not agree) or contradiction:
+            # E185: a move between two postings that were never on sale together is one path.
+            moved = _price_sequential_path(a, b, feats, cfg)
+            if ((over and not agree) or contradiction) and not moved:
                 add("price", a.price, b.price)
         elif over:
             add("price", a.price, b.price)
@@ -623,8 +767,8 @@ def distinguishing_facts(
     # PRINTS (or, for the signature, two numbers the portal prints for it), so all three modes
     # read them — E138's "inferred rather than stated" exemption does not reach any of them.
     if cfg.d43_parcel_numbers:
-        parcels_a = parcel_numbers(a.description, cfg.d43_parcel_forms_wide)
-        parcels_b = parcel_numbers(b.description, cfg.d43_parcel_forms_wide)
+        parcels_a = selected_parcels(a, cfg)
+        parcels_b = selected_parcels(b, cfg)
         if _set_conflict(parcels_a, parcels_b):
             add("parcel", sorted(parcels_a), sorted(parcels_b))
 
@@ -669,8 +813,43 @@ def distinguishing_facts(
         if floors_a and floors_b and not (floors_a & floors_b):
             prose_gap = min(abs(x - y) for x in floors_a for y in floors_b)
             feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
-            if prose_gap >= 2 or (prose_gap == 1 and feed):
+            if (_rounded_floors(a, b, cfg, prose_gap)
+                    or (prose_gap == 1 and feed)):
                 add("prose_floor", sorted(floors_a), sorted(floors_b))
+
+    # E181: the storey stated OF THE OFFERED UNIT. `prose_floor` is a set of every storey the
+    # body names, and one Dašice mill advert names its own 2.NP and a WC in 1.NP, so the sets
+    # meet and the two floors of one mill never contradict. The placement clause names one.
+    if cfg.d43_subject_floor:
+        subject_a, subject_b = subject_floors(a.description), subject_floors(b.description)
+        if subject_a and subject_b and not (subject_a & subject_b):
+            subject_gap = min(abs(x - y) for x in subject_a for y in subject_b)
+            feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
+            if _rounded_floors(a, b, cfg, subject_gap) or (subject_gap == 1 and feed):
+                add("subject_floor", sorted(subject_a), sorted(subject_b))
+
+    # E181: the storey written in WORDS. `v přízemí` against `v patře` carries no digit, so no
+    # numbered reader sees it — and it needs no camp table either, because `přízemí` is the
+    # ground floor on every portal. One HK-Pouchov 3+kk is `s terasou 15 m2 v přízemí` on
+    # realitymix and `s balkonem v patře` on four other portals at the same 17,000 rent.
+    if cfg.d43_ground_vs_upper:
+        words_a, words_b = ground_or_upper(a.description), ground_or_upper(b.description)
+        if len(words_a) == 1 and len(words_b) == 1 and words_a != words_b:
+            add("storey_word", next(iter(words_a)), next(iter(words_b)))
+
+    # E183: how many dwellings the object holds. D49 refused the bare co-live price limb, and
+    # that refusal stands — one advert may carry a freehold price and a co-operative share at
+    # the same moment. A stated COUNT is not that case: `dům se 2 byty` at 11,100,000 against
+    # `dům se 4 byty` at 21,500,000, both live on bazos for 7.3 days, are two houses.
+    if cfg.d43_stated_unit_count != "off" and not is_land:
+        counts_a = stated_unit_counts(a.description)
+        counts_b = stated_unit_counts(b.description)
+        if len(counts_a) == 1 and len(counts_b) == 1 and counts_a != counts_b:
+            conjunction = cfg.d43_stated_unit_count == "always" or (
+                _co_live(a, b, cfg.d43_price_colive_min_overlap_days)
+                and not price_paths_agree(a, b, cfg.d43_price_path_tol))
+            if conjunction:
+                add("unit_count", next(iter(counts_a)), next(iter(counts_b)))
 
     if cfg.d43_unit_codes:
         codes_a = printed_unit_codes(a.description, cfg.d43_unit_codes_wide)

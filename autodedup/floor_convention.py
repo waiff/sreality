@@ -84,6 +84,22 @@ def convention_known(
     return camp_offset(camps, source_a, source_b) is not None
 
 
+def same_camp(
+    camps: CampTable | None, source_a: str | None, source_b: str | None
+) -> bool:
+    """E180: do these two adverts count the ground floor the SAME way?
+
+    One portal always does. Two portals do when the table places both at one level. This is the
+    condition under which a one-storey gap has no convention left to blame: `convention_known`
+    is true for a known offset of EITHER sign, and an offset of one is exactly the excuse —
+    `same_camp` is the narrower question of a known offset of ZERO."""
+    if source_a is None or source_b is None:
+        return False
+    if source_a == source_b:
+        return True
+    return camp_offset(camps, source_a, source_b) == 0
+
+
 def convention_ambiguous(
     camps: CampTable | None, source_a: str | None, source_b: str | None
 ) -> bool:

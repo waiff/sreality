@@ -539,6 +539,46 @@ class Settings:
     # E166: the storey the BODY prints, read under the same convention rule as the column.
     d43_prose_floor: bool = False
 
+    # --- W18 / S3: what the cohort-5 confirmation named (E180-E185, D57) --------------------
+    # E180: the ground-floor convention is a difference BETWEEN camps. Inside one camp — and a
+    # portal is always inside its own — a one-storey gap is not vocabulary, it is a storey.
+    # `d43_floor_within_camp_colive` keeps the excuse for two SEQUENTIAL postings, where the
+    # gap is one portal's parse drifting between re-posts (29 bazos re-posts of one Dašice rent
+    # advert drift 0/1); two adverts on sale TOGETHER have no such excuse.
+    d43_floor_within_camp: bool = False
+    d43_floor_within_camp_colive: bool = False
+    # E181: the storey a PLACEMENT clause states of the offered unit, and the storey written in
+    # words rather than digits. Both are read under E180's camp rule; the worded pair is not,
+    # because `přízemí` is the ground floor on every portal.
+    d43_subject_floor: bool = False
+    d43_ground_vs_upper: bool = False
+    # E182: the parcel area read EXACTLY for a house or a plot, and read through a truncating
+    # carrier by its residue instead of being blanked.
+    d43_plot_area_exact: bool = False
+    d43_plot_exact_tol: float = 0.0
+    d43_plot_truncation_residue: bool = False
+    # E183: the catalogue row that is THIS advert's, selected by its own area and price, and
+    # the widest parcel keyword set (`číslo pozemku`, the Czech word order idnes uses).
+    d43_parcel_table: bool = False
+    # E184: a stated count of dwelling units. `colive_price` is D49's refusal kept intact — the
+    # bare co-live price limb stays refused, and only the conjunction with a stated count is
+    # read; `always` reads the count alone.
+    d43_stated_unit_count: str = "off"
+    # E185: a price MOVE between two postings that were never on sale together is one price
+    # path, when the rest of the identity is demonstrated. This is the standing ruling about
+    # re-lists applied to the `price` FACT, which until now only `price_demonstrated` honoured.
+    d43_price_sequential_path: bool = False
+    d43_price_sequential_same_feed: bool = False
+    d43_price_sequential_containment: float = 0.9
+    d43_price_sequential_min_photos: float = 3.0
+    # D57: exactness where identity is CLAIMED reaches the PATH too. `price_paths_agree` runs at
+    # `d43_price_path_tol` (0.5 %), which is looser than the exact bar and silently readmits
+    # every pair the exact bar refuses — the Ráby packages at 10,999,000 and 10,988,000 are
+    # 0.1 % apart and meet through it. Rounding-aware means the coarser number is the finer one
+    # rounded at the coarser's OWN granularity, not a percentage.
+    demonstrate_price_path_exact: bool = False
+    demonstrate_price_rounding_aware: bool = False
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -697,6 +737,20 @@ class Settings:
             )
         if set(self.floor_camps.values()) - {0, 1}:
             raise ValueError(f"floor_camps levels must be 0 or 1: {sorted(set(self.floor_camps.values()))}")
+        if self.d43_stated_unit_count not in ("off", "colive_price", "always"):
+            raise ValueError(
+                "d43_stated_unit_count must be off/colive_price/always: "
+                f"{self.d43_stated_unit_count}"
+            )
+        if self.d43_floor_within_camp_colive and not self.d43_floor_within_camp:
+            raise ValueError("d43_floor_within_camp_colive needs d43_floor_within_camp")
+        if self.d43_plot_exact_tol and not 0.0 <= self.d43_plot_exact_tol < 1.0:
+            raise ValueError(f"d43_plot_exact_tol must be in [0, 1): {self.d43_plot_exact_tol}")
+        if self.d43_price_sequential_same_feed and not self.d43_price_sequential_path:
+            raise ValueError("d43_price_sequential_same_feed needs d43_price_sequential_path")
+        for name in ("demonstrate_price_path_exact", "demonstrate_price_rounding_aware"):
+            if getattr(self, name) and not self.demonstrate_price_exact:
+                raise ValueError(f"{name} needs demonstrate_price_exact")
         from autodedup.features import ATTR_KEYS, CONFLATED_ATTR_KEYS, NUMERAL_TOLERANCE
 
         unknown_attrs = sorted(
