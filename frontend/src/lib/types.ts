@@ -14,7 +14,7 @@ export type Disposition =
  * parser.OWNERSHIP for the int→text mapping. NULL when sreality didn't
  * report a value. */
 export type Furnished = 'ano' | 'ne' | 'castecne';
-export type Ownership = 'osobni' | 'druzstevni' | 'statni';
+export type Ownership = 'osobni' | 'druzstevni' | 'statni' | 'jine';
 
 /* THE MF "Cenová mapa nájemného" reference-rent breakdown — ONE shape for both
  * columns that store it: `listings.mf_reference_rent` (migration 134) and

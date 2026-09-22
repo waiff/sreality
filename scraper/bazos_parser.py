@@ -565,7 +565,7 @@ def parse_detail(
         price_unit=price_unit,
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
-        disposition=vocabulary.disposition(haystack),
+        disposition=vocabulary.disposition("bazos", haystack),
         floor=floor,
         total_floors=total_floors,
         locality=locality,

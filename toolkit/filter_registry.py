@@ -233,7 +233,11 @@ UNKNOWN_FILTER_VALUE = "__unknown__"
 _UNKNOWN_OPTION = EnumOption(UNKNOWN_FILTER_VALUE, "Neuvedeno", "Unknown / not specified")
 
 FURNISHED_CANONICAL: tuple[str, ...] = ("ano", "ne", "castecne")
-OWNERSHIP_CANONICAL: tuple[str, ...] = ("osobni", "druzstevni", "statni")
+# `jine` is the portals' own "other" bucket, not a placeholder: idnes ("jiné", "s.r.o.",
+# "podílové"), mmreality ("Jiné") and bezrealitky ("OSTATNI") all publish one and used to
+# drop it, while realitymix stored it off-canon (73 active rows). A stated fact is never
+# NULLed, so it is a member on all nine portals and the per-portal override is gone.
+OWNERSHIP_CANONICAL: tuple[str, ...] = ("osobni", "druzstevni", "statni", "jine")
 
 FURNISHED_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("ano", "Vybaveno", "Furnished"),
@@ -246,6 +250,7 @@ OWNERSHIP_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("osobni", "Osobní", "Personal"),
     EnumOption("druzstevni", "Družstevní", "Cooperative"),
     EnumOption("statni", "Státní/obecní", "State/Municipal"),
+    EnumOption("jine", "Jiné", "Other"),
     _UNKNOWN_OPTION,
 )
 
@@ -256,6 +261,9 @@ BUILDING_MATERIAL_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("ostatni", "Ostatní", "Other"),
 )
 
+# Every construction the nine portals actually publish. `jina` is ceskereality's own
+# "other" bucket (8,223 active rows, 17% of its stock) and mmreality's "Ostatní"; the four
+# members below `nizkoenergeticka` were unreachable by any filter until W5.
 BUILDING_TYPE_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("cihla", "Cihla", "Brick"),
     EnumOption("panel", "Panel", "Panel"),
@@ -265,17 +273,34 @@ BUILDING_TYPE_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("kamen", "Kamenná", "Stone"),
     EnumOption("montovana", "Montovaná", "Prefab"),
     EnumOption("nizkoenergeticka", "Nízkoenergetická", "Low-energy"),
+    EnumOption("modularni", "Modulární", "Modular"),
+    EnumOption("ocelova", "Ocelová", "Steel"),
+    EnumOption("roubena", "Roubená", "Log"),
+    EnumOption("jina", "Jiná", "Other"),
 )
 
+# Ordered best-to-worst, which is how the Browse pills read. The five members after
+# `k_demolici`'s six predecessors were live on every portal and reachable by nothing:
+# 14,068 active rows fell out of every condition-scoped query.
 CONDITION_OPTIONS: tuple[EnumOption, ...] = (
+    EnumOption("projekt", "Projekt", "Project"),
+    EnumOption("ve_vystavbe", "Ve výstavbě", "Under construction"),
     EnumOption("novostavba", "Novostavba", "New build"),
     EnumOption("po_rekonstrukci", "Po rekonstrukci", "Recently renovated"),
     EnumOption("velmi_dobry", "Velmi dobrý", "Very good"),
     EnumOption("dobry", "Dobrý", "Good"),
+    EnumOption("udrzovany", "Udržovaný", "Maintained"),
+    EnumOption("v_rekonstrukci", "V rekonstrukci", "Being renovated"),
     EnumOption("pred_rekonstrukci", "Před rekonstrukcí", "Needs renovation"),
+    EnumOption("spatny", "Špatný", "Poor"),
     EnumOption("k_demolici", "K demolici", "For demolition"),
 )
 
+# No `unassessed` member: measured over all nine censuses, NO portal marks its `G` as the
+# statutory placeholder for an unassessed building. Every one of them states it as the
+# ordinary class-G label ("G - Mimořádně nehospodárná", or idnes's decree citation
+# "G (vyhl. č. 78/2013 Sb.)"), the same shape it gives A–F. The 67% G share is real and
+# unreadable — a measure-validity fact the fill matrix reports, not a value to split.
 ENERGY_RATING_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("A", "A", "A"),
     EnumOption("B", "B", "B"),
@@ -286,17 +311,24 @@ ENERGY_RATING_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("G", "G", "G"),
 )
 
-DISPOSITION_OPTIONS: tuple[EnumOption, ...] = (
-    EnumOption("1+kk", "1+kk", "1+kk"),
-    EnumOption("1+1", "1+1", "1+1"),
-    EnumOption("2+kk", "2+kk", "2+kk"),
-    EnumOption("2+1", "2+1", "2+1"),
-    EnumOption("3+kk", "3+kk", "3+kk"),
-    EnumOption("3+1", "3+1", "3+1"),
-    EnumOption("4+kk", "4+kk", "4+kk"),
-    EnumOption("4+1", "4+1", "4+1"),
-    EnumOption("5+kk", "5+kk", "5+kk"),
-    EnumOption("5+1", "5+1", "5+1"),
+# The whole Czech grammar, N rooms + a kitchenette (`kk`) or a separate kitchen (`1`),
+# for the N portals actually publish — 1 through 9. It used to stop at 5+1, which left
+# 710 active rows (a 6+kk house on idnes, bezrealitky, realitymix and bazos) nameable by
+# no filter. `scraper.vocabulary.disposition` is the same grammar on the producer side.
+DISPOSITION_OPTIONS: tuple[EnumOption, ...] = tuple(
+    EnumOption(f"{n}+{k}", f"{n}+{k}", f"{n}+{k}")
+    for n in range(1, 10)
+    for k in ("kk", "1")
+)
+
+# Two facts, and until W5 four spellings of them. The value is the slug the eight
+# text-priced portals already store, chosen over sreality's `celkem`/`měsíc` because
+# moving the majority would have deferred ~279k snapshots instead of 5,696; the label is
+# what the listing page renders after the price, which is why it is lower-case and
+# diacritic-correct where the slug is neither.
+PRICE_UNIT_OPTIONS: tuple[EnumOption, ...] = (
+    EnumOption("za nemovitost", "celkem", "total"),
+    EnumOption("za mesic", "za měsíc", "per month"),
 )
 
 # Portal-agnostic property sub-type, grouped by category_main. House and
@@ -329,6 +361,24 @@ SUBTYPE_OPTIONS: tuple[EnumOption, ...] = (
 
 _SUBTYPE_LABEL_CS: dict[str, str] = {o.value: o.label_cs for o in SUBTYPE_OPTIONS}
 
+# THE canon, by `listings` column: what a stored value may BE. The producer side
+# (`scraper.vocabulary`) and the validity matrix (`scraper.field_census`) both read this
+# one table. Spelled out rather than scanned off the filters, because a scan gets two
+# things wrong: `building_material` is a filter over `building_type` whose values are
+# BUCKET names, so `ostatni` used to count as a canonical construction, and `price_unit`
+# has no filter at all yet still has a canon.
+COLUMN_CANONICAL_VALUES: dict[str, tuple[str, ...]] = {
+    "category_main": tuple(o.value for o in CATEGORY_MAIN_OPTIONS),
+    "category_type": tuple(o.value for o in CATEGORY_TYPE_OPTIONS),
+    "condition": tuple(o.value for o in CONDITION_OPTIONS),
+    "building_type": tuple(o.value for o in BUILDING_TYPE_OPTIONS),
+    "disposition": tuple(o.value for o in DISPOSITION_OPTIONS),
+    "energy_rating": tuple(o.value for o in ENERGY_RATING_OPTIONS),
+    "furnished": FURNISHED_CANONICAL,
+    "ownership": OWNERSHIP_CANONICAL,
+    "price_unit": tuple(o.value for o in PRICE_UNIT_OPTIONS),
+    "subtype": tuple(o.value for o in SUBTYPE_OPTIONS),
+}
 
 def subtype_label_cs(slug: str | None) -> str | None:
     """Czech label for a portal-agnostic `subtype` slug, or None. The single
@@ -968,9 +1018,10 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description=(
                 "Restrict cohort to listings whose `condition` is in "
-                "this list. Czech values without diacritics: "
-                "novostavba, po_rekonstrukci, velmi_dobry, dobry, "
-                "pred_rekonstrukci, k_demolici."
+                "this list. Czech values without diacritics, best to "
+                "worst: projekt, ve_vystavbe, novostavba, "
+                "po_rekonstrukci, velmi_dobry, dobry, udrzovany, "
+                "v_rekonstrukci, pred_rekonstrukci, spatny, k_demolici."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
@@ -985,7 +1036,8 @@ def _build_registry() -> dict[str, FilterDef]:
             description=(
                 "Restrict cohort to listings whose `building_type` is "
                 "in this list. Czech values: cihla, panel, smisena, "
-                "skelet, drevo, kamen, montovana, nizkoenergeticka."
+                "skelet, drevo, kamen, montovana, nizkoenergeticka, "
+                "modularni, ocelova, roubena, jina."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
@@ -1002,9 +1054,11 @@ def _build_registry() -> dict[str, FilterDef]:
                 "The four values (cihla / panel / smisena / ostatni) map onto "
                 "the granular building_type column; a listing matches if its "
                 "building_type is in the union of the selected buckets. "
-                "`ostatni` expands to skelet / drevo / kamen / montovana / "
-                "nizkoenergeticka under the hood. Empty list / null = no "
-                "constraint."
+                "`ostatni` expands to every BUILDING_TYPE_OPTIONS member "
+                "outside the explicit three (skelet, drevo, kamen, "
+                "montovana, nizkoenergeticka, modularni, ocelova, roubena, "
+                "jina), so widening the canon widens the bucket. Empty "
+                "list / null = no constraint."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
@@ -2114,6 +2168,8 @@ __all__ = [
     "CONDITION_OPTIONS",
     "ENERGY_RATING_OPTIONS",
     "DISPOSITION_OPTIONS",
+    "PRICE_UNIT_OPTIONS",
+    "COLUMN_CANONICAL_VALUES",
     "LIFECYCLE_OPTIONS",
     "DISPOSITION_MATCH_OPTIONS",
     "STATUS_OPTIONS",

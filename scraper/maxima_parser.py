@@ -427,7 +427,7 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=vocabulary.disposition(title),
+        disposition=vocabulary.disposition(SOURCE, title),
         locality=locality,
         district=None,
         # Street is the LAST comma-segment ("Praha 6, Suchdol, U Hotelu") — the

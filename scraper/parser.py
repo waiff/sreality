@@ -111,7 +111,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "area_m2": area_m2,
         "area_basis": area_basis,
         "disposition": vocabulary.disposition(
-            *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
+            SOURCE, *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
         ),
         "floor": _int_or_none(read("floor")),
         "total_floors": _int_or_none(read("total_floors")),

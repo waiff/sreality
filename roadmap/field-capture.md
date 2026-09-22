@@ -69,8 +69,17 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       the true→unknown half (idnes has_balcony 17,845 rows, bezrealitky 396, bezrealitky
       price_czk 31) is blocked by R9's never-blank rule** and arrives on each row's next
       detail fetch, never for inactive rows — per-portal numbers in the program doc.
-- [ ] **W5 — apply the vocabulary collapses to stored rows**, one counted batch each;
-      `price_unit` 4 → 2; ~14k + ~8.3k rows become reachable by a Browse filter.
+- [x] **W5 — the vocabulary collapses.** The canon widened to the values live rows carry
+      (condition +5, building_type +4, ownership `jine`, dispositions to 9+1, `price_unit`
+      4 spellings → 2 members): 14,068 + 8,351 + 710 + 73 active rows become reachable by a
+      Browse option that could not name them. Four true synonyms collapse
+      (`ve_vystavbe_(hruba_stavba)`, `urceny_k_demolici`, ceskereality's comma-joined
+      materials, the price_unit pair); the legacy tier and the one portal override are gone,
+      so the LLM tool schema's enums ARE the canon — `disposition` and `price_unit` included.
+      The disposition grammar refuses what cannot exist (819 stored bazos rows across 28
+      values, listed for the operator; R9 keeps them). PENB `G` stays one member: measured,
+      no portal marks the statutory placeholder. **The stored-row heal is dispatched
+      post-merge** — dry-run lines per portal in the PR.
 - [x] **W6 — close the wipe (R4).** The one shared SET builder now takes the source and
       asks the contract: `structured` / `derived` cells still clear from a parser NULL (a
       portal that stops stating a fact must be able to drop it), `text` / `none` cells

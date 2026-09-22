@@ -83,8 +83,10 @@ def test_baseline_records_the_known_zero_cells() -> None:
 
 
 def test_the_baseline_carries_the_statutory_energy_placeholder_per_portal() -> None:
-    """R11 makes PENB 'G' a vocabulary member of its own, so W4/W5 must be able to read
-    its share per portal out of the blessed artifact instead of re-querying production."""
+    """The 67% G share is the corpus's biggest measure-validity fact, and W5 measured that
+    no portal marks which of them is the statutory unassessed placeholder — so it stays one
+    member and this share is the only instrument on it. Read out of the blessed artifact,
+    never by re-querying production."""
     cells = fc.load_baseline()["cells"]
     for portal in ("sreality", "idnes", "remax", "ceskereality"):
         values = cells[f"{portal}/energy_rating"]["values"]
@@ -97,11 +99,13 @@ def test_attribute_fields_are_the_column_contract_minus_the_three_non_attributes
     )
 
 
-def test_canon_comes_from_the_filter_registry_and_price_unit_has_none() -> None:
-    """`price_unit` is the one enum-shaped column no filter constrains, so W1 can count
-    its vocabulary but not judge it — the collapse to two members is W5's."""
+def test_canon_comes_from_the_filter_registry_by_column_not_by_filter() -> None:
+    """A filter is the wrong index: `building_material` is one over `building_type`
+    whose values are BUCKET names, so a scan made `ostatni` a canonical construction,
+    and `price_unit` has no filter at all yet carries a two-member canon."""
     assert "novostavba" in (fc.canonical_values("condition") or set())
-    assert fc.canonical_values("price_unit") is None
+    assert fc.canonical_values("price_unit") == {"za nemovitost", "za mesic"}
+    assert "ostatni" not in (fc.canonical_values("building_type") or set())
 
 
 # --- the reductions --------------------------------------------------------

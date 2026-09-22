@@ -33,11 +33,14 @@ emits". That is now one table and one module rather than nine copies of each:
   NOT a seventh top-level key there (`location_data/contracts.py` `_TOP_LEVEL_KEYS`).
 - **`scraper/vocabulary.py`** — the producer side of the vocabulary: one diacritic fold, one
   `(field, portal label) → canonical` registry, one disposition grammar, one PENB grammar and
-  the boolean readings. The CANON stays in `toolkit/filter_registry.py` and is imported, never
-  restated; the LLM tool schema's enums are generated from `known_values` (canon plus the
-  legacy spellings the columns still hold until W5) — except `disposition`, whose contract is
-  the grammar, not the Browse filter's pill list. A label no entry names is NULL **plus a
-  counted event** in the run summary (`RUN done … unmapped=N`), never a passthrough; the
+  the boolean readings. The CANON stays in `toolkit/filter_registry.py`
+  (`COLUMN_CANONICAL_VALUES`, keyed by `listings` column — NOT scanned off the filters, which
+  made the `building_material` bucket name `ostatni` a canonical construction and left
+  `price_unit` with no canon at all) and is imported, never restated; the LLM tool schema's
+  enums are generated from `CANON`, which since W5 IS the whole value space — `disposition`
+  and `price_unit` included, so the on-demand URL parser cannot emit an `8+7` or a fifth
+  spelling of "monthly". A label no entry names is NULL **plus a counted event** in the run
+  summary (`RUN done … unmapped=N`), never a passthrough; the
   counter is drained per drain pass, because the always-on worker runs every source's drain
   in one long-lived process.
 - The evidence both answer to is the checked-in per-portal key census in
@@ -2205,8 +2208,8 @@ renumber.** Navigate by area:
     `tests/toolkit/test_dedup_candidates_sql.py` was re-pinned in the same commit.
 
     **The basis is resolved from `(category_main, category_type)`, rent-first, and NEVER from
-    `listings.price_unit`** — that column is four legacy spellings of two concepts across nine
-    portals, a duplicate of `category_type`, not a per-area unit. The three tokens
+    `listings.price_unit`** — that column is two values (`za nemovitost` / `za mesic`; W5
+    collapsed the four spellings), a duplicate of `category_type`, not a per-area unit. The three tokens
     (`sale_capital_czk_m2`, `rent_monthly_czk_m2`, `land_capital_czk_m2`) are published as
     `price_per_m2_basis` on all six read relations, so a render surface READS the label rather
     than recomputing it. Two states a *cohort* can be in are not bases and get no unit at all:

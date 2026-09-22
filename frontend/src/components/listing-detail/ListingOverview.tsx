@@ -10,7 +10,7 @@ import { lazyChunk } from '@/lib/lazyChunk';
 import { fmtCzk, fmtArea, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/format';
 import { areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
-import { listingKindParts } from '@/lib/enums';
+import { listingKindParts, priceUnitLabel } from '@/lib/enums';
 import {
   buildFacts,
   buildAmenities,
@@ -106,7 +106,7 @@ function Header({
     listing.price_per_m2,
     ppm2BasisFromToken(listing.price_per_m2_basis),
   );
-  const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
+  const unit = hasPrice && listing.price_unit ? ` / ${priceUnitLabel(listing.price_unit)}` : '';
   // Only sreality carries a real portal id; other sources hold a synthetic
   // (negative) sreality_id that must never surface as an "ID".
   const hasId = listing.source === 'sreality';

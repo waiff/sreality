@@ -881,6 +881,46 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "5+1",
           "label_cs": "5+1",
           "label_en": "5+1"
+        },
+        {
+          "value": "6+kk",
+          "label_cs": "6+kk",
+          "label_en": "6+kk"
+        },
+        {
+          "value": "6+1",
+          "label_cs": "6+1",
+          "label_en": "6+1"
+        },
+        {
+          "value": "7+kk",
+          "label_cs": "7+kk",
+          "label_en": "7+kk"
+        },
+        {
+          "value": "7+1",
+          "label_cs": "7+1",
+          "label_en": "7+1"
+        },
+        {
+          "value": "8+kk",
+          "label_cs": "8+kk",
+          "label_en": "8+kk"
+        },
+        {
+          "value": "8+1",
+          "label_cs": "8+1",
+          "label_en": "8+1"
+        },
+        {
+          "value": "9+kk",
+          "label_cs": "9+kk",
+          "label_en": "9+kk"
+        },
+        {
+          "value": "9+1",
+          "label_cs": "9+1",
+          "label_en": "9+1"
         }
       ],
       "aliases": [],
@@ -1096,7 +1136,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "condition",
       "default": null,
-      "description": "Restrict cohort to listings whose `condition` is in this list. Czech values without diacritics: novostavba, po_rekonstrukci, velmi_dobry, dobry, pred_rekonstrukci, k_demolici.",
+      "description": "Restrict cohort to listings whose `condition` is in this list. Czech values without diacritics, best to worst: projekt, ve_vystavbe, novostavba, po_rekonstrukci, velmi_dobry, dobry, udrzovany, v_rekonstrukci, pred_rekonstrukci, spatny, k_demolici.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1112,6 +1152,16 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "unit": null,
       "basis": null,
       "enum_values": [
+        {
+          "value": "projekt",
+          "label_cs": "Projekt",
+          "label_en": "Project"
+        },
+        {
+          "value": "ve_vystavbe",
+          "label_cs": "Ve výstavbě",
+          "label_en": "Under construction"
+        },
         {
           "value": "novostavba",
           "label_cs": "Novostavba",
@@ -1133,9 +1183,24 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Good"
         },
         {
+          "value": "udrzovany",
+          "label_cs": "Udržovaný",
+          "label_en": "Maintained"
+        },
+        {
+          "value": "v_rekonstrukci",
+          "label_cs": "V rekonstrukci",
+          "label_en": "Being renovated"
+        },
+        {
           "value": "pred_rekonstrukci",
           "label_cs": "Před rekonstrukcí",
           "label_en": "Needs renovation"
+        },
+        {
+          "value": "spatny",
+          "label_cs": "Špatný",
+          "label_en": "Poor"
         },
         {
           "value": "k_demolici",
@@ -1151,7 +1216,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "building_type",
       "default": null,
-      "description": "Restrict cohort to listings whose `building_type` is in this list. Czech values: cihla, panel, smisena, skelet, drevo, kamen, montovana, nizkoenergeticka.",
+      "description": "Restrict cohort to listings whose `building_type` is in this list. Czech values: cihla, panel, smisena, skelet, drevo, kamen, montovana, nizkoenergeticka, modularni, ocelova, roubena, jina.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1202,6 +1267,26 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "nizkoenergeticka",
           "label_cs": "Nízkoenergetická",
           "label_en": "Low-energy"
+        },
+        {
+          "value": "modularni",
+          "label_cs": "Modulární",
+          "label_en": "Modular"
+        },
+        {
+          "value": "ocelova",
+          "label_cs": "Ocelová",
+          "label_en": "Steel"
+        },
+        {
+          "value": "roubena",
+          "label_cs": "Roubená",
+          "label_en": "Log"
+        },
+        {
+          "value": "jina",
+          "label_cs": "Jiná",
+          "label_en": "Other"
         }
       ],
       "aliases": [],
@@ -1212,7 +1297,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "building_type",
       "default": null,
-      "description": "Operator-friendly building material buckets (multi-select). The four values (cihla / panel / smisena / ostatni) map onto the granular building_type column; a listing matches if its building_type is in the union of the selected buckets. `ostatni` expands to skelet / drevo / kamen / montovana / nizkoenergeticka under the hood. Empty list / null = no constraint.",
+      "description": "Operator-friendly building material buckets (multi-select). The four values (cihla / panel / smisena / ostatni) map onto the granular building_type column; a listing matches if its building_type is in the union of the selected buckets. `ostatni` expands to every BUILDING_TYPE_OPTIONS member outside the explicit three (skelet, drevo, kamen, montovana, nizkoenergeticka, modularni, ocelova, roubena, jina), so widening the canon widens the bucket. Empty list / null = no constraint.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1499,6 +1584,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "statni",
           "label_cs": "Státní/obecní",
           "label_en": "State/Municipal"
+        },
+        {
+          "value": "jine",
+          "label_cs": "Jiné",
+          "label_en": "Other"
         },
         {
           "value": "__unknown__",
@@ -2589,4 +2679,9 @@ export const UI_CONTROLS = FILTER_REGISTRY.ui_controls;
  * multi-select logic (a value that also matches NULL / non-canonical).
  * Generated from toolkit.filter_registry; do not hand-edit. */
 export const FURNISHED_CANONICAL = ["ano", "ne", "castecne"] as const;
-export const OWNERSHIP_CANONICAL = ["osobni", "druzstevni", "statni"] as const;
+export const OWNERSHIP_CANONICAL = ["osobni", "druzstevni", "statni", "jine"] as const;
+
+/* `listings.price_unit` constrains no filter, so it is not in the payload
+ * above — but every listing surface renders it after the price, and the
+ * stored slug ('za mesic') is not the word a Czech page should show. */
+export const PRICE_UNIT_LABELS: Record<string, string> = {"za nemovitost": "celkem", "za mesic": "za měsíc"};

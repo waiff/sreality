@@ -10,7 +10,7 @@
  * never shows a blank cell. Add a row whenever a new code surfaces in
  * a frontend filter dropdown. */
 
-import { filterById } from './filterRegistry.generated';
+import { PRICE_UNIT_LABELS, filterById } from './filterRegistry.generated';
 import type { Furnished, Ownership } from './types';
 
 export const FURNISHED_LABELS: Record<Furnished, string> = {
@@ -23,7 +23,16 @@ export const OWNERSHIP_LABELS: Record<Ownership, string> = {
   osobni: 'Osobní',
   druzstevni: 'Družstevní',
   statni: 'Státní/obecní',
+  jine: 'Jiné',
 };
+
+/* The word rendered after a price ("3 000 000 Kč / celkem"). The stored slug is
+ * the eight text-priced portals' spelling and is not display Czech; an unhealed
+ * sreality row still carries its own 'celkem' / 'měsíc', which falls through as
+ * itself, so the two spellings read identically while the heal runs. */
+export function priceUnitLabel(unit: string | null | undefined): string | null {
+  return unit ? PRICE_UNIT_LABELS[unit] ?? unit : null;
+}
 
 /* What an area figure is the area OF — `scraper/area.py`'s vocabulary, which is
  * stamped on every row it derives a headline area for. `unknown` gets no label

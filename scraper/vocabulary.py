@@ -27,11 +27,11 @@ other half: turning what a portal WROTE into one of those values.
     was previously four separate definitions (`parser._any_of`, `idnes._any_true`, and the
     `or` chains in maxima and remax that turned an explicit `False` into NULL).
 
-**Identity, until W5.** Every value a parser emits today is still emitted today. The
-off-canon spellings live rows carry (`ve_vystavbe_(hruba_stavba)`, `urceny_k_demolici`,
-building_type `jina`) are declared as LEGACY entries mapped to themselves, with the
-collapse W5 will apply recorded beside them — so this wave moves no stored value and W5
-is one table edit plus one counted batch.
+**The canon is the whole value space (W5).** There is no legacy tier any more: every
+value a live row carries is either a canonical member (`ve_vystavbe`, `projekt`,
+`udrzovany`, building_type `jina`, ownership `jine`, a 6+kk disposition — all real facts
+the filters had no slot for) or a spelling of one, collapsed here. So `CANON` is exactly
+what this module may emit, and the LLM tool schema generated from it offers exactly that.
 """
 
 from __future__ import annotations
@@ -42,58 +42,14 @@ from threading import Lock
 from typing import Iterable, Mapping
 from unicodedata import combining, normalize
 
-from toolkit.filter_registry import (
-    BUILDING_TYPE_OPTIONS,
-    CONDITION_OPTIONS,
-    DISPOSITION_OPTIONS,
-    ENERGY_RATING_OPTIONS,
-    FURNISHED_CANONICAL,
-    OWNERSHIP_CANONICAL,
-)
+from toolkit.filter_registry import COLUMN_CANONICAL_VALUES
 
 # The canon, read from the consumer-side registry — one list, never a second spelling.
 CANON: dict[str, frozenset[str]] = {
-    "condition": frozenset(o.value for o in CONDITION_OPTIONS),
-    "building_type": frozenset(o.value for o in BUILDING_TYPE_OPTIONS),
-    "ownership": frozenset(OWNERSHIP_CANONICAL),
-    "furnished": frozenset(FURNISHED_CANONICAL),
-    "energy_rating": frozenset(o.value for o in ENERGY_RATING_OPTIONS),
-    "disposition": frozenset(o.value for o in DISPOSITION_OPTIONS),
+    field: frozenset(COLUMN_CANONICAL_VALUES[field])
+    for field in ("condition", "building_type", "ownership", "furnished",
+                  "energy_rating", "disposition", "price_unit")
 }
-
-# Values live rows carry that the canon has no slot for, mapped here to THEMSELVES so
-# this wave moves nothing, with the collapse W5 applies to stored rows recorded beside
-# each. A `None` target means "the operator rules on it in W5" (R11 adds the real ones as
-# canonical members rather than NULLing a stated fact).
-LEGACY_COLLAPSES: dict[str, dict[str, str | None]] = {
-    "condition": {
-        "ve_vystavbe_(hruba_stavba)": "ve_vystavbe",  # a slugified portal label, parens and all
-        "urceny_k_demolici": "k_demolici",
-        "ve_vystavbe": None,      # R11: becomes a canonical member
-        "projekt": None,
-        "v_rekonstrukci": None,
-        "udrzovany": None,
-        "spatny": None,
-    },
-    "building_type": {
-        "zdena, kamenna": "cihla",    # a comma-joined ceskereality cell nothing splits
-        "drevena, zdena": "cihla",
-        "jina": None,                 # 8,230 ceskereality rows; R11 rules
-        "ocelova": None,
-        "roubena": None,
-        "modularni": None,
-    },
-    "ownership": {"jine": None},      # 73 realitymix rows, semantically absent
-}
-
-_LEGACY_VALUES: dict[str, frozenset[str]] = {
-    field: frozenset(values) for field, values in LEGACY_COLLAPSES.items()
-}
-
-
-def known_values(field: str) -> frozenset[str]:
-    """Every value this module may emit for a field: the canon plus today's legacy."""
-    return CANON.get(field, frozenset()) | _LEGACY_VALUES.get(field, frozenset())
 
 
 # --- the one fold ----------------------------------------------------------
@@ -132,31 +88,38 @@ _LABELS: dict[str, dict[str, str]] = {
         "k_demolici": "k_demolici", "demolition": "k_demolici",
         "ve_vystavbe": "ve_vystavbe", "rozestaveny": "ve_vystavbe",
         "construction": "ve_vystavbe",
+        # realitymix and remax slugify the whole dropdown label, parentheses and all.
+        "ve_vystavbe_(hruba_stavba)": "ve_vystavbe",
         "projekt": "projekt", "project": "projekt",
         "v_rekonstrukci": "v_rekonstrukci", "in_reconstruction": "v_rekonstrukci",
         "spatny": "spatny", "bad": "spatny",
         "udrzovany": "udrzovany",
-        "ve_vystavbe_(hruba_stavba)": "ve_vystavbe_(hruba_stavba)",
-        "urceny_k_demolici": "urceny_k_demolici",
+        "urceny_k_demolici": "k_demolici",
     },
     "building_type": {
         "cihlova": "cihla", "cihla": "cihla", "zdena": "cihla", "brick": "cihla",
         "panelova": "panel", "panel": "panel",
         "smisena": "smisena", "mixed": "smisena",
+        # ceskereality has no "smíšená" option and states two materials in one cell
+        # instead ("Zděná, kamenná"); two materials IS mixed construction, and folding
+        # the pair onto its first member would throw the second fact away.
+        "zdena_kamenna": "smisena", "drevena_zdena": "smisena",
         "skeletova": "skelet", "skelet": "skelet",
         "drevena": "drevo", "drevostavba": "drevo", "wood": "drevo",
         "kamenna": "kamen", "stone": "kamen",
         "montovana": "montovana", "prefab": "montovana",
         "nizkoenergeticka": "nizkoenergeticka",
-        "jina": "jina", "ocelova": "ocelova", "roubena": "roubena",
-        "modularni": "modularni",
-        "zdena_kamenna": "zdena, kamenna", "drevena_zdena": "drevena, zdena",
+        "jina": "jina", "jine": "jina", "ostatni": "jina",
+        "ocelova": "ocelova", "roubena": "roubena", "modularni": "modularni",
     },
     "ownership": {
         "osobni": "osobni", "soukrome": "osobni",
         "druzstevni": "druzstevni",
         "statni": "statni", "obecni": "statni", "statni_obecni": "statni",
         "statni_obecni_jine": "statni",
+        # Every regime outside the three. idnes names two of them outright ("s.r.o.",
+        # "podílové") and four portals used to drop the bucket entirely.
+        "jine": "jine", "ostatni": "jine", "s.r.o.": "jine", "podilove": "jine",
     },
     # Both stems in both genders: the five deleted `_norm_furnished` matchers keyed on the
     # substrings "zariz" / "vybav" / "castec", so every inflection a portal renders had to
@@ -176,18 +139,13 @@ _LABELS: dict[str, dict[str, str]] = {
 # NULLed silently, so they never count as unmapped: the operator has decided about them.
 _REFUSED: dict[str, frozenset[str]] = {
     "condition": frozenset({"undefined", "neuvedeno", "rezervovano", "prodano"}),
-    "building_type": frozenset({"undefined", "neuvedeno", "ostatni", "jine",
-                                "rezervovano", "prodano"}),
-    "ownership": frozenset({"undefined", "ostatni", "jine", "s.r.o.", "podilove",
-                            "neuvedeno"}),
+    "building_type": frozenset({"undefined", "neuvedeno", "rezervovano", "prodano"}),
+    "ownership": frozenset({"undefined", "neuvedeno"}),
     "furnished": frozenset({"undefined", "neuvedeno"}),
 }
 
-# Where one portal reads a label differently from the rest. `jine` is the whole list: on
-# idnes and mmreality an "other" ownership has always been dropped, and on realitymix it
-# has always been stored as `jine` (73 active rows). W5 is where those two agree.
+# Where one portal reads a label differently from the rest.
 _PORTAL_LABELS: dict[tuple[str, str], dict[str, str]] = {
-    ("realitymix", "ownership"): {"jine": "jine"},
     # mmreality states `equipment` as 1|2|3 and renders no "Vybavení" row on the page, so
     # the codebook was settled against the ads' own words on the rental slice (n=1,246):
     # code 1 reads "plně/kompletně vybaven" on 29.8% of its rows, code 2 "nevybaven" on
@@ -262,22 +220,33 @@ def take_unmapped() -> list[tuple[str, int]]:
 
 # --- the two grammars ------------------------------------------------------
 
-# One disposition grammar. The spaced form is the superset: every portal's own regex was
-# either this or the unspaced `\d\+(kk|\d)` sreality used, which this matches too.
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
+# One disposition grammar, and it is the Czech one: N rooms plus a kitchenette (`kk`) or
+# a separate kitchen (`1`). The second term can be nothing else and the first cannot be
+# zero, which the `\d\+(kk|\d)` every portal used to carry did not say — so bazos's
+# free-text mining wrote 0+1, 4+2, 8+7 and 9+5 into the column (230 active rows across 28
+# impossible values). A near-miss is now refused and COUNTED, not stored.
+_DISPOSITION_RE = re.compile(r"\b([1-9])\s*\+\s*(kk|1)\b", re.IGNORECASE)
+_DISPOSITION_NEAR_MISS_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 # bezrealitky states its disposition as a code, not as text.
 _DISP_CODE_RE = re.compile(r"DISP_(\d)_(KK|1|IZB)")
 _ENERGY_RE = re.compile(r"\b([A-G])\b")
 
 
-def disposition(*texts: str | None) -> str | None:
-    """The first `N+kk` / `N+M` any of the texts states, in the caller's order."""
+def disposition(portal: str, *texts: str | None) -> str | None:
+    """The first grammatical `N+kk` / `N+1` any of the texts states, in the caller's order.
+
+    A digit pair that is not a disposition ("4+2", "0+1") is refused and counted rather
+    than stored: on bazos the haystack is the advert's own prose, where a bare "8+7" is
+    far more likely to be a phone number or a dimension than a flat."""
     for text in texts:
         if not text:
             continue
         match = _DISPOSITION_RE.search(str(text))
         if match:
             return f"{match.group(1)}+{match.group(2).lower()}"
+        near = _DISPOSITION_NEAR_MISS_RE.search(str(text))
+        if near:
+            refuse("disposition", portal, near.group(0))
     return None
 
 
@@ -298,8 +267,10 @@ def energy_rating(*texts: str | None) -> str | None:
 
     A stated `G` is very often the statutory placeholder for an UNASSESSED building
     (67.4% of every rated row, uniformly across all nine portals) rather than a
-    measurement. That is a measure-validity fact, recorded by the fill matrix and ruled
-    on in W5 — not something to silently drop here."""
+    measurement — but NO portal marks which (W5 measured all nine: every one spells its
+    G as the ordinary class label, "G - Mimořádně nehospodárná" or idnes's decree
+    citation). So it cannot be split here, and stays a measure-validity fact the fill
+    matrix reports."""
     for text in texts:
         if not text:
             continue

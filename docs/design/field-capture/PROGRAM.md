@@ -142,9 +142,19 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 - **R11 — Vocabulary defaults (operator-accepted):** add every real value as a canonical member (`ve_vystavbe`,
   `projekt`, `spatny`, `udrzovany`, `v_rekonstrukci`, building_type `jina`, dispositions above 5+1); collapse only
   true synonyms; never NULL a stated fact. `has_balcony` = balcony OR loggia (terrace has its own column; any union is
-  computed once in the filter layer). `has_parking` = a space or right **belonging to** the property. The statutory
-  PENB placeholder "G" is a distinct `unassessed` member where the portal marks it. The on-demand URL parser is kept
+  computed once in the filter layer). `has_parking` = a space or right **belonging to** the property. ~~The statutory
+  PENB placeholder "G" is a distinct `unassessed` member where the portal marks it.~~ *(W5 correction: measured over
+  all nine censuses, **no portal marks it**. Every one spells its G as the ordinary class label — "G - Mimořádně
+  nehospodárná" on sreality / ceskereality / realitymix / mmreality, idnes's decree citation "G (vyhl. č. 78/2013
+  Sb.)", a bare letter on maxima / remax / bezrealitky — the same shape it gives A–F. There is nothing to split on,
+  so `energy_rating` stays A–G and the 67 % G share stays what W1 made it: a measure-validity fact the fill matrix
+  reports.)* The on-demand URL parser is kept
   and brought onto the generated vocabulary. `LLM_DAILY_COST_WARN_USD` moves to $15 with the lane.
+  *(W5 correction: ownership `jine` is the last clause's first real customer. The brief called it "semantically
+  absent → NULL"; it is the portals' own "other" bucket — idnes states it three ways ("jiné", "s.r.o.",
+  "podílové"), mmreality as "Jiné", bezrealitky as "OSTATNI" — and four of the five used to drop it while realitymix
+  stored it off-canon. NULLing a stated fact is what the ruling forbids, so it is a canonical member on all nine and
+  the per-portal override is gone.)*
 - **R12 — Autodedup is another program's territory.** This program fixes upstream and hands over in writing; it never
   edits `autodedup/` or `docs/design/autodedup/`. Owed hand-overs: the false "zero area" sentences (E12, :241, :1046);
   the stale `PLOT_TRUNCATING_SOURCES` guard (the truncation was fixed by `scraper/area.py` + healed); the W8 floor
@@ -323,9 +333,45 @@ than trickled. Live at the time of writing, `notification_subscriptions` has **0
 collection, so the live blast radius of this wave's heal is zero; the mechanism above is what makes it safe when
 subscriptions come back.
 
-**W5.** Unmapped-value rate = 0 for condition, building_type, ownership, price_unit, disposition;
-`count(distinct price_unit)` = 2; building_type `jina` ≈ 8,203 retained; per-value Browse membership delta published
-before each batch; impossible dispositions (0+1, 8+7…) refused and counted, never silent.
+**W5 — met in code; the stored-row half is the operator's dispatch.** Unmapped-value rate = 0 for condition,
+building_type, ownership, price_unit, disposition (gate A3, over every value the nine censuses record);
+`count(distinct price_unit)` = 2 in the canon **and** on every row the heal reaches; building_type `jina` 8,223
+active rows retained as a member; impossible dispositions refused and counted (`vocabulary.disposition` takes the
+portal and raises a `disposition/{portal}/{pair}` event), never silent.
+
+**What the canon gained, and what it cost.** 14,068 active rows become reachable by a Browse condition option they
+were invisible to (`ve_vystavbe` 7,859 + `ve_vystavbe_(hruba_stavba)` 1,291, `projekt` 2,457, `spatny` 1,175,
+`udrzovany` 675, `v_rekonstrukci` 553, `urceny_k_demolici` 58); 8,351 by a building_type option (`jina` 8,223,
+`modularni` 99, `ocelova` 14, `roubena` 7, the two comma-joined ceskereality cells 7, bazos's `smisana` 1); 710 by a
+disposition option (6+kk 361, 6+1 210, 7+1 56, 7+kk 47, 8+1 25, 8+kk 6, 9+1 4, 9+kk 1); 73 realitymix rows by the new
+`jine` ownership option. **Only four of those need a stored-row heal** — the rest were already stored under the value
+the canon now names. The four are the collapses: condition `ve_vystavbe_(hruba_stavba)` → `ve_vystavbe`
+(realitymix 1,157 active / 383 inactive, remax 134 / 53) and `urceny_k_demolici` → `k_demolici` (realitymix 44 / 34,
+remax 14 / 7), both through the W3 seam on the page substrate; building_type `zdena, kamenna` / `drevena, zdena` →
+`smisena` (ceskereality 7 / 2 — two materials IS mixed construction, and that portal offers no "smíšená" option,
+which is why it states the pair); and `price_unit` → `za nemovitost` / `za mesic` (sreality 103,841 active,
+bezrealitky 5,696 active). **bazos's one active `smisana` row is the seam's blind spot**: that portal's
+`building_type` producer is `none` (the value came from the removed LLM lane), so a re-derive yields None and
+never-blank keeps it — a one-off `UPDATE` is the only reach, and it is the operator's call.
+
+**Snapshot budget, which is what chose the `price_unit` spelling.** The eight non-sreality portals hash the PARSED
+fields and `price_unit` is one of them, so each changed active row defers one snapshot to its next detail fetch.
+Collapsing onto sreality's `celkem`/`měsíc` would have moved the seven text-priced portals — 278,844 active rows,
+~28 days of the whole platform's snapshot budget. Collapsing onto their `za nemovitost`/`za mesic` moves sreality
+(103,841 rows, which hash the RAW payload and so defer NOTHING — the recorded permanent column/history divergence)
+and bezrealitky (5,696). **5,696 deferred snapshots against 278,844: a 49x difference for the same two facts.** The
+slug is therefore not display Czech, so `PRICE_UNIT_OPTIONS` carries the label the SPA renders after the price
+("celkem", "za měsíc") and the three render sites read it — which also un-regresses the two portals whose own
+spelling was already the Czech word.
+
+**The impossible dispositions stay stored (R9) and are listed for the operator.** 28 values, 230 active / 589
+inactive rows, all bazos but one inactive idnes row: `0+1` 8/12, `0+2` 1/1, `1+0` 15/55, `1+2` 10/18, `1+3` 3/11,
+`1+4` 2/9, `1+5` 0/1, `1+6` 1/1, `2+0` 9/39, `2+2` 1/3, `2+3` 0/2, `3+0` 0/1, `3+2` 3/5, `4+0` 1/1, `4+2` 25/45,
+`4+3` 2/3, `5+2` 43/109, `5+5` 3/4, `6+2` 52/138, `6+3` 2/10, `6+7` 1/0, `7+2` 18/52, `8+2` 18/35, `8+3` 0/2,
+`8+7` 3/3, `9+2` 6/21, `9+3` 2/3, `9+5` 1/5. The brief said "~60 rows"; it is 819. The grammar refuses them from now
+on, so the set can only shrink — each row clears on its next detail fetch, which re-derives `disposition` as None
+and, `disposition` being `text` on bazos, is PRESERVED by R4's rule rather than cleared. So they persist until a
+heal blanks them, which never-blank forbids: **the honest state is "stored, unreachable, counted, and listed here".**
 
 **W6 — met offline; two gates are post-merge by nature.** The preserved-cell rule is contract-driven and rendered per
 source in `tests/scraper/test_listing_write_preserve.py`: for all nine portals every `text`/`none` cell is

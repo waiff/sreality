@@ -1,5 +1,5 @@
 import type { Disposition } from './types';
-import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL } from './filterRegistry.generated';
+import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL, filterById } from './filterRegistry.generated';
 import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
@@ -396,13 +396,17 @@ export const USABLE_AREA_BOUNDS = { min: 0, max: 500, step: 5 };
 export const PRICE_BOUNDS = { min: 0, max: 100_000, step: 500 };
 export const AREA_BOUNDS = { min: 0, max: 300, step: 5 };
 
-/* The "Ostatní" bucket expands to every sreality building_type value
- * that isn't in the explicit three. Listings with a NULL building_type
- * fall out of any non-null selection — matching how furnished /
+/* The "Ostatní" bucket expands to every building_type value that isn't in the
+ * explicit three — read off the registry, so a construction added to the canon
+ * is reachable the moment it exists (the hand-kept list left ceskereality's
+ * `jina`, 8,223 active rows, selectable by nothing). Listings with a NULL
+ * building_type fall out of any non-null selection — matching how furnished /
  * ownership filters already behave. */
-export const BUILDING_MATERIAL_OTHER_VALUES = [
-  'skelet', 'drevo', 'kamen', 'montovana', 'nizkoenergeticka',
-] as const;
+export const BUILDING_MATERIAL_OTHER_VALUES: ReadonlyArray<string> = (
+  filterById('building_type_match')?.enum_values ?? []
+)
+  .map((o) => String(o.value))
+  .filter((v) => v !== 'cihla' && v !== 'panel' && v !== 'smisena');
 
 const buildingMaterialBucketToValues = (
   m: BuildingMaterial,
@@ -440,10 +444,9 @@ export const UNKNOWN_FILTER_VALUE = '__unknown__';
 export { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL };
 const FURNISHED_VALUES: ReadonlyArray<string> = [...FURNISHED_CANONICAL, UNKNOWN_FILTER_VALUE];
 const OWNERSHIP_VALUES: ReadonlyArray<string> = [...OWNERSHIP_CANONICAL, UNKNOWN_FILTER_VALUE];
-const CONDITION_VALUES: ReadonlyArray<string> = [
-  'novostavba', 'po_rekonstrukci', 'velmi_dobry',
-  'dobry', 'pred_rekonstrukci', 'k_demolici',
-];
+const CONDITION_VALUES: ReadonlyArray<string> = (
+  filterById('condition_match')?.enum_values ?? []
+).map((o) => String(o.value));
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = [
   'byt', 'dum', 'komercni', 'pozemek', 'ostatni',
 ];
