@@ -510,3 +510,80 @@ def test_e219_needs_the_two_to_be_on_sale_together() -> None:
                 category_type="prodej", area_m2=500.0, price=3990000.0,
                 description=OPATOVICE.format(connection=BUILT))
     assert "neighbour_plot" not in names(a, b, S6)
+
+
+# --- the bars each reading needs, measured on the cohorts and pinned here ------------------
+def test_e211_refuses_two_bodies_that_both_contradict_their_columns() -> None:
+    body = ("Do prodeje se dostává stavba občanského komerčního vybavení. Stavba z cihel na "
+            "ploše {lead} m2 je z větší části podsklepena.")
+    a = listing(46382, area_m2=1284.0, description=body.format(lead="641"))
+    b = listing(46383, area_m2=1284.0, description=body.format(lead="1000"))
+    assert "headline_area" not in names(a, b, S6)
+
+
+def test_e211_refuses_a_lead_whose_body_also_states_its_column() -> None:
+    a = listing(40457, area_m2=654.0, description=(
+        "Nabízím k prodeji zděný objekt s celkovou užitnou plochou 654 m² pro investory."))
+    b = listing(48439, category_main="dum", area_m2=654.0, description=(
+        "1. NP: atypický byt 3kk o výměře 120 m2; 2. NP: byt 6+1 o výměře 203 m2. "
+        "Celková užitná plocha činí 654 m²."))
+    assert "headline_area" not in names(a, b, S6)
+
+
+UJEZD_FLAT = ("Nabízíme k pronájmu moderní byt 2+kk s terasou o velikosti 66 m² v klidné "
+              "části obce Újezd. Byt se nachází ve {storey}. nadzemním podlaží novostavby. "
+              "Celkem má budova 4 nadzemní podlaží a 1 podzemní podlaží.")
+
+
+def test_e212_refuses_a_storey_that_contradicts_its_own_column() -> None:
+    a = listing(34819, category_main="byt", category_type="pronajem", area_m2=66.0, floor=2,
+                price=20000.0, description=UJEZD_FLAT.format(storey="2"))
+    b = listing(378669, source="realitymix", category_main="byt", category_type="pronajem",
+                area_m2=66.0, floor=2, price=21000.0, description=UJEZD_FLAT.format(storey="4"))
+    assert offered_storeys(a.description) == frozenset({2})
+    assert offered_storeys(b.description) == frozenset({4})
+    assert "offered_storey" not in names(a, b, S6)
+
+
+def test_e210_column_limb_yields_to_the_storey_both_bodies_state() -> None:
+    body = ("Nabízíme ke koupi zkolaudovaný byt 3+kk s velkou terasou, situovaný ve druhém "
+            "patře novostavby cihlového bytového domu se třemi bytovými jednotkami.")
+    a = listing(16337, first=0, last=10, category_main="byt", category_type="prodej",
+                area_m2=86.0, floor=2, price=12390000.0, broker_firm_id=7, description=body)
+    b = listing(18934706, first=25, last=35, category_main="byt", category_type="prodej",
+                area_m2=86.0, floor=1, price=10800000.0, broker_firm_id=7, description=body)
+    assert "floor" in names(a, b, variant(d43_floor_cross_form_agreement=False))
+    assert "floor" not in names(a, b, S6)
+
+
+def test_e215_needs_a_stated_total() -> None:
+    a = listing(463564, category_main="byt", category_type="prodej", area_m2=70.0,
+                description=("K bytu náleží klasická sklepní kóje 2m2 s okýnkem a navíc podíl "
+                             "na velké sklepní místnosti o výměře 13m2."))
+    b = listing(14048448, source="realitymix", category_main="byt", category_type="prodej",
+                area_m2=70.0, description=("K bytu náleží sklepní kóje s okýnkem o velikosti "
+                                           "2 m² a navíc podíl na velké sklepní místnosti."))
+    assert accessory_areas(a.description) == frozenset()
+    assert "accessory_area" not in names(a, b, S6)
+
+
+def test_e217_needs_one_sellers_own_feed() -> None:
+    a = flat(47803, "Dobřany", "Šlovice", "V Šlovice nabízíme novostavbu rodinného domu.",
+             broker_key="k", broker_firm_id=9)
+    b = flat(186296, "Plzeň", "Plzeň", "Nabízíme dům, a přitom jste v Plzeň za 10 minut.",
+             source="bazos", broker_key="k", broker_firm_id=9)
+    assert "body_obec" not in names(a, b, S6)
+
+
+def test_e217_reads_a_capitalised_preposition() -> None:
+    assert body_localities("V Šlovice nabízíme novostavbu.") == frozenset({"slovice"})
+
+
+def test_e218_reads_only_the_band_between_the_exact_bar_and_the_tolerance() -> None:
+    a = listing(291231, category_main="pozemek", category_type="prodej", area_m2=913.0,
+                price=3700000.0,
+                description="Celková plocha pozemku činí 913 m² v obci Bělkovice-Lašťany.")
+    b = listing(18777561, source="bazos", category_main="pozemek", category_type="prodej",
+                area_m2=913.0, price=3700000.0,
+                description="Celková plocha pozemku činí 690 m² s příjezdovou cestou 223 m².")
+    assert "plot_prose_exact" not in names(a, b, S6)

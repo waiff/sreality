@@ -93,6 +93,7 @@ from autodedup.settings import Settings
 from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
     CHARGE_KINDS,
+    printed_areas,
     accessory_areas,
     accessory_designators,
     body_localities,
@@ -919,7 +920,23 @@ def headline_vs_column_conflict(
     def contradicts(lead: tuple[float, int], column: float) -> bool:
         return not rounding_equal_values(lead[0], lead[1], float(column), 0)
 
-    if not (contradicts(lead_a, float(column_a)) or contradicts(lead_b, float(column_b))):
+    def states_column(listing: Listing) -> bool:
+        column = float(listing.area_m2 or 0.0)
+        return any(rounding_equal_values(value, decimals, column, 0)
+                   for value, decimals, _scope in printed_areas(listing.description))
+
+    # EXACTLY one side, and that side's body must never state its own column. One advert's
+    # headline agrees with what the portal measured and the other's does not: that is the
+    # seller saying this advert is a different slice of the same space. Both contradicting is
+    # two bodies leading with two parts of one offer — the Skuhrov 1,284 m² object whose two
+    # sreality adverts lead with the 641 m² footprint and the "more than 1,000 m²" of floor —
+    # and a contradicting body that ALSO states its column has led with a part while saying so
+    # (M444). Measured: with both limbs, this rule costs 0 certain duplicates on eight cohorts.
+    hit_a = contradicts(lead_a, float(column_a)) and not states_column(a)
+    hit_b = contradicts(lead_b, float(column_b)) and not states_column(b)
+    if hit_a == hit_b:
+        return None
+    if contradicts(lead_a, float(column_a)) and contradicts(lead_b, float(column_b)):
         return None
     return (f"{lead_a[0]} of column {column_a}", f"{lead_b[0]} of column {column_b}")
 
@@ -938,6 +955,13 @@ def offered_storey_conflict(
     left, right = offered_storeys(a.description), offered_storeys(b.description)
     if not left or not right or left & right:
         return None
+    # E211's mirror: a body that contradicts its OWN stored storey is not a witness about the
+    # other advert's. Two Plzeň-Újezd 2+kk run one template at floor 2 on both rows and say
+    # `ve 2. nadzemním podlaží` and `ve 4.`, so neither sentence agrees with the column each
+    # advert carries, and the difference is a typist's (M445).
+    for side, storeys in ((a, left), (b, right)):
+        if side.floor is not None and (side.floor + 1) not in storeys:
+            return None
     gap = min(abs(x - y) for x in left for y in right)
     feed = _same_feed(a, b, settings.floor_same_source_feed, settings.floor_feed_unknown_closed)
     if _rounded_floors(a, b, settings, gap) or (gap == 1 and feed):
@@ -991,6 +1015,15 @@ def body_obec_conflict(a: Listing, b: Listing, settings: Settings) -> tuple[str,
     """
     if settings.d43_body_obec_colive_only and not _live_together(a, b, settings):
         return None
+    # ONE SELLER'S OWN FEED on both sides. E135's refusal is a refusal of two PORTALS
+    # disagreeing, and every case this rule got wrong is exactly that: one Šlovice house
+    # filed by bazos under Plzeň, one Robčice cottage filed under Štěnovice, one Mariánské
+    # Lázně golf residence filed under Zádub-Závišín, each a byte-identical body on two
+    # portals. A portal disagreeing with ITSELF about one agency's two adverts is not a
+    # geocoding dispute — the seller filed them in two municipalities (M452).
+    if not _same_feed(a, b, settings.floor_same_source_feed,
+                      settings.floor_feed_unknown_closed):
+        return None
     for speaker, other in ((a, b), (b, a)):
         names = body_localities(speaker.description)
         own = getattr(speaker.location, "obec_name", None)
@@ -1031,6 +1064,13 @@ def prose_plot_exact_conflict(
     if abs(value_a - value_b) <= settings.d43_plot_exact_abs:
         return None
     if rendering_equal(value_a, value_b, PLOT_TOL):
+        return None
+    # The BAND E182 opened for the column, on the prose carrier: more than the exact bar apart
+    # and no more than the tolerance. Two plots of one parcelling differ by a little — 1,288
+    # against 1,294 is 0.47 % — and beyond the tolerance the two figures are not two parcels
+    # but two different measurements, which is one body leading with the building plot and the
+    # other with the access road it is sold with (M446).
+    if rel_diff(value_a, value_b) > PLOT_TOL:
         return None
     return (str(value_a), str(value_b))
 
@@ -1209,6 +1249,16 @@ def distinguishing_facts(
         if (same_feed and abs(gap) == 1 and cfg.floor_feed_unknown_closed
                 and not _feed_known(a, b) and _prices_meet(a, b, cfg.d43_price_path_tol)):
             same_feed = False
+        # E210, the column limb: a ONE-storey gap between two columns is not read where both
+        # BODIES state the same storey OF THE OFFERED UNIT. Two adverts for one Rezidence
+        # Česká 3+kk both say `situovaný ve druhém patře` and the portal stored 2 then 1. The
+        # reading is the placement clause and not the set, because one Dašice mill advert
+        # names its own 2.NP and a WC in 1.NP and must stay apart from the ground-floor unit.
+        if (same_feed and abs(gap) == 1 and cfg.d43_floor_cross_form_agreement):
+            subject_a = subject_floors(a.description, cfg.d43_prose_floor_words)
+            subject_b = subject_floors(b.description, cfg.d43_prose_floor_words)
+            if subject_a and subject_b and (subject_a & subject_b):
+                same_feed = False
         strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
         within = _rounded_floors(a, b, cfg, gap)
         if (gap != 0) if strict else (within or (abs(gap) == 1 and same_feed)):

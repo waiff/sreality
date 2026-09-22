@@ -1221,11 +1221,16 @@ def _labelled_unit_ids(text: str) -> frozenset[str]:
 # is not what the flat is sold by — and leaves it read by nothing. Two Prague Želivecká 4+kk of
 # one house, same 90 m², same 3.NP, same 10,900,000, live together on two portals: one states
 # `dva sklepy o celkové ploše 9 m²`, the other `Celkem 10 m² úložného prostoru`.
+# Only the TOTAL the body states. One Jablonec flat comes with a 2 m² kóje AND a share of a
+# 13 m² cellar room, and the two portals lead with a different one of the two; one Pardubice
+# flat is `sklep o velikosti 7,09 m²` on bazos and `2 sklepy o velikosti 2,82 m² a 4,27 m²,
+# celkem tedy 7,09 m²` on idnes. One accessory's size is one of several and says nothing about
+# the flat; what the body TOTALS is the claim.
 _ACCESSORY_AREA = re.compile(
     r"\b(?:sklep\w*|sklepn\w*|koj\w*|komor\w*|ulozn\w*)[^.;:]{0,44}?"
-    r"(?:o\s+)?(?:celkove\s+)?(?:ploche|plose|vymere|vymera|velikosti|rozloze)"
+    r"(?:o\s+)?celkov\w+\s+(?:ploche|plose|vymere|vymera|velikosti|rozloze)"
     r"\s+(?:cca\s+)?" + _AREA_NUMBER + r"\s*m2"
-    r"|\bcelkem\s+" + _AREA_NUMBER + r"\s*m2\s+(?:ulozn|sklep|kojn)\w*"
+    r"|\bcelkem\s+(?:tedy\s+)?" + _AREA_NUMBER + r"\s*m2\s+(?:ulozn|sklep|kojn)\w*"
 )
 ACCESSORY_AREA_MAX_M2: float = 120.0
 
@@ -1315,7 +1320,9 @@ def _stated_bed_counts(text: str) -> frozenset[int]:
 # locality is Brno-Chrlice is separated from its Újezd u Brna twin only by what the other
 # advert's own body says it is. Capitalisation is the cue, so this reader takes the RAW text.
 _BODY_PLACE = re.compile(
-    r"\b(?:v|ve)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤ"
+    # The preposition is capitalised at the start of a sentence as often as not, and
+    # `V Šlovicích nabízíme` is the sentence that says where the object IS.
+    r"\b(?:[Vv]|[Vv]e)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤ"
     r"ÚŮÝŽ][\w]{2,}(?:\s+u\s+[A-Z][\w]{2,})?)"
 )
 PLACE_STEM: int = 3
