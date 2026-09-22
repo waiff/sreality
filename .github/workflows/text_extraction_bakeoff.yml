@@ -21,7 +21,7 @@ name: "Field capture: text-extraction bake-off"
 # refuses. The pod is torn down in a `finally`, named in `pod.json` in the artefact before
 # the long wait, AND reaped by an `if: always()` step, because a cancelled job runs no
 # `finally` and a receipt nobody acts on terminates nothing (autodedup.yml's precedent).
-# An arm is serial, ~11.7 s an advert, so a 1,300-advert panel is ~4.2 h: run ONE arm per
+# An arm runs eight adverts at a time (ARM_WORKERS); a 32B model behind one A100 still needs the better part of an hour for a 1,300-advert panel, so run ONE arm per
 # dispatch, or shrink the panel, against the 240-minute cap.
 #
 # THE WINNER IS NOT SET HERE, AND NEITHER IS THE SCOPE. Two separate operator acts, in

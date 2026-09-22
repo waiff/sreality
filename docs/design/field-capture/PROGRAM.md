@@ -522,7 +522,7 @@ where houses are a large share. A thin category is not redistributed (idnes `poz
 reports the REALISED mix; `per_source=600` measured 1,207 structured rows. sreality's floor label is `floor - 1` and
 only for `floor >= 1` (A9; that portal writes both 0 and 1 for the ground storey). The bazos slice is 842 sibling
 pairs on unique `(price_czk, area_m2, disposition)` — the only in-domain read there is, and small. One arm is
-serial at ~11.7 s an advert, so a 1,300-advert panel is ~4.2 h against the workflow's 240-minute cap: one arm per
+eight adverts in flight at once (`ARM_WORKERS`; the serial first cut needed ~4 h for 1,387 adverts and hit the 240-minute cap on the Qwen arm, run 35708090261): one arm per
 dispatch.
 
 **Destructive step (iii), measured 2026-09-22 and smaller in effect than it looks:** 21,459 column values over ~15k
