@@ -20,7 +20,10 @@
 -- `if not exists` would then keep. So: an explicit budget, and the invalid leftover is
 -- dropped first -- both idempotent, so a re-run after any failure is safe.
 
-set lock_timeout = '5s';
+-- The drop and the build take no lock that blocks anyone else, but each WAITS for the
+-- transactions already using the table; while a heal pages the table every few seconds a
+-- 5 s wait never lands (run 35722695489). Two minutes is the wait, not a hold.
+set lock_timeout = '120s';
 set statement_timeout = '1800s';
 
 drop index concurrently if exists public.listings_source_id_idx;
