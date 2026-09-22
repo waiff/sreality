@@ -36,7 +36,9 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
    the snapshot rule and `dirty_properties`, and ~$65 of ~$207 was spent re-extracting on price-only snapshot churn.
    Its accuracy was never measured: floor ≈ 73 %, has_lift precision 92.9 %, `false` written from silence.
 3. **Structured portals drop facts they publish** — parser key mismatches certified by tests over hand-authored
-   fixtures: ceskereality reads `vybavení` / `počet podlaží` (never emitted; the live key is `vybavení pronájem`) and
+   fixtures: ceskereality reads `vybavení` / `počet podlaží` (never emitted; W4 measured the nearest live key,
+   `vybavení pronájem`, and it is an APPLIANCE list — "Kuchyňská linka, Myčka" — not the ano/ne/castecne state, so
+   that column stays a genuine portal gap) and
    ignores `parkování` (~27 % of pages); remax reads `balkon` / `lodzie` (never emitted) and ignores
    `pocet parkovacich mist`; realitymix never sets lift/cellar; idnes drops `total_floors` on 29.7k houses; mmreality
    `has_parking` (73.5 % true) matches "Parkety" (parquet flooring) and street parking.
@@ -65,7 +67,9 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 - **R3 — ONE producer per (portal, field)**: `structured | text | derived | none`. No precedence rule, no
   per-row provenance column — provenance IS the contract row. A `structured` cell also declares its source-key
   order, its **absence semantics** (missing key ⇒ `false` | `unknown`) and its **default sentinels** (values read
-  as absent). *(W2 correction: the three-value set was short by one. Declaring all 9 × 26 cells found 36 that are
+  as absent). *(W4 correction: no cell declares `false` any more. bezrealitky was the only one that did, and its
+  census refutes it — `parking` and `garage` are on 100 % of adverts, so the "missing key" was a JSON null, which is
+  the API saying "not stated". The axis stays as the declaration slot the next such portal needs.)* *(W2 correction: the three-value set was short by one. Declaring all 9 × 26 cells found 36 that are
   written from something that is not a payload attribute key at all — `category_main` from a URL segment or a
   breadcrumb, `subtype` from an SEO title, `price_unit` restated from `category_type` on seven portals,
   `area_basis` stamped by `scraper.area`. Calling those `structured` would have named keys that do not exist and
@@ -185,7 +189,8 @@ portals' cells against the checked-in census found 26 (ceskereality 9, remax 6, 
 A further **13** were outside A1's reach until review, because `areas_from_params` and realitymix's price fallback
 kept their own key chains and the contract merely restated them: 39 dead reads in all, and the five area chains now
 consume the contract so the gate covers them. Gate A2 (no unread emission ≥ 5 %) — every such key is mapped or on
-the explicit `IGNORED` list with a reason (300 entries, and 12 of the 50 `none` cells name the census key W4 wires).
+the explicit `IGNORED` list with a reason (300 entries, and 12 of the 50 `none` cells named the census key W4 wires —
+after W4, one does: mmreality `subtype`, which needs a vocabulary ruling, not a wire).
 Gate A3 (no unmapped value). **Identity proof:** the characterisation goldens in
 `tests/fixtures/field_capture/golden/` — 35 real detail payloads (one of which records a raise), 1,254 label probes,
 33 source-key-chain probes — recorded from the parsers BEFORE the module existed and byte-identical after, except
@@ -213,10 +218,91 @@ whose `raw_json['params']` carries both keys with a JSON null. `has_lift` is the
 fixture carries; live, over the 3,000 newest active idnes byt rows (2026-09-21): 'výtah' present on 1,328, text
 non-null on 0, `has_lift` true on 1,328, false on 0. **No production row was healed** — W3 ships the seam, not a heal.
 
-**W4.** Every `structured` cell > 0 %. Zero active rows with `terrace = true` and `has_balcony` not true under the new
-definition (today 2,471 + 572 + 37). mmreality `has_parking` falls to the group-qualified rate; a 300-row audit shows
-0 matches on "Parkety" / "Parkoviště poblíž" / "Parkování na ulici". ceskereality `has_parking` rises from 0 %.
-**Watchdog safety proven with SQL before any fill:** a first-time attribute fill cannot mint a `:new:` dispatch.
+**W4 (SHIPPED, pre-heal).** Every `structured` cell has a producer the census proves; the twelve cells still at 0 %
+are the heal's to-do list and `field_fill_matrix` names them (`zero_fill_undeclared`) until it lands.
+**The gate as first written was the wrong measure and R11 supersedes it.** "Zero active rows with `terrace = true`
+and `has_balcony` not true" is unreachable under `has_balcony = balcony OR loggia`: excluding the terrace arm *raises*
+that count, because the three portals that folded a terrace into the flag (sreality, bezrealitky, idnes) stop doing so.
+The honest measure is **zero active rows where `has_balcony` disagrees with `balcony OR loggia`** — i.e. no portal
+makes a terrace-only listing a balcony match, and none drops a stated loggia. **That measure is met by the parsers
+from now on and only PARTLY by the heal — see "what the seam can and cannot land" below.**
+
+**Measured over the WHOLE active stock, not a newest-N window (W1's own rule; a newest-N window rotates with cohort
+mix and reads systematically high, because older rows carry fewer keys — the first cut of these numbers was taken on
+the newest 4,000/5,000/6,000/8,000 and every one of them was biased up).** Re-measured 2026-09-22:
+
+| portal | cell | before | after (expected) |
+| --- | --- | --- | --- |
+| ceskereality (48,579) | `has_parking` | 0 % | 10,219 true (21.0 %) / 3,105 false (6.4 %) |
+| ceskereality | `garage` | 0 % | 5,436 true / 7,888 false |
+| ceskereality | `terrace` | 0 % | 3,259 true / 4,927 false |
+| ceskereality | `has_balcony` | 5,800 true | 5,801 true / 2,385 false (a `Terasa`-only cell is now a stated false) |
+| remax (9,086) | `parking_lots` | 0 of 9,086 | the key is on 1,575 (17.3 %) |
+| remax | `has_parking` | 1,375 true — byte-identical to `garage` | `garaz` (1,375) ∪ a count row (1,575) |
+| realitymix (48,763) | `has_lift` | 0 % | 1,296 true / 3,396 false (the `ostatní` multi-select, on 4,692 rows) |
+| realitymix | `garage` | 1,680 true / 0 false | 1,680 true / 3,012 false |
+| realitymix | `has_parking` | 3,254 true / 0 false | 3,254 true / 1,438 false |
+| realitymix | `cellar` | 0 % | the key is on 6,982 (14.3 %) |
+| realitymix | `garden_area` | 0 of 48,763 | the key is on 3,027 (6.2 %); ~40 % of those say "ano" with no measure and stay NULL |
+| realitymix | `parking_lots` | 0 % | the key is on 224 (0.46 %) |
+| mmreality (10,317) | `has_balcony` | 0/0 | the two booleans are on 2,309 (22.4 %): 1,292 true / 1,017 false |
+| mmreality | `terrace` | 0/0 | `terraceArea` on 612 (5.9 %) |
+| mmreality | `furnished` | 0 % | `equipment` on 5,878 (57.0 %) |
+| mmreality | `has_parking` | 7,573 true (73.4 %) / 0 false | 5,557 true (53.9 %) / 2,361 false / 2,399 unknown |
+| idnes (111,418) | `total_floors` on houses | NULL on 29,906 of 29,913 | 24,134 of them carry `počet podlaží` |
+| idnes | `has_balcony` | 28,404 true | 17,845 of those are terrace-only and go to unknown |
+| maxima (272) | `has_balcony` | 30 true | 69 (the `lodžie` key nothing read is on 39, every one of them loggia-only) |
+| maxima | `furnished` | 0 of 272 | `vybavení` on 65 (23.9 %) |
+| bezrealitky (5,696) | `has_balcony` | 1,418 true | 396 of those are terrace-only and go to unknown |
+| bezrealitky | `price_czk` | 31 EUR amounts stored as CZK | refused (NULL) + a counted event |
+| sreality (105,083) | `has_balcony` | 16,766 true | ~3,200 of them to false (19.1 % of true rows in the newest-8,000 sample; the whole-stock scan times out) |
+
+"Parkety" is in the group `Podlahy` and "Parkoviště poblíž" (582 live rows) / "Parkování na ulici" (4,672) are named
+exclusions, so none of the three can match mmreality's `has_parking` any more.
+
+**What the seam can and cannot land (R9's never-blank rule, measured).** `scripts/reparse._merged` keeps the stored
+value whenever the re-derive yields None, and there is no flag that overrides it — by design, so a parse that lost a
+key cannot erase a column. So the heal lands every NULL→value and every true→false move, and **none of the
+true→unknown ones**:
+
+* Healable now: ceskereality (all four cells, 0 %→real), remax, realitymix, idnes `total_floors`, maxima,
+  mmreality (2,015 of its 2,018 `has_parking` true rows move to an explicit false; 3 would go to unknown),
+  sreality `has_balcony` (388 of 2,029 true rows in the newest-8,000 sample move to false, 0 to unknown).
+* NOT reachable by the seam: **idnes `has_balcony` 17,845 rows**, **bezrealitky `has_balcony` 396 rows**, and
+  **bezrealitky `price_czk` 31 EUR rows**. Those values change on each listing's next successful detail fetch
+  (`upsert_listing` has no COALESCE for them), so active rows converge within a cadence or two and **inactive rows
+  never do**. Until then `has_balcony` carries two definitions on those two portals, with no marker distinguishing
+  which. Moving them now would need an explicit blank-allowed path in `reparse.py` — a later wave's call, not a
+  silent expectation of this one.
+
+**Watchdog safety proven with SQL before any fill:** a first-time attribute fill cannot mint a `:new:` dispatch —
+see § W4a.
+
+**W4a — watchdog safety, established in code + read-only SQL before any heal (no notification code changed).**
+A heal through the W3 seam writes only the named `listings` columns and a `dirty_properties` mark. It cannot mint a
+`:new:` dispatch for an existing listing, on three independent grounds:
+
+1. **The `:new:` window is keyed on arrival, not on content.** `api/notifications.match_once` evaluates
+   `properties_public` where `first_seen_at > last_matched_first_seen_at` for that subscription, plus a re-scan of
+   `first_seen_at <= cursor AND > now() - lookback`, where `lookback = max(60, 2 × notifications_new_requires_image_
+   timeout_minutes)` — 60 minutes on today's settings (neither image-gate key is set in `app_settings`, so both
+   defaults apply). `properties.first_seen_at` is `min(child.first_seen_at)` (`scripts/recompute_property_stats.py`
+   :179) and no heal writes `listings.first_seen_at`, so a property older than the window cannot re-enter it however
+   its columns move. 685 of 461k active properties were inside that 60-minute window at the time of measurement.
+2. **The dedupe key is once-ever per property.** `wd:{sub}:new:{property_id}`, UNIQUE, `ON CONFLICT DO NOTHING`
+   (:1420) — a property already dispatched to a subscription can never fire `new` again.
+3. **`:price_drop:` needs a snapshot with a LOWER price.** Its grain is `wd:{sub}:price_drop:{snapshot_id}` over
+   `listing_snapshots` rows with `price_czk < lag(price_czk)`. The seam writes no snapshot at all, and the one
+   deferred snapshot a healed live row's next detail fetch appends carries the CURRENT price, so it is a drop only
+   if the portal actually cut it. The same holds for `collection_monitor`, whose every detector is anchored on
+   `monitor_since` over `listing_snapshots.scraped_at`, `first_seen_at` or `inactive_at` — none of which a heal moves.
+
+The residual, stated rather than hidden: a property first seen INSIDE the 60-minute window that did not match a
+saved filter before the heal and does match after it fires a genuinely-new dispatch. That is the filter seeing a fact
+it should always have seen, bounded by one hour of ingest, and it is the reason the heal is run in one pass rather
+than trickled. Live at the time of writing, `notification_subscriptions` has **0 active rows** and one monitored
+collection, so the live blast radius of this wave's heal is zero; the mechanism above is what makes it safe when
+subscriptions come back.
 
 **W5.** Unmapped-value rate = 0 for condition, building_type, ownership, price_unit, disposition;
 `count(distinct price_unit)` = 2; building_type `jina` ≈ 8,203 retained; per-value Browse membership delta published

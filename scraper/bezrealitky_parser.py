@@ -68,12 +68,6 @@ def _int(value: Any) -> int | None:
     return int(f) if f is not None else None
 
 
-def _surface_bool(value: Any) -> bool | None:
-    if value is None:
-        return None
-    return _num(value) is not None
-
-
 def _str_or_none(value: Any) -> str | None:
     if value is None:
         return None
@@ -117,16 +111,30 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     lon = _num(gps.get("lng"))
 
     read = partial(source_value, SOURCE, params=advert)
-    balcony_surfaces = source_values(SOURCE, "has_balcony", advert)
-    has_balcony = (
-        None
-        if all(v is None for v in balcony_surfaces)
-        else any(_num(v) is not None for v in balcony_surfaces)
+    # R11: balcony OR loggia, each stated as its m² surface. `terraceSurface` used to be
+    # a third arm and is its own column — dropping it takes 395 of 1,417 true rows back
+    # to unknown, and the m² is still in raw_json for whoever wants the measure.
+    has_balcony = vocabulary.any_true(
+        *(vocabulary.present(v) for v in source_values(SOURCE, "has_balcony", advert))
     )
-    garage = bool(read("garage")) if read("garage") is not None else None
-    # The one cell anywhere whose ABSENCE has always meant false, which is why the
-    # contract declares it (`absence="false"`) instead of a helper guessing.
-    has_parking = bool(any(source_values(SOURCE, "has_parking", advert)))
+    garage = vocabulary.yes_no(read("garage"))
+    # `parking` and `garage` are real booleans the API sends on every advert, so a JSON
+    # null is "not stated", not a false. `bool(a or b)` could never return None at all,
+    # which also locked the NULL-only text lane out of the rows it should repair.
+    has_parking = vocabulary.any_true(
+        *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_parking", advert))
+    )
+
+    # `price_czk` is a CZK total by contract on all nine portals. bezrealitky is the only
+    # one that states a currency, and 31 active rows quote the rent in EUR — stored as CZK
+    # they read ~25x low and become the cheapest rents in the country. Refused (and
+    # counted, so a portal switching currencies shows up in the run summary), never
+    # converted: this program does not invent an exchange rate.
+    currency = _str_or_none(advert.get("currency"))
+    price_czk = _int(advert.get("price"))
+    if price_czk is not None and currency is not None and currency.upper() != "CZK":
+        vocabulary.refuse("price_czk", SOURCE, currency)
+        price_czk = None
 
     raw = dict(advert)
     raw["image_urls"] = _image_urls(advert)
@@ -148,7 +156,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         category_main=category_main,
         category_type=category_type,
         subtype=subtype,
-        price_czk=_int(advert.get("price")),
+        price_czk=price_czk,
         price_unit="měsíc" if category_type == "pronajem" else "celkem",
         area_m2=area_m2,
         area_basis=area_basis,
@@ -179,8 +187,8 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         garden_area=_num(advert.get("frontGarden")),
         category_sub_cb=None,
         furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
-        terrace=_surface_bool(advert.get("terraceSurface")),
-        cellar=_surface_bool(advert.get("cellarSurface")),
+        terrace=vocabulary.present(advert.get("terraceSurface")),
+        cellar=vocabulary.present(advert.get("cellarSurface")),
         garage=garage,
         parking_lots=None,
         ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),

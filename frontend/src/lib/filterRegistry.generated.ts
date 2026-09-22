@@ -1514,7 +1514,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "bool",
       "pg_column": "has_balcony",
       "default": null,
-      "description": "Legacy combined flag: balcony OR terrace OR loggia. Kept for backwards compatibility; prefer the granular `terrace` filter when only a terrace will do.",
+      "description": "A balcony OR a loggia. A terrace is NOT one of them — it has its own `terrace` filter; combine the two when you want either.",
       "category": "Amenity",
       "ui_control": "tristate",
       "agendas": [
@@ -1566,7 +1566,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "bool",
       "pg_column": "has_parking",
       "default": null,
-      "description": "Legacy combined flag: any parking (street, lot, or garage). Prefer the granular `garage` and `parking_lots_min` filters for new analytical work.",
+      "description": "A parking space or right BELONGING to the property (a space, a garage, or a stated count). Street parking and a car park merely nearby do not count; `false` means the advert listed its facilities and none of them was ours. `garage` and `parking_lots_min` are the finer filters.",
       "category": "Amenity",
       "ui_control": "tristate",
       "agendas": [

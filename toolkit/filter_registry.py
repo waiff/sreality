@@ -1147,9 +1147,9 @@ def _build_registry() -> dict[str, FilterDef]:
             pg_column="has_balcony",
             default=None,
             description=(
-                "Legacy combined flag: balcony OR terrace OR loggia. "
-                "Kept for backwards compatibility; prefer the granular "
-                "`terrace` filter when only a terrace will do."
+                "A balcony OR a loggia. A terrace is NOT one of them — it "
+                "has its own `terrace` filter; combine the two when you "
+                "want either."
             ),
             category=CATEGORY_AMENITY,
             ui_control=UiControl.TRISTATE,
@@ -1173,9 +1173,11 @@ def _build_registry() -> dict[str, FilterDef]:
             pg_column="has_parking",
             default=None,
             description=(
-                "Legacy combined flag: any parking (street, lot, or "
-                "garage). Prefer the granular `garage` and "
-                "`parking_lots_min` filters for new analytical work."
+                "A parking space or right BELONGING to the property (a "
+                "space, a garage, or a stated count). Street parking and a "
+                "car park merely nearby do not count; `false` means the "
+                "advert listed its facilities and none of them was ours. "
+                "`garage` and `parking_lots_min` are the finer filters."
             ),
             category=CATEGORY_AMENITY,
             ui_control=UiControl.TRISTATE,

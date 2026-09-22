@@ -456,7 +456,9 @@ def areas_from_params(
     The `plocha pozemku` / `výměra pozemku` / `podlahová plocha` fallbacks and the
     `plocha zahrady` garden read are gone: realitymix emits none of them on any row of the
     checked-in census or of 3,700 stored rows sampled at both ends of the corpus. The
-    garden measure it DOES publish is spelled `zahrada` and is W4's to wire (gate A1).
+    garden measure it DOES publish is spelled `zahrada` (W4) and is a size OR a bare
+    "ano" — roughly 40% of the cells say only that the garden exists, and this column is
+    a measure, so those stay NULL rather than becoming a number nobody stated.
     """
     usable_text, floor_text, total_text, plot_text = source_values(
         SOURCE, "area_m2", params)
@@ -472,7 +474,8 @@ def areas_from_params(
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis, usable_area=usable_area,
-        estate_area=estate_area, garden_area=None,
+        estate_area=estate_area,
+        garden_area=parse_area_text(source_value(SOURCE, "garden_area", params)),
     )
 
 
@@ -543,12 +546,19 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         lon=lon,
         floor=_parse_floor(read("floor")),
         total_floors=_parse_int(read("total_floors")),
+        parking_lots=_parse_int(read("parking_lots")),
         # Each amenity is its OWN labelled row whose value is the size ("Balkon: 4 m²"),
         # so the label is the fact and the value only ever negates it.
         has_balcony=vocabulary.present(read("has_balcony")),
         terrace=vocabulary.present(read("terrace")),
-        garage=vocabulary.mentions(read("garage"), "garaz"),
-        has_parking=vocabulary.mentions(read("has_parking"), "parkov", "garaz"),
+        # `ostatní` is the building's stated amenity list ("Bezbarierový přístup, Garáž,
+        # Výtah, Parkoviště") — the portal's ONLY lift signal, and a list that does not
+        # name a thing is it saying the thing is absent.
+        garage=vocabulary.contains(read("garage"), "garaz"),
+        has_parking=vocabulary.parking(read("has_parking")),
+        has_lift=vocabulary.contains(read("has_lift"), "vytah"),
+        # Each is its own labelled row whose value is a size ("Sklep: 2 m²") or "ano".
+        cellar=vocabulary.present(read("cellar")),
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
         condition=vocabulary.canonical("condition", SOURCE, read("condition")),
         ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),

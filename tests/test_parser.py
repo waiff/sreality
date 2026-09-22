@@ -180,7 +180,7 @@ def test_total_floors_present():
 
 def test_amenities(sample):
     row = parse_listing(sample)
-    assert row["has_balcony"] is False  # balcony/terrace/loggia all false
+    assert row["has_balcony"] is False  # R11: balcony/loggia both false
     assert row["has_parking"] is False  # parking_lots/garage false, parking null
     assert row["has_lift"] is None      # elevator cb value 0 (unspecified)
 
@@ -353,3 +353,28 @@ def test_published_at_malformed_is_none():
 def test_missing_id_raises():
     with pytest.raises(ValueError):
         parse_listing({"locality": {}})
+
+
+def test_a_terrace_alone_is_not_a_balcony():
+    """R11: has_balcony is balcony OR loggia, and `terrace` is its own column.
+
+    sreality was the portal the three-arm reading was copied FROM, so it is the one
+    where dropping the terrace arm moves the most rows: ~4.9% of the active corpus
+    (388 of 8,000 sampled) is true today from a terrace alone."""
+    row = parse_listing(
+        {"hash_id": 1, "balcony": False, "loggia": False, "terrace": True})
+    assert row["terrace"] is True
+    assert row["has_balcony"] is False
+
+
+def test_parking_lots_is_the_count_and_parking_lots_key_is_the_flag():
+    """sreality's payload names are the opposite way round from the columns':
+    `parking_lots` is a BOOLEAN and `parking` the count."""
+    row = parse_listing({"hash_id": 1, "parking_lots": True, "parking": 3})
+    assert row["parking_lots"] == 3
+    assert row["has_parking"] is True
+    # A stated zero count with both flags false is "no parking", not unknown.
+    zero = parse_listing({"hash_id": 1, "parking_lots": False, "garage": False,
+                          "parking": 0})
+    assert zero["parking_lots"] == 0
+    assert zero["has_parking"] is False

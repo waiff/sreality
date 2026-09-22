@@ -591,6 +591,9 @@ def parse_detail(
     category_main = category_main or category_of(read("category_main"), title)
     category_type = category_type or type_of(title) or type_of(source_url) or "prodej"
 
+    garaz, lots_text = source_values(SOURCE, "has_parking", params)
+    lots = _parse_int(lots_text)
+
     price_match = _ADVERT_PRICE_RE.search(html)
     price_attr = price_match.group(1) if price_match else None
     price_czk: int | None = None
@@ -705,13 +708,19 @@ def parse_detail(
         lon=lon,
         floor=_parse_int(read("floor")),
         total_floors=_parse_int(read("total_floors")),
+        parking_lots=lots,
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
         condition=vocabulary.canonical("condition", SOURCE, read("condition")),
         ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
         energy_rating=vocabulary.energy_rating(read("energy_rating")),
         has_lift=vocabulary.yes_no(read("has_lift")),
         garage=vocabulary.yes_no(read("garage")),
-        has_parking=vocabulary.yes_no(read("has_parking")),
+        # R11: the garage row OR the count row, and a stated "Ne" on either must survive
+        # (`a or b` collapsed `False or None` to None). `parkovani` is a key this portal
+        # has never emitted, so has_parking used to be identical to `garage`.
+        has_parking=vocabulary.any_true(
+            vocabulary.yes_no(garaz), None if lots is None else lots > 0,
+        ),
         furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,

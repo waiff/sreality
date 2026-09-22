@@ -88,6 +88,10 @@ BYT_HTML = """
   <li class="detail-information__data-item"><span>Vlastnictví:</span><span>osobní</span></li>
   <li class="detail-information__data-item"><span>Balkon:</span><span>4 m²</span></li>
   <li class="detail-information__data-item"><span>Vybaveno:</span><span>ano</span></li>
+  <li class="detail-information__data-item"><span>Sklep:</span><span>2 m²</span></li>
+  <li class="detail-information__data-item"><span>Zahrada:</span><span>400 m²</span></li>
+  <li class="detail-information__data-item"><span>Ostatní:</span><span>Bezbarierový přístup, Výtah, Parkoviště</span></li>
+  <li class="detail-information__data-item"><span>Počet míst k parkování:</span><span>2</span></li>
   <li class="detail-information__data-item"><span>Energetická náročnost budovy:</span><span>C - Úsporná</span></li>
 </ul>
 <div data-fk_rk="1269965" data-id="8414569"></div>
@@ -197,6 +201,14 @@ def test_parse_detail_byt_full():
     assert listing.ownership == "osobni"
     assert listing.furnished == "ano"
     assert listing.has_balcony is True
+    # W4. Every one of these was 0-filled on all 48,827 active rows: `Výtah` sits inside
+    # the already-parsed `Ostatní` list, `Sklep` is its own sized row, the garden measure
+    # is spelled `Zahrada` (the parser read `plocha zahrady`, which the portal has never
+    # emitted), and the parking count had no mapping at all.
+    assert listing.has_lift is True
+    assert listing.cellar is True
+    assert listing.garden_area == 400.0
+    assert listing.parking_lots == 2
     assert listing.energy_rating == "C"
     assert listing.description.startswith("Prostorný byt 2+1")
     # Broker: stable profile id (per-broker key) + agency id, identity-only.
@@ -222,6 +234,8 @@ def test_parse_detail_dum_area_estate_and_garage():
     assert listing.total_floors == 2
     assert listing.garage is True             # from the "Ostatní: Garáž, Parkoviště" row
     assert listing.has_parking is True
+    # The same stated list without a lift is the portal saying there is none.
+    assert listing.has_lift is False
     # data-address first segment "Jindřichov" is a místní část, not a street ->
     # dropped by the morphology gate (don't fabricate a street from a settlement).
     assert listing.street is None
