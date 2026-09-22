@@ -942,6 +942,60 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ceskereality_index_walk.yml"
     },
     {
+      "filename": "clear_unmeasured_fills.yml",
+      "name": "Ops: clear the deleted enrichment lane's unmeasured fills (field-capture W7, step iii)",
+      "description": "Runs scripts/clear_unmeasured_enrichment_fills.py — the operator-approved destructive step (iii) of the field-capture program: blank the `floor` values and the silence-based `false` booleans the DELETED description-enrichment lane wrote on bazos rows and never measured (its own docstring has the counts: ~21k cells, sixteen on active listings). dry_run=true (the default) only counts. The real write needs dry_run=false AND confirm=APPLY, and the script REFUSES to blank a cell it has not first copied into the backup table (listing_id, column_name, value) — a proportionate backup for a table too hot for a data-only pg_dump. Same guard shape as reparse.yml.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "columns",
+          "description": "Comma-separated subset of floor,has_lift,has_balcony,has_parking (blank = all four)",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "dry_run",
+          "description": "true = count only. false = write (needs confirm=APPLY).",
+          "required": false,
+          "type": "boolean",
+          "default": "true",
+          "options": null
+        },
+        {
+          "name": "confirm",
+          "description": "Type APPLY to arm the real write. Ignored when dry_run=true.",
+          "required": false,
+          "type": "string",
+          "default": "",
+          "options": null
+        },
+        {
+          "name": "backup_table",
+          "description": "Where every blanked cell is copied first (a plain identifier).",
+          "required": false,
+          "type": "string",
+          "default": "listings_w7_clear_backup",
+          "options": null
+        }
+      ],
+      "secrets": [
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "reparse",
+      "cancelInProgress": false,
+      "timeoutMinutes": 60,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/clear_unmeasured_fills.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/clear_unmeasured_fills.yml"
+    },
+    {
       "filename": "clip_retag.yml",
       "name": "Dedup — CLIP re-tag from stored embeddings (sharded)",
       "description": "Re-runs the CLIP zero-shot tagging over ALREADY-tagged images from their STORED embeddings (image_clip_embeddings) — NO R2 download, NO image re-inference, just the taxonomy's text anchors dotted with each stored vector. How a TAXONOMY change (new logical tags, sharpened anchors) reaches the back catalogue cheaply; new / not-yet-tagged images go through clip_tag.yml, which loads the same live taxonomy.",

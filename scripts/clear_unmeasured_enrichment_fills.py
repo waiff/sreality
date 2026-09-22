@@ -1,9 +1,10 @@
 """Blank the cells the DELETED description-enrichment lane wrote and never measured.
 
 Field-capture W7, approved destructive step (iii) (operator OK 2026-09-21). Dry run is the
-default; `--apply` writes. Back up the affected columns first:
-
-    pg_dump "$SUPABASE_DB_URL" -t listings --data-only -f listings_before_w7_clear.sql
+default; `--apply` writes, and REFUSES to run without `--backup-table NAME`: every value it
+is about to blank is first copied into that table as (listing_id, column_name, value), page
+by page ahead of each clear — a proportionate backup for ~21k cells on a table too hot and
+too large for a data-only pg_dump. Dispatch through `clear_unmeasured_fills.yml`.
 
 WHAT AND WHY. Two of the old lane's outputs failed measurement afterwards:
 
@@ -37,6 +38,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from typing import Any
 
@@ -87,6 +89,27 @@ ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 
 _STATEMENT_TIMEOUT_SQL = "SET statement_timeout = '120s'"
 
+_BACKUP_TABLE_SQL_TEMPLATE = """
+CREATE TABLE IF NOT EXISTS {table} (
+    listing_id  bigint      NOT NULL,
+    column_name text        NOT NULL,
+    value       jsonb       NOT NULL,
+    backed_up   timestamptz NOT NULL DEFAULT now()
+)
+"""
+# RLS on with no policies and no browser grant: the service role reads it, nothing else.
+_BACKUP_GUARD_SQL_TEMPLATE = (
+    "ALTER TABLE {table} ENABLE ROW LEVEL SECURITY",
+    "REVOKE ALL ON {table} FROM anon, authenticated, public",
+)
+_BACKUP_SQL_TEMPLATE = """
+INSERT INTO {table} (listing_id, column_name, value)
+SELECT l.id, %(column)s, to_jsonb(l.{column})
+  FROM listings l
+ WHERE l.id = ANY(%(ids)s::bigint[]) AND l.{column} IS NOT NULL
+"""
+_IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
+
 
 def candidate_sql(column: str, *, only_false: bool) -> str:
     return _CANDIDATE_SQL_TEMPLATE.format(
@@ -99,6 +122,19 @@ def clear_sql(column: str) -> str:
     return _CLEAR_SQL_TEMPLATE.format(column=column)
 
 
+def backup_sql(column: str, table: str) -> str:
+    return _BACKUP_SQL_TEMPLATE.format(column=column, table=table)
+
+
+def create_backup_table(conn: Any, table: str) -> None:
+    if not _IDENT.match(table):
+        raise ValueError(f"backup table name must be a plain identifier: {table!r}")
+    with conn.cursor() as cur:
+        cur.execute(_BACKUP_TABLE_SQL_TEMPLATE.format(table=table))
+        for statement in _BACKUP_GUARD_SQL_TEMPLATE:
+            cur.execute(statement.format(table=table))
+
+
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -106,12 +142,17 @@ def _build_parser() -> argparse.ArgumentParser:
                     help=f"comma-separated subset of {sorted(TARGETS)}")
     ap.add_argument("--apply", action="store_true",
                     help="write. Without it the run only counts.")
+    ap.add_argument("--backup-table", default=None,
+                    help="required with --apply: every cell is copied here before it is blanked")
     ap.add_argument("--page", type=int, default=2000)
     ap.add_argument("--verbose", action="store_true")
     return ap
 
 
-def run(conn: Any, columns: list[str], *, apply: bool, page: int) -> dict[str, int]:
+def run(conn: Any, columns: list[str], *, apply: bool, page: int,
+        backup_table: str | None = None) -> dict[str, int]:
+    if apply and not backup_table:
+        raise ValueError("--apply needs --backup-table: nothing is blanked without a copy")
     counts: dict[str, int] = {}
     for column in columns:
         select = candidate_sql(column, only_false=TARGETS[column] == "false")
@@ -129,6 +170,7 @@ def run(conn: Any, columns: list[str], *, apply: bool, page: int) -> dict[str, i
             total += len(ids)
             if apply:
                 with conn.cursor() as cur:
+                    cur.execute(backup_sql(column, backup_table), {"column": column, "ids": ids})
                     cur.execute(clear, {"ids": ids})
             after = ids[-1]
             if len(ids) < page:
@@ -153,13 +195,18 @@ def main() -> int:
     if not os.environ.get("SUPABASE_DB_URL"):
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
-    if args.apply:
-        LOG.warning("APPLY: blanking cells. Back up first — see this file's docstring.")
+    if args.apply and not args.backup_table:
+        print("ERROR: --apply needs --backup-table NAME.", file=sys.stderr)
+        return 2
 
     with db.connect() as conn:
         with conn.cursor() as cur:
             cur.execute(_STATEMENT_TIMEOUT_SQL)
-        counts = run(conn, columns, apply=args.apply, page=args.page)
+        if args.apply:
+            create_backup_table(conn, args.backup_table)
+            LOG.warning("APPLY: blanking cells; each is copied to %s first", args.backup_table)
+        counts = run(conn, columns, apply=args.apply, page=args.page,
+                     backup_table=args.backup_table)
 
     LOG.info("DONE %s total=%d%s", counts, sum(counts.values()),
              "" if args.apply else " (dry run — nothing was written)")
