@@ -33,7 +33,8 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area
-from scraper.attribute_contract import source_label, source_value, source_values
+from scraper.attribute_contract import floor_convention, source_label, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street, street_from_locality
 
@@ -518,7 +519,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         street=street,
         lat=lat,
         lon=lon,
-        floor=_to_int(read("floor")),
+        floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
         total_floors=total_floors,
         building_type=vocabulary.canonical("building_type", SOURCE, label("building_type")),
         condition=vocabulary.canonical("condition", SOURCE, label("condition")),

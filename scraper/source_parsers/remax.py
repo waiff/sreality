@@ -19,7 +19,9 @@ Layout notes specific to remax-czech.cz:
   pronajem listings exist too — verify against the page rather
   than defaulting.
 - Address has a city + district format like "Praha 4 - Krč".
-- Floor values like "Přízemí" → 0, "1. patro" → 1, "Suterén" → -1.
+- Floor: spelled values read directly ("Přízemí" → 0, "1. patro" → 1,
+  "Suterén" → -1), but the numeric "Číslo podlaží" cell is a PODLAŽÍ ordinal
+  counting the ground storey as 1 — subtract one ("1" → 0, "3" → 2).
 - Building type values: "Cihlová" → cihla, "Panelová" → panel,
   "Smíšená" → smisena, etc. Lowercase, no diacritics on the
   category enum.

@@ -433,6 +433,12 @@ a census older than 30 d warns (a CI test would red `main` on a date, not on a d
 the OPERATOR's (step 4 above), both goldens' tests are subset assertions so an unblessed new field or
 portal reds nothing, and it owns no thresholds (sized on that cohort's measured drift) — every other
 check's live in `app_settings.pipeline_check_thresholds` over code defaults in `DEFAULT_THRESHOLDS`.
+**`floor_convention`** (field capture W8) asks what no fill or validity measure can — whether a
+populated, plausible integer is on the RIGHT SCALE: `mean(portal floor − idnes floor)` over active
+`byt` rows sharing a (price, area, disposition) key, warn 0.35 / fail 0.50 / min 40 pairs. It is the
+lane's costliest check (11-35 s, registered last among the DB checks) and the ONE that ships RED on
+purpose — the six ground = 1 portals stay +0.8..+1.1 until the operator has run the six
+`scripts/reparse.py --fields floor` heal passes in the W8 hand-over § 7.
 **Per-check rationale, incidents and threshold sizing: `references/pipeline-verification.md`.**
 
 ## Reading the logs

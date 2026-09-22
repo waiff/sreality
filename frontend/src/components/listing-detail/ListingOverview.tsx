@@ -7,7 +7,7 @@
  * listings row. */
 import { Suspense, useLayoutEffect, useRef, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
-import { fmtCzk, fmtArea, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/format';
+import { fmtCzk, fmtArea, fmtFloor, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/format';
 import { areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 import { listingKindParts, priceUnitLabel } from '@/lib/enums';
@@ -88,12 +88,7 @@ function Header({
   /* A pozemek's area_m2 is its PLOT, not a floor plan — the header has room to
    * say which, so it does. */
   const area = fmtArea(listing.area_m2, areaKindOf(listing.category_main));
-  const floor =
-    listing.floor != null
-      ? listing.total_floors != null
-        ? `${listing.floor}/${listing.total_floors}`
-        : String(listing.floor)
-      : null;
+  const floor = fmtFloor(listing.floor, listing.total_floors);
   // A null price means the seller hid it (often quoting it in the description);
   // it's real source state, not missing data — surface it as such.
   const hasPrice = listing.price_czk != null;
@@ -125,9 +120,7 @@ function Header({
             {floor != null && (
               <>
                 <span className="mx-2 text-[var(--color-ink-4)]">·</span>
-                <span title="Floor">
-                  floor <span className="text-[var(--color-ink)]">{floor}</span>
-                </span>
+                <span className="text-[var(--color-ink)]">{floor}</span>
               </>
             )}
           </p>

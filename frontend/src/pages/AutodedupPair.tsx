@@ -35,7 +35,7 @@ import {
   type AutodedupPairImage,
 } from '@/lib/api';
 import { imageSrc } from '@/lib/imageUrl';
-import { fmtCzk } from '@/lib/format';
+import { fmtCzk, fmtFloor } from '@/lib/format';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import AttrDiffTable, { memberDiffRows } from '@/components/autodedup/AttrDiffTable';
@@ -334,7 +334,11 @@ function DigestPanel({ digest }: { digest: AutodedupDigest | null }) {
     ['podtyp', digest.subtype ?? '—'],
     ['dispozice', digest.disposition ?? '—'],
     ['plocha', digest.area_m2 == null ? '—' : String(digest.area_m2)],
-    ['patro', digest.floor == null ? '—' : String(digest.floor)],
+    /* fmtFloor says the storey AND the building count, and says which scale. It
+     * returns null on an absent storey, so the count keeps its own row: 77.8k active
+     * rows (mostly houses) state podlaží and no patro, and on a same/different verdict
+     * '2 podlaží' against '3' is exactly the distinguishing fact. */
+    ['patro', fmtFloor(digest.floor, digest.total_floors) ?? '—'],
     ['podlaží', digest.total_floors == null ? '—' : String(digest.total_floors)],
     ['cena', digest.price == null ? '—' : fmtCzk(digest.price)],
     ['první', digest.first_seen ?? '—'],

@@ -43,7 +43,8 @@ from scraper.area import (
     derive_headline_area,
     parse_area_text,
 )
-from scraper.attribute_contract import source_value, source_values
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -706,7 +707,7 @@ def parse_detail(
         street=street,
         lat=lat,
         lon=lon,
-        floor=_parse_int(read("floor")),
+        floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
         total_floors=_parse_int(read("total_floors")),
         parking_lots=lots,
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),

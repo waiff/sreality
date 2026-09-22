@@ -347,6 +347,28 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # under it on both axes, which is also how a CROP is caught. Timeout is the read half
     # of a (5, 8) connect/read pair, bounded per call in the seam; worst case across the
     # three calls is 39 s, inside the 45 s per-check budget.
+    # Floor convention: the mean (portal storey − idnes storey) over sibling pairs.
+    # A whole-storey offset is the defect (W8 measured +0.82..+1.05 on the six ground=1
+    # portals against +0.20 ceskereality / +0.10 bazos, the two that were already
+    # canonical), so the tiers sit between the two populations. The measure has a real
+    # noise floor — a sibling pair is a price/area/disposition match, not a proven
+    # duplicate — and it is NOT the same size on every portal: ceskereality reads +0.20
+    # against bazos's +0.10. That gap is NOT sample conditioning, though the portal does
+    # never state the ground storey (0 of its 34,363 floored rows read 0): restricting
+    # the idnes side to floor >= 1 too moves it only +0.199 -> +0.167 (n=7,166 of 7,394,
+    # measured 2026-09-22). What is left is a real sub-population — 925 of its pairs sit
+    # at exactly +1 against 92 below 0, a 10:1 asymmetry bazos does not have (565:264) —
+    # i.e. ceskereality carries an UNEXPLAINED one-storey defect on ~12 % of its pairs,
+    # tracked as an open finding in the W8 hand-over §6. warn is 0.35 to hold that portal
+    # amber-free while it is investigated, not because its reading is certified: simulated
+    # on the live corpus the six converted portals land -0.16..+0.06, well inside 0.25, so
+    # the wider tier protects exactly one portal and that portal is the open question.
+    # fail at 0.5 is half a storey — unreachable by noise, reachable only by a portal on
+    # the other scale. min_pairs 40 lets maxima score on its ~49 pairs and still refuses
+    # a mean of one or two adverts.
+    "floor_convention_delta_warn": 0.35,
+    "floor_convention_delta_fail": 0.50,
+    "floor_convention_min_pairs": 40,
     "sreality_image_template_min_ratio": 0.9,
     "sreality_image_template_timeout_s": 8.0,
     # --- alert escalation policy (W3.4) -------------------------------------
@@ -376,8 +398,11 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 # THE ACUTE LANE's budget: 120s of llm_health.yml's 300s job. The remaining 180s is
 # deliberate headroom for process start, the threshold read and alert emission.
 _LANE_BUDGET_S = 120.0
-# No single check may hold the lane for more than this. The slowest today is the shared
-# measure_plausibility read at ~12s, so 45s is ~4x headroom over the known worst case.
+# No single check may hold the lane for more than this. The slowest today is
+# floor_convention's cross-portal self-join, 11-35s over four measured runs (the shared
+# measure_plausibility read is ~12s), so at its worst 45s is only 1.3x the known worst
+# case — a new check above ~20s starves the tail and needs its query reworked, not a
+# wider budget.
 _CHECK_BUDGET_S = 45.0
 # Process start, threshold read and alert emission, reserved out of every job's timeout.
 _JOB_HEADROOM_S = 180.0
@@ -2060,6 +2085,134 @@ select source,
 """
 
 
+# The floor convention, measured against another portal rather than against labels.
+#
+# `listings.floor` was a ~50/50 MIX of two Czech conventions until W8: idnes, bazos and
+# ceskereality counted the ground storey 0, the other six counted it 1, so one flat read
+# 3 from its idnes row and 4 from its sreality row in the same Browse list. Nothing in
+# the repo could see it — there was no floor check of any kind — because a wrong-by-one
+# storey is perfectly typed, perfectly non-NULL and perfectly plausible.
+#
+# The measure needs no labels and no LLM: two adverts agreeing on price, area AND
+# disposition are the same flat often enough that the MEAN of their floor difference is a
+# clean convention signal. idnes is the reference because it is the one portal whose
+# parser has always read the Czech word ("2. patro (3. NP)"). A key counts only where the
+# side holds ONE storey for it (min = max), so a repeated price/area/disposition triple
+# cannot smear the difference.
+#
+# Measured on the live cluster over ~34.7k pairs: 27.0 / 35.1 / 11.0 / 16.1 s on four
+# EXPLAIN (ANALYZE) runs across two days. It is the MOST EXPENSIVE check in the lane and
+# by far the most VARIABLE — the plan is a BitmapAnd feeding a Bitmap Heap Scan that
+# spills (57k exact + 51k lossy heap blocks, ~116k buffers, ~85 % of them `read` even on
+# a warm cluster, so it never stays cached and its cost tracks whatever else is reading
+# `listings`) — which is why it is registered LAST among the DB checks and runs
+# under the same server-side `statement_timeout` as every other check: on a bad day it is
+# cancelled and reports `warn / timed out`, which says UNKNOWN, never a false green.
+_FLOOR_CONVENTION_SQL = """
+WITH k AS MATERIALIZED (
+    SELECT source, price_czk, area_m2, disposition, min(floor) AS f
+      FROM listings
+     WHERE is_active AND category_main = 'byt' AND floor IS NOT NULL
+       AND price_czk IS NOT NULL AND area_m2 IS NOT NULL AND disposition IS NOT NULL
+     GROUP BY 1, 2, 3, 4
+    HAVING min(floor) = max(floor)
+)
+SELECT o.source, count(*) AS pairs, avg(o.f - r.f)::double precision AS mean_delta
+  FROM k o JOIN k r USING (price_czk, area_m2, disposition)
+ WHERE r.source = %(reference)s AND o.source <> %(reference)s
+ GROUP BY 1
+"""
+
+_FLOOR_REFERENCE = "idnes"
+
+
+def _declared_floor_convention(source: str) -> str | None:
+    """The storey scale that portal's floor cell declares, or None for a source that
+    has no contract row (a portal added to the DB before its cell exists)."""
+    portal = attribute_contract.CONTRACT.get(source)
+    return portal["floor"].convention if portal else None
+
+
+def check_floor_convention(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Is every portal's `floor` on the SAME storey scale (ground = 0)?"""
+    # `_fetchall`, not a bare cursor: it is the only thing that emits the per-check
+    # `SET LOCAL statement_timeout`, and this is the one query in the lane expensive
+    # enough to need it (the cheap counter reads elsewhere can afford a raw cursor).
+    rows = _fetchall(conn, _FLOOR_CONVENTION_SQL, {"reference": _FLOOR_REFERENCE})
+
+    warn = float(thresholds["floor_convention_delta_warn"])
+    fail = float(thresholds["floor_convention_delta_fail"])
+    min_pairs = int(thresholds["floor_convention_min_pairs"])
+
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    scale_offenders: list[str] = []
+    status = "ok"
+    worst = 0.0
+    scored = 0
+    for source, pairs, mean_delta in rows:
+        delta = float(mean_delta)
+        per_source[source] = {"pairs": int(pairs), "mean_delta": round(delta, 3)}
+        if int(pairs) < min_pairs:
+            continue
+        scored += 1
+        worst = max(worst, abs(delta))
+        if abs(delta) >= fail:
+            status = "fail"
+        elif abs(delta) >= warn and status != "fail":
+            status = "warn"
+        if abs(delta) >= warn:
+            offenders.append(f"{source} {delta:+.2f} ({pairs} pairs)")
+            scale_offenders.append(source)
+
+    if not scored:
+        # Rows without a scored arm certify nothing; `value` stays None so the tile
+        # shows an em-dash rather than a 0 that reads as agreement.
+        return {
+            "check_key": "floor_convention", "status": "warn", "value": None,
+            "details": {"skipped": f"no portal reached {min_pairs} sibling pairs",
+                        "per_source": per_source},
+            "message": (
+                "Floor-convention check verified NOTHING — no portal reached "
+                f"{min_pairs} sibling pairs against {_FLOOR_REFERENCE}. That is a "
+                "coverage failure, not a clean bill of health."),
+        }
+
+    if offenders:
+        # The runbook only applies to a portal whose contract cell says `ground1` — the
+        # heal is that conversion. Telling the operator to re-derive ceskereality (cell
+        # `ground0`) would shift 34,363 CORRECT rows down one storey, which is exactly
+        # what W8 and its hand-over forbid, so the two cases get different sentences.
+        convertible = [s for s in scale_offenders
+                       if _declared_floor_convention(s) == "ground1"]
+        remedy = (
+            "Heal it per docs/design/field-capture/handover-autodedup-floor.md §7 "
+            "(`python -m scripts.reparse --source <portal> --fields floor --write "
+            "--allow-snapshot-deferral`; the bare command is a dry run and `floor` is "
+            f"hashed): {', '.join(convertible)}."
+            if convertible else
+            "None of them declares `ground1`, so re-deriving is NOT the remedy — the "
+            "reading itself moved. Check that portal's parser and contract cell first."
+        )
+        message = (
+            f"{len(offenders)} portal(s) are on a different storey scale than "
+            f"{_FLOOR_REFERENCE} (worst {worst:.2f} storeys): " + "; ".join(offenders)
+            + " — a mean near +1 is the ground=1 reading. " + remedy
+        )
+    else:
+        message = (f"Every portal reads the same storey scale as {_FLOOR_REFERENCE} "
+                   f"(worst |mean| {worst:.2f} across {scored} scored portals).")
+    return {
+        "check_key": "floor_convention",
+        "status": status,
+        "value": round(worst, 3),
+        "details": {"per_source": per_source, "offenders": offenders,
+                    "reference": _FLOOR_REFERENCE, "warn": warn, "fail": fail,
+                    "min_pairs": min_pairs, "scored": scored},
+        "message": message,
+    }
+
+
 def check_acquisition_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     """How long a DISCOVERED but never-fetched listing has been waiting, per portal."""
     with conn.cursor() as cur:
@@ -3138,11 +3291,18 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # in-app bell; not in the hourly --only list (ship, soak, then promote).
     ("outbound_url_coverage", check_outbound_url_coverage),
     # The other ingest checks ask whether rows ARRIVE; this one asks whether their fields
-    # are filled and in-vocabulary. Second to last deliberately: at ~12s over the whole
-    # active stock it is the most expensive DB check in the lane, so it queues behind the
-    # cheap ones rather than spending their budget. 6h lane + in-app bell; not in
+    # are filled and in-vocabulary. Third to last deliberately: at ~12s over the whole
+    # active stock it is one of the lane's two expensive DB checks, so it queues behind
+    # the cheap ones rather than spending their budget. 6h lane + in-app bell; not in
     # llm_health.yml's hourly --only list (ship, soak, promote — the ppm2 ladder).
     ("field_fill_matrix", check_field_fill_matrix),
+    # The last DB check, and the most expensive one in the lane (11-35 s measured): a
+    # cross-portal self-join over every active byt row. It asks the question no fill or
+    # validity measure can — whether a populated, plausible integer is on the RIGHT SCALE.
+    # 6h lane + in-app bell; not in llm_health.yml's hourly --only list (ship, soak,
+    # promote — the ppm2 ladder). It reads RED until W8's heal has run on all six
+    # ground=1 portals; that is the gate, not a regression.
+    ("floor_convention", check_floor_convention),
     # LAST deliberately: the only check that makes an outbound request, so if the
     # lane budget runs out it is the one that goes unrun, never a DB check. 6h lane
     # + in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).

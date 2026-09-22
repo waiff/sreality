@@ -194,7 +194,8 @@ def test_parse_detail_byt_full():
     # guard (Nupaky / okres Praha-východ are NOT mistaken for the street).
     assert listing.street == "Luční"
     assert listing.district == "Praha-východ"
-    assert listing.floor == 2
+    # 'číslo podlaží v domě' 2 -> ground=0 storey 1 (W8).
+    assert listing.floor == 1
     assert listing.total_floors == 1
     assert listing.building_type == "cihla"
     assert listing.condition == "velmi_dobry"

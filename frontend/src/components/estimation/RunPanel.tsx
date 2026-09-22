@@ -35,6 +35,7 @@ import {
   fmtAbsolute,
   fmtArea,
   fmtCzk,
+  fmtFloor,
   fmtMeasuredPricePerM2,
   fmtRelative,
 } from '@/lib/format';
@@ -818,7 +819,7 @@ function InputRecap({ run }: { run: EstimationRun }) {
       : null]);
     facts.push(['Area', spec.area_m2 != null ? fmtArea(spec.area_m2) : null]);
     facts.push(['Disposition', spec.disposition ?? null]);
-    if (spec.floor != null) facts.push(['Floor', String(spec.floor)]);
+    if (spec.floor != null) facts.push(['Floor', fmtFloor(spec.floor)]);
     if (spec.exclude_ids.length > 0) {
       facts.push(['Excluded', spec.exclude_ids.map(String).join(', ')]);
     }
@@ -1597,6 +1598,7 @@ function AdjustPanel({
           value={state.floor}
           step="1"
           placeholder="—"
+          hint="Přízemí = 0, 1. patro = 1, suterén = −1 — the same scale listings.floor is on."
           onChange={(v) => set('floor', v != null ? Math.round(v) : null)}
         />
       </div>

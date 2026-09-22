@@ -28,7 +28,8 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
-from scraper.attribute_contract import source_value, source_values
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.broker_idnes import parse_idnes_broker
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
@@ -128,9 +129,6 @@ _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # Map config: "center":[lon, lat]. CZ lat/lon ranges don't overlap, so a swap is
 # caught by the bbox guard rather than producing a bogus point.
 _CENTER_RE = re.compile(r'"center"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\]')
-_FLOOR_PATRO_RE = re.compile(r"(-?\d+)\.\s*patro")
-_FLOOR_NP_RE = re.compile(r"(\d+)\.\s*np")
-_FLOOR_PP_RE = re.compile(r"(\d+)\.\s*pp")
 # The price cell's inline mortgage-calculator link ("Spočítat hypotéku" /
 # "Chci spočítat hypotéku") — UI chrome, not price data; stripped before the
 # text lands in raw_json. Safe: raw is not part of the typed content hash.
@@ -313,26 +311,6 @@ def _parse_int(text: str | None) -> int | None:
         return None
     m = _INT_RE.search(text)
     return int(m.group(1)) if m else None
-
-
-def _parse_floor(text: str | None) -> int | None:
-    """idnes shows "2. patro (3. NP)" — prefer the 'patro' count; fall back to
-    NP (nadzemní podlaží: 1.NP = ground = 0) / PP (podzemní = below ground)."""
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if "prizem" in low:
-        return 0
-    m = _FLOOR_PATRO_RE.search(low)
-    if m:
-        return int(m.group(1))
-    m = _FLOOR_NP_RE.search(low)
-    if m:
-        return int(m.group(1)) - 1
-    m = _FLOOR_PP_RE.search(low)
-    if m:
-        return -int(m.group(1))
-    return None
 
 
 def _detail_params(tree: HTMLParser) -> dict[str, Node]:
@@ -624,7 +602,7 @@ def parse_detail(
         street=street_from_locality(locality, position="first", lat=lat, lon=lon),
         lat=lat,
         lon=lon,
-        floor=_parse_floor(read("floor")),
+        floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
         total_floors=_parse_int(read("total_floors")),
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
         # A flat labels its condition row "Stav bytu"; a house or a commercial unit

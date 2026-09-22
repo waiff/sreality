@@ -158,7 +158,9 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 - **R12 — Autodedup is another program's territory.** This program fixes upstream and hands over in writing; it never
   edits `autodedup/` or `docs/design/autodedup/`. Owed hand-overs: the false "zero area" sentences (E12, :241, :1046);
   the stale `PLOT_TRUNCATING_SOURCES` guard (the truncation was fixed by `scraper/area.py` + healed); the W8 floor
-  conversion table and predicate **before** W8 merges (their `l0_floor_tolerance` and fitted weights depend on it).
+  conversion table and predicate **before** W8 merges — DELIVERED as
+  `docs/design/field-capture/handover-autodedup-floor.md` (their `l0_floor_tolerance`, `floor_stated_conflict`, the
+  guards' `band` arm and the persisted `floor_lo`/`floor_hi`/`floor_checked` pair state all depend on it).
 
 **Approved destructive steps (operator OK 2026-09-21, each with a backup + before/after counts):** (i) drop the two
 0-row batch tables; (ii) re-key `listing_description_enrichments`; (iii) clear the OLD lane's cells that failed
@@ -191,7 +193,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |
 | **W6 — SHIPPED** | Close the wipe (R4); property rollup stops letting a lower-trust `true` beat a higher-trust `false`; fills reach Browse in minutes | the `bool_or` special case; the per-listing re-render of the upsert statement | 114 / −38 across three files (most of it the WHY comments) + 156 test lines | W1 |
 | **W7** | The text lane on the realtime worker; bake-off; per-field gates | duplicate tool enums; the old cache key | ~170 | W0, W2, W3, W6 |
-| **W8** | Floor: ground = 0 everywhere — six portals re-derived; the SPA names the convention | 5 floor regexes, 4 inline FE expressions | ~60 | W2, W3, R12 hand-over |
+| **W8 — SHIPPED (heal pending)** | Floor: ground = 0 everywhere — the convention as contract data; six portals' parsers converted; the SPA names the convention | 3 per-parser floor readers + 5 regexes, maxima's int-returning split, 6 inline FE expressions | the `convention` axis, `floor_from_portal`, `fmtFloor`, one verify_pipeline check | W2, W3, R12 hand-over |
 | **W9** | Patchwork sweep (non-autodedup), one small PR each | stale docs, a dead rung or a dead path | — | — |
 
 ## 5. Wave gates (numeric; SQL or CI)
@@ -447,13 +449,53 @@ drains; `eligible > 0 AND claimed = 0` never persists two passes. p99 extraction
 (the watchdog lookback reads the same constant). Re-bill closed: no `(listing_id, description-hash)` extracted twice
 per extractor version. Pre-call budget guard binds before spend.
 
-**W8.** Sibling-pair gate (one SQL, no labels): mean(portal_floor − idnes_floor) within ± 0.25 of 0 for every portal.
-Baseline 2026-09-21 — exactly +1 on: sreality 94.0 % (n=13,069), realitymix 92.3 %, mmreality 98.6 %, remax 87.1 %,
-bezrealitky 73.1 %, maxima 85.1 % (n=47); ceskereality already 85.4 % same and **must not be converted**. Expected
-residual after conversion 5–13 % (27 % on bezrealitky) = the field's own noise floor (ceskereality shows 14.6 %
-today). Conversion = idempotent re-derive, `floor ≥ 1` only; 4,700 rows at 0 and 996 below 0 unchanged.
-`is_plausible_floor` tightens to `total_floors − 1`. `listing_snapshots`/day stays < 12,500 for 30 days
-(baseline 10,090; ~25k deferred snapshots on the five hashed portals). Hand-over to autodedup delivered first (R12).
+**W8 — SHIPPED in code; the GATE and the heal are post-merge by nature.** Sibling-pair gate (one SQL, no
+labels), now registered as `verify_pipeline`'s `floor_convention` check — the first floor check of any kind:
+mean(portal_floor − idnes_floor) over unique (price_czk, area_m2, disposition) active byt keys, within ± 0.35 of 0
+for every portal, fail at ± 0.50, min 40 pairs. The warn tier is 0.35, not the planned 0.25, and the reason in the
+plan was WRONG: ceskereality's +0.20 is not sample conditioning. It does never state the ground storey (0 of its
+34,363 floored rows read 0), but restricting the idnes side to `floor ≥ 1` as well moves it only +0.199 → +0.167
+(n = 7,166 of 7,394, measured 2026-09-22). The rest is a real sub-population — 925 pairs at exactly +1 against 92
+below 0, a 10:1 asymmetry bazos does not have (565:264) — so ~12 % of that portal's pairs carry an UNEXPLAINED
+one-storey defect, now an open finding in the hand-over § 6. 0.35 holds it amber-free while that is investigated;
+it does not certify it. Simulated on the live corpus the six converted portals land −0.16..+0.06 — inside the
+planned 0.25 — so the wider tier protects exactly one portal, and that portal is the open question. Measured
+27.0 / 35.1 / 11.0 / 16.1 s on four EXPLAIN (ANALYZE) runs over ~34.7k pairs — the lane's most expensive check and
+by far its most variable (a Bitmap Heap Scan that spills, ~116k buffers ~85 % `read`, so it never stays cached and
+its cost tracks whatever else is reading `listings`), which is why it is
+registered LAST among the DB checks and runs under the per-check `statement_timeout`: cancelled on a bad day it
+reports `warn / timed out`, which says UNKNOWN, never a false green. Baseline re-measured 2026-09-22 (mean, and
+the share at exactly +1): sreality +0.97 / 94.0 % (n=13,574), realitymix +0.96 / 92.4 % (7,416), remax +1.05 /
+86.8 % (1,248), mmreality +0.99 / 98.6 % (1,574), bezrealitky +0.87 / 73.0 % (900), maxima +0.82 / 85.7 % (49);
+ceskereality already +0.20 (85.6 % same, n=7,453) and **must not be converted**, bazos +0.10. The residual the six
+should land on after the heal is those two portals' own reading, not 0 — a price/area/disposition match is a
+sibling signal, not a proven duplicate. **The check therefore reads RED from merge until all six heal passes have
+run**; that is the gate working, not a regression — but the 6-hourly lane opens a `system_health` incident at the
+first `fail` and re-escalates while it stays open, so **the heal is run in the SAME operator session as the merge**.
+Six commands, hand-over § 7, also reproduced in the PR body. The check's own failure message prints them, and
+prints them only for a portal whose contract cell declares `ground1`.
+
+Conversion = idempotent re-derive through `scripts/reparse.py --fields floor`, `floor ≥ 1` only; re-measured
+2026-09-22 the six portals hold **183,801 rows that move (63,431 active)**, and **4,707 rows at 0** (sreality 4,597,
+mmreality 108, maxima 2) plus **900 below 0** stay put. `is_plausible_floor` tightened to `total_floors − 1`.
+Snapshot gate, stated as a DELTA because the absolute was already crossed before the wave: `listing_snapshots`/day
+stays within +40 % of the trailing 7-day median once the refetch cycle has turned over (median **11,199** over the
+seven full days to 2026-09-21: 20,386 / 9,608 / 13,107 / 11,199 / 8,669 / 3,220 / 13,130 — three of them already
+above the 12,500 the plan wrote as an absolute, with no row moved, which is why the gate is a delta). **25,327** deferred snapshots on the five hashed portals, one per
+healed active row at its next detail fetch; sreality's 124,300 rows churn none, it hashes the raw payload. Hand-over to autodedup delivered
+first (R12): `docs/design/field-capture/handover-autodedup-floor.md`.
+
+**Three things the wave found that the plan did not have.** (i) The convention needed a THIRD member, not two:
+idnes states the scale in the VALUE ("2. patro (3. NP)"), so its cell declares `word` and the Czech grammar reads
+it — `ground0`/`ground1` alone would have forced a choice between two numbers one storey apart on the one portal
+that never had the bug. (ii) `total_floors` does NOT convert — it is a podlaží count including the ground storey on
+every portal — but the bazos free-text miner's two **patra-worded** total cues ("z celkových 10 pater", "6patrový")
+count storeys ABOVE the ground one, so they now read `n + 1`; without that the tightened guard would have refused
+correct floors. 28 of 1,158 active bazos rows with a total carry such a cue. (iii) bezrealitky uses **0 as its
+numeric "not specified" sentinel** (it has never emitted a floor=0 row), so its call site reads the value through
+`_int` before the converter — under ground = 0 a bare 0 would otherwise have become the ground storey.
+`is_plausible_floor`'s only other caller named in the design, `toolkit/bazos_enrichment.py`, no longer exists: W0
+deleted it, so the tightening reaches exactly one live producer, the bazos miner.
 
 **W9.** Each item its own PR (status as of 2026-09-21, worked alongside W0):
 

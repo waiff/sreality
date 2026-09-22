@@ -25,6 +25,11 @@ Each cell carries four axes:
     like a missing key is a JSON null, which is the API saying "not stated". A portal that
     genuinely omits a key to mean "no" declares it here rather than in a parser branch.
   * **sentinels** — values to read as absent ("neuvedeno", sreality's "- nezadáno").
+  * **convention** — the `floor` cell only: which storey scale the key counts on
+    (`ground0` | `ground1` | `word`, `scraper.floor.FloorConvention`). It is here rather
+    than in nine parsers because it is a fact ABOUT THE KEY, and because a bare-int
+    reader with no declaration is how `patro` and `podlaží` — one storey apart — shared
+    one code path (W8). `scraper.floor.floor_from_portal` refuses a cell without it.
 
 A cell with nothing behind it carries `gap=` naming the census key W4 will wire, or
 `gap=None` where the portal genuinely never states the fact. That marker is the ONE place
@@ -37,6 +42,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping
 
+from scraper.floor import FloorConvention
 from scraper.vocabulary import fold
 
 Producer = Literal["structured", "text", "derived", "none"]
@@ -51,12 +57,14 @@ class Cell:
     sentinels: tuple[str, ...] = ()
     gap: str | None = None
     note: str | None = None
+    convention: FloorConvention | None = None
 
 
 def _cell(producer: Producer, *keys: str, absence: Absence = "unknown",
           sentinels: Iterable[str] = (), gap: str | None = None,
-          note: str | None = None) -> Cell:
-    return Cell(producer, tuple(keys), absence, tuple(sentinels), gap, note)
+          note: str | None = None,
+          convention: FloorConvention | None = None) -> Cell:
+    return Cell(producer, tuple(keys), absence, tuple(sentinels), gap, note, convention)
 
 
 # sreality paints the sale STATUS over the condition / building-type NAME on a reserved or
@@ -81,7 +89,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "area_m2": _cell("structured", "usable_area", "estate_area"),
         "area_basis": _cell("derived", note="stamped by scraper.area from the two measures"),
         "disposition": _cell("structured", "category_sub_cb", "advert_name"),
-        "floor": _cell("structured", "floor_number"),
+        "floor": _cell("structured", "floor_number", convention="ground1"),
         "total_floors": _cell("structured", "floors"),
         # R11: balcony OR loggia. `terrace` was a third arm here and is its own column —
         # dropping it flips ~3,200 of the 16,766 active true rows to false (19.1% of them
@@ -119,7 +127,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "area_m2": _cell("structured", "surface", "surfaceLand"),
         "area_basis": _cell("derived"),
         "disposition": _cell("structured", "disposition"),
-        "floor": _cell("structured", "etage"),
+        "floor": _cell("structured", "etage", convention="ground1"),
         "total_floors": _cell("structured", "totalFloors"),
         # R11: balcony OR loggia. `terraceSurface` was a third arm here and is its own
         # column — dropping it takes 395 of 1,417 true rows back to unknown.
@@ -155,7 +163,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "area_m2": _cell("structured", "usableArea", "parcelArea", "gardenArea"),
         "area_basis": _cell("derived"),
         "disposition": _cell("structured", "type", "title"),
-        "floor": _cell("structured", "floor"),
+        "floor": _cell("structured", "floor", convention="ground1"),
         "total_floors": _cell("structured", "overgroundFloors", "undergroundFloors"),
         # R11: balcony OR loggia, from the two top-level booleans the portal actually
         # publishes (2,309 of 10,317 active rows each, 22.4%, with a real `false`). The
@@ -205,7 +213,10 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "area_basis": _cell("derived"),
         "disposition": _cell("derived", note="the h1 title; the portal ships no "
                              "`dispozice` cell on any page of a 1,000-row census"),
-        "floor": _cell("structured", "patro"),
+        # The one HTML portal whose key is `patro`: its "2." IS the storey above the
+        # ground one. Sibling-paired against idnes it lands on 0 (+0.20 mean over 7,453
+        # active byt pairs), so it was already canonical and W8 left its values alone.
+        "floor": _cell("structured", "patro", convention="ground0"),
         "total_floors": _cell("none", gap=None),
         # "Balkóny" is ONE multi-value cell ("Balkon, Lodžie, Terasa"): the union is read
         # out of it, and a list that does not name the thing is the portal saying it is
@@ -250,7 +261,10 @@ CONTRACT: dict[str, dict[str, Cell]] = {
                          note="the (usable, plot) slot order derive_headline_area takes"),
         "area_basis": _cell("derived"),
         "disposition": _cell("derived", note="the h1 title"),
-        "floor": _cell("structured", "podlaží"),
+        # The only portal that states the scale in the VALUE: "2. patro (3. NP)",
+        # "snížené přízemí (1. PP)". The number alone is meaningless here, so the cell
+        # declares `word` and `scraper.floor.normalize_floor` reads the Czech.
+        "floor": _cell("structured", "podlaží", convention="word"),
         # A flat's page labels the row "Počet podlaží budovy"; a HOUSE's page labels it
         # "Počet podlaží" — 29.7k active dum rows had total_floors NULL for want of the
         # second spelling (35.7% of a 1,000-row census carries it).
@@ -286,7 +300,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
                          note="the (usable, floor, plot) slot order"),
         "area_basis": _cell("derived"),
         "disposition": _cell("derived", note="the h3 title"),
-        "floor": _cell("structured", "podlaží"),
+        # ONE row, "3./6.", carrying both: the storey ordinal and the building's podlaží
+        # count. The parser splits it and the ordinal is read as `ground1`.
+        "floor": _cell("structured", "podlaží", convention="ground1"),
         "total_floors": _cell("structured", "podlaží"),
         # R11: balcony OR loggia. maxima states them as two "Ano"-or-absent rows.
         "has_balcony": _cell("structured", "balkón", "lodžie"),
@@ -320,7 +336,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
                          note="the (usable, floor, total, plot) slot order"),
         "area_basis": _cell("derived"),
         "disposition": _cell("structured", "dispozice bytu"),
-        "floor": _cell("structured", "číslo podlaží v domě"),
+        "floor": _cell("structured", "číslo podlaží v domě", convention="ground1"),
         "total_floors": _cell("structured", "počet podlaží objektu"),
         "has_balcony": _cell("structured", "balkon", "lodžie"),
         # `ostatní` is ONE closed multi-select of building amenities (live on 4,692 active
@@ -364,7 +380,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
                          note="the (usable, total, plot) slot order"),
         "area_basis": _cell("derived"),
         "disposition": _cell("structured", "dispozice"),
-        "floor": _cell("structured", "cislo podlazi"),
+        "floor": _cell("structured", "cislo podlazi", convention="ground1"),
         "total_floors": _cell("structured", "pocet podlazi v objektu"),
         "has_balcony": _cell("none", gap=None,
                              note="no balcony/loggia key in a 1,000-row census"),
@@ -397,7 +413,8 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "area_m2": _cell("text", note="scraper.area over the title + description"),
         "area_basis": _cell("derived"),
         "disposition": _cell("text"),
-        "floor": _cell("text", note="scraper.floor over the same haystack"),
+        "floor": _cell("text", note="scraper.floor over the same haystack",
+                       convention="word"),
         "total_floors": _cell("text"),
         "has_balcony": _cell("none", gap=None),
         "has_parking": _cell("none", gap=None),
@@ -605,6 +622,12 @@ IGNORED: dict[str, dict[str, str]] = {
 
 def cell(portal: str, field: str) -> Cell:
     return CONTRACT[portal][field]
+
+
+def floor_convention(portal: str) -> FloorConvention | None:
+    """The storey scale that portal's floor key counts on — the one input
+    `scraper.floor.floor_from_portal` will not work without."""
+    return CONTRACT[portal]["floor"].convention
 
 
 def source_value(portal: str, field: str, params: Mapping[str, Any]) -> Any:

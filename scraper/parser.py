@@ -17,7 +17,8 @@ from unicodedata import combining, normalize
 
 from scraper import sreality_url, vocabulary
 from scraper.area import derive_headline_area
-from scraper.attribute_contract import source_label, source_value, source_values
+from scraper.attribute_contract import floor_convention, source_label, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.published import iso_date
 
 SOURCE = "sreality"
@@ -113,7 +114,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "disposition": vocabulary.disposition(
             SOURCE, *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
         ),
-        "floor": _int_or_none(read("floor")),
+        "floor": floor_from_portal(floor_convention(SOURCE), read("floor")),
         "total_floors": _int_or_none(read("total_floors")),
         "has_balcony": vocabulary.any_true(
             *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_balcony", raw))

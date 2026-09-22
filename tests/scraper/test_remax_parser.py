@@ -270,7 +270,8 @@ def test_parse_detail_full():
     assert "address" not in listing.raw
     assert "Oleška" not in (listing.locality or "")
     assert listing.district == "Žižkov"
-    assert listing.floor == 8
+    # 'cislo podlazi' 8 -> ground=0 storey 7 (W8).
+    assert listing.floor == 7
     assert listing.total_floors == 8
     assert listing.building_type == "cihla"
     assert listing.condition == "velmi_dobry"
