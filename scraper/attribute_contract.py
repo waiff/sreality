@@ -84,11 +84,13 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "floor": _cell("structured", "floor_number"),
         "total_floors": _cell("structured", "floors"),
         # R11: balcony OR loggia. `terrace` was a third arm here and is its own column —
-        # dropping it flips ~5,100 active rows (4.9% of the portal) from true to false.
+        # dropping it flips ~3,200 of the 16,766 active true rows to false (19.1% of them
+        # in the newest-8,000 sample; the whole-stock scan times out).
         "has_balcony": _cell("structured", "balcony", "loggia"),
         # `parking_lots` is a BOOLEAN in sreality's payload and `parking` the count — the
         # opposite of what the column names suggest. Verified live (8,000 newest active
-        # rows): `parking_lots` is boolean on 1,813+491, `parking` a number 1..9 on 491.
+        # rows): both keys are on 6,251, `parking_lots` boolean (2,011 true), `parking` a
+        # number on 1,230 spanning -1..1,879 — hence the `> 0`, not a truthiness test.
         # Both are the property's own, so both belong to has_parking under R11.
         "has_parking": _cell("structured", "parking_lots", "garage", "parking"),
         "has_lift": _cell("structured", "elevator", sentinels=_SREALITY_UNSET),
@@ -156,14 +158,16 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "floor": _cell("structured", "floor"),
         "total_floors": _cell("structured", "overgroundFloors", "undergroundFloors"),
         # R11: balcony OR loggia, from the two top-level booleans the portal actually
-        # publishes (34% of rows each, with a real `false`). The accessory-name search
-        # this replaces matched NOTHING on any live row — 0/0 on all 10,317.
+        # publishes (2,309 of 10,317 active rows each, 22.4%, with a real `false`). The
+        # accessory-name search this replaces matched NOTHING on any live row — 0/0 on
+        # all 10,317.
         "has_balcony": _cell("structured", "balcony", "loggia"),
         # `parkingPlaces` is the property's own count; the accessory group named
         # "Parkování" is a closed 15-member list of which only the members BELONGING to
-        # the property count (R11) — "Parkování na ulici", "Parkoviště poblíž" and the
-        # literal "Není" do not, and "Parkety" (parquet flooring) is in another group
-        # entirely, which is how a flattened name search read it as parking.
+        # the property count (R11) — "Parkování na ulici" (4,672 live rows), "Parkoviště
+        # poblíž" (582) and the literal "Není" (51) do not, and "Parkety" (parquet
+        # flooring) is in another group entirely, which is how a flattened name search
+        # read it as parking.
         "has_parking": _cell("structured", "parkingPlaces", "accessoryGroups"),
         "has_lift": _cell("structured", "lift"),
         "building_type": _cell("structured", "construction", sentinels=("neuvedeno",)),
@@ -208,9 +212,10 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         # absent — which is why this portal can carry a real `false`.
         "has_balcony": _cell("structured", "balkóny"),
         # "Parkování" is the same shape: {Garáž, Vlastní parkovací stání, Parkoviště,
-        # Parkování na ulici} on 28.3% of rows, and nothing read it — has_parking was
-        # 0.0% on all 48,620. R11's rule applies to the members: everything the listing
-        # states as its own facility counts except the street (95 of 283 census cells).
+        # Parkování na ulici} on 13,324 of 48,579 active rows (27.4%), and nothing read
+        # it — has_parking was 0.0% on every one. R11's rule applies to the members:
+        # everything the listing states as its own facility counts except the street,
+        # which is the sole member on 3,105 of those cells.
         "has_parking": _cell("structured", "parkování"),
         "has_lift": _cell("none", gap=None),
         "building_type": _cell("structured", "konstrukce"),
@@ -318,9 +323,14 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "floor": _cell("structured", "číslo podlaží v domě"),
         "total_floors": _cell("structured", "počet podlaží objektu"),
         "has_balcony": _cell("structured", "balkon", "lodžie"),
-        # `ostatní` is the building's stated amenity list ("Bezbarierový přístup, Garáž,
-        # Výtah, Parkoviště") — the portal's only lift/parking signal, and every member
-        # of it belongs to the property (it offers no street-parking option at all).
+        # `ostatní` is ONE closed multi-select of building amenities (live on 4,692 active
+        # rows: Bezbarierový přístup / Garáž / Výtah / Parkoviště / Plot / Bazén / Ostraha
+        # / Vrátnice / Stravování / Sociální zařízení) — the portal's only lift, garage and
+        # parking signal, and every member belongs to the property (there is no street
+        # option at all). Its silence is a STATED absence, the same shape as ceskereality's
+        # `balkóny`: 3,396 of those rows become `has_lift=false`, 3,012 `garage=false`,
+        # where `mentions` could only say "unknown". A list this long that is filled in at
+        # all is the advert answering the question, not omitting it.
         "has_parking": _cell("structured", "ostatní"),
         "has_lift": _cell("structured", "ostatní"),
         "building_type": _cell("structured", "druh objektu"),
@@ -329,9 +339,9 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "estate_area": _cell("structured", "plocha parcely"),
         "usable_area": _cell("structured", "užitná plocha"),
         # The live key is `zahrada`; `areas_from_params` used to read `plocha zahrady`,
-        # which realitymix emits on no row, so the column was 0-filled on all 48,757. The
-        # cell is "4.3% of rows", not "4.3% of rows with a number": ~40% of them say "ano"
-        # with no measure, which stays NULL here (a size column, not a flag).
+        # which realitymix emits on no row, so the column was 0-filled on all 48,763. The
+        # cell is on 3,027 active rows (6.2%), but that is not 6.2% "with a number": ~40%
+        # of them say "ano" with no measure, which stays NULL here (a size, not a flag).
         "garden_area": _cell("structured", "zahrada"),
         "category_sub_cb": _cell("none", gap=None),
         "subtype": _cell("none", gap=None),
@@ -427,7 +437,11 @@ IGNORED: dict[str, dict[str, str]] = {
         "since": "no column", "sale_date": "no column", "ready_date": "no column",
         "rus": "no column", "rus_reply": "no column", "state_cb": "no column",
         "price": "price_czk", "price_summary": "price_czk",
-        "price_currency_cb": "CZK only", "price_czk_m2": "computed per-m², not stored",
+        # NOT "CZK only": 134 of the newest 8,000 active rows quote EUR. Unlike
+        # bezrealitky, `price` is already the CZK amount (those rows' median rent is 8x
+        # the CZK cohort's, not 1/25th), so there is nothing to refuse here.
+        "price_currency_cb": "the advert's quoted currency; `price` is CZK regardless",
+        "price_czk_m2": "computed per-m², not stored",
         "price_note": "no column", "price_summary_old": "no column",
         "price_summary_old_czk": "no column",
         "price_flag_negotiation_cb": "no column",
@@ -631,9 +645,10 @@ def source_label(portal: str, field: str, params: Mapping[str, Any]) -> str | No
 def source_values(portal: str, field: str, params: Mapping[str, Any]) -> tuple[Any, ...]:
     """One value per declared source key, in contract order, None where absent.
 
-    For the cells whose keys are a UNION rather than a precedence — the legacy combined
-    booleans `has_balcony` (balcony | loggia | terrace) and `has_parking` (a space | a
-    garage | a count). The contract still declares WHICH keys; how they combine stays
+    For the cells whose keys are a UNION rather than a precedence — the combined
+    booleans `has_balcony` (balcony | loggia; a terrace is its own column, R11) and
+    `has_parking` (a space | a garage | a count, each BELONGING to the property, R11).
+    The contract still declares WHICH keys; how they combine stays
     with the parser, because the combination differs per column, not per portal."""
     declared = CONTRACT[portal][field]
     return tuple(

@@ -53,11 +53,12 @@ export function buildFacts(listing: ListingPublic): Fact[] {
  * slash something we can't confirm. The parking-spaces count rides along as a
  * note on the Parking chip.
  *
- * TODO(amenity-canon): this renders BOTH the legacy combined booleans
- * (has_balcony conflates balcony+terrace+loggia; has_parking conflates
- * parking+garage) AND the granular columns (terrace, garage). That double-render
+ * TODO(amenity-canon): this renders BOTH the combined booleans (since
+ * field-capture W4/R11: has_balcony = balcony OR loggia — a terrace is NOT one
+ * of them and has its own column; has_parking = a space or right BELONGING to
+ * the property) AND the granular columns (terrace, garage). That double-render
  * is pre-existing behaviour preserved verbatim by this extraction. Deprecating
- * the legacy chips in favour of the granular columns (CLAUDE.md schema note) is
+ * the combined chips in favour of the granular columns (CLAUDE.md schema note) is
  * a separate, operator-approved UI refactor — it would change the listing-detail
  * header too, so it must not ride in unrelated work. */
 export function buildAmenities(listing: ListingPublic): Amenity[] {

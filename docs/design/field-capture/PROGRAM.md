@@ -224,14 +224,59 @@ are the heal's to-do list and `field_fill_matrix` names them (`zero_fill_undecla
 and `has_balcony` not true" is unreachable under `has_balcony = balcony OR loggia`: excluding the terrace arm *raises*
 that count, because the three portals that folded a terrace into the flag (sreality, bezrealitky, idnes) stop doing so.
 The honest measure is **zero active rows where `has_balcony` disagrees with `balcony OR loggia`** — i.e. no portal
-makes a terrace-only listing a balcony match, and none drops a stated loggia. Measured moves, all deliberate:
-sreality −4.9 pp of the active corpus from true to false (388 of 8,000 sampled), bezrealitky 395 of 1,417 true rows
-back to unknown, idnes ~569, and maxima +14.3 pp of rows gained from the `lodžie` key nothing read.
-mmreality `has_parking` falls from 73.5 % true to 59.1 % under the group-qualified reading (2,363 of 4,000 sampled),
-with 886 stated `false` where it could previously only say "unknown"; "Parkety" is in the group `Podlahy` and
-"Parkoviště poblíž" / "Parkování na ulici" are named exclusions, so none of the three can match. ceskereality
-`has_parking` rises from 0 % to ≈ 18.8 % true / 9.5 % false. **Watchdog safety proven with SQL before any fill:** a
-first-time attribute fill cannot mint a `:new:` dispatch — see § 5a.
+makes a terrace-only listing a balcony match, and none drops a stated loggia. **That measure is met by the parsers
+from now on and only PARTLY by the heal — see "what the seam can and cannot land" below.**
+
+**Measured over the WHOLE active stock, not a newest-N window (W1's own rule; a newest-N window rotates with cohort
+mix and reads systematically high, because older rows carry fewer keys — the first cut of these numbers was taken on
+the newest 4,000/5,000/6,000/8,000 and every one of them was biased up).** Re-measured 2026-09-22:
+
+| portal | cell | before | after (expected) |
+| --- | --- | --- | --- |
+| ceskereality (48,579) | `has_parking` | 0 % | 10,219 true (21.0 %) / 3,105 false (6.4 %) |
+| ceskereality | `garage` | 0 % | 5,436 true / 7,888 false |
+| ceskereality | `terrace` | 0 % | 3,259 true / 4,927 false |
+| ceskereality | `has_balcony` | 5,800 true | 5,801 true / 2,385 false (a `Terasa`-only cell is now a stated false) |
+| remax (9,086) | `parking_lots` | 0 of 9,086 | the key is on 1,575 (17.3 %) |
+| remax | `has_parking` | 1,375 true — byte-identical to `garage` | `garaz` (1,375) ∪ a count row (1,575) |
+| realitymix (48,763) | `has_lift` | 0 % | 1,296 true / 3,396 false (the `ostatní` multi-select, on 4,692 rows) |
+| realitymix | `garage` | 1,680 true / 0 false | 1,680 true / 3,012 false |
+| realitymix | `has_parking` | 3,254 true / 0 false | 3,254 true / 1,438 false |
+| realitymix | `cellar` | 0 % | the key is on 6,982 (14.3 %) |
+| realitymix | `garden_area` | 0 of 48,763 | the key is on 3,027 (6.2 %); ~40 % of those say "ano" with no measure and stay NULL |
+| realitymix | `parking_lots` | 0 % | the key is on 224 (0.46 %) |
+| mmreality (10,317) | `has_balcony` | 0/0 | the two booleans are on 2,309 (22.4 %): 1,292 true / 1,017 false |
+| mmreality | `terrace` | 0/0 | `terraceArea` on 612 (5.9 %) |
+| mmreality | `furnished` | 0 % | `equipment` on 5,878 (57.0 %) |
+| mmreality | `has_parking` | 7,573 true (73.4 %) / 0 false | 5,557 true (53.9 %) / 2,361 false / 2,399 unknown |
+| idnes (111,418) | `total_floors` on houses | NULL on 29,906 of 29,913 | 24,134 of them carry `počet podlaží` |
+| idnes | `has_balcony` | 28,404 true | 17,845 of those are terrace-only and go to unknown |
+| maxima (272) | `has_balcony` | 30 true | 69 (the `lodžie` key nothing read is on 39, every one of them loggia-only) |
+| maxima | `furnished` | 0 of 272 | `vybavení` on 65 (23.9 %) |
+| bezrealitky (5,696) | `has_balcony` | 1,418 true | 396 of those are terrace-only and go to unknown |
+| bezrealitky | `price_czk` | 31 EUR amounts stored as CZK | refused (NULL) + a counted event |
+| sreality (105,083) | `has_balcony` | 16,766 true | ~3,200 of them to false (19.1 % of true rows in the newest-8,000 sample; the whole-stock scan times out) |
+
+"Parkety" is in the group `Podlahy` and "Parkoviště poblíž" (582 live rows) / "Parkování na ulici" (4,672) are named
+exclusions, so none of the three can match mmreality's `has_parking` any more.
+
+**What the seam can and cannot land (R9's never-blank rule, measured).** `scripts/reparse._merged` keeps the stored
+value whenever the re-derive yields None, and there is no flag that overrides it — by design, so a parse that lost a
+key cannot erase a column. So the heal lands every NULL→value and every true→false move, and **none of the
+true→unknown ones**:
+
+* Healable now: ceskereality (all four cells, 0 %→real), remax, realitymix, idnes `total_floors`, maxima,
+  mmreality (2,015 of its 2,018 `has_parking` true rows move to an explicit false; 3 would go to unknown),
+  sreality `has_balcony` (388 of 2,029 true rows in the newest-8,000 sample move to false, 0 to unknown).
+* NOT reachable by the seam: **idnes `has_balcony` 17,845 rows**, **bezrealitky `has_balcony` 396 rows**, and
+  **bezrealitky `price_czk` 31 EUR rows**. Those values change on each listing's next successful detail fetch
+  (`upsert_listing` has no COALESCE for them), so active rows converge within a cadence or two and **inactive rows
+  never do**. Until then `has_balcony` carries two definitions on those two portals, with no marker distinguishing
+  which. Moving them now would need an explicit blank-allowed path in `reparse.py` — a later wave's call, not a
+  silent expectation of this one.
+
+**Watchdog safety proven with SQL before any fill:** a first-time attribute fill cannot mint a `:new:` dispatch —
+see § W4a.
 
 **W4a — watchdog safety, established in code + read-only SQL before any heal (no notification code changed).**
 A heal through the W3 seam writes only the named `listings` columns and a `dirty_properties` mark. It cannot mint a

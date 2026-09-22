@@ -62,12 +62,13 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       `balkóny` (has_parking/garage/terrace, 0.0% → real on 48,620 rows), remax
       `pocet parkovacich mist`, realitymix lift/cellar/garden/lots, idnes `total_floors`
       on 29.7k houses, mmreality's typed balcony/loggia/garage/equipment keys and a
-      group-qualified has_parking (73.5% → 59.1%, "Parkety" gone), bezrealitky's EUR
+      group-qualified has_parking (73.4% → 53.9%, "Parkety" gone), bezrealitky's EUR
       prices refused. ONE `has_balcony` (balcony OR loggia) and `has_parking` (a space
       BELONGING to the property) definition, four union helpers collapsed into
-      `vocabulary.any_true`. **Values land on stored rows when the operator dispatches
-      the W3 seam** — the twelve cells still at 0% are named by `field_fill_matrix`
-      until then.
+      `vocabulary.any_true`. **The W3 seam lands the NULL→value and true→false half;
+      the true→unknown half (idnes has_balcony 17,845 rows, bezrealitky 396, bezrealitky
+      price_czk 31) is blocked by R9's never-blank rule** and arrives on each row's next
+      detail fetch, never for inactive rows — per-portal numbers in the program doc.
 - [ ] **W5 — apply the vocabulary collapses to stored rows**, one counted batch each;
       `price_unit` 4 → 2; ~14k + ~8.3k rows become reachable by a Browse filter.
 - [ ] **W6 — close the wipe (R4).** A detail re-fetch stops erasing text-derived cells

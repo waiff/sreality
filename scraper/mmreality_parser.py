@@ -473,7 +473,8 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     # R11: parking BELONGING to the property. The portal files "Parkování na ulici" and
     # "Parkoviště poblíž" under the group "Parkování" and "Parkety" (parquet FLOORING)
     # under "Podlahy", so the group is half the fact — a flattened name search read all
-    # three as parking and put has_parking at 73.5% true.
+    # three as parking and put has_parking at 73.4% true (7,573 of 10,317 active rows);
+    # the group-qualified reading is 5,557 true / 2,361 false / 2,399 unknown.
     parking_group = vocabulary.accessory_names(
         obj.get("accessoryGroups"), group="Parkování")
     parking_lots = _to_int(read("parking_lots"))
@@ -532,7 +533,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
             else vocabulary.mentions(accessories, "sklep")
         ),
         # The top-level booleans, not the accessory names: `balcony` and `loggia` are on
-        # 34% of rows with a real `false`, and NO accessory name has ever matched
+        # 22.4% of active rows with a real `false`, and NO accessory name has ever matched
         # balcony/loggia/terrace — both columns were 0/0 on all 10,317 active rows.
         has_balcony=vocabulary.any_true(
             *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_balcony", obj))
