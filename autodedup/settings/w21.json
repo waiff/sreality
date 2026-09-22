@@ -38,6 +38,7 @@
  "d43_ground_vs_upper": true,
  "d43_headline_vs_column": true,
  "d43_headline_vs_column_colive_only": true,
+ "d43_headline_vs_column_same_source_only": true,
  "d43_labelled_unit_ids": true,
  "d43_neighbour_plot_attribute": true,
  "d43_obec_street_grain_only": true,

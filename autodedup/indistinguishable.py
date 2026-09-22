@@ -359,11 +359,17 @@ def _same_feed(a: Listing, b: Listing, mode: str, unknown_closed: bool = False) 
     # people is free — two Vídeňská 18b 1+kk of Garantovaný nájem carry `broker_key`s 15c7 and
     # 2a10 and one firm — so at broker grain the two look like two feeds and the storey they
     # state, 1. NP against 2. NP, is forgiven as a vocabulary difference it cannot be.
-    left, right = ((a.broker_firm_id, b.broker_firm_id) if mode == "firm"
-                   else (a.broker_key, b.broker_key))
-    if unknown_closed:
-        return not (left is not None and right is not None and left != right)
-    return left is not None and left == right
+    broker = (not (a.broker_key is not None and b.broker_key is not None
+                   and a.broker_key != b.broker_key) if unknown_closed
+              else a.broker_key is not None and a.broker_key == b.broker_key)
+    if mode != "firm":
+        return broker
+    # `firm` ADDS to `broker` and never subtracts: an unknown key still fails closed (E154 —
+    # bazos, bezrealitky and maxima name no broker at all), and two KNOWN agents of one known
+    # agency are now one feed. Measured: reading an unknown FIRM as one feed instead costs 19
+    # certain duplicates of cohort 8 and buys nothing (M447).
+    return broker or (a.broker_firm_id is not None
+                      and a.broker_firm_id == b.broker_firm_id)
 
 
 def _feed_known(a: Listing, b: Listing) -> bool:
@@ -890,6 +896,13 @@ def headline_vs_column_conflict(
     """
     if COMMERCIAL_CATEGORY not in (a.category_main, b.category_main):
         return None
+    # ONE portal on both sides. idnes prepends its own title — `Pronájem kanceláře 235 m²,
+    # Brno` — so its lead is the stored column echoed back rather than anything the seller
+    # wrote, and against a sreality body that opens on one room of the same let that echo is a
+    # contradiction on every one of 44 certain duplicates of cohort 8 (M443).
+    if settings.d43_headline_vs_column_same_source_only and not (
+            a.source is not None and a.source == b.source):
+        return None
     if settings.d43_headline_vs_column_colive_only and not _live_together(a, b, settings):
         return None
     lead_a = leading_area(a.description, UNIT_SCOPE)
@@ -979,10 +992,16 @@ def body_obec_conflict(a: Listing, b: Listing, settings: Settings) -> tuple[str,
         return None
     for speaker, other in ((a, b), (b, a)):
         names = body_localities(speaker.description)
-        own, far = _stored_places(speaker), _stored_places(other)
+        own = getattr(speaker.location, "obec_name", None)
+        far = _stored_places(other)
         if not names or not own or len(far) < 2:
             continue
-        if not any(place_names_match(name, place) for name in names for place in own):
+        # The speaker must name its own MUNICIPALITY. E135's refusal is an obec refusal, and
+        # only an obec may overturn it: a body naming a QUARTER says nothing about which town
+        # it is in, and two identical sreality adverts for one Plíže garage — both `v
+        # Maloměřicích`, filed by the portal under Brno-Maloměřice and Brno-Židenice — are
+        # E135's own case wearing a body (M451).
+        if not any(place_names_match(name, fact_text(str(own))) for name in names):
             continue
         if any(place_names_match(name, place) for name in names for place in far):
             continue
