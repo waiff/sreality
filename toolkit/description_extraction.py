@@ -146,8 +146,8 @@ def text_hash(description: str | None) -> str:
 # --- the extraction contract ------------------------------------------------
 
 # Field semantics, one row per extractable column. Every enum is GENERATED from
-# `scraper.vocabulary.known_values` — the canon PLUS today's legacy spellings, because this
-# lane writes the same columns the nine parsers write and W5 has not collapsed them yet.
+# `scraper.vocabulary.CANON` — the whole value space since W5 — because this lane writes
+# the same columns the nine parsers write, and a value outside it is a defect, not a spelling.
 # `floor` is deliberately a STRING: the advert's own words, converted by `scraper.floor`.
 # The model doing that arithmetic is what produced a ~73 %-correct, two-convention column.
 _FIELD_SPEC: dict[str, tuple[list[str], str, str | None]] = {
@@ -190,7 +190,7 @@ def extraction_tool(fields: Sequence[str]) -> dict[str, Any]:
         value_type, description, enum_field = _FIELD_SPEC[field]
         value: dict[str, Any] = {"type": value_type, "description": description}
         if enum_field:
-            value["enum"] = [*sorted(vocabulary.known_values(enum_field)), None]
+            value["enum"] = [*sorted(vocabulary.CANON[enum_field]), None]
         properties[field] = {
             "type": "object",
             "additionalProperties": False,
@@ -310,7 +310,7 @@ def _coerce(field: str, raw: Any, quote: str) -> tuple[Any, str | None]:
         return raw, None
     if not isinstance(raw, str):
         return None, "not_string"
-    if enum_field and raw not in vocabulary.known_values(enum_field):
+    if enum_field and raw not in vocabulary.CANON[enum_field]:
         # The JSON enum should have made this impossible; providers vary, so the value is
         # refused and counted rather than trusted (`vocabulary.refuse` feeds gate A3's
         # counter, which is the instrument that would show a canon gap).

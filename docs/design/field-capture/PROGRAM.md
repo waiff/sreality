@@ -247,7 +247,7 @@ stay W7's (§7) — **except** `llm_parse_system_prompt`, which W5's migration 5
 `price_unit` an enum turned that prompt's retired spelling from stale prose into a contradiction the provider
 enforces. *(W7 correction: they were parked as "W7's" and W7 did not take them. It did the only thing it could
 without a tenth surface — its own prompt and tool schema live in `toolkit/description_extraction.py`, generated from
-`vocabulary.known_values`, so the lane adds no operator-editable prompt to the nine. Bringing the existing nine under
+`vocabulary.CANON`, so the lane adds no operator-editable prompt to the nine. Bringing the existing nine under
 codegen or a CI diff is still owed, and is a `llm-pipelines`-track item rather than this program's.)*
 
 **W3 — met, with the gates restated as what is actually provable offline.** Idempotence is proven on the stored

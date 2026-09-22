@@ -362,7 +362,7 @@ def test_the_enums_are_real_json_arrays_generated_from_the_vocabulary() -> None:
     props = tool["input_schema"]["properties"]
     for field in ("condition", "building_type", "energy_rating"):
         enum = props[field]["properties"]["value"]["enum"]
-        assert set(enum) == set(vocabulary.known_values(field)) | {None}
+        assert set(enum) == set(vocabulary.CANON[field]) | {None}
 
 
 def test_floor_is_a_string_so_the_model_never_does_the_arithmetic() -> None:

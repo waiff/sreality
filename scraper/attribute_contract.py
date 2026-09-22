@@ -9,7 +9,7 @@ and re-mine the whole 10.9M-row location claim corpus (`location_data/contracts.
 records the 5.1M-row / 2.6 GB precedent), and `location_data` imports `scraper`, never the
 reverse. Same shape as the per-portal `PortalConfig` in `scraper/portal.py` (rule 21).
 
-Each cell carries four axes:
+Each cell carries six axes:
 
   * **producer** — where the value comes from. `structured` (named key(s) in the portal's
     stored payload), `text` (mined from the ad prose), `derived` (computed by the parse

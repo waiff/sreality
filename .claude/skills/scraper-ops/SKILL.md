@@ -389,17 +389,10 @@ Lanes shipped so far:
   shared rate ledger; one in-process pass lock. Heartbeat `details.sold_comps.last` = `{ran, cells,
   records, new, failed, skipped, seconds}`; no store = `ran: false` + one warning.
 - **Text-extract lane** (field-capture W7, `toolkit/description_extraction.run_pass`) — the
-  post-publication read of the facts a prose-only advert states in its text and nowhere else. Ships
-  **LIVE** on a CONSTANT 300 s interval: no flag, no setting, no env var (the estimation lane above
-  is why — a lane nobody enabled is a lane no monitor can see). Scope = the contract's `text` cells
-  whose R7 `gate` has PASSED, so **today it is live and free**: no gate is open and the pass
-  returns before opening a cursor. 250 rows newest-first, ONE arm — an extracted row leaves the
-  predicate, so DESC walks backwards through a backlog (~57k/day vs a 1,940/day bazos inflow). 8
-  threads through `toolkit.vision_batch.run_batch`; one pass lock (an abandoned pass keeps
-  billing); a failed call writes its own cache row and is given up on after 5 attempts. Heartbeat
-  `details.text_extract.last` = `{claimed, extracted, written, by_column, dropped, failed, errors,
-  spent_usd, model}`; needs `OPENAI_API_KEY`; rail below = `text_extraction_lag`. **Contract, cache
-  key, write gate: `llm-pipelines` skill.**
+  post-publication read of the facts a prose-only advert states only in its text. CONSTANT 300 s
+  interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope
+  = the contract's `text` cells whose R7 `gate` has PASSED, so with no gate open it is live and free.
+  Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
 
 ## Pipeline verification (migration 274)
 
