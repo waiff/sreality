@@ -554,6 +554,15 @@ class Settings:
     # and the data says their offset is 1. A camp table fitted for a DIFFERENT question may
     # not be read as evidence of agreement.
     d43_floor_within_camp_scope: str = "camp"
+    # E154's escape, kept and sharpened. One Jablonec vila 4+1 is carried on ceskereality at
+    # 6,988,000 with its storey written 1 and, 27 days later and still live, at 6,980,000 with
+    # it written 2; the second row names no broker. E154 excused that on the reading that "the
+    # asking price is what separates them", and it is right — but only where the price MOVED.
+    # Two adverts on one portal LIVE TOGETHER at the SAME number are two simultaneous
+    # statements and the storey between them is a fact (Chrudimska 99's two 2,475,000 micro-
+    # units). So the escape holds where the feed is unknown and the prices meet WITHOUT being
+    # identical, and nowhere else.
+    d43_floor_within_camp_price_escape: bool = False
     # E181: the storey a PLACEMENT clause states of the offered unit, and the storey written in
     # words rather than digits. Both are read under E180's camp rule; the worded pair is not,
     # because `přízemí` is the ground floor on every portal.

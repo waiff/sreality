@@ -132,6 +132,30 @@ def test_a_storey_across_the_camp_boundary_is_still_the_convention() -> None:
     assert "floor" not in names(a, b, S3)
 
 
+def test_a_jablonec_vila_relisted_at_a_moved_price_keeps_e154s_escape() -> None:
+    """418942 x 15427848: one ceskereality 131 m² 4+1 at 6,988,000 with its storey written 1
+    and, still live 27 days later, at 6,980,000 with it written 2 — and the second row names no
+    broker. E154 excused that because the asking price is what separates a unit from a typist,
+    and the price MOVED, so the storey moved with the re-post."""
+    a = listing(418942, source="ceskereality", floor=1, area_m2=131.0, price=6_988_000.0,
+                broker_key="b1a082b4", first=0, last=50)
+    b = listing(15427848, source="ceskereality", floor=2, area_m2=131.0, price=6_980_000.0,
+                broker_key=None, first=20, last=50)
+    assert "floor" not in names(a, b, S2)
+    assert "floor" not in names(a, b, S3)
+
+
+def test_chrudimska_99_at_one_unmoved_price_is_two_statements() -> None:
+    """62868 x 65870: both sreality, both brokerless, 2,475,000 and 17 m² on both sides, 5.4
+    days together with the storey written 1 and 2. Nothing moved, so nothing is a re-post."""
+    a = listing(62868, floor=1, area_m2=17.0, price=2_475_000.0, broker_key=None,
+                first=10, last=17)
+    b = listing(65870, floor=2, area_m2=17.0, price=2_475_000.0, broker_key=None,
+                first=11, last=17)
+    assert "floor" not in names(a, b, S2)
+    assert "floor" in names(a, b, S3)
+
+
 def test_bazos_reposts_that_drift_a_storey_stay_one_advert() -> None:
     """29 sequential bazos re-posts of one Dašice advert drift 0/1; they never co-live."""
     a = listing(1, source="bazos", floor=0, first=0, last=1)
@@ -483,7 +507,8 @@ def test_every_earlier_arm_keeps_the_S2_reading(arm: str) -> None:
     for name in ("d43_floor_within_camp", "d43_subject_floor", "d43_ground_vs_upper",
                  "d43_plot_area_exact", "d43_plot_truncation_residue", "d43_parcel_table",
                  "d43_price_sequential_path", "demonstrate_price_path_exact",
-                 "demonstrate_price_rounding_aware", "d43_offer_area"):
+                 "demonstrate_price_rounding_aware", "d43_offer_area",
+                 "d43_floor_within_camp_price_escape"):
         assert getattr(cfg, name) is False, name
     assert cfg.d43_stated_unit_count == "off"
 

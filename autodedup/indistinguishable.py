@@ -328,6 +328,13 @@ def _feed_known(a: Listing, b: Listing) -> bool:
     return a.broker_key is not None and b.broker_key is not None
 
 
+def _prices_identical(a: Listing, b: Listing) -> bool:
+    """One number, printed twice — not one number within a tolerance of another."""
+    if not (a.price and b.price):
+        return False
+    return float(a.price) == float(b.price)
+
+
 def _prices_meet(a: Listing, b: Listing, tol: float) -> bool:
     """One asking price, written twice."""
     if not (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0):
@@ -607,6 +614,12 @@ def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> boo
     elif not same_camp(settings.floor_camps, a.source, b.source):
         return False
     if settings.d43_floor_within_camp_colive and sequential_postings(a, b, settings):
+        return False
+    # E154, kept: with the feed UNKNOWN a price that MOVED is one advert at two moments, and
+    # the storey moved with it. A price that did not move is two simultaneous statements.
+    if (settings.d43_floor_within_camp_price_escape and not _feed_known(a, b)
+            and _prices_meet(a, b, settings.d43_price_path_tol)
+            and not _prices_identical(a, b)):
         return False
     return True
 
