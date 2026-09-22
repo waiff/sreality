@@ -372,6 +372,23 @@ _SOLD_COMPS_STORE_WARNED = False
 _SOLD_COMPS_PASS_LOCK = threading.Lock()
 _SOLD_COMPS_WEDGE_LOGGED = False
 
+# text_extract lane (field-capture W7): the post-publication extraction of the facts a
+# prose-only advert states in its text and nowhere else. A CONSTANT interval, no
+# app_settings row, no env var and no flag — the estimation lane is the cautionary case
+# (its flag was never set, so it has been dark since it shipped and is absent from
+# worker_heartbeats entirely, which makes it invisible to every monitor). This lane's whole
+# scope is `attribute_contract.extracted_cells()` — the cells whose R7 gate the bake-off
+# has OPENED. None open (the shipping state) and the pass returns before it opens a cursor,
+# so the lane is live, visible and free. Five minutes puts a new listing well inside the
+# lane's 20-minute SLO even after a missed pass.
+TEXT_EXTRACT_INTERVAL_SECONDS = 300.0
+# The sold_comps lane's reason, with money on it: a pass abandoned at
+# LANE_PASS_TIMEOUT_SECONDS keeps its eight threads — and their billing — running, and the
+# cache rows they have not written yet cannot stop the next tick handing the same listings
+# to a second set of paid calls.
+_TEXT_EXTRACT_PASS_LOCK = threading.Lock()
+_TEXT_EXTRACT_WEDGE_LOGGED = False
+
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
 # diff ids seen on a shallow unsplit page walk, not request a true newest-first
@@ -1770,6 +1787,57 @@ async def _sold_comps_pass(
     _record_pass(state, "sold_comps", last)
 
 
+def _text_extract_sync() -> dict[str, Any]:
+    """One bounded pass of THE post-publication text lane
+    (`toolkit.description_extraction.run_pass`).
+
+    Lazy import: the module reaches api.llm_client and the provider registry, which no
+    other lane on this worker needs on the startup path. No try/except around run_pass —
+    a raise is the signal, and _lane_loop records the failed pass.
+
+    While every gate in `attribute_contract` is closed the pass returns before it opens a
+    cursor, so this lane is live, visible in the heartbeat and free from the day it ships.
+    """
+    global _TEXT_EXTRACT_WEDGE_LOGGED
+
+    from toolkit import description_extraction
+
+    if not _TEXT_EXTRACT_PASS_LOCK.acquire(blocking=False):
+        if not _TEXT_EXTRACT_WEDGE_LOGGED:
+            _TEXT_EXTRACT_WEDGE_LOGGED = True
+            LOG.warning(
+                "TEXT_EXTRACT lane skipped: the previous pass was abandoned and its "
+                "threads are still calling")
+        return {"claimed": 0, "previous_pass_running": True}
+    _TEXT_EXTRACT_WEDGE_LOGGED = False
+    try:
+        conn = db.connect()
+        try:
+            return description_extraction.run_pass(conn)
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    finally:
+        _TEXT_EXTRACT_PASS_LOCK.release()
+
+
+async def _text_extract_pass(
+    stop_event: asyncio.Event, state: dict[str, Any],
+) -> None:
+    if stop_event.is_set():
+        return
+    last = await asyncio.to_thread(_text_extract_sync)
+    # Only when the pass did work: at a 5-minute cadence an unconditional line is ~290
+    # "claimed=0" a day once the backlog is drained. The heartbeat records every pass.
+    if last.get("claimed"):
+        LOG.info(
+            "TEXT-EXTRACT claimed=%s extracted=%s written=%s errors=%s $%.4f model=%s",
+            last.get("claimed"), last.get("extracted"), last.get("written"),
+            last.get("errors"), last.get("spent_usd", 0.0), last.get("model"),
+        )
+    _record_pass(state, "text_extract", last)
+
+
 def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     """The lane state as written to the heartbeat, with elapsed time resolved.
 
@@ -1999,6 +2067,14 @@ async def _amain() -> int:
             state,
             default_interval=0,
             first_delay_seconds=SOLD_COMPS_FIRST_DELAY_SECONDS)),
+        # A CONSTANT interval, like the heartbeat lane's: no app_settings read, therefore
+        # no failure mode and no fail-safe-0 requirement. What governs this lane is the
+        # attribute contract, and a lane with no gated `text` cell simply claims nothing.
+        ("text_extract", lambda: _lane_loop(
+            "text_extract", stop_event, lambda: TEXT_EXTRACT_INTERVAL_SECONDS,
+            lambda: _text_extract_pass(stop_event, state),
+            state,
+            default_interval=TEXT_EXTRACT_INTERVAL_SECONDS)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

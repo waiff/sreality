@@ -99,10 +99,27 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       (94 rebuilds / 24 h, worst 36.6) and takes this lane's ~2 min cadence whenever a
       wholesale rebuild is not in flight — which it is ~26 % of the time, and a patch
       inside that window is silently superseded.
-- [ ] **W7 — the text lane on the realtime worker.** No flag, no new setting: governed by
-      the contract's producer=text cells. Model bake-off in ONE run (gpt-5.6-luna vs OSS on
-      RunPod); a field is written only after a labelled panel passes ≥ 95% (R7); the lane
-      and its health check share ONE eligibility function (R8).
+- [x] **W7 — the text lane on the realtime worker.** `text_extract`, constant 300 s, no flag /
+      setting / env var: its scope is the contract's `text` cells whose R7 `gate` has PASSED, and
+      that `gate` is where the measured precision lives — as data beside the column it governs, not
+      as a setting. **Every gate ships CLOSED, so the lane ships LIVE AND FREE**: a closed gate is
+      not extracted, not billed and not written, and the pass returns before it opens a cursor. The
+      bake-off (`text_extraction_bakeoff.yml`, dispatch-only) is what opens them — in ONE edit,
+      because the open-gate set is inside `extractor_version` and adding a field later re-reads
+      every description already paid for. **The panel needs no hand labelling**: idnes and sreality
+      state these fields in a table AND describe the property in prose, so their own table grades
+      what a model reads out of their prose (stratified per category in SQL; 1,207 structured rows
+      at the default, plus an ~840-pair bazos sibling slice for the domain shift). Cache re-keyed
+      `(listing_id, text_hash, extractor_version)` (migration 552, destructive — the old
+      three-column key dropped). Lane and check share ONE predicate (R8): `text_extraction_lag` is
+      a twin of `acquisition_lag` plus a wedge arm (eligible, lane claiming none, oldest past an
+      hour — or the lane absent from the heartbeat). A failed call writes its own cache row with an
+      attempt count and is given up on after 5, so a permanent refusal is never re-billed for ever.
+      `false` needs an explicit negation in the evidence quote; every value needs a quote verbatim
+      in the description; floor comes back as the advert's own words for `scraper/floor.py`.
+      `LLM_DAILY_COST_WARN_USD` → $15 (R11). `scripts/clear_unmeasured_enrichment_fills.py` is
+      destructive step (iii), dry-run first: 21,459 values (floor 6,340; false has_balcony 7,103,
+      has_lift 6,655, has_parking 1,361) — all bazos, and all but SIXTEEN on inactive rows.
 - [x] **W8 — floor: ground = 0 everywhere.** The convention is contract DATA
       (`ground0` | `ground1` | `word` per portal) and `scraper.floor.floor_from_portal`
       refuses a bare int without one; three per-parser floor readers, maxima's

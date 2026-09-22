@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast/sold-comps lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast/sold-comps/text-extract lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -139,9 +139,9 @@ like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combine
 drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
 mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
 `45 * * * *`, bounded `--max-seconds`). Bazos's ad text needs a post-publication pass the other
-portals' structured pages don't; the LLM lane that did it was deleted in field-capture W0 (keyed
-on `sreality_id`, which Gate 2 leaves NULL on every non-sreality row, so it reached ~0.4% of
-bazos while reading green) and returns in W7 — `docs/design/field-capture/PROGRAM.md`.
+portals' structured pages don't: field-capture W7 runs it as the worker's `text_extract` lane
+(`toolkit/description_extraction.py`), never in the scrape — the LLM is behind publication, never
+in front of it.
 The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
@@ -388,6 +388,11 @@ Lanes shipped so far:
   non-advancing `nextPage`) cut short carries `truncated: …` in `error`; 1 req/5 s + ONE retry on the
   shared rate ledger; one in-process pass lock. Heartbeat `details.sold_comps.last` = `{ran, cells,
   records, new, failed, skipped, seconds}`; no store = `ran: false` + one warning.
+- **Text-extract lane** (field-capture W7, `toolkit/description_extraction.run_pass`) — the
+  post-publication read of the facts a prose-only advert states only in its text. CONSTANT 300 s
+  interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope
+  = the contract's `text` cells whose R7 `gate` has PASSED, so with no gate open it is live and free.
+  Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
 
 ## Pipeline verification (migration 274)
 
@@ -415,10 +420,7 @@ once a transaction outlives it), and the per-m² program's four plausibility che
 are ratios that skip a cell with no inputs and would read clean on a corpus gone dark. **`acquisition_lag` + `walk_coverage`
 (2026-08-27)** close the ingestion blind spot: until then every scraper health signal compared our
 data to our own data and rendered as a dot on a page, so sreality ingested ZERO new listings for
-nine days without anything leaving the database. `acquisition_lag` reads the oldest unclaimed
-never-fetched `listing_detail_queue` row per portal — deliberately the QUEUE and not
-`listings.first_seen_at`, because a "no new rows in N hours" check needs a baseline that the outage
-itself erodes (nine days of zeros makes zero the expected value). `walk_coverage` is the only
+nine days without anything leaving the database. `acquisition_lag` reads the oldest unclaimed never-fetched `listing_detail_queue` row per portal — deliberately the QUEUE and not `listings.first_seen_at`, because a "no new rows in N hours" check needs a baseline that the outage itself erodes (nine days of zeros makes zero the expected value). **`text_extraction_lag`** (field capture W7) is its twin one layer later — oldest ELIGIBLE-unextracted advert + waiting count per portal, plus a wedge arm (rows eligible, lane claiming none, or the lane absent from the heartbeat) — and it is computed from the text lane's OWN selector predicate, because the outage it replaces was a lane and its three monitors disagreeing about who was eligible. `walk_coverage` is the only
 comparison against EXTERNAL truth: collected vs the portal's advertised total from the latest
 COMPLETED index run's `by_category`, plus a truncation arm (categories walked vs that portal's own
 7-day best) because a budget-stopped walk leaves no entry for the categories it never reached and

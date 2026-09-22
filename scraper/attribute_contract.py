@@ -9,7 +9,7 @@ and re-mine the whole 10.9M-row location claim corpus (`location_data/contracts.
 records the 5.1M-row / 2.6 GB precedent), and `location_data` imports `scraper`, never the
 reverse. Same shape as the per-portal `PortalConfig` in `scraper/portal.py` (rule 21).
 
-Each cell carries four axes:
+Each cell carries six axes:
 
   * **producer** — where the value comes from. `structured` (named key(s) in the portal's
     stored payload), `text` (mined from the ad prose), `derived` (computed by the parse
@@ -35,6 +35,18 @@ A cell with nothing behind it carries `gap=` naming the census key W4 will wire,
 `gap=None` where the portal genuinely never states the fact. That marker is the ONE place
 "this zero is known" is declared — `scripts/verify_pipeline.py`'s fill matrix reads it
 rather than carrying a second flag of its own.
+
+W7 adds a fifth axis: `gate`. A `text` cell with NO gate is the ingest grammar's alone
+(bazos `area_m2` / `disposition`: `scraper.area` and `scraper.vocabulary` already read that
+prose at parse time and R3's panel condition for taking them off it is not met). A `text`
+cell whose gate has PASSED is one the post-publication lane extracts AND writes — R7 wants
+a measured ≥ 95 % precision per field before a column moves, and the measurement belongs
+here, as the number and the date beside the verdict, not as an `app_settings` flag nobody
+reads next to the cell it governs. A gate that has NOT passed is simply outside the lane's
+scope: the field is not asked for, not paid for and not written. That is the whole switch,
+and it is why opening a gate re-opens the corpus (`description_extraction.extractor_version`
+carries the open-gate set, so a cached answer for a narrower set is not a hit) — open every
+field the bake-off cleared in ONE edit, not one per deploy.
 """
 
 from __future__ import annotations
@@ -50,6 +62,22 @@ Absence = Literal["false", "unknown"]
 
 
 @dataclass(frozen=True)
+class Gate:
+    """R7's per-field write permission, carried as the measurement that granted it.
+
+    `passed=False` is the shipping state of every gate, and it means the lane does not
+    touch the field AT ALL: not asked for, not billed, not written. The bake-off fills in
+    `precision` / `measured_on` / `panel_n` and flips `passed` — one edit, in the row the
+    column is declared on, and ideally one edit for every field that cleared at once."""
+
+    passed: bool = False
+    precision: float | None = None
+    panel_n: int | None = None
+    measured_on: str | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True)
 class Cell:
     producer: Producer
     keys: tuple[str, ...] = ()
@@ -58,13 +86,21 @@ class Cell:
     gap: str | None = None
     note: str | None = None
     convention: FloorConvention | None = None
+    gate: Gate | None = None
 
 
 def _cell(producer: Producer, *keys: str, absence: Absence = "unknown",
           sentinels: Iterable[str] = (), gap: str | None = None,
           note: str | None = None,
-          convention: FloorConvention | None = None) -> Cell:
-    return Cell(producer, tuple(keys), absence, tuple(sentinels), gap, note, convention)
+          convention: FloorConvention | None = None,
+          gate: Gate | None = None) -> Cell:
+    return Cell(producer, tuple(keys), absence, tuple(sentinels), gap, note, convention,
+                gate)
+
+
+# Every W7 gate ships closed. Spelled once so "no field is extracted yet" is one fact in
+# one place, and so flipping one is visibly a per-field edit, never a sweep.
+_UNGATED = Gate(passed=False, note="awaiting the W7 bake-off panel (R7: >= 95 %)")
 
 
 # sreality paints the sale STATUS over the condition / building-type NAME on a reserved or
@@ -410,18 +446,27 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "category_type": _cell("derived"),
         "price_czk": _cell("structured", "price_text"),
         "price_unit": _cell("derived"),
+        # No gate: the ingest grammar is the whole producer. R3's condition for adding the
+        # post-publication lane to a cell the regex already fills is a panel proving the
+        # model better for THAT cell, and W1 measured the ceiling at ~3 pp on area (only
+        # 3 % of area-less bazos rows even carry an "m²" token), so neither is worth a call.
         "area_m2": _cell("text", note="scraper.area over the title + description"),
         "area_basis": _cell("derived"),
         "disposition": _cell("text"),
+        # Gated: the regex writes first (14,563 active rows) and the lane fills the rest.
+        # The words, never the arithmetic — `scraper.floor` converts them (R7).
         "floor": _cell("text", note="scraper.floor over the same haystack",
-                       convention="word"),
-        "total_floors": _cell("text"),
-        "has_balcony": _cell("none", gap=None),
-        "has_parking": _cell("none", gap=None),
-        "has_lift": _cell("none", gap=None),
-        "building_type": _cell("none", gap=None),
-        "condition": _cell("none", gap=None),
-        "energy_rating": _cell("none", gap=None),
+                       convention="word", gate=_UNGATED),
+        "total_floors": _cell("text", gate=_UNGATED),
+        # The six prose-only cells. `none` until W7 because the deleted lane was their only
+        # producer and it had been dead since 2026-07-23; the post-publication lane is now
+        # declared, which is also what keeps R4 preserving them across a re-fetch.
+        "has_balcony": _cell("text", gate=_UNGATED),
+        "has_parking": _cell("text", gate=_UNGATED),
+        "has_lift": _cell("text", gate=_UNGATED),
+        "building_type": _cell("text", gate=_UNGATED),
+        "condition": _cell("text", gate=_UNGATED),
+        "energy_rating": _cell("text", gate=_UNGATED),
         "estate_area": _cell("none", gap=None),
         "usable_area": _cell("none", gap=None),
         "garden_area": _cell("none", gap=None),
@@ -677,6 +722,43 @@ def source_values(portal: str, field: str, params: Mapping[str, Any]) -> tuple[A
     return tuple(
         source_value(portal, field, {key: params.get(key)}) for key in declared.keys
     )
+
+
+def extracted_cells() -> dict[str, tuple[str, ...]]:
+    """`portal -> the fields the post-publication text lane extracts AND may write`.
+
+    ONE set, not two. An earlier draft had the lane extract every gated cell and write only
+    the passed ones, so that a closed gate still filled the cache; that cache could never
+    become a column, because the selector retires a listing the moment a cache row exists
+    and opening a gate changes neither the text nor the model. Extract exactly what may be
+    written and the question does not arise: a closed gate costs nothing, and the money is
+    spent the first time the value it buys can land.
+
+    The lane's ONLY scope declaration (R10, and the reason it needs no flag): a portal with
+    no OPEN gate never appears in the selector, so the lane does not even query. Sorted so
+    the generated tool schema and the selector SQL are byte-stable across processes."""
+    return {
+        portal: fields
+        for portal, cells in CONTRACT.items()
+        if (fields := tuple(sorted(
+            field for field, declared in cells.items()
+            if declared.producer == "text" and declared.gate is not None
+            and declared.gate.passed
+        )))
+    }
+
+
+def gated_cells() -> dict[str, tuple[str, ...]]:
+    """`portal -> every `text` cell carrying a gate, open or closed`. The bake-off's field
+    list and the honest answer to "what is this lane for"; never the lane's own scope."""
+    return {
+        portal: fields
+        for portal, cells in CONTRACT.items()
+        if (fields := tuple(sorted(
+            field for field, declared in cells.items()
+            if declared.producer == "text" and declared.gate is not None
+        )))
+    }
 
 
 def known_gaps() -> dict[str, str | None]:

@@ -1382,6 +1382,15 @@ class ImageGateSettings:
         # The re-scan window must exceed the longest possible hold (the
         # timeout), or a property gated the whole way would leave the lookback
         # before its release and be lost.
+        #
+        # It must also exceed the longest a MATCHING FACT can be late, and the latest such
+        # fact is the post-publication text lane's (SLO 20 min, W7): the `:new:` cursor
+        # advances past a property that did not match and the dedupe key is once-ever, so
+        # an attribute filled after the cursor passed can only ever cost a MISSED alert,
+        # never a duplicate, and this re-scan is the only second look there is. 60 min
+        # already clears 20 by 3x. Reading `description_extraction.SLO_MINUTES` here was
+        # tried and removed: as a third `max()` term it can never be the maximum, so it
+        # bought an api -> toolkit -> scraper import at call time and changed nothing.
         return max(60, self.timeout_minutes * 2)
 
 
