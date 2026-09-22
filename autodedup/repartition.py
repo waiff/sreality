@@ -73,6 +73,8 @@ def partition(
     invariants: Invariants,
     max_rounds: int = 4,
     keep_factless: bool = False,
+    rejoin_cells: bool = False,
+    rejoin_invariants: Invariants | None = None,
 ) -> list[list[int]]:
     """Cut one component into consistent groups, maximising the merge evidence kept inside.
 
@@ -157,7 +159,56 @@ def partition(
             if not _reconcile(ordered, home, cells, invariants):
                 break
 
+    if rejoin_cells:
+        strict = rejoin_invariants or invariants
+        for _round in range(max_rounds):
+            if not _rejoin(ordered, home, cells, strict):
+                break
+            if keep_factless:
+                _reconcile(ordered, home, cells, invariants)
+
     return [sorted(cell) for cell in cells if cell]
+
+
+def _rejoin(
+    ordered: Sequence[Edge],
+    home: dict[int, int],
+    cells: list[list[int]],
+    invariants: Invariants,
+) -> bool:
+    """E193: offer every cut merge edge its WHOLE-CELL join once more. True when one held.
+
+    The greedy pass at the top of `partition` reads the cells as they stand before the local
+    search, so a join it refuses is refused against members the search is about to move away.
+    `_reconcile` cannot repair that: it moves one member at a time, and two cells of three
+    each never meet a member-sized move. Here the union of the two cells is offered whole, and
+    only accepted when the invariants hold on it — the same test the greedy pass applies, on
+    the partition the search actually produced.
+
+    The edges are read in `edge.rank` order and each cell is joined at most once per round, so
+    the result is a function of the edge SET; the caller bounds the rounds. This is the pass
+    W13 measured and refused in its unordered form, where the Prostějov component lost its
+    certified member to a cell of three: reading the certificate-first order fixes WHICH join
+    is offered first, which is the whole of that complaint.
+    """
+    moved = False
+    touched: set[int] = set()
+    for edge in ordered:
+        left, right = home[edge.lo], home[edge.hi]
+        if left == right or left in touched or right in touched:
+            continue
+        merged = sorted(cells[left] + cells[right])
+        if invariants(merged) is not None:
+            continue
+        keeper, loser = (left, right) if left < right else (right, left)
+        for member in cells[loser]:
+            home[member] = keeper
+        cells[keeper] = merged
+        cells[loser] = []
+        touched.add(keeper)
+        touched.add(loser)
+        moved = True
+    return moved
 
 
 def _reconcile(

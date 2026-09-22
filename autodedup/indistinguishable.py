@@ -82,6 +82,7 @@ from autodedup.floor_convention import (
     floor_gap,
     joint_convention_shift,
     same_camp,
+    total_convention_shift,
 )
 from autodedup.guards import LAND_CATEGORY, area_rel_diff, area_relation
 from autodedup.settings import Settings
@@ -674,13 +675,24 @@ def _price_sequential_path(
     # limb needs it): one Pouchovská 2+kk at 18,500 and one Slezské Předměstí 2+kk at 21,000
     # were bridged through a bazos row carrying neither, and `area_rel_diff` abstains on a
     # missing side. Both sides must state it, and the two must be the same number.
-    gap = area_rel_diff(a.area_m2, b.area_m2)
-    if gap is None or gap > 0.0:
-        return False
     photos = _present(feats, "phash_tight_matches") or 0.0
     contained = _present(feats, "containment_max") or 0.0
+    code = _present(feats, "ref_code_shared") or 0.0
+    gap = area_rel_diff(a.area_m2, b.area_m2)
+    if gap is not None and gap > 0.0:
+        return False
+    if gap is None:
+        # E192: a side that states no area has demonstrated no area — unless the two adverts
+        # carry the seller's own order code for ONE object, or one body essentially IS the
+        # other. A bazos row with no area, the same 655820 on both sides and an identical body
+        # is one advert re-posted, and refusing it here is refusing the standing ruling.
+        if not settings.d43_price_sequential_identity:
+            return False
+        if code < 1.0 and contained < settings.d43_price_sequential_containment:
+            return False
     return (photos >= settings.d43_price_sequential_min_photos
-            or contained >= settings.d43_price_sequential_containment)
+            or contained >= settings.d43_price_sequential_containment
+            or (settings.d43_price_sequential_identity and code >= 1.0))
 
 
 def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> tuple[str, str] | None:
@@ -797,11 +809,17 @@ def distinguishing_facts(
         joint = reads != "off" and joint_convention_shift(
             cfg.floor_camps, a.source, a.floor, a.total_floors,
             b.source, b.floor, b.total_floors)
+        # E190: the camps read on their own, for the adverts that state no floor to move with
+        # the total. Read in EVERY mode, because a vocabulary is not a fact in any of them —
+        # exactly as `joint` already is.
+        camped = cfg.d43_total_floors_camp and total_convention_shift(
+            cfg.floor_camps, a.source, a.floor, a.total_floors,
+            b.source, b.floor, b.total_floors)
         # E138: one storey across a boundary the camps cannot place is the ground-floor
         # ambiguity again — the same slack `floor` already carries across every portal pair.
         ambiguous = (lenient and cfg.d43_gate_total_floors_slack and delta_total == 1
                      and convention_ambiguous(cfg.floor_camps, a.source, b.source))
-        if delta_total and not joint and not ambiguous:
+        if delta_total and not joint and not camped and not ambiguous:
             add("total_floors", a.total_floors, b.total_floors)
 
     plot_conflict = _plot_conflict(a, b, cfg, is_land)
@@ -1051,6 +1069,10 @@ def agreeing_attributes(
                  or (cfg.floor_camps_reads != "off"
                      and joint_convention_shift(cfg.floor_camps, a.source, a.floor,
                                                 a.total_floors, b.source, b.floor,
+                                                b.total_floors))
+                 or (cfg.d43_total_floors_camp
+                     and total_convention_shift(cfg.floor_camps, a.source, a.floor,
+                                                a.total_floors, b.source, b.floor,
                                                 b.total_floors)))):
         out.append("total_floors")
     if a.price and b.price:
@@ -1095,4 +1117,43 @@ def promotion_warrant(
         return f"agree:{bar}"
     if cfg.d43_promote_photo_alternative and tight_photo_match(feats):
         return "photo"
+    unit = unit_grade_warrant(a, b, feats, cfg)
+    if unit is not None:
+        return f"unit:{unit}"
     return None
+
+
+def unit_grade_warrant(
+    a: Listing, b: Listing, feats: Feats | None, settings: Settings
+) -> str | None:
+    """E191: evidence only ONE unit has, read as a warrant to PROMOTE.
+
+    E131's rail counts the public attributes the two adverts both state. That is a proxy for
+    "an operator could check this by reading them", and on a corpus of prose adverts it is the
+    wrong proxy: 2,118 of cohort 6's 5,698 unrecovered certain duplicates state fewer than two
+    of the nine — no area, no price, no storey, no street — because they are bazos re-posts of
+    one advert whose whole content is its body. 2,126 of them carry `strong_corroboration`
+    anyway. Counting fields is not what makes them one unit; the shared body is.
+
+    The bar is E164's, not (B)'s: the seller's own order code, three tight non-catalogue photo
+    FILES with the interiors holding, or a body one advert essentially IS. And the body limb
+    asks for the standing ruling's shape as well — two postings never on sale TOGETHER, which
+    is a re-post. Two adverts alive at the same time sharing a body are the developer's
+    template (the Černovírské zahrady parcelling), and that is the one thing this must not
+    promote on.
+
+    A warrant is not a merge: `demonstration_refusal` still reads every key fact afterwards,
+    and `distinguishing_facts` has already found none. This limb only decides which band pairs
+    D50 is allowed to judge.
+    """
+    if not settings.d43_promote_unit_evidence:
+        return None
+    from autodedup.demonstrate import sequential_postings, strong_corroboration
+
+    grade = strong_corroboration(a, b, feats, settings)
+    if grade is None:
+        return None
+    if (grade == "body" and settings.d43_promote_unit_body_sequential
+            and not sequential_postings(a, b, settings)):
+        return None
+    return grade

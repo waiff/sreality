@@ -292,6 +292,14 @@ class Settings:
     # shared frame is the evidence a presence count stands in for, and it does not penalise the
     # prose portals (bazos) the way counting stated fields does.
     d43_promote_photo_alternative: bool = False
+    # E191: the promotion rail reads UNIT-GRADE evidence as well as the count of agreeing
+    # public attributes. E164's bar exactly — order code, three tight photo files, or a body
+    # one advert essentially is — because an advert whose whole content is its body states
+    # none of the nine attributes and is still one advert re-posted.
+    d43_promote_unit_evidence: bool = False
+    # ...and the BODY limb asks for the re-post shape too: two adverts on sale TOGETHER that
+    # share a body are a developer's template, which is the one thing this may not promote on.
+    d43_promote_unit_body_sequential: bool = True
     # E132: the CLUSTER-grain invariant. A group is transitive, so a pairwise gate alone lets
     # A-B and B-C both pass while A and C differ on the floor; without this limb the relaxed
     # arms carry real negatives and bad groups.
@@ -353,11 +361,23 @@ class Settings:
     d43_cluster_image_facts: bool = True
     d43_street_min_distance_m: float | None = None
     d43_gate_total_floors_slack: bool = False
+    # E190: `total_floors` read through the camp table on its own. `joint_convention_shift`
+    # needs the storey to move WITH the total, which a house advert (floor unstated on both
+    # sides) and half the flat adverts can never do. Measured on cohorts 3-6, `idnes` states
+    # one storey fewer than sreality/realitymix/mmreality, and the opposite gap is 28 pairs
+    # against 903 — so the excuse is signed and the wrong-way gap stays a fact.
+    d43_total_floors_camp: bool = False
     # E137: the re-partitioner. A component the invariants cannot make one group is cut into
     # maximal consistent sub-groups rather than left where greedy arrival order dropped it. Off
     # = E33/E37's constrained union-find, unchanged.
     repartition: bool = False
     repartition_max_rounds: int = 4
+    # E193: after the local search has moved what it can, offer every CUT merge edge its
+    # cell-join again. The greedy first pass reads the cells as they were before the search;
+    # a cell the search has since made smaller may now hold its neighbour, and 545 of cohort
+    # 6's unrecovered certain duplicates are exactly that — two cells whose union no invariant
+    # refuses, left apart because the join was offered too early.
+    repartition_rejoin_cells: bool = False
 
     # ------------------------------------------------------- W15 (g8b, 2026-09-21): the repairs
     #
@@ -594,6 +614,10 @@ class Settings:
     # re-lists applied to the `price` FACT, which until now only `price_demonstrated` honoured.
     d43_price_sequential_path: bool = False
     d43_price_sequential_same_feed: bool = False
+    # E192: what stands in for the area when one side states none. A shared rare order code
+    # is the seller's own name for ONE object and an essentially-contained body is the advert
+    # itself; either is a stronger identity than the column the portal did not fill.
+    d43_price_sequential_identity: bool = False
     d43_price_sequential_containment: float = 0.9
     d43_price_sequential_min_photos: float = 3.0
     # D57: exactness where identity is CLAIMED reaches the PATH too. `price_paths_agree` runs at
@@ -712,6 +736,16 @@ class Settings:
             )
         if self.d43_promote_photo_alternative and not self.d43_promote:
             raise ValueError("d43_promote_photo_alternative needs d43_promote")
+        if self.d43_promote_unit_evidence and not self.d43_promote:
+            raise ValueError("d43_promote_unit_evidence needs d43_promote")
+        if self.d43_promote_unit_evidence and not self.demonstrate_identity:
+            raise ValueError("d43_promote_unit_evidence needs demonstrate_identity")
+        if self.d43_total_floors_camp and not self.floor_camps:
+            raise ValueError("d43_total_floors_camp needs a floor_camps table")
+        if self.d43_price_sequential_identity and not self.d43_price_sequential_path:
+            raise ValueError("d43_price_sequential_identity needs d43_price_sequential_path")
+        if self.repartition_rejoin_cells and not self.repartition:
+            raise ValueError("repartition_rejoin_cells needs repartition")
         if self.corroboration not in ("off", "unit", "two_of", "development_only"):
             raise ValueError(
                 "corroboration must be off/unit/two_of/development_only: "
