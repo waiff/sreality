@@ -2216,8 +2216,25 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Curation",
       "ui_control": "multiselect",
       "agendas": [
-        "browse",
-        "watchdog"
+        "browse"
+      ],
+      "constraints": null,
+      "unit": null,
+      "basis": null,
+      "enum_values": null,
+      "aliases": [],
+      "nullable": false
+    },
+    {
+      "id": "collections",
+      "type": "int_list",
+      "pg_column": null,
+      "default": null,
+      "description": "Operator-curated collection ids. OR-semantics — a property matches if it is in ANY collection in the list. Deliberately the opposite of `tags` (AND): collections read as folders, so two of them mean 'either folder'. Collection ids are account-scoped and stable across renames. BROWSE-only, for the same reasons as `pipeline`: watching a collection would fire on the operator's own clicks, and their groupings must never feed back into a valuation.",
+      "category": "Curation",
+      "ui_control": "multiselect",
+      "agendas": [
+        "browse"
       ],
       "constraints": null,
       "unit": null,

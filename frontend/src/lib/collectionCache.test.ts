@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { revalidateCollections } from './collectionCache';
+import { BROWSE_QUERY_KEYS } from './browseInvalidation';
 import { curationKeys } from './queries';
 
 describe('collection revalidation contract', () => {
@@ -22,6 +23,22 @@ describe('collection revalidation contract', () => {
       curationKeys.propertyCollectionMembers,
       curationKeys.collections,
       curationKeys.collection(7),
+    ]);
+  });
+
+  /* When Browse is scoped to collections, membership IS the cohort: a removal
+   * has to drop the row from the list, not just un-fill a glyph. */
+  it('re-reads the Browse surfaces only when membership is the cohort', () => {
+    const off = vi.fn();
+    revalidateCollections({ invalidateQueries: off } as never, { collection_id: 7 });
+    expect(off).toHaveBeenCalledTimes(3);
+
+    const on = vi.fn();
+    revalidateCollections({ invalidateQueries: on } as never, { cohortScoped: true });
+    expect(on.mock.calls.map(([arg]) => arg.queryKey)).toEqual([
+      curationKeys.propertyCollectionMembers,
+      curationKeys.collections,
+      ...BROWSE_QUERY_KEYS.map((k) => [k]),
     ]);
   });
 });

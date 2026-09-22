@@ -1385,11 +1385,8 @@ renumber.** Navigate by area:
     **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
     side starts clean (the operator re-curates — nothing is destroyed, it is on the survivor).
     Notes carry `origin_listing_id` as display provenance only ("written while viewing this
-    advert"), never as a grouping key. The Browse tag filter resolves through
-    `properties_with_tags(tag_ids)` at property grain — a property matches if ANY of its
-    listings' property carries the tags, fixing the pre-202 bug where only the representative
-    listing's tags were matched. Writes flow through the FastAPI service (property-grain routes
-    `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
+    advert"), never as a grouping key. Writes flow through the FastAPI service (property-grain
+    routes `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
     browser never writes directly. **Collections carry monitoring (Sprint C, migration 211):
     `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
     rule #16) and `notify_channels` is its delivery-channel pick (folded into the dispatch's
@@ -1409,6 +1406,34 @@ renumber.** Navigate by area:
     the map's keys change). The hand-typed key lists it replaced had drifted — every one but the
     menu forgot the shared map — the same failure `lib/browseInvalidation.ts` records for Browse. The
     extension holds no such cache, so this is an SPA-scoped claim.
+    **`collections` is also a Browse COHORT FILTER** (`ListingFilters.collections`,
+    `?collections=<ids>`, registry id `collections`, BROWSE agenda only). Semantics are **OR** —
+    a property matches if it is in ANY selected collection — stated once, in the registry
+    description, and deliberately the opposite of `tags` (AND): collections read as folders,
+    so two of them mean "either folder". BROWSE-only for
+    `pipeline`'s reasons (rule #22): a watchdog scoped to the operator's own groupings would
+    fire on their own clicks, and the estimation agent must never see their taste. Like the
+    other lenses it sits OUTSIDE preset identity (`PRESET_EXCLUDED_KEYS` + `_PARAMS`), so
+    toggling it never dirties a loaded preset. `lib/collectionScope.ts` holds the ONE definition
+    of what a selection means, rendered for whichever surface asks — today a property-id
+    allowlist for Browse; the pipeline board's in-memory predicate joins it there rather than
+    growing a second answer. The allowlist resolves from the SAME member map
+    the glyphs render from, and "nothing selected" (no constraint, `null`) stays distinguishable
+    from "a selection nothing is in" (zero rows, `[]`) all the way to the query.
+    **Both curated-set prefilters now share one shape** — membership rows reduced to a
+    property-id allowlist, AND for tags, OR for collections — and `tags` left
+    `properties_with_tags(tag_ids)` for `property_tags_public` to get there: the RPC body
+    carries `limit 5000` (migration 202) under a client comment asserting exhaustiveness, and a
+    truncated allowlist silently bleeds listings the operator asked to exclude back into the
+    cohort. The membership read is complete-or-throw (`fetchAllRows`); the RPC stays in the
+    database until the SPA deploy has rolled out. `fetchBrowseStats` was the one Browse fetcher
+    that named its prefilters by hand; it now resolves through `resolveBrowsePrefilters` like
+    every other lane (with `brokerId` cleared — Stats is deliberately not broker-scoped and has
+    no listing-grain parameter, while the broker resolver throws without a session), so a new
+    property-grain filter cannot narrow the list and leave the panel above it counting the whole
+    market. A membership write invalidates the Browse reads only when membership IS the cohort
+    (`revalidateCollections`' `cohortScoped`, passed by the Browse card alone — the mirror of
+    `revalidatePipeline`'s knob).
     **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
     existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are

@@ -11,20 +11,30 @@
 import type { QueryClient } from '@tanstack/react-query';
 
 import { curationKeys } from '@/lib/queries';
+import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 
 /** Re-read collections after ANY collection write — one idiom per call site,
  * metadata included. The member map is in the list because a property-grain
  * add/remove, a collection DELETE (migration 202 cascades its memberships away)
  * and a merge (operator_state re-points collection_properties onto the
  * survivor) each change it. Pass `collection_id` when the write names one
- * collection, so its own page refetches too. */
+ * collection, so its own page refetches too.
+ *
+ * `cohortScoped` is revalidatePipeline's knob again: when Browse is scoped to
+ * collections, membership IS the cohort, so the Browse reads refetch too. Only
+ * a caller that knows the current filters can say so; everyone else leaves it
+ * false (refetching every Browse surface on a save is otherwise waste). */
 export function revalidateCollections(
   qc: QueryClient,
-  { collection_id }: { collection_id?: number } = {},
+  {
+    collection_id,
+    cohortScoped = false,
+  }: { collection_id?: number; cohortScoped?: boolean } = {},
 ): void {
   qc.invalidateQueries({ queryKey: curationKeys.propertyCollectionMembers });
   qc.invalidateQueries({ queryKey: curationKeys.collections });
   if (collection_id != null) {
     qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
   }
+  if (cohortScoped) invalidateBrowseQueries(qc);
 }

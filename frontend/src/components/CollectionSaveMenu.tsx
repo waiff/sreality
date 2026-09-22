@@ -41,6 +41,7 @@ export default function CollectionSaveMenu({
   anchorRef,
   onClose,
   id,
+  cohortScoped = false,
 }: {
   property_id: number;
   /* Collection ids this property is already in — owned by the caller's read. */
@@ -49,6 +50,8 @@ export default function CollectionSaveMenu({
   onClose: () => void;
   /* DOM id, so the trigger's aria-controls can point at the panel. */
   id?: string;
+  /* The surrounding cohort is scoped to collections — see revalidateCollections. */
+  cohortScoped?: boolean;
 }) {
   const qc = useQueryClient();
   const collectionsQ = useQuery({
@@ -59,11 +62,13 @@ export default function CollectionSaveMenu({
 
   const add = useMutation({
     mutationFn: (cid: number) => addPropertiesToCollection(cid, [property_id]),
-    onSuccess: (_, cid) => revalidateCollections(qc, { collection_id: cid }),
+    onSuccess: (_, cid) =>
+      revalidateCollections(qc, { collection_id: cid, cohortScoped }),
   });
   const remove = useMutation({
     mutationFn: (cid: number) => removePropertyFromCollection(cid, property_id),
-    onSuccess: (_, cid) => revalidateCollections(qc, { collection_id: cid }),
+    onSuccess: (_, cid) =>
+      revalidateCollections(qc, { collection_id: cid, cohortScoped }),
   });
   const pending = add.isPending || remove.isPending;
 

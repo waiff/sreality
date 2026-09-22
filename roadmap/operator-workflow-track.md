@@ -486,6 +486,33 @@ one); every other collection needed a trip to the app.
   the panel (the app's listing page doesn't either — "Spravovat kolekce →"
   links there).
 
+### Phase U-COLL-SCOPE: Collections as a Browse cohort filter (done)
+Collections could group properties but not SHOW them: seeing "everything in
+Shortlist" meant opening the collection page, which is a list, not Browse — no
+map, no stats, no price bounds on top.
+- **One vocabulary.** `lib/collectionScope.ts` owns what a selection means,
+  rendered as a property-id allowlist for Browse; the pipeline board's
+  rendering will land beside it rather than as a second answer. OR,
+  deliberately unlike `tags` (AND) — collections read as folders.
+- **A lens, not criteria.** Registry id `collections`, BROWSE agenda only (the
+  watchdog would fire on the operator's own clicks; the estimation agent must
+  not see their taste), and outside preset identity like `pipeline` / `broker` /
+  `dismissed`, so toggling it never dirties a loaded preset. No migration: the
+  allowlist rides `browse_stats_properties`' generic `property_ids_filter`
+  (migration 378), the seam that filter was built to be reused as.
+- **The subtraction that paid for it.** `fetchBrowseStats` now resolves through
+  `resolveBrowsePrefilters` like every other lane, `tags` moved off the
+  `properties_with_tags` RPC onto the membership rows, and the registry's dead
+  WATCHDOG agenda on `tags` went with it. Rule 18 in `docs/architecture.md` has
+  the detail.
+- **Cache coherence.** `revalidateCollections` gained `cohortScoped`, the mirror
+  of the pipeline's knob: when Browse is scoped to collections, membership IS the
+  cohort, so a save from the Browse card refetches the list too. Off by default —
+  everywhere else, refetching map + cards + count + stats on a bookmark click is
+  waste.
+- Next: the same filter on the pipeline board, and dropping
+  `properties_with_tags` once this SPA build has rolled out.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

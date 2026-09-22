@@ -78,6 +78,9 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   // (property_pipeline_public), resolved in queries.ts:resolvePipelinePrefilter
   // — there is no pipeline column on the browse read model to narrow on.
   'pipeline',
+  // Collection membership, the same shape again: an allowlist resolved from
+  // collection_properties_public in queries.ts:resolveCollectionPrefilter.
+  'collections',
   // Dismissed properties are excluded by the SOURCE, not a predicate:
   // queries.ts:readSource reads the *_visible() twin unless it is set (mig 537).
   'show_dismissed',
