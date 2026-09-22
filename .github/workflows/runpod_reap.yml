@@ -1,0 +1,50 @@
+name: "Ops: terminate a RunPod pod by id"
+
+# The bake-off tears its pod down in a `finally`, but a terminate call that times out on
+# RunPod's side (run 35731041090: "POD MAY STILL BE BILLING") leaves a pod nobody can
+# reach from a shell without the key. This is the one-input remedy: write the receipt
+# `autodedup.oss_pod --reap` already understands and let it DELETE the pod. Idempotent —
+# an already-gone pod counts as success.
+#
+# Required GitHub secret: RUNPOD_API_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pod_id:
+        description: "The RunPod pod id to terminate (from the run log or the artifact's pod.json)"
+        required: true
+        type: string
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      # The id reaches the shell as an env var, never interpolated into the script body.
+      - name: Reap
+        env:
+          IN_POD_ID: ${{ inputs.pod_id }}
+        run: |
+          set -euo pipefail
+          case "$IN_POD_ID" in
+            ''|*[!a-z0-9]*) echo "::error::pod_id must be a plain lowercase id"; exit 1 ;;
+          esac
+          mkdir -p reap
+          printf '{"pod_id": "%s"}\n' "$IN_POD_ID" > reap/pod.json
+          python -m autodedup.oss_pod --reap reap/pod.json
