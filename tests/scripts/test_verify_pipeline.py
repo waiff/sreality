@@ -2890,12 +2890,12 @@ def test_text_extraction_lag_rings_when_the_lane_is_not_in_the_heartbeat(
     assert "not in the heartbeat" in " ".join(out["details"]["offenders"])
 
 
-def test_text_extraction_lag_reports_a_closed_gate_as_nothing_waiting() -> None:
-    """The shipping state: every gate closed means the lane is out of scope, not late."""
+def test_text_extraction_lag_names_the_open_scope() -> None:
+    """The check's scope is the contract's open gates — the same declaration the lane
+    reads — so a report and the selector can never disagree about who is waiting."""
     from scripts.verify_pipeline import check_text_extraction_lag
 
     out = check_text_extraction_lag(
         _text_lane_conn(waiting=0, oldest_hours=0.0, claimed=0), T)
     assert out["status"] == "ok"
-    assert out["details"]["scope"] == {}
-    assert "every contract gate is closed" in out["message"]
+    assert out["details"]["scope"] == {"bazos": ["floor", "has_lift"]}
