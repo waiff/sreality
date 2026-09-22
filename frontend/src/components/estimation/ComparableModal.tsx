@@ -9,7 +9,7 @@ import {
 } from '@/lib/format';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
-import { listingKindLabel } from '@/lib/enums';
+import { listingKindLabel, priceUnitLabel } from '@/lib/enums';
 import { imageSrc } from '@/lib/imageUrl';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import { portalShort } from '@/lib/portals';
@@ -103,7 +103,7 @@ function Header({ listing, titleId }: { listing: ListingPublic; titleId: string 
         {fmtCzk(listing.price_czk)}
         {listing.price_unit && (
           <span className="text-sm font-sans font-normal text-[var(--color-ink-3)] tracking-wide ml-1">
-            / {listing.price_unit}
+            / {priceUnitLabel(listing.price_unit)}
           </span>
         )}
       </h2>

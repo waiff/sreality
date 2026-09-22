@@ -31,17 +31,26 @@ CASES: tuple[tuple[str, str, str, str | None], ...] = (
     ("building_type", "ceskereality", "Cihlová", "cihla"),
     ("building_type", "ceskereality", "Panelová", "panel"),
     ("building_type", "ceskereality", "Jiná", "jina"),
+    ("building_type", "mmreality", "Ostatní", "jina"),
     ("building_type", "mmreality", "Smíšená", "smisena"),
     ("building_type", "mmreality", "neuvedeno", None),
-    # ownership — the canonical-only rule the four `_norm_ownership` copies enforced
+    # The two collapses W5 applied: a slugified dropdown label, and the comma-joined
+    # multi-material cell ceskereality states because it has no "smíšená" option.
+    ("condition", "realitymix", "ve výstavbě (hrubá stavba)", "ve_vystavbe"),
+    ("condition", "realitymix", "Určený k demolici", "k_demolici"),
+    ("building_type", "ceskereality", "Zděná, kamenná", "smisena"),
+    ("building_type", "ceskereality", "Dřevěná, zděná", "smisena"),
+    # ownership — three regimes plus the portals' own "other", which is a stated fact
     ("ownership", "ceskereality", "Státní, obecní, jiné", "statni"),
     ("ownership", "ceskereality", "soukromé", "osobni"),
     ("ownership", "ceskereality", "Družstevní", "druzstevni"),
     ("ownership", "mmreality", "Obecní", "statni"),
-    ("ownership", "idnes", "Jiné", None),
-    ("ownership", "idnes", "s.r.o.", None),
-    ("ownership", "idnes", "Podílové", None),
-    ("ownership", "mmreality", "Ostatní", None),
+    ("ownership", "idnes", "Jiné", "jine"),
+    ("ownership", "idnes", "s.r.o.", "jine"),
+    ("ownership", "idnes", "Podílové", "jine"),
+    ("ownership", "mmreality", "Ostatní", "jine"),
+    ("ownership", "bezrealitky", "OSTATNI", "jine"),
+    ("ownership", "sreality", "- vyber vlastnictví", None),
     # furnished — both stems, both genders: `_norm_furnished` matched on substrings
     ("furnished", "remax", "Ano", "ano"),
     ("furnished", "remax", "Ne", "ne"),
@@ -91,14 +100,28 @@ def test_a_numeric_zero_is_a_stated_absence_like_the_string() -> None:
 def test_the_llm_schema_offers_every_value_the_parsers_may_emit() -> None:
     """The on-demand URL parser writes the SAME columns the nine scrapers write.
 
-    Its tool schema is generated from `known_values`, so until W5 collapses the legacy
-    spellings the two producers of one column cannot disagree about its value space."""
+    Its tool schema is generated from the canon, which since W5 IS the whole value space
+    — so the two producers of one column cannot disagree about it. `disposition` and
+    `price_unit` are enumerated too: the pill list now spans the entire grammar."""
     from scraper.source_parsers.common import RECORD_LISTING_TOOL
 
     properties = RECORD_LISTING_TOOL["input_schema"]["properties"]
-    for field in ("condition", "building_type", "energy_rating"):
+    for field in ("condition", "building_type", "energy_rating", "disposition",
+                  "price_unit"):
         offered = set(properties[field]["properties"]["value"]["enum"]) - {None}
-        assert offered == set(vocabulary.known_values(field))
-    # `disposition` is a grammar, not a list: the filter pill list stops at 5+1 and would
-    # make a 6+1 house unnameable.
-    assert "enum" not in properties["disposition"]["properties"]["value"]
+        assert offered == set(vocabulary.CANON[field])
+
+
+def test_the_grammar_refuses_a_disposition_that_cannot_exist() -> None:
+    """`N+M` with M outside {kk, 1}, or no rooms at all, is a digit pair the bazos
+    free-text scan found — not a flat. Refused, counted, and never stored."""
+    vocabulary.take_unmapped()
+    for text in ("prodam byt 4+2", "0+1", "8+7 novostavba", "byt 1+0"):
+        assert vocabulary.disposition("bazos", text) is None
+    assert sorted(key for key, _ in vocabulary.take_unmapped()) == [
+        "disposition/bazos/0+1", "disposition/bazos/1+0",
+        "disposition/bazos/4+2", "disposition/bazos/8+7",
+    ]
+    # A grammatical pair beside an impossible one still wins, and costs no event.
+    assert vocabulary.disposition("bazos", "4+2 patro, byt 3+kk") == "3+kk"
+    assert vocabulary.take_unmapped() == []

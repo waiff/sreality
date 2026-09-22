@@ -509,7 +509,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
         disposition=vocabulary.disposition(
-            *(_name_of(v) for v in source_values(SOURCE, "disposition", obj))
+            SOURCE, *(_name_of(v) for v in source_values(SOURCE, "disposition", obj))
         ),
         locality=locality,
         district=district,

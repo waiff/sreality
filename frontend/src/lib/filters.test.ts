@@ -34,6 +34,8 @@ import {
   toSearchParams,
   watchdogNameSuggestion,
 } from './filters';
+import { filterById } from './filterRegistry.generated';
+import type { Disposition } from './types';
 
 describe('URL round-trip', () => {
   it('preserves the empty default state across an empty URL', () => {
@@ -65,6 +67,18 @@ describe('URL round-trip', () => {
     expect(round.terrace).toBe('no');
     expect(round.furnished).toEqual(['castecne', '__unknown__']);
     expect(round.ownership).toEqual(['osobni']);
+  });
+
+  /* Every disposition the registry offers must survive the URL, because Browse
+   * state IS the URL: a value the allowlist drops deselects its own pill. */
+  it('round-trips every registry disposition, not just the ones under 6', () => {
+    const all = (filterById('dispositions')?.enum_values ?? []).map((o) => String(o.value));
+    expect(all).toContain('6+kk');
+    expect(all).toContain('9+1');
+    const round = fromSearchParams(
+      toSearchParams({ ...DEFAULT_FILTERS, dispositions: all as Disposition[] }),
+    );
+    expect(round.dispositions).toEqual(all);
   });
 
   it('round-trips the includeNoPrice toggle (emitted only when on)', () => {

@@ -62,16 +62,13 @@ def _field(value_type: str | list[str], description: str,
 
 
 # Field semantics mirror the seeded system prompt. Every enum below is GENERATED from
-# `scraper.vocabulary`, never restated — widening the vocabulary widens this schema in the
-# same commit. It is `known_values`, not the bare canon: this parser writes the SAME
-# columns the nine scrapers write, and until W5 collapses them those columns legitimately
-# hold the legacy spellings too (`ve_vystavbe`, 7,873 active rows; `jina`, 8,232), so a
-# canon-only enum would leave the two producers of one column disagreeing — the defect R5
-# exists to remove. `disposition` carries NO enum: its contract is `vocabulary.disposition`'s
-# open grammar, while `DISPOSITION_OPTIONS` is the Browse filter pill list, which stops at
-# 5+1 and cannot name the 937 active rows above it (R11 widens the canon in W5). The
-# DB-resident prompt (`app_settings.llm_parse_system_prompt`) is still edited through the
-# Settings UI, and CI cannot reach it; that gap is W7's.
+# `scraper.vocabulary.CANON`, never restated — widening the vocabulary widens this schema
+# in the same commit. Since W5 the canon IS the whole value space, so this parser and the
+# nine scrapers cannot disagree about what a column may hold; `disposition` and
+# `price_unit` join the enumerated fields, which is what stops this parser writing an
+# `8+7` or a fifth spelling of "monthly". The DB-resident prompt
+# (`app_settings.llm_parse_system_prompt`) is still edited through the Settings UI, and
+# CI cannot reach it; that gap is W7's.
 RECORD_LISTING_TOOL: dict[str, Any] = {
     "name": "record_listing",
     "description": (
@@ -88,14 +85,16 @@ RECORD_LISTING_TOOL: dict[str, Any] = {
                 "celková. For a pozemek (land) report the PLOT area here instead. "
                 "Never a garden/parcel area for a building."),
             "disposition": _field(["string", "null"],
-                "Czech disposition exactly as the page states it: 1+kk, 1+1, 2+kk, "
-                "… 6+1, 7+2. Never round it down to a listed size."),
+                "Czech disposition exactly as the page states it (N rooms + kk or 1). "
+                "Never round it down to a listed size.",
+                vocabulary.CANON["disposition"]),
             "price_czk": _field(["integer", "null"],
                 "Headline TOTAL price (or monthly rent) in CZK. Strip thousands "
                 "separators. Null if not stated, not in CZK, or if the page quotes "
                 "only a per-m² unit price — a unit price is never this field."),
             "price_unit": _field(["string", "null"],
-                "'měsíc' for monthly rent; 'celkem' for total/sale."),
+                "The agenda the price is quoted for.",
+                vocabulary.CANON["price_unit"]),
             "locality": _field(["string", "null"],
                 "Most specific human-readable address suitable for geocoding."),
             "district": _field(["string", "null"],
@@ -114,11 +113,11 @@ RECORD_LISTING_TOOL: dict[str, Any] = {
             "has_parking": _field(["boolean", "null"],
                 "Garage, parking lot, or parkovací stání."),
             "building_type": _field(["string", "null"],
-                "Construction material.", vocabulary.known_values("building_type")),
+                "Construction material.", vocabulary.CANON["building_type"]),
             "condition": _field(["string", "null"],
-                "Building condition.", vocabulary.known_values("condition")),
+                "Building condition.", vocabulary.CANON["condition"]),
             "energy_rating": _field(["string", "null"],
-                "PENB class.", vocabulary.known_values("energy_rating")),
+                "PENB class.", vocabulary.CANON["energy_rating"]),
             "description": _field(["string", "null"],
                 "Seller's free-text description, verbatim, up to 8000 chars."),
             "warnings": {

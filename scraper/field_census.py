@@ -78,8 +78,10 @@ MATRIX_COHORT = "every is_active row of every enabled scraper portal"
 JSON_NULL = "(json null)"
 
 # The canon is interpolated into the matrix SQL as literals, so a registry label that is
-# not a bare one is refused at import rather than becoming broken SQL at 03:30.
-_SQL_SAFE_VALUE = re.compile(r"[A-Za-z0-9_+]+")
+# not a bare one is refused at import rather than becoming broken SQL at 03:30. A space
+# is bare (`price_unit` is `za nemovitost`); a quote or a backslash is what would break
+# the literal.
+_SQL_SAFE_VALUE = re.compile(r"[A-Za-z0-9_+ ]+")
 
 # `description` is the substrate of the post-publication text lane, not a portal-stated
 # attribute; `published_at` and `source_url` are identity, kept out of every content hash.
@@ -227,17 +229,9 @@ def census_params(**extra: Any) -> dict[str, Any]:
 def canonical_values(field: str) -> frozenset[str] | None:
     """The canon for a listings column, read from `toolkit.filter_registry` — the one
     place that already defines "what counts as a known value" and generates the SPA and
-    API schema from it. None where no filter constrains the column: `price_unit` has no
-    canonical option list anywhere today, so its vocabulary can be COUNTED here but not
-    judged (W5 is where its four spellings collapse to two)."""
-    values = {
-        str(option.value)
-        for f in filter_registry.all_filters()
-        if f.pg_column == field and f.enum_values
-        for option in f.enum_values
-        if option.value != filter_registry.UNKNOWN_FILTER_VALUE
-    }
-    return frozenset(values) or None
+    API schema from it. None where the column carries no closed vocabulary at all."""
+    values = filter_registry.COLUMN_CANONICAL_VALUES.get(field)
+    return frozenset(values) if values else None
 
 
 # Built once at import, after the canon is readable: the statement is a pure function of

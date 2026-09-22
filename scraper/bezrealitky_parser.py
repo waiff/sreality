@@ -157,7 +157,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         category_type=category_type,
         subtype=subtype,
         price_czk=price_czk,
-        price_unit="měsíc" if category_type == "pronajem" else "celkem",
+        price_unit="za mesic" if category_type == "pronajem" else "za nemovitost",
         area_m2=area_m2,
         area_basis=area_basis,
         disposition=vocabulary.disposition_code(read("disposition")),

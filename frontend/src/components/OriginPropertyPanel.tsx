@@ -13,7 +13,7 @@ import { useMemo } from 'react';
 import ImageCarousel from '@/components/ImageCarousel';
 import { fmtArea, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
 import { areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
-import { listingKindParts } from '@/lib/enums';
+import { listingKindParts, priceUnitLabel } from '@/lib/enums';
 import { imageSrc, type ImageRef } from '@/lib/imageUrl';
 import { AmenityChips, buildAmenities } from '@/lib/listingFacts';
 import type { ListingPublic } from '@/lib/types';
@@ -41,7 +41,7 @@ export default function OriginPropertyPanel({
   // ("on request"), not missing data; rentals carry a "/ měsíc" unit.
   const hasPrice = listing.price_czk != null;
   const price = hasPrice ? fmtCzk(listing.price_czk) : 'Cena na vyžádání';
-  const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
+  const unit = hasPrice && listing.price_unit ? ` / ${priceUnitLabel(listing.price_unit)}` : '';
   const ppm = fmtMeasuredPricePerM2(
     listing.price_per_m2,
     ppm2BasisFromToken(listing.price_per_m2_basis),

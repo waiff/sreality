@@ -111,7 +111,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "area_m2": area_m2,
         "area_basis": area_basis,
         "disposition": vocabulary.disposition(
-            *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
+            SOURCE, *(_cb_name(v) for v in source_values(SOURCE, "disposition", raw))
         ),
         "floor": _int_or_none(read("floor")),
         "total_floors": _int_or_none(read("total_floors")),
@@ -211,9 +211,9 @@ def _price_unit(raw: dict[str, Any]) -> str | None:
             if isinstance(name, str):
                 ascii_name = _strip_diacritics(name.lower())
                 if "mesic" in ascii_name:
-                    return "měsíc"
+                    return "za mesic"
                 if "nemovitost" in ascii_name or "celkem" in ascii_name:
-                    return "celkem"
+                    return "za nemovitost"
     return None
 
 

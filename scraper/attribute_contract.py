@@ -115,7 +115,7 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "category_main": _cell("structured", "estateType"),
         "category_type": _cell("structured", "offerType"),
         "price_czk": _cell("structured", "price"),
-        "price_unit": _cell("derived", note="the offerType dialect: celkem / měsíc"),
+        "price_unit": _cell("derived", note="restated from offerType"),
         "area_m2": _cell("structured", "surface", "surfaceLand"),
         "area_basis": _cell("derived"),
         "disposition": _cell("structured", "disposition"),

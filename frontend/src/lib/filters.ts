@@ -1,5 +1,5 @@
 import type { Disposition } from './types';
-import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL } from './filterRegistry.generated';
+import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL, filterById } from './filterRegistry.generated';
 import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
@@ -396,13 +396,17 @@ export const USABLE_AREA_BOUNDS = { min: 0, max: 500, step: 5 };
 export const PRICE_BOUNDS = { min: 0, max: 100_000, step: 500 };
 export const AREA_BOUNDS = { min: 0, max: 300, step: 5 };
 
-/* The "Ostatní" bucket expands to every sreality building_type value
- * that isn't in the explicit three. Listings with a NULL building_type
- * fall out of any non-null selection — matching how furnished /
+/* The "Ostatní" bucket expands to every building_type value that isn't in the
+ * explicit three — read off the registry, so a construction added to the canon
+ * is reachable the moment it exists (the hand-kept list left ceskereality's
+ * `jina`, 8,223 active rows, selectable by nothing). Listings with a NULL
+ * building_type fall out of any non-null selection — matching how furnished /
  * ownership filters already behave. */
-export const BUILDING_MATERIAL_OTHER_VALUES = [
-  'skelet', 'drevo', 'kamen', 'montovana', 'nizkoenergeticka',
-] as const;
+export const BUILDING_MATERIAL_OTHER_VALUES: ReadonlyArray<string> = (
+  filterById('building_type_match')?.enum_values ?? []
+)
+  .map((o) => String(o.value))
+  .filter((v) => v !== 'cihla' && v !== 'panel' && v !== 'smisena');
 
 const buildingMaterialBucketToValues = (
   m: BuildingMaterial,
@@ -422,11 +426,12 @@ export const buildingMaterialToValues = (
   ...new Set(materials.flatMap((m) => buildingMaterialBucketToValues(m))),
 ];
 
-const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
-  '1+kk', '1+1', '2+kk', '2+1',
-  '3+kk', '3+1', '4+kk', '4+1',
-  '5+kk', '5+1',
-];
+/* Read off the registry, like CONDITION_VALUES below: this list is what
+ * survives a URL round-trip, so a hand-kept copy silently discards every pill
+ * the canon gains (it stopped at 5+1 while the pills reached 9+1). */
+const ALL_DISPOSITIONS: ReadonlyArray<string> = (
+  filterById('dispositions')?.enum_values ?? []
+).map((o) => String(o.value));
 
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
@@ -440,10 +445,9 @@ export const UNKNOWN_FILTER_VALUE = '__unknown__';
 export { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL };
 const FURNISHED_VALUES: ReadonlyArray<string> = [...FURNISHED_CANONICAL, UNKNOWN_FILTER_VALUE];
 const OWNERSHIP_VALUES: ReadonlyArray<string> = [...OWNERSHIP_CANONICAL, UNKNOWN_FILTER_VALUE];
-const CONDITION_VALUES: ReadonlyArray<string> = [
-  'novostavba', 'po_rekonstrukci', 'velmi_dobry',
-  'dobry', 'pred_rekonstrukci', 'k_demolici',
-];
+const CONDITION_VALUES: ReadonlyArray<string> = (
+  filterById('condition_match')?.enum_values ?? []
+).map((o) => String(o.value));
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = [
   'byt', 'dum', 'komercni', 'pozemek', 'ostatni',
 ];
@@ -568,7 +572,7 @@ export const priceChangeCountColumn = (windowDays: number | null): string => {
 export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const dispRaw = splitCsv(sp.get('disposition'));
   const dispositions = dispRaw.filter((d): d is Disposition =>
-    (ALL_DISPOSITIONS as ReadonlyArray<string>).includes(d),
+    ALL_DISPOSITIONS.includes(d),
   );
   const [priceMin, priceMax] = parseRange(sp.get('price'));
   const [ppm2Min, ppm2Max] = parseRange(sp.get('ppm2'));

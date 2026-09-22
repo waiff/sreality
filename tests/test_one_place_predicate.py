@@ -89,9 +89,10 @@ def test_the_ts_module_declares_the_same_levels_and_columns() -> None:
 _W3_S3 = "504_location_w3_one_code_predicate.sql"
 # The latest definition of both RPCs. 537 carried 504's bodies forward verbatim
 # plus one `hide_dismissed` clause; 547 carried 537's forward verbatim except the
-# two estate-area predicates, which now read the plot MEASURE column. Re-read the
-# chip arms when this moves again.
-_LATEST_RPC_DEFINITION = "547_browse_aggregates_read_the_plot_measure.sql"
+# two estate-area predicates, which now read the plot MEASURE column; 549 carries
+# 547's forward verbatim except the ownership `__unknown__` array, which gained
+# `jine`. Re-read the chip arms when this moves again.
+_LATEST_RPC_DEFINITION = "549_browse_aggregates_know_ownership_jine.sql"
 
 
 def _function_body(func: str) -> str:
@@ -135,6 +136,23 @@ def test_the_stats_and_map_cohorts_inherit_the_consumer_rule(func: str, relation
     assert f"from {relation} l" in body
     for legacy in ("from properties p", "from properties_public", "from listings l"):
         assert legacy not in body, f"{func} reads {legacy} — it would bypass the rule"
+
+
+@pytest.mark.parametrize("func", ["browse_stats_properties", "browse_map_cells"])
+def test_the_rpc_bodies_know_the_same_canonical_ownership(func: str) -> None:
+    """The `__unknown__` ownership pill means "NULL or not canonical", and rule 16
+    gives that predicate one definition. Browse's list compiles it from
+    `OWNERSHIP_CANONICAL`; these two bodies spell the array out. RED by: widening
+    the canon (W5 added `jine`) without carrying it into the SQL, which makes the
+    aggregates count as unknown the rows the list beside them no longer does."""
+    from toolkit.filter_registry import OWNERSHIP_CANONICAL
+
+    arrays = re.findall(
+        r"l\.ownership = any\(array\[([^\]]+)\]\)", _function_body(func)
+    )
+    assert arrays, f"{func} has no ownership __unknown__ predicate"
+    for arr in arrays:
+        assert tuple(re.findall(r"'([a-z_]+)'", arr)) == OWNERSHIP_CANONICAL
 
 
 @pytest.mark.parametrize("func", ["browse_stats_properties", "browse_map_cells"])

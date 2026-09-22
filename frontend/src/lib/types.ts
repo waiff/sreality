@@ -3,18 +3,25 @@
 
 import type { DistrictChip, ListingFilters, PresetSpec } from './filters';
 
+/* The whole Czech grammar, 1 through 9 — the same span
+ * `filter_registry.DISPOSITION_OPTIONS` generates. It used to stop at 5+1,
+ * which made the type a lie about 708 active rows. */
 export type Disposition =
   | '1+kk' | '1+1'
   | '2+kk' | '2+1'
   | '3+kk' | '3+1'
   | '4+kk' | '4+1'
-  | '5+kk' | '5+1';
+  | '5+kk' | '5+1'
+  | '6+kk' | '6+1'
+  | '7+kk' | '7+1'
+  | '8+kk' | '8+1'
+  | '9+kk' | '9+1';
 
 /* Promoted from raw_json via migration 022. See parser.FURNISHED /
  * parser.OWNERSHIP for the int→text mapping. NULL when sreality didn't
  * report a value. */
 export type Furnished = 'ano' | 'ne' | 'castecne';
-export type Ownership = 'osobni' | 'druzstevni' | 'statni';
+export type Ownership = 'osobni' | 'druzstevni' | 'statni' | 'jine';
 
 /* THE MF "Cenová mapa nájemného" reference-rent breakdown — ONE shape for both
  * columns that store it: `listings.mf_reference_rent` (migration 134) and

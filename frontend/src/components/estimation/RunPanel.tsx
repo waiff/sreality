@@ -61,6 +61,7 @@ import { MfReferenceCard } from '@/components/estimation/MfReferenceCard';
 import { PickButton } from '@/components/controls';
 import { canRerun, type RerunOverrides } from '@/lib/rerun';
 import { listingPath } from '@/lib/listingUrl';
+import { filterById } from '@/lib/filterRegistry.generated';
 import type {
   ComparableExcluded,
   ComparableUsed,
@@ -1390,13 +1391,11 @@ function sortedComparables(comps: ComparableUsed[]): ComparableUsed[] {
  * attributes belong to the listing scrape, not the run, and aren't
  * something the operator can override here. */
 
-const DISPOSITIONS: ReadonlyArray<Disposition> = [
-  '1+kk', '1+1',
-  '2+kk', '2+1',
-  '3+kk', '3+1',
-  '4+kk', '4+1',
-  '5+kk', '5+1',
-];
+/* The registry's list, not a copy of it — the third hand-kept disposition
+ * allowlist this wave folds back onto the canon. */
+const DISPOSITIONS: ReadonlyArray<Disposition> = (
+  filterById('dispositions')?.enum_values ?? []
+).map((o) => String(o.value) as Disposition);
 
 interface AdjustState {
   lat: number | null;

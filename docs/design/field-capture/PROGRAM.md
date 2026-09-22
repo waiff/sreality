@@ -142,9 +142,19 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
 - **R11 — Vocabulary defaults (operator-accepted):** add every real value as a canonical member (`ve_vystavbe`,
   `projekt`, `spatny`, `udrzovany`, `v_rekonstrukci`, building_type `jina`, dispositions above 5+1); collapse only
   true synonyms; never NULL a stated fact. `has_balcony` = balcony OR loggia (terrace has its own column; any union is
-  computed once in the filter layer). `has_parking` = a space or right **belonging to** the property. The statutory
-  PENB placeholder "G" is a distinct `unassessed` member where the portal marks it. The on-demand URL parser is kept
+  computed once in the filter layer). `has_parking` = a space or right **belonging to** the property. ~~The statutory
+  PENB placeholder "G" is a distinct `unassessed` member where the portal marks it.~~ *(W5 correction: measured over
+  all nine censuses, **no portal marks it**. Every one spells its G as the ordinary class label — "G - Mimořádně
+  nehospodárná" on sreality / ceskereality / realitymix / mmreality, idnes's decree citation "G (vyhl. č. 78/2013
+  Sb.)", a bare letter on maxima / remax / bezrealitky — the same shape it gives A–F. There is nothing to split on,
+  so `energy_rating` stays A–G and the 67 % G share stays what W1 made it: a measure-validity fact the fill matrix
+  reports.)* The on-demand URL parser is kept
   and brought onto the generated vocabulary. `LLM_DAILY_COST_WARN_USD` moves to $15 with the lane.
+  *(W5 correction: ownership `jine` is the last clause's first real customer. The brief called it "semantically
+  absent → NULL"; it is the portals' own "other" bucket — idnes states it three ways ("jiné", "s.r.o.",
+  "podílové"), mmreality as "Jiné", bezrealitky as "OSTATNI" — and four of the five used to drop it while realitymix
+  stored it off-canon. NULLing a stated fact is what the ruling forbids, so it is a canonical member on all nine and
+  the per-portal override is gone.)*
 - **R12 — Autodedup is another program's territory.** This program fixes upstream and hands over in writing; it never
   edits `autodedup/` or `docs/design/autodedup/`. Owed hand-overs: the false "zero area" sentences (E12, :241, :1046);
   the stale `PLOT_TRUNCATING_SOURCES` guard (the truncation was fixed by `scraper/area.py` + healed); the W8 floor
@@ -221,7 +231,14 @@ more than 12 distinct values gets no probe, so realitymix/idnes `balkon`/`terasa
 entry mapped to itself. The LLM tool schema's enums are generated from `vocabulary.known_values` — canon PLUS the
 legacy spellings, because that parser writes the same columns the scrapers do — except `disposition`, which keeps a
 described free string: `DISPOSITION_OPTIONS` is the Browse filter pill list, stops at 5+1, and cannot name the 937
-active rows above it. The nine DB-resident prompts are NOT reachable from CI and stay W7's (§7).
+active rows above it. *(W5 correction: none of that sentence survives W5. `known_values`, `LEGACY_COLLAPSES` and
+the legacy tier are DELETED — `CANON` is the whole value space and the schema's enums are generated from it, for
+five fields now including `disposition` and `price_unit`; `DISPOSITION_OPTIONS` runs 1+kk…9+1. The two
+`count(distinct …)` numbers above were W2's, held by mapping each off-canon spelling to itself; W5 widens the canon
+instead, so they hold because the values ARE members.)* The nine DB-resident prompts are NOT reachable from CI and
+stay W7's (§7) — **except** `llm_parse_system_prompt`, which W5's migration 550 corrects, because giving
+`price_unit` an enum turned that prompt's retired spelling from stale prose into a contradiction the provider
+enforces.
 
 **W3 — met, with the gates restated as what is actually provable offline.** Idempotence is proven on the stored
 substrate itself rather than by two live dry runs: pass one writes what the parse produced, pass two compares the same
@@ -323,9 +340,76 @@ than trickled. Live at the time of writing, `notification_subscriptions` has **0
 collection, so the live blast radius of this wave's heal is zero; the mechanism above is what makes it safe when
 subscriptions come back.
 
-**W5.** Unmapped-value rate = 0 for condition, building_type, ownership, price_unit, disposition;
-`count(distinct price_unit)` = 2; building_type `jina` ≈ 8,203 retained; per-value Browse membership delta published
-before each batch; impossible dispositions (0+1, 8+7…) refused and counted, never silent.
+**W5 — met in code; the stored-row half is the operator's dispatch.** Unmapped-value rate = 0 for condition,
+building_type, ownership, price_unit, disposition (gate A3, over every value the nine censuses record);
+`count(distinct price_unit)` = 2 in the canon **and** on every row the heal reaches; building_type `jina` 8,223
+active rows retained as a member; impossible dispositions refused and counted (`vocabulary.disposition` takes the
+portal and raises a `disposition/{portal}/{pair}` event), never silent.
+
+**What the canon gained, and what it cost.** 14,068 active rows become reachable by a Browse condition option they
+were invisible to (`ve_vystavbe` 7,859 + `ve_vystavbe_(hruba_stavba)` 1,291, `projekt` 2,457, `spatny` 1,175,
+`udrzovany` 675, `v_rekonstrukci` 553, `urceny_k_demolici` 58); 8,351 by a building_type option (`jina` 8,223,
+`modularni` 99, `ocelova` 14, `roubena` 7, the two comma-joined ceskereality cells 7, bazos's `smisana` 1); 710 by a
+disposition option (6+kk 361, 6+1 210, 7+1 56, 7+kk 47, 8+1 25, 8+kk 6, 9+1 4, 9+kk 1); 73 rows by the new
+`jine` ownership option. *(Counts taken 2026-09-22 and re-measured the same day; hourly churn moves each by a few
+rows — 14,044 / 8,351 / 708 / 73 on the second read. Only `smisana` changed in kind, below.)* **Only four of those need a stored-row heal** — the rest were already stored under the value
+the canon now names. The four are the collapses: condition `ve_vystavbe_(hruba_stavba)` → `ve_vystavbe`
+(realitymix 1,157 active / 383 inactive, remax 134 / 53) and `urceny_k_demolici` → `k_demolici` (realitymix 44 / 34,
+remax 14 / 7), both through the W3 seam on the page substrate; building_type `zdena, kamenna` / `drevena, zdena` →
+`smisena` (ceskereality 7 / 2 — two materials IS mixed construction, and that portal offers no "smíšená" option,
+which is why it states the pair); and `price_unit` → `za nemovitost` / `za mesic` (sreality 103,841 active,
+bezrealitky 5,696 active). **bazos's `smisana` is 0 active / 5 inactive** (re-measured 2026-09-22; an earlier read
+the same day found one active row, since delisted), so there is nothing for a heal to reach: that portal's
+`building_type` producer is `none` (the value came from the removed LLM lane), a re-derive yields None and
+never-blank keeps it. No one-off `UPDATE` is proposed — five inactive rows stay as documented dead data, and the
+8,351 building_type delta does not depend on them.
+
+**Snapshot budget, which is what chose the `price_unit` spelling.** The eight non-sreality portals hash the PARSED
+fields and `price_unit` is one of them, so each changed active row defers one snapshot to its next detail fetch.
+Collapsing onto sreality's `celkem`/`měsíc` would have moved the seven text-priced portals — 278,844 active rows,
+~28 days of the whole platform's snapshot budget. Collapsing onto their `za nemovitost`/`za mesic` moves sreality
+(103,841 rows, which hash the RAW payload and so defer NOTHING — the recorded permanent column/history divergence)
+and bezrealitky (5,696). **5,696 deferred snapshots against 278,844: a 49x difference for the same two facts.** The
+slug is therefore not display Czech, so `PRICE_UNIT_OPTIONS` carries the label the SPA renders after the price
+("celkem", "za měsíc") and the three render sites read it — which also un-regresses the two portals whose own
+spelling was already the Czech word.
+
+**The impossible dispositions stay stored (R9) and are listed for the operator.** 28 values, 230 active / 589
+inactive rows, all bazos but one inactive idnes row: `0+1` 8/12, `0+2` 1/1, `1+0` 15/55, `1+2` 10/18, `1+3` 3/11,
+`1+4` 2/9, `1+5` 0/1, `1+6` 1/1, `2+0` 9/39, `2+2` 1/3, `2+3` 0/2, `3+0` 0/1, `3+2` 3/5, `4+0` 1/1, `4+2` 25/45,
+`4+3` 2/3, `5+2` 43/109, `5+5` 3/4, `6+2` 52/138, `6+3` 2/10, `6+7` 1/0, `7+2` 18/52, `8+2` 18/35, `8+3` 0/2,
+`8+7` 3/3, `9+2` 6/21, `9+3` 2/3, `9+5` 1/5. The brief said "~60 rows"; it is 819. The grammar refuses them from now
+on, so no NEW one can be written — but the stored ones do not clear: a re-derive yields None, and `disposition`
+being `text` on bazos, R4's rule PRESERVES the stored value rather than clearing it. They persist until a heal
+blanks them, which never-blank forbids: **the honest state is "stored, unreachable, counted, and listed here".**
+
+**Two things the canon change reaches OUTSIDE the parsers, both shipped as migrations.** Widening a canon moves the
+`__unknown__` predicate, and rule 16 says that predicate has one definition: `ownership` gaining `jine` made the
+Browse LIST stop counting those 73 active rows as unknown while `browse_stats_properties` and `browse_map_cells`
+kept their hardcoded three-member array — **migration 549** recreates both from 547's byte-identical bodies with
+one literal one element longer. And giving `price_unit` its first real JSON enum turned a stale line in the
+DB-resident `llm_parse_system_prompt` into a contradiction the provider enforces (it still instructed
+"měsíc"/"celkem") — **migration 550** rewrites that block, and the disposition list beside it, with a guard that
+raises rather than no-op if the operator has reworded either.
+
+**The heal dispatch, in order.** `dry_run=true` first on each line; the real write needs `dry_run=false`,
+`confirm=APPLY` and, because all three columns are in the content hash, `allow_snapshot_deferral=true`:
+
+    gh workflow run reparse.yml -f source=realitymix   -f fields=condition     -f dry_run=true
+    gh workflow run reparse.yml -f source=remax        -f fields=condition     -f dry_run=true
+    gh workflow run reparse.yml -f source=ceskereality -f fields=building_type -f dry_run=true
+    gh workflow run reparse.yml -f source=sreality     -f fields=price_unit    -f dry_run=true
+    gh workflow run reparse.yml -f source=bezrealitky  -f fields=price_unit    -f dry_run=true
+
+**Then re-bless, and that step is not optional.** `data/field_capture/fill_baseline.json` ships hand-re-scored, not
+regenerated: the `off_canon` shares were rewritten to what the widened canon makes true TODAY, and the per-value
+`values` maps were left as they were, so they under-count every newly-canonical member (idnes/condition reads
+`filled: 72787` against a `values` sum of 67,363 — the 5,424 `ve_vystavbe`/`projekt`/`udrzovany`/`v_rekonstrukci`/
+`spatny` rows a real re-bless would name). Worse, `sreality/price_unit` and `bezrealitky/price_unit` are blessed at
+`off_canon: 1.0` — the honest pre-heal state, and also the CEILING, and `compare_to_baseline` fires only on a RISE.
+Until the re-bless those two cells cannot fail, whatever drifts in them. So `python -m scraper.field_census --bless`
+is **step 3 of this dispatch**, run once the five reparse batches complete, and the allowance is time-boxed to that
+window rather than permanent.
 
 **W6 — met offline; two gates are post-merge by nature.** The preserved-cell rule is contract-driven and rendered per
 source in `tests/scraper/test_listing_write_preserve.py`: for all nine portals every `text`/`none` cell is

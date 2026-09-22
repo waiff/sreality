@@ -537,7 +537,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=vocabulary.disposition(read("disposition"), title),
+        disposition=vocabulary.disposition(SOURCE, read("disposition"), title),
         locality=locality,
         district=okres,
         street=street_name,

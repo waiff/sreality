@@ -74,7 +74,7 @@ def test_core_mapping():
     assert listing.category_main == "byt"
     assert listing.category_type == "prodej"
     assert listing.price_czk == 3290000
-    assert listing.price_unit == "celkem"
+    assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 83
     assert listing.area_basis == "usable"
     assert listing.usable_area == 83
@@ -141,7 +141,7 @@ def test_image_urls_ordered_in_raw():
 def test_rent_price_unit():
     listing = parse_advert(_advert(offerType="PRONAJEM", estateType="BYT"))
     assert listing.category_type == "pronajem"
-    assert listing.price_unit == "měsíc"
+    assert listing.price_unit == "za mesic"
 
 
 def test_land_headline_is_surface_land_stamped_plot():
