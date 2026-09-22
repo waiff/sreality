@@ -2,8 +2,13 @@
 mirror the real nemovitosti.maxima.cz markup: the catalogue index cards (an
 `<a href="/nemovitosti/{id}/">` wrapping `.slider_titulek` / `.slider_cena`), the
 `th.slider_label` / `td.slider_value` spec table, the `/resize/...{ID}...jpg`
-gallery, the embedded OpenLayers map config (`"center":[lon,lat]`), and the
-`btn-pager` pagination.
+gallery, the embedded OpenLayers map config, and the `btn-pager` pagination.
+
+The map config is here so the parser can be shown IGNORING it: W9 deleted the
+view-centre read, and the fixture carries the real shape — a `center` (the map's
+scroll position) beside a `features[0]` pin (the agency's drawn point), kilometres
+apart on real listings — so a re-added coordinate reader would fail the rail below
+rather than quietly pick the wrong one of the two.
 """
 
 from __future__ import annotations
@@ -92,7 +97,7 @@ DETAIL_HTML = """
   <img src="https://nemovitosti.maxima.cz/resize/w-1600-R_s_x-B50087758-2-1764065478.jpg" />
   <img src="https://nemovitosti.maxima.cz/resize/w-640-R_s_x-OTHER9999-1-1.jpg" />
   <script>
-    const mapdata = JSON.parse('{"center":[14.3808766436688,50.135296277954296],"zoom":17.0}');
+    const mapdata = JSON.parse('{\"center\":[14.3808766436688,50.135296277954296],\"zoom\":17.0,\"features\":[{\"type\":\"Point\",\"coordinates\":[14.3901,50.1281]}]}');
   </script>
 </main>
 </body></html>
@@ -171,8 +176,6 @@ def test_parse_detail_full():
     assert listing.area_m2 == 114.0
     assert listing.area_basis == "floor"
     assert listing.disposition == "4+kk"
-    assert listing.lat == 50.135296277954296
-    assert listing.lon == 14.3808766436688
     assert "Praha 6" in (listing.locality or "")
     # Street is the last comma-segment of "Praha 6, Suchdol, U Hotelu".
     assert listing.street == "U Hotelu"
@@ -194,7 +197,6 @@ def test_parse_detail_full():
     assert listing.terrace is None       # absent row -> unknown, not guessed False
     assert listing.description.startswith("K prodeji")
     assert listing.raw["maxima_ref"] == "B50087758"
-    assert listing.raw["coords"]["source"] == "page"
     # Only this listing's images (by upper id), not the OTHER9999 recommendation.
     assert len(listing.raw["image_urls"]) == 2
     assert all("B50087758" in u for u in listing.raw["image_urls"])
@@ -216,18 +218,43 @@ def test_parse_detail_content_hash_stable_and_bridges_to_ingest():
     assert row["area_m2"] == 114.0
 
 
-def test_house_category_and_no_coords():
-    # A house detail without an embedded map -> coords None; category from d-prefix.
+def test_house_category_from_the_d_prefix():
     house = parse_detail(
         DETAIL_HTML.replace("b50087758", "d40030826")
         .replace("B50087758", "D40030826")
-        .replace('"center":[14.3808766436688,50.135296277954296]', '')
         .replace("Prodej bytu 4 + kk", "Prodej rodinného domu"),
         source_url="https://nemovitosti.maxima.cz/nemovitosti/d40030826/",
     )
     assert house.category_main == "dum"
     assert house.category_type == "prodej"
-    assert house.lat is None and house.lon is None
+
+
+def test_the_parser_reads_no_coordinate_even_from_a_page_that_has_two():
+    """W9's subtraction, as a rail. The fixture page carries BOTH numbers the map
+    config publishes — the view centre and the drawn pin — and the parser must take
+    neither: maxima's coordinate is `contracts/portals/maxima.yaml`'s
+    `mx.det.map_features`, read off the archived body by the resolver, and a second
+    producer here was measured 9.2 km out (d40031686) because it keyed on `center`."""
+    listing = parse_detail(DETAIL_HTML, source_url=_DETAIL_URL)
+    assert listing.lat is None and listing.lon is None
+    assert "coords" not in listing.raw
+    assert "50.135296277954296" in DETAIL_HTML and "50.1281" in DETAIL_HTML
+
+
+def test_the_street_no_longer_turns_on_a_coordinate():
+    """The one thing the deleted coordinate decided: `street_from_locality`'s CZ-bbox
+    arm. It was unreachable — the parser bbox-guarded before passing — and a sweep of
+    the 273 live maxima locality strings moved 0 streets. The 2-segment case is the
+    only ambiguous one, so it is the one pinned here."""
+    from scraper.street import street_from_locality
+    for locality, expected in (
+        ("Praha 6, Suchdol, U Hotelu", "U Hotelu"),   # 3 segments: street is the last
+        ("Chomutov, Poděbradova", "Poděbradova"),     # 2 segments: morphology says street
+        ("Višňová, Předlánce", None),                 # 2 segments: a village, not a street
+        ("Kokory", None),                             # 1 segment: town only
+    ):
+        assert street_from_locality(
+            locality, position="last", require_morphology=True) == expected
 
 
 def test_index_price_parsing():

@@ -609,24 +609,33 @@ deleted it, so the tightening reaches exactly one live producer, the bazos miner
   `min_estate_area` declares, and the one the list's registry dispatcher reads), and the rail in
   `tests/api/test_watchdog_browse_one_measure.py` — which covered `api/notifications.py` and
   `toolkit/comparables.py` but never the RPCs, which is why this survived — now covers them too.
-- ⏳ **maxima coords read the pin, not the map view-centre.** **The item as written was wrong about where it
-  lives.** `contracts/portals/maxima.yaml` ALREADY reads the drawn feature (`/features/0`,
-  `position_branch: portal_pin`) and says so ("never `/center` (the view centre, 9.2 km out on d40031686)"), so no
-  contract version bump, no goldens and no re-mine are involved. The live defect is in the SCRAPER:
-  `scraper/maxima_parser._resolve_coords` matches `_CENTER_RE` (`"center":[lon,lat]`) and nothing else, and its
-  output feeds `street_from_locality(..., require_morphology=True, lat=…, lon=…)` — a street-vs-village
-  disambiguation decided by a coordinate that can be kilometres off. Own PR, because the honest fix needs a
-  decision the item does not contain: the OpenLayers feature reader lives in `location_data`, and R2 forbids
-  `scraper` importing it. **Blast radius, measured 2026-09-21:** narrower than the item implies — `listings`
-  has no coordinate column (W4-c dropped `geom`) and `claims_common.COORDINATE_RULES["maxima"]` is
-  `geom_column`, so the RESOLVER re-reads the pin from the archived page and never arbitrates the scraper's
-  number. What the wrong coordinate decides is that one street-vs-village call plus the `raw_json.coords`
-  provenance stamp. The open decision is the LineString branch: `location_data.page_readers.
-  _openlayers_geometry` walks to the HALF-LENGTH point, so a naive midpoint in `scraper/` would be a second
-  definition of the same point — the PR either ports that walk or returns no hint for a LineString and says why.
-  Note for whoever takes it: `tests/scraper/test_maxima_parser.py`'s map fixture is hand-authored and carries
-  `center` with NO `features` key at all, so it certifies today's behaviour; re-author it from the real shape in
-  `tests/fixtures/location_w2/maxima_detail.html` (`{"center":[…],"zoom":15,"features":[{"type":"Point",…}]}`).
+- ✅ **maxima coords: the SECOND producer is deleted, not re-pointed.** **The item as written was wrong
+  about where it lives.** `contracts/portals/maxima.yaml` ALREADY reads the drawn feature (`/features/0`,
+  `position_branch: portal_pin`) and says so ("never `/center` (the view centre, 9.2 km out on d40031686)"), so
+  no contract version bump, no goldens and no re-mine were involved. The live defect was in the SCRAPER:
+  `scraper/maxima_parser._resolve_coords` matched `_CENTER_RE` (`"center":[lon,lat]`) and nothing else.
+  **Blast radius, measured 2026-09-22 — smaller than even the revised item said.** `listings` has no
+  coordinate column (W4-c dropped `geom`) and maxima's parser never put the number in `raw_json` either:
+  **0 of 557 maxima rows carry a `lat`/`lon` anywhere in the payload**, only the `coords.source` stamp (244
+  `page`, 26 unstamped, 3 legacy `carry_forward` of the 273 active). The resolver re-reads the pin from the
+  archived body and never arbitrates the scraper's number — and W1-c deleted the `geom_column` /
+  `coords_stamp_quality` readers, so no contract entry can read that stamp at all. The coordinate's ONE
+  consumer was `street_from_locality(..., lat=…, lon=…)`, whose only coordinate arm is `reject_as_town`'s
+  CZ-bbox test — **unreachable**, because `_resolve_coords` applied the identical bbox before returning.
+  Swept over the 273 live maxima locality strings: 175 yield a street, and an in-bbox pin (or either bbox
+  corner) changes **0** of them; only an out-of-bbox coordinate would change anything, and the parser could
+  never produce one. So the LineString question the item raised never had to be answered: there is no
+  coordinate in `scraper/maxima_parser` to get right, and the `openlayers` geometry walk stays the single
+  definition in `location_data.page_readers` (R2 intact). Deleted `_CENTER_RE`, `_resolve_coords`,
+  `_in_cz_bbox`, the bbox constants, the `lat`/`lon` on maxima's `ScrapedListing` and the `coords` stamp in
+  its `raw_json`. The parser fixture now carries the REAL map shape (`center` + `features[0]`, ~600 m apart
+  on the W2 capture) with a rail that the parser takes neither. The three frozen regression bodies keep their
+  captured `lat`/`coords` — the golden gate mines them, and they are the surviving measurement of the defect
+  (~830 m between two view centres of one plot vs ~12 m between its declared circle centres) — but nothing
+  asserts them as current behaviour any more. Left standing, reported not built: `COORDINATE_RULES`'
+  `first_party_sources` is now vestigial FLEET-WIDE (the payload arm's only caller passes `coords_source=None`),
+  and `scraper/idnes_parser.py:131` reads a `"center"` key by the same regex on a portal nobody has audited.
+
 - ⏳ **bezrealitky `ruianId` rung — the evidence says FEED IT.** 2,836 of 5,716 active bezrealitky rows carry a
   non-empty `ruianId`, yet `location_claims` holds exactly **1** `address_point_id` claim from that portal and no
   portal contract declares the type at all — so bind.py's R0 rung ("the prize") has never fired. Of those 2,836

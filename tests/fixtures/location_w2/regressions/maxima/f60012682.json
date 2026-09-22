@@ -2,8 +2,8 @@
   "_captured_from": "https://nemovitosti.maxima.cz/nemovitosti/f60012682/",
   "_captured_at": "2026-09-05",
   "_http_status": 200,
-  "_provenance": "scraper.maxima_parser.parse_detail over the live page, verbatim; `image_urls` dropped (no entry reads it) and nothing else edited. The page carries no broker name, phone or e-mail in any parsed field — title, params and locality_text are property facts only.",
-  "_why_pinned": "The other half of the same pair, the same 2 621 m² plot. Its only feature is a Circle centred 15.265521,50.360596 r=0.0036645° — 12 m from d40026367's circle centre, while the two stored view-centre pins sit ~830 m apart.",
+  "_provenance": "scraper.maxima_parser.parse_detail over the live page as of the capture date, verbatim; `image_urls` dropped (no entry reads it) and nothing else edited. The page carries no broker name, phone or e-mail in any parsed field — title, params and locality_text are property facts only. W9 later deleted the parser's view-centre coordinate read, so a re-capture carries no `lat`/`lon`/`coords`; the keys below are kept as the frozen evidence of that removed producer.",
+  "_why_pinned": "The other half of the same pair, the same 2 621 m² plot. Its only feature is a Circle centred 15.265521,50.360596 r=0.0036645° — 12 m from d40026367's circle centre, while the two view-centre pins captured here sit ~830 m apart. W9 deleted the view-centre read, so lat/lon below are frozen evidence of the removed producer.",
   "raw_json": {
     "id": "f60012682",
     "title": "Prodej pozemku ostatní, 2 621 m 2",
