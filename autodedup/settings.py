@@ -563,6 +563,12 @@ class Settings:
     # units). So the escape holds where the feed is unknown and the prices meet WITHOUT being
     # identical, and nowhere else.
     d43_floor_within_camp_price_escape: bool = False
+    # W8's correction, which `overlap_days` never took: `inactive_at` is when a delisting was
+    # DETECTED, not when the advert went, and the lag runs to weeks. Two ceskereality re-posts
+    # of one Jablonec flat are sighted three hours apart and both detected gone on 8 September,
+    # so the detection clock calls them 27.6 days co-live and E180's guard lets a re-post's
+    # storey drift through as a fact. The honest window is `dataset.live_end_stamp`.
+    d43_floor_within_camp_honest_window: bool = False
     # E181: the storey a PLACEMENT clause states of the offered unit, and the storey written in
     # words rather than digits. Both are read under E180's camp rule; the worded pair is not,
     # because `přízemí` is the ground floor on every portal.

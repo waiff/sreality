@@ -132,6 +132,20 @@ def test_a_storey_across_the_camp_boundary_is_still_the_convention() -> None:
     assert "floor" not in names(a, b, S3)
 
 
+def test_the_colive_guard_reads_the_honest_window_not_the_detection_one() -> None:
+    """13410297 x 15427848: two ceskereality re-posts of one Jablonec flat, sighted three
+    hours apart and both DETECTED gone on 8 September. `overlap_days` runs on `inactive_at`
+    and calls them 27.6 days co-live; the sightings say they never overlapped at all."""
+    a = listing(13410297, source="ceskereality", floor=1, area_m2=131.0, price=6_980_000.0,
+                broker_key="b1a082b4", first=0, last=7,
+                inactive_at=stamp(35), is_active=False)
+    b = listing(15427848, source="ceskereality", floor=2, area_m2=131.0, price=6_980_000.0,
+                broker_key=None, first=8, last=15, inactive_at=stamp(35), is_active=False)
+    detection = variant(d43_floor_within_camp_honest_window=False)
+    assert "floor" in names(a, b, detection)
+    assert "floor" not in names(a, b, S3)
+
+
 def test_a_jablonec_vila_relisted_at_a_moved_price_keeps_e154s_escape() -> None:
     """418942 x 15427848: one ceskereality 131 m² 4+1 at 6,988,000 with its storey written 1
     and, still live 27 days later, at 6,980,000 with it written 2 — and the second row names no

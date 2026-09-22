@@ -20,6 +20,7 @@
  "d43_cluster_invariant": true,
  "d43_floor_within_camp": true,
  "d43_floor_within_camp_colive": true,
+ "d43_floor_within_camp_honest_window": true,
  "d43_floor_within_camp_price_escape": true,
  "d43_floor_within_camp_scope": "source",
  "d43_gate": true,

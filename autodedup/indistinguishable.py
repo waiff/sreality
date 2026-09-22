@@ -59,11 +59,12 @@ from datetime import datetime
 from typing import Mapping, Sequence
 
 from autodedup.body_align import aligned_difference, rounding_equal_values
-from autodedup.dataset import Listing
+from autodedup.dataset import Listing, live_end_stamp
 from autodedup.demonstrate import (
     area_readings,
     body_headline_areas,
     decimals_decide,
+    live_days,
     rendering_equal,
     sequential_postings,
 )
@@ -326,6 +327,28 @@ def _same_feed(a: Listing, b: Listing, mode: str, unknown_closed: bool = False) 
 def _feed_known(a: Listing, b: Listing) -> bool:
     """Do both adverts name the feed they came from?"""
     return a.broker_key is not None and b.broker_key is not None
+
+
+def _honest_overlap_days(a: Listing, b: Listing) -> float | None:
+    """How long both adverts were SIGHTED live — `live_end_stamp`, never `inactive_at`."""
+    starts = [_stamp(a.first_seen_at), _stamp(b.first_seen_at)]
+    ends = [_stamp(live_end_stamp(a)), _stamp(live_end_stamp(b))]
+    if any(value is None for value in starts + ends):
+        return None
+    return max(0.0, (min(ends) - max(starts)).total_seconds() / 86400.0)  # type: ignore[operator]
+
+
+def _never_live_together(a: Listing, b: Listing, settings: Settings) -> bool:
+    """`sequential_postings`, read on the clock W8 established when asked for it."""
+    if not settings.d43_floor_within_camp_honest_window:
+        return sequential_postings(a, b, settings)
+    overlap = _honest_overlap_days(a, b)
+    if overlap is None or overlap >= settings.demonstrate_price_colive_days:
+        return False
+    shortest = min(live_days(a), live_days(b))
+    if shortest <= 0.0:
+        return True
+    return overlap <= settings.demonstrate_price_colive_fraction * shortest
 
 
 def _prices_identical(a: Listing, b: Listing) -> bool:
@@ -613,7 +636,7 @@ def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> boo
             return False
     elif not same_camp(settings.floor_camps, a.source, b.source):
         return False
-    if settings.d43_floor_within_camp_colive and sequential_postings(a, b, settings):
+    if settings.d43_floor_within_camp_colive and _never_live_together(a, b, settings):
         return False
     # E154, kept: with the feed UNKNOWN a price that MOVED is one advert at two moments, and
     # the storey moved with it. A price that did not move is two simultaneous statements.
