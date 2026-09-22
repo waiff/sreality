@@ -571,6 +571,9 @@ def _offer_area_conflict(
         return None
     if rounding_equal_values(lead_a[0], lead_a[1], lead_b[0], lead_b[1]):
         return None
+    small, large = sorted((lead_a[0], lead_b[0]))
+    if small <= 0.0 or large / small < settings.d43_offer_area_min_ratio:
+        return None
     printed_a = body_headline_areas(a, is_land)
     printed_b = body_headline_areas(b, is_land)
     unstated = (

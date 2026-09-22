@@ -469,7 +469,7 @@ def test_every_earlier_arm_keeps_the_S2_reading(arm: str) -> None:
     for name in ("d43_floor_within_camp", "d43_subject_floor", "d43_ground_vs_upper",
                  "d43_plot_area_exact", "d43_plot_truncation_residue", "d43_parcel_table",
                  "d43_price_sequential_path", "demonstrate_price_path_exact",
-                 "demonstrate_price_rounding_aware"):
+                 "demonstrate_price_rounding_aware", "d43_offer_area"):
         assert getattr(cfg, name) is False, name
     assert cfg.d43_stated_unit_count == "off"
 
@@ -488,3 +488,16 @@ def test_a_dependent_field_cannot_be_set_alone() -> None:
         variant(demonstrate_price_exact=False, demonstrate_price_path_exact=True)
     with pytest.raises(ValueError):
         variant(d43_stated_unit_count="sometimes")
+
+
+# --- E186: measured, and REFUSED ---------------------------------------------------------
+
+
+def test_the_offer_area_limb_is_off_in_s3() -> None:
+    """E186 read the size a body LEADS with. Measured alone it splits 648 certain duplicates of
+    cohort 5 and 386 of cohort 3 — two bodies routinely lead with the terrace, the plot or the
+    building where the other leads with the flat — and the one fusion it was built for it does
+    not even read: the HK-Zámeček advert writes its whole-parcel figure as `o celkové výměře`,
+    which E153's `_BUILDING_TOTAL` skips as the building's own size. The field stays, off, so
+    the measurement is on the record and a later wave can re-open it."""
+    assert S3.d43_offer_area is False

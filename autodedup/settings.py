@@ -585,6 +585,11 @@ class Settings:
     # third of a parcel names the whole parcel while explaining the split, so the two sets meet
     # on the number that is not the offer. What an advert leads with is what it sells.
     d43_offer_area: bool = False
+    # And only where the two figures are a WHOLE and a PART of it. Read at any gap the limb
+    # costs 648 certain duplicates on cohort 5 for one fusion — two bodies routinely lead with
+    # the terrace, the plot or the building where the other leads with the flat. A factor is
+    # what "one third of a parcel" looks like and a measurement difference never is.
+    d43_offer_area_min_ratio: float = 2.0
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
