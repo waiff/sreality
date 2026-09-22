@@ -8,7 +8,7 @@ name: "Field capture: text-extraction bake-off"
 # building_type / energy_rating / floor / total_floors / balcony / parking in a table AND
 # describe the property in prose, so their table grades what a model reads out of their
 # prose. The model is shown the description alone. A bazos slice rides along, scored only
-# where a cross-portal sibling exists (762 pairs live), because broker prose is not seller
+# where a cross-portal sibling exists (842 live on 2026-09-22), because broker prose is not seller
 # prose and the lane's target portal is the second kind.
 #
 # START WITH panel_only: it builds and uploads the panel, makes no LLM call and spends

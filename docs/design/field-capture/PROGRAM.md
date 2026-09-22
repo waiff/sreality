@@ -520,7 +520,7 @@ newest-first inside each), not the newest N sorted afterwards, which is not stra
 scored `condition` and `building_type` almost entirely on flat prose before opening their gates for a bazos corpus
 where houses are a large share. A thin category is not redistributed (idnes `pozemek` has 7 rows), so the summary
 reports the REALISED mix; `per_source=600` measured 1,207 structured rows. sreality's floor label is `floor - 1` and
-only for `floor >= 1` (A9; that portal writes both 0 and 1 for the ground storey). The bazos slice is 762 sibling
+only for `floor >= 1` (A9; that portal writes both 0 and 1 for the ground storey). The bazos slice is 842 sibling
 pairs on unique `(price_czk, area_m2, disposition)` — the only in-domain read there is, and small. One arm is
 serial at ~11.7 s an advert, so a 1,300-advert panel is ~4.2 h against the workflow's 240-minute cap: one arm per
 dispatch.

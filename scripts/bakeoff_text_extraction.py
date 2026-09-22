@@ -14,7 +14,7 @@ Two caveats that go in every summary this writes:
 
   * DOMAIN SHIFT. An idnes/sreality description is broker prose; a bazos description is a
     seller writing their own ad. So the panel carries a bazos slice too, scored where a
-    cross-portal sibling exists — 762 pairs live on unique (price_czk, area_m2,
+    cross-portal sibling exists — 842 pairs on 2026-09-22, on unique (price_czk, area_m2,
     disposition) — which is small, and stated as small.
   * FLOOR CONVENTION. idnes stores ground = 0 and sreality ground = 1 (W8/A9, proven by
     sibling pairs), so a sreality label is `floor - 1` and only for `floor >= 1`: that

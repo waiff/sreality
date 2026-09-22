@@ -109,7 +109,7 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       every description already paid for. **The panel needs no hand labelling**: idnes and sreality
       state these fields in a table AND describe the property in prose, so their own table grades
       what a model reads out of their prose (stratified per category in SQL; 1,207 structured rows
-      at the default, plus a 762-pair bazos sibling slice for the domain shift). Cache re-keyed
+      at the default, plus an ~840-pair bazos sibling slice for the domain shift). Cache re-keyed
       `(listing_id, text_hash, extractor_version)` (migration 549, destructive — the old
       three-column key dropped). Lane and check share ONE predicate (R8): `text_extraction_lag` is
       a twin of `acquisition_lag` plus a wedge arm (eligible, lane claiming none, oldest past an
