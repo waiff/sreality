@@ -254,21 +254,61 @@ _WORD_NP = re.compile(
 _WORD_PATRO = re.compile(r"\b(" + _ORDINAL_ALTERNATION + r")\s+(?:patre|patro|poschodi)\b")
 
 
+# Which WORD carried a storey, kept beside the number. `3. patro` is the fourth storey and
+# `3. NP` is the third, so two bodies that both write "three" are one storey apart on the NP
+# scale for no other reason than which noun their author reached for — and one Bílina agency
+# re-writes its own advert from `v šestém patře osmipodlažního objektu` to `ve 6. nadzemním
+# podlaží`, same flat, same rent, same house number. That is a vocabulary, not a storey, and
+# `_same_feed` cannot see it because it is one feed's two spellings.
+FLOOR_FORMS: tuple[str, ...] = ("np", "patro")
+
+
 def printed_floors(text: str | None, words: bool = False) -> frozenset[int]:
     """Every storey the body prints, on the NP scale (`1` is the ground floor)."""
     return _printed_floors(text, words) if text else frozenset()
 
 
+def printed_floors_by_form(text: str | None, words: bool = False
+                           ) -> dict[str, frozenset[int]]:
+    """`printed_floors` split by the noun that carried each storey — `np` or `patro`."""
+    return dict(_printed_floors_by_form(text, words)) if text else {}
+
+
 @lru_cache(maxsize=BODY_CACHE)
-def _printed_floors(text: str, words: bool = False) -> frozenset[int]:
+def _printed_floors_by_form(text: str, words: bool) -> tuple[tuple[str, frozenset[int]], ...]:
     folded = fold(text)
-    out = {int(match.group(1)) for match in _PROSE_NP.finditer(folded)}
-    out |= {int(match.group(1)) + 1 for match in _PROSE_PATRO.finditer(folded)}
+    np_side = {int(match.group(1)) for match in _PROSE_NP.finditer(folded)}
+    patro = {int(match.group(1)) + 1 for match in _PROSE_PATRO.finditer(folded)}
     if words:
-        out |= {_FLOOR_ORDINAL_WORDS[match.group(1)] for match in _WORD_NP.finditer(folded)}
-        out |= {_FLOOR_ORDINAL_WORDS[match.group(1)] + 1
-                for match in _WORD_PATRO.finditer(folded)}
-    return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
+        np_side |= {_FLOOR_ORDINAL_WORDS[match.group(1)]
+                    for match in _WORD_NP.finditer(folded)}
+        patro |= {_FLOOR_ORDINAL_WORDS[match.group(1)] + 1
+                  for match in _WORD_PATRO.finditer(folded)}
+    return tuple((name, frozenset(v for v in values if 0 < v <= PROSE_FLOOR_MAX))
+                 for name, values in (("np", np_side), ("patro", patro)))
+
+
+def _printed_floors(text: str, words: bool = False) -> frozenset[int]:
+    return frozenset().union(*(v for _, v in _printed_floors_by_form(text, words)))
+
+
+def floors_meet_under_vocabulary(left: Mapping[str, frozenset[int]],
+                                 right: Mapping[str, frozenset[int]]) -> bool:
+    """Do the two bodies name one storey once the `patro`/`NP` vocabulary is taken out?
+
+    Same noun, same number is agreement; different nouns one apart is the vocabulary — which
+    is what `3. patro` and `4. NP` literally are, and what `3. patro` against `3. NP` is when
+    one of the two writers is using the words loosely.
+    """
+    for form_a, values_a in left.items():
+        for form_b, values_b in right.items():
+            for value_a in values_a:
+                for value_b in values_b:
+                    if value_a == value_b:
+                        return True
+                    if form_a != form_b and abs(value_a - value_b) == 1:
+                        return True
+    return False
 
 
 # --- the storey the body predicates of the OFFERED unit (E181) ------------------------------
@@ -299,28 +339,40 @@ def subject_floors(text: str | None, words: bool = False) -> frozenset[int]:
     return _subject_floors(text, words) if text else frozenset()
 
 
+def subject_floors_by_form(text: str | None, words: bool = False
+                           ) -> dict[str, frozenset[int]]:
+    """`subject_floors` split by the noun that carried each storey — `np` or `patro`."""
+    return dict(_subject_floors_by_form(text, words)) if text else {}
+
+
 @lru_cache(maxsize=BODY_CACHE)
-def _subject_floors(text: str, words: bool = False) -> frozenset[int]:
+def _subject_floors_by_form(text: str, words: bool) -> tuple[tuple[str, frozenset[int]], ...]:
     folded = fold(text)
-    out: set[int] = set()
+    np_side: set[int] = set()
+    patro: set[int] = set()
     for cue in _PLACEMENT_CUE.finditer(folded):
         window = folded[cue.end(): cue.end() + PLACEMENT_WINDOW]
         for match in _PROSE_NP.finditer(window):
             if match.start() == 0:
-                out.add(int(match.group(1)))
+                np_side.add(int(match.group(1)))
         for match in _PROSE_PATRO.finditer(window):
             if match.start() == 0:
-                out.add(int(match.group(1)) + 1)
+                patro.add(int(match.group(1)) + 1)
         if not words:
             continue
         wide = folded[cue.end(): cue.end() + PLACEMENT_WORD_WINDOW]
         for match in _WORD_NP.finditer(wide):
             if match.start() == 0:
-                out.add(_FLOOR_ORDINAL_WORDS[match.group(1)])
+                np_side.add(_FLOOR_ORDINAL_WORDS[match.group(1)])
         for match in _WORD_PATRO.finditer(wide):
             if match.start() == 0:
-                out.add(_FLOOR_ORDINAL_WORDS[match.group(1)] + 1)
-    return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
+                patro.add(_FLOOR_ORDINAL_WORDS[match.group(1)] + 1)
+    return tuple((name, frozenset(v for v in values if 0 < v <= PROSE_FLOOR_MAX))
+                 for name, values in (("np", np_side), ("patro", patro)))
+
+
+def _subject_floors(text: str, words: bool = False) -> frozenset[int]:
+    return frozenset().union(*(v for _, v in _subject_floors_by_form(text, words)))
 
 
 # --- ground against upper, written without a number (E181) ----------------------------------

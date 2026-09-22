@@ -17,9 +17,11 @@ from autodedup.dataset import Listing
 from autodedup.indistinguishable import GATE, distinguishing_facts
 from autodedup.settings import Settings
 from autodedup.text_facts import (
+    floors_meet_under_vocabulary,
     ground_or_upper,
     parcel_divisions,
     printed_floors,
+    printed_floors_by_form,
     prose_plot_areas,
     stated_charges,
     subject_floors,
@@ -184,6 +186,55 @@ def test_ground_against_a_worded_upper_storey_is_a_fact() -> None:
     assert "storey_word" not in names(a, b, S4)
     assert "storey_word" in names(a, b, S5)
     assert "storey_word" not in names(a, b, variant(d43_prose_floor_words=False))
+
+
+# One Bílina agency re-writes its own advert for č.p. 707, Sídliště U Nového nádraží — same
+# 36 m², same 8,556 Kč rent, same broker, same portal — from the worded `patro` to the numbered
+# `NP`. On the NP scale that is a one-storey gap, and it is nothing but the noun.
+BILINA_PATRO = (
+    "Nabízíme do pronájmu byt 1 + 1, situovaný na adrese Ulice Sídliště U Nového nádraží "
+    "Č. p. 707, v části obce Teplické Předměstí, obci Bílina, okres Teplice. Tento panelový "
+    "byt o velikosti 1 + 1 se nachází ve velmi dobrém stavu a je umístěn v šestém patře "
+    "osmipodlažního objektu, což zajišťuje příjemný výhled a dostatek přirozeného světla. "
+    "V objektu se nachází výtah. Nájemné včetně služeb + elektřina + plyn. Pro jednu osobu "
+    "+ 10 000,- provize + 10 000,- kauce."
+)
+BILINA_NP = (
+    "Nabízíme k pronájmu prostorný byt 1 + 1 v osobním vlastnictví, situovaný na klidné "
+    "adrese v ulici Sídliště U Nového nádraží, č. p. 707, v části obce Teplické Předměstí, "
+    "města Bílina, okres Teplice. Byt se nachází ve 6. nadzemním podlaží osmi podlažního "
+    "panelového objektu, který je ve velmi dobrém stavu. Celková užitná plocha bytu činí "
+    "36 m². Nájemné včetně služeb + elektřina + plyn. Pro jednu osobu + 10 000,- provize "
+    "+ 10 000,- kauce."
+)
+
+
+def test_patro_against_np_is_a_vocabulary_and_not_a_storey() -> None:
+    """ceskereality 437664 x 18907864 and idnes 449020 x 18906827. `_same_feed` cannot see
+    this one: it IS one feed, writing its own storey two ways."""
+    assert printed_floors(BILINA_PATRO, True) == frozenset({7})
+    assert printed_floors(BILINA_NP, True) == frozenset({6})
+    assert floors_meet_under_vocabulary(printed_floors_by_form(BILINA_PATRO, True),
+                                        printed_floors_by_form(BILINA_NP, True))
+    a = listing(437664, source="ceskereality", disposition="1+1", area_m2=36.0, floor=5,
+                price=8_556.0, description=BILINA_PATRO, first=0, last=20)
+    b = listing(18907864, source="ceskereality", disposition="1+1", area_m2=36.0, floor=5,
+                price=8_556.0, description=BILINA_NP, first=20, last=40)
+    assert "prose_floor" not in names(a, b, S5)
+    assert "subject_floor" not in names(a, b, S5)
+
+
+def test_two_storeys_apart_survives_the_vocabulary() -> None:
+    """The excuse is ONE storey wide, which is all the noun can be worth."""
+    assert not floors_meet_under_vocabulary(
+        printed_floors_by_form("byt v osmém patře", True),
+        printed_floors_by_form("byt ve 6. nadzemním podlaží", True))
+
+
+def test_one_noun_written_twice_is_still_a_storey() -> None:
+    assert not floors_meet_under_vocabulary(
+        printed_floors_by_form("byt v šestém patře", True),
+        printed_floors_by_form("byt ve třetím patře", True))
 
 
 def test_an_ordinal_word_away_from_a_storey_noun_is_not_a_storey() -> None:

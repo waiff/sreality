@@ -94,6 +94,7 @@ from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
     CHARGE_KINDS,
     accessory_designators,
+    floors_meet_under_vocabulary,
     address_block_key,
     capacity_counts,
     fold,
@@ -110,10 +111,12 @@ from autodedup.text_facts import (
     parcel_table,
     prose_streets,
     printed_floors,
+    printed_floors_by_form,
     stated_areas,
     stated_unit_counts,
     streets_agree,
     subject_floors,
+    subject_floors_by_form,
     printed_unit_codes,
     unit_designators,
 )
@@ -1084,10 +1087,19 @@ def distinguishing_facts(
     # because `body_align` must not read a storey (E163: doing so newly split 126 certain
     # duplicates of two cohorts on nothing else).
     words = cfg.d43_prose_floor_words
+
+    def vocabulary_meets(reader, left: Listing, right: Listing) -> bool:
+        # E201: `3. patro` is the fourth storey and `3. NP` the third, so a body that spells
+        # its storey one way and its own re-write that spells it the other are one storey apart
+        # for no reason but the noun. Read only where the worded forms are read at all.
+        return words and floors_meet_under_vocabulary(reader(left.description, True),
+                                                      reader(right.description, True))
+
     if cfg.d43_prose_floor:
         floors_a = printed_floors(a.description, words)
         floors_b = printed_floors(b.description, words)
-        if floors_a and floors_b and not (floors_a & floors_b):
+        if (floors_a and floors_b and not (floors_a & floors_b)
+                and not vocabulary_meets(printed_floors_by_form, a, b)):
             prose_gap = min(abs(x - y) for x in floors_a for y in floors_b)
             feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
             if (_rounded_floors(a, b, cfg, prose_gap)
@@ -1100,7 +1112,8 @@ def distinguishing_facts(
     if cfg.d43_subject_floor:
         subject_a = subject_floors(a.description, words)
         subject_b = subject_floors(b.description, words)
-        if subject_a and subject_b and not (subject_a & subject_b):
+        if (subject_a and subject_b and not (subject_a & subject_b)
+                and not vocabulary_meets(subject_floors_by_form, a, b)):
             subject_gap = min(abs(x - y) for x in subject_a for y in subject_b)
             feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
             if _rounded_floors(a, b, cfg, subject_gap) or (subject_gap == 1 and feed):
