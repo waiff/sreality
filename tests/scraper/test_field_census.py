@@ -74,12 +74,16 @@ def test_baseline_records_the_known_zero_cells() -> None:
     never emitted. They are blessed as zero so the check is green on day one — and
     named in its report on every run until W2 declares a producer for each."""
     known = set(fc.zero_fill_cells(fc.load_baseline()))
+    # Still zero after the W4 heal (2026-09-22): the portal genuinely never states these.
     assert {
-        "remax/has_balcony", "mmreality/has_balcony",
-        "ceskereality/has_parking", "ceskereality/garage", "ceskereality/terrace",
-        "ceskereality/parking_lots", "ceskereality/total_floors",
-        "realitymix/has_lift",
+        "remax/has_balcony", "remax/terrace", "ceskereality/parking_lots",
+        "ceskereality/total_floors", "ceskereality/has_lift", "ceskereality/cellar",
     } <= known
+    # Filled by the W4 heal — a zero here again is a regression, not a known gap.
+    assert not {
+        "mmreality/has_balcony", "ceskereality/has_parking", "ceskereality/garage",
+        "ceskereality/terrace", "realitymix/has_lift",
+    } & known
 
 
 def test_the_baseline_carries_the_statutory_energy_placeholder_per_portal() -> None:
