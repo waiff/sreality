@@ -94,8 +94,10 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   would keep its number and lose the marker that stops it reading as a usable area. Residual, accepted: the ingest
   grammar can no longer CLEAR a `text` cell it stops matching (bazos `area_m2` 42,364, `disposition` 18,843, `floor`
   14,562, `total_floors` 1,158 active rows) — the same trade already accepted for `published_at` / `source_url` —
-  and it has **no automated remedy today**: `scripts/reparse.py` (R9) re-derives and CORRECTS such a cell but never
-  blanks one by design, so removing a stale preserved value is a hand-written UPDATE until something is built for it.
+  and it has **no GENERAL remedy today**: `scripts/reparse.py` (R9) re-derives and CORRECTS such a cell but never
+  blanks one by design. *(W7 correction: there is now ONE blank-allowed path, and it is deliberately not general —
+  `scripts/clear_unmeasured_enrichment_fills.py` blanks only cells the DELETED enrichment lane's own `filled` ledger
+  says it wrote AND that still hold exactly that value. Anything else is still a hand-written UPDATE.)*
   The finer rule the brief asked about (freeze W7's fill, still let a bazos regex clear its own cell) needs per-row
   provenance, which R3 forbids; and adding it as a contract axis would re-open exactly this wipe, because R3 has the
   text lane fill only NULLs — a cleared regex cell IS where W7 writes, and the next refetch would wipe that fill.)*
@@ -163,8 +165,11 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   guards' `band` arm and the persisted `floor_lo`/`floor_hi`/`floor_checked` pair state all depend on it).
 
 **Approved destructive steps (operator OK 2026-09-21, each with a backup + before/after counts):** (i) drop the two
-0-row batch tables; (ii) re-key `listing_description_enrichments`; (iii) clear the OLD lane's cells that failed
-measurement (LLM-written floor, silence-based `false`) — only cells that lane wrote, never a portal-stated value.
+0-row batch tables — DONE, migration 546; (ii) re-key `listing_description_enrichments` — DONE, migration 549
+(adds the key, drops the old one, relaxes `snapshot_id`'s NOT NULL, all in one file; the 37,754 old rows stay as
+history with a NULL `text_hash`, which is both unfakeable and correct — they can never be a cache HIT);
+(iii) clear the OLD lane's cells that failed measurement (LLM-written floor, silence-based `false`) — SCRIPTED, not
+run: `scripts/clear_unmeasured_enrichment_fills.py`, dry-run by default, counts in § W7.
 
 **Awaiting the operator's word (NOT in migration 546, which carries only the two approved DROPs):** delete the retired
 `llm_liveness` check's 1,162 `pipeline_check_results` rows (122 fails, oldest 2026-07-10, newest 2026-09-21 17:00Z) —
@@ -192,7 +197,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |
 | **W6 — SHIPPED** | Close the wipe (R4); property rollup stops letting a lower-trust `true` beat a higher-trust `false`; fills reach Browse in minutes | the `bool_or` special case; the per-listing re-render of the upsert statement | 114 / −38 across three files (most of it the WHY comments) + 156 test lines | W1 |
-| **W7** | The text lane on the realtime worker; bake-off; per-field gates | duplicate tool enums; the old cache key | ~170 | W0, W2, W3, W6 |
+| **W7 — SHIPPED** | The text lane on the realtime worker; the bake-off harness; per-field gates | the old cache key; the `confidence` enum; `run_vision_batch`'s private loop | the estimate of ~170 was the LANE alone and it is ~90; the branch is +2,290 / −87, of which the bake-off harness, the clear script, the migration and 366 test lines are the rest | W0, W2, W3, W6 |
 | **W8 — SHIPPED (heal pending)** | Floor: ground = 0 everywhere — the convention as contract data; six portals' parsers converted; the SPA names the convention | 3 per-parser floor readers + 5 regexes, maxima's int-returning split, 6 inline FE expressions | the `convention` axis, `floor_from_portal`, `fmtFloor`, one verify_pipeline check | W2, W3, R12 hand-over |
 | **W9** | Patchwork sweep (non-autodedup), one small PR each | stale docs, a dead rung or a dead path | — | — |
 
@@ -240,7 +245,10 @@ five fields now including `disposition` and `price_unit`; `DISPOSITION_OPTIONS` 
 instead, so they hold because the values ARE members.)* The nine DB-resident prompts are NOT reachable from CI and
 stay W7's (§7) — **except** `llm_parse_system_prompt`, which W5's migration 550 corrects, because giving
 `price_unit` an enum turned that prompt's retired spelling from stale prose into a contradiction the provider
-enforces.
+enforces. *(W7 correction: they were parked as "W7's" and W7 did not take them. It did the only thing it could
+without a tenth surface — its own prompt and tool schema live in `toolkit/description_extraction.py`, generated from
+`vocabulary.known_values`, so the lane adds no operator-editable prompt to the nine. Bringing the existing nine under
+codegen or a CI diff is still owed, and is a `llm-pipelines`-track item rather than this program's.)*
 
 **W3 — met, with the gates restated as what is actually provable offline.** Idempotence is proven on the stored
 substrate itself rather than by two live dry runs: pass one writes what the parse produced, pass two compares the same
@@ -442,12 +450,65 @@ inside that window is superseded without erroring — over 72 h, 283 succeeded r
 measure, expected ≈ 3 in 4 changes on the maintenance lane's cadence and the rest unchanged; and the wiped-cell
 count on `condition` (today 2,949) stops growing after one refetch cycle.
 
-**W7.** `OPENAI_API_KEY` (and the RunPod route) verified on the worker before merge — no lane on that worker has ever
-made an LLM call. Lane visible in `worker_heartbeats`. Bake-off: all candidates on the same labelled panel in ONE run;
-per-field precision, cost/1k, p50 latency recorded in the PR. Oldest eligible-unextracted age < 24 h after the backlog
-drains; `eligible > 0 AND claimed = 0` never persists two passes. p99 extraction ≤ 20 min from `first_seen_at`
-(the watchdog lookback reads the same constant). Re-bill closed: no `(listing_id, description-hash)` extracted twice
-per extractor version. Pre-call budget guard binds before spend.
+**W7 — SHIPPED, with five gates that are post-merge or post-bake-off by nature.** `OPENAI_API_KEY` on the
+realtime-worker service is the one PRE-SHIP fact this program cannot verify from a branch (no lane on that worker has
+ever made an LLM call: `estimation_runs.worker` is NULL for all 16 runs in 90 d and the estimation lane is absent from
+the heartbeat entirely). Lane visible in `worker_heartbeats` — asserted offline in
+`tests/scraper/test_realtime_worker.py`, confirmed live after the deploy. Lane and check share ONE predicate,
+asserted as a string containment of `_eligible_where()` in both SQLs. Re-bill closed by the key itself (migration 549).
+Pre-call budget guard binds before spend, proven by source order over `vision_batch.run_batch`.
+
+**Four gate statements as first written were wrong, and the code wins:**
+
+1. *"Every declared producer=text cell's fill rate rises above 0."* Not in this wave, by design. Every `gate` ships
+   `passed=False`, so the lane extracts and CACHES and writes nothing at all until the bake-off flips one. A fill-rate
+   gate belongs to the field's own gate-flip, not to the lane's merge.
+2. *"`eligible > 0 AND claimed = 0` never persists two passes."* Two passes is not observable: `_record_pass` keeps only
+   the LAST pass per lane and the check runs 6-hourly against a 5-minute lane. It is also not needed — eligibility is
+   durable (a row stays eligible until it is extracted), so there is no transient to ride out. The check rings on ONE
+   pass, and additionally when the lane is missing from the heartbeat at all, which is the estimation lane's failure.
+3. *"The watchdog lookback reads the same constant."* It reads it as a FLOOR term, not as the value:
+   `max(60, timeout_minutes * 2, SLO_MINUTES)`. Today all three evaluate to 60 min, so nothing changes; making the SLO
+   the value would have SHRUNK the re-scan window from 60 to 20 and cost alerts rather than saving them.
+4. *R10's candidate list.* Checked on the Hub 2026-09-22: **Gemma 4 exists** (2026-04-02) but has no 27B — the sizes
+   are E2B / E4B / 26B-A4B MoE / 31B dense — and there is **no Qwen3 72B** in that line. The two open candidates are
+   `google/gemma-4-26B-A4B-it` (25.2B total, 3.8B active) and `Qwen/Qwen3-VL-32B-Instruct` (33B), both Apache-2.0 and
+   **ungated**, so no `HF_TOKEN` and no licence acceptance is needed. Both want an 80 GB A100, i.e. RunPod SECURE at
+   ~$1.6-2.2/hr, ABOVE `autodedup/oss_pod`'s $1.00/hr community cap — the workflow defaults to
+   `oss_cloud=SECURE, oss_max_price=2.50`. Both are chosen MULTIMODAL for a reason that has nothing to do with the
+   task: `oss_pod.build_vllm_args` always emits `--limit-mm-per-prompt`, a text-only checkpoint may refuse to bind on
+   it, and R12 forbids this program editing that module. A text-only candidate is an owed hand-over, not a flag here.
+
+**A fifth correction, found by measuring the plan rather than assuming it.** The selector was designed as ONE
+statement with a newest-first and an oldest-first arm, run every pass. Measured on the live table 2026-09-22: the
+newest-first arm stops at its LIMIT in ~0.4 s whether or not a backlog exists (the eligible rows ARE the newest), but
+the oldest-first arm cannot stop early once nothing is eligible — as an aggregate over all 50,374 eligible bazos rows
+the predicate is a **9.4-10.0 s** bitmap heap scan of 55,252 blocks, warm and cold alike. Paying that every five
+minutes to find nothing is a standing query, not a drain. So they are two statements from one predicate: inflow every
+pass, backlog every twelfth (hourly), 750 rows, which still clears the 50k backlog in under three days — the number
+the wave was sized on. The same measurement is why `text_extraction_lag` is registered beside `field_fill_matrix` in
+`_CHECKS` rather than beside its twin `acquisition_lag`: it is a ten-second check, not an indexed one.
+
+**The panel needs no hand labelling** (the operator has ruled against labelling tasks): idnes and sreality state these
+eight fields in a table AND describe the property in prose, so their own table grades what a model reads out of their
+prose. Live 2026-09-22 over active rows: idnes 111,447 (condition 73,001 / building_type 82,872 / energy 84,081 /
+lift 16,533 / floor 35,012) and sreality 103,841 (condition 75,436 / lift 30,776 / floor 40,900), so n ≥ 1,000
+stratified by category is not close to binding. sreality's floor label is `floor - 1` and only for `floor >= 1` (A9;
+that portal writes both 0 and 1 for the ground storey). The bazos slice is 762 sibling pairs on unique
+`(price_czk, area_m2, disposition)` — the only in-domain read there is, and small.
+
+**Destructive step (iii), measured 2026-09-22 and smaller in effect than it looks:** 21,459 column values over ~15k
+rows — `floor` 6,340, `has_balcony` false 7,103, `has_lift` false 6,655, `has_parking` false 1,361 — every one of them
+bazos, and all but **sixteen** on INACTIVE rows. An inactive bazos row never refetches, so the clear mostly stops
+delisted history asserting a number nobody measured; "the new lane then refills them" is true of sixteen listings.
+`total_floors` (10,264 rows still holding the old lane's value) is deliberately NOT in the script's default set: its
+accuracy was never measured either way, so blanking it would be a guess in the other direction.
+
+**One consequence of declaring the six cells, for whoever runs step (iii):** flipping bazos `has_balcony` /
+`has_parking` / `has_lift` / `building_type` / `condition` / `energy_rating` from `none` to `text` takes them out of
+`attribute_contract.known_gaps()`, so `field_fill_matrix` stops treating their near-zero fill as a declared gap. They
+are non-zero today (17-133 rows each), so nothing rings on merge; after step (iii) they collapse toward zero and the
+baseline in `data/field_capture/` must be re-blessed, or the matrix reports a collapse that the operator caused.
 
 **W8 — SHIPPED in code; the GATE and the heal are post-merge by nature.** Sibling-pair gate (one SQL, no
 labels), now registered as `verify_pipeline`'s `floor_convention` check — the first floor check of any kind:

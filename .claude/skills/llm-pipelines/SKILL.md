@@ -80,12 +80,20 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   names the unit AND the period from it, and without one the model narrates bare Kč/m² and
   cannot tell a ~91 535 capital figure from a ~319 monthly one. Browse skips the call
   entirely for a cohort whose basis is mixed rather than sending an unlabelled payload.
-- `enrich_listing_description` — the description→attributes lane. **No code produces it today**:
-  the `sreality_id`-keyed lane was deleted in field-capture W0 (Gate 2 leaves that column NULL on
-  every non-sreality row, so it reached ~0.4% of bazos while three health checks read green). The
-  `called_for` value, the 37,754-row `listing_description_enrichments` cache and
-  `app_settings.enrichment_model` are kept for W7, which rebuilds the lane on the realtime worker
-  keyed `(listing_id, description-hash, extractor_version)` — `docs/design/field-capture/PROGRAM.md`.
+- `enrich_listing_description` — the post-publication text lane (`toolkit/description_extraction.py`),
+  rebuilt by field-capture W7 on the **realtime worker** (lane `text_extract`, constant 300 s, no
+  flag / setting / env var). Its scope is the attribute contract's `text` cells carrying a `gate` —
+  today bazos's eight prose-only columns. The cache `listing_description_enrichments` is keyed
+  `(listing_id, text_hash, extractor_version)` (migration 549), `extractor_version` being
+  `'<schema>:<model>'`, so a model swap re-attempts and a price-only snapshot never re-bills.
+  Concurrency + the one pre-call budget guard come from `toolkit.vision_batch.run_batch`; the write
+  is NULL-only (`coalesce`) with the `dirty_properties` enqueue in the same CTE and no snapshot. **A
+  column moves only once its `Cell.gate.passed` is true** (R7, a measured ≥ 95 % panel —
+  `scripts/bakeoff_text_extraction.py`, dispatch-only); until then the lane extracts and CACHES.
+  `false` needs an explicit negation in the evidence quote, every value needs a quote verbatim in
+  the description, and `floor` comes back as the advert's own words for `scraper/floor.py` to
+  convert. Health: `verify_pipeline`'s `text_extraction_lag`, built from the lane's OWN selector
+  (R8). `app_settings.enrichment_model` is the one switch. `docs/design/field-capture/PROGRAM.md`.
 
 **Vision image downscaling is unified in `toolkit/vision_images.py` — one helper, two
 tiers.** Every image→LLM call routes R2 bytes through `image_block(r2, key, max_edge)`

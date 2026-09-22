@@ -1382,7 +1382,15 @@ class ImageGateSettings:
         # The re-scan window must exceed the longest possible hold (the
         # timeout), or a property gated the whole way would leave the lookback
         # before its release and be lost.
-        return max(60, self.timeout_minutes * 2)
+        #
+        # It must also exceed the longest a MATCHING FACT can be late. The `:new:` cursor
+        # advances past a property that did not match, and the dedupe key is once-ever per
+        # property, so an attribute the post-publication text lane fills after the cursor
+        # passed can only ever cost a MISSED alert, never a duplicate. This re-scan is the
+        # only second look there is, so it reads the lane's own SLO rather than a second
+        # number that would drift away from it.
+        from toolkit.description_extraction import SLO_MINUTES
+        return max(60, self.timeout_minutes * 2, SLO_MINUTES)
 
 
 def _load_image_gate_settings(conn: "psycopg.Connection") -> ImageGateSettings:

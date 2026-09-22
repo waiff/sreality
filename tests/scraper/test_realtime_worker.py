@@ -1911,3 +1911,77 @@ def test_sold_comps_pass_returns_early_when_stopping(
     state = rw._new_state()
     asyncio.run(rw._sold_comps_pass(stop, state))
     assert "sold_comps" not in state["lanes"]
+
+
+# --- text_extract lane (field-capture W7) ---------------------------------------
+
+
+def test_text_extract_pass_publishes_into_the_heartbeat(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lane has to be VISIBLE. The estimation lane is the cautionary case: its flag
+    was never set, so it never records a pass and is absent from worker_heartbeats
+    entirely — which makes it invisible to every monitor by construction."""
+    from toolkit import description_extraction
+
+    conn = _FakeConn()
+    monkeypatch.setattr(rw.db, "connect", lambda: conn)
+    monkeypatch.setattr(
+        description_extraction, "run_pass",
+        lambda c, backlog=False: {"claimed": 2, "extracted": 2, "written": 0,
+                                  "spent_usd": 0.0045, "model": "gpt-5-mini"})
+    state = rw._new_state()
+
+    asyncio.run(rw._text_extract_pass(asyncio.Event(), state))
+
+    assert conn.closed
+    lane = state["lanes"]["text_extract"]
+    assert lane["last"]["claimed"] == 2
+    assert lane["last"]["spent_usd"] == 0.0045
+    Jsonb(rw._lane_snapshot(state["lanes"]))
+
+
+def test_text_extract_lane_ships_live_on_a_constant_interval() -> None:
+    """No app_settings read, so no failure mode and no fail-safe-0 requirement — the
+    heartbeat lane's shape. What governs it is the attribute contract."""
+    src = inspect.getsource(rw._amain)
+    assert '"text_extract"' in src
+    assert "TEXT_EXTRACT_INTERVAL_SECONDS" in src
+    assert rw.TEXT_EXTRACT_INTERVAL_SECONDS > 0
+    lane_src = inspect.getsource(rw._text_extract_sync)
+    for forbidden in ("app_settings", "os.environ"):
+        assert forbidden not in lane_src
+
+
+def test_an_abandoned_text_extract_pass_is_never_overlapped(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps its threads — and their
+    billing — running; without the lock the next tick hands the same listings to a second
+    set of paid calls."""
+    monkeypatch.setattr(rw.db, "connect", lambda: pytest.fail(
+        "a second pass must not open a connection while the first still holds the lock"))
+    assert rw._TEXT_EXTRACT_PASS_LOCK.acquire(blocking=False)
+    try:
+        assert rw._text_extract_sync() == {"claimed": 0, "previous_pass_running": True}
+    finally:
+        rw._TEXT_EXTRACT_PASS_LOCK.release()
+
+
+def test_text_extract_runs_the_expensive_backlog_arm_only_periodically(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Oldest-first cannot stop at its LIMIT once nothing is eligible and costs a measured
+    ~10 s of database; every five minutes that is a standing query, not a drain."""
+    from toolkit import description_extraction
+
+    monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
+    monkeypatch.setattr(rw, "_TEXT_EXTRACT_PASSES", 0)
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        description_extraction, "run_pass",
+        lambda c, backlog=False: seen.append(backlog) or {"claimed": 0})
+
+    for _ in range(description_extraction.BACKLOG_EVERY_PASSES + 1):
+        rw._text_extract_sync()
+
+    assert seen[0] is True
+    assert not any(seen[1:description_extraction.BACKLOG_EVERY_PASSES])
+    assert seen[description_extraction.BACKLOG_EVERY_PASSES] is True

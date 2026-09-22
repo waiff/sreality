@@ -99,10 +99,24 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       (94 rebuilds / 24 h, worst 36.6) and takes this lane's ~2 min cadence whenever a
       wholesale rebuild is not in flight — which it is ~26 % of the time, and a patch
       inside that window is silently superseded.
-- [ ] **W7 — the text lane on the realtime worker.** No flag, no new setting: governed by
-      the contract's producer=text cells. Model bake-off in ONE run (gpt-5.6-luna vs OSS on
-      RunPod); a field is written only after a labelled panel passes ≥ 95% (R7); the lane
-      and its health check share ONE eligibility function (R8).
+- [x] **W7 — the text lane on the realtime worker.** `text_extract`, constant 300 s, no flag /
+      setting / env var: its scope is the contract's `text` cells that carry a `gate`, and that
+      `gate` is where R7's measured precision lives — as data beside the column it governs, not as
+      a setting. Every gate ships CLOSED, so the lane extracts and CACHES and writes nothing until
+      the bake-off (`text_extraction_bakeoff.yml`, dispatch-only) fills one in. **The panel needs
+      no hand labelling**: idnes and sreality state these fields in a table AND describe the
+      property in prose, so their own table grades what a model reads out of their prose (n ≥
+      1,000, plus a 762-pair bazos sibling slice for the domain shift). Cache re-keyed
+      `(listing_id, text_hash, extractor_version)` (migration 549, destructive — the old
+      three-column key dropped), the model INSIDE `extractor_version` so migration 249's lesson
+      survives the re-key. Lane and check share ONE predicate (R8): `text_extraction_lag` is a
+      twin of `acquisition_lag` plus a wedge arm (eligible > 0, lane claiming none). `false` needs
+      an explicit negation in the evidence quote; every value needs a quote verbatim in the
+      description; floor comes back as the advert's own words for `scraper/floor.py` to convert.
+      `LLM_DAILY_COST_WARN_USD` → $15 (R11); the notification re-scan floor reads the lane's SLO.
+      `scripts/clear_unmeasured_enrichment_fills.py` is destructive step (iii), dry-run first:
+      21,459 values (floor 6,340; false has_balcony 7,103, has_lift 6,655, has_parking 1,361) —
+      all bazos, and all but SIXTEEN on inactive rows the lane can never refill.
 - [x] **W8 — floor: ground = 0 everywhere.** The convention is contract DATA
       (`ground0` | `ground1` | `word` per portal) and `scraper.floor.floor_from_portal`
       refuses a bare int without one; three per-parser floor readers, maxima's

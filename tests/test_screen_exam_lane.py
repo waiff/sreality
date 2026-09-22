@@ -170,10 +170,14 @@ def test_the_screener_runs_in_parallel_by_default() -> None:
 def test_each_worker_opens_its_own_connection() -> None:
     """psycopg connections are not thread-safe, and LLMClient writes an llm_calls
     row per call — sharing one connection across workers would interleave writes on
-    it, which is the classic way a parallel lane corrupts its own cost ledger."""
+    it, which is the classic way a parallel lane corrupts its own cost ledger.
+
+    Asserted on `run_batch`, the loop itself: field-capture W7 generalised the engine to
+    a text sink, so `run_vision_batch` is now the image adapter over it and the invariant
+    lives one level down."""
     import inspect
     from toolkit import vision_batch
-    src = inspect.getsource(vision_batch.run_vision_batch)
+    src = inspect.getsource(vision_batch.run_batch)
     assert "wconn = db.connect()" in src
     assert "wconn.close()" in src
 
@@ -183,7 +187,7 @@ def test_the_budget_is_checked_by_the_worker_under_a_lock() -> None:
     # once every in-flight call has already been billed.
     import inspect
     from toolkit import vision_batch
-    src = inspect.getsource(vision_batch.run_vision_batch)
+    src = inspect.getsource(vision_batch.run_batch)
     assert "with lock:" in src and "_stop()" in src
 
 

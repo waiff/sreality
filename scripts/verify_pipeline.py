@@ -25,12 +25,13 @@ dispatch-driven or on demand, so silence is the normal resting state: the longes
 in the 30 days to 2026-09-21 was 143.8 h, and the check was already 52 fails / 347 runs
 against a healthy pipeline. A fixed hours threshold over an on-demand workload is a
 false-red generator, and the fix is not a bigger number — it is a per-lane instrument
-with its own baseline (field-capture R8: oldest eligible-unextracted age per source,
-ships with the W7 text lane). Until then `llm_errors` still catches "calls are failing"
-(state, not recency) and `llm_burn_rate`'s starvation arm still catches "attempting and
-never succeeding". The gap that leaves, stated plainly: both derive from rows that
-EXIST, so a total stop — zero `llm_calls` rows at all, e.g. the key unset on every
-runner — reads `ok` on every remaining check until R8 lands.
+with its own baseline. That is `text_extraction_lag` (field-capture R8, W7): oldest
+ELIGIBLE-unextracted age and waiting count per source, computed from the text lane's own
+selector predicate, plus the wedge arm — rows eligible and the lane claiming none. It
+covers the one recurring producer; `llm_errors` still catches "calls are failing" (state,
+not recency) and `llm_burn_rate`'s starvation arm "attempting and never succeeding". The
+residual, stated plainly: both of those derive from rows that EXIST, so a total stop on a
+lane R8 does not cover — every remaining producer is dispatch-driven — still reads `ok`.
 
 Each result is persisted AND alerted the moment its check completes, under a per-check
 and a whole-lane wall-clock budget (the acute lane's `_LANE_BUDGET_S`; the full lane's
@@ -129,6 +130,14 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # 2026-08-17 starvation sreality reached 216h.
     "acquisition_lag_warn_hours": 6,
     "acquisition_lag_fail_hours": 24,
+    # The same shape one layer later (field-capture R8): how long a listing whose prose
+    # the text lane has not read has been waiting. The lane runs every 5 minutes and its
+    # 20-minute SLO is for INFLOW; the backlog drains at ~1,000 rows a pass, so the first
+    # two days after the lane ships legitimately read tens of hours. Warn at 48h, fail at
+    # 168h — a week of a portal's prose unread is the lane being dead, which is the exact
+    # failure this instrument exists for and the one nothing else can see.
+    "text_extraction_lag_warn_hours": 48,
+    "text_extraction_lag_fail_hours": 168,
     # Walk coverage against the portal's own advertised total. Healthy portals sit
     # at 0.0-0.2% (measured 2026-08-27: sreality 0.00%, realitymix 0.00%, bazos
     # 0.16%). Warn at 5% is ~25x the observed noise floor. Fail at 15% is a portal
@@ -2261,6 +2270,130 @@ def check_acquisition_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
     }
 
 
+# The R8 invariant, and a literal twin of check_acquisition_lag above for the same reason
+# its docstring gives: a "nothing extracted in N hours" alarm needs a baseline the outage
+# itself erodes, while the oldest UN-EXTRACTED row grows without bound and cannot be
+# normalised away. The outage this replaces is the reason the program exists — the deleted
+# enrichment lane selected 223 of 50,205 bazos rows for two months while llm_liveness read
+# a global max(called_at), llm_burn_rate's starvation arm needed attempts > 0 and
+# worker_lane_stall read only in_flight_s. Every one of those is blind to a lane that
+# selects nothing, so this check reads the lane's OWN eligibility predicate
+# (`description_extraction.ELIGIBLE_LAG_SQL`, built from `_eligible_where`) and never
+# re-spells it: a re-spelling would recreate exactly the blindness it exists to end.
+_TEXT_EXTRACT_LANE_SQL = """
+select details -> 'text_extract' as lane,
+       extract(epoch from (now() - beat_at)) / 60.0 as beat_age_minutes
+  from worker_heartbeats where worker = 'realtime-worker'
+"""
+
+
+def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """How long a listing the text lane has not read has been waiting, per portal."""
+    from toolkit import description_extraction as text_lane
+
+    model = text_lane.resolve_model(conn)
+    scope = attribute_contract.extracted_cells()
+    if not scope or model is None:
+        # Not a failure and not a silence: the contract declaring no `text` cell with a
+        # gate IS the lane being off, and it is reported as that rather than as health.
+        return {
+            "check_key": "text_extraction_lag", "status": "ok", "value": 0,
+            "details": {"scope": {k: list(v) for k, v in scope.items()},
+                        "model": model},
+            "message": (
+                "The text lane has nothing declared to it"
+                + ("" if scope else " (no contract cell is producer=text with a gate)")
+                + ("" if model else f"; app_settings.{text_lane.MODEL_SETTING} is unset")
+                + " — no listing is eligible and none is waiting."
+            ),
+        }
+    version = text_lane.extractor_version(model)
+    with conn.cursor() as cur:
+        cur.execute(text_lane.ELIGIBLE_LAG_SQL, {"version": version})
+        rows = cur.fetchall()
+        cur.execute(text_lane.EXTRACTION_LATENCY_SQL)
+        latency = cur.fetchone()
+        cur.execute(_TEXT_EXTRACT_LANE_SQL)
+        beat = cur.fetchone()
+
+    warn_h = thresholds["text_extraction_lag_warn_hours"]
+    fail_h = thresholds["text_extraction_lag_fail_hours"]
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    status = "ok"
+    worst = 0.0
+    waiting_total = 0
+    for source, waiting, oldest_hours, median_hours in rows:
+        oldest = float(oldest_hours or 0.0)
+        waiting_total += int(waiting)
+        per_source[source] = {
+            "waiting": int(waiting),
+            "oldest_hours": round(oldest, 2),
+            "median_hours": round(float(median_hours or 0.0), 2),
+        }
+        worst = max(worst, oldest)
+        if oldest >= fail_h:
+            status = "fail"
+            offenders.append(f"{source} {oldest:.1f}h ({waiting} waiting)")
+        elif oldest >= warn_h:
+            if status != "fail":
+                status = "warn"
+            offenders.append(f"{source} {oldest:.1f}h ({waiting} waiting)")
+
+    # The wedge arm, and the one the thresholds cannot see: rows ARE eligible and the lane
+    # is claiming none of them. Either it never registered (the estimation lane's fate —
+    # absent from the heartbeat entirely, therefore invisible to every other monitor) or
+    # it is running and selecting nothing, which is the 2026-07 outage exactly.
+    lane = beat[0] if beat else None
+    lane_last = (lane or {}).get("last") or {}
+    claimed = int(lane_last.get("claimed") or 0)
+    wedged = waiting_total > 0 and (lane is None or claimed == 0)
+    if wedged:
+        status = "fail"
+        offenders.append(
+            f"{waiting_total} eligible and the lane claimed "
+            + ("nothing — it is not in the heartbeat at all" if lane is None
+               else f"{claimed} on its last pass")
+        )
+
+    p99 = float(latency[1]) if latency and latency[1] is not None else None
+    if offenders:
+        message = (
+            "Prose facts are not being extracted: " + "; ".join(offenders)
+            + " — check the realtime worker's text_extract lane and OPENAI_API_KEY on "
+            "that Railway service."
+        )
+    else:
+        message = (
+            f"Text extraction healthy (oldest unread advert {worst:.1f}h across "
+            f"{len(per_source)} portal(s), {waiting_total} waiting"
+            + (f", p99 {p99:.1f} min from first_seen_at against a "
+               f"{text_lane.SLO_MINUTES} min SLO" if p99 is not None else "")
+            + ")."
+        )
+    return {
+        "check_key": "text_extraction_lag",
+        "status": status,
+        "value": round(worst, 2),
+        "details": {
+            "per_source": per_source,
+            "offenders": offenders,
+            "waiting_total": waiting_total,
+            "model": model,
+            "extractor_version": version,
+            "scope": {k: list(v) for k, v in scope.items()},
+            "writable": {p: list(attribute_contract.writable_cells(p)) for p in scope},
+            "lane_last": lane_last or None,
+            "beat_age_minutes": round(float(beat[1]), 1) if beat and beat[1] else None,
+            # Reported, never a threshold of its own — the lag arms above are what ring.
+            "p99_minutes_from_first_seen": round(p99, 1) if p99 is not None else None,
+            "slo_minutes": text_lane.SLO_MINUTES,
+            "extractions_24h": int(latency[0]) if latency else 0,
+        },
+        "message": message,
+    }
+
+
 # The one comparison the platform makes against EXTERNAL truth: what the portal
 # says it has vs what the walk collected. It was already being recorded per
 # category in scrape_runs.by_category and read by nothing that can raise an alarm.
@@ -3296,6 +3429,12 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # the cheap ones rather than spending their budget. 6h lane + in-app bell; not in
     # llm_health.yml's hourly --only list (ship, soak, promote — the ppm2 ladder).
     ("field_fill_matrix", check_field_fill_matrix),
+    # `acquisition_lag`'s twin one layer later — "did the row arrive" vs "was its prose
+    # ever read" — but registered HERE rather than beside it: the eligibility predicate as
+    # an aggregate over the whole eligible stock measured 9.4-10.0 s on 2026-09-22, which
+    # is field_fill_matrix's class, not acquisition_lag's indexed one. 6h lane + in-app
+    # bell; not in llm_health.yml's hourly --only list (ship, soak, promote).
+    ("text_extraction_lag", check_text_extraction_lag),
     # The last DB check, and the most expensive one in the lane (11-35 s measured): a
     # cross-portal self-join over every active byt row. It asks the question no fill or
     # validity measure can — whether a populated, plausible integer is on the RIGHT SCALE.

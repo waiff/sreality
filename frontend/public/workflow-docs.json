@@ -5054,6 +5054,85 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/test.yml"
     },
     {
+      "filename": "text_extraction_bakeoff.yml",
+      "name": "Field capture: text-extraction bake-off",
+      "description": "Decides which model may write a prose-only fact, and at what price (field-capture W7, ruling R10). MANUAL DISPATCH ONLY — it spends money and nothing in the lane calls it.",
+      "portal": null,
+      "manual": true,
+      "schedules": [],
+      "onPush": false,
+      "onPullRequest": false,
+      "paths": null,
+      "inputs": [
+        {
+          "name": "models",
+          "description": "Comma-separated arms. 'oss:<hf id>' rents a pod; anything else is an API model (gpt-5.6-luna, gpt-5-mini).",
+          "required": false,
+          "type": "string",
+          "default": "gpt-5.6-luna",
+          "options": null
+        },
+        {
+          "name": "per_source",
+          "description": "Panel rows per structured portal (idnes + sreality), so 500 gives the n >= 1,000 the gate wants.",
+          "required": false,
+          "type": "string",
+          "default": "500",
+          "options": null
+        },
+        {
+          "name": "bazos",
+          "description": "Bazos rows, scored only where a cross-portal sibling exists. The in-domain read, and a small one.",
+          "required": false,
+          "type": "string",
+          "default": "300",
+          "options": null
+        },
+        {
+          "name": "oss_cloud",
+          "description": "RunPod cloud for an oss: arm. The default open candidates need an 80 GB card, which is SECURE.",
+          "required": false,
+          "type": "choice",
+          "default": "SECURE",
+          "options": [
+            "SECURE",
+            "COMMUNITY"
+          ]
+        },
+        {
+          "name": "oss_max_price",
+          "description": "Ceiling, USD/hr, for an oss: arm's GPU.",
+          "required": false,
+          "type": "string",
+          "default": "2.50",
+          "options": null
+        },
+        {
+          "name": "panel_only",
+          "description": "Build the panel, make no LLM call, spend nothing.",
+          "required": false,
+          "type": "choice",
+          "default": "true",
+          "options": [
+            "true",
+            "false"
+          ]
+        }
+      ],
+      "secrets": [
+        "HF_TOKEN",
+        "OPENAI_API_KEY",
+        "RUNPOD_API_KEY",
+        "SUPABASE_DB_URL"
+      ],
+      "concurrencyGroup": "text-extraction-bakeoff",
+      "cancelInProgress": false,
+      "timeoutMinutes": 240,
+      "permissions": "contents: read",
+      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/text_extraction_bakeoff.yml",
+      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/text_extraction_bakeoff.yml"
+    },
+    {
       "filename": "verify_outbound_urls.yml",
       "name": "Monitoring: portal URL conformance",
       "description": "Weekly live check that the stored portal URLs still resolve (W3 of the portal-URL contract, docs/design/portal-listing-url.md). Samples ACTIVE rows — a rotating quarter of sreality's sub-category codebook chosen by the ISO week (three rows per code) plus one row per crawler portal — and sends ~44 HEAD requests at <= 2/s. Status-code HEAD only: never follows a redirect, never reads a body, never authenticates. Writes one `outbound_url_conformance` row into pipeline_check_results and rings the in-app bell through the shared transition alerts. Thresholds by CONCENTRATION: a whole (category, sub-code) cell failing together is a slug defect; a scattered 404 is a delisting the presence check has not reached. Its own lane, deliberately outside verify_pipeline's DB-only budget.",
