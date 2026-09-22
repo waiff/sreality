@@ -124,6 +124,9 @@ def test_the_word_wins_over_the_keys_convention():
     # A value that spells the storey out is the portal speaking about THAT advert.
     assert floor_from_portal("ground1", "přízemí") == 0
     assert floor_from_portal("ground0", "přízemí") == 0
+    # 'zvýšené přízemí' is still the ground storey — the reading sreality's own
+    # 4,597 floor=0 rows carry, and the reason those rows must not be decremented.
+    assert floor_from_portal("ground1", "zvýšené přízemí") == 0
     assert floor_from_portal("ground1", "suterén") == -1
     assert floor_from_portal("word", "2. patro (3. NP)") == 2
     assert floor_from_portal("word", "-1. patro, suterén (1. PP)") == -1
