@@ -1,6 +1,6 @@
 {
-  "bezrealitky::has_balcony": {"price_unit": "celkem", "terrace": true},
-  "bezrealitky::has_parking": {"garage": true, "has_parking": true, "price_unit": "celkem"},
+  "bezrealitky::has_balcony": {"price_unit": "za nemovitost", "terrace": true},
+  "bezrealitky::has_parking": {"garage": true, "has_parking": true, "price_unit": "za nemovitost"},
   "ceskereality::building_type": {"area_basis": "unknown", "area_m2": 75.0, "building_type": "cihla", "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "price_unit": "za nemovitost"},
   "ceskereality::condition": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "condition": "velmi_dobry", "disposition": "3+kk", "price_unit": "za nemovitost"},
   "ceskereality::disposition": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "price_unit": "za nemovitost"},
@@ -31,5 +31,5 @@
   "sreality::has_balcony": {"disposition": "3+kk", "has_balcony": false, "terrace": true},
   "sreality::has_parking": {"disposition": "3+kk", "garage": true, "has_parking": true},
   "sreality::price_czk": {"disposition": "3+kk", "price_czk": 111},
-  "sreality::price_unit": {"disposition": "3+kk", "price_unit": "měsíc"}
+  "sreality::price_unit": {"disposition": "3+kk", "price_unit": "za mesic"}
 }

@@ -82,21 +82,21 @@ def test_price_hidden_is_none(sample):
     # This fixture is a "price on request" listing (price_czk == 0).
     row = parse_listing(sample)
     assert row["price_czk"] is None
-    assert row["price_unit"] == "celkem"
+    assert row["price_unit"] == "za nemovitost"
 
 
 def test_price_present():
     row = parse_listing(_estate(price_summary_czk=8690000,
                                 price_summary_unit_cb={"name": "za nemovitost", "value": 1}))
     assert row["price_czk"] == 8690000
-    assert row["price_unit"] == "celkem"
+    assert row["price_unit"] == "za nemovitost"
 
 
 def test_price_unit_monthly():
     row = parse_listing(_estate(price_czk=22500,
                                 price_unit_cb={"name": "za měsíc", "value": 4}))
     assert row["price_czk"] == 22500
-    assert row["price_unit"] == "měsíc"
+    assert row["price_unit"] == "za mesic"
 
 
 def test_area(sample):
