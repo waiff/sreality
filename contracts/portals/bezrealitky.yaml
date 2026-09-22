@@ -1,9 +1,37 @@
 # bezrealitky — the GraphQL advert JSON already in `listings.raw_json`; no page body.
 # contract_version 2: the eleven-type vocabulary, one entry per type, `obec_name` live.
 # Reads the advert's typed location fields; the country is the tail of `addressInput`.
+#
+# contract_version 4 — THE RÚIAN RUNG GETS FED (FIELD CAPTURE W9).
+# This portal publishes `ruianId`, the state address register's own kód ADM for the
+# building entrance, and it is the only portal in the fleet that does. `resolver/bind.py`'s
+# R0 rung — base score 100, the highest in the ladder — exists to read exactly that: one
+# lookup in `ruian_address_points` and the listing IS an exact address point, no name
+# matching, no house-number arithmetic, no trigram. The rung has never fired from a
+# contract. `bzr.det.ruian_id` was declared at version 1 and W1-c dropped it as collateral
+# when the vocabulary slimmed to eleven types (see `contracts.CLAIM_TYPES`), so since then
+# the single `address_point_id` claim in the whole corpus has been one operator correction.
+#
+# MEASURED 2026-09-21 (re-confirmed 2026-09-22 — the drift is ordinary churn): 2,836 of
+# 5,716 active bezrealitky rows carry a non-empty `ruianId`; 99.7 % of them join a LIVE
+# `ruian_address_points` row (2,819 of 2,827 on the 09-22 re-count), and on the rows that
+# resolve below address-point precision today the joined point's obec agrees with the obec
+# the resolver already reached on 742 of 745. 732 rows sit below address point right now
+# (390 street, 216 cast_obce_or_quarter, 86 obec, 40 street_segment) and the rung lifts
+# every one of them to an exact point. The other ~2,100 already reach a point the long way
+# round, through street + house number; R0 will reach the same point in one step.
+#
+# WHY THIS BUMP CANNOT BLACK THE PORTAL OUT. Version 4 declares every version-3 entry
+# byte-for-byte and adds one. The resolver's version rail is per CLAIM TYPE (resolver
+# v5.3, W18-b): each type reads the newest contract version `<= active` that carries a
+# claim OF THAT TYPE, so the eight existing types keep serving their version-3 claims until
+# the re-mine reaches them, and `address_point_id` — which has no claim at any version —
+# simply contributes nothing until it is mined. No type is dropped, so nothing stops being
+# evidence. The re-mine is the PAYLOAD half of the claim lane and is change-driven, so the
+# corpus-wide fill needs one dispatched `--mode full --source bezrealitky` walk.
 
 portal: bezrealitky
-contract_version: 3
+contract_version: 4
 
 persistence:
   # What this portal's body carries that changes without the listing changing —
@@ -111,3 +139,24 @@ extractions:
     transform: ["address_part_country"]
     prior: {granularity: country}
     notes: "`addressInput` ends in the country ('…, 194 00, Česko'); any other tail claims nothing."
+
+  # APPENDED, never inserted: `contract_entry_id` is assigned by file position and
+  # 02 §2.1.8 forbids reordering, so a new act goes on the end even though version 1 wrote
+  # this one second. The id is the one version 1 used — ids are permanent and are never
+  # reused for a DIFFERENT act, and this is the same act.
+  - id: bzr.det.ruian_id
+    locator_kind: graphql
+    extraction_method: portal_structured_field
+    page_kind: detail
+    locator: {reader: scalar, json_pointer: /ruianId}
+    claim_type: address_point_id
+    prior: {granularity: address_point, position_source: registry_point}
+    notes: >
+      The state register's own kód ADM for the building entrance, published BARE — no
+      namespace and no transform, because R0 reads it as an integer key into
+      `ruian_address_points` (`bind._as_int`) and a decorated value would simply not
+      parse. `scalar` is therefore the reader and not `namespaced_id`, whose whole point
+      is to keep a PORTAL id from ever being queried across portals; this is not a portal
+      id, it is the national register's. The prior states what the claim implies rather
+      than assigning it — R0 takes the granularity, the street, the obec and the position
+      from the register row it looks up, never from this line.

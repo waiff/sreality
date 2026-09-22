@@ -1066,6 +1066,27 @@ component is slimmed twice — each wave rewrites one component and slims its st
   the evidence they always had. The re-mine of the bazos bodies runs in parallel and is no longer
   load-bearing for correctness — it only upgrades those types to version 7.
 
+- **bezrealitky@4 — the vocabulary re-admits `address_point_id`, and R0 finally has a feeder**
+  (shipped from the FIELD CAPTURE program's W9 sweep, not a location-data wave): `bezrealitky` is
+  the only portal publishing `ruianId`, the register's own kód ADM, and `resolver/bind.py`'s R0 rung
+  — base score 100, the top of the ladder — was written to read it. It never has: W1-c slimmed
+  `contracts.CLAIM_TYPES` to eleven and took `address_point_id` with bezrealitky@1's entry, as
+  collateral rather than on the cut's own test ("a type no resolver reads"). `contracts.CLAIM_TYPES`
+  is **twelve** now, with that reasoning written beside it; `operator_corrections.py` had accepted
+  the type throughout, and the single `address_point_id` claim in the corpus is one such correction.
+  **bezrealitky@3 → @4**, one appended entry (`bzr.det.ruian_id`, the id version 1 used — `scalar`
+  on `/ruianId`, bare, no transform, appended because file position assigns `contract_entry_id`),
+  eight entries byte-for-byte unchanged, lockfile + the `bezrealitky@4.json` golden regenerated,
+  **no migration** (`location_value_norm` is claim-type-agnostic and the enum label has existed all
+  along). Measured 2026-09-21, re-confirmed 09-22: 2,836/5,716 active rows carry the id, 99.7 % of
+  them join a LIVE `ruian_address_points` row, and **732 resolve below `address_point` today** (390
+  street, 216 cast_obce_or_quarter, 86 obec, 40 street_segment) — every one lifts to an exact point.
+  W18-b is what makes the bump safe: @4 declares every @3 type plus one, so the per-type rail keeps
+  each existing type on its @3 claims until re-mined and the new type contributes nothing until it
+  is mined. **The fill is NOT automatic** — the bodies-half hash gate re-arms PAGE entries only and
+  bezrealitky has none, so its payload claims re-mine on content change; the corpus-wide fill needs
+  one dispatched `location_claims_intake.yml` at `mode=full`, `source=bezrealitky`.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a

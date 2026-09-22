@@ -101,17 +101,31 @@ EXTRACTION_METHODS = frozenset({
     "url_slug_parse", "breadcrumb_parse", "jsonld_parse", "map_widget_parse", "regex_text",
     "llm_text", "registry_derived", "operator_manual",
 })
-# ELEVEN, and that is the whole vocabulary a contract may claim (rule 25 / W1-c R1).
-# Ten after W2: `precision_declaration` folds onto the pin claim when the resolver is
-# rewritten. The other 29 enum labels are not "declared ahead for a later wave" — they were
+# TWELVE, and that is the whole vocabulary a contract may claim (rule 25 / W1-c R1).
+# Eleven after W2: `precision_declaration` folds onto the pin claim when the resolver is
+# rewritten. The other 28 enum labels are not "declared ahead for a later wave" — they were
 # entries nothing resolved, which is the state this wave exists to end. The ones with a
 # live reader but no resolver (`uncertainty_geometry`, `map_zoom`, `blur_hint`,
 # `obec_code`, `portal_admin_id`, `postal_town`, …) go with them; a portal fact worth
-# claiming re-enters through one of the eleven.
+# claiming re-enters through one of the twelve.
+#
+# `address_point_id` IS that re-entry, and it is the criterion's own case (FIELD CAPTURE
+# W9). W1-c cut it as collateral rather than on the test the cut was made by: bezrealitky@1
+# was the type's only carrier, so slimming that contract to one entry per type took the
+# type with it — and every other name in the cut list was a type no resolver read. This one
+# is not. `resolver/bind.py`'s R0 rung reads `address_point_id` and scores it 100, the
+# highest base in the ladder: a portal-supplied RÚIAN kód ADM IS an exact address point and
+# needs no binding at all. So the resolver's top rung has had no contract able to feed it,
+# and the single claim of this type in the whole corpus is an OPERATOR correction
+# (`operator_corrections.py` has accepted the type throughout — this loader is the only
+# place it was ever refused). Measured 2026-09-21: 2,836 of 5,716 active bezrealitky rows
+# publish a `ruianId`, and 732 of them resolve BELOW address-point precision. A re-entry,
+# not a widening — the rail is still "a type the resolver reads".
 CLAIM_TYPES = frozenset({
     "coordinate", "precision_declaration", "country",
     "kraj_name", "okres_name", "obec_name", "cast_obce_name",
     "street_name", "house_number_cp", "house_number_co", "psc",
+    "address_point_id",
 })
 # The one type every contract must claim, with a reader. "Every active Czech listing has a
 # town" is rule 25's invariant and `location_town_coverage` is red until it holds, so a
