@@ -5074,10 +5074,10 @@
         },
         {
           "name": "per_source",
-          "description": "Panel rows per structured portal (idnes + sreality), so 500 gives the n >= 1,000 the gate wants.",
+          "description": "Panel rows per structured portal (idnes + sreality). Stratified per category, so a thin category (idnes pozemek, 7 rows) leaves the realised n under this; 600 measured 1,207 structured rows.",
           "required": false,
           "type": "string",
-          "default": "500",
+          "default": "600",
           "options": null
         },
         {

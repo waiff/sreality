@@ -2280,6 +2280,10 @@ def check_acquisition_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
 # selects nothing, so this check reads the lane's OWN eligibility predicate
 # (`description_extraction.ELIGIBLE_LAG_SQL`, built from `_eligible_where`) and never
 # re-spells it: a re-spelling would recreate exactly the blindness it exists to end.
+# How stale the oldest eligible row must be before "the lane claimed 0 last pass" is read
+# as a wedge rather than as a quiet minute: 12 of the lane's own 5-minute intervals.
+_TEXT_EXTRACT_WEDGE_HOURS = 1.0
+
 _TEXT_EXTRACT_LANE_SQL = """
 select details -> 'text_extract' as lane,
        extract(epoch from (now() - beat_at)) / 60.0 as beat_age_minutes
@@ -2301,8 +2305,12 @@ def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str
             "details": {"scope": {k: list(v) for k, v in scope.items()},
                         "model": model},
             "message": (
-                "The text lane has nothing declared to it"
-                + ("" if scope else " (no contract cell is producer=text with a gate)")
+                "The text lane has nothing open to it"
+                + ("" if scope else
+                   " (every contract gate is closed — "
+                   f"{sum(len(v) for v in attribute_contract.gated_cells().values())} "
+                   "field(s) await the W7 bake-off, and until one opens the lane extracts "
+                   "nothing and spends nothing)")
                 + ("" if model else f"; app_settings.{text_lane.MODEL_SETTING} is unset")
                 + " — no listing is eligible and none is waiting."
             ),
@@ -2347,7 +2355,14 @@ def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str
     lane = beat[0] if beat else None
     lane_last = (lane or {}).get("last") or {}
     claimed = int(lane_last.get("claimed") or 0)
-    wedged = waiting_total > 0 and (lane is None or claimed == 0)
+    # `claimed` is the LAST pass only, and bazos arrives in bursts (1,940 rows a day over
+    # ~147 distinct minutes), so a great many healthy 5-minute passes legitimately claim
+    # nothing. Reading that as a wedge would make this a false-red generator — the exact
+    # thing this file's docstring says it is here to replace. The durable form of the same
+    # signal is the OLDEST eligible row: a lane that is claiming will always have taken
+    # everything older than a few of its own intervals.
+    wedged = waiting_total > 0 and (
+        lane is None or (claimed == 0 and worst > _TEXT_EXTRACT_WEDGE_HOURS))
     if wedged:
         status = "fail"
         offenders.append(
@@ -2382,7 +2397,6 @@ def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str
             "model": model,
             "extractor_version": version,
             "scope": {k: list(v) for k, v in scope.items()},
-            "writable": {p: list(attribute_contract.writable_cells(p)) for p in scope},
             "lane_last": lane_last or None,
             "beat_age_minutes": round(float(beat[1]), 1) if beat and beat[1] else None,
             # Reported, never a threshold of its own — the lag arms above are what ring.
@@ -3430,10 +3444,11 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # llm_health.yml's hourly --only list (ship, soak, promote — the ppm2 ladder).
     ("field_fill_matrix", check_field_fill_matrix),
     # `acquisition_lag`'s twin one layer later — "did the row arrive" vs "was its prose
-    # ever read" — but registered HERE rather than beside it: the eligibility predicate as
-    # an aggregate over the whole eligible stock measured 9.4-10.0 s on 2026-09-22, which
-    # is field_fill_matrix's class, not acquisition_lag's indexed one. 6h lane + in-app
-    # bell; not in llm_health.yml's hourly --only list (ship, soak, promote).
+    # ever read" — but registered HERE rather than beside it: once a gate is open the
+    # eligibility predicate as an aggregate over the whole eligible stock measured
+    # 9.4-10.0 s on 2026-09-22, which is field_fill_matrix's class, not acquisition_lag's
+    # indexed one. (With every gate closed it returns before it queries at all.) 6h lane +
+    # in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).
     ("text_extraction_lag", check_text_extraction_lag),
     # The last DB check, and the most expensive one in the lane (11-35 s measured): a
     # cross-portal self-join over every active byt row. It asks the question no fill or

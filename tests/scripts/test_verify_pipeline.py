@@ -2805,3 +2805,104 @@ def test_floor_convention_runs_under_the_per_check_statement_timeout() -> None:
     conn = _FloorConn(_live_floor_rows())
     check_floor_convention(conn, T)
     assert any("statement_timeout" in s for s in conn.executed)
+
+
+# --- text_extraction_lag (field-capture W7) --------------------------------
+#
+# The R8 instrument. Its wedge arm is the one that rings when nothing else can —
+# a lane that SELECTS nothing looks healthy to every other check — so it has to
+# be right about what "claiming none" means.
+
+
+class _ScriptedConn:
+    """A conn that answers each statement from a script keyed on a SQL fragment."""
+
+    def __init__(self, answers: dict[str, Any]) -> None:
+        self._answers = answers
+        self._last: Any = None
+
+    def cursor(self) -> "_ScriptedConn":
+        return self
+
+    def __enter__(self) -> "_ScriptedConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._last = next(
+            (v for k, v in self._answers.items() if k in sql), [])
+
+    def fetchall(self) -> list[Any]:
+        return list(self._last)
+
+    def fetchone(self) -> Any:
+        rows = list(self._last)
+        return rows[0] if rows else None
+
+
+def _text_lane_conn(*, waiting: int, oldest_hours: float, claimed: int | None) -> Any:
+    lane = None if claimed is None else {"last": {"claimed": claimed}}
+    return _ScriptedConn({
+        "FROM app_settings": [("gpt-5-mini",)],
+        "GROUP BY l.source": ([("bazos", waiting, oldest_hours, oldest_hours / 2)]
+                              if waiting else []),
+        "percentile_cont(0.99)": [(10, 6.0)],
+        "worker_heartbeats": [(lane, 2.0)],
+    })
+
+
+def _open_one_gate(monkeypatch: Any) -> None:
+    from scraper import attribute_contract
+
+    monkeypatch.setattr(attribute_contract, "extracted_cells",
+                        lambda: {"bazos": ("has_lift",)})
+
+
+def test_text_extraction_lag_does_not_ring_on_one_quiet_pass(
+        monkeypatch: Any) -> None:
+    """bazos arrives in bursts — 1,940 rows a day over ~147 distinct minutes — so a great
+    many healthy 5-minute passes legitimately claim nothing. Reading that as a wedge is
+    the false-red generator this harness exists to replace."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=40, oldest_hours=0.05, claimed=0), T)
+    assert out["status"] == "ok"
+
+
+def test_text_extraction_lag_rings_when_the_oldest_row_outlives_the_lane(
+        monkeypatch: Any) -> None:
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=50205, oldest_hours=9.0, claimed=0), T)
+    assert out["status"] == "fail"
+    assert "claimed" in " ".join(out["details"]["offenders"])
+
+
+def test_text_extraction_lag_rings_when_the_lane_is_not_in_the_heartbeat(
+        monkeypatch: Any) -> None:
+    """The estimation lane's failure: never registered, therefore invisible to every
+    other monitor. That one needs no staleness at all."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=3, oldest_hours=0.01, claimed=None), T)
+    assert out["status"] == "fail"
+    assert "not in the heartbeat" in " ".join(out["details"]["offenders"])
+
+
+def test_text_extraction_lag_reports_a_closed_gate_as_nothing_waiting() -> None:
+    """The shipping state: every gate closed means the lane is out of scope, not late."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=0, oldest_hours=0.0, claimed=0), T)
+    assert out["status"] == "ok"
+    assert out["details"]["scope"] == {}
+    assert "every contract gate is closed" in out["message"]

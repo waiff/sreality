@@ -377,9 +377,10 @@ _SOLD_COMPS_WEDGE_LOGGED = False
 # app_settings row, no env var and no flag — the estimation lane is the cautionary case
 # (its flag was never set, so it has been dark since it shipped and is absent from
 # worker_heartbeats entirely, which makes it invisible to every monitor). This lane's whole
-# scope is `attribute_contract.extracted_cells()`: none declared, one indexed query per
-# interval and nothing else. Five minutes puts a new listing well inside the lane's
-# 20-minute SLO even after a missed pass.
+# scope is `attribute_contract.extracted_cells()` — the cells whose R7 gate the bake-off
+# has OPENED. None open (the shipping state) and the pass returns before it opens a cursor,
+# so the lane is live, visible and free. Five minutes puts a new listing well inside the
+# lane's 20-minute SLO even after a missed pass.
 TEXT_EXTRACT_INTERVAL_SECONDS = 300.0
 # The sold_comps lane's reason, with money on it: a pass abandoned at
 # LANE_PASS_TIMEOUT_SECONDS keeps its eight threads — and their billing — running, and the
@@ -387,7 +388,6 @@ TEXT_EXTRACT_INTERVAL_SECONDS = 300.0
 # to a second set of paid calls.
 _TEXT_EXTRACT_PASS_LOCK = threading.Lock()
 _TEXT_EXTRACT_WEDGE_LOGGED = False
-_TEXT_EXTRACT_PASSES = 0
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -1794,6 +1794,9 @@ def _text_extract_sync() -> dict[str, Any]:
     Lazy import: the module reaches api.llm_client and the provider registry, which no
     other lane on this worker needs on the startup path. No try/except around run_pass —
     a raise is the signal, and _lane_loop records the failed pass.
+
+    While every gate in `attribute_contract` is closed the pass returns before it opens a
+    cursor, so this lane is live, visible in the heartbeat and free from the day it ships.
     """
     global _TEXT_EXTRACT_WEDGE_LOGGED
 
@@ -1808,17 +1811,9 @@ def _text_extract_sync() -> dict[str, Any]:
         return {"claimed": 0, "previous_pass_running": True}
     _TEXT_EXTRACT_WEDGE_LOGGED = False
     try:
-        # The oldest-first backlog arm only every BACKLOG_EVERY_PASSES-th pass: it costs a
-        # measured ~10 s of database once nothing is eligible, because it cannot stop at
-        # its LIMIT, and paying that every five minutes to find nothing is a standing
-        # query, not a drain. The newest-first arm — the one the SLO is about — runs every
-        # pass and stops at its slice.
-        global _TEXT_EXTRACT_PASSES
-        _TEXT_EXTRACT_PASSES += 1
-        backlog = _TEXT_EXTRACT_PASSES % description_extraction.BACKLOG_EVERY_PASSES == 1
         conn = db.connect()
         try:
-            return description_extraction.run_pass(conn, backlog=backlog)
+            return description_extraction.run_pass(conn)
         finally:
             with contextlib.suppress(Exception):
                 conn.close()

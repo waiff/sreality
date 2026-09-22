@@ -82,14 +82,17 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   entirely for a cohort whose basis is mixed rather than sending an unlabelled payload.
 - `enrich_listing_description` — the post-publication text lane (`toolkit/description_extraction.py`),
   rebuilt by field-capture W7 on the **realtime worker** (lane `text_extract`, constant 300 s, no
-  flag / setting / env var). Its scope is the attribute contract's `text` cells carrying a `gate` —
-  today bazos's eight prose-only columns. The cache `listing_description_enrichments` is keyed
-  `(listing_id, text_hash, extractor_version)` (migration 549), `extractor_version` being
-  `'<schema>:<model>'`, so a model swap re-attempts and a price-only snapshot never re-bills.
-  Concurrency + the one pre-call budget guard come from `toolkit.vision_batch.run_batch`; the write
-  is NULL-only (`coalesce`) with the `dirty_properties` enqueue in the same CTE and no snapshot. **A
-  column moves only once its `Cell.gate.passed` is true** (R7, a measured ≥ 95 % panel —
-  `scripts/bakeoff_text_extraction.py`, dispatch-only); until then the lane extracts and CACHES.
+  flag / setting / env var). **A field is in scope only once its `Cell.gate.passed` is true** (R7,
+  a measured ≥ 95 % panel — `scripts/bakeoff_text_extraction.py`, dispatch-only): a closed gate is
+  not extracted, not billed and not written, and every gate ships closed, so the lane is live and
+  free until the bake-off opens one. The declared set is bazos's eight prose-only columns. The
+  cache `listing_description_enrichments` is keyed `(listing_id, text_hash, extractor_version)`
+  (migration 549), `extractor_version` being `'<schema>:<open-gate hash>:<model>'` — a model swap
+  re-attempts, a price-only snapshot never re-bills, and **opening a gate re-opens the corpus**, so
+  open every field that cleared in ONE edit. Concurrency + the one pre-call budget guard come from
+  `toolkit.vision_batch.run_batch`; the write is NULL-only (`coalesce`) with the `dirty_properties`
+  enqueue in the same CTE and no snapshot; a failed call is cached with an attempt count and given
+  up on after 5.
   `false` needs an explicit negation in the evidence quote, every value needs a quote verbatim in
   the description, and `floor` comes back as the advert's own words for `scraper/floor.py` to
   convert. Health: `verify_pipeline`'s `text_extraction_lag`, built from the lane's OWN selector

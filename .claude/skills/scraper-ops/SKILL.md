@@ -391,15 +391,15 @@ Lanes shipped so far:
 - **Text-extract lane** (field-capture W7, `toolkit/description_extraction.run_pass`) — the
   post-publication read of the facts a prose-only advert states in its text and nowhere else. Ships
   **LIVE** on a CONSTANT 300 s interval: no flag, no setting, no env var (the estimation lane above
-  is why — a lane nobody enabled is a lane no monitor can see). Scope = the attribute contract's
-  `text` cells carrying a `gate`, so none declared is one indexed query a tick. 250 newest-first
-  every pass + 750 OLDEST-first HOURLY — the DESC-only order is why the deleted lane's 50k backlog
-  was unreachable, and the ASC arm cannot stop at its LIMIT once nothing is eligible (a measured
-  ~10 s), so it is not a per-pass cost; 8 threads through `toolkit.vision_batch.run_batch`;
-  one in-process pass lock, because an abandoned pass keeps billing. Heartbeat
-  `details.text_extract.last` = `{claimed, extracted, written, by_column, dropped, errors,
-  spent_usd, model, backlog, slice_full}`; needs `OPENAI_API_KEY` on the Railway service; rail =
-  `text_extraction_lag` below. **Contract, cache key and write gate: `llm-pipelines` skill.**
+  is why — a lane nobody enabled is a lane no monitor can see). Scope = the contract's `text` cells
+  whose R7 `gate` has PASSED, so **today it is live and free**: no gate is open and the pass
+  returns before opening a cursor. 250 rows newest-first, ONE arm — an extracted row leaves the
+  predicate, so DESC walks backwards through a backlog (~57k/day vs a 1,940/day bazos inflow). 8
+  threads through `toolkit.vision_batch.run_batch`; one pass lock (an abandoned pass keeps
+  billing); a failed call writes its own cache row and is given up on after 5 attempts. Heartbeat
+  `details.text_extract.last` = `{claimed, extracted, written, by_column, dropped, failed, errors,
+  spent_usd, model}`; needs `OPENAI_API_KEY`; rail below = `text_extraction_lag`. **Contract, cache
+  key, write gate: `llm-pipelines` skill.**
 
 ## Pipeline verification (migration 274)
 

@@ -450,65 +450,102 @@ inside that window is superseded without erroring — over 72 h, 283 succeeded r
 measure, expected ≈ 3 in 4 changes on the maintenance lane's cadence and the rest unchanged; and the wiped-cell
 count on `condition` (today 2,949) stops growing after one refetch cycle.
 
-**W7 — SHIPPED, with five gates that are post-merge or post-bake-off by nature.** `OPENAI_API_KEY` on the
-realtime-worker service is the one PRE-SHIP fact this program cannot verify from a branch (no lane on that worker has
-ever made an LLM call: `estimation_runs.worker` is NULL for all 16 runs in 90 d and the estimation lane is absent from
-the heartbeat entirely). Lane visible in `worker_heartbeats` — asserted offline in
-`tests/scraper/test_realtime_worker.py`, confirmed live after the deploy. Lane and check share ONE predicate,
-asserted as a string containment of `_eligible_where()` in both SQLs. Re-bill closed by the key itself (migration 549).
-Pre-call budget guard binds before spend, proven by source order over `vision_batch.run_batch`.
+**W7 — SHIPPED, and it ships DARK BY GATE.** The lane is live on the worker from the deploy, and it extracts
+nothing, bills nothing and writes nothing until the bake-off opens a field's gate. That is the whole design, and it
+is narrower than the first draft of this section: `OPENAI_API_KEY` on the realtime-worker service is still the one
+PRE-SHIP fact this program cannot verify from a branch (no lane on that worker has ever made an LLM call:
+`estimation_runs.worker` is NULL for all 16 runs in 90 d and the estimation lane is absent from the heartbeat
+entirely), but nothing breaks while it is missing, because nothing calls. Lane visible in `worker_heartbeats` —
+asserted offline in `tests/scraper/test_realtime_worker.py`, confirmed live after the deploy. Lane and check share
+ONE predicate, asserted as a string containment of `_eligible_where()` in both SQLs. Re-bill closed by the key
+itself (migration 549). Pre-call budget guard binds before spend, proven by source order over
+`vision_batch.run_batch`.
 
-**Four gate statements as first written were wrong, and the code wins:**
+**Six gate statements as first written were wrong, and the code wins:**
 
 1. *"Every declared producer=text cell's fill rate rises above 0."* Not in this wave, by design. Every `gate` ships
-   `passed=False`, so the lane extracts and CACHES and writes nothing at all until the bake-off flips one. A fill-rate
-   gate belongs to the field's own gate-flip, not to the lane's merge.
-2. *"`eligible > 0 AND claimed = 0` never persists two passes."* Two passes is not observable: `_record_pass` keeps only
-   the LAST pass per lane and the check runs 6-hourly against a 5-minute lane. It is also not needed — eligibility is
-   durable (a row stays eligible until it is extracted), so there is no transient to ride out. The check rings on ONE
-   pass, and additionally when the lane is missing from the heartbeat at all, which is the estimation lane's failure.
-3. *"The watchdog lookback reads the same constant."* It reads it as a FLOOR term, not as the value:
-   `max(60, timeout_minutes * 2, SLO_MINUTES)`. Today all three evaluate to 60 min, so nothing changes; making the SLO
-   the value would have SHRUNK the re-scan window from 60 to 20 and cost alerts rather than saving them.
-4. *R10's candidate list.* Checked on the Hub 2026-09-22: **Gemma 4 exists** (2026-04-02) but has no 27B — the sizes
+   `passed=False` and a closed gate is OUT OF SCOPE. A fill-rate gate belongs to the field's own gate-flip.
+2. *"Fields not yet passed are extracted and CACHED but not written, so the panel can be scored from the cache."*
+   **Refuted twice over, and the build was changed.** The bake-off harness builds its own panel from `listings` and
+   makes its own calls, so it never reads the cache; and bazos — the only portal in scope — has no structured
+   sibling to grade a cache row against, so nothing could have scored it. Worse, the selector retires a listing the
+   moment a cache row exists at that `extractor_version`, and `passed` was not in the version: the ~$113 the lane
+   would have spent on day one (50,208 eligible bazos rows at a measured $0.00225) could NEVER have become a column
+   value, because every one of those rows would have been out of the selector for ever. So the lane's scope is the
+   OPEN gates only, and the open-gate set is part of `extractor_version`. Two consequences, both stated loudly at
+   the switch: with every gate closed the lane costs nothing at all (no query, no call), and opening a gate re-opens
+   the corpus — open every field the bake-off cleared in ONE edit or pay for the same descriptions twice.
+3. *"`eligible > 0 AND claimed = 0` never persists two passes."* Two passes is not observable: `_record_pass` keeps
+   only the LAST pass per lane and the check runs 6-hourly against a 5-minute lane. It is also not the right test:
+   bazos arrives in bursts (1,940 rows a day over ~147 distinct minutes), so healthy passes legitimately claim
+   nothing and a one-sample `claimed == 0` would be a false-red generator. The durable form of the same signal is
+   the OLDEST eligible row, so the wedge arm rings when rows are eligible AND the last pass claimed none AND the
+   oldest has waited more than an hour (12 lane intervals) — or, unconditionally, when the lane is missing from the
+   heartbeat at all, which is the estimation lane's failure.
+4. *"The watchdog lookback reads the same constant."* It cannot, usefully. Wired as a third `max()` term
+   (`max(60, timeout_minutes * 2, SLO_MINUTES)`) the lane's 20-minute SLO can never be the maximum, so it changed
+   nothing and bought an api -> toolkit -> scraper import at call time; wired as the VALUE it would have shrunk the
+   re-scan window from 60 to 20 and cost alerts rather than saving them. The term and the import are gone and the
+   invariant (60 min must exceed the latest a matching fact can be filled — it clears 20 by 3x) is stated in
+   `api/notifications.py` where the number lives.
+5. *R10's candidate list.* Checked on the Hub 2026-09-22: **Gemma 4 exists** (2026-04-02) but has no 27B — the sizes
    are E2B / E4B / 26B-A4B MoE / 31B dense — and there is **no Qwen3 72B** in that line. The two open candidates are
    `google/gemma-4-26B-A4B-it` (25.2B total, 3.8B active) and `Qwen/Qwen3-VL-32B-Instruct` (33B), both Apache-2.0 and
    **ungated**, so no `HF_TOKEN` and no licence acceptance is needed. Both want an 80 GB A100, i.e. RunPod SECURE at
    ~$1.6-2.2/hr, ABOVE `autodedup/oss_pod`'s $1.00/hr community cap — the workflow defaults to
-   `oss_cloud=SECURE, oss_max_price=2.50`. Both are chosen MULTIMODAL for a reason that has nothing to do with the
-   task: `oss_pod.build_vllm_args` always emits `--limit-mm-per-prompt`, a text-only checkpoint may refuse to bind on
-   it, and R12 forbids this program editing that module. A text-only candidate is an owed hand-over, not a flag here.
+   `oss_cloud=SECURE, oss_max_price=2.50`, reaps the pod in an `if: always()` step (a `finally` does not run on a
+   cancel, and naming the pod in the artefact terminates nothing), and the lane's own provider registry carries
+   `OssProvider` beside `OpenAIProvider` so the one switch can actually name the winner it crowns.
+6. *"Newest-first for inflow plus a bounded backlog slice."* Measured and then deleted. The oldest-first arm was
+   sized on a belief that the deleted lane's 50k backlog was unreachable because it ordered `first_seen_at DESC`;
+   it was unreachable because it keyed on `sreality_id` and selected 223 rows. An extracted row LEAVES the
+   predicate, so the DESC arm walks backwards through the backlog on its own, at 250 rows a pass = ~57k a day
+   against a 1,940-a-day inflow — the 50,208-row bazos stock clears in about a day, not the "under three days at
+   750 rows an hour" this document claimed. The ASC arm was a 9.4-10.0 s bitmap heap scan over 55,252 blocks run
+   every hour to find rows the DESC arm had already taken, and it is gone.
 
-**A fifth correction, found by measuring the plan rather than assuming it.** The selector was designed as ONE
-statement with a newest-first and an oldest-first arm, run every pass. Measured on the live table 2026-09-22: the
-newest-first arm stops at its LIMIT in ~0.4 s whether or not a backlog exists (the eligible rows ARE the newest), but
-the oldest-first arm cannot stop early once nothing is eligible — as an aggregate over all 50,374 eligible bazos rows
-the predicate is a **9.4-10.0 s** bitmap heap scan of 55,252 blocks, warm and cold alike. Paying that every five
-minutes to find nothing is a standing query, not a drain. So they are two statements from one predicate: inflow every
-pass, backlog every twelfth (hourly), 750 rows, which still clears the 50k backlog in under three days — the number
-the wave was sized on. The same measurement is why `text_extraction_lag` is registered beside `field_fill_matrix` in
-`_CHECKS` rather than beside its twin `acquisition_lag`: it is a ten-second check, not an indexed one.
+**A seventh thing the reviews found, and it is rule #5 in a new place.** A failed extraction left no trace, so the
+listing stayed eligible and the same refusal was re-billed on every pass for ever — and `vision_batch` only counts
+cost on the SUCCESS path, so a completion billed and then discarded (a model that stops honouring `tool_choice`, a
+provider 500 after billing) was invisible to the $5-a-pass guard as well. A failure now writes its own cache row,
+with the cost and an attempt counter, and the selector retires it after `GIVE_UP_AFTER = 5`. A FATAL error
+(`vision_batch.is_fatal`) does not count an attempt: that is the provider's state, not the listing's.
 
 **The panel needs no hand labelling** (the operator has ruled against labelling tasks): idnes and sreality state these
 eight fields in a table AND describe the property in prose, so their own table grades what a model reads out of their
 prose. Live 2026-09-22 over active rows: idnes 111,447 (condition 73,001 / building_type 82,872 / energy 84,081 /
-lift 16,533 / floor 35,012) and sreality 103,841 (condition 75,436 / lift 30,776 / floor 40,900), so n ≥ 1,000
-stratified by category is not close to binding. sreality's floor label is `floor - 1` and only for `floor >= 1` (A9;
-that portal writes both 0 and 1 for the ground storey). The bazos slice is 762 sibling pairs on unique
-`(price_czk, area_m2, disposition)` — the only in-domain read there is, and small.
+lift 16,533 / floor 35,012) and sreality 103,841 (condition 75,436 / lift 30,776 / floor 40,900), so n ≥ 1,000 is
+not close to binding. The draw is stratified **in SQL** — a per-category quota (`limit / distinct categories`,
+newest-first inside each), not the newest N sorted afterwards, which is not stratification at all and would have
+scored `condition` and `building_type` almost entirely on flat prose before opening their gates for a bazos corpus
+where houses are a large share. A thin category is not redistributed (idnes `pozemek` has 7 rows), so the summary
+reports the REALISED mix; `per_source=600` measured 1,207 structured rows. sreality's floor label is `floor - 1` and
+only for `floor >= 1` (A9; that portal writes both 0 and 1 for the ground storey). The bazos slice is 762 sibling
+pairs on unique `(price_czk, area_m2, disposition)` — the only in-domain read there is, and small. One arm is
+serial at ~11.7 s an advert, so a 1,300-advert panel is ~4.2 h against the workflow's 240-minute cap: one arm per
+dispatch.
 
 **Destructive step (iii), measured 2026-09-22 and smaller in effect than it looks:** 21,459 column values over ~15k
 rows — `floor` 6,340, `has_balcony` false 7,103, `has_lift` false 6,655, `has_parking` false 1,361 — every one of them
 bazos, and all but **sixteen** on INACTIVE rows. An inactive bazos row never refetches, so the clear mostly stops
-delisted history asserting a number nobody measured; "the new lane then refills them" is true of sixteen listings.
-`total_floors` (10,264 rows still holding the old lane's value) is deliberately NOT in the script's default set: its
-accuracy was never measured either way, so blanking it would be a guess in the other direction.
+delisted history asserting a number nobody measured; "the new lane then refills them" is true of sixteen listings,
+and only once their gates are open. `total_floors` (10,264 rows still holding the old lane's value) is deliberately
+NOT in the script's default set: its accuracy was never measured either way, so blanking it would be a guess in the
+other direction.
 
 **One consequence of declaring the six cells, for whoever runs step (iii):** flipping bazos `has_balcony` /
 `has_parking` / `has_lift` / `building_type` / `condition` / `energy_rating` from `none` to `text` takes them out of
-`attribute_contract.known_gaps()`, so `field_fill_matrix` stops treating their near-zero fill as a declared gap. They
-are non-zero today (17-133 rows each), so nothing rings on merge; after step (iii) they collapse toward zero and the
-baseline in `data/field_capture/` must be re-blessed, or the matrix reports a collapse that the operator caused.
+`attribute_contract.known_gaps()`, so `field_fill_matrix` stops treating their near-zero fill as a declared gap.
+Measured 2026-09-22 over active bazos rows they are `has_lift` 13, `has_parking` 17, `has_balcony` 18,
+`building_type` 19, `energy_rating` 28, `condition` 33 — non-zero, so nothing rings on merge, but 13 is one
+step-(iii) batch from an exact zero. Run step (iii) and re-bless the baseline in `data/field_capture/` in the same
+sitting, or the matrix reports a collapse the operator caused.
+
+**Migration 549 must be applied before any gate is opened, and applying it before the merge costs nothing.** With
+every gate closed neither the lane nor `text_extraction_lag` touches `text_hash` — both return before they query —
+so the merge-before-apply window is harmless here, which is NOT the usual case in this repo (migration 438: merged
+≠ applied, 29 h of outage). Re-confirm the number against `origin/main` at apply time: W5 and W8 are building in
+parallel against the same slot.
 
 **W8 — SHIPPED in code; the GATE and the heal are post-merge by nature.** Sibling-pair gate (one SQL, no
 labels), now registered as `verify_pipeline`'s `floor_convention` check — the first floor check of any kind:

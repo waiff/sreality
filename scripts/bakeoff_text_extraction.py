@@ -67,16 +67,37 @@ LABEL_SOURCES: dict[str, int] = {"idnes": 0, "sreality": 1}
 PRECISION_GATE = 0.95
 FLOOR_TOLERANCE = 1
 
+# STRATIFIED BY CATEGORY, in SQL, because drawing the newest N and sorting them afterwards
+# is not stratification: idnes's newest 500 are ~40 % flats and a field measured almost
+# entirely on flat prose would have its gate opened for a bazos corpus where houses are a
+# large share. The quota is `limit / distinct categories`, taken newest-first inside each
+# category; a category with fewer rows than its quota contributes all it has and the
+# shortfall is NOT redistributed, so the realised mix is reported rather than assumed.
 _PANEL_SQL_TEMPLATE = """
-SELECT l.id, l.source, l.category_main, l.description,
-       l.floor, l.total_floors, l.has_balcony, l.has_lift, l.has_parking,
-       l.building_type, l.condition, l.energy_rating
-  FROM listings l
- WHERE l.is_active
-   AND l.source = %(source)s
-   AND l.description IS NOT NULL
-   AND ({stated})
- ORDER BY l.id DESC
+WITH pool AS (
+  SELECT l.id, l.source, l.category_main, l.description,
+         l.floor, l.total_floors, l.has_balcony, l.has_lift, l.has_parking,
+         l.building_type, l.condition, l.energy_rating
+    FROM listings l
+   WHERE l.is_active
+     AND l.source = %(source)s
+     AND l.description IS NOT NULL
+     AND ({stated})
+), quota AS (
+  SELECT greatest(1, ceil(%(limit)s::numeric
+                          / greatest(count(DISTINCT category_main), 1))::int) AS n
+    FROM pool
+), ranked AS (
+  SELECT pool.*,
+         row_number() OVER (PARTITION BY category_main ORDER BY id DESC) AS rn
+    FROM pool
+)
+SELECT ranked.id, ranked.source, ranked.category_main, ranked.description,
+       ranked.floor, ranked.total_floors, ranked.has_balcony, ranked.has_lift,
+       ranked.has_parking, ranked.building_type, ranked.condition, ranked.energy_rating
+  FROM ranked, quota
+ WHERE ranked.rn <= quota.n
+ ORDER BY ranked.category_main, ranked.id DESC
  LIMIT %(limit)s
 """
 
@@ -138,9 +159,6 @@ def build_panel(conn: Any, *, per_source: int, bazos: int) -> list[dict[str, Any
             for row in cur.fetchall():
                 record = dict(zip((*columns, "label_source"), row))
                 rows.append(_panel_row(record, label_source=record["label_source"]))
-    # Stratify by category so one cohort cannot carry the verdict: keep the sources
-    # interleaved per category in id order, which the LIMIT already made newest-first.
-    rows.sort(key=lambda r: (str(r["category_main"]), r["id"]))
     return rows
 
 
@@ -276,8 +294,10 @@ def summarise(report: dict[str, Any]) -> str:
         f"# Text-extraction bake-off — {report['generated_at']}",
         "",
         f"Panel: {report['panel']['n']} adverts "
-        f"({report['panel']['by_source']}), labels are the structured portals' own "
-        "stated fields on the same advert. No hand labelling.",
+        f"({report['panel']['by_source']}), stratified by category "
+        f"({report['panel']['by_category']}) — the REALISED mix, not the quota. Labels "
+        "are the structured portals' own stated fields on the same advert. No hand "
+        "labelling.",
         "",
         f"Gate: precision >= {PRECISION_GATE:.0%} where the model answers "
         f"(floor: within +-{FLOOR_TOLERANCE}).",
@@ -321,8 +341,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS))
-    ap.add_argument("--per-source", type=int, default=500,
-                    help="panel rows per structured portal (2 x 500 = the n >= 1,000)")
+    ap.add_argument("--per-source", type=int, default=600,
+                    help="panel rows per structured portal, stratified per category "
+                         "(600 measured 1,207 structured rows; a thin category is not "
+                         "redistributed, so the realised n is at or under 2 x this)")
     ap.add_argument("--bazos", type=int, default=300)
     ap.add_argument("--out-dir", default="bakeoff")
     ap.add_argument("--oss-cloud", default="COMMUNITY", choices=("COMMUNITY", "SECURE"))
@@ -347,9 +369,12 @@ def main() -> int:
     with db.connect() as conn:
         panel = build_panel(conn, per_source=args.per_source, bazos=args.bazos)
         by_source: dict[str, int] = {}
+        by_category: dict[str, int] = {}
         for row in panel:
             by_source[row["source"]] = by_source.get(row["source"], 0) + 1
-        LOG.info("PANEL n=%d %s", len(panel), by_source)
+            key = str(row["category_main"])
+            by_category[key] = by_category.get(key, 0) + 1
+        LOG.info("PANEL n=%d %s %s", len(panel), by_source, by_category)
         (out_dir / "panel.json").write_text(
             json.dumps(panel, ensure_ascii=False, default=str), encoding="utf-8")
         if args.panel_only:
@@ -369,7 +394,8 @@ def main() -> int:
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "gate": PRECISION_GATE,
         "floor_tolerance": FLOOR_TOLERANCE,
-        "panel": {"n": len(panel), "by_source": by_source},
+        "panel": {"n": len(panel), "by_source": by_source,
+                  "by_category": by_category},
         "arms": arms,
     }
     (out_dir / "bakeoff.json").write_text(

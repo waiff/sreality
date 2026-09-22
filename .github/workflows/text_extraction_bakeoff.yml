@@ -18,12 +18,18 @@ name: "Field capture: text-extraction bake-off"
 # 1,300-advert panel is roughly $3 per OpenAI arm. An `oss:` arm rents a GPU pod instead:
 # the two default open candidates are 26-33B and need an 80 GB A100, which is SECURE
 # cloud at ~$1.6-2.2/hr, so pass oss_cloud=SECURE and oss_max_price=2.50 or the launch
-# refuses. The pod is torn down in a `finally` AND named in `pod.json` in the artefact
-# before the long wait, because a cancelled job runs no `finally`.
+# refuses. The pod is torn down in a `finally`, named in `pod.json` in the artefact before
+# the long wait, AND reaped by an `if: always()` step, because a cancelled job runs no
+# `finally` and a receipt nobody acts on terminates nothing (autodedup.yml's precedent).
+# An arm is serial, ~11.7 s an advert, so a 1,300-advert panel is ~4.2 h: run ONE arm per
+# dispatch, or shrink the panel, against the 240-minute cap.
 #
-# THE WINNER IS NOT SET HERE. The operator reads the summary and sets
-# `app_settings.enrichment_model`, which is the lane's one switch; then they flip the
-# per-field `gate` in `scraper/attribute_contract.py` for each field that cleared 95 %.
+# THE WINNER IS NOT SET HERE, AND NEITHER IS THE SCOPE. Two separate operator acts, in
+# either order, and the lane does nothing until BOTH have happened: set
+# `app_settings.enrichment_model` (the lane's one switch), and flip the per-field `gate`
+# in `scraper/attribute_contract.py` for each field that cleared 95 %. Flip EVERY field
+# that cleared in ONE edit: the open-gate set is part of the cache key, so adding a field
+# later re-reads every description the lane has already paid for.
 #
 # Required secrets: SUPABASE_DB_URL, OPENAI_API_KEY (both already in use by other lanes);
 # RUNPOD_API_KEY and HF_TOKEN only for an `oss:` arm (both already exist — autodedup.yml,
@@ -40,9 +46,9 @@ on:
         default: "gpt-5.6-luna"
         type: string
       per_source:
-        description: "Panel rows per structured portal (idnes + sreality), so 500 gives the n >= 1,000 the gate wants."
+        description: "Panel rows per structured portal (idnes + sreality). Stratified per category, so a thin category (idnes pozemek, 7 rows) leaves the realised n under this; 600 measured 1,207 structured rows."
         required: false
-        default: "500"
+        default: "600"
         type: string
       bazos:
         description: "Bazos rows, scored only where a cross-portal sibling exists. The in-domain read, and a small one."
@@ -113,6 +119,11 @@ jobs:
                 --out-dir bakeoff)
           if [ "${PANEL_ONLY}" = "true" ]; then ARGS+=(--panel-only); fi
           python -m scripts.bakeoff_text_extraction "${ARGS[@]}" | tee bakeoff-summary.md
+      # Naming the pod in the artefact is not terminating it: a cancelled or timed-out job
+      # runs no `finally`, and an 80 GB A100 keeps billing until something DELETEs it.
+      - name: Reap the pod
+        if: always()
+        run: python -m autodedup.oss_pod --reap bakeoff/pod.json
       - name: Summary
         if: always()
         run: |

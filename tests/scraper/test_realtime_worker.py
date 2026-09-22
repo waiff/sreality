@@ -1966,22 +1966,14 @@ def test_an_abandoned_text_extract_pass_is_never_overlapped(
         rw._TEXT_EXTRACT_PASS_LOCK.release()
 
 
-def test_text_extract_runs_the_expensive_backlog_arm_only_periodically(
+def test_text_extract_is_free_while_every_gate_is_closed(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """Oldest-first cannot stop at its LIMIT once nothing is eligible and costs a measured
-    ~10 s of database; every five minutes that is a standing query, not a drain."""
+    """The lane ships LIVE and costs nothing: the contract decides its scope, and with no
+    gate open `run_pass` returns before it opens a cursor."""
+    from scraper import attribute_contract
     from toolkit import description_extraction
 
     monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
-    monkeypatch.setattr(rw, "_TEXT_EXTRACT_PASSES", 0)
-    seen: list[bool] = []
-    monkeypatch.setattr(
-        description_extraction, "run_pass",
-        lambda c, backlog=False: seen.append(backlog) or {"claimed": 0})
-
-    for _ in range(description_extraction.BACKLOG_EVERY_PASSES + 1):
-        rw._text_extract_sync()
-
-    assert seen[0] is True
-    assert not any(seen[1:description_extraction.BACKLOG_EVERY_PASSES])
-    assert seen[description_extraction.BACKLOG_EVERY_PASSES] is True
+    assert attribute_contract.extracted_cells() == {}
+    assert rw._text_extract_sync() == {"claimed": 0, "reason": "no_open_gate"}
+    assert not hasattr(description_extraction, "BACKLOG_EVERY_PASSES")

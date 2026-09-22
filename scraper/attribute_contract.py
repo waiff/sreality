@@ -39,12 +39,14 @@ rather than carrying a second flag of its own.
 W7 adds a fifth axis: `gate`. A `text` cell with NO gate is the ingest grammar's alone
 (bazos `area_m2` / `disposition`: `scraper.area` and `scraper.vocabulary` already read that
 prose at parse time and R3's panel condition for taking them off it is not met). A `text`
-cell WITH a gate is one the post-publication lane ALSO extracts, and `gate.passed` decides
-whether the lane may WRITE it — R7 wants a measured ≥ 95 % precision per field before a
-column moves, and the measurement belongs here, as the number and the date beside the
-verdict, not as an `app_settings` flag nobody reads next to the cell it governs. A gate
-that has NOT passed still extracts and caches, which is the only way the panel can be
-scored on the one portal with no structured sibling to score against.
+cell whose gate has PASSED is one the post-publication lane extracts AND writes — R7 wants
+a measured ≥ 95 % precision per field before a column moves, and the measurement belongs
+here, as the number and the date beside the verdict, not as an `app_settings` flag nobody
+reads next to the cell it governs. A gate that has NOT passed is simply outside the lane's
+scope: the field is not asked for, not paid for and not written. That is the whole switch,
+and it is why opening a gate re-opens the corpus (`description_extraction.extractor_version`
+carries the open-gate set, so a cached answer for a narrower set is not a hit) — open every
+field the bake-off cleared in ONE edit, not one per deploy.
 """
 
 from __future__ import annotations
@@ -63,9 +65,10 @@ Absence = Literal["false", "unknown"]
 class Gate:
     """R7's per-field write permission, carried as the measurement that granted it.
 
-    `passed=False` is the shipping state of every gate: the lane extracts and caches the
-    field and writes nothing. The bake-off fills in `precision` / `measured_on` / `panel_n`
-    and flips `passed` — one edit, in the row the column is declared on."""
+    `passed=False` is the shipping state of every gate, and it means the lane does not
+    touch the field AT ALL: not asked for, not billed, not written. The bake-off fills in
+    `precision` / `measured_on` / `panel_n` and flips `passed` — one edit, in the row the
+    column is declared on, and ideally one edit for every field that cleared at once."""
 
     passed: bool = False
     precision: float | None = None
@@ -95,8 +98,8 @@ def _cell(producer: Producer, *keys: str, absence: Absence = "unknown",
                 gate)
 
 
-# Every W7 gate ships closed. Spelled once so "no field is written yet" is one fact in one
-# place, and so flipping one is visibly a per-field edit, never a sweep.
+# Every W7 gate ships closed. Spelled once so "no field is extracted yet" is one fact in
+# one place, and so flipping one is visibly a per-field edit, never a sweep.
 _UNGATED = Gate(passed=False, note="awaiting the W7 bake-off panel (R7: >= 95 %)")
 
 
@@ -722,30 +725,40 @@ def source_values(portal: str, field: str, params: Mapping[str, Any]) -> tuple[A
 
 
 def extracted_cells() -> dict[str, tuple[str, ...]]:
-    """`portal -> the fields the post-publication text lane extracts`, gate or no gate.
+    """`portal -> the fields the post-publication text lane extracts AND may write`.
+
+    ONE set, not two. An earlier draft had the lane extract every gated cell and write only
+    the passed ones, so that a closed gate still filled the cache; that cache could never
+    become a column, because the selector retires a listing the moment a cache row exists
+    and opening a gate changes neither the text nor the model. Extract exactly what may be
+    written and the question does not arise: a closed gate costs nothing, and the money is
+    spent the first time the value it buys can land.
 
     The lane's ONLY scope declaration (R10, and the reason it needs no flag): a portal with
-    no gated `text` cell never appears in the selector, so the lane does one indexed query
-    per interval and stops. Sorted so the generated tool schema and the selector SQL are
-    byte-stable across processes."""
+    no OPEN gate never appears in the selector, so the lane does not even query. Sorted so
+    the generated tool schema and the selector SQL are byte-stable across processes."""
     return {
-        portal: tuple(sorted(
+        portal: fields
+        for portal, cells in CONTRACT.items()
+        if (fields := tuple(sorted(
             field for field, declared in cells.items()
             if declared.producer == "text" and declared.gate is not None
-        ))
-        for portal, cells in CONTRACT.items()
-        if any(c.producer == "text" and c.gate is not None for c in cells.values())
+            and declared.gate.passed
+        )))
     }
 
 
-def writable_cells(portal: str) -> tuple[str, ...]:
-    """The subset of `extracted_cells(portal)` whose gate has PASSED — the only columns
-    the lane may write (R7). Everything else is extracted, cached and left in the cache."""
-    return tuple(sorted(
-        field for field, declared in CONTRACT.get(portal, {}).items()
-        if declared.producer == "text" and declared.gate is not None
-        and declared.gate.passed
-    ))
+def gated_cells() -> dict[str, tuple[str, ...]]:
+    """`portal -> every `text` cell carrying a gate, open or closed`. The bake-off's field
+    list and the honest answer to "what is this lane for"; never the lane's own scope."""
+    return {
+        portal: fields
+        for portal, cells in CONTRACT.items()
+        if (fields := tuple(sorted(
+            field for field, declared in cells.items()
+            if declared.producer == "text" and declared.gate is not None
+        )))
+    }
 
 
 def known_gaps() -> dict[str, str | None]:

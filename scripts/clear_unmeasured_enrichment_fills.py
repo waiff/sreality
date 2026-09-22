@@ -28,7 +28,8 @@ MEASURED BEFORE (2026-09-22), all bazos, and this is the honest shape of it: flo
 (6,651 inactive), has_parking-false 1,361 (all inactive) — 21,459 values over ~15k rows,
 of which SIXTEEN are on an active listing. An inactive bazos row never refetches, so what
 this mostly does is stop delisted history asserting a number nobody measured; the new lane
-refills the sixteen and everything that arrives after it.
+refills the sixteen and everything that arrives after it — but only once the bake-off has
+opened those fields' gates, because a closed gate is outside the lane's scope entirely.
 """
 
 from __future__ import annotations

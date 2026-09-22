@@ -16,9 +16,14 @@ What the deleted lane got wrong, and what this one does instead:
   * Its cache was keyed `(sreality_id, snapshot_id, model)`, so a price-only snapshot
     re-billed the same text (~$65 of ~$207) and a missed extraction was permanent. The key
     is now `(listing_id, text_hash, extractor_version)` — the text, not the snapshot (R6).
-    `extractor_version` carries the MODEL, because the model is what a cached answer is an
-    answer from: migration 249 learned that with `model` in the old key and the lesson does
-    not change when the rest of the key does.
+    `extractor_version` carries the MODEL and the OPEN-GATE SET, because those are what a
+    cached answer is an answer from: migration 249 learned the model half, and the gate
+    half is what stops a cached answer for a narrower field set retiring a listing that a
+    newly-opened gate now has a column for.
+  * A failed call left no trace, so the same listing was re-selected and re-billed on the
+    next pass and every pass after it. A failure now writes the cache row too, with an
+    attempt counter, and is given up on after GIVE_UP_AFTER — rule #5's shape, in the table
+    that already exists rather than a second one.
   * It wrote with a bare `UPDATE listings`, appending no snapshot and marking no property.
     The write here is one statement whose UPDATE and `dirty_properties` enqueue are the
     same CTE (rule 20), sets every column through `coalesce(l.c, …)` so it can only ever
@@ -33,12 +38,22 @@ What the deleted lane got wrong, and what this one does instead:
   * It converted floors itself, at ~73 % and across two conventions. The model returns the
     advert's OWN words ('3. patro', '1. NP', 'přízemí') and `scraper.floor` converts them.
 
-Nothing is written until R7's gate passes. `attribute_contract.Cell.gate` carries the
-per-field verdict with the precision that granted it; until a gate flips, the lane extracts
-and CACHES, which is what lets the bake-off panel be scored on the portal that has no
-structured sibling. The lane has no flag, no `app_settings` key of its own and no env var:
-the contract's gated `text` cells are its entire scope, and zero of them means one indexed
-query per interval and nothing else.
+Nothing is EXTRACTED until R7's gate passes. `attribute_contract.Cell.gate` carries the
+per-field verdict with the precision that granted it, and an open gate is the whole of this
+lane's scope — today that set is EMPTY, so the lane costs one dict comprehension per
+interval and does not even open a cursor. The earlier draft of this wave extracted every
+gated cell and wrote only the passed ones, on the theory that the cache would be scored
+later; it would not have been (the bake-off builds its own panel and makes its own calls,
+and bazos — the only portal in scope — has no structured sibling to grade it against), and
+worse, a cached row retires its listing from the selector, so the ~$113 it would have spent
+on day one could never have become a column value. Extract what may be written, and the
+first money the lane spends is money that lands somewhere.
+
+Opening a gate therefore re-opens the corpus (the gate set is inside `extractor_version`):
+open every field the bake-off cleared in ONE edit, or pay for the same descriptions twice.
+
+The lane has no flag, no `app_settings` key of its own and no env var; the one switch is
+`app_settings.enrichment_model`, which names the model the bake-off chose.
 """
 
 from __future__ import annotations
@@ -75,23 +90,29 @@ SCHEMA_VERSION = "1"
 # once-ever per property), never a duplicate.
 SLO_MINUTES = 20
 
-# Pass sizing, not a knob: 1,000 rows at the measured p50 of 11.7 s over 8 workers is ~24
-# min, comfortably under LANE_PASS_TIMEOUT_SECONDS (1800) and the 1200 s stall warn. A pass
-# abandoned at the timeout keeps its threads — and their billing — alive, so the slice is
-# what bounds the lane, and the in-process pass lock in the worker is what stops an
-# abandoned pass being overlapped by the next one.
-PASS_SLICE = 1000
-# Of that slice, the newest-first share. The deleted lane ordered `first_seen_at DESC` and
-# nothing else, which is why its 50k backlog was structurally unreachable: inflow always
-# filled the slice. The oldest-first remainder is what drains a backlog.
-INFLOW_SLICE = 250
-# How often a pass ALSO walks oldest-first. Hourly at the 300 s cadence: the backlog arm
-# costs ~10 s of DB once nothing is eligible (measured), and 750 rows an hour still drains
-# the 50k bazos backlog in under three days, which is the estimate the wave was sized on.
-BACKLOG_EVERY_PASSES = 12
+# Pass sizing, not a knob: 250 rows at the measured p50 of 11.7 s over 8 workers is ~6 min,
+# under LANE_PASS_TIMEOUT_SECONDS (1800) and the 1200 s stall warn. A pass abandoned at the
+# timeout keeps its threads — and their billing — alive, so the slice is what bounds the
+# lane, and the in-process pass lock in the worker is what stops an abandoned pass being
+# overlapped by the next one.
+#
+# ONE arm, newest-first. An earlier draft added an oldest-first backlog arm on an hourly
+# sub-cadence, on the theory that the deleted lane's 50k backlog was unreachable because it
+# ordered DESC. It was not: the anti-join means a row the lane has read is no longer
+# eligible, so DESC walks BACKWARDS through the backlog at 250 rows per pass — ~57k a day
+# against a measured bazos inflow of 1,940 a day, i.e. the 50,208-row backlog clears in
+# about a day. The deleted lane's backlog was unreachable because it keyed on `sreality_id`
+# and selected 223 rows, which no ORDER BY could have fixed. The ASC arm was a measured
+# 9.4-10.0 s bitmap heap scan buying nothing, so it is gone.
+PASS_SLICE = 250
 WORKERS = 8
 MAX_TOKENS = 4096
 PASS_MAX_SECONDS = 900
+# How many times one listing's text may be attempted before the lane gives up on it (rule
+# #5's `given_up`, at the same 5). Without it a listing whose call fails permanently — a
+# refusal, a description past the context window, a provider that stops honouring the
+# forced tool call — is re-selected and re-billed on every pass, for ever.
+GIVE_UP_AFTER = 5
 # The ONE binding guard, expressed the way every other lane expresses backpressure: the
 # slice times the measured unit cost ($0.00225/call, n=15,382), with headroom for a pricier
 # winner. `vision_batch` checks it in the worker, under the lock, BEFORE each call.
@@ -101,9 +122,18 @@ _MAX_QUOTE_CHARS = 300
 
 
 def extractor_version(model: str) -> str:
-    """The cache's third key column. The model is IN it: a cached answer is an answer from
-    a particular model, and a model swap must re-attempt rather than serve the old one."""
-    return f"{SCHEMA_VERSION}:{model}"
+    """The cache's third key column: schema, OPEN-GATE SET, model.
+
+    All three are things a cached answer is an answer FROM, and all three must invalidate
+    it. The model half is migration 249's lesson. The gate half is this wave's: the lane
+    asks only for the fields whose gate is open, so a row cached while three gates were
+    open is not an answer for the fourth — and without the fingerprint the selector's
+    anti-join would retire that listing for ever and the newly-opened column would stay
+    NULL on the entire existing corpus."""
+    scope = contract.extracted_cells()
+    blob = ";".join(f"{p}:{','.join(f)}" for p, f in sorted(scope.items()))
+    gates = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8] if blob else "none"
+    return f"{SCHEMA_VERSION}:{gates}:{model}"
 
 
 def text_hash(description: str | None) -> str:
@@ -294,7 +324,7 @@ def _coerce(field: str, raw: Any, quote: str) -> tuple[Any, str | None]:
 _HASH_EXPR = "encode(sha256(convert_to(l.description, 'UTF8')), 'hex')"
 
 
-def _eligible_where() -> str:
+def _eligible_where(cells: Mapping[str, Sequence[str]]) -> str:
     """The predicate BOTH the lane's selector and the health check's count are built from.
 
     `IS NOT DISTINCT FROM` on the hash is deliberate and load-bearing: it keeps `text_hash`
@@ -304,7 +334,6 @@ def _eligible_where() -> str:
     hash into an index condition and detoasts + hashes all ~50k descriptions every pass,
     forever, including the steady state where nothing is eligible.
     """
-    cells = contract.extracted_cells()
     if not cells:
         return "false"
     arms = [
@@ -320,21 +349,22 @@ def _eligible_where() -> str:
         "         SELECT 1 FROM listing_description_enrichments e\n"
         "          WHERE e.listing_id = l.id\n"
         "            AND e.extractor_version = %(version)s\n"
-        f"            AND e.text_hash IS NOT DISTINCT FROM {_HASH_EXPR})"
+        f"            AND e.text_hash IS NOT DISTINCT FROM {_HASH_EXPR}\n"
+        # A row whose extraction FAILED is still eligible, up to GIVE_UP_AFTER attempts:
+        # a blip must not lose a listing for ever, and a permanent refusal must not be
+        # re-billed for ever. The count lives in the cache row it already writes.
+        "            AND (e.extracted -> 'error' IS NULL\n"
+        "                 OR coalesce((e.extracted ->> 'attempts')::int, 1)\n"
+        f"                    >= {GIVE_UP_AFTER}))"
     )
 
 
-# TWO arms, ONE predicate, and they run on different cadences because they cost different
-# amounts. Measured on the live table 2026-09-22 with 50,374 eligible bazos rows:
-#   * NEWEST-first stops at its LIMIT as soon as it has a slice, and the eligible rows ARE
-#     the newest ones, so it is ~0.4 s whether or not a backlog exists. Every pass.
-#   * OLDEST-first is cheap only WHILE a backlog exists. Once nothing is eligible it cannot
-#     stop early and walks the whole source: the same predicate as an aggregate over all
-#     50,374 rows measured 9.4-10.0 s (a 55,252-block bitmap heap scan), warm and cold
-#     alike. Paying that every 5 minutes for ever, to find nothing, is not a backlog drain
-#     — it is a standing query. It runs on BACKLOG_EVERY_PASSES instead.
-# The deleted lane had the newest arm and nothing else, which is why its 50k backlog was
-# structurally unreachable; one arm is the bug, and two arms at one cadence is a tax.
+# ONE arm: newest-first, every pass. The eligible rows ARE the newest, so the query stops
+# at its LIMIT in ~0.4 s whether or not a backlog exists, and because an extracted row
+# leaves the predicate the same arm walks backwards through the backlog at PASS_SLICE a
+# pass. An oldest-first companion was measured and removed: once nothing is eligible it
+# cannot stop early and becomes a 9.4-10.0 s bitmap heap scan over 55,252 blocks, run to
+# find nothing.
 _SELECT_SQL_TEMPLATE = """
 SELECT l.id, l.source, l.first_seen_at, l.description
   FROM listings l
@@ -371,17 +401,39 @@ SELECT count(*) AS n,
  WHERE e.created_at > now() - interval '24 hours'
 """
 
-SELECT_INFLOW_SQL = _SELECT_SQL_TEMPLATE.format(where=_eligible_where(), direction="DESC")
-SELECT_BACKLOG_SQL = _SELECT_SQL_TEMPLATE.format(where=_eligible_where(), direction="ASC")
-ELIGIBLE_LAG_SQL = _LAG_SQL_TEMPLATE.format(where=_eligible_where())
+_OPEN = contract.extracted_cells()
+SELECT_INFLOW_SQL = _SELECT_SQL_TEMPLATE.format(
+    where=_eligible_where(_OPEN), direction="DESC")
+ELIGIBLE_LAG_SQL = _LAG_SQL_TEMPLATE.format(where=_eligible_where(_OPEN))
+# The same predicate over every gate the contract DECLARES, open or not. With all gates
+# closed the two live constants above collapse to `WHERE false`, which PREPAREs and proves
+# nothing; this one keeps `tests/sql_corpus` type-checking the column arms a gate flip
+# switches on. One function, three spellings of its output — never a second predicate.
+_DECLARED_SELECT_SQL = _SELECT_SQL_TEMPLATE.format(
+    where=_eligible_where(contract.gated_cells()), direction="DESC")
 
+# The conflict target is the key migration 549 adds. DO UPDATE, not DO NOTHING, and only
+# over a row that is itself a recorded FAILURE: a retry either replaces the error with the
+# real extraction or bumps its attempt count towards GIVE_UP_AFTER, and a row that already
+# holds an answer is never rewritten. `cost_usd` accumulates because every attempt was
+# billed, and the lane's cost series must say so.
 _CACHE_INSERT_SQL = """
-INSERT INTO listing_description_enrichments
+INSERT INTO listing_description_enrichments AS e
     (listing_id, text_hash, extractor_version, extracted, filled,
      model, llm_call_id, cost_usd)
 VALUES (%(listing_id)s, %(text_hash)s, %(extractor_version)s,
         %(extracted)s, %(filled)s, %(model)s, %(llm_call_id)s, %(cost_usd)s)
-ON CONFLICT (listing_id, text_hash, extractor_version) DO NOTHING
+ON CONFLICT (listing_id, extractor_version, text_hash) DO UPDATE
+   SET extracted = excluded.extracted
+                || CASE WHEN excluded.extracted -> 'error' IS NULL THEN '{}'::jsonb
+                        ELSE jsonb_build_object(
+                          'attempts',
+                          coalesce((e.extracted ->> 'attempts')::int, 0) + 1) END,
+       filled = excluded.filled,
+       model = excluded.model,
+       llm_call_id = coalesce(excluded.llm_call_id, e.llm_call_id),
+       cost_usd = coalesce(e.cost_usd, 0) + coalesce(excluded.cost_usd, 0)
+ WHERE e.extracted -> 'error' IS NOT NULL
 """
 
 # ONE statement: the column fill and the property enqueue in a single CTE, so the dirty mark
@@ -428,28 +480,16 @@ def resolve_model(conn: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
-def select_eligible(conn: Any, *, version: str, slice_size: int = PASS_SLICE,
-                    inflow: int = INFLOW_SLICE,
-                    backlog: bool = False) -> list[dict[str, Any]]:
-    """The newest eligible listings, plus — only on a backlog pass — the oldest."""
-    plan = [(SELECT_INFLOW_SQL, max(0, inflow))]
-    if backlog:
-        plan.append((SELECT_BACKLOG_SQL, max(0, slice_size - inflow)))
-    seen: set[int] = set()
-    out: list[dict[str, Any]] = []
-    for sql, limit in plan:
-        if limit <= 0:
-            continue
-        with conn.cursor() as cur:
-            cur.execute(sql, {"version": version, "limit": limit})
-            rows = cur.fetchall()
-        for listing_id, source, first_seen_at, description in rows:
-            if listing_id in seen:
-                continue
-            seen.add(listing_id)
-            out.append({"id": listing_id, "source": source,
-                        "first_seen_at": first_seen_at, "description": description})
-    return out
+def select_eligible(conn: Any, *, version: str,
+                    slice_size: int = PASS_SLICE) -> list[dict[str, Any]]:
+    """The newest eligible listings. An extracted row leaves the predicate, so this walks
+    backwards through a backlog at `slice_size` a pass without a second arm."""
+    with conn.cursor() as cur:
+        cur.execute(SELECT_INFLOW_SQL, {"version": version, "limit": max(0, slice_size)})
+        rows = cur.fetchall()
+    return [{"id": listing_id, "source": source,
+             "first_seen_at": first_seen_at, "description": description}
+            for listing_id, source, first_seen_at, description in rows]
 
 
 def _tool_arguments(response: Any) -> Mapping[str, Any] | None:
@@ -465,12 +505,13 @@ def record_extraction(
     extracted: Mapping[str, Any], model: str, version: str,
     llm_call_id: int | None, cost_usd: float,
 ) -> list[str]:
-    """Write the columns the gate allows, then the cache row, in ONE transaction.
+    """Write the columns the lane may write, then the cache row, in ONE transaction.
 
     Both or neither: a cache row without its fill would retire the listing from selection
     holding a value it never wrote, which is the deleted lane's permanence bug in a new
     key."""
-    writable = [c for c in contract.writable_cells(str(row["source"])) if c in values]
+    writable = [c for c in contract.extracted_cells().get(str(row["source"]), ())
+                if c in values]
     filled = {c: values[c] for c in writable}
     with conn.transaction():
         if writable:
@@ -478,40 +519,75 @@ def record_extraction(
             params.update(filled)
             with conn.cursor() as cur:
                 cur.execute(write_sql(writable), params)
-        with conn.cursor() as cur:
-            cur.execute(_CACHE_INSERT_SQL, {
-                "listing_id": row["id"],
-                "text_hash": text_hash(row["description"]),
-                "extractor_version": version,
-                "extracted": json.dumps(extracted, ensure_ascii=False),
-                "filled": json.dumps(filled, ensure_ascii=False),
-                "model": model,
-                "llm_call_id": llm_call_id,
-                "cost_usd": cost_usd,
-            })
+        _cache_row(conn, row, extracted=extracted, filled=filled, model=model,
+                   version=version, llm_call_id=llm_call_id, cost_usd=cost_usd)
     return writable
 
 
-def run_pass(conn: Any, *, slice_size: int = PASS_SLICE, workers: int = WORKERS,
-             backlog: bool = False) -> dict[str, Any]:
+def record_failure(conn: Any, row: Mapping[str, Any], *, error: str, model: str,
+                   version: str, cost_usd: float) -> None:
+    """A failed attempt is a cache row too (rule #5's shape).
+
+    Without it the listing is re-selected and re-billed on every pass for ever, which is
+    what the forced tool call only narrows: a refusal, a description past the context
+    window and a provider that stops honouring `tool_choice` are all still permanent, and
+    all still billed. The attempt count lives in the payload and GIVE_UP_AFTER retires the
+    row; the selector reads both."""
+    _cache_row(conn, row, extracted={"error": error[:500], "attempts": 1}, filled={},
+               model=model, version=version, llm_call_id=None, cost_usd=cost_usd)
+
+
+def _cache_row(conn: Any, row: Mapping[str, Any], *, extracted: Mapping[str, Any],
+               filled: Mapping[str, Any], model: str, version: str,
+               llm_call_id: int | None, cost_usd: float) -> None:
+    with conn.cursor() as cur:
+        cur.execute(_CACHE_INSERT_SQL, {
+            "listing_id": row["id"],
+            "text_hash": text_hash(row["description"]),
+            "extractor_version": version,
+            "extracted": json.dumps(extracted, ensure_ascii=False),
+            "filled": json.dumps(filled, ensure_ascii=False),
+            "model": model,
+            "llm_call_id": llm_call_id,
+            "cost_usd": cost_usd,
+        })
+
+
+def _providers() -> dict[str, Any]:
+    """The per-worker provider registry. OpenAI AND the self-hosted pod, because
+    `app_settings.enrichment_model` is the one switch and the bake-off may crown an `oss:`
+    id — a registry that switch cannot reach turns every row of every pass into a
+    ProviderError raised before a single call is made."""
+    from api.providers.openai import OpenAIProvider
+    from api.providers.oss import OssProvider
+
+    return {"openai": OpenAIProvider(), "oss": OssProvider()}
+
+
+def run_pass(conn: Any, *, slice_size: int = PASS_SLICE,
+             workers: int = WORKERS) -> dict[str, Any]:
     """One bounded pass. Returns the dict the worker publishes in its heartbeat."""
     from toolkit import vision_batch
 
     scope = contract.extracted_cells()
     if not scope:
-        return {"claimed": 0, "reason": "no_text_cells"}
+        # No gate is open, so there is nothing this lane is allowed to write and therefore
+        # nothing it is allowed to pay for. Not even a query.
+        return {"claimed": 0, "reason": "no_open_gate"}
     model = resolve_model(conn)
     if model is None:
         LOG.warning("text-extract lane idle: app_settings.%s is not set", MODEL_SETTING)
         return {"claimed": 0, "reason": "no_model"}
     version = extractor_version(model)
-    rows = select_eligible(conn, version=version, slice_size=slice_size, backlog=backlog)
+    rows = select_eligible(conn, version=version, slice_size=slice_size)
     if not rows:
-        return {"claimed": 0, "extracted": 0, "written": 0, "dropped": 0,
-                "spent_usd": 0.0, "errors": 0, "model": model, "backlog": backlog}
+        return {"claimed": 0, "extracted": 0, "written": 0, "failed": 0,
+                "spent_usd": 0.0, "errors": 0, "model": model}
 
     written: Counter[str] = Counter()
     dropped: Counter[str] = Counter()
+    failures: Counter[str] = Counter()
+    stored: list[int] = []
     tally = Lock()
 
     def _call(llm: Any, row: Mapping[str, Any]) -> tuple[float, Any]:
@@ -520,22 +596,39 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE, workers: int = WORKERS,
         res = llm.call(
             called_for=CALLED_FOR, model=model, max_tokens=MAX_TOKENS,
             system=_SYSTEM_PROMPT, tools=[tool],
-            # FORCED. A model that answers in prose produces no tool call, the listing
-            # stays eligible and the next pass pays for the same refusal — for ever.
+            # FORCED, because a model that answers in prose produces no tool call. The
+            # cost comes back either way: the completion is already billed, and raising
+            # here would hide that spend from the pre-call guard as well.
             tool_choice=tool["name"],
             messages=[{"role": "user", "content": str(row["description"])}],
         )
-        payload = _tool_arguments(res)
-        if payload is None:
-            raise ValueError(f"the model returned no {tool['name']} call")
-        return float(getattr(res, "cost_usd", 0.0) or 0.0), (res, payload)
+        return (float(getattr(res, "cost_usd", 0.0) or 0.0),
+                (res, _tool_arguments(res)))
 
     def _record(wconn: Any, row: Mapping[str, Any], result: Any,
                 error: str | None) -> None:
-        if error is not None or result is None:
-            LOG.warning("TEXT-EXTRACT listing=%s failed: %s", row["id"], (error or "")[:200])
+        res, payload, cost = None, None, 0.0
+        if result is not None:
+            res, payload = result
+            cost = float(getattr(res, "cost_usd", 0.0) or 0.0)
+            if payload is None:
+                error = "the model returned no record_description_facts call"
+        if error is not None:
+            LOG.warning("TEXT-EXTRACT listing=%s failed: %s", row["id"], error[:200])
+            # A fatal error is the PROVIDER's state, not this listing's: the pass is
+            # already aborting, and counting an attempt against every row in flight would
+            # retire listings for an outage they had no part in.
+            if vision_batch.is_fatal(error):
+                return
+            try:
+                record_failure(wconn, row, error=error, model=model, version=version,
+                               cost_usd=cost)
+            except Exception as exc:  # noqa: BLE001 - see the write path below
+                LOG.warning("TEXT-EXTRACT listing=%s failure not stored: %s",
+                            row["id"], str(exc)[:200])
+            with tally:
+                failures[error.split(":")[0][:60]] += 1
             return
-        res, payload = result
         fields = scope[str(row["source"])]
         values, why = merge_extraction(
             payload, description=str(row["description"]), fields=fields)
@@ -543,7 +636,7 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE, workers: int = WORKERS,
             columns = record_extraction(
                 wconn, row, values=values, extracted=dict(payload), model=model,
                 version=version, llm_call_id=getattr(res, "llm_call_id", None),
-                cost_usd=float(getattr(res, "cost_usd", 0.0) or 0.0),
+                cost_usd=cost,
             )
         except Exception as exc:  # noqa: BLE001 - the engine does not wrap `record`, and a
             # write failure that escapes here ends this WORKER THREAD, silently, mid-pass.
@@ -551,17 +644,20 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE, workers: int = WORKERS,
             return
         # Counters are touched by eight threads; `c[k] += 1` is a read-modify-write.
         with tally:
+            stored.append(row["id"])
             dropped.update(f"{field}:{reason}" for field, reason in why.items())
             written.update(columns)
 
     stats = vision_batch.run_batch(
-        rows=list(rows), call=_call, record=_record,
+        rows=list(rows), call=_call, record=_record, providers=_providers,
         max_usd=MAX_USD_PER_PASS, max_seconds=PASS_MAX_SECONDS, workers=workers,
     )
     return {
         "claimed": len(rows),
-        "extracted": stats["ok"],
+        "extracted": len(stored),
         "errors": stats["errors"],
+        "failed": sum(failures.values()),
+        "failures": dict(failures),
         "written": sum(written.values()),
         "by_column": dict(written),
         "dropped": dict(dropped),
@@ -570,6 +666,5 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE, workers: int = WORKERS,
         "fatal": stats["fatal"],
         "model": model,
         # The backlog signal, free: a full slice means more is waiting.
-        "slice_full": len(rows) >= (slice_size if backlog else INFLOW_SLICE),
-        "backlog": backlog,
+        "slice_full": len(rows) >= slice_size,
     }

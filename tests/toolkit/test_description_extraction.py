@@ -33,49 +33,57 @@ def _cell(value: Any, quote: str | None) -> dict[str, Any]:
 def test_the_lane_and_the_check_share_one_predicate() -> None:
     """The critical invariant. The 2026-07 outage was a lane and its monitors disagreeing
     about who was eligible; a re-spelled predicate recreates it."""
-    where = tx._eligible_where()
+    where = tx._eligible_where(contract.extracted_cells())
     assert where in tx.SELECT_INFLOW_SQL
-    assert where in tx.SELECT_BACKLOG_SQL
     assert where in tx.ELIGIBLE_LAG_SQL
 
 
 def test_the_selector_keys_on_listing_id_and_never_on_sreality_id() -> None:
-    sql = tx.SELECT_INFLOW_SQL
+    sql = tx._DECLARED_SELECT_SQL
     assert "sreality_id" not in sql
     assert "e.listing_id = l.id" in sql
     assert "e.extractor_version = %(version)s" in sql
 
 
 def test_the_selector_covers_every_extractable_cell_of_every_declared_portal() -> None:
-    sql = tx.SELECT_INFLOW_SQL
-    scope = contract.extracted_cells()
-    assert scope, "the contract declares no text cell for the lane at all"
-    for portal, fields in scope.items():
+    """Over the DECLARED gates, because with every gate closed the live predicate is
+    `false` — which is the shipping state and the point of the wave."""
+    sql = tx._DECLARED_SELECT_SQL
+    declared = contract.gated_cells()
+    assert declared, "the contract declares no gated text cell at all"
+    for portal, fields in declared.items():
         assert f"l.source = '{portal}'" in sql
         for field in fields:
             assert f"l.{field} IS NULL" in sql
+
+
+def test_a_closed_gate_costs_nothing_at_all() -> None:
+    """The lane's scope is the OPEN gates, so today it neither selects nor spends. The
+    draft that extracted every gated cell and wrote only the passed ones would have paid
+    ~$113 for cache rows that, because a cache row retires its listing, could never have
+    become a column value."""
+    assert contract.extracted_cells() == {}
+    assert tx.SELECT_INFLOW_SQL.count("WHERE false") == 1
 
 
 def test_the_hash_stays_out_of_the_index_condition() -> None:
     """`IS NOT DISTINCT FROM`, not `=`: a plain equality lets the planner make the hash an
     index condition, which detoasts and hashes all ~50k descriptions every pass forever,
     including the steady state where nothing is eligible."""
-    assert "text_hash IS NOT DISTINCT FROM" in tx.SELECT_INFLOW_SQL
-    assert "text_hash =" not in tx.SELECT_INFLOW_SQL
+    assert "text_hash IS NOT DISTINCT FROM" in tx._DECLARED_SELECT_SQL
+    assert "text_hash =" not in tx._DECLARED_SELECT_SQL
 
 
-def test_the_selector_reaches_the_backlog_as_well_as_the_inflow() -> None:
-    """The deleted lane ordered `first_seen_at DESC` and nothing else, so its 50k backlog
-    was structurally unreachable — inflow always filled the slice. The oldest-first arm is
-    a SEPARATE statement because it costs a measured ~10 s once nothing is eligible, and
-    it runs on its own cadence rather than every pass."""
+def test_one_arm_newest_first_reaches_the_backlog() -> None:
+    """An extracted row leaves the predicate, so DESC walks BACKWARDS through a backlog at
+    PASS_SLICE a pass (~57k a day against a 1,940-a-day inflow). The oldest-first arm an
+    earlier draft added bought nothing and cost a measured 9.4-10.0 s per run."""
     assert "ORDER BY l.first_seen_at DESC" in tx.SELECT_INFLOW_SQL
-    assert "ORDER BY l.first_seen_at ASC" in tx.SELECT_BACKLOG_SQL
-    assert 0 < tx.INFLOW_SLICE < tx.PASS_SLICE
-    assert tx.BACKLOG_EVERY_PASSES > 1
+    assert not hasattr(tx, "SELECT_BACKLOG_SQL")
+    assert not hasattr(tx, "BACKLOG_EVERY_PASSES")
 
 
-def test_a_pass_only_runs_the_expensive_arm_when_asked() -> None:
+def test_a_pass_issues_exactly_one_select() -> None:
     seen: list[str] = []
 
     class _Cur:
@@ -89,9 +97,6 @@ def test_a_pass_only_runs_the_expensive_arm_when_asked() -> None:
 
     tx.select_eligible(_Conn(), version="v")
     assert seen == [tx.SELECT_INFLOW_SQL]
-    seen.clear()
-    tx.select_eligible(_Conn(), version="v", backlog=True)
-    assert seen == [tx.SELECT_INFLOW_SQL, tx.SELECT_BACKLOG_SQL]
 
 
 def test_the_extractor_version_carries_the_model() -> None:
@@ -99,6 +104,20 @@ def test_the_extractor_version_carries_the_model() -> None:
     from a particular model, so a model swap must re-attempt rather than serve the old."""
     assert tx.extractor_version("gpt-5-mini") != tx.extractor_version("gpt-5.6-luna")
     assert "gpt-5-mini" in tx.extractor_version("gpt-5-mini")
+
+
+def test_the_extractor_version_carries_the_open_gate_set(monkeypatch) -> None:
+    """Without this, opening a gate would write NOTHING to the existing corpus: every one
+    of those listings already has a cache row at this version, and the anti-join retires
+    it for ever. The fingerprint is what re-opens them."""
+    closed = tx.extractor_version("m")
+    monkeypatch.setattr(contract, "extracted_cells",
+                        lambda: {"bazos": ("has_lift",)})
+    one_open = tx.extractor_version("m")
+    monkeypatch.setattr(contract, "extracted_cells",
+                        lambda: {"bazos": ("has_balcony", "has_lift")})
+    two_open = tx.extractor_version("m")
+    assert len({closed, one_open, two_open}) == 3
 
 
 # --- the write ---------------------------------------------------------------
@@ -162,35 +181,20 @@ class _FakeConn:
 
 
 def test_every_gate_ships_closed() -> None:
-    """The bake-off flips them, one field at a time, with its measurement in the row."""
-    for portal, fields in contract.extracted_cells().items():
-        assert contract.writable_cells(portal) == (), portal
+    """The bake-off flips them, with its measurement in the row. Closed means OUT OF
+    SCOPE: not extracted, not billed, not written."""
+    assert contract.extracted_cells() == {}
+    declared = contract.gated_cells()
+    assert declared
+    for portal, fields in declared.items():
         for field in fields:
             gate = contract.CONTRACT[portal][field].gate
             assert gate is not None and gate.passed is False
 
 
-def test_an_ungated_field_is_cached_and_not_written() -> None:
-    conn = _FakeConn()
-    written = tx.record_extraction(
-        conn, {"id": 7, "source": "bazos", "description": DESCRIPTION},
-        values={"has_lift": False, "condition": "po_rekonstrukci"},
-        extracted={"has_lift": _cell(False, "bez výtahu")},
-        model="gpt-5-mini", version="1:gpt-5-mini", llm_call_id=3, cost_usd=0.002,
-    )
-    assert written == []
-    assert len(conn.calls) == 1
-    sql, params = conn.calls[0]
-    assert "INSERT INTO listing_description_enrichments" in sql
-    # Cached with an EMPTY `filled`: the panel can be scored from `extracted` without any
-    # column having moved.
-    assert json.loads(params["filled"]) == {}
-    assert json.loads(params["extracted"])["has_lift"]["value"] is False
-    assert params["text_hash"] == tx.text_hash(DESCRIPTION)
-
-
 def test_a_passed_gate_writes_only_its_own_column(monkeypatch) -> None:
-    monkeypatch.setattr(contract, "writable_cells", lambda portal: ("has_lift",))
+    monkeypatch.setattr(contract, "extracted_cells",
+                        lambda: {"bazos": ("has_lift",)})
     conn = _FakeConn()
     written = tx.record_extraction(
         conn, {"id": 7, "source": "bazos", "description": DESCRIPTION},
@@ -203,6 +207,40 @@ def test_a_passed_gate_writes_only_its_own_column(monkeypatch) -> None:
     assert "condition = coalesce" not in update_sql
     assert params["has_lift"] is False
     assert json.loads(conn.calls[1][1]["filled"]) == {"has_lift": False}
+
+
+def test_a_failed_attempt_is_recorded_so_it_is_not_re_billed_for_ever() -> None:
+    """Rule #5's shape in the table that already exists: the deleted lane dropped a
+    failure, so the same listing was re-selected and re-billed on every pass."""
+    conn = _FakeConn()
+    tx.record_failure(conn, {"id": 7, "source": "bazos", "description": DESCRIPTION},
+                      error="the model returned no record_description_facts call",
+                      model="m", version="v", cost_usd=0.00225)
+    assert len(conn.calls) == 1
+    sql, params = conn.calls[0]
+    assert "INSERT INTO listing_description_enrichments" in sql
+    payload = json.loads(params["extracted"])
+    assert payload["attempts"] == 1
+    assert "no record_description_facts call" in payload["error"]
+    # Billed, and said so: a failure that reports $0 hides the spend from the daily series.
+    assert params["cost_usd"] == 0.00225
+    assert json.loads(params["filled"]) == {}
+
+
+def test_the_selector_retires_a_listing_only_after_give_up_attempts() -> None:
+    sql = tx._DECLARED_SELECT_SQL
+    assert "e.extracted -> 'error' IS NULL" in sql
+    assert f">= {tx.GIVE_UP_AFTER}" in sql
+    assert tx.GIVE_UP_AFTER == 5
+
+
+def test_a_retry_bumps_the_attempt_count_and_never_rewrites_an_answer() -> None:
+    sql = tx._CACHE_INSERT_SQL
+    assert "ON CONFLICT (listing_id, extractor_version, text_hash) DO UPDATE" in sql
+    # Only over a row that is itself a failure.
+    assert "WHERE e.extracted -> 'error' IS NOT NULL" in sql
+    assert "'attempts'" in sql
+    assert "cost_usd = coalesce(e.cost_usd, 0) + coalesce(excluded.cost_usd, 0)" in sql
 
 
 # --- the merge rules ---------------------------------------------------------
@@ -341,7 +379,8 @@ def test_every_field_demands_an_evidence_quote() -> None:
 
 
 def test_the_schema_covers_exactly_the_contract_and_nothing_else() -> None:
-    for fields in contract.extracted_cells().values():
+    assert contract.gated_cells(), "nothing declared: this test would be vacuous"
+    for fields in contract.gated_cells().values():
         assert set(fields) <= set(tx._FIELD_SPEC)
         tool = tx.extraction_tool(fields)
         assert set(tool["input_schema"]["properties"]) == set(fields)
@@ -359,13 +398,17 @@ def test_confidence_is_gone() -> None:
 def test_a_pass_with_no_model_configured_claims_nothing(monkeypatch) -> None:
     """No hardcoded fallback: `LLMClient`'s own default is a claude id and this project
     does not use Anthropic models."""
+    monkeypatch.setattr(contract, "extracted_cells",
+                        lambda: {"bazos": ("has_lift",)})
     monkeypatch.setattr(tx, "resolve_model", lambda conn: None)
     assert tx.run_pass(object()) == {"claimed": 0, "reason": "no_model"}
 
 
-def test_a_pass_with_nothing_declared_claims_nothing(monkeypatch) -> None:
+def test_a_pass_with_no_open_gate_claims_nothing(monkeypatch) -> None:
+    """The shipping state: no gate is open, so there is nothing the lane may write and
+    therefore nothing it may pay for. Not even a query."""
     monkeypatch.setattr(contract, "extracted_cells", dict)
-    assert tx.run_pass(object()) == {"claimed": 0, "reason": "no_text_cells"}
+    assert tx.run_pass(object()) == {"claimed": 0, "reason": "no_open_gate"}
 
 
 def test_the_called_for_is_the_one_the_cost_series_already_knows() -> None:
@@ -390,9 +433,36 @@ def test_the_budget_guard_is_the_shared_engines_and_binds_before_the_call() -> N
 
 
 def test_the_tool_call_is_forced(monkeypatch) -> None:
-    """A model that answers in prose produces no tool call, the listing stays eligible and
-    the next pass pays for the same refusal — for ever."""
+    """A model that answers in prose produces no tool call. Forcing it narrows that;
+    `record_failure` is what stops the remaining causes being re-billed for ever."""
     import inspect
 
     src = inspect.getsource(tx.run_pass)
     assert 'tool_choice=tool["name"]' in src
+    # The cost comes back even when the answer is unusable, so the pre-call guard sees it.
+    assert "raise" not in src
+    assert "record_failure(" in src
+
+
+def test_the_lane_can_serve_the_model_the_one_switch_may_name() -> None:
+    """`app_settings.enrichment_model` may be an `oss:` id — the bake-off's own default
+    arms are two of them. A registry the switch cannot reach turns every row of every pass
+    into a ProviderError raised before a single call."""
+    import inspect
+
+    from api.llm_client import provider_for_model
+
+    registry = tx._providers()
+    assert provider_for_model("oss:Qwen/Qwen3-VL-32B-Instruct") in registry
+    assert provider_for_model("gpt-5.6-luna") in registry
+    assert "providers=_providers" in inspect.getsource(tx.run_pass)
+
+
+def test_a_fatal_provider_error_does_not_burn_a_listings_attempts() -> None:
+    """A dead key is the PROVIDER's state, not the listing's; counting it would retire
+    rows for an outage they had no part in."""
+    import inspect
+
+    src = inspect.getsource(tx.run_pass)
+    assert "vision_batch.is_fatal(error)" in src
+    assert src.index("vision_batch.is_fatal(error)") < src.index("record_failure(")

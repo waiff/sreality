@@ -15,11 +15,16 @@
 --     re-billed the identical description. ~$65 of the lane's ~$207 lifetime spend was
 --     that, and 6,649 listings were extracted two or more times. R6: a text cell is a pure
 --     function of `description`, so the key is the hash of `description`.
---   * `model` is not deleted, it MOVES: `extractor_version` is '<schema>:<model>'
+--   * `model` is not deleted, it MOVES: `extractor_version` is
+--     '<schema>:<open-gate hash>:<model>'
 --     (toolkit/description_extraction.extractor_version), so migration 249's lesson — a
 --     model upgrade must re-attempt, a same-model re-run must not re-bill — survives, and
---     a change to the tool schema or the merge rules invalidates the cache too, which the
---     bare model id could not express.
+--     a change to the tool schema, the merge rules or the set of fields the lane is
+--     allowed to write invalidates the cache too, which the bare model id could not
+--     express. That last part is load-bearing: the lane asks only for the fields whose R7
+--     gate is open, so a row cached while three gates were open is not an answer for the
+--     fourth, and without the fingerprint the anti-join would retire that listing for ever
+--     and the newly-opened column would stay NULL on the whole existing corpus.
 --
 -- THE 37,754 EXISTING ROWS STAY, as history, with text_hash and extractor_version NULL.
 -- They are not backfillable and must not be faked: the hash would have to be of the
@@ -27,9 +32,14 @@
 -- latest-wins with no history of its own. NULL is also the correct behaviour — a unique
 -- index treats NULLs as distinct, so an old row never blocks an insert, and the new
 -- lane's selector only matches a row whose text_hash equals today's description, so an
--- old row is never a cache HIT either. Every listing is re-extracted exactly once under
--- the new extractor version, which is what the measurement in W7's gates requires anyway:
--- those rows are the OLD extractor's output, at the precision W1 refuted.
+-- old row is never a cache HIT either. Those rows are the OLD extractor's output, at the
+-- precision W1 refuted; the new lane re-reads a listing at most once per extractor
+-- version, and today not at all, because every R7 gate ships closed and a closed gate is
+-- outside the lane's scope entirely.
+--
+-- NOTHING IN THE RUNTIME READS THESE COLUMNS UNTIL A GATE OPENS: with every gate closed
+-- the lane and `verify_pipeline`'s `text_extraction_lag` both return before they query.
+-- Apply this before opening any gate; applying it before the merge costs nothing.
 --
 -- snapshot_id loses its NOT NULL for the same reason the key drops it: the new writer has
 -- no snapshot to name and must not invent one.

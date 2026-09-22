@@ -87,9 +87,10 @@ DEFAULT_SYSTEM_PROMPT_FALLBACK = (
 # `toolkit.vision_batch`'s pre-call `max_usd` is the one that binds before the money is
 # spent; this is an early-warning log line.
 #
-# $15, not $5 (field-capture R11). The always-on text lane costs a measured $3.11-$6.22 a
-# day in steady state and more while its backlog drains, so at $5 the only existing cost
-# signal would fire every single day — which is the same as not having one.
+# $15, not $5 (field-capture R11). The always-on text lane is free until a field's gate
+# opens, and once one does it costs a measured ~$4 a day in steady state (1,940 bazos
+# adverts at $0.00225) and ~$113 over the day its backlog drains, so at $5 the only
+# existing cost signal would fire every single day — the same as not having one.
 DEFAULT_DAILY_COST_WARN_USD = 15.0
 
 # The zone lives in the DATABASE now, in exactly three places (migration 437): the daily
