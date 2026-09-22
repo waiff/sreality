@@ -24,6 +24,7 @@ from autodedup.dataset import Listing
 from autodedup.demonstrate import price_conflict
 from autodedup.indistinguishable import (
     CLUSTER,
+    PROMOTE,
     distinguishing_facts,
     overlap_days,
     price_paths_agree,
@@ -36,18 +37,29 @@ Feats = Mapping[str, tuple[float, bool]]
 class ClusterRelation:
     """`ok(a, b)` = no stated fact separates the two adverts, memoised per unordered pair."""
 
-    __slots__ = ("_listings", "_feats", "_settings", "_memo")
+    __slots__ = ("_listings", "_feats", "_settings", "_memo", "_mode")
 
     def __init__(
         self,
         listings: Mapping[int, Listing],
         feats: Mapping[tuple[int, int], Feats] | None = None,
         settings: Settings | None = None,
+        mode: str = CLUSTER,
     ) -> None:
         self._listings = listings
         self._feats = feats or {}
         self._settings = settings or Settings()
+        self._mode = mode
         self._memo: dict[tuple[int, int], bool] = {}
+
+    def strict(self) -> "ClusterRelation":
+        """E193: the same relation read at PROMOTION's bar, with its own memo.
+
+        A cut re-offered its join is a merge made on the ABSENCE of a fact, and E136 says that
+        is the one place the engine has no positive evidence to fall back on — so the area is
+        read at 3 % rather than the gate's 8 %, and the geocode and storey slacks the gate
+        carries for a merge it already certified are not extended to a join nobody certified."""
+        return ClusterRelation(self._listings, self._feats, self._settings, PROMOTE)
 
     def ok(self, left: int, right: int) -> bool:
         key = (left, right) if left < right else (right, left)
@@ -57,7 +69,8 @@ class ClusterRelation:
             if a is None or b is None:
                 # A member the pass cannot read is not a member this rule may refuse.
                 return True
-            hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings, CLUSTER)
+            hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings,
+                                            self._mode)
             if hit and self._settings.demonstrate_cluster_price:
                 hit = not price_conflict(
                     a, b, self._settings,

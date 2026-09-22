@@ -74,6 +74,7 @@ def partition(
     max_rounds: int = 4,
     keep_factless: bool = False,
     rejoin_cells: bool = False,
+    rejoin_invariants: Invariants | None = None,
 ) -> list[list[int]]:
     """Cut one component into consistent groups, maximising the merge evidence kept inside.
 
@@ -159,8 +160,9 @@ def partition(
                 break
 
     if rejoin_cells:
+        strict = rejoin_invariants or invariants
         for _round in range(max_rounds):
-            if not _rejoin(ordered, home, cells, invariants):
+            if not _rejoin(ordered, home, cells, strict):
                 break
             if keep_factless:
                 _reconcile(ordered, home, cells, invariants)

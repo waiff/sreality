@@ -166,6 +166,17 @@ def _repartition_clusters(
         fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
         return cluster_invariants_ok(fingerprints, settings, must_not_link, relation)
 
+    strict_relation = (relation.strict()
+                       if settings.repartition_rejoin_cells and relation is not None else None)
+
+    def strict_invariants(members: Sequence[int]) -> str | None:
+        broken = invariants(members)
+        if broken is not None:
+            return broken
+        if strict_relation is not None and strict_relation.violating_pair(members) is not None:
+            return "d43_strict"
+        return None
+
     graph = [Edge(d.lo, d.hi, d.score, d.certificate is not None) for d in edges]
     nodes = {listing_id for edge in edges for listing_id in (edge.lo, edge.hi)}
     grouped: dict[int, list[int]] = {}
@@ -179,7 +190,7 @@ def _repartition_clusters(
             local = [edge for edge in graph if edge.lo in inside and edge.hi in inside]
             cells = partition(component, local, invariants, settings.repartition_max_rounds,
                               settings.repartition_keep_factless,
-                              settings.repartition_rejoin_cells)
+                              settings.repartition_rejoin_cells, strict_invariants)
         for cell in cells:
             grouped[min(cell)] = sorted(cell)
 
