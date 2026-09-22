@@ -13,8 +13,17 @@
 --
 -- CONCURRENTLY: listings is the hottest table; apply_migration.yml runs statement-autocommit
 -- (no transaction), which is the one shape in which CONCURRENTLY is legal. Additive.
+--
+-- A concurrent build over 893k rows outlasts the cluster's 120 s default statement
+-- timeout under the day's IO (the first apply, run 35721990100, was cancelled at that
+-- mark), and a cancelled CONCURRENTLY build leaves an INVALID index behind that
+-- `if not exists` would then keep. So: an explicit budget, and the invalid leftover is
+-- dropped first -- both idempotent, so a re-run after any failure is safe.
 
 set lock_timeout = '5s';
+set statement_timeout = '1800s';
+
+drop index concurrently if exists public.listings_source_id_idx;
 
 create index concurrently if not exists listings_source_id_idx
     on public.listings (source, id);
