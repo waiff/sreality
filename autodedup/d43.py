@@ -70,7 +70,7 @@ class ClusterRelation:
                 # A member the pass cannot read is not a member this rule may refuse.
                 return True
             hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings,
-                                            self._mode)
+                                           self._mode)
             if hit and self._settings.demonstrate_cluster_price:
                 hit = not price_conflict(
                     a, b, self._settings,
