@@ -10,12 +10,11 @@
  * owns dismissal: outside pointerdown, Escape (returning focus to the trigger),
  * and the anchor scrolling out of view.
  *
- * Membership is a PROP, not a read: the Browse grid answers it for every card in
- * one shared query, the listing header from the per-property key its
- * CurationBlock already subscribes to. Writes are here, so both surfaces issue
- * the same call and invalidate the same four keys — including the OTHER
- * surface's, which is what keeps a save made in the header visible on the card
- * grid (and in the block below it) without a reload.
+ * Membership is a PROP, not a read: every surface answers it from the one
+ * shared member map (curationKeys.propertyCollectionMembers). Writes are here,
+ * so both surfaces issue the same call and revalidate through the one helper —
+ * which is what keeps a save made in the header visible on the card grid (and
+ * in the block below it) without a reload.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -28,6 +27,7 @@ import {
   listCollections,
   removePropertyFromCollection,
 } from '@/lib/api';
+import { revalidateCollections } from '@/lib/collectionCache';
 import { curationKeys } from '@/lib/queries';
 import { ROUTES } from '@/lib/routes';
 
@@ -57,24 +57,13 @@ export default function CollectionSaveMenu({
     staleTime: 30_000,
   });
 
-  /* Both membership shapes plus the collection rows themselves: the grid's one
-   * shared map, this property's own ids, the list (its counts moved) and the
-   * collection page for the one we touched. */
-  const invalidate = (collection_id: number) => {
-    qc.invalidateQueries({ queryKey: curationKeys.propertyCollectionMembers });
-    qc.invalidateQueries({
-      queryKey: curationKeys.propertyCollections(property_id),
-    });
-    qc.invalidateQueries({ queryKey: curationKeys.collections });
-    qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
-  };
   const add = useMutation({
     mutationFn: (cid: number) => addPropertiesToCollection(cid, [property_id]),
-    onSuccess: (_, cid) => invalidate(cid),
+    onSuccess: (_, cid) => revalidateCollections(qc, { collection_id: cid }),
   });
   const remove = useMutation({
     mutationFn: (cid: number) => removePropertyFromCollection(cid, property_id),
-    onSuccess: (_, cid) => invalidate(cid),
+    onSuccess: (_, cid) => revalidateCollections(qc, { collection_id: cid }),
   });
   const pending = add.isPending || remove.isPending;
 

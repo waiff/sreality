@@ -36,9 +36,10 @@ import {
   removePropertyFromCollection,
   updatePropertyNote,
 } from '@/lib/api';
+import { revalidateCollections } from '@/lib/collectionCache';
 import {
   curationKeys,
-  fetchPropertyCollectionIds,
+  fetchPropertyCollectionMemberSet,
   fetchPropertyTagIds,
 } from '@/lib/queries';
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
@@ -90,14 +91,14 @@ function CollectionsRow({ property_id }: { property_id: number }) {
   });
 
   const membershipQ = useQuery({
-    queryKey: curationKeys.propertyCollections(property_id),
-    queryFn: () => fetchPropertyCollectionIds(property_id),
+    queryKey: curationKeys.propertyCollectionMembers,
+    queryFn: fetchPropertyCollectionMemberSet,
     staleTime: 30_000,
   });
 
   const memberIds = useMemo(
-    () => new Set(membershipQ.data ?? []),
-    [membershipQ.data],
+    () => new Set(membershipQ.data?.get(property_id) ?? []),
+    [membershipQ.data, property_id],
   );
 
   const collections = allQ.data?.data ?? [];
@@ -105,25 +106,13 @@ function CollectionsRow({ property_id }: { property_id: number }) {
   const add = useMutation({
     mutationFn: (collection_id: number) =>
       addPropertiesToCollection(collection_id, [property_id]),
-    onSuccess: (_, collection_id) => {
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyCollections(property_id),
-      });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
-    },
+    onSuccess: (_, collection_id) => revalidateCollections(qc, { collection_id }),
   });
 
   const remove = useMutation({
     mutationFn: (collection_id: number) =>
       removePropertyFromCollection(collection_id, property_id),
-    onSuccess: (_, collection_id) => {
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyCollections(property_id),
-      });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
-    },
+    onSuccess: (_, collection_id) => revalidateCollections(qc, { collection_id }),
   });
 
   return (

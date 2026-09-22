@@ -8,17 +8,22 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import CollectionDetail from './CollectionDetail';
-import type { CollectionWithProperties } from '@/lib/types';
+import type { CollectionPropertyRow, CollectionWithProperties } from '@/lib/types';
 import * as api from '@/lib/api';
+import { curationKeys } from '@/lib/queries';
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
-  return { ...actual, getCollection: vi.fn() };
+  return {
+    ...actual,
+    getCollection: vi.fn(),
+    removePropertyFromCollection: vi.fn(),
+  };
 });
 
 const DATA: CollectionWithProperties = {
@@ -36,11 +41,26 @@ const DATA: CollectionWithProperties = {
   properties: [],
 };
 
+const MEMBER: CollectionPropertyRow = {
+  property_id: 42,
+  sreality_id: 900,
+  source: 'sreality',
+  display_label: 'Praha 5',
+  disposition: '2+kk',
+  subtype: null,
+  area_m2: 55,
+  price_czk: 8_900_000,
+  last_seen_at: '2026-08-20T10:00:00Z',
+  is_active: true,
+  added_at: '2026-08-01T10:00:00Z',
+};
+
 function renderPage() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const invalidate = vi.spyOn(qc, 'invalidateQueries');
+  render(
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={['/collections/1']}>
         <Routes>
@@ -49,12 +69,16 @@ function renderPage() {
       </MemoryRouter>
     </QueryClientProvider>,
   );
+  return { invalidate };
 }
 
 describe('<CollectionDetail>', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.getCollection).mockResolvedValue(DATA);
+    vi.mocked(api.removePropertyFromCollection).mockResolvedValue({
+      removed: true,
+    });
   });
 
   it('names both edit fields', async () => {
@@ -71,5 +95,32 @@ describe('<CollectionDetail>', () => {
     const toggle = await screen.findByRole('switch', { name: 'Monitoring' });
     expect(toggle).toHaveAccessibleName('Monitoring');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
+  });
+
+  /* Removing a member here changes the SAME fact the Browse card glyph and the
+     listing header paint, so it has to revalidate the shared member map — this
+     row used to hand-type a key list that omitted it. */
+  it('removes a member through the API and revalidates the shared member map', async () => {
+    vi.mocked(api.getCollection).mockResolvedValue({
+      ...DATA,
+      properties: [MEMBER],
+    });
+    const { invalidate } = renderPage();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Remove listing from collection' }),
+    );
+
+    await waitFor(() =>
+      expect(api.removePropertyFromCollection).toHaveBeenCalledWith(1, 42),
+    );
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: curationKeys.propertyCollectionMembers,
+      }),
+    );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: curationKeys.collection(1),
+    });
   });
 });

@@ -13,6 +13,7 @@ import {
   removePropertyFromCollection,
   updateCollection,
 } from '@/lib/api';
+import { revalidateCollections } from '@/lib/collectionCache';
 import { curationKeys } from '@/lib/queries';
 import { listingPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
@@ -173,8 +174,7 @@ function EditBlock({ collection }: { collection: Collection }) {
       }),
     onSuccess: () => {
       setError(null);
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collection.id) });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
+      revalidateCollections(qc, { collection_id: collection.id });
     },
     onError: (err: Error) => setError(err.message || 'Failed to save'),
   });
@@ -182,7 +182,7 @@ function EditBlock({ collection }: { collection: Collection }) {
   const del = useMutation({
     mutationFn: () => deleteCollection(collection.id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
+      revalidateCollections(qc);
       navigate(ROUTES.collections.build(), { replace: true });
     },
     onError: (err: Error) => setError(err.message || 'Failed to delete'),
@@ -276,8 +276,7 @@ function MonitoringBlock({ collection }: { collection: Collection }) {
 
   const invalidate = () => {
     setError(null);
-    qc.invalidateQueries({ queryKey: curationKeys.collection(collection.id) });
-    qc.invalidateQueries({ queryKey: curationKeys.collections });
+    revalidateCollections(qc, { collection_id: collection.id });
   };
 
   const toggle = useMutation({
@@ -424,13 +423,7 @@ function PropertyRowView({
 
   const remove = useMutation({
     mutationFn: () => removePropertyFromCollection(collectionId, row.property_id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collectionId) });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyCollections(row.property_id),
-      });
-    },
+    onSuccess: () => revalidateCollections(qc, { collection_id: collectionId }),
   });
 
   return (
