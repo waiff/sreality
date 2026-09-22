@@ -78,8 +78,12 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       so the LLM tool schema's enums ARE the canon — `disposition` and `price_unit` included.
       The disposition grammar refuses what cannot exist (819 stored bazos rows across 28
       values, listed for the operator; R9 keeps them). PENB `G` stays one member: measured,
-      no portal marks the statutory placeholder. **The stored-row heal is dispatched
-      post-merge** — dry-run lines per portal in the PR.
+      no portal marks the statutory placeholder. Two migrations carry the canon change
+      outside the parsers: **549** teaches the two Browse aggregate RPCs the fourth
+      ownership value (rule 16's one `__unknown__` predicate), **550** stops the URL
+      parser's DB-resident prompt instructing the retired `price_unit` spelling its new
+      enum forbids. **The stored-row heal is dispatched post-merge** — five dry-run lines
+      plus the `--bless` re-score, in the PR and the program doc.
 - [x] **W6 — close the wipe (R4).** The one shared SET builder now takes the source and
       asks the contract: `structured` / `derived` cells still clear from a parser NULL (a
       portal that stops stating a fact must be able to drop it), `text` / `none` cells

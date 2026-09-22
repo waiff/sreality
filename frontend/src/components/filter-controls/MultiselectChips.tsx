@@ -1,6 +1,6 @@
 /* MultiselectChips — multi-select rendered as a wrapping row of toggleable pills.
  *
- * Used for dispositions (10 options), districts when sourced from a
+ * Used for dispositions (1+kk … 9+1), districts when sourced from a
  * closed list, etc. Mirrors the existing DispositionPicker in
  * Filters.tsx but in a registry-driven shape: takes an option list
  * with value + label and emits a list of selected values.

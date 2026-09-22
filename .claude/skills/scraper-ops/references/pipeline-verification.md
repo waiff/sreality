@@ -138,9 +138,10 @@ aggregate pass over every `is_active` row: measured 12.2 s for all nine portals,
 per-check budget, and registered second-to-last in `_CHECKS` so the lane's cheap checks are never
 the ones that go unrun. It never expands a row into (field, value) pairs — that form costs 32 s
 over the stock; per-value counts come from `count(*) filter (where col = '<canonical value>')`
-interpolated from `toolkit/filter_registry`, which is also where the statutory `energy_rating` 'G'
-share per portal comes from (R11 makes it a vocabulary member of its own). A field with no canon
-is counted, not enumerated — W5 gives `price_unit` one, and its values appear that day.
+interpolated from `toolkit/filter_registry.COLUMN_CANONICAL_VALUES`, keyed by COLUMN — which is also
+where the statutory `energy_rating` 'G' share per portal comes from. 'G' stays an ordinary grade: W5
+measured all nine censuses and no portal marks it as the unassessed placeholder, so R11's `unassessed`
+member is struck. A field with no canon is counted, not enumerated — W5 gives `price_unit` one.
 
 **The arms are RELATIVE to a blessed baseline** (`data/field_capture/fill_baseline.json`), never
 to an absolute floor, because a floor cannot see a legitimately-zero cell or a partial break

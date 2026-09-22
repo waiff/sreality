@@ -426,11 +426,12 @@ export const buildingMaterialToValues = (
   ...new Set(materials.flatMap((m) => buildingMaterialBucketToValues(m))),
 ];
 
-const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
-  '1+kk', '1+1', '2+kk', '2+1',
-  '3+kk', '3+1', '4+kk', '4+1',
-  '5+kk', '5+1',
-];
+/* Read off the registry, like CONDITION_VALUES below: this list is what
+ * survives a URL round-trip, so a hand-kept copy silently discards every pill
+ * the canon gains (it stopped at 5+1 while the pills reached 9+1). */
+const ALL_DISPOSITIONS: ReadonlyArray<string> = (
+  filterById('dispositions')?.enum_values ?? []
+).map((o) => String(o.value));
 
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
@@ -571,7 +572,7 @@ export const priceChangeCountColumn = (windowDays: number | null): string => {
 export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const dispRaw = splitCsv(sp.get('disposition'));
   const dispositions = dispRaw.filter((d): d is Disposition =>
-    (ALL_DISPOSITIONS as ReadonlyArray<string>).includes(d),
+    ALL_DISPOSITIONS.includes(d),
   );
   const [priceMin, priceMax] = parseRange(sp.get('price'));
   const [ppm2Min, ppm2Max] = parseRange(sp.get('ppm2'));

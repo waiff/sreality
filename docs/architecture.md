@@ -205,7 +205,7 @@ every 6h) tagged `source='bezrealitky'`. Bezrealitky is a JSON-API portal like s
 `advert(id)` for detail). The API requires browser-like `Origin`/`Referer` headers; no
 cookies. `bezrealitky_parser.parse_advert` maps the advert object onto the shared
 `ScrapedListing` contract, translating bezrealitky's enums into the SAME canonical label
-strings sreality stores (`po_rekonstrukci`, `cihla`, `celkem`/`měsíc`, `2+kk`, …) so
+strings sreality stores (`po_rekonstrukci`, `cihla`, `za nemovitost`/`za mesic`, `2+kk`, …) so
 cross-source filtering/dedup/condition-scoring see one vocabulary. Coordinates come from
 the API's `gps` field (precise, per-listing — no geocoding step). Because the detail JSON
 carries `offerType`/`estateType`, the drain derives each listing's category from the
