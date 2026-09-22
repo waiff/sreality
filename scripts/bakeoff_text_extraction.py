@@ -214,35 +214,54 @@ def score(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def run_model(conn: Any, model: str, panel: list[dict[str, Any]]) -> dict[str, Any]:
+ARM_WORKERS = 8
+
+
+def _extract_one(model: str, tool: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    """One advert through the lane's contract, on this worker thread's own connection.
+
+    `LLMClient` writes `llm_calls` through the connection it is handed and psycopg
+    connections are not shared across threads, so each worker opens its own — the shape
+    `toolkit.vision_batch.run_batch` already uses (per-worker connections)."""
     from api.llm_client import LLMClient
     from api.providers.openai import OpenAIProvider
     from api.providers.oss import OssProvider
 
-    llm = LLMClient(conn, providers={"openai": OpenAIProvider(), "oss": OssProvider()})
-    tool = tx.extraction_tool(FIELDS)
-    results: list[dict[str, Any]] = []
-    for row in panel:
-        started = time.monotonic()
-        try:
+    started = time.monotonic()
+    try:
+        with db.connect() as wconn:
+            llm = LLMClient(wconn, providers={"openai": OpenAIProvider(), "oss": OssProvider()})
             res = llm.call(
                 called_for=tx.CALLED_FOR, model=model, max_tokens=tx.MAX_TOKENS,
                 system=tx._SYSTEM_PROMPT, tools=[tool], tool_choice=tool["name"],
                 messages=[{"role": "user", "content": row["description"]}],
             )
-            payload = tx._tool_arguments(res) or {}
-            values, dropped = tx.merge_extraction(
-                payload, description=row["description"], fields=FIELDS)
-            results.append({
-                "id": row["id"], "labels": row["labels"], "values": values,
-                "dropped": dropped, "cost_usd": float(res.cost_usd or 0.0),
-                "ms": int((time.monotonic() - started) * 1000),
-            })
-        except Exception as exc:  # noqa: BLE001 — one advert must not end the arm
-            LOG.warning("%s listing=%s failed: %s", model, row["id"], str(exc)[:200])
-            results.append({"id": row["id"], "labels": row["labels"], "values": {},
-                            "dropped": {}, "cost_usd": 0.0, "ms": None,
-                            "error": str(exc)[:300]})
+        payload = tx._tool_arguments(res) or {}
+        values, dropped = tx.merge_extraction(
+            payload, description=row["description"], fields=FIELDS)
+        return {
+            "id": row["id"], "labels": row["labels"], "values": values,
+            "dropped": dropped, "cost_usd": float(res.cost_usd or 0.0),
+            "ms": int((time.monotonic() - started) * 1000),
+        }
+    except Exception as exc:  # noqa: BLE001 — one advert must not end the arm
+        LOG.warning("%s listing=%s failed: %s", model, row["id"], str(exc)[:200])
+        return {"id": row["id"], "labels": row["labels"], "values": {},
+                "dropped": {}, "cost_usd": 0.0, "ms": None, "error": str(exc)[:300]}
+
+
+def run_model(conn: Any, model: str, panel: list[dict[str, Any]],
+              *, workers: int = ARM_WORKERS) -> dict[str, Any]:
+    """One arm over the panel, `workers` adverts in flight at once — the lane's own
+    concurrency. Serial, a 32B model behind one A100 needed ~4 h for 1,387 adverts and
+    the job cap cancelled it at page 1,387-minus-something (run 35708090261); both vLLM
+    and the API serve eight requests as fast as one. Results keep the panel's order."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    del conn  # the panel was built on it; every call below runs on a worker's own
+    tool = tx.extraction_tool(FIELDS)
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        results = list(pool.map(lambda row: _extract_one(model, tool, row), panel))
     return {"model": model, **score(results)}
 
 
