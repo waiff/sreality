@@ -1272,6 +1272,42 @@ def capacity_counts_english(text: str | None) -> set[int]:
     return set(_capacity_counts_en(text)) if text else set()
 
 
+# E216, the other vocabulary the capacity reader was blind to: a FURNISHED let sells its unit
+# types by how many people they sleep, and it says so in its equipment list rather than in an
+# office phrase. Two Brno Dornych co-live units of one residence, floor 4 at 14,990 and floor 3
+# at 16,690, run the same 1,900-character template and differ under `Vybavení:` — `2 jednolůžka
+# s úložným prostorem, 2 pracovní stoly` against `postel s úložným prostorem`. Read ONLY inside
+# that section: a `postel` in prose is furniture in a photograph caption, not the offer's size.
+_FURNISHING_SECTION = re.compile(r"\b(?:vybaveni|zarizeni|k\s+dispozici\s+je)\b")
+_BED_NOUN: str = r"jednoluzk\w*|dvouluzk\w*|luzk\w*|postel\w*|palanda\w*"
+_BED_WORDS: dict[str, int] = {"jedno": 1, "dve": 2, "dva": 2, "tri": 3, "ctyri": 4, "pet": 5}
+_BED_COUNT = re.compile(
+    r"(?:(\d{1,2})|\b(" + "|".join(_BED_WORDS) + r"))\s+(?:\w+\s+){0,1}?(?:" + _BED_NOUN
+    + r")\b|\b(?:manzelsk\w+\s+)?(" + _BED_NOUN + r")\b")
+FURNISHING_WINDOW: int = 420
+
+
+def stated_bed_counts(text: str | None) -> frozenset[int]:
+    """How many sleeping places the equipment list of a FURNISHED let states."""
+    return _stated_bed_counts(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _stated_bed_counts(text: str) -> frozenset[int]:
+    folded = fact_text(text)
+    out: set[int] = set()
+    for section in _FURNISHING_SECTION.finditer(folded):
+        window = folded[section.end(): section.end() + FURNISHING_WINDOW]
+        for match in _BED_COUNT.finditer(window):
+            if match.group(1) is not None:
+                out.add(int(match.group(1)))
+            elif match.group(2) is not None:
+                out.add(_BED_WORDS[match.group(2)])
+            else:
+                out.add(1)
+    return frozenset(v for v in out if 0 < v <= 12)
+
+
 # --- the place the BODY names (E217) ---------------------------------------------------------
 # E135 refuses the raw obec conflict: portals disagree about which municipality a property is
 # in, and a village is routinely filed under its town. The BODY is a different witness — one

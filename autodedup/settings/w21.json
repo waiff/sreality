@@ -76,6 +76,7 @@
  "d43_prose_plot_conflict": true,
  "d43_prose_plot_exact": true,
  "d43_prose_street": true,
+ "d43_stated_beds": true,
  "d43_stated_unit_count": "colive_price",
  "d43_street_min_distance_m": 15.0,
  "d43_subject_floor": true,

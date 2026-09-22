@@ -105,6 +105,7 @@ from autodedup.text_facts import (
     place_names_match,
     priced_land_rows,
     prose_plot_areas_wide,
+    stated_bed_counts,
     states_second_plot,
     same_form_floor_gap,
     address_block_key,
@@ -1118,7 +1119,14 @@ def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> 
         found = capacity_counts(text)
         return (found | capacity_counts_english(text)) if cfg.d43_capacity_english else found
 
-    for reader, label in ((capacity, "capacity"), (offered_room_counts, "rooms")):
+    def beds(text: str | None) -> set[int]:
+        # E216's other vocabulary: a FURNISHED let states its size as sleeping places in its
+        # equipment list. Two Dornych co-live units run one template and differ under
+        # `Vybavení:` — `2 jednolůžka` at 14,990 against `postel` at 16,690.
+        return set(stated_bed_counts(text)) if cfg.d43_stated_beds else set()
+
+    for reader, label in ((capacity, "capacity"), (offered_room_counts, "rooms"),
+                          (beds, "beds")):
         left, right = reader(a.description), reader(b.description)
         if left and right and left != right:
             return (f"{label}={sorted(left)}", f"{label}={sorted(right)}")

@@ -694,6 +694,7 @@ class Settings:
     # E216: the capacity written in English. One serviced-office operator publishes the same
     # building's products in both languages and the Czech-only reader saw one of them.
     d43_capacity_english: bool = False
+    d43_stated_beds: bool = False
     # E217: the obec the BODY names, against the other advert's stored locality. E135's refusal
     # of the raw column conflict stands (D64): this reads the body, requires the speaker's own
     # body to name its own place, and requires the other side's locality to be known at part
