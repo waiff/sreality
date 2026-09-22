@@ -637,6 +637,30 @@ class Settings:
     # what "one third of a parcel" looks like and a measurement difference never is.
     d43_offer_area_min_ratio: float = 2.0
 
+    # --- W20 / S5: what the cohort-7 residue named (E200-E204, D61-D62) ---------------------
+    # E200: two of one seller's printed order codes, live together on one portal, on two
+    # bodies of ONE template. The bare code conflict is refuted — 263 certain duplicates of the
+    # seven cohorts carry disjoint codes while live together, because a re-post is renumbered —
+    # so the reading is banded by how much of the two bodies is the same text.
+    d43_agency_code_conflict: bool = False
+    d43_agency_code_max_codes: int = 3
+    d43_agency_code_body_floor: float = 0.55
+    d43_agency_code_body_ceiling: float = 0.97
+    # E201: the storey written as an ORDINAL WORD (`ve třetím patře`), read by the same three
+    # readers that read the numeral. Without it a worded upper storey reads as no storey.
+    d43_prose_floor_words: bool = False
+    # E203: a stated service advance or deposit that differs BESIDE a co-live price gap. D49's
+    # refusal of the bare price limb is kept — `requires_price_gap` is what keeps it.
+    d43_colive_charge_conflict: bool = False
+    d43_colive_charge_requires_price_gap: bool = True
+    d43_colive_charge_same_source_only: bool = False
+    # E202: the plot the body states, for the portals that fill no plot column at all.
+    d43_prose_plot_conflict: bool = False
+    d43_prose_plot_requires_price_gap: bool = True
+    # E204: an advert that states its plot is cut from a bigger parcel the other sells whole.
+    d43_part_whole: bool = False
+    d43_part_whole_min_gap: float = 0.1
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -805,6 +829,20 @@ class Settings:
             )
         if set(self.floor_camps.values()) - {0, 1}:
             raise ValueError(f"floor_camps levels must be 0 or 1: {sorted(set(self.floor_camps.values()))}")
+        if not 0.0 <= self.d43_agency_code_body_floor <= self.d43_agency_code_body_ceiling <= 1.0:
+            raise ValueError(
+                "d43_agency_code_body_floor must be in [0, ceiling] and the ceiling in "
+                f"[floor, 1]: {self.d43_agency_code_body_floor} "
+                f"{self.d43_agency_code_body_ceiling}"
+            )
+        if self.d43_agency_code_max_codes < 1:
+            raise ValueError(
+                f"d43_agency_code_max_codes must be at least 1: {self.d43_agency_code_max_codes}"
+            )
+        if not 0.0 <= self.d43_part_whole_min_gap < 1.0:
+            raise ValueError(
+                f"d43_part_whole_min_gap must be in [0, 1): {self.d43_part_whole_min_gap}"
+            )
         if self.d43_stated_unit_count not in ("off", "colive_price", "always"):
             raise ValueError(
                 "d43_stated_unit_count must be off/colive_price/always: "

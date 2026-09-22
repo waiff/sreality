@@ -236,17 +236,38 @@ _PROSE_NP = re.compile(r"\b(\d{1,2})\.?\s*(?:np\b|nadzemnim?\s+podlazi)")
 _PROSE_PATRO = re.compile(r"\b(\d{1,2})\.?\s*patr")
 PROSE_FLOOR_MAX: int = 40
 
+# E201: the storey written as an ORDINAL WORD. `ve třetím patře` carries no digit, so every
+# reader above is blind to it — and a Czech letting agent writes the storey that way as often
+# as with a numeral (both Ústí `ul. Stará` 1+kk adverts of one broker do, `v přízemí` against
+# `ve třetím patře`). The word must sit directly in front of the storey noun; `druhé` on its
+# own is one of the commonest words in the language and is never read alone.
+_FLOOR_ORDINAL_WORDS: dict[str, int] = {
+    "prvnim": 1, "prvni": 1, "druhem": 2, "druhe": 2, "druhy": 2, "tretim": 3, "treti": 3,
+    "ctvrtem": 4, "ctvrte": 4, "patem": 5, "pate": 5, "sestem": 6, "seste": 6,
+    "sedmem": 7, "sedme": 7, "osmem": 8, "osme": 8, "devatem": 9, "devate": 9,
+    "desatem": 10, "desate": 10,
+}
+_ORDINAL_ALTERNATION: str = "|".join(
+    sorted(_FLOOR_ORDINAL_WORDS, key=len, reverse=True))
+_WORD_NP = re.compile(
+    r"\b(" + _ORDINAL_ALTERNATION + r")\s+(?:nadzemnim\s+)?(?:podlazi|np)\b")
+_WORD_PATRO = re.compile(r"\b(" + _ORDINAL_ALTERNATION + r")\s+(?:patre|patro|poschodi)\b")
 
-def printed_floors(text: str | None) -> frozenset[int]:
+
+def printed_floors(text: str | None, words: bool = False) -> frozenset[int]:
     """Every storey the body prints, on the NP scale (`1` is the ground floor)."""
-    return _printed_floors(text) if text else frozenset()
+    return _printed_floors(text, words) if text else frozenset()
 
 
 @lru_cache(maxsize=BODY_CACHE)
-def _printed_floors(text: str) -> frozenset[int]:
+def _printed_floors(text: str, words: bool = False) -> frozenset[int]:
     folded = fold(text)
     out = {int(match.group(1)) for match in _PROSE_NP.finditer(folded)}
     out |= {int(match.group(1)) + 1 for match in _PROSE_PATRO.finditer(folded)}
+    if words:
+        out |= {_FLOOR_ORDINAL_WORDS[match.group(1)] for match in _WORD_NP.finditer(folded)}
+        out |= {_FLOOR_ORDINAL_WORDS[match.group(1)] + 1
+                for match in _WORD_PATRO.finditer(folded)}
     return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
 
 
@@ -268,13 +289,18 @@ _PLACEMENT_CUE = re.compile(
 PLACEMENT_WINDOW: int = 12
 
 
-def subject_floors(text: str | None) -> frozenset[int]:
+# A worded ordinal is longer than a numeral, so the placement window has to reach past it:
+# `nachází se ve třetím patře` needs 12 characters for `tretim patre` alone.
+PLACEMENT_WORD_WINDOW: int = 26
+
+
+def subject_floors(text: str | None, words: bool = False) -> frozenset[int]:
     """The storeys a PLACEMENT clause states of the offered unit, on the NP scale."""
-    return _subject_floors(text) if text else frozenset()
+    return _subject_floors(text, words) if text else frozenset()
 
 
 @lru_cache(maxsize=BODY_CACHE)
-def _subject_floors(text: str) -> frozenset[int]:
+def _subject_floors(text: str, words: bool = False) -> frozenset[int]:
     folded = fold(text)
     out: set[int] = set()
     for cue in _PLACEMENT_CUE.finditer(folded):
@@ -285,6 +311,15 @@ def _subject_floors(text: str) -> frozenset[int]:
         for match in _PROSE_PATRO.finditer(window):
             if match.start() == 0:
                 out.add(int(match.group(1)) + 1)
+        if not words:
+            continue
+        wide = folded[cue.end(): cue.end() + PLACEMENT_WORD_WINDOW]
+        for match in _WORD_NP.finditer(wide):
+            if match.start() == 0:
+                out.add(_FLOOR_ORDINAL_WORDS[match.group(1)])
+        for match in _WORD_PATRO.finditer(wide):
+            if match.start() == 0:
+                out.add(_FLOOR_ORDINAL_WORDS[match.group(1)] + 1)
     return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
 
 
@@ -298,20 +333,24 @@ def _subject_floors(text: str) -> frozenset[int]:
 # statement about the building.
 _GROUND_WORD = re.compile(r"\b(?:v|ve)\s+prizemi\b|\bprizemni\s+(?:byt|jednotk|apartman)\w*")
 _UPPER_WORD = re.compile(r"\b(?:v|ve)\s+(?:\d{1,2}\.?\s*)?(?:patre|poschodi)\b")
+# E201: the same clause with the storey spelled out. `ve třetím patře` is `v patře` with an
+# ordinal in the middle, and without this the worded upper storey reads as no storey at all.
+_UPPER_WORD_ORDINAL = re.compile(
+    r"\b(?:v|ve)\s+(?:" + _ORDINAL_ALTERNATION + r")\s+(?:patre|poschodi)\b")
 
 
-def ground_or_upper(text: str | None) -> frozenset[str]:
+def ground_or_upper(text: str | None, words: bool = False) -> frozenset[str]:
     """`{"ground"}`, `{"upper"}`, both, or nothing — the storey named in words, not digits."""
-    return _ground_or_upper(text) if text else frozenset()
+    return _ground_or_upper(text, words) if text else frozenset()
 
 
 @lru_cache(maxsize=BODY_CACHE)
-def _ground_or_upper(text: str) -> frozenset[str]:
+def _ground_or_upper(text: str, words: bool = False) -> frozenset[str]:
     folded = fold(text)
     out: set[str] = set()
     if _GROUND_WORD.search(folded):
         out.add("ground")
-    if _UPPER_WORD.search(folded):
+    if _UPPER_WORD.search(folded) or (words and _UPPER_WORD_ORDINAL.search(folded)):
         out.add("upper")
     return frozenset(out)
 
@@ -930,3 +969,101 @@ def code_population(descriptions: Mapping[int, str | None]) -> dict[str, int]:
 def rare_codes(codes: Iterable[str], population: Mapping[str, int]) -> set[str]:
     """The codes of one listing that a crowd does not share (E60's population cap)."""
     return {code for code in codes if population.get(code, 0) <= MAX_CODE_POPULATION}
+
+
+# --- what the advert says the tenant pays BESIDES the rent (E203) ---------------------------
+# D49 refused the bare co-live price limb and that refusal stands: two live adverts at two
+# prices may be one flat a portal has not re-read yet. What the co-live price gap has never
+# had beside it is a SECOND stated number of the same tenancy. One Bílina 2+1 prints
+# `nájemné 11200 Kč + zálohy na služby 3800 Kč`; another, live with it on the same portal,
+# prints `Nájemné: 9.000 Kč / Zálohy na služby: 4.500 Kč / Vratná kauce: 20.000 Kč`. A landlord
+# quotes one service advance per flat, so two advances are two tenancies.
+CHARGE_MIN_CZK: float = 500.0
+CHARGE_MAX_CZK: float = 5_000_000.0
+CHARGE_WINDOW: int = 64
+CHARGE_KINDS: tuple[str, ...] = ("services", "deposit")
+_CHARGE_KEYWORDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("services", re.compile(
+        r"zaloh\w*\s+(?:na\s+)?(?:sluzb\w*|energi\w*|topeni|vodu)"
+        r"|poplatk\w*\s+za\s+sluzb\w*|sluzby\s+a\s+energie|inkaso\w*")),
+    ("deposit", re.compile(r"\bkauc\w*|\bjistin\w*|\bjistot\w*|\bvratn\w+\s+zaloh\w*")),
+)
+_CHARGE_MONEY = re.compile(_AREA_NUMBER + r"\s*(?:,-)?\s*(?:kc\b|kč\b)?")
+
+
+def stated_charges(text: str | None) -> dict[str, frozenset[float]]:
+    """`{kind: {amounts}}` — the service advance and the deposit the body quotes, in Kč."""
+    return dict(_stated_charges(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _stated_charges(text: str) -> tuple[tuple[str, frozenset[float]], ...]:
+    folded = fold(text)
+    found: dict[str, set[float]] = {}
+    for kind, keyword in _CHARGE_KEYWORDS:
+        for match in keyword.finditer(folded):
+            window = folded[match.end(): match.end() + CHARGE_WINDOW]
+            for money in _CHARGE_MONEY.finditer(window):
+                value = _area_value(money.group(1))
+                # `kauce ve výši 3 nájmů tj. 15 000 Kč` states the multiplier before the money;
+                # a charge is a sum of money, so anything below the floor is not one.
+                if value is None or not CHARGE_MIN_CZK <= value <= CHARGE_MAX_CZK:
+                    continue
+                found.setdefault(kind, set()).add(value)
+                break
+    return tuple((kind, frozenset(values)) for kind, values in sorted(found.items()))
+
+
+# --- the plot the BODY says comes with the house (E202) -------------------------------------
+# `plot_area` reads a stored column, and bazos has none: one Hrobčice house is offered twice by
+# one seller, 25 minutes apart, `+ areál o rozloze 2 830 m²` for 7,999,000 and `+ pozemek o
+# rozloze 1 483 m²` for 6,190,000, and the only place either figure exists is the prose and the
+# URL slug. The noun set is deliberately narrower than `_AREA_SCOPES`'s `land`: a `zahrada` is
+# not the plot the house stands on, and both of those bodies print the same 87 m² garden.
+_PROSE_PLOT = re.compile(
+    r"\b(?:pozemk\w*|pozemek|parcel\w*|areal\w*|dvur)[^.;:]{0,24}?"
+    r"(?:o\s+)?(?:celkov\w+\s+)?(?:rozloze|vymere|vymera|velikosti|ploche|plose)"
+    r"\s+(?:cca\s+)?" + _AREA_NUMBER + r"\s*m2")
+PROSE_PLOT_MIN_M2: float = 50.0
+
+
+def prose_plot_areas(text: str | None) -> frozenset[float]:
+    """Every plot size the body states as the land sold WITH the object, in m²."""
+    return _prose_plot_areas(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _prose_plot_areas(text: str) -> frozenset[float]:
+    out: set[float] = set()
+    for match in _PROSE_PLOT.finditer(fact_text(text)):
+        value = _area_value(next(group for group in match.groups() if group))
+        if value is not None and PROSE_PLOT_MIN_M2 <= value <= STATED_AREA_MAX_M2:
+            out.add(value)
+    return frozenset(out)
+
+
+# --- the advert that admits it is a PART of a bigger parcel (E204) ---------------------------
+# One HK-Zámeček body offers `stavební pozemek o výměře 732 m²` and says four sentences later
+# that it `vznikne rozdělením parcely o celkové výměře 2 195 m² na tři části`; the advert of the
+# whole parcel offers 2 195 m². Read as SETS the two share 2 195 and never contradict — the
+# part names the whole it will be cut from, which is exactly what makes it a part.
+_PARCEL_DIVISION = re.compile(
+    r"(?:rozdelen\w*|rozdeleni\w*|deleni\w*|oddelen\w*)\s+(?:puvodni\s+)?"
+    r"(?:parcely|pozemku|parcele)[^.;:]{0,30}?"
+    r"(?:o\s+)?(?:celkov\w+\s+)?(?:vymere|vymera|rozloze|ploche|plose)"
+    r"\s+(?:cca\s+)?" + _AREA_NUMBER + r"\s*m2")
+
+
+def parcel_divisions(text: str | None) -> frozenset[float]:
+    """The parcel sizes this advert says its own plot will be CUT FROM, in m²."""
+    return _parcel_divisions(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parcel_divisions(text: str) -> frozenset[float]:
+    out: set[float] = set()
+    for match in _PARCEL_DIVISION.finditer(fact_text(text)):
+        value = _area_value(next(group for group in match.groups() if group))
+        if value is not None and PROSE_PLOT_MIN_M2 <= value <= STATED_AREA_MAX_M2:
+            out.add(value)
+    return frozenset(out)
