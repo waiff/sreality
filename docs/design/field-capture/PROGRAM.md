@@ -451,9 +451,14 @@ per extractor version. Pre-call budget guard binds before spend.
 
 **W8 — SHIPPED in code; the GATE and the heal are post-merge by nature.** Sibling-pair gate (one SQL, no
 labels), now registered as `verify_pipeline`'s `floor_convention` check — the first floor check of any kind:
-mean(portal_floor − idnes_floor) over unique (price_czk, area_m2, disposition) active byt keys, within ± 0.25 of 0
-for every portal, fail at ± 0.50, min 40 pairs. Measured 18.4 s warm / 20.8 s cold over 34,800 pairs, inside the
-45 s per-check budget and registered LAST among the DB checks for it. Baseline re-measured 2026-09-22 (mean, and
+mean(portal_floor − idnes_floor) over unique (price_czk, area_m2, disposition) active byt keys, within ± 0.35 of 0
+for every portal, fail at ± 0.50, min 40 pairs. The warn tier is 0.35, not the planned 0.25: ceskereality never
+states the ground storey (0 of its 34,350 floored rows read 0), so its sample is conditioned on `floor ≥ 1` and
+sits at +0.20 — 0.25 left a CORRECT portal 0.05 from an amber it could reach in an ordinary week. Measured
+27.0 s / 35.1 s on two EXPLAIN (ANALYZE) runs over 34,801 pairs — the lane's most expensive check by some way
+(a Bitmap Heap Scan that spills, ~103k buffers almost all `read`, so it never stays cached), which is why it is
+registered LAST among the DB checks and runs under the per-check `statement_timeout`: cancelled on a bad day it
+reports `warn / timed out`, which says UNKNOWN, never a false green. Baseline re-measured 2026-09-22 (mean, and
 the share at exactly +1): sreality +0.97 / 94.0 % (n=13,574), realitymix +0.96 / 92.4 % (7,416), remax +1.05 /
 86.8 % (1,248), mmreality +0.99 / 98.6 % (1,574), bezrealitky +0.87 / 73.0 % (900), maxima +0.82 / 85.7 % (49);
 ceskereality already +0.20 (85.6 % same, n=7,453) and **must not be converted**, bazos +0.10. The residual the six

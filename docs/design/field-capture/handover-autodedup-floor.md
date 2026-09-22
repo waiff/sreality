@@ -202,5 +202,6 @@ idempotence, and the offline half is
 * **ceskereality, idnes and bazos must NOT be healed for floor.** Converting ceskereality would break
   34,350 correct rows.
 * **The gate.** `scripts/verify_pipeline.py` → `floor_convention` (new in this PR). It reads RED until
-  every one of the six passes has run; after them each portal must sit within ±0.25 of 0, with fail at
-  ±0.50. Run it before and after, and once more after a full drain cycle.
+  every one of the six passes has run; after them each portal must sit within ±0.35 of 0, with fail at
+  ±0.50 (the warn tier is 0.35, not 0.25, because ceskereality's sample is conditioned on `floor >= 1`
+  — it never states the ground storey — and reads +0.20 while correct). Run it before and after, and once more after a full drain cycle.

@@ -2724,3 +2724,84 @@ def test_full_lane_budget_fits_its_job() -> None:
     workflow = Path(__file__).resolve().parents[2] / ".github/workflows/verify_pipeline.yml"
     minutes = int(re.search(r"timeout-minutes:\s*(\d+)", workflow.read_text()).group(1))
     assert vp.full_lane_budget_s(weekly=True) + vp._JOB_HEADROOM_S <= minutes * 60
+
+
+# --- floor_convention (field capture W8) -----------------------------------
+
+
+class _FloorConn(_ShapeDriftConn):
+    """`_fetchall` wants transaction() + cursor(); _ShapeDriftConn already has both."""
+
+
+def _live_floor_rows() -> list[tuple[Any, ...]]:
+    """(source, pairs, mean_delta) as the live cluster read them 2026-09-22, before
+    the heal: the six ground=1 portals a storey high, the two canonical ones at their
+    own noise floor."""
+    return [
+        ("remax", 1248, 1.050), ("mmreality", 1574, 0.988), ("sreality", 13575, 0.973),
+        ("realitymix", 7416, 0.962), ("bezrealitky", 900, 0.869), ("maxima", 49, 0.816),
+        ("ceskereality", 7453, 0.201), ("bazos", 2586, 0.098),
+    ]
+
+
+def test_floor_convention_is_registered() -> None:
+    from scripts.verify_pipeline import _CHECKS, check_floor_convention
+
+    assert ("floor_convention", check_floor_convention) in _CHECKS
+
+
+def test_floor_convention_fails_on_todays_pre_heal_corpus() -> None:
+    """The gate W8 is measured by: six portals a whole storey off idnes is a fail, and
+    the two portals that were already canonical are NOT named as offenders."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn(_live_floor_rows()), T)
+    assert out["status"] == "fail"
+    assert out["value"] == 1.05
+    assert out["details"]["scored"] == 8
+    assert sorted(s.split()[0] for s in out["details"]["offenders"]) == [
+        "bezrealitky", "maxima", "mmreality", "realitymix", "remax", "sreality"]
+    assert "--write --allow-snapshot-deferral" in out["message"]
+
+
+def test_floor_convention_never_tells_the_operator_to_heal_a_canonical_portal() -> None:
+    """ceskereality's cell declares `ground0`: re-deriving it would shift 34,350 CORRECT
+    rows down one storey, so the reparse runbook must never name it."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn([("ceskereality", 7453, 0.62)]), T)
+    assert out["status"] == "fail"
+    assert "scripts.reparse" not in out["message"]
+    assert "re-deriving is NOT the remedy" in out["message"]
+
+
+def test_floor_convention_is_ok_once_every_portal_reads_the_same_scale() -> None:
+    """What the heal buys: the residual is each portal's own sibling noise, not 0."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn(
+        [(s, n, d - 1.0) for s, n, d in _live_floor_rows() if d > 0.5]
+        + [("ceskereality", 7453, 0.201), ("bazos", 2586, 0.098)]), T)
+    assert out["status"] == "ok"
+    assert out["details"]["offenders"] == []
+
+
+def test_floor_convention_warns_rather_than_passing_when_nothing_scored() -> None:
+    """A thin sample certifies nothing; `value` stays None so the tile reads em-dash,
+    never a 0 that looks like agreement."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn([("maxima", 12, 0.9)]), T)
+    assert out["status"] == "warn"
+    assert out["value"] is None
+    assert "verified NOTHING" in out["message"]
+
+
+def test_floor_convention_runs_under_the_per_check_statement_timeout() -> None:
+    """The lane's most expensive query (27-35 s measured) is exactly the one that must
+    be cancellable server-side: a raw cursor would run it under the 10-minute default."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    conn = _FloorConn(_live_floor_rows())
+    check_floor_convention(conn, T)
+    assert any("statement_timeout" in s for s in conn.executed)

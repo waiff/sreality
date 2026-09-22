@@ -109,7 +109,8 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       gone, `is_plausible_floor` tightened to `total_floors - 1`, and one `fmtFloor`
       replaces four inline SPA expressions so the screen says "2. patro z 5 podlaží"
       instead of a bare number. New `floor_convention` check in verify_pipeline (the
-      sibling-pair mean vs idnes; 18.4 s measured) — there was no floor check of any kind.
+      sibling-pair mean vs idnes; 27-35 s measured, the lane's costliest) — there was
+      no floor check of any kind.
       The R12 hand-over shipped first: `docs/design/field-capture/handover-autodedup-floor.md`.
       **The 183,745-row heal (63,328 active) is the operator's to run** — six
       `scripts/reparse.py --fields floor` passes, runbook in the hand-over §7; the new
