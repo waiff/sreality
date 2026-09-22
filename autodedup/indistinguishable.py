@@ -1094,18 +1094,29 @@ def distinguishing_facts(
     words = cfg.d43_prose_floor_words and not (
         {a.category_main, b.category_main} & PLOT_EXACT_CATEGORIES)
 
-    def within_noun_gap(reader, left: Listing, right: Listing) -> int | None:
-        return same_form_floor_gap(reader(left.description, True),
-                                   reader(right.description, True))
+    def worded_gap(reader, numbered, left: Listing, right: Listing) -> int | None:
+        """The storey gap the two bodies state, or None when they state none.
+
+        Where the NUMBERED reading already answers, that answer stands and S4 is untouched.
+        The worded reading only ever adds, and it adds under two rules: within ONE noun (the
+        `patro`/`NP` scales do not convert) and at TWO storeys or more. `v druhém patře` is
+        written for the second storey and for the second floor above it by different authors —
+        one Rokytnice 2+kk is `v druhém patře` and, re-posted by the same broker at the same
+        9,800 Kč, `ve 1. patře (2. NP)` — so a worded ordinal cannot carry a one-storey claim.
+        """
+        plain_a, plain_b = numbered(left.description), numbered(right.description)
+        if plain_a and plain_b and not (plain_a & plain_b):
+            return min(abs(x - y) for x in plain_a for y in plain_b)
+        if not words:
+            return None
+        gap = same_form_floor_gap(reader(left.description, True), reader(right.description, True))
+        return gap if gap is not None and gap >= 2 else None
 
     if cfg.d43_prose_floor:
-        floors_a = printed_floors(a.description, words)
-        floors_b = printed_floors(b.description, words)
-        same_noun = within_noun_gap(printed_floors_by_form, a, b) if words else None
-        if (floors_a and floors_b and not (floors_a & floors_b)
-                and not (words and (same_noun is None or same_noun == 0))):
-            prose_gap = (same_noun if words and same_noun
-                         else min(abs(x - y) for x in floors_a for y in floors_b))
+        prose_gap = worded_gap(printed_floors_by_form, printed_floors, a, b)
+        if prose_gap is not None:
+            floors_a = printed_floors(a.description, words)
+            floors_b = printed_floors(b.description, words)
             feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
             if (_rounded_floors(a, b, cfg, prose_gap)
                     or (prose_gap == 1 and feed)):
@@ -1115,13 +1126,10 @@ def distinguishing_facts(
     # body names, and one Dašice mill advert names its own 2.NP and a WC in 1.NP, so the sets
     # meet and the two floors of one mill never contradict. The placement clause names one.
     if cfg.d43_subject_floor:
-        subject_a = subject_floors(a.description, words)
-        subject_b = subject_floors(b.description, words)
-        subject_noun = within_noun_gap(subject_floors_by_form, a, b) if words else None
-        if (subject_a and subject_b and not (subject_a & subject_b)
-                and not (words and (subject_noun is None or subject_noun == 0))):
-            subject_gap = (subject_noun if words and subject_noun
-                           else min(abs(x - y) for x in subject_a for y in subject_b))
+        subject_gap = worded_gap(subject_floors_by_form, subject_floors, a, b)
+        if subject_gap is not None:
+            subject_a = subject_floors(a.description, words)
+            subject_b = subject_floors(b.description, words)
             feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
             if _rounded_floors(a, b, cfg, subject_gap) or (subject_gap == 1 and feed):
                 add("subject_floor", sorted(subject_a), sorted(subject_b))

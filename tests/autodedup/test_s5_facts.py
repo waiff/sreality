@@ -245,6 +245,34 @@ def test_two_storeys_apart_across_the_two_nouns_is_still_the_nouns() -> None:
         printed_floors_by_form("bydlení je situováno v prvním podlaží", True)) is None
 
 
+ROKYTNICE_PATRO = (
+    "Dovoluji si Vám nabídnout k pronájmu byt o dispozici 2+kk v cihlovém domě v Rokytnici "
+    "nad Jizerou. Byt je jednopodlažní a nachází se v druhém patře. Užitná plocha bytu činí "
+    "33 m², což je ideální pro jednotlivce nebo dvojici. K bytu náleží sklep. Měsíční nájemné "
+    "činí 9 800 Kč, náklady na služby cca 3 800 Kč."
+)
+ROKYTNICE_NP = (
+    "Nabízíme k pronájmu byt 2+kk v dobrém stavu, situovaný ve 1. patře (2. NP) cihlové budovy "
+    "v centru Horní Rokytnice. Nájem: 9800 CZK/měsíc + služby. Dispozice: 2+kk, užitná plocha "
+    "33 m2. Patro: 2. podlaží, celkem 2 m2 sklepa. Kauce: 2 měsíční nájmy. Bez provize."
+)
+
+
+def test_a_worded_ordinal_cannot_carry_a_one_storey_claim() -> None:
+    """sreality 14859053 and 18596066, one broker, one 33 m² 2+kk at 9,800 Kč in Rokytnice:
+    `v druhém patře` against `ve 1. patře (2. NP)`. The second body pins its own scale and the
+    first does not, which is what a worded ordinal is worth. The numbered reading is untouched:
+    it answers first wherever both bodies print a digit."""
+    a = listing(14859053, source="sreality", disposition="2+kk", area_m2=33.0, floor=2,
+                price=9_800.0, description=ROKYTNICE_PATRO, first=0, last=5)
+    b = listing(18596066, source="sreality", disposition="2+kk", area_m2=33.0, floor=2,
+                price=9_800.0, description=ROKYTNICE_NP, first=19, last=34)
+    assert printed_floors(ROKYTNICE_PATRO, True) == frozenset({3})
+    assert printed_floors(ROKYTNICE_NP, True) == frozenset({2})
+    assert "prose_floor" not in names(a, b, S5)
+    assert "subject_floor" not in names(a, b, S5)
+
+
 def test_one_noun_written_twice_is_still_a_storey() -> None:
     """Mariánské Lázně, Kubelíkova: two 1+kk of 21 m² in one house, `v pátém patře` against
     `ve druhém patře`. One noun, three storeys, a fact."""
