@@ -5,9 +5,10 @@
  * adding a sort control on top of that would have compounded it (you sort, you
  * navigate to a listing, you come back, and the board is unsorted again).
  *
- * Param names and encodings are Browse's, not new ones: `status`, `cat`, and
- * the `districts` / `districts_ctx` / `districts_excl` / `districts_lvl` /
- * `districts_id` CSV family that `districtChipsToCsvParams` +
+ * Param names and encodings are Browse's, not new ones: `status`, `cat`,
+ * `collections` (Browse's own CSV of collection ids, parsed by its
+ * `parseIntList`), and the `districts` / `districts_ctx` / `districts_excl` /
+ * `districts_lvl` / `districts_id` CSV family that `districtChipsToCsvParams` +
  * `parseDistrictChips` already define as "the one wire format every
  * location-filterable surface uses". Same meaning, same spelling, everywhere.
  *
@@ -19,6 +20,7 @@ import { useSearchParams } from 'react-router-dom';
 import {
   districtChipsToCsvParams,
   parseDistrictChips,
+  parseIntList,
   type DistrictChip,
   type ListingStatus,
 } from './filters';
@@ -41,12 +43,14 @@ export interface PipelineViewState {
   status: ListingStatus;
   types: ReadonlySet<string>;
   districts: DistrictChip[];
+  collectionIds: number[];
   sort: PipelineSort;
   setStatus: (next: ListingStatus) => void;
-  toggleType: (value: string) => void;
-  clearTypes: () => void;
+  setTypes: (next: string[]) => void;
   setDistricts: (next: DistrictChip[]) => void;
+  setCollections: (next: number[]) => void;
   setSort: (next: PipelineSort) => void;
+  reset: () => void;
 }
 
 export function usePipelineViewState(): PipelineViewState {
@@ -54,12 +58,15 @@ export function usePipelineViewState(): PipelineViewState {
 
   const status = (searchParams.get('status') as ListingStatus | null) ?? 'any';
   const typesParam = searchParams.get('cat');
+  const collectionsParam = searchParams.get('collections');
   const sortParam = searchParams.get('sort');
 
   const types = useMemo(
     () => new Set(typesParam ? typesParam.split(',').filter(Boolean) : []),
     [typesParam],
   );
+
+  const collectionIds = useMemo(() => parseIntList(collectionsParam), [collectionsParam]);
 
   /* Rebuilt from the five district params rather than from a single joined
    * string, so a chip's admin id / level / exclusion survives a reload — the
@@ -106,19 +113,19 @@ export function usePipelineViewState(): PipelineViewState {
     [patch],
   );
 
-  const toggleType = useCallback(
-    (value: string) =>
-      patch((sp) => {
-        const cur = new Set((sp.get('cat') ?? '').split(',').filter(Boolean));
-        if (cur.has(value)) cur.delete(value);
-        else cur.add(value);
-        if (cur.size === 0) sp.delete('cat');
-        else sp.set('cat', [...cur].join(','));
-      }),
+  const setTypes = useCallback(
+    (next: string[]) =>
+      patch((sp) => (next.length === 0 ? sp.delete('cat') : sp.set('cat', next.join(',')))),
     [patch],
   );
 
-  const clearTypes = useCallback(() => patch((sp) => sp.delete('cat')), [patch]);
+  const setCollections = useCallback(
+    (next: number[]) =>
+      patch((sp) =>
+        next.length === 0 ? sp.delete('collections') : sp.set('collections', next.join(',')),
+      ),
+    [patch],
+  );
 
   const setDistricts = useCallback(
     (next: DistrictChip[]) =>
@@ -154,15 +161,27 @@ export function usePipelineViewState(): PipelineViewState {
     [patch],
   );
 
+  /* One write, one render: Reset is a single intent, not four setter calls.
+   * Sort survives — it is how the board is read, not which deals are on it. */
+  const reset = useCallback(
+    () =>
+      patch((sp) => {
+        for (const p of ['status', 'cat', 'collections', ...DISTRICT_PARAMS]) sp.delete(p);
+      }),
+    [patch],
+  );
+
   return {
     status,
     types,
     districts,
+    collectionIds,
     sort,
     setStatus,
-    toggleType,
-    clearTypes,
+    setTypes,
     setDistricts,
+    setCollections,
     setSort,
+    reset,
   };
 }

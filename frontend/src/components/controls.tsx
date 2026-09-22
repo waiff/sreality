@@ -256,15 +256,22 @@ export function Segmented<T extends string | number | null>({
   options,
   value,
   onChange,
+  variant = 'soft',
 }: {
   options: ReadonlyArray<{ value: T; label: string }>;
   value: T;
   onChange: (v: T) => void;
+  variant?: 'soft' | 'solid';
 }) {
   return (
     <div className="flex flex-wrap gap-1">
       {options.map((o) => (
-        <PickButton key={String(o.value)} on={o.value === value} onClick={() => onChange(o.value)}>
+        <PickButton
+          key={String(o.value)}
+          on={o.value === value}
+          onClick={() => onChange(o.value)}
+          variant={variant}
+        >
           {o.label}
         </PickButton>
       ))}

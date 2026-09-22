@@ -129,6 +129,14 @@ const BUDGET_FIRST_CARD_MS = Number(process.env.SMOKE_BUDGET_FIRST_CARD_MS || 12
  *                    same second call — not visible here, this sweep has no
  *                    /listing route. Measured live post-deploy: 17 req / 0.9s,
  *                    time-to-first-card 368ms.
+ *   2026-09-22 U-COLL — /pipeline gains 2 requests on a COLD visit: the Kolekce
+ *                    filter reads the collections list and the shared
+ *                    collection-member map. Both keys are shared with Browse
+ *                    and /collections, so a session that has been anywhere else
+ *                    pays nothing. The ceiling stays 22 — this is a ratchet
+ *                    file, so it moves DOWN on a measurement, never up to make
+ *                    room; the `baseline` above is left at its last live
+ *                    measurement rather than guessing 19 from a local build.
  * Still ahead: W9b appends columns to listings_public for the listing-detail
  * chain; W7a moves Browse + comparables onto the shared hydration layer.
  *

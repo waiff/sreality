@@ -1910,11 +1910,24 @@ renumber.** Navigate by area:
     a board past that size would lose EVERY card's broker rather than the overflow — and rejects a
     200 that carries no envelope (an SPA-fallback HTML page), a guard inherited from the deleted
     `fetchBrokersByIds` twin and now covering the entire broker line rather than half of it.
-    The board offers basic **property-type
-    filtering** — multi-select `category_main` chips (Byty / Domy / Komerční / …) whose labels come
-    from the SAME generated filter registry as Browse's TYPE tabs (`FILTER_REGISTRY`, never a parallel
-    hardcode); only the types actually present in the pipeline get a chip, and the filter is
-    client-side (the board is small). **On the kanban board** stage moves are
+    The board's **filter bar is built from the app's shared primitives**
+    (`Field` + `Segmented` + `MultiselectChips`, the horizontal grammar `Brokers.tsx` already uses):
+    **Stav** (any/active/inactive), **Typ** (`category_main`), **Lokalita** (the shared
+    `LocationTypeahead`) and **Kolekce** (collection membership, OR — rule #18). Labels come from
+    the SAME generated filter registry as Browse's own controls (`FILTER_REGISTRY`, never a parallel
+    hardcode) and the URL spellings are Browse's (`status` / `cat` / the `districts` family /
+    `collections`). Every row applies **client-side** over ONE board read plus the shared
+    member map (`curationKeys.propertyCollectionMembers`) — no per-filter read, no widened view —
+    and is offered only when it could change the view, or while it already constrains it: Stav
+    needs a delisted card, Typ ≥2 present types, Kolekce a RESOLVED member map plus either a
+    selection in the URL (a live constraint is always visible, so it is always liftable — before
+    the list arrives its chip reads `#<id>`) or a board collection that could partition the board.
+    Clearing is ONE header **Reset** gated on a derived `filtersActive`, never a per-row
+    clear. **Fail-open contract** (pinned by `Pipeline.test.tsx`): an unresolved member map
+    (loading or errored) means no constraint, no Kolekce row and nothing counted — a `?collections=`
+    link must never empty a board that cannot see membership — while a RESOLVED selection matching
+    nothing is zero cards, never everything. Stav's default stays `any`, so a delisted member of a
+    collection stays in the cohort. **On the kanban board** stage moves are
     **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a
     `useDraggable` with a grip handle; one optimistic move mutation; keyboard moves via the
     `KeyboardSensor`). The drag→move resolution is the pure, unit-tested `planMove(activeId,

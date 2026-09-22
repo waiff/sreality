@@ -510,8 +510,13 @@ map, no stats, no price bounds on top.
   cohort, so a save from the Browse card refetches the list too. Off by default —
   everywhere else, refetching map + cards + count + stats on a bookmark click is
   waste.
-- Next: the same filter on the pipeline board, and dropping
-  `properties_with_tags` once this SPA build has rolled out.
+- **The board, same filter.** The pipeline bar was rebuilt on the shared
+  primitives (Field + Segmented + MultiselectChips) — Stav / Typ / Lokalita /
+  **Kolekce**, each offered only when it could change the view, all client-side
+  over the one board read plus the shared member map, cleared by one header
+  Reset instead of two hand-rolled idioms. Rule 22 in `docs/architecture.md`
+  carries the availability and fail-open contract.
+- Next: dropping `properties_with_tags` once this SPA build has rolled out.
 
 ### Phase U-ME: Manual rental estimates (next)
 
