@@ -94,16 +94,22 @@ class Arm:
     usd_out_per_mtok: float
 
 
-# The four arms this experiment can run. Two OpenAI (the cheapest text model the repo prices,
-# and the judge's own text model as the quality reference) and two DashScope/Qwen through the
-# path the judge lane already opened — a small one and a mid one. Prices are the PRICES rows
-# in api/providers/{openai,qwen}.py; they are the FORECAST, never the reported spend.
+# The arms this experiment can run. Three OpenAI (the cheapest text model the repo prices, the
+# mid one, and the judge's own text model as the quality reference) and two DashScope/Qwen
+# through the path the judge lane already opened — a small one and a mid one. Prices are the
+# PRICES rows in api/providers/{openai,qwen}.py — gpt-5-mini was already priced there, so the
+# mid arm needed no new row. A price is the FORECAST, never the reported spend: `spent_usd` in
+# the summary is read back from `llm_calls` (E32), so a wrong one costs a wrong pre-flight
+# estimate and nothing else. gpt-5-mini joins MINIMAL_EFFORT_MODELS below, because a GPT-5
+# model at its default effort reasons its whole completion budget away and returns no tool
+# call at all — measured, on 1,145 of 1,153 billed nano calls.
 #
 # DashScope answered W6's judge arms with 429s at three and six workers, so the Qwen arms ship
 # at one worker with a spacing floor. That is not timidity: an arm that dies mid-pass measures
 # nothing.
 ARMS: dict[str, Arm] = {
     "nano": Arm("nano", "gpt-5-nano", "openai", 6, 0, 0.05, 0.40),
+    "mini": Arm("mini", "gpt-5-mini", "openai", 6, 0, 0.25, 2.00),
     "luna": Arm("luna", "gpt-5.6-luna", "openai", 6, 0, 0.20, 1.20),
     "qwen-flash": Arm("qwen-flash", "qwen3.7-flash", "qwen", 1, 400, 0.03, 0.13),
     "qwen-30b": Arm("qwen-30b", "qwen3-vl-30b-a3b-instruct", "qwen", 1, 400, 0.20, 0.80),
@@ -127,7 +133,7 @@ class FactsArgs:
     workers: int
     max_chars: int
     limit: int
-    prompt_version: str
+    prompt: fact_cards.Prompt
 
 
 def _int_arg(args: dict[str, str], name: str, default: int) -> int:
@@ -229,8 +235,9 @@ def parse_args(args: dict[str, str]) -> FactsArgs:
         workers=workers,
         max_chars=max_chars,
         limit=limit,
-        prompt_version=(args.get("prompt_version") or "").strip()
-        or fact_cards.PROMPT_VERSION,
+        prompt=fact_cards.prompt_for(
+            (args.get("prompt_version") or "").strip() or fact_cards.PROMPT_VERSION
+        ),
     )
 
 
@@ -293,7 +300,7 @@ class Counters:
 # card on the first smoke; gpt-5-nano at its default effort spent the whole 2,048-token
 # completion budget on reasoning and emitted NO tool call on 1,145 of 1,153 billed calls.
 NO_THINKING_MODELS: frozenset[str] = frozenset({"qwen3.7-flash"})
-MINIMAL_EFFORT_MODELS: frozenset[str] = frozenset({"gpt-5-nano"})
+MINIMAL_EFFORT_MODELS: frozenset[str] = frozenset({"gpt-5-nano", "gpt-5-mini"})
 
 
 def llm_client(conn: Any) -> Any:
@@ -329,8 +336,8 @@ def est_call_usd(arm: Arm, text_chars: int) -> float:
     )
 
 
-def _call_with_retry(client: Any, arm: Arm, listing_id: int, text: str,
-                     truncated: bool, pacer: ArmPacer) -> Any:
+def _call_with_retry(client: Any, arm: Arm, prompt: fact_cards.Prompt, listing_id: int,
+                     text: str, truncated: bool, pacer: ArmPacer) -> Any:
     """The judge's own ladder: back off a burst, step the arm down, then give up.
 
     A retried 429 bought nothing and is not billed, so the budget is reserved per CALL by the
@@ -345,8 +352,8 @@ def _call_with_retry(client: Any, arm: Arm, listing_id: int, text: str,
                     model=arm.model,
                     provider=arm.provider,
                     messages=fact_cards.build_messages(listing_id, text, truncated),
-                    system=fact_cards.SYSTEM_PROMPT,
-                    tools=[fact_cards.TOOL_SCHEMA],
+                    system=prompt.system,
+                    tools=[prompt.tool_schema],
                     tool_choice=fact_cards.TOOL_NAME,
                     max_tokens=MAX_TOKENS,
                 )
@@ -470,7 +477,9 @@ def _run_job(
 
     started = time.monotonic()
     try:
-        response = _call_with_retry(client, parsed.arm, listing_id, text, truncated, pacer)
+        response = _call_with_retry(
+            client, parsed.arm, parsed.prompt, listing_id, text, truncated, pacer
+        )
     except Exception as exc:  # noqa: BLE001 — classified once more, then recorded
         budget.release(estimate)
         if classify_provider_error(exc, after_success=pacer.had_success) == ERROR_QUOTA:
@@ -489,7 +498,7 @@ def _run_job(
         "status": "done",
         "model": getattr(response, "model", parsed.arm.model),
         "arm": parsed.arm.name,
-        "prompt_version": parsed.prompt_version,
+        "prompt_version": parsed.prompt.version,
         "content_key": fact_cards.content_key(text),
         "text_chars": len(text),
         "text_truncated": truncated,
@@ -588,7 +597,7 @@ def run_facts(
         "arm": parsed.arm.name,
         "model": parsed.arm.model,
         "provider": parsed.arm.provider,
-        "prompt_version": parsed.prompt_version,
+        "prompt_version": parsed.prompt.version,
         "max_usd": parsed.max_usd,
         "workers": parsed.workers,
         "max_chars": parsed.max_chars,
