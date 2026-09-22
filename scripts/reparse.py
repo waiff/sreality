@@ -115,6 +115,8 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+import psycopg
+
 from scraper import db
 from scraper.db import (
     LISTING_COLUMNS,
@@ -248,6 +250,31 @@ _BATCH_GUARDS: tuple[str, ...] = (
     "SET LOCAL statement_timeout = '120s'",
     "SET LOCAL lock_timeout = '30s'",
 )
+
+# A page read joins 200 detail bodies out of TOAST. Under the twice-hourly map-view rebuild
+# (`browse-map-rebuild`, 2-7 min of saturating IO) one such read overran the 120 s
+# statement_timeout and, with no retry, took a 17-minute heal down at page one (run
+# 35674500840, 2026-09-22). The read is idempotent — same cursor, same page — so it is
+# replayed a bounded number of times with a widening pause, and only QueryCanceled is
+# retried: any other failure is a defect, not weather.
+_PAGE_READ_ATTEMPTS: int = 4
+_PAGE_READ_DELAY_SECONDS: float = 45.0
+
+
+def _read_page(conn: Any, select_sql: str, params: dict[str, Any], *, label: str) -> list[Any]:
+    for attempt in range(1, _PAGE_READ_ATTEMPTS + 1):
+        try:
+            with conn.cursor() as cur:
+                cur.execute(select_sql, params)
+                return cur.fetchall()
+        except psycopg.errors.QueryCanceled:
+            if attempt == _PAGE_READ_ATTEMPTS:
+                raise
+            LOG.warning("%s: page read cancelled by statement_timeout after id=%s "
+                        "(attempt %d/%d); retrying", label, params["after"], attempt,
+                        _PAGE_READ_ATTEMPTS)
+            time.sleep(_PAGE_READ_DELAY_SECONDS * attempt)
+    raise AssertionError("unreachable")
 
 
 def _gap_sql(fields: tuple[str, ...], *, missing: bool, prefix: str = "") -> str:
@@ -486,10 +513,9 @@ def main() -> int:
                         break
                     page = min(page, remaining)
 
-                with conn.cursor() as cur:
-                    cur.execute(select_sql,
-                                {"source": source, "after": cursor, "page": page})
-                    rows = cur.fetchall()
+                rows = _read_page(conn, select_sql,
+                                  {"source": source, "after": cursor, "page": page},
+                                  label="REPARSE " + source)
                 if not rows:
                     complete = True
                     break
