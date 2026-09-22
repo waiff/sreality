@@ -2571,7 +2571,8 @@ def check_field_fill_matrix(conn: Any, thresholds: dict[str, Any]) -> dict[str, 
     rows = _fetchall(conn, field_census.FIELD_MATRIX_SQL)
     live = field_census.reduce_matrix(rows, generated_at=now)
     baseline = field_census.load_baseline()
-    fails, warns = field_census.compare_to_baseline(live, baseline)
+    fails, warns = field_census.compare_to_baseline(
+        live, baseline, inert=attribute_contract.inert_cells())
     stale = field_census.stale_censuses(field_census.load_censuses(), now=now)
     zero_fill = field_census.zero_fill_cells(live)
     never_false = field_census.booleans_never_false(live)

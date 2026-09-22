@@ -325,3 +325,29 @@ def test_the_matrix_sql_measures_the_stock_and_carries_the_canon_it_judges_by() 
     assert "'novostavba'" in sql and "'G'" in sql
     for field in fc.ATTRIBUTE_FIELDS:
         assert f"count(l.{field})" in sql, field
+
+
+def test_an_inert_cell_may_collapse_without_ringing_but_not_go_off_canon() -> None:
+    """A cell nothing can write today (bazos/condition: text, gate closed) only ever falls —
+    the deleted lane's residue leaving with its listings. The drop and collapse arms skip
+    it; a rising off-canon share still rings, whoever wrote the spelling."""
+    base = {"cells": {"bazos/condition": {"n": 50000, "filled": 133, "fill": 0.003, "off_canon": 0.0}}}
+    live = {"cells": {"bazos/condition": {"n": 50000, "filled": 30, "fill": 0.0006, "off_canon": 0.0}}}
+    assert fc.compare_to_baseline(live, base) != ([], [])
+    assert fc.compare_to_baseline(live, base, inert={"bazos/condition"}) == ([], [])
+    worse = {"cells": {"bazos/condition": {"n": 50000, "filled": 30, "fill": 0.0006, "off_canon": 0.2,
+                                          "off_canon_values": ["smisana"]}}}
+    fails, _ = fc.compare_to_baseline(worse, base, inert={"bazos/condition"})
+    assert fails
+
+
+def test_inert_cells_are_exactly_the_unwritable_ones() -> None:
+    from scraper import attribute_contract as ac
+
+    inert = ac.inert_cells()
+    for portal, cells in ac.CONTRACT.items():
+        for field, declared in cells.items():
+            key = f"{portal}/{field}"
+            unwritable = declared.producer == "none" or (
+                declared.producer == "text" and (declared.gate is None or not declared.gate.passed))
+            assert (key in inert) == unwritable, key
