@@ -761,6 +761,20 @@ def gated_cells() -> dict[str, tuple[str, ...]]:
     }
 
 
+def inert_cells() -> frozenset[str]:
+    """`"{portal}/{field}"` for every cell NOTHING can write today: a `none` producer, or a
+    `text` cell whose gate is closed. The fill-matrix check's drop and collapse arms skip
+    them — their fill can only fall, and a fall there is the deleted lane's residue leaving
+    with its listings, not a defect."""
+    return frozenset(
+        f"{portal}/{field}"
+        for portal, cells in CONTRACT.items()
+        for field, declared in cells.items()
+        if declared.producer == "none"
+        or (declared.producer == "text" and (declared.gate is None or not declared.gate.passed))
+    )
+
+
 def known_gaps() -> dict[str, str | None]:
     """`"{portal}/{field}" -> the census key W4 will wire` for every cell with nothing
     behind it. The one declaration `verify_pipeline` reads to say which of the live

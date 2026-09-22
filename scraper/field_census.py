@@ -38,7 +38,7 @@ import json
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from scraper.db import LISTING_COLUMNS, connect
 from toolkit import filter_registry
@@ -355,9 +355,15 @@ CENSUS_STALE_DAYS = 30
 
 
 def compare_to_baseline(
-    live: Mapping[str, Any], baseline: Mapping[str, Any]
+    live: Mapping[str, Any], baseline: Mapping[str, Any],
+    *, inert: Collection[str] = (),
 ) -> tuple[list[str], list[str]]:
     """(fail offenders, warn offenders) for the live matrix against the blessed one.
+
+    `inert` names the cells NOTHING can write today — a `none` producer, or a `text` cell
+    whose gate is closed. Their fill can only fall (the deleted lane's residue leaving with
+    its listings), and a fall there is expected, not a defect: the drop and collapse arms
+    skip them, the off-canon arm does not (a wrong spelling is wrong whoever wrote it).
 
     A cell the baseline does not carry is never an offender — a new portal or a new
     column arrives green and is blessed into the baseline by the next re-bless. The
@@ -385,7 +391,9 @@ def compare_to_baseline(
             continue
         drop = float(was.get("fill", 0.0)) - float(cell.get("fill", 0.0))
         base_filled = int(was.get("filled", 0))
-        if float(was.get("fill", 0.0)) >= FILL_DROP_MIN_BASELINE and drop >= FILL_DROP_WARN_PP:
+        if key in inert:
+            pass
+        elif float(was.get("fill", 0.0)) >= FILL_DROP_MIN_BASELINE and drop >= FILL_DROP_WARN_PP:
             line = (
                 f"{key} fill {was['fill']:.1%} -> {cell['fill']:.1%} "
                 f"(-{drop * 100:.1f} pp of {cell['n']} sampled)"
