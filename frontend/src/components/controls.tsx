@@ -301,8 +301,10 @@ export function PickButton({
     variant === 'solid'
       ? 'bg-[var(--color-copper)] text-white border-[var(--color-copper)]'
       : 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]';
+  // Resting label is ink-2, not ink-3: ink-3 on paper-2 is 3.9:1 (below the
+  // 4.5:1 AA floor for 12px text); ink-2 is 7.6:1. Hover keeps the border cue.
   const offClasses =
-    'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]';
+    'bg-[var(--color-paper-2)] text-[var(--color-ink-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
   const disabledClasses =
     'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] opacity-50 cursor-not-allowed';
   return (
