@@ -192,54 +192,58 @@ _RECOMPUTE_BATCH_SQL = """
     -- children disagree true-vs-false, and there presence-wins let the LEAST trusted
     -- child decide: a bazos text guess beat sreality's stated false. W6/R3: provenance is
     -- the contract row and rank is source_trust_rank, so the arbiter must be the same one
-    -- at both grains.
+    -- at both grains. The order ends on k.id (the surrogate, never NULL) because
+    -- bool_or was order-independent and this is not: sreality_id is NULL on every
+    -- post-Gate-2 non-sreality row, and _touch_chunk stamps one last_seen_at across a
+    -- whole index-walk chunk, so without it two same-portal children that disagree would
+    -- decide by array_agg's unspecified order and the value could oscillate.
     golden AS (
       SELECT
         k.property_id AS pid,
         (array_agg(k.has_lift ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.has_lift IS NOT NULL))[1]     AS has_lift,
         (array_agg(k.has_balcony ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.has_balcony IS NOT NULL))[1]  AS has_balcony,
         (array_agg(k.has_parking ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.has_parking IS NOT NULL))[1]  AS has_parking,
         (array_agg(k.terrace ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.terrace IS NOT NULL))[1]      AS terrace,
         (array_agg(k.garage ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.garage IS NOT NULL))[1]       AS garage,
         (array_agg(k.cellar ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.cellar IS NOT NULL))[1]       AS cellar,
         (array_agg(k.usable_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.usable_area IS NOT NULL))[1]  AS usable_area,
         (array_agg(k.estate_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.estate_area IS NOT NULL))[1]  AS estate_area,
         (array_agg(k.garden_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.garden_area IS NOT NULL))[1]  AS garden_area,
         (array_agg(k.parking_lots ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.parking_lots IS NOT NULL))[1] AS parking_lots,
         (array_agg(k.building_type ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.building_type IS NOT NULL))[1] AS building_type,
         (array_agg(k.condition ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.condition IS NOT NULL))[1]    AS condition,
         (array_agg(k.ownership ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.ownership IS NOT NULL))[1]    AS ownership,
         (array_agg(k.furnished ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.furnished IS NOT NULL))[1]    AS furnished,
         (array_agg(k.energy_rating ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.energy_rating IS NOT NULL))[1] AS energy_rating
       FROM kids k
       GROUP BY k.property_id
@@ -693,11 +697,18 @@ def _drain_dirty(
         # a measured 11.7 min later on average (94 rebuilds / 24 h: best 2.3,
         # worst 36.6). Patching here, the one place that knows which properties
         # just changed, puts it on this lane's own cadence instead. Ordered BEFORE
-        # the dirty delete so a crash between the two replays both. Cheap at this
-        # grain (200 ids = 46 ms, 1.9k buffers) and it cannot fight the wholesale
-        # rebuild: that one builds `browse_list_next` and swaps by rename, and
-        # sync_browse_list is best-effort in a SAVEPOINT — a patch that lands on
-        # the table being swapped out logs and is reconciled by the swap itself.
+        # the dirty delete so a crash between the two replays both.
+        # A FAST PATH, not a guarantee, and two costs worth knowing. (i) The rebuild
+        # snapshots `browse_projection` into `browse_list_next` at its START and
+        # renames at its END, so a patch committed inside that window lands on the
+        # doomed table and is superseded WITHOUT erroring (nothing logs): 283
+        # succeeded rebuilds / 72 h, mean 237 s against a 900 s cadence = in flight
+        # ~26% of wall-clock, so the seen-to-Browse gain is bimodal, not a flat
+        # ~2 min. (ii) A full slice is not free: `batch_size` defaults to 2000 (the
+        # GH cron passes exactly that) and the SELECT half alone is ~100 ms warm /
+        # ~270 ms cold over ~23k buffers, holding ROW EXCLUSIVE on `browse_list` —
+        # the one lock the rebuild's `drop table` waits behind. The live dirty depth
+        # is a couple of dozen; only a post-freeze backlog claims a full slice.
         sync_browse_list(conn, ids)
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})

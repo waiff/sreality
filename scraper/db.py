@@ -161,10 +161,20 @@ _PRESERVE_IF_NULL_COLUMNS = frozenset({"published_at", "source_url"})
 # description-enrichment lane filled (2,949 of 24,621 `condition` fills; 100% of them on
 # rows refetched after the fill, 0 in the complement) — permanently, because an
 # unchanged-hash refetch mints no snapshot for the lane's selector to re-attempt.
-# Residual, accepted: the ingest grammar can no longer CLEAR a text cell it stops
-# matching, the same trade already accepted for published_at / source_url. The sanctioned
-# clear path is `scripts/reparse.py` (R9).
+# Residual, accepted and with NO automated remedy today: the ingest grammar can no longer
+# CLEAR a text cell it stops matching, the same trade already accepted for published_at /
+# source_url. `scripts/reparse.py` (R9) can CORRECT such a cell but never blanks one by
+# design, so removing a stale preserved value is a deliberate hand-written UPDATE until
+# something is built for it.
 _PARSE_SILENT_PRODUCERS = frozenset({"text", "none"})
+
+# `area_basis` is `derived` on every portal and would therefore clear — but it is not an
+# independent verdict: `scraper.area.derive_headline_area` stamps it on whichever measure
+# it just picked for `area_m2` and returns (None, None) together. Letting the two decouple
+# would leave a preserved bazos area with its basis blanked, i.e. a stored parcel figure
+# (14,901 active rows read 'plot') silently re-reading as usable area to price-per-m2,
+# best_area and the plot guards. So the pair moves together: basis follows the number.
+_AREA_BASIS_FOLLOWS = ("area_m2", "area_basis")
 
 
 @lru_cache(maxsize=None)
@@ -172,12 +182,15 @@ def _preserved_columns(source: str) -> frozenset[str]:
     """Columns a NULL from `source`'s parse must not clear.
 
     A source with no contract row keeps only the two identity preserves — the pre-R4
-    behaviour; `tests/scraper/test_attribute_contract.py` is what keeps the nine portals
-    in the contract."""
-    return _PRESERVE_IF_NULL_COLUMNS | frozenset(
+    behaviour; the rail that keeps the nine portals in the contract is
+    `tests/scraper/test_attribute_contract.py`, which pins the contract's keys to
+    `scraper.portal._DEFAULTS` (the per-portal config fleet, rule 21)."""
+    preserved = _PRESERVE_IF_NULL_COLUMNS | frozenset(
         column for column, declared in CONTRACT.get(source, {}).items()
         if declared.producer in _PARSE_SILENT_PRODUCERS
     )
+    number, basis = _AREA_BASIS_FOLLOWS
+    return preserved | {basis} if number in preserved else preserved
 
 
 def detail_ref(source: str, source_url: str | None) -> str | None:
@@ -527,9 +540,8 @@ def stamp_derived_artifact(
 @lru_cache(maxsize=None)
 def _upsert_listing_sql(source: str) -> str:
     """The per-item upsert statement. ONE fixed text per source (the contract decides
-    which columns preserve, so the nine portals get nine statements), built once so the
-    hot per-listing path on the eight non-sreality portals neither re-renders it nor
-    defeats psycopg's prepared-statement cache."""
+    which columns preserve, so the nine portals get nine statements), built once per
+    source instead of once per listing on the eight portals that write one at a time."""
     column_list = ", ".join(LISTING_COLUMNS)
     placeholders = ", ".join(f"%({c})s" for c in LISTING_COLUMNS)
     update_set = _listing_update_set_sql(source)

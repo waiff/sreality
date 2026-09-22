@@ -34,6 +34,8 @@ def _clause(sql: str, column: str) -> str:
 def test_the_contract_decides_which_cells_a_parser_null_may_clear(portal: str) -> None:
     sql = db._listing_update_set_sql(portal)
     for column, declared in sorted(CONTRACT[portal].items()):
+        if column == "area_basis":
+            continue  # follows area_m2, not its own producer — the next test
         clause = _clause(sql, column)
         if declared.producer in ("text", "none"):
             assert clause == (
@@ -69,6 +71,18 @@ def test_the_rule_really_differs_by_source() -> None:
         assert _clause(bazos, column).startswith(f"{column} = COALESCE")
         assert _clause(sreality, column) == f"{column} = EXCLUDED.{column}"
     assert db._preserved_columns("sreality") == db._PRESERVE_IF_NULL_COLUMNS
+
+
+@pytest.mark.parametrize("portal", PORTALS)
+def test_the_area_pair_never_decouples(portal: str) -> None:
+    """`area_basis` is `derived` on every portal, so on bazos — the one portal whose
+    `area_m2` is `text` — the two producers disagree. The rendering must not:
+    `derive_headline_area` returns (None, None) together, and a preserved parcel area
+    whose basis was blanked reads as a usable area to every consumer."""
+    sql = db._listing_update_set_sql(portal)
+    number = _clause(sql, "area_m2").removeprefix("area_m2 = ")
+    basis = _clause(sql, "area_basis").removeprefix("area_basis = ")
+    assert number == basis.replace("area_basis", "area_m2")
 
 
 @pytest.mark.parametrize("portal", PORTALS)

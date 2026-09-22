@@ -88,9 +88,17 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   rule would have left it growing. Evidence the contract is right about `none`: over active rows, every `none` cell
   on the eight structured portals is 0-filled (bezrealitky 2, mmreality 3, ceskereality 11, idnes 1, maxima 6,
   realitymix 6, remax 5 cells, all zero), so the rule is a no-op for the parsers and protects only post-publication
-  producers. Residual, accepted: the ingest grammar can no longer CLEAR a `text` cell it stops matching (bazos
-  `area_m2` 42,352, `disposition` 18,839, `floor` 14,588 active rows) — the same trade already accepted for
-  `published_at` / `source_url`, with `scripts/reparse.py` (R9) as the sanctioned clear path.)*
+  producers. `area_basis` is the ONE cell that does not follow its own producer: it is `derived` everywhere, but
+  `scraper.area.derive_headline_area` stamps it on the number it just picked and returns `(None, None)` with it, so
+  it follows `area_m2`'s decision — otherwise a preserved bazos parcel figure (14,901 active rows read `'plot'`)
+  would keep its number and lose the marker that stops it reading as a usable area. Residual, accepted: the ingest
+  grammar can no longer CLEAR a `text` cell it stops matching (bazos `area_m2` 42,364, `disposition` 18,843, `floor`
+  14,562, `total_floors` 1,158 active rows) — the same trade already accepted for `published_at` / `source_url` —
+  and it has **no automated remedy today**: `scripts/reparse.py` (R9) re-derives and CORRECTS such a cell but never
+  blanks one by design, so removing a stale preserved value is a hand-written UPDATE until something is built for it.
+  The finer rule the brief asked about (freeze W7's fill, still let a bazos regex clear its own cell) needs per-row
+  provenance, which R3 forbids; and adding it as a contract axis would re-open exactly this wipe, because R3 has the
+  text lane fill only NULLs — a cleared regex cell IS where W7 writes, and the next refetch would wipe that fill.)*
 - **R5 — The canon stays in `toolkit/filter_registry.py`.** `scraper/vocabulary.py` holds only the producer side:
   diacritic fold, ONE `(field, portal_label) → canonical` registry, ONE disposition grammar, ONE boolean helper.
   An unmapped label is NULL + a counted event, never a passthrough enum. LLM tool schemas and the DB-resident prompts
@@ -324,18 +332,28 @@ source in `tests/scraper/test_listing_write_preserve.py`: for all nine portals e
 `COALESCE(EXCLUDED.c, listings.c)` and every `structured`/`derived` cell is `= EXCLUDED.c`, `published_at` /
 `source_url` unchanged, `description` (not a contract cell) still clears. Both write paths are proven to carry the
 identical fragment — the per-item statement for each portal and, for sreality, `_BATCH_UPSERT_SQL` too. Two further
-rails: a fifth producer cannot silently fall through to "clears", and a source outside the contract keeps the pre-R4
-rule. **Property rollup:** the `bool_or` special case is deleted; the six amenity booleans take the same trust-ordered
-best-non-null as every scalar. Its stated reason (recover a fact from the sibling that parsed it) survives — that rule
+rails: a fifth producer cannot silently fall through to "clears"; `area_m2` and `area_basis` render the SAME clause on
+every source; and a source outside the contract keeps the pre-R4 rule — which is now more than a fallback nobody
+checks, because the contract's portal keys are pinned to `scraper.portal._DEFAULTS`, the per-portal config fleet.
+**Property rollup:** the `bool_or` special case is deleted; the six amenity booleans take the same trust-ordered
+best-non-null as every scalar (ended on `id` so the pick is total — `bool_or` was order-independent and this is not).
+Its stated reason (recover a fact from the sibling that parsed it) survives — that rule
 skips NULLs too — so the two differ only on a true-vs-false disagreement. Measured over the 23,641 active multi-child
 properties: has_parking 1,384 flips, cellar 486, has_balcony 212, garage 162, terrace 140, has_lift 64, all
-one-directional true→false. **Honest reading of those flips:** only a minority are the "inferred `true`" this ruling
+one-directional true→false. The recompute writes the whole table, not only the Browse-visible part, so the **blast
+radius over all 74,090 multi-child properties** is has_parking 4,095, cellar 1,388, has_balcony 682, terrace 410,
+has_lift 406, garage 357 — same direction; the surplus is delisted properties Browse hides and comparables never
+reads (it filters `listings`, not `properties`). **Honest reading of those flips:** only a minority are the "inferred `true`" this ruling
 names — 1,027 of the 1,384 parking flips are an idnes-STATED true losing to a sreality-STATED false, which is the
 declared `source_trust` policy rather than a provenance fix. The provenance fix is the same change seen forward: when
 W7's lane fills bazos booleans at 50k-row scale, presence-wins would hand every one of them a veto over sreality's
 stated false. **Seen-to-Browse baseline (2026-09-21, 94 succeeded rebuilds in 24 h):** mean 11.7 min from
 properties-row-ready to visible in `browse_list`, best case 2.3, worst 36.6, p90-of-worst 22.0, rebuild duration
-4.1 min average. Post-merge: the same measure after `run_incremental_pass → sync_browse_list`, and the wiped-cell
+4.1 min average. The patch is a fast path, not a guarantee, so the expected shape is **bimodal, not a flat ~2 min**:
+a rebuild snapshots `browse_projection` at its start and renames the new table in at its end, so a patch that commits
+inside that window is superseded without erroring — over 72 h, 283 succeeded rebuilds, mean 237 s / p50 200 / p90 358
+/ max 1,295 against a 900 s cadence, i.e. **in flight ~26 % of wall-clock**. Post-merge: the same seen-to-Browse
+measure, expected ≈ 3 in 4 changes on the maintenance lane's cadence and the rest unchanged; and the wiped-cell
 count on `condition` (today 2,949) stops growing after one refetch cycle.
 
 **W7.** `OPENAI_API_KEY` (and the RunPod route) verified on the worker before merge — no lane on that worker has ever

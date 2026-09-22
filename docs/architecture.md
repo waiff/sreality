@@ -1613,9 +1613,12 @@ renumber.** Navigate by area:
     the worker's maintenance lane) and the job is **O(changes)**, not O(all properties). Reaching
     **Browse** is a second step, because `browse_projection` reads `properties` and Browse reads
     the `browse_list` snapshot: since field-capture W6 the drain patches `browse_list` for exactly
-    the ids it recomputed (`sync_browse_list`), so a change no longer waits for the `*/15`
+    the ids it recomputed (`sync_browse_list`), so a change usually no longer waits for the `*/15`
     wholesale rebuild — which was a measured mean of 11.7 min, worst 36.6 (94 rebuilds / 24 h,
-    2026-09-21). The drain is race-free +
+    2026-09-21). A fast path, not a guarantee: the rebuild snapshots `browse_projection` at its
+    start and renames the new table in at its end, so a patch committed inside that window is
+    superseded silently, and a rebuild is in flight ~26 % of wall-clock (283 runs / 72 h, mean
+    237 s against a 900 s cadence). The drain is race-free +
     terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
     since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
     New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The

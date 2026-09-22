@@ -19,7 +19,9 @@ test / log helpers: `scripts/test-summary.sh` and `scripts/logs.sh <run-id> [pat
    `source_label`; a label→value mapping belongs in `scraper/vocabulary.py`, never in the parser.
    Gates A1–A3 (`tests/scraper/test_attribute_contract.py`) read the checked-in key census.
 3. Add it to `scraper/db.py` `LISTING_COLUMNS` + `_LISTING_COLUMN_PGTYPE` (covers BOTH write paths) and,
-   for crawler portals, `scraped_listing._LISTING_FIELDS`; `_PRESERVE_IF_NULL_COLUMNS` only if a NULL must never erase.
+   for crawler portals, `scraped_listing._LISTING_FIELDS`. Whether a parser NULL erases is decided per
+   (source, column) by the producer from step 2 (`text`/`none` preserve, `structured`/`derived` clear);
+   `_PRESERVE_IF_NULL_COLUMNS` is the GLOBAL identity pair (`published_at`, `source_url`) and must not grow.
 4. Backfill old rows from NARROW typed columns via a `scripts/backfill_*.py` dispatch job (never a
    `raw_json` pass — ~62 KB/row detoast); NULL is acceptable for a nullable column. The new cell reaches
    `field_fill_matrix` only once the OPERATOR re-blesses (`--bless` needs the prod DB).

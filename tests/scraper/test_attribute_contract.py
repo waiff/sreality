@@ -151,8 +151,16 @@ def test_the_contract_declares_every_typed_column_of_every_portal() -> None:
     """The contract's own shape. Asserted here and not at import time because
     `field_census` reaches `scraper.db`, which pulls psycopg, and every parser imports the
     contract — a parse must not need a database driver (CLAUDE.md's file split)."""
+    from scraper.portal import _DEFAULTS  # the fleet, spelled once
+
     assert set(contract.CONTRACT) == set(contract.IGNORED), (
         "a portal is missing from one of the two tables"
+    )
+    # Not just "the two tables agree" — they are both hand-kept here. A source the
+    # contract does not hold silently falls back to the pre-R4 clear-everything rule in
+    # db._preserved_columns, so the keys are pinned to the per-portal config fleet.
+    assert set(contract.CONTRACT) == set(_DEFAULTS), (
+        "the contract's portals drifted from scraper.portal._DEFAULTS"
     )
     fields = set(field_census.ATTRIBUTE_FIELDS)
     for portal, cells in sorted(contract.CONTRACT.items()):

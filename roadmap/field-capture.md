@@ -80,9 +80,12 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       of per listing. The property golden record loses its `bool_or` special case for the
       six amenity booleans (has_parking 1,384, cellar 486, has_balcony 212, garage 162,
       terrace 140, has_lift 64 rolled-up values flip true→false over 23,641 active
-      multi-child properties). `run_incremental_pass` patches `browse_list` for the ids it
-      recomputed: seen-to-Browse was a measured mean 11.7 min (94 rebuilds / 24 h, worst
-      36.6) and becomes this lane's ~2 min cadence.
+      multi-child properties; 4,095 / 1,388 / 682 / 410 / 406 / 357 over all 74,090,
+      the surplus on delisted properties Browse hides). `run_incremental_pass` patches
+      `browse_list` for the ids it recomputed: seen-to-Browse was a measured mean 11.7 min
+      (94 rebuilds / 24 h, worst 36.6) and takes this lane's ~2 min cadence whenever a
+      wholesale rebuild is not in flight — which it is ~26 % of the time, and a patch
+      inside that window is silently superseded.
 - [ ] **W7 — the text lane on the realtime worker.** No flag, no new setting: governed by
       the contract's producer=text cells. Model bake-off in ONE run (gpt-5.6-luna vs OSS on
       RunPod); a field is written only after a labelled panel passes ≥ 95% (R7); the lane
