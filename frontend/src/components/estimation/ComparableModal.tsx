@@ -3,18 +3,20 @@ import { Link } from 'react-router-dom';
 import {
   fmtArea,
   fmtCzk,
+  fmtFloor,
   fmtMeasuredPricePerM2,
   fmtRelative,
   fmtAbsolute,
 } from '@/lib/format';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
-import { listingKindLabel } from '@/lib/enums';
+import { listingKindLabel, priceUnitLabel } from '@/lib/enums';
 import { imageSrc } from '@/lib/imageUrl';
 import ImageTagBadge from '@/components/ImageTagBadge';
 import { portalShort } from '@/lib/portals';
 import { listingPath } from '@/lib/listingUrl';
 import Dialog, { DialogClose } from '@/components/Dialog';
+import { Hairline, SectionLabel } from '@/components/section';
 
 /* The comparable's detail card, opened from a row of the estimation-detail
  * comparables table — which is itself inside a dialog, so this is the app's
@@ -65,32 +67,20 @@ export default function ComparableModal({
 
       <div className="p-6">
         <Header listing={listing} titleId={titleId} />
-        <Hairline />
+        <Hairline tight />
         <Carousel images={images} isActive={listing.is_active} />
-        <Hairline />
+        <Hairline tight />
         <SummarySection
           summary={summary}
           error={summaryError}
           loading={summaryLoading}
         />
-        <Hairline />
+        <Hairline tight />
         <Facts listing={listing} />
-        <Hairline />
+        <Hairline tight />
         <Footer listing={listing} />
       </div>
     </Dialog>
-  );
-}
-
-function Hairline() {
-  return <div className="my-5 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
   );
 }
 
@@ -114,7 +104,7 @@ function Header({ listing, titleId }: { listing: ListingPublic; titleId: string 
         {fmtCzk(listing.price_czk)}
         {listing.price_unit && (
           <span className="text-sm font-sans font-normal text-[var(--color-ink-3)] tracking-wide ml-1">
-            / {listing.price_unit}
+            / {priceUnitLabel(listing.price_unit)}
           </span>
         )}
       </h2>
@@ -313,11 +303,7 @@ function SummaryRow({ label, text }: { label: string; text?: string | null }) {
 function Facts({ listing }: { listing: ListingPublic }) {
   const facts: Array<[string, string | null]> = [
     ['Location', listing.display_label],
-    ['Floor', listing.floor != null
-      ? listing.total_floors != null
-        ? `${listing.floor} / ${listing.total_floors}`
-        : String(listing.floor)
-      : null],
+    ['Floor', fmtFloor(listing.floor, listing.total_floors)],
     ['Building', listing.building_type],
     ['Condition', listing.condition],
     ['Energy', listing.energy_rating],

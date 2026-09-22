@@ -6,10 +6,15 @@ into a `ScrapedListing` (the shared multi-portal contract in
 `scraper.scraped_listing`).
 
 Maxima is a single-agency catalogue (~220 listings) on a WordPress site, but a
-STRUCTURED one: a `<table>` spec block (paired `th.slider_label` / `td.slider_value`),
-a clean `div.price` element, and — when present — precise per-listing coordinates
-embedded in the page's OpenLayers map config (`"center":[lon,lat]`). So coordinates
-come straight from the page when available (some agency listings omit the map).
+STRUCTURED one: a `<table>` spec block (paired `th.slider_label` / `td.slider_value`)
+and a clean `div.price` element.
+
+This parser reads NO coordinate. The page's OpenLayers config carries two of them
+and they are not the same point: `"center"` is where the map is SCROLLED TO (9.2 km
+off the property on d40031686) and `/features/0` is the pin the agency drew. The pin
+is read by `contracts/portals/maxima.yaml` (`mx.det.map_features`) off the archived
+body, so a second reader here could only be a second, worse answer — W9 deleted the
+view-centre read rather than duplicate the contract's geometry walk.
 
 Unlike sreality/idnes, maxima exposes ONE mixed index (no per-category URL); the
 category is encoded in the native id's leading letter (b=byt, d=dum, f=pozemek,
@@ -24,15 +29,21 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
+
+SOURCE = "maxima"
 
 # Native-id leading letter -> our canonical category_main (mirrors the sreality
 # parser.CATEGORY_* labels). The letter is the agency's own taxonomy and is the
@@ -61,46 +72,16 @@ CATEGORY_BY_TITLE: tuple[tuple[str, str], ...] = (
 
 # idnes/sreality building-construction labels -> the canonical codes the sreality
 # parser emits, so a cross-portal "panel" filter matches every source.
-BUILDING_TYPE: dict[str, str] = {
-    "panelová": "panel",
-    "cihlová": "cihla",
-    "smíšená": "smisena",
-    "skeletová": "skelet",
-    "dřevěná": "drevo",
-    "kamenná": "kamen",
-    "montovaná": "montovana",
-    "nízkoenergetická": "nizkoenergeticka",
-}
-OWNERSHIP: dict[str, str] = {
-    "osobni": "osobni",
-    "druzstevni": "druzstevni",
-    "statni": "statni",
-    "obecni": "statni",
-}
-
-# Czech-bbox guard: a coordinate outside it (a swapped lat/lon, or a stray pin) is
-# dropped rather than stored as geom.
-_CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
-_CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The detail-URL slug is the source_id_native, e.g. /nemovitosti/b50087758/.
 _ID_RE = re.compile(r"/nemovitosti/([a-z]\d+)/?(?:[?#]|$)")
 _LISTING_HREF_RE = re.compile(r"/nemovitosti/[a-z]\d+/?$")
 _PAGE_RE = re.compile(r"/page/(\d+)/?")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
-_INT_RE = re.compile(r"(\d+)")
 # Price runs are Czech "18 878 000" (groups split by ordinary / no-break / thin /
 # zero-width spaces). The first run only is taken so a struck original + current
 # price never concatenate into an integer-overflowing number.
 _PRICE_RUN_RE = re.compile(r"\d[\d\s ​‌‍⁠]*")
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
-# Map config: "center":[lon, lat]. The map JSON is passed to JSON.parse('…') with
-# the quotes backslash-escaped in the page source (\"center\":[…]), so the quotes
-# are optionally preceded by a backslash. CZ lat/lon ranges don't overlap, so a
-# swap is caught by the bbox guard rather than producing a bogus point.
-_CENTER_RE = re.compile(
-    r'\\?"center\\?"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*[\]\\]'
-)
 # "3./6." -> floor 3 of 6.
 _FLOOR_RE = re.compile(r"(-?\d+)\s*\.\s*/\s*(\d+)\s*\.")
 _PENB_RE = re.compile(r"PENB\s*:?\s*([A-G])\b")
@@ -151,10 +132,6 @@ def _page_text(tree: HTMLParser) -> str:
         return body.text(separator=" ", strip=False)
     root = tree.root
     return root.text(separator=" ", strip=False) if root is not None else ""
-
-
-def _in_cz_bbox(lat: float, lon: float) -> bool:
-    return _CZ_LAT_MIN <= lat <= _CZ_LAT_MAX and _CZ_LON_MIN <= lon <= _CZ_LON_MAX
 
 
 def _id_from_href(href: str | None) -> str | None:
@@ -244,75 +221,17 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if value <= _PRICE_MAX else None), unit
 
 
-def _parse_disposition(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _DISPOSITION_RE.search(text)
-    if not m:
-        return None
-    return f"{m.group(1)}+{m.group(2).lower()}"
+def _split_floors(text: str | None) -> tuple[str | None, int | None]:
+    """maxima renders 'podlaží' as '3./6.' — split the storey off the building total.
 
-
-def _parse_int(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _INT_RE.search(text)
-    return int(m.group(1)) if m else None
-
-
-def _parse_floors(text: str | None) -> tuple[int | None, int | None]:
-    """maxima renders 'podlaží' as '3./6.' (floor 3 of 6)."""
+    The storey half stays TEXT: reading its convention is `scraper.floor`'s job, and a
+    cell that spells the storey out ("přízemí") has to reach that grammar intact."""
     if not text:
         return None, None
     m = _FLOOR_RE.search(text)
     if m:
-        return int(m.group(1)), int(m.group(2))
-    return _parse_int(text), None
-
-
-def _yes_no(text: str | None) -> bool | None:
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower().strip()
-    if low.startswith("ano"):
-        return True
-    if low.startswith("ne"):
-        return False
-    return None
-
-
-def _norm_condition(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    key = re.sub(r"\s+stav$", "", key)
-    key = re.sub(r"\s+", "_", key)
-    return key or None
-
-
-def _norm_ownership(text: str | None) -> str | None:
-    if not text:
-        return None
-    # Canonical set only ({osobni, druzstevni, statni}); unmapped labels → None
-    # rather than leaking a value no ownership filter option can match.
-    key = _strip_diacritics(text).lower().strip()
-    return OWNERSHIP.get(key)
-
-
-def _norm_building_type(text: str | None) -> str | None:
-    if not text:
-        return None
-    raw = text.strip().lower()
-    if raw in BUILDING_TYPE:
-        return BUILDING_TYPE[raw]
-    return _strip_diacritics(raw) or None
-
-
-def _energy_rating(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = re.search(r"\b([A-G])\b", text)
-    return m.group(1).upper() if m else None
+        return m.group(1), int(m.group(2))
+    return text, None
 
 
 def parse_index(html: str) -> IndexPage:
@@ -365,15 +284,6 @@ def _next_page(tree: HTMLParser) -> int | None:
     return None
 
 
-def _resolve_coords(html: str) -> tuple[float | None, float | None, dict[str, Any]]:
-    m = _CENTER_RE.search(html)
-    if m:
-        lon, lat = float(m.group(1)), float(m.group(2))
-        if _in_cz_bbox(lat, lon):
-            return lat, lon, {"source": "page"}
-    return None, None, {"source": None}
-
-
 def _detail_params(tree: HTMLParser) -> dict[str, str]:
     """Map the spec-table row labels (lowercased) to their value text.
 
@@ -399,16 +309,17 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """maxima's area cells, in ITS precedence — spelled here once and nowhere else.
+    """maxima's area slots — the KEYS are the contract's, this owns the measure.
 
-    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
-    reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. maxima renders a no-break space around its unit and inside a thousands
+    `parse_detail` reads it off a live page, and `scripts/reparse.py` replays `parse_detail`
+    over the stored page, so there is one reading of these keys. maxima renders a no-break space around its unit and inside a thousands
     group alike, which is what the naive grammar truncated.
+
+    The `užitná plocha` / `podlahová plocha` second spellings and `plocha zahrady` are
+    gone: maxima emits none of them on any of its 556 stored rows (gate A1).
     """
-    usable_text = params.get("plocha užitná") or params.get("užitná plocha")
-    floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    usable_text, floor_text, plot_text = source_values(SOURCE, "area_m2", params)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=parse_area_text(usable_text),
@@ -419,7 +330,7 @@ def areas_from_params(
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
         usable_area=parse_area_text(usable_text), estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        garden_area=None,
     )
 
 
@@ -436,6 +347,7 @@ def parse_detail(
     title = _text(tree.css_first("h3")) or _text(tree.css_first("title")) or ""
     description = _text(tree.css_first("#collapse-inzerat-text"))
     params = _detail_params(tree)
+    read = partial(source_value, SOURCE, params=params)
 
     # Category is encoded in the title verb (authoritative across both agendas) +
     # the id prefix (sale only); derive it when the caller didn't pass an override.
@@ -443,14 +355,14 @@ def parse_detail(
     category_main = category_main or category_of(source_id, title)
     category_type = category_type or _sale_type_from_title(title) or "prodej"
 
-    price_text = _text(tree.css_first("div.price")) or params.get("cena")
+    price_text = _text(tree.css_first("div.price"))
     price_czk, price_unit = _parse_price(price_text, category_type)
 
     locality = _text(tree.css_first("div.locality"))
-    lat, lon, coord_provenance = _resolve_coords(html)
 
     areas = areas_from_params(params, title=title, category_main=category_main)
-    floor, total_floors = _parse_floors(params.get("podlaží"))
+    floor_text, total_floors = _split_floors(read("floor"))
+    floor = floor_from_portal(floor_convention(SOURCE), floor_text)
 
     source_id_upper = source_id.upper()
     image_urls: list[str] = []
@@ -471,7 +383,6 @@ def parse_detail(
         "locality_text": locality,
         "maxima_ref": params.get("id zakázky"),
         "image_urls": image_urls,
-        "coords": coord_provenance,
         "params": params,
     }
 
@@ -481,7 +392,7 @@ def parse_detail(
     # rather than infer from the free-text title. NULL still shows at the
     # category level; it only drops out under a specific-subtype filter.
     return ScrapedListing(
-        source="maxima",
+        source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
         category_main=category_main,
@@ -491,33 +402,35 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
+        disposition=vocabulary.disposition(SOURCE, title),
         locality=locality,
         district=None,
         # Street is the LAST comma-segment ("Praha 6, Suchdol, U Hotelu") — the
         # opposite order from idnes. require_morphology guards the ambiguous
         # 2-segment case where the last token is a village, not a street.
-        street=street_from_locality(
-            locality, position="last", require_morphology=True, lat=lat, lon=lon
-        ),
-        lat=lat,
-        lon=lon,
+        street=street_from_locality(locality, position="last", require_morphology=True),
         floor=floor,
         total_floors=total_floors,
-        building_type=_norm_building_type(params.get("budova")),
-        condition=_norm_condition(params.get("stav objektu")),
-        ownership=_norm_ownership(params.get("vlastnictví")),
+        building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
+        condition=vocabulary.canonical("condition", SOURCE, read("condition")),
+        ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
         energy_rating=(
-            _energy_rating(params.get("energetická náročnost"))
-            or _energy_rating(params.get("penb"))
+            vocabulary.energy_rating(read("energy_rating"))
             or _penb_from_text(_page_text(tree))
         ),
-        has_balcony=_yes_no(params.get("balkón")),
-        has_lift=_yes_no(params.get("výtah")),
-        cellar=_yes_no(params.get("sklep")),
-        terrace=_yes_no(params.get("terasa")),
-        garage=_yes_no(params.get("garáž")),
-        has_parking=_yes_no(params.get("parkovací stání")) or _yes_no(params.get("garáž")),
+        # R11: balcony OR loggia, and parking-stání OR garage. maxima renders each as
+        # its own "Ano"-or-absent row, so the union must not lose a stated "Ne" — which
+        # is what `a or b` did (`False or None` is None).
+        has_balcony=vocabulary.any_true(
+            *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_balcony", params))
+        ),
+        has_lift=vocabulary.yes_no(read("has_lift")),
+        terrace=vocabulary.yes_no(read("terrace")),
+        garage=vocabulary.yes_no(read("garage")),
+        has_parking=vocabulary.any_true(
+            *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_parking", params))
+        ),
+        furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,
         description=description,

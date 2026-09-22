@@ -14,7 +14,8 @@ export type Agenda =
   | "estimation"
   | "velocity"
   | "neighborhood"
-  | "defaults";
+  | "defaults"
+  | "sold";
 
 export type UiControl =
   | "range_slider"
@@ -90,7 +91,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     "estimation",
     "velocity",
     "neighborhood",
-    "defaults"
+    "defaults",
+    "sold"
   ],
   "categories": [
     "Spatial",
@@ -296,11 +298,32 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "nullable": false
     },
     {
+      "id": "max_sold_age_days",
+      "type": "int",
+      "pg_column": "sold_age_days",
+      "default": null,
+      "description": "Drop registered sales whose `sold_at` is older than N days. Reads `sold_age_days`, the whole-day age `sold_comparables` computes from `sold_at` (migration 545) — an integer, so the bound is the same `.lte` predicate every other `max_` filter emits: no date control, no hand-coded translation. One-sided by design; a lower bound on a comparable's age answers nothing. The bounds are the SOURCE's, not a preference: a sale is published about 30 days after the transfer, so 60 is the first window that can answer at all, and reas.cz publishes 24 months, so 730 is the whole corpus — a wider bound would only promise history the source does not carry.",
+      "category": "Velocity",
+      "ui_control": "number_input",
+      "agendas": [
+        "sold"
+      ],
+      "constraints": {
+        "min": 60,
+        "max": 730
+      },
+      "unit": "days",
+      "basis": null,
+      "enum_values": null,
+      "aliases": [],
+      "nullable": false
+    },
+    {
       "id": "lifecycle",
       "type": "string",
       "pg_column": null,
       "default": null,
-      "description": "The single cohort lifecycle selector. `active` = is_active=true (plus the max_age_days freshness gate when set); `delisted` = is_active=false (closed deals only — rough proxy for transacted listings); `all` = both. Unset means no is_active gate (the raw-tool default); the estimation path seeds `active` from `default_lifecycle`.",
+      "description": "The single cohort lifecycle selector. `active` = is_active=true (plus the max_age_days freshness gate when set); `delisted` = is_active=false — the advertisement ended, which is not a sale and carries no transacted price; `all` = both. Unset means no is_active gate (the raw-tool default); the estimation path seeds `active` from `default_lifecycle`.",
       "category": "Status",
       "ui_control": "single_select",
       "agendas": [
@@ -675,11 +698,12 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "category_main",
       "default": null,
-      "description": "Multi-select top-level category for Browse + Watchdog cohorts: a listing matches if its `category_main` is in the list (`byt` apartments, `dum` houses, `komercni` commercial, `pozemek` land, `ostatni` other). Empty list / null = no constraint. The analytical surfaces (comparables / estimation / velocity / neighborhood) use the SCALAR `category_main` instead — an estimate is for one property of one category, so a multi-value category is meaningless there. Mirrors the dispositions / disposition_match split.",
+      "description": "Multi-select top-level category for Browse + Watchdog cohorts: a listing matches if its `category_main` is in the list (`byt` apartments, `dum` houses, `komercni` commercial, `pozemek` land, `ostatni` other). Empty list / null = no constraint. The analytical surfaces (comparables / estimation / velocity / neighborhood) use the SCALAR `category_main` instead — an estimate is for one property of one category, so a multi-value category is meaningless there. Mirrors the dispositions / disposition_match split. On Agenda.SOLD only `byt` and `dum` can ever match — reas.cz publishes those two and the parser refuses the rest — so the block offers that pair and no more.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": null,
@@ -801,6 +825,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "multiselect",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": null,
@@ -856,6 +881,46 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "5+1",
           "label_cs": "5+1",
           "label_en": "5+1"
+        },
+        {
+          "value": "6+kk",
+          "label_cs": "6+kk",
+          "label_en": "6+kk"
+        },
+        {
+          "value": "6+1",
+          "label_cs": "6+1",
+          "label_en": "6+1"
+        },
+        {
+          "value": "7+kk",
+          "label_cs": "7+kk",
+          "label_en": "7+kk"
+        },
+        {
+          "value": "7+1",
+          "label_cs": "7+1",
+          "label_en": "7+1"
+        },
+        {
+          "value": "8+kk",
+          "label_cs": "8+kk",
+          "label_en": "8+kk"
+        },
+        {
+          "value": "8+1",
+          "label_cs": "8+1",
+          "label_en": "8+1"
+        },
+        {
+          "value": "9+kk",
+          "label_cs": "9+kk",
+          "label_en": "9+kk"
+        },
+        {
+          "value": "9+1",
+          "label_cs": "9+1",
+          "label_en": "9+1"
         }
       ],
       "aliases": [],
@@ -866,7 +931,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "subtype",
       "default": null,
-      "description": "Portal-agnostic property sub-type (multi-select). Only meaningful for category_main in (dum, komercni): houses (rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, zemedelska_usedlost, na_klic, pamatka_jine) and commercial (kancelar, sklad, obchodni_prostor, vyroba, ubytovani, restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, virtualni_kancelar, ostatni). A listing matches if its subtype is in the list. Normalized across portals — distinct from the sreality-only numeric category_sub_cb. The Browse sidebar renders the group matching the selected category_main (dum / komercni) and hides it otherwise.",
+      "description": "Portal-agnostic property sub-type (multi-select). Only meaningful for category_main in (dum, komercni): houses (rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, zemedelska_usedlost, na_klic, pamatka_jine) and commercial (kancelar, sklad, obchodni_prostor, vyroba, ubytovani, restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, virtualni_kancelar, ostatni). A listing matches if its subtype is in the list. Normalized across portals — distinct from the sreality-only numeric category_sub_cb. The Browse sidebar renders the group matching the selected category_main (dum / komercni) and hides it otherwise. NOT an Agenda.SOLD filter: reas.cz publishes byty and domy only (the parser refuses any other type), so every commercial member of this taxonomy is a cohort that can only ever be empty there, and a flat has no subtype at all.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1071,7 +1136,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "condition",
       "default": null,
-      "description": "Restrict cohort to listings whose `condition` is in this list. Czech values without diacritics: novostavba, po_rekonstrukci, velmi_dobry, dobry, pred_rekonstrukci, k_demolici.",
+      "description": "Restrict cohort to listings whose `condition` is in this list. Czech values without diacritics, best to worst: projekt, ve_vystavbe, novostavba, po_rekonstrukci, velmi_dobry, dobry, udrzovany, v_rekonstrukci, pred_rekonstrukci, spatny, k_demolici.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1087,6 +1152,16 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "unit": null,
       "basis": null,
       "enum_values": [
+        {
+          "value": "projekt",
+          "label_cs": "Projekt",
+          "label_en": "Project"
+        },
+        {
+          "value": "ve_vystavbe",
+          "label_cs": "Ve výstavbě",
+          "label_en": "Under construction"
+        },
         {
           "value": "novostavba",
           "label_cs": "Novostavba",
@@ -1108,9 +1183,24 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Good"
         },
         {
+          "value": "udrzovany",
+          "label_cs": "Udržovaný",
+          "label_en": "Maintained"
+        },
+        {
+          "value": "v_rekonstrukci",
+          "label_cs": "V rekonstrukci",
+          "label_en": "Being renovated"
+        },
+        {
           "value": "pred_rekonstrukci",
           "label_cs": "Před rekonstrukcí",
           "label_en": "Needs renovation"
+        },
+        {
+          "value": "spatny",
+          "label_cs": "Špatný",
+          "label_en": "Poor"
         },
         {
           "value": "k_demolici",
@@ -1126,7 +1216,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "building_type",
       "default": null,
-      "description": "Restrict cohort to listings whose `building_type` is in this list. Czech values: cihla, panel, smisena, skelet, drevo, kamen, montovana, nizkoenergeticka.",
+      "description": "Restrict cohort to listings whose `building_type` is in this list. Czech values: cihla, panel, smisena, skelet, drevo, kamen, montovana, nizkoenergeticka, modularni, ocelova, roubena, jina.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1177,6 +1267,26 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "nizkoenergeticka",
           "label_cs": "Nízkoenergetická",
           "label_en": "Low-energy"
+        },
+        {
+          "value": "modularni",
+          "label_cs": "Modulární",
+          "label_en": "Modular"
+        },
+        {
+          "value": "ocelova",
+          "label_cs": "Ocelová",
+          "label_en": "Steel"
+        },
+        {
+          "value": "roubena",
+          "label_cs": "Roubená",
+          "label_en": "Log"
+        },
+        {
+          "value": "jina",
+          "label_cs": "Jiná",
+          "label_en": "Other"
         }
       ],
       "aliases": [],
@@ -1187,7 +1297,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "building_type",
       "default": null,
-      "description": "Operator-friendly building material buckets (multi-select). The four values (cihla / panel / smisena / ostatni) map onto the granular building_type column; a listing matches if its building_type is in the union of the selected buckets. `ostatni` expands to skelet / drevo / kamen / montovana / nizkoenergeticka under the hood. Empty list / null = no constraint.",
+      "description": "Operator-friendly building material buckets (multi-select). The four values (cihla / panel / smisena / ostatni) map onto the granular building_type column; a listing matches if its building_type is in the union of the selected buckets. `ostatni` expands to every BUILDING_TYPE_OPTIONS member outside the explicit three (skelet, drevo, kamen, montovana, nizkoenergeticka, modularni, ocelova, roubena, jina), so widening the canon widens the bucket. Empty list / null = no constraint.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -1476,6 +1586,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "State/Municipal"
         },
         {
+          "value": "jine",
+          "label_cs": "Jiné",
+          "label_en": "Other"
+        },
+        {
           "value": "__unknown__",
           "label_cs": "Neuvedeno",
           "label_en": "Unknown / not specified"
@@ -1489,7 +1604,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "bool",
       "pg_column": "has_balcony",
       "default": null,
-      "description": "Legacy combined flag: balcony OR terrace OR loggia. Kept for backwards compatibility; prefer the granular `terrace` filter when only a terrace will do.",
+      "description": "A balcony OR a loggia. A terrace is NOT one of them — it has its own `terrace` filter; combine the two when you want either.",
       "category": "Amenity",
       "ui_control": "tristate",
       "agendas": [
@@ -1541,7 +1656,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "bool",
       "pg_column": "has_parking",
       "default": null,
-      "description": "Legacy combined flag: any parking (street, lot, or garage). Prefer the granular `garage` and `parking_lots_min` filters for new analytical work.",
+      "description": "A parking space or right BELONGING to the property (a space, a garage, or a stated count). Street parking and a car park merely nearby do not count; `false` means the advert listed its facilities and none of them was ours. `garage` and `parking_lots_min` are the finer filters.",
       "category": "Amenity",
       "ui_control": "tristate",
       "agendas": [
@@ -1870,6 +1985,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "range_inputs",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": {
@@ -1896,6 +2012,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "ui_control": "range_inputs",
       "agendas": [
         "browse",
+        "sold",
         "watchdog"
       ],
       "constraints": {
@@ -1986,6 +2103,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "defaults",
         "estimation",
         "neighborhood",
+        "sold",
         "velocity",
         "watchdog"
       ],
@@ -2016,6 +2134,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "defaults",
         "estimation",
         "neighborhood",
+        "sold",
         "velocity",
         "watchdog"
       ],
@@ -2097,8 +2216,25 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Curation",
       "ui_control": "multiselect",
       "agendas": [
-        "browse",
-        "watchdog"
+        "browse"
+      ],
+      "constraints": null,
+      "unit": null,
+      "basis": null,
+      "enum_values": null,
+      "aliases": [],
+      "nullable": false
+    },
+    {
+      "id": "collections",
+      "type": "int_list",
+      "pg_column": null,
+      "default": null,
+      "description": "Operator-curated collection ids. OR-semantics — a property matches if it is in ANY collection in the list. Deliberately the opposite of `tags` (AND): collections read as folders, so two of them mean 'either folder'. Collection ids are account-scoped and stable across renames. BROWSE-only, for the same reasons as `pipeline`: watching a collection would fire on the operator's own clicks, and their groupings must never feed back into a valuation.",
+      "category": "Curation",
+      "ui_control": "multiselect",
+      "agendas": [
+        "browse"
       ],
       "constraints": null,
       "unit": null,
@@ -2560,4 +2696,9 @@ export const UI_CONTROLS = FILTER_REGISTRY.ui_controls;
  * multi-select logic (a value that also matches NULL / non-canonical).
  * Generated from toolkit.filter_registry; do not hand-edit. */
 export const FURNISHED_CANONICAL = ["ano", "ne", "castecne"] as const;
-export const OWNERSHIP_CANONICAL = ["osobni", "druzstevni", "statni"] as const;
+export const OWNERSHIP_CANONICAL = ["osobni", "druzstevni", "statni", "jine"] as const;
+
+/* `listings.price_unit` constrains no filter, so it is not in the payload
+ * above — but every listing surface renders it after the price, and the
+ * stored slug ('za mesic') is not the word a Czech page should show. */
+export const PRICE_UNIT_LABELS: Record<string, string> = {"za nemovitost": "celkem", "za mesic": "za měsíc"};

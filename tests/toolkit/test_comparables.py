@@ -461,7 +461,7 @@ def test_furnished_unknown_only_drops_real_in_clause():
     )
     assert "l.ownership = ANY(%(ownership)s)" not in sql
     assert "l.ownership IS NULL OR NOT (l.ownership = ANY(%(ownership_canon)s))" in sql
-    assert params["ownership_canon"] == ["osobni", "druzstevni", "statni"]
+    assert params["ownership_canon"] == ["osobni", "druzstevni", "statni", "jine"]
     assert "ownership" not in params
 
 

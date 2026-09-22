@@ -2,7 +2,7 @@
   "_captured_from": "https://nemovitosti.maxima.cz/nemovitosti/f60012522/",
   "_captured_at": "2026-09-05",
   "_http_status": 200,
-  "_provenance": "scraper.maxima_parser.parse_detail over the live page, verbatim; `image_urls` dropped (no entry reads it) and nothing else edited. The page carries no broker name, phone or e-mail in any parsed field — title, params and locality_text are property facts only.",
+  "_provenance": "scraper.maxima_parser.parse_detail over the live page as of the capture date, verbatim; `image_urls` dropped (no entry reads it) and nothing else edited. The page carries no broker name, phone or e-mail in any parsed field — title, params and locality_text are property facts only. W9 later deleted the parser's view-centre coordinate read, so a re-capture carries no `lat`/`lon`/`coords`; the keys below are kept as the frozen evidence of that removed producer.",
   "_why_pinned": "THE D6 HOMONYM REGRESSION. The page states only 'Krásný Les' and serves NO map script at all, so coords.source is null and the archived body can mint no coordinate — the stored pin 50.76764,13.93526 (the other Krásný Les, ~100 km west) has no portal-declared geometry behind it.",
   "raw_json": {
     "id": "f60012522",

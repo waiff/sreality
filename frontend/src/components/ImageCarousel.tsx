@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type ImgHTMLAttributes, type ReactNode } from 'react';
 import ImageTagBadge from './ImageTagBadge';
 import ImageRenderBadge from './ImageRenderBadge';
 import { type TaggedImageUrl } from '@/lib/imageTags';
@@ -36,6 +36,12 @@ interface Props {
    * the whole point of that page, so its photos are not lazy; everything below
    * the fold stays lazy, which is the default. */
   eager?: boolean;
+  /* Forwarded to the <img>. Our own photos come from R2 and need nothing here;
+   * a HOT-LINKED third-party photo (the sold-comps carousel) passes
+   * 'no-referrer', which is both the request a source's hot-link protection is
+   * likeliest to serve and the one that doesn't stamp the operator's page URL
+   * on every frame. */
+  referrerPolicy?: ImgHTMLAttributes<HTMLImageElement>['referrerPolicy'];
   /* What to render IN PLACE OF a frame the browser could not load. A portal CDN
    * refuses a cross-origin request for a photo R2 has no copy of yet (idnes
    * answers ERR_BLOCKED_BY_ORB), and on a surface where the operator is judging
@@ -53,6 +59,7 @@ export default function ImageCarousel({
   hoverZoom = false,
   fadeChevrons = false,
   eager = false,
+  referrerPolicy,
   fallback,
   children,
 }: Props) {
@@ -93,6 +100,7 @@ export default function ImageCarousel({
           src={current.url}
           alt=""
           loading={eager ? 'eager' : 'lazy'}
+          referrerPolicy={referrerPolicy}
           className={[
             'w-full h-full object-cover transition-transform duration-200',
             hoverZoom ? 'group-hover:scale-[1.02]' : '',

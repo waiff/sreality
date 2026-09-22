@@ -1,8 +1,9 @@
 """The one per-area price-marker test shared by every portal's price parser.
 
 `listings.price_czk` is a TOTAL (or a monthly rent) across all nine portals —
-production carries only `za nemovitost` / `za mesic` / `celkem` / `měsíc`, none
-per-area. A per-m2 figure written there reads as a total in every downstream
+production carries only `za nemovitost` / `za mesic` (W5 collapsed the four
+spellings to the canon's two), none per-area. A per-m2 figure written there
+reads as a total in every downstream
 consumer (Kč/m2 stats, estimation comparables, Browse sort, price-drop
 watchdogs), which is strictly worse than the missing value it replaces. So a
 price cell that quotes a unit price must yield NULL, not the unit price.

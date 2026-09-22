@@ -63,6 +63,7 @@ import CollectionSaveToggle from '@/components/listing-detail/CollectionSaveTogg
 import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
 import { lazyChunk } from '@/lib/lazyChunk';
+import { Hairline, SectionLabel } from '@/components/section';
 
 const PriceLineChart = lazyChunk(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -72,6 +73,9 @@ const CurationBlock = lazyChunk(
 );
 const ManualEstimatesBlock = lazyChunk(
   () => import('@/components/listing-detail/ManualEstimatesBlock'),
+);
+const SoldCompsBlock = lazyChunk(
+  () => import('@/components/listing-detail/SoldCompsBlock'),
 );
 const EstimationsBlock = lazyChunk(
   () => import('@/components/listing-detail/EstimationsBlock'),
@@ -486,6 +490,28 @@ export default function ListingDetail() {
         )}
       </Suspense>
       <Hairline />
+      <Suspense fallback={<Skeleton height={160} />}>
+        {/* The only REALIZED prices on the page — registered sales near this
+            point, which is why they sit beside the estimates rather than with
+            the portal history above. Needs the listing's point and nothing
+            else: a sale is never linked to a property (rule #15 does not reach
+            a transactions fact). */}
+        {listing.lat != null && listing.lng != null && (
+          /* Keyed on the listing: every listing route renders the SAME
+             <ListingDetail> element, so listing → listing reuses this instance,
+             and the block's radius and its category seed are mount-time state.
+             Without the key a new subject is answered with the previous one's
+             cohort. */
+          <SoldCompsBlock
+            key={listing.id}
+            categoryMain={listing.category_main}
+            lat={listing.lat}
+            lng={listing.lng}
+            propertyId={propPid}
+          />
+        )}
+      </Suspense>
+      <Hairline />
       <Suspense fallback={<Skeleton height={140} />}>
         {propPid != null && (
           <CurationBlock
@@ -783,18 +809,6 @@ function MapPinGlyph() {
       />
       <circle cx="8" cy="6" r="1.6" stroke="currentColor" strokeWidth="1.2" />
     </svg>
-  );
-}
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
   );
 }
 

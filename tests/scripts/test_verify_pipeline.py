@@ -25,7 +25,6 @@ from scripts.verify_pipeline import (
     _status_for_cron,
     _status_for_burn,
     _status_for_llm_errors,
-    _status_for_llm_silence,
     _status_for_worker,
     load_thresholds,
     run_checks,
@@ -69,34 +68,6 @@ def test_llm_errors_rate_only_fails_while_live() -> None:
 def test_llm_errors_clean_is_ok() -> None:
     clean = [{"called_for": "parse_url", "total": 100, "errors": 1}]
     assert _status_for_llm_errors(clean, False, True, T) == ("ok", [])
-
-
-def test_llm_silence_fails_when_stale_or_absent() -> None:
-    fail_h = T["llm_silence_fail_hours"]
-    assert _status_for_llm_silence(0.02, fail_h) == "ok"      # ~1 min ago (normal)
-    assert _status_for_llm_silence(fail_h, fail_h) == "ok"    # exactly at threshold, not over
-    assert _status_for_llm_silence(fail_h + 0.1, fail_h) == "fail"  # silent past threshold
-    assert _status_for_llm_silence(None, fail_h) == "fail"    # no calls on record at all
-
-
-def test_llm_silence_default_is_sized_for_the_enrichment_cron_not_dedup_vision() -> None:
-    """W0.5: pin the default and the boundary it moved to.
-
-    4h was sized for dedup vision on the always-on worker (p99 inter-call gap ~1 min),
-    a workload deleted 2026-08-06 with the decision engine (rule 15). The recurring
-    producer left is the 6h-nominal description-enrichment cron, which the Actions
-    throttle stretches past 7h — so 4h red the acute lane 8 times over Aug 27-30 while
-    the pipeline was healthy (595 ok / 0 error calls in 24h, $1.53 spend). This check has
-    no warn tier, so every one of those was a hard false red.
-    """
-    fail_h = T["llm_silence_fail_hours"]
-    assert fail_h == 13.0
-    # The gaps that produced the false reds are now ok, up to and including the boundary.
-    for healthy in (4.195, 6.0, 7.5, 12.9, 13.0):
-        assert _status_for_llm_silence(healthy, fail_h) == "ok"
-    # Past 13h it still fails: a genuinely dead pipeline is caught within one 6h lane tick.
-    assert _status_for_llm_silence(13.01, fail_h) == "fail"
-    assert _status_for_llm_silence(24.0, fail_h) == "fail"
 
 
 def test_burn_rate_thresholds() -> None:
@@ -565,8 +536,8 @@ def test_thresholds_partial_override_merges_over_defaults() -> None:
 
 
 def test_thresholds_json_string_is_parsed() -> None:
-    merged = load_thresholds(_ThresholdConn(json.dumps({"llm_silence_fail_hours": 6})))
-    assert merged["llm_silence_fail_hours"] == 6
+    merged = load_thresholds(_ThresholdConn(json.dumps({"llm_error_rate_warn": 0.5})))
+    assert merged["llm_error_rate_warn"] == 0.5
 
 
 def test_thresholds_ignores_non_numeric_values() -> None:
@@ -640,8 +611,8 @@ def test_live_state_a_newer_success_clears_it() -> None:
 
 
 def test_live_state_stale_failure_with_no_traffic_since_is_still_failing() -> None:
-    """The regression. A total outage stops producing traffic (the enrichment loop
-    breaks at 5 consecutive errors), so the last error ages past the old 90-minute
+    """The regression. A total outage stops producing traffic (every LLM lane aborts
+    its pass on a fatal provider error), so the last error ages past the old 90-minute
     window and the check flipped to `ok` — 11 days of real outage read healthy, and
     edge-triggered alerting emitted 114 alerts alternating onset with a literal
     'Recovered' for something that never recovered. Silence is not recovery."""
@@ -710,7 +681,7 @@ def test_check_llm_errors_reds_on_a_days_old_credit_outage() -> None:
     from scripts.verify_pipeline import check_llm_errors
 
     conn = _LlmErrorsConn(
-        rates=[("enrich_listing_description", 500, 500)],
+        rates=[("extract_location_claims", 500, 500)],
         credit_count=63547,
         live_row=(_t(hours=-30), _t(hours=-40), _t(hours=-30)),
     )
@@ -728,7 +699,7 @@ def test_check_llm_errors_is_ok_once_a_success_lands() -> None:
     from scripts.verify_pipeline import check_llm_errors
 
     conn = _LlmErrorsConn(
-        rates=[("enrich_listing_description", 500, 400)],
+        rates=[("extract_location_claims", 500, 400)],
         credit_count=63547,          # still in the 24h window, but superseded
         live_row=(_t(hours=-30), _t(minutes=-2), None),
     )
@@ -743,12 +714,12 @@ def test_check_llm_errors_is_ok_once_a_success_lands() -> None:
 def test_burn_starvation_arm_fails_a_lane_that_spends_nothing() -> None:
     from scripts.verify_pipeline import _status_for_burn_lanes
 
-    lanes = [{"called_for": "enrich_listing_description",
+    lanes = [{"called_for": "extract_location_claims",
               "attempts": 5000, "successes": 0, "spend": 0.0}]
     status, arm, starved = _status_for_burn_lanes(lanes, 0.0, T["llm_spend_24h_warn_usd"],
                                                   T["llm_spend_24h_fail_usd"])
     assert status == "fail" and arm == "starved"
-    assert starved == ["enrich_listing_description"]
+    assert starved == ["extract_location_claims"]
 
 
 def test_burn_starvation_is_per_lane_so_one_cheap_success_cannot_mask_it() -> None:
@@ -758,18 +729,18 @@ def test_burn_starvation_is_per_lane_so_one_cheap_success_cannot_mask_it() -> No
     from scripts.verify_pipeline import _status_for_burn_lanes
 
     lanes = [
-        {"called_for": "enrich_listing_description", "attempts": 5000,
+        {"called_for": "extract_location_claims", "attempts": 5000,
          "successes": 0, "spend": 0.0},
         {"called_for": "summarize_region_dispositions", "attempts": 1,
          "successes": 1, "spend": 0.01},
     ]
     status, arm, starved = _status_for_burn_lanes(lanes, 0.01, 90, 150)
     assert status == "fail" and arm == "starved"
-    assert starved == ["enrich_listing_description"]
+    assert starved == ["extract_location_claims"]
 
 
 def test_burn_idle_is_ok_and_flagged_not_starved() -> None:
-    """No attempts is a different axis (llm_liveness owns it), not a burn failure."""
+    """No attempts is not a burn failure — every producer is dispatch-driven."""
     from scripts.verify_pipeline import _status_for_burn_lanes
 
     status, arm, starved = _status_for_burn_lanes([], 0.0, 90, 150)
@@ -2624,3 +2595,314 @@ def test_sreality_probe_seam_stops_on_its_wall_clock_deadline(monkeypatch: Any) 
         assert "wall-clock budget" in str(exc)
     else:  # pragma: no cover - the guard is the point of the test
         raise AssertionError("the seam never tripped its deadline")
+
+
+# --- field_fill_matrix (field capture W1) ----------------------------------
+
+
+class _MatrixConn(_ShapeDriftConn):
+    """`_fetchall` wants transaction() + cursor(); _ShapeDriftConn already has both."""
+
+
+def _live_matrix_rows(**moved: int) -> list[tuple[Any, ...]]:
+    """One row per BLESSED cell, mirroring the baseline unless `moved` says otherwise.
+
+    Every test here builds the whole matrix, because a blessed cell missing from the live
+    read is now an offender in its own right — a partial matrix is a finding, not a
+    fixture shortcut."""
+    from scraper import field_census
+
+    rows: list[tuple[Any, ...]] = []
+    for key, cell in field_census.load_baseline()["cells"].items():
+        source, field = key.split("/", 1)
+        rows.append((source, cell["n"], field, moved.get(key.replace("/", "__"),
+                                                         cell["filled"]),
+                     None, None, 0, 0, None, None))
+    return rows
+
+
+def test_field_fill_matrix_is_registered() -> None:
+    from scripts.verify_pipeline import _CHECKS, check_field_fill_matrix
+
+    assert ("field_fill_matrix", check_field_fill_matrix) in _CHECKS
+
+
+def test_field_fill_matrix_reproduces_the_known_zero_cells() -> None:
+    """The gate this wave is measured by: a cell whose parser reads a key its portal
+    has never emitted is named in the report.
+
+    W4 split the list in two, and the split is the wave's own receipt. The cells it
+    WIRED no longer carry a gap marker, so replaying the pre-W4 baseline as if it were
+    today's live matrix reports them as zeros that should be filling — which is exactly
+    what production says between this merge and the heal that lands the values. The
+    cells left declared are the ones the portal genuinely never states."""
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    out = check_field_fill_matrix(_MatrixConn(_live_matrix_rows()), T)
+    details = out["details"]
+    assert {
+        "remax/has_balcony", "ceskereality/parking_lots", "ceskereality/total_floors",
+        "ceskereality/has_lift", "ceskereality/cellar", "remax/terrace",
+    } <= set(details["zero_fill_known_gaps"])
+    # Wired by W4 and still 0% on the pre-heal corpus: the heal's to-do list.
+    assert set(details["zero_fill_undeclared"]) == {
+        "ceskereality/garage", "ceskereality/has_parking", "ceskereality/terrace",
+        "maxima/furnished", "mmreality/furnished", "mmreality/has_balcony",
+        "mmreality/terrace", "realitymix/cellar", "realitymix/garden_area",
+        "realitymix/has_lift", "realitymix/parking_lots", "remax/parking_lots",
+    }
+    assert out["status"] == "warn"
+    assert "should be filling and is not" in out["message"]
+    assert out["details"]["cells_measured"] == out["details"]["cells_blessed"]
+
+
+def test_field_fill_matrix_fails_when_a_whole_source_stops_being_measured() -> None:
+    """The denominator arm: a portal disabled in `portals`, or one whose stock has gone
+    inactive, drops out of the matrix spine — and a check that walked only live cells
+    would report `ok` over a shrinking denominator."""
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    rows = [r for r in _live_matrix_rows() if r[0] != "remax"]
+    out = check_field_fill_matrix(_MatrixConn(rows), T)
+    assert out["status"] == "fail"
+    assert "remax: 26 blessed cell(s) absent" in out["details"]["offenders"][0]
+    assert out["details"]["cells_measured"] < out["details"]["cells_blessed"]
+
+
+def test_field_fill_matrix_runs_under_the_per_check_statement_timeout() -> None:
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    conn = _MatrixConn(_live_matrix_rows())
+    check_field_fill_matrix(conn, T)
+    assert any("statement_timeout" in s for s in conn.executed)
+    # The cohort is the whole active stock, not a newest-N slice of it.
+    assert any("where l.is_active" in s and "first_seen_at" not in s
+               for s in conn.executed)
+
+
+def test_field_fill_matrix_fails_when_a_blessed_cell_collapses() -> None:
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    # idnes `condition` is blessed at 65.4% fill; a parser that stopped writing it.
+    out = check_field_fill_matrix(
+        _MatrixConn(_live_matrix_rows(idnes__condition=0)), T)
+    assert out["status"] == "fail"
+    assert out["value"] == 1
+    assert "idnes/condition" in out["details"]["offenders"][0]
+
+
+def test_field_fill_matrix_warns_on_a_stale_census(monkeypatch: Any) -> None:
+    """Stale census = a portal could have renamed a key and every gate built on the
+    census would still agree with itself. A warn here, never a calendar-keyed CI red."""
+    import scripts.verify_pipeline as vp
+    from scripts.verify_pipeline import check_field_fill_matrix
+
+    monkeypatch.setattr(
+        vp.field_census, "load_censuses",
+        lambda: [{"portal": "remax", "generated_at": "2020-01-01T00:00:00+00:00"}])
+    out = check_field_fill_matrix(_MatrixConn(_live_matrix_rows()), T)
+    assert out["status"] == "warn"
+    assert out["details"]["stale_census"] and "remax" in out["message"]
+
+
+def test_full_lane_budget_owes_every_check_its_own_budget() -> None:
+    from scripts import verify_pipeline as vp
+
+    assert vp.full_lane_budget_s(weekly=False) == len(vp._CHECKS) * vp._CHECK_BUDGET_S
+    assert vp.full_lane_budget_s(weekly=True) == (
+        (len(vp._CHECKS) + len(vp._WEEKLY_CHECKS)) * vp._CHECK_BUDGET_S)
+
+
+def test_full_lane_budget_fits_its_job() -> None:
+    """A registry that outgrows verify_pipeline.yml's timeout must fail HERE, not go quiet
+    in production: the shared 120 s budget left 7-17 of 24 checks unrun for weeks."""
+    import re
+    from pathlib import Path
+
+    from scripts import verify_pipeline as vp
+
+    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/verify_pipeline.yml"
+    minutes = int(re.search(r"timeout-minutes:\s*(\d+)", workflow.read_text()).group(1))
+    assert vp.full_lane_budget_s(weekly=True) + vp._JOB_HEADROOM_S <= minutes * 60
+
+
+# --- floor_convention (field capture W8) -----------------------------------
+
+
+class _FloorConn(_ShapeDriftConn):
+    """`_fetchall` wants transaction() + cursor(); _ShapeDriftConn already has both."""
+
+
+def _live_floor_rows() -> list[tuple[Any, ...]]:
+    """(source, pairs, mean_delta) as the live cluster read them 2026-09-22, before
+    the heal: the six ground=1 portals a storey high, the two canonical ones at their
+    own noise floor."""
+    return [
+        ("remax", 1248, 1.050), ("mmreality", 1574, 0.988), ("sreality", 13575, 0.973),
+        ("realitymix", 7416, 0.962), ("bezrealitky", 900, 0.869), ("maxima", 49, 0.816),
+        ("ceskereality", 7453, 0.201), ("bazos", 2586, 0.098),
+    ]
+
+
+def test_floor_convention_is_registered() -> None:
+    from scripts.verify_pipeline import _CHECKS, check_floor_convention
+
+    assert ("floor_convention", check_floor_convention) in _CHECKS
+
+
+def test_floor_convention_fails_on_todays_pre_heal_corpus() -> None:
+    """The gate W8 is measured by: six portals a whole storey off idnes is a fail, and
+    the two portals that were already canonical are NOT named as offenders."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn(_live_floor_rows()), T)
+    assert out["status"] == "fail"
+    assert out["value"] == 1.05
+    assert out["details"]["scored"] == 8
+    assert sorted(s.split()[0] for s in out["details"]["offenders"]) == [
+        "bezrealitky", "maxima", "mmreality", "realitymix", "remax", "sreality"]
+    assert "--write --allow-snapshot-deferral" in out["message"]
+
+
+def test_floor_convention_never_tells_the_operator_to_heal_a_canonical_portal() -> None:
+    """ceskereality's cell declares `ground0`: re-deriving it would shift 34,350 CORRECT
+    rows down one storey, so the reparse runbook must never name it."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn([("ceskereality", 7453, 0.62)]), T)
+    assert out["status"] == "fail"
+    assert "scripts.reparse" not in out["message"]
+    assert "re-deriving is NOT the remedy" in out["message"]
+
+
+def test_floor_convention_is_ok_once_every_portal_reads_the_same_scale() -> None:
+    """What the heal buys: the residual is each portal's own sibling noise, not 0."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn(
+        [(s, n, d - 1.0) for s, n, d in _live_floor_rows() if d > 0.5]
+        + [("ceskereality", 7453, 0.201), ("bazos", 2586, 0.098)]), T)
+    assert out["status"] == "ok"
+    assert out["details"]["offenders"] == []
+
+
+def test_floor_convention_warns_rather_than_passing_when_nothing_scored() -> None:
+    """A thin sample certifies nothing; `value` stays None so the tile reads em-dash,
+    never a 0 that looks like agreement."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    out = check_floor_convention(_FloorConn([("maxima", 12, 0.9)]), T)
+    assert out["status"] == "warn"
+    assert out["value"] is None
+    assert "verified NOTHING" in out["message"]
+
+
+def test_floor_convention_runs_under_the_per_check_statement_timeout() -> None:
+    """The lane's most expensive query (27-35 s measured) is exactly the one that must
+    be cancellable server-side: a raw cursor would run it under the 10-minute default."""
+    from scripts.verify_pipeline import check_floor_convention
+
+    conn = _FloorConn(_live_floor_rows())
+    check_floor_convention(conn, T)
+    assert any("statement_timeout" in s for s in conn.executed)
+
+
+# --- text_extraction_lag (field-capture W7) --------------------------------
+#
+# The R8 instrument. Its wedge arm is the one that rings when nothing else can —
+# a lane that SELECTS nothing looks healthy to every other check — so it has to
+# be right about what "claiming none" means.
+
+
+class _ScriptedConn:
+    """A conn that answers each statement from a script keyed on a SQL fragment."""
+
+    def __init__(self, answers: dict[str, Any]) -> None:
+        self._answers = answers
+        self._last: Any = None
+
+    def cursor(self) -> "_ScriptedConn":
+        return self
+
+    def __enter__(self) -> "_ScriptedConn":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._last = next(
+            (v for k, v in self._answers.items() if k in sql), [])
+
+    def fetchall(self) -> list[Any]:
+        return list(self._last)
+
+    def fetchone(self) -> Any:
+        rows = list(self._last)
+        return rows[0] if rows else None
+
+
+def _text_lane_conn(*, waiting: int, oldest_hours: float, claimed: int | None) -> Any:
+    lane = None if claimed is None else {"last": {"claimed": claimed}}
+    return _ScriptedConn({
+        "FROM app_settings": [("gpt-5-mini",)],
+        "GROUP BY l.source": ([("bazos", waiting, oldest_hours, oldest_hours / 2)]
+                              if waiting else []),
+        "percentile_cont(0.99)": [(10, 6.0)],
+        "worker_heartbeats": [(lane, 2.0)],
+    })
+
+
+def _open_one_gate(monkeypatch: Any) -> None:
+    from scraper import attribute_contract
+
+    monkeypatch.setattr(attribute_contract, "extracted_cells",
+                        lambda: {"bazos": ("has_lift",)})
+
+
+def test_text_extraction_lag_does_not_ring_on_one_quiet_pass(
+        monkeypatch: Any) -> None:
+    """bazos arrives in bursts — 1,940 rows a day over ~147 distinct minutes — so a great
+    many healthy 5-minute passes legitimately claim nothing. Reading that as a wedge is
+    the false-red generator this harness exists to replace."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=40, oldest_hours=0.05, claimed=0), T)
+    assert out["status"] == "ok"
+
+
+def test_text_extraction_lag_rings_when_the_oldest_row_outlives_the_lane(
+        monkeypatch: Any) -> None:
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=50205, oldest_hours=9.0, claimed=0), T)
+    assert out["status"] == "fail"
+    assert "claimed" in " ".join(out["details"]["offenders"])
+
+
+def test_text_extraction_lag_rings_when_the_lane_is_not_in_the_heartbeat(
+        monkeypatch: Any) -> None:
+    """The estimation lane's failure: never registered, therefore invisible to every
+    other monitor. That one needs no staleness at all."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    _open_one_gate(monkeypatch)
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=3, oldest_hours=0.01, claimed=None), T)
+    assert out["status"] == "fail"
+    assert "not in the heartbeat" in " ".join(out["details"]["offenders"])
+
+
+def test_text_extraction_lag_reports_a_closed_gate_as_nothing_waiting() -> None:
+    """The shipping state: every gate closed means the lane is out of scope, not late."""
+    from scripts.verify_pipeline import check_text_extraction_lag
+
+    out = check_text_extraction_lag(
+        _text_lane_conn(waiting=0, oldest_hours=0.0, claimed=0), T)
+    assert out["status"] == "ok"
+    assert out["details"]["scope"] == {}
+    assert "every contract gate is closed" in out["message"]

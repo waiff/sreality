@@ -76,6 +76,14 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              ever re-read it; the drain does the rest (a bazos category page
              raises ListingGoneError and delists instead). LIVE by default
              (`LOCATION_REFETCH_ENABLED=0` idles it).
+- sold_comps: every `realtime_sold_comps_interval_seconds` (DARK: the seeded row is
+             0), fetch registered sales from reas.cz for up to 5 obec cells — the
+             towns where the deal pipeline holds a live card, stalest first, minus
+             the cells whose newest `sold_transaction_fetches` row is younger than
+             35 days (ok) or 6 hours (failed). One integer is cadence AND kill
+             switch; no boolean flag, no env var, no queue. A cell attempt always
+             ends in the ledger (`scraper.sold_fetch.fetch_cell` never raises), and
+             an unmigrated database skips with one warning.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
              worker_heartbeats (migration 269) — the Health-page liveness hook.
 
@@ -110,7 +118,9 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from scraper import db, image_storage, portal_factory, portal_runner
+from scraper import (
+    db, image_storage, portal_factory, portal_runner, sold_db, sold_fetch,
+)
 from scraper.portal import PortalConfig, default_config, load_portal_config
 
 LOG = logging.getLogger("scraper.realtime_worker")
@@ -336,6 +346,48 @@ LOCATION_REFETCH_CAP_DEFAULT = 500
 LOCATION_REFETCH_FIRST_DELAY_SECONDS = 300.0
 # log-once-per-process guard: the audit matview is absent (a branch database).
 _LOCATION_REFETCH_VIEW_WARNED = False
+
+# sold_comps lane (sold-comps W2): REGISTERED SALES FOR THE TOWNS THE OPERATOR IS
+# ACTUALLY WORKING IN. A sale is an external fact with no account and no listing, so
+# the lane has no queue: its work-list is a query (`sold_db.sold_comp_cells`) over the
+# obec cells where the deal pipeline holds a live card, minus the cells whose newest
+# ledger row is still fresh. The source republishes a transfer ~30 days after the
+# sale, so a cell that succeeded is not worth re-asking for weeks — which makes five
+# cells a pass generous rather than tight.
+SOLD_COMPS_INTERVAL_SETTING = "realtime_sold_comps_interval_seconds"
+SOLD_COMPS_CELL_CAP = 5
+# The cheapest cell is still a ~1.9 MB SSR page against a politeness budget of one
+# request per five seconds, so this lane does not race the container's first minute.
+SOLD_COMPS_FIRST_DELAY_SECONDS = 300.0
+# log-once-per-process guard: migration 542's store is absent (a branch database, or
+# main before the apply).
+_SOLD_COMPS_STORE_WARNED = False
+# The lane's own mutual exclusion, INSIDE this process (the location_resolve lane's
+# reason, and this lane has no lease to fall back on). A pass abandoned at
+# LANE_PASS_TIMEOUT_SECONDS keeps running — Python cannot kill the thread — and it
+# has written no ledger row yet, so the freshness subtraction cannot stop the next
+# tick handing the SAME cells to a second walk. Under the rate limiter's 8x penalty
+# factor a five-cell pass can exceed the timeout, which is exactly when a second
+# walk is least welcome. Held for the whole pass.
+_SOLD_COMPS_PASS_LOCK = threading.Lock()
+_SOLD_COMPS_WEDGE_LOGGED = False
+
+# text_extract lane (field-capture W7): the post-publication extraction of the facts a
+# prose-only advert states in its text and nowhere else. A CONSTANT interval, no
+# app_settings row, no env var and no flag — the estimation lane is the cautionary case
+# (its flag was never set, so it has been dark since it shipped and is absent from
+# worker_heartbeats entirely, which makes it invisible to every monitor). This lane's whole
+# scope is `attribute_contract.extracted_cells()` — the cells whose R7 gate the bake-off
+# has OPENED. None open (the shipping state) and the pass returns before it opens a cursor,
+# so the lane is live, visible and free. Five minutes puts a new listing well inside the
+# lane's 20-minute SLO even after a missed pass.
+TEXT_EXTRACT_INTERVAL_SECONDS = 300.0
+# The sold_comps lane's reason, with money on it: a pass abandoned at
+# LANE_PASS_TIMEOUT_SECONDS keeps its eight threads — and their billing — running, and the
+# cache rows they have not written yet cannot stop the next tick handing the same listings
+# to a second set of paid calls.
+_TEXT_EXTRACT_PASS_LOCK = threading.Lock()
+_TEXT_EXTRACT_WEDGE_LOGGED = False
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
 # param, so its own probe (added Phase 4 of portal-order-fidelity) can only
@@ -605,6 +657,14 @@ def _read_location_refetch_min_age() -> int:
 def _read_location_refetch_cap() -> int:
     return _env_int(LOCATION_REFETCH_CAP_ENV, LOCATION_REFETCH_CAP_DEFAULT,
                     minimum=1, maximum=10000)
+
+
+def _read_sold_comps_interval() -> int:
+    # ONE integer is the cadence AND the kill switch (interval<=0 = idle-not-dead), so
+    # this lane carries no `*_enabled` flag. Default 0 twice over: the seeded row ships
+    # at 0, and an absent row reads as 0 — the lane is dark until the operator sets it
+    # on /settings.
+    return _read_int(SOLD_COMPS_INTERVAL_SETTING, 0)
 
 
 def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
@@ -1658,6 +1718,126 @@ async def _location_refetch_pass(
     _record_pass(state, "location_refetch", last)
 
 
+def _sold_comps_sync() -> dict[str, Any]:
+    """One tick: the stalest pipeline obec cells, fetched from the source and stored.
+
+    No lease (the location_refetch lane's reason: one SELECT and a handful of
+    idempotent cell writes), but one in-process lock — an abandoned pass has written
+    no ledger row, so nothing else can stop the next tick re-walking its cells beside
+    it. `fetch_cell` never raises, so one bad cell costs its own ledger row.
+    """
+    global _SOLD_COMPS_STORE_WARNED, _SOLD_COMPS_WEDGE_LOGGED
+
+    started = time.monotonic()
+    if not _SOLD_COMPS_PASS_LOCK.acquire(blocking=False):
+        if not _SOLD_COMPS_WEDGE_LOGGED:
+            _SOLD_COMPS_WEDGE_LOGGED = True
+            LOG.warning(
+                "SOLD_COMPS lane skipped: the previous pass was abandoned and its "
+                "thread is still walking cells")
+        return {"ran": False, "reason": "previous_pass_running",
+                "seconds": round(time.monotonic() - started, 1)}
+    try:
+        conn = db.connect()
+        try:
+            cells = sold_db.sold_comp_cells(
+                conn, sold_fetch.SOURCE, cap=SOLD_COMPS_CELL_CAP)
+            if cells is None:
+                if not _SOLD_COMPS_STORE_WARNED:
+                    _SOLD_COMPS_STORE_WARNED = True
+                    LOG.warning(
+                        "SOLD_COMPS: sold_transactions is absent on this database; "
+                        "the lane has nothing to write and skips every tick")
+                return {"ran": False, "reason": "store_missing",
+                        "seconds": round(time.monotonic() - started, 1)}
+            results: list[dict[str, Any]] = []
+            if cells:
+                client = sold_fetch.build_client()
+                results = [sold_fetch.fetch_cell(conn, client, kod) for kod in cells]
+            return {
+                "ran": True,
+                "cells": len(results),
+                "records": sum(r["records"] for r in results),
+                "new": sum(r["new"] for r in results),
+                "failed": sum(1 for r in results if r["status"] == "failed"),
+                # A cell that could not be boxed writes no ledger row, so if one ever
+                # reaches the lane again the heartbeat — not the ledger — is the only
+                # place it can show. Counted so it can never read as a quiet pass.
+                "skipped": sum(1 for r in results if r["status"] == "skipped"),
+                "seconds": round(time.monotonic() - started, 1),
+            }
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    finally:
+        _SOLD_COMPS_PASS_LOCK.release()
+
+
+async def _sold_comps_pass(
+    stop_event: asyncio.Event, state: dict[str, Any],
+) -> None:
+    if stop_event.is_set():
+        return
+    last = await asyncio.to_thread(_sold_comps_sync)
+    LOG.info(
+        "SOLD_COMPS lane cells=%s records=%s new=%s failed=%s skipped=%s %ss",
+        last.get("cells", 0), last.get("records", 0), last.get("new", 0),
+        last.get("failed", 0), last.get("skipped", 0), last.get("seconds"),
+    )
+    _record_pass(state, "sold_comps", last)
+
+
+def _text_extract_sync() -> dict[str, Any]:
+    """One bounded pass of THE post-publication text lane
+    (`toolkit.description_extraction.run_pass`).
+
+    Lazy import: the module reaches api.llm_client and the provider registry, which no
+    other lane on this worker needs on the startup path. No try/except around run_pass —
+    a raise is the signal, and _lane_loop records the failed pass.
+
+    While every gate in `attribute_contract` is closed the pass returns before it opens a
+    cursor, so this lane is live, visible in the heartbeat and free from the day it ships.
+    """
+    global _TEXT_EXTRACT_WEDGE_LOGGED
+
+    from toolkit import description_extraction
+
+    if not _TEXT_EXTRACT_PASS_LOCK.acquire(blocking=False):
+        if not _TEXT_EXTRACT_WEDGE_LOGGED:
+            _TEXT_EXTRACT_WEDGE_LOGGED = True
+            LOG.warning(
+                "TEXT_EXTRACT lane skipped: the previous pass was abandoned and its "
+                "threads are still calling")
+        return {"claimed": 0, "previous_pass_running": True}
+    _TEXT_EXTRACT_WEDGE_LOGGED = False
+    try:
+        conn = db.connect()
+        try:
+            return description_extraction.run_pass(conn)
+        finally:
+            with contextlib.suppress(Exception):
+                conn.close()
+    finally:
+        _TEXT_EXTRACT_PASS_LOCK.release()
+
+
+async def _text_extract_pass(
+    stop_event: asyncio.Event, state: dict[str, Any],
+) -> None:
+    if stop_event.is_set():
+        return
+    last = await asyncio.to_thread(_text_extract_sync)
+    # Only when the pass did work: at a 5-minute cadence an unconditional line is ~290
+    # "claimed=0" a day once the backlog is drained. The heartbeat records every pass.
+    if last.get("claimed"):
+        LOG.info(
+            "TEXT-EXTRACT claimed=%s extracted=%s written=%s errors=%s $%.4f model=%s",
+            last.get("claimed"), last.get("extracted"), last.get("written"),
+            last.get("errors"), last.get("spent_usd", 0.0), last.get("model"),
+        )
+    _record_pass(state, "text_extract", last)
+
+
 def _lane_snapshot(lanes: dict[str, Any]) -> dict[str, Any]:
     """The lane state as written to the heartbeat, with elapsed time resolved.
 
@@ -1877,6 +2057,24 @@ async def _amain() -> int:
             state,
             default_interval=LOCATION_REFETCH_INTERVAL_DEFAULT,
             first_delay_seconds=LOCATION_REFETCH_FIRST_DELAY_SECONDS)),
+        # default_interval=0 for the location_resolve lane's reason above: the
+        # interval IS the kill switch, so a settings-read failure must not wake a
+        # lane the operator deliberately left dark — and this one spends an external
+        # site's bandwidth when it wakes.
+        ("sold_comps", lambda: _lane_loop(
+            "sold_comps", stop_event, _read_sold_comps_interval,
+            lambda: _sold_comps_pass(stop_event, state),
+            state,
+            default_interval=0,
+            first_delay_seconds=SOLD_COMPS_FIRST_DELAY_SECONDS)),
+        # A CONSTANT interval, like the heartbeat lane's: no app_settings read, therefore
+        # no failure mode and no fail-safe-0 requirement. What governs this lane is the
+        # attribute contract, and a lane with no gated `text` cell simply claims nothing.
+        ("text_extract", lambda: _lane_loop(
+            "text_extract", stop_event, lambda: TEXT_EXTRACT_INTERVAL_SECONDS,
+            lambda: _text_extract_pass(stop_event, state),
+            state,
+            default_interval=TEXT_EXTRACT_INTERVAL_SECONDS)),
         ("heartbeat", lambda: _lane_loop(
             "heartbeat", stop_event, lambda: HEARTBEAT_INTERVAL_SECONDS,
             lambda: _heartbeat_pass(state),

@@ -3,18 +3,25 @@
 
 import type { DistrictChip, ListingFilters, PresetSpec } from './filters';
 
+/* The whole Czech grammar, 1 through 9 — the same span
+ * `filter_registry.DISPOSITION_OPTIONS` generates. It used to stop at 5+1,
+ * which made the type a lie about 708 active rows. */
 export type Disposition =
   | '1+kk' | '1+1'
   | '2+kk' | '2+1'
   | '3+kk' | '3+1'
   | '4+kk' | '4+1'
-  | '5+kk' | '5+1';
+  | '5+kk' | '5+1'
+  | '6+kk' | '6+1'
+  | '7+kk' | '7+1'
+  | '8+kk' | '8+1'
+  | '9+kk' | '9+1';
 
 /* Promoted from raw_json via migration 022. See parser.FURNISHED /
  * parser.OWNERSHIP for the int→text mapping. NULL when sreality didn't
  * report a value. */
 export type Furnished = 'ano' | 'ne' | 'castecne';
-export type Ownership = 'osobni' | 'druzstevni' | 'statni';
+export type Ownership = 'osobni' | 'druzstevni' | 'statni' | 'jine';
 
 /* THE MF "Cenová mapa nájemného" reference-rent breakdown — ONE shape for both
  * columns that store it: `listings.mf_reference_rent` (migration 134) and
@@ -1680,4 +1687,67 @@ export interface PropertyStatusEventPublic {
   property_id: number;
   is_active: boolean;
   event_at: string;
+}
+
+/* One registered sale, as `sold_comparables(p_lat, p_lng, p_radius_m)` answers
+ * it (migration 545). NOT a listing and never joined to one: a sale is an
+ * account-less external fact under its own cadastral identity, so the key is
+ * `(source, source_record_id)` — the cadastre transfer id — and there is no
+ * `listing_id`, no `property_id` and no `is_active`.
+ *
+ * The attribute columns are spelled exactly as `listings` spells them, which is
+ * what lets `price_per_m2` / `price_per_m2_basis` be migration 425's measure
+ * rather than a second per-m² definition for sold data. `distance_m` is the
+ * function's own derivation: metres from the point it was asked about.
+ *
+ * These are the columns the block RENDERS, not every column the function
+ * returns. The rest — the RÚIAN codes, the sale's own point, `sold_age_days`,
+ * the two secondary areas — exist to be FILTERED on, and a PostgREST predicate
+ * does not need its column selected. */
+export interface SoldComparable {
+  source: string;
+  source_record_id: string;
+  /* A DATE: the source's time component is its batch clock, not a legal time. */
+  sold_at: string;
+  price_czk: number;
+  /* The last ASKING price. Only ever rendered as a discount against the sale
+   * price — it is never itself a comparable. */
+  asking_last_czk: number | null;
+  listed_at: string | null;
+  category_main: string;
+  category_type: string;
+  subtype: string | null;
+  disposition: Disposition | null;
+  area_m2: number | null;
+  area_basis: string | null;
+  address_text: string | null;
+  photo_urls: string[] | null;
+  source_url: string | null;
+  fetched_at: string;
+  distance_m: number;
+  price_per_m2: number | null;
+  price_per_m2_basis: string | null;
+}
+
+/* Coverage of the MUNICIPALITY containing a point — `sold_coverage` (migration
+ * 545). Not of the fetched box: cells are obec envelopes expanded by 5 km and
+ * overlap heavily, so only the point's own obec is a statement about the point.
+ * Four answers, and the block says which:
+ *   - no row: the point is in no municipality we hold a boundary for;
+ *   - `fetched_at` and `last_attempt_at` both null: nobody has ever looked;
+ *   - `fetched_at` null with a failed `last_attempt_at`: we tried and could
+ *     not — a broken lane, NOT operator inaction;
+ *   - `fetched_at` set: we looked that day. `record_count` is what the source
+ *     published for this municipality inside its 24-month window; `source_total`
+ *     is what it says has EVER been registered there. Two populations, not a
+ *     numerator over a denominator. */
+export interface SoldCoverage {
+  obec_kod: number;
+  obec_name: string;
+  fetched_at: string | null;
+  record_count: number | null;
+  source_total: number | null;
+  truncated: boolean | null;
+  last_attempt_at: string | null;
+  last_attempt_status: string | null;
 }

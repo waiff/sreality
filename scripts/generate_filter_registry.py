@@ -147,6 +147,14 @@ def _render_constants() -> str:
             _arr("FURNISHED_CANONICAL", fr.FURNISHED_CANONICAL),
             _arr("OWNERSHIP_CANONICAL", fr.OWNERSHIP_CANONICAL),
             "",
+            "/* `listings.price_unit` constrains no filter, so it is not in the payload",
+            " * above — but every listing surface renders it after the price, and the",
+            " * stored slug ('za mesic') is not the word a Czech page should show. */",
+            "export const PRICE_UNIT_LABELS: Record<string, string> = "
+            + json.dumps({o.value: o.label_cs for o in fr.PRICE_UNIT_OPTIONS},
+                         ensure_ascii=False)
+            + ";",
+            "",
         ]
     )
 

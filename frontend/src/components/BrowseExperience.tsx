@@ -66,6 +66,7 @@ import {
 } from '@/lib/api';
 import { pushToast } from '@/lib/toast';
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
+import { revalidateCollections } from '@/lib/collectionCache';
 import {
   cityQualityKeys,
   fetchCityIndexDefinitions,
@@ -230,6 +231,9 @@ export default function BrowseExperience({
        * MutationCache. `browse-count` is included so the header total decrements. */
       pushToast('ok', `Merged ${res.retired_ids.length + 1} listings into one property.`);
       invalidateBrowseQueries(queryClient);
+      /* Same txn re-points collection_properties onto the survivor
+       * (toolkit/operator_state.py), so the member map's KEYS changed too. */
+      revalidateCollections(queryClient);
       exitMergeMode();
     },
   });
@@ -899,6 +903,7 @@ export default function BrowseExperience({
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
                 pipelineScoped={filters.pipeline != null}
+                collectionScoped={filters.collections.length > 0}
                 hoveredIds={hoveredIds}
                 hoverOrigin={hoverState.origin}
                 onHover={setHoveredFromList}

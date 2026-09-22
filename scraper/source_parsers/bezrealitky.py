@@ -27,6 +27,9 @@ Layout notes specific to bezrealitky:
   is the building_type.
 - Bezrealitky lists category_type as "Pronájem" / "Prodej" — map to
   "pronajem" / "prodej".
+- "Podlaží" is a PODLAŽÍ ordinal counting the ground storey as 1 — subtract one
+  for the `floor` field ("1" → 0, "3" → 2). A spelled value wins over the number
+  ("přízemí" → 0, "suterén" → -1), and a bare 0 means "not stated" → null.
 
 HTML:
 """

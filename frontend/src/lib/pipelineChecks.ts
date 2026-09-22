@@ -12,7 +12,6 @@ export type PipelineCheckStatus = 'ok' | 'warn' | 'fail';
  * checks (the dedup decision-engine ones) fall through to the humanizer below. */
 const CHECK_LABELS: Record<string, string> = {
   llm_errors: 'LLM errors',
-  llm_liveness: 'LLM liveness',
   llm_burn_rate: 'LLM burn rate',
   long_open_transaction: 'Oldest open transaction',
   db_saturation: 'DB saturation',

@@ -30,7 +30,7 @@ def test_update_set_preserves_published_at_if_incoming_null() -> None:
     # value forward; a fresher portal date still wins (COALESCE).
     assert "published_at" in db._PRESERVE_IF_NULL_COLUMNS
     expected = "published_at = COALESCE(EXCLUDED.published_at, listings.published_at)"
-    assert expected in db._listing_update_set_sql()
+    assert expected in db._listing_update_set_sql("sreality")
     assert expected in db._BATCH_UPSERT_SQL
 
 

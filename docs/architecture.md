@@ -18,6 +18,37 @@ which workflows run each portal, their crons, dispatch inputs, and log lines —
 `scraper-ops` skill; cross-source grouping is rule #15 (and, for the rebuild in progress,
 `docs/design/new-dedup/PROGRAM.md`).
 
+**Where a typed attribute comes from is DECLARED, not discovered (field-capture W2).** Every
+narrative below says its typed fields are "normalised to the same canonical labels sreality
+emits". That is now one table and one module rather than nine copies of each:
+
+- **`scraper/attribute_contract.py`** — the ATTRIBUTE contract: one cell per (portal, typed
+  column), all 9 × 26 declared, carrying the producer (`structured` = named payload keys,
+  `text` = mined from the ad prose, `derived` = the URL/breadcrumb/title, `none`), the source-key
+  PRECEDENCE (replacing the inline `params.get(a) or params.get(b)` chains), what a MISSING key
+  means (`false` on bezrealitky's real booleans, `unknown` everywhere else), the default
+  sentinels, and — for a cell nothing fills — the census key a later wave will wire.
+  Not to be confused with the LOCATION contract in `contracts/portals/*.yaml`: that one is
+  governed by a hash tied to a re-minable claim corpus, and typed attributes are deliberately
+  NOT a seventh top-level key there (`location_data/contracts.py` `_TOP_LEVEL_KEYS`).
+- **`scraper/vocabulary.py`** — the producer side of the vocabulary: one diacritic fold, one
+  `(field, portal label) → canonical` registry, one disposition grammar, one PENB grammar and
+  the boolean readings. The CANON stays in `toolkit/filter_registry.py`
+  (`COLUMN_CANONICAL_VALUES`, keyed by `listings` column — NOT scanned off the filters, which
+  made the `building_material` bucket name `ostatni` a canonical construction and left
+  `price_unit` with no canon at all) and is imported, never restated; the LLM tool schema's
+  enums are generated from `CANON`, which since W5 IS the whole value space — `disposition`
+  and `price_unit` included, so the on-demand URL parser cannot emit an `8+7` or a fifth
+  spelling of "monthly". A label no entry names is NULL **plus a counted event** in the run
+  summary (`RUN done … unmapped=N`), never a passthrough; the
+  counter is drained per drain pass, because the always-on worker runs every source's drain
+  in one long-lived process.
+- The evidence both answer to is the checked-in per-portal key census in
+  `data/field_capture/census/`, through gates A1 (no dead read), A2 (no unread emission ≥ 5%
+  that is neither mapped nor ignored with a reason) and A3 (no unmapped live value), plus the
+  characterisation goldens in `tests/fixtures/field_capture/golden/` — recorded from the
+  parsers as they stood before the module existed, so a value that moves is visible.
+
 **Data source (sreality v1 API).** In 2026 sreality rebuilt their site on Next.js and
 removed the old `/api/cs/v2/estates` API the scraper was born on. The scraper now
 reads the public JSON v1 API: `GET /api/v1/estates/search` (filters `category_main_cb`
@@ -174,7 +205,7 @@ every 6h) tagged `source='bezrealitky'`. Bezrealitky is a JSON-API portal like s
 `advert(id)` for detail). The API requires browser-like `Origin`/`Referer` headers; no
 cookies. `bezrealitky_parser.parse_advert` maps the advert object onto the shared
 `ScrapedListing` contract, translating bezrealitky's enums into the SAME canonical label
-strings sreality stores (`po_rekonstrukci`, `cihla`, `celkem`/`měsíc`, `2+kk`, …) so
+strings sreality stores (`po_rekonstrukci`, `cihla`, `za nemovitost`/`za mesic`, `2+kk`, …) so
 cross-source filtering/dedup/condition-scoring see one vocabulary. Coordinates come from
 the API's `gps` field (precise, per-listing — no geocoding step). Because the detail JSON
 carries `offerType`/`estateType`, the drain derives each listing's category from the
@@ -374,6 +405,121 @@ robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-dem
 (`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
 preview — a separate entry point unchanged by the scheduled scraper.
 
+**Data source (reas.cz sold transactions) — NOT a portal.** The tenth source is not a tenth
+portal: it is a feed of **registered sales**, and a sale is an account-less external FACT, not a
+listing. Its north star: one row per sale under the sale's own cadastral identity, fetched per
+municipality cell and only where the deal pipeline has a live card, read through ONE SQL
+definition — never a `listings` row, never linked to a `property`, never mixed with asking
+prices, never adjusted, never shown without saying where it came from and when we last looked.
+It therefore has its OWN store (`sold_transactions` + the append-only `sold_transaction_fetches`
+ledger, migration 542) and touches none of the listings contract: no `listing_snapshots`, no
+`is_active`, no `listing_detail_queue`, no `portals` row, no `images` rows (photos are hot-linked
+from the source's public URLs), no `property_id` — rules #2/#3/#15/#19 are about listings and do
+not reach here. What it DOES share is the vocabulary: the attribute columns carry the same names
+and types as their `listings` twins, so `measure_price_per_m2` / `plot_area_m2` and
+`scraper/area.derive_headline_area` apply with zero new code (rules 21/23).
+Ingest shape: the SSR HTML of `https://www.reas.cz/prodane/...` carries the whole page in
+`<script id="__NEXT_DATA__">` → `props.pageProps.adsListResult`; `scraper/reas_parser.py` is a pure
+payload→rows function (no I/O, no `requests`). The natural key is `mapPointerId`
+(`<transferId>_unit_<buildingId>-<čp>-<unitNo>` or `<transferId>_building_<buildingId>`) — the
+cadastre transfer id, which survives the source re-creating its own ad record. Three refusals, each
+a measured silent-failure class: the `_next/data/<buildId>/prodane/…` JSON route answers **200 with
+the ACTIVE catalogue** and no sold price on any record (`adsListParams.linkedToTransfer` is THE
+discriminator and is checked before a row is read); a record whose transferId is neither a number
+nor an ObjectId has no cadastral identity; a `type` outside flat|building is a contract change (the
+sold catalogue is byty + domy only, proven by the sold sitemap, by zero parcels in 308 records
+despite the query asking for them, and by the source's own four-member filter enum). Records whose
+transferId is a Mongo ObjectId are the source's **self-reported** ~1%, so they are dropped and
+counted, not stored and not raised on. The envelope is read as the source's own two numbers:
+`count`, the cell inside the query's date window (what a completed walk takes, so it can never
+measure what we miss), and `possibleCount`, the same cell without it — the second is what the
+ledger's `source_total` records, so the table can always say how much it is NOT seeing (Olomouc 89
+of 625, Praha 1,082 of 7,545).
+**Deliberately absent, and each for a reason that has been measured:** `displayArea` (the source's
+own headline, `min(utility, floor)` on a flat against our usable-first precedence — a 30% area and
+43% per-m² gap on 3% of flats, in one direction), `histogramPrice` (`soldPrice` indexed to today:
+identity within 12 months, ×1.10–1.28 beyond), `originalPrice` (corrupt — one record carries 1 Kč),
+and seller/broker identity (dropped at parse time by key SHAPE —
+`seller|company|agent|broker|contact|phone|email|owner|user` — not by a list of today's names,
+because `raw` keeps every other key the source invents and would otherwise quietly start storing
+the next one). None of the four is in `raw` either, so a future session is never one mapping away
+from the defect. Two more: there is no `price_kind` column (asking
+vs realized is PROVENANCE, and the table identity is the discriminator) and no widened
+`DISPOSITION_OPTIONS` — the source's `larger` and `atypic` become NULL rather than push two
+sold-only values into Browse, the watchdog matcher and the comparables agent for 0.68% of one
+source. `mapPointerPublishedAt` (= `soldAt` + 27–31 days) is the only correct crawl watermark: a
+sale is a state change on an arbitrarily old ad record, so the freshest sale the feed can show is
+~30 days old.
+**The fetch unit is a municipality CELL, and the deal pipeline is what makes a cell worth fetching.**
+The box is the obec's `admin_boundaries` envelope widened by `sold_db.MAX_READ_RADIUS_M` (5,000 m —
+the read surface's largest radius, so any subject inside the obec is covered out to its full radius
+by construction, with no second fetch). `admin_boundaries.id` IS the ČÚZK/RÚIAN code of the unit
+(migration 017; `sreality_id` is the separate bridge into sreality's own id space), so it joins
+directly to `listing_location.obec_kod` and to the source's `municipalityId` — three spellings of one
+number. The work-list (`sold_db.sold_comp_cells`) is a QUERY, not a queue: the obec cells of
+properties carrying ANY account's pipeline card at a non-terminal, non-archived stage, active,
+`byt`/`dum`, with a resolved point, **and an `admin_boundaries` polygon** — DISTINCT over accounts,
+minus the cells whose NEWEST `sold_transaction_fetches` row is `ok` within 35 days or `failed` within
+6 hours. That last join is load-bearing: a cell with no polygon cannot be boxed, so a fetch can only
+skip it, a skip writes no ledger row, and `ORDER BY fetched_at NULLS FIRST` would then re-offer it
+first on every pass for ever. Terminal stages leave the REFRESH, never the READ: stopping the
+re-fetch is the politeness lever, and a closed deal is exactly where the stored comps must survive.
+`sold_fetch.fetch_cell` never raises — every cell attempt ends in the ledger, because a cell that
+failed silently is indistinguishable from a cell that holds no sales — a page the parser REFUSES
+fails the whole cell rather than storing 90% of it (a half-truth in a fact table that nothing could
+later audit), and an `ok` row whose walk was cut short by the page cap or a non-advancing `nextPage`
+says so in `error` (`truncated: took N of M in P pages`), so "we looked" never silently means "we
+looked at part". Politeness: one request per five seconds on the shared `portal_rate_state` ledger,
+an identifying User-Agent, `listPerPage=100`, ONE retry (403/429 are retryable in `portal_base`, and
+a 35-day-TTL fact feed does not knock four times), and a walk that follows `nextPage` alone under a
+25-page runaway cap — Praha, the one cell measured to paginate at all, is 11 pages of its BARE
+envelope, while a cell sends that envelope +5 km, which is why truncation is recorded rather than
+assumed impossible. The scheduler is the `sold_comps` worker lane, dark behind one integer
+(`realtime_sold_comps_interval_seconds`, migration 544, seeded 0) that is cadence AND kill switch: no
+boolean flag, no env var, no workflow YAML.
+
+**Read surface (migration 545).** ONE SQL definition reaches the browser. The SALES get a
+definer-style view, `sold_transactions_public` (the base table is RLS-deny-all, so the single
+`grant select … to authenticated` on it IS the dissemination switch), and over it a SECURITY INVOKER
+`language sql stable` single-SELECT function with NO `SET` clause — so the planner INLINES it and
+PostgREST's filters / ORDER BY / LIMIT reach the `(geom::geography)` GiST index (migration 537's
+contract; migration 109 is the anti-pattern — never an optional filter parameter here).
+`sold_comparables(p_lat, p_lng, p_radius_m)` returns the sale's columns plus `distance_m`,
+`sold_age_days` (which is what makes the date filter a plain integer `.lte`) and migration 425's
+`price_per_m2` + `price_per_m2_basis`. The fetch LEDGER gets no view at all: a cell is fetched only
+where some account holds a live deal-pipeline card, so the set of fetched cells is a projection of
+tenant state, not market data — `sold_transaction_fetches` is registered in
+`tests/test_migration_rls_grants.py::_ADMIN_ONLY_RELATIONS`. Its one reader is
+`sold_coverage(p_lat, p_lng)`, SECURITY DEFINER and scoped to the MUNICIPALITY containing the point,
+resolved through the same `admin_boundaries` obec polygon W2 builds the cell from: the cell is that
+polygon's envelope expanded by 5 km, so overlapping boxes would otherwise answer with whichever town
+happened to be walked last. It returns that obec's name, its newest successful fetch (`fetched_at`,
+`record_count`, `source_total`) and its newest attempt of ANY status, so the surface can separate
+four answers — never looked, tried and FAILED (our outage, not operator inaction), looked and found
+nothing, looked and hold N. A radius control, a filter panel and a "no registered sale matches these
+filters" line all say WE LOOKED, so over a town nobody has fetched they contradict the coverage
+sentence directly above them and are withheld — unless the cohort itself came back holding sales,
+which is the store answering for itself. The cohort READ is never gated on coverage: `sold_coverage`
+answers about the one obec containing the point while `sold_comparables` is a radius query over
+every sale we hold, and a fetched cell is that obec's envelope plus 5 km, so the store routinely
+holds sales around neighbouring towns whose own coverage row is still NULL. That sentence advises a
+pipeline card only where the fetcher would act on one: the work-list takes live stages only (`NOT
+ps.is_terminal`), so a card closed into a terminal stage is told to move it rather than that its
+town is on the list — and where no obec resolves at all, nothing about the work-list is knowable and
+no advice is given. The filter vocabulary is `Agenda.SOLD` (existing area / category / disposition defs
+re-tagged, plus `max_sold_age_days`, bounded 60–730 by the source's own ~30-day publication lag and
+24-month window), dispatched to PostgREST by the shared `applyAgendaFilters` with no hand-coded
+escape. `subtype` is deliberately NOT in it, and Type offers `byt` / `dum` only: reas publishes
+flats and houses and the parser refuses the rest, so every other option is a cohort that can only
+ever be empty — the block narrows the registry's OWN option list through FilterForm's existing
+per-filter widget override rather than growing per-agenda option machinery. The SPA reads it in
+`frontend/src/components/listing-detail/SoldCompsBlock.tsx` — the listing page's only REALIZED
+prices. `record_count` and `source_total` render as what they are, two populations (the source's
+24-month window against all-time) and never as a shortfall; the ~30-day lag and reas's minority
+match of the register are on screen; and the headline median holds out the 0–30 m² band, whose
+Kč/m² is a denominator defect rather than a market fact. The reas.cz and Cenová-mapa outbound chips both stay beside it: the
+table holds only reas.cz's anonymous 24-month window. Waves and sequencing: `roadmap/sold-comps.md`.
+
 ## Territories — deep rationale
 
 The three-territory summary is in `CLAUDE.md`; the full per-territory rules and rationale
@@ -559,7 +705,8 @@ rules. Identify which one a task belongs to before you start.
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
   deal-pipeline control (bookmark; once in, change stage via a native `<select>`, and remove
   behind the panel's two-step confirm — rule #22: no surface removes a card on one click)
-  + a monitoring/collection toggle (rule #18) + **operator notes** (list existing + add a new
+  + a save-to-collection control (rule #18 — the SPA header's "Uložit do kolekce": a checklist of
+  every collection, monitored first) + **operator notes** (list existing + add a new
   one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
   the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA page
   (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
@@ -1238,11 +1385,8 @@ renumber.** Navigate by area:
     **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
     side starts clean (the operator re-curates — nothing is destroyed, it is on the survivor).
     Notes carry `origin_listing_id` as display provenance only ("written while viewing this
-    advert"), never as a grouping key. The Browse tag filter resolves through
-    `properties_with_tags(tag_ids)` at property grain — a property matches if ANY of its
-    listings' property carries the tags, fixing the pre-202 bug where only the representative
-    listing's tags were matched. Writes flow through the FastAPI service (property-grain routes
-    `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
+    advert"), never as a grouping key. Writes flow through the FastAPI service (property-grain
+    routes `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
     browser never writes directly. **Collections carry monitoring (Sprint C, migration 211):
     `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
     rule #16) and `notify_channels` is its delivery-channel pick (folded into the dispatch's
@@ -1250,6 +1394,46 @@ renumber.** Navigate by area:
     renamed or deleted) ships monitoring on. The "add to collection" affordance lives on the
     Browse card (a layers control ADJACENT to the pipeline funnel — rule #22 keeps the funnel the
     sole pipeline affordance), the listing-detail `CurationBlock`, and the Chrome-extension panel.**
+    The panel's control is the SPA header's `CollectionSaveToggle` + `CollectionSaveMenu` reproduced
+    by value (a bookmark button opening a checklist of EVERY collection, monitored ones first and
+    bell-marked); it replaced a one-click "Sledovat" bell that could only reach the single
+    monitoring collection, so the panel and the app now offer the same verb over the same set.
+    In the SPA those affordances share ONE membership read (`fetchPropertyCollectionMemberSet`
+    under `curationKeys.propertyCollectionMembers`; one property's ids are `members.get(id)`) and
+    ONE revalidation — `lib/collectionCache.ts`, called by every writer: the menu, the
+    `CurationBlock` row, the collection page's row-remove, BOTH collection DELETEs (migration 202
+    cascades memberships away) and the merge (operator state re-points `collection_properties`, so
+    the map's keys change). The hand-typed key lists it replaced had drifted — every one but the
+    menu forgot the shared map — the same failure `lib/browseInvalidation.ts` records for Browse. The
+    extension holds no such cache, so this is an SPA-scoped claim.
+    **`collections` is also a Browse COHORT FILTER** (`ListingFilters.collections`,
+    `?collections=<ids>`, registry id `collections`, BROWSE agenda only). Semantics are **OR** —
+    a property matches if it is in ANY selected collection — stated once, in the registry
+    description, and deliberately the opposite of `tags` (AND): collections read as folders,
+    so two of them mean "either folder". BROWSE-only for
+    `pipeline`'s reasons (rule #22): a watchdog scoped to the operator's own groupings would
+    fire on their own clicks, and the estimation agent must never see their taste. Like the
+    other lenses it sits OUTSIDE preset identity (`PRESET_EXCLUDED_KEYS` + `_PARAMS`), so
+    toggling it never dirties a loaded preset. `lib/collectionScope.ts` holds the ONE definition
+    of what a selection means, rendered for whichever surface asks — today a property-id
+    allowlist for Browse; the pipeline board's in-memory predicate joins it there rather than
+    growing a second answer. The allowlist resolves from the SAME member map
+    the glyphs render from, and "nothing selected" (no constraint, `null`) stays distinguishable
+    from "a selection nothing is in" (zero rows, `[]`) all the way to the query.
+    **Both curated-set prefilters now share one shape** — membership rows reduced to a
+    property-id allowlist, AND for tags, OR for collections — and `tags` left
+    `properties_with_tags(tag_ids)` for `property_tags_public` to get there: the RPC body
+    carries `limit 5000` (migration 202) under a client comment asserting exhaustiveness, and a
+    truncated allowlist silently bleeds listings the operator asked to exclude back into the
+    cohort. The membership read is complete-or-throw (`fetchAllRows`); the RPC stays in the
+    database until the SPA deploy has rolled out. `fetchBrowseStats` was the one Browse fetcher
+    that named its prefilters by hand; it now resolves through `resolveBrowsePrefilters` like
+    every other lane (with `brokerId` cleared — Stats is deliberately not broker-scoped and has
+    no listing-grain parameter, while the broker resolver throws without a session), so a new
+    property-grain filter cannot narrow the list and leave the panel above it counting the whole
+    market. A membership write invalidates the Browse reads only when membership IS the cohort
+    (`revalidateCollections`' `cohortScoped`, passed by the Browse card alone — the mirror of
+    `revalidatePipeline`'s knob).
     **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
     existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
     `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
@@ -1287,13 +1471,20 @@ renumber.** Navigate by area:
     and nothing deletes one — the table is its own history. `property_dismissals_public`
     (security_invoker, active rows only) is the ONE read definition of "dismissed for the
     caller"; it is plural under RLS, so `DELETE /dismissals/{property_id}` is RLS-only and lifts
-    every row the caller can see, while `POST /dismissals` names its one account. Dismissal and
-    the deal pipeline are mutually exclusive: `POST /dismissals` answers 409 for a property in
-    the caller's pipeline, and `add_card` lifts the caller's dismissal (the pipeline always
-    wins). The row is deliberately absent from `OPERATOR_STATE_TABLES` — a SET collision there
-    DELETEs, which would destroy history — so `toolkit/dismissal_identity.py` carries it across
-    a merge after the pipeline reconciler: a colliding active row is lifted (`merge`), every row
-    re-points, and a survivor holding that account's pipeline card lifts the dismissal
+    every row the caller can see, while `POST /dismissals` names its one account. **A LIVE deal
+    and a dismissal never coexist** — "live" meaning a card at a non-terminal stage.
+    `POST /dismissals` answers 409 for a live deal; every pipeline write that can leave a card
+    live (`add_card`, a `move_card` stage change, `update_stage` re-opening a terminal stage)
+    then calls `api.dismissals.lift_dismissals_of_live_deals`, which lifts (`pipeline`) only
+    where the data shows a live card — so the rule is decided in one statement from the data,
+    not re-derived by each caller. A deal closed into a terminal stage is history, not pursuit,
+    and keeps its dismissal: until 2026-09-21 ANY card blocked dismissing, so a deal the
+    operator had "Passed" on stayed in Browse forever with no way to hide it (29 "Passed" + 15
+    "Lost" cards at the time), while the 409's own advice — "close the deal there instead" —
+    hid nothing. The row is deliberately absent from `OPERATOR_STATE_TABLES` — a SET collision
+    there DELETEs, which would destroy history — so `toolkit/dismissal_identity.py` carries it
+    across a merge after the pipeline reconciler: a colliding active row is lifted (`merge`),
+    every row re-points, and a survivor holding that account's LIVE card lifts the dismissal
     (`pipeline`). Unmerge is best-effort, as for the registry tables.
     **Browse hides dismissed properties by default, server-side (migration 537).** Every other
     Browse prefilter is an id ALLOWLIST sent as `.in(...)` in the GET URL; a dismissed set is an
@@ -1454,8 +1645,16 @@ renumber.** Navigate by area:
     new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is
     out-of-band, rule #15) and recomputes **only the queued properties** (the full
     recompute SQL scoped to
-    `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` + Browse within ~5
-    min and the job is **O(changes)**, not O(all properties). The drain is race-free +
+    `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` within ~5 min (~2 on
+    the worker's maintenance lane) and the job is **O(changes)**, not O(all properties). Reaching
+    **Browse** is a second step, because `browse_projection` reads `properties` and Browse reads
+    the `browse_list` snapshot: since field-capture W6 the drain patches `browse_list` for exactly
+    the ids it recomputed (`sync_browse_list`), so a change usually no longer waits for the `*/15`
+    wholesale rebuild — which was a measured mean of 11.7 min, worst 36.6 (94 rebuilds / 24 h,
+    2026-09-21). A fast path, not a guarantee: the rebuild snapshots `browse_projection` at its
+    start and renames the new table in at its end, so a patch committed inside that window is
+    superseded silently, and a rebuild is in flight ~26 % of wall-clock (283 runs / 72 h, mean
+    237 s against a 900 s cadence). The drain is race-free +
     terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
     since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
     New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
@@ -1482,7 +1681,12 @@ renumber.** Navigate by area:
     include the row's `source_url` (its page on the portal): a stored fact every surface READS and
     none reconstructs — sreality's assembler is `scraper/sreality_url.py`, the 8 crawlers' are their
     `<portal>_client.detail_url`; the column rides `LISTING_COLUMNS` preserve-if-null on every write
-    path (`docs/design/portal-listing-url.md`). The pieces:
+    path (`docs/design/portal-listing-url.md`). Preserve-if-null is per (source, column) since
+    field-capture W6 — `scraper/db._listing_update_set_sql(source)` asks
+    `scraper/attribute_contract.py` which cells a parser NULL may clear (`structured`/`derived`
+    still clear, `text`/`none` preserve) — and that is a config row of the same kind as
+    `PortalConfig`, not a per-portal branch: shared code reads one table and the nine portals add
+    no code to it. The pieces:
     `scraper/portal_base.py` (`BasePortalClient` — the shared HTTP session/headers, `RateLimiter`
     pacing + 429/403 penalize, retry/backoff, `ListingGoneError` on 404/410); `scraper/portal.py`
     (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`
@@ -1706,11 +1910,24 @@ renumber.** Navigate by area:
     a board past that size would lose EVERY card's broker rather than the overflow — and rejects a
     200 that carries no envelope (an SPA-fallback HTML page), a guard inherited from the deleted
     `fetchBrokersByIds` twin and now covering the entire broker line rather than half of it.
-    The board offers basic **property-type
-    filtering** — multi-select `category_main` chips (Byty / Domy / Komerční / …) whose labels come
-    from the SAME generated filter registry as Browse's TYPE tabs (`FILTER_REGISTRY`, never a parallel
-    hardcode); only the types actually present in the pipeline get a chip, and the filter is
-    client-side (the board is small). **On the kanban board** stage moves are
+    The board's **filter bar is built from the app's shared primitives**
+    (`Field` + `Segmented` + `MultiselectChips`, the horizontal grammar `Brokers.tsx` already uses):
+    **Stav** (any/active/inactive), **Typ** (`category_main`), **Lokalita** (the shared
+    `LocationTypeahead`) and **Kolekce** (collection membership, OR — rule #18). Labels come from
+    the SAME generated filter registry as Browse's own controls (`FILTER_REGISTRY`, never a parallel
+    hardcode) and the URL spellings are Browse's (`status` / `cat` / the `districts` family /
+    `collections`). Every row applies **client-side** over ONE board read plus the shared
+    member map (`curationKeys.propertyCollectionMembers`) — no per-filter read, no widened view —
+    and is offered only when it could change the view, or while it already constrains it: Stav
+    needs a delisted card, Typ ≥2 present types, Kolekce a RESOLVED member map plus either a
+    selection in the URL (a live constraint is always visible, so it is always liftable — before
+    the list arrives its chip reads `#<id>`) or a board collection that could partition the board.
+    Clearing is ONE header **Reset** gated on a derived `filtersActive`, never a per-row
+    clear. **Fail-open contract** (pinned by `Pipeline.test.tsx`): an unresolved member map
+    (loading or errored) means no constraint, no Kolekce row and nothing counted — a `?collections=`
+    link must never empty a board that cannot see membership — while a RESOLVED selection matching
+    nothing is zero cards, never everything. Stav's default stays `any`, so a delisted member of a
+    collection stays in the cohort. **On the kanban board** stage moves are
     **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a
     `useDraggable` with a grip handle; one optimistic move mutation; keyboard moves via the
     `KeyboardSensor`). The drag→move resolution is the pure, unit-tested `planMove(activeId,
@@ -1772,11 +1989,14 @@ renumber.** Navigate by area:
     **52,183 land rows** (sreality 44,237 of 44,237, idnes 5,292 of 45,500, bezrealitky 2,654 of
     2,667; ~32.7k active) stored a parcel in `estate_area` and carried `area_m2` NULL — no per-m²
     price and no area for any consumer reading the headline. `scripts/backfill_land_headline_area.py`
-    (+ its dispatch-only workflow) heals exactly that population, active or not, by moving the
-    stored value into the column the one rule would put it in today; it writes **no snapshot**
+    (+ its dispatch-only workflow) healed exactly that population, active or not, by moving the
+    stored value into the column the one rule would put it in today; it wrote **no snapshot**
     (the sanctioned rule-2 exception: our own mis-parse of the SAME stored page, the
-    `backfill_idnes_areas` precedent) and is idempotent because the write empties its own
-    selection. What follows the heal differs by portal: idnes and bezrealitky hash the PARSED
+    `backfill_idnes_areas` precedent) and was idempotent because the write emptied its own
+    selection. **Both scripts were deleted by the field-capture program's W3** — the ONE
+    re-parse seam (`scripts/reparse.py` / `reparse.yml`) is the heal path now, replaying the
+    portal's own parse entry point over its declared substrate under the same rules. What
+    follows a heal differs by portal: idnes and bezrealitky hash the PARSED
     fields, so W17's parser change — not the heal — makes each live row's next detail fetch
     append exactly ONE genuine snapshot; **sreality hashes the RAW payload**
     (`scraper.hashing.content_hash`), which did not change, so its 44,237 rows get no snapshot
@@ -1812,9 +2032,15 @@ renumber.** Navigate by area:
     that order is the same defect as a second copy of the grammar. So each parser exposes
     `areas_from_params(params, title=, category_main=)` (bazos, which has no spec table:
     `areas_from_text`) returning `scraper.area.PortalAreas`, and its own `parse_detail` calls
-    it. That is what makes the heal possible without a second implementation.
+    it. That is what makes the heal possible without a second implementation. Since W2 the
+    KEYS in that order are the attribute contract's: the five HTML-table portals unpack
+    `source_values(SOURCE, "area_m2", params)` in the slot order (usable, floor, total, plot)
+    the `area_m2` cell declares, so the gates can prove every one of them is a key the portal
+    emits — the restatement it replaced named seven keys no parser reads (which let the
+    portals go on publishing them unread) and omitted thirteen the parsers did read, every
+    one of the thirteen dead.
 
-    `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) heals the
+    `scripts/backfill_area_spaced_thousands.py` (+ its dispatch-only workflow) healed the
     stored rows **from `listings.raw_json` — the parser's own latest reading of the live
     page**. Each of these parsers stores the detail page's spec cells verbatim under
     `raw_json['params']` plus `raw_json['title']`; bazos keeps its ad body in
@@ -1826,7 +2052,14 @@ renumber.** Navigate by area:
     body skipped **89 % of the population** on the first production dry run (examined=3000,
     would change=85, body_stale=2672), and the heal was very nearly a no-op. `raw_json`
     cannot lag: it is rewritten by the same transaction that writes the areas, so the
-    staleness question does not arise. Same rule-2 posture as the heals above, and it
+    staleness question does not arise. **That script is GONE since the field-capture
+    program's W3** — the same heal is now `reparse.yml --source <portal> --fields
+    area_m2,estate_area,usable_area,garden_area`, which replays the portal's whole
+    `parse_detail` over `portal_raw_pages.html`. That substrate is staged in the SAME drain
+    transaction as the listings row, so it cannot lag either, and it carries the page rather
+    than the parser's spec-cell projection of it; `portal_raw_payloads` stays out of the seam
+    for exactly the 89 %-stale reason recorded above. Same rule-2 posture as the heals above,
+    and it
     **subsumes the W17 land heal on these portals**: that one copied `estate_area` into
     `area_m2`, and on these portals `estate_area` was itself truncated, so the re-derive fixes
     both columns from the same fields in one statement (which also enqueues
@@ -1876,9 +2109,9 @@ renumber.** Navigate by area:
     rows corpus-wide** (5 byt, 2 komerční, 11 dum and one inactive pozemek) whose page states
     neither input, and nothing on land, where `parcelArea` equals `totalArea` on every one of
     4,568 rows. mmreality is a JSON-object portal, so its function takes the estate
-    object (`raw_json` IS that object) rather than a `params` map and no title; it exports
-    `AREA_OBJECT_KEYS` so the heal projects exactly the keys the parser reads instead of
-    respelling them.
+    object (`raw_json` IS that object) rather than a `params` map and no title; the
+    re-parse seam replays `parse_detail` over the stored page, so no second copy of that key
+    list exists anywhere.
 
     *`usable_area` is the "užitná plocha" label and nothing else.* idnes
     (`užitná or podlahová or plocha`) and ceskereality (`plocha užitná or užitná plocha or
@@ -1906,8 +2139,9 @@ renumber.** Navigate by area:
 
     idnes joined the shared shape in the same wave: `idnes.areas_from_params` replaces its
     private `_AREA_M2_MAX` / `_AREA_LARGE_MAX` / `_clamp` with the shared bounds, and both it
-    and mmreality joined `backfill_area_spaced_thousands`'s dispatch — which is why W21 needed
-    no heal of its own. mmreality's arm of that heal walks the portal WHOLE rather than by the
+    and mmreality joined `backfill_area_spaced_thousands`'s dispatch (deleted in W3; the seam
+    is the dispatch now) — which is why W21 needed no heal of its own. mmreality's arm of that
+    heal walked the portal WHOLE rather than by the
     truncation fingerprint: its numbers are typed JSON that never met a regex, and a land row
     carrying the sum as its headline with NULL in every other area column satisfies neither
     fingerprint arm (3,443 of 14,417 rows). It is also FIRST in the default set — the only
@@ -2012,8 +2246,8 @@ renumber.** Navigate by area:
     `tests/toolkit/test_dedup_candidates_sql.py` was re-pinned in the same commit.
 
     **The basis is resolved from `(category_main, category_type)`, rent-first, and NEVER from
-    `listings.price_unit`** — that column is four legacy spellings of two concepts across nine
-    portals, a duplicate of `category_type`, not a per-area unit. The three tokens
+    `listings.price_unit`** — that column is two values (`za nemovitost` / `za mesic`; W5
+    collapsed the four spellings), a duplicate of `category_type`, not a per-area unit. The three tokens
     (`sale_capital_czk_m2`, `rent_monthly_czk_m2`, `land_capital_czk_m2`) are published as
     `price_per_m2_basis` on all six read relations, so a render surface READS the label rather
     than recomputing it. Two states a *cohort* can be in are not bases and get no unit at all:
@@ -2739,10 +2973,12 @@ POINT resolves only to obec / okres / kraj and the quarter is placed BY NAME ins
 `browse_projection` re-sources `obec_id` / `okres_id` / `region_id` from
 `ll.obec_kod` / `okres_kod` / `kraj_kod` and `lat` / `lng` from `ST_Y/ST_X(ll.geom)`, and appends
 `cast_obce_id`, `uncertainty_radius_m` and `granularity_rank`. The last two are what the map DRAWS: a
-pin the resolver placed **below building level** (rank < 90, `location_granularity_rank`) gets a
-true-metre translucent circle of its own uncertainty radius under it, so "middle of the village" and
-"this front door" stop looking identical; at or above building level the pin stands alone, and
-clusters and server-side grid cells carry no per-pin radius, so the circle exists only in point mode.
+pin the resolver placed **below building level** (rank < 90, `location_granularity_rank`) is an open
+ring and one at or above it a solid dot, so "middle of the village" and "this front door" stop looking
+identical; clicking a pin draws its true-metre circle of `uncertainty_radius_m` for as long as its
+popup is open, and the popup names the rung and the radius. (W3-3 first drew that circle under every
+such pin at once — with ~87 % of active pins below building level it buried the map, 2026-09-22.)
+Clusters and server-side grid cells carry no per-pin radius, so all of this exists only in point mode.
 **Appending is the only legal edit here** — `browse_list` and `properties_map_mv` materialize
 `select * from browse_projection` and `toolkit/browse_read_model.sync_browse_list` re-inserts
 POSITIONALLY, so anything computed outside the view, or any reordering, writes NULLs into the wrong

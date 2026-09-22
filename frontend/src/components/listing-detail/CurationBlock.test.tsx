@@ -22,12 +22,12 @@ vi.mock('@/lib/api', async (orig) => ({
 
 vi.mock('@/lib/queries', async (orig) => ({
   ...(await orig<typeof import('@/lib/queries')>()),
-  fetchPropertyCollectionIds: vi.fn(),
+  fetchPropertyCollectionMemberSet: vi.fn(),
   fetchPropertyTagIds: vi.fn(),
 }));
 
 import { listCollections, listPropertyNotes, listTags } from '@/lib/api';
-import { fetchPropertyCollectionIds, fetchPropertyTagIds } from '@/lib/queries';
+import { fetchPropertyCollectionMemberSet, fetchPropertyTagIds } from '@/lib/queries';
 import CurationBlock from './CurationBlock';
 
 const TAG: Tag = {
@@ -44,7 +44,7 @@ function renderBlock() {
   vi.mocked(listCollections).mockResolvedValue({ data: [] } as never);
   vi.mocked(listTags).mockResolvedValue({ data: [TAG] } as never);
   vi.mocked(listPropertyNotes).mockResolvedValue({ data: [NOTE] } as never);
-  vi.mocked(fetchPropertyCollectionIds).mockResolvedValue([]);
+  vi.mocked(fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
   vi.mocked(fetchPropertyTagIds).mockResolvedValue([]);
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });

@@ -1,7 +1,7 @@
 /* CollectionSaveToggle — the listing-detail "save to collection" control.
  *
- * Hermetic: mock the two reads (this property's memberships + the collection
- * list) and the two writes. What is worth pinning here is not the network call
+ * Hermetic: mock the two reads (the shared member map + the collection list)
+ * and the two writes. What is worth pinning here is not the network call
  * (api/test_curation.py owns that) but the contract the operator sees: the
  * button says what it does, says it differently once the property IS saved,
  * opens a real named popup, and writes through the SHARED menu — the same one
@@ -31,7 +31,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
 
 vi.mock('@/lib/queries', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/queries')>();
-  return { ...actual, fetchPropertyCollectionIds: vi.fn() };
+  return { ...actual, fetchPropertyCollectionMemberSet: vi.fn() };
 });
 
 const collection = (over: Partial<Collection>): Collection =>
@@ -83,7 +83,7 @@ describe('<CollectionSaveToggle>', () => {
   });
 
   it('offers the save verb when the property is in no collection', async () => {
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
     renderToggle();
 
     const btn = await screen.findByRole('button', { name: 'Uložit do kolekce' });
@@ -96,11 +96,15 @@ describe('<CollectionSaveToggle>', () => {
      kolekce" over a button that says "V kolekci" would be the label-in-name
      mismatch the interactive-semantics program exists to catch. */
   it('says it is saved — and how many times — once the property is a member', async () => {
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([7]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[42, [7]]]),
+    );
     renderToggle();
     expect(await screen.findByRole('button', { name: 'V kolekci' })).toBeInTheDocument();
 
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([7, 9]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[42, [7, 9]]]),
+    );
     renderToggle();
     expect(
       await screen.findByRole('button', { name: 'V kolekcích · 2' }),
@@ -108,7 +112,7 @@ describe('<CollectionSaveToggle>', () => {
   });
 
   it('opens the shared, named panel with monitored collections first', async () => {
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
     renderToggle();
 
     const btn = await screen.findByRole('button', { name: 'Uložit do kolekce' });
@@ -127,7 +131,7 @@ describe('<CollectionSaveToggle>', () => {
   });
 
   it('adds the property to the collection that is clicked', async () => {
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
     renderToggle();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Uložit do kolekce' }));
@@ -142,7 +146,9 @@ describe('<CollectionSaveToggle>', () => {
   /* Same click, opposite direction, when the row is already checked — the panel
      is a set of toggles, not an add-only list. */
   it('removes the property from a collection it is already in', async () => {
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([7]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[42, [7]]]),
+    );
     renderToggle();
 
     fireEvent.click(await screen.findByRole('button', { name: 'V kolekci' }));
@@ -158,7 +164,7 @@ describe('<CollectionSaveToggle>', () => {
      "Create a collection →" — which tells an operator whose collections exist
      that they have none. Same distinction the broker vizitka draws. */
   it('says the list failed instead of offering to create a first collection', async () => {
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
     vi.mocked(api.listCollections).mockRejectedValue(new Error('HTTP 500'));
     renderToggle();
 
@@ -169,7 +175,7 @@ describe('<CollectionSaveToggle>', () => {
   });
 
   it('Escape closes the panel and hands focus back to the trigger', async () => {
-    vi.mocked(queries.fetchPropertyCollectionIds).mockResolvedValue([]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
     renderToggle();
 
     const btn = await screen.findByRole('button', { name: 'Uložit do kolekce' });

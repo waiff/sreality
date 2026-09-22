@@ -36,12 +36,15 @@ def reconcile_dismissals_on_merge(
         "UPDATE property_dismissals SET property_id = %(s)s WHERE property_id = %(r)s",
         params,
     )
-    # A property in an account's deal pipeline is not dismissed by that account
-    # (the pipeline always wins), whichever side each fact came from.
+    # A LIVE deal and a dismissal never coexist for one account, whichever side
+    # each fact came from; a card closed into a terminal stage keeps it (the same
+    # rule `api.dismissals` states on the tenant connection, here per account).
     cur.execute(
         "UPDATE property_dismissals d SET lifted_at = now(), lift_reason = 'pipeline' "
         "WHERE d.property_id = %(s)s AND d.lifted_at IS NULL "
         "AND EXISTS (SELECT 1 FROM property_pipeline pp "
-        "  WHERE pp.property_id = d.property_id AND pp.account_id = d.account_id)",
+        "  JOIN pipeline_stages ps ON ps.id = pp.stage_id "
+        "  WHERE pp.property_id = d.property_id AND pp.account_id = d.account_id "
+        "  AND NOT ps.is_terminal)",
         params,
     )

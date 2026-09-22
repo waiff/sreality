@@ -35,6 +35,7 @@ import {
   fmtAbsolute,
   fmtArea,
   fmtCzk,
+  fmtFloor,
   fmtMeasuredPricePerM2,
   fmtRelative,
 } from '@/lib/format';
@@ -61,6 +62,7 @@ import { MfReferenceCard } from '@/components/estimation/MfReferenceCard';
 import { PickButton } from '@/components/controls';
 import { canRerun, type RerunOverrides } from '@/lib/rerun';
 import { listingPath } from '@/lib/listingUrl';
+import { filterById } from '@/lib/filterRegistry.generated';
 import type {
   ComparableExcluded,
   ComparableUsed,
@@ -78,6 +80,8 @@ import type {
   SkillRefinement,
   Trace,
 } from '@/lib/types';
+import { Hairline, SectionLabel } from '@/components/section';
+import { Th } from '@/components/table';
 
 const ComparablesMap = lazyChunk(
   () => import('@/components/estimation/ComparablesMap'),
@@ -332,18 +336,6 @@ export function RunDetailModal({
 /* -------------------------------------------------------------------------- */
 /* Layout primitives                                                          */
 /* -------------------------------------------------------------------------- */
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
-  );
-}
 
 export function ConfidencePill({ confidence }: { confidence: Confidence | null }) {
   if (confidence == null) return null;
@@ -827,7 +819,7 @@ function InputRecap({ run }: { run: EstimationRun }) {
       : null]);
     facts.push(['Area', spec.area_m2 != null ? fmtArea(spec.area_m2) : null]);
     facts.push(['Disposition', spec.disposition ?? null]);
-    if (spec.floor != null) facts.push(['Floor', String(spec.floor)]);
+    if (spec.floor != null) facts.push(['Floor', fmtFloor(spec.floor)]);
     if (spec.exclude_ids.length > 0) {
       facts.push(['Excluded', spec.exclude_ids.map(String).join(', ')]);
     }
@@ -1208,13 +1200,13 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
         <table className="w-full text-sm">
           <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
             <tr>
-              <Th align="left">ID</Th>
-              <Th align="right">Price</Th>
-              <Th align="right">Area</Th>
-              <Th align="left">Disp.</Th>
-              <Th align="left">Summary</Th>
-              <Th align="left">Why kept</Th>
-              <Th align="right">Age</Th>
+              <Th align="left" size="xs">ID</Th>
+              <Th align="right" size="xs">Price</Th>
+              <Th align="right" size="xs">Area</Th>
+              <Th align="left" size="xs">Disp.</Th>
+              <Th align="left" size="xs">Summary</Th>
+              <Th align="left" size="xs">Why kept</Th>
+              <Th align="right" size="xs">Age</Th>
             </tr>
           </thead>
           <tbody>
@@ -1389,20 +1381,6 @@ function sortedComparables(comps: ComparableUsed[]): ComparableUsed[] {
   );
 }
 
-function Th({ align, children }: { align: 'left' | 'right'; children: React.ReactNode }) {
-  return (
-    <th
-      scope="col"
-      className={[
-        'px-3 py-2 text-[0.65rem] tracking-[0.14em] uppercase font-medium text-[var(--color-ink-3)]',
-        align === 'right' ? 'text-right' : 'text-left',
-      ].join(' ')}
-    >
-      {children}
-    </th>
-  );
-}
-
 /* -------------------------------------------------------------------------- */
 /* Re-run                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -1414,13 +1392,11 @@ function Th({ align, children }: { align: 'left' | 'right'; children: React.Reac
  * attributes belong to the listing scrape, not the run, and aren't
  * something the operator can override here. */
 
-const DISPOSITIONS: ReadonlyArray<Disposition> = [
-  '1+kk', '1+1',
-  '2+kk', '2+1',
-  '3+kk', '3+1',
-  '4+kk', '4+1',
-  '5+kk', '5+1',
-];
+/* The registry's list, not a copy of it — the third hand-kept disposition
+ * allowlist this wave folds back onto the canon. */
+const DISPOSITIONS: ReadonlyArray<Disposition> = (
+  filterById('dispositions')?.enum_values ?? []
+).map((o) => String(o.value) as Disposition);
 
 interface AdjustState {
   lat: number | null;
@@ -1622,6 +1598,7 @@ function AdjustPanel({
           value={state.floor}
           step="1"
           placeholder="—"
+          hint="Přízemí = 0, 1. patro = 1, suterén = −1 — the same scale listings.floor is on."
           onChange={(v) => set('floor', v != null ? Math.round(v) : null)}
         />
       </div>

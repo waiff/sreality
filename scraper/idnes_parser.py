@@ -20,16 +20,22 @@ from collections.abc import Collection, Mapping
 
 import re
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.broker_idnes import parse_idnes_broker
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
+
+SOURCE = "idnes"
 
 
 # idnes search-URL segments -> our canonical labels (mirrors parser.CATEGORY_*).
@@ -55,25 +61,6 @@ DETAIL_CATEGORY: dict[str, str] = {
     "pozemek": "pozemek",
     "komercni-nemovitost": "komercni",
     "maly-objekt-nebo-garaz": "ostatni",
-}
-
-# idnes building-construction labels -> the canonical codes parser._BUILDING_TYPE_TEXT
-# emits, so a cross-portal "panel" filter matches sreality and idnes alike.
-BUILDING_TYPE: dict[str, str] = {
-    "panelová": "panel",
-    "cihlová": "cihla",
-    "smíšená": "smisena",
-    "skeletová": "skelet",
-    "dřevěná": "drevo",
-    "kamenná": "kamen",
-    "montovaná": "montovana",
-    "nízkoenergetická": "nizkoenergeticka",
-}
-OWNERSHIP: dict[str, str] = {
-    "osobni": "osobni",
-    "druzstevni": "druzstevni",
-    "statni": "statni",
-    "obecni": "statni",
 }
 
 # Portal-agnostic subtype (migration 152). idnes exposes NO structured subtype
@@ -131,9 +118,7 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The detail-URL hash is the source_id_native (24 hex chars today; >=16 to be safe).
 _ID_RE = re.compile(r"/detail/[^?#]*?/([0-9a-f]{16,})/?(?:[?#]|$)")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(\d+)")
-_ENERGY_RE = re.compile(r"\b([A-G])\b")
 _PAGE_RE = re.compile(r"[?&]page=(\d+)")
 _DETAIL_PATH_RE = re.compile(r"/detail/([^/?#]+)/([^/?#]+)/")
 # A price token: a leading digit then more digits split by ordinary / no-break /
@@ -144,9 +129,6 @@ _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # Map config: "center":[lon, lat]. CZ lat/lon ranges don't overlap, so a swap is
 # caught by the bbox guard rather than producing a bogus point.
 _CENTER_RE = re.compile(r'"center"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\]')
-_FLOOR_PATRO_RE = re.compile(r"(-?\d+)\.\s*patro")
-_FLOOR_NP_RE = re.compile(r"(\d+)\.\s*np")
-_FLOOR_PP_RE = re.compile(r"(\d+)\.\s*pp")
 # The price cell's inline mortgage-calculator link ("Spočítat hypotéku" /
 # "Chci spočítat hypotéku") — UI chrome, not price data; stripped before the
 # text lands in raw_json. Safe: raw is not part of the typed content hash.
@@ -324,88 +306,11 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if value <= _PRICE_MAX else None), unit
 
 
-def _parse_disposition(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _DISPOSITION_RE.search(text)
-    if not m:
-        return None
-    return f"{m.group(1)}+{m.group(2).lower()}"
-
-
 def _parse_int(text: str | None) -> int | None:
     if not text:
         return None
     m = _INT_RE.search(text)
     return int(m.group(1)) if m else None
-
-
-def _parse_floor(text: str | None) -> int | None:
-    """idnes shows "2. patro (3. NP)" — prefer the 'patro' count; fall back to
-    NP (nadzemní podlaží: 1.NP = ground = 0) / PP (podzemní = below ground)."""
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if "prizem" in low:
-        return 0
-    m = _FLOOR_PATRO_RE.search(low)
-    if m:
-        return int(m.group(1))
-    m = _FLOOR_NP_RE.search(low)
-    if m:
-        return int(m.group(1)) - 1
-    m = _FLOOR_PP_RE.search(low)
-    if m:
-        return -int(m.group(1))
-    return None
-
-
-def _norm_condition(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    key = re.sub(r"\s+stav$", "", key)        # idnes "velmi dobrý stav" -> "velmi dobry"
-    key = re.sub(r"\s+", "_", key)
-    return key or None
-
-
-def _norm_ownership(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    # Only the canonical set ({osobni, druzstevni, statni}) the ownership filter
-    # offers; idnes free-text like "jiné" / "s.r.o." / "podílové" → None rather
-    # than polluting the column with values no filter option can match.
-    return OWNERSHIP.get(key)
-
-
-def _norm_furnished(text: str | None) -> str | None:
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if "neza" in low or "nevyba" in low:
-        return "ne"
-    if "castec" in low:
-        return "castecne"
-    if "zariz" in low or "vybav" in low:
-        return "ano"
-    return None
-
-
-def _norm_building_type(text: str | None) -> str | None:
-    if not text:
-        return None
-    raw = text.strip().lower()
-    if raw in BUILDING_TYPE:
-        return BUILDING_TYPE[raw]
-    return _strip_diacritics(raw) or None
-
-
-def _energy_rating(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _ENERGY_RE.search(text)
-    return m.group(1).upper() if m else None
 
 
 def _detail_params(tree: HTMLParser) -> dict[str, Node]:
@@ -450,14 +355,6 @@ def _truthy_field(dd: Node | None) -> bool | None:
     if checked is not None:
         return checked
     return True if _text(dd) else None
-
-
-def _any_true(*vals: bool | None) -> bool | None:
-    """Combine related amenity signals the way parser._has_balcony does for
-    sreality: None only when every signal is unknown, else any-True."""
-    if all(v is None for v in vals):
-        return None
-    return any(v is True for v in vals)
 
 
 def parse_index(html: str) -> IndexPage:
@@ -573,20 +470,18 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """idnes's area cells, in ITS precedence — spelled here once and nowhere else.
+    """idnes's area slots — the KEYS are the contract's, this owns the measure.
 
     Keys are the lowercased spec-`<dl>` labels `_detail_params` produces, which is also how
     `parse_detail` stores them in `raw_json['params']`: the live parse reads this off the
-    page and `scripts/backfill_area_spaced_thousands` off that stored reading of the same
-    page. Two copies of a key order is the same defect as two copies of the number grammar,
+    page, and `scripts/reparse.py` replays `parse_detail` over the stored page. Two copies of a key order is the same defect as two copies of the number grammar,
     one level up (rule 21).
 
-    `usable_area` IS THE "UŽITNÁ PLOCHA" CELL AND NOTHING ELSE (W21). It used to be
-    `užitná or podlahová or plocha` — the same collapse the headline resolver exists to
-    prevent, one column over: a page stating only "Podlahová plocha" or a bare "Plocha"
-    wrote that number into the column every consumer reads as the užitná measure. Those two
-    labels still reach the headline through their own typed slots, carrying their own basis;
-    what they no longer do is impersonate a third label in a side column.
+    `usable_area` IS THE "UŽITNÁ PLOCHA" CELL AND NOTHING ELSE (W21): a page stating only
+    "Podlahová plocha" or a bare "Plocha" must not write that number into the column every
+    consumer reads as the užitná measure. Neither label reaches the headline any more
+    either — idnes emits neither on any row of the checked-in census or of the newest 2,500
+    stored rows, so those two slots were unreachable and the contract drops them (gate A1).
 
     "Plocha pozemku" is the parcel: it reaches the resolver as `plot` (before W17 it went
     only to `estate_area`, so 5,292 land rows whose title states no area carried no headline
@@ -596,20 +491,19 @@ def areas_from_params(
     `MAX_AREA_M2` and `PortalAreas` bounds the three side columns at `MAX_SIDE_AREA_M2` —
     both BEFORE the content hash, which is the whole point (rules 2/8).
     """
-    usable = parse_area_text(params.get("užitná plocha"))
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    usable_text, plot_text = source_values(SOURCE, "area_m2", params)
+    usable = parse_area_text(usable_text)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=usable,
-        floor=parse_area_text(params.get("podlahová plocha")),
-        total=parse_area_text(params.get("plocha")),
         plot=estate_area,
         fallback=parse_area_text(title),
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
         usable_area=usable, estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        garden_area=parse_area_text(source_value(SOURCE, "garden_area", params)),
     )
 
 
@@ -659,16 +553,15 @@ def parse_detail(
     # parking kind), so everything goes through _truthy_field. idnes has no
     # standalone "Garáž" row — the garage signal lives in the "Parkování"
     # value ("garáž , parkování na ulici") and the icon-only "Dvojgaráž" row.
-    balcony = _truthy_field(params.get("balkon"))
-    loggia = _truthy_field(params.get("lodžie"))
-    terrace = _truthy_field(params.get("terasa"))
-    parking_field = _truthy_field(params.get("parkování"))
-    parking_text = _text(params.get("parkování"))
-    parking_lots = _parse_int(_text(params.get("počet parkovacích míst")))
-    garage = _any_true(
-        _truthy_field(params.get("garáž")),
-        _truthy_field(params.get("dvojgaráž")),
-        ("garaz" in _strip_diacritics(parking_text).lower()) if parking_text else None,
+    read = partial(source_value, SOURCE, params=params_text)
+    terrace = _truthy_field(source_value(SOURCE, "terrace", params))
+    parking_field, lots_node = source_values(SOURCE, "has_parking", params)
+    parking_text = _text(parking_field)
+    parking_lots = _parse_int(_text(lots_node))
+    double_garage, garage_parking = source_values(SOURCE, "garage", params)
+    garage = vocabulary.any_true(
+        _truthy_field(double_garage),
+        vocabulary.contains(_text(garage_parking), "garaz"),
     )
 
     image_urls = _gallery_urls(tree)
@@ -689,7 +582,7 @@ def parse_detail(
     }
 
     return ScrapedListing(
-        source="idnes",
+        source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
         category_main=category_main,
@@ -700,7 +593,7 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=_parse_disposition(title) or _parse_disposition(_text(params.get("dispozice"))),
+        disposition=vocabulary.disposition(SOURCE, title),
         locality=locality,
         district=None,
         # Street is the FIRST comma-segment of locality ("Bělehradská, Pardubice
@@ -709,31 +602,33 @@ def parse_detail(
         street=street_from_locality(locality, position="first", lat=lat, lon=lon),
         lat=lat,
         lon=lon,
-        floor=_parse_floor(_text(params.get("podlaží"))),
-        total_floors=_parse_int(_text(params.get("počet podlaží budovy"))),
-        building_type=_norm_building_type(_text(params.get("konstrukce budovy"))),
-        condition=_norm_condition(
-            _text(params.get("stav bytu"))
-            or _text(params.get("stav domu"))
-            or _text(params.get("stav objektu"))
-            # houses / commercial label their condition row "Stav budovy"
-            or _text(params.get("stav budovy"))
+        floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
+        total_floors=_parse_int(read("total_floors")),
+        building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
+        # A flat labels its condition row "Stav bytu"; a house or a commercial unit
+        # labels it "Stav budovy".
+        condition=vocabulary.canonical("condition", SOURCE, read("condition")),
+        ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
+        furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
+        energy_rating=vocabulary.energy_rating(read("energy_rating")),
+        # R11: balcony OR loggia. `terasa` used to be a third arm and is its own
+        # column — dropping it takes 17,845 terrace-only active rows back to unknown.
+        has_balcony=vocabulary.any_true(
+            *(_truthy_field(n) for n in source_values(SOURCE, "has_balcony", params))
         ),
-        ownership=_norm_ownership(_text(params.get("vlastnictví"))),
-        furnished=_norm_furnished(
-            _text(params.get("vybavení")) or _text(params.get("vybavení domu"))
-        ),
-        energy_rating=_energy_rating(_text(params.get("penb")) or _text(params.get("energetická náročnost"))),
-        # Legacy combined boolean — balcony|terrace|loggia, mirroring
-        # parser._has_balcony so the cross-portal filter agrees with sreality.
-        has_balcony=_any_true(balcony, terrace, loggia),
-        has_lift=_truthy_field(params.get("výtah")),
-        cellar=_truthy_field(params.get("sklep")),
+        has_lift=_truthy_field(source_value(SOURCE, "has_lift", params)),
+        cellar=_truthy_field(source_value(SOURCE, "cellar", params)),
         terrace=terrace,
         garage=garage,
-        # Legacy combined boolean — parking|garage|lots, mirroring parser._has_parking.
-        has_parking=_any_true(
-            parking_field,
+        # R11: a space or right BELONGING to the property. idnes's "Parkování" cell
+        # lists the KINDS it has, so `_truthy_field` on it means "some parking is
+        # stated" — including "parkování na ulici", which the portal files under the
+        # listing's own facilities rather than as a neighbourhood note. Only the text
+        # says which kind, so the check/cross icon is consulted only without it — this
+        # portal renders the same amenity row both ways.
+        has_parking=vocabulary.any_true(
+            vocabulary.parking(parking_text) if parking_text is not None
+            else _has_check(parking_field),
             garage,
             (parking_lots > 0) if parking_lots is not None else None,
         ),

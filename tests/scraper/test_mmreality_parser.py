@@ -18,44 +18,16 @@ from typing import Any
 
 from scraper.mmreality_parser import PropertyMismatch, declared_total, extract_property
 from scraper.mmreality_parser import (
-    _building_type,
-    _condition,
-    _ownership,
     index_price,
     parse_detail,
     parse_index,
 )
 
 
-def test_ownership_canonical_only():
-    assert _ownership({"ownership": {"name": "Osobní"}}) == "osobni"
-    assert _ownership({"ownership": {"name": "Družstevní"}}) == "druzstevni"
-    assert _ownership({"ownership": {"name": "Obecní"}}) == "statni"
-    # Unmapped labels collapse to None, never leak a value no filter can match.
-    assert _ownership({"ownership": {"name": "Jiné"}}) is None
-    assert _ownership({"ownership": {"name": "Ostatní"}}) is None
-    assert _ownership({}) is None
 
 
-def test_building_type_canonical_only():
-    # Real mmreality values are nouns that already equal a canonical code.
-    assert _building_type({"construction": {"name": "Cihla"}}) == "cihla"
-    assert _building_type({"construction": {"name": "Panel"}}) == "panel"
-    assert _building_type({"construction": {"name": "Smíšená"}}) == "smisena"
-    # The "neuvedeno" ("not specified") placeholder must NOT leak into the column.
-    assert _building_type({"construction": {"name": "neuvedeno"}}) is None
-    assert _building_type({}) is None
 
 
-def test_condition_canonical_only():
-    assert _condition({"condition": {"name": "novostavba"}}) == "novostavba"
-    assert _condition({"condition": {"name": "velmi dobrý"}}) == "velmi_dobry"
-    assert _condition({"condition": {"name": "dobrý"}}) == "dobry"
-    # Defensive "… stav" stripping (idnes form) still lands on the canonical value.
-    assert _condition({"condition": {"name": "Velmi dobrý stav"}}) == "velmi_dobry"
-    # Placeholder / unknown labels collapse to None instead of leaking.
-    assert _condition({"condition": {"name": "neuvedeno"}}) is None
-    assert _condition({}) is None
 
 INDEX_HTML = """
 <!DOCTYPE html><html lang="cs"><head>
@@ -111,6 +83,15 @@ ESTATE = {
     "lift": "False",
     "parkingPlaces": "1",
     "cellar": "True",
+    # The typed amenity keys the portal really publishes. The accessory NAMES below
+    # never carried any of these: `_has_any(accessories, "balkon", "lodzie")` matched
+    # 0 of 10,317 active rows, and this fixture used to plant a "Balkón" accessory the
+    # live portal has never emitted — a green test over a mapping that never fired.
+    "balcony": True,
+    "loggia": False,
+    "terraceArea": "6",
+    "garage": True,
+    "equipment": "1",
     "images": [
         {
             "id": "40411597",
@@ -124,9 +105,15 @@ ESTATE = {
             "previews": {"medium": "https://cdn.mmreality.cz/medium/offer/76/c1/b.jpg"},
         },
     ],
+    # The live group shape: "Parkování" mixes the property's own spaces with the street
+    # and a car park nearby, and "Parkety" (parquet FLOORING) sits in another group —
+    # all three used to read as parking through a flattened name search.
     "accessoryGroups": [
-        {"name": "Parkování", "accessories": [{"name": "Garáž"}]},
-        {"name": "Vedlejší prostory a stavby", "accessories": [{"name": "Balkón"}]},
+        {"name": "Parkování", "accessories": [
+            {"name": "Parkování na pozemku"}, {"name": "Parkování na ulici"},
+        ]},
+        {"name": "Podlahy", "accessories": [{"name": "Parkety"}]},
+        {"name": "Vedlejší prostory a stavby", "accessories": [{"name": "Sklep"}]},
     ],
 }
 
@@ -204,14 +191,18 @@ def test_parse_detail_full_mapping():
     assert listing.building_type == "smisena"
     assert listing.ownership == "druzstevni"
     assert listing.energy_rating == "G"
-    assert listing.floor == 5
+    # obj.floor 5 -> ground=0 storey 4 (W8).
+    assert listing.floor == 4
     assert listing.total_floors == 5
     assert listing.has_lift is False
     assert listing.cellar is True
     assert listing.parking_lots == 1
     assert listing.has_parking is True
     assert listing.garage is True
+    assert listing.furnished == "ano"
+    # R11: balcony OR loggia, from the typed keys. The terrace is its own column.
     assert listing.has_balcony is True
+    assert listing.terrace is True
     assert listing.description.startswith("Nabízíme")
     assert listing.raw["image_urls"] == [
         "https://cdn.mmreality.cz/xlarge/offer/f1/95/a.jpg",
@@ -406,3 +397,48 @@ def test_a_page_of_substitute_cards_is_a_mismatch_not_a_listing():
         extract_property(html, "944445")
     # No id to match (a caller that only has the page) keeps the fallback.
     assert extract_property(html, None)["id"] in ("111111", "222222")
+
+
+# R11's has_parking: a space or right BELONGING to the property. The live "Parkování"
+# group's 15 members include "Parkování na ulici" (2,044 rows), "Parkoviště poblíž" (313)
+# and the literal "Není" (21) — none of which comes with the unit — while "Parkety"
+# (parquet flooring, group "Podlahy") is not parking at all. The pre-W4 reading flattened
+# every accessory name and matched all four, putting has_parking at 73.5% true.
+STREET_PARKING_ONLY = {
+    **ESTATE,
+    "id": "944447",
+    "parkingPlaces": None,
+    "garage": None,
+    "accessoryGroups": [
+        {"name": "Parkování", "accessories": [
+            {"name": "Parkování na ulici"}, {"name": "Parkoviště poblíž"},
+        ]},
+        {"name": "Podlahy", "accessories": [{"name": "Parkety"}]},
+    ],
+}
+
+
+def test_public_parking_and_parquet_flooring_are_not_the_property_s_parking():
+    url = "https://www.mmreality.cz/nemovitosti/944447/"
+    listing = parse_detail(_detail_html(STREET_PARKING_ONLY), source_url=url)
+
+    # The group IS stated, and nothing in it belongs to the property — a real `false`,
+    # not the "unknown" a True-or-None reading could only ever produce.
+    assert listing.has_parking is False
+    assert listing.parking_lots is None
+    assert listing.garage is None
+
+
+def test_has_balcony_is_balcony_or_loggia_never_the_terrace():
+    url = "https://www.mmreality.cz/nemovitosti/944448/"
+    terrace_only = {**ESTATE, "id": "944448", "balcony": False, "loggia": False}
+    listing = parse_detail(_detail_html(terrace_only), source_url=url)
+
+    assert listing.terrace is True
+    assert listing.has_balcony is False
+
+    loggia_only = {**terrace_only, "id": "944449", "loggia": True}
+    other = parse_detail(
+        _detail_html(loggia_only), source_url="https://www.mmreality.cz/nemovitosti/944449/"
+    )
+    assert other.has_balcony is True

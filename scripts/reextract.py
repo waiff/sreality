@@ -1,26 +1,21 @@
-"""Re-extract a field from ALREADY-STORED page bytes — no re-fetch, no snapshot churn.
+"""Re-extract a NON-COLUMN field from ALREADY-STORED page bytes — no re-fetch, no snapshot.
 
-The generic form of the ~20 one-off `backfill_*.py` scripts: when a parser silently
-stopped extracting something, the pages we parsed are still in `portal_raw_pages`, so the
-fix is to replay the CURRENT parser over stored bytes rather than re-crawl the portal.
-That also repairs INACTIVE listings, which a re-fetch structurally cannot.
+The two things a portal publishes that are not `listings` columns and therefore cannot go
+through the one re-parse seam: the `images` child rows, whose identity is POSITIONAL (see
+SAFETY below), and the `raw_json.broker` block the broker resolver reads. Everything typed
+— every `LISTING_COLUMNS` member, `description` included — is `scripts/reparse.py`'s work
+now, over a substrate declared per portal; this file kept only what that seam's write path
+(one UPDATE of named columns + a `dirty_properties` enqueue) cannot express.
 
 Rule compliance:
-  #2  Depends on the field, and the registry says which. An UNHASHED field (`media`) writes
-      only child rows, so the content hash cannot change and ZERO snapshots are appended.
-      A HASHED field (`description`, in `_HASH_FIELDS`) cannot be repaired snapshot-free:
-      setting it genuinely changes the hash, so ONE snapshot per listing is appended — not
-      here, but on that listing's next natural detail scrape, when the recomputed hash
-      differs from the latest snapshot's. Deferred, never skipped, and spread over the
-      normal cadence rather than concentrated. `--allow-snapshot-deferral` is required so
-      that is an explicit choice; a mismatch between `FieldSpec.hashed` and `_HASH_FIELDS`
-      raises at import.
+  #2  Neither field is in `_HASH_FIELDS` — media writes only child rows and the broker block
+      rides `raw_json` — so the content hash cannot change and ZERO snapshots are appended,
+      here or later. `FieldSpec.hashed` declares that per field and the module raises at
+      import if a field ever joins `_HASH_FIELDS`, rather than silently downgrading the
+      guarantee. (A field that DOES need the deferred snapshot belongs in the seam, which
+      carries the `--allow-snapshot-deferral` gate this file no longer needs.)
   #3  Never touches `is_active` / `mark_inactive` / any index walk.
   #4  Not a sighting: `last_seen_at` is untouched.
-
-Hashed fields are written with a targeted single-column UPDATE, NOT by replaying a whole
-`ScrapedListing` through the scrape write path — that would rewrite every other column from
-a possibly-stale stored page and could regress a price the portal has since changed.
 
 SAFETY — why this only repairs ZERO-row listings. `record_images` upserts on
 `(listing_id, sequence)` where sequence is the URL's position in the parsed gallery, and
@@ -60,7 +55,6 @@ from scraper import db
 from scraper.idnes_parser import _gallery_urls as _idnes_gallery
 from scraper.realitymix_parser import _images as _realitymix_images
 from scraper.remax_parser import _broker as _remax_broker
-from scraper.remax_parser import _description as _remax_description
 from scraper.scraped_listing import _HASH_FIELDS
 
 LOG = logging.getLogger("reextract")
@@ -71,8 +65,8 @@ class FieldSpec:
     """How one re-extractable field is found, selected and written.
 
     `hashed` is the load-bearing flag. A field inside `_HASH_FIELDS` cannot be repaired
-    snapshot-free (rule #2), so it may not silently inherit the media path's guarantee —
-    see `--allow-snapshot-deferral`.
+    snapshot-free (rule #2), so it may not silently inherit this file's guarantee — it
+    belongs in `scripts/reparse.py`, which carries the deferral gate.
     """
 
     extractors: dict[str, Callable[[str, str], Any]]
@@ -96,11 +90,6 @@ _FIELDS: dict[str, FieldSpec] = {
         missing_predicate="NOT EXISTS (SELECT 1 FROM images i WHERE i.listing_id = l.id)",
         hashed=False,
     ),
-    "description": FieldSpec(
-        extractors={"remax": lambda html, _native: _remax_description(HTMLParser(html))},
-        missing_predicate="l.description IS NULL",
-        hashed=True,
-    ),
     # `raw_json` is not in _HASH_FIELDS, so this is snapshot-free like media. Attribution
     # itself is NOT done here: the resolver is queue-driven and `ingest_scraped_listing`
     # only enqueues when the content hash changes — which writing raw_json does not. The
@@ -122,35 +111,23 @@ for _name, _spec in _FIELDS.items():
             f"reextract field {_name!r}: hashed={_spec.hashed} but _HASH_FIELDS says {_expected}"
         )
 
-# Newest staged detail page per candidate listing. A listing can have several staged
-# pages (one per re-fetch); replaying an older one would resurrect content the portal has
-# since changed, so take the newest by fetched_at.
+# The staged detail page, one row per listing: `portal_raw_pages` is
+# UNIQUE(source, source_id_native, page_kind) and latest-wins, upserted in the same
+# transaction that writes the listings row, so it cannot lag the row it produced.
 _CLAIM = """
 SELECT l.id, l.source_id_native, p.html
 FROM listings l
-JOIN LATERAL (
-    SELECT p.html
-    FROM portal_raw_pages p
-    WHERE p.source = l.source
-      AND p.source_id_native = l.source_id_native
-      AND p.page_kind = 'detail'
-      AND p.html IS NOT NULL
-    ORDER BY p.fetched_at DESC
-    LIMIT 1
-) p ON true
+JOIN portal_raw_pages p
+  ON p.source = l.source
+ AND p.source_id_native = l.source_id_native
+ AND p.page_kind = 'detail'
+ AND p.html IS NOT NULL
 WHERE l.source = %(source)s
   AND l.id > %(cursor)s
   AND (%(since)s::timestamptz IS NULL OR l.first_seen_at >= %(since)s::timestamptz)
   AND {missing}
 ORDER BY l.id
 LIMIT %(limit)s
-"""
-
-# Direct column write, deliberately NOT the scrape write path: replaying a whole
-# ScrapedListing would rewrite every other column from a possibly-stale stored page
-# (regressing a price that has since changed). One column, one statement.
-_WRITE_DESCRIPTION = """
-UPDATE listings SET description = %(value)s WHERE id = %(id)s AND description IS NULL
 """
 
 _WRITE_BROKER = """
@@ -169,13 +146,6 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="0 = no cap")
     parser.add_argument("--max-seconds", type=int, default=3000)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument(
-        "--allow-snapshot-deferral",
-        action="store_true",
-        help="required for a field in _HASH_FIELDS: acknowledges that setting it changes "
-        "the content hash, so one snapshot per listing is appended on the next natural "
-        "detail scrape (deferred, never skipped) — see the module docstring",
-    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -184,14 +154,6 @@ def main() -> int:
         print(
             f"ERROR: --field {args.field} is not wired for --source {args.source} "
             f"(available: {', '.join(spec.sources())})",
-            file=sys.stderr,
-        )
-        return 2
-    if spec.hashed and not args.allow_snapshot_deferral and not args.dry_run:
-        print(
-            f"ERROR: {args.field!r} is in _HASH_FIELDS, so writing it changes the content "
-            "hash and defers one snapshot per listing to its next detail scrape. Re-run "
-            "with --allow-snapshot-deferral to acknowledge.",
             file=sys.stderr,
         )
         return 2
@@ -246,10 +208,9 @@ def main() -> int:
                 if args.field == "media":
                     rows_written += db.record_media(conn, int(listing_id), value)
                     continue
-                sql = _WRITE_DESCRIPTION if args.field == "description" else _WRITE_BROKER
-                payload = value if args.field == "description" else json.dumps(value)
                 with conn.cursor() as wcur:
-                    wcur.execute(sql, {"value": payload, "id": int(listing_id)})
+                    wcur.execute(_WRITE_BROKER,
+                                 {"value": json.dumps(value), "id": int(listing_id)})
                     rows_written += wcur.rowcount or 0
 
             LOG.info(

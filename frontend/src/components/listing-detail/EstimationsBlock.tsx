@@ -42,6 +42,7 @@ import type {
   ListingPublic,
   ReferenceRent,
 } from '@/lib/types';
+import { Hairline, SectionLabel } from '@/components/section';
 
 export default function EstimationsBlock({
   listing,
@@ -464,23 +465,6 @@ function PriceDivergenceNote({
         </span>
       ))}
       .
-    </p>
-  );
-}
-
-
-/* -------------------------------------------------------------------------- */
-/* Layout primitives                                                          */
-/* -------------------------------------------------------------------------- */
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
     </p>
   );
 }

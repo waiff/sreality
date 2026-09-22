@@ -1,7 +1,7 @@
 """verify_pipeline.py — scheduled pipeline-health harness.
 
-Computes a fixed set of pipeline-health metrics (LLM error rate + liveness + burn
-rate, DB saturation, worker liveness, dual-write parity, property maintenance,
+Computes a fixed set of pipeline-health metrics (LLM error rate + burn rate, DB
+saturation, worker liveness, dual-write parity, property maintenance,
 broker-resolution freshness),
 writes one `pipeline_check_results` row per check, and rings the in-app bell once per
 INCIDENT (toolkit.system_alerts.emit_transition_alerts): at onset, again at 6h / 24h /
@@ -17,8 +17,25 @@ Each check is isolated (one failing check writes a `fail` row with the error in
 `details`, never kills the run). Thresholds live in
 `app_settings.pipeline_check_thresholds` with the code defaults below as fallbacks.
 
+There is deliberately NO total-silence check any more. `llm_liveness` measured hours
+since the newest `llm_calls` row against a threshold sized to "the one recurring
+producer" — bazos description enrichment, deleted with its lane in field-capture W0.
+Every producer left (autodedup judging, labelling, estimations, URL parsing) is
+dispatch-driven or on demand, so silence is the normal resting state: the longest gap
+in the 30 days to 2026-09-21 was 143.8 h, and the check was already 52 fails / 347 runs
+against a healthy pipeline. A fixed hours threshold over an on-demand workload is a
+false-red generator, and the fix is not a bigger number — it is a per-lane instrument
+with its own baseline. That is `text_extraction_lag` (field-capture R8, W7): oldest
+ELIGIBLE-unextracted age and waiting count per source, computed from the text lane's own
+selector predicate, plus the wedge arm — rows eligible and the lane claiming none. It
+covers the one recurring producer; `llm_errors` still catches "calls are failing" (state,
+not recency) and `llm_burn_rate`'s starvation arm "attempting and never succeeding". The
+residual, stated plainly: both of those derive from rows that EXIST, so a total stop on a
+lane R8 does not cover — every remaining producer is dispatch-driven — still reads `ok`.
+
 Each result is persisted AND alerted the moment its check completes, under a per-check
-and a whole-lane wall-clock budget (`_LANE_BUDGET_S`). The lane runs inside a job with
+and a whole-lane wall-clock budget (the acute lane's `_LANE_BUDGET_S`; the full lane's
+`full_lane_budget_s`, one per-check budget per registered check). The acute lane runs inside a job with
 `timeout-minutes: 5`, and it used to compute every result before writing any — so a
 timeout wrote zero rows and fired zero alerts, blinding `db_saturation` and
 `worker_liveness` at exactly the moment DB saturation would make the checks slow. A
@@ -50,7 +67,7 @@ from urllib.parse import urlencode
 import requests
 
 from location_data import location_steps
-from scraper import media as _media
+from scraper import attribute_contract, field_census, media as _media
 from scraper.db import QUEUE_PRIORITY_NEW, connect
 from scraper.image_storage import IMAGE_TRANSFORM_OPS, image_dimensions, with_transform
 from scraper.parser import parse_images
@@ -85,22 +102,10 @@ LOG = logging.getLogger("verify_pipeline")
 
 # Code fallbacks. The pipeline_check_thresholds seed (migration 274) is merged OVER
 # these in load_thresholds, so a key present here but not in the DB seed (e.g.
-# llm_silence_fail_hours, added with the WS4 alerting rebuild) is served from this
+# long_open_txn_warn_minutes, added with the llm-cost rollup) is served from this
 # default until a future seed migration includes it.
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "llm_error_rate_warn": 0.2,
-    # Sized to the workload that ACTUALLY runs (W0.5). The old 4h was sized for
-    # dedup vision on the always-on worker — a p99 inter-call gap of ~1 minute —
-    # and that workload was deleted on 2026-08-06 with the decision engine (rule
-    # 15). The only recurring producer left is bazos description enrichment
-    # (`enrich_bazos.yml`); every other LLM workflow is dispatch-only or paused.
-    # Its schedule reads `20 */3` but its own name still says "every 6h", and
-    # under the Actions cron throttle the observed run-to-run gaps over Aug 27-30
-    # were 2.4-15.0h. 13h = 2x the 6h nominal cadence plus throttle slack: above
-    # every gap this check has actually fired on (the false reds were 4.2-7h+)
-    # while still catching a genuinely dead pipeline within one 6h lane tick.
-    # This check has no warn tier, so a too-tight number is pure false red.
-    "llm_silence_fail_hours": 13.0,
     "llm_spend_24h_warn_usd": 90,
     "llm_spend_24h_fail_usd": 150,
     # The llm-cost rollup (migration 437) absorbs late arrivals by re-scanning the
@@ -125,6 +130,14 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # 2026-08-17 starvation sreality reached 216h.
     "acquisition_lag_warn_hours": 6,
     "acquisition_lag_fail_hours": 24,
+    # The same shape one layer later (field-capture R8): how long a listing whose prose
+    # the text lane has not read has been waiting. The lane runs every 5 minutes and its
+    # 20-minute SLO is for INFLOW; the backlog drains at ~1,000 rows a pass, so the first
+    # two days after the lane ships legitimately read tens of hours. Warn at 48h, fail at
+    # 168h — a week of a portal's prose unread is the lane being dead, which is the exact
+    # failure this instrument exists for and the one nothing else can see.
+    "text_extraction_lag_warn_hours": 48,
+    "text_extraction_lag_fail_hours": 168,
     # Walk coverage against the portal's own advertised total. Healthy portals sit
     # at 0.0-0.2% (measured 2026-08-27: sreality 0.00%, realitymix 0.00%, bazos
     # 0.16%). Warn at 5% is ~25x the observed noise floor. Fail at 15% is a portal
@@ -303,8 +316,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # number. The stock arm can only WARN: the live offenders were the four sreality
     # `pozemek` cells at 100.0% and bezrealitky pozemek/prodej at 99.5% — three parsers
     # kept the parcel out of `area_m2`, which is the only area the measure reads. W17
-    # closed that (the plot reaches `derive_headline_area` from every portal, and
-    # `backfill_land_headline_area` heals the 52,183 stored rows), so those cells should
+    # closed that (the plot reaches `derive_headline_area` from every portal, and a one-off
+    # heal — since replaced by `scripts/reparse.py` — fixed the 52,183 stored rows), so those cells should
     # clear; a land cell with no portal area at all stays a visible gap by charter (a NULL
     # measure is never a guess), amber and named rather than a red tile nobody can clear.
     # The next
@@ -343,6 +356,28 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # under it on both axes, which is also how a CROP is caught. Timeout is the read half
     # of a (5, 8) connect/read pair, bounded per call in the seam; worst case across the
     # three calls is 39 s, inside the 45 s per-check budget.
+    # Floor convention: the mean (portal storey − idnes storey) over sibling pairs.
+    # A whole-storey offset is the defect (W8 measured +0.82..+1.05 on the six ground=1
+    # portals against +0.20 ceskereality / +0.10 bazos, the two that were already
+    # canonical), so the tiers sit between the two populations. The measure has a real
+    # noise floor — a sibling pair is a price/area/disposition match, not a proven
+    # duplicate — and it is NOT the same size on every portal: ceskereality reads +0.20
+    # against bazos's +0.10. That gap is NOT sample conditioning, though the portal does
+    # never state the ground storey (0 of its 34,363 floored rows read 0): restricting
+    # the idnes side to floor >= 1 too moves it only +0.199 -> +0.167 (n=7,166 of 7,394,
+    # measured 2026-09-22). What is left is a real sub-population — 925 of its pairs sit
+    # at exactly +1 against 92 below 0, a 10:1 asymmetry bazos does not have (565:264) —
+    # i.e. ceskereality carries an UNEXPLAINED one-storey defect on ~12 % of its pairs,
+    # tracked as an open finding in the W8 hand-over §6. warn is 0.35 to hold that portal
+    # amber-free while it is investigated, not because its reading is certified: simulated
+    # on the live corpus the six converted portals land -0.16..+0.06, well inside 0.25, so
+    # the wider tier protects exactly one portal and that portal is the open question.
+    # fail at 0.5 is half a storey — unreachable by noise, reachable only by a portal on
+    # the other scale. min_pairs 40 lets maxima score on its ~49 pairs and still refuses
+    # a mean of one or two adverts.
+    "floor_convention_delta_warn": 0.35,
+    "floor_convention_delta_fail": 0.50,
+    "floor_convention_min_pairs": 40,
     "sreality_image_template_min_ratio": 0.9,
     "sreality_image_template_timeout_s": 8.0,
     # --- alert escalation policy (W3.4) -------------------------------------
@@ -369,15 +404,27 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 # saturation) that made the checks slow in the first place. Results are now persisted as
 # each check completes, and these budgets keep one slow check from eating the lane.
 #
-# 120s of the job's 300s. The remaining 180s is deliberate headroom: process start, the
-# threshold read, alert emission, and the checks W2/W3 will add. This wave owns the number;
-# later waves spend against it.
+# THE ACUTE LANE's budget: 120s of llm_health.yml's 300s job. The remaining 180s is
+# deliberate headroom for process start, the threshold read and alert emission.
 _LANE_BUDGET_S = 120.0
-# No single check may hold the lane for more than this. The slowest today is the shared
-# measure_plausibility read at ~12s, so 45s is ~4x headroom over the known worst case.
+# No single check may hold the lane for more than this. The slowest today is
+# floor_convention's cross-portal self-join, 11-35s over four measured runs (the shared
+# measure_plausibility read is ~12s), so at its worst 45s is only 1.3x the known worst
+# case — a new check above ~20s starves the tail and needs its query reworked, not a
+# wider budget.
 _CHECK_BUDGET_S = 45.0
+# Process start, threshold read and alert emission, reserved out of every job's timeout.
+_JOB_HEADROOM_S = 180.0
 # Outside run_checks (ad-hoc use, tests) keep the historical 10-minute ceiling.
 _DEFAULT_STATEMENT_TIMEOUT_MS = 600_000
+
+
+def full_lane_budget_s(*, weekly: bool) -> float:
+    """The FULL lane owes every registered check its own budget, so no check can starve
+    another. It used to share the acute lane's 120 s: over the 15 runs to 2026-09-21, 13
+    left 7-17 of the 24 checks `not_run`. A registry that outgrows verify_pipeline.yml's
+    job timeout fails CI (test_full_lane_budget_fits_its_job) instead of going quiet."""
+    return (len(_CHECKS) + (len(_WEEKLY_CHECKS) if weekly else 0)) * _CHECK_BUDGET_S
 
 
 class _LaneBudget:
@@ -453,9 +500,11 @@ def _llm_live_state(
     last_err_at`. It used to additionally require the failure to be newer than a
     90-minute window (`min_live_at`), which is wrong for a reason worth stating —
     **silence is not recovery.** A failure is superseded only by a newer SUCCESS,
-    never by elapsed time. The producers here have circuit breakers (the enrichment
-    loop aborts at 5 consecutive errors), so once an outage is total the traffic
-    stops, the last error ages past the window, and the check reads `ok`.
+    never by elapsed time. The producers here have circuit breakers (`toolkit/
+    vision_batch.py` stops the labelling pass on the first fatal provider error;
+    the autodedup judge lane aborts its pass the same way), so once an outage is
+    total the traffic stops, the last error ages past the window, and the check
+    reads `ok`.
 
     Measured: OpenAI was credit-exhausted for 11 days (63,547 error rows, zero
     successes) and `llm_errors` read `ok` for most of it, flapping `fail` -> `ok`
@@ -473,13 +522,6 @@ def _llm_live_state(
         and (last_ok_at is None or last_credit_err_at > last_ok_at)
     )
     return currently_failing, credit_live
-
-
-def _status_for_llm_silence(hours: float | None, fail_hours: float) -> str:
-    """Fail when the newest llm_call is older than `fail_hours` (or there are none at all)."""
-    if hours is None or hours > fail_hours:
-        return "fail"
-    return "ok"
 
 
 def _status_for_poller_staleness(
@@ -541,7 +583,9 @@ def _status_for_burn_lanes(
     it is the maximally healthy number AND the signature of a total outage:
       - `starved`: some lane has attempts but zero successes and zero spend -> fail.
         `_record_failure` writes `cost_usd=0.0`, so a total outage drives spend DOWN.
-      - `idle`: nothing was attempted at all -> ok. Silence is llm_liveness's axis.
+      - `idle`: nothing was attempted at all -> ok. Every LLM producer left is
+        dispatch-driven or on demand, so silence is the normal resting state and
+        no check judges it (see the module docstring's note on llm_liveness).
       - `runaway`/`ok`: the existing upper spend arms.
     The arm is carried in `details.arm` so a red or green zero is legible in logs.
     """
@@ -692,7 +736,7 @@ def _status_for_worker(
 # --- per-m2 measure plausibility (W9) --------------------------------------
 #
 # The four checks below exist because the OTHER health surfaces cannot see the
-# defects the per-m2 program fixed. `data_quality_by_source` tests 29 fields for
+# defects the per-m2 program fixed. `data_quality_by_source` tests 26 fields for
 # IS NOT NULL; both defects produce 100% non-NULL values. A null-check cannot see
 # a plot area sitting in a floor-area column, and it cannot see 136 Kc sitting in
 # a price column. These read `measure_plausibility_by_source` (migration 427)
@@ -972,7 +1016,7 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
         message = (
             "LLM calls are failing with credit-balance errors right now — the provider "
             "account is out of credit. Every paid LLM path (estimations, summaries, "
-            "listing enrichment, URL parsing) is down "
+            "autodedup judging, image labelling, location claims, URL parsing) is down "
             f"({credit_errors} credit errors in 24h, no successful call since)."
         )
     elif offenders:
@@ -997,53 +1041,6 @@ def check_llm_errors(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
             "offending_called_for": offenders,
             "per_called_for": per_called_for,
         },
-        "message": message,
-    }
-
-
-_LLM_SILENCE_SQL = """
-select extract(epoch from (now() - max(called_at))) / 3600.0 as hours_since_last
-from llm_calls
-"""
-
-
-def check_llm_liveness(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Total-silence guard: a stretch with ZERO llm_calls means the paid pipeline is dead —
-    key unset, provider unreachable, or an outage so hard nothing is even attempted. This is
-    the failure mode error-rate checks are structurally blind to (no calls → no errors → false
-    green).
-
-    **The threshold is sized to the cadence of the one recurring producer, not to a
-    continuous stream** (W0.5). This check used to document itself as "p99 inter-call gap is
-    ~1 min, so the 4h default never trips in normal operation" — true only while dedup vision
-    ran on the always-on worker, which was deleted on 2026-08-06 with the decision engine
-    (rule 15). Nothing has run continuously since. The recurring producer today is bazos
-    description enrichment (`enrich_bazos.yml`, the only LLM workflow still on a schedule —
-    condition scoring is paused and the rest are dispatch-only), so the healthy inter-call gap
-    is a CRON PERIOD stretched by the Actions throttle, not a minute. At 4h that made the
-    check a false-red generator: it fired `fail value=4.195` and reds against a perfectly
-    healthy pipeline. See `llm_silence_fail_hours` in DEFAULT_THRESHOLDS for the 13h sizing.
-
-    Folds in the unique liveness intent of the retired check_llm_health.py, but UNGATED — the
-    old probe hid behind a condition-scoring `pending` gate that is dead while scoring is paused."""
-    fail_hours = float(thresholds["llm_silence_fail_hours"])
-    row = _fetchone(conn, _LLM_SILENCE_SQL)
-    hours = float(row[0]) if row and row[0] is not None else None
-    status = _status_for_llm_silence(hours, fail_hours)
-    if hours is None:
-        message = f"No LLM calls on record at all — the LLM pipeline looks dead (threshold {fail_hours:.0f}h)."
-    elif status == "fail":
-        message = (
-            f"No LLM calls in {hours:.1f}h (> {fail_hours:.0f}h) — the LLM pipeline is silent "
-            "(worker down / key unset / hard outage). No paid path is running."
-        )
-    else:
-        message = f"LLM pipeline live (last call {hours:.2f}h ago)."
-    return {
-        "check_key": "llm_liveness",
-        "status": status,
-        "value": round(hours, 3) if hours is not None else None,
-        "details": {"hours_since_last_call": hours, "fail_hours": fail_hours},
         "message": message,
     }
 
@@ -1101,7 +1098,7 @@ def check_llm_burn_rate(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
     elif arm == "idle":
         message = (
             "No LLM calls attempted in 24h — nothing to bill and nothing to judge. "
-            "Whether that silence is itself wrong is llm_liveness's call."
+            "Every producer is dispatch-driven or on demand, so silence is normal."
         )
     elif status == "fail":
         message = (
@@ -2097,6 +2094,134 @@ select source,
 """
 
 
+# The floor convention, measured against another portal rather than against labels.
+#
+# `listings.floor` was a ~50/50 MIX of two Czech conventions until W8: idnes, bazos and
+# ceskereality counted the ground storey 0, the other six counted it 1, so one flat read
+# 3 from its idnes row and 4 from its sreality row in the same Browse list. Nothing in
+# the repo could see it — there was no floor check of any kind — because a wrong-by-one
+# storey is perfectly typed, perfectly non-NULL and perfectly plausible.
+#
+# The measure needs no labels and no LLM: two adverts agreeing on price, area AND
+# disposition are the same flat often enough that the MEAN of their floor difference is a
+# clean convention signal. idnes is the reference because it is the one portal whose
+# parser has always read the Czech word ("2. patro (3. NP)"). A key counts only where the
+# side holds ONE storey for it (min = max), so a repeated price/area/disposition triple
+# cannot smear the difference.
+#
+# Measured on the live cluster over ~34.7k pairs: 27.0 / 35.1 / 11.0 / 16.1 s on four
+# EXPLAIN (ANALYZE) runs across two days. It is the MOST EXPENSIVE check in the lane and
+# by far the most VARIABLE — the plan is a BitmapAnd feeding a Bitmap Heap Scan that
+# spills (57k exact + 51k lossy heap blocks, ~116k buffers, ~85 % of them `read` even on
+# a warm cluster, so it never stays cached and its cost tracks whatever else is reading
+# `listings`) — which is why it is registered LAST among the DB checks and runs
+# under the same server-side `statement_timeout` as every other check: on a bad day it is
+# cancelled and reports `warn / timed out`, which says UNKNOWN, never a false green.
+_FLOOR_CONVENTION_SQL = """
+WITH k AS MATERIALIZED (
+    SELECT source, price_czk, area_m2, disposition, min(floor) AS f
+      FROM listings
+     WHERE is_active AND category_main = 'byt' AND floor IS NOT NULL
+       AND price_czk IS NOT NULL AND area_m2 IS NOT NULL AND disposition IS NOT NULL
+     GROUP BY 1, 2, 3, 4
+    HAVING min(floor) = max(floor)
+)
+SELECT o.source, count(*) AS pairs, avg(o.f - r.f)::double precision AS mean_delta
+  FROM k o JOIN k r USING (price_czk, area_m2, disposition)
+ WHERE r.source = %(reference)s AND o.source <> %(reference)s
+ GROUP BY 1
+"""
+
+_FLOOR_REFERENCE = "idnes"
+
+
+def _declared_floor_convention(source: str) -> str | None:
+    """The storey scale that portal's floor cell declares, or None for a source that
+    has no contract row (a portal added to the DB before its cell exists)."""
+    portal = attribute_contract.CONTRACT.get(source)
+    return portal["floor"].convention if portal else None
+
+
+def check_floor_convention(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Is every portal's `floor` on the SAME storey scale (ground = 0)?"""
+    # `_fetchall`, not a bare cursor: it is the only thing that emits the per-check
+    # `SET LOCAL statement_timeout`, and this is the one query in the lane expensive
+    # enough to need it (the cheap counter reads elsewhere can afford a raw cursor).
+    rows = _fetchall(conn, _FLOOR_CONVENTION_SQL, {"reference": _FLOOR_REFERENCE})
+
+    warn = float(thresholds["floor_convention_delta_warn"])
+    fail = float(thresholds["floor_convention_delta_fail"])
+    min_pairs = int(thresholds["floor_convention_min_pairs"])
+
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    scale_offenders: list[str] = []
+    status = "ok"
+    worst = 0.0
+    scored = 0
+    for source, pairs, mean_delta in rows:
+        delta = float(mean_delta)
+        per_source[source] = {"pairs": int(pairs), "mean_delta": round(delta, 3)}
+        if int(pairs) < min_pairs:
+            continue
+        scored += 1
+        worst = max(worst, abs(delta))
+        if abs(delta) >= fail:
+            status = "fail"
+        elif abs(delta) >= warn and status != "fail":
+            status = "warn"
+        if abs(delta) >= warn:
+            offenders.append(f"{source} {delta:+.2f} ({pairs} pairs)")
+            scale_offenders.append(source)
+
+    if not scored:
+        # Rows without a scored arm certify nothing; `value` stays None so the tile
+        # shows an em-dash rather than a 0 that reads as agreement.
+        return {
+            "check_key": "floor_convention", "status": "warn", "value": None,
+            "details": {"skipped": f"no portal reached {min_pairs} sibling pairs",
+                        "per_source": per_source},
+            "message": (
+                "Floor-convention check verified NOTHING — no portal reached "
+                f"{min_pairs} sibling pairs against {_FLOOR_REFERENCE}. That is a "
+                "coverage failure, not a clean bill of health."),
+        }
+
+    if offenders:
+        # The runbook only applies to a portal whose contract cell says `ground1` — the
+        # heal is that conversion. Telling the operator to re-derive ceskereality (cell
+        # `ground0`) would shift 34,363 CORRECT rows down one storey, which is exactly
+        # what W8 and its hand-over forbid, so the two cases get different sentences.
+        convertible = [s for s in scale_offenders
+                       if _declared_floor_convention(s) == "ground1"]
+        remedy = (
+            "Heal it per docs/design/field-capture/handover-autodedup-floor.md §7 "
+            "(`python -m scripts.reparse --source <portal> --fields floor --write "
+            "--allow-snapshot-deferral`; the bare command is a dry run and `floor` is "
+            f"hashed): {', '.join(convertible)}."
+            if convertible else
+            "None of them declares `ground1`, so re-deriving is NOT the remedy — the "
+            "reading itself moved. Check that portal's parser and contract cell first."
+        )
+        message = (
+            f"{len(offenders)} portal(s) are on a different storey scale than "
+            f"{_FLOOR_REFERENCE} (worst {worst:.2f} storeys): " + "; ".join(offenders)
+            + " — a mean near +1 is the ground=1 reading. " + remedy
+        )
+    else:
+        message = (f"Every portal reads the same storey scale as {_FLOOR_REFERENCE} "
+                   f"(worst |mean| {worst:.2f} across {scored} scored portals).")
+    return {
+        "check_key": "floor_convention",
+        "status": status,
+        "value": round(worst, 3),
+        "details": {"per_source": per_source, "offenders": offenders,
+                    "reference": _FLOOR_REFERENCE, "warn": warn, "fail": fail,
+                    "min_pairs": min_pairs, "scored": scored},
+        "message": message,
+    }
+
+
 def check_acquisition_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     """How long a DISCOVERED but never-fetched listing has been waiting, per portal."""
     with conn.cursor() as cur:
@@ -2141,6 +2266,144 @@ def check_acquisition_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, An
         "status": status,
         "value": round(worst, 2),
         "details": {"per_source": per_source, "offenders": offenders},
+        "message": message,
+    }
+
+
+# The R8 invariant, and a literal twin of check_acquisition_lag above for the same reason
+# its docstring gives: a "nothing extracted in N hours" alarm needs a baseline the outage
+# itself erodes, while the oldest UN-EXTRACTED row grows without bound and cannot be
+# normalised away. The outage this replaces is the reason the program exists — the deleted
+# enrichment lane selected 223 of 50,205 bazos rows for two months while llm_liveness read
+# a global max(called_at), llm_burn_rate's starvation arm needed attempts > 0 and
+# worker_lane_stall read only in_flight_s. Every one of those is blind to a lane that
+# selects nothing, so this check reads the lane's OWN eligibility predicate
+# (`description_extraction.ELIGIBLE_LAG_SQL`, built from `_eligible_where`) and never
+# re-spells it: a re-spelling would recreate exactly the blindness it exists to end.
+# How stale the oldest eligible row must be before "the lane claimed 0 last pass" is read
+# as a wedge rather than as a quiet minute: 12 of the lane's own 5-minute intervals.
+_TEXT_EXTRACT_WEDGE_HOURS = 1.0
+
+_TEXT_EXTRACT_LANE_SQL = """
+select details -> 'text_extract' as lane,
+       extract(epoch from (now() - beat_at)) / 60.0 as beat_age_minutes
+  from worker_heartbeats where worker = 'realtime-worker'
+"""
+
+
+def check_text_extraction_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """How long a listing the text lane has not read has been waiting, per portal."""
+    from toolkit import description_extraction as text_lane
+
+    model = text_lane.resolve_model(conn)
+    scope = attribute_contract.extracted_cells()
+    if not scope or model is None:
+        # Not a failure and not a silence: the contract declaring no `text` cell with a
+        # gate IS the lane being off, and it is reported as that rather than as health.
+        return {
+            "check_key": "text_extraction_lag", "status": "ok", "value": 0,
+            "details": {"scope": {k: list(v) for k, v in scope.items()},
+                        "model": model},
+            "message": (
+                "The text lane has nothing open to it"
+                + ("" if scope else
+                   " (every contract gate is closed — "
+                   f"{sum(len(v) for v in attribute_contract.gated_cells().values())} "
+                   "field(s) await the W7 bake-off, and until one opens the lane extracts "
+                   "nothing and spends nothing)")
+                + ("" if model else f"; app_settings.{text_lane.MODEL_SETTING} is unset")
+                + " — no listing is eligible and none is waiting."
+            ),
+        }
+    version = text_lane.extractor_version(model)
+    with conn.cursor() as cur:
+        cur.execute(text_lane.ELIGIBLE_LAG_SQL, {"version": version})
+        rows = cur.fetchall()
+        cur.execute(text_lane.EXTRACTION_LATENCY_SQL)
+        latency = cur.fetchone()
+        cur.execute(_TEXT_EXTRACT_LANE_SQL)
+        beat = cur.fetchone()
+
+    warn_h = thresholds["text_extraction_lag_warn_hours"]
+    fail_h = thresholds["text_extraction_lag_fail_hours"]
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    status = "ok"
+    worst = 0.0
+    waiting_total = 0
+    for source, waiting, oldest_hours, median_hours in rows:
+        oldest = float(oldest_hours or 0.0)
+        waiting_total += int(waiting)
+        per_source[source] = {
+            "waiting": int(waiting),
+            "oldest_hours": round(oldest, 2),
+            "median_hours": round(float(median_hours or 0.0), 2),
+        }
+        worst = max(worst, oldest)
+        if oldest >= fail_h:
+            status = "fail"
+            offenders.append(f"{source} {oldest:.1f}h ({waiting} waiting)")
+        elif oldest >= warn_h:
+            if status != "fail":
+                status = "warn"
+            offenders.append(f"{source} {oldest:.1f}h ({waiting} waiting)")
+
+    # The wedge arm, and the one the thresholds cannot see: rows ARE eligible and the lane
+    # is claiming none of them. Either it never registered (the estimation lane's fate —
+    # absent from the heartbeat entirely, therefore invisible to every other monitor) or
+    # it is running and selecting nothing, which is the 2026-07 outage exactly.
+    lane = beat[0] if beat else None
+    lane_last = (lane or {}).get("last") or {}
+    claimed = int(lane_last.get("claimed") or 0)
+    # `claimed` is the LAST pass only, and bazos arrives in bursts (1,940 rows a day over
+    # ~147 distinct minutes), so a great many healthy 5-minute passes legitimately claim
+    # nothing. Reading that as a wedge would make this a false-red generator — the exact
+    # thing this file's docstring says it is here to replace. The durable form of the same
+    # signal is the OLDEST eligible row: a lane that is claiming will always have taken
+    # everything older than a few of its own intervals.
+    wedged = waiting_total > 0 and (
+        lane is None or (claimed == 0 and worst > _TEXT_EXTRACT_WEDGE_HOURS))
+    if wedged:
+        status = "fail"
+        offenders.append(
+            f"{waiting_total} eligible and the lane claimed "
+            + ("nothing — it is not in the heartbeat at all" if lane is None
+               else f"{claimed} on its last pass")
+        )
+
+    p99 = float(latency[1]) if latency and latency[1] is not None else None
+    if offenders:
+        message = (
+            "Prose facts are not being extracted: " + "; ".join(offenders)
+            + " — check the realtime worker's text_extract lane and OPENAI_API_KEY on "
+            "that Railway service."
+        )
+    else:
+        message = (
+            f"Text extraction healthy (oldest unread advert {worst:.1f}h across "
+            f"{len(per_source)} portal(s), {waiting_total} waiting"
+            + (f", p99 {p99:.1f} min from first_seen_at against a "
+               f"{text_lane.SLO_MINUTES} min SLO" if p99 is not None else "")
+            + ")."
+        )
+    return {
+        "check_key": "text_extraction_lag",
+        "status": status,
+        "value": round(worst, 2),
+        "details": {
+            "per_source": per_source,
+            "offenders": offenders,
+            "waiting_total": waiting_total,
+            "model": model,
+            "extractor_version": version,
+            "scope": {k: list(v) for k, v in scope.items()},
+            "lane_last": lane_last or None,
+            "beat_age_minutes": round(float(beat[1]), 1) if beat and beat[1] else None,
+            # Reported, never a threshold of its own — the lag arms above are what ring.
+            "p99_minutes_from_first_seen": round(p99, 1) if p99 is not None else None,
+            "slo_minutes": text_lane.SLO_MINUTES,
+            "extractions_24h": int(latency[0]) if latency else 0,
+        },
         "message": message,
     }
 
@@ -2259,6 +2522,115 @@ def check_walk_coverage(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]
         "value": round(worst * 100, 2),
         "details": {"per_source": per_source, "offenders": offenders,
                     "unverified": sorted(unverified)},
+        "message": message,
+    }
+
+
+# --- what every portal STATES vs what we STORED (field capture W1) ----------
+#
+# `data_quality_by_source` tests 26 fields for IS NOT NULL and nothing else, so it
+# cannot see the defect class this program exists to fix: a value that is present and
+# outside every canonical option list (13 live `condition` spellings against a filter
+# list of 6), or a cell that has read 0.0% since the parser was written because it
+# reads a key the portal never emits (remax `balkon`, ceskereality `vybavení`). This
+# check measures BOTH halves per (source, field), against a blessed baseline in
+# `data/field_capture/` rather than against a threshold tuned per cell.
+#
+# The two instruments read the SAME cohort (every active row) on purpose, so they can
+# never report two different fill rates for one cell. Who owns what: the view keeps the
+# seven probes with no `listings` column of their own (`geom`, `locality`, `street`,
+# `property_grouped`, the two condition levels, `source_url`); this check owns the 26
+# LISTING_COLUMNS attributes; the 19 they share are the view's to lose in a later wave.
+#
+# It carries no `pipeline_check_thresholds` entries on purpose: its numbers are sized
+# against the measured drift of that cohort (the arithmetic is in `scraper.field_census`),
+# and the field-capture program adds no settings.
+
+
+def check_field_fill_matrix(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Per (source, field): did fill COLLAPSE, or did off-canon validity get WORSE?
+
+    Both arms are relative to the blessed baseline, never to an absolute floor, because
+    a floor cannot see either live shape: a cell that is legitimately 0% (remax has no
+    balcony key to read) or a partial break (ceskereality's `furnished` key mismatch
+    would sit at ~2.5%, not 0%). The baseline records today's zeros and today's off-canon
+    values as KNOWN, so day one is green and still says them out loud.
+
+    A blessed cell the live matrix no longer produces is an offender of its own — the
+    denominator arm the ppm2 checks learned to carry, because the spine comes from
+    `portals.is_enabled` and from a source HAVING active rows, so the loudest possible
+    failure (a portal stops writing everything) would otherwise subtract itself from the
+    measurement and read as health.
+
+    Third arm, free of SQL: the checked-in per-portal key census going stale. A portal
+    that renames a key leaves the census — and every contract gate W2 will build on it —
+    agreeing with itself about a key space that no longer exists. That is a warn here,
+    deliberately not a CI test: a test keyed on the calendar reds `main` on a date rather
+    than on a defect."""
+    now = _dt.datetime.now(_dt.timezone.utc)
+    rows = _fetchall(conn, field_census.FIELD_MATRIX_SQL)
+    live = field_census.reduce_matrix(rows, generated_at=now)
+    baseline = field_census.load_baseline()
+    fails, warns = field_census.compare_to_baseline(
+        live, baseline, inert=attribute_contract.inert_cells())
+    stale = field_census.stale_censuses(field_census.load_censuses(), now=now)
+    zero_fill = field_census.zero_fill_cells(live)
+    never_false = field_census.booleans_never_false(live)
+    measured, blessed = len(live["cells"]), len(baseline.get("cells") or {})
+    # Which of the live zeros are KNOWN comes from the attribute contract's gap marker
+    # and nowhere else — one declaration, not a baseline flag saying the same thing in a
+    # second place. A zero whose cell still claims a producer is the loud case: the
+    # portal states the fact, the contract says we read it, and nothing arrives.
+    gaps = attribute_contract.known_gaps()
+    undeclared = sorted(key for key in zero_fill if key not in gaps)
+
+    status = "fail" if fails else ("warn" if warns or stale or undeclared else "ok")
+    if fails or warns:
+        message = (
+            f"{len(fails) + len(warns)} (source, field) cell(s) moved against the blessed "
+            f"baseline ({measured} measured of {blessed} blessed): "
+            + "; ".join((fails + warns)[:6])
+            + f" — re-bless with `{field_census.BLESS_COMMAND}` only once the move is "
+            "confirmed to be a fix, not a regression."
+        )
+    elif stale or undeclared:
+        notes = list(stale)
+        if undeclared:
+            notes.append(
+                f"{len(undeclared)} zero-fill cell(s) whose contract cell still claims a "
+                f"live producer ({', '.join(undeclared[:4])})"
+            )
+        message = (
+            "Fill and validity are stable, but: " + "; ".join(notes)
+            + f" — a stale census is re-run with `{field_census.BLESS_COMMAND}`; an "
+            "undeclared zero is a cell that should be filling and is not."
+        )
+    else:
+        message = (
+            f"Fill and validity stable across {measured} of {blessed} blessed "
+            f"(source, field) cells. {len(zero_fill)} cell(s) carry no value at all and "
+            f"{len(never_false)} boolean cell(s) have never been written false — both "
+            "recorded, neither judged: which of them is a gap needs W2's contract."
+        )
+    return {
+        "check_key": "field_fill_matrix",
+        "status": status,
+        "value": len(fails) + len(warns),
+        "details": {
+            "offenders": fails + warns,
+            "stale_census": stale,
+            "cells_measured": measured,
+            "cells_blessed": blessed,
+            # The wave's whole point, reported every run until a contract claims them.
+            # Both lists are LIVE, so a cell a later wave repairs stops being named.
+            "zero_fill_cells": zero_fill,
+            # Split by the contract, so "W4 will wire it" and "this should be filling
+            # and is not" stop reading the same.
+            "zero_fill_known_gaps": {k: gaps[k] for k in zero_fill if k in gaps},
+            "zero_fill_undeclared": undeclared,
+            "booleans_never_false": never_false,
+            "baseline_generated_at": baseline.get("generated_at"),
+        },
         "message": message,
     }
 
@@ -3033,13 +3405,12 @@ def check_sreality_image_template(conn: Any, thresholds: dict[str, Any]) -> dict
 
 
 _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
-    # FIRST, and the position is the point: the lane runs _CHECKS in order under a 120 s
-    # budget and stamps whatever it did not reach `not_run` (2026-09-11 21:02 lost the last
+    # FIRST, and the position is the point: a lane runs _CHECKS in order under its budget
+    # and stamps whatever it did not reach `not_run` (2026-09-11 21:02 lost the last
     # seven, this one among them). The invariant the location programme is measured by must
     # never be the measurement a slower check starves — and it is one indexed join.
     ("location_town_coverage", check_location_town_coverage),
     ("llm_errors", check_llm_errors),
-    ("llm_liveness", check_llm_liveness),
     ("llm_burn_rate", check_llm_burn_rate),
     ("long_open_transaction", check_long_open_transaction),
     ("db_saturation", check_db_saturation),
@@ -3067,6 +3438,26 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # Portal-URL contract: absolute count of active rows with no page URL. 6h lane +
     # in-app bell; not in the hourly --only list (ship, soak, then promote).
     ("outbound_url_coverage", check_outbound_url_coverage),
+    # The other ingest checks ask whether rows ARRIVE; this one asks whether their fields
+    # are filled and in-vocabulary. Third to last deliberately: at ~12s over the whole
+    # active stock it is one of the lane's two expensive DB checks, so it queues behind
+    # the cheap ones rather than spending their budget. 6h lane + in-app bell; not in
+    # llm_health.yml's hourly --only list (ship, soak, promote — the ppm2 ladder).
+    ("field_fill_matrix", check_field_fill_matrix),
+    # `acquisition_lag`'s twin one layer later — "did the row arrive" vs "was its prose
+    # ever read" — but registered HERE rather than beside it: once a gate is open the
+    # eligibility predicate as an aggregate over the whole eligible stock measured
+    # 9.4-10.0 s on 2026-09-22, which is field_fill_matrix's class, not acquisition_lag's
+    # indexed one. (With every gate closed it returns before it queries at all.) 6h lane +
+    # in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).
+    ("text_extraction_lag", check_text_extraction_lag),
+    # The last DB check, and the most expensive one in the lane (11-35 s measured): a
+    # cross-portal self-join over every active byt row. It asks the question no fill or
+    # validity measure can — whether a populated, plausible integer is on the RIGHT SCALE.
+    # 6h lane + in-app bell; not in llm_health.yml's hourly --only list (ship, soak,
+    # promote — the ppm2 ladder). It reads RED until W8's heal has run on all six
+    # ground=1 portals; that is the gate, not a regression.
+    ("floor_convention", check_floor_convention),
     # LAST deliberately: the only check that makes an outbound request, so if the
     # lane budget runs out it is the one that goes unrun, never a DB check. 6h lane
     # + in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).
@@ -3231,7 +3622,7 @@ def main() -> int:
                              "-week health heartbeat (idempotent: the workflow appends "
                              "this to all four of Monday's runs).")
     parser.add_argument("--only", default="",
-                        help="Comma-separated check keys to run (e.g. 'llm_errors,llm_liveness' "
+                        help="Comma-separated check keys to run (e.g. 'llm_errors,llm_burn_rate' "
                              "for the hourly LLM lane). Empty = all checks.")
     parser.add_argument("--exit-nonzero-on-fail", action="store_true",
                         help="Exit 1 if any run check is 'fail' — so the hourly LLM lane's "
@@ -3294,7 +3685,9 @@ def main() -> int:
                 counts[kind] += emitted[kind]
 
         results = run_checks(
-            conn, thresholds, weekly=args.weekly, only=only, on_result=_persist)
+            conn, thresholds, weekly=args.weekly, only=only, on_result=_persist,
+            lane_budget_s=(
+                _LANE_BUDGET_S if only else full_lane_budget_s(weekly=args.weekly)))
         if args.dry_run:
             LOG.info("dry-run: %d checks computed, no rows written", len(results))
             return 0

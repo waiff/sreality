@@ -174,9 +174,15 @@ def test_extractor_id_prefixes_are_portal_unique_and_permanent():
 def test_every_entry_states_both_axes_and_a_canonical_claim_type():
     """00 §3.2: `locator_kind` IS the surface and `extraction_method` is a separate,
     mandatory field — an html_selector locator can be html_selector_parse, breadcrumb_parse
-    or map_widget_parse. The claim type is one of the ELEVEN (rule 25 / W1-c): a type
-    outside them is a claim no resolver reads."""
-    assert len(CLAIM_TYPES) == 11
+    or map_widget_parse. The claim type is one of the TWELVE (rule 25 / W1-c): a type
+    outside them is a claim no resolver reads.
+
+    Eleven until FIELD CAPTURE W9. The count is asserted, not just membership, because the
+    rule is a CEILING and the only legitimate way past it is the one `address_point_id`
+    took: a type `resolver/bind.py` demonstrably reads — R0, base score 100 — that W1-c cut
+    as collateral when bezrealitky@1 slimmed. `contracts.CLAIM_TYPES` carries that
+    reasoning; a thirteenth needs the same evidence, not just an edit here."""
+    assert len(CLAIM_TYPES) == 12
     for contract in _all().values():
         for entry in contract.entries:
             assert entry.claim_type in CLAIM_TYPES, entry.entry_id

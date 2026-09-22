@@ -80,16 +80,22 @@ one definition, computed where it is read.
 5. nothing → NULL. A CZ row with no town is the red line rule 25 measures; it renders as an em-dash,
    never as a bare "CZ".
 
-**Precision is DRAWN, not described** (W3-3). `browse_projection` and `listing_feed_public` also
-publish `granularity_rank` (the INT from `location_granularity_rank` — the SPA compares numbers,
-never enum text) and `uncertainty_radius_m`. In point mode the Browse map draws a translucent
-true-metre circle of that radius under any pin **below building level** (rank < 90); at or above it
-the pin is the building and stands alone. Clusters and server-side grid cells carry no per-pin
-identity or radius, so there is no per-pin circle above the point budget. The DRAWN radius is
-capped at **2 km** (`MAX_DRAWN_CIRCLE_RADIUS_M`, `frontend/src/lib/uncertaintyCircle.ts`) — the
-coarse rungs carry radii of a different order (okres ~25 km, kraj ~60 km, unknown ~250 km) and a
-screen of 25 km discs is a wash of colour with a moving clipped arc on pan. The cap is display
-only: the true radius rides on every feature and is what any measurement reads.
+**Precision is DRAWN, not described** (W3-3, revised 2026-09-22). `browse_projection` and
+`listing_feed_public` also publish `granularity_rank` (the INT from `location_granularity_rank` —
+the SPA compares numbers, never enum text) and `uncertainty_radius_m`. In point mode the Browse map
+draws a pin **at building level or better** (rank ≥ 90) as a solid dot — the pin is the building —
+and every other pin, unresolved included, as an open ring; a legend under the count names both
+faces with their counts. The true-metre circle of `uncertainty_radius_m` is drawn for **one pin
+only: the one whose popup is open**, and the popup prints the rung and the true radius in words
+("Přibližná poloha: obec, ±1 km"). W3-3 first drew that circle under every pin below building
+level, all the time; with ~87 % of active pins below it (street 300 m, část obce 750 m, obec 1 km)
+the map became stacked discs with pins and prices buried underneath, and the operator called it
+unusable. Clusters and server-side grid cells carry no per-pin identity or radius, so none of this
+applies above the point budget. The DRAWN radius is capped at **2 km** (`MAX_DRAWN_CIRCLE_RADIUS_M`,
+`frontend/src/lib/uncertaintyCircle.ts`) — the coarse rungs carry radii of a different order
+(okres ~25 km, kraj ~60 km, unknown ~250 km) and a 25 km disc is a wash of colour with a moving
+clipped arc on pan. The cap is display only: the true radius rides on every feature and is what the
+popup and any measurement read.
 
 **Country and self-disagreement.** `country_status` (NOT NULL: `cz` | `foreign` | `disputed` |
 `undetermined`) — foreign is a DETERMINATION the resolver makes, never a default for "no town

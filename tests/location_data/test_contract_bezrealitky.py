@@ -35,7 +35,7 @@ from tests.location_data import claim_intake_fixtures as fx
 _ROOT = Path(__file__).resolve().parents[2]
 _CONTRACT = _ROOT / "contracts" / "portals" / "bezrealitky.yaml"
 
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 4
 
 # The town entry. Named here rather than derived, because "which entry carries the town"
 # is the one fact rule 25 makes mandatory — deriving it from the file would let a rename
@@ -54,6 +54,7 @@ ENTRIES: dict[str, str] = {
     "bzr.det.house_number_co": "house_number_co",
     "bzr.det.zip": "psc",
     "bzr.det.country": "country",
+    "bzr.det.ruian_id": "address_point_id",
 }
 
 # One assertion per entry over the committed advert payload. `value_text` for the text
@@ -66,6 +67,9 @@ EXPECTED: dict[str, tuple[str, str]] = {
     "bzr.det.house_number_cp": ("value_text", "655"),
     "bzr.det.house_number_co": ("value_text", "31"),
     "bzr.det.zip": ("value_text", "15400"),
+    # @4: the register key itself, bare. The rung that reads it (`bind`'s R0) parses it
+    # with `int()`, so "the value is the digits and nothing else" is the assertion.
+    "bzr.det.ruian_id": ("value_text", "22698884"),
 }
 
 # The prior each entry keeps from bezrealitky@1 (W1-c R3: `prior:` survives the slim, the
@@ -76,6 +80,8 @@ PRIORS: dict[str, dict[str, str]] = {
     "bzr.det.city_district": {"granularity": "cast_obce_or_quarter"},
     "bzr.det.street": {"granularity": "street"},
     "bzr.det.country": {"granularity": "country"},
+    "bzr.det.ruian_id": {"granularity": "address_point",
+                         "position_source": "registry_point"},
 }
 
 # The advert as the LIVE detail query returns it: `addressInput`, not the recon-era
@@ -199,6 +205,25 @@ def test_the_coordinate_entry_declares_its_cap_and_bbox_guard(
     assert pin.precision_map["precision_cap"] == {
         "granularity_max": "address_point", "position_source_max": "portal_pin"}
     assert "reject_outside_cz_bbox" in pin.guards
+
+
+def test_the_ruian_entry_feeds_r0_as_a_BARE_integer_key(
+        contract: contracts.PortalContract, claims: dict[str, list[Claim]]) -> None:
+    """@4, FIELD CAPTURE W9 — the one entry the resolver's top rung was waiting for.
+
+    `resolver.bind` R0 does `_as_int(claim.value_text)` and looks the result up in
+    `ruian_address_points.kod_adm`. Everything asserted here is a precondition of that one
+    line: the value is digits and nothing else (so `namespaced_id`, which decorates a
+    portal id precisely so it can never be queried across portals, would break it — and
+    this is the national register's id, not the portal's), no transform rewrites it, and
+    it is this portal's only `address_point_id` carrier.
+    """
+    entry = next(e for e in contract.entries if e.claim_type == "address_point_id")
+    assert entry.entry_id == "bzr.det.ruian_id"
+    assert entry.locator == {"reader": "scalar", "json_pointer": "/ruianId"}
+    assert entry.transform == [] and entry.guards == []
+    value = claims["bzr.det.ruian_id"][0].value_text
+    assert value.isdigit() and int(value) == 22698884
 
 
 @pytest.mark.parametrize("entry_id", list(EXPECTED))

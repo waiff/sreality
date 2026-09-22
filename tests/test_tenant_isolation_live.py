@@ -180,6 +180,11 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     "autodedup.resolve_queue",
     "autodedup.scan_cursor",
     "autodedup.judge_queue",
+    # The sold-transaction fetch ledger (migration 542): fetched only where some account
+    # holds a live deal-pipeline card, so its obec set is a projection of tenant state,
+    # not market data. NO `_public` view; the ONE reader is `sold_coverage` below.
+    # MIRRORS tests/test_migration_rls_grants.py::_ADMIN_ONLY_RELATIONS.
+    "sold_transaction_fetches",
 ]
 
 # Relations that read the above but are legitimately reachable without the gate.
@@ -213,6 +218,13 @@ _ADMIN_GATE_ALLOWLIST: list[str] = [
     # fails the moment either browser role gains SELECT on it. Do not delete that rail
     # without deleting this entry.
     "llm_cost_hour_union",
+    # sold_coverage (migration 545) reads sold_transaction_fetches and IS executable by
+    # `authenticated`, deliberately and without the admin gate: the operator's own
+    # listing page has to be able to say when we last looked here. It is narrow by
+    # construction — SECURITY DEFINER, a point in, four facts about the ONE municipality
+    # containing that point out. It never returns a cell list, a bbox, our `error` text
+    # or `pages`, so it cannot be walked to enumerate which towns are being worked.
+    "sold_coverage",
 ]
 
 # The 20 user-state tables migrations 290-294 (+ entitlements 298, property_dismissals

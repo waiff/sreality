@@ -13,17 +13,21 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 
 import Pipeline, { planMove } from './Pipeline';
-import type { PipelineBoardCard, PipelineStage } from '@/lib/types';
+import type { Collection, PipelineBoardCard, PipelineStage } from '@/lib/types';
 import * as api from '@/lib/api';
 import * as queries from '@/lib/queries';
 import * as brokersApi from '@/lib/brokers';
 
+/* Every read the page makes has to be named here: the factories spread the
+   real module, so an unnamed one runs for real and fails SOFT (request()
+   throws on an unset VITE_API_BASE_URL) — a green suite proving nothing. */
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
   return {
     ...actual,
     movePipelineCard: vi.fn(),
     removePipelineCard: vi.fn(),
+    listCollections: vi.fn(),
   };
 });
 
@@ -34,6 +38,7 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchPipelineStages: vi.fn(),
     fetchPipelineBoard: vi.fn(),
     fetchListingCovers: vi.fn(),
+    fetchPropertyCollectionMemberSet: vi.fn(),
   };
 });
 
@@ -151,6 +156,21 @@ const CARD_INACTIVE: PipelineBoardCard = {
   is_active: false,
 };
 
+const collection = (id: number, name: string): Collection => ({
+  id,
+  name,
+  description: null,
+  created_at: '2026-05-01T00:00:00Z',
+  updated_at: '2026-05-01T00:00:00Z',
+  listing_count: 1,
+  monitoring_enabled: false,
+  notify_channels: [],
+  is_system: false,
+});
+
+// Šortlist holds a board property; Archiv holds none — only the first earns a chip.
+const COLLECTIONS = [collection(7, 'Šortlist'), collection(8, 'Archiv')];
+
 describe('planMove', () => {
   it('resolves a cross-column drop into a stage move', () => {
     expect(planMove('card:42', 'stage:3', CARDS)).toEqual({
@@ -210,6 +230,11 @@ describe('<Pipeline> board', () => {
     vi.mocked(brokersApi.fetchListingBrokersByIds).mockResolvedValue(
       new Map([[111, listingBroker(false)]]),
     );
+    vi.mocked(api.listCollections).mockResolvedValue({
+      data: COLLECTIONS,
+      total: COLLECTIONS.length,
+    });
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(new Map());
   });
 
   /* The card-size switch. jsdom lays nothing out, so what is pinned here is
@@ -220,25 +245,51 @@ describe('<Pipeline> board', () => {
   it('restyles the board and remembers the card size', async () => {
     renderBoard();
     await screen.findByLabelText('Přetáhnout kartu do jiné fáze');
-    const column = () => document.querySelector('ul')?.parentElement;
+    const column = () => screen.getByRole('list', { name: 'Zájem' });
+    /* The header sits in its own pinned row, apart from its column, so the
+       two only line up while they carry the same width at every size. */
+    const header = () => screen.getByText('Zájem').parentElement;
     /* The cover read is mocked empty, so every card draws the placeholder
        frame — which carries exactly the geometry the photo would. */
     const thumb = () => document.querySelector('ul li div[aria-hidden]');
 
-    expect(column()?.className).toContain('w-72');
+    expect(column().className).toContain('w-72');
+    expect(header()?.className).toContain('w-72');
     expect(thumb()?.className).toContain('h-12 w-12');
 
     fireEvent.click(screen.getByRole('button', { name: 'Velké' }));
-    expect(column()?.className).toContain('w-[26rem]');
+    expect(column().className).toContain('w-[26rem]');
+    expect(header()?.className).toContain('w-[26rem]');
     /* lg is a different card design, not a scaled one: the photo spans the
        card instead of sitting in a fixed square beside the text. */
     expect(thumb()?.className).toContain('aspect-[16/10]');
     expect(localStorage.getItem('sreality.pipeline.cardSize')).toBe('lg');
 
     fireEvent.click(screen.getByRole('button', { name: 'Střední' }));
-    expect(column()?.className).toContain('w-[24rem]');
+    expect(column().className).toContain('w-[24rem]');
+    expect(header()?.className).toContain('w-[24rem]');
     expect(thumb()?.className).toContain('h-24 w-24');
     expect(localStorage.getItem('sreality.pipeline.cardSize')).toBe('md');
+  });
+
+  /* jsdom lays nothing out, so the pin itself was checked in a real browser;
+     what this holds is the wiring. The header row must sit OUTSIDE the
+     sideways scroller (inside it, `sticky` pins to the scroller, never the
+     page), which means it has to be carried along by hand when the columns
+     scroll. */
+  it('pins the stage headers above the columns and scrolls them together', async () => {
+    renderBoard();
+    const headerRow = (await screen.findByText('Zájem')).parentElement!.parentElement!;
+    const columns = screen.getByRole('list', { name: 'Zájem' }).parentElement!;
+
+    expect(headerRow.className).toContain('sticky');
+    expect(columns.contains(headerRow)).toBe(false);
+    expect(headerRow).toHaveTextContent('Nabídka');
+
+    Object.defineProperty(headerRow, 'scrollLeft', { value: 0, writable: true });
+    Object.defineProperty(columns, 'scrollLeft', { value: 240, writable: true });
+    fireEvent.scroll(columns);
+    expect(headerRow.scrollLeft).toBe(240);
   });
 
   it('renders draggable cards with a drag handle + enriched content', async () => {
@@ -267,14 +318,33 @@ describe('<Pipeline> board', () => {
 
   /* The board is a triage surface worked a column at a time, so following a
      card must not unload it — the property link opens in a NEW TAB. `rel` rides
-     along so the opened document can't reach back through `window.opener`. */
-  it('opens the property in a new tab', async () => {
+     along so the opened document can't reach back through `window.opener`.
+     The link is the address, which leads the card; the price below it is a
+     figure, not a second way in. */
+  it('opens the property in a new tab from the address line', async () => {
     renderBoard();
-    const price = await screen.findByText(/5\s*000\s*000/);
-    const link = price.closest('a');
+    const place = await screen.findByText('Sadová, Praha');
+    const link = place.closest('a');
     expect(link).toHaveAttribute('href', '/listing/sreality/111');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
+
+    const price = screen.getByText(/5\s*000\s*000/);
+    expect(price.closest('a')).toBeNull();
+    expect(
+      place.compareDocumentPosition(price) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  /* The address is the card's only link, so a property whose place never
+     resolved must still offer something to click. */
+  it('still links a card whose place is unresolved', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([
+      { ...CARDS[0], display_label: null },
+    ]);
+    renderBoard();
+    const link = (await screen.findByText('Lokalita neurčena')).closest('a');
+    expect(link).toHaveAttribute('href', '/listing/sreality/111');
   });
 
   /* The point of the split, pinned: with BOTH decoration reads hanging
@@ -375,6 +445,121 @@ describe('<Pipeline> board', () => {
       expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
     );
     expect(screen.getByText('Polní, Ostrava')).toBeInTheDocument();
+  });
+
+  /* The collection lens (rule #18): the fail-open contract, on both ways the
+     member map can be missing — in flight here, errored in the next case. */
+  it('applies no collection constraint and offers no row while membership is unresolved', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockReturnValue(
+      new Promise(() => {}),
+    );
+    renderBoard('/pipeline?collections=7');
+    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+    expect(screen.queryByText('Kolekce')).not.toBeInTheDocument();
+    // Uncounted: the header reads the plain total, and there is nothing to reset.
+    expect(screen.getByText(/nemovitostí/).textContent).toBe('2 nemovitostí');
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument();
+  });
+
+  it('applies no collection constraint when the member map errors', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockRejectedValue(new Error('403'));
+    renderBoard('/pipeline?collections=7');
+    await waitFor(() =>
+      expect(screen.getByText(/nemovitostí/).textContent).toBe('2 nemovitostí'),
+    );
+    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.queryByText('Kolekce')).not.toBeInTheDocument();
+  });
+
+  /* The row reads the member map, NOT the collections list: a selection is a
+     live constraint, so its chip renders (pressed, under a placeholder name)
+     before the list arrives — otherwise the only way out is Reset. */
+  it('offers the selected collection before the collections list resolves', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[42, [7]]]),
+    );
+    vi.mocked(api.listCollections).mockReturnValue(
+      new Promise(() => {}) as ReturnType<typeof api.listCollections>,
+    );
+    renderBoard('/pipeline?collections=7');
+    expect(await screen.findByRole('button', { name: '#7' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByText('Kolekce')).toBeInTheDocument();
+    expect(screen.getByText(/nemovitostí/).textContent).toBe('1 z 2 nemovitostí');
+  });
+
+  it('narrows the board to a collection and counts it in the header', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[42, [7]]]),
+    );
+    renderBoard();
+    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    // Only the collection with a member ON the board is offered.
+    const chip = await screen.findByRole('button', { name: 'Šortlist' });
+    expect(screen.getByText('Kolekce')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Archiv' })).not.toBeInTheDocument();
+    fireEvent.click(chip);
+    await waitFor(() =>
+      expect(screen.queryByText('Lesní, Brno')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText(/nemovitostí/).textContent).toBe('1 z 2 nemovitostí');
+  });
+
+  /* A resolved selection that matches nothing is ZERO cards, never the whole
+     board — the failure mode that makes a filter silently meaningless. */
+  it('shows no cards for a resolved collection nothing on the board is in', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[42, [7]]]),
+    );
+    renderBoard('/pipeline?collections=8');
+    await waitFor(() =>
+      expect(screen.getByText(/nemovitostí/).textContent).toBe('0 z 2 nemovitostí'),
+    );
+    expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument();
+    expect(screen.queryByText('Lesní, Brno')).not.toBeInTheDocument();
+    // Its chip renders pressed although nothing on the board is in it: a
+    // constraint you cannot see is one you can only leave through Reset.
+    expect(screen.getByRole('button', { name: 'Archiv' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  /* Stav defaults to 'any' precisely so a delisted member of a collection is
+     still in the cohort — a shortlist you can't see the dead deals in is a
+     different question than the one the operator asked. */
+  it('keeps a delisted member visible under a collection filter', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_INACTIVE]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[44, [7]]]),
+    );
+    renderBoard('/pipeline?collections=7');
+    expect(await screen.findByText('Polní, Ostrava')).toBeInTheDocument();
+    expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument();
+  });
+
+  it('clears every filter through the one header Reset', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
+    vi.mocked(queries.fetchPropertyCollectionMemberSet).mockResolvedValue(
+      new Map([[42, [7]]]),
+    );
+    renderBoard('/pipeline?cat=dum&collections=7');
+    // Type and collection disagree, so the board is empty until Reset.
+    const reset = await screen.findByRole('button', { name: 'Reset' });
+    expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument();
+    fireEvent.click(reset);
+    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument();
   });
 
   it('names the stage-manager create field by its visible words', async () => {

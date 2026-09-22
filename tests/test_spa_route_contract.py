@@ -17,6 +17,7 @@ boundary — verified by reading both emitters, not assumed:
   /listing/:source/:nativeId   api/notification_outbox.py + chrome-extension
   /listing/:sreality_id        api/notification_outbox.py
   /notifications               api/notification_outbox.py (system-health rows)
+  /collections                 chrome-extension (the save checklist's "Spravovat kolekce")
 Widening it past what actually crosses the boundary would make it a second full
 route table to maintain, which is the failure mode it exists to prevent.
 """
@@ -41,6 +42,7 @@ CROSS_TERRITORY = {
     "listingCanonical": "/listing/:source/:nativeId",
     "listingLegacy": "/listing/:sreality_id",
     "notifications": "/notifications",
+    "collections": "/collections",
 }
 
 
@@ -145,6 +147,16 @@ def test_extension_builds_the_canonical_listing_route() -> None:
     expected = re.sub(r":[A-Za-z_]\w*", ":param", CROSS_TERRITORY["listingCanonical"])
     assert shape == expected, (
         f"extension builds {shape!r} but the SPA registry declares {expected!r}"
+    )
+
+
+def test_extension_builds_the_collections_route() -> None:
+    """The save-to-collection checklist links to the app's collections page."""
+    src = EXTENSION_TS.read_text()
+    assert f"${{APP_BASE_URL}}{CROSS_TERRITORY['collections']}`" in src, (
+        "chrome-extension/src/content.ts no longer builds "
+        "${APP_BASE_URL}/collections — if the link moved, check it still matches "
+        "the SPA registry."
     )
 
 

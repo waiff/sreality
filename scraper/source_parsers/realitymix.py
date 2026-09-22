@@ -23,7 +23,10 @@ Layout notes specific to realitymix.cz (a structured server-rendered page):
   <li class="detail-information__data-item"><span>Label:</span>
   <span>Value</span></li> rows. Czech labels:
   "Dispozice bytu"/"Dispozice", "Celková podlahová plocha"/"Užitná plocha"
-  (the usable/floor area in m²), "Číslo podlaží v domě" (floor, "přízemí" → 0),
+  (the usable/floor area in m²), "Číslo podlaží v domě" — a PODLAŽÍ ordinal
+  counting the ground storey as 1, so subtract one for the `floor` field
+  ("1" → 0, "3" → 2); a spelled value wins over the number ("přízemí" → 0,
+  "suterén" → -1),
   "Druh objektu" (construction), "Stav objektu", "Vlastnictví"
   ("osobní" → osobni, "družstevní" → druzstevni), "Energetická náročnost budovy".
 - Building type values: "Cihlová" → cihla, "Panelová" → panel, "Smíšená" →

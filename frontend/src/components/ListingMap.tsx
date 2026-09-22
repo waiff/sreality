@@ -33,7 +33,12 @@ import {
 } from '@/lib/growthChoropleth';
 import HoverChart from '@/components/HoverChart';
 import { listingRowPath } from '@/lib/listingUrl';
-import { drawnUncertaintyRadiusM, uncertaintyPixelsAtZoom0 } from '@/lib/uncertaintyCircle';
+import {
+  drawnUncertaintyRadiusM,
+  isPinExact,
+  pinPrecisionLabel,
+  uncertaintyPixelsAtZoom0,
+} from '@/lib/uncertaintyCircle';
 
 const psgLayerId = (m: GrowthMetric) => `psg-${m}`;
 
@@ -146,38 +151,57 @@ const formatPriceLabel = (r: MapRow, metric: PriceMetric): string => {
   return `${czPriceCompact.format(r.price_per_m2)}\u00a0${PPM2_UNIT[basis]}`;
 };
 
-/* `uncertainty_px_z0` is PRESENT only on a pin that draws an uncertainty circle
- * (drawnUncertaintyRadiusM decides — below building level, with a radius, and
- * capped at MAX_DRAWN_CIRCLE_RADIUS_M so a kraj-grain pin does not wash out the
- * map; the true radius still rides on the feature as `uncertainty_radius_m`), which
- * is what the `point-uncertainty` layer filters on. Absent, not null: `['has']`
- * is the one filter that reads the same on both. */
-type MapFeatureProps = MapRow & { price_label: string; uncertainty_px_z0?: number };
+/* `pin_exact` picks the pin's face (lib/uncertaintyCircle.isPinExact): a solid
+ * dot for a pin placed on a building, an open ring for anything coarser. Baked
+ * per feature so the rule stays in TypeScript, where it is tested, and the paint
+ * expression only reads a boolean. */
+type MapFeatureProps = MapRow & { price_label: string; pin_exact: boolean };
 type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapFeatureProps>;
+
+/* The pin's paint, shared with the legend swatches so the two cannot drift. The
+ * basemap is not themed, so these are the map's literals, not theme tokens. */
+const PIN_COLOR = '#3c6e63';
+const PIN_RING_FILL = '#ffffff';
 
 const toFeatureCollection = (rows: MapRow[], metric: PriceMetric): FC => ({
   type: 'FeatureCollection',
-  features: rows.map((r) => {
-    const radiusM = drawnUncertaintyRadiusM(r);
-    return {
-      type: 'Feature' as const,
-      /* Stable feature id lets maplibre's setFeatureState target this
-       * point even after the source data is replaced — that's what
-       * powers the cross-source hover highlight (cards / table → map).
-       * The surrogate listing_id (never null), NOT sreality_id — a null
-       * feature id would make setFeatureState a no-op post-Gate-2. */
-      id: r.listing_id,
-      geometry: { type: 'Point' as const, coordinates: [r.lng, r.lat] },
-      properties: {
-        ...r,
-        price_label: formatPriceLabel(r, metric),
-        ...(radiusM == null
-          ? {}
-          : { uncertainty_px_z0: uncertaintyPixelsAtZoom0(radiusM, r.lat) }),
-      },
-    };
-  }),
+  features: rows.map((r) => ({
+    type: 'Feature' as const,
+    /* Stable feature id lets maplibre's setFeatureState target this
+     * point even after the source data is replaced — that's what
+     * powers the cross-source hover highlight (cards / table → map).
+     * The surrogate listing_id (never null), NOT sreality_id — a null
+     * feature id would make setFeatureState a no-op post-Gate-2. */
+    id: r.listing_id,
+    geometry: { type: 'Point' as const, coordinates: [r.lng, r.lat] },
+    properties: {
+      ...r,
+      price_label: formatPriceLabel(r, metric),
+      pin_exact: isPinExact(r),
+    },
+  })),
 });
+
+/* The one uncertainty circle on the map: the pin whose popup is open. Empty
+ * otherwise — including for a pin with no circle to draw (building level, or
+ * unresolved), whose popup says why in words. */
+const pinPrecisionArea = (
+  row: MapRow | null,
+  at: [number, number] | null,
+): GeoJSON.FeatureCollection<GeoJSON.Point, { px_z0: number }> => {
+  const radiusM = row ? drawnUncertaintyRadiusM(row) : null;
+  return {
+    type: 'FeatureCollection',
+    features:
+      radiusM == null || at == null
+        ? []
+        : [{
+            type: 'Feature',
+            geometry: { type: 'Point', coordinates: at },
+            properties: { px_z0: uncertaintyPixelsAtZoom0(radiusM, at[1]) },
+          }],
+  };
+};
 
 /* W6b — SERVER-side grid cells (migration 439), used instead of `rows` when the
  * cohort is too large to plot point-by-point. They are NOT fed to the `listings`
@@ -635,6 +659,14 @@ export default function ListingMap({
    * opens at, waits through a re-cluster of the whole cohort, and sees no
    * pixel change anywhere — a control that reads as broken. */
   const [labelsVisible, setLabelsVisible] = useState(false);
+  /* The legend's counts, over the plotted rows, by the same rule that picks each
+   * pin's face — so the legend also answers "how much of this is only roughly
+   * placed" for the whole view at once. */
+  const pinFaces = useMemo(() => {
+    let exact = 0;
+    for (const r of rows) if (isPinExact(r)) exact += 1;
+    return { exact, approx: rows.length - exact };
+  }, [rows]);
   /* Same ref trick for the hover emitter — the maplibre listeners
    * are registered once at mount and must keep reading the latest
    * callback without rebinding. */
@@ -1041,28 +1073,33 @@ export default function ListingMap({
         map.getCanvas().style.cursor = '';
       });
 
-      /* HOW PRECISE THIS PIN IS. A true-metre-radius circle under every pin the
-       * resolver placed below building level (W3-3). It is a `circle` layer, not
+      /* HOW FAR OFF THIS PIN MAY BE — for the ONE pin whose popup is open (see
+       * lib/uncertaintyCircle for why it is no longer drawn under every pin). Its
+       * own unclustered source holding zero or one point, fed by the `point`
+       * click handler and emptied when that popup closes. A `circle` layer, not
        * a polygon ring like `center-circle`: the radius interpolates on zoom with
        * an exponential base of exactly 2, which is EXACT (web-Mercator metres per
-       * pixel halve per zoom level) and costs one point per pin instead of 96.
-       * Added before `point` so the dot always sits on top of its own circle. */
+       * pixel halve per zoom level). Added before `point` so the pin always sits
+       * on top of its own circle. */
+      map.addSource('pin-precision', {
+        type: 'geojson',
+        data: pinPrecisionArea(null, null),
+      });
       map.addLayer({
-        id: 'point-uncertainty',
+        id: 'pin-precision-area',
         type: 'circle',
-        source: 'listings',
-        filter: ['all', ['!', ['has', 'point_count']], ['has', 'uncertainty_px_z0']],
+        source: 'pin-precision',
         paint: {
           'circle-radius': [
             'interpolate', ['exponential', 2], ['zoom'],
-            0, ['get', 'uncertainty_px_z0'],
-            20, ['*', ['get', 'uncertainty_px_z0'], 2 ** 20],
+            0, ['get', 'px_z0'],
+            20, ['*', ['get', 'px_z0'], 2 ** 20],
           ],
-          'circle-color': '#3c6e63',
-          'circle-opacity': 0.10,
-          'circle-stroke-color': '#3c6e63',
-          'circle-stroke-width': 0.75,
-          'circle-stroke-opacity': 0.35,
+          'circle-color': PIN_COLOR,
+          'circle-opacity': 0.08,
+          'circle-stroke-color': PIN_COLOR,
+          'circle-stroke-width': 1.5,
+          'circle-stroke-opacity': 0.6,
           /* A footprint on the ground, so it stays a circle around the pin when
              the map is pitched rather than a disc facing the camera. It is never
              a hit target: no handler binds to this layer, and listingUnderCursor
@@ -1078,26 +1115,39 @@ export default function ListingMap({
         filter: ['!', ['has', 'point_count']],
         paint: {
           /* feature-state.hovered drives the bumped radius / ochre
-           * stroke. Same paint values as the resting dot otherwise —
-           * the highlight reads as "selected", not "different kind
-           * of pin". */
+           * stroke — the highlight reads as "selected", not "different
+           * kind of pin". The kind is `pin_exact`: a solid dot for a pin
+           * placed on a building, an open ring (same size, green edge)
+           * for one placed only to a street, a quarter or a town. */
           'circle-radius': [
             'case',
             ['boolean', ['feature-state', 'hovered'], false], 8,
             5,
           ],
-          'circle-color': '#3c6e63',
+          'circle-color': [
+            'case',
+            ['boolean', ['get', 'pin_exact'], false], PIN_COLOR,
+            PIN_RING_FILL,
+          ],
           'circle-stroke-color': [
             'case',
             ['boolean', ['feature-state', 'hovered'], false], '#b58438',
-            '#ffffff',
+            ['boolean', ['get', 'pin_exact'], false], '#ffffff',
+            PIN_COLOR,
           ],
           'circle-stroke-width': [
             'case',
             ['boolean', ['feature-state', 'hovered'], false], 3,
-            1.5,
+            ['boolean', ['get', 'pin_exact'], false], 1.5,
+            2,
           ],
+          /* Stroke fades with the fill: a ring IS its stroke, so dimming only
+             the fill would leave an inactive ring looking active. */
           'circle-opacity': [
+            'case',
+            ['get', 'is_active'], 1, 0.55,
+          ],
+          'circle-stroke-opacity': [
             'case',
             ['get', 'is_active'], 1, 0.55,
           ],
@@ -1185,20 +1235,33 @@ export default function ListingMap({
         onHoverRef.current?.(null);
       });
 
+      const setPinPrecisionArea = (row: MapRow | null, at: [number, number] | null) => {
+        (map.getSource('pin-precision') as GeoJSONSource | undefined)
+          ?.setData(pinPrecisionArea(row, at));
+      };
+
       map.on('click', 'point', (e) => {
         const f = e.features?.[0];
         if (!f || f.geometry.type !== 'Point') return;
         const props = f.properties as unknown as MapRow;
+        const at = f.geometry.coordinates as [number, number];
+        /* Removing the previous popup fires its `close`, which clears the
+         * previous circle before this one is drawn. */
         popupRef.current?.remove();
-        popupRef.current = new maplibregl.Popup({
+        const popup = new maplibregl.Popup({
           closeButton: true,
           closeOnClick: true,
           maxWidth: '280px',
           className: 'listing-popup',
         })
-          .setLngLat(f.geometry.coordinates as [number, number])
-          .setHTML(popupHtml(props))
-          .addTo(map);
+          .setLngLat(at)
+          .setHTML(popupHtml(props));
+        /* The circle lives exactly as long as the popup that explains it: its
+         * ×, a click elsewhere on the map, or the next popup replacing it all
+         * end in `close`. */
+        popup.on('close', () => setPinPrecisionArea(null, null));
+        setPinPrecisionArea(props, at);
+        popupRef.current = popup.addTo(map);
       });
 
       /* Centre+radius overlay. The polygon source carries an empty
@@ -1748,73 +1811,80 @@ export default function ListingMap({
           />
         </div>
       )}
-      <div className="pointer-events-none absolute top-3 left-3 right-3 flex items-start justify-between gap-3">
-        <Pill>
-          {isLoading
-            ? 'Loading…'
-            : total == null
-              ? '—'
-              : cohortTotal != null && cohortTotal > total
-                ? `${total.toLocaleString('cs-CZ')} of ${cohortTotalApprox ? '~' : ''}${cohortTotal.toLocaleString('cs-CZ')} mapped`
-                : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
-          {capped && (
-            /* Corollary F: a surface that cannot render its whole cohort must say so IN
-             * THE COHORT'S OWN TERMS. The count above is honest about the SIZE of what is
-             * missing and silent about its KIND -- the cap is applied with no ORDER BY, so
-             * the plotted pins are whatever the index scan reached first (in practice the
-             * southernmost matches), not a spread across the cohort. Saying "capped" alone
-             * invites reading the pins as a representative sample. The number comes from
-             * MAP_CAP so the copy cannot drift from the constant it describes. */
-            <span
-              className="ml-2 text-[var(--color-ochre)]"
-              title={
-                `The ${MAP_CAP.toLocaleString('cs-CZ')}-row cap is applied without an ordering, ` +
-                'so these pins are an arbitrary slice of the cohort — geographically clustered, ' +
-                'not a sample of it. Narrow the filters to see a cohort that fits.'
-              }
-            >
-              · capped at {MAP_CAP.toLocaleString('cs-CZ')} — an arbitrary slice, not a sample
-            </span>
-          )}
-          {cells != null && (
-            /* Corollary F again, but for the OPPOSITE situation: nothing is
-             * missing here, and the operator must not read grouped bubbles as
-             * the old truncation. Every property in the cohort is counted in
-             * exactly one bubble, so this says what changed (grain) rather than
-             * apologising for a loss that did not happen. */
-            <span
-              className="ml-2 text-[var(--color-ink-2)]"
-              title={
-                'The cohort is larger than the map plots pin-by-pin, so the server grouped it '
-                + `into ${cells.length.toLocaleString('cs-CZ')} cells. Every matching property is `
-                + 'counted in exactly one of them — nothing is cut. Zoom in (the viewport is part '
-                + 'of the filter) and individual pins return once the cohort fits.'
-              }
-            >
-              · grouped into {cells.length.toLocaleString('cs-CZ')} cells — complete, zoom in for pins
-            </span>
-          )}
-          {offGrid > 0 && (
-            /* These rows ARE in `total` and are NOT drawn: their coordinates
-             * fall outside the grid extent (the data holds lng values from -118
-             * to +125). Placing them on an edge cell would invent a location. */
-            <span
-              className="ml-2 text-[var(--color-ochre)]"
-              title={
-                'These properties match the filters and carry coordinates, but those coordinates '
-                + 'fall outside the mapped extent, so they are counted and not drawn. Putting them '
-                + 'on the edge of the map would invent a location for them.'
-              }
-            >
-              · {offGrid.toLocaleString('cs-CZ')} outside the mapped extent
-            </span>
-          )}
-        </Pill>
+      {/* `right-12`, not `right-3`: createMap's zoom buttons own the top-right
+          corner, and at right-3 they sat on top of "Show all". The legend rides
+          in the count's row and wraps under it only when the map is too narrow,
+          so it does not add a second band of chrome over the pins. */}
+      <div className="pointer-events-none absolute top-3 left-3 right-12 flex items-start justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Pill>
+            {isLoading
+              ? 'Loading…'
+              : total == null
+                ? '—'
+                : cohortTotal != null && cohortTotal > total
+                  ? `${total.toLocaleString('cs-CZ')} of ${cohortTotalApprox ? '~' : ''}${cohortTotal.toLocaleString('cs-CZ')} mapped`
+                  : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
+            {capped && (
+              /* Corollary F: a surface that cannot render its whole cohort must say so IN
+               * THE COHORT'S OWN TERMS. The count above is honest about the SIZE of what is
+               * missing and silent about its KIND -- the cap is applied with no ORDER BY, so
+               * the plotted pins are whatever the index scan reached first (in practice the
+               * southernmost matches), not a spread across the cohort. Saying "capped" alone
+               * invites reading the pins as a representative sample. The number comes from
+               * MAP_CAP so the copy cannot drift from the constant it describes. */
+              <span
+                className="ml-2 text-[var(--color-ochre)]"
+                title={
+                  `The ${MAP_CAP.toLocaleString('cs-CZ')}-row cap is applied without an ordering, ` +
+                  'so these pins are an arbitrary slice of the cohort — geographically clustered, ' +
+                  'not a sample of it. Narrow the filters to see a cohort that fits.'
+                }
+              >
+                · capped at {MAP_CAP.toLocaleString('cs-CZ')} — an arbitrary slice, not a sample
+              </span>
+            )}
+            {cells != null && (
+              /* Corollary F again, but for the OPPOSITE situation: nothing is
+               * missing here, and the operator must not read grouped bubbles as
+               * the old truncation. Every property in the cohort is counted in
+               * exactly one bubble, so this says what changed (grain) rather than
+               * apologising for a loss that did not happen. */
+              <span
+                className="ml-2 text-[var(--color-ink-2)]"
+                title={
+                  'The cohort is larger than the map plots pin-by-pin, so the server grouped it '
+                  + `into ${cells.length.toLocaleString('cs-CZ')} cells. Every matching property is `
+                  + 'counted in exactly one of them — nothing is cut. Zoom in (the viewport is part '
+                  + 'of the filter) and individual pins return once the cohort fits.'
+                }
+              >
+                · grouped into {cells.length.toLocaleString('cs-CZ')} cells — complete, zoom in for pins
+              </span>
+            )}
+            {offGrid > 0 && (
+              /* These rows ARE in `total` and are NOT drawn: their coordinates
+               * fall outside the grid extent (the data holds lng values from -118
+               * to +125). Placing them on an edge cell would invent a location. */
+              <span
+                className="ml-2 text-[var(--color-ochre)]"
+                title={
+                  'These properties match the filters and carry coordinates, but those coordinates '
+                  + 'fall outside the mapped extent, so they are counted and not drawn. Putting them '
+                  + 'on the edge of the map would invent a location for them.'
+                }
+              >
+                · {offGrid.toLocaleString('cs-CZ')} outside the mapped extent
+              </span>
+            )}
+          </Pill>
+          {rows.length > 0 && <PinPrecisionLegend exact={pinFaces.exact} approx={pinFaces.approx} />}
+        </div>
         {bounds && (
           <button
             type="button"
             onClick={resetView}
-            className="pointer-events-auto inline-flex items-center gap-1 px-2 py-1 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] transition-colors"
+            className="pointer-events-auto shrink-0 whitespace-nowrap inline-flex items-center gap-1 px-2 py-1 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] transition-colors"
             title="Clear the map area filter"
           >
             Show all
@@ -2240,6 +2310,45 @@ function Pill({ children }: { children: React.ReactNode }) {
   );
 }
 
+/* The key to the pin's two faces. Without it the ring is a code nobody was told;
+ * the tooltip also says where the circle went — onto the pin you click. */
+function PinPrecisionLegend({ exact, approx }: { exact: number; approx: number }) {
+  return (
+    <span
+      className="pointer-events-auto inline-flex flex-wrap items-center gap-x-3 gap-y-0.5 px-2.5 py-1 text-[0.7rem] rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] text-[var(--color-ink-3)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] tabular-nums cursor-help"
+      title={
+        'Plný bod: poloha ověřená na budovu nebo adresu. Kroužek: poloha jen přibližná '
+        + '(ulice, část obce, obec…). Klikněte na pin: mapa ukáže okruh, ve kterém '
+        + 'nemovitost leží, a popisek řekne, jak je velký.'
+      }
+    >
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+        <PinSwatch exact />
+        Přesná poloha <span className="text-[var(--color-ink-2)]">{exact.toLocaleString('cs-CZ')}</span>
+      </span>
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+        <PinSwatch exact={false} />
+        Přibližná <span className="text-[var(--color-ink-2)]">{approx.toLocaleString('cs-CZ')}</span>
+      </span>
+    </span>
+  );
+}
+
+/* The pin in miniature, from the same paint constants as the `point` layer. */
+function PinSwatch({ exact }: { exact: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+      style={
+        exact
+          ? { background: PIN_COLOR, boxShadow: `0 0 0 1.5px ${PIN_RING_FILL}` }
+          : { background: PIN_RING_FILL, border: `2px solid ${PIN_COLOR}` }
+      }
+    />
+  );
+}
+
 function popupHtml(r: MapRow): string {
   const price = fmtCzk(r.price_czk);
   /* The popup has room, so it says what the m² MEASURES: a pozemek's area_m2 is
@@ -2255,6 +2364,11 @@ function popupHtml(r: MapRow): string {
   /* The ONE label (migration 503). `lp-district` stays the style hook -- it is a
    * class name in globals.css, not a claim about what the string is. */
   const place = r.display_label ?? '';
+  /* Directly under the place it qualifies: "Nádražní 12, Hradec Králové" and
+   * "Přibližná poloha: obec, ±1 km" are one statement. It names the radius the
+   * circle drawn behind this popup shows, and the TRUE one where that circle is
+   * capped. */
+  const precision = pinPrecisionLabel(r);
   const seen = fmtRelative(r.last_seen_at);
   const seenAbs = fmtAbsolute(r.last_seen_at);
   const inactive = !r.is_active;
@@ -2271,6 +2385,7 @@ function popupHtml(r: MapRow): string {
         ${ppm === '—' ? '' : `<span class="lp-sep">·</span><span class="lp-mono">${escape(ppm)}</span>`}
       </p>
       ${place ? `<p class="lp-district">${escape(place)}</p>` : ''}
+      <p class="lp-precision">${escape(precision)}</p>
       <p class="lp-seen" title="${escape(seenAbs)}">last seen ${escape(seen)}</p>
       <a href="${listingRowPath(r)}" class="lp-link">View details →</a>
     </div>

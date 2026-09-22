@@ -110,6 +110,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from scraper import db
+from toolkit.browse_read_model import sync_browse_list
 
 LOG = logging.getLogger("recompute_property_stats")
 
@@ -182,52 +183,67 @@ _RECOMPUTE_BATCH_SQL = """
       JOIN batch b ON b.id = l.property_id
       GROUP BY l.property_id
     ),
-    -- GOLDEN RECORD (field-level survivorship). Amenity booleans use bool_or =
-    -- three-valued OR-union (any reliable TRUE wins; else any explicit FALSE; else
-    -- NULL) — the right rule because a portal that simply doesn't parse an amenity
-    -- leaves it NULL, which the MF calc reads as "absent"; presence-wins recovers
-    -- it from a sibling that did parse it (validated: of cross-child lift
-    -- disagreements only ~2 percent are true-vs-false, the rest NULL-vs-known).
-    -- (Keep a literal percent sign out of this comment: psycopg parses the whole
-    -- query string for placeholders on every parameterized execute, so a stray
-    -- one raises ProgrammingError — see tests/test_sql_placeholders.py.) Scalars
-    -- take the best NON-NULL value in source-trust order via
-    -- (array_agg(x ORDER BY rank) FILTER (WHERE x IS NOT NULL))[1].
+    -- GOLDEN RECORD (field-level survivorship): ONE rule for every field — the best
+    -- NON-NULL value in source-trust order, (array_agg(x ORDER BY rank) FILTER (WHERE x
+    -- IS NOT NULL))[1]. The amenity booleans used to be a second rule, bool_or, whose
+    -- stated reason was that a portal which simply does not parse an amenity leaves it
+    -- NULL and a sibling that did parse it should recover the fact. Best-non-null
+    -- recovers it identically — it skips NULLs too — so the two rules differ ONLY where
+    -- children disagree true-vs-false, and there presence-wins let the LEAST trusted
+    -- child decide: a bazos text guess beat sreality's stated false. W6/R3: provenance is
+    -- the contract row and rank is source_trust_rank, so the arbiter must be the same one
+    -- at both grains. The order ends on k.id (the surrogate, never NULL) because
+    -- bool_or was order-independent and this is not: sreality_id is NULL on every
+    -- post-Gate-2 non-sreality row, and _touch_chunk stamps one last_seen_at across a
+    -- whole index-walk chunk, so without it two same-portal children that disagree would
+    -- decide by array_agg's unspecified order and the value could oscillate.
     golden AS (
       SELECT
         k.property_id AS pid,
-        bool_or(k.has_lift)     AS has_lift,
-        bool_or(k.has_balcony)  AS has_balcony,
-        bool_or(k.has_parking)  AS has_parking,
-        bool_or(k.terrace)      AS terrace,
-        bool_or(k.garage)       AS garage,
-        bool_or(k.cellar)       AS cellar,
+        (array_agg(k.has_lift ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
+            FILTER (WHERE k.has_lift IS NOT NULL))[1]     AS has_lift,
+        (array_agg(k.has_balcony ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
+            FILTER (WHERE k.has_balcony IS NOT NULL))[1]  AS has_balcony,
+        (array_agg(k.has_parking ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
+            FILTER (WHERE k.has_parking IS NOT NULL))[1]  AS has_parking,
+        (array_agg(k.terrace ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
+            FILTER (WHERE k.terrace IS NOT NULL))[1]      AS terrace,
+        (array_agg(k.garage ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
+            FILTER (WHERE k.garage IS NOT NULL))[1]       AS garage,
+        (array_agg(k.cellar ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
+            FILTER (WHERE k.cellar IS NOT NULL))[1]       AS cellar,
         (array_agg(k.usable_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.usable_area IS NOT NULL))[1]  AS usable_area,
         (array_agg(k.estate_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.estate_area IS NOT NULL))[1]  AS estate_area,
         (array_agg(k.garden_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.garden_area IS NOT NULL))[1]  AS garden_area,
         (array_agg(k.parking_lots ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.parking_lots IS NOT NULL))[1] AS parking_lots,
         (array_agg(k.building_type ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.building_type IS NOT NULL))[1] AS building_type,
         (array_agg(k.condition ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.condition IS NOT NULL))[1]    AS condition,
         (array_agg(k.ownership ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.ownership IS NOT NULL))[1]    AS ownership,
         (array_agg(k.furnished ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.furnished IS NOT NULL))[1]    AS furnished,
         (array_agg(k.energy_rating ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
             FILTER (WHERE k.energy_rating IS NOT NULL))[1] AS energy_rating
       FROM kids k
       GROUP BY k.property_id
@@ -676,6 +692,24 @@ def _drain_dirty(
             break
         ids = [int(r[0]) for r in claimed]
         _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": ids})
+        # Browse reads `browse_list`, not `properties`, and pg_cron rebuilds it
+        # wholesale only every 15 min — so without this a recompute reached Browse
+        # a measured 11.7 min later on average (94 rebuilds / 24 h: best 2.3,
+        # worst 36.6). Patching here, the one place that knows which properties
+        # just changed, puts it on this lane's own cadence instead. Ordered BEFORE
+        # the dirty delete so a crash between the two replays both.
+        # A FAST PATH, not a guarantee, and two costs worth knowing. (i) The rebuild
+        # snapshots `browse_projection` into `browse_list_next` at its START and
+        # renames at its END, so a patch committed inside that window lands on the
+        # doomed table and is superseded WITHOUT erroring (nothing logs): 283
+        # succeeded rebuilds / 72 h, mean 237 s against a 900 s cadence = in flight
+        # ~26% of wall-clock, so the seen-to-Browse gain is bimodal, not a flat
+        # ~2 min. (ii) A full slice is not free: `batch_size` defaults to 2000 (the
+        # GH cron passes exactly that) and the SELECT half alone is ~100 ms warm /
+        # ~270 ms cold over ~23k buffers, holding ROW EXCLUSIVE on `browse_list` —
+        # the one lock the rebuild's `drop table` waits behind. The live dirty depth
+        # is a couple of dozen; only a post-freeze backlog claims a full slice.
+        sync_browse_list(conn, ids)
         with conn.cursor() as cur:
             cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})
         total += len(ids)
@@ -875,7 +909,9 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """ONE incremental property-maintenance pass — THE shared implementation
     behind the GH cron (property_maintenance.yml) and the realtime worker's
     maintenance lane: attach new stragglers (skip the legacy native-id
-    backfill) + recompute the dirty set.
+    backfill) + recompute the dirty set + patch `browse_list` for exactly the
+    properties it recomputed, so a change reaches Browse on this lane's cadence
+    rather than at the next */15 wholesale rebuild.
     Serialized by the maintenance lease; a caller that
     finds the lease held returns {"skipped": True} — the concurrent pass is
     doing the same work, and the next tick is seconds away. A pass normally

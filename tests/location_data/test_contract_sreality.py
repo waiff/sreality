@@ -102,12 +102,18 @@ def test_the_entry_id_set_is_exactly_the_slim_eleven_in_order() -> None:
 
 
 def test_each_claim_type_is_declared_exactly_once_and_the_set_is_the_vocabulary() -> None:
-    """Rule 25: one entry per claim type. sreality is the portal that carries all eleven —
-    a twelfth type, or a second entry for one, is what the slim store exists to forbid."""
+    """Rule 25: one entry per claim type, and a second entry for one type is what the slim
+    store exists to forbid.
+
+    sreality carried ALL ELEVEN until FIELD CAPTURE W9 re-admitted `address_point_id` — a
+    registry key sreality does not publish and only bezrealitky does. So the subset is
+    asserted with the ONE absence named: an equality here would red this file every time
+    another portal's fact re-enters the vocabulary, which is a fleet rule and not
+    sreality's, and it is pinned in `test_claims_intake_contracts`."""
     counts = Counter(e.claim_type for e in CONTRACT.entries)
     assert [t for t, n in counts.items() if n > 1] == []
     assert {e.entry_id: e.claim_type for e in CONTRACT.entries} == CLAIM_TYPES
-    assert set(counts) == set(contracts.CLAIM_TYPES)
+    assert set(contracts.CLAIM_TYPES) - set(counts) == {"address_point_id"}
 
 
 def test_the_town_entry_is_present_and_names_a_payload_reader() -> None:

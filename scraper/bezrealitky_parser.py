@@ -10,10 +10,13 @@ straight from `gps` (precise per-listing), so no geocoding step is needed.
 
 from __future__ import annotations
 
-import re
+from functools import partial
 from typing import Any
 
+from scraper import vocabulary
 from scraper.area import derive_headline_area
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.bezrealitky_client import detail_url
 from scraper.published import iso_datetime
 from scraper.scraped_listing import ScrapedListing
@@ -40,52 +43,7 @@ ESTATE_TYPE: dict[str, str] = {
 ESTATE_SUBTYPE: dict[str, str] = {
     "KANCELAR": "kancelar",
 }
-CONSTRUCTION: dict[str, str] = {
-    "BRICK": "cihla",
-    "PANEL": "panel",
-    "MIXED": "smisena",
-    "SKELET": "skelet",
-    "STONE": "kamen",
-    "WOOD": "drevo",
-    "PREFAB": "montovana",
-}
-CONDITION: dict[str, str] = {
-    "VERY_GOOD": "velmi_dobry",
-    "GOOD": "dobry",
-    "BAD": "spatny",
-    "CONSTRUCTION": "ve_vystavbe",
-    "PROJECT": "projekt",
-    "NEW": "novostavba",
-    "DEMOLITION": "k_demolici",
-    "BEFORE_RECONSTRUCTION": "pred_rekonstrukci",
-    "AFTER_RECONSTRUCTION": "po_rekonstrukci",
-    "AFTER_PARTIAL_RECONSTRUCTION": "po_rekonstrukci",
-    "IN_RECONSTRUCTION": "v_rekonstrukci",
-}
-OWNERSHIP: dict[str, str] = {
-    "OSOBNI": "osobni",
-    "DRUZSTEVNI": "druzstevni",
-    "OBECNI": "statni",
-}
-FURNISHED: dict[str, str] = {
-    "VYBAVENY": "ano",
-    "NEVYBAVENY": "ne",
-    "CASTECNE": "castecne",
-}
 
-_DISP_RE = re.compile(r"DISP_(\d)_(KK|1|IZB)")
-
-
-def _disposition(value: str | None) -> str | None:
-    if not value:
-        return None
-    if value == "GARSONIERA":
-        return "1+kk"
-    m = _DISP_RE.fullmatch(value)
-    if not m:
-        return None
-    n, kind = m.group(1), m.group(2)
-    return f"{n}+kk" if kind == "KK" else f"{n}+1"
 
 
 def _num(value: Any) -> float | None:
@@ -109,16 +67,6 @@ def _num(value: Any) -> float | None:
 def _int(value: Any) -> int | None:
     f = _num(value)
     return int(f) if f is not None else None
-
-
-def _surface_bool(value: Any) -> bool | None:
-    if value is None:
-        return None
-    return _num(value) is not None
-
-
-def _energy(value: str | None) -> str | None:
-    return value if value in ("A", "B", "C", "D", "E", "F", "G") else None
 
 
 def _str_or_none(value: Any) -> str | None:
@@ -163,18 +111,31 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     lat = _num(gps.get("lat"))
     lon = _num(gps.get("lng"))
 
-    balcony_surfaces = [
-        advert.get("balconySurface"),
-        advert.get("terraceSurface"),
-        advert.get("loggiaSurface"),
-    ]
-    has_balcony = (
-        None
-        if all(v is None for v in balcony_surfaces)
-        else any(_num(v) is not None for v in balcony_surfaces)
+    read = partial(source_value, SOURCE, params=advert)
+    # R11: balcony OR loggia, each stated as its m² surface. `terraceSurface` used to be
+    # a third arm and is its own column — dropping it takes 395 of 1,417 true rows back
+    # to unknown, and the m² is still in raw_json for whoever wants the measure.
+    has_balcony = vocabulary.any_true(
+        *(vocabulary.present(v) for v in source_values(SOURCE, "has_balcony", advert))
     )
-    garage = bool(advert.get("garage")) if advert.get("garage") is not None else None
-    has_parking = bool(advert.get("parking") or advert.get("garage"))
+    garage = vocabulary.yes_no(read("garage"))
+    # `parking` and `garage` are real booleans the API sends on every advert, so a JSON
+    # null is "not stated", not a false. `bool(a or b)` could never return None at all,
+    # which also locked the NULL-only text lane out of the rows it should repair.
+    has_parking = vocabulary.any_true(
+        *(vocabulary.yes_no(v) for v in source_values(SOURCE, "has_parking", advert))
+    )
+
+    # `price_czk` is a CZK total by contract on all nine portals. bezrealitky is the only
+    # one that states a currency, and 31 active rows quote the rent in EUR — stored as CZK
+    # they read ~25x low and become the cheapest rents in the country. Refused (and
+    # counted, so a portal switching currencies shows up in the run summary), never
+    # converted: this program does not invent an exchange rate.
+    currency = _str_or_none(advert.get("currency"))
+    price_czk = _int(advert.get("price"))
+    if price_czk is not None and currency is not None and currency.upper() != "CZK":
+        vocabulary.refuse("price_czk", SOURCE, currency)
+        price_czk = None
 
     raw = dict(advert)
     raw["image_urls"] = _image_urls(advert)
@@ -196,11 +157,11 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         category_main=category_main,
         category_type=category_type,
         subtype=subtype,
-        price_czk=_int(advert.get("price")),
-        price_unit="měsíc" if category_type == "pronajem" else "celkem",
+        price_czk=price_czk,
+        price_unit="za mesic" if category_type == "pronajem" else "za nemovitost",
         area_m2=area_m2,
         area_basis=area_basis,
-        disposition=_disposition(advert.get("disposition")),
+        disposition=vocabulary.disposition_code(read("disposition")),
         locality=_locality(advert),
         district=None,
         # bezrealitky's GraphQL advert carries structured street/houseNumber/zip
@@ -210,14 +171,17 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         zip=_str_or_none(advert.get("zip")),
         lat=lat,
         lon=lon,
-        floor=_int(advert.get("etage")),
+        # `_int` first: 0 is this portal's "not specified" sentinel for every numeric
+        # (it has never emitted one floor=0 row), and under ground=0 a bare 0 would
+        # otherwise read as the ground storey instead of as silence.
+        floor=floor_from_portal(floor_convention(SOURCE), _int(read("floor"))),
         total_floors=_int(advert.get("totalFloors")),
         has_balcony=has_balcony,
         has_parking=has_parking,
         has_lift=bool(advert["lift"]) if advert.get("lift") is not None else None,
-        building_type=CONSTRUCTION.get(advert.get("construction")),
-        condition=CONDITION.get(advert.get("condition")),
-        energy_rating=_energy(advert.get("penb")),
+        building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
+        condition=vocabulary.canonical("condition", SOURCE, read("condition")),
+        energy_rating=vocabulary.energy_rating(read("energy_rating")),
         estate_area=surface_land,
         usable_area=_num(advert.get("surface")),
         # `frontGarden` is bezrealitky's FRONT YARD ("předzahrádka"), the strip in
@@ -226,12 +190,12 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         # carries here; read it as that, not as a parcel (rule 23's side columns).
         garden_area=_num(advert.get("frontGarden")),
         category_sub_cb=None,
-        furnished=FURNISHED.get(advert.get("equipped")),
-        terrace=_surface_bool(advert.get("terraceSurface")),
-        cellar=_surface_bool(advert.get("cellarSurface")),
+        furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
+        terrace=vocabulary.present(advert.get("terraceSurface")),
+        cellar=vocabulary.present(advert.get("cellarSurface")),
         garage=garage,
         parking_lots=None,
-        ownership=OWNERSHIP.get(advert.get("ownership")),
+        ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
         description=(advert.get("description") or "").strip() or None,
         # The detail query requests timeActivated but the anon API returns it
         # NULL today — the mapping is free if access ever appears (the one

@@ -13,6 +13,7 @@ import {
   removePropertyFromCollection,
   updateCollection,
 } from '@/lib/api';
+import { revalidateCollections } from '@/lib/collectionCache';
 import { curationKeys } from '@/lib/queries';
 import { listingPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
@@ -31,6 +32,8 @@ import type {
   CollectionPropertyRow,
   CollectionWithProperties,
 } from '@/lib/types';
+import { Hairline } from '@/components/section';
+import { Th } from '@/components/table';
 
 export default function CollectionDetail() {
   const { id: idParam } = useParams();
@@ -112,10 +115,6 @@ function Crumb() {
   );
 }
 
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
 /* -------------------------------------------------------------------------- */
 /* Header                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -175,8 +174,7 @@ function EditBlock({ collection }: { collection: Collection }) {
       }),
     onSuccess: () => {
       setError(null);
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collection.id) });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
+      revalidateCollections(qc, { collection_id: collection.id });
     },
     onError: (err: Error) => setError(err.message || 'Failed to save'),
   });
@@ -184,7 +182,7 @@ function EditBlock({ collection }: { collection: Collection }) {
   const del = useMutation({
     mutationFn: () => deleteCollection(collection.id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
+      revalidateCollections(qc);
       navigate(ROUTES.collections.build(), { replace: true });
     },
     onError: (err: Error) => setError(err.message || 'Failed to delete'),
@@ -278,8 +276,7 @@ function MonitoringBlock({ collection }: { collection: Collection }) {
 
   const invalidate = () => {
     setError(null);
-    qc.invalidateQueries({ queryKey: curationKeys.collection(collection.id) });
-    qc.invalidateQueries({ queryKey: curationKeys.collections });
+    revalidateCollections(qc, { collection_id: collection.id });
   };
 
   const toggle = useMutation({
@@ -387,15 +384,15 @@ function PropertiesBlock({
             <table className="w-full text-sm">
               <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
                 <tr>
-                  <Th align="left">ID</Th>
-                  <Th align="left">District</Th>
-                  <Th align="left">Type</Th>
-                  <Th align="right">Area</Th>
-                  <Th align="right">Price</Th>
-                  <Th align="left">Last seen</Th>
-                  <Th align="left">Status</Th>
-                  <Th align="left">Added</Th>
-                  <Th align="right">{''}</Th>
+                  <Th align="left" size="sm">ID</Th>
+                  <Th align="left" size="sm">District</Th>
+                  <Th align="left" size="sm">Type</Th>
+                  <Th align="right" size="sm">Area</Th>
+                  <Th align="right" size="sm">Price</Th>
+                  <Th align="left" size="sm">Last seen</Th>
+                  <Th align="left" size="sm">Status</Th>
+                  <Th align="left" size="sm">Added</Th>
+                  <Th align="right" size="sm">{''}</Th>
                 </tr>
               </thead>
               <tbody>
@@ -415,26 +412,6 @@ function PropertiesBlock({
   );
 }
 
-function Th({
-  align,
-  children,
-}: {
-  align: 'left' | 'right';
-  children: React.ReactNode;
-}) {
-  return (
-    <th
-      scope="col"
-      className={[
-        'px-3 py-2.5 text-[0.7rem] tracking-[0.14em] uppercase font-medium text-[var(--color-ink-3)]',
-        align === 'right' ? 'text-right' : 'text-left',
-      ].join(' ')}
-    >
-      {children}
-    </th>
-  );
-}
-
 function PropertyRowView({
   row,
   collectionId,
@@ -446,13 +423,7 @@ function PropertyRowView({
 
   const remove = useMutation({
     mutationFn: () => removePropertyFromCollection(collectionId, row.property_id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collectionId) });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-      qc.invalidateQueries({
-        queryKey: curationKeys.propertyCollections(row.property_id),
-      });
-    },
+    onSuccess: () => revalidateCollections(qc, { collection_id: collectionId }),
   });
 
   return (

@@ -121,6 +121,8 @@ interface Props {
    * scope chip). Bookmark writes then change the result set, so the card
    * funnels must invalidate the Browse reads — see usePipelineCard. */
   pipelineScoped: boolean;
+  /* The same claim for collection membership — see revalidateCollections. */
+  collectionScoped: boolean;
   /* On-card estimate: latest rent estimate per listing id (keyed by
    * sreality_id), the set of ids whose run is being kicked off right now
    * (optimistic spinner), and the trigger. Estimate runs on apartment cards
@@ -154,6 +156,7 @@ export default function ListingCards({
   selectedPropertyIds,
   onToggleSelect,
   pipelineScoped,
+  collectionScoped,
   estimates,
   estimatingIds,
   onEstimate,
@@ -246,6 +249,7 @@ export default function ListingCards({
                     estimating={r.sreality_id != null && estimatingIds.has(r.sreality_id)}
                     onEstimate={onEstimate}
                     pipelineScoped={pipelineScoped}
+                    collectionScoped={collectionScoped}
                     collectionMembers={collectionMembersQ.data}
                   />
                 </li>
@@ -277,11 +281,13 @@ export default function ListingCards({
 function CollectionSaveButton({
   property_id,
   collectionMembers,
+  cohortScoped,
 }: {
   property_id: number;
   /* Owned by ListingCards — one shared read for the whole grid, gated on
    * there being any rows to show it for. */
   collectionMembers: Map<number, number[]> | undefined;
+  cohortScoped: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -318,6 +324,7 @@ function CollectionSaveButton({
           memberIds={memberIds}
           anchorRef={btnRef}
           onClose={close}
+          cohortScoped={cohortScoped}
         />
       )}
     </>
@@ -338,6 +345,7 @@ function Card({
   estimating,
   onEstimate,
   pipelineScoped,
+  collectionScoped,
   collectionMembers,
 }: {
   r: CardRow;
@@ -358,6 +366,8 @@ function Card({
   /* The cohort is currently scoped to the deal pipeline, so a bookmark write
    * changes which cards match — see usePipelineCard's cohortScoped. */
   pipelineScoped: boolean;
+  /* The same claim for collection membership — see revalidateCollections. */
+  collectionScoped: boolean;
   collectionMembers: Map<number, number[]> | undefined;
 }) {
   /* The card element itself, for the map-origin scrollIntoView below. Both
@@ -493,7 +503,11 @@ function Card({
               property_id={r.property_id}
               cohortScoped={pipelineScoped}
             />
-            <CollectionSaveButton property_id={r.property_id} collectionMembers={collectionMembers} />
+            <CollectionSaveButton
+              property_id={r.property_id}
+              collectionMembers={collectionMembers}
+              cohortScoped={collectionScoped}
+            />
             <DismissButton property_id={r.property_id} />
           </div>
         )}

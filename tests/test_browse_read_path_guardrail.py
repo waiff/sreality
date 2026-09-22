@@ -93,9 +93,24 @@ def _latest_migration_defining(view: str) -> Path:
 
 
 def _latest_migration_defining_function(fn: str) -> Path:
+    # `(public\.)?` for the same reason _latest_migration_defining carries it:
+    # migrations 522/547 write `create or replace function public.<fn>(`, and
+    # without it the "effective" definition resolves to a stale migration.
     return _latest_migration_matching(
-        rf"create\s+or\s+replace\s+function\s+{re.escape(fn)}\s*\(", fn
+        rf"create\s+or\s+replace\s+function\s+(public\.)?{re.escape(fn)}\s*\(", fn
     )
+
+
+def _function_block(fn: str) -> tuple[str, str]:
+    """(sql, label) for the effective definition of `fn`, comments stripped —
+    from its CREATE up to the next CREATE FUNCTION in the same migration."""
+    src = _latest_migration_defining_function(fn)
+    sql = _strip_comments(src.read_text())
+    pat = rf"create\s+or\s+replace\s+function\s+(public\.)?{re.escape(fn)}\s*\("
+    start = re.search(pat, sql, re.IGNORECASE).start()
+    rest = re.search(r"create\s+or\s+replace\s+function\s", sql[start + 1:], re.IGNORECASE)
+    end = start + 1 + rest.start() if rest else len(sql)
+    return sql[start:end], f"{src.name}:{fn}"
 
 
 # ------------------------------------------------------------------- no gate --
@@ -185,6 +200,22 @@ def test_map_rebuild_analyzes_before_swap_and_notifies() -> None:
         "properties_map_mv_next",
         "alter materialized view properties_map_mv_next rename",
     )
+
+
+# ------------------------------------------------------- resolved-but-empty --
+
+@pytest.mark.parametrize("fn", ["browse_stats_properties", "browse_map_cells"])
+def test_a_resolved_but_empty_allowlist_yields_zero_rows(fn: str) -> None:
+    """A resolved id allowlist that matched NOTHING must return nothing, not everything.
+    The trap: eight sibling array params in the same WHERE read '{}' as no constraint."""
+    sql, label = _function_block(fn)
+    for param in ("property_ids_filter", "obec_ids_filter"):
+        assert f"{param} is null or" in sql, f"{label}: {param} lost its null guard"
+        assert f"array_length({param}" not in sql, (
+            f"{label}: {param} now treats '{{}}' as no constraint. The callers pass a "
+            f"resolved-empty allowlist straight through as [] (fetchBrowseStats does not "
+            f"short-circuit), so this widens the cohort to the whole market."
+        )
 
 
 # ------------------------------------------------------- the consumer rule --

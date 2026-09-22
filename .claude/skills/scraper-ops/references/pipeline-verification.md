@@ -15,7 +15,7 @@ polls. A `SECURITY DEFINER` dead-man-switch pg_cron function fires if the hourly
 running (the migration-136 exception-guarded pg_cron pattern). This exists because the pipeline
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
 the only alarm was a failing GH Actions cron the operator happened to miss. The live checks are
-`llm_errors`, `llm_liveness`, `llm_burn_rate`, `long_open_transaction` (6-hourly only, from
+`llm_errors`, `llm_burn_rate`, `long_open_transaction` (6-hourly only, from
 migration 437: warns when the oldest `pg_stat_activity.xact_start` passes an hour, because
 `refresh_llm_cost_rollups`' 3-hour trailing re-scan only absorbs a late arrival whose
 transaction was shorter than that — `called_at` defaults to now() = transaction START; the
@@ -117,6 +117,112 @@ The six dedup-specific checks (street/geo debt, eligibility funnel,
 merge latency, engine health, merge-precision sample) went with the engine, along with their
 `pipeline_check_thresholds` rows.
 
+## `field_fill_matrix` — fill AND validity per (source, field) (field capture W1)
+
+`data_quality_by_source` tests 26 fields for `IS NOT NULL`. That is blind to the two defect
+shapes the field-capture program exists to fix: a value that is PRESENT and outside every
+canonical option list (13 live `condition` spellings against a filter list of 6, ~14k active rows
+unreachable by any Browse filter), and a cell that has read 0.0 % since the parser was written
+because it reads a key the portal never emits (remax `balkon`/`lodzie`, ceskereality `vybavení`,
+`počet podlaží`). `scraper/field_census.py` owns both SQL statements and both pure reductions, so
+the live check and the re-bless can never measure different things.
+
+**The matrix reads the whole active stock; only the census samples.** A census is evidence about a
+payload's key space, so the newest 1,000 rows per portal answer it (~1 s). The matrix is compared
+against a file blessed weeks earlier, and a SAMPLED cohort cannot be compared with itself: the
+newest-1,000 slice is a time window whose category mix rotates with whatever a portal's walk
+happened to cover. Measured on the shipped code before this was fixed — mmreality's window went
+from a balanced mix to 73 % commercial rentals in two days, moving `cellar` 40.2 % → 8.2 % and
+`disposition` 41.4 % → 6.3 % with no parser touched, twice over the fail tier. So the matrix is one
+aggregate pass over every `is_active` row: measured 12.2 s for all nine portals, inside the 45 s
+per-check budget, and registered third-to-last in `_CHECKS` (`floor_convention` displaced it) so the
+cheap checks are never
+the ones that go unrun. It never expands a row into (field, value) pairs — that form costs 32 s
+over the stock; per-value counts come from `count(*) filter (where col = '<canonical value>')`
+interpolated from `toolkit/filter_registry.COLUMN_CANONICAL_VALUES`, keyed by COLUMN — which is also
+where the statutory `energy_rating` 'G' share per portal comes from. 'G' stays an ordinary grade: W5
+measured all nine censuses and no portal marks it as the unassessed placeholder, so R11's `unassessed`
+member is struck. A field with no canon is counted, not enumerated — W5 gives `price_unit` one.
+
+**The arms are RELATIVE to a blessed baseline** (`data/field_capture/fill_baseline.json`), never
+to an absolute floor, because a floor cannot see a legitimately-zero cell or a partial break
+(ceskereality's `furnished` key mismatch would sit at ~2.5 %, not 0 %). Sizing is the MEASURED
+drift of that cohort, never a binomial SE (the stock is the population, not a draw): comparing
+each cell's fill with the same fill over the rows already active a week earlier, across 90 cells
+on 2026-09-21, the worst moved 4.1 pp in a WEEK (bezrealitky `disposition` 55.0 → 50.9) and the
+median under 1 pp — a 6-hourly run sees ~0.15 pp of that. A fill drop ≥ 10 pp warns and ≥ 20 pp
+fails, both only where the baseline was ≥ 10 % filled; below that the collapse arm binds instead —
+a cell with 50+ blessed filled rows keeping under a quarter of them fails. An off-canon share
+rising ≥ 5 pp warns, ≥ 15 pp fails. A cell that drifts past a threshold honestly is a re-bless,
+and the message says so. The check carries NO `pipeline_check_thresholds` entries: the numbers
+belong to the cohort, not to a taste, and the program adds no settings.
+
+**A blessed cell that stops being measured is an offender.** The spine comes from
+`portals.is_enabled` and from a source having active rows, so a portal disabled during an incident
+would otherwise take its 26 cells out of the denominator and leave the check certifying the
+silence — `ppm2_measure_coverage`'s lesson, applied here as: a whole source missing FAILS, a single
+missing cell warns, and the message carries `cells_measured` of `cells_blessed`.
+
+**Known, not judged.** The baseline records today's zeros, so the check is green on day one and
+still names them every run (`details.zero_fill_cells`) until W2's attribute contract declares a
+producer for each. That list is computed from the LIVE matrix, so the run that repairs a cell is
+the run that stops naming it. Boolean cells never written `false` are reported the same way
+(`details.booleans_never_false`) — whether silence means `false` or `unknown` is an absence
+semantics the contract declares, so there is nothing yet to be right or wrong against.
+
+**Who owns which field**, so the two fill instruments can never be read against each other:
+`data_quality_by_source` keeps the seven probes with no attribute column (`geom`, `locality`,
+`street`, `property_grouped`, `source_url`, the two condition levels), `field_fill_matrix` owns
+the 26 `LISTING_COLUMNS` attributes, and the 19 they share are the view's to lose in a later wave.
+Both now read every active row, so a shared cell cannot report two different numbers.
+
+**The census half** is checked in per portal under `data/field_capture/census/` and re-blessed
+with `python -m scraper.field_census --bless` — a reviewed diff, like the location contract's
+golden. A stale census is the known blind spot (a portal renames a key and every gate built on the
+census still agrees with itself), so staleness > 30 d is this check's last arm, a WARN. It is
+deliberately NOT a pytest: a test keyed on the calendar reds `main` on a date, on a branch that
+touched nothing.
+
+## `floor_convention` — is a plausible integer on the RIGHT SCALE? (field capture W8)
+
+The check no fill or validity measure can stand in for. `listings.floor` was a ~50/50 mix of two Czech
+conventions until W8 — ground = 0 on idnes, bazos and ceskereality, ground = 1 on the other six — and
+nothing in the repo could see it, because a storey one too high is perfectly typed, perfectly non-NULL
+and perfectly plausible. There was **no floor check of any kind** before this one.
+
+**The measure needs no labels and no LLM.** Two active `byt` adverts agreeing on price, area AND
+disposition are the same flat often enough that the MEAN of their floor difference is a clean
+convention signal; the check reports `mean(portal floor − idnes floor)` per portal. idnes is the
+reference because its parser has always read the Czech word ("2. patro (3. NP)"). A key counts only
+where its side holds ONE storey for it (`min(floor) = max(floor)`), so a repeated
+price/area/disposition triple cannot smear the difference.
+
+**Tiers: warn 0.35, fail 0.50, min 40 pairs.** Fail at half a storey is unreachable by noise and
+reachable only by a portal on the other scale. The measure has a real noise floor — a sibling match is
+not a proven duplicate — sized live at +0.10 on bazos. warn is 0.35 rather than 0.25 for ONE portal:
+ceskereality reads +0.20 and only ~0.03 of that is sample conditioning (restricting the idnes side to
+`floor >= 1` moves it +0.199 → +0.167); the rest is 925 pairs at exactly +1 against 92 below 0, an
+unexplained one-storey sub-population tracked in `docs/design/field-capture/handover-autodedup-floor.md`
+§ 6. Every converted portal lands inside 0.25 in simulation, so the wider tier protects that portal
+alone and does not certify it. `min_pairs` 40 lets maxima score on its ~49 pairs and still refuses a
+mean drawn from one or two adverts; a portal below the floor is reported but not scored, and if NO
+portal is scored the check returns `warn` with `value` None — "verified nothing" is not a green.
+
+**It is the most expensive check in the lane, and the most variable** — 27.0 / 35.1 / 11.0 / 16.1 s on
+four `EXPLAIN (ANALYZE)` runs over ~34.7k pairs, against `field_fill_matrix`'s steady ~12 s — because
+the plan is a BitmapAnd feeding a Bitmap Heap Scan that spills (~116k buffers, ~85 % of them `read` even
+on a warm cluster, so it never stays cached and its cost tracks concurrent readers). Hence: registered
+LAST among the DB checks, and read through `_fetchall` so it inherits the per-check
+`SET LOCAL statement_timeout`. Cancelled, it reports `warn / timed out` = UNKNOWN, never a false green.
+A new check above ~20 s starves the tail and needs its query reworked, not a wider `_CHECK_BUDGET_S`.
+
+**It reads RED from the day it shipped** — the one check in the lane that does, deliberately. The six
+ground = 1 portals read +0.82..+1.05 until the heal has re-derived them
+(`python -m scripts.reparse --source <portal> --fields floor --write --allow-snapshot-deferral`, six
+passes, runbook in the hand-over § 7). The failure message names those commands, and names them ONLY
+for a portal whose contract cell declares `ground1`: telling the operator to re-derive ceskereality
+(cell `ground0`) would shift 34,363 rows down one storey, most of them correct.
+
 ## The `scrape_runs` crash contract (`portal_runner.run_phase`, W0.2)
 
 Both scraper health arms read one row, so what that row records on a bad ending is the whole
@@ -159,8 +265,9 @@ six portals that fell over on 2026-08-26 showed no error count anywhere
 **1. Silence is not recovery.** `llm_errors` derives `currently_failing` purely from state:
 `last_ok_at < last_err_at`. It used to additionally `and` in a 90-minute staleness window
 (`min_live_at`), on the theory that a lone old error with no traffic since is not a live
-outage. That is backwards. The producers here have circuit breakers — the enrichment loop
-aborts at exactly 5 consecutive errors — so once an outage is *total* the traffic stops, the
+outage. That is backwards. The producers here have circuit breakers — `toolkit/vision_batch.py`
+stops the labelling pass on the first fatal provider error, and the autodedup judge lane aborts
+its pass the same way — so once an outage is *total* the traffic stops, the
 last error ages out of the window, and the check reads `ok`. Measured: OpenAI was
 credit-exhausted for 11 days (63,547 error rows, **zero** successful calls) and the check read
 `ok` for most of it, flipping `fail` at 14:02 and `ok` at 14:58 on unchanged inputs. Because
@@ -180,7 +287,7 @@ $150 fail), and `_record_failure` writes `cost_usd=0.0`, so a **total outage dri
 to the maximally healthy number**: it reported `ok value=0.0` throughout the 11-day outage. It
 now carries `details.arm`:
 - `starved` → `fail`: a `called_for` lane with `attempts > 0 AND successes == 0 AND spend == 0`.
-- `idle` → `ok`: nothing attempted at all. Silence is `llm_liveness`'s axis, not this one.
+- `idle` → `ok`: nothing attempted at all. No check judges silence (see §4).
 - `runaway`/`ok`: the pre-existing spend arms.
 
 **Evaluated per `called_for`, and that is load-bearing.** A 24h aggregate arm is defeated by a
@@ -197,8 +304,11 @@ therefore wrote **zero rows and fired zero alerts** — blinding `db_saturation`
 result is inserted and alerted the instant its check returns (the transition baseline,
 `latest_statuses`, is captured once before the first write, so per-check
 `emit_transition_alerts` calls stay equivalent to the old batch call). Budgets:
-`_CHECK_BUDGET_S` (45s) per check, capped by whatever remains of `_LANE_BUDGET_S` (**120s of
-the job's 300s** — the rest is headroom for W2/W3's checks; this wave owns the number).
+`_CHECK_BUDGET_S` (45s) per check, capped by whatever remains of the LANE budget: the acute
+lane's `_LANE_BUDGET_S` (**120s of `llm_health.yml`'s 300s job**), or for the 6-hourly full lane
+`full_lane_budget_s` = one per-check budget per registered check. The full lane shared the 120 s
+until 2026-09-22, and in 13 of the 15 runs before that 7-17 of its 25 checks were `not_run` —
+`test_full_lane_budget_fits_its_job` now fails CI if the registry outgrows the 30-minute job.
 Enforcement is **server-side** via `SET LOCAL statement_timeout`: the connection is autocommit
 and shared by every check, so a thread we cannot cancel or a signal raised mid-query would
 leave it wedged for everyone downstream. Postgres cancelling its own query is the only
@@ -231,9 +341,10 @@ a poll that reached back past `since`, and the page budget doubled to 10 pages /
 traffic continuously (dedup vision on the always-on worker) … p99 inter-call gap is ~1 min,
 so the 4h default never trips in normal operation." That premise died on **2026-08-06**, when
 the dedup decision engine was removed wholesale (rule 15) and took the continuous vision
-traffic with it. The threshold stayed. The only recurring LLM producer left is bazos
-description enrichment (`enrich_bazos.yml`) — condition scoring is paused and every other LLM
-workflow is dispatch-only — so the healthy inter-call gap stopped being a minute and became a
+traffic with it. The threshold stayed. The only recurring LLM producer left THEN was bazos
+description enrichment (`enrich_bazos.yml`, itself deleted a month later — see below) —
+condition scoring paused and every other LLM workflow dispatch-only — so the healthy
+inter-call gap stopped being a minute and became a
 cron period stretched by the Actions throttle (observed run-to-run gaps of 2.4–15.0 h over
 Aug 27-30). The check has **no warn tier**, so every overshoot is a hard red: it fired
 `fail value=4.195` and reddened "Monitoring: acute health (hourly)" **8 times between Aug 27
@@ -244,10 +355,20 @@ cadence plus throttle slack, still inside one 6 h lane tick of a genuinely dead 
 The transferable rule: **a threshold is a claim about a workload, so deleting the workload
 invalidates the threshold.** When a producer is retired, grep the health harness for the
 numbers that were sized on it — `DEFAULT_THRESHOLDS` carries its own rationale per key for
-exactly this reason. `llm_silence_fail_hours` is **not** in the migration-274 seed and no
-later migration adds it, so it resolves from the code default; if an operator ever adds it to
-`app_settings.pipeline_check_thresholds`, that row wins over the code (`load_thresholds`
-merges the DB over the defaults) and the deploy alone will not move it.
+exactly this reason.
+
+**And the second time, the check went with it.** Field-capture W0 (2026-09-21) deleted the
+enrichment lane itself, leaving NO recurring LLM producer: everything left (autodedup judging,
+labelling, estimations, URL parsing) is dispatch-driven or on demand. Measured over the 30 days
+to 2026-09-21 the longest gap between `llm_calls` rows excluding that lane was **143.8 h**, and
+`llm_liveness` had already logged 52 fails in 349 runs against a healthy pipeline. Re-sizing
+13 h → 144 h would have bought a check that only speaks after six days of normal weekend quiet,
+so `check_llm_liveness`, `_status_for_llm_silence` and `llm_silence_fail_hours` were all
+deleted. The replacement is not a global recency threshold at all: field-capture R8 makes each
+lane's health check read the lane's OWN eligibility predicate (oldest eligible-unextracted age
+per source), which needs no historical baseline — the same shape as `check_acquisition_lag`.
+Until W7 ships it, `llm_errors` still catches "calls are failing" (from state, not recency) and
+`llm_burn_rate`'s starvation arm still catches "attempting and never succeeding".
 
 ---
 
@@ -484,8 +605,7 @@ template from sreality's own frontend and update `IMAGE_TRANSFORM_OPS`.
 
 **Its own lane.** `.github/workflows/sreality_image_canary.yml` runs it daily
 (`--only sreality_image_template --exit-nonzero-on-fail`): it is registered LAST so a slow CDN
-can never starve a database check, and for the same reason the 6-hourly verify lane routinely
-exhausts its 120 s budget before reaching it (observed on its first run: `lane budget 120s
-exhausted; check sreality_image_template not run`). A CDN 403/429 (sreality's throttle) or a
+can never starve a database check (the 6-hourly lane used to exhaust a shared 120 s budget
+before reaching it; it now owes every check its own budget, and this lane stays the daily guarantee). A CDN 403/429 (sreality's throttle) or a
 5xx is a `warn` that verified nothing — only a 4xx refusal, a non-image body or a downgraded
 frame is a `fail`.

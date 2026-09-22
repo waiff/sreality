@@ -34,6 +34,8 @@ import {
   toSearchParams,
   watchdogNameSuggestion,
 } from './filters';
+import { filterById } from './filterRegistry.generated';
+import type { Disposition } from './types';
 
 describe('URL round-trip', () => {
   it('preserves the empty default state across an empty URL', () => {
@@ -65,6 +67,18 @@ describe('URL round-trip', () => {
     expect(round.terrace).toBe('no');
     expect(round.furnished).toEqual(['castecne', '__unknown__']);
     expect(round.ownership).toEqual(['osobni']);
+  });
+
+  /* Every disposition the registry offers must survive the URL, because Browse
+   * state IS the URL: a value the allowlist drops deselects its own pill. */
+  it('round-trips every registry disposition, not just the ones under 6', () => {
+    const all = (filterById('dispositions')?.enum_values ?? []).map((o) => String(o.value));
+    expect(all).toContain('6+kk');
+    expect(all).toContain('9+1');
+    const round = fromSearchParams(
+      toSearchParams({ ...DEFAULT_FILTERS, dispositions: all as Disposition[] }),
+    );
+    expect(round.dispositions).toEqual(all);
   });
 
   it('round-trips the includeNoPrice toggle (emitted only when on)', () => {
@@ -369,6 +383,25 @@ describe('pipeline scope URL codec', () => {
     // whole market — the loud failure is showing them all their cards.
     const got = fromSearchParams(new URLSearchParams('pipeline=abc'));
     expect(got.pipeline).toEqual({ stage_ids: [] });
+  });
+});
+
+describe('collection scope URL codec', () => {
+  it('round-trips a selection as a CSV of ids', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, collections: [4, 9] };
+    const sp = toSearchParams(f);
+    expect(sp.get('collections')).toBe('4,9');
+    expect(fromSearchParams(sp)).toEqual(f);
+  });
+
+  it('emits nothing when nothing is selected, and parses absence as off', () => {
+    expect(toSearchParams(DEFAULT_FILTERS).has('collections')).toBe(false);
+    expect(fromSearchParams(new URLSearchParams()).collections).toEqual([]);
+  });
+
+  it('drops junk ids rather than inventing a selection', () => {
+    expect(fromSearchParams(new URLSearchParams('collections=4,abc,0')).collections)
+      .toEqual([4]);
   });
 });
 
@@ -681,11 +714,13 @@ describe('filtersToWatchdogSpec', () => {
       status: 'active',
       lastSeenMaxDays: 7,
       tags: [3],
+      collections: [4],
       buildingMaterial: ['cihla'],
     });
     expect(unsupported).toContain('listing status');
     expect(unsupported).toContain('last/first-seen date range');
     expect(unsupported).toContain('tags');
+    expect(unsupported).toContain('collections');
     expect(unsupported).toContain('building material');
   });
 
@@ -775,6 +810,17 @@ describe('filter presets', () => {
     expect(filtersEqualForPreset({ ...saved, brokerId: 527 }, saved)).toBe(true);
     expect(
       filtersEqualForPreset({ ...saved, priceMax: 4_000_000, brokerId: 527 }, saved),
+    ).toBe(false);
+  });
+
+  it('treats the collection scope as a lens too: stripped, never dirtying a preset', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 6_000_000, collections: [4] };
+    expect(filtersForPreset(f, false).collections).toEqual([]);
+    expect(filtersForPreset(f, true).collections).toEqual([]);
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000 };
+    expect(filtersEqualForPreset({ ...saved, collections: [4, 9] }, saved)).toBe(true);
+    expect(
+      filtersEqualForPreset({ ...saved, priceMax: 4_000_000, collections: [4] }, saved),
     ).toBe(false);
   });
 

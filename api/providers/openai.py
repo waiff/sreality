@@ -3,10 +3,10 @@
 Wraps the plain Chat Completions REST API via `OpenAICompatibleProvider` — no
 `openai` SDK dependency (rule #7): the wire format is JSON over HTTP and the
 shared base already speaks it. Also implements the async Batch API (the
-`BatchCapableProvider` surface) so gpt-5-mini can run the enrichment lanes
-through OpenAI's own −50% batch tier, the way Sonnet runs through Anthropic's —
-see scripts.submit_enrich_batch / ingest_enrich_batch, which drive whichever
-provider a lane's model resolves to (llm_client.provider_for_model).
+`BatchCapableProvider` surface) so gpt-5-mini can run a batch lane through
+OpenAI's own −50% batch tier, the way Sonnet runs through Anthropic's — see
+scripts.submit_condition_batch, which drives whichever provider a lane's model
+resolves to (llm_client.provider_for_model).
 """
 
 from __future__ import annotations

@@ -177,10 +177,7 @@ export default function WatchdogEdit() {
           exclude={['location']}
           customWidgets={{
             // Same Mapy.cz typeahead as Browse — keeps the operator's
-            // muscle memory consistent across surfaces. Tags don't
-            // surface here yet because Watchdog stores numeric tag ids
-            // and the rich picker needs the listings-attached colour
-            // palette context.
+            // muscle memory consistent across surfaces.
             districts: LocationTypeahead as never,
             // Phase QUAL — city-quality rule picker. The matcher in
             // api/notifications._build_match_clauses already understands
@@ -215,7 +212,6 @@ export default function WatchdogEdit() {
             furnished: 'Furnished',
             ownership: 'Ownership',
             building_material: 'Building material',
-            tags: 'Tags',
           }}
         />
 

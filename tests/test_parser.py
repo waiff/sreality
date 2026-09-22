@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from scraper import vocabulary
 from scraper.parser import SUBTYPE, parse_images, parse_listing
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -81,21 +82,21 @@ def test_price_hidden_is_none(sample):
     # This fixture is a "price on request" listing (price_czk == 0).
     row = parse_listing(sample)
     assert row["price_czk"] is None
-    assert row["price_unit"] == "celkem"
+    assert row["price_unit"] == "za nemovitost"
 
 
 def test_price_present():
     row = parse_listing(_estate(price_summary_czk=8690000,
                                 price_summary_unit_cb={"name": "za nemovitost", "value": 1}))
     assert row["price_czk"] == 8690000
-    assert row["price_unit"] == "celkem"
+    assert row["price_unit"] == "za nemovitost"
 
 
 def test_price_unit_monthly():
     row = parse_listing(_estate(price_czk=22500,
                                 price_unit_cb={"name": "za měsíc", "value": 4}))
     assert row["price_czk"] == 22500
-    assert row["price_unit"] == "měsíc"
+    assert row["price_unit"] == "za mesic"
 
 
 def test_area(sample):
@@ -165,7 +166,10 @@ def test_the_row_carries_no_place_at_all(sample):
 
 
 def test_floor(sample):
-    assert parse_listing(sample)["floor"] == 1
+    # `floor_number` 1 is the STOREY ORDINAL: sreality counts the ground storey 1, so
+    # the canonical ground=0 reading is 0 (W8).
+    assert sample["floor_number"] == 1
+    assert parse_listing(sample)["floor"] == 0
 
 
 def test_total_floors(sample):
@@ -179,7 +183,7 @@ def test_total_floors_present():
 
 def test_amenities(sample):
     row = parse_listing(sample)
-    assert row["has_balcony"] is False  # balcony/terrace/loggia all false
+    assert row["has_balcony"] is False  # R11: balcony/loggia both false
     assert row["has_parking"] is False  # parking_lots/garage false, parking null
     assert row["has_lift"] is None      # elevator cb value 0 (unspecified)
 
@@ -260,19 +264,32 @@ def test_category_fields(sample):
     assert row["ownership"] == "osobni"
 
 
-def test_furnished_known_code():
-    row = parse_listing(_estate(furnished={"name": "Vybaveno", "value": 1}))
-    assert row["furnished"] == "ano"
+def test_furnished_reads_the_label_not_the_code():
+    # The enum's NAME is what the one vocabulary maps; sreality's own code was a second
+    # spelling of the same three values and is no longer consulted.
+    assert parse_listing(_estate(furnished={"name": "Ano", "value": 1}))["furnished"] == "ano"
+    assert parse_listing(_estate(furnished={"name": "Ne", "value": 2}))["furnished"] == "ne"
 
 
-def test_furnished_unknown_code_returns_none():
-    row = parse_listing(_estate(furnished={"name": "?", "value": 99}))
+def test_the_unset_dropdown_is_absence_not_a_value():
+    # sreality spells the empty option of every dropdown with a leading dash. It is a
+    # declared sentinel, so it yields None WITHOUT being counted as an unmapped label.
+    vocabulary.take_unmapped()
+    row = parse_listing(_estate(furnished={"name": "- vyber vybavení", "value": 0}))
     assert row["furnished"] is None
+    assert vocabulary.take_unmapped() == []
 
 
-def test_ownership_unknown_code_returns_none():
-    row = parse_listing(_estate(ownership={"name": "?", "value": 99}))
+def test_a_label_nothing_maps_is_null_and_counted():
+    vocabulary.take_unmapped()
+    row = parse_listing(_estate(ownership={"name": "Spoluvlastnický podíl", "value": 99}))
     assert row["ownership"] is None
+    assert vocabulary.take_unmapped() == [
+        ("ownership/sreality/spoluvlastnicky_podil", 1)
+    ]
+    # Drained: the always-on worker reads this once per pass, so a label counted on one
+    # pass must not be re-reported on the next.
+    assert vocabulary.take_unmapped() == []
 
 
 def test_amenities_missing_returns_none():
@@ -339,3 +356,28 @@ def test_published_at_malformed_is_none():
 def test_missing_id_raises():
     with pytest.raises(ValueError):
         parse_listing({"locality": {}})
+
+
+def test_a_terrace_alone_is_not_a_balcony():
+    """R11: has_balcony is balcony OR loggia, and `terrace` is its own column.
+
+    sreality was the portal the three-arm reading was copied FROM, so it is the one
+    where dropping the terrace arm moves the most rows: ~4.9% of the active corpus
+    (388 of 8,000 sampled) is true today from a terrace alone."""
+    row = parse_listing(
+        {"hash_id": 1, "balcony": False, "loggia": False, "terrace": True})
+    assert row["terrace"] is True
+    assert row["has_balcony"] is False
+
+
+def test_parking_lots_is_the_count_and_parking_lots_key_is_the_flag():
+    """sreality's payload names are the opposite way round from the columns':
+    `parking_lots` is a BOOLEAN and `parking` the count."""
+    row = parse_listing({"hash_id": 1, "parking_lots": True, "parking": 3})
+    assert row["parking_lots"] == 3
+    assert row["has_parking"] is True
+    # A stated zero count with both flags false is "no parking", not unknown.
+    zero = parse_listing({"hash_id": 1, "parking_lots": False, "garage": False,
+                          "parking": 0})
+    assert zero["parking_lots"] == 0
+    assert zero["has_parking"] is False

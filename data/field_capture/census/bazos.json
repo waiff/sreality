@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-09-21T19:20:00+00:00",
+  "keys": {
+    "coords": {"distinct": 321, "n": 1000, "pct": 100.0},
+    "id": {"distinct": 1000, "n": 1000, "pct": 100.0},
+    "image_urls": {"distinct": 971, "n": 1000, "pct": 100.0},
+    "listings.description": {"distinct": 1, "n": 1000, "pct": 100.0, "values": {"present": 1000}},
+    "locality_text": {"distinct": 539, "n": 1000, "pct": 100.0},
+    "posted_date": {"distinct": 2, "n": 1000, "pct": 100.0, "values": {"- TOP - [21.9. 2026]": 19, "- [21.9. 2026]": 981}},
+    "price_text": {"distinct": 612, "n": 1000, "pct": 100.0},
+    "psc": {"distinct": 539, "n": 1000, "pct": 100.0},
+    "title": {"distinct": 963, "n": 1000, "pct": 100.0},
+    "views": {"distinct": 133, "n": 1000, "pct": 100.0}
+  },
+  "portal": "bazos",
+  "rare": {"keys": [], "n_keys": 0},
+  "sample": {"max_distinct_for_values": 12, "n_rows": 1000, "predicate": "the newest 1000 rows per source with is_active, by first_seen_at desc", "rare_key_pct": 1.0}
+}

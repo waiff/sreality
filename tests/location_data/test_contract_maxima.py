@@ -272,8 +272,9 @@ def test_a_point_page_still_states_its_precision_rather_than_staying_silent():
 
 def test_a_two_feature_page_types_the_first_feature_and_never_the_view_centre():
     """d40026367 serves a Point AND a Circle. `then: /features/0` is the whole selection
-    rule — and the view centre (15.2596,50.3634), which is what the LIVE parser stores,
-    appears in no claim."""
+    rule — and the view centre (15.2596,50.3634) appears in no claim. It used to be what
+    `scraper.maxima_parser` stored; W9 deleted that second producer, so this contract is
+    now the only thing that reads a maxima coordinate at all."""
     result = run(live_body("Údrnice, Únětice", LIVE_TWO_FEATURES), native="d40026367")
     pin = one(result, "mx.det.map_features")
     assert pin.value_geom_wkt == "POINT(15.271186828990166 50.370363263565366)"
@@ -447,13 +448,12 @@ def test_every_pinned_regression_still_has_a_captured_body(listing_id):
     doc = json.loads((_BODIES / f"{listing_id}.json").read_text(encoding="utf-8"))
     assert doc["raw_json"]["id"] == listing_id
     assert doc["_http_status"] == 200
-    # The stored lat/lon is the parser's read of the map VIEW CENTRE — the trap the map
-    # entry replaces. d40026367 and f60012682 are the same plot, and their view centres are
-    # ~830 m apart while their declared circle centres are ~12 m apart.
-    if listing_id == "f60012522":
-        assert doc["lat"] is None and doc["raw_json"]["coords"]["source"] is None
-    else:
-        assert doc["raw_json"]["coords"]["source"] == "page"
+    # `lat`/`lon`/`coords` in these files are a 2026-09-05 capture of a producer that no
+    # longer exists: the parser's read of the map VIEW CENTRE, which W9 deleted. They are
+    # left frozen because the golden gate mines these bodies, and they are the surviving
+    # measurement of the defect — d40026367 and f60012682 are the same plot, and their
+    # view centres are ~830 m apart while their declared circle centres are ~12 m apart.
+    # Nothing asserts them as current behaviour any more; a re-capture simply drops them.
 
 
 def test_the_captured_bodies_carry_no_broker_identity():

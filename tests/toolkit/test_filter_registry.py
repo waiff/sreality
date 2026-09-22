@@ -141,6 +141,11 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         "near_jobs_5km", "near_jobs_15km",
         "near_youth_5km", "near_youth_15km",
         "near_overall_5km", "near_overall_15km",
+        # Migration 545 — the sold-comps read surface, the one relation in this
+        # registry that is NOT listings-grain. `sold_comparables` computes it
+        # from `sold_transactions.sold_at` so the sold-date bound is a plain
+        # integer predicate; nothing on `listings` carries it.
+        "sold_age_days",
     }
     for f in fr.all_filters():
         if f.pg_column is None:
@@ -396,8 +401,9 @@ def test_mf_gross_yield_filter_registered():
 
 def test_category_main_multiselect_split():
     """category_main is split like dispositions/disposition_match: the
-    multi-select `category_main_in` is Browse+Watchdog only, while the
-    scalar `category_main` is the analytical single-category anchor.
+    multi-select `category_main_in` belongs to the surfaces that RENDER a
+    category control, while the scalar `category_main` is the analytical
+    single-category anchor.
 
     The two MUST NOT both reach a UI agenda (FilterForm would render two
     category controls) nor both reach an analytical agenda (a list-valued
@@ -406,7 +412,9 @@ def test_category_main_multiselect_split():
     assert multi.pg_column == "category_main"
     assert multi.type == fr.FilterType.STRING_LIST
     assert multi.ui_control == fr.UiControl.MULTISELECT
-    assert multi.agendas == frozenset({fr.Agenda.BROWSE, fr.Agenda.WATCHDOG})
+    assert multi.agendas == frozenset(
+        {fr.Agenda.BROWSE, fr.Agenda.WATCHDOG, fr.Agenda.SOLD}
+    )
     # STRING_LIST renders its enum under items.enum; a stray
     # constraints['enum'] would also emit an invalid top-level enum.
     assert not multi.constraints
@@ -420,6 +428,85 @@ def test_category_main_multiselect_split():
     assert fr.Agenda.ESTIMATION in scalar.agendas
     # The two never co-occupy an agenda.
     assert scalar.agendas.isdisjoint(multi.agendas)
+
+
+# --- the SOLD agenda (migration 545) --------------------------------------
+
+
+# The sold-comps block's whole filter set. Spelled out rather than derived so that
+# widening it is a deliberate edit with a reviewer, not a side effect: every id here
+# must name a column `sold_comparables` returns (asserted in
+# tests/test_sold_comps_read_surface.py), and the relation is NOT listings-grain, so
+# most of the registry cannot apply to it at all.
+#
+# `subtype` is deliberately absent and must not come back: reas.cz publishes byty and
+# domy (the parser refuses every other type), so the taxonomy's commercial half is
+# unreachable there and a flat has no subtype at all — twenty options that could only
+# ever return zero rows. `category_main_in` stays, narrowed to byt/dum at the block.
+_SOLD_FILTER_IDS = frozenset({
+    "category_main_in", "dispositions",
+    "min_area_m2", "max_area_m2",
+    "min_usable_area", "max_usable_area",
+    "max_sold_age_days",
+})
+
+
+def test_sold_agenda_membership_is_opt_in() -> None:
+    """`_ALL_AGENDAS` must not sweep SOLD up. It is spelled as "every agenda over the
+    LISTINGS vocabulary" precisely because ~30 filters carry it, and each one names a
+    column the sold relation does not have — a silent PostgREST 400 per filter."""
+    sold = {f.id for f in fr.filters_for_agenda(fr.Agenda.SOLD)}
+    assert sold == set(_SOLD_FILTER_IDS), (
+        f"unexpected {sorted(sold - _SOLD_FILTER_IDS)}, "
+        f"missing {sorted(_SOLD_FILTER_IDS - sold)}"
+    )
+
+
+def test_every_sold_filter_is_column_backed_and_prefix_routable() -> None:
+    """The sold surface has no `HAND_CODED_*` escape set: `applyRegistryFilters`
+    dispatches by type + id prefix, so a filter that fits no path is not hand-coded
+    somewhere else — it is simply never applied. Each sold filter must therefore be a
+    string_list (`.in`/`.eq`) or a `min_`/`max_`-prefixed number (`.gte`/`.lte`)."""
+    for f in fr.filters_for_agenda(fr.Agenda.SOLD):
+        assert f.pg_column, f"{f.id}: a sold filter with no column is a no-op"
+        if f.type == fr.FilterType.STRING_LIST:
+            continue
+        assert f.type in (fr.FilterType.INT, fr.FilterType.FLOAT), (
+            f"{f.id}: type {f.type} has no auto-dispatch path"
+        )
+        assert f.id.startswith(("min_", "max_")) or f.id.endswith(("_min", "_max")), (
+            f"{f.id}: a numeric sold filter without a min/max affix dispatches as "
+            f"equality, which is never what a bound means"
+        )
+
+
+def test_the_sold_date_filter_reaches_no_other_agenda() -> None:
+    """`sold_age_days` exists only on `sold_comparables`. Offering the filter anywhere
+    else — above all to the estimation agent, which must never see a sold cohort — would
+    be a bound on a column that surface cannot read."""
+    f = fr.by_id("max_sold_age_days")
+    assert f.agendas == frozenset({fr.Agenda.SOLD})
+    assert f.pg_column == "sold_age_days"
+    for agenda in fr.Agenda:
+        if agenda is fr.Agenda.SOLD:
+            continue
+        ids = {d.id for d in fr.filters_for_agenda(agenda)}
+        assert "max_sold_age_days" not in ids, agenda
+
+
+def test_sold_only_filters_are_absent_from_the_agent_tool_schema() -> None:
+    """End-to-end: the agent enumerates COMPARABLES and nothing else, so a sold-only
+    filter must not appear in a tool's input_schema."""
+    from api.agent import _build_tool_registry
+    comparables = set(fr.to_jsonschema_properties(fr.Agenda.COMPARABLES))
+    sold_only = {
+        f.id for f in fr.filters_for_agenda(fr.Agenda.SOLD)
+        if f.agendas == frozenset({fr.Agenda.SOLD})
+    }
+    assert sold_only
+    assert not (comparables & sold_only)
+    schema = _build_tool_registry()["find_comparables_relaxed"].input_schema
+    assert not (set(schema["properties"]) & sold_only)
 
 
 def test_nullable_is_declared_not_encoded_as_an_enum_member() -> None:

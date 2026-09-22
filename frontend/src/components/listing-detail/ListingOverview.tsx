@@ -7,16 +7,17 @@
  * listings row. */
 import { Suspense, useLayoutEffect, useRef, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
-import { fmtCzk, fmtArea, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/format';
+import { fmtCzk, fmtArea, fmtFloor, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/format';
 import { areaKindOf, ppm2BasisFromToken } from '@/lib/measure';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
-import { listingKindParts } from '@/lib/enums';
+import { listingKindParts, priceUnitLabel } from '@/lib/enums';
 import {
   buildFacts,
   buildAmenities,
   FactsList,
   AmenityChips,
 } from '@/lib/listingFacts';
+import { Hairline, SectionLabel } from '@/components/section';
 
 const DetailMap = lazyChunk(() => import('@/components/listing-detail/DetailMap'));
 const Gallery = lazyChunk(() => import('@/components/listing-detail/Gallery'));
@@ -66,22 +67,6 @@ export function ListingOverview({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Layout primitives                                                          */
-/* -------------------------------------------------------------------------- */
-
-function Hairline() {
-  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 /* Header (hero)                                                              */
 /* -------------------------------------------------------------------------- */
 
@@ -103,12 +88,7 @@ function Header({
   /* A pozemek's area_m2 is its PLOT, not a floor plan — the header has room to
    * say which, so it does. */
   const area = fmtArea(listing.area_m2, areaKindOf(listing.category_main));
-  const floor =
-    listing.floor != null
-      ? listing.total_floors != null
-        ? `${listing.floor}/${listing.total_floors}`
-        : String(listing.floor)
-      : null;
+  const floor = fmtFloor(listing.floor, listing.total_floors);
   // A null price means the seller hid it (often quoting it in the description);
   // it's real source state, not missing data — surface it as such.
   const hasPrice = listing.price_czk != null;
@@ -121,7 +101,7 @@ function Header({
     listing.price_per_m2,
     ppm2BasisFromToken(listing.price_per_m2_basis),
   );
-  const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
+  const unit = hasPrice && listing.price_unit ? ` / ${priceUnitLabel(listing.price_unit)}` : '';
   // Only sreality carries a real portal id; other sources hold a synthetic
   // (negative) sreality_id that must never surface as an "ID".
   const hasId = listing.source === 'sreality';
@@ -140,9 +120,7 @@ function Header({
             {floor != null && (
               <>
                 <span className="mx-2 text-[var(--color-ink-4)]">·</span>
-                <span title="Floor">
-                  floor <span className="text-[var(--color-ink)]">{floor}</span>
-                </span>
+                <span className="text-[var(--color-ink)]">{floor}</span>
               </>
             )}
           </p>

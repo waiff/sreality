@@ -21,6 +21,7 @@ import {
   type Ppm2RowBasis,
 } from '@/lib/measure';
 import { fmtMeasuredPricePerM2 } from '@/lib/format';
+import { StatTd, StatTh } from '@/components/table';
 
 interface Props {
   rows: RegionDispositionRow[];
@@ -531,44 +532,28 @@ function NumericTable({ rows }: { rows: Array<RenderRow & { box: Ppm2Box }> }) {
         <thead>
           <tr className="text-left">
             <th className="px-3 py-2 font-medium text-[var(--color-ink-3)] tracking-wide uppercase text-[0.65rem]">Disposition</th>
-            <Th>n</Th>
-            <Th>min</Th>
-            <Th>p25</Th>
-            <Th>median</Th>
-            <Th>p75</Th>
-            <Th>max</Th>
+            <StatTh>n</StatTh>
+            <StatTh>min</StatTh>
+            <StatTh>p25</StatTh>
+            <StatTh>median</StatTh>
+            <StatTh>p75</StatTh>
+            <StatTh>max</StatTh>
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.disposition} className="border-t border-[var(--color-rule-soft)]">
               <td className="px-3 py-1.5 text-[var(--color-ink)] font-medium">{r.disposition}</td>
-              <Td>{cz.format(r.box.n)}</Td>
-              <Td>{cz.format(r.box.min)}</Td>
-              <Td>{cz.format(r.box.p25)}</Td>
-              <Td bold>{cz.format(r.box.median)}</Td>
-              <Td>{cz.format(r.box.p75)}</Td>
-              <Td>{cz.format(r.box.max)}</Td>
+              <StatTd>{cz.format(r.box.n)}</StatTd>
+              <StatTd>{cz.format(r.box.min)}</StatTd>
+              <StatTd>{cz.format(r.box.p25)}</StatTd>
+              <StatTd bold>{cz.format(r.box.median)}</StatTd>
+              <StatTd>{cz.format(r.box.p75)}</StatTd>
+              <StatTd>{cz.format(r.box.max)}</StatTd>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
-  );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th className="px-3 py-2 font-medium text-right text-[var(--color-ink-3)] tracking-wide uppercase text-[0.65rem]">
-      {children}
-    </th>
-  );
-}
-
-function Td({ children, bold }: { children: React.ReactNode; bold?: boolean }) {
-  return (
-    <td className={`px-3 py-1.5 text-right ${bold ? 'font-medium text-[var(--color-ink)]' : 'text-[var(--color-ink-2)]'}`}>
-      {children}
-    </td>
   );
 }

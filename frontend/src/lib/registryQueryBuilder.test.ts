@@ -14,6 +14,7 @@ import { DEFAULT_FILTERS, REGISTRY_KEY_MAP } from './filters';
 import {
   BROWSE_FILTERS_NOT_ON_THE_LIST_QUERY,
   HAND_CODED_BROWSE_FILTERS,
+  applyAgendaFilters,
   applyRegistryFilters,
   isAutoDispatchable,
 } from './registryQueryBuilder';
@@ -322,5 +323,52 @@ describe('hand-coded skip set', () => {
     // These need days-ago → ISO timestamp translation; stays hand-coded.
     expect(r.calls.find((c) => c.col === 'last_seen_at')).toBeUndefined();
     expect(r.calls.find((c) => c.col === 'first_seen_at')).toBeUndefined();
+  });
+});
+
+
+// --- The SOLD agenda ------------------------------------------------------
+
+
+describe('the sold agenda', () => {
+  /* The sold surface has no queries.ts twin applying a filter by hand, so
+     blessing one with the browse escape set would mean it is never applied at
+     all. Every sold filter must reach PostgREST by shape. */
+  it('every sold filter is column-backed and auto-dispatchable', () => {
+    const sold = FILTER_REGISTRY.filters.filter((f) => f.agendas.includes('sold'));
+    expect(sold.length).toBeGreaterThan(0);
+    for (const f of sold) {
+      expect(f.pg_column, `${f.id} has no pg_column`).not.toBeNull();
+      expect(isAutoDispatchable(f), `${f.id} fits no dispatch path`).toBe(true);
+      expect(HAND_CODED_BROWSE_FILTERS.has(f.id), `${f.id} is hand-coded`).toBe(false);
+    }
+  });
+
+  it('dispatches the sold filters by registry id, with no key map in between', () => {
+    const r = new _Recorder();
+    applyAgendaFilters(r, 'sold', (id) =>
+      ({
+        category_main_in: ['byt'],
+        dispositions: ['2+kk', '3+kk'],
+        min_area_m2: 40,
+        max_area_m2: 80,
+        max_sold_age_days: 730,
+      } as Record<string, unknown>)[id] ?? null,
+    );
+    expect(r.calls).toContainEqual({ op: 'eq', col: 'category_main', value: 'byt' });
+    expect(r.calls).toContainEqual({
+      op: 'in', col: 'disposition', value: ['2+kk', '3+kk'],
+    });
+    expect(r.calls).toContainEqual({ op: 'gte', col: 'area_m2', value: 40 });
+    expect(r.calls).toContainEqual({ op: 'lte', col: 'area_m2', value: 80 });
+    expect(r.calls).toContainEqual({ op: 'lte', col: 'sold_age_days', value: 730 });
+  });
+
+  it('applies nothing for a browse-only filter, whatever the state holds', () => {
+    const r = new _Recorder();
+    applyAgendaFilters(r, 'sold', () => 5_000_000);
+    // price_czk is not on the sold relation; a value for it must not reach
+    // PostgREST as a predicate on a column the function never returns.
+    expect(r.calls.find((c) => c.col === 'price_czk')).toBeUndefined();
   });
 });

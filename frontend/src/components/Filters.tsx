@@ -14,11 +14,13 @@ import { CollapsibleGroup, ControlGroup, PickButton, Section } from '@/component
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import {
+  curationKeys,
   dismissalKeys,
   fetchBrowseCount,
   fetchDismissedCount,
   fetchNoPriceCount,
 } from '@/lib/queries';
+import { listCollections } from '@/lib/api';
 import { FilterForm } from '@/components/FilterForm';
 import { PPM2_UNIT, ppm2BasisOfCohort } from '@/lib/measure';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
@@ -84,7 +86,7 @@ const FEATURES_KEYS = [
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const CURATION_KEYS = [
-  'pipeline', 'tags', 'withEstimates', 'showDismissed',
+  'pipeline', 'tags', 'collections', 'withEstimates', 'showDismissed',
   'cityIndexRules', 'minCityPopulation', 'maxCityPopulation',
   'nearCityProximity',
   'nearPop5kmMin', 'nearPop15kmMin', 'nearJobs5kmMin', 'nearJobs15kmMin',
@@ -177,6 +179,45 @@ function IncludeNoPriceToggle({
               : `${fmt(count)} listing${count === 1 ? '' : 's'} with no listed price ${count === 1 ? 'is' : 'are'} hidden.`}
       </p>
     </div>
+  );
+}
+
+/* Collection scope (rule #18). The registry's `int_list` fallback is a box you
+ * type ids into, so the sidebar picks from the ONE collections list instead. */
+function CollectionsPicker({
+  value,
+  onChange,
+}: {
+  value: ReadonlyArray<number> | null;
+  onChange: (next: number[] | null) => void;
+}) {
+  const q = useQuery({
+    queryKey: curationKeys.collections,
+    queryFn: listCollections,
+    staleTime: 30_000,
+  });
+  const collections = q.data?.data ?? [];
+
+  if (q.isLoading) {
+    return (
+      <p className="text-[0.75rem] text-[var(--color-ink-4)]">Loading…</p>
+    );
+  }
+
+  if (collections.length === 0) {
+    return (
+      <p className="text-[0.75rem] text-[var(--color-ink-4)]">
+        No collections yet. Create one from the Collections page.
+      </p>
+    );
+  }
+
+  return (
+    <MultiselectChips
+      value={value ?? []}
+      options={collections.map((c) => ({ value: c.id, label: c.name }))}
+      onChange={(next) => onChange(next.length === 0 ? null : next)}
+    />
   );
 }
 
@@ -296,6 +337,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
   // can also surface its picked-suggestion side channel to Browse.
   const customWidgets = {
     tags: TagPicker as never,
+    collections: CollectionsPicker as never,
     city_index_rules: CityIndexRulesPicker as never,
     pipeline: PipelineScopePicker as never,
   };
@@ -374,7 +416,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
                   onChange={(next) =>
                     handleRegistryChange([{ id: 'subtype', value: next }])
                   }
-                  cols={2}
                 />
               </ControlGroup>
             );
@@ -575,10 +616,11 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['pipeline', 'tags', 'with_estimates']}
+              includeOnly={['pipeline', 'tags', 'collections', 'with_estimates']}
               labels={{
                 pipeline: 'Pipeline',
                 tags: 'Tags',
+                collections: 'Kolekce',
                 with_estimates: 'With estimates',
               }}
               customWidgets={customWidgets}

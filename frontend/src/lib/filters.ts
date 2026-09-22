@@ -1,5 +1,5 @@
 import type { Disposition } from './types';
-import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL } from './filterRegistry.generated';
+import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL, filterById } from './filterRegistry.generated';
 import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
@@ -286,6 +286,9 @@ export interface ListingFilters {
    * every selected tag id. Stored as ids (not names) so renames /
    * recolour-by-delete-recreate stay queryable. */
   tags: number[];
+  /* Browse-only collection scope (rule #18). Empty = off. Like `pipeline`
+   * above, a lens over operator state, so it sits outside preset identity. */
+  collections: number[];
   bounds: MapBounds | null;
   /* `viewport` (default) = map pan/zoom emits bounds, those filter
    * the cohort. `center_radius` = a sidebar-set point + radius drives
@@ -372,6 +375,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   pipeline: null,
   brokerId: null,
   tags: [],
+  collections: [],
   bounds: null,
   locationMode: 'viewport',
   centerRadius: null,
@@ -396,13 +400,17 @@ export const USABLE_AREA_BOUNDS = { min: 0, max: 500, step: 5 };
 export const PRICE_BOUNDS = { min: 0, max: 100_000, step: 500 };
 export const AREA_BOUNDS = { min: 0, max: 300, step: 5 };
 
-/* The "Ostatní" bucket expands to every sreality building_type value
- * that isn't in the explicit three. Listings with a NULL building_type
- * fall out of any non-null selection — matching how furnished /
+/* The "Ostatní" bucket expands to every building_type value that isn't in the
+ * explicit three — read off the registry, so a construction added to the canon
+ * is reachable the moment it exists (the hand-kept list left ceskereality's
+ * `jina`, 8,223 active rows, selectable by nothing). Listings with a NULL
+ * building_type fall out of any non-null selection — matching how furnished /
  * ownership filters already behave. */
-export const BUILDING_MATERIAL_OTHER_VALUES = [
-  'skelet', 'drevo', 'kamen', 'montovana', 'nizkoenergeticka',
-] as const;
+export const BUILDING_MATERIAL_OTHER_VALUES: ReadonlyArray<string> = (
+  filterById('building_type_match')?.enum_values ?? []
+)
+  .map((o) => String(o.value))
+  .filter((v) => v !== 'cihla' && v !== 'panel' && v !== 'smisena');
 
 const buildingMaterialBucketToValues = (
   m: BuildingMaterial,
@@ -422,11 +430,12 @@ export const buildingMaterialToValues = (
   ...new Set(materials.flatMap((m) => buildingMaterialBucketToValues(m))),
 ];
 
-const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
-  '1+kk', '1+1', '2+kk', '2+1',
-  '3+kk', '3+1', '4+kk', '4+1',
-  '5+kk', '5+1',
-];
+/* Read off the registry, like CONDITION_VALUES below: this list is what
+ * survives a URL round-trip, so a hand-kept copy silently discards every pill
+ * the canon gains (it stopped at 5+1 while the pills reached 9+1). */
+const ALL_DISPOSITIONS: ReadonlyArray<string> = (
+  filterById('dispositions')?.enum_values ?? []
+).map((o) => String(o.value));
 
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
@@ -440,10 +449,9 @@ export const UNKNOWN_FILTER_VALUE = '__unknown__';
 export { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL };
 const FURNISHED_VALUES: ReadonlyArray<string> = [...FURNISHED_CANONICAL, UNKNOWN_FILTER_VALUE];
 const OWNERSHIP_VALUES: ReadonlyArray<string> = [...OWNERSHIP_CANONICAL, UNKNOWN_FILTER_VALUE];
-const CONDITION_VALUES: ReadonlyArray<string> = [
-  'novostavba', 'po_rekonstrukci', 'velmi_dobry',
-  'dobry', 'pred_rekonstrukci', 'k_demolici',
-];
+const CONDITION_VALUES: ReadonlyArray<string> = (
+  filterById('condition_match')?.enum_values ?? []
+).map((o) => String(o.value));
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = [
   'byt', 'dum', 'komercni', 'pozemek', 'ostatni',
 ];
@@ -568,7 +576,7 @@ export const priceChangeCountColumn = (windowDays: number | null): string => {
 export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const dispRaw = splitCsv(sp.get('disposition'));
   const dispositions = dispRaw.filter((d): d is Disposition =>
-    (ALL_DISPOSITIONS as ReadonlyArray<string>).includes(d),
+    ALL_DISPOSITIONS.includes(d),
   );
   const [priceMin, priceMax] = parseRange(sp.get('price'));
   const [ppm2Min, ppm2Max] = parseRange(sp.get('ppm2'));
@@ -656,6 +664,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     pipeline: parsePipelineScope(sp.get('pipeline')),
     brokerId: parseIntOrNull(sp.get('broker')),
     tags: parseIntList(sp.get('tags')),
+    collections: parseIntList(sp.get('collections')),
     bounds: parseBounds(sp.get('bbox')),
     locationMode: sp.get('locmode') === 'center_radius'
       ? 'center_radius'
@@ -788,7 +797,7 @@ const parseCenterRadius = (s: string | null): CenterRadius | null => {
   return { lat, lng, radius_m: Math.trunc(radius) };
 };
 
-const parseIntList = (s: string | null): number[] => {
+export const parseIntList = (s: string | null): number[] => {
   if (!s) return [];
   const out: number[] = [];
   for (const part of s.split(',')) {
@@ -918,6 +927,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   }
   if (f.brokerId != null) sp.set('broker', String(f.brokerId));
   if (f.tags.length) sp.set('tags', f.tags.join(','));
+  if (f.collections.length) sp.set('collections', f.collections.join(','));
   if (f.bounds) {
     const { west, south, east, north } = f.bounds;
     sp.set(
@@ -1212,11 +1222,11 @@ export const pipelineViewFilters = (): ListingFilters => ({
  * `bounds` is deliberately NOT here: it is opt-in per save (the "include map
  * area" toggle), which is a different rule, expressed below. */
 const PRESET_EXCLUDED_KEYS = [
-  'pipeline', 'brokerId', 'showDismissed',
+  'pipeline', 'brokerId', 'showDismissed', 'collections',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 /* The same fields as URL params — the form preset equality is computed in. */
-const PRESET_EXCLUDED_PARAMS: readonly string[] = ['pipeline', 'broker', 'dismissed'];
+const PRESET_EXCLUDED_PARAMS: readonly string[] = ['pipeline', 'broker', 'dismissed', 'collections'];
 
 const stripPresetExcluded = (f: ListingFilters): ListingFilters => {
   const out = { ...f };
@@ -1368,6 +1378,7 @@ export const REGISTRY_KEY_MAP = {
   show_dismissed: 'showDismissed',
   pipeline: 'pipeline',
   tags: 'tags',
+  collections: 'collections',
   tom_days_min: 'tomDaysMin',
   tom_days_max: 'tomDaysMax',
   last_seen_min_days: 'lastSeenMinDays',
@@ -1416,10 +1427,10 @@ export function listingFiltersToRegistryView(
     const v = filters[key as keyof ListingFilters];
     if ((TRISTATE_KEYS as ReadonlyArray<string>).includes(registryId)) {
       out[registryId] = triToBoolNullable(v as TriState);
-    } else if (registryId === 'tags') {
-      out[registryId] = (v as number[]).length === 0 ? null : v;
     } else if (
-      registryId === 'category_main_in'
+      registryId === 'tags'
+      || registryId === 'collections'
+      || registryId === 'category_main_in'
       || registryId === 'dispositions'
       || registryId === 'districts'
       || registryId === 'condition_match'
@@ -1454,9 +1465,8 @@ export function applyRegistryUpdate(
   if ((TRISTATE_KEYS as ReadonlyArray<string>).includes(id)) {
     return { ...filters, [key]: boolNullableToTri(value) };
   }
-  if (id === 'tags') {
-    const next = value == null ? [] : (value as number[]);
-    return { ...filters, tags: next };
+  if (id === 'tags' || id === 'collections') {
+    return { ...filters, [key]: value == null ? [] : (value as number[]) };
   }
   if (id === 'category_main_in') {
     const next = value == null ? [] : (value as CategoryMain[]);
@@ -1545,7 +1555,7 @@ export function applyRegistryUpdates(
  * `recently added/changed` presets (a watchdog already fires on brand-new /
  * changed listings, so a recency window is redundant there), the map `bounds`
  * viewport (use a district chip or center+radius instead), `buildingMaterial`,
- * `garden_area` bounds, and `tags`. */
+ * `garden_area` bounds, `tags` and `collections`. */
 
 const UNSUPPORTED_LABELS: ReadonlyArray<{
   test: (f: ListingFilters) => boolean;
@@ -1571,10 +1581,12 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
   { test: (f) => f.withEstimates, label: 'with estimates' },
   /* A watchdog never surfaces a dismissed property, whatever the spec says. */
   { test: (f) => f.showDismissed, label: 'dismissed properties' },
-  /* The pipeline is the operator's own state: a watchdog scoped to it would
-   * only ever fire on properties they already put there — and "new listing"
-   * events can't match a card that doesn't exist yet. */
+  /* The pipeline and collections are the operator's own state: a watchdog
+   * scoped to either would only ever fire on properties they already put
+   * there — and "new listing" events can't match a card, or a membership,
+   * that doesn't exist yet. */
   { test: (f) => f.pipeline != null, label: 'pipeline' },
+  { test: (f) => f.collections.length > 0, label: 'collections' },
   /* "Alert me when broker X lists something new" is a real, separable feature
    * idea, not built yet — the matcher has no broker join today. */
   { test: (f) => f.brokerId != null, label: 'broker' },

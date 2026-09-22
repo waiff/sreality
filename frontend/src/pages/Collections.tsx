@@ -12,6 +12,7 @@ import {
   deleteCollection,
   listCollections,
 } from '@/lib/api';
+import { revalidateCollections } from '@/lib/collectionCache';
 import { curationKeys } from '@/lib/queries';
 import { Field } from '@/components/controls';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
@@ -35,7 +36,7 @@ export default function Collections() {
       <div className="mt-7">
         <NewCollectionForm
           existing={items.map((c) => c.name.toLowerCase())}
-          onCreated={() => qc.invalidateQueries({ queryKey: curationKeys.collections })}
+          onCreated={() => revalidateCollections(qc)}
         />
       </div>
       <div className="mt-9">
@@ -212,9 +213,7 @@ function CollectionRow({ c }: { c: Collection }) {
 
   const del = useMutation({
     mutationFn: () => deleteCollection(c.id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-    },
+    onSuccess: () => revalidateCollections(qc),
   });
 
   return (

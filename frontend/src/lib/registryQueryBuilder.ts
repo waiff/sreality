@@ -1,4 +1,4 @@
-/* Registry-driven PostgREST filter dispatcher for the Browse page.
+/* Registry-driven PostgREST filter dispatcher.
  *
  * Before this module existed, every filter had to be hand-wired in
  * `queries.ts:applyFilters` to the matching PostgREST `.gte()` /
@@ -7,9 +7,9 @@
  * and `ComparableFilters` were all wired, but the PostgREST
  * translation step was missed and the cohort silently never narrowed.
  *
- * `applyRegistryFilters` walks `FILTER_REGISTRY.filters` at runtime
- * and dispatches each BROWSE-eligible entry to the right PostgREST
- * call based on its `type` and id suffix:
+ * `applyAgendaFilters` walks `FILTER_REGISTRY.filters` at runtime
+ * and dispatches each entry declared for the caller's AGENDA to the
+ * right PostgREST call based on its `type` and id suffix:
  *
  *   - `tristate` (`has_balcony`, `terrace`, …)           → `.eq(col, true|false)` when not 'any'
  *   - `string_list` (`condition_match`, `dispositions`)  → `.in(col, values)` when non-empty
@@ -26,9 +26,18 @@
  * every BROWSE-eligible registry filter is either in that set or
  * matches one of the auto-dispatch patterns above — so a new
  * registry entry that fits no path fails CI loudly instead of
- * silently no-op'ing in the UI. */
+ * silently no-op'ing in the UI.
+ *
+ * `applyRegistryFilters` is Browse's caller: its state is camelCase and reaches
+ * the registry through REGISTRY_KEY_MAP. The sold-comps block keys its state by
+ * registry id and calls `applyAgendaFilters` directly — same walk, same
+ * dispatch table, so the two surfaces cannot drift in what a filter MEANS. */
 
-import { FILTER_REGISTRY, type FilterDef } from './filterRegistry.generated';
+import {
+  FILTER_REGISTRY,
+  type Agenda,
+  type FilterDef,
+} from './filterRegistry.generated';
 import { REGISTRY_KEY_MAP, type ListingFilters } from './filters';
 
 /* Registry IDs whose shape is too irregular for the auto-dispatcher.
@@ -69,6 +78,9 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   // (property_pipeline_public), resolved in queries.ts:resolvePipelinePrefilter
   // — there is no pipeline column on the browse read model to narrow on.
   'pipeline',
+  // Collection membership, the same shape again: an allowlist resolved from
+  // collection_properties_public in queries.ts:resolveCollectionPrefilter.
+  'collections',
   // Dismissed properties are excluded by the SOURCE, not a predicate:
   // queries.ts:readSource reads the *_visible() twin unless it is set (mig 537).
   'show_dismissed',
@@ -147,21 +159,25 @@ export const isAutoDispatchable = (f: FilterDef): boolean => {
   return false;
 };
 
-/* Apply every BROWSE-eligible registry filter that isn't in the
- * hand-coded set. Idempotent on each call; returns the chained builder. */
-export const applyRegistryFilters = <T>(q: T, f: ListingFilters): T => {
+/* Apply every registry filter the agenda declares, reading each one's current
+ * value through `valueOf`. Idempotent on each call; returns the chained
+ * builder. */
+export const applyAgendaFilters = <T>(
+  q: T,
+  agenda: Agenda,
+  valueOf: (id: string) => unknown,
+): T => {
   let r = q as unknown as PostgrestBuilder;
-  const filterRecord = f as unknown as Record<string, unknown>;
 
   for (const filter of FILTER_REGISTRY.filters) {
-    if (HAND_CODED_BROWSE_FILTERS.has(filter.id)) continue;
-    if (!filter.agendas.includes('browse')) continue;
+    /* The escape set is BROWSE's — it names filters `queries.ts:applyFilters`
+     * applies by hand on THAT surface. Skipping them on another agenda would
+     * mean the filter is simply never applied. */
+    if (agenda === 'browse' && HAND_CODED_BROWSE_FILTERS.has(filter.id)) continue;
+    if (!filter.agendas.includes(agenda)) continue;
     if (filter.pg_column == null) continue;
 
-    const key = REGISTRY_KEY_MAP[filter.id as keyof typeof REGISTRY_KEY_MAP];
-    if (key === undefined) continue;
-
-    const value = filterRecord[key];
+    const value = valueOf(filter.id);
     if (value === null || value === undefined) continue;
 
     // Tristate first — has to win over `type === 'bool'` below.
@@ -226,4 +242,14 @@ export const applyRegistryFilters = <T>(q: T, f: ListingFilters): T => {
   }
 
   return r as unknown as T;
+};
+
+/* Browse's caller: its filter state is camelCase, so the registry id is
+ * resolved through REGISTRY_KEY_MAP before the value is read. */
+export const applyRegistryFilters = <T>(q: T, f: ListingFilters): T => {
+  const filterRecord = f as unknown as Record<string, unknown>;
+  return applyAgendaFilters(q, 'browse', (id) => {
+    const key = REGISTRY_KEY_MAP[id as keyof typeof REGISTRY_KEY_MAP];
+    return key === undefined ? undefined : filterRecord[key];
+  });
 };

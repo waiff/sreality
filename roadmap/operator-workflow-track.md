@@ -387,13 +387,32 @@ vitest — the numbers below come from Playwright against live data).
   read), NOT part of the URL view state: a shared link carries which deals to
   look at, not how this browser likes its photos.
 
+### Phase U-PIPE Phase 3k: Pinned stage headers + address-led card (done)
+Two operator asks, measured in a real browser (Playwright, local build, a
+98-card fixture board served to the page; nothing written).
+- **Stage headers stay on screen while the page scrolls.** A `sticky` header
+  inside its column cannot work: the board scrolls sideways, `overflow-x: auto`
+  forces `overflow-y` to auto, and a sticky child then pins to the board — which
+  never scrolls vertically — instead of the page. The headers now sit in their
+  own row (`BoardFrame`) outside the horizontal scroller, `sticky top-14` under
+  the top bar, copying the columns' `scrollLeft`; both rows share widths and
+  gaps, so their scroll ranges are identical. Measured: pinned at y=56 after a
+  1,400px scroll; a 700px sideways wheel leaves both rows at 700 with every
+  header 0px off its column; `z-10` stays under the Lokalita dropdown (z-20).
+  Each column list now carries its stage as `aria-label`, since the heading is
+  no longer its neighbour.
+- **The card leads with its address, and the address is the link** (new tab, as
+  before); the price is the plain second line. A card whose place is unresolved
+  links "Lokalita neurčena" rather than losing its only way to the listing.
+
 ### Phase U-DISMISS: Dismiss a property (done)
 North star: a dismissal is ONE durable, account-scoped fact about a property
 ("reviewed, never show it again") with one meaning everywhere — discovery
 (Browse, notification feed + delivery) hides it by default, non-destructively
 (lift, never delete), enforced server-side once, rendered by one shared
 control. Not a special collection (collections are m2m groupings; see
-`docs/architecture.md` rule 18). The pipeline always wins over a dismissal.
+`docs/architecture.md` rule 18). A LIVE deal always wins over a dismissal; a
+deal closed into a terminal stage can be dismissed.
 - **W1 — store, merge carry, API** (done, #1515): migration 536
   (`property_dismissals` + `property_dismissals_public`), `POST /dismissals`,
   `DELETE /dismissals/{property_id}` (lift), 409 for a piped property,
@@ -418,10 +437,86 @@ control. Not a special collection (collections are m2m groupings; see
   toggle beside the monitoring bell, state as `dismissed` on
   `POST /listings/lookup`, writes on `/dismissals`; the panel mirrors the
   lift when a card is added.
+- **W6 — closed deals can be dismissed** (done, 2026-09-21): the rule narrowed
+  from "any pipeline card blocks a dismissal" to "a LIVE card does". Under the
+  old rule a deal moved to "Passed" stayed in Browse forever with no Skrýt
+  button — 44 closed cards (29 Passed, 15 Lost) were stuck, and the 409's own
+  advice ("close the deal there instead") hid nothing. One statement,
+  `lift_dismissals_of_live_deals`, decides from the data after every write that
+  can leave a card live (add, a stage move, a stage re-opened); the merge
+  reconciler states the same rule per account. The SPA and the extension read
+  liveness off the stage (`is_terminal`). No migration, no backfill: 0 active
+  dismissals sat on a carded property.
 - **Next (not built):** a dismissal *reason* (a small operator taxonomy — the
   label set a future ranking/scoring model would learn from; `property_notes`
   covers free text today), and an "only dismissed" review lens if the reveal
   proves too coarse for reviewing the pile.
+
+### Phase U-EXT-COLL: Every collection from the extension panel (done, #1562, 2026-09-21)
+Operator ask: use any collection from the portal page the way the app's
+listing page does. The panel could only reach ONE collection — a "Sledovat"
+bell hard-wired to the system monitoring collection (else the first monitored
+one); every other collection needed a trip to the app.
+- The bell is replaced by the SPA header's control reproduced by value
+  (`CollectionSaveToggle` + `CollectionSaveMenu`): "Uložit do kolekce" /
+  "V kolekci" / "V kolekcích · N", opening a checklist of every collection,
+  monitored first and bell-marked, one click to add or remove. Same routes as
+  the SPA; no API change, no migration.
+- The list is re-read whenever the checklist opens (it was cached for the life
+  of the tab, so a collection made in the app never appeared), and both
+  account-scoped caches (collections, stages) are dropped on sign-out.
+- Two panel-wide fixes the checklist needed: the panel now scrolls when taller
+  than the window (pinned to the bottom edge, it grew off the top of short
+  screens), keeping its scroll position across re-renders; and focus survives a
+  re-render again — current Chrome fires `blur` on a removed element, which had
+  silently disabled the panel's focus restore (the note box too).
+- An independent review before merge found that re-enabled focus restore could
+  also STEAL focus: a row being saved dropped focus to the page, and when the
+  save landed the panel pulled it back from the portal's search box, so the
+  next Space undid the save (reproduced on the pre-fix build). Now focus is
+  carried only while it is still in the panel, busy rows stay focusable
+  (`aria-disabled`), a write is applied as one add/remove to the CURRENT state
+  (a panel re-opened mid-write keeps newer saves), a failure with the checklist
+  closed surfaces on the panel's error line, and a sign-out invalidates list
+  reads still in flight (`sessionGen`).
+- Verified by driving the built `content.js` in headless Chromium with mocked
+  `chrome.*` APIs — 44 checks (order, writes, revert on error, keyboard,
+  Escape, a 620px window, and one regression check per review finding, each
+  shown to fail on the pre-fix build). Not built: creating a collection from
+  the panel (the app's listing page doesn't either — "Spravovat kolekce →"
+  links there).
+
+### Phase U-COLL-SCOPE: Collections as a Browse cohort filter (done)
+Collections could group properties but not SHOW them: seeing "everything in
+Shortlist" meant opening the collection page, which is a list, not Browse — no
+map, no stats, no price bounds on top.
+- **One vocabulary.** `lib/collectionScope.ts` owns what a selection means,
+  rendered as a property-id allowlist for Browse; the pipeline board's
+  rendering will land beside it rather than as a second answer. OR,
+  deliberately unlike `tags` (AND) — collections read as folders.
+- **A lens, not criteria.** Registry id `collections`, BROWSE agenda only (the
+  watchdog would fire on the operator's own clicks; the estimation agent must
+  not see their taste), and outside preset identity like `pipeline` / `broker` /
+  `dismissed`, so toggling it never dirties a loaded preset. No migration: the
+  allowlist rides `browse_stats_properties`' generic `property_ids_filter`
+  (migration 378), the seam that filter was built to be reused as.
+- **The subtraction that paid for it.** `fetchBrowseStats` now resolves through
+  `resolveBrowsePrefilters` like every other lane, `tags` moved off the
+  `properties_with_tags` RPC onto the membership rows, and the registry's dead
+  WATCHDOG agenda on `tags` went with it. Rule 18 in `docs/architecture.md` has
+  the detail.
+- **Cache coherence.** `revalidateCollections` gained `cohortScoped`, the mirror
+  of the pipeline's knob: when Browse is scoped to collections, membership IS the
+  cohort, so a save from the Browse card refetches the list too. Off by default —
+  everywhere else, refetching map + cards + count + stats on a bookmark click is
+  waste.
+- **The board, same filter.** The pipeline bar was rebuilt on the shared
+  primitives (Field + Segmented + MultiselectChips) — Stav / Typ / Lokalita /
+  **Kolekce**, each offered only when it could change the view, all client-side
+  over the one board read plus the shared member map, cleared by one header
+  Reset instead of two hand-rolled idioms. Rule 22 in `docs/architecture.md`
+  carries the availability and fail-open contract.
+- Next: dropping `properties_with_tags` once this SPA build has rolled out.
 
 ### Phase U-ME: Manual rental estimates (next)
 

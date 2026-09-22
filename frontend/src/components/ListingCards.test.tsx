@@ -161,6 +161,7 @@ function renderGrid(
             selectedPropertyIds={new Set(opts.merge?.selected ? [42] : [])}
             onToggleSelect={opts.onToggleSelect ?? (() => {})}
             pipelineScoped={false}
+            collectionScoped={false}
             estimates={opts.estimates}
             estimatingIds={new Set()}
             onEstimate={() => {}}

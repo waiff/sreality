@@ -27,17 +27,22 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from html import unescape
 from typing import Any
 from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
-from scraper import street
+from scraper import street, vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.price_text import is_per_area_price
 from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
+
+SOURCE = "ceskereality"
 
 # ceskereality URL segments -> our canonical labels (mirrors parser.CATEGORY_*).
 # Both the search and the detail URL use the SAME plural segment
@@ -55,31 +60,6 @@ CATEGORY_MAIN: dict[str, str] = {
     "ostatni": "ostatni",
 }
 
-# ceskereality construction labels -> the SAME canonical codes the sreality parser
-# emits (verified against the live sreality vocabulary), so a cross-portal "cihla"
-# filter matches sreality and ceskereality alike. "zděná" (masonry) maps to sreality's
-# "cihla" (its dominant solid-masonry value); "jiná" (other) has no sreality
-# equivalent and is left as-is rather than mis-mapped.
-BUILDING_TYPE: dict[str, str] = {
-    "panelova": "panel",
-    "cihlova": "cihla",
-    "zdena": "cihla",
-    "smisena": "smisena",
-    "skeletova": "skelet",
-    "drevena": "drevo",
-    "kamenna": "kamen",
-    "montovana": "montovana",
-    "nizkoenergeticka": "nizkoenergeticka",
-}
-# ceskereality "Stav nemovitosti" labels (diacritics-stripped) -> sreality's canonical
-# condition vocabulary. The already-matching values (dobry, novostavba, po_rekonstrukci,
-# pred_rekonstrukci, spatny) pass through; only the divergent ones are mapped.
-CONDITION: dict[str, str] = {
-    "bezvadny": "velmi_dobry",          # "Bezvadný" == sreality "velmi dobrý"
-    "k_rekonstrukci": "pred_rekonstrukci",
-    "rozestaveny": "ve_vystavbe",
-}
-
 # Czech-bbox guard: a coordinate outside it — a swapped lat/lon or a bad pin — is
 # dropped rather than stored as geom.
 _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
@@ -87,9 +67,6 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The numeric listing id is the trailing "-1234567.html" of the detail URL.
 _ID_RE = re.compile(r"-(\d{4,})\.html\b")
-_DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
-_INT_RE = re.compile(r"(-?\d+)")
-_ENERGY_RE = re.compile(r"\b([A-G])\b")
 _STRANA_RE = re.compile(r"[?&]strana=(\d+)")
 _PATH_RE = re.compile(r"^/([a-z]+)/([a-z0-9-]+)/")
 # A Czech-format price run: digits split by ordinary / no-break / thin spaces.
@@ -216,96 +193,6 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
         return None, unit
     value = int(digits)
     return (value if value <= _PRICE_MAX else None), unit
-
-
-def _parse_disposition(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _DISPOSITION_RE.search(text)
-    if not m:
-        return None
-    return f"{m.group(1)}+{m.group(2).lower()}"
-
-
-def _parse_int(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _INT_RE.search(text)
-    return int(m.group(1)) if m else None
-
-
-def _parse_floor(text: str | None) -> int | None:
-    """ceskereality renders the floor as "1." (1st floor) or "přízemí" (ground)."""
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if "prizem" in low:
-        return 0
-    m = _INT_RE.search(low)
-    return int(m.group(1)) if m else None
-
-
-def _norm_condition(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    key = re.sub(r"\s+stav$", "", key)        # "velmi dobrý stav" -> "velmi dobry"
-    key = re.sub(r"\s+", "_", key)
-    return CONDITION.get(key, key or None)    # align to sreality's vocabulary
-
-
-def _norm_ownership(text: str | None) -> str | None:
-    """ceskereality ownership labels (incl. compound "Státní, obecní, jiné") ->
-    sreality's osobni / druzstevni / statni, by substring so the variants collapse."""
-    if not text:
-        return None
-    key = _strip_diacritics(text).lower().strip()
-    if "druzstev" in key:
-        return "druzstevni"
-    if "soukrom" in key or "osob" in key:
-        return "osobni"
-    if "statni" in key or "obecni" in key:
-        return "statni"
-    return key or None
-
-
-def _norm_furnished(text: str | None) -> str | None:
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if "neza" in low or "nevyba" in low:
-        return "ne"
-    if "castec" in low:
-        return "castecne"
-    if "zariz" in low or "vybav" in low:
-        return "ano"
-    return None
-
-
-def _norm_building_type(text: str | None) -> str | None:
-    if not text:
-        return None
-    key = _strip_diacritics(text.strip().lower())
-    return BUILDING_TYPE.get(key, key or None)
-
-
-def _energy_rating(text: str | None) -> str | None:
-    if not text:
-        return None
-    m = _ENERGY_RE.search(text)
-    return m.group(1).upper() if m else None
-
-
-def _has_balcony(text: str | None) -> bool | None:
-    """The "Balkóny" spec value ("Balkon"/"Lodžie" -> True, "Ne"/"Bez" -> False)."""
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if low.startswith("ne") or "bez " in low:
-        return False
-    if "balk" in low or "lod" in low:
-        return True
-    return None
 
 
 def _detail_params(tree: HTMLParser) -> dict[str, str]:
@@ -568,35 +455,33 @@ def areas_from_params(
     title: str | None,
     category_main: str | None,
 ) -> PortalAreas:
-    """ceskereality's area cells, in ITS precedence — spelled here once and nowhere else.
+    """ceskereality's area slots — the KEYS are the contract's, this owns the measure.
 
-    `parse_detail` reads it off a live page; `scripts/backfill_area_spaced_thousands`
-    reads it off `raw_json['params']`, which is this parser's own latest reading of the
-    same page. The headline goes through the shared resolver on SEPARATE measures.
+    `parse_detail` reads it off a live page, and `scripts/reparse.py` replays `parse_detail`
+    over the stored page, so there is one reading of these keys. The headline goes through the shared resolver on SEPARATE measures.
 
-    `usable_area` IS THE "PLOCHA UŽITNÁ" CELL AND NOTHING ELSE (W21). It used to end
-    `... or params.get("plocha")`, so a page carrying only the bare "Plocha" — the total —
-    wrote that number into the column every consumer reads as the užitná measure: the same
-    collapse the headline resolver exists to prevent, one column over. "Plocha" still
-    reaches the headline through its own `total` slot, stamped `'total'`; what it no longer
-    does is impersonate a užitná in a side column. (The two spellings that DO stay are one
-    label: ceskereality renders it "Plocha užitná" on some templates and "Užitná plocha" on
-    others.)
+    `usable_area` IS THE "PLOCHA UŽITNÁ" CELL AND NOTHING ELSE (W21): a page carrying only
+    the bare "Plocha" — the total — must not write that number into the column every
+    consumer reads as the užitná measure.
+
+    The `užitná plocha`, `plocha` and `plocha zahrady` fallbacks this used to carry are
+    gone: ceskereality emits none of the three on any row of the checked-in census or of
+    4,500 stored rows sampled at both ends of the corpus, so the `total` slot and the
+    garden column were unreachable, and the contract now names only the two keys that are
+    real (gate A1).
     """
-    usable = parse_area_text(
-        params.get("plocha užitná") or params.get("užitná plocha"))
-    estate_area = parse_area_text(params.get("plocha pozemku"))
+    usable_text, plot_text = source_values(SOURCE, "area_m2", params)
+    usable = parse_area_text(usable_text)
+    estate_area = parse_area_text(plot_text)
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
         usable=usable,
-        total=parse_area_text(params.get("plocha")),
         plot=estate_area,
         fallback=parse_area_text(title),
     )
     return PortalAreas(
         area_m2=area_m2, area_basis=area_basis,
-        usable_area=usable, estate_area=estate_area,
-        garden_area=parse_area_text(params.get("plocha zahrady")),
+        usable_area=usable, estate_area=estate_area, garden_area=None,
     )
 
 
@@ -612,6 +497,7 @@ def parse_detail(
     ld = _jsonld_product(html)
     offers = ld.get("offers") if isinstance(ld.get("offers"), dict) else {}
     params = _detail_params(tree)
+    read = partial(source_value, SOURCE, params=params)
 
     title = (
         ld.get("name")
@@ -676,7 +562,7 @@ def parse_detail(
     }
 
     return ScrapedListing(
-        source="ceskereality",
+        source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
         category_main=category_main,
@@ -686,7 +572,7 @@ def parse_detail(
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
+        disposition=vocabulary.disposition(SOURCE, title),
         locality=locality,
         # The <title>'s ", okres X" segment (W0 0j) — matches the "okres ..."
         # convention the sreality DISTRICTS labels use.
@@ -695,18 +581,21 @@ def parse_detail(
         house_number=house_number,
         lat=lat,
         lon=lon,
-        floor=_parse_floor(params.get("patro") or params.get("podlaží")),
-        total_floors=_parse_int(params.get("počet podlaží") or params.get("podlaží v domě")),
-        has_balcony=_has_balcony(params.get("balkóny") or params.get("balkon")),
-        building_type=_norm_building_type(
-            params.get("konstrukce") or params.get("typ stavby") or params.get("stavba")
-        ),
-        condition=_norm_condition(params.get("stav nemovitosti") or params.get("stav objektu")),
-        ownership=_norm_ownership(params.get("vlastnictví")),
-        furnished=_norm_furnished(params.get("vybavení")),
-        energy_rating=_energy_rating(
-            params.get("energetická náročnost") or params.get("penb")
-        ),
+        floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
+        # "Balkóny" is one multi-value cell ("Balkon, Lodžie, Terasa"), so has_balcony
+        # (R11: balcony OR loggia) and `terrace` are both read out of it — and a list
+        # that names neither is the portal stating their absence, which is why this
+        # portal can carry a real `false` where a per-amenity row portal cannot.
+        has_balcony=vocabulary.contains(read("has_balcony"), "balk", "lod"),
+        terrace=vocabulary.contains(read("terrace"), "teras"),
+        # "Parkování" is the same shape ("Garáž, Vlastní parkovací stání, Parkoviště,
+        # Parkování na ulici") and nothing read it: has_parking was 0.0% on 48,620 rows.
+        has_parking=vocabulary.parking(read("has_parking")),
+        garage=vocabulary.contains(read("garage"), "garaz"),
+        building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
+        condition=vocabulary.canonical("condition", SOURCE, read("condition")),
+        ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
+        energy_rating=vocabulary.energy_rating(read("energy_rating")),
         estate_area=areas.estate_area,
         garden_area=areas.garden_area,
         description=description,

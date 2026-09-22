@@ -1,0 +1,137 @@
+name: "Field capture: text-extraction bake-off"
+
+# Decides which model may write a prose-only fact, and at what price (field-capture W7,
+# ruling R10). MANUAL DISPATCH ONLY — it spends money and nothing in the lane calls it.
+#
+# THE PANEL IS NOT LABELLED BY HAND. Its labels are the structured portals' own stated
+# fields on the SAME advert: idnes and sreality publish has_lift / condition /
+# building_type / energy_rating / floor / total_floors / balcony / parking in a table AND
+# describe the property in prose, so their table grades what a model reads out of their
+# prose. The model is shown the description alone. A bazos slice rides along, scored only
+# where a cross-portal sibling exists (842 live on 2026-09-22), because broker prose is not seller
+# prose and the lane's target portal is the second kind.
+#
+# START WITH panel_only: it builds and uploads the panel, makes no LLM call and spends
+# nothing. Read `panel.json` before paying for anything.
+#
+# COST. The paid arm is ~$0.00225 an advert measured (gpt-5-mini, n=15,382), so a
+# 1,300-advert panel is roughly $3 per OpenAI arm. An `oss:` arm rents a GPU pod instead:
+# the two default open candidates are 26-33B and need an 80 GB A100, which is SECURE
+# cloud at ~$1.6-2.2/hr, so pass oss_cloud=SECURE and oss_max_price=2.50 or the launch
+# refuses. The pod is torn down in a `finally`, named in `pod.json` in the artefact before
+# the long wait, AND reaped by an `if: always()` step, because a cancelled job runs no
+# `finally` and a receipt nobody acts on terminates nothing (autodedup.yml's precedent).
+# An arm is serial, ~11.7 s an advert, so a 1,300-advert panel is ~4.2 h: run ONE arm per
+# dispatch, or shrink the panel, against the 240-minute cap.
+#
+# THE WINNER IS NOT SET HERE, AND NEITHER IS THE SCOPE. Two separate operator acts, in
+# either order, and the lane does nothing until BOTH have happened: set
+# `app_settings.enrichment_model` (the lane's one switch), and flip the per-field `gate`
+# in `scraper/attribute_contract.py` for each field that cleared 95 %. Flip EVERY field
+# that cleared in ONE edit: the open-gate set is part of the cache key, so adding a field
+# later re-reads every description the lane has already paid for.
+#
+# Required secrets: SUPABASE_DB_URL, OPENAI_API_KEY (both already in use by other lanes);
+# RUNPOD_API_KEY and HF_TOKEN only for an `oss:` arm (both already exist — autodedup.yml,
+# dinov3_embed_backfill.yml and tagging_bakeoff.yml consume them). Both default open
+# candidates are Apache-2.0 and UNGATED, so HF_TOKEN is passed for the general case and
+# needed by neither.
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Comma-separated arms. 'oss:<hf id>' rents a pod; anything else is an API model (gpt-5.6-luna, gpt-5-mini)."
+        required: false
+        default: "gpt-5.6-luna"
+        type: string
+      per_source:
+        description: "Panel rows per structured portal (idnes + sreality). Stratified per category, so a thin category (idnes pozemek, 7 rows) leaves the realised n under this; 600 measured 1,207 structured rows."
+        required: false
+        default: "600"
+        type: string
+      bazos:
+        description: "Bazos rows, scored only where a cross-portal sibling exists. The in-domain read, and a small one."
+        required: false
+        default: "300"
+        type: string
+      oss_cloud:
+        description: "RunPod cloud for an oss: arm. The default open candidates need an 80 GB card, which is SECURE."
+        required: false
+        default: "SECURE"
+        type: choice
+        options: ["SECURE", "COMMUNITY"]
+      oss_max_price:
+        description: "Ceiling, USD/hr, for an oss: arm's GPU."
+        required: false
+        default: "2.50"
+        type: string
+      panel_only:
+        description: "Build the panel, make no LLM call, spend nothing."
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: text-extraction-bakeoff
+  cancel-in-progress: false
+
+jobs:
+  bakeoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[api]"
+      - name: Bake-off
+        env:
+          MODELS: ${{ inputs.models }}
+          PER_SOURCE: ${{ inputs.per_source }}
+          BAZOS: ${{ inputs.bazos }}
+          OSS_CLOUD: ${{ inputs.oss_cloud }}
+          OSS_MAX_PRICE: ${{ inputs.oss_max_price }}
+          PANEL_ONLY: ${{ inputs.panel_only }}
+        # Inputs travel via env, never interpolation.
+        run: |
+          set -euo pipefail
+          case "${MODELS}" in
+            ''|*[!a-zA-Z0-9_,.:/-]*) echo "::error::models must be [A-Za-z0-9_,.:/-]+"; exit 1 ;;
+          esac
+          case "${PER_SOURCE}" in ''|*[!0-9]*) echo "::error::per_source must be a number"; exit 1 ;; esac
+          case "${BAZOS}" in ''|*[!0-9]*) echo "::error::bazos must be a number"; exit 1 ;; esac
+          case "${OSS_MAX_PRICE}" in ''|*[!0-9.]*) echo "::error::oss_max_price must be a number"; exit 1 ;; esac
+          ARGS=(--models "${MODELS}" --per-source "${PER_SOURCE}" --bazos "${BAZOS}"
+                --oss-cloud "${OSS_CLOUD}" --oss-max-price "${OSS_MAX_PRICE}"
+                --out-dir bakeoff)
+          if [ "${PANEL_ONLY}" = "true" ]; then ARGS+=(--panel-only); fi
+          python -m scripts.bakeoff_text_extraction "${ARGS[@]}" | tee bakeoff-summary.md
+      # Naming the pod in the artefact is not terminating it: a cancelled or timed-out job
+      # runs no `finally`, and an 80 GB A100 keeps billing until something DELETEs it.
+      - name: Reap the pod
+        if: always()
+        run: python -m autodedup.oss_pod --reap bakeoff/pod.json
+      - name: Summary
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -f bakeoff/bakeoff.md ]; then cat bakeoff/bakeoff.md >> "$GITHUB_STEP_SUMMARY"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: text-extraction-bakeoff
+          path: bakeoff/
+          if-no-files-found: warn

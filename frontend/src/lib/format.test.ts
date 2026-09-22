@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { fmtArea, fmtMeasuredPricePerM2, fmtPct, fmtPP } from './format';
+import {
+  fmtArea,
+  fmtDistanceM,
+  fmtFloor,
+  fmtMeasuredPricePerM2,
+  fmtPct,
+  fmtPP,
+} from './format';
 
 const NBSP = ' ';
 
@@ -125,5 +132,50 @@ describe('fmtArea', () => {
   it('names the plot denominator when asked', () => {
     expect(fmtArea(1_200, 'plot')).toBe(`1\u00a0200${NBSP}m²${NBSP}pozemku`);
     expect(fmtArea(62, 'usable')).toBe(`62${NBSP}m²`);
+  });
+});
+
+describe('fmtDistanceM', () => {
+  /* Metres below a kilometre: 80 m and 900 m from the subject are the same
+     street and a different neighbourhood, and rounding both to "0,1 km" and
+     "0,9 km" would hide that. */
+  it('renders metres under a kilometre and kilometres above it', () => {
+    expect(fmtDistanceM(84)).toBe(`84${NBSP}m`);
+    expect(fmtDistanceM(999)).toBe(`999${NBSP}m`);
+    expect(fmtDistanceM(1_000)).toBe(`1,0${NBSP}km`);
+    expect(fmtDistanceM(4_820)).toBe(`4,8${NBSP}km`);
+  });
+
+  it('renders the gap for a missing distance', () => {
+    expect(fmtDistanceM(null)).toBe('—');
+    expect(fmtDistanceM(Number.NaN)).toBe('—');
+  });
+});
+
+describe('fmtFloor', () => {
+  /* The column is ground = 0 on every portal (W8), and the word is the only thing on
+     screen that says so — a bare "0" reads as missing data, a bare "3" reads as
+     whichever convention the reader assumes. */
+  it('names the storey in Czech under the ground = 0 convention', () => {
+    expect(fmtFloor(0)).toBe('přízemí');
+    expect(fmtFloor(3)).toBe('3. patro');
+    expect(fmtFloor(-1)).toBe('suterén');
+  });
+
+  it('spells the building total as podlaží, not as the second half of a slash', () => {
+    expect(fmtFloor(2, 5)).toBe('2. patro z 5 podlaží');
+    expect(fmtFloor(0, 4)).toBe('přízemí z 4 podlaží');
+  });
+
+  it('keeps the magnitude below ground so two basements never read as one', () => {
+    /* AttrDiffTable diffs the RENDERED strings, so 'suterén' for both −1 and −2 hid a
+       distinguishing fact on the surface whose whole job is same-or-different. */
+    expect(fmtFloor(-2)).toBe('2. podzemní podlaží');
+    expect(fmtFloor(-3, 6)).toBe('3. podzemní podlaží z 6 podlaží');
+  });
+
+  it('returns null for an absent storey so each surface renders its own gap', () => {
+    expect(fmtFloor(null, 5)).toBeNull();
+    expect(fmtFloor(undefined)).toBeNull();
   });
 });

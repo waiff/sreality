@@ -10,6 +10,13 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+/* The broker allowlist is the one prefilter resolved over the bearer-gated API,
+ * and it THROWS without a session — Stats must never reach it. */
+vi.mock('./brokers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./brokers')>()),
+  fetchBrokerListingIds: vi.fn(async () => [1]),
+}));
+
 import { DEFAULT_FILTERS } from './filters';
 import { supabase } from './supabase';
 import {
@@ -17,6 +24,7 @@ import {
   applyPrefilters,
   buildBrowseStatsArgs,
   fetchBrowseCount,
+  fetchBrowseStats,
   fetchIsDismissed,
   fetchListingsForCards,
   fetchListingsForMap,
@@ -37,8 +45,47 @@ import {
   type BrowsePrefilters,
   type DistrictMatchRow,
 } from './queries';
-import type { ListingBroker } from './brokers';
+import { fetchBrokerListingIds, type ListingBroker } from './brokers';
 import type { DistrictChip } from './filters';
+
+/* THE PostgREST stand-in for this file: every builder method chains, `.in()`
+ * records the ids it was handed, and awaiting the chain — or `.range()`, which
+ * fetchAllRows drives — answers with the rows registered for that relation, or
+ * with `error`. `.rpc()` answers the same way and records its argument object. */
+const stubReads = (rows: Record<string, object[]> = {}, error: unknown = null) => {
+  const inIds: number[][] = [];
+  const rpcArgs: Array<Record<string, unknown>> = [];
+  const chain = (relation: string): unknown => {
+    const data = rows[relation] ?? [];
+    const answer = () =>
+      Promise.resolve(
+        error ? { data: null, error } : { data, error: null, count: data.length },
+      );
+    const page: unknown = new Proxy(() => {}, {
+      get: (_t, prop) => {
+        if (prop === 'then') return (resolve: (v: unknown) => void) => answer().then(resolve);
+        if (prop === 'range') return answer;
+        if (prop === 'in') {
+          return (_column: string, ids: number[]) => {
+            inIds.push(ids);
+            return page;
+          };
+        }
+        return () => page;
+      },
+    });
+    return page;
+  };
+  return {
+    from: vi.spyOn(supabase, 'from').mockImplementation(((rel: string) => chain(rel)) as never),
+    rpc: vi.spyOn(supabase, 'rpc').mockImplementation(((name: string, args: unknown) => {
+      rpcArgs.push(args as Record<string, unknown>);
+      return chain(name);
+    }) as never),
+    inIds,
+    rpcArgs,
+  };
+};
 
 describe('priceNullTolerantOr', () => {
   it('AND-groups both bounds with the NULL disjunct', () => {
@@ -500,27 +547,13 @@ describe('Browse select-lists carry the measure with its published basis', () =>
  * server-side, under the caller's RLS — a dismissed set never rides in the
  * URL), the plain relation only when the operator reveals dismissed ones. */
 describe('dismissed properties are hidden at the source', () => {
-  /* A PostgREST builder stand-in: every method chains, awaiting resolves. */
-  const builder = (): unknown => {
-    const p: unknown = new Proxy(() => {}, {
-      get: (_t, prop) =>
-        prop === 'then'
-          ? (resolve: (v: unknown) => void) => resolve({ data: [], error: null, count: 0 })
-          : () => p,
-    });
-    return p;
-  };
-  const spy = () => ({
-    rpc: vi.spyOn(supabase, 'rpc').mockImplementation(() => builder() as never),
-    from: vi.spyOn(supabase, 'from').mockImplementation(() => builder() as never),
-  });
   afterEach(() => vi.restoreAllMocks());
 
   const revealed = { ...DEFAULT_FILTERS, showDismissed: true };
   const mirror = { ...DEFAULT_FILTERS, portals: ['bazos'] };
 
   it('reads the visible twins by default, for cards, table and count', async () => {
-    const s = spy();
+    const s = stubReads();
     await fetchListingsForCards(DEFAULT_FILTERS, DEFAULT_SORT, null);
     await fetchListingsForTable(DEFAULT_FILTERS, DEFAULT_SORT, null);
     await fetchBrowseCount(DEFAULT_FILTERS);
@@ -533,7 +566,7 @@ describe('dismissed properties are hidden at the source', () => {
   });
 
   it('reads the plain relation only when dismissed properties are revealed', async () => {
-    const s = spy();
+    const s = stubReads();
     await fetchListingsForCards(revealed, DEFAULT_SORT, null);
     await fetchBrowseCount(revealed);
     expect(s.from.mock.calls.map((c) => c[0])).toEqual(['browse_list', 'browse_list']);
@@ -541,7 +574,7 @@ describe('dismissed properties are hidden at the source', () => {
   });
 
   it('hides them on the listing-grain feed too', async () => {
-    const s = spy();
+    const s = stubReads();
     await fetchListingsForCards(mirror, DEFAULT_SORT, null);
     expect(s.rpc.mock.calls.map((c) => c[0])).toEqual(['listing_feed_visible']);
     await fetchListingsForCards({ ...mirror, showDismissed: true }, DEFAULT_SORT, null);
@@ -549,7 +582,7 @@ describe('dismissed properties are hidden at the source', () => {
   });
 
   it('tells the map cells and reads the map pins through the same twin', async () => {
-    const s = spy();
+    const s = stubReads();
     await fetchListingsForMap(DEFAULT_FILTERS);
     const [cells, pins] = s.rpc.mock.calls;
     expect(cells[0]).toBe('browse_map_cells');
@@ -564,40 +597,131 @@ describe('dismissed properties are hidden at the source', () => {
   });
 });
 
+/* Rule #16: Stats and the map must describe the cohort the list describes. The
+ * five Size-group controls (plot, usable, garden, parking count) narrowed the
+ * list and were silently dropped on the way to the two aggregate RPCs, whose
+ * parameters have existed since migrations 133/439. */
+describe('buildBrowseStatsArgs sends the size bounds', () => {
+  const resolved = { obec_ids_filter: null, property_ids_filter: null };
+
+  it('passes every Size-group bound through', () => {
+    const args = buildBrowseStatsArgs({
+      ...DEFAULT_FILTERS,
+      estateAreaMin: 400, estateAreaMax: 1200,
+      usableAreaMin: 60, usableAreaMax: 90,
+      gardenAreaMin: 100, gardenAreaMax: 300,
+      parkingLotsMin: 2,
+    }, resolved);
+    expect(args.estate_area_min_filter).toBe(400);
+    expect(args.estate_area_max_filter).toBe(1200);
+    expect(args.usable_area_min_filter).toBe(60);
+    expect(args.usable_area_max_filter).toBe(90);
+    expect(args.garden_area_min_filter).toBe(100);
+    expect(args.garden_area_max_filter).toBe(300);
+    expect(args.parking_lots_min_filter).toBe(2);
+  });
+
+  it('sends null when unset, never undefined (the RPC default is the same)', () => {
+    const args = buildBrowseStatsArgs(DEFAULT_FILTERS, resolved);
+    for (const k of [
+      'estate_area_min_filter', 'estate_area_max_filter',
+      'usable_area_min_filter', 'usable_area_max_filter',
+      'garden_area_min_filter', 'garden_area_max_filter',
+      'parking_lots_min_filter',
+    ]) {
+      expect(args[k]).toBeNull();
+    }
+  });
+});
+
 /* A page of cards asks per property; the view is read once per batch. */
 describe('fetchIsDismissed batches per task', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  const readsReturning = (result: { data: unknown; error: unknown }) => {
-    const inCalls: number[][] = [];
-    const chain = {
-      select: () => chain,
-      in: (_col: string, ids: number[]) => {
-        inCalls.push(ids);
-        return Promise.resolve(result);
-      },
-    };
-    vi.spyOn(supabase, 'from').mockImplementation(() => chain as never);
-    return inCalls;
-  };
-
   it('answers every call made in one task with one read', async () => {
-    const inCalls = readsReturning({ data: [{ property_id: 2 }], error: null });
+    const { inIds } = stubReads({ property_dismissals_public: [{ property_id: 2 }] });
     const answers = await Promise.all([1, 2, 3, 2].map((id) => fetchIsDismissed(id)));
     expect(answers).toEqual([false, true, false, true]);
-    expect(inCalls).toEqual([[1, 2, 3]]);
+    expect(inIds).toEqual([[1, 2, 3]]);
     expect(supabase.from).toHaveBeenCalledWith('property_dismissals_public');
   });
 
   it('never sends more than 200 ids in one URL', async () => {
-    const inCalls = readsReturning({ data: [], error: null });
+    const { inIds } = stubReads();
     await Promise.all(Array.from({ length: 450 }, (_, i) => fetchIsDismissed(i + 1)));
-    expect(inCalls.map((c) => c.length)).toEqual([200, 200, 50]);
+    expect(inIds.map((c) => c.length)).toEqual([200, 200, 50]);
   });
 
   it('fails every waiter of a failed read', async () => {
-    readsReturning({ data: null, error: new Error('boom') });
+    stubReads({}, new Error('boom'));
     const outcomes = await Promise.allSettled([fetchIsDismissed(1), fetchIsDismissed(2)]);
     expect(outcomes.map((o) => o.status)).toEqual(['rejected', 'rejected']);
+  });
+});
+/* Rule #16 again, on the one Browse fetcher that used to name its prefilters by
+ * hand. Every property-grain filter now resolves ONCE, in resolveBrowsePrefilters,
+ * and reaches list, map and Stats through the same `property_ids_filter` seam
+ * (migration 378) — so a new curated-set filter cannot narrow the list and leave
+ * the panel above it counting the whole market. */
+describe('Browse Stats resolves through the one prefilter path', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const MEMBERS = [
+    { property_id: 1, collection_id: 10 },
+    { property_id: 2, collection_id: 11 },
+    { property_id: 3, collection_id: 12 },
+  ];
+
+  it('sends the collection allowlist as property_ids_filter, OR across the selection', async () => {
+    const { rpcArgs } = stubReads({ collection_properties_public: MEMBERS });
+    await fetchBrowseStats({ ...DEFAULT_FILTERS, collections: [10, 12] });
+    expect(rpcArgs[0].property_ids_filter).toEqual([1, 3]);
+  });
+
+  it('sends [] — not null — for a selection nothing is in', async () => {
+    const { rpcArgs } = stubReads({ collection_properties_public: MEMBERS });
+    await fetchBrowseStats({ ...DEFAULT_FILTERS, collections: [99] });
+    expect(rpcArgs[0].property_ids_filter).toEqual([]);
+  });
+
+  it('keeps the tag AND contract, resolved off the membership rows', async () => {
+    const { rpcArgs } = stubReads({
+      property_tags_public: [
+        { property_id: 1, tag_id: 5 },
+        { property_id: 1, tag_id: 6 },
+        { property_id: 2, tag_id: 5 },
+      ],
+    });
+    await fetchBrowseStats({ ...DEFAULT_FILTERS, tags: [5, 6] });
+    expect(rpcArgs[0].property_ids_filter).toEqual([1]);
+    /* property_tags_public, not the properties_with_tags RPC, whose body
+     * truncates at 5000 rows under a comment claiming exhaustiveness. */
+    expect(supabase.from).toHaveBeenCalledWith('property_tags_public');
+  });
+
+  it('intersects the curated sets: a property must satisfy both', async () => {
+    const { rpcArgs } = stubReads({
+      collection_properties_public: MEMBERS,
+      property_tags_public: [
+        { property_id: 2, tag_id: 5 },
+        { property_id: 3, tag_id: 5 },
+      ],
+    });
+    await fetchBrowseStats({ ...DEFAULT_FILTERS, collections: [10, 12], tags: [5] });
+    expect(rpcArgs[0].property_ids_filter).toEqual([3]);
+  });
+
+  it('sends the RPC own tag / estimate predicates OFF — one resolution path', async () => {
+    const { rpcArgs } = stubReads({ collection_properties_public: MEMBERS });
+    await fetchBrowseStats({ ...DEFAULT_FILTERS, tags: [5], withEstimates: true });
+    expect(rpcArgs[0].tag_ids).toBeNull();
+    expect(rpcArgs[0].with_estimates).toBe(false);
+  });
+
+  it('never resolves the broker allowlist: Stats has no parameter to carry it', async () => {
+    const { rpcArgs } = stubReads({ collection_properties_public: MEMBERS });
+    await fetchBrowseStats({ ...DEFAULT_FILTERS, brokerId: 527 });
+    expect(fetchBrokerListingIds).not.toHaveBeenCalled();
+    expect(rpcArgs[0].property_ids_filter).toBeNull();
   });
 });

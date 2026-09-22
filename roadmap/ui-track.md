@@ -7,6 +7,18 @@ This track runs in parallel with the analytical phases above; the
 toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
+### Browse map: pin precision on request, not under every pin (done, 2026-09-22)
+- Location W3-3 drew a true-metre uncertainty circle under every pin below building level. ~87 % of
+  active pins are below it (street 300 m, část obce 750 m, obec 1 km), so at street zoom the map
+  was stacked discs with the pins and prices buried: "totally unusable" (operator).
+- Now the pin carries the answer: a solid dot for a building / address pin, an open ring for
+  anything coarser, with a legend in the count's row ("Přesná poloha N · Přibližná N"). Clicking a
+  pin draws its one circle for as long as its popup is open, and the popup says it in words
+  ("Přibližná poloha: ulice, ±300 m", the TRUE radius even where the drawn circle is capped at 2 km).
+  Covers Browse, Explore area and the broker explore map (all one `ListingMap`).
+- Two map-chrome fixes found on the way: "Show all" sat under the zoom buttons, and a popup opened
+  under the floating panels and lost its price line (popups now stack above them).
+
 ### Save-to-collection on the listing detail header (done, 2026-09-14)
 - The Browse card's bookmark now has a twin in the listing-detail action bar, between "Přidat do
   pipeline" and "New estimation": out of every collection it reads "Uložit do kolekce"; saved, it
@@ -38,6 +50,9 @@ toolkit work.
   `/<obec>-<RÚIAN obec kód>` path form, because `listings_public` carries no RÚIAN codes and a box is
   the neighbourhood across municipal borders; ±1 km because ±500 m showed nothing around a small-town
   listing. The row is a 2×2 grid below `sm` (four equal chips truncated "Mapy.cz" at 360px).
+  Deleted by sold-comps W3 (2026-09-21) as superseded by the in-app table, and RESTORED the same
+  day on the operator's ruling: the table holds only what reas.cz shows anonymously (24 months),
+  and the chip is the one-click way to reas.cz's own map, where a logged-in operator sees more.
 - **+ sreality Cenová mapa (2026-09-17):** a fifth chip, and the row splits in two — WHERE (Mapy.cz,
   Google, Katastr) over what it SELLS for (Reas.cz, Cenová mapa). The price map addresses places by
   Seznam's own locality ids (`/cenova-mapa/hledani/byty/<kraj>-<id>/<okres>-<id>/<obec>-<id>`,

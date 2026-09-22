@@ -19,7 +19,8 @@ import {
   FURNISHED_CANONICAL,
   OWNERSHIP_CANONICAL,
 } from './filters';
-import { applyRegistryFilters } from './registryQueryBuilder';
+import { applyAgendaFilters, applyRegistryFilters } from './registryQueryBuilder';
+import { propertyIdsInCollections } from './collectionScope';
 import {
   applyKeyset,
   nextCursorFrom,
@@ -46,6 +47,8 @@ import type {
   Ppm2Box,
   ScrapeRun,
   ScraperHealthChecks,
+  SoldComparable,
+  SoldCoverage,
 } from './types';
 import type { BorderCase } from './api';
 
@@ -126,12 +129,12 @@ export const CARD_PAGE_SIZE = 24;
  * renders it. */
 /* W3: `district` came OUT and `display_label` went in -- one string per pin, from
  * listing_location through the projection, so the popup no longer names the okres
- * when it knows the street. The two that joined it are what the UNCERTAINTY CIRCLE
+ * when it knows the street. The two that joined it are what the PIN PRECISION
  * reads, and they are the only two columns on this list that ListingMap draws
- * rather than prints: a pin resolved below building level is drawn with a circle
- * of `uncertainty_radius_m` metres around it, and `granularity_rank` is the INT
- * form of the rung (migration 380), because granularity is compared by rank and
- * never by enum text. */
+ * rather than prints: a pin resolved below building level is drawn as an open
+ * ring, the clicked one with a circle of `uncertainty_radius_m` metres around it,
+ * and `granularity_rank` is the INT form of the rung (migration 380), because
+ * granularity is compared by rank and never by enum text. */
 const MAP_COLS = 'listing_id,property_id,sreality_id,source,source_id_native,lat,lng,price_czk,price_per_m2,price_per_m2_basis,category_main,category_type,disposition,area_m2,display_label,uncertainty_radius_m,granularity_rank,last_seen_at,is_active';
 /* `property_id` is listed explicitly rather than arriving via withKeysetColumns:
  * it used to come free because the tiebreak was ALWAYS property_id, but the
@@ -500,11 +503,12 @@ export interface MapRow {
   /* The one server-composed place string (migration 503) -- what the popup
    * prints. */
   display_label: string | null;
-  /* The two the circle rule reads. `granularity_rank` is the INT rung from
-   * location_granularity_rank (migration 380): compare it, never the enum text.
-   * A pin below BUILDING is drawn inside a circle of `uncertainty_radius_m`
-   * metres -- see ListingMap. Both are NULL for an unresolved row, which draws
-   * no circle rather than a circle of unknown size. */
+  /* The two the pin-precision rules read (lib/uncertaintyCircle). `granularity_rank`
+   * is the INT rung from location_granularity_rank (migration 380): compare it,
+   * never the enum text. A pin below BUILDING is drawn as an open ring, and the pin
+   * whose popup is open gets a circle of `uncertainty_radius_m` metres -- see
+   * ListingMap. Both are NULL for an unresolved row, which draws no circle rather
+   * than a circle of unknown size. */
   uncertainty_radius_m: number | null;
   granularity_rank: number | null;
   last_seen_at: string;
@@ -550,30 +554,48 @@ export interface MapResult {
   capped: boolean;
 }
 
-/* Tags facet is composed of two server queries: (1) properties_with_tags RPC
- * resolves the PROPERTY ids matching ALL selected tag ids (property grain, so
- * a property matches if any of its listings carries the tags), (2) the Browse
- * query gets .in('property_id', ids) appended. Returns null if no tags are
- * selected (skip the prefilter entirely), an empty array if none match (caller
- * short-circuits to empty results), or the id list. Declared as a hoistable
- * function so the Map/Table fetchers below can call it without forward-ref issues. */
+/* The two curated-set prefilters share ONE shape: read the membership rows
+ * whole (complete-or-throw, via fetchAllRows) and reduce them to a property-id
+ * allowlist. They differ only in the predicate — tags AND, collections OR.
+ *
+ * Returns null when the filter is off, [] when it matched nothing (the caller
+ * short-circuits to zero results), else the ids. Hoistable functions so the
+ * Map/Table fetchers below can call them without forward-ref issues. */
 async function resolveTagPrefilter(
   f: ListingFilters,
 ): Promise<number[] | null> {
   if (f.tags.length === 0) return null;
-  /* Exhaustive by contract: a truncated allowlist would silently bleed
-   * listings the operator asked to exclude back into the cohort — so the read
-   * pages via fetchAllRows (complete-or-throw, correct under any db-max-rows;
-   * see its header for the cap-drift history). */
-  const rows = await fetchAllRows<{ property_id: number }>({
-    relation: 'properties_with_tags',
+  const rows = await fetchAllRows<{ property_id: number; tag_id: number }>({
+    relation: 'property_tags_public',
     build: () =>
-      supabase.rpc('properties_with_tags', { tag_ids: f.tags }, { count: 'exact' }),
-    orderBy: [{ column: 'property_id' }],
-    key: ['property_id'],
+      supabase
+        .from('property_tags_public')
+        .select('property_id, tag_id', { count: 'exact' })
+        .in('tag_id', f.tags),
+    orderBy: [{ column: 'property_id' }, { column: 'tag_id' }],
+    key: ['property_id', 'tag_id'],
     expectMax: 100_000,
   });
-  return rows.map((r) => r.property_id);
+  /* The read restricts tag_id to the selection and fetchAllRows dedupes on
+   * (property_id, tag_id), so a tally IS the distinct count; the Set keeps
+   * `?tags=3,3` from raising the bar to two. */
+  const needed = new Set(f.tags).size;
+  const carried = new Map<number, number>();
+  for (const r of rows) carried.set(r.property_id, (carried.get(r.property_id) ?? 0) + 1);
+  return [...carried].filter(([, n]) => n === needed).map(([property_id]) => property_id);
+}
+
+/* Collection scope (rule #18). Reads through the SAME member map every
+ * collection glyph renders from, so "which collections is this property in"
+ * has one answer on screen and in the cohort. OR across the selection. */
+async function resolveCollectionPrefilter(
+  f: ListingFilters,
+): Promise<number[] | null> {
+  if (f.collections.length === 0) return null;
+  return propertyIdsInCollections(
+    await fetchPropertyCollectionMemberSet(),
+    f.collections,
+  );
 }
 
 /* min/max city population and the near_* proximity filters are NOT here:
@@ -734,7 +756,7 @@ const intersectPrefilters = (
  * issuing the main query. Shared by the Map / Table / Cards fetchers. */
 export interface BrowsePrefilters {
   obecIds: number[] | null;       // market growth (price-stats datasets)
-  propertyIds: number[] | null;   // tags ∩ with-estimates (property grain)
+  propertyIds: number[] | null;   // tags ∩ with-estimates ∩ pipeline ∩ collections (property grain)
   brokerListingIds: number[] | null;  // broker scope (listing grain) — see resolveBrokerPrefilter
   empty: boolean;
 }
@@ -742,22 +764,24 @@ export interface BrowsePrefilters {
 async function resolveBrowsePrefilters(
   f: ListingFilters,
 ): Promise<BrowsePrefilters> {
-  const [tagProps, cityObec, growthObec, estimateProps, pipelineProps, brokerListingIds] =
-    await Promise.all([
-      resolveTagPrefilter(f),
-      resolveCityQualityObecPrefilter(f),
-      resolvePriceGrowthPrefilter(f),
-      resolveEstimatesPrefilter(f),
-      resolvePipelinePrefilter(f),
-      resolveBrokerPrefilter(f),
-    ]);
-  // Tags are now property-grain (properties_with_tags) — intersect them with the
-  // with-estimates and pipeline property prefilters and apply via
-  // .in('property_id', …). City-quality is representative-listing grain, keyed
+  const [
+    tagProps, cityObec, growthObec, estimateProps, pipelineProps, collectionProps,
+    brokerListingIds,
+  ] = await Promise.all([
+    resolveTagPrefilter(f),
+    resolveCityQualityObecPrefilter(f),
+    resolvePriceGrowthPrefilter(f),
+    resolveEstimatesPrefilter(f),
+    resolvePipelinePrefilter(f),
+    resolveCollectionPrefilter(f),
+    resolveBrokerPrefilter(f),
+  ]);
+  // The property-grain allowlists intersect into the one .in('property_id', …)
+  // applyPrefilters emits. City-quality is representative-listing grain, keyed
   // on the surrogate listing_id (.in('listing_id', …)) — null-safe past Gate-2.
-  const propertyIds = intersectPrefilters(
-    intersectPrefilters(tagProps, estimateProps),
-    pipelineProps,
+  const propertyIds = [estimateProps, pipelineProps, collectionProps].reduce(
+    intersectPrefilters,
+    tagProps,
   );
   // City-quality and market-growth are BOTH obec-grain now, and applyPrefilters applies
   // .in('obec_id', …) once — so they must be intersected here, not applied twice.
@@ -907,13 +931,7 @@ export const fetchListingsForMap = async (
   }
 
   /* migration 439. Same named parameters as browse_stats_properties (one
-   * builder, so the two cohorts cannot diverge) with four deliberate overrides:
-   *
-   *   tag_ids / with_estimates / city_index_rules are already RESOLVED into the
-   *   three allowlists below by resolveBrowsePrefilters — the same resolution the
-   *   point read uses. Passing them again would apply each predicate twice
-   *   (idempotent, but the tag one is a GROUP BY ... HAVING subquery, so it is
-   *   not free), and, worse, would put two resolution paths in one fetcher.
+   * builder, so the two cohorts cannot diverge) plus two of its own:
    *
    *   listing_ids_filter carries the broker allowlist, the one listing-grain
    *   `.in()` applyPrefilters still emits (W3 S4 deleted the legacy
@@ -929,9 +947,6 @@ export const fetchListingsForMap = async (
       obec_ids_filter: pre.obecIds,
       property_ids_filter: pre.propertyIds,
     }),
-    tag_ids: null,
-    with_estimates: false,
-    city_index_rules: null,
     listing_ids_filter: pre.brokerListingIds,
     point_budget: MAP_POINT_BUDGET,
   });
@@ -1028,7 +1043,7 @@ export const fetchListingsForTable = async (
   if (pre.empty) return { rows: [], nextCursor: null };
   /* browse_list (migration 276): the compact snapshot read model — a STABLE
    * relation under the scroll (the live table mutates last_seen_at every
-   * scrape cycle), rebuilt every 5 min from browse_projection. Single-portal
+   * scrape cycle), rebuilt every 15 min from browse_projection. Single-portal
    * mode swaps in listing_feed_public; that one IS the live table, so a row
    * whose last_seen_at is bumped mid-scroll can shift — harmless here because
    * the mirror's sort key (portal_sort_key) is immutable after first write. */
@@ -1306,6 +1321,21 @@ export const buildBrowseStatsArgs = (
     include_no_price:        f.includeNoPrice,
     area_min_filter:         f.areaMin,
     area_max_filter:         f.areaMax,
+    /* The four Size-group bounds + the parking count. The RPC parameters have
+     * existed since migrations 133/439 and their predicates with them, but no
+     * caller ever sent them — so an operator who set a plot or usable-area
+     * bound got a narrowed LIST beside a Stats panel and a map describing the
+     * whole cohort, with nothing on screen to say so (rule #16: one definition
+     * of "matches"). `estate_area_*` narrows the PLOT MEASURE server-side
+     * (migration 547), the same `plot_area_m2` column the list's registry
+     * dispatcher reads, not the bare `estate_area` column. */
+    estate_area_min_filter:  f.estateAreaMin,
+    estate_area_max_filter:  f.estateAreaMax,
+    usable_area_min_filter:  f.usableAreaMin,
+    usable_area_max_filter:  f.usableAreaMax,
+    garden_area_min_filter:  f.gardenAreaMin,
+    garden_area_max_filter:  f.gardenAreaMax,
+    parking_lots_min_filter: f.parkingLotsMin,
     active_only_filter:      f.status === 'active',
     inactive_only_filter:    f.status === 'inactive',
     last_seen_min_days:      f.lastSeenMinDays,
@@ -1330,7 +1360,6 @@ export const buildBrowseStatsArgs = (
     subtype_filter:          f.subtype.length ? f.subtype : null,
     building_type_filter:    buildingTypeArray,
     condition_match_filter:  f.conditionMatch.length ? f.conditionMatch : null,
-    tag_ids:                 f.tags.length ? f.tags : null,
     bbox_west:               effBbox?.west  ?? null,
     bbox_south:              effBbox?.south ?? null,
     bbox_east:               effBbox?.east  ?? null,
@@ -1342,6 +1371,10 @@ export const buildBrowseStatsArgs = (
      * dropping it needs a DROP FUNCTION and would break every deployed bundle
      * mid-rollout; it is inert. */
     city_index_rules:        null,
+    /* Off for a different reason: both resolve to property-id allowlists
+     * client-side (resolveBrowsePrefilters), so there is one resolution path. */
+    tag_ids:                 null,
+    with_estimates:          false,
     city_pop_min:            f.minCityPopulation,
     city_pop_max:            f.maxCityPopulation,
     city_proximity:          null,   // retired (W5); the RPC raises on a non-null value
@@ -1362,12 +1395,10 @@ export const buildBrowseStatsArgs = (
     mf_gross_yield_pct_min:  f.mfGrossYieldPctMin,
     mf_gross_yield_pct_max:  f.mfGrossYieldPctMax,
     /* Migration 173 — merged price-history predicates + condition-level
-     * bounds + with-estimates. Property grain; columns maintained by the
-     * recompute job, estimates read via property_estimates_public. */
+     * bounds. Property grain; columns maintained by the recompute job. */
     price_change_count_min:        f.priceChangeCountMin,
     price_change_window_days:      f.priceChangeWindowDays,
     total_price_change_pct_filter: f.totalPriceChangePct,
-    with_estimates:                f.withEstimates,
     /* Migration 537 — the caller's dismissed properties, excluded server-side. */
     hide_dismissed:                !f.showDismissed,
     building_condition_level_min:  f.buildingConditionLevelMin,
@@ -1388,26 +1419,19 @@ export const buildBrowseStatsArgs = (
 export const fetchBrowseStats = async (
   f: ListingFilters,
 ): Promise<BrowseStats> => {
-  /* Market-growth allowlist (obec_ids); null = no active rule, [] = no obec
-   * qualifies (the RPC's `= any('{}')` then yields total 0). Keeps Stats
-   * aligned with Map/Table. */
-  const growthObec = await resolvePriceGrowthPrefilter(f);
-  /* City-quality is obec-grain and feeds the SAME obec_ids_filter parameter, so the two
-   * allowlists intersect here exactly as they do on the cohort reads — ONE definition of
-   * "matches" (rule 16), with no second spelling left to keep in step. */
-  const cityObec = await resolveCityQualityObecPrefilter(f);
-  /* Deal-pipeline allowlist (property_ids); same contract as growthObec above —
-   * null = scope off, [] = an empty pipeline (the RPC's `= any('{}')` then
-   * yields total 0). Without this the Stats tab would keep counting the whole
-   * market while Cards/Table/Map/Count show only the pipeline: the exact
-   * count-vs-list divergence migration 351 was written to close. */
-  const pipelineProps = await resolvePipelinePrefilter(f);
-
+  /* Stats resolves through the SAME function every other Browse lane calls,
+   * rather than naming its prefilters one by one — which left the panel
+   * counting the whole market once per property-grain filter added.
+   *
+   * `brokerId` is CLEARED rather than ignored: Stats has no listing-grain
+   * parameter to carry the allowlist, and resolveBrokerPrefilter throws without
+   * a session, so resolving it would fail the panel over a filter it cannot apply. */
+  const pre = await resolveBrowsePrefilters({ ...f, brokerId: null });
   const { data, error } = await supabase.rpc(
     'browse_stats_properties',
     buildBrowseStatsArgs(f, {
-      obec_ids_filter: intersectPrefilters(cityObec, growthObec),
-      property_ids_filter: pipelineProps,
+      obec_ids_filter: pre.obecIds,
+      property_ids_filter: pre.propertyIds,
     }),
   );
   if (error) throw error;
@@ -1870,6 +1894,73 @@ export const fetchImagesByListing = async (
 };
 
 /* -------------------------------------------------------------------------- */
+/* Registered sales — migration 545's sold_comparables / sold_coverage.       */
+/* `sold_comparables` is an inlinable SQL function, so the predicates, ORDER BY */
+/* and LIMIT below reach the GiST index exactly as they would against a table:  */
+/* the narrowing happens in Postgres, never in the browser.                     */
+/* -------------------------------------------------------------------------- */
+
+/* What the block RENDERS, and nothing else. The function returns more — the
+ * RÚIAN codes, the sale's own point, `sold_age_days`, the secondary areas — but
+ * those are there to be FILTERED on, and a PostgREST predicate does not need
+ * its column selected. Carrying them would be dead weight on up to 200 rows per
+ * listing open, and a standing invitation to assume the block plots them. */
+const SOLD_COMP_COLS =
+  'source,source_record_id,sold_at,price_czk,asking_last_czk,listed_at,' +
+  'category_main,category_type,subtype,disposition,area_m2,area_basis,' +
+  'address_text,photo_urls,source_url,fetched_at,' +
+  /* The function's own derivation, plus migration 425's measure AND its
+   * published basis label — read, never re-derived (lib/measure's north star). */
+  'distance_m,price_per_m2,price_per_m2_basis';
+
+/* A radius over a dense town can hold thousands of sales, so the read is
+ * capped — and the cap cuts the FAR end: nearest first, so a truncated cohort
+ * is still the neighbourhood rather than a scatter across the whole circle.
+ * `source_record_id` is the final tiebreak because two flats in one building
+ * share a point exactly (the source geocodes the building), and an order with
+ * ties reshuffles between reads.
+ *
+ * The fetch asks for ONE row more than the cap: a full page is not the same
+ * fact as a cohort that happens to hold exactly 200 sales, and the block says
+ * "200+" only when the extra row proves there is more. */
+export const SOLD_COMPS_LIMIT = 200;
+
+export const fetchSoldComparables = async (
+  lat: number,
+  lng: number,
+  radiusM: number,
+  filters: Record<string, unknown>,
+): Promise<SoldComparable[]> => {
+  const q = supabase
+    .rpc('sold_comparables', { p_lat: lat, p_lng: lng, p_radius_m: radiusM }, { get: true })
+    .select(SOLD_COMP_COLS)
+    .order('distance_m', { ascending: true })
+    .order('sold_at', { ascending: false })
+    .order('source_record_id', { ascending: true })
+    .limit(SOLD_COMPS_LIMIT + 1);
+  const { data, error } = await applyAgendaFilters(q, 'sold', (id) => filters[id]);
+  if (error) throw error;
+  return (data ?? []) as unknown as SoldComparable[];
+};
+
+export const fetchSoldCoverage = async (
+  lat: number,
+  lng: number,
+): Promise<SoldCoverage | null> => {
+  const { data, error } = await supabase
+    .rpc('sold_coverage', { p_lat: lat, p_lng: lng }, { get: true })
+    .select(
+      'obec_kod,obec_name,fetched_at,record_count,source_total,truncated,' +
+        'last_attempt_at,last_attempt_status',
+    );
+  if (error) throw error;
+  /* No row means the point is in no municipality we hold a boundary for; a row
+   * with a null `fetched_at` means nobody has ever successfully looked there.
+   * Both differ from `record_count: 0`, and the block says which. */
+  return ((data ?? []) as unknown as SoldCoverage[])[0] ?? null;
+};
+
+/* -------------------------------------------------------------------------- */
 /* Health dashboard (Part E) — calls migration 013 health_summary RPC         */
 /* -------------------------------------------------------------------------- */
 
@@ -2289,8 +2380,8 @@ export const useUrlPreview = (): UseMutationResult<
 /* place. The reverse-index queries below — "which tags / collections does    */
 /* property X belong to" — read directly from the property-grain *_public      */
 /* views via the anon key, matching the read-only pattern Browse / Region use. */
-/* The `properties_with_tags(tag_ids)` RPC powers the Browse "tags" facet:     */
-/* AND-semantics across the supplied ids, capped at 5000 rows on the server.   */
+/* Both Browse curated-set facets (tags, collections) resolve from those same  */
+/* membership rows — see resolveTagPrefilter / resolveCollectionPrefilter.     */
 /* -------------------------------------------------------------------------- */
 
 export const fetchPropertyTagIds = async (
@@ -2304,23 +2395,19 @@ export const fetchPropertyTagIds = async (
   return ((data ?? []) as Array<{ tag_id: number }>).map((r) => r.tag_id);
 };
 
-export const fetchPropertyCollectionIds = async (
-  property_id: number,
-): Promise<number[]> => {
-  const { data, error } = await supabase
-    .from('collection_properties_public')
-    .select('collection_id')
-    .eq('property_id', property_id);
-  if (error) throw error;
-  return ((data ?? []) as Array<{ collection_id: number }>).map(
-    (r) => r.collection_id,
-  );
-};
-
 /* All (property_id → collection_ids) memberships in ONE read, shared (React
  * Query dedupes the key) by every Browse-card collection control — the
  * collection analogue of fetchPipelineMemberSet, so Browse fires one query
- * instead of one-per-card. */
+ * instead of one-per-card.
+ *
+ * It is also the ONLY membership read: a per-property `propertyCollections(id)`
+ * key existed alongside it until W1, which meant a writer had two keys to
+ * remember and every writer but the save menu forgot one (the same collapse
+ * pipelineKeys records below). One property's ids are
+ * `members.get(property_id) ?? []`. fetchAllRows REJECTS past expectMax rather
+ * than resolving a truncated map, so an outgrown map can never read as a
+ * smaller one — though consumers still render a REJECTED read as "no
+ * membership", a fail-open that predates W1. */
 export const fetchPropertyCollectionMemberSet = async (): Promise<
   Map<number, number[]>
 > => {
@@ -2369,8 +2456,6 @@ export const curationKeys = {
   tags: ['curation', 'tags'] as const,
   propertyTags: (property_id: number) =>
     ['curation', 'property-tags', property_id] as const,
-  propertyCollections: (property_id: number) =>
-    ['curation', 'property-collections', property_id] as const,
   propertyCollectionMembers: ['curation', 'property-collection-members'] as const,
   propertyNotes: (property_id: number) =>
     ['curation', 'property-notes', property_id] as const,

@@ -32,6 +32,7 @@ from toolkit.comparables import (
     _shared_filter_where,
     build_query,
 )
+from tests.migration_defs import latest_definition
 from toolkit.measures import per_m2_sql, plot_area_sql
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -113,6 +114,30 @@ def test_neither_site_reads_the_bare_plot_column():
         assert not bare.search(code), (
             f"{rel} bounds the bare estate_area column; call plot_area_m2 instead"
         )
+
+
+_BROWSE_RPCS = ("browse_stats_properties", "browse_map_cells")
+
+
+def test_the_browse_aggregate_rpcs_bound_the_plot_measure():
+    """The third site, and the one that got away: `browse_stats_properties` and
+    `browse_map_cells` bounded `l.estate_area` while the Browse LIST beside them
+    narrowed `plot_area_m2` (the registry's declared `pg_column`), so a plot bound
+    made the Stats panel and the map describe a different cohort than the rows —
+    rule 16, silently. Both relations PUBLISH a `plot_area_m2` column (migration 534
+    via `browse_projection`), so here reading the column IS reading the measure.
+    RED by: pointing either predicate back at the bare column."""
+    for func in _BROWSE_RPCS:
+        # One file may carry both definitions, so this reads every estate bound in it.
+        bounds = [
+            line for line in latest_definition(func).read_text().splitlines()
+            if ("estate_area_min_filter" in line or "estate_area_max_filter" in line)
+            and (">=" in line or "<=" in line)
+        ]
+        assert bounds, f"{func}: no estate-area bound found"
+        for line in bounds:
+            assert "l.plot_area_m2" in line, f"{func} bounds the bare column: {line}"
+            assert "l.estate_area" not in line
 
 
 def test_plot_area_sql_names_the_one_measure():

@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
-import { CollapsibleGroup } from './controls';
+import { CollapsibleGroup, Segmented } from './controls';
 
 describe('<CollapsibleGroup>', () => {
   it('is named by its band title alone, with or without active filters', () => {
@@ -33,5 +33,22 @@ describe('<CollapsibleGroup>', () => {
     expect(trigger).toHaveAccessibleName('Essentials');
     // Nothing is lost: the state is still announced, as a description.
     expect(trigger).toHaveAccessibleDescription('has active filters');
+  });
+});
+
+/* The `variant` pass-through: a bar that mixes Segmented with MultiselectChips
+ * (which hardcodes solid) needs Segmented to reach solid too — without moving
+ * the callers that never asked for it. */
+describe('<Segmented>', () => {
+  const OPTIONS = [{ value: 'a', label: 'A' }];
+  const cls = () => screen.getByRole('button', { name: 'A' }).className;
+
+  it('stays soft by default and forwards solid when asked', () => {
+    const { rerender } = render(<Segmented options={OPTIONS} value="a" onChange={() => {}} />);
+    expect(cls()).toContain('bg-[var(--color-copper-soft)]');
+    rerender(
+      <Segmented options={OPTIONS} value="a" onChange={() => {}} variant="solid" />,
+    );
+    expect(cls()).toContain('bg-[var(--color-copper)]');
   });
 });
