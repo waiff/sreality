@@ -1968,12 +1968,12 @@ def test_an_abandoned_text_extract_pass_is_never_overlapped(
 
 def test_text_extract_is_free_while_every_gate_is_closed(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """The lane ships LIVE and costs nothing: the contract decides its scope, and with no
-    gate open `run_pass` returns before it opens a cursor."""
-    from scraper import attribute_contract
+    """The contract decides the lane's scope, and with no gate open `run_pass` returns
+    before it opens a cursor — the state the lane SHIPPED in (the W7 bake-off has since
+    opened bazos floor + has_lift, so the closed contract is simulated here)."""
     from toolkit import description_extraction
 
     monkeypatch.setattr(rw.db, "connect", lambda: _FakeConn())
-    assert attribute_contract.extracted_cells() == {}
+    monkeypatch.setattr(description_extraction.contract, "extracted_cells", lambda: {})
     assert rw._text_extract_sync() == {"claimed": 0, "reason": "no_open_gate"}
     assert not hasattr(description_extraction, "BACKLOG_EVERY_PASSES")
