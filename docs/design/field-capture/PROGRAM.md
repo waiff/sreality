@@ -454,7 +454,7 @@ labels), now registered as `verify_pipeline`'s `floor_convention` check — the 
 mean(portal_floor − idnes_floor) over unique (price_czk, area_m2, disposition) active byt keys, within ± 0.35 of 0
 for every portal, fail at ± 0.50, min 40 pairs. The warn tier is 0.35, not the planned 0.25, and the reason in the
 plan was WRONG: ceskereality's +0.20 is not sample conditioning. It does never state the ground storey (0 of its
-34,350 floored rows read 0), but restricting the idnes side to `floor ≥ 1` as well moves it only +0.199 → +0.167
+34,363 floored rows read 0), but restricting the idnes side to `floor ≥ 1` as well moves it only +0.199 → +0.167
 (n = 7,166 of 7,394, measured 2026-09-22). The rest is a real sub-population — 925 pairs at exactly +1 against 92
 below 0, a 10:1 asymmetry bazos does not have (565:264) — so ~12 % of that portal's pairs carry an UNEXPLAINED
 one-storey defect, now an open finding in the hand-over § 6. 0.35 holds it amber-free while that is investigated;
@@ -476,13 +476,13 @@ Six commands, hand-over § 7, also reproduced in the PR body. The check's own fa
 prints them only for a portal whose contract cell declares `ground1`.
 
 Conversion = idempotent re-derive through `scripts/reparse.py --fields floor`, `floor ≥ 1` only; re-measured
-2026-09-22 the six portals hold **183,745 rows that move (63,328 active)**, and **4,707 rows at 0** (sreality 4,597,
+2026-09-22 the six portals hold **183,801 rows that move (63,431 active)**, and **4,707 rows at 0** (sreality 4,597,
 mmreality 108, maxima 2) plus **900 below 0** stay put. `is_plausible_floor` tightened to `total_floors − 1`.
 Snapshot gate, stated as a DELTA because the absolute was already crossed before the wave: `listing_snapshots`/day
 stays within +40 % of the trailing 7-day median once the refetch cycle has turned over (median **11,199** over the
 seven full days to 2026-09-21: 20,386 / 9,608 / 13,107 / 11,199 / 8,669 / 3,220 / 13,130 — three of them already
-above the 12,500 the plan wrote as an absolute, with no row moved, which is why the gate is a delta). **25,330** deferred snapshots on the five hashed portals, one per
-healed active row at its next detail fetch; sreality's 124,263 rows churn none, it hashes the raw payload. Hand-over to autodedup delivered
+above the 12,500 the plan wrote as an absolute, with no row moved, which is why the gate is a delta). **25,327** deferred snapshots on the five hashed portals, one per
+healed active row at its next detail fetch; sreality's 124,300 rows churn none, it hashes the raw payload. Hand-over to autodedup delivered
 first (R12): `docs/design/field-capture/handover-autodedup-floor.md`.
 
 **Three things the wave found that the plan did not have.** (i) The convention needed a THIRD member, not two:

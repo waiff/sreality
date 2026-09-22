@@ -113,7 +113,7 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       sibling-pair mean vs idnes; 11-35 s measured, the lane's costliest) — there was
       no floor check of any kind.
       The R12 hand-over shipped first: `docs/design/field-capture/handover-autodedup-floor.md`.
-      **The 183,745-row heal (63,328 active) is the operator's to run** — six
+      **The 183,801-row heal (63,431 active) is the operator's to run** — six
       `scripts/reparse.py --fields floor` passes, runbook in the hand-over §7; the new
       check reads RED until they have run.
 - [~] **W9 — patchwork sweep (non-autodedup).** Done alongside W0: the browse_list cadence

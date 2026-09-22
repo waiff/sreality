@@ -354,7 +354,7 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # noise floor — a sibling pair is a price/area/disposition match, not a proven
     # duplicate — and it is NOT the same size on every portal: ceskereality reads +0.20
     # against bazos's +0.10. That gap is NOT sample conditioning, though the portal does
-    # never state the ground storey (0 of its 34,350 floored rows read 0): restricting
+    # never state the ground storey (0 of its 34,363 floored rows read 0): restricting
     # the idnes side to floor >= 1 too moves it only +0.199 -> +0.167 (n=7,166 of 7,394,
     # measured 2026-09-22). What is left is a real sub-population — 925 of its pairs sit
     # at exactly +1 against 92 below 0, a 10:1 asymmetry bazos does not have (565:264) —
@@ -2181,7 +2181,7 @@ def check_floor_convention(conn: Any, thresholds: dict[str, Any]) -> dict[str, A
     if offenders:
         # The runbook only applies to a portal whose contract cell says `ground1` — the
         # heal is that conversion. Telling the operator to re-derive ceskereality (cell
-        # `ground0`) would shift 34,350 CORRECT rows down one storey, which is exactly
+        # `ground0`) would shift 34,363 CORRECT rows down one storey, which is exactly
         # what W8 and its hand-over forbid, so the two cases get different sentences.
         convertible = [s for s in scale_offenders
                        if _declared_floor_convention(s) == "ground1"]

@@ -221,7 +221,7 @@ ground = 1 portals read +0.82..+1.05 until the heal has re-derived them
 (`python -m scripts.reparse --source <portal> --fields floor --write --allow-snapshot-deferral`, six
 passes, runbook in the hand-over § 7). The failure message names those commands, and names them ONLY
 for a portal whose contract cell declares `ground1`: telling the operator to re-derive ceskereality
-(cell `ground0`) would shift 34,350 correct rows down one storey.
+(cell `ground0`) would shift 34,363 rows down one storey, most of them correct.
 
 ## The `scrape_runs` crash contract (`portal_runner.run_phase`, W0.2)
 

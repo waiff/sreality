@@ -69,20 +69,21 @@ floor := floor_from_portal("ground1", <the portal's declared floor key>)
 
 ## 3. Rows that move, and the before/after distribution
 
-Whole corpus, rows with `floor NOT NULL`, measured 2026-09-22.
+Whole corpus, rows with `floor NOT NULL`, re-measured 2026-09-22. The counts drift by a few dozen a day
+with ingest; the shape does not.
 
 | portal | with floor | active | inactive | **rows that move** (`floor >= 1`) | active movers | stay put (0 / negative) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| sreality | 129,418 | 40,900 | 88,518 | **124,263** | 37,998 | 4,597 / 558 |
-| realitymix | 34,165 | 14,960 | 19,205 | **34,018** | 14,882 | 0 / 147 |
-| bezrealitky | 13,748 | 3,152 | 10,596 | **13,661** | 3,133 | 0 / 87 |
-| remax | 6,327 | 3,709 | 2,618 | **6,221** | 3,634 | 0 / 106 |
-| mmreality | 5,450 | 3,669 | 1,781 | **5,342** | 3,593 | 108 / 0 |
+| sreality | 129,455 | 41,013 | 88,442 | **124,300** | 38,104 | 4,597 / 558 |
+| realitymix | 34,181 | 14,971 | 19,210 | **34,034** | 14,893 | 0 / 147 |
+| bezrealitky | 13,749 | 3,151 | 10,598 | **13,662** | 3,132 | 0 / 87 |
+| remax | 6,328 | 3,695 | 2,633 | **6,222** | 3,620 | 0 / 106 |
+| mmreality | 5,451 | 3,670 | 1,781 | **5,343** | 3,594 | 108 / 0 |
 | maxima | 244 | 89 | 155 | **240** | 88 | 2 / 2 |
-| **total (six)** | **189,352** | **66,479** | **122,873** | **183,745** | **63,328** | 4,707 / 900 |
-| ceskereality | 34,350 | 13,709 | 20,641 | 0 (unchanged) | — | — |
-| idnes | 103,689 | 35,012 | 68,677 | 0 (unchanged) | — | — |
-| bazos | 40,616 | 14,563 | 26,053 | 0 (unchanged) | — | — |
+| **total (six)** | **189,408** | **66,589** | **122,819** | **183,801** | **63,431** | 4,707 / 900 |
+| ceskereality | 34,363 | 13,712 | 20,651 | 0 (unchanged) | — | — |
+| idnes | 103,740 | 33,900 | 69,840 | 0 (unchanged) | — | — |
+| bazos | 40,668 | 14,545 | 26,123 | 0 (unchanged) | — | — |
 
 **Distribution, before → after** (whole corpus; each converted portal's histogram shifts down one bin,
 the 0 bin absorbs today's 1 bin, and the negative tail is unchanged):
@@ -182,7 +183,7 @@ Everything below is **yours to re-measure**. We list the mechanism, not a prescr
   exactly +1 against 92 below 0 — a 10:1 asymmetry bazos does not have (565:264) — so roughly 12 % of its
   pairs look a storey high. 226 of its pairs sit against an idnes floor of 0, and ceskereality writes a
   non-zero for every one of them. **Do not read "already ground = 0 — NOT converted" as "certified".** The
-  portal must not be bulk-converted (that would break the ~85 % that are right), so this needs a per-row
+  portal must not be bulk-converted (that would break the ~88 % that are right), so this needs a per-row
   cause, not a scale flip. W8 leaves it open and the gate's warn tier (0.35) is set to keep it amber-free
   until it is understood, not because it is clean.
 * **mmreality's 108 rows at `floor = 0` are unverified.** Its cell declares `ground1`, under which 0 has no
@@ -196,7 +197,7 @@ Everything below is **yours to re-measure**. We list the mechanism, not a prescr
 * **mmreality's `total_floors` is `overgroundFloors + undergroundFloors`**
   (`scraper/mmreality_parser.py:485-490`), so it is not a storey count and
   `total_floors_equal` is comparing a different quantity on that portal.
-* **ceskereality's `total_floors` is NULL on all 34,350 rows** (the contract declares the cell a genuine
+* **ceskereality's `total_floors` is NULL on all 34,363 rows** (the contract declares the cell a genuine
   portal gap). That portal contributes nothing to any floor/total relation.
 * **realitymix has 3,123 `byt` rows at `floor > total_floors`** (idnes 2,700, sreality 1,137,
   remax 27, mmreality 10, bezrealitky 45) — pre-existing, unrelated to the convention, and now visible.
@@ -219,26 +220,28 @@ python -m scripts.reparse --source mmreality   --fields floor --write --allow-sn
 python -m scripts.reparse --source maxima      --fields floor --write --allow-snapshot-deferral
 ```
 
-Expected `changed=` per pass: the "rows that move" column of §3 (sreality 124,263 minus its
-unreachable rows — see below; realitymix 34,018; bezrealitky 13,661; remax 6,221; mmreality 5,342;
-maxima 240). A SECOND pass over the same portal must report `changed=0`; that is the live proof of
+Expected `changed=` per pass: the "rows that move" column of §3 (sreality 124,300 minus its
+unreachable rows — see below; realitymix 34,034; bezrealitky 13,662; remax 6,222; mmreality 5,343;
+maxima 240), plus whatever the portals have ingested since. A SECOND pass over the same portal must report `changed=0`; that is the live proof of
 idempotence, and the offline half is
 `tests/scripts/test_reparse.py::test_the_floor_heal_converges_in_one_pass_and_never_decrements_twice`.
 
 * **Snapshot budget.** The seam writes no `listing_snapshots` row. On the five portals that hash the
   PARSED fields, each healed LIVE row appends exactly one snapshot at its next detail fetch:
-  14,882 + 3,133 + 3,634 + 3,593 + 88 = **25,330 deferred snapshots**, spread over the normal cadence.
+  14,893 + 3,132 + 3,620 + 3,594 + 88 = **25,327 deferred snapshots**, spread over the normal cadence.
   **sreality appends none** — it hashes the RAW payload, which a column heal never touches, so its
-  124,263 rows leave column and history permanently divergent (the asymmetry `docs/architecture.md`
-  already records for the W17 land heal). Baseline is 10,090 snapshots/day; the W8 gate is
-  `listing_snapshots`/day under 12,500 for 30 days.
+  124,300 rows leave column and history permanently divergent (the asymmetry `docs/architecture.md`
+  already records for the W17 land heal). The gate is a DELTA, not an absolute: `listing_snapshots`/day
+  within +40 % of the trailing 7-day median (11,199 over the seven full days to 2026-09-21 — 20,386 /
+  9,608 / 13,107 / 11,199 / 8,669 / 3,220 / 13,130). Three of those days already cross the 12,500 the
+  plan wrote, before a single row moved, which is why the absolute was dropped.
 * **sreality `parse_errors` are expected and are not a failure.** The raw_json arm needs
   `hash_id`/`id`, and rows stored before the client unwrapped the estate object carry neither: measured
   234/1,000 usable at id ≤ 1,000, 609/1,001 at id ≈ 30k, 597/1,001 at id ≈ 60k, 1,001/1,001 from
   id ≈ 90k up. Those rows are counted, WARNed about with their share, and stay on the old scale forever
   — a floor heal cannot reach them by any means.
 * **ceskereality, idnes and bazos must NOT be healed for floor.** Converting ceskereality would break
-  34,350 correct rows.
+  the ~85 % of its 34,363 rows that are already right (and would not fix the ~12 % that are not — §6).
 * **The gate.** `scripts/verify_pipeline.py` → `floor_convention` (new in this PR). It reads RED until
   every one of the six passes has run; after them each portal must sit within ±0.35 of 0, with fail at
   ±0.50. The warn tier is 0.35 rather than the planned 0.25 to hold ceskereality's +0.20 amber-free while
