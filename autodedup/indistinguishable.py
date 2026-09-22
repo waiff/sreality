@@ -64,6 +64,7 @@ from autodedup.demonstrate import (
     area_readings,
     body_headline_areas,
     decimals_decide,
+    rendering_equal,
     sequential_postings,
 )
 from autodedup.features import (
@@ -90,6 +91,7 @@ from autodedup.text_facts import (
     capacity_counts,
     fold,
     ground_or_upper,
+    leading_area,
     offered_room_counts,
     orientations,
     parcel_numbers,
@@ -172,6 +174,7 @@ FACT_NAMES: tuple[str, ...] = (
     "subject_floor",
     "storey_word",
     "unit_count",
+    "offer_area",
 )
 
 
@@ -508,12 +511,22 @@ def _plot_conflict(
     differ — two ceskereality adverts of Rezidence Loučná at 227 and 191 m², one catalogue
     price, 82 days together. Where a residue AGREES nothing is claimed: 870 may be 5,870.
     """
-    exact = (settings.d43_plot_area_exact
-             and {a.category_main, b.category_main} <= PLOT_EXACT_CATEGORIES)
-    tol = settings.d43_plot_exact_tol if exact else PLOT_TOL
-    if not settings.d43_plot_truncation_residue:
+    parcel_is_the_object = {a.category_main, b.category_main} <= PLOT_EXACT_CATEGORIES
+    exact = settings.d43_plot_area_exact and parcel_is_the_object
+
+    def apart(left: float, right: float) -> bool:
+        if not exact:
+            return rel_diff(left, right) > PLOT_TOL
+        # Two portals measuring ONE parcel differ in the last digit or in how coarsely they
+        # print it: 1,667 against 1,668, or 897 against a rendered 900. Two parcels of one
+        # parcelling differ by more, at one granularity: Ráby's 998 against 1,001.
+        if abs(left - right) <= settings.d43_plot_exact_abs:
+            return False
+        return not rendering_equal(left, right, PLOT_TOL)
+
+    if not settings.d43_plot_truncation_residue or not parcel_is_the_object:
         plot_a, plot_b = plot_area(a), plot_area(b)
-        if plot_a and plot_b and rel_diff(plot_a, plot_b) > tol:
+        if plot_a and plot_b and apart(plot_a, plot_b):
             return (str(plot_a), str(plot_b))
         return None
     left, right = plot_reading(a), plot_reading(b)
@@ -521,13 +534,54 @@ def _plot_conflict(
         return None
     (value_a, trusted_a), (value_b, trusted_b) = left, right
     if trusted_a and trusted_b:
-        if rel_diff(value_a, value_b) > tol and abs(value_a - value_b) > 0.5:
-            return (str(value_a), str(value_b))
-        return None
+        return (str(value_a), str(value_b)) if apart(value_a, value_b) else None
+    # A truncated number has lost its leading groups, so only the residue can be compared —
+    # and only for a house or a plot, where the parcel IS the object. One ceskereality
+    # `estate_area` of 920 against a 14,788 m² commercial parcel is not a truncation of it,
+    # it is a different measurement the portal put in the same column.
     residue_a, residue_b = plot_residue(value_a), plot_residue(value_b)
-    if abs(residue_a - residue_b) > 0.5:
+    if abs(residue_a - residue_b) > settings.d43_plot_exact_abs:
         return (f"{value_a}(residue {residue_a})", f"{value_b}(residue {residue_b})")
     return None
+
+
+def _offer_area_conflict(
+    a: Listing, b: Listing, settings: Settings, is_land: bool
+) -> tuple[str, str] | None:
+    """E186: one advert leads with a size the other never prints at all.
+
+    `printed_area` compares SETS, so the advert of one third of a parcel meets the advert of
+    the whole: it names the 2,195 m² parcel while explaining that its own 732 m² will be cut
+    from it, and the shared number decides. What an advert LEADS with is what it sells.
+
+    Order alone is not a fact, and that is what makes this safe. One Jablonec hotel is carried
+    by idnes under a headline naming the 14,788 m² plot and by two other portals under the
+    2,900 m² floor area, and both bodies print BOTH numbers — one advert, two orders of
+    presentation. The fact is a leading figure the other body never states.
+
+    A body carrying a parcel CATALOGUE is skipped: its first row is the seller's first plot,
+    not this advert's, and `selected_parcels` is the reader for that shape.
+    """
+    if parcel_table(a.description) or parcel_table(b.description):
+        return None
+    scopes = frozenset({"unit", "land"}) if is_land else frozenset({"unit"})
+    lead_a = leading_area(a.description, scopes)
+    lead_b = leading_area(b.description, scopes)
+    if lead_a is None or lead_b is None:
+        return None
+    if rounding_equal_values(lead_a[0], lead_a[1], lead_b[0], lead_b[1]):
+        return None
+    printed_a = body_headline_areas(a, is_land)
+    printed_b = body_headline_areas(b, is_land)
+    unstated = (
+        not any(rounding_equal_values(lead_a[0], lead_a[1], value, decimals)
+                for value, decimals in printed_b)
+        or not any(rounding_equal_values(lead_b[0], lead_b[1], value, decimals)
+                   for value, decimals in printed_a)
+    )
+    if not unstated:
+        return None
+    return (str(lead_a[0]), str(lead_b[0]))
 
 
 def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> bool:
@@ -797,6 +851,16 @@ def distinguishing_facts(
         printed = printed_area_conflict_cfg(a, b, cfg)
         if printed is not None:
             add("printed_area", printed[0], printed[1])
+
+    # E186: the size the two bodies LEAD with. Read only where the set reader has already
+    # abstained — one HK-Zámeček advert offers `stavební pozemek o výměře 732 m²` and names the
+    # 2 195 m² parcel it will be cut from, the other offers the 2 195 m² parcel itself, and as
+    # sets they share 2 195 and meet. Both sides must lead with a figure, and the two must be
+    # apart by more than the rounding of the coarser.
+    if cfg.d43_offer_area:
+        offer = _offer_area_conflict(a, b, cfg, is_land)
+        if offer is not None:
+            add("offer_area", offer[0], offer[1])
 
     # E161: the unit code the body PRINTS, whole and in the bare form. `unit_designator` reads
     # a keyword and truncates at the word boundary, so `B2.2.1` against `B1.2.1` read B2 against

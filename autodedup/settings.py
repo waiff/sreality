@@ -555,7 +555,10 @@ class Settings:
     # E182: the parcel area read EXACTLY for a house or a plot, and read through a truncating
     # carrier by its residue instead of being blanked.
     d43_plot_area_exact: bool = False
-    d43_plot_exact_tol: float = 0.0
+    # Two portals measuring one parcel differ in the last digit; two parcels of a parcelling
+    # differ by more (Ráby's 981 / 998 / 1,001 m²). An absolute metre, not a percentage — 2 %
+    # of 1,000 m² is 20 m² and 2 % of 200 m² is 4, and a tape measure does not scale.
+    d43_plot_exact_abs: float = 1.0
     d43_plot_truncation_residue: bool = False
     # E183: the catalogue row that is THIS advert's, selected by its own area and price, and
     # the widest parcel keyword set (`číslo pozemku`, the Czech word order idnes uses).
@@ -578,6 +581,10 @@ class Settings:
     # rounded at the coarser's OWN granularity, not a percentage.
     demonstrate_price_path_exact: bool = False
     demonstrate_price_rounding_aware: bool = False
+    # E186: the area the body LEADS with. `printed_area` compares SETS, and the advert of one
+    # third of a parcel names the whole parcel while explaining the split, so the two sets meet
+    # on the number that is not the offer. What an advert leads with is what it sells.
+    d43_offer_area: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
@@ -744,8 +751,8 @@ class Settings:
             )
         if self.d43_floor_within_camp_colive and not self.d43_floor_within_camp:
             raise ValueError("d43_floor_within_camp_colive needs d43_floor_within_camp")
-        if self.d43_plot_exact_tol and not 0.0 <= self.d43_plot_exact_tol < 1.0:
-            raise ValueError(f"d43_plot_exact_tol must be in [0, 1): {self.d43_plot_exact_tol}")
+        if self.d43_plot_exact_abs < 0.0:
+            raise ValueError(f"d43_plot_exact_abs must be >= 0: {self.d43_plot_exact_abs}")
         if self.d43_price_sequential_same_feed and not self.d43_price_sequential_path:
             raise ValueError("d43_price_sequential_same_feed needs d43_price_sequential_path")
         for name in ("demonstrate_price_path_exact", "demonstrate_price_rounding_aware"):

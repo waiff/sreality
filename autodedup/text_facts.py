@@ -782,6 +782,45 @@ def _printed_areas(text: str) -> frozenset[tuple[float, int, str]]:
     return frozenset(out)
 
 
+def leading_area(text: str | None, scopes: frozenset[str]) -> tuple[float, int] | None:
+    """E186: the FIRST area the body states in one of `scopes` — the size it leads with.
+
+    `printed_areas` is a set, and a set cannot tell the offer from the context. One HK-Zámeček
+    advert opens `stavební pozemek o výměře 732 m²` and explains four sentences later that the
+    plot `vznikne rozdělením parcely o celkové výměře 2 195 m² na tři části`; the advert of the
+    WHOLE parcel opens with 2 195. Read as sets the two share 2 195 and never contradict. What
+    an advert leads with is what it sells."""
+    return _leading_area(text, scopes) if text else None
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _leading_area(text: str, scopes: frozenset[str]) -> tuple[float, int] | None:
+    folded = fact_text(text)
+    best: tuple[int, float, int] | None = None
+    for value, decimals, scope in _printed_areas(text):
+        if scope not in scopes:
+            continue
+        position = _position_of(folded, value, decimals)
+        if position is None:
+            continue
+        if best is None or position < best[0]:
+            best = (position, value, decimals)
+    return None if best is None else (best[1], best[2])
+
+
+def _position_of(folded: str, value: float, decimals: int) -> int | None:
+    """Where in the body this exact printed figure first stands."""
+    for match in _M2_MENTION.finditer(folded):
+        parsed = _area_value(match.group(1))
+        if parsed is None or abs(parsed - value) > 1e-9:
+            continue
+        raw = match.group(1).replace(",", ".")
+        printed = len(raw.split(".", 1)[1]) if "." in raw else 0
+        if printed == decimals:
+            return match.start()
+    return None
+
+
 # --- the street the BODY names (E151) -------------------------------------------------------
 # A portal's resolved street key is missing or wrong on exactly the adverts that need it: two
 # Olomouc office blocks, one on Litovelská and one on třída 28. října, carry the same obec and

@@ -271,7 +271,7 @@ def price_demonstrated(
     return _sequential(a, b, settings, overlap)
 
 
-# The unit a printed price was ROUNDED to. `11,25 mil.` is 11,250,000 and its granularity is
+# The unit a printed number was ROUNDED to. `11,25 mil.` is 11,250,000 and its granularity is
 # 10,000; `5 500 000` is granular to 100,000 and `5 499 000` to 1,000. Only powers of ten, and
 # only up to a million — beyond that every asking price in the corpus is "round".
 _PRICE_GRANULARITIES: tuple[float, ...] = (1e6, 1e5, 1e4, 1e3, 1e2, 1e1, 1.0)
@@ -285,24 +285,38 @@ def price_granularity(value: float) -> float:
     return 1.0
 
 
-def prices_round_equal(left: float, right: float) -> bool:
-    """D57: is the coarser number the finer one ROUNDED, at the coarser's own granularity?
+def rendering_equal(left: float, right: float, cap: float) -> bool:
+    """D57's arithmetic: is the coarser number the finer one written to FEWER digits?
 
-    This is what "exact, rounding-aware" means, and it is arithmetic rather than a percentage.
-    `5 499 000` against `5 500 000` is one price written twice, because the second is the first
-    rounded to its own hundred thousand. `10 999 000` against `10 988 000` is not: both are
-    granular to a thousand, so at that granularity they are two different numbers — which is
-    exactly what the Ráby price list says they are. A percentage cannot tell those two cases
-    apart: the first gap is 0.018 % and the second 0.1 %, and only the first is a rounding.
+    One number, two renderings, differs in GRANULARITY — `6 988 000` and its `6,98 mil.`, a
+    897 m² parcel a second portal prints as `900`. Two numbers of the SAME granularity differ
+    in nothing but value, and there is no rendering left to blame: `10 999 000` against
+    `10 988 000`, `998` against `1 001`. The relative `cap` is a second condition and not the
+    rule — a granularity artefact is a last-digit artefact, and 7,000,000 against 7,400,000
+    agrees at a million while being a price cut.
     """
     if left == right:
         return True
-    if left <= 0.0 or right <= 0.0:
+    if left <= 0.0 or right <= 0.0 or rel_diff(left, right) > cap:
         return False
-    unit = max(price_granularity(left), price_granularity(right))
-    if unit <= 1.0:
+    coarse, fine = (left, right) if price_granularity(left) >= price_granularity(right) \
+        else (right, left)
+    unit = price_granularity(coarse)
+    if unit <= 1.0 or unit == price_granularity(fine):
         return False
-    return round(left / unit) == round(right / unit)
+    return coarse / unit in (float(int(fine / unit)), float(round(fine / unit)))
+
+
+# A granularity artefact is a last-digit artefact. Beyond this the two numbers are two prices
+# however their trailing zeros fall — 7,000,000 and 7,400,000 agree at a million and are 5.7 %
+# apart, which is a price cut, not a rendering.
+PRICE_ROUNDING_CAP: float = 0.002
+
+
+def prices_round_equal(left: float, right: float) -> bool:
+    """`rendering_equal` at the price cap. S2's flat 0.2 % could not tell 0.114 % (a rendering)
+    from 0.100 % (the next Ráby package); granularity can."""
+    return rendering_equal(left, right, PRICE_ROUNDING_CAP)
 
 
 def price_paths_round_equal(a: Listing, b: Listing) -> bool:
