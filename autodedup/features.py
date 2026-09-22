@@ -500,6 +500,47 @@ def plot_area(listing: Listing) -> float | None:
     return number
 
 
+def plot_reading(listing: Listing) -> tuple[float, bool] | None:
+    """E182: the parcel area and whether the CARRIER is trusted, instead of blanking it.
+
+    `plot_area` returns None for a source whose parser truncates thousands, and that is right
+    for a feature: an untrusted number may not be scored. It is wrong for a FACT. Truncation
+    removes leading digit GROUPS and never touches the last three digits, so an untrusted 227
+    against an untrusted 191 still proves two parcels — one is not the other, whatever the
+    missing thousands are. Two ceskereality adverts of Rezidence Loučná carry exactly that pair
+    at one catalogue price, 82 days together, and the blanked carrier is why they meet.
+
+    The distrust is preserved in the flag rather than in a None, so the caller can compare the
+    residue where a side is untrusted and the whole number where both are trusted."""
+    attrs = listing.attrs or {}
+    value = attrs.get("estate_area")
+    carrier = "estate"
+    if value is None and listing.category_main == LAND_CATEGORY:
+        value = listing.area_m2
+        carrier = "headline"
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < PLOT_MIN_M2:
+        return None
+    trusted = ((listing.source, carrier) not in PLOT_TRUNCATING_SOURCES
+               and not plot_truncated_in_text(number, listing.description))
+    return (number, trusted)
+
+
+# A truncated plot keeps its last three digits and loses whole groups above them, so the residue
+# is the only part of an untrusted number that can be compared at all.
+PLOT_RESIDUE_MODULUS: float = 1000.0
+
+
+def plot_residue(value: float) -> float:
+    """What survives a thousands truncation: the number modulo one thousand."""
+    return value % PLOT_RESIDUE_MODULUS
+
+
 def plot_truncated_in_text(value: float, text: str | None) -> bool:
     """Is this stored plot a three-digit tail of a space-grouped number the advert itself writes?
 

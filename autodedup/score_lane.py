@@ -599,16 +599,23 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
-def read_must_not_link(conn: Any) -> frozenset[tuple[int, int]]:
-    """E27's permanent negatives: an operator's `different` verdict binds the NEXT pass."""
+def read_must_not_link(conn: Any) -> dict[str, frozenset[tuple[int, int]]]:
+    """E27's permanent negatives BY SOURCE: an operator's `different` verdict binds the next pass.
+
+    N4: the caller needs the operator's rows apart from the machine's, because the whole defect
+    was that one number could not say which of them a pass had loaded — g7 reported 45 and
+    every one of those was the E61 designator veto set.
+    """
     rows = _fetchall(conn, MUST_NOT_LINK_SQL)
-    pairs: set[tuple[int, int]] = set()
+    by_source: dict[str, set[tuple[int, int]]] = {}
     for row in rows:
-        lo, hi = (row[0], row[1]) if isinstance(row, (list, tuple)) else (
-            row.get("listing_lo"), row.get("listing_hi")
-        )
-        pairs.add((int(min(lo, hi)), int(max(lo, hi))))
-    return frozenset(pairs)
+        if isinstance(row, (list, tuple)):
+            lo, hi, source = row[0], row[1], row[2]
+        else:
+            lo, hi = row.get("listing_lo"), row.get("listing_hi")
+            source = row.get("source")
+        by_source.setdefault(str(source), set()).add((int(min(lo, hi)), int(max(lo, hi))))
+    return {source: frozenset(pairs) for source, pairs in sorted(by_source.items())}
 
 
 def read_judged_edges(
@@ -754,7 +761,12 @@ def run_score(
                 "scoring; this lane's deliverable IS the stored pass"
             )
         # E27/E33: read FIRST, because it is an input to the clustering this row will record.
-        must_not_link = read_must_not_link(conn)
+        # N4: the operator's own rows are a SEPARATE receipt from the machine's, and the
+        # settings row decides whether they bind — never a silent default nobody can audit.
+        mnl_by_source = read_must_not_link(conn)
+        must_not_link = frozenset().union(*mnl_by_source.values()) if mnl_by_source else frozenset()
+        if not settings.operator_must_not_link:
+            must_not_link = must_not_link - mnl_by_source.get("operator", frozenset())
 
         run_id = start_run(conn, {
             "fingerprint": fingerprint_of(settings, model, parsed.generation),
@@ -769,6 +781,9 @@ def run_score(
                 "feature_version": FEATURE_VERSION,
                 "keep_generations": parsed.keep_generations,
                 "n_must_not_link": len(must_not_link),
+                "must_not_link_by_source": {
+                    source: len(pairs) for source, pairs in mnl_by_source.items()
+                },
             }, ensure_ascii=False, sort_keys=True, default=str),
         })
 
@@ -833,6 +848,9 @@ def run_score(
             "store_floor": settings.store_floor,
             "keep_generations": parsed.keep_generations,
             "n_must_not_link": len(must_not_link),
+            "must_not_link_by_source": {
+                source: len(pairs) for source, pairs in mnl_by_source.items()
+            },
             "counts": counts,
             "timings": engine.get("timings") or {},
             "band_width": engine.get("band_width"),

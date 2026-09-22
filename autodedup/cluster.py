@@ -31,10 +31,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
+from autodedup.d43 import ClusterRelation
 from autodedup.dataset import Listing
 from autodedup.decide import Decision
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import cluster_invariants_ok
+from autodedup.repartition import Edge, components, partition
 from autodedup.settings import Settings
 
 
@@ -120,6 +122,7 @@ def apply_bridges(
     fps: Mapping[int, Fingerprint],
     settings: Settings,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
+    relation: ClusterRelation | None = None,
 ) -> int:
     """E57: re-offer each recorded bridge once; apply it only if the MERGED set still holds.
 
@@ -140,7 +143,7 @@ def apply_bridges(
             continue
         members = union_find.members(root_lo) + union_find.members(root_hi)
         fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
-        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link)
+        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link, relation)
         if invariant is not None:
             bridge["invariant"] = invariant
             continue
@@ -150,17 +153,86 @@ def apply_bridges(
     return applied
 
 
+def _repartition_clusters(
+    edges: Sequence[Decision],
+    fps: Mapping[int, Fingerprint],
+    settings: Settings,
+    must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
+    relation: ClusterRelation | None,
+) -> tuple[dict[int, list[int]], list[dict[str, Any]], int]:
+    """E137: components of the merge graph, each cut into maximal consistent sub-groups."""
+
+    def invariants(members: Sequence[int]) -> str | None:
+        fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
+        return cluster_invariants_ok(fingerprints, settings, must_not_link, relation)
+
+    graph = [Edge(d.lo, d.hi, d.score, d.certificate is not None) for d in edges]
+    nodes = {listing_id for edge in edges for listing_id in (edge.lo, edge.hi)}
+    grouped: dict[int, list[int]] = {}
+    cut = 0
+    for component in components(nodes, graph):
+        inside = {listing_id: index for index, listing_id in enumerate(component)}
+        if invariants(component) is None:
+            cells = [component]
+        else:
+            cut += 1
+            local = [edge for edge in graph if edge.lo in inside and edge.hi in inside]
+            cells = partition(component, local, invariants, settings.repartition_max_rounds,
+                              settings.repartition_keep_factless)
+        for cell in cells:
+            grouped[min(cell)] = sorted(cell)
+
+    membership = {listing_id: key for key, members in grouped.items() for listing_id in members}
+    conflicts: list[dict[str, Any]] = []
+    for decision in edges:
+        if membership.get(decision.lo) == membership.get(decision.hi):
+            continue
+        members = sorted(set(grouped.get(membership.get(decision.lo, -1), [decision.lo]))
+                         | set(grouped.get(membership.get(decision.hi, -1), [decision.hi])))
+        conflicts.append({
+            "lo": decision.lo,
+            "hi": decision.hi,
+            "score": decision.score,
+            "certificate": decision.certificate,
+            "invariant": invariants(members) or "repartition",
+            "members": members,
+            "families": sorted(decision.families),
+        })
+    return grouped, conflicts, cut
+
+
 def cluster_pairs(
     decisions: Sequence[Decision],
     listings: Mapping[int, Listing],
     fps: Mapping[int, Fingerprint],
     settings: Settings,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]] = frozenset(),
+    relation: ClusterRelation | None = None,
 ) -> ClusterResult:
     """Merge edges -> validated clusters, one conflict row per refused union, bridges recorded."""
     edges = sorted(
         (decision for decision in decisions if decision.zone == "merge"), key=edge_rank
     )
+    if settings.repartition:
+        grouped, conflicts, cut = _repartition_clusters(
+            edges, fps, settings, must_not_link, relation
+        )
+        clusters = {key: members for key, members in sorted(grouped.items())
+                    if len(members) > 1}
+        return ClusterResult(
+            clusters=clusters,
+            conflicts=conflicts,
+            stats=_cluster_stats(
+                clusters, conflicts, must_not_link,
+                n_merge_edges=len(edges),
+                n_edges_applied=len(edges) - len(conflicts),
+                n_edges_redundant=0,
+                n_bridges_applied=0,
+                n_bridges_refused=0,
+                n_components_repartitioned=cut,
+            ),
+            bridges=[],
+        )
     union_find = _UnionFind()
     grouped: dict[int, list[int]] = {}
     for decision in edges:
@@ -197,7 +269,7 @@ def cluster_pairs(
             continue
         members = left + right
         fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
-        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link)
+        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link, relation)
         if invariant is not None:
             conflicts.append({
                 "lo": decision.lo,
@@ -212,12 +284,35 @@ def cluster_pairs(
         union_find.union(root_lo, root_hi)
         accepted.append(decision)
 
-    bridges_applied = apply_bridges(bridges, union_find, fps, settings, must_not_link)
+    bridges_applied = apply_bridges(
+        bridges, union_find, fps, settings, must_not_link, relation
+    )
 
     for root, members in union_find.groups.items():
         grouped[root] = sorted(members)
     clusters = {key: members for key, members in sorted(grouped.items()) if len(members) > 1}
 
+    stats = _cluster_stats(
+        clusters, conflicts, must_not_link,
+        n_merge_edges=len(edges),
+        n_edges_applied=len(accepted) - redundant,
+        n_edges_redundant=redundant,
+        n_bridges_applied=bridges_applied,
+        n_bridges_refused=len(bridges) - bridges_applied,
+        n_components_repartitioned=0,
+    )
+    return ClusterResult(
+        clusters=clusters, conflicts=conflicts, stats=stats, bridges=bridges
+    )
+
+
+def _cluster_stats(
+    clusters: Mapping[int, Sequence[int]],
+    conflicts: Sequence[Mapping[str, Any]],
+    must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
+    **counts: int,
+) -> dict[str, Any]:
+    """One stats shape whichever pass built the clusters, so the two are comparable."""
     sizes = [len(members) for members in clusters.values()]
     histogram: dict[str, int] = {}
     for size in sizes:
@@ -226,13 +321,14 @@ def cluster_pairs(
     for conflict in conflicts:
         name = str(conflict["invariant"])
         by_invariant[name] = by_invariant.get(name, 0) + 1
-    stats: dict[str, Any] = {
-        "n_merge_edges": len(edges),
-        "n_edges_applied": len(accepted) - redundant,
-        "n_edges_redundant": redundant,
+    return {
+        "n_merge_edges": counts["n_merge_edges"],
+        "n_edges_applied": counts["n_edges_applied"],
+        "n_edges_redundant": counts["n_edges_redundant"],
         "n_edges_refused": len(conflicts),
-        "n_bridges_applied": bridges_applied,
-        "n_bridges_refused": len(bridges) - bridges_applied,
+        "n_bridges_applied": counts["n_bridges_applied"],
+        "n_bridges_refused": counts["n_bridges_refused"],
+        "n_components_repartitioned": counts["n_components_repartitioned"],
         "n_must_not_link": len(must_not_link),
         "n_clusters": len(clusters),
         "n_clustered_listings": sum(sizes),
@@ -241,9 +337,6 @@ def cluster_pairs(
         "mean_size": (sum(sizes) / len(sizes)) if sizes else 0.0,
         "conflicts_by_invariant": dict(sorted(by_invariant.items())),
     }
-    return ClusterResult(
-        clusters=clusters, conflicts=conflicts, stats=stats, bridges=bridges
-    )
 
 
 def cluster_rows(

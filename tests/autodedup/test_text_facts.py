@@ -10,6 +10,7 @@ from autodedup.text_facts import (
     address_block_key,
     code_population,
     mask_codes,
+    orientations,
     rare_codes,
     reference_codes,
     stated_areas,
@@ -130,3 +131,31 @@ def test_live_end_stamp_prefers_the_sighting_over_the_detection_stamp() -> None:
     stampless = _listing(last_seen_at=None, inactive_at="2026-09-08T00:00:00+00:00",
                          is_active=False)
     assert live_end_stamp(stampless) == "2026-09-08T00:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Orientace obou pokojů je na jihovýchod a na oknech jsou žaluzie.", {"jihovychod"}),
+        ("Orientace je na východ, na oknech s trojskly jsou žaluzie.", {"vychod"}),
+        # A through-flat names two; the clause is read whole so neither wins.
+        ("Byt je orientovaný na jih a západ, díky čemuž je prosvětlený.", {"jih", "zapad"}),
+        # "na dvě světové strany" names no direction at all.
+        ("Díky orientaci na dvě světové strany byt přirozeně větrá.", set()),
+        # An abbreviation is a coin flip; the parser abstains.
+        ("Nový byt 2+kk, orientovaný na J/Z, vybavený kuchyňskou linkou.", set()),
+        # No keyword, no fact: a body names the direction of the park too.
+        ("Sever (ložnice) je vaše oáza klidu, Jih patří obývacímu pokoji.", set()),
+        ("", set()),
+    ],
+)
+def test_orientations_reads_only_what_the_body_states_as_this_unit_s(
+    text: str, expected: set[str]
+) -> None:
+    assert orientations(text) == expected
+
+
+def test_orientations_prefers_the_longer_compass_stem() -> None:
+    """`jihovýchod` contains `východ`; reading the short stem would merge two flats."""
+    assert orientations("Byt je orientován na jihovýchod.") == {"jihovychod"}
+    assert orientations("Byt je orientován na severozápad.") == {"severozapad"}

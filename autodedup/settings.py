@@ -272,6 +272,347 @@ class Settings:
     clip_sample: int = 8
     phash_sample: int = 30
 
+    # ---------------------------------------------------------------- D43 (W14, 2026-09-21)
+    #
+    # The operator's ruling redefines a false merge: two adverts are INDISTINGUISHABLE when no
+    # stated fact tells the units apart, and merging those is the WANTED outcome; a false merge
+    # is a merge ACROSS a stated fact. Every dial below is OFF by default, because g7 must stay
+    # byte-replayable under `settings/w13.json` — `test_g7_replay_parity` pins it.
+    #
+    # E130: the gate. A merge carrying a stated fact is demoted to the band.
+    d43_gate: bool = False
+    # E131: the promotion. A band pair carrying no stated fact is promoted to merge.
+    d43_promote: bool = False
+    # E131's evidence rail: how many comparable attributes both adverts must STATE and AGREE on
+    # before an ABSENCE of facts is allowed to merge them. 0 is the bare predicate (G8-B), 2 is
+    # the rail (G8-A). The predicate is weakest exactly where both adverts say almost nothing,
+    # and this is the direct measure of what the model score was proxying.
+    d43_promote_min_agreeing: int = 0
+    # G8-A2: one tight non-catalogue photo match is an ALTERNATIVE to the attribute count. A
+    # shared frame is the evidence a presence count stands in for, and it does not penalise the
+    # prose portals (bazos) the way counting stated fields does.
+    d43_promote_photo_alternative: bool = False
+    # E132: the CLUSTER-grain invariant. A group is transitive, so a pairwise gate alone lets
+    # A-B and B-C both pass while A and C differ on the floor; without this limb the relaxed
+    # arms carry real negatives and bad groups.
+    d43_cluster_invariant: bool = False
+    # E132's retired limbs. D43 reads both pairwise with a measured tolerance, so keeping them
+    # at cluster grain charges one difference twice — `floor_spread` alone refused 842 of g7's
+    # 858 rejected unions, because two portals disagree about `přízemí`.
+    cluster_floor_spread: bool = True
+    cluster_disposition: bool = True
+    # E133 (N1): the portal ground-floor camps, `source -> level`. Level 1 counts the ground
+    # floor, level 0 does not, and a source absent from the table has no known convention.
+    # DERIVED from data by `floor_convention.measure_camps` — never hard-coded — and an empty
+    # table turns the whole reading off.
+    floor_camps: dict[str, int] = field(default_factory=dict)
+    # How far the camps are trusted when reading the FLOOR itself. A camp is a majority
+    # behaviour (84-94 % on this corpus), not a law, so the three readings are a real choice:
+    #   `off`    — no joint reading at all: `floor` and `total_floors` are two facts, which is
+    #              exactly the predicate `truth/labels_d43.jsonl` was built with.
+    #   `joint`  — the camps power the joint `floor`+`total_floors` excuse; the floor fact keeps
+    #              g7's rule, which already excuses a one-floor gap across portals.
+    #   `slack`  — the floor gap is read with the convention taken out, and a residual of one
+    #              is still vocabulary.
+    #   `strict` — where the camps place both sources, any residual gap is a fact.
+    floor_camps_reads: str = "off"
+    # E134 (N2): the asking price read as a PATH. Two adverts whose price histories ever name
+    # the same amount are not told apart by a momentary gap; the tolerance is what "the same
+    # amount" means.
+    d43_price_path: bool = False
+    d43_price_path_tol: float = 0.005
+    # E134's other half: two adverts live at the same time whose paths never name one another's
+    # price contradict each other, and that IS a fact even on one portal.
+    d43_price_colive_contradiction: bool = False
+    # E135 (M199): the obec tells two adverts apart only when BOTH sides are resolved at street
+    # grain or finer. Measured over 140 obce: 533 of 22,421 structurally certain duplicates are
+    # recorded under two towns (a village against the district town it is advertised under), and
+    # every one of them has at least one side known only to the obec or the quarter.
+    d43_obec_street_grain_only: bool = False
+    # E136 (N3): the area tolerance is ASYMMETRIC on purpose. Promotion — merging on the ABSENCE
+    # of evidence — reads `area_band_pct` (3%). The gate and the cluster invariant — overruling
+    # positive evidence the engine already certified — read this wider bar, the engine's own
+    # merge-grade guard (`area_reject_pct`, 8%). None = the strict definition on both sides.
+    d43_gate_area_tol: float | None = None
+    # E138: the GATE's own reading, and the generalisation of E136. Demoting a merge means
+    # overruling positive evidence the engine already certified, so the gate does not demote on
+    # a difference that is INFERRED rather than stated, nor on one a known vocabulary or geocode
+    # ambiguity explains. Promotion keeps reading every fact strictly — it has no positive
+    # evidence to fall back on. Each limb names a measured loss class of the W14 arms:
+    #   image facts   — `interior` and `floorplan` are a CLIP similarity and a model flag, not
+    #                   anything either advert states (9 labelled duplicates).
+    #   street metres — two names for one corner building, pins 0.1-4 m apart (3 duplicates,
+    #                   and the town probe's `street_kills_a_merge` worked example).
+    #   total floors  — a one-storey gap across a boundary the camps cannot place is the same
+    #                   ground-floor ambiguity `floor` is already read with (3 duplicates).
+    d43_gate_image_facts: bool = True
+    # The same limb at CLUSTER grain, and it stays ON: the invariant is the only thing between
+    # a development and one big group. Measured on the chosen arm, dropping it recovers 9
+    # labelled duplicates and builds 4 groups holding a pair a judge called different on
+    # exactly that evidence — the one trade this wave refuses.
+    d43_cluster_image_facts: bool = True
+    d43_street_min_distance_m: float | None = None
+    d43_gate_total_floors_slack: bool = False
+    # E137: the re-partitioner. A component the invariants cannot make one group is cut into
+    # maximal consistent sub-groups rather than left where greedy arrival order dropped it. Off
+    # = E33/E37's constrained union-find, unchanged.
+    repartition: bool = False
+    repartition_max_rounds: int = 4
+
+    # ------------------------------------------------------- W15 (g8b, 2026-09-21): the repairs
+    #
+    # W14's adversarial read of g8 found merges ACROSS facts the predicate could not see. Each
+    # row below is one of them, read as a general fact a Czech estate agent would recognise
+    # rather than as a patch for the listings that exposed it. All OFF by default so
+    # `settings/w13.json` (g7) and `settings/w14.json` (g8) keep replaying byte-for-byte.
+    #
+    # E140: the land-register parcel. A pozemek or dům advert prints the parcel the object
+    # stands on, and that number IS the object's identity in the register. DISJOINT printed
+    # sets are two objects; a subset is not a conflict, because an advert also names the access
+    # road and the neighbour's plot. Measured on the 140-town region cohort: 1 of 22,421
+    # structurally certain duplicates — and that one is two of three building plots in Paceřice
+    # that share one photo set, so the reference is wrong there, not the rule — against 235 of
+    # 7,354 structural negatives and 8 of the 18 groups g8 fused.
+    d43_parcel_numbers: bool = False
+    # E141: the accessory the flat comes WITH — parking space, cellar, garage, by number. E61
+    # already reads the UNIT designator; where a developer prints none, the building's own
+    # numbering of its accessories is the next thing that separates two identical flats.
+    # 6 of 22,421 region certain duplicates, and all six are the ONE Turnov pair the blind
+    # hand-read called different ("stání č. 47" against "stání č. 32 + kóje č. 25").
+    d43_accessory_designators: bool = False
+    # E142: the offered EXTENT. Three spellings of one fact — a serviced-office capacity
+    # ("kancelář pro 1 osobu" at 10,890 Kč against "pro 2 pracovní místa" at 15,590), a room
+    # let's room count ("Pronajmu pokoj" at 8,500 against "2 spojené pokoje" at 12,000), and a
+    # parcel inventory one advert offers strictly more of than the other. The first two need
+    # the price and overlap conjunction: a bare capacity regex fires on service-charge lines
+    # and on "byt se hodí pro 1 osobu", and 5 of its 7 g8 hits were exactly those.
+    # `d43_offered_extent_requires_price_gap` is the conjunction the W14 group attack proposed,
+    # kept as a dial and measured rather than assumed. Its case was that a CAPACITY regex is
+    # noisy — 5 of its 7 hits in g8 were prose — but the noise was the bare regex, and once the
+    # office noun must carry the phrase the reading costs 0 of 22,421 region certain duplicates
+    # and 0 of 2,052 trial labelled ones. The conjunction then only removes real catches: Regus
+    # publishes its 1-person and its 2-desk product at the SAME price (43617 at 16,290 Kč,
+    # 38043 at 15,490), so requiring a price gap merges two products because their prices met.
+    d43_offered_extent: bool = False
+    d43_offered_extent_requires_price_gap: bool = False
+    d43_offered_extent_price_tol: float = 0.05
+    # E143: the two-unit signature. One advert has ONE area and ONE price at any moment, so two
+    # adverts whose area AND price BOTH differ beyond rounding are two units — this is what the
+    # 3 % / 5 % / 60 % tolerances cannot see, because neighbouring units of one project sit
+    # 0.5-2 % apart. Two rails keep it honest: an agreeing price PATH (E134) excuses a moment,
+    # and a floor area BOTH bodies print excuses a stored-column basis difference (`užitná 51
+    # m² (podlahová 55 m²)` against `podlahová 55 m² (užitná 51 m²)`). Measured: 58 of 22,421
+    # region certain duplicates, 0 of the 1,415 carrying a shared agency ORDER code, 0 of any
+    # operator-tier labelled duplicate, and 16 of the 18 fused groups.
+    d43_two_unit_signature: bool = False
+    d43_two_unit_area_tol: float = 0.005
+    d43_two_unit_price_tol: float = 0.005
+    d43_two_unit_stated_tol: float = 0.005
+    # E144: E134's co-live limb needs an overlap BAR. Windows that merely touch are a re-post
+    # boundary — 38 of the 63 raw pairs — and a 3-day bar removes every one of them. It also
+    # needs a SIDE: all 25 contradictions the W14 group attack found are same-portal, and
+    # across portals the limb only ever overrules E134's own price-path excuse, which is where
+    # its cost lives (7 dev and 3 sealed labelled duplicates, against 0 for the same-portal
+    # reading).
+    d43_price_colive_min_overlap_days: float = 0.0
+    d43_price_colive_same_source_only: bool = False
+    # E145: WHOSE ground-floor convention is it? N1's same-portal clause assumes one portal is
+    # one convention, and the data refuses that: among same-portal KNOWN duplicates a one-storey
+    # gap runs at 7.5 % on sreality, 6.8 % on ceskereality, 15 % on realitymix and 23.5 % on
+    # bazos. The convention belongs to the FEED, and the feed is the broker. `portal` is g7/g8's
+    # reading; `broker` makes the same-portal clause need a shared `broker_key`, which is what a
+    # broker-feed aggregator needs and what stops the V Aleji 131 m² 4+1 being cut in two.
+    floor_same_source_feed: str = "portal"
+    # E11 as a dial rather than a module constant, so an arm can open it without a monkeypatch.
+    min_evidence_families: int = 2
+    # E27/N4: the batch build loads the operator's permanent negatives. g7 did not — its
+    # `n_must_not_link = 45` is the E61 designator veto set and nothing else — so a pass that
+    # loads none now has to say so out loud instead of looking identical to one that did.
+    operator_must_not_link: bool = True
+
+    # ------------------------------------------ W16 (g8c, 2026-09-21): identity is DEMONSTRATED
+    #
+    # D50. g8b promotes a band pair unless a reader FINDS a distinguishing fact, and that is
+    # fail-open: its safety is bounded by how much Czech prose the readers cover, and every new
+    # cohort has produced a form none of them knew — `B1.2.2` against `B1.2.3`, plots 7/8/9 of
+    # one parcelling, a garage block G3 against G4, 58,90 m² against 58,70 m². Silence is not
+    # evidence. Everything below is OFF by default so w13/w14/w15 keep replaying byte-for-byte.
+    #
+    # E150: the reader that knows no form. Two adverts for two units of one project are written
+    # from ONE template, so they align everywhere except where the unit is named; the alignment
+    # says WHERE to look and the token says whether what is written there can name a unit.
+    d43_body_align: bool = False
+    # How much of the two bodies must align before any position is read. 0.60 is where the
+    # Rokytná pair (one shared first sentence, then two different paragraphs) still aligns.
+    d43_body_align_min_ratio: float = 0.60
+    # E151: the street the BODY names, for the adverts whose resolved street key is missing —
+    # two Olomouc office blocks, one on Litovelská and one on třída 28. října, same obec, no
+    # street key on either side, and the prose is the only place either street is written.
+    d43_prose_street: bool = False
+    # E152: the obec the BODY names. E135 suppresses the obec fact below street grain, which is
+    # right for a village advertised under its district town and wrong for two adverts that each
+    # PRINT their own different town (Droždín against Oplocany u Tovačova). Reading the printed
+    # name restores the fact without re-opening the 533 recorded-under-two-towns duplicates.
+    d43_prose_obec: bool = False
+    # E153: the printed headline area, read WITHOUT the stored column. 16 % of the corpus prints
+    # a headline area outside `stated_areas`' stored-column window, because the portal stored a
+    # terrace, a cellar or the plot. Equality is the ROUNDING rule, not a tolerance: two numbers
+    # agree when they agree within half of the coarser one's last printed digit.
+    d43_printed_area: bool = False
+    # E154: E145 fails CLOSED. `floor_same_source_feed="broker"` drops the same-portal one-storey
+    # fact wherever a broker key is null — and bazos, bezrealitky and maxima are 100 % null — so
+    # floors 3 and 4 of one new-build fuse. A null key is UNKNOWN, not "a different feed": the
+    # fact stands unless both keys are known AND different.
+    floor_feed_unknown_closed: bool = False
+    # E155: the parcel forms the narrow keyword misses. Fail-safe in both directions.
+    d43_parcel_forms_wide: bool = False
+    # E156: the re-partitioner may not drop a member that carries NO fact against the group it
+    # is being separated from. Measured on the region cohort: 8 of g8b's 38 lost certain
+    # duplicates are exactly that — Penzion Horálka, same 374 m², same price, same body, one
+    # side sreality and one mmreality, cut to two singletons by a conflict elsewhere.
+    repartition_keep_factless: bool = False
+
+    # E157 (A): the key facts must be POSITIVELY EQUAL before a band pair may be promoted.
+    demonstrate_identity: bool = False
+    # A price gap the two adverts never reconcile is only excusable when they were never on sale
+    # together: a cut between two sequential postings is one unit, two co-live prices are two.
+    demonstrate_price_colive_days: float = 3.0
+    # And the slack must be read RELATIVE to the two lives. Two Okružní garages at 1,190,000 and
+    # 1,240,000 were first sighted seven minutes apart and the cheaper one died two days later:
+    # its whole life overlapped the other's, and "1.59 days" made that look like a re-post tail.
+    # A re-post boundary is a small fraction of both windows; a shared life is all of one.
+    demonstrate_price_colive_fraction: float = 0.25
+    demonstrate_require_disposition: bool = True
+    demonstrate_require_obec: bool = True
+    # E158 (B): unit-grade corroboration, the positive evidence that these two galleries or
+    # bodies are of ONE home. `unit` is the strict reading (a tight non-catalogue photo file, a
+    # near-identical body, or a shared rare order code); `two_of` also accepts two of the wider
+    # list; `development_only` asks for `unit` inside a development and nothing outside one.
+    # Every mode is a SUPERSET of `unit`, which is what makes S ⊆ M ⊆ L an identity rather than
+    # a measurement.
+    # E157 at CLUSTER grain, price limb only. A group is built transitively, so a pairwise
+    # filter alone lets two co-live prices into one group through a third advert. Only the
+    # price limb travels here: the others already have a fact of their own at this grain, and
+    # only this one has D49's ratio mechanism to keep it away from the co-op share and the
+    # dražba figure.
+    demonstrate_cluster_price: bool = False
+    corroboration: str = "off"
+    corroboration_body_containment: float = 0.80
+    corroboration_min: int = 2
+
+    # --- W17 / S2: exactness where identity is CLAIMED (E160-E165) -------------------------
+    # E160: "price equal" at promotion is EXACT, or one price on the other's recorded path.
+    # 5 % is the width of two portals carrying one order; it is also the width of a developer's
+    # next unit (Kozolupy 11,250,000 against 11,500,000, 2.2 %, one cluster of 25). A tolerance
+    # that cannot tell those apart is not a demonstration of identity.
+    demonstrate_price_exact: bool = False
+    # What a portal's ROUNDING costs, and nothing more: 0.2 % covers 11,250,000 written as
+    # `11,25 mil.` and still refuses `11,5`.
+    demonstrate_price_exact_tol: float = 0.002
+    # E160: "area equal" is decided by what the two BODIES print whenever both print anything.
+    # A stored integer column rescues 75,52 against 75,64 — both portals store 76 — and that is
+    # the Chotěšov twin. The column stays the reading only where a body states nothing.
+    demonstrate_area_printed_decides: bool = False
+    d43_printed_area_decimals_decide: bool = False
+    # E161: the printed unit code, read WHOLE and in the bare form. `wide` adds the Roman
+    # numeral, the number word and the single letter, each behind an explicit marker.
+    d43_unit_codes: bool = False
+    d43_unit_codes_wide: bool = False
+    # E162: a fact ONE side prints and the other is silent about. Outside a development that is
+    # E12's missing datum and no refusal; inside one it is the whole hazard, so the silent side
+    # fails closed. `development_context_mode` says how narrowly "inside" is read — `vocab` is
+    # `PROJECT_TERMS` on either side (the skeptic measured that at 41.8 % of all pairs, which is
+    # not a context), `narrow` asks for the vocabulary on BOTH sides AND a second marker.
+    demonstrate_onesided: bool = False
+    development_context_mode: str = "off"
+    # E163: the healed generic reader — charges, contract terms, year-less dates, short order
+    # codes, inventory multipliers, metre dimensions, ranges, and NP against patro.
+    d43_body_align_heal: bool = False
+    # E164: 87 % of the A-limb's refusals are a MISSING reading, not a disagreement. A missing
+    # reading may be waived where the pair carries evidence only one unit has.
+    demonstrate_recover_missing: bool = False
+    demonstrate_recover_min_photos: float = 3.0
+    demonstrate_recover_body_containment: float = 0.98
+    # E165: E143's two-unit signature reads two numbers as SIMULTANEOUS. Two sequential
+    # postings never were, and a price cut plus a re-parsed area is what a re-post looks like.
+    d43_two_unit_requires_colive: bool = False
+    # E166: the storey the BODY prints, read under the same convention rule as the column.
+    d43_prose_floor: bool = False
+
+    # --- W18 / S3: what the cohort-5 confirmation named (E180-E185, D57) --------------------
+    # E180: the ground-floor convention is a difference BETWEEN camps. Inside one camp — and a
+    # portal is always inside its own — a one-storey gap is not vocabulary, it is a storey.
+    # `d43_floor_within_camp_colive` keeps the excuse for two SEQUENTIAL postings, where the
+    # gap is one portal's parse drifting between re-posts (29 bazos re-posts of one Dašice rent
+    # advert drift 0/1); two adverts on sale TOGETHER have no such excuse.
+    d43_floor_within_camp: bool = False
+    d43_floor_within_camp_colive: bool = False
+    # `camp` trusts the table's zero-offset claim BETWEEN two portals; `source` trusts only
+    # what cannot be doubted — that one portal counts one way. The hand read of the 182
+    # certain duplicates the `camp` scope splits on cohort 5 is almost all idnes against
+    # ceskereality at identical price and area, one storey apart: the table places both at 0
+    # and the data says their offset is 1. A camp table fitted for a DIFFERENT question may
+    # not be read as evidence of agreement.
+    d43_floor_within_camp_scope: str = "camp"
+    # E154's escape, kept and sharpened. One Jablonec vila 4+1 is carried on ceskereality at
+    # 6,988,000 with its storey written 1 and, 27 days later and still live, at 6,980,000 with
+    # it written 2; the second row names no broker. E154 excused that on the reading that "the
+    # asking price is what separates them", and it is right — but only where the price MOVED.
+    # Two adverts on one portal LIVE TOGETHER at the SAME number are two simultaneous
+    # statements and the storey between them is a fact (Chrudimska 99's two 2,475,000 micro-
+    # units). So the escape holds where the feed is unknown and the prices meet WITHOUT being
+    # identical, and nowhere else.
+    d43_floor_within_camp_price_escape: bool = False
+    # W8's correction, which `overlap_days` never took: `inactive_at` is when a delisting was
+    # DETECTED, not when the advert went, and the lag runs to weeks. Two ceskereality re-posts
+    # of one Jablonec flat are sighted three hours apart and both detected gone on 8 September,
+    # so the detection clock calls them 27.6 days co-live and E180's guard lets a re-post's
+    # storey drift through as a fact. The honest window is `dataset.live_end_stamp`.
+    d43_floor_within_camp_honest_window: bool = False
+    # E181: the storey a PLACEMENT clause states of the offered unit, and the storey written in
+    # words rather than digits. Both are read under E180's camp rule; the worded pair is not,
+    # because `přízemí` is the ground floor on every portal.
+    d43_subject_floor: bool = False
+    d43_ground_vs_upper: bool = False
+    # E182: the parcel area read EXACTLY for a house or a plot, and read through a truncating
+    # carrier by its residue instead of being blanked.
+    d43_plot_area_exact: bool = False
+    # Two portals measuring one parcel differ in the last digit; two parcels of a parcelling
+    # differ by more (Ráby's 981 / 998 / 1,001 m²). An absolute metre, not a percentage — 2 %
+    # of 1,000 m² is 20 m² and 2 % of 200 m² is 4, and a tape measure does not scale.
+    d43_plot_exact_abs: float = 1.0
+    d43_plot_truncation_residue: bool = False
+    # E183: the catalogue row that is THIS advert's, selected by its own area and price, and
+    # the widest parcel keyword set (`číslo pozemku`, the Czech word order idnes uses).
+    d43_parcel_table: bool = False
+    # E184: a stated count of dwelling units. `colive_price` is D49's refusal kept intact — the
+    # bare co-live price limb stays refused, and only the conjunction with a stated count is
+    # read; `always` reads the count alone.
+    d43_stated_unit_count: str = "off"
+    # E185: a price MOVE between two postings that were never on sale together is one price
+    # path, when the rest of the identity is demonstrated. This is the standing ruling about
+    # re-lists applied to the `price` FACT, which until now only `price_demonstrated` honoured.
+    d43_price_sequential_path: bool = False
+    d43_price_sequential_same_feed: bool = False
+    d43_price_sequential_containment: float = 0.9
+    d43_price_sequential_min_photos: float = 3.0
+    # D57: exactness where identity is CLAIMED reaches the PATH too. `price_paths_agree` runs at
+    # `d43_price_path_tol` (0.5 %), which is looser than the exact bar and silently readmits
+    # every pair the exact bar refuses — the Ráby packages at 10,999,000 and 10,988,000 are
+    # 0.1 % apart and meet through it. Rounding-aware means the coarser number is the finer one
+    # rounded at the coarser's OWN granularity, not a percentage.
+    demonstrate_price_path_exact: bool = False
+    demonstrate_price_rounding_aware: bool = False
+    # E186: the area the body LEADS with. `printed_area` compares SETS, and the advert of one
+    # third of a parcel names the whole parcel while explaining the split, so the two sets meet
+    # on the number that is not the offer. What an advert leads with is what it sells.
+    d43_offer_area: bool = False
+    # And only where the two figures are a WHOLE and a PART of it. Read at any gap the limb
+    # costs 648 certain duplicates on cohort 5 for one fusion — two bodies routinely lead with
+    # the terrace, the plot or the building where the other leads with the flat. A factor is
+    # what "one third of a parcel" looks like and a measurement difference never is.
+    d43_offer_area_min_ratio: float = 2.0
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -280,6 +621,8 @@ class Settings:
             str(key): (None if value is None else float(value))
             for key, value in dict(self.t_hi_by_stratum).items()
         }
+        self.floor_camps = {str(key): int(value)
+                            for key, value in dict(self.floor_camps).items()}
         self.validate()
 
     def validate(self) -> None:
@@ -313,6 +656,138 @@ class Settings:
             raise ValueError(f"cluster_area_spread must be positive: {self.cluster_area_spread}")
         if self.rare_token_df < 0 or self.text_min_chars < 0:
             raise ValueError("rare_token_df and text_min_chars must not be negative")
+        if self.min_evidence_families < 1:
+            raise ValueError(
+                f"min_evidence_families must be at least 1: {self.min_evidence_families}"
+            )
+        if self.d43_promote_min_agreeing < 0:
+            raise ValueError(
+                f"d43_promote_min_agreeing must not be negative: "
+                f"{self.d43_promote_min_agreeing}"
+            )
+        if not 0.0 < self.d43_price_path_tol < 1.0:
+            raise ValueError(
+                f"d43_price_path_tol must be in (0, 1): {self.d43_price_path_tol}"
+            )
+        if self.d43_gate_area_tol is not None and not (
+            self.area_band_pct <= self.d43_gate_area_tol <= self.area_reject_pct
+        ):
+            # The gate is the PERMISSIVE side of E136: wider than promotion reads, and never
+            # wider than the guard that let the merge through in the first place.
+            raise ValueError(
+                f"d43_gate_area_tol must lie in [area_band_pct, area_reject_pct]: "
+                f"{self.d43_gate_area_tol}"
+            )
+        if (self.d43_street_min_distance_m is not None
+                and not 0.0 < self.d43_street_min_distance_m <= 250.0):
+            raise ValueError(
+                f"d43_street_min_distance_m must be in (0, 250] metres: "
+                f"{self.d43_street_min_distance_m}"
+            )
+        if self.repartition_max_rounds < 1:
+            raise ValueError(
+                f"repartition_max_rounds must be at least 1: {self.repartition_max_rounds}"
+            )
+        for name in ("d43_two_unit_area_tol", "d43_two_unit_price_tol",
+                     "d43_two_unit_stated_tol", "d43_offered_extent_price_tol"):
+            value = getattr(self, name)
+            if not 0.0 < value < 1.0:
+                raise ValueError(f"{name} must be in (0, 1): {value}")
+        # The signature's whole case is that it sees BELOW the engine's own area guard: a
+        # tolerance at or above `area_band_pct` reads nothing the `area` fact does not already.
+        if self.d43_two_unit_area_tol >= self.area_band_pct:
+            raise ValueError(
+                "d43_two_unit_area_tol must sit below area_band_pct — above it the signature "
+                f"is the `area` fact spelled twice: {self.d43_two_unit_area_tol} >= "
+                f"{self.area_band_pct}"
+            )
+        if self.d43_price_colive_min_overlap_days < 0.0:
+            raise ValueError(
+                "d43_price_colive_min_overlap_days must not be negative: "
+                f"{self.d43_price_colive_min_overlap_days}"
+            )
+        if self.floor_same_source_feed not in ("portal", "broker"):
+            raise ValueError(
+                f"floor_same_source_feed must be portal/broker: {self.floor_same_source_feed}"
+            )
+        if self.d43_promote_photo_alternative and not self.d43_promote:
+            raise ValueError("d43_promote_photo_alternative needs d43_promote")
+        if self.corroboration not in ("off", "unit", "two_of", "development_only"):
+            raise ValueError(
+                "corroboration must be off/unit/two_of/development_only: "
+                f"{self.corroboration}"
+            )
+        if not 0.0 < self.d43_body_align_min_ratio <= 1.0:
+            raise ValueError(
+                f"d43_body_align_min_ratio must be in (0, 1]: {self.d43_body_align_min_ratio}"
+            )
+        if not 0.0 < self.corroboration_body_containment <= 1.0:
+            raise ValueError(
+                "corroboration_body_containment must be in (0, 1]: "
+                f"{self.corroboration_body_containment}"
+            )
+        if self.corroboration_min < 1:
+            raise ValueError(f"corroboration_min must be at least 1: {self.corroboration_min}")
+        if self.demonstrate_price_colive_days < 0.0:
+            raise ValueError(
+                "demonstrate_price_colive_days must not be negative: "
+                f"{self.demonstrate_price_colive_days}"
+            )
+        if not 0.0 <= self.demonstrate_price_colive_fraction <= 1.0:
+            raise ValueError(
+                "demonstrate_price_colive_fraction must be in [0, 1]: "
+                f"{self.demonstrate_price_colive_fraction}"
+            )
+        # The ladder is nested by CONSTRUCTION, and the constructor is where that is enforced:
+        # corroboration is a filter on promotion, so it cannot be asked for without the
+        # demonstration it refines, or S ⊆ M ⊆ L would stop being an identity (E159).
+        if self.corroboration != "off" and not self.demonstrate_identity:
+            raise ValueError("corroboration needs demonstrate_identity")
+        if self.demonstrate_cluster_price and not self.demonstrate_identity:
+            raise ValueError("demonstrate_cluster_price needs demonstrate_identity")
+        if self.development_context_mode not in ("off", "vocab", "narrow", "template"):
+            raise ValueError(
+                "development_context_mode must be off/vocab/narrow/template: "
+                f"{self.development_context_mode}"
+            )
+        if not 0.0 <= self.demonstrate_price_exact_tol < 1.0:
+            raise ValueError(
+                "demonstrate_price_exact_tol must be in [0, 1): "
+                f"{self.demonstrate_price_exact_tol}"
+            )
+        if self.demonstrate_onesided and self.development_context_mode == "off":
+            raise ValueError("demonstrate_onesided needs a development_context_mode")
+        for name in ("demonstrate_price_exact", "demonstrate_area_printed_decides",
+                     "demonstrate_onesided", "demonstrate_recover_missing"):
+            if getattr(self, name) and not self.demonstrate_identity:
+                raise ValueError(f"{name} needs demonstrate_identity")
+        if self.d43_unit_codes_wide and not self.d43_unit_codes:
+            raise ValueError("d43_unit_codes_wide needs d43_unit_codes")
+        if self.d43_body_align_heal and not self.d43_body_align:
+            raise ValueError("d43_body_align_heal needs d43_body_align")
+        if self.floor_camps_reads not in ("off", "joint", "slack", "strict"):
+            raise ValueError(
+                f"floor_camps_reads must be off/joint/slack/strict: {self.floor_camps_reads}"
+            )
+        if set(self.floor_camps.values()) - {0, 1}:
+            raise ValueError(f"floor_camps levels must be 0 or 1: {sorted(set(self.floor_camps.values()))}")
+        if self.d43_stated_unit_count not in ("off", "colive_price", "always"):
+            raise ValueError(
+                "d43_stated_unit_count must be off/colive_price/always: "
+                f"{self.d43_stated_unit_count}"
+            )
+        if self.d43_floor_within_camp_colive and not self.d43_floor_within_camp:
+            raise ValueError("d43_floor_within_camp_colive needs d43_floor_within_camp")
+        if self.d43_floor_within_camp_scope not in ("camp", "source"):
+            raise ValueError("d43_floor_within_camp_scope must be camp/source: "
+                             f"{self.d43_floor_within_camp_scope}")
+        if self.d43_plot_exact_abs < 0.0:
+            raise ValueError(f"d43_plot_exact_abs must be >= 0: {self.d43_plot_exact_abs}")
+        if self.d43_price_sequential_same_feed and not self.d43_price_sequential_path:
+            raise ValueError("d43_price_sequential_same_feed needs d43_price_sequential_path")
+        for name in ("demonstrate_price_path_exact", "demonstrate_price_rounding_aware"):
+            if getattr(self, name) and not self.demonstrate_price_exact:
+                raise ValueError(f"{name} needs demonstrate_price_exact")
         from autodedup.features import ATTR_KEYS, CONFLATED_ATTR_KEYS, NUMERAL_TOLERANCE
 
         unknown_attrs = sorted(

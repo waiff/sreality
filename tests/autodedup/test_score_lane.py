@@ -538,7 +538,7 @@ def test_every_cluster_member_is_written_with_the_edge_it_arrived_on(
 
 
 def test_a_refused_union_is_stored_with_the_generation(lane, tmp_path: Path) -> None:
-    lane.state["must_not_link"] = [(DUP_A, DUP_B)]
+    lane.state["must_not_link"] = [(DUP_A, DUP_B, "operator")]
     lane(tmp_path / "out", export_run="1", generation="gtest")
     rows = _rows(lane.executed, CLUSTER_CONFLICT_INSERT_SQL)
     assert len(rows) == 1
@@ -587,7 +587,7 @@ def test_an_operator_must_not_link_row_binds_the_pass(lane, tmp_path: Path) -> N
     assert DUP_A in before and summary["n_must_not_link"] == 0
 
     lane.executed.clear()
-    lane.state["must_not_link"] = [(DUP_A, DUP_B)]
+    lane.state["must_not_link"] = [(DUP_A, DUP_B, "operator")]
     summary = lane(tmp_path / "out2", export_run="1")
     assert summary["n_must_not_link"] == 1
     assert _index(lane.executed, MUST_NOT_LINK_SQL) < _index(lane.executed, RUN_START_SQL)

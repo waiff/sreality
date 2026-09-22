@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from autodedup import decide
-from autodedup.decide import MIN_EVIDENCE_FAMILIES, Decision
+from autodedup.decide import Decision
 from autodedup.hazard_context import PairContext
 from autodedup.labels import (
     CHEAP_TIERS,
@@ -688,7 +688,7 @@ def decide_context(
         propose_only = decide.stratum_t_hi(feats, certificate, live) is None
     return {
         "certificate": certificate,
-        "diverse": len(row.get("families") or ()) >= MIN_EVIDENCE_FAMILIES,
+        "diverse": len(row.get("families") or ()) >= live.min_evidence_families,
         "blocked": discarded or gate is not None or propose_only,
         "stratum_propose_only": propose_only,
         # A guard and an auto-reject take the pair out of the QUEUE; E45/E46 and E11 only take it

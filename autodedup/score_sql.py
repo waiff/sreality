@@ -71,9 +71,11 @@ returning id
 
 # E27/E33: the operator's permanent negatives are an INPUT to clustering, not a report on it.
 # The table is small by construction (one row per operator "different" verdict), so it is read
-# whole rather than scoped to the cohort.
+# whole rather than scoped to the cohort. N4: the SOURCE comes back with the pair, because a
+# pass that loaded 0 operator rows and one that loaded 246 used to look identical in the run
+# row — one `n_must_not_link` covering the E61 veto set and the operator's testimony alike.
 MUST_NOT_LINK_SQL = """
-select listing_lo, listing_hi
+select listing_lo, listing_hi, source
   from autodedup.must_not_link
 """
 

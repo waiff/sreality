@@ -22,10 +22,23 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from autodedup.dataset import Listing
+from autodedup.demonstrate import (
+    MISSING,
+    corroboration_warrant,
+    demonstration_shortfall,
+    strong_corroboration,
+)
 from autodedup.features import Feats, evidence_families, parse_ts, window_end_stamp
 from autodedup.fingerprint import Fingerprint
 from autodedup.guards import UNIT_DESIGNATOR_VETO, pair_veto, unit_designator_conflict
 from autodedup.hazard_context import ContextIndex, PairContext, fungible_catalogue
+from autodedup.indistinguishable import (
+    GATE,
+    distinguishing_facts,
+    overlap_days,
+    price_paths_agree,
+    promotion_warrant,
+)
 from autodedup.model import LogisticModel
 from autodedup.settings import Settings
 
@@ -45,6 +58,13 @@ CONTEXT_RULE_REASON: str = "context_rule"
 # ruling is about, and a pair they banded is exactly the pair a text-and-price warrant
 # cannot speak for (a developer's adverts share both by construction).
 CONTEXT_RULE_NEVER_OVERRIDES: tuple[str, ...] = ("developer_signature", "developer_colive")
+
+# E130/E131 name their own reasons for the reason E63 does: the store has to say WHY every g8
+# merge exists and WHICH fact demoted each g7 merge, without re-running the pass.
+D43_GATE_REASON: str = "d43_gate"
+D43_PROMOTE_REASON: str = "d43_promote"
+# D50/E157/E158: and WHY a pair no fact separates was still not promoted.
+D43_DEMONSTRATE_REASON: str = "d43_demonstrate"
 
 CERT_A_AREA: float = 0.02
 CERT_B_AREA: float = 0.01
@@ -520,6 +540,83 @@ def apply_context_rule(
     )
 
 
+def apply_d43_rule(
+    decision: Decision,
+    la: Listing,
+    lb: Listing,
+    feats: Feats,
+    settings: Settings,
+) -> Decision:
+    """D43 at the decide layer: the gate demotes, the promotion promotes, both named.
+
+    The GATE reads the permissive area bar (E136): it is about to overrule evidence the engine
+    already certified, and a parse defect in the 3-8 % band must not split a certified merge.
+    The PROMOTION reads the strict one, because merging on the ABSENCE of a fact is the one
+    place the engine has no positive evidence to fall back on.
+
+    A veto or an auto-reject is never reached — the ruling is about which adverts are one unit,
+    not about the rule floor that says they cannot be compared at all.
+    """
+    if decision.zone == "merge" and settings.d43_gate:
+        facts = distinguishing_facts(la, lb, feats, settings, GATE)
+        if facts:
+            return Decision(
+                decision.lo, decision.hi, "band", decision.score, decision.families,
+                decision.certificate, None,
+                f"{decision.reason}:{D43_GATE_REASON}:{facts[0].name}",
+                {**decision.evidence,
+                 f"{D43_GATE_REASON}_facts": ",".join(fact.name for fact in facts)},
+            )
+        return decision
+    if decision.zone == "band" and settings.d43_promote:
+        warrant = promotion_warrant(la, lb, feats, settings)
+        if warrant is None:
+            return decision
+        refusal = demonstration_refusal(la, lb, feats, settings)
+        if refusal is not None:
+            return Decision(
+                decision.lo, decision.hi, "band", decision.score, decision.families,
+                decision.certificate, None,
+                f"{decision.reason}:{D43_DEMONSTRATE_REASON}:{refusal}",
+                {**decision.evidence, D43_DEMONSTRATE_REASON: refusal},
+            )
+        return Decision(
+            decision.lo, decision.hi, "merge", decision.score, decision.families,
+            decision.certificate, None,
+            f"{D43_PROMOTE_REASON}:{warrant}",
+            {**decision.evidence, "d43_banded_as": decision.reason},
+        )
+    return decision
+
+
+def demonstration_refusal(
+    la: Listing, lb: Listing, feats: Feats, settings: Settings
+) -> str | None:
+    """D50 (E157/E158): why a band pair no fact separates may still NOT be promoted.
+
+    The absence of a distinguishing fact is what the readers happened to see, and three
+    cohorts have each produced a form they had never seen. So promotion asks for the positive
+    case instead: `A:<fact>` names the key fact the two adverts do not demonstrably agree on,
+    `B` that nothing corroborates them at unit grade. Both are pure filters ON PROMOTION —
+    the merge zone is untouched — which is what makes S ⊆ M ⊆ L an identity (E159)."""
+    if not settings.demonstrate_identity:
+        return None
+    paths_agree = price_paths_agree(la, lb, settings.d43_price_path_tol)
+    shortfall = demonstration_shortfall(la, lb, settings, paths_agree, overlap_days(la, lb))
+    if shortfall is not None:
+        gap, kind = shortfall
+        # E164: a reading NOBODY states is not a disagreement. Where the pair carries evidence
+        # only one unit has — three tight photo files with the interiors holding, the seller's
+        # own order code, or a body one advert essentially IS outside a development — the
+        # missing reading is waived. A CONTRADICTION never is.
+        if not (settings.demonstrate_recover_missing and kind == MISSING
+                and strong_corroboration(la, lb, feats, settings) is not None):
+            return f"A:{gap}"
+    if corroboration_warrant(la, lb, feats, settings) is None:
+        return "B"
+    return None
+
+
 def decide_pair(
     fa: Fingerprint,
     fb: Fingerprint,
@@ -540,7 +637,8 @@ def decide_pair(
     is the one path back out of that band, and it can only ever read a pair the layers above it
     have already decided — it never reaches a veto, an auto-reject or a developer guard."""
     decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings, kb_refused)
-    return apply_context_rule(decision, feats, la, lb, settings, context)
+    decision = apply_context_rule(decision, feats, la, lb, settings, context)
+    return apply_d43_rule(decision, la, lb, feats, settings)
 
 
 def _decide_layers(
@@ -579,7 +677,7 @@ def _decide_layers(
     if rejected is not None:
         return Decision(lo, hi, "reject", score, families, None, None, f"auto_reject:{rejected}")
 
-    diverse = len(families) >= MIN_EVIDENCE_FAMILIES
+    diverse = len(families) >= settings.min_evidence_families
     certificate = certificate_of(feats, la, lb, settings, kb_refused)
     if certificate is not None:
         if stratum_t_hi(feats, certificate, settings) is None:

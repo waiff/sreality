@@ -33,7 +33,7 @@ LANE_WRITERS: tuple[str, ...] = (
     "parity.py",
     "progress_sql.py", "replay.py", "rt_equivalence.py", "score_lane.py", "score_sql.py",
     "seals.py",
-    "structural_truth.py",
+    "structural_truth.py", "town_probe.py",
 )
 
 # Columns and claim names that identify a PERSON — the operator or a broker.
@@ -84,10 +84,14 @@ def test_the_lane_writer_census_covers_the_package() -> None:
     """A new module under autodedup/ that writes an artifact must join the list rather than
     quietly sit outside the rail. Modules that only compute are listed as exempt."""
     exempt = {
-        "__init__.py", "agreement.py", "blocking.py", "candidates.py", "cluster.py",
-        "cohort.py", "dataset.py", "decide.py", "development.py", "ensembles.py",
+        "__init__.py", "agreement.py", "blocking.py", "body_align.py", "candidates.py",
+        "cluster.py",
+        "cohort.py", "dataset.py", "decide.py", "demonstrate.py", "development.py",
+        "ensembles.py",
             "family.py", "features.py",
-        "fingerprint.py", "guards.py", "hazard_context.py", "incremental.py",
+        "d43.py", "fingerprint.py", "floor_convention.py", "guards.py",
+        "hazard_context.py", "incremental.py",
+            "indistinguishable.py", "repartition.py",
         "incremental_scope.py", "incremental_store.py", "parity_digest.py",
         "model.py", "normalize.py", "oss_pod.py", "revocation.py", "settings.py",
         "stock.py", "store_score.py",

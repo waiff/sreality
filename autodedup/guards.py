@@ -21,6 +21,7 @@ from autodedup.text_facts import address_block_key, unit_designators
 from toolkit.room_taxonomy import category_main_compatible
 
 if TYPE_CHECKING:  # pragma: no cover
+    from autodedup.d43 import ClusterRelation
     from autodedup.fingerprint import Fingerprint
 
 LAND_CATEGORY: str = "pozemek"
@@ -129,8 +130,15 @@ def cluster_invariants_ok(
     members: Sequence["Fingerprint"],
     settings: Settings | None = None,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]] = frozenset(),
+    relation: "ClusterRelation | None" = None,
 ) -> str | None:
-    """E34 on the MERGED member set: the violated invariant's name, or None when it holds."""
+    """E34 on the MERGED member set: the violated invariant's name, or None when it holds.
+
+    E132: `relation` is D43 read at cluster grain — a group is built transitively, so a
+    pairwise gate alone lets A-B and B-C pass while A and C differ on the floor. It is the last
+    limb because it is the expensive one and it reads the two BODIES, which a fingerprint
+    cannot.
+    """
     cfg = settings or Settings()
     if len(members) > cfg.max_cluster_size:
         return "size"
@@ -150,15 +158,16 @@ def cluster_invariants_ok(
         return "area_spread"
 
     is_land = any(fp.category_main == LAND_CATEGORY for fp in members)
-    if not is_land:
+    if cfg.cluster_disposition and not is_land:
         dispositions = {fp.disposition for fp in members if fp.disposition is not None}
         if len(dispositions) > 1:
             return "disposition"
 
-    floors = [fp.floor for fp in members
-              if fp.category_main == FLAT_CATEGORY and fp.floor is not None]
-    if floors and max(floors) != min(floors):
-        return "floor_spread"
+    if cfg.cluster_floor_spread:
+        floors = [fp.floor for fp in members
+                  if fp.category_main == FLAT_CATEGORY and fp.floor is not None]
+        if floors and max(floors) != min(floors):
+            return "floor_spread"
 
     ids = [fp.listing_id for fp in members]
     for index, left in enumerate(ids):
@@ -166,4 +175,7 @@ def cluster_invariants_ok(
             pair = (left, right) if left < right else (right, left)
             if pair in must_not_link:
                 return "must_not_link"
+
+    if relation is not None and relation.violating_pair(ids) is not None:
+        return "d43_distinguishable"
     return None

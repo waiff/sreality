@@ -54,6 +54,7 @@ from autodedup.labels_lane import run_labels
 from autodedup.parity import run_parity
 from autodedup.rt_equivalence import run_equivalence
 from autodedup.score_lane import run_score
+from autodedup.town_probe import run_town
 
 Mode = Callable[[Callable[[], Any], dict[str, str], Path], dict[str, Any]]
 
@@ -69,11 +70,12 @@ MODES: dict[str, Mode] = {
     "rt_equivalence": run_equivalence,
     "labels": run_labels,
     "record": run_record,
+    "town": run_town,
 }
 
-# `incremental`, `rt_seed`, `rt_parity` and `rt_equivalence` are deliberately ABSENT below, so
-# they run unwrapped — and for the two read-only instruments that is a CONTRACT, not an
-# economy: an `iterations` row would be the one write each of them promises never to make. The pass is
+# `incremental`, `rt_seed`, `rt_parity`, `rt_equivalence` and `town` are deliberately ABSENT
+# below, so they run unwrapped — and for the three read-only instruments that is a CONTRACT,
+# not an economy: an `iterations` row would be the one write each promises never to make. The pass is
 # a `*/10` schedule: a ledger row per pass would file 144 iterations a day, and
 # `autodedup.iterations` is the operator's NARRATIVE of the program (one line per unit of
 # work a person can read), not a machine log — `autodedup.runs` and the workflow's own run

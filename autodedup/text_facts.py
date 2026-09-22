@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
+from html import unescape
 from typing import Iterable, Iterator, Mapping, TYPE_CHECKING
 
 from autodedup.normalize import fact_text
@@ -31,6 +33,10 @@ if TYPE_CHECKING:  # pragma: no cover
 # number rather than an order key: it collides across objects and cannot certify anything.
 MIN_CODE_LEN: int = 5
 MAX_CODE_POPULATION: int = 8
+
+# The cluster invariant asks the same advert's facts once per PAIR, so a 256-member group would
+# re-scan one body 255 times. Keyed on the body text, which is what the readers actually parse.
+BODY_CACHE: int = 65536
 
 CODE_MASK: str = "[KOD]"
 
@@ -151,6 +157,484 @@ def unit_designators(text: str | None) -> set[str]:
     }
 
 
+# --- the printed unit CODE, read whole and in the bare form (E161) --------------------------
+# `_UNIT_PATTERNS` reads `oznacen\w*\s+([a-z]\d{1,3})` and stops at the word boundary, so
+# `s označením B2.2.1` reads `B2` and `s označením B1.2.2` reads `B1` — and B1 against B1 is no
+# conflict at all. The bare form `byt B1.2.1 o dispozici` (no keyword) reads nothing. That is
+# how b1.2.1 and b2.2.1 of Slavonínské zahrady ended in one cluster of every W16 arm.
+#
+# So this reader is anchored on the unit NOUN rather than on a keyword, and the code is kept
+# WHOLE. Two segments is the whole point: a bare `B2` is a BUILDING and every flat in it shares
+# it, so a single segment is never read — that is the fail-safe direction, because an empty set
+# is never a conflict.
+_UNIT_NOUN: str = (
+    r"(?:byt\w*|jednotk\w*|apartman\w*|mezonet\w*|atelier\w*|studi[ou]"
+    r"|dum|domu|domek\w*|domku|vil[aeuy]\w{0,2}|rd|radovk\w*"
+    r"|parcel\w*|pozemk\w*|pozemek|garaz\w*|\bstani\b|chat[ay]|chalup\w*)"
+)
+# `byt 3+kk č. 2.07`: the disposition sits between the noun and the code, and it is the only
+# thing that legitimately does — a longer gap is a sentence and the code belongs to something
+# else. `pdl\d+` is `body_align`'s storey token and is never a unit's name.
+_UNIT_MARKER: str = (
+    r"(?:\d\s?\+\s?(?:kk|\d)\s+)?(?:s\s+)?(?:oznacen\w{0,4}\s+)?(?:c\.?\s*|cislo\s+)?"
+)
+_UNIT_CODE_BODY: str = (
+    r"([a-z]{1,2}\s?\d{1,3}(?:\s?[.\-/]\s?\d{1,3}){1,3}|\d{1,3}(?:\.\d{1,3}){1,3})"
+)
+_PRINTED_UNIT_CODE = re.compile(_UNIT_NOUN + r"\s+" + _UNIT_MARKER + _UNIT_CODE_BODY
+                                + r"(?![\d+]|\s*m2)")
+# The three forms the segment reader cannot see. Each needs an EXPLICIT marker, because a bare
+# letter or numeral after a noun is Czech grammar: `dům i zahrada` is a house and a garden, not
+# unit I, and `byt a garáž` is a flat and a garage.
+_ROMAN: str = r"(?:ii|iii|iv|vi|vii|viii|ix|xi|xii)"
+_PRINTED_UNIT_ROMAN = re.compile(_UNIT_NOUN + r"\s+" + _UNIT_MARKER + r"(" + _ROMAN + r")\b")
+_NUMBER_WORDS: dict[str, str] = {
+    "jedna": "I", "dva": "II", "dve": "II", "tri": "III", "ctyri": "IV", "pet": "V",
+    "sest": "VI", "sedm": "VII", "osm": "VIII", "devet": "IX", "deset": "X",
+}
+_PRINTED_UNIT_WORD = re.compile(
+    _UNIT_NOUN + r"\s+(?:s\s+)?(?:oznacen\w{0,4}\s+)?(?:c\.?\s*|cislo\s+)"
+    r"(" + "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True)) + r")\b"
+)
+_PRINTED_UNIT_LETTER = re.compile(
+    _UNIT_NOUN + r"\s+(?:s\s+)?(?:oznacen\w{0,4}\s+|c\.?\s*|cislo\s+)([a-z])\b(?!\s*m2)"
+)
+# More than this many distinct codes in one body is a developer's price list, not this unit's
+# identity — and a price list must never refuse anything (an empty set is not a conflict).
+UNIT_CODE_MAX_PER_ADVERT: int = 4
+
+
+def printed_unit_codes(text: str | None, wide: bool = False) -> frozenset[str]:
+    """Every unit code the body prints as this unit's, whole and normalised.
+
+    `wide` adds the Roman numeral, the number word and the single letter, each of which needs
+    an explicit `označením` / `č.` / `číslo` marker to be read at all."""
+    return _printed_unit_codes(text, wide) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_unit_codes(text: str, wide: bool) -> frozenset[str]:
+    folded = fold(text)
+    out: set[str] = {
+        re.sub(r"\s+", "", match.group(1)).upper().strip(".-/")
+        for match in _PRINTED_UNIT_CODE.finditer(folded)
+    }
+    if wide:
+        out |= {match.group(1).upper() for match in _PRINTED_UNIT_ROMAN.finditer(folded)}
+        out |= {_NUMBER_WORDS[match.group(1)] for match in _PRINTED_UNIT_WORD.finditer(folded)}
+        out |= {match.group(1).upper() for match in _PRINTED_UNIT_LETTER.finditer(folded)}
+    out.discard("")
+    return frozenset(out) if len(out) <= UNIT_CODE_MAX_PER_ADVERT else frozenset()
+
+
+# --- the storey the BODY prints (E166) -----------------------------------------------------
+# `1. NP` is the Czech ground floor and `1. patro` stands above it, so the two vocabularies are
+# one scale with an offset of one. Read from the prose because the stored column is null on one
+# side of a third of the corpus — and read as a set, because a body names the building's storeys
+# as well as this unit's.
+_PROSE_NP = re.compile(r"\b(\d{1,2})\.?\s*(?:np\b|nadzemnim?\s+podlazi)")
+_PROSE_PATRO = re.compile(r"\b(\d{1,2})\.?\s*patr")
+PROSE_FLOOR_MAX: int = 40
+
+
+def printed_floors(text: str | None) -> frozenset[int]:
+    """Every storey the body prints, on the NP scale (`1` is the ground floor)."""
+    return _printed_floors(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_floors(text: str) -> frozenset[int]:
+    folded = fold(text)
+    out = {int(match.group(1)) for match in _PROSE_NP.finditer(folded)}
+    out |= {int(match.group(1)) + 1 for match in _PROSE_PATRO.finditer(folded)}
+    return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
+
+
+# --- the storey the body predicates of the OFFERED unit (E181) ------------------------------
+# `printed_floors` is a SET of every storey a body names, and a body names the building's as
+# well as the unit's: one Dašice mill advert offers a space `umístěného v 2.NP` and mentions a
+# WC `v 1.NP`, so its set {1, 2} meets the ground-floor advert's {1} and the two storeys never
+# contradict. What separates them is the PLACEMENT clause — the storey stated of the thing
+# being sold. The cue must be a verb of placement and the storey must follow it closely; a
+# storey with no cue in front of it is not read here at all, which is why this reader is
+# strictly narrower than `printed_floors` and never contradicts it.
+_PLACEMENT_CUE = re.compile(
+    r"(?:umisten\w*|situovan\w*|nachazi\s+se|se\s+nachazi|lezici\w*|nabizime?\s+\w{0,12}\s*"
+    r"(?:byt|prostor|jednotk)\w*|(?:byt|prostor|jednotk|apartman|kancelar)\w*)\s+"
+    r"(?:se\s+)?(?:v|ve)\s+"
+)
+# `umístěného v 1.NP` needs 0; `situovaný ve druhém nadzemním podlaží` is spelled out and is not
+# read; the window only has to cover an ordinal and its separator.
+PLACEMENT_WINDOW: int = 12
+
+
+def subject_floors(text: str | None) -> frozenset[int]:
+    """The storeys a PLACEMENT clause states of the offered unit, on the NP scale."""
+    return _subject_floors(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _subject_floors(text: str) -> frozenset[int]:
+    folded = fold(text)
+    out: set[int] = set()
+    for cue in _PLACEMENT_CUE.finditer(folded):
+        window = folded[cue.end(): cue.end() + PLACEMENT_WINDOW]
+        for match in _PROSE_NP.finditer(window):
+            if match.start() == 0:
+                out.add(int(match.group(1)))
+        for match in _PROSE_PATRO.finditer(window):
+            if match.start() == 0:
+                out.add(int(match.group(1)) + 1)
+    return frozenset(value for value in out if 0 < value <= PROSE_FLOOR_MAX)
+
+
+# --- ground against upper, written without a number (E181) ----------------------------------
+# `v přízemí` and `v patře` name a storey as surely as `1.NP` does and neither carries a digit,
+# so `printed_floors` is blind to both. One HK-Pouchov 3+kk is advertised `s terasou 15 m2 v
+# přízemí novostavby` on one portal and `s balkonem v patře novostavby` on four others at the
+# same rent. The words are portal-independent — `přízemí` is the ground floor on every portal —
+# so unlike the numbered storeys this reading needs no convention table. Both must be stated of
+# the offered unit: the preposition is mandatory, because `v přízemí domu je kočárkárna` is a
+# statement about the building.
+_GROUND_WORD = re.compile(r"\b(?:v|ve)\s+prizemi\b|\bprizemni\s+(?:byt|jednotk|apartman)\w*")
+_UPPER_WORD = re.compile(r"\b(?:v|ve)\s+(?:\d{1,2}\.?\s*)?(?:patre|poschodi)\b")
+
+
+def ground_or_upper(text: str | None) -> frozenset[str]:
+    """`{"ground"}`, `{"upper"}`, both, or nothing — the storey named in words, not digits."""
+    return _ground_or_upper(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _ground_or_upper(text: str) -> frozenset[str]:
+    folded = fold(text)
+    out: set[str] = set()
+    if _GROUND_WORD.search(folded):
+        out.add("ground")
+    if _UPPER_WORD.search(folded):
+        out.add("upper")
+    return frozenset(out)
+
+
+# --- how many units the advert says the object holds (E183) ---------------------------------
+# `Výnosový dům se 2 byty 3+kk` against `Výnosový dům se 4 byty 3+kk`, both live on bazos for
+# 7.3 days at 11,100,000 and 21,500,000. A stated count of flats is a fact about the object,
+# not a tolerance — and it is the only thing that separates those two adverts, whose bodies are
+# otherwise the same seller's template. Instrumental number words are read because that is how
+# Czech writes the phrase; the digit form covers the rest.
+_COUNT_WORDS: dict[str, int] = {
+    "jednim": 1, "dvema": 2, "tremi": 3, "ctyrmi": 4, "peti": 5, "sesti": 6, "sedmi": 7,
+    "osmi": 8, "deviti": 9, "deseti": 10,
+}
+_UNIT_COUNT_DIGIT = re.compile(
+    r"\b(?:se|s)\s+(\d{1,2})\s+(?:byt\w*|bytov\w*\s+jednotk\w*|jednotk\w*)\b"
+    r"|\b(\d{1,2})\s+bytov\w*\s+jednotk\w*"
+)
+_UNIT_COUNT_WORD = re.compile(
+    r"\b(?:se|s)\s+(" + "|".join(sorted(_COUNT_WORDS)) + r")\s+"
+    r"(?:byty|bytov\w*\s+jednotkami|jednotkami)\b"
+)
+UNIT_COUNT_MAX: int = 40
+
+
+def stated_unit_counts(text: str | None) -> frozenset[int]:
+    """How many dwelling units the body says the offered object holds."""
+    return _stated_unit_counts(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _stated_unit_counts(text: str) -> frozenset[int]:
+    folded = fact_text(text)
+    out: set[int] = set()
+    for match in _UNIT_COUNT_DIGIT.finditer(folded):
+        raw = match.group(1) or match.group(2)
+        if raw is not None:
+            out.add(int(raw))
+    for match in _UNIT_COUNT_WORD.finditer(folded):
+        out.add(_COUNT_WORDS[match.group(1)])
+    return frozenset(value for value in out if 0 < value <= UNIT_COUNT_MAX)
+
+
+# --- printed land-register parcels (E140) --------------------------------------------------
+# A Czech land or house advert prints the parcel the object stands on, and that number IS the
+# object's identity in the land register: two adverts printing disjoint parcels are two
+# objects, whatever else they look like. The keyword is mandatory and a digit must follow it,
+# because a bare number in a body is a price, a year or a house number.
+_PARCEL_KEYWORD = re.compile(
+    r"(?:parceln\w*\s*cisl\w*"
+    r"|parcel\w*\s*(?:c\.|cisl\w*)"
+    r"|parc\.?\s*(?:c\.|cisl\w*)"
+    r"|\b(?:st\.?\s*)?p\.?\s*(?:p\.?\s*)?c\.?)"
+    r"\s*:?\s*(?=\d)"
+)
+# One advert may print several parcels (`parcelní čísla 3217, 3097, 3341`), and the run ends at
+# the first token that is not another number: `parcelní číslo 3255, podíl 1/1` prints ONE
+# parcel and a share, and reading the share as a second parcel would make every share-advert
+# of one seller look alike. The list separator must therefore carry a comma, a `+` or the word
+# `a`/`i` — a bare space is not one, or `parc. č. 123, 2 393 m²` would read the AREA as a
+# second parcel (idnes 166968, and the spaced-thousands trap the portal parsers carry).
+_PARCEL_NUMBER = re.compile(r"\d{1,5}(?:/\d{1,4})?")
+_PARCEL_SEPARATOR = re.compile(r"\s*(?:[,;+]|\ba\b|\bi\b)[\s,;+]*")
+_AREA_UNIT_AFTER = re.compile(r"\s*m2\b")
+# Spaced thousands are collapsed first, so `2 393 m²` is one token the area guard can refuse
+# rather than two tokens the list reader accepts.
+_SPACED_THOUSANDS = re.compile(r"(?<=\d) (?=\d{3}(?!\d))")
+PARCEL_MAX_PER_ADVERT: int = 12
+
+# E155: the forms the narrow keyword misses, counted over the 15,017 region bodies —
+# `parcelní číslo: st. 661` (21 of 25 bodies, the stavební-parcela prefix and the biggest
+# hole), `pozemek č. N` (23 of 30), `parcela N/M` with no `č.` (15 of 19), `pod číslem
+# parcely N` (11 of 11), `na parcele N` (5 of 5), `č. parc. N` (2 of 2). Widening is
+# FAIL-SAFE in both directions: an empty set is never a conflict, so the narrow reader's
+# silence costs protection rather than precision, and a wider one can only add protection.
+_PARCEL_KEYWORD_WIDE = re.compile(
+    r"(?:parceln\w*\s*\.?\s*cisl\w*"
+    r"|pod\s+cisl\w*\s+parcel\w*"
+    r"|na\s+parcel[aeiu]"
+    r"|c\.?\s*parc\w*\s*\.?"
+    r"|parc\w*\s*\.?\s*(?:c\.|cisl\w*)"
+    r"|parcel[aeuy]\b"
+    r"|pozemk\w*\s*(?:c\.|cisl\w*)"
+    r"|pozemek\s*(?:c\.|cisl\w*)"
+    r"|\b(?:st\.?\s*)?p\.?\s*(?:p\.?\s*)?c\.?)"
+    r"\s*:?\s*(?:st\.?\s*)?(?=\d)"
+)
+
+
+def parcel_numbers(text: str | None, wide: bool = False) -> set[str]:
+    """Every land-register parcel the body prints, as `934/11` / `1633` strings.
+
+    HTML entities are unescaped first: one sreality broker publishes an entity-escaped body and
+    its parcel line would otherwise read as prose. Capped per advert — a body listing a whole
+    estate's parcels is a seller's inventory, not this object's identity."""
+    return set(_parcel_numbers(text, wide)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parcel_numbers(text: str, wide: bool = False) -> frozenset[str]:
+    folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
+    out: set[str] = set()
+    for keyword in (_PARCEL_KEYWORD_WIDE if wide else _PARCEL_KEYWORD).finditer(folded):
+        position = keyword.end()
+        while True:
+            number = _PARCEL_NUMBER.match(folded, position)
+            if number is None or _AREA_UNIT_AFTER.match(folded, number.end()):
+                break
+            out.add(number.group(0))
+            separator = _PARCEL_SEPARATOR.match(folded, number.end())
+            if separator is None:
+                break
+            position = separator.end()
+    return frozenset(out) if len(out) <= PARCEL_MAX_PER_ADVERT else frozenset()
+
+
+# --- the parcel TABLE, and which of its rows is THIS advert's (E182) ------------------------
+# A parcelling is advertised twice over: one portal's body names the single parcel it sells
+# (`číslo pozemku: 274/9 + 274/14`), another's prints the seller's whole catalogue —
+#
+#     • 277/2 + 277/3 — 1 465 m² — 3 469 000 Kč
+#     • 274/8 + 274/13 — 1 458 m² — 3 459 000 Kč
+#
+# — and `parcel_numbers` then returns fourteen numbers for an advert that sells one plot, so
+# the two sides always share a number and the parcel fact can never fire. The table itself says
+# which row is this advert's: the row whose area and price are the advert's OWN. Each row must
+# carry all three of parcels, area and price, which is what tells a catalogue from prose.
+_PARCEL_TABLE_ROW = re.compile(
+    r"(?P<parcels>\d{1,5}(?:/\d{1,4})?(?:\s*(?:\+|,|\ba\b)\s*\d{1,5}(?:/\d{1,4})?){0,5})"
+    r"\s*[-–—:]\s*(?P<area>\d{2,7})\s*m2"
+    r"\s*[-–—:]\s*(?P<price>\d{4,12})\s*kc"
+)
+PARCEL_TABLE_MIN_ROWS: int = 2
+# The forms the WIDE keyword still misses, and only the table reader needs: the Czech order
+# `číslo pozemku` (the keyword AFTER the noun), which is how idnes writes the one parcel it
+# sells. Fail-safe like every other widening — an empty set is never a conflict.
+_PARCEL_KEYWORD_WIDER = re.compile(
+    r"(?:cisl\w*\s+(?:pozemk\w*|parcel\w*)"
+    r"|parceln\w*\s*\.?\s*cisl\w*"
+    r"|pod\s+cisl\w*\s+parcel\w*"
+    r"|na\s+parcel[aeiu]"
+    r"|c\.?\s*parc\w*\s*\.?"
+    r"|parc\w*\s*\.?\s*(?:c\.|cisl\w*)"
+    r"|parcel[aeuy]\b"
+    r"|pozemk\w*\s*(?:c\.|cisl\w*)"
+    r"|pozemek\s*(?:c\.|cisl\w*)"
+    r"|\b(?:st\.?\s*)?p\.?\s*(?:p\.?\s*)?c\.?)"
+    r"\s*:?\s*(?:st\.?\s*)?(?=\d)"
+)
+
+
+def parcel_table(text: str | None) -> tuple[tuple[frozenset[str], float, float], ...]:
+    """The catalogue rows the body prints, as `(parcels, area m2, price)` — empty when none."""
+    return _parcel_table(text) if text else ()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parcel_table(text: str) -> tuple[tuple[frozenset[str], float, float], ...]:
+    folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
+    rows: list[tuple[frozenset[str], float, float]] = []
+    for match in _PARCEL_TABLE_ROW.finditer(folded):
+        parcels = frozenset(_PARCEL_NUMBER.findall(match.group("parcels")))
+        if parcels:
+            rows.append((parcels, float(match.group("area")), float(match.group("price"))))
+    return tuple(rows) if len(rows) >= PARCEL_TABLE_MIN_ROWS else ()
+
+
+def parcel_numbers_wider(text: str | None) -> set[str]:
+    """`parcel_numbers` under the widest keyword set — E182's reading, behind its own field."""
+    return set(_parcel_numbers_wider(text)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parcel_numbers_wider(text: str) -> frozenset[str]:
+    folded = _SPACED_THOUSANDS.sub("", fact_text(unescape(text)))
+    out: set[str] = set()
+    for keyword in _PARCEL_KEYWORD_WIDER.finditer(folded):
+        position = keyword.end()
+        while True:
+            number = _PARCEL_NUMBER.match(folded, position)
+            if number is None or _AREA_UNIT_AFTER.match(folded, number.end()):
+                break
+            out.add(number.group(0))
+            separator = _PARCEL_SEPARATOR.match(folded, number.end())
+            if separator is None:
+                break
+            position = separator.end()
+    return frozenset(out) if len(out) <= PARCEL_MAX_PER_ADVERT else frozenset()
+
+
+# --- printed accessory designators (E141) --------------------------------------------------
+# The parking space, the cellar and the garage a flat comes WITH, named by their number. A
+# developer's adverts inside one building are near-identical by construction (E61), and where
+# no unit number is printed the accessory number is the next thing the building itself names.
+# `stání` is matched as a whole word so `stanice metra` can never become a parking space, and
+# `pokoj č. 2` is deliberately not read: that is a room inside one flat, not an accessory.
+_ACCESSORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("stani", re.compile(r"\bstani\b\s*(?:pro\s+auto\s*)?(?:c\.|cislo)\s*(\d{1,4})\b")),
+    ("sklep", re.compile(r"\bsklep\w*\s*(?:koj\w*\s*)?(?:c\.|cislo)\s*(\d{1,4})\b")),
+    ("sklep", re.compile(r"\bkoj\w*\s*(?:c\.|cislo)\s*(\d{1,4})\b")),
+    ("garaz", re.compile(r"\bgaraz\w*\s*(?:c\.|cislo)\s*(\d{1,4})\b")),
+)
+ACCESSORY_KINDS: tuple[str, ...] = ("stani", "sklep", "garaz")
+ACCESSORY_MAX_PER_KIND: int = 6
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _accessory_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fact_text(unescape(text))
+    found: dict[str, set[str]] = {}
+    for kind, pattern in _ACCESSORY_PATTERNS:
+        for match in pattern.finditer(folded):
+            found.setdefault(kind, set()).add(match.group(1))
+    return tuple(sorted((kind, frozenset(values)) for kind, values in found.items()
+                        if len(values) <= ACCESSORY_MAX_PER_KIND))
+
+
+def accessory_designators(text: str | None) -> dict[str, frozenset[str]]:
+    """`kind -> the numbers this advert prints for it`: `stání č. 47`, `sklepní kóje č. 25`.
+
+    A kind whose run is longer than `ACCESSORY_MAX_PER_KIND` is a building's price list rather
+    than one flat's accessories and is dropped."""
+    return dict(_accessory_designators(text)) if text else {}
+
+
+# --- the offered product tier (E142) -------------------------------------------------------
+# A serviced-office operator sells the SAME room as several products — "kancelář pro 1 osobu"
+# at 10,890 Kč and "kancelář pro 2 pracovní místa" at 15,590 Kč, both printing the building's
+# generic 50 m² and the building's address. The capacity is the only thing that tells the two
+# apart, and it is stated only in prose. The office noun is mandatory: a bare `pro 2 osoby` is
+# a service-charge line or a flat's suitability on residential adverts and fires on both.
+_OFFER_NOUN = re.compile(r"kancelar\w*|coworking\w*|open\s?space|pracovi\w*|zasedac\w*")
+_CAPACITY = re.compile(
+    r"pro\s+(\d{1,3})\s*(?:osob\w*|pracovni\w*\s+mist\w*|mist\w*|zamestnan\w*|clen\w*)"
+)
+CAPACITY_WINDOW: int = 60
+
+
+def capacity_counts(text: str | None) -> set[int]:
+    """How many people the offered WORKSPACE is for, when an office noun carries the phrase."""
+    return set(_capacity_counts(text)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _capacity_counts(text: str) -> frozenset[int]:
+    folded = fact_text(text)
+    out: set[int] = set()
+    for match in _CAPACITY.finditer(folded):
+        window = folded[max(0, match.start() - CAPACITY_WINDOW): match.start()]
+        if _OFFER_NOUN.search(window):
+            out.add(int(match.group(1)))
+    return frozenset(out)
+
+
+# The EXTENT of a room let: "Pronajmu pokoj" against "Pronajmu 2 spojené pokoje" is one room
+# against two, in one house, at two prices. The offer verb is mandatory — "v domě je jen 6
+# pokojů" describes the house, not what is on offer — and the count window is short so an
+# adjective (`2 spojené pokoje`) fits and a sentence does not.
+_OFFER_VERB = re.compile(r"\b(?:pronajmu|pronajimam|nabizim|nabizime|pronajem|k\s+pronajmu)\b")
+_ROOM_EXTENT = re.compile(r"(?:(\d{1,2})\s+)?(?:\w+\s+){0,1}?pokoj(?:e|u|ich|em)?\b")
+EXTENT_WINDOW: int = 34
+
+
+def offered_room_counts(text: str | None) -> set[int]:
+    """How many ROOMS a room let offers, read only where an offer verb carries the phrase."""
+    return set(_offered_room_counts(text)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _offered_room_counts(text: str) -> frozenset[int]:
+    folded = fact_text(text)
+    out: set[int] = set()
+    for verb in _OFFER_VERB.finditer(folded):
+        clause = folded[verb.end(): verb.end() + EXTENT_WINDOW]
+        match = _ROOM_EXTENT.match(clause.lstrip())
+        if match is None:
+            continue
+        out.add(int(match.group(1)) if match.group(1) else 1)
+    return frozenset(out)
+
+
+# The compass direction a body PRINTS as this unit's: `Orientace je na východ`, `byt je
+# orientovaný na jihozápad`, `situovaný na sever`. Longest stem first, because `jihovýchod`
+# contains `východ` and a shorter match would read one flat's south-east as another's east.
+# The keyword is mandatory — a body also names the direction of the motorway and of the park.
+_COMPASS_STEMS: tuple[str, ...] = (
+    "severovychod", "severozapad", "jihovychod", "jihozapad",
+    "sever", "jih", "vychod", "zapad",
+)
+_ORIENTATION_KEYWORD = re.compile(r"orientac\w*|orientovan\w*|situovan\w*")
+_ORIENTATION_WINDOW: int = 44
+_COMPASS_WORD = re.compile(
+    r"\b(severovychod\w*|severozapad\w*|jihovychod\w*|jihozapad\w*"
+    r"|sever\w*|jizni|jih|vychod\w*|zapad\w*)\b"
+)
+
+
+def orientations(text: str | None) -> set[str]:
+    """Every compass direction the body states as this unit's, normalised to one stem.
+
+    The clause after the keyword is read WHOLE, not to its first direction: `orientaci na jih
+    i na sever` is a through-flat naming two, and a rule that stopped at `jih` would read it
+    as one. Abbreviations (`na J/Z`) are deliberately not read — a two-letter token is a coin
+    flip against street names and room labels, and the rule would rather abstain than guess."""
+    if not text:
+        return set()
+    folded = fold(text)
+    out: set[str] = set()
+    for keyword in _ORIENTATION_KEYWORD.finditer(folded):
+        clause = folded[keyword.end(): keyword.end() + _ORIENTATION_WINDOW]
+        clause = re.split(r"[.;!?]", clause, maxsplit=1)[0]
+        for match in _COMPASS_WORD.finditer(clause):
+            word = match.group(1)
+            if word == "jizni":
+                out.add("jih")
+                continue
+            for stem in _COMPASS_STEMS:
+                if word.startswith(stem):
+                    out.add(stem)
+                    break
+    return out
+
+
 def _area_value(raw: str) -> float | None:
     cleaned = raw.replace(" ", "").replace(" ", "")
     if re.fullmatch(r"\d{1,3}(?:[.]\d{3})+", cleaned):  # 10.500 = ten and a half thousand
@@ -189,8 +673,11 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
     available (`od 55 m² do 900 m²`, `10 m², 20 m², 30 m², …`). Neither is a statement about the
     advertised unit, and comparing one side's building with the other side's unit mislabelled
     three same-unit cross-broker pairs as different (W7 benchmark, root cause AREA SCOPE)."""
-    if not text:
-        return set()
+    return set(_stated_areas(text, stored_area_m2)) if text else set()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _stated_areas(text: str, stored_area_m2: float | None) -> frozenset[float]:
     folded = fact_text(text)
     mentions: list[tuple[int, int, float]] = []
     for match in _M2_MENTION.finditer(folded):
@@ -198,7 +685,7 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
         if value is not None:
             mentions.append((match.start(), match.end(), value))
     if not mentions:
-        return set()
+        return frozenset()
     skip = _menu_spans(folded, mentions) + [
         match.span() for match in _BUILDING_TOTAL.finditer(folded)
     ]
@@ -212,7 +699,7 @@ def stated_areas(text: str | None, stored_area_m2: float | None = None) -> set[f
             continue
         if low <= value <= high:
             out.add(value)
-    return out
+    return frozenset(out)
 
 
 # A price the advert states as a STARTING price — "ceny od 5 499 000 Kč", "již od 2 750 000".
@@ -227,6 +714,190 @@ _FROM_PRICE = re.compile(
 def states_from_price(text: str | None) -> bool:
     """Does the body quote a FROM price — the advert's own word for a price list?"""
     return bool(text) and bool(_FROM_PRICE.search(fold(text)))
+
+
+# --- the areas the BODY prints, read WITHOUT the stored column (E153) -----------------------
+# `stated_areas` clamps every printed m² to `stored/3 .. stored*3`, and 2,390 of the 15,017
+# region listings (16 %) print a headline area outside that window — because the portal stored
+# the terrace, the cellar or the plot. bazos stores `area_m2 = 10.0` for a 76 m² apartment
+# whose body says "terasou o velikosti 10 m²", and every reader that goes through the clamp is
+# then blind to the 76. So this reader never looks at the stored column at all. Instead it
+# SCOPES each mention by the noun that carries it: the terrace's size is the terrace's, a
+# bedroom's is the bedroom's, and what is left is the size the advert is sold BY.
+_AREA_SCOPES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("accessory", re.compile(
+        r"teras\w*|balk\w*|lodzi\w*|sklep\w*|koj\w*|komor\w*|spiz\w*|garaz\w*|\bstani\w*"
+        r"|pud\w*|dvur|predzahrad\w*|atrium|zastaven\w*|sklepn\w*")),
+    ("room", re.compile(
+        r"pokoj\w*|loznic\w*|kuchyn\w*|kuchyns\w*|koupeln\w*|predsin\w*|chodb\w*|jideln\w*"
+        r"|satn\w*|zadver\w*|zavetr\w*|pradeln\w*|\bwc\b|toalet\w*|technick\w*|zachod\w*")),
+    ("land", re.compile(r"pozemk\w*|pozemek|parcel\w*|zahrad\w*|louk\w*|orn\w*|les\w*")),
+)
+# How far back the scoping noun may sit. `podlahovou plochou 76,1 m² a terasou o velikosti
+# 10 m²` needs ~24 characters; a window much wider starts reading the previous sentence's noun.
+AREA_SCOPE_WINDOW: int = 34
+
+
+def printed_areas(text: str | None) -> frozenset[tuple[float, int, str]]:
+    """Every m² the body prints, as `(value, printed decimals, scope)`.
+
+    The decimals are kept because they are the only thing that says what the number MEANS:
+    `50` and `50,5` are one area written to two precisions, `58,90` and `58,70` are two areas
+    (see `body_align.rounding_equal`). Menu runs and the building's own size are dropped the
+    same way `stated_areas` drops them."""
+    return _printed_areas(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_areas(text: str) -> frozenset[tuple[float, int, str]]:
+    folded = fact_text(text)
+    mentions: list[tuple[int, int, float]] = []
+    decimals: dict[int, int] = {}
+    for match in _M2_MENTION.finditer(folded):
+        value = _area_value(match.group(1))
+        if value is None:
+            continue
+        mentions.append((match.start(), match.end(), value))
+        raw = match.group(1).replace(",", ".")
+        decimals[match.start()] = len(raw.split(".", 1)[1]) if "." in raw else 0
+    if not mentions:
+        return frozenset()
+    skip = _menu_spans(folded, mentions) + [
+        match.span() for match in _BUILDING_TOTAL.finditer(folded)
+    ]
+    out: set[tuple[float, int, str]] = set()
+    for start, end, value in mentions:
+        if any(span[0] <= start and end <= span[1] for span in skip):
+            continue
+        if not STATED_AREA_MIN_M2 <= value <= STATED_AREA_MAX_M2:
+            continue
+        window = folded[max(0, start - AREA_SCOPE_WINDOW): start]
+        scope = "unit"
+        best = -1
+        for name, pattern in _AREA_SCOPES:
+            for hit in pattern.finditer(window):
+                if hit.start() > best:
+                    best, scope = hit.start(), name
+        out.add((value, decimals[start], scope))
+    return frozenset(out)
+
+
+def leading_area(text: str | None, scopes: frozenset[str]) -> tuple[float, int] | None:
+    """E186: the FIRST area the body states in one of `scopes` — the size it leads with.
+
+    `printed_areas` is a set, and a set cannot tell the offer from the context. One HK-Zámeček
+    advert opens `stavební pozemek o výměře 732 m²` and explains four sentences later that the
+    plot `vznikne rozdělením parcely o celkové výměře 2 195 m² na tři části`; the advert of the
+    WHOLE parcel opens with 2 195. Read as sets the two share 2 195 and never contradict. What
+    an advert leads with is what it sells."""
+    return _leading_area(text, scopes) if text else None
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _leading_area(text: str, scopes: frozenset[str]) -> tuple[float, int] | None:
+    folded = fact_text(text)
+    best: tuple[int, float, int] | None = None
+    for value, decimals, scope in _printed_areas(text):
+        if scope not in scopes:
+            continue
+        position = _position_of(folded, value, decimals)
+        if position is None:
+            continue
+        if best is None or position < best[0]:
+            best = (position, value, decimals)
+    return None if best is None else (best[1], best[2])
+
+
+def _position_of(folded: str, value: float, decimals: int) -> int | None:
+    """Where in the body this exact printed figure first stands."""
+    for match in _M2_MENTION.finditer(folded):
+        parsed = _area_value(match.group(1))
+        if parsed is None or abs(parsed - value) > 1e-9:
+            continue
+        raw = match.group(1).replace(",", ".")
+        printed = len(raw.split(".", 1)[1]) if "." in raw else 0
+        if printed == decimals:
+            return match.start()
+    return None
+
+
+# --- the street the BODY names (E151) -------------------------------------------------------
+# A portal's resolved street key is missing or wrong on exactly the adverts that need it: two
+# Olomouc office blocks, one on Litovelská and one on třída 28. října, carry the same obec and
+# no street, and the only place either street is written is the prose. The keyword is
+# mandatory and the name must be CAPITALISED in the original text, because that is what tells
+# a street from the genitive of a common noun.
+_PROSE_STREET = re.compile(
+    r"(?:ulici|ulice|ul\.|na\s+ulici|v\s+ulici|t[rř][ií]d[aěe]|t[rř]\.|n[aá]m[eě]st[ií]|n[aá]m\.)"
+    r"\s+((?:\d{1,2}\.\s+)?[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ][\wáčďéěíňóřšťúůýž]{2,}"
+    r"(?:\s+[A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ][\wáčďéěíňóřšťúůýž]{2,}){0,2})"
+)
+# A street named as a LANDMARK is not this advert's address. Every one of these prefixes was
+# taken from a body that names a second street it is merely near.
+_STREET_PROXIMITY = re.compile(
+    r"(?:nedaleko|bl[ií]zko|pobl[ií]|v\s+bl[ií]zkosti|kousek|sm[eě]rem|zast[aá]vk\w*"
+    r"|kone[cč]n\w*|dojezd\w*|dostupnost\w*|roh\w*\s+s|k\s+ulici|na\s+rohu)\s*$"
+)
+STREET_PROXIMITY_WINDOW: int = 30
+# Two spellings of one street ("Krapkova" / "Krapkově") share this much of their stem.
+STREET_STEM: int = 5
+# A portal truncates the title mid-phrase and the body resumes with a capitalised verb, so the
+# keyword's next word is `Nabízíme`, not a street: `...garážového stání ... v Olomouci, ul.
+# Nabízíme k pronájmu...` (261802). A capture that STARTS with one of these is not a street;
+# one that merely runs into it is cut there.
+_STREET_STOPWORD = re.compile(
+    r"^(?:nabizim\w*|nabidk\w*|nabizen\w*|prodej\w*|pronaj\w*|prodav\w*|cena|ceny|dum|byt|byty"
+    r"|jedna|jde|tento|tato|toto|kontakt\w*|informac\w*|exkluzivn\w*|nove|nova|novy|vice"
+    r"|vsechny|vse|dale|velmi|ideal\w*|k|v|ve|na|po|pri|za|do|od|pro|lokalit\w*)$"
+)
+
+
+def prose_streets(text: str | None) -> frozenset[str]:
+    """Every street the body names AS THIS ADVERT'S, folded to one spelling.
+
+    Each capture also yields its PREFIXES, because the regex cannot tell where a name ends:
+    `ul. Milana Ticháka Nabízíme` is one street and one verb. A prefix makes the reader agree
+    with the other side more readily, and agreement is the fail-safe direction — a street fact
+    is a REFUSAL to merge, so an over-read name must never be the only thing on its side."""
+    return _prose_streets(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _prose_streets(text: str) -> frozenset[str]:
+    out: set[str] = set()
+    for match in _PROSE_STREET.finditer(text):
+        before = text[max(0, match.start() - STREET_PROXIMITY_WINDOW): match.start()]
+        if _STREET_PROXIMITY.search(fold(before)):
+            continue
+        words = re.sub(r"\s+", " ", fold(match.group(1))).strip().split(" ")
+        kept: list[str] = []
+        for word in words:
+            if _STREET_STOPWORD.match(word):
+                break
+            kept.append(word)
+            # `tř. 20. dubna` numbers its street, and `20.` alone names nothing: a prefix is a
+            # name only once it carries a word. Without this the numeral becomes the only
+            # street on its side and refuses every advert that names a real one.
+            if any(len(word) > 2 and word.isalpha() for word in kept):
+                out.add(" ".join(kept))
+    return frozenset(out)
+
+
+def streets_agree(left: Iterable[str], right: Iterable[str]) -> bool:
+    """Do two sets of street names share one street? A stem match counts, an inflection is not
+    a different street."""
+    for one in left:
+        for other in right:
+            if one == other:
+                return True
+            shared = 0
+            for a_char, b_char in zip(one, other):
+                if a_char != b_char:
+                    break
+                shared += 1
+            if shared >= STREET_STEM:
+                return True
+    return False
 
 
 def address_block_key(listing: "Listing") -> str:

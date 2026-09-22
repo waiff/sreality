@@ -278,6 +278,26 @@ name: "AUTODEDUP: engine lane"
 #             block is walked in the SAME pass (the cadence is suspended, the rolling-day scan
 #             cap is not); the phase ends by itself in the pass that empties the backlog.
 #
+#   town    - READS ONLY, writes nothing (not even a ledger row). Asks whether ONE property
+#             is ever recorded under two different TOWNS, corpus-wide, because the trial
+#             cohort is SELECTED by `listing_location.obec_kod` and cannot answer it: when
+#             two portals disagree about the town, the second advert falls outside the scope
+#             and the pair does not exist for the engine. The probe pages the whole
+#             `listings` table (keyset, `id > after`) for bodies whose text may carry an
+#             agency order code, extracts the codes with `text_facts.reference_codes`
+#             UNCHANGED, keeps E60's population rail (a code on more than 8 listings is a
+#             sequence number, not an order key) and drops every pair the rule floor refuses
+#             for a non-location reason - so what is left is the population a broker's own
+#             statement of identity certifies as ONE unit. Over it, `obec_differ` IS the
+#             false-veto rate a different-town veto would pay, measured without a label, a
+#             judge or a model; `cast_obce`, `okres` and `kraj` are reported beside it so the
+#             KEYING question (which rung of the hierarchy a veto would read) is answered
+#             from the same pass. args: batch (5000), max_rows (0 = the whole table),
+#             timeout_s (300, per statement), sample (80 cross-town pairs written out for
+#             hand reading) and coverage (1 = also report, per portal, how much of the corpus
+#             carries a town at all - the denominator E12 needs, since a missing town is
+#             never a mismatch). Writes out/town.json. Costs GitHub minutes and one seq scan.
+#
 #   record  - WRITES ONE LEDGER ROW, nothing else. Files a finished `autodedup.iterations`
 #             row from its arguments, for work that happened outside a lane run (a migration
 #             applied by apply_migration.yml, an operator review session, a wave that closed
@@ -295,7 +315,8 @@ name: "AUTODEDUP: engine lane"
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
 # without migration 528 costs the row, never the run.
 #
-# `args` is a free-form `k=v,k=v` string each mode parses for itself. census accepts
+# `args` is a free-form `k=v,k=v` string each mode parses for itself. town accepts batch,
+# max_rows, timeout_s, sample and coverage; census accepts
 # min_n, max_n, top, detail_top, timeout_s, pin_share_min, probes and hash_share_min;
 # probes accepts timeout_s and source; export accepts blocks, timeout_s, phash_timeout_s,
 # batch, clip_model and negctl_max (block overrides are SPACE-separated, e.g.

@@ -31,6 +31,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup.blocking import build_index, generate_pairs
 from autodedup.cluster import cluster_pairs, cluster_rows
+from autodedup.d43 import relation_for
+from autodedup.indistinguishable import FEATURE_SLOTS as D43_FEATURE_SLOTS
 from autodedup.dataset import (
     CATALOG_POP_MIN,
     UNASSIGNED_BLOCK,
@@ -385,12 +387,25 @@ def _score_histogram(scores: Iterable[float]) -> dict[str, int]:
 
 
 def load_must_not_link(path: str | None) -> frozenset[tuple[int, int]]:
-    """E27's permanent negatives as a JSON list of `[lo, hi]`, normalised to lo<hi."""
+    """E27's permanent negatives, normalised to lo<hi.
+
+    Two shapes, because the batch build has to be able to read the one the labels lane
+    actually uploads (N4): a JSON list of `[lo, hi]`, or the lane's `must_not_link.jsonl`
+    artifact — one `{"listing_lo": …, "listing_hi": …}` object per line.
+    """
     if not path:
         return frozenset()
-    rows = json.loads(Path(path).read_text(encoding="utf-8"))
+    text = Path(path).read_text(encoding="utf-8")
+    if Path(path).suffix == ".jsonl":
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+        return frozenset(
+            (int(min(row["listing_lo"], row["listing_hi"])),
+             int(max(row["listing_lo"], row["listing_hi"])))
+            for row in rows
+        )
     return frozenset(
-        (int(min(lo, hi)), int(max(lo, hi))) for lo, hi in (tuple(row) for row in rows)
+        (int(min(lo, hi)), int(max(lo, hi)))
+        for lo, hi in (tuple(row) for row in json.loads(text))
     )
 
 
@@ -458,6 +473,9 @@ def run_engine(
     per_source_pair: dict[str, dict[str, Any]] = {}
     scores: list[float] = []
     vetoed: set[tuple[int, int]] = set()
+    # E132 reads three feature slots per pair and nothing else, so the cluster relation carries
+    # those rather than the whole vector — 16k thin rows instead of 49k feature dictionaries.
+    pair_slots: dict[tuple[int, int], dict[str, tuple[float, bool]]] = {}
     stored = 0
 
     clock = time.perf_counter()
@@ -496,6 +514,9 @@ def run_engine(
                 or decision.zone in ("merge", "band")
                 or decision.evidence):
             stored += 1
+            pair_slots[(lo, hi)] = {
+                name: feats[name] for name in D43_FEATURE_SLOTS if name in feats
+            }
             row = decision.to_json()
             if decision.certificate == "K-R":
                 row.setdefault("evidence", {})["ref_codes"] = ",".join(ctx.shared_codes(lo, hi))
@@ -589,7 +610,8 @@ def run_engine(
     # E61 refuses a UNION, not only an edge: two units of one building must not be joined
     # transitively through a third advert either, so the veto joins the must-not-link set.
     clusters = cluster_pairs(
-        decisions, dataset.listings, fps, settings, frozenset(must_not_link) | vetoed
+        decisions, dataset.listings, fps, settings, frozenset(must_not_link) | vetoed,
+        relation_for(settings, dataset.listings, pair_slots),
     )
     rows = cluster_rows(clusters, decisions, fps)
     timings["cluster_s"] = time.perf_counter() - clock
@@ -639,6 +661,15 @@ def run_engine(
         "per_block": {key: per_block[key] for key in sorted(per_block)},
         "per_source_pair": {key: per_source_pair[key] for key in sorted(per_source_pair)},
         "clusters": clusters.stats,
+        # N4: g7 shipped `n_must_not_link = 45` and that was the E61 designator veto set alone —
+        # the operator's own permanent negatives never reached the batch build, and the single
+        # total could not say so. The split is now on the record of every run.
+        "must_not_link": {
+            "operator": len(frozenset(must_not_link) - vetoed),
+            "unit_designator_veto": len(vetoed),
+            "total": len(frozenset(must_not_link) | vetoed),
+            "loaded": bool(must_not_link),
+        },
         "family_guard": family_report,
         "development_hold": hold_report,
         "timings": timings,
