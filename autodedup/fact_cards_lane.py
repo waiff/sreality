@@ -66,7 +66,7 @@ LISTINGS_DIR: Path = Path(__file__).resolve().parent / "listings"
 # migration this experiment is not entitled to open.
 CALLED_FOR: str = "autodedup_judge_text"
 
-MAX_TOKENS: int = 2048
+MAX_TOKENS: int = 4096
 
 # D2's hard per-run cap, the same number the judge lane binds to.
 HARD_CAP_USD: float = 25.0
@@ -288,9 +288,12 @@ class Counters:
             self.errors = []
 
 
-# Hybrid DashScope models reason before the forced tool call unless told not to: measured on
-# the first smoke, qwen3.7-flash wrote 4,258 output tokens and took 44 s per card.
+# Reasoning models reason before the forced tool call unless told not to, and the card is a
+# reading, not a decision. Measured: qwen3.7-flash wrote 4,258 output tokens and took 44 s per
+# card on the first smoke; gpt-5-nano at its default effort spent the whole 2,048-token
+# completion budget on reasoning and emitted NO tool call on 1,145 of 1,153 billed calls.
 NO_THINKING_MODELS: frozenset[str] = frozenset({"qwen3.7-flash"})
+MINIMAL_EFFORT_MODELS: frozenset[str] = frozenset({"gpt-5-nano"})
 
 
 def llm_client(conn: Any) -> Any:
@@ -305,7 +308,16 @@ def llm_client(conn: Any) -> Any:
                 body["enable_thinking"] = False
             return body
 
-    return LLMClient(conn, providers={"openai": OpenAIProvider(), "qwen": ExtractionQwen()})
+    class ExtractionOpenAI(OpenAIProvider):
+        def _chat_body(self, **kwargs: Any) -> dict[str, Any]:
+            body = super()._chat_body(**kwargs)
+            if kwargs.get("model") in MINIMAL_EFFORT_MODELS and kwargs.get("tools"):
+                body["reasoning_effort"] = "minimal"
+            return body
+
+    return LLMClient(
+        conn, providers={"openai": ExtractionOpenAI(), "qwen": ExtractionQwen()}
+    )
 
 
 def est_call_usd(arm: Arm, text_chars: int) -> float:
