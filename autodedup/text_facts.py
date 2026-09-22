@@ -292,23 +292,23 @@ def _printed_floors(text: str, words: bool = False) -> frozenset[int]:
     return frozenset().union(*(v for _, v in _printed_floors_by_form(text, words)))
 
 
-def floors_meet_under_vocabulary(left: Mapping[str, frozenset[int]],
-                                 right: Mapping[str, frozenset[int]]) -> bool:
-    """Do the two bodies name one storey once the `patro`/`NP` vocabulary is taken out?
+def same_form_floor_gap(left: Mapping[str, frozenset[int]],
+                        right: Mapping[str, frozenset[int]]) -> int | None:
+    """The smallest storey gap the two bodies state IN ONE NOUN, or None if they share none.
 
-    Same noun, same number is agreement; different nouns one apart is the vocabulary — which
-    is what `3. patro` and `4. NP` literally are, and what `3. patro` against `3. NP` is when
-    one of the two writers is using the words loosely.
+    `patro` and `NP` are two scales and this module has no converter it trusts: `3. patro` is
+    the fourth storey, `3. NP` the third, and a writer who means one and types the other is
+    commonplace — one Bílina agency re-writes its own advert for č.p. 707 from `v šestém patře
+    osmipodlažního objektu` to `ve 6. nadzemním podlaží`, and one Prague flat is `ve druhém
+    patře` on sreality and `v prvním podlaží` on bezrealitky at the same 20,553 Kč. Across the
+    two nouns the difference is the noun; within one noun it is a storey, and only that is
+    read. Returning 0 says the two agree.
     """
-    for form_a, values_a in left.items():
-        for form_b, values_b in right.items():
-            for value_a in values_a:
-                for value_b in values_b:
-                    if value_a == value_b:
-                        return True
-                    if form_a != form_b and abs(value_a - value_b) == 1:
-                        return True
-    return False
+    gaps = [abs(value_a - value_b)
+            for form, values_a in left.items()
+            for value_a in values_a
+            for value_b in right.get(form, frozenset())]
+    return min(gaps) if gaps else None
 
 
 # --- the storey the body predicates of the OFFERED unit (E181) ------------------------------

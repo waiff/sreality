@@ -94,7 +94,7 @@ from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
     CHARGE_KINDS,
     accessory_designators,
-    floors_meet_under_vocabulary,
+    same_form_floor_gap,
     address_block_key,
     capacity_counts,
     fold,
@@ -1086,21 +1086,26 @@ def distinguishing_facts(
     # is read because the stored column is null on one side of a third of the corpus, and
     # because `body_align` must not read a storey (E163: doing so newly split 126 certain
     # duplicates of two cohorts on nothing else).
-    words = cfg.d43_prose_floor_words
+    # E201: a HOUSE is sold with every storey it has, so a storey its body names is a room's
+    # address and not the offer's — one Abertamy 8+1 is re-listed with `V prvním patře se
+    # nachází dvě samostatné místnosti` rewritten as `V přízemí najdete dvě samostatné
+    # místnosti`, one house, one price path, two storey words. The worded readings are
+    # therefore not read at all where either side is a whole building or a plot.
+    words = cfg.d43_prose_floor_words and not (
+        {a.category_main, b.category_main} & PLOT_EXACT_CATEGORIES)
 
-    def vocabulary_meets(reader, left: Listing, right: Listing) -> bool:
-        # E201: `3. patro` is the fourth storey and `3. NP` the third, so a body that spells
-        # its storey one way and its own re-write that spells it the other are one storey apart
-        # for no reason but the noun. Read only where the worded forms are read at all.
-        return words and floors_meet_under_vocabulary(reader(left.description, True),
-                                                      reader(right.description, True))
+    def within_noun_gap(reader, left: Listing, right: Listing) -> int | None:
+        return same_form_floor_gap(reader(left.description, True),
+                                   reader(right.description, True))
 
     if cfg.d43_prose_floor:
         floors_a = printed_floors(a.description, words)
         floors_b = printed_floors(b.description, words)
+        same_noun = within_noun_gap(printed_floors_by_form, a, b) if words else None
         if (floors_a and floors_b and not (floors_a & floors_b)
-                and not vocabulary_meets(printed_floors_by_form, a, b)):
-            prose_gap = min(abs(x - y) for x in floors_a for y in floors_b)
+                and not (words and (same_noun is None or same_noun == 0))):
+            prose_gap = (same_noun if words and same_noun
+                         else min(abs(x - y) for x in floors_a for y in floors_b))
             feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
             if (_rounded_floors(a, b, cfg, prose_gap)
                     or (prose_gap == 1 and feed)):
@@ -1112,9 +1117,11 @@ def distinguishing_facts(
     if cfg.d43_subject_floor:
         subject_a = subject_floors(a.description, words)
         subject_b = subject_floors(b.description, words)
+        subject_noun = within_noun_gap(subject_floors_by_form, a, b) if words else None
         if (subject_a and subject_b and not (subject_a & subject_b)
-                and not vocabulary_meets(subject_floors_by_form, a, b)):
-            subject_gap = min(abs(x - y) for x in subject_a for y in subject_b)
+                and not (words and (subject_noun is None or subject_noun == 0))):
+            subject_gap = (subject_noun if words and subject_noun
+                           else min(abs(x - y) for x in subject_a for y in subject_b))
             feed = _same_feed(a, b, cfg.floor_same_source_feed, cfg.floor_feed_unknown_closed)
             if _rounded_floors(a, b, cfg, subject_gap) or (subject_gap == 1 and feed):
                 add("subject_floor", sorted(subject_a), sorted(subject_b))

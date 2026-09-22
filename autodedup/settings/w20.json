@@ -13,7 +13,7 @@
  "corroboration_body_containment": 0.8,
  "corroboration_min": 2,
  "d43_accessory_designators": true,
- "d43_agency_code_conflict": true,
+ "d43_agency_code_conflict": false,
  "d43_body_align": true,
  "d43_body_align_heal": true,
  "d43_body_align_min_ratio": 0.6,

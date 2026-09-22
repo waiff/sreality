@@ -17,12 +17,12 @@ from autodedup.dataset import Listing
 from autodedup.indistinguishable import GATE, distinguishing_facts
 from autodedup.settings import Settings
 from autodedup.text_facts import (
-    floors_meet_under_vocabulary,
     ground_or_upper,
     parcel_divisions,
     printed_floors,
     printed_floors_by_form,
     prose_plot_areas,
+    same_form_floor_gap,
     stated_charges,
     subject_floors,
 )
@@ -87,12 +87,16 @@ def purkynova(listing_id: int, body: str, first: int = 0, last: int = 40) -> Lis
                    price=10_500.0, description=body)
 
 
+CODES_ON = variant(d43_agency_code_conflict=True)
+
+
 def test_two_order_codes_on_two_bodies_of_one_template_are_a_fact() -> None:
-    """CL10850. S4 merges the two flats; g7 kept them apart and this is what it was reading."""
+    """CL10850, and the reason the dial exists. S4 merges the two flats; g7 kept them apart.
+    The dial ships OFF — see `test_the_order_code_dial_ships_off_because_it_is_refuted`."""
     a = purkynova(264492, UNIT_00841)
     b = purkynova(415240, UNIT_01071)
     assert "agency_code" not in names(a, b, S4)
-    assert "agency_code" in names(a, b, S5)
+    assert "agency_code" in names(a, b, CODES_ON)
 
 
 def test_the_same_advert_re_posted_under_a_new_code_is_not_a_fact() -> None:
@@ -103,7 +107,7 @@ def test_the_same_advert_re_posted_under_a_new_code_is_not_a_fact() -> None:
     a = purkynova(11565029, UNIT_01071.replace("01071", "00037"))
     b = purkynova(11565031, UNIT_01071.replace("01071", "00037-1"))
     assert overlap_ratio(a.description, b.description) == 1.0
-    assert "agency_code" not in names(a, b, S5)
+    assert "agency_code" not in names(a, b, CODES_ON)
 
 
 def test_two_codes_on_two_unrelated_bodies_claim_nothing() -> None:
@@ -114,7 +118,7 @@ def test_two_codes_on_two_unrelated_bodies_claim_nothing() -> None:
     b = purkynova(205378, "Ev.č. 932343 Prodej. Cena k jednání. Více informací u makléře. "
                           "Nemovitost je volná ihned a lze ji obratem prohlédnout po dohodě "
                           "telefonem s naším zástupcem v regionu, děkujeme za pochopení.")
-    assert "agency_code" not in names(a, b, S5)
+    assert "agency_code" not in names(a, b, CODES_ON)
 
 
 def test_two_codes_that_never_lived_together_are_a_renumbered_re_post() -> None:
@@ -123,27 +127,35 @@ def test_two_codes_that_never_lived_together_are_a_renumbered_re_post() -> None:
     says a re-post may be renumbered."""
     a = purkynova(264492, UNIT_00841, first=0, last=10)
     b = purkynova(415240, UNIT_01071, first=20, last=40)
-    assert "agency_code" not in names(a, b, S5)
+    assert "agency_code" not in names(a, b, CODES_ON)
 
 
 def test_two_codes_on_two_portals_are_two_portals_numbering_one_advert() -> None:
     a = purkynova(264492, UNIT_00841)
     b = purkynova(415240, UNIT_01071, first=0, last=40)
     b.source = "sreality"
-    assert "agency_code" not in names(a, b, S5)
+    assert "agency_code" not in names(a, b, CODES_ON)
 
 
 def test_a_catalogue_of_codes_is_not_a_conflict() -> None:
     """A body that prints the seller's whole order book states no single order number."""
     a = purkynova(264492, UNIT_00841 + " Ev.č. 00842 Ev.č. 00843 Ev.č. 00844 Ev.č. 00845")
     b = purkynova(415240, UNIT_01071)
-    assert "agency_code" not in names(a, b, S5)
+    assert "agency_code" not in names(a, b, CODES_ON)
 
 
-def test_the_code_dial_is_what_turns_the_reading_on() -> None:
+def test_the_order_code_dial_ships_off_because_it_is_refuted() -> None:
+    """The band does not separate two units of one project from ONE object re-pitched under a
+    second advert number. Hand-read on the seven cohorts: `rodinný dům` against `chatu` for one
+    34 m² Čeperka cottage at 1,200,000 (codes N117852 / N117854, bodies 90.3 % one text); one
+    145 m² Plzeň shop whose second posting adds the street-works note (944918 / 945479, 85.9 %);
+    one Pardubice villa offered `jako sídlo firmy` and `pro zdravotnické zařízení s 6
+    ordinacemi` (656917 / 657002, 89–90 %). CL10850's two flats sit at 86.8 and 87.6 % — inside
+    the same band. The dial stays, measured and OFF, for the operator to rule on."""
     a = purkynova(264492, UNIT_00841)
     b = purkynova(415240, UNIT_01071)
-    assert "agency_code" not in names(a, b, variant(d43_agency_code_conflict=False))
+    assert "agency_code" not in names(a, b, S5)
+    assert S5.d43_agency_code_conflict is False
 
 
 # --- E201: the storey written as an ordinal WORD -------------------------------------------
@@ -214,8 +226,8 @@ def test_patro_against_np_is_a_vocabulary_and_not_a_storey() -> None:
     this one: it IS one feed, writing its own storey two ways."""
     assert printed_floors(BILINA_PATRO, True) == frozenset({7})
     assert printed_floors(BILINA_NP, True) == frozenset({6})
-    assert floors_meet_under_vocabulary(printed_floors_by_form(BILINA_PATRO, True),
-                                        printed_floors_by_form(BILINA_NP, True))
+    assert same_form_floor_gap(printed_floors_by_form(BILINA_PATRO, True),
+                               printed_floors_by_form(BILINA_NP, True)) is None
     a = listing(437664, source="ceskereality", disposition="1+1", area_m2=36.0, floor=5,
                 price=8_556.0, description=BILINA_PATRO, first=0, last=20)
     b = listing(18907864, source="ceskereality", disposition="1+1", area_m2=36.0, floor=5,
@@ -224,23 +236,74 @@ def test_patro_against_np_is_a_vocabulary_and_not_a_storey() -> None:
     assert "subject_floor" not in names(a, b, S5)
 
 
-def test_two_storeys_apart_survives_the_vocabulary() -> None:
-    """The excuse is ONE storey wide, which is all the noun can be worth."""
-    assert not floors_meet_under_vocabulary(
-        printed_floors_by_form("byt v osmém patře", True),
-        printed_floors_by_form("byt ve 6. nadzemním podlaží", True))
+def test_two_storeys_apart_across_the_two_nouns_is_still_the_nouns() -> None:
+    """sreality 464422 `ve druhém patře` against bezrealitky 509662 `v prvním podlaží`, one
+    45 m² Prague 1+kk at 20,553 Kč on both: the patro adds one and the two portals' own
+    ground-floor camps add the other. Neither of those is a storey."""
+    assert same_form_floor_gap(
+        printed_floors_by_form("byt ve druhém patře", True),
+        printed_floors_by_form("bydlení je situováno v prvním podlaží", True)) is None
 
 
 def test_one_noun_written_twice_is_still_a_storey() -> None:
-    assert not floors_meet_under_vocabulary(
-        printed_floors_by_form("byt v šestém patře", True),
-        printed_floors_by_form("byt ve třetím patře", True))
+    """Mariánské Lázně, Kubelíkova: two 1+kk of 21 m² in one house, `v pátém patře` against
+    `ve druhém patře`. One noun, three storeys, a fact."""
+    assert same_form_floor_gap(
+        printed_floors_by_form("Prodej bytu 1+kk v pátém patře", True),
+        printed_floors_by_form("Prodej bytu 1+kk ve druhém patře", True)) == 3
 
 
 def test_an_ordinal_word_away_from_a_storey_noun_is_not_a_storey() -> None:
     assert printed_floors("na druhé straně ulice je park, třetí dům od rohu", True) == (
         frozenset())
     assert ground_or_upper("výhled na druhé nádvoří", True) == frozenset()
+
+
+# remax 171943 and 17601990: one Abertamy 8+1 of 220 m² on a 507 m² plot, re-listed by one
+# broker at 7,390,000 and then 6,490,000, whose body enumerates its own storeys — and which
+# storey word heads the enumeration changes between the two writings.
+ABERTAMY_PATRO = (
+    "Patrový rodinný dům 8+1 s velkou terasou v srdci Krušných hor nabízí ideální kombinaci "
+    "prostoru, soukromí a krásné horské přírody. Dům má zastavěnou plochu 142 m² a užitnou "
+    "plochu 220 m². V prvním patře se nachází dvě samostatné místnosti, další pokoj s vlastní "
+    "koupelnou, samostatná toaleta s komorou a vstup na prostornou terasu. Druhé patro tvoří "
+    "světlý obývací pokoj, kuchyň s jídelnou, ložnice, další pokoj a koupelna s vanou. "
+    "Součástí domu je také sklep se třemi místnostmi a garáž."
+)
+ABERTAMY_PRIZEMI = (
+    "Nabízíme k prodeji prostorný rodinný dům o dispozici 8+1 a užitné ploše 220 m², který se "
+    "nachází v oblíbených Abertamech, přímo v srdci Krušných hor. Dům stojí na pozemku se "
+    "zastavěnou plochou 142 m². V přízemí najdete dvě samostatné místnosti, pokoj s vlastní "
+    "koupelnou, samostatné WC, komoru a přímý vstup na prostornou terasu. Ve druhém nadzemním "
+    "podlaží se nachází obývací pokoj s krbem, kuchyně s jídelnou, ložnice, další pokoj a "
+    "koupelna s vanou a WC. K domu náleží také sklep se třemi místnostmi a garáž."
+)
+
+
+def test_a_house_is_sold_with_every_storey_it_has() -> None:
+    """The worded readings are not read for a whole building: the storey heads a list of ROOMS,
+    and the offer is the house. Both spellings describe the same two storeys of one house."""
+    a = listing(171943, source="remax", category_main="dum", category_type="prodej",
+                disposition=None, area_m2=220.0, price=7_390_000.0,
+                description=ABERTAMY_PATRO, first=0, last=20)
+    b = listing(17601990, source="remax", category_main="dum", category_type="prodej",
+                disposition=None, area_m2=220.0, price=6_490_000.0,
+                description=ABERTAMY_PRIZEMI, first=20, last=40)
+    assert ground_or_upper(ABERTAMY_PATRO, True) == frozenset({"upper"})
+    assert ground_or_upper(ABERTAMY_PRIZEMI, True) == frozenset({"ground"})
+    assert "storey_word" not in names(a, b, S5)
+
+
+def test_a_flat_is_on_one_storey_and_the_guard_does_not_reach_it() -> None:
+    """The same shape in a `byt` still reads: one Mariánské Lázně office is `v přízemí` and a
+    second of the same 25 m² at the same 5,000 Kč is `ve druhém patře`, 60 days together."""
+    a = listing(1, category_main="komercni", area_m2=25.0, price=5_000.0,
+                description="Nabízíme k pronájmu nebytový prostor o výměře 25 m², který se "
+                            "nachází v přízemí reprezentativního domu v centru.")
+    b = listing(2, category_main="komercni", area_m2=25.0, price=5_000.0,
+                description="Nabízíme k pronájmu nebytový prostor o výměře 25 m², který se "
+                            "nachází ve druhém patře reprezentativního domu v centru.")
+    assert "storey_word" in names(a, b, S5)
 
 
 def test_the_same_worded_storey_on_both_sides_is_no_fact() -> None:
@@ -450,8 +513,9 @@ def test_no_shipped_generation_before_w20_names_an_s5_dial() -> None:
             assert getattr(shipped, name) == off, (arm, name)
 
 
-def test_w20_differs_from_w19_only_in_the_five_dials_the_wave_names() -> None:
+def test_w20_differs_from_w19_only_in_the_dials_the_wave_names() -> None:
+    """Four of the five ship ON; E200's ships OFF, refuted and measured, so w20 moves four."""
     w19 = Settings.from_json(SETTINGS / "w19.json").to_dict()
     w20 = Settings.from_json(SETTINGS / "w20.json").to_dict()
     moved = {key for key in w20 if w19.get(key) != w20[key]}
-    assert moved == set(S5_DIALS), sorted(moved ^ set(S5_DIALS))
+    assert moved == set(S5_DIALS) - {"d43_agency_code_conflict"}, sorted(moved)
