@@ -14,14 +14,17 @@ import {
 import {
   archivePipelineStage,
   createPipelineStage,
+  listCollections,
   movePipelineCard,
   removePipelineCard,
   reorderPipelineStages,
   updatePipelineStage,
 } from '@/lib/api';
 import {
+  curationKeys,
   fetchPipelineBoard,
   fetchPipelineStages,
+  fetchPropertyCollectionMemberSet,
   matchesDistricts,
   pipelineKeys,
 } from '@/lib/queries';
@@ -35,8 +38,12 @@ import {
 import { CardHydrationProvider } from '@/lib/hydration';
 import { useLegacyChipUpgrade } from '@/lib/useLegacyChipUpgrade';
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
+import { MultiselectChips } from '@/components/filter-controls/MultiselectChips';
+import { type EnumOptionLite } from '@/components/filter-controls/types';
+import { Field, Segmented } from '@/components/controls';
+import { matchesCollections } from '@/lib/collectionScope';
 import { type ListingStatus } from '@/lib/filters';
-import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
+import { filterById } from '@/lib/filterRegistry.generated';
 import TagColorPicker from '@/components/TagColorPicker';
 import { FunnelIcon, InfoIcon } from '@/components/icons';
 import SizeToggle, {
@@ -66,29 +73,24 @@ import {
   type TagColor,
 } from '@/lib/types';
 
-/* Property-type (category_main) options for the pipeline filter — the SAME
- * canonical source as Browse's TYPE tabs (the generated filter registry), so the
- * Byty/Domy/Komerční/… labels never drift from one hardcode to another. */
-const CATEGORY_MAIN_ENUM =
-  FILTER_REGISTRY.filters.find((f) => f.id === 'category_main')?.enum_values ?? [];
-const CATEGORY_MAIN_ORDER: string[] = CATEGORY_MAIN_ENUM.map((o) => String(o.value));
-const CATEGORY_MAIN_LABEL: Record<string, string> = Object.fromEntries(
-  CATEGORY_MAIN_ENUM.map((o) => [String(o.value), o.label_cs]),
-);
+/* The bar's vocabulary comes off the generated filter registry, so the
+ * Byty/Domy/… and Vše/Aktivní/Neaktivní labels never drift from Browse's. */
+const enumOptions = (id: string): EnumOptionLite[] =>
+  (filterById(id)?.enum_values ?? []).map((o) => ({
+    value: String(o.value),
+    label: o.label_cs,
+  }));
 
-/* Active/inactive filter — the SAME any/active/inactive vocabulary and Czech
- * labels as Browse's `status` filter (single source of truth: the registry),
- * applied here against the property-grain `is_active` rollup (bool_or over
- * child listings, rule #15/#20) that fetchPipelineBoard already selects from
- * properties_public. */
-const STATUS_ENUM =
-  FILTER_REGISTRY.filters.find((f) => f.id === 'status')?.enum_values ?? [];
-const STATUS_ORDER: ListingStatus[] = STATUS_ENUM.map(
-  (o) => String(o.value) as ListingStatus,
-);
-const STATUS_LABEL: Record<string, string> = Object.fromEntries(
-  STATUS_ENUM.map((o) => [String(o.value), o.label_cs]),
-);
+/* `status` reads against the property-grain `is_active` rollup (bool_or over
+ * child listings, rule #15/#20) that fetchPipelineBoard already selects. */
+const STATUS_OPTIONS = enumOptions('status').map((o) => ({
+  value: o.value as ListingStatus,
+  label: o.label,
+}));
+const CATEGORY_MAIN_OPTIONS = enumOptions('category_main');
+
+/* One stable empty board, so every memo below can depend on `cards` itself. */
+const NO_CARDS: PipelineBoardCard[] = [];
 
 export default function Pipeline() {
   const [manage, setManage] = useState(false);
@@ -99,12 +101,14 @@ export default function Pipeline() {
     status,
     types,
     districts,
+    collectionIds,
     sort,
     setStatus,
-    toggleType,
-    clearTypes,
+    setTypes,
     setDistricts,
+    setCollections,
     setSort,
+    reset,
   } = usePipelineViewState();
   /* The board filters its cards in the browser (matchesDistricts), so a chip
    * with no code matches nothing here exactly as it does server-side — which
@@ -127,57 +131,93 @@ export default function Pipeline() {
     staleTime: 30_000,
   });
 
+  /* The collection lens (rule #18), on the two keys the rest of the app
+   * already shares — the board pays for them only on a cold visit. */
+  const collectionsQ = useQuery({
+    queryKey: curationKeys.collections,
+    queryFn: listCollections,
+    staleTime: 30_000,
+  });
+  const membersQ = useQuery({
+    queryKey: curationKeys.propertyCollectionMembers,
+    queryFn: fetchPropertyCollectionMemberSet,
+    staleTime: 30_000,
+  });
+  /* Undefined while loading or errored — NOT an empty map (the fail-open
+   * contract, docs/architecture.md rule #22). */
+  const members = membersQ.data;
+
   const stages = stagesQ.data ?? [];
-  const cards = boardQ.data ?? [];
+  const cards = boardQ.data ?? NO_CARDS;
 
-  // Property types actually present in the pipeline (registry order) — the chip
-  // set. Depends on the stable query reference (not the per-render `cards`).
-  const presentTypes = useMemo(() => {
-    const set = new Set<string>();
-    for (const c of boardQ.data ?? []) if (c.category_main) set.add(c.category_main);
-    return CATEGORY_MAIN_ORDER.filter((t) => set.has(t));
-  }, [boardQ.data]);
+  // Client-side (rule #22) as ONE list the board, the count and Reset share.
+  // The collection clause is skipped while the member map is unresolved.
+  const predicates = useMemo(() => {
+    const out: Array<(c: PipelineBoardCard) => boolean> = [];
+    if (types.size > 0) {
+      out.push((c) => c.category_main != null && types.has(c.category_main));
+    }
+    if (districts.length > 0) out.push((c) => matchesDistricts(c, districts));
+    if (status !== 'any') out.push((c) => c.is_active === (status === 'active'));
+    if (members && collectionIds.length > 0) {
+      out.push((c) => matchesCollections(members.get(c.property_id), collectionIds));
+    }
+    return out;
+  }, [types, districts, status, members, collectionIds]);
 
-  // Only offer the status filter when the board actually holds a delisted
-  // property to filter out — an all-active pipeline has nothing to stratify.
-  const hasInactive = useMemo(
-    () => (boardQ.data ?? []).some((c) => !c.is_active),
-    [boardQ.data],
+  const filtersActive = predicates.length > 0;
+  const filteredCards = useMemo(
+    () => cards.filter((c) => predicates.every((p) => p(c))),
+    [cards, predicates],
   );
 
-  // Client-side filters (the board is small, rule #22): type chips + the region
-  // picker + active/inactive status, applied in-memory. Region reuses Browse's
-  // exact chip semantics via matchesDistricts; status reuses Browse's
-  // any/active/inactive vocabulary against the same is_active rollup. Empty /
-  // 'any' = no constraint.
-  const filtersActive =
-    types.size > 0 || districts.length > 0 || status !== 'any';
-  const filteredCards = useMemo(() => {
-    let result = boardQ.data ?? [];
-    if (types.size > 0) {
-      result = result.filter(
-        (c) => c.category_main != null && types.has(c.category_main),
-      );
+  /* One pass over the board for everything the bar offers: the types on it,
+   * whether a delisted card is on it, and which collections hold one. */
+  const bar = useMemo(() => {
+    const present = new Set<string>();
+    const held = new Set<number>();
+    let inactive = 0;
+    let inCollection = 0;
+    for (const c of cards) {
+      if (c.category_main) present.add(c.category_main);
+      if (!c.is_active) inactive += 1;
+      const ids = members?.get(c.property_id);
+      if (ids?.length) {
+        inCollection += 1;
+        for (const id of ids) held.add(id);
+      }
     }
-    if (districts.length > 0) {
-      result = result.filter((c) => matchesDistricts(c, districts));
+    const known = collectionsQ.data?.data ?? [];
+    /* Only collections with a member ON the board — plus any SELECTED one,
+     * whose chip has to render or the constraint is un-deselectable. */
+    const onBoard = known.filter((c) => held.has(c.id));
+    const options = onBoard.map((c) => ({ value: c.id, label: c.name }));
+    for (const id of collectionIds) {
+      if (options.some((o) => o.value === id)) continue;
+      options.push({ value: id, label: known.find((c) => c.id === id)?.name ?? `#${id}` });
     }
-    if (status !== 'any') {
-      result = result.filter((c) => c.is_active === (status === 'active'));
-    }
-    return result;
-  }, [boardQ.data, types, districts, status]);
+    return {
+      types: CATEGORY_MAIN_OPTIONS.filter((o) => present.has(o.value)),
+      hasInactive: inactive > 0,
+      collections: options,
+      /* A live constraint is always visible; otherwise the row is offered only
+       * when it could change the view. Membership is multi-valued and partial,
+       * so an option count would wrongly hide a working control — two
+       * collections can partition a board with every card inside one. */
+      showCollections:
+        !!members &&
+        (collectionIds.length > 0 ||
+          (onBoard.length > 0 && (inCollection < cards.length || onBoard.length >= 2))),
+    };
+  }, [cards, members, collectionsQ.data, collectionIds]);
 
   /* The decoration cohort: the representative listing of every card ON the
    * board (not just the filtered view — filtering is client-side and instant,
    * so hydrating the full board once keeps a filter toggle free instead of
    * re-keying the enrichment query on every chip click). */
   const visibleListingIds = useMemo(
-    () =>
-      (boardQ.data ?? [])
-        .map((c) => c.listing_id)
-        .filter((id): id is number => id != null),
-    [boardQ.data],
+    () => cards.map((c) => c.listing_id).filter((id): id is number => id != null),
+    [cards],
   );
 
   /* Curated-city indexes for the card strip. Cached forever and keyed shared
@@ -227,6 +267,15 @@ export default function Pipeline() {
                 : cards.length}{' '}
             nemovitostí
           </p>
+          {filtersActive && (
+            <button
+              type="button"
+              onClick={reset}
+              className="text-[0.7rem] tracking-wide uppercase text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+            >
+              Reset
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setManage((v) => !v)}
@@ -240,134 +289,84 @@ export default function Pipeline() {
 
       {manage && stages.length > 0 && <StageManager stages={stages} />}
 
-      {/* Filters — active/inactive status (only when the pipeline holds a
-          delisted property) + property type (only when the pipeline holds >1
-          type) + the region picker. The region control is the SAME
-          LocationTypeahead Browse and Datasets use; the status pills are the
-          SAME any/active/inactive vocabulary as Browse's status filter
-          (single source of truth: FILTER_REGISTRY). All three apply
-          client-side (rule #22, the board is small). */}
       {cards.length > 0 && (
         <div className="mt-5 flex flex-col gap-3">
-          {hasInactive && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-                Stav
-              </span>
-              {STATUS_ORDER.map((s) => {
-                const active = status === s;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => setStatus(active ? 'any' : s)}
-                    className={[
-                      'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.78rem] transition-colors',
-                      active
-                        ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-                        : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
-                    ].join(' ')}
-                  >
-                    {STATUS_LABEL[s] ?? s}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          {presentTypes.length >= 2 && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="mr-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-                Typ
-              </span>
-              {presentTypes.map((t) => {
-                const active = types.has(t);
-                return (
-                  <button
-                    key={t}
-                    type="button"
-                    aria-pressed={active}
-                    onClick={() => toggleType(t)}
-                    className={[
-                      'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.78rem] transition-colors',
-                      active
-                        ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-                        : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
-                    ].join(' ')}
-                  >
-                    {CATEGORY_MAIN_LABEL[t] ?? t}
-                  </button>
-                );
-              })}
-              {types.size > 0 && (
-                <button
-                  type="button"
-                  onClick={clearTypes}
-                  className="ml-1 text-[0.72rem] text-[var(--color-ink-3)] underline underline-offset-2 hover:text-[var(--color-ink)]"
-                >
-                  Vše
-                </button>
-              )}
-            </div>
-          )}
-          <div className="flex items-start gap-2">
-            <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-              Lokalita
-            </span>
-            <div className="min-w-0 flex-1 max-w-xl">
+          <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+            {bar.hasInactive && (
+              <Field label="Stav">
+                <Segmented
+                  variant="solid"
+                  options={STATUS_OPTIONS}
+                  value={status}
+                  onChange={setStatus}
+                />
+              </Field>
+            )}
+            {bar.types.length >= 2 && (
+              <Field label="Typ">
+                <MultiselectChips
+                  value={[...types]}
+                  options={bar.types}
+                  onChange={setTypes}
+                />
+              </Field>
+            )}
+            {bar.showCollections && (
+              <Field label="Kolekce">
+                <MultiselectChips
+                  value={collectionIds}
+                  options={bar.collections}
+                  onChange={setCollections}
+                />
+              </Field>
+            )}
+            <Field label="Lokalita" className="min-w-[16rem] max-w-xl flex-1">
               <LocationTypeahead
                 label="Lokalita"
                 value={districts}
                 onChange={(n) => setDistricts(n ?? [])}
               />
-            </div>
+            </Field>
           </div>
-          {/* Sort joins the existing Stav/Typ/Lokalita chip grammar as a fourth
-              row rather than floating in a new header toolbar — it is another
-              knob on the same cohort, and the operator's eye is already here.
-              Ordering applies WITHIN each column. */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-              Řazení
-            </span>
-            <select
-              aria-label="Řazení karet ve fázi"
-              value={
-                PIPELINE_SORT_OPTIONS.find(
-                  (o) => o.field === sort.field && o.direction === sort.direction,
-                )?.value ?? sortParamOf(sort)
-              }
-              onChange={(e) => {
-                const picked = PIPELINE_SORT_OPTIONS.find(
-                  (o) => o.value === e.target.value,
-                );
-                if (picked) setSort({ field: picked.field, direction: picked.direction });
-              }}
-              className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2 py-1 text-[0.78rem] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-rule-strong)]"
-            >
-              {PIPELINE_SORT_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            {/* Card size shares the Řazení row rather than claiming a fifth
-                one: both are about how the board PRESENTS the cohort, while
-                Stav/Typ/Lokalita choose the cohort itself. */}
-            <span className="ml-auto shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-              Karty
-            </span>
-            <SizeToggle
-              label="Velikost karet"
-              value={cardSize.value}
-              onChange={cardSize.set}
-              steps={PIPELINE_CARD_SIZES.map((v) => ({
-                value: v,
-                label: PIPELINE_CARD_SIZE_LABELS[v].label,
-                title: PIPELINE_CARD_SIZE_LABELS[v].title,
-                glyph: CARD_SIZE_GLYPH[v],
-              }))}
-            />
+          {/* Řazení and Karty are how the board PRESENTS the cohort, not which
+              deals are in it — their own row, and Reset leaves them alone. */}
+          <div className="flex flex-wrap items-end gap-x-6 gap-y-3">
+            <Field label="Řazení" as="control">
+              <select
+                aria-label="Řazení karet ve fázi"
+                value={
+                  PIPELINE_SORT_OPTIONS.find(
+                    (o) => o.field === sort.field && o.direction === sort.direction,
+                  )?.value ?? sortParamOf(sort)
+                }
+                onChange={(e) => {
+                  const picked = PIPELINE_SORT_OPTIONS.find(
+                    (o) => o.value === e.target.value,
+                  );
+                  if (picked) setSort({ field: picked.field, direction: picked.direction });
+                }}
+                className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2 py-1 text-[0.78rem] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-rule-strong)]"
+              >
+                {PIPELINE_SORT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Karty" className="ml-auto">
+              <SizeToggle
+                label="Velikost karet"
+                value={cardSize.value}
+                onChange={cardSize.set}
+                steps={PIPELINE_CARD_SIZES.map((v) => ({
+                  value: v,
+                  label: PIPELINE_CARD_SIZE_LABELS[v].label,
+                  title: PIPELINE_CARD_SIZE_LABELS[v].title,
+                  glyph: CARD_SIZE_GLYPH[v],
+                }))}
+              />
+            </Field>
           </div>
         </div>
       )}

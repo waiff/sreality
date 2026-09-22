@@ -14,6 +14,7 @@ function Harness({ onReady }: { onReady: (s: PipelineViewState) => void }) {
       <span data-testid="search">{loc.search}</span>
       <span data-testid="status">{state.status}</span>
       <span data-testid="types">{[...state.types].join(',')}</span>
+      <span data-testid="collections">{state.collectionIds.join(',')}</span>
       <span data-testid="sort">{`${state.sort.field}:${state.sort.direction}`}</span>
       <span data-testid="districts">{state.districts.map((d) => d.name).join('|')}</span>
     </div>
@@ -68,15 +69,40 @@ describe('usePipelineViewState', () => {
     expect(h.read('sort')).toBe('board_position:asc');
   });
 
+  /* The chips emit the WHOLE next selection, so the hook takes an array and
+   * owns nothing about which chip moved. */
   it('round-trips the type chips', () => {
     const h = mount();
-    act(() => h.state.toggleType('byt'));
-    act(() => h.state.toggleType('dum'));
+    act(() => h.state.setTypes(['byt', 'dum']));
     expect(h.search()).toBe('?cat=byt%2Cdum');
-    act(() => h.state.toggleType('byt'));
+    expect(h.read('types')).toBe('byt,dum');
+    act(() => h.state.setTypes(['dum']));
     expect(h.read('types')).toBe('dum');
-    act(() => h.state.clearTypes());
+    act(() => h.state.setTypes([]));
     expect(h.search()).toBe('');
+  });
+
+  /* `collections` is Browse's own spelling and encoding (a CSV of ids read
+   * through its parseIntList), not a second one for the board. */
+  it('round-trips the collection ids and omits the param when empty', () => {
+    const h = mount();
+    act(() => h.state.setCollections([7, 9]));
+    expect(h.search()).toBe('?collections=7%2C9');
+    expect(h.read('collections')).toBe('7,9');
+    act(() => h.state.setCollections([]));
+    expect(h.search()).toBe('');
+  });
+
+  it('clears every cohort param in one write, keeping the sort', () => {
+    const h = mount(
+      '/pipeline?status=active&cat=byt&collections=7&districts=Beroun&districts_lvl=obec&districts_id=531057&sort=-added_at',
+    );
+    act(() => h.state.reset());
+    expect(h.search()).toBe('?sort=-added_at');
+    expect(h.read('status')).toBe('any');
+    expect(h.read('types')).toBe('');
+    expect(h.read('collections')).toBe('');
+    expect(h.read('districts')).toBe('');
   });
 
   it('round-trips status', () => {
@@ -113,9 +139,10 @@ describe('usePipelineViewState', () => {
   });
 
   it('keeps unrelated params intact', () => {
-    const h = mount('/pipeline?status=active');
+    const h = mount('/pipeline?status=active&collections=7');
     act(() => h.state.setSort({ field: 'price_czk', direction: 'asc' }));
     expect(h.search()).toContain('status=active');
+    expect(h.search()).toContain('collections=7');
     expect(h.search()).toContain('sort=price_czk');
   });
 });
