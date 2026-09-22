@@ -178,7 +178,8 @@ def _repartition_clusters(
             cut += 1
             local = [edge for edge in graph if edge.lo in inside and edge.hi in inside]
             cells = partition(component, local, invariants, settings.repartition_max_rounds,
-                              settings.repartition_keep_factless)
+                              settings.repartition_keep_factless,
+                              settings.repartition_rejoin_cells)
         for cell in cells:
             grouped[min(cell)] = sorted(cell)
 

@@ -138,6 +138,46 @@ def joint_convention_shift(
     return abs(delta_floor) == 1
 
 
+def total_convention_shift(
+    camps: CampTable | None,
+    source_a: str | None,
+    floor_a: int | None,
+    total_a: int | None,
+    source_b: str | None,
+    floor_b: int | None,
+    total_b: int | None,
+) -> bool:
+    """E190: the BUILDING's storey count carries the ground-floor convention too.
+
+    `joint_convention_shift` reads the two numbers as one only when BOTH move together, which
+    is the right reading when both are stated — but a house advert states `floor` on neither
+    side and a flat advert often on one, and then the offset has nothing to travel with. This
+    asks the narrower question the camps can answer alone: is the total-storey gap EXACTLY the
+    offset the two sources are known to differ by, in that direction?
+
+    Measured on the certain duplicates of cohorts 3-6 (s4/total_camps.json): `idnes` states one
+    storey fewer than `sreality` on 386 of 5,073 cross-portal pairs, than `realitymix` on 300
+    of 3,298 and than `mmreality` on 354 of 520 — and the OTHER direction, idnes one storey
+    more, happens 15, 8 and 5 times. The excuse is therefore SIGNED: it forgives the gap the
+    convention predicts and leaves the opposite gap a fact.
+
+    Where both floors are stated they must not contradict the reading — a floor gap that is
+    neither zero nor the same offset is two statements about the unit, and this rule does not
+    reach across it.
+    """
+    if total_a is None or total_b is None:
+        return False
+    offset = camp_offset(camps, source_a, source_b)
+    if not offset:
+        return False
+    if int(total_a) - int(total_b) != offset:
+        return False
+    if floor_a is not None and floor_b is not None:
+        if (int(floor_a) - int(floor_b)) not in (0, offset):
+            return False
+    return True
+
+
 def measure_camps(
     anchors: Iterable[Anchor],
     min_observations: int = MIN_OBSERVATIONS,
