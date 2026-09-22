@@ -670,8 +670,12 @@ def _price_sequential_path(
         return False
     if a.floor is not None and b.floor is not None and a.floor != b.floor:
         return False
+    # An advert that states no area has demonstrated no area (E164's rule, and the reason this
+    # limb needs it): one Pouchovská 2+kk at 18,500 and one Slezské Předměstí 2+kk at 21,000
+    # were bridged through a bazos row carrying neither, and `area_rel_diff` abstains on a
+    # missing side. Both sides must state it, and the two must be the same number.
     gap = area_rel_diff(a.area_m2, b.area_m2)
-    if gap is not None and gap > 0.0:
+    if gap is None or gap > 0.0:
         return False
     photos = _present(feats, "phash_tight_matches") or 0.0
     contained = _present(feats, "containment_max") or 0.0

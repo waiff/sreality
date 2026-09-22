@@ -440,6 +440,17 @@ def test_the_relist_rule_needs_the_rest_of_the_identity() -> None:
     assert "price" in names(a, b, S3, FEATS)
 
 
+def test_the_relist_rule_needs_an_area_on_BOTH_sides() -> None:
+    """74696 x 140706: a Pouchovská 2+kk at 18,500 and a Slezské Předměstí 2+kk at 21,000, two
+    different flats, bridged by a bazos row that states no area at all. `area_rel_diff`
+    abstains on a missing side, and abstention is not agreement (E164)."""
+    a = listing(74696, category_type="pronajem", area_m2=60.0, price=18_500.0,
+                first=0, last=2, description=BODY)
+    bridge = listing(136541, source="bazos", category_type="pronajem", area_m2=None,
+                     price=21_000.0, first=3, last=60, description=BODY)
+    assert "price" in names(a, bridge, S3, FEATS)
+
+
 def test_the_relist_rule_needs_the_body_or_the_photographs() -> None:
     a = listing(1, category_main="dum", disposition=None, area_m2=280.0, price=14_500_000.0,
                 first=0, last=22, description=BODY)
