@@ -20,6 +20,13 @@ import inspect
 from scraper import db
 
 
+def _single_upsert_source() -> str:
+    """The per-item write path: the caller that builds the params and the cached
+    statement builder it feeds (one statement per source since field-capture W6)."""
+    return (inspect.getsource(db.upsert_listing)
+            + inspect.getsource(db._upsert_listing_sql))
+
+
 def test_batch_upsert_stamps_and_heals_source_id_native() -> None:
     # The drain is sreality-only, whose native id IS its sreality_id.
     assert "source_id_native" in db._BATCH_UPSERT_SQL
@@ -32,7 +39,7 @@ def test_batch_upsert_stamps_and_heals_source_id_native() -> None:
 
 
 def test_single_upsert_stamps_and_heals_source_id_native() -> None:
-    src = inspect.getsource(db.upsert_listing)
+    src = _single_upsert_source()
     # Inline INSERT stamp (bound param) + preserve-if-null heal on conflict.
     assert "%(source_id_native)s" in src
     assert (
@@ -49,7 +56,7 @@ def test_single_upsert_stamps_source_inline_to_avoid_natkey_collision() -> None:
     # ('sreality', <native_id>) and could collide with a real sreality row on the
     # UNIQUE(source, source_id_native) index, which ON CONFLICT (sreality_id) does not
     # arbitrate (unique_violation -> ingest aborts -> portal drain wedges).
-    src = inspect.getsource(db.upsert_listing)
+    src = _single_upsert_source()
     assert "%(source)s" in src
     assert 'row.get("source") or "sreality"' in src
 

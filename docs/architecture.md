@@ -1609,8 +1609,16 @@ renumber.** Navigate by area:
     new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is
     out-of-band, rule #15) and recomputes **only the queued properties** (the full
     recompute SQL scoped to
-    `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` + Browse within ~5
-    min and the job is **O(changes)**, not O(all properties). The drain is race-free +
+    `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` within ~5 min (~2 on
+    the worker's maintenance lane) and the job is **O(changes)**, not O(all properties). Reaching
+    **Browse** is a second step, because `browse_projection` reads `properties` and Browse reads
+    the `browse_list` snapshot: since field-capture W6 the drain patches `browse_list` for exactly
+    the ids it recomputed (`sync_browse_list`), so a change usually no longer waits for the `*/15`
+    wholesale rebuild — which was a measured mean of 11.7 min, worst 36.6 (94 rebuilds / 24 h,
+    2026-09-21). A fast path, not a guarantee: the rebuild snapshots `browse_projection` at its
+    start and renames the new table in at its end, so a patch committed inside that window is
+    superseded silently, and a rebuild is in flight ~26 % of wall-clock (283 runs / 72 h, mean
+    237 s against a 900 s cadence). The drain is race-free +
     terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
     since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
     New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
@@ -1637,7 +1645,12 @@ renumber.** Navigate by area:
     include the row's `source_url` (its page on the portal): a stored fact every surface READS and
     none reconstructs — sreality's assembler is `scraper/sreality_url.py`, the 8 crawlers' are their
     `<portal>_client.detail_url`; the column rides `LISTING_COLUMNS` preserve-if-null on every write
-    path (`docs/design/portal-listing-url.md`). The pieces:
+    path (`docs/design/portal-listing-url.md`). Preserve-if-null is per (source, column) since
+    field-capture W6 — `scraper/db._listing_update_set_sql(source)` asks
+    `scraper/attribute_contract.py` which cells a parser NULL may clear (`structured`/`derived`
+    still clear, `text`/`none` preserve) — and that is a config row of the same kind as
+    `PortalConfig`, not a per-portal branch: shared code reads one table and the nine portals add
+    no code to it. The pieces:
     `scraper/portal_base.py` (`BasePortalClient` — the shared HTTP session/headers, `RateLimiter`
     pacing + 429/403 penalize, retry/backoff, `ListingGoneError` on 404/410); `scraper/portal.py`
     (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`

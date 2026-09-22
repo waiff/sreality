@@ -71,9 +71,21 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       detail fetch, never for inactive rows — per-portal numbers in the program doc.
 - [ ] **W5 — apply the vocabulary collapses to stored rows**, one counted batch each;
       `price_unit` 4 → 2; ~14k + ~8.3k rows become reachable by a Browse filter.
-- [ ] **W6 — close the wipe (R4).** A detail re-fetch stops erasing text-derived cells
-      inside the one shared SET builder; the property rollup stops letting an inferred
-      `true` beat a stated `false`; fills reach Browse in minutes.
+- [x] **W6 — close the wipe (R4).** The one shared SET builder now takes the source and
+      asks the contract: `structured` / `derived` cells still clear from a parser NULL (a
+      portal that stops stating a fact must be able to drop it), `text` / `none` cells
+      preserve — and every `none` cell on the eight structured portals is 0-filled live,
+      so the rule is a no-op for the parsers and protects only post-publication producers.
+      Zero extra statements; the per-item statement is now built once per source instead
+      of per listing. The property golden record loses its `bool_or` special case for the
+      six amenity booleans (has_parking 1,384, cellar 486, has_balcony 212, garage 162,
+      terrace 140, has_lift 64 rolled-up values flip true→false over 23,641 active
+      multi-child properties; 4,095 / 1,388 / 682 / 410 / 406 / 357 over all 74,090,
+      the surplus on delisted properties Browse hides). `run_incremental_pass` patches
+      `browse_list` for the ids it recomputed: seen-to-Browse was a measured mean 11.7 min
+      (94 rebuilds / 24 h, worst 36.6) and takes this lane's ~2 min cadence whenever a
+      wholesale rebuild is not in flight — which it is ~26 % of the time, and a patch
+      inside that window is silently superseded.
 - [ ] **W7 — the text lane on the realtime worker.** No flag, no new setting: governed by
       the contract's producer=text cells. Model bake-off in ONE run (gpt-5.6-luna vs OSS on
       RunPod); a field is written only after a labelled panel passes ≥ 95% (R7); the lane

@@ -21,12 +21,14 @@ import uuid
 from collections.abc import Callable, Collection, Iterable, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any, Literal, Protocol, TypeVar
 
 import psycopg
 from psycopg.types.json import Jsonb, set_json_dumps
 
 from scraper import media
+from scraper.attribute_contract import CONTRACT
 from scraper.scraped_listing import ScrapedListing
 from toolkit.broker_sources import BROKER_FINGERPRINT_KEYS, BROKER_SOURCE_NAMES
 
@@ -149,6 +151,47 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
 # incident). Clearing a known-bad URL is a deliberate act, never the ingest path's.
 _PRESERVE_IF_NULL_COLUMNS = frozenset({"published_at", "source_url"})
 
+# R4: the same preserve-if-null shape, decided per (source, column) by the ATTRIBUTE
+# CONTRACT instead of by a hand-kept list. A `structured` or `derived` cell IS the parse's
+# verdict — the portal stopped stating the fact, or the URL/breadcrumb stopped yielding it
+# — so its NULL still clears, and a portal that drops a fact can still drop it. A `text`
+# or `none` cell is the opposite: the prose grammar only speaks when the prose does, and
+# nothing in the parse ever looks at a `none` cell, so the NULL those two produce is
+# SILENCE, not a correction. Writing it anyway is what erased 12-14% of every cell the
+# description-enrichment lane filled (2,949 of 24,621 `condition` fills; 100% of them on
+# rows refetched after the fill, 0 in the complement) — permanently, because an
+# unchanged-hash refetch mints no snapshot for the lane's selector to re-attempt.
+# Residual, accepted and with NO automated remedy today: the ingest grammar can no longer
+# CLEAR a text cell it stops matching, the same trade already accepted for published_at /
+# source_url. `scripts/reparse.py` (R9) can CORRECT such a cell but never blanks one by
+# design, so removing a stale preserved value is a deliberate hand-written UPDATE until
+# something is built for it.
+_PARSE_SILENT_PRODUCERS = frozenset({"text", "none"})
+
+# `area_basis` is `derived` on every portal and would therefore clear — but it is not an
+# independent verdict: `scraper.area.derive_headline_area` stamps it on whichever measure
+# it just picked for `area_m2` and returns (None, None) together. Letting the two decouple
+# would leave a preserved bazos area with its basis blanked, i.e. a stored parcel figure
+# (14,901 active rows read 'plot') silently re-reading as usable area to price-per-m2,
+# best_area and the plot guards. So the pair moves together: basis follows the number.
+_AREA_BASIS_FOLLOWS = ("area_m2", "area_basis")
+
+
+@lru_cache(maxsize=None)
+def _preserved_columns(source: str) -> frozenset[str]:
+    """Columns a NULL from `source`'s parse must not clear.
+
+    A source with no contract row keeps only the two identity preserves — the pre-R4
+    behaviour; the rail that keeps the nine portals in the contract is
+    `tests/scraper/test_attribute_contract.py`, which pins the contract's keys to
+    `scraper.portal._DEFAULTS` (the per-portal config fleet, rule 21)."""
+    preserved = _PRESERVE_IF_NULL_COLUMNS | frozenset(
+        column for column, declared in CONTRACT.get(source, {}).items()
+        if declared.producer in _PARSE_SILENT_PRODUCERS
+    )
+    number, basis = _AREA_BASIS_FOLLOWS
+    return preserved | {basis} if number in preserved else preserved
+
 
 def detail_ref(source: str, source_url: str | None) -> str | None:
     """The URL a detail fetch may use, or None to fetch by native id.
@@ -162,11 +205,13 @@ def detail_ref(source: str, source_url: str | None) -> str | None:
     """
     return None if source == "sreality" else source_url
 
-def _listing_update_set_sql() -> str:
+@lru_cache(maxsize=None)
+def _listing_update_set_sql(source: str) -> str:
     """The ONE ON CONFLICT SET builder shared by upsert_listing and the batched drain
     upsert, so preserve-if-null semantics can never drift between the two write paths."""
+    preserved = _preserved_columns(source)
     return ",\n          ".join(
-        (f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in _PRESERVE_IF_NULL_COLUMNS
+        (f"{c} = COALESCE(EXCLUDED.{c}, listings.{c})" if c in preserved
          else f"{c} = EXCLUDED.{c}")
         for c in LISTING_COLUMNS
     )
@@ -492,24 +537,16 @@ def stamp_derived_artifact(
         cur.execute(_STAMP_DERIVED_ARTIFACT_SQL, (name, rows, duration_ms))
 
 
-def upsert_listing(
-    conn: psycopg.Connection,
-    row: dict[str, Any],
-    raw_json: dict[str, Any],
-    content_hash: str,
-) -> UpsertResult:
-    """Upsert listings, append snapshot if content_hash differs from last.
-
-    Returns 'new' for first insert, 'updated' if a snapshot was appended,
-    'unchanged' if the listing already exists with this content_hash.
-    """
-    sreality_id = row["sreality_id"]
-    raw_jsonb = Jsonb(raw_json)
+@lru_cache(maxsize=None)
+def _upsert_listing_sql(source: str) -> str:
+    """The per-item upsert statement. ONE fixed text per source (the contract decides
+    which columns preserve, so the nine portals get nine statements), built once per
+    source instead of once per listing on the eight portals that write one at a time."""
     column_list = ", ".join(LISTING_COLUMNS)
     placeholders = ", ".join(f"%({c})s" for c in LISTING_COLUMNS)
-    update_set = _listing_update_set_sql()
+    update_set = _listing_update_set_sql(source)
 
-    upsert_sql = f"""
+    return f"""
         INSERT INTO listings (
             sreality_id, last_seen_at, is_active,
             {column_list},
@@ -562,13 +599,30 @@ def upsert_listing(
         RETURNING xmax = 0 AS inserted, id
     """
 
+
+def upsert_listing(
+    conn: psycopg.Connection,
+    row: dict[str, Any],
+    raw_json: dict[str, Any],
+    content_hash: str,
+) -> UpsertResult:
+    """Upsert listings, append snapshot if content_hash differs from last.
+
+    Returns 'new' for first insert, 'updated' if a snapshot was appended,
+    'unchanged' if the listing already exists with this content_hash.
+    """
+    sreality_id = row["sreality_id"]
+    raw_jsonb = Jsonb(raw_json)
+    source = row.get("source") or "sreality"
+    upsert_sql = _upsert_listing_sql(source)
+
     params: dict[str, Any] = {
         "sreality_id": sreality_id,
         "raw_json": raw_jsonb,
         # The natural-key pair, stamped inline (see the INSERT comment). sreality's
         # native id IS its sreality_id; non-sreality callers (ingest) put their
         # source + portal id in the row so the pair is written atomically.
-        "source": row.get("source") or "sreality",
+        "source": source,
         "source_id_native": row.get("source_id_native") or str(sreality_id),
         # The queue-assigned discovery-order value (migration 368), threaded in by
         # ingest_scraped_listing / the sreality batch path; None for callers outside
@@ -2952,8 +3006,11 @@ _BATCH_RECORD_SPEC = ", ".join(
 )
 _BATCH_SELECT_COLS = ", ".join(f"j.{c}" for c in LISTING_COLUMNS)
 # One shared builder with upsert_listing — preserve-if-null (see
-# _PRESERVE_IF_NULL_COLUMNS) applies identically to both write paths.
-_BATCH_UPDATE_SET = _listing_update_set_sql()
+# _PRESERVE_IF_NULL_COLUMNS and the contract-driven _preserved_columns) applies
+# identically to both write paths. This one is sreality's because the batched drain is
+# sreality-only; the assertion in tests/scraper/test_listing_write_preserve.py renders
+# both paths for all nine portals and compares them.
+_BATCH_UPDATE_SET = _listing_update_set_sql("sreality")
 
 _BATCH_UPSERT_SQL = f"""
     INSERT INTO listings (

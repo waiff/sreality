@@ -79,7 +79,26 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   The LLM never overwrites a regex value unless a labelled panel proves it better for that cell.
 - **R4 — The wipe is closed inside the one shared SET builder** (`_listing_update_set_sql`), driven by the contract:
   a parser NULL preserves the stored value for `text` cells of that source; `structured` cells still clear normally.
-  Zero extra statements on the ingest path.
+  Zero extra statements on the ingest path. *(W6 correction: the preserving set was short by one producer, and
+  `derived` needed naming. The split is whether the PARSE has an opinion. `structured` and `derived` cells are its
+  verdict — the portal stopped stating the key, the breadcrumb stopped yielding it — so both still clear. `text` and
+  `none` are silence: the ingest grammar speaks only when the prose does, and nothing in the parse ever looks at a
+  `none` cell. `none` is not optional here — the measured wipe this ruling exists to close, 2,949 of 24,621
+  `condition` fills, is on bazos, where the contract declares `condition` producer `none`, not `text`; a text-only
+  rule would have left it growing. Evidence the contract is right about `none`: over active rows, every `none` cell
+  on the eight structured portals is 0-filled (bezrealitky 2, mmreality 3, ceskereality 11, idnes 1, maxima 6,
+  realitymix 6, remax 5 cells, all zero), so the rule is a no-op for the parsers and protects only post-publication
+  producers. `area_basis` is the ONE cell that does not follow its own producer: it is `derived` everywhere, but
+  `scraper.area.derive_headline_area` stamps it on the number it just picked and returns `(None, None)` with it, so
+  it follows `area_m2`'s decision — otherwise a preserved bazos parcel figure (14,901 active rows read `'plot'`)
+  would keep its number and lose the marker that stops it reading as a usable area. Residual, accepted: the ingest
+  grammar can no longer CLEAR a `text` cell it stops matching (bazos `area_m2` 42,364, `disposition` 18,843, `floor`
+  14,562, `total_floors` 1,158 active rows) — the same trade already accepted for `published_at` / `source_url` —
+  and it has **no automated remedy today**: `scripts/reparse.py` (R9) re-derives and CORRECTS such a cell but never
+  blanks one by design, so removing a stale preserved value is a hand-written UPDATE until something is built for it.
+  The finer rule the brief asked about (freeze W7's fill, still let a bazos regex clear its own cell) needs per-row
+  provenance, which R3 forbids; and adding it as a contract axis would re-open exactly this wipe, because R3 has the
+  text lane fill only NULLs — a cleared regex cell IS where W7 writes, and the next refetch would wipe that fill.)*
 - **R5 — The canon stays in `toolkit/filter_registry.py`.** `scraper/vocabulary.py` holds only the producer side:
   diacritic fold, ONE `(field, portal_label) → canonical` registry, ONE disposition grammar, ONE boolean helper.
   An unmapped label is NULL + a counted event, never a passthrough enum. LLM tool schemas and the DB-resident prompts
@@ -160,7 +179,7 @@ recovery row and is marked seen by hand — `notification_dispatches` is append-
 | **W3** | The one re-parse seam — SHIPPED | 2,887 LOC across 11 deleted files (**4** backfill scripts, **4** workflows, **3** tests; two of the six named candidates survive on evidence — see R9) | 1,383 in the four new files; the branch's own total is +1,663 / −3,358 incl. the regenerated workflow-docs asset | W1 |
 | **W4** | Close every structured gap the census proves; one `has_balcony` / `has_parking` definition; heal via seam | 3 + 4 rival definitions; dead reads | contract cells | W2, W3 |
 | **W5** | Apply vocabulary collapses to stored rows, one counted batch each | spelling variants; `price_unit` 4 → 2 | missing canonical members | W2, W3 |
-| **W6** | Close the wipe (R4); property rollup stops letting an inferred `true` beat a stated `false`; fills reach Browse in minutes | the `bool_or` special case | ~15 | W1 |
+| **W6 — SHIPPED** | Close the wipe (R4); property rollup stops letting a lower-trust `true` beat a higher-trust `false`; fills reach Browse in minutes | the `bool_or` special case; the per-listing re-render of the upsert statement | 114 / −38 across three files (most of it the WHY comments) + 156 test lines | W1 |
 | **W7** | The text lane on the realtime worker; bake-off; per-field gates | duplicate tool enums; the old cache key | ~170 | W0, W2, W3, W6 |
 | **W8** | Floor: ground = 0 everywhere — six portals re-derived; the SPA names the convention | 5 floor regexes, 4 inline FE expressions | ~60 | W2, W3, R12 hand-over |
 | **W9** | Patchwork sweep (non-autodedup), one small PR each | stale docs, a dead rung or a dead path | — | — |
@@ -308,10 +327,34 @@ subscriptions come back.
 `count(distinct price_unit)` = 2; building_type `jina` ≈ 8,203 retained; per-value Browse membership delta published
 before each batch; impossible dispositions (0+1, 8+7…) refused and counted, never silent.
 
-**W6.** The preserved-cell rule is contract-driven (unit-tested per source); a synthetic re-fetch with parser NULL
-leaves a text cell intact and clears a structured one. After one refetch cycle the wiped-cell count stops growing
-(today 2,949 on `condition`). Property rollup: a stated `false` beats an inferred `true`. Seen-to-Browse p50 measured
-before/after the `run_incremental_pass → sync_browse_list` change.
+**W6 — met offline; two gates are post-merge by nature.** The preserved-cell rule is contract-driven and rendered per
+source in `tests/scraper/test_listing_write_preserve.py`: for all nine portals every `text`/`none` cell is
+`COALESCE(EXCLUDED.c, listings.c)` and every `structured`/`derived` cell is `= EXCLUDED.c`, `published_at` /
+`source_url` unchanged, `description` (not a contract cell) still clears. Both write paths are proven to carry the
+identical fragment — the per-item statement for each portal and, for sreality, `_BATCH_UPSERT_SQL` too. Two further
+rails: a fifth producer cannot silently fall through to "clears"; `area_m2` and `area_basis` render the SAME clause on
+every source; and a source outside the contract keeps the pre-R4 rule — which is now more than a fallback nobody
+checks, because the contract's portal keys are pinned to `scraper.portal._DEFAULTS`, the per-portal config fleet.
+**Property rollup:** the `bool_or` special case is deleted; the six amenity booleans take the same trust-ordered
+best-non-null as every scalar (ended on `id` so the pick is total — `bool_or` was order-independent and this is not).
+Its stated reason (recover a fact from the sibling that parsed it) survives — that rule
+skips NULLs too — so the two differ only on a true-vs-false disagreement. Measured over the 23,641 active multi-child
+properties: has_parking 1,384 flips, cellar 486, has_balcony 212, garage 162, terrace 140, has_lift 64, all
+one-directional true→false. The recompute writes the whole table, not only the Browse-visible part, so the **blast
+radius over all 74,090 multi-child properties** is has_parking 4,095, cellar 1,388, has_balcony 682, terrace 410,
+has_lift 406, garage 357 — same direction; the surplus is delisted properties Browse hides and comparables never
+reads (it filters `listings`, not `properties`). **Honest reading of those flips:** only a minority are the "inferred `true`" this ruling
+names — 1,027 of the 1,384 parking flips are an idnes-STATED true losing to a sreality-STATED false, which is the
+declared `source_trust` policy rather than a provenance fix. The provenance fix is the same change seen forward: when
+W7's lane fills bazos booleans at 50k-row scale, presence-wins would hand every one of them a veto over sreality's
+stated false. **Seen-to-Browse baseline (2026-09-21, 94 succeeded rebuilds in 24 h):** mean 11.7 min from
+properties-row-ready to visible in `browse_list`, best case 2.3, worst 36.6, p90-of-worst 22.0, rebuild duration
+4.1 min average. The patch is a fast path, not a guarantee, so the expected shape is **bimodal, not a flat ~2 min**:
+a rebuild snapshots `browse_projection` at its start and renames the new table in at its end, so a patch that commits
+inside that window is superseded without erroring — over 72 h, 283 succeeded rebuilds, mean 237 s / p50 200 / p90 358
+/ max 1,295 against a 900 s cadence, i.e. **in flight ~26 % of wall-clock**. Post-merge: the same seen-to-Browse
+measure, expected ≈ 3 in 4 changes on the maintenance lane's cadence and the rest unchanged; and the wiped-cell
+count on `condition` (today 2,949) stops growing after one refetch cycle.
 
 **W7.** `OPENAI_API_KEY` (and the RunPod route) verified on the worker before merge — no lane on that worker has ever
 made an LLM call. Lane visible in `worker_heartbeats`. Bake-off: all candidates on the same labelled panel in ONE run;
