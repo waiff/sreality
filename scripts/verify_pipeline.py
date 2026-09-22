@@ -352,14 +352,20 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # portals against +0.20 ceskereality / +0.10 bazos, the two that were already
     # canonical), so the tiers sit between the two populations. The measure has a real
     # noise floor — a sibling pair is a price/area/disposition match, not a proven
-    # duplicate — and it is NOT the same size on every portal: ceskereality never states
-    # the ground storey at all (0 of its 34,350 rows with a floor are 0), so its sample
-    # is conditioned on floor >= 1 and it sits at +0.20 while bazos sits at +0.10. warn
-    # at 0.35 clears the noisier of the two canonical portals by 0.15 and still leaves
-    # 0.47 of daylight below the nearest real offender; 0.25 left ceskereality 0.05 from
-    # an amber it could reach in an ordinary week. fail at 0.5 is half a storey —
-    # unreachable by noise, reachable only by a portal on the other scale. min_pairs 40
-    # lets maxima score on its ~49 pairs and still refuses a mean of one or two adverts.
+    # duplicate — and it is NOT the same size on every portal: ceskereality reads +0.20
+    # against bazos's +0.10. That gap is NOT sample conditioning, though the portal does
+    # never state the ground storey (0 of its 34,350 floored rows read 0): restricting
+    # the idnes side to floor >= 1 too moves it only +0.199 -> +0.167 (n=7,166 of 7,394,
+    # measured 2026-09-22). What is left is a real sub-population — 925 of its pairs sit
+    # at exactly +1 against 92 below 0, a 10:1 asymmetry bazos does not have (565:264) —
+    # i.e. ceskereality carries an UNEXPLAINED one-storey defect on ~12 % of its pairs,
+    # tracked as an open finding in the W8 hand-over §6. warn is 0.35 to hold that portal
+    # amber-free while it is investigated, not because its reading is certified: simulated
+    # on the live corpus the six converted portals land -0.16..+0.06, well inside 0.25, so
+    # the wider tier protects exactly one portal and that portal is the open question.
+    # fail at 0.5 is half a storey — unreachable by noise, reachable only by a portal on
+    # the other scale. min_pairs 40 lets maxima score on its ~49 pairs and still refuses
+    # a mean of one or two adverts.
     "floor_convention_delta_warn": 0.35,
     "floor_convention_delta_fail": 0.50,
     "floor_convention_min_pairs": 40,
@@ -393,9 +399,10 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 # deliberate headroom for process start, the threshold read and alert emission.
 _LANE_BUDGET_S = 120.0
 # No single check may hold the lane for more than this. The slowest today is
-# floor_convention's cross-portal self-join at 27-35s measured (the shared
-# measure_plausibility read is ~12s), so 45s is barely 1.3x over the known worst case —
-# a new check above ~20s starves the tail and needs its query reworked, not a wider budget.
+# floor_convention's cross-portal self-join, 11-35s over four measured runs (the shared
+# measure_plausibility read is ~12s), so at its worst 45s is only 1.3x the known worst
+# case — a new check above ~20s starves the tail and needs its query reworked, not a
+# wider budget.
 _CHECK_BUDGET_S = 45.0
 # Process start, threshold read and alert emission, reserved out of every job's timeout.
 _JOB_HEADROOM_S = 180.0
@@ -2093,11 +2100,12 @@ select source,
 # side holds ONE storey for it (min = max), so a repeated price/area/disposition triple
 # cannot smear the difference.
 #
-# Measured on the live cluster 2026-09-22 over 34,801 pairs: 27.0 s and 35.1 s on two
-# EXPLAIN (ANALYZE) runs minutes apart. It is by some way the MOST EXPENSIVE check in the
-# lane — the plan is a BitmapAnd feeding a Bitmap Heap Scan that spills (52k exact +
-# 51k lossy heap blocks, ~103k buffers, almost all of them `read`, so it never stays
-# cached between runs) — which is why it is registered LAST among the DB checks and runs
+# Measured on the live cluster over ~34.7k pairs: 27.0 / 35.1 / 11.0 / 16.1 s on four
+# EXPLAIN (ANALYZE) runs across two days. It is the MOST EXPENSIVE check in the lane and
+# by far the most VARIABLE — the plan is a BitmapAnd feeding a Bitmap Heap Scan that
+# spills (57k exact + 51k lossy heap blocks, ~116k buffers, ~85 % of them `read` even on
+# a warm cluster, so it never stays cached and its cost tracks whatever else is reading
+# `listings`) — which is why it is registered LAST among the DB checks and runs
 # under the same server-side `statement_timeout` as every other check: on a bad day it is
 # cancelled and reports `warn / timed out`, which says UNKNOWN, never a false green.
 _FLOOR_CONVENTION_SQL = """
@@ -3288,7 +3296,7 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # the cheap ones rather than spending their budget. 6h lane + in-app bell; not in
     # llm_health.yml's hourly --only list (ship, soak, promote — the ppm2 ladder).
     ("field_fill_matrix", check_field_fill_matrix),
-    # The last DB check, and the most expensive one in the lane (27-35 s measured): a
+    # The last DB check, and the most expensive one in the lane (11-35 s measured): a
     # cross-portal self-join over every active byt row. It asks the question no fill or
     # validity measure can — whether a populated, plausible integer is on the RIGHT SCALE.
     # 6h lane + in-app bell; not in llm_health.yml's hourly --only list (ship, soak,

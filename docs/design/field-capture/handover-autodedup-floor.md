@@ -31,9 +31,12 @@ Proof, re-measured live 2026-09-22 — mean(portal floor − idnes floor) over u
 | ceskereality | 7,453 | +0.201 | 927 | 6,382 | **already ground = 0 — NOT converted** |
 | bazos | 2,586 | +0.098 | 561 | 1,698 | already ground = 0 — NOT converted |
 
-The residual on the two canonical portals (+0.20 / +0.10) is the measure's own noise floor: a
-price/area/disposition match is a strong sibling signal, not a proven duplicate. Expect the six to land
-in the same band after the heal, not at exactly 0.
+Part of the residual on the two canonical portals is the measure's own noise floor — a
+price/area/disposition match is a strong sibling signal, not a proven duplicate — so expect the six to land
+in that band after the heal, not at exactly 0. **bazos's +0.10 is that noise floor; ceskereality's +0.20 is
+not all noise**, and §6 records the part that is a defect. Simulating the conversion on the live corpus
+(`floor − 1 where floor ≥ 1` on the six) lands sreality −0.019, realitymix −0.031, mmreality −0.006,
+remax +0.059, bezrealitky −0.129, maxima −0.160.
 
 ## 2. The exact conversion predicate
 
@@ -56,9 +59,13 @@ floor := floor_from_portal("ground1", <the portal's declared floor key>)
 * **Idempotent by construction.** The heal reads the payload, not the column, so a row the drain
   already rewrote between the parser deploy and the heal is re-derived to the same value rather than
   decremented twice. `scripts/reparse.py` additionally compare-and-sets every column it writes.
-* **Out-of-band values are NOT touched** (`floor > 40`: sreality 45, realitymix 26, ceskereality 11,
-  remax 3, bezrealitky 1; `floor < -3`: sreality 4, realitymix 2). Correcting them is a separate
-  finding, listed in §6.
+* **Out-of-band values are decremented like any other value ≥ 1** (`floor > 40`: sreality 45,
+  realitymix 26, ceskereality 11, remax 3, bezrealitky 1; `floor < -3`: sreality 4, realitymix 2 — the
+  negatives, like every negative, stay). The converter has no bounds check, so a stored 3,127 becomes
+  3,126: do not treat these as a fixed reference set across the heal. BLANKING them is what is out of
+  scope, and it is the separate finding listed in §6. The one exception is a value that states an
+  out-of-band storey in WORDS ("45. patro"): the grammar refuses it and the converter returns NULL
+  rather than falling through to the key's convention, which would read it on the opposite scale.
 
 ## 3. Rows that move, and the before/after distribution
 
@@ -95,7 +102,9 @@ the 0 bin absorbs today's 1 bin, and the negative tail is unchanged):
 | maxima **before** | 2 | 2 | 32 | 56 | 43 | 36 | 35 | 38 |
 | maxima **after** | 2 | 34 | 56 | 43 | 36 | 35 | 18 | 20 |
 
-**ceskereality, idnes and bazos are byte-identical after the wave** — the characterisation goldens
+**ceskereality and idnes are byte-identical after the wave; bazos is NOT** — its free-text miner changed in
+two ways that are not a floor conversion and are not healed (§4, and the rows table above counts 0 movers for
+it because no `floor` value is rescaled). The characterisation goldens
 (`tests/fixtures/field_capture/golden/`) moved on exactly six probes, all of them `floor` cells of
 converted portals (sreality 1, realitymix 4, mmreality 1), and not one `total_floors` cell anywhere.
 
@@ -107,9 +116,21 @@ the INVARIANT relating the two: under ground = 0 the top storey is `total_floors
 `total_floors`. `scraper.floor.is_plausible_floor` was tightened to match in this PR (it had been
 enforcing the ground = 1 relation inside a module declaring ground = 0).
 
-One related correction, bazos only: the free-text miner's two **patra-worded** total cues
-("z celkových 10 pater", "6patrový") count storeys ABOVE the ground one and are now read as `n + 1`
-podlaží. Blast radius measured: 28 of 1,158 active bazos rows with a `total_floors` carry such a cue.
+Two related corrections, bazos only — the free-text miner, not a conversion, and **not healed**:
+
+1. The two **patra-worded** total cues ("z celkových 10 pater", "6patrový") count storeys ABOVE the ground
+   one and are now read as `n + 1` podlaží. 28 of 1,158 active bazos rows with a `total_floors` carry such
+   a cue.
+2. The tightened `is_plausible_floor` drops a mined floor EQUAL to the stated total (under ground = 0 the
+   top storey is total − 1), so `floor_from_text("Podlaží: 6. patro / Podlaží celkem: 6")` now returns
+   `(None, 6)` where it returned `(6, 6)`. 23 active bazos rows currently hold `floor >= total_floors`.
+
+Both take effect **per row at its next detail fetch**, not at merge: an active bazos row is re-mined and
+changes (which also re-hashes it and appends one `listing_snapshots` row), while the 26,053 inactive bazos
+rows keep the old reading permanently. `total_floors` on bazos is therefore a two-reading column for as long
+as that tail survives. We did NOT add a bazos pass to the runbook (§7): re-deriving `floor` on bazos would be
+correct too, but bazos floors are MINED from prose rather than read from a key, so a mass re-mine is a
+different risk profile from a key re-read and it belongs to whoever owns the text lane, not to W8.
 
 ## 5. What this does to your features, and what we did not touch
 
@@ -155,6 +176,23 @@ Everything below is **yours to re-measure**. We list the mechanism, not a prescr
 
 ## 6. Reported, not fixed (yours or ours, but not this wave's)
 
+* **ceskereality carries an unexplained one-storey sub-population.** Its +0.199 mean against idnes is NOT
+  mostly sample conditioning: restricting the idnes side to `floor >= 1` as well (removing the effect of
+  ceskereality never writing a 0) moves it only to +0.167 (n = 7,166 of 7,394). What remains is 925 pairs at
+  exactly +1 against 92 below 0 — a 10:1 asymmetry bazos does not have (565:264) — so roughly 12 % of its
+  pairs look a storey high. 226 of its pairs sit against an idnes floor of 0, and ceskereality writes a
+  non-zero for every one of them. **Do not read "already ground = 0 — NOT converted" as "certified".** The
+  portal must not be bulk-converted (that would break the ~85 % that are right), so this needs a per-row
+  cause, not a scale flip. W8 leaves it open and the gate's warn tier (0.35) is set to keep it amber-free
+  until it is understood, not because it is clean.
+* **mmreality's 108 rows at `floor = 0` are unverified.** Its cell declares `ground1`, under which 0 has no
+  legal meaning, and the converter passes 0 through untouched — so after W8 they assert "přízemí". Their
+  stored payload literally carries `"floor": "0"` with `total_floors` NULL, which is consistent with either
+  a genuine ground-storey cell or a not-specified sentinel like bezrealitky's. The only live evidence is 9
+  sibling pairs, on which the idnes side reads mean **0.89 storeys higher** — i.e. those flats look like
+  1st-floor flats, not ground-floor ones. sreality's own floor = 0 rows pair at only 0.33 higher (n = 46),
+  which does support the "zvýšené přízemí" reading there. 9 pairs decides nothing, so these 108 rows are
+  excluded from the "rows that stay put" claim being called verified.
 * **mmreality's `total_floors` is `overgroundFloors + undergroundFloors`**
   (`scraper/mmreality_parser.py:485-490`), so it is not a storey count and
   `total_floors_equal` is comparing a different quantity on that portal.
@@ -203,5 +241,7 @@ idempotence, and the offline half is
   34,350 correct rows.
 * **The gate.** `scripts/verify_pipeline.py` → `floor_convention` (new in this PR). It reads RED until
   every one of the six passes has run; after them each portal must sit within ±0.35 of 0, with fail at
-  ±0.50 (the warn tier is 0.35, not 0.25, because ceskereality's sample is conditioned on `floor >= 1`
-  — it never states the ground storey — and reads +0.20 while correct). Run it before and after, and once more after a full drain cycle.
+  ±0.50. The warn tier is 0.35 rather than the planned 0.25 to hold ceskereality's +0.20 amber-free while
+  the §6 finding behind it is investigated — NOT because that reading is certified. Every converted portal
+  lands inside 0.25 in simulation (§1), so 0.35 is protecting exactly one portal. Run the check before and
+  after, and once more after a full drain cycle.

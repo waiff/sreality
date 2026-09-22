@@ -105,11 +105,12 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       and its health check share ONE eligibility function (R8).
 - [x] **W8 — floor: ground = 0 everywhere.** The convention is contract DATA
       (`ground0` | `ground1` | `word` per portal) and `scraper.floor.floor_from_portal`
-      refuses a bare int without one; five per-parser floor readers and their regexes are
-      gone, `is_plausible_floor` tightened to `total_floors - 1`, and one `fmtFloor`
-      replaces four inline SPA expressions so the screen says "2. patro z 5 podlaží"
+      refuses a bare int without one; three per-parser floor readers, maxima's
+      int-returning split and five per-parser regexes are gone, `is_plausible_floor`
+      tightened to `total_floors - 1`, and one `fmtFloor` replaces six inline SPA
+      expressions so the screen says "2. patro z 5 podlaží"
       instead of a bare number. New `floor_convention` check in verify_pipeline (the
-      sibling-pair mean vs idnes; 27-35 s measured, the lane's costliest) — there was
+      sibling-pair mean vs idnes; 11-35 s measured, the lane's costliest) — there was
       no floor check of any kind.
       The R12 hand-over shipped first: `docs/design/field-capture/handover-autodedup-floor.md`.
       **The 183,745-row heal (63,328 active) is the operator's to run** — six

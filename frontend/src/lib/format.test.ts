@@ -167,6 +167,13 @@ describe('fmtFloor', () => {
     expect(fmtFloor(0, 4)).toBe('přízemí z 4 podlaží');
   });
 
+  it('keeps the magnitude below ground so two basements never read as one', () => {
+    /* AttrDiffTable diffs the RENDERED strings, so 'suterén' for both −1 and −2 hid a
+       distinguishing fact on the surface whose whole job is same-or-different. */
+    expect(fmtFloor(-2)).toBe('2. podzemní podlaží');
+    expect(fmtFloor(-3, 6)).toBe('3. podzemní podlaží z 6 podlaží');
+  });
+
   it('returns null for an absent storey so each surface renders its own gap', () => {
     expect(fmtFloor(null, 5)).toBeNull();
     expect(fmtFloor(undefined)).toBeNull();

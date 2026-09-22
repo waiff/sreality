@@ -68,7 +68,9 @@ _PP_RE = re.compile(r"(\d{1,2})\.\s*(?:pp|podzemni\w*\s+podlazi)\b")
 # at its 'v', and the genitive-plural building total 'pater' (pat+er) lacks the
 # 'patr' stem entirely. The sign is captured: idnes spells a basement '-1. patro'.
 _PATRO_NOUN = r"(?:patr[oau]|patre|patrem)\b"
-_PATRO_RE = re.compile(rf"(-?\d{{1,2}})\.\s*{_PATRO_NOUN}")
+# The sign may not be the hyphen of a storey RANGE: in "1.-2. patro" (a maisonette)
+# the '-' separates two ordinals, so a bare `-?` read it as -2 = suterén.
+_PATRO_RE = re.compile(rf"(?<![\d.])(-?\d{{1,2}})\.\s*{_PATRO_NOUN}")
 # přízemí (ground) -> 0; 'zvýšené/snížené přízemí' is still the ground storey.
 _PRIZEMI_RE = re.compile(r"prizem")
 # suterén (basement) -> -1. NOT 'sklep' (a cellar the flat HAS, not the storey it
@@ -76,6 +78,11 @@ _PRIZEMI_RE = re.compile(r"prizem")
 _SUTEREN_RE = re.compile(r"suteren")
 # The number a bare-int cell carries, sign included: ceskereality writes "2.".
 _BARE_INT_RE = re.compile(r"-?\d+")
+# Any storey WORD at all. A value carrying one has already spoken for itself, so when
+# the grammar reads it and refuses it (out of band) the key's convention must not get a
+# second go at the bare number — "45. patro" is not 44 under any reading.
+_WORD_CUE_RE = re.compile(
+    rf"prizem|suteren|\d{{1,2}}\.\s*(?:np|pp|nadzemni|podzemni|{_PATRO_NOUN})")
 
 
 def _bounded(value: int) -> int | None:
@@ -150,6 +157,8 @@ def floor_from_portal(convention: FloorConvention | None, value: Any) -> int | N
         spelled = normalize_floor(text)
         if spelled is not None:
             return spelled
+        if _WORD_CUE_RE.search(_fold(text)):
+            return None
     if convention == "word":
         return None
     if value is None or isinstance(value, bool):
@@ -185,7 +194,9 @@ _TOTAL_CUES: tuple[tuple[re.Pattern[str], int], ...] = (
 # 'Podlaží: 7' with no NP/patro keyword yields None (the integer's convention is
 # unknowable from the label alone) and is left to the text lane. 'Podlaží celkem:' has a
 # word between 'podlazi' and the colon, so it never matches this floor label.
-_FLOOR_LABEL_RE = re.compile(r"\bpodlazi\s*[:\-]\s*([^\n]{1,30})")
+# The capture stops at a comma/semicolon: it routinely runs past the value into the next
+# clause, and a 'přízemí' three words later would otherwise beat the label's own '3. NP'.
+_FLOOR_LABEL_RE = re.compile(r"\bpodlazi\s*[:\-]\s*([^\n,;]{1,30})")
 # A numeric unit-floor expression, optionally bound by a leading preposition.
 _FLOOR_EXPR = rf"\d{{1,2}}\.\s*(?:np|nadzemni\w*\s+podlazi|pp|podzemni\w*\s+podlazi|{_PATRO_NOUN})"
 _FLOOR_PREP_RE = re.compile(rf"\b(?:v|ve|na)\s+({_FLOOR_EXPR})")

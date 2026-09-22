@@ -162,3 +162,28 @@ def test_every_portal_declares_its_floor_convention():
     assert {floor_convention(p) for p in
             ("sreality", "realitymix", "mmreality", "remax", "bezrealitky", "maxima")
             } == {"ground1"}
+
+
+def test_a_storey_range_is_not_a_basement():
+    # The hyphen between two ordinals is a separator, not a sign: "1.-2. patro" is a
+    # maisonette on the 1st and 2nd storeys, and a bare `-?` read it as suterén-2.
+    assert normalize_floor("1.-2. patro") == 2
+    assert normalize_floor("2-3. patře") == 3
+    assert floor_from_text("Podlaží: 1.-2. patro") == (2, None)
+    # The one value that really does carry a sign still reads it (idnes).
+    assert normalize_floor("-1. patro") == -1
+
+
+def test_an_out_of_band_word_is_refused_not_re_read_as_a_bare_int():
+    # "45. patro" is out of the plausibility band. Falling through to the key's
+    # convention would decrement it to 44 — the OPPOSITE scale, on the one value that
+    # already stated its own.
+    assert floor_from_portal("ground1", "45. patro") is None
+    assert floor_from_portal("ground1", "-9. patro") is None
+
+
+def test_the_label_arm_reads_its_own_value_not_the_next_clause():
+    # The spec-label capture runs past the value into the neighbouring text; a
+    # 'přízemí' in that tail must not beat the label's own explicit storey.
+    assert floor_from_text("Podlaží: 3. NP, přízemí s garáží") == (2, None)
+    assert floor_from_text("Podlaží: přízemí, výtah") == (0, None)

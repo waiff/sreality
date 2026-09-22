@@ -135,7 +135,8 @@ happened to cover. Measured on the shipped code before this was fixed — mmreal
 from a balanced mix to 73 % commercial rentals in two days, moving `cellar` 40.2 % → 8.2 % and
 `disposition` 41.4 % → 6.3 % with no parser touched, twice over the fail tier. So the matrix is one
 aggregate pass over every `is_active` row: measured 12.2 s for all nine portals, inside the 45 s
-per-check budget, and registered second-to-last in `_CHECKS` so the lane's cheap checks are never
+per-check budget, and registered third-to-last in `_CHECKS` (`floor_convention` displaced it) so the
+cheap checks are never
 the ones that go unrun. It never expands a row into (field, value) pairs — that form costs 32 s
 over the stock; per-value counts come from `count(*) filter (where col = '<canonical value>')`
 interpolated from `toolkit/filter_registry.COLUMN_CANONICAL_VALUES`, keyed by COLUMN — which is also
@@ -181,6 +182,46 @@ golden. A stale census is the known blind spot (a portal renames a key and every
 census still agrees with itself), so staleness > 30 d is this check's last arm, a WARN. It is
 deliberately NOT a pytest: a test keyed on the calendar reds `main` on a date, on a branch that
 touched nothing.
+
+## `floor_convention` — is a plausible integer on the RIGHT SCALE? (field capture W8)
+
+The check no fill or validity measure can stand in for. `listings.floor` was a ~50/50 mix of two Czech
+conventions until W8 — ground = 0 on idnes, bazos and ceskereality, ground = 1 on the other six — and
+nothing in the repo could see it, because a storey one too high is perfectly typed, perfectly non-NULL
+and perfectly plausible. There was **no floor check of any kind** before this one.
+
+**The measure needs no labels and no LLM.** Two active `byt` adverts agreeing on price, area AND
+disposition are the same flat often enough that the MEAN of their floor difference is a clean
+convention signal; the check reports `mean(portal floor − idnes floor)` per portal. idnes is the
+reference because its parser has always read the Czech word ("2. patro (3. NP)"). A key counts only
+where its side holds ONE storey for it (`min(floor) = max(floor)`), so a repeated
+price/area/disposition triple cannot smear the difference.
+
+**Tiers: warn 0.35, fail 0.50, min 40 pairs.** Fail at half a storey is unreachable by noise and
+reachable only by a portal on the other scale. The measure has a real noise floor — a sibling match is
+not a proven duplicate — sized live at +0.10 on bazos. warn is 0.35 rather than 0.25 for ONE portal:
+ceskereality reads +0.20 and only ~0.03 of that is sample conditioning (restricting the idnes side to
+`floor >= 1` moves it +0.199 → +0.167); the rest is 925 pairs at exactly +1 against 92 below 0, an
+unexplained one-storey sub-population tracked in `docs/design/field-capture/handover-autodedup-floor.md`
+§ 6. Every converted portal lands inside 0.25 in simulation, so the wider tier protects that portal
+alone and does not certify it. `min_pairs` 40 lets maxima score on its ~49 pairs and still refuses a
+mean drawn from one or two adverts; a portal below the floor is reported but not scored, and if NO
+portal is scored the check returns `warn` with `value` None — "verified nothing" is not a green.
+
+**It is the most expensive check in the lane, and the most variable** — 27.0 / 35.1 / 11.0 / 16.1 s on
+four `EXPLAIN (ANALYZE)` runs over ~34.7k pairs, against `field_fill_matrix`'s steady ~12 s — because
+the plan is a BitmapAnd feeding a Bitmap Heap Scan that spills (~116k buffers, ~85 % of them `read` even
+on a warm cluster, so it never stays cached and its cost tracks concurrent readers). Hence: registered
+LAST among the DB checks, and read through `_fetchall` so it inherits the per-check
+`SET LOCAL statement_timeout`. Cancelled, it reports `warn / timed out` = UNKNOWN, never a false green.
+A new check above ~20 s starves the tail and needs its query reworked, not a wider `_CHECK_BUDGET_S`.
+
+**It reads RED from the day it shipped** — the one check in the lane that does, deliberately. The six
+ground = 1 portals read +0.82..+1.05 until the heal has re-derived them
+(`python -m scripts.reparse --source <portal> --fields floor --write --allow-snapshot-deferral`, six
+passes, runbook in the hand-over § 7). The failure message names those commands, and names them ONLY
+for a portal whose contract cell declares `ground1`: telling the operator to re-derive ceskereality
+(cell `ground0`) would shift 34,350 correct rows down one storey.
 
 ## The `scrape_runs` crash contract (`portal_runner.run_phase`, W0.2)
 
@@ -266,7 +307,7 @@ result is inserted and alerted the instant its check returns (the transition bas
 `_CHECK_BUDGET_S` (45s) per check, capped by whatever remains of the LANE budget: the acute
 lane's `_LANE_BUDGET_S` (**120s of `llm_health.yml`'s 300s job**), or for the 6-hourly full lane
 `full_lane_budget_s` = one per-check budget per registered check. The full lane shared the 120 s
-until 2026-09-22, and in 13 of the 15 runs before that 7-17 of its 24 checks were `not_run` —
+until 2026-09-22, and in 13 of the 15 runs before that 7-17 of its 25 checks were `not_run` —
 `test_full_lane_budget_fits_its_job` now fails CI if the registry outgrows the 30-minute job.
 Enforcement is **server-side** via `SET LOCAL statement_timeout`: the connection is autocommit
 and shared by every check, so a thread we cannot cancel or a signal raised mid-query would

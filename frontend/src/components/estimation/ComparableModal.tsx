@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   fmtArea,
   fmtCzk,
+  fmtFloor,
   fmtMeasuredPricePerM2,
   fmtRelative,
   fmtAbsolute,
@@ -302,11 +303,7 @@ function SummaryRow({ label, text }: { label: string; text?: string | null }) {
 function Facts({ listing }: { listing: ListingPublic }) {
   const facts: Array<[string, string | null]> = [
     ['Location', listing.display_label],
-    ['Floor', listing.floor != null
-      ? listing.total_floors != null
-        ? `${listing.floor} / ${listing.total_floors}`
-        : String(listing.floor)
-      : null],
+    ['Floor', fmtFloor(listing.floor, listing.total_floors)],
     ['Building', listing.building_type],
     ['Condition', listing.condition],
     ['Energy', listing.energy_rating],
