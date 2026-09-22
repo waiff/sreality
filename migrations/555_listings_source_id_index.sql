@@ -1,0 +1,20 @@
+-- 555_listings_source_id_index.sql
+-- The re-parse seam walks one portal's rows by id; give it an index that does the same.
+--
+-- scripts/reparse.py pages `WHERE l.source = %(source)s AND l.id > %(after)s ORDER BY l.id
+-- LIMIT n`. With no (source, id) index the planner walks listings_pkey from `after` and
+-- FILTERS on source, so the first page of a portal whose rows start late in the id space
+-- reads every earlier row of every other portal before its first hit: realitymix's first
+-- id is 365,203, and under the IO of the twice-hourly map-view rebuild that first page
+-- overran the 120 s statement_timeout four times in a row, twice (runs 35710722269 and
+-- 35717845718, 2026-09-22) and took the floor heal down at page one. The workaround --
+-- `--after <min id - 1>` -- is a per-portal number a human has to know; the index makes
+-- the walk O(page) for every portal from id 0.
+--
+-- CONCURRENTLY: listings is the hottest table; apply_migration.yml runs statement-autocommit
+-- (no transaction), which is the one shape in which CONCURRENTLY is legal. Additive.
+
+set lock_timeout = '5s';
+
+create index concurrently if not exists listings_source_id_idx
+    on public.listings (source, id);
