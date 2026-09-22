@@ -308,6 +308,28 @@ def test_a_second_pass_over_the_same_stored_page_changes_nothing(
     assert mod._moved(first, second, fields) == ()
 
 
+def test_the_floor_heal_converges_in_one_pass_and_never_decrements_twice() -> None:
+    """W8's heal is `--fields floor` through this seam, and the hazard it exists to avoid
+    is arithmetic: the parser deploy and the heal cannot be atomic, so a row the drain
+    already rewrote must not be decremented again. The seam re-derives the storey from the
+    stored payload, so pass one moves a stale ground=1 row down by one and pass two —
+    reading the same payload against the healed column — moves nothing."""
+    raw = json.loads((_FIXTURES / "sample_listing.json").read_text(encoding="utf-8"))
+    produced = mod._derive("sreality", body=raw, ref=None,
+                           category_main=None, category_type=None)
+
+    assert raw["floor_number"] == 1 and produced["floor"] == 0
+
+    stale = {"floor": raw["floor_number"]}          # what the column held pre-W8
+    first = mod._merged(produced, stale, ("floor",))
+    assert first == {"floor": 0}
+    assert mod._moved(stale, first, ("floor",)) == ("floor",)
+
+    second = mod._merged(produced, first, ("floor",))
+    assert second == first
+    assert mod._moved(first, second, ("floor",)) == ()
+
+
 def test_the_sreality_raw_json_substrate_round_trips_the_same_way() -> None:
     raw = json.loads((_FIXTURES / "sample_listing.json").read_text(encoding="utf-8"))
     fields = ("area_m2", "floor", "condition", "has_lift", "ownership")

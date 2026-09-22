@@ -35,7 +35,7 @@ import {
   type AutodedupPairImage,
 } from '@/lib/api';
 import { imageSrc } from '@/lib/imageUrl';
-import { fmtCzk } from '@/lib/format';
+import { fmtCzk, fmtFloor } from '@/lib/format';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import AttrDiffTable, { memberDiffRows } from '@/components/autodedup/AttrDiffTable';
@@ -334,8 +334,10 @@ function DigestPanel({ digest }: { digest: AutodedupDigest | null }) {
     ['podtyp', digest.subtype ?? '—'],
     ['dispozice', digest.disposition ?? '—'],
     ['plocha', digest.area_m2 == null ? '—' : String(digest.area_m2)],
-    ['patro', digest.floor == null ? '—' : String(digest.floor)],
-    ['podlaží', digest.total_floors == null ? '—' : String(digest.total_floors)],
+    /* ONE row, because 'patro' and 'podlaží' are two CONVENTIONS, not two columns:
+     * labelling the storey 'patro' and the building count 'podlaží' read as if the
+     * words named the fields. fmtFloor says both, and says which scale. */
+    ['patro', fmtFloor(digest.floor, digest.total_floors) ?? '—'],
     ['cena', digest.price == null ? '—' : fmtCzk(digest.price)],
     ['první', digest.first_seen ?? '—'],
     ['poslední', digest.last_seen ?? '—'],

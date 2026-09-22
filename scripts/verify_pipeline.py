@@ -347,6 +347,18 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # under it on both axes, which is also how a CROP is caught. Timeout is the read half
     # of a (5, 8) connect/read pair, bounded per call in the seam; worst case across the
     # three calls is 39 s, inside the 45 s per-check budget.
+    # Floor convention: the mean (portal storey − idnes storey) over sibling pairs.
+    # A whole-storey offset is the defect (W8 measured +0.82..+1.05 on the six ground=1
+    # portals against +0.20 ceskereality / +0.10 bazos, the two that were already
+    # canonical), so the tiers sit between the two populations: warn at 0.25 is above the
+    # field's own noise floor (a sibling pair is a price/area/disposition match, not a
+    # proven duplicate, so some pairs are genuinely different flats) and fail at 0.5 is
+    # half a storey — unreachable by noise, reachable only by a portal on the other
+    # scale. min_pairs 40 lets maxima score on its ~49 pairs and still refuses a cell
+    # whose mean is one or two adverts.
+    "floor_convention_delta_warn": 0.25,
+    "floor_convention_delta_fail": 0.50,
+    "floor_convention_min_pairs": 40,
     "sreality_image_template_min_ratio": 0.9,
     "sreality_image_template_timeout_s": 8.0,
     # --- alert escalation policy (W3.4) -------------------------------------
@@ -2060,6 +2072,104 @@ select source,
 """
 
 
+# The floor convention, measured against another portal rather than against labels.
+#
+# `listings.floor` was a ~50/50 MIX of two Czech conventions until W8: idnes, bazos and
+# ceskereality counted the ground storey 0, the other six counted it 1, so one flat read
+# 3 from its idnes row and 4 from its sreality row in the same Browse list. Nothing in
+# the repo could see it — there was no floor check of any kind — because a wrong-by-one
+# storey is perfectly typed, perfectly non-NULL and perfectly plausible.
+#
+# The measure needs no labels and no LLM: two adverts agreeing on price, area AND
+# disposition are the same flat often enough that the MEAN of their floor difference is a
+# clean convention signal. idnes is the reference because it is the one portal whose
+# parser has always read the Czech word ("2. patro (3. NP)"). A key counts only where the
+# side holds ONE storey for it (min = max), so a repeated price/area/disposition triple
+# cannot smear the difference.
+#
+# Measured on the live cluster 2026-09-22: 18.4 s warm / 20.8 s cold over 34,800 pairs,
+# inside the 45 s per-check budget — and the most expensive DB check in the lane, which
+# is why it is registered LAST among the DB checks.
+_FLOOR_CONVENTION_SQL = """
+WITH k AS MATERIALIZED (
+    SELECT source, price_czk, area_m2, disposition, min(floor) AS f
+      FROM listings
+     WHERE is_active AND category_main = 'byt' AND floor IS NOT NULL
+       AND price_czk IS NOT NULL AND area_m2 IS NOT NULL AND disposition IS NOT NULL
+     GROUP BY 1, 2, 3, 4
+    HAVING min(floor) = max(floor)
+)
+SELECT o.source, count(*) AS pairs, avg(o.f - r.f)::double precision AS mean_delta
+  FROM k o JOIN k r USING (price_czk, area_m2, disposition)
+ WHERE r.source = %(reference)s AND o.source <> %(reference)s
+ GROUP BY 1
+"""
+
+_FLOOR_REFERENCE = "idnes"
+
+
+def check_floor_convention(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """Is every portal's `floor` on the SAME storey scale (ground = 0)?"""
+    with conn.cursor() as cur:
+        cur.execute(_FLOOR_CONVENTION_SQL, {"reference": _FLOOR_REFERENCE})
+        rows = cur.fetchall()
+
+    warn = float(thresholds["floor_convention_delta_warn"])
+    fail = float(thresholds["floor_convention_delta_fail"])
+    min_pairs = int(thresholds["floor_convention_min_pairs"])
+
+    per_source: dict[str, Any] = {}
+    offenders: list[str] = []
+    status = "ok"
+    worst = 0.0
+    scored = 0
+    for source, pairs, mean_delta in rows:
+        delta = float(mean_delta)
+        per_source[source] = {"pairs": int(pairs), "mean_delta": round(delta, 3)}
+        if int(pairs) < min_pairs:
+            continue
+        scored += 1
+        worst = max(worst, abs(delta))
+        if abs(delta) >= fail:
+            status = "fail"
+        elif abs(delta) >= warn and status != "fail":
+            status = "warn"
+        if abs(delta) >= warn:
+            offenders.append(f"{source} {delta:+.2f} ({pairs} pairs)")
+
+    if not scored:
+        # Rows without a scored arm certify nothing; `value` stays None so the tile
+        # shows an em-dash rather than a 0 that reads as agreement.
+        return {
+            "check_key": "floor_convention", "status": "warn", "value": None,
+            "details": {"skipped": f"no portal reached {min_pairs} sibling pairs",
+                        "per_source": per_source},
+            "message": (
+                "Floor-convention check verified NOTHING — no portal reached "
+                f"{min_pairs} sibling pairs against {_FLOOR_REFERENCE}. That is a "
+                "coverage failure, not a clean bill of health."),
+        }
+
+    message = (
+        f"{len(offenders)} portal(s) are on a different storey scale than "
+        f"{_FLOOR_REFERENCE} (worst {worst:.2f} storeys): " + "; ".join(offenders)
+        + " — a mean near +1 is the ground=1 reading. Re-derive that portal's column "
+          "with `python -m scripts.reparse --source <portal> --fields floor`."
+        if offenders
+        else f"Every portal reads the same storey scale as {_FLOOR_REFERENCE} "
+             f"(worst |mean| {worst:.2f} across {scored} scored portals)."
+    )
+    return {
+        "check_key": "floor_convention",
+        "status": status,
+        "value": round(worst, 3),
+        "details": {"per_source": per_source, "offenders": offenders,
+                    "reference": _FLOOR_REFERENCE, "warn": warn, "fail": fail,
+                    "min_pairs": min_pairs, "scored": scored},
+        "message": message,
+    }
+
+
 def check_acquisition_lag(conn: Any, thresholds: dict[str, Any]) -> dict[str, Any]:
     """How long a DISCOVERED but never-fetched listing has been waiting, per portal."""
     with conn.cursor() as cur:
@@ -3143,6 +3253,13 @@ _CHECKS: list[tuple[str, Callable[[Any, dict[str, Any]], dict[str, Any]]]] = [
     # cheap ones rather than spending their budget. 6h lane + in-app bell; not in
     # llm_health.yml's hourly --only list (ship, soak, promote — the ppm2 ladder).
     ("field_fill_matrix", check_field_fill_matrix),
+    # The last DB check, and the most expensive one (18.4 s measured): a cross-portal
+    # self-join over every active byt row. It asks the question no fill or validity
+    # measure can — whether a populated, plausible integer is on the RIGHT SCALE.
+    # 6h lane + in-app bell; not in llm_health.yml's hourly --only list (ship, soak,
+    # promote — the ppm2 ladder). It reads RED until W8's heal has run on all six
+    # ground=1 portals; that is the gate, not a regression.
+    ("floor_convention", check_floor_convention),
     # LAST deliberately: the only check that makes an outbound request, so if the
     # lane budget runs out it is the one that goes unrun, never a DB check. 6h lane
     # + in-app bell; not in llm_health.yml's hourly --only list (ship, soak, promote).

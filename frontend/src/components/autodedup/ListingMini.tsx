@@ -31,7 +31,7 @@ import { imageSrc } from '@/lib/imageUrl';
 import { listingRowPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
 import { categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
-import { fmtArea, fmtCzk, fmtShortDate } from '@/lib/format';
+import { fmtArea, fmtCzk, fmtFloor, fmtShortDate } from '@/lib/format';
 import { type RoutePath } from '@/lib/routes';
 
 export function memberListingPath(m: AutodedupMember): RoutePath | null {
@@ -51,7 +51,7 @@ export function memberAttrs(m: AutodedupMember): Array<[string, string]> {
     ['Cena', fmtCzk(m.price_czk)],
     ['Plocha', fmtArea(m.area_m2)],
     ['Dispozice', m.disposition ?? '—'],
-    ['Patro', m.floor == null ? '—' : String(m.floor)],
+    ['Patro', fmtFloor(m.floor, m.total_floors) ?? '—'],
   ];
 }
 

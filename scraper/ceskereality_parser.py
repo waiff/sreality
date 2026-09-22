@@ -36,7 +36,8 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import street, vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
-from scraper.attribute_contract import source_value, source_values
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.price_text import is_per_area_price
 from scraper.published import czech_date
 from scraper.scraped_listing import ScrapedListing
@@ -66,7 +67,6 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 
 # The numeric listing id is the trailing "-1234567.html" of the detail URL.
 _ID_RE = re.compile(r"-(\d{4,})\.html\b")
-_INT_RE = re.compile(r"(-?\d+)")
 _STRANA_RE = re.compile(r"[?&]strana=(\d+)")
 _PATH_RE = re.compile(r"^/([a-z]+)/([a-z0-9-]+)/")
 # A Czech-format price run: digits split by ordinary / no-break / thin spaces.
@@ -193,24 +193,6 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
         return None, unit
     value = int(digits)
     return (value if value <= _PRICE_MAX else None), unit
-
-
-def _parse_int(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _INT_RE.search(text)
-    return int(m.group(1)) if m else None
-
-
-def _parse_floor(text: str | None) -> int | None:
-    """ceskereality renders the floor as "1." (1st floor) or "přízemí" (ground)."""
-    if not text:
-        return None
-    low = _strip_diacritics(text).lower()
-    if "prizem" in low:
-        return 0
-    m = _INT_RE.search(low)
-    return int(m.group(1)) if m else None
 
 
 def _detail_params(tree: HTMLParser) -> dict[str, str]:
@@ -599,7 +581,7 @@ def parse_detail(
         house_number=house_number,
         lat=lat,
         lon=lon,
-        floor=_parse_floor(read("floor")),
+        floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
         # "Balkóny" is one multi-value cell ("Balkon, Lodžie, Terasa"), so has_balcony
         # (R11: balcony OR loggia) and `terrace` are both read out of it — and a list
         # that names neither is the portal stating their absence, which is why this

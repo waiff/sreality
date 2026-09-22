@@ -1,4 +1,12 @@
-from scraper.floor import floor_from_text, is_plausible_floor, normalize_floor
+import pytest
+
+from scraper.attribute_contract import CONTRACT, floor_convention
+from scraper.floor import (
+    floor_from_portal,
+    floor_from_text,
+    is_plausible_floor,
+    normalize_floor,
+)
 
 
 def test_is_plausible_floor():
@@ -9,6 +17,11 @@ def test_is_plausible_floor():
     assert is_plausible_floor(8, 5) is False           # above the building total
     assert is_plausible_floor(99, None) is False       # out of band
     assert is_plausible_floor(-5, None) is False       # too deep
+    # total_floors counts PODLAŽÍ including the ground storey, so under ground=0 the
+    # top storey is total-1 and the count itself is one storey too high.
+    assert is_plausible_floor(5, 6) is True
+    assert is_plausible_floor(6, 6) is False
+    assert is_plausible_floor(0, 1) is True
 
 
 def test_normalize_floor_grammar():
@@ -57,7 +70,10 @@ def test_floor_from_text_building_total_trap():
     # Unit floor (digit ordinal noun) captured; building total (digit adjectival)
     # read only as total_floors — never as the floor.
     assert floor_from_text("v 6. patře šestipodlažního domu") == (6, None)
-    assert floor_from_text("ve 3. patře (z celkových 10 pater)") == (3, 10)
+    # PATRA are storeys ABOVE the ground one; total_floors is a podlaží count, so the
+    # patra-worded cues are +1 ("10 pater" = 11 podlaží, "6patrový" = 7).
+    assert floor_from_text("ve 3. patře (z celkových 10 pater)") == (3, 11)
+    assert floor_from_text("byt ve 2. patře 6patrového domu") == (2, 7)
     # The unit floor exceeding the stated building total is dropped (we grabbed a
     # building number), the total is kept.
     f, t = floor_from_text("Podlaží: 8. patro Podlaží celkem: 5")
@@ -79,3 +95,67 @@ def test_floor_from_text_defers_ambiguous_tail():
 def test_floor_from_text_empty():
     assert floor_from_text(None) == (None, None)
     assert floor_from_text("") == (None, None)
+
+
+# --- the per-portal converter ------------------------------------------------
+
+
+def test_floor_from_portal_ground1_shifts_only_positive_storeys():
+    assert floor_from_portal("ground1", 1) == 0
+    assert floor_from_portal("ground1", 3) == 2
+    # sreality emits BOTH 0 and 1 for the ground storey ('zvýšené přízemí'), so a
+    # blanket decrement would invent basements; -1 is suterén under either reading.
+    assert floor_from_portal("ground1", 0) == 0
+    assert floor_from_portal("ground1", -1) == -1
+    assert floor_from_portal("ground1", "3") == 2
+    assert floor_from_portal("ground1", None) is None
+
+
+def test_floor_from_portal_ground0_is_a_passthrough():
+    assert floor_from_portal("ground0", "2.") == 2
+    assert floor_from_portal("ground0", 0) == 0
+    assert floor_from_portal("ground0", "-1.") == -1
+    # ceskereality's own out-of-band values survive untouched: correcting them is not
+    # this conversion's job, and blanking a stated number is never a heal's to do.
+    assert floor_from_portal("ground0", "126.") == 126
+
+
+def test_the_word_wins_over_the_keys_convention():
+    # A value that spells the storey out is the portal speaking about THAT advert.
+    assert floor_from_portal("ground1", "přízemí") == 0
+    assert floor_from_portal("ground0", "přízemí") == 0
+    assert floor_from_portal("ground1", "suterén") == -1
+    assert floor_from_portal("word", "2. patro (3. NP)") == 2
+    assert floor_from_portal("word", "-1. patro, suterén (1. PP)") == -1
+    # 'snížené přízemí' is the ground storey the advert names, not the 1. PP its
+    # parenthetical files it as.
+    assert floor_from_portal("word", "snížené přízemí (1. PP)") == 0
+    # A word portal that states no word states nothing: a bare int is not guessed.
+    assert floor_from_portal("word", "7") is None
+
+
+def test_a_bare_int_with_no_declared_convention_is_refused():
+    with pytest.raises(ValueError):
+        floor_from_portal(None, 3)
+
+
+def test_the_conversion_is_idempotent_because_it_reads_the_source_not_the_column():
+    # The heal re-derives from the stored payload; running it twice on the same
+    # payload gives the same storey. `floor = floor - 1` would move on every pass.
+    payload = 3
+    once = floor_from_portal("ground1", payload)
+    assert floor_from_portal("ground1", payload) == once == 2
+    # And re-deriving is NOT re-applying: feeding the already-converted column back
+    # would be the double-decrement bug, which no call site can express.
+    assert floor_from_portal("ground1", once) == 1
+
+
+def test_every_portal_declares_its_floor_convention():
+    """The refusal above only binds if no cell can reach a parser without one."""
+    missing = [p for p in CONTRACT if floor_convention(p) is None]
+    assert missing == []
+    assert floor_convention("ceskereality") == "ground0"
+    assert floor_convention("idnes") == "word"
+    assert {floor_convention(p) for p in
+            ("sreality", "realitymix", "mmreality", "remax", "bezrealitky", "maxima")
+            } == {"ground1"}

@@ -21,7 +21,7 @@
   "realitymix::building_type": {"area_basis": "unknown", "area_m2": 75.0, "building_type": "cihla", "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "price_unit": "za nemovitost"},
   "realitymix::disposition": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "2+kk", "price_unit": "za nemovitost"},
   "realitymix::energy_rating": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "energy_rating": "A", "price_unit": "za nemovitost"},
-  "realitymix::floor": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "floor": 5, "price_unit": "za nemovitost"},
+  "realitymix::floor": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "floor": 4, "price_unit": "za nemovitost"},
   "realitymix::furnished": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "furnished": "ano", "price_unit": "za nemovitost"},
   "realitymix::has_balcony": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "has_balcony": true, "price_unit": "za nemovitost"},
   "realitymix::has_parking": {"area_basis": "unknown", "area_m2": 75.0, "category_main": "byt", "category_type": "prodej", "disposition": "3+kk", "garage": true, "has_lift": false, "has_parking": true, "price_unit": "za nemovitost"},

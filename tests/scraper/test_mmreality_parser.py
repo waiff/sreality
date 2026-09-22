@@ -191,7 +191,8 @@ def test_parse_detail_full_mapping():
     assert listing.building_type == "smisena"
     assert listing.ownership == "druzstevni"
     assert listing.energy_rating == "G"
-    assert listing.floor == 5
+    # obj.floor 5 -> ground=0 storey 4 (W8).
+    assert listing.floor == 4
     assert listing.total_floors == 5
     assert listing.has_lift is False
     assert listing.cellar is True

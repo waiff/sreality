@@ -103,9 +103,17 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       the contract's producer=text cells. Model bake-off in ONE run (gpt-5.6-luna vs OSS on
       RunPod); a field is written only after a labelled panel passes ≥ 95% (R7); the lane
       and its health check share ONE eligibility function (R8).
-- [ ] **W8 — floor: ground = 0 everywhere.** Six portals re-derived, `is_plausible_floor`
-      tightened, the SPA names the convention. Blocked on the R12 hand-over to autodedup
-      (their `l0_floor_tolerance` and fitted weights depend on the conversion table).
+- [x] **W8 — floor: ground = 0 everywhere.** The convention is contract DATA
+      (`ground0` | `ground1` | `word` per portal) and `scraper.floor.floor_from_portal`
+      refuses a bare int without one; five per-parser floor readers and their regexes are
+      gone, `is_plausible_floor` tightened to `total_floors - 1`, and one `fmtFloor`
+      replaces four inline SPA expressions so the screen says "2. patro z 5 podlaží"
+      instead of a bare number. New `floor_convention` check in verify_pipeline (the
+      sibling-pair mean vs idnes; 18.4 s measured) — there was no floor check of any kind.
+      The R12 hand-over shipped first: `docs/design/field-capture/handover-autodedup-floor.md`.
+      **The 183,745-row heal (63,328 active) is the operator's to run** — six
+      `scripts/reparse.py --fields floor` passes, runbook in the hand-over §7; the new
+      check reads RED until they have run.
 - [~] **W9 — patchwork sweep (non-autodedup).** Done alongside W0: the browse_list cadence
       comments (`*/15` since migration 413, two said 5 min); `location_data/payloads.py`'s
       "NOT WIRED" docstring (826,948 rows, nine portals); Browse Stats/Map now send the
@@ -122,4 +130,8 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
   E12, :241, :1046). Live: bazos `area_m2` is present on 84.1% of active rows.
 - The stale `PLOT_TRUNCATING_SOURCES` guard — the truncation it pins was fixed by
   `scraper/area.py` and healed.
-- The W8 floor conversion table + predicate, **before** W8 merges.
+- ✅ The W8 floor conversion table + predicate, delivered before W8 merged:
+  `docs/design/field-capture/handover-autodedup-floor.md` (per-portal before/after
+  distributions, the exact predicate, and every autodedup site that assumes a floor
+  convention — `l0_floor_tolerance`, `floor_stated_conflict`, the guards' `band` arm,
+  `floor_spread`, and the persisted `floor_lo`/`floor_hi`/`floor_checked` pair state).

@@ -10,7 +10,7 @@
 
 import type { AutodedupMember } from '@/lib/api';
 import { categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
-import { fmtArea, fmtCzk, fmtShortDate } from '@/lib/format';
+import { fmtArea, fmtCzk, fmtFloor, fmtShortDate } from '@/lib/format';
 import { portalLabel } from '@/lib/portals';
 
 export interface DiffRow {
@@ -26,11 +26,6 @@ const text = (v: string | number | null | undefined): string | null =>
  * what it is, then what it costs, then where in the building, then when it
  * lived. `portal` leads because a same-portal pair is a different question
  * from a cross-portal one. */
-const floorText = (m: AutodedupMember): string | null => {
-  if (m.floor == null) return null;
-  return m.total_floors == null ? String(m.floor) : `${m.floor} / ${m.total_floors}`;
-};
-
 export function memberDiffRows(a: AutodedupMember, b: AutodedupMember): DiffRow[] {
   return [
     {
@@ -60,12 +55,12 @@ export function memberDiffRows(a: AutodedupMember, b: AutodedupMember): DiffRow[
       b: b.area_m2 == null ? null : fmtArea(b.area_m2),
     },
     {
-      /* Floor WITHIN the building: "2 / 5" against "2 / 6" is two different
-       * buildings, which the bare storey number hides. Shown only when the
-       * payload carries the total — never padded with a guess. */
+      /* Floor WITHIN the building: "2. patro z 5 podlaží" against "… z 6 podlaží"
+       * is two different buildings, which the bare storey number hides. The total is
+       * shown only when the payload carries it — never padded with a guess. */
       label: 'Patro',
-      a: floorText(a),
-      b: floorText(b),
+      a: fmtFloor(a.floor, a.total_floors),
+      b: fmtFloor(b.floor, b.total_floors),
     },
     {
       label: 'Cena',

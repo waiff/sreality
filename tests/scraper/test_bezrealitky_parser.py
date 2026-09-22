@@ -91,7 +91,8 @@ def test_core_mapping():
     assert listing.ownership == "osobni"
     assert listing.furnished == "ne"
     assert listing.energy_rating == "C"
-    assert listing.floor == 5
+    # etage 5 -> ground=0 storey 4 (W8); 0 stays this portal's numeric sentinel.
+    assert listing.floor == 4
     assert listing.total_floors == 8
     assert listing.has_lift is True
     assert listing.description == "Hezký byt."

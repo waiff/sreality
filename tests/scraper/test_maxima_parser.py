@@ -176,7 +176,8 @@ def test_parse_detail_full():
     assert "Praha 6" in (listing.locality or "")
     # Street is the last comma-segment of "Praha 6, Suchdol, U Hotelu".
     assert listing.street == "U Hotelu"
-    assert listing.floor == 3
+    # 'podlaží' 3./6. -> ground=0 storey 2 of a 6-podlaží building (W8).
+    assert listing.floor == 2
     assert listing.total_floors == 6
     assert listing.building_type == "skelet"
     assert listing.condition == "novostavba"

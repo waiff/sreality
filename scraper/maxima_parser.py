@@ -32,7 +32,8 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
-from scraper.attribute_contract import source_value, source_values
+from scraper.attribute_contract import floor_convention, source_value, source_values
+from scraper.floor import floor_from_portal
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -76,7 +77,6 @@ _CZ_LON_MIN, _CZ_LON_MAX = 12.0, 19.0
 _ID_RE = re.compile(r"/nemovitosti/([a-z]\d+)/?(?:[?#]|$)")
 _LISTING_HREF_RE = re.compile(r"/nemovitosti/[a-z]\d+/?$")
 _PAGE_RE = re.compile(r"/page/(\d+)/?")
-_INT_RE = re.compile(r"(\d+)")
 # Price runs are Czech "18 878 000" (groups split by ordinary / no-break / thin /
 # zero-width spaces). The first run only is taken so a struck original + current
 # price never concatenate into an integer-overflowing number.
@@ -232,21 +232,17 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     return (value if value <= _PRICE_MAX else None), unit
 
 
-def _parse_int(text: str | None) -> int | None:
-    if not text:
-        return None
-    m = _INT_RE.search(text)
-    return int(m.group(1)) if m else None
+def _split_floors(text: str | None) -> tuple[str | None, int | None]:
+    """maxima renders 'podlaží' as '3./6.' — split the storey off the building total.
 
-
-def _parse_floors(text: str | None) -> tuple[int | None, int | None]:
-    """maxima renders 'podlaží' as '3./6.' (floor 3 of 6)."""
+    The storey half stays TEXT: reading its convention is `scraper.floor`'s job, and a
+    cell that spells the storey out ("přízemí") has to reach that grammar intact."""
     if not text:
         return None, None
     m = _FLOOR_RE.search(text)
     if m:
-        return int(m.group(1)), int(m.group(2))
-    return _parse_int(text), None
+        return m.group(1), int(m.group(2))
+    return text, None
 
 
 def parse_index(html: str) -> IndexPage:
@@ -386,7 +382,8 @@ def parse_detail(
     lat, lon, coord_provenance = _resolve_coords(html)
 
     areas = areas_from_params(params, title=title, category_main=category_main)
-    floor, total_floors = _parse_floors(read("floor"))
+    floor_text, total_floors = _split_floors(read("floor"))
+    floor = floor_from_portal(floor_convention(SOURCE), floor_text)
 
     source_id_upper = source_id.upper()
     image_urls: list[str] = []

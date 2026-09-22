@@ -166,7 +166,10 @@ def test_the_row_carries_no_place_at_all(sample):
 
 
 def test_floor(sample):
-    assert parse_listing(sample)["floor"] == 1
+    # `floor_number` 1 is the STOREY ORDINAL: sreality counts the ground storey 1, so
+    # the canonical ground=0 reading is 0 (W8).
+    assert sample["floor_number"] == 1
+    assert parse_listing(sample)["floor"] == 0
 
 
 def test_total_floors(sample):
