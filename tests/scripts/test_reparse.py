@@ -472,3 +472,58 @@ def test_a_substrate_that_cannot_be_parsed_is_warned_about_not_counted_quietly(
 
 def _refuse(*args: Any, **kwargs: Any) -> int:
     raise AssertionError("a dry run must neither write nor wait for a rebuild gap")
+
+
+def test_a_cancelled_page_read_is_replayed_and_a_defect_is_not(monkeypatch: Any) -> None:
+    """A statement_timeout on the page SELECT is weather (the map-view rebuild), so the
+    same page is read again after a pause; any other error surfaces at once."""
+    import psycopg
+
+    from scripts import reparse as r
+
+    monkeypatch.setattr(r.time, "sleep", lambda _s: None)
+    calls: list[int] = []
+
+    class _Cur:
+        def __init__(self, outcomes: list[Any]) -> None:
+            self._outcomes = outcomes
+
+        def __enter__(self) -> "_Cur":
+            return self
+
+        def __exit__(self, *exc: Any) -> None:
+            return None
+
+        def execute(self, _sql: str, _params: dict[str, Any]) -> None:
+            calls.append(1)
+            outcome = self._outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            self._rows = outcome
+
+        def fetchall(self) -> list[Any]:
+            return self._rows
+
+    class _Conn:
+        def __init__(self, outcomes: list[Any]) -> None:
+            self._outcomes = outcomes
+
+        def cursor(self) -> _Cur:
+            return _Cur(self._outcomes)
+
+    cancelled = psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+    conn = _Conn([cancelled, cancelled, [(1,), (2,)]])
+    assert r._read_page(conn, "select 1", {"after": 0}, label="t") == [(1,), (2,)]
+    assert len(calls) == 3
+
+    calls.clear()
+    conn = _Conn([cancelled] * r._PAGE_READ_ATTEMPTS)
+    with pytest.raises(psycopg.errors.QueryCanceled):
+        r._read_page(conn, "select 1", {"after": 0}, label="t")
+    assert len(calls) == r._PAGE_READ_ATTEMPTS
+
+    calls.clear()
+    conn = _Conn([psycopg.errors.UndefinedColumn("boom")])
+    with pytest.raises(psycopg.errors.UndefinedColumn):
+        r._read_page(conn, "select 1", {"after": 0}, label="t")
+    assert len(calls) == 1
