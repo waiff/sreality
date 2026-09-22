@@ -93,7 +93,19 @@ from autodedup.settings import Settings
 from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
     CHARGE_KINDS,
+    accessory_areas,
     accessory_designators,
+    body_localities,
+    built_connection,
+    capacity_counts_english,
+    cross_form_floor_agreement,
+    fact_text,
+    labelled_unit_ids,
+    offered_storeys,
+    place_names_match,
+    priced_land_rows,
+    prose_plot_areas_wide,
+    states_second_plot,
     same_form_floor_gap,
     address_block_key,
     capacity_counts,
@@ -193,6 +205,14 @@ FACT_NAMES: tuple[str, ...] = (
     "charge",
     "plot_prose",
     "part_whole",
+    "headline_area",
+    "offered_storey",
+    "labelled_unit",
+    "accessory_area",
+    "body_obec",
+    "plot_prose_exact",
+    "priced_row",
+    "neighbour_plot",
 )
 
 
@@ -333,12 +353,17 @@ def _same_feed(a: Listing, b: Listing, mode: str, unknown_closed: bool = False) 
     """
     if a.source is None or a.source != b.source:
         return False
-    if mode != "broker":
+    if mode == "portal":
         return True
+    # E213: the AGENCY, not the agent. One landlord's portfolio is posted by whichever of its
+    # people is free — two Vídeňská 18b 1+kk of Garantovaný nájem carry `broker_key`s 15c7 and
+    # 2a10 and one firm — so at broker grain the two look like two feeds and the storey they
+    # state, 1. NP against 2. NP, is forgiven as a vocabulary difference it cannot be.
+    left, right = ((a.broker_firm_id, b.broker_firm_id) if mode == "firm"
+                   else (a.broker_key, b.broker_key))
     if unknown_closed:
-        return not (a.broker_key is not None and b.broker_key is not None
-                    and a.broker_key != b.broker_key)
-    return a.broker_key is not None and a.broker_key == b.broker_key
+        return not (left is not None and right is not None and left != right)
+    return left is not None and left == right
 
 
 def _feed_known(a: Listing, b: Listing) -> bool:
@@ -845,6 +870,207 @@ def part_whole_conflict(a: Listing, b: Listing, settings: Settings) -> tuple[str
     return None
 
 
+COMMERCIAL_CATEGORY: str = "komercni"
+UNIT_SCOPE: frozenset[str] = frozenset({"unit"})
+# A catalogue row is this advert's when its price is the advert's, to the last hundred.
+PRICED_ROW_PRICE_TOL: float = 0.005
+
+
+def headline_vs_column_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E211: a commercial body leads with a size its own stored column contradicts.
+
+    E186's bare comparison of what two bodies LEAD with is refused: two adverts of one offer
+    routinely lead with different parts of it. A lead that contradicts THIS advert's own column
+    is a different claim — the portal measured one space and the seller is offering a slice of
+    it. Two Brno Business Park adverts print 860 m² and `od cca 450 m² a více` under one stored
+    860; one Přízřenice advert leads with an 18 m² office and the other with the 291 m² hall,
+    under one stored 291 and two rents, 6,500 against 50,000.
+    """
+    if COMMERCIAL_CATEGORY not in (a.category_main, b.category_main):
+        return None
+    if settings.d43_headline_vs_column_colive_only and not _live_together(a, b, settings):
+        return None
+    lead_a = leading_area(a.description, UNIT_SCOPE)
+    lead_b = leading_area(b.description, UNIT_SCOPE)
+    if lead_a is None or lead_b is None:
+        return None
+    if rounding_equal_values(lead_a[0], lead_a[1], lead_b[0], lead_b[1]):
+        return None
+    column_a, column_b = a.area_m2, b.area_m2
+    if not column_a or not column_b or column_a <= 0.0 or column_b <= 0.0:
+        return None
+
+    def contradicts(lead: tuple[float, int], column: float) -> bool:
+        return not rounding_equal_values(lead[0], lead[1], float(column), 0)
+
+    if not (contradicts(lead_a, float(column_a)) or contradicts(lead_b, float(column_b))):
+        return None
+    return (f"{lead_a[0]} of column {column_a}", f"{lead_b[0]} of column {column_b}")
+
+
+def offered_storey_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E212: the storey the two lettings name as the OFFER, on the NP scale.
+
+    One Brno-Tuřany office block is let a storey at a time: `Pronájem přízemního podlaží` and
+    `možnost pronájmu samostatného 1. patra`, both idnes, both of one broker, both stored at
+    300 m². One Voroněžská parking house sells three spaces: `se nachází v nejžádanějším
+    přízemí` against `se nachází v 3 nadzemním podlaží`. Judged by the convention every other
+    storey reading uses — two storeys anywhere, one only inside one feed.
+    """
+    left, right = offered_storeys(a.description), offered_storeys(b.description)
+    if not left or not right or left & right:
+        return None
+    gap = min(abs(x - y) for x in left for y in right)
+    feed = _same_feed(a, b, settings.floor_same_source_feed, settings.floor_feed_unknown_closed)
+    if _rounded_floors(a, b, settings, gap) or (gap == 1 and feed):
+        return (str(sorted(left)), str(sorted(right)))
+    return None
+
+
+def accessory_area_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E215: the cellar the two bodies state, which no other reader compares.
+
+    `printed_area` scopes a cellar's m² OUT of the headline comparison — a cellar is not what
+    the flat is sold by — and leaves it read by nothing at all. Two Želivecká 4+kk of one
+    six-flat house, same 90 m², same 3. NP, same 10,900,000, live together on sreality and on
+    ceskereality: one states `dva sklepy o celkové ploše 9 m²`, the other `Celkem 10 m²`.
+    """
+    if settings.d43_accessory_area_colive_only and not _live_together(a, b, settings):
+        return None
+    left, right = accessory_areas(a.description), accessory_areas(b.description)
+    if len(left) != 1 or len(right) != 1:
+        return None
+    value_a, value_b = next(iter(left)), next(iter(right))
+    if rounding_equal_values(value_a, 0, value_b, 0):
+        return None
+    return (str(value_a), str(value_b))
+
+
+def _stored_places(listing: Listing) -> frozenset[str]:
+    """The municipality and the part the export stores for this advert, folded."""
+    out: set[str] = set()
+    for value in (getattr(listing.location, "obec_name", None),
+                  getattr(listing.location, "cast_obce_name", None)):
+        if value:
+            out.add(fact_text(str(value)))
+    return frozenset(out)
+
+
+def body_obec_conflict(a: Listing, b: Listing, settings: Settings) -> tuple[str, str] | None:
+    """E217: the place the BODY names, against the place the other advert is filed under.
+
+    E135 refuses the raw column conflict and that refusal stands (D64): portals file a village
+    under its town and the two columns then disagree about one property. Three conditions make
+    the body a witness the column is not. The speaker's body must name the speaker's OWN place,
+    so it is talking about itself. The other side must be known down to the PART, so a village
+    filed under its town cannot look like a different place. And the speaker's names must miss
+    both of the other's. One Brno developer builds one 5+kk design twice — `v novostavbě domu
+    se třemi samostatnými jednotkami v Újezdu u Brna` at 9,499,000, and the same design filed
+    at Brno-Chrlice at 9,499,000, whose own body says it is only the show home that stands in
+    Újezd.
+    """
+    if settings.d43_body_obec_colive_only and not _live_together(a, b, settings):
+        return None
+    for speaker, other in ((a, b), (b, a)):
+        names = body_localities(speaker.description)
+        own, far = _stored_places(speaker), _stored_places(other)
+        if not names or not own or len(far) < 2:
+            continue
+        if not any(place_names_match(name, place) for name in names for place in own):
+            continue
+        if any(place_names_match(name, place) for name in names for place in far):
+            continue
+        return ("/".join(sorted(names)), "/".join(sorted(far)))
+    return None
+
+
+def prose_plot_exact_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E218: the plot the BODY states, read at E182's exact bar.
+
+    E182 reads the plot COLUMN exactly where the parcel is the object, and E202 reads the prose
+    carrier at the 2 % tolerance under a co-live and a price gap. Neither reaches eight adverts
+    of two Rebešovice halves of one semi-detached pair: every portal stores the same 1,288 for
+    both, the bodies say `Celková plocha pozemku činí 1.288 m²` and `1.294 m²`, and 6 m² is
+    0.47 % — inside the tolerance and outside what one parcel looks like measured twice.
+    """
+    if not {a.category_main, b.category_main} <= PLOT_EXACT_CATEGORIES:
+        return None
+    left = prose_plot_areas_wide(a.description)
+    right = prose_plot_areas_wide(b.description)
+    if len(left) != 1 or len(right) != 1:
+        return None
+    value_a, value_b = next(iter(left)), next(iter(right))
+    if abs(value_a - value_b) <= settings.d43_plot_exact_abs:
+        return None
+    if rendering_equal(value_a, value_b, PLOT_TOL):
+        return None
+    return (str(value_a), str(value_b))
+
+
+def _priced_row_for(
+    listing: Listing, rows: tuple[tuple[float, float], ...]
+) -> tuple[float, float] | None:
+    """The catalogue row whose price is THIS advert's, when exactly one is."""
+    if not listing.price or float(listing.price) <= 0.0:
+        return None
+    price = float(listing.price)
+    hits = [row for row in rows if rel_diff(row[1], price) <= PRICED_ROW_PRICE_TOL]
+    return hits[0] if len(hits) == 1 else None
+
+
+def priced_row_conflict(a: Listing, b: Listing, settings: Settings) -> tuple[str, str] | None:
+    """E218: a seller's own price list says which plot each advert is.
+
+    E183 reads a parcel catalogue keyed on parcel NUMBERS. One Ochoz u Brna seller's bazos body
+    prices four plots by name and by nothing else — `Obora (4840 m2) ... Cena za pozemek
+    958.000,- Kč` — and the portal stores one of those prices per advert. Two adverts of that
+    seller, live together 10.7 days, carry 1,880,000 and 958,000: the 818 m² building plot and
+    the 4,840 m² game enclosure.
+    """
+    rows_a, rows_b = priced_land_rows(a.description), priced_land_rows(b.description)
+    if not rows_a or not rows_b or max(len(rows_a), len(rows_b)) < 2:
+        return None
+    pick_a, pick_b = _priced_row_for(a, rows_a), _priced_row_for(b, rows_b)
+    if pick_a is None or pick_b is None:
+        return None
+    if rel_diff(pick_a[0], pick_b[0]) <= PLOT_TOL:
+        return None
+    return (f"{pick_a[0]}m2@{pick_a[1]}", f"{pick_b[0]}m2@{pick_b[1]}")
+
+
+def neighbour_plot_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E219: a stated difference between two plots the sellers say are BOTH on offer.
+
+    D63 keeps the general refusal — an attribute one body prints and the other does not is not
+    a fact, because absence is not a statement. What lifts it here is that both bodies SAY
+    there are two: `Současně je nabízen také bezprostředně sousedící stavební pozemek o stejné
+    výměře 500 m²`. Two Opatovice adverts of one street, both 500 m², both 3,990,000, live
+    together twenty days on four portals, and one of them alone says `již vybudovaná elektrická
+    přípojka s osazeným elektroměrem` where the other has only `vedení nízkého napětí`.
+    """
+    if {a.category_main, b.category_main} != {LAND_CATEGORY}:
+        return None
+    if not _live_together(a, b, settings):
+        return None
+    if not (states_second_plot(a.description) and states_second_plot(b.description)):
+        return None
+    built_a, built_b = built_connection(a.description), built_connection(b.description)
+    if built_a == built_b:
+        return None
+    return ("connection built" if built_a else "none stated",
+            "connection built" if built_b else "none stated")
+
+
 def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> tuple[str, str] | None:
     """E142: the two adverts offer a different QUANTITY of the same kind of thing.
 
@@ -866,7 +1092,14 @@ def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> 
                                float(b.price)) > cfg.d43_offered_extent_price_tol)
         if not priced or not _co_live(a, b, cfg.d43_price_colive_min_overlap_days):
             return None
-    for reader, label in ((capacity_counts, "capacity"), (offered_room_counts, "rooms")):
+    def capacity(text: str | None) -> set[int]:
+        # E216: one serviced-office operator publishes the same building's products in both
+        # languages — `kancelář pro 1 osobu` and `private serviced office space for 2
+        # workstations`, both 50 m², both 8,190 Kč — and the Czech-only reader saw one of them.
+        found = capacity_counts(text)
+        return (found | capacity_counts_english(text)) if cfg.d43_capacity_english else found
+
+    for reader, label in ((capacity, "capacity"), (offered_room_counts, "rooms")):
         left, right = reader(a.description), reader(b.description)
         if left and right and left != right:
             return (f"{label}={sorted(left)}", f"{label}={sorted(right)}")
@@ -1109,7 +1342,18 @@ def distinguishing_facts(
             return min(abs(x - y) for x in plain_a for y in plain_b)
         if not words:
             return None
-        gap = same_form_floor_gap(reader(left.description, True), reader(right.description, True))
+        # E210: what the two bodies NAME, across both nouns, is the veto on every worded
+        # split. The worded ordinal is the weakest storey evidence in the stack — it cannot
+        # even carry a one-storey claim — so it may not out-vote a storey the two bodies
+        # plainly share. Read off `printed_floors` for both readers, because the placement
+        # clause of a 300 m² villa let over three storeys picks one of them and the other
+        # advert's picks another while the two bodies name the same three.
+        if cfg.d43_floor_cross_form_agreement and cross_form_floor_agreement(
+                printed_floors_by_form(left.description, True),
+                printed_floors_by_form(right.description, True)):
+            return None
+        gap = same_form_floor_gap(reader(left.description, True),
+                                  reader(right.description, True))
         return gap if gap is not None and gap >= 2 else None
 
     if cfg.d43_prose_floor:
@@ -1193,6 +1437,47 @@ def distinguishing_facts(
             add("plot_prose", plot_prose[0], plot_prose[1])
 
     # E204: the advert that says it is one part of the parcel the other sells whole.
+    if cfg.d43_labelled_unit_ids:
+        ids_a = labelled_unit_ids(a.description)
+        ids_b = labelled_unit_ids(b.description)
+        if _set_conflict(ids_a, ids_b):
+            add("labelled_unit", sorted(ids_a), sorted(ids_b))
+
+    if cfg.d43_headline_vs_column:
+        headline = headline_vs_column_conflict(a, b, cfg)
+        if headline is not None:
+            add("headline_area", headline[0], headline[1])
+
+    if cfg.d43_offered_storey:
+        storey = offered_storey_conflict(a, b, cfg)
+        if storey is not None:
+            add("offered_storey", storey[0], storey[1])
+
+    if cfg.d43_accessory_area:
+        acc_area = accessory_area_conflict(a, b, cfg)
+        if acc_area is not None:
+            add("accessory_area", acc_area[0], acc_area[1])
+
+    if cfg.d43_body_obec:
+        locality = body_obec_conflict(a, b, cfg)
+        if locality is not None:
+            add("body_obec", locality[0], locality[1])
+
+    if cfg.d43_prose_plot_exact:
+        prose_exact = prose_plot_exact_conflict(a, b, cfg)
+        if prose_exact is not None:
+            add("plot_prose_exact", prose_exact[0], prose_exact[1])
+
+    if cfg.d43_priced_land_rows:
+        row = priced_row_conflict(a, b, cfg)
+        if row is not None:
+            add("priced_row", row[0], row[1])
+
+    if cfg.d43_neighbour_plot_attribute:
+        neighbour = neighbour_plot_conflict(a, b, cfg)
+        if neighbour is not None:
+            add("neighbour_plot", neighbour[0], neighbour[1])
+
     if cfg.d43_part_whole:
         part = part_whole_conflict(a, b, cfg)
         if part is not None:

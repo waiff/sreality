@@ -442,6 +442,10 @@ class Settings:
     # bazos. The convention belongs to the FEED, and the feed is the broker. `portal` is g7/g8's
     # reading; `broker` makes the same-portal clause need a shared `broker_key`, which is what a
     # broker-feed aggregator needs and what stops the V Aleji 131 m² 4+1 being cut in two.
+    # E213: `firm` is the AGENCY rather than the agent — one landlord's portfolio is posted by
+    # whichever of its people is free, so two Brno Vídeňská 41 m² 1+kk of one agency carry two
+    # `broker_key`s and one convention, and `broker` read them as two feeds and forgave a
+    # storey that separates two flats.
     floor_same_source_feed: str = "portal"
     # E11 as a dial rather than a module constant, so an arm can open it without a monkeypatch.
     min_evidence_families: int = 2
@@ -661,6 +665,49 @@ class Settings:
     d43_part_whole: bool = False
     d43_part_whole_min_gap: float = 0.1
 
+    # --- W21 / S6: what the cohort-8 confirmation named (E210-E219, D63-D64) ----------------
+    # E210: `N. patro` and `(N+1). NP` are ONE storey. The worded reading (E201) compares
+    # within one noun, so a body that states its own storey as `7. patře` while naming the
+    # building's `1.-3. NP` looked five storeys away from the `8. nadzemní podlaží` advert of
+    # the same 57 m² office. An AGREEMENT across the two nouns needs no converter this module
+    # does not trust: it is the scale it already converts to.
+    d43_floor_cross_form_agreement: bool = False
+    # E211: the area a commercial body LEADS with, read against that advert's OWN stored
+    # column. E186's bare lead comparison is refused (M419) because two bodies routinely lead
+    # with different parts of one offer; a lead that contradicts its own column is the seller
+    # saying this advert is a different slice of the space the portal measured.
+    d43_headline_vs_column: bool = False
+    d43_headline_vs_column_colive_only: bool = True
+    # E212: the storey a letting states as the OFFER — `přízemní podlaží` against `samostatné
+    # 1. patro`. Judged by the storey convention every other reading uses: two storeys anywhere,
+    # one only inside one feed.
+    d43_offered_storey: bool = False
+    # E214: a designator printed under an explicit unit-identity LABEL (`ID jednotky: DOUBLE
+    # B`). `printed_unit_codes` needs a digit; the label is what makes a letters-only value a
+    # unit name rather than prose.
+    d43_labelled_unit_ids: bool = False
+    # E215: the cellar/storage size the body states. `printed_area` scopes it out of the
+    # headline comparison and nothing else reads it.
+    d43_accessory_area: bool = False
+    d43_accessory_area_colive_only: bool = True
+    # E216: the capacity written in English. One serviced-office operator publishes the same
+    # building's products in both languages and the Czech-only reader saw one of them.
+    d43_capacity_english: bool = False
+    # E217: the obec the BODY names, against the other advert's stored locality. E135's refusal
+    # of the raw column conflict stands (D64): this reads the body, requires the speaker's own
+    # body to name its own place, and requires the other side's locality to be known at part
+    # grain so a village filed under its town cannot look like a different place.
+    d43_body_obec: bool = False
+    d43_body_obec_colive_only: bool = False
+    # E218: the land the body states — the measurement written before the noun, read at the
+    # EXACT bar where the parcel is the object (E182's rule, on the prose carrier); and the row
+    # a seller's own price list assigns to this advert.
+    d43_prose_plot_exact: bool = False
+    d43_priced_land_rows: bool = False
+    # E219: a stated difference between two plots whose bodies BOTH say a neighbouring plot is
+    # also on offer. D63 keeps the general refusal: absence is not a statement.
+    d43_neighbour_plot_attribute: bool = False
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -754,9 +801,10 @@ class Settings:
                 "d43_price_colive_min_overlap_days must not be negative: "
                 f"{self.d43_price_colive_min_overlap_days}"
             )
-        if self.floor_same_source_feed not in ("portal", "broker"):
+        if self.floor_same_source_feed not in ("portal", "broker", "firm"):
             raise ValueError(
-                f"floor_same_source_feed must be portal/broker: {self.floor_same_source_feed}"
+                "floor_same_source_feed must be portal/broker/firm: "
+                f"{self.floor_same_source_feed}"
             )
         if self.d43_promote_photo_alternative and not self.d43_promote:
             raise ValueError("d43_promote_photo_alternative needs d43_promote")
