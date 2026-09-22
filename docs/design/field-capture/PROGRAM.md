@@ -165,7 +165,7 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   guards' `band` arm and the persisted `floor_lo`/`floor_hi`/`floor_checked` pair state all depend on it).
 
 **Approved destructive steps (operator OK 2026-09-21, each with a backup + before/after counts):** (i) drop the two
-0-row batch tables — DONE, migration 546; (ii) re-key `listing_description_enrichments` — DONE, migration 549
+0-row batch tables — DONE, migration 546; (ii) re-key `listing_description_enrichments` — DONE, migration 552
 (adds the key, drops the old one, relaxes `snapshot_id`'s NOT NULL, all in one file; the 37,754 old rows stay as
 history with a NULL `text_hash`, which is both unfakeable and correct — they can never be a cache HIT);
 (iii) clear the OLD lane's cells that failed measurement (LLM-written floor, silence-based `false`) — SCRIPTED, not
@@ -458,7 +458,7 @@ PRE-SHIP fact this program cannot verify from a branch (no lane on that worker h
 entirely), but nothing breaks while it is missing, because nothing calls. Lane visible in `worker_heartbeats` —
 asserted offline in `tests/scraper/test_realtime_worker.py`, confirmed live after the deploy. Lane and check share
 ONE predicate, asserted as a string containment of `_eligible_where()` in both SQLs. Re-bill closed by the key
-itself (migration 549). Pre-call budget guard binds before spend, proven by source order over
+itself (migration 552). Pre-call budget guard binds before spend, proven by source order over
 `vision_batch.run_batch`.
 
 **Six gate statements as first written were wrong, and the code wins:**
@@ -541,7 +541,7 @@ Measured 2026-09-22 over active bazos rows they are `has_lift` 13, `has_parking`
 step-(iii) batch from an exact zero. Run step (iii) and re-bless the baseline in `data/field_capture/` in the same
 sitting, or the matrix reports a collapse the operator caused.
 
-**Migration 549 must be applied before any gate is opened, and applying it before the merge costs nothing.** With
+**migration 552 must be applied before any gate is opened, and applying it before the merge costs nothing.** With
 every gate closed neither the lane nor `text_extraction_lag` touches `text_hash` — both return before they query —
 so the merge-before-apply window is harmless here, which is NOT the usual case in this repo (migration 438: merged
 ≠ applied, 29 h of outage). Re-confirm the number against `origin/main` at apply time: W5 and W8 are building in

@@ -412,7 +412,7 @@ ELIGIBLE_LAG_SQL = _LAG_SQL_TEMPLATE.format(where=_eligible_where(_OPEN))
 _DECLARED_SELECT_SQL = _SELECT_SQL_TEMPLATE.format(
     where=_eligible_where(contract.gated_cells()), direction="DESC")
 
-# The conflict target is the key migration 549 adds. DO UPDATE, not DO NOTHING, and only
+# The conflict target is the key migration 552 adds. DO UPDATE, not DO NOTHING, and only
 # over a row that is itself a recorded FAILURE: a retry either replaces the error with the
 # real extraction or bumps its attempt count towards GIVE_UP_AFTER, and a row that already
 # holds an answer is never rewritten. `cost_usd` accumulates because every attempt was

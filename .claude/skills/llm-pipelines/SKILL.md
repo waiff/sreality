@@ -87,7 +87,7 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   not extracted, not billed and not written, and every gate ships closed, so the lane is live and
   free until the bake-off opens one. The declared set is bazos's eight prose-only columns. The
   cache `listing_description_enrichments` is keyed `(listing_id, text_hash, extractor_version)`
-  (migration 549), `extractor_version` being `'<schema>:<open-gate hash>:<model>'` — a model swap
+  (migration 552), `extractor_version` being `'<schema>:<open-gate hash>:<model>'` — a model swap
   re-attempts, a price-only snapshot never re-bills, and **opening a gate re-opens the corpus**, so
   open every field that cleared in ONE edit. Concurrency + the one pre-call budget guard come from
   `toolkit.vision_batch.run_batch`; the write is NULL-only (`coalesce`) with the `dirty_properties`
