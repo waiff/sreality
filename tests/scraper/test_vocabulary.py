@@ -64,6 +64,30 @@ def test_label_maps_to_its_canonical_value(
     assert vocabulary.take_unmapped() == []
 
 
+def test_a_negated_member_never_states_the_thing_it_names() -> None:
+    """`contains` reads negation per MEMBER, not per cell.
+
+    Per cell — the shape the deleted `states()` had — "Bezbarierový přístup, Výtah"
+    (138 live realitymix rows) would read as "no lift", because the folded cell starts
+    with `bez`. Per member, "Bez balkonu" still cannot become a balcony."""
+    assert vocabulary.contains("Bez balkonu", "balk", "lod") is False
+    assert vocabulary.contains("Bez výtahu", "vytah") is False
+    assert vocabulary.contains("Bezbarierový přístup, Výtah", "vytah") is True
+    assert vocabulary.contains("Bezbarierový přístup", "vytah") is False
+    assert vocabulary.contains("Balkon, Lodžie, Terasa", "balk", "lod") is True
+    assert vocabulary.contains(None, "balk") is None
+
+
+def test_a_numeric_zero_is_a_stated_absence_like_the_string() -> None:
+    """The surface arrives as a JSON number on bezrealitky and mmreality, and `fold`
+    swallows a falsy value — so 0 has to be read before the fold, not after."""
+    assert vocabulary.present(0) is False
+    assert vocabulary.present(0.0) is False
+    assert vocabulary.present("0") is False
+    assert vocabulary.present(4) is True
+    assert vocabulary.present(None) is None
+
+
 def test_the_llm_schema_offers_every_value_the_parsers_may_emit() -> None:
     """The on-demand URL parser writes the SAME columns the nine scrapers write.
 

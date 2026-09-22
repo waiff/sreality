@@ -634,7 +634,7 @@ def parse_detail(
         furnished=vocabulary.canonical("furnished", SOURCE, read("furnished")),
         energy_rating=vocabulary.energy_rating(read("energy_rating")),
         # R11: balcony OR loggia. `terasa` used to be a third arm and is its own
-        # column — dropping it takes ~570 terrace-only rows back to unknown.
+        # column — dropping it takes 17,845 terrace-only active rows back to unknown.
         has_balcony=vocabulary.any_true(
             *(_truthy_field(n) for n in source_values(SOURCE, "has_balcony", params))
         ),
@@ -645,9 +645,12 @@ def parse_detail(
         # R11: a space or right BELONGING to the property. idnes's "Parkování" cell
         # lists the KINDS it has, so `_truthy_field` on it means "some parking is
         # stated" — including "parkování na ulici", which the portal files under the
-        # listing's own facilities rather than as a neighbourhood note.
+        # listing's own facilities rather than as a neighbourhood note. Only the text
+        # says which kind, so the check/cross icon is consulted only without it — this
+        # portal renders the same amenity row both ways.
         has_parking=vocabulary.any_true(
-            vocabulary.parking(parking_text),
+            vocabulary.parking(parking_text) if parking_text is not None
+            else _has_check(parking_field),
             garage,
             (parking_lots > 0) if parking_lots is not None else None,
         ),

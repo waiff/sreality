@@ -351,9 +351,33 @@ def test_parse_detail_house_labels_and_amenities():
     assert listing.has_parking is True
     assert listing.estate_area == 1033.0
     # W4. A HOUSE page labels the row "Počet podlaží"; only a flat's says "Počet podlaží
-    # budovy", and the parser read the flat spelling alone — 29,756 active idnes houses
-    # carried total_floors NULL with the number on the page.
+    # budovy", and the parser read the flat spelling alone — 29,906 of 29,913 active
+    # idnes houses carried total_floors NULL, 24,134 with the number on the page.
     assert listing.total_floors == 3
+
+
+def test_an_icon_only_parking_row_keeps_its_signal() -> None:
+    """idnes renders the SAME amenity row as text OR as a bare icon.
+
+    Only the text says WHICH kind of parking it is, so `vocabulary.parking` reads the
+    text; without text the icon is the whole statement and must still be read, or a
+    ticked "Parkování" row would silently become unknown."""
+    url = "https://reality.idnes.cz/detail/prodej/dum/x/6a18deadbeefdeadbeef0011/"
+    icon = HOUSE_DETAIL_HTML.replace(
+        "<dt>Parkování</dt><dd>parkování na pozemku</dd>",
+        '<dt>Parkování</dt><dd><span class="icon icon--check"></span></dd>',
+    ).replace("<dt>Počet parkovacích míst</dt><dd>2</dd>", "").replace(
+        "<dt>Dvojgaráž</dt><dd><span class=\"icon icon--check\"></span></dd>", "")
+    listing = parse_detail(icon, source_url=url,
+                           category_main="dum", category_type="prodej")
+    assert listing.parking_lots is None
+    assert listing.garage is None
+    assert listing.has_parking is True
+    # A cross icon is the portal saying no, and nothing else states a space of the
+    # property's own.
+    crossed = parse_detail(icon.replace("icon icon--check", "icon icon--cross"),
+                           source_url=url, category_main="dum", category_type="prodej")
+    assert crossed.has_parking is False
 
 
 # Mirrors the live pozemek detail markup verified against 5,773 staged pages

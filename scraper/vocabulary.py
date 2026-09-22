@@ -17,8 +17,10 @@ other half: turning what a portal WROTE into one of those values.
     a portal actually uses, from an `Ano` cell to a set of accessory names. They differ in what
     SILENCE means, which is a live fact per portal and not a thing to unify by fiat. What
     a MISSING KEY means is not decided here at all — absence is a per-(portal, field) fact
-    the attribute contract declares, because only sreality and bezrealitky ever write an
-    explicit `false`.
+    the attribute contract declares. SIX portals can write an explicit `false` after W4:
+    sreality and bezrealitky from a real payload boolean, ceskereality and realitymix from
+    a stated list that does not name the thing (`contains` / `parking`), idnes from a cross
+    icon or a parking cell naming only the street, and mmreality from a stated group.
   * `any_true` — the ONE union over those readings (W4). `has_balcony` is balcony OR
     loggia and `has_parking` is a space or right BELONGING to the property, on all nine
     portals; which KEYS carry those facts is the contract's business, and combining them
@@ -331,9 +333,12 @@ def present(value: object) -> bool | None:
 
     Present means true unless the value negates it; absent is the contract's call. The
     size arrives as text on the HTML portals and as a JSON number on bezrealitky and
-    mmreality, which is why this takes an object and folds it rather than a `str`."""
+    mmreality, which is why this takes an object and folds it rather than a `str`: a
+    numeric 0 is a stated absence like the string "0", which `fold` would swallow."""
     if value is None:
         return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value > 0
     key = fold(value)
     if not key:
         return None
@@ -346,12 +351,16 @@ def contains(text: str | None, *needles: str) -> bool | None:
     """A STATED list read for one of its members ("garáž , parkování na ulici").
 
     Unlike `mentions`, a present list that does not name the thing is the portal saying
-    it is absent — which is how idnes states a garage, and the only reason `garage` has
-    a real `false` anywhere outside sreality and bezrealitky."""
+    it is absent — which is how idnes states a garage. Negation is read per MEMBER, not
+    per cell: "Bez balkonu" negates the needle it carries, while "Bezbarierový přístup,
+    Výtah" (138 live realitymix rows) states a lift beside a member that merely begins
+    like a negation, and a whole-cell prefix test would read it as no lift."""
     if not text:
         return None
-    key = fold(text)
-    return any(n in key for n in needles)
+    return any(
+        any(n in key for n in needles) and not key.startswith(_NEGATION)
+        for key in (fold(part) for part in str(text).split(","))
+    )
 
 
 def mentions(names: Iterable[str] | str | None, *needles: str) -> bool | None:
@@ -368,8 +377,10 @@ def mentions(names: Iterable[str] | str | None, *needles: str) -> bool | None:
 
 # R11's ONE reading of `has_parking`: a space or right BELONGING to the property. Every
 # portal states its parking as a facility OF THE LISTING, so the discriminator is not a
-# per-portal inclusion list but the explicit not-ours qualifier the four live vocabularies
-# share — the street, a car park merely nearby, and mmreality's literal "Není".
+# per-portal inclusion list but the explicit not-ours qualifier the live vocabularies
+# share — the street and a car park merely nearby. mmreality's literal "Není" (51 live
+# rows) needs no qualifier: it names no parking at all, so the inclusion test already
+# drops it; `neni` covers a member that names parking AND negates it in one cell.
 _PARKING_WORDS = ("parkov", "garaz", "stani", "pristresek")
 _PARKING_NOT_OURS = ("na_ulici", "pobliz", "v_okoli", "neni")
 
