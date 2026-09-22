@@ -141,10 +141,16 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
       (the scraper's view-centre read is DELETED, not re-pointed — the location contract
       already reads the drawn pin, the second producer never reached `raw_json` on any of
       557 rows, and its only consumer was an unreachable bbox guard, so 0 of 273 live
-      locality strings change street). Still owed, each its own PR: the bezrealitky
-      `ruianId` rung (**feed it**:
-      732 of the 2,836 ruianId-bearing active rows resolve below `address_point` today;
-      needs contract v4 + a re-mine); branch protection on `main` (operator action).
+      locality strings change street); and the
+      bezrealitky `ruianId` rung is now **fed** — `contracts.CLAIM_TYPES` re-admits
+      `address_point_id` (eleven → twelve, on the cut's own test: `bind.py`'s R0 reads it
+      and scores it 100), bezrealitky@3 → @4 appends `bzr.det.ruian_id`, lockfile + golden
+      regenerated, no migration. 732 of the 2,836 ruianId-bearing active rows resolve below
+      `address_point` today and lift to an exact point once the re-mine lands; the fill
+      needs one dispatched `location_claims_intake.yml` at `mode=full source=bezrealitky`
+      (the bodies-half hash gate re-arms page entries only, and this portal has none).
+     
+      Still owed: branch protection on `main` (operator action, last, announced first).
 
 ## Hand-overs owed to the autodedup program (R12 — this program never edits theirs)
 
