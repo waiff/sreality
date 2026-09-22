@@ -57,13 +57,21 @@ def test_the_selector_covers_every_extractable_cell_of_every_declared_portal() -
             assert f"l.{field} IS NULL" in sql
 
 
-def test_a_closed_gate_costs_nothing_at_all() -> None:
-    """The lane's scope is the OPEN gates, so today it neither selects nor spends. The
-    draft that extracted every gated cell and wrote only the passed ones would have paid
-    ~$113 for cache rows that, because a cache row retires its listing, could never have
-    become a column value."""
-    assert contract.extracted_cells() == {}
-    assert tx.SELECT_INFLOW_SQL.count("WHERE false") == 1
+OPEN_GATES = {"bazos": ("floor", "has_lift")}
+
+
+def test_the_lane_extracts_exactly_the_open_gates() -> None:
+    """The lane's scope is the OPEN gates and nothing else: a closed gate is not asked
+    for, not billed, not written. The draft that extracted every gated cell and wrote
+    only the passed ones would have paid ~$113 for cache rows that, because a cache row
+    retires its listing, could never have become a column value. The W7 bake-off
+    (2026-09-22) opened floor + has_lift on bazos; the selector names those two columns."""
+    assert contract.extracted_cells() == OPEN_GATES
+    assert "WHERE false" not in tx.SELECT_INFLOW_SQL
+    for field in OPEN_GATES["bazos"]:
+        assert field in tx.SELECT_INFLOW_SQL
+    for field in ("condition", "building_type", "energy_rating", "has_parking"):
+        assert field not in tx.SELECT_INFLOW_SQL
 
 
 def test_the_hash_stays_out_of_the_index_condition() -> None:
@@ -180,16 +188,22 @@ class _FakeConn:
         return _FakeTxn()
 
 
-def test_every_gate_ships_closed() -> None:
-    """The bake-off flips them, with its measurement in the row. Closed means OUT OF
-    SCOPE: not extracted, not billed, not written."""
-    assert contract.extracted_cells() == {}
+def test_an_open_gate_carries_the_measurement_that_opened_it() -> None:
+    """R7: a gate opens only on a measured precision >= 95 % (floor: within +-1), and the
+    measurement travels with the row. Every gate not measured past that stays closed —
+    OUT OF SCOPE: not extracted, not billed, not written."""
     declared = contract.gated_cells()
     assert declared
     for portal, fields in declared.items():
         for field in fields:
             gate = contract.CONTRACT[portal][field].gate
-            assert gate is not None and gate.passed is False
+            assert gate is not None
+            if gate.passed:
+                assert field in OPEN_GATES.get(portal, ())
+                assert gate.precision is not None and gate.precision >= 0.95
+                assert gate.panel_n and gate.measured_on
+            else:
+                assert field not in OPEN_GATES.get(portal, ())
 
 
 def test_a_passed_gate_writes_only_its_own_column(monkeypatch) -> None:
