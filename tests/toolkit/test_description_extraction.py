@@ -480,3 +480,89 @@ def test_a_fatal_provider_error_does_not_burn_a_listings_attempts() -> None:
     src = inspect.getsource(tx.run_pass)
     assert "vision_batch.is_fatal(error)" in src
     assert src.index("vision_batch.is_fatal(error)") < src.index("record_failure(")
+
+
+# --- area: a quantity the grammar could not read ------------------------------
+
+AREA_DESCRIPTION = (
+    "Prodám byt 2+kk, plocha padesát čtyři metrů čtverečních, ve 3. patře. "
+    "K domu patří pozemek o výměře 12 arů a zahrada 0,5 ha. Cena 5 000 000 Kč."
+)
+AREA_FIELDS = (*FIELDS, "area_m2")
+
+
+def merge_area(payload: dict[str, Any], category_main: str = "byt") -> tuple[dict, dict]:
+    return tx.merge_extraction(payload, description=AREA_DESCRIPTION, fields=AREA_FIELDS,
+                               category_main=category_main)
+
+
+def test_an_area_figure_must_itself_appear_in_the_quote() -> None:
+    """R7 for a quantity: the number the model returns is the number the text carries.
+    'padesát čtyři' is words, so the model's 54 has no digits to match and is refused."""
+    values, dropped = merge_area({"area_m2": _cell(54, "plocha padesát čtyři metrů čtverečních")})
+    assert "area_m2" not in values
+    assert dropped["area_m2"] == "figure_not_in_quote"
+
+
+@pytest.mark.parametrize("value,quote,category,expected", [
+    (1200, "pozemek o výměře 12 arů", "pozemek", 1200.0),   # ares convert, and only ares
+    (5000, "zahrada 0,5 ha", "pozemek", 5000.0),            # hectares, decimal comma
+    (5000000, "Cena 5 000 000 Kč", "pozemek", None),        # a price is not an area
+])
+def test_ares_and_hectares_are_the_only_conversions(value, quote, category, expected) -> None:
+    values, dropped = merge_area({"area_m2": _cell(value, quote)}, category_main=category)
+    if expected is None:
+        assert dropped["area_m2"] == "area_out_of_range"
+    else:
+        assert values["area_m2"] == expected and "area_m2" not in dropped
+
+
+def test_the_grammars_category_bounds_apply_to_a_lane_area() -> None:
+    """5 m² is the floor for a flat (scraper.area.MIN_AREA_M2) and no bound for land —
+    the one function that stamps `area_basis` at ingest decides, not this lane."""
+    values, dropped = merge_area({"area_m2": _cell(3, "pozemek o výměře 12 arů")})
+    assert dropped["area_m2"] == "figure_not_in_quote"
+    values, dropped = merge_area({"area_m2": _cell(12, "pozemek o výměře 12 arů")},
+                                 category_main="byt")
+    assert values["area_m2"] == 12.0
+    values, dropped = merge_area({"area_m2": _cell(4, "0,5 ha")}, category_main="byt")
+    assert dropped["area_m2"] == "figure_not_in_quote"
+
+
+def test_an_area_is_a_number_never_words() -> None:
+    values, dropped = merge_area({"area_m2": _cell("54", "12 arů")})
+    assert dropped["area_m2"] == "not_number"
+    values, dropped = merge_area({"area_m2": _cell(True, "12 arů")})
+    assert dropped["area_m2"] == "not_number"
+
+
+def test_the_selector_carries_the_category_the_basis_stamp_needs() -> None:
+    assert "l.category_main" in tx.SELECT_INFLOW_SQL
+
+
+def test_area_basis_follows_area_in_the_same_update_and_never_alone() -> None:
+    sql = tx.write_sql(["area_m2"], {"area_basis": "area_m2"})
+    assert "area_m2 = coalesce(l.area_m2, %(area_m2)s::numeric)" in sql
+    assert ("area_basis = CASE WHEN l.area_m2 IS NULL THEN %(area_basis)s::text "
+            "ELSE l.area_basis END") in sql
+    changed = sql.split("AND (")[1].split(")\n")[0]
+    assert "area_basis" not in changed
+
+
+def test_a_lane_area_carries_the_ingest_basis_stamp_in_the_same_update(monkeypatch) -> None:
+    """`plot` on land, `unknown` elsewhere — the stamp `scraper.area` gives a grammar-read
+    area, so a lane-filled row is indistinguishable downstream; and it rides in `filled`
+    so the rollback script reverts both."""
+    monkeypatch.setattr(contract, "extracted_cells", lambda: {"bazos": ("area_m2",)})
+    conn = _FakeConn()
+    written = tx.record_extraction(
+        conn, {"id": 7, "source": "bazos", "description": DESCRIPTION,
+               "category_main": "pozemek"},
+        values={"area_m2": 1200.0},
+        extracted={}, model="m", version="v", llm_call_id=None, cost_usd=0.0,
+    )
+    assert written == ["area_m2"]
+    update_sql, params = conn.calls[0]
+    assert "area_basis = CASE WHEN l.area_m2 IS NULL" in update_sql
+    assert params["area_m2"] == 1200.0 and params["area_basis"] == "plot"
+    assert json.loads(conn.calls[1][1]["filled"]) == {"area_m2": 1200.0, "area_basis": "plot"}

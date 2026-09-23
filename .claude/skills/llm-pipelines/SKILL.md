@@ -85,7 +85,9 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   flag / setting / env var). **A field is in scope only once its `Cell.gate.passed` is true** (R7,
   a measured ≥ 95 % panel — `scripts/bakeoff_text_extraction.py`, dispatch-only): a closed gate is
   not extracted, not billed and not written, and every gate ships closed, so the lane is live and
-  free until the bake-off opens one. The declared set is bazos's eight prose-only columns. The
+  free until the bake-off opens one. The declared set is bazos's eight prose-only columns plus
+  `area_m2` on the rows the ingest grammar left NULL (2026-09-23; the figure must appear in the
+  quote — digits, or ares / hectares — and `area_basis` is stamped as at ingest). The
   cache `listing_description_enrichments` is keyed `(listing_id, text_hash, extractor_version)`
   (migration 552), `extractor_version` being `'<schema>:<open-gate hash>:<model>'` — a model swap
   re-attempts, a price-only snapshot never re-bills, and **opening a gate re-opens the corpus**, so

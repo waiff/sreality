@@ -63,3 +63,29 @@ def test_the_receipt_survives_a_terminate_runpod_did_not_confirm() -> None:
     assert bk._pod_is_gone(_Client({"desiredStatus": "TERMINATED"}), "p") is True
     assert bk._pod_is_gone(_Client({"desiredStatus": "RUNNING"}), "p") is False
     assert bk._pod_is_gone(_Client(TimeoutError("read timed out")), "p") is False
+
+
+def test_area_agrees_within_three_percent_or_one_square_metre() -> None:
+    assert bk.agrees("area_m2", 54.0, 55.5)      # 68 vs 68,5-style restatement
+    assert bk.agrees("area_m2", 12.0, 13.0)      # one square metre on a small unit
+    assert not bk.agrees("area_m2", 54.0, 60.0)  # a different measure
+
+
+def _record(description: str, area: float | None) -> dict[str, Any]:
+    row = {f: None for f in bk.FIELDS}
+    row.update(id=1, source="idnes", category_main="byt", description=description,
+               area_m2=area)
+    return row
+
+
+def test_area_is_labelled_only_where_the_grammar_reads_nothing() -> None:
+    """The lane is only ever asked on adverts `scraper.area` found no figure in, so the
+    panel scores area on exactly those — a row the grammar reads is out of domain."""
+    blind = bk._panel_row(_record("Byt 2+kk o výměře padesát čtyři metrů", 54.0),
+                          label_source="idnes")
+    assert blind["labels"]["area_m2"] == 54.0
+    readable = bk._panel_row(_record("Byt 2+kk, 54 m²", 54.0), label_source="idnes")
+    assert "area_m2" not in readable["labels"]
+    unstated = bk._panel_row(_record("Byt 2+kk o výměře padesát čtyři metrů", None),
+                             label_source="idnes")
+    assert "area_m2" not in unstated["labels"]

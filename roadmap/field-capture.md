@@ -152,6 +152,14 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
      
       Still owed: branch protection on `main` (operator action, last, announced first).
 
+## Post-delivery (operator-ruled additions)
+
+- [ ] **`area_m2` on bazos through the text lane (2026-09-23).** Declared + gated (`_UNGATED`) in the
+      contract, the figure-in-quote rule and the `area_basis` companion stamp in the lane, the
+      grammar-blind area label + 3 % tolerance in the harness. Gate opens only on a measured ≥ 95 %
+      luna panel with n ≥ 100 answered; PROGRAM.md § 8 carries the measurement. Expected yield:
+      a few hundred to ~2,000 of the 8,096 area-less active bazos rows.
+
 ## Hand-overs owed to the autodedup program (R12 — this program never edits theirs)
 
 - The false "zero area on all 138,997 bazos rows" sentences (`docs/design/autodedup/PROGRAM.md`

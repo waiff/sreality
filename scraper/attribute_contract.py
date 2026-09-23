@@ -446,11 +446,13 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "category_type": _cell("derived"),
         "price_czk": _cell("structured", "price_text"),
         "price_unit": _cell("derived"),
-        # No gate: the ingest grammar is the whole producer. R3's condition for adding the
-        # post-publication lane to a cell the regex already fills is a panel proving the
-        # model better for THAT cell, and W1 measured the ceiling at ~3 pp on area (only
-        # 3 % of area-less bazos rows even carry an "m²" token), so neither is worth a call.
-        "area_m2": _cell("text", note="scraper.area over the title + description"),
+        # The grammar writes first; the lane fills only the rows it left NULL (operator
+        # ruling 2026-09-23, over W1's "not worth a call": 8,096 active area-less rows, of
+        # which 1,992 mention an area word the grammar cannot read — "80 metrů", "12 arů",
+        # "0,5 ha"). The figure must itself appear in the quote (R7 for a quantity); the
+        # `area_basis` stamp follows exactly as at ingest.
+        "area_m2": _cell("text", note="scraper.area over the title + description; the lane "
+                         "fills the rest", gate=_UNGATED),
         "area_basis": _cell("derived"),
         "disposition": _cell("text"),
         # Gated: the regex writes first (14,563 active rows) and the lane fills the rest.

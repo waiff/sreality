@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from scraper import db
+from scraper import area as area_grammar
 from toolkit import description_extraction as tx
 
 LOG = logging.getLogger("bakeoff_text_extraction")
@@ -71,6 +72,9 @@ DEFAULT_MODELS = ("gpt-5.6-luna", "oss:Qwen/Qwen3-VL-32B-Instruct",
 LABEL_SOURCES: tuple[str, ...] = ("idnes", "sreality")
 PRECISION_GATE = 0.95
 FLOOR_TOLERANCE = 1
+# An area read from prose against the portal's table: a rounded decimal or a
+# 68 vs 68,5 restatement, never a different measure. 3 % or one square metre.
+AREA_TOLERANCE = 0.03
 
 # STRATIFIED BY CATEGORY, in SQL, because drawing the newest N and sorting them afterwards
 # is not stratification: idnes's newest 500 are ~40 % flats and a field measured almost
@@ -82,7 +86,7 @@ _PANEL_SQL_TEMPLATE = """
 WITH pool AS (
   SELECT l.id, l.source, l.category_main, l.description,
          l.floor, l.total_floors, l.has_balcony, l.has_lift, l.has_parking,
-         l.building_type, l.condition, l.energy_rating
+         l.building_type, l.condition, l.energy_rating, l.area_m2
     FROM listings l
    WHERE l.is_active
      AND l.source = %(source)s
@@ -99,7 +103,8 @@ WITH pool AS (
 )
 SELECT ranked.id, ranked.source, ranked.category_main, ranked.description,
        ranked.floor, ranked.total_floors, ranked.has_balcony, ranked.has_lift,
-       ranked.has_parking, ranked.building_type, ranked.condition, ranked.energy_rating
+       ranked.has_parking, ranked.building_type, ranked.condition, ranked.energy_rating,
+       ranked.area_m2
   FROM ranked, quota
  WHERE ranked.rn <= quota.n
  ORDER BY ranked.category_main, ranked.id DESC
@@ -124,7 +129,8 @@ WITH b AS (
 )
 SELECT l.id, 'bazos' AS source, l.category_main, l.description,
        sib.floor, sib.total_floors, sib.has_balcony, sib.has_lift, sib.has_parking,
-       sib.building_type, sib.condition, sib.energy_rating, sib.source AS label_source
+       sib.building_type, sib.condition, sib.energy_rating, sib.area_m2,
+       sib.source AS label_source
   FROM b JOIN s USING (price_czk, area_m2, disposition)
   JOIN listings l ON l.id = b.id
   JOIN listings sib ON sib.id = s.id
@@ -139,6 +145,15 @@ FIELDS: tuple[str, ...] = tuple(tx._FIELD_SPEC)
 def panel_sql(fields: Iterable[str]) -> str:
     return _PANEL_SQL_TEMPLATE.format(
         stated=" OR ".join(f"l.{f} IS NOT NULL" for f in fields))
+
+
+def _label_area(description: str | None, stored: Any) -> float | None:
+    """The portal's headline area, but ONLY on an advert whose prose the ingest grammar
+    reads nothing from: those are the rows the lane will ever be asked, so a panel that
+    also scored "54 m²" would measure the grammar's job, not the model's."""
+    if stored is None or area_grammar.parse_area_text(description) is not None:
+        return None
+    return float(stored)
 
 
 def _label_floor(source: str, stored: Any) -> int | None:
@@ -166,6 +181,7 @@ def build_panel(conn: Any, *, per_source: int, bazos: int) -> list[dict[str, Any
 def _panel_row(record: dict[str, Any], *, label_source: str) -> dict[str, Any]:
     labels = {f: record.get(f) for f in FIELDS}
     labels["floor"] = _label_floor(label_source, labels.get("floor"))
+    labels["area_m2"] = _label_area(record["description"], labels.get("area_m2"))
     return {
         "id": record["id"],
         "source": record["source"],
@@ -182,6 +198,9 @@ def _panel_row(record: dict[str, Any], *, label_source: str) -> dict[str, Any]:
 def agrees(field: str, predicted: Any, label: Any) -> bool:
     if field == "floor":
         return abs(int(predicted) - int(label)) <= FLOOR_TOLERANCE
+    if field == "area_m2":
+        label = float(label)
+        return abs(float(predicted) - label) <= max(1.0, AREA_TOLERANCE * label)
     return predicted == label
 
 
@@ -239,7 +258,8 @@ def _extract_one(model: str, tool: dict[str, Any], row: dict[str, Any]) -> dict[
             )
         payload = tx._tool_arguments(res) or {}
         values, dropped = tx.merge_extraction(
-            payload, description=row["description"], fields=FIELDS)
+            payload, description=row["description"], fields=FIELDS,
+            category_main=row.get("category_main"))
         return {
             "id": row["id"], "labels": row["labels"], "values": values,
             "dropped": dropped, "cost_usd": float(res.cost_usd or 0.0),

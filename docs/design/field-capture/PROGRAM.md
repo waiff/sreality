@@ -692,3 +692,37 @@ different gate — coupling two lifecycles is not a subtraction); unifying the t
   0-filled staying 0-filled, never a value that moves.
 - A fill-rate move > 5 pp on any portal changes cohort predicates and dedup features fitted under the old missingness
   — each such wave publishes its delta to the autodedup program (R12) and re-runs a fixed comparables basket.
+
+---
+
+## 8. Post-delivery changes
+
+### 2026-09-23 — `area_m2` joins the text lane on bazos (operator ruling)
+
+W1 measured the ceiling at ~3 pp and the contract said "not worth a call"; the operator ruled
+otherwise: **add area to the LLM pass for the listings the grammar found nothing in, and record it
+only past an appropriate confidence threshold.** The threshold is R7's, not the model's: a measured
+≥ 95 % panel opens the gate, and per answer the figure the model returns must itself appear in the
+quoted span — as digits, or as an ares / hectares figure that converts to it (`_quote_states_figure`)
+— so a number the model computed, averaged or read off a price is refused before any panel sees it.
+
+- **Scope**: bazos only, `l.area_m2 IS NULL` rows only (the grammar writes first; the selector's
+  own arm is the "did not get it from the grammar" test). Live 2026-09-23: 8,096 active area-less
+  bazos rows (byt 2,348 / dům 1,946 / ostatní 1,834 / pozemek 1,031 / komerční 937), of which 1,992
+  mention an area word at all, 155 carry digits + `m2` the grammar somehow missed and 341 carry
+  digits + "metr". The realistic yield is therefore a few hundred to ~2,000 rows, i.e. 1–4 pp of
+  bazos fill — the W1 ceiling was right in size, and the operator chose to buy it anyway.
+- **What the model returns**: one number in m² (the property's OWN area: usable for a flat or house,
+  the parcel for land), quoted. `scraper.area.derive_headline_area` then applies the same category
+  bounds and stamps the same `area_basis` (`plot` on land, `unknown` elsewhere) it gives a
+  grammar-read fallback, in the SAME UPDATE as `area_m2` (`write_sql(companions=...)`), and both ride
+  in the cache row's `filled` so the rollback script reverts both. The selector now carries
+  `category_main` for that stamp.
+- **Panel**: the harness labels area from the structured portals' own `area_m2`, but ONLY on adverts
+  whose prose `parse_area_text` reads nothing from — the rows the lane will ever be asked. Agreement
+  is within 3 % or 1 m². The bazos slice cannot label area (its sibling key IS the grammar's area).
+- **Cost of the gate flip**: `extractor_version` carries the open-gate set, so opening area re-reads
+  every eligible bazos row once (~$11 at the 3-field shape); steady state adds ~300 area-less
+  adverts a day to a lane that already reads them for floor / lift.
+- **Measurement**: _pending — filled in by the run that opens or refuses the gate._
+

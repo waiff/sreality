@@ -67,7 +67,9 @@ from collections import Counter
 from threading import Lock
 from typing import Any, Iterable, Mapping, Sequence
 
+from scraper import area as area_grammar
 from scraper import attribute_contract as contract
+from scraper.db import _AREA_BASIS_FOLLOWS
 from scraper import floor as floor_grammar
 from scraper import vocabulary
 
@@ -171,6 +173,16 @@ _FIELD_SPEC: dict[str, tuple[list[str], str, str | None]] = {
                   "condition"),
     "energy_rating": (["string", "null"],
                       "The PENB energy class the advert states.", "energy_rating"),
+    # A NUMBER, not words: the ingest grammar (`scraper.area`) reads "54 m²" first, so the
+    # lane only ever sees adverts the grammar found nothing in, and the figure it returns
+    # must itself appear in the quote — digits, or an ares/hectares figure that converts to
+    # it — which is the whole of R7 for a quantity: the text states it or the value is null.
+    "area_m2": (["number", "null"],
+                "The advertised property's OWN area in square metres, as one number: the "
+                "living / usable floor area of a flat or a house, the parcel area of land "
+                "or a garden. Never the plot a house stands on, never a garage, cellar, "
+                "balcony or room, never a sum of several figures. Quote the span that "
+                "carries the figure and its unit.", None),
 }
 
 _SYSTEM_PROMPT = (
@@ -229,6 +241,11 @@ _NEGATION_RE = re.compile(
     r"\b(bez|neni|nema|nemaji|nemame|zadn\w*|chybi|nenachazi|nedisponuje)\b"
 )
 _WS_RE = re.compile(r"\s+")
+# A figure in a flattened quote: Czech spaced thousands, a decimal comma or point, and the
+# unit token that follows it ("m2", "m²", "ha", "aru"). Ares and hectares are the only
+# conversions a quantity check accepts, because they are the only ones a Czech advert
+# writes an area in; anything else is arithmetic, and the model is not allowed any.
+_FIGURE_RE = re.compile(r"(\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)(?:[.,](\d+))?\s*([a-z\u00b2]*)")
 
 
 def _flat(text: str | None) -> str:
@@ -246,6 +263,21 @@ def _flat(text: str | None) -> str:
     return _WS_RE.sub(" ", stripped.lower()).strip()
 
 
+def _quote_states_figure(quote: str, value: float) -> bool:
+    """True when some figure in the quote IS `value` in m² — as written, or via ares /
+    hectares. Half a square metre or 0.5 % of tolerance, whichever is larger, covers a
+    rounded decimal and nothing else."""
+    tolerance = max(0.5, 0.005 * value)
+    for match in _FIGURE_RE.finditer(_flat(quote)):
+        whole = re.sub(r"\D", "", match.group(1))
+        figure = float(f"{whole}.{match.group(2)}" if match.group(2) else whole)
+        unit = match.group(3)
+        factor = 10_000.0 if unit.startswith("ha") else 100.0 if unit in ("a", "ar", "ary", "aru") or unit.startswith("aru") else 1.0
+        if any(abs(figure * k - value) <= tolerance for k in {1.0, factor}):
+            return True
+    return False
+
+
 def quote_supports(description: str, quote: str | None) -> bool:
     if not quote:
         return False
@@ -257,6 +289,7 @@ def quote_supports(description: str, quote: str | None) -> bool:
 
 def merge_extraction(
     payload: Mapping[str, Any], *, description: str, fields: Iterable[str],
+    category_main: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """The model's tool arguments -> the values this lane is willing to store.
 
@@ -286,6 +319,16 @@ def merge_extraction(
     if "floor" in values and not floor_grammar.is_plausible_floor(values["floor"], total):
         del values["floor"]
         dropped["floor"] = "implausible_floor"
+    if "area_m2" in values:
+        # The grammar's own category bounds (5 m² for a flat / house / commercial unit,
+        # none for land), applied by the one function that stamps `area_basis` at ingest.
+        area, _basis = area_grammar.derive_headline_area(
+            category_main=category_main, fallback=values["area_m2"])
+        if area is None:
+            del values["area_m2"]
+            dropped["area_m2"] = "area_out_of_range"
+        else:
+            values["area_m2"] = area
     return values, dropped
 
 
@@ -298,6 +341,15 @@ def _coerce(field: str, raw: Any, quote: str) -> tuple[Any, str | None]:
         # A bare integer has no convention to read, which is exactly the trap this lane is
         # not allowed to fall into: `normalize_floor` returns None and the field is dropped.
         return (None, "floor_words_unreadable") if converted is None else (converted, None)
+    if "number" in value_type:
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None, "not_number"
+        value = float(raw)
+        if not 0 < value < area_grammar.MAX_AREA_M2:
+            return None, "area_out_of_range"
+        if not _quote_states_figure(quote, value):
+            return None, "figure_not_in_quote"
+        return value, None
     if "boolean" in value_type:
         if not isinstance(raw, bool):
             return None, "not_boolean"
@@ -366,7 +418,7 @@ def _eligible_where(cells: Mapping[str, Sequence[str]]) -> str:
 # cannot stop early and becomes a 9.4-10.0 s bitmap heap scan over 55,252 blocks, run to
 # find nothing.
 _SELECT_SQL_TEMPLATE = """
-SELECT l.id, l.source, l.first_seen_at, l.description
+SELECT l.id, l.source, l.first_seen_at, l.description, l.category_main
   FROM listings l
  WHERE {where}
  ORDER BY l.first_seen_at {direction}
@@ -455,13 +507,19 @@ ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
 
-def write_sql(columns: Sequence[str]) -> str:
+def write_sql(columns: Sequence[str], companions: Mapping[str, str] | None = None) -> str:
+    """`companions` maps a DERIVED column onto the extracted column it follows
+    (`area_basis` -> `area_m2`, `scraper.db._AREA_BASIS_FOLLOWS`): it is set only in the
+    same UPDATE that fills its leader, never on its own, and it is not a reason to write."""
     from scraper.db import _LISTING_COLUMN_PGTYPE
 
-    casts = {c: _LISTING_COLUMN_PGTYPE[c] for c in columns}
+    companions = dict(companions or {})
+    casts = {c: _LISTING_COLUMN_PGTYPE[c] for c in (*columns, *companions)}
+    sets = [f"{c} = coalesce(l.{c}, %({c})s::{casts[c]})" for c in columns]
+    sets += [f"{c} = CASE WHEN l.{leader} IS NULL THEN %({c})s::{casts[c]} ELSE l.{c} END"
+             for c, leader in companions.items()]
     return _WRITE_SQL_TEMPLATE.format(
-        sets=",\n           ".join(
-            f"{c} = coalesce(l.{c}, %({c})s::{casts[c]})" for c in columns),
+        sets=",\n           ".join(sets),
         changed=" OR ".join(
             f"(l.{c} IS NULL AND %({c})s::{casts[c]} IS NOT NULL)" for c in columns),
     )
@@ -487,9 +545,9 @@ def select_eligible(conn: Any, *, version: str,
     with conn.cursor() as cur:
         cur.execute(SELECT_INFLOW_SQL, {"version": version, "limit": max(0, slice_size)})
         rows = cur.fetchall()
-    return [{"id": listing_id, "source": source,
-             "first_seen_at": first_seen_at, "description": description}
-            for listing_id, source, first_seen_at, description in rows]
+    return [{"id": listing_id, "source": source, "first_seen_at": first_seen_at,
+             "description": description, "category_main": category_main}
+            for listing_id, source, first_seen_at, description, category_main in rows]
 
 
 def _tool_arguments(response: Any) -> Mapping[str, Any] | None:
@@ -513,12 +571,22 @@ def record_extraction(
     writable = [c for c in contract.extracted_cells().get(str(row["source"]), ())
                 if c in values]
     filled = {c: values[c] for c in writable}
+    companions: dict[str, str] = {}
+    if "area_m2" in filled:
+        # The same stamp ingest gives a grammar-read area (`plot` on land, `unknown`
+        # elsewhere), so a lane-filled row is indistinguishable downstream (rule 20's
+        # ppm2 basis included). In `filled` too: the rollback script reverts by its keys.
+        leader, follower = _AREA_BASIS_FOLLOWS
+        _area, basis = area_grammar.derive_headline_area(
+            category_main=row.get("category_main"), fallback=filled[leader])
+        filled[follower] = basis
+        companions[follower] = leader
     with conn.transaction():
         if writable:
             params: dict[str, Any] = {"id": row["id"]}
             params.update(filled)
             with conn.cursor() as cur:
-                cur.execute(write_sql(writable), params)
+                cur.execute(write_sql(writable, companions), params)
         _cache_row(conn, row, extracted=extracted, filled=filled, model=model,
                    version=version, llm_call_id=llm_call_id, cost_usd=cost_usd)
     return writable
@@ -631,7 +699,8 @@ def run_pass(conn: Any, *, slice_size: int = PASS_SLICE,
             return
         fields = scope[str(row["source"])]
         values, why = merge_extraction(
-            payload, description=str(row["description"]), fields=fields)
+            payload, description=str(row["description"]), fields=fields,
+            category_main=row.get("category_main"))
         try:
             columns = record_extraction(
                 wconn, row, values=values, extracted=dict(payload), model=model,
