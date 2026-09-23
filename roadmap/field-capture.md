@@ -154,11 +154,16 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
 
 ## Post-delivery (operator-ruled additions)
 
-- [ ] **`area_m2` on bazos through the text lane (2026-09-23).** Declared + gated (`_UNGATED`) in the
-      contract, the figure-in-quote rule and the `area_basis` companion stamp in the lane, the
-      grammar-blind area label + 3 % tolerance in the harness. Gate opens only on a measured ≥ 95 %
-      luna panel with n ≥ 100 answered; PROGRAM.md § 8 carries the measurement. Expected yield:
-      a few hundred to ~2,000 of the 8,096 area-less active bazos rows.
+- [x] **`area_m2` on bazos through the text lane (2026-09-23) — built, gate CLOSED by measurement.**
+      Declared + gated in the contract, the figure-with-an-area-unit rule and the `area_basis`
+      companion stamp in the lane, the grammar-blind area label + 3 % tolerance + `MIN_ANSWERED`
+      in the harness, rows in the receipt. Two luna runs: 5 and 2 answers on 617 / 281 grammar-blind
+      adverts — n ≥ 100 unreachable, so the lane never asks for area. PROGRAM.md § 8.
+- [ ] **idnes `floor = 20` placeholder heal.** "20. patro a vyšší" is now a sentinel at ingest; the
+      2,995 stored rows (1,736 active) need a NULLing data migration with a backup (destructive:
+      operator's call). Until then the bake-off's idnes floor labels carry it.
+- [ ] **Wider area rail, by evidence only.** Bare "metrů" / "m" after "plocha" / "výměra" is the one
+      lever left for bazos area; measure it on a panel before writing a line of it.
 
 ## Hand-overs owed to the autodedup program (R12 — this program never edits theirs)
 

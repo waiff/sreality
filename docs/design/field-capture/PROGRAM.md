@@ -738,5 +738,34 @@ quoted span — as digits, or as an ares / hectares figure that converts to it (
 - **Cost of the gate flip**: `extractor_version` carries the open-gate set, so opening area re-reads
   every eligible bazos row once (~$11 at the 3-field shape); steady state adds ~300 area-less
   adverts a day to a lane that already reads them for floor / lift.
-- **Measurement**: _pending — filled in by the run that opens or refuses the gate._
+- **Measurement (2026-09-23) — the gate stays CLOSED.** gpt-5.6-luna, corrected check, runs
+  35829666286 (per_source 1,500: 3,008 adverts) and 35830742594 (per_source 600: 1,388 adverts):
+
+  | run | area-labelled (grammar-blind) | answered | precision | refused: no area unit in the quote | refused: quote not in text |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | 35829666286 | 617 | 5 | 60 % | 90 | 19 |
+  | 35830742594 | 281 | 2 | 100 % | 57 | 10 |
+
+  On broker prose the grammar cannot read, the model commits to a unit-carrying area on well under 1 %
+  of adverts; the rest of what it offers is a figure without an area unit (a distance to the sea,
+  a height, a price), which the rail refuses by design. n ≥ 100 is out of reach on this panel, so
+  R7 cannot open the gate: `area_m2` ships declared and closed, the lane never asks for it, nothing
+  is billed. Only 55 of the 281 labelled adverts even carry a digit followed by "m" / "metr", and
+  those are mostly "300 metrů od moře". The W1 ceiling ("~3 pp, not worth a call") stands as measured.
+  A wider rail (bare "metrů", "m" after "plocha" / "výměra") is the one lever left; it needs its own
+  panel reading before it is written, never a guess.
+- **A finding the re-runs surfaced, and it is not the model's.** The same runs scored luna's FLOOR
+  at 79.6–82.5 % (n 555–630) against the 95.6 % (n 340) that opened the gate. Per label source
+  (run 35830742594, rows in the receipt): sreality 96.8 % (n 220), idnes 82.1 % (n 140) with 23
+  labels exactly 20 on flats described "v přízemí" / "1. patře". Live: idnes carries
+  `"podlaží": "20. patro a vyšší"` — the top option of its floor select, a broker feed's placeholder
+  — on 2,995 rows (1,736 active; a Croatian coastal broker), stored as `floor = 20`. Without those
+  labels the two sources read 97.6 % together, consistent with the gate. The lane's own writes,
+  checked in-domain against cross-portal siblings on unique (price, area, disposition):
+  177 / 188 within ±1 (94.1 %), has_lift 32 / 34 — the gate holds. The placeholder is now a declared
+  sentinel on idnes `floor` (ingest reads it as absence); the 2,995 stored rows need a data
+  migration (the re-parse seam never blanks), proposed to the operator, not applied.
+- **Receipt**: every arm now carries its per-advert rows (`rows_<model>.json`: labels, validated
+  values, the model's raw payload with its quotes, refusal reasons, label source), because a gate
+  reading that cannot be broken down by portal, category or spelling cannot be questioned.
 
