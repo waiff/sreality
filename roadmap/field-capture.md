@@ -162,8 +162,11 @@ estimate ≈ −7,260 / +2,860 LOC, −30 files, −2 tables, −8 workflows, 0 
 - [ ] **idnes `floor = 20` placeholder heal.** "20. patro a vyšší" is now a sentinel at ingest; the
       2,995 stored rows (1,736 active) need a NULLing data migration with a backup (destructive:
       operator's call). Until then the bake-off's idnes floor labels carry it.
-- [ ] **Wider area rail, by evidence only.** Bare "metrů" / "m" after "plocha" / "výměra" is the one
-      lever left for bazos area; measure it on a panel before writing a line of it.
+- [ ] **Dotted thousands in the one area grammar.** `scraper.area` reads "1.910 m2" as 1,91: 121 active
+      area-less rows carry the form (bazos 69, remax 27, realitymix 20, idnes 5) and bazos holds 313 active
+      parcels under 5 m². Accept `d{1,3}(.ddd)+` before an m² unit, every portal at once, then heal
+      through the re-parse seam. (A wider LLM unit rule was measured and is NOT worth it: the model's
+      misses are the wrong measure, not the unit — PROGRAM.md § 8.)
 
 ## Hand-overs owed to the autodedup program (R12 — this program never edits theirs)
 

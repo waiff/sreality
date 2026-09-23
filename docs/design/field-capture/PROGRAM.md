@@ -752,8 +752,16 @@ quoted span — as digits, or as an ares / hectares figure that converts to it (
   R7 cannot open the gate: `area_m2` ships declared and closed, the lane never asks for it, nothing
   is billed. Only 55 of the 281 labelled adverts even carry a digit followed by "m" / "metr", and
   those are mostly "300 metrů od moře". The W1 ceiling ("~3 pp, not worth a call") stands as measured.
-  A wider rail (bare "metrů", "m" after "plocha" / "výměra") is the one lever left; it needs its own
-  panel reading before it is written, never a guess.
+  **What the refused quotes say (run 35833304757, payloads in the receipt, 54 refusals):** 24 carry no
+  unit at all, 15 a bare "m" ("o výměře 31m", "celkové ploše 61,3 m"), 13 an m² the rail refused for
+  another reason — a dotted thousands group ("1.910 m2", "12.100 m2"), a product ("15x7 m" → 105), a
+  sum of rooms, a range ("180–210 m²"). Where a label exists the model's figure was the wrong MEASURE
+  as often as not (the plot under a flat, a garage, "celková" for "užitná"), so widening the unit rule
+  to a cued bare "m" would not clear 95 % either: the limiter is measure selection, not the unit.
+  Not pursued. The dotted-thousands form IS a grammar gap (`scraper.area` reads "1.910 m2" as 1,91):
+  121 active area-less rows carry it (bazos 69, remax 27, realitymix 20, idnes 5) and bazos holds
+  313 active parcels under 5 m², which is where a mis-read parcel lands. That is the one grammar's to
+  fix, on every portal at once, then healed through the re-parse seam — a separate PR.
 - **A finding the re-runs surfaced, and it is not the model's.** The same runs scored luna's FLOOR
   at 79.6–82.5 % (n 555–630) against the 95.6 % (n 340) that opened the gate. Per label source
   (run 35830742594, rows in the receipt): sreality 96.8 % (n 220), idnes 82.1 % (n 140) with 23
