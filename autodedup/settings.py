@@ -378,6 +378,14 @@ class Settings:
     # 6's unrecovered certain duplicates are exactly that — two cells whose union no invariant
     # refuses, left apart because the join was offered too early.
     repartition_rejoin_cells: bool = False
+    # E253: and let a cell SHED what blocks a cut merge edge. Cohort 12 cut seven families of
+    # adverts no fact separates, every one of them because the cell one half landed in had
+    # absorbed a THIRD advert carrying a fact against the other half — a member neither edge
+    # was about. `shed_max` bounds the cover, `shed_max_union` the component work, and the
+    # move is accepted only when it keeps MORE merge evidence inside than the two cells did.
+    repartition_shed_blockers: bool = False
+    repartition_shed_max: int = 1
+    repartition_shed_max_union: int = 64
 
     # ------------------------------------------------------- W15 (g8b, 2026-09-21): the repairs
     #
@@ -542,6 +550,10 @@ class Settings:
     # numeral, the number word and the single letter, each behind an explicit marker.
     d43_unit_codes: bool = False
     d43_unit_codes_wide: bool = False
+    # E250 (W25): the designator noun in its Czech INFLECTIONS — `k domu č.1`, `na domě č.3`,
+    # `v bytě č. 7`. Read per kind; a kind that prints several numbers is a project's menu
+    # and abstains, and a number on one side only is never a conflict.
+    d43_printed_designator: bool = False
     # E162: a fact ONE side prints and the other is silent about. Outside a development that is
     # E12's missing datum and no refusal; inside one it is the whole hazard, so the silent side
     # fails closed. `development_context_mode` says how narrowly "inside" is read — `vocab` is
@@ -741,6 +753,18 @@ class Settings:
     d43_rental_colive_flooring: bool = False
     d43_rental_colive_furnishing: bool = False
     d43_rental_colive_parking_level: bool = False
+    # E251/E252 (W25). The fit-out, refused at a cost of seven in W22 as a limb of its OWN,
+    # read again with a second statement beside it that there are two units — two address
+    # points the resolver numbers differently, or two rents diverging on one portal while
+    # both adverts are live. The reader is the wide one, which knows the letting's own
+    # sentence (`Pronajímá se nezařízený`) and, behind its own dial, the portal's column.
+    # And whose the kitchen and the lavatory ARE: `sdílené zázemí` against `vlastním
+    # sociálním zařízením` is two lettings of one villa, not one let described twice.
+    d43_rental_colive_furnishing_corroborated: bool = False
+    d43_rental_colive_furnishing_column: bool = False
+    d43_rental_colive_furnishing_needs_ruian: bool = True
+    d43_rental_colive_furnishing_corroboration: str = "split"
+    d43_rental_colive_facility: bool = False
     # E203's charge table, widened to the spellings E220 met. Separate from the limb, because
     # widening the shipped table would move E203 under w21.
     d43_charge_keywords_wide: bool = False
@@ -929,6 +953,15 @@ class Settings:
             raise ValueError("d43_price_sequential_identity needs d43_price_sequential_path")
         if self.repartition_rejoin_cells and not self.repartition:
             raise ValueError("repartition_rejoin_cells needs repartition")
+        if self.repartition_shed_blockers and not self.repartition:
+            raise ValueError("repartition_shed_blockers needs repartition")
+        if self.repartition_shed_max < 1:
+            raise ValueError(
+                f"repartition_shed_max must be at least 1: {self.repartition_shed_max}")
+        if self.repartition_shed_max_union < 2:
+            raise ValueError(
+                "repartition_shed_max_union must be at least 2: "
+                f"{self.repartition_shed_max_union}")
         if self.corroboration not in ("off", "unit", "two_of", "development_only"):
             raise ValueError(
                 "corroboration must be off/unit/two_of/development_only: "
@@ -980,6 +1013,14 @@ class Settings:
                 raise ValueError(f"{name} needs demonstrate_identity")
         if self.d43_unit_codes_wide and not self.d43_unit_codes:
             raise ValueError("d43_unit_codes_wide needs d43_unit_codes")
+        if self.d43_rental_colive_furnishing_corroboration not in ("split", "any"):
+            raise ValueError(
+                "d43_rental_colive_furnishing_corroboration must be 'split' or 'any': "
+                f"{self.d43_rental_colive_furnishing_corroboration}")
+        for name in ("d43_rental_colive_furnishing_corroborated",
+                     "d43_rental_colive_facility"):
+            if getattr(self, name) and not self.d43_rental_colive:
+                raise ValueError(f"{name} needs d43_rental_colive")
         if self.d43_body_align_heal and not self.d43_body_align:
             raise ValueError("d43_body_align_heal needs d43_body_align")
         if self.floor_camps_reads not in ("off", "joint", "slack", "strict"):
@@ -1243,7 +1284,7 @@ class Settings:
                 f"max_attr_contradictions must be positive: {self.max_attr_contradictions}"
             )
         limbs = ("charges", "house_number", "sanitary", "renovation", "flooring",
-                 "furnishing", "parking")
+                 "furnishing", "parking", "facility")
         unknown = sorted(set(self.d43_rental_colive_cross_portal_limbs) - set(limbs))
         if unknown:
             raise ValueError(

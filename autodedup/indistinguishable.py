@@ -98,7 +98,9 @@ from autodedup.text_facts import (
     commercial_product_class,
     english_unit_codes,
     floor_coverings,
+    facility_tenure,
     furnished_state,
+    furnished_state_wide,
     parking_level,
     plot_attributes,
     renovation_state,
@@ -152,6 +154,7 @@ from autodedup.text_facts import (
     subject_floors,
     subject_floors_by_form,
     printed_space_numbers,
+    printed_designators,
     printed_unit_codes,
     further_areas,
     unit_designators,
@@ -1276,7 +1279,13 @@ def rental_colive_conflict(
         printed = _house_numbers(a), _house_numbers(b)
         if printed[0] and printed[1] and printed[0] != printed[1]:
             return (f"cp/co={printed[0]}", f"cp/co={printed[1]}")
+    if settings.d43_rental_colive_furnishing_corroborated and _colive_side(
+            a, b, settings, "furnishing"):
+        fit = _furnishing_conflict(a, b, settings)
+        if fit is not None and _unit_split_corroborated(a, b, settings):
+            return fit
     for dial, reader, limb, label in (
+        (settings.d43_rental_colive_facility, facility_tenure, "facility", "facility"),
         (settings.d43_rental_colive_sanitary, sanitary_arrangement, "sanitary", "wc"),
         (settings.d43_rental_colive_renovation, renovation_state, "renovation",
          "renovation"),
@@ -1291,6 +1300,57 @@ def rental_colive_conflict(
         if _one_each(left, right):
             return (f"{label}={sorted(left)}", f"{label}={sorted(right)}")
     return None
+
+
+def _furnishing_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E251: what the two lets say about their own fit-out, read three-valued.
+
+    `furnished_state` knows `zařízený byt` and `byt je zařízen`; the two Rezidence Chodovec
+    adverts write `Pronajímá se nezařízený` against `Pronajímá se částečně zařízený — k
+    dispozici je postel a prostorná šatní skříň v ložnici`, and neither reader nor column
+    limb saw it. The wide reader adds the letting's own sentence and, where no sentence
+    answers, the portal's own `furnished` column — which sreality and bezrealitky BOTH fill
+    per unit here, `ne` against `částečně`."""
+    left = furnished_state_wide(a.description,
+                                a.attrs.get("furnished") if settings.
+                                d43_rental_colive_furnishing_column else None)
+    right = furnished_state_wide(b.description,
+                                 b.attrs.get("furnished") if settings.
+                                 d43_rental_colive_furnishing_column else None)
+    if not _one_each(left, right):
+        return None
+    return (f"furnishing={sorted(left)}", f"furnishing={sorted(right)}")
+
+
+def _unit_split_corroborated(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E251's second signal: something OTHER than the fit-out says these are two units.
+
+    W22 refused the bare furnishing limb at a cost of seven certain duplicates, and that
+    refusal was right about the limb ALONE — one advert re-posted after the landlord put a
+    bed in it says `zařízený` where its twin said `nezařízený`. What the Chodovec pair adds
+    is a second, independent statement that there are two units: two ADDRESS POINTS the
+    resolver gives different RÚIAN codes and different printed house numbers, each of them
+    reached by both portals; or two rents diverging on ONE portal while both adverts are
+    live, which D49 refuses to read alone and which is no longer alone here."""
+    if settings.d43_rental_colive_furnishing_corroboration == "any":
+        return True
+    address = (a.location.granularity == ADDRESS_GRAIN == b.location.granularity
+               and _one_street(a, b))
+    numbers = (a.location.house_number, b.location.house_number)
+    points = (a.location.ruian_adm_kod, b.location.ruian_adm_kod)
+    if address and all(numbers) and numbers[0] != numbers[1]:
+        if all(points) and points[0] != points[1]:
+            return True
+        if not settings.d43_rental_colive_furnishing_needs_ruian:
+            return True
+    if (a.source is not None and a.source == b.source
+            and _live_together(a, b, settings)
+            and not price_paths_agree(a, b, settings.d43_price_path_tol)
+            and _moved(a.price, b.price, settings.d43_price_path_tol)):
+        return True
+    return False
 
 
 def _tenancy_charge_conflict(
@@ -1442,6 +1502,27 @@ def stored_house_number_conflict(a: Listing, b: Listing, cfg: Settings
     if printed_a and printed_b and printed_house_numbers_meet(printed_a, printed_b):
         return None
     return (f"stored={left}", f"stored={right}")
+
+def printed_designator_conflict(a: Listing, b: Listing, cfg: Settings
+                                ) -> tuple[str, str] | None:
+    """E250: two bodies of one project naming two different houses, flats or spaces.
+
+    Read per KIND and never as one set — `byt č.2 v domě č.3` states two things. A number on
+    ONE side only is not a conflict, and a body that prints SEVERAL numbers for one kind has
+    published a menu of the project rather than named its own unit, which the reader itself
+    refuses. The Stará Lípa three-house project is the shape: `Pro více informací k domu č.1`
+    against `domluvte si schůzku na domě č.3`, one price, one plot, one 116 m² floor area,
+    and the project advert that names no house at all stays with whichever house takes it."""
+    if not cfg.d43_printed_designator:
+        return None
+    left, right = printed_designators(a.description), printed_designators(b.description)
+    if not left or not right:
+        return None
+    for kind in sorted(set(left) & set(right)):
+        if not (left[kind] & right[kind]):
+            return (f"{kind}={sorted(left[kind])}", f"{kind}={sorted(right[kind])}")
+    return None
+
 
 def _plan_match(rows: Mapping[str, tuple[float, float]], value: float | None,
                 index: int, tol: float) -> list[str]:
@@ -2189,6 +2270,11 @@ def distinguishing_facts(
     stored_number = stored_house_number_conflict(a, b, cfg)
     if stored_number is not None:
         add("stored_house_number", stored_number[0], stored_number[1])
+
+    # E250: the designator noun in its Czech inflections — `k domu č.1` against `na domě č.3`.
+    designator = printed_designator_conflict(a, b, cfg)
+    if designator is not None:
+        add("printed_designator", designator[0], designator[1])
 
     # E244: which room of one building's own priced letting plan each advert is.
     plan_space = plan_space_conflict(a, b, cfg)

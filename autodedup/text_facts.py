@@ -2082,3 +2082,137 @@ def plan_headline_area(text: str | None) -> float | None:
         return None
     match = _PLAN_HEADLINE.match(fact_text(unescape(text)))
     return _plan_number(match.group(1)) if match else None
+
+
+# --- the designator noun in its Czech INFLECTIONS (E250) --------------------------------------
+# W25. `printed_unit_codes` is anchored on a unit noun and needs a MULTI-SEGMENT code, and
+# `unit_designators` reads `byt č. 3` and `jednotka č. 12` and nothing else. Between them they
+# miss the plainest designator a Czech advert writes: the noun in an oblique case followed by a
+# bare number. The Stará Lípa project of three houses parts on exactly that — `Pro více
+# informací k domu č.1`, `domluvte si schůzku na domě č. 2`, `na domě č.3` — and no reader in
+# the chain knows `domu`, `domě` or `domem` at all.
+#
+# Read per KIND, never as one set: `byt č.2 v domě č.3` states two different things, and a set
+# reader would meet on the 2 or the 3. A kind that prints more than one number is a MENU (the
+# project advert that lists all three houses) and abstains, which is the fail-safe direction —
+# an empty set is never a conflict.
+_DESIGNATOR_KINDS: tuple[tuple[str, str], ...] = (
+    ("dum", r"dum|domu|dome|domem|domku|domek"),
+    ("byt", r"byt|bytu|byte|bytem"),
+    ("jednotka", r"jednotka|jednotky|jednotce|jednotku|jednotkou"),
+    ("prostor", r"prostor|prostoru|prostoru|prostorem"),
+    ("kancelar", r"kancelar|kancelare|kancelari|kancelarem"),
+    ("garaz", r"garaz|garaze|garazi"),
+    ("stani", r"stani"),
+    ("parcela", r"parcela|parcely|parcele|parcelu"),
+    ("pozemek", r"pozemek|pozemku|pozemkem"),
+)
+# `č.`, `č. p.`, `číslo`, `č.p.` — the marker is MANDATORY. A bare numeral after a Czech noun
+# is grammar (`tři domy`, `dům 4+kk`), never a name.
+_DESIGNATOR_MARKER: str = r"(?:c\s*\.?\s*p\s*\.?\s*|c\s*\.\s*|cislo\s+|c\s+)"
+# A designator inside one project is a small number; a big one is an address, and E240 owns
+# the address. Bounding it here is what keeps the two readings from arguing.
+DESIGNATOR_MAX_VALUE: int = 99
+# More than one number for one kind is a list of the project's houses, not this advert's own.
+DESIGNATOR_MAX_PER_KIND: int = 1
+_DESIGNATOR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (kind, re.compile(r"\b(?:" + forms + r")\s+" + _DESIGNATOR_MARKER
+                      + r"(\d{1,3})(?![\d+]|[.,]\d|\s*m2|\s*kk)"))
+    for kind, forms in _DESIGNATOR_KINDS
+)
+
+
+def printed_designators(text: str | None) -> dict[str, frozenset[str]]:
+    """`{kind: {number}}` for `k domu č.1` / `na domě č. 2` / `v bytě č. 7`."""
+    return dict(_printed_designators(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fold(unescape(text))
+    out: list[tuple[str, frozenset[str]]] = []
+    for kind, pattern in _DESIGNATOR_PATTERNS:
+        found = {match.group(1).lstrip("0") or "0" for match in pattern.finditer(folded)
+                 if int(match.group(1)) <= DESIGNATOR_MAX_VALUE}
+        if found and len(found) <= DESIGNATOR_MAX_PER_KIND:
+            out.append((kind, frozenset(found)))
+    return tuple(out)
+
+
+# --- whose lavatory and whose kitchen it is (E252) ---------------------------------------------
+# W25. `sanitary_arrangement` reads where the lavatory IS — separate from the bathroom or in
+# it. The Masarykova villa parts two 35 m² offices at one 6,000 Kč on a different question:
+# whose it is. `sdílené zázemí (kuchyň, koupelna, WC)` against `Samostatná kancelář s vlastním
+# sociálním zařízením (WC)` is one office that shares the facilities of the house and one that
+# does not, and both bodies are on one portal for 8.7 days together.
+#
+# The adjective must reach a SANITARY noun: the same villa body writes `ve společných obytných
+# prostorech vily`, and a reader that took `společných` on its own would answer `shared` for
+# the advert that states the opposite. A body that says both abstains.
+_FACILITY_NOUN: str = (r"zazemi|socialni\w*\s+zarizeni\w*|soc\.?\s*zarizeni\w*|kuchyn\w*"
+                       r"|koupeln\w*|wc\b|toalet\w*|zachod\w*")
+_FACILITY_SHARED = re.compile(
+    r"\b(?:sdilen\w+|spolecn\w+)\s+(?:[a-z]+\s+){0,2}?(?:" + _FACILITY_NOUN + r")"
+    r"|\b(?:sdilen\w+|spolecn\w+)\s+prostor\w*\s*[-–—:,]?\s*(?:" + _FACILITY_NOUN + r")")
+_FACILITY_OWN = re.compile(
+    r"\b(?:vlastni\w*|soukrom\w+|samostatn\w+\s+vlastni\w*)\s+(?:[a-z]+\s+){0,2}?(?:"
+    + _FACILITY_NOUN + r")")
+
+
+def facility_tenure(text: str | None) -> frozenset[str]:
+    """`{'shared'}` / `{'own'}` — whose the kitchen and the lavatory are, or nothing."""
+    return _facility_tenure(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _facility_tenure(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    out: set[str] = set()
+    if _FACILITY_SHARED.search(folded):
+        out.add("shared")
+    if _FACILITY_OWN.search(folded):
+        out.add("own")
+    return frozenset(out)
+
+
+# --- the fit-out a LETTING states about itself (E251) ------------------------------------------
+# W25. `furnished_state` reads `zařízený byt` and `byt je zařízen`; the Rezidence Chodovec
+# adverts write neither. They write `Pronajímá se nezařízený` against `Pronajímá se částečně
+# zařízený – k dispozici je postel a prostorná šatní skříň v ložnici`, which is the letting's
+# own sentence about its own fit-out and the plainest form there is. The wide reader adds that
+# form and the portal's own `furnished` column, and it separates PART-furnished from furnished,
+# because `nezařízený` against `částečně zařízený` is the Chodovec pair and a three-valued
+# answer is what makes it readable.
+_FURNISHED_LET = re.compile(
+    r"\bpronajima\s+se\s+(?:plne\s+|kompletne\s+|castecne\s+)?(?:zarizen|vybaven)\w*"
+    r"|\bpronajima\s+se\s+(?:nezarizen|nevybaven)\w*"
+    r"|\bk\s+pronajmu\s+(?:plne\s+|kompletne\s+|castecne\s+)?(?:zarizen|vybaven)\w*")
+_PART_FURNISHED = re.compile(r"\bcastecne\s+(?:zarizen|vybaven)\w*")
+_FURNISHED_COLUMN: dict[str, str] = {
+    "ano": "furnished", "castecne": "part", "ne": "unfurnished",
+}
+
+
+def furnished_state_wide(text: str | None, column: str | None = None) -> frozenset[str]:
+    """`{'furnished'}` / `{'part'}` / `{'unfurnished'}` — the fit-out, body first, column after."""
+    out = _furnished_state_wide(text) if text else frozenset()
+    if out:
+        return out
+    stated = _FURNISHED_COLUMN.get(str(column).strip().lower()) if column else None
+    return frozenset({stated}) if stated else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _furnished_state_wide(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    out: set[str] = set()
+    if _PART_FURNISHED.search(folded):
+        out.add("part")
+    if _UNFURNISHED.search(folded):
+        out.add("unfurnished")
+    if _FURNISHED.search(folded) or (_FURNISHED_LET.search(folded)
+                                     and not _UNFURNISHED.search(folded)):
+        out.add("furnished")
+    if "part" in out:
+        out.discard("furnished")
+    return frozenset(out)

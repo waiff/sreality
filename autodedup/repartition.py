@@ -21,7 +21,7 @@ and a certificate outweighs any number of scores because its precision is struct
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 # A certificate outranks every learned score, exactly as `cluster.edge_rank` orders them.
 CERTIFICATE_WEIGHT: float = 1000.0
@@ -44,6 +44,9 @@ class Edge:
 
 
 Invariants = Callable[[Sequence[int]], str | None]
+# The pairs of a member set a stated fact separates — the pairwise part of `Invariants`,
+# which is the only part a cell can shed its way out of.
+Blockers = Callable[[Sequence[int]], Sequence[tuple[int, int]]]
 
 
 def components(members: Iterable[int], edges: Sequence[Edge]) -> list[list[int]]:
@@ -75,6 +78,9 @@ def partition(
     keep_factless: bool = False,
     rejoin_cells: bool = False,
     rejoin_invariants: Invariants | None = None,
+    shed_blockers: Blockers | None = None,
+    shed_max: int = 1,
+    shed_max_union: int = 64,
 ) -> list[list[int]]:
     """Cut one component into consistent groups, maximising the merge evidence kept inside.
 
@@ -167,6 +173,14 @@ def partition(
             if keep_factless:
                 _reconcile(ordered, home, cells, invariants)
 
+    if shed_blockers is not None:
+        for _round in range(max_rounds):
+            if not _shed(ordered, neighbours, home, cells, invariants, shed_blockers,
+                         shed_max, shed_max_union):
+                break
+            if keep_factless:
+                _reconcile(ordered, home, cells, invariants)
+
     return [sorted(cell) for cell in cells if cell]
 
 
@@ -252,3 +266,108 @@ def _reconcile(
             moved = True
             break
     return moved
+
+
+def _weight_inside(
+    neighbours: Mapping[int, Sequence[Edge]], members: Iterable[int]
+) -> float:
+    """The merge evidence a cell of these members keeps INSIDE it — the module's objective."""
+    inside = set(members)
+    total = 0.0
+    for member in inside:
+        for edge in neighbours[member]:
+            other = edge.hi if edge.lo == member else edge.lo
+            if other in inside and other > member:
+                total += edge.weight
+    return total
+
+
+def _shed(
+    ordered: Sequence[Edge],
+    neighbours: Mapping[int, Sequence[Edge]],
+    home: dict[int, int],
+    cells: list[list[int]],
+    invariants: Invariants,
+    blockers: Blockers,
+    shed_max: int,
+    max_union: int,
+) -> bool:
+    """E253: let a cell SHED the members that block a cut merge edge. True when one did.
+
+    `_rejoin` offers two cells their whole union and takes the answer; `_reconcile` moves one
+    member. Neither can reach the partition where a cell has to give a member UP to take a
+    bigger one in — and that is the shape W25 measured on cohort 12: seven families of adverts
+    no fact separates, each cut because the cell one half landed in had absorbed a THIRD advert
+    that carries a fact against the other half. The absorbed advert was not party to either
+    edge; it is simply what the greedy pass happened to reach first, and once inside it can
+    veto every later join. Relaxing a rule makes that strictly more likely, which is why the
+    seven appeared when E243 recovered its merges.
+
+    The move is the same objective, not a new one: the union minus a bounded cover of its
+    conflicting pairs is accepted only when the evidence it keeps inside BEATS what the two
+    cells kept apart, so a cell never sheds a member that is worth more than the join. The
+    shed members become their own cells and `_reconcile` may put them back elsewhere. Neither
+    end of the cut edge may ever be shed — that would answer a different question than the one
+    the edge asked.
+    """
+    moved = False
+    touched: set[int] = set()
+    for edge in ordered:
+        left, right = home[edge.lo], home[edge.hi]
+        if left == right or left in touched or right in touched:
+            continue
+        union = sorted(cells[left] + cells[right])
+        if len(union) > max_union or invariants(union) is None:
+            continue
+        keep = {edge.lo, edge.hi}
+        conflicts = [(lo, hi) for lo, hi in blockers(union)]
+        if not conflicts or any(lo in keep and hi in keep for lo, hi in conflicts):
+            continue
+        cover = _cover(conflicts, keep, shed_max)
+        if cover is None:
+            continue
+        kept = [member for member in union if member not in cover]
+        if invariants(kept) is not None:
+            continue
+        before = _weight_inside(neighbours, cells[left]) + _weight_inside(
+            neighbours, cells[right])
+        if _weight_inside(neighbours, kept) <= before:
+            continue
+        for member in cover:
+            cells.append([member])
+            home[member] = len(cells) - 1
+        keeper, loser = (left, right) if left < right else (right, left)
+        for member in kept:
+            home[member] = keeper
+        cells[keeper] = kept
+        cells[loser] = []
+        touched.add(keeper)
+        touched.add(loser)
+        moved = True
+    return moved
+
+
+def _cover(
+    conflicts: Sequence[tuple[int, int]], keep: set[int], limit: int
+) -> list[int] | None:
+    """The smallest set of members whose removal clears every conflict, greedily, or None.
+
+    Greedy by degree with the smallest id breaking every tie, so the answer is a function of
+    the conflict SET. A member the cut edge asked about is never a candidate, so a conflict
+    with both ends protected has no cover at all."""
+    remaining = [(lo, hi) for lo, hi in conflicts]
+    chosen: list[int] = []
+    while remaining:
+        if len(chosen) >= limit:
+            return None
+        degree: dict[int, int] = {}
+        for lo, hi in remaining:
+            for member in (lo, hi):
+                if member not in keep:
+                    degree[member] = degree.get(member, 0) + 1
+        if not degree:
+            return None
+        pick = min(degree, key=lambda member: (-degree[member], member))
+        chosen.append(pick)
+        remaining = [(lo, hi) for lo, hi in remaining if lo != pick and hi != pick]
+    return sorted(chosen)
