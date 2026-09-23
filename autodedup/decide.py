@@ -589,6 +589,53 @@ def apply_d43_rule(
     return decision
 
 
+MERGE_POLICY_HOLD: str = "policy_hold"
+
+
+def merge_policy_cells(listing: Listing) -> tuple[str, ...]:
+    """The four keys one advert answers to, most specific first."""
+    kind = listing.category_type or "*"
+    main = listing.category_main or "*"
+    return (f"{kind}|{main}", f"{kind}|*", f"*|{main}", "*|*")
+
+
+def merge_policy_verdict(listing: Listing, settings: Settings) -> str | None:
+    """`merge` / `propose` for this advert's cell, or None where the table says nothing."""
+    for key in merge_policy_cells(listing):
+        verdict = settings.merge_policy.get(key)
+        if verdict is not None:
+            return verdict
+    return None
+
+
+def apply_merge_policy(decision: Decision, la: Listing, lb: Listing,
+                       settings: Settings) -> Decision:
+    """D65: a category the operator holds PROPOSE-ONLY never reaches the merge zone.
+
+    The blind read of cohort 9 found 12 of its 16 DIFFERENT merges in one stratum — rentals
+    that co-live on one portal — so the operator asked for a dial that holds a whole category
+    back at rollout while the rest of the corpus merges. It is a pure filter on the merge zone
+    and reads nothing but the two adverts' own category columns, so a held pair still carries
+    its score, its certificate and its evidence into the band for the operator to act on.
+
+    EITHER side's cell holds the pair: a `dům` advertised as `komerční` is the one sanctioned
+    cross-type (rule #15), and holding rentals must not be escapable by pairing one with a row
+    whose type column is null."""
+    if not settings.merge_policy or decision.zone != "merge":
+        return decision
+    for listing in (la, lb):
+        if merge_policy_verdict(listing, settings) != "propose":
+            continue
+        cell = f"{listing.category_type}|{listing.category_main}"
+        return Decision(
+            decision.lo, decision.hi, "band", decision.score, decision.families,
+            decision.certificate, None,
+            f"{decision.reason}:{MERGE_POLICY_HOLD}:{cell}",
+            {**decision.evidence, MERGE_POLICY_HOLD: cell},
+        )
+    return decision
+
+
 def demonstration_refusal(
     la: Listing, lb: Listing, feats: Feats, settings: Settings
 ) -> str | None:
@@ -638,7 +685,9 @@ def decide_pair(
     have already decided — it never reaches a veto, an auto-reject or a developer guard."""
     decision = _decide_layers(fa, fb, la, lb, feats, probes, model, settings, kb_refused)
     decision = apply_context_rule(decision, feats, la, lb, settings, context)
-    return apply_d43_rule(decision, la, lb, feats, settings)
+    decision = apply_d43_rule(decision, la, lb, feats, settings)
+    # D65 last: a cell the operator holds propose-only must survive every promotion above it.
+    return apply_merge_policy(decision, la, lb, settings)
 
 
 def _decide_layers(

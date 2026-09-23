@@ -342,3 +342,22 @@ def aligned_difference(
         if found is not None:
             return found
     return None
+
+
+def overlap_ratio(left_text: str | None, right_text: str | None,
+                  heal: bool = False) -> float | None:
+    """E200: how much of the two bodies is the SAME text, 0..1, or None when one is too short.
+
+    Read on the same masked tokens `aligned_difference` aligns, so a difference of numbers,
+    dates or order codes never lowers it — this measures the PROSE, which is where a seller's
+    template and a seller's statement about one unit are the same thing.
+    """
+    if not left_text or not right_text:
+        return None
+    left, right = tokens(left_text, heal), tokens(right_text, heal)
+    if len(left) < MIN_TOKENS or len(right) < MIN_TOKENS:
+        return None
+    matcher = SequenceMatcher(None, [token.text for token in left],
+                              [token.text for token in right], autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return 2.0 * matched / (len(left) + len(right))

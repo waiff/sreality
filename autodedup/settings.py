@@ -442,6 +442,10 @@ class Settings:
     # bazos. The convention belongs to the FEED, and the feed is the broker. `portal` is g7/g8's
     # reading; `broker` makes the same-portal clause need a shared `broker_key`, which is what a
     # broker-feed aggregator needs and what stops the V Aleji 131 m² 4+1 being cut in two.
+    # E213: `firm` is the AGENCY rather than the agent — one landlord's portfolio is posted by
+    # whichever of its people is free, so two Brno Vídeňská 41 m² 1+kk of one agency carry two
+    # `broker_key`s and one convention, and `broker` read them as two feeds and forgave a
+    # storey that separates two flats.
     floor_same_source_feed: str = "portal"
     # E11 as a dial rather than a module constant, so an arm can open it without a monkeypatch.
     min_evidence_families: int = 2
@@ -637,6 +641,139 @@ class Settings:
     # what "one third of a parcel" looks like and a measurement difference never is.
     d43_offer_area_min_ratio: float = 2.0
 
+    # --- W20 / S5: what the cohort-7 residue named (E200-E204, D61-D62) ---------------------
+    # E200: two of one seller's printed order codes, live together on one portal, on two
+    # bodies of ONE template. The bare code conflict is refuted — 263 certain duplicates of the
+    # seven cohorts carry disjoint codes while live together, because a re-post is renumbered —
+    # so the reading is banded by how much of the two bodies is the same text.
+    d43_agency_code_conflict: bool = False
+    d43_agency_code_max_codes: int = 3
+    d43_agency_code_body_floor: float = 0.55
+    d43_agency_code_body_ceiling: float = 0.97
+    # E201: the storey written as an ORDINAL WORD (`ve třetím patře`), read by the same three
+    # readers that read the numeral. Without it a worded upper storey reads as no storey.
+    d43_prose_floor_words: bool = False
+    # E203: a stated service advance or deposit that differs BESIDE a co-live price gap. D49's
+    # refusal of the bare price limb is kept — `requires_price_gap` is what keeps it.
+    d43_colive_charge_conflict: bool = False
+    d43_colive_charge_requires_price_gap: bool = True
+    d43_colive_charge_same_source_only: bool = False
+    # E202: the plot the body states, for the portals that fill no plot column at all.
+    d43_prose_plot_conflict: bool = False
+    d43_prose_plot_requires_price_gap: bool = True
+    # E204: an advert that states its plot is cut from a bigger parcel the other sells whole.
+    d43_part_whole: bool = False
+    d43_part_whole_min_gap: float = 0.1
+
+    # --- W21 / S6: what the cohort-8 confirmation named (E210-E219, D63-D64) ----------------
+    # E210: `N. patro` and `(N+1). NP` are ONE storey. The worded reading (E201) compares
+    # within one noun, so a body that states its own storey as `7. patře` while naming the
+    # building's `1.-3. NP` looked five storeys away from the `8. nadzemní podlaží` advert of
+    # the same 57 m² office. An AGREEMENT across the two nouns needs no converter this module
+    # does not trust: it is the scale it already converts to.
+    d43_floor_cross_form_agreement: bool = False
+    # E211: the area a commercial body LEADS with, read against that advert's OWN stored
+    # column. E186's bare lead comparison is refused (M419) because two bodies routinely lead
+    # with different parts of one offer; a lead that contradicts its own column is the seller
+    # saying this advert is a different slice of the space the portal measured.
+    d43_headline_vs_column: bool = False
+    d43_headline_vs_column_colive_only: bool = True
+    d43_headline_vs_column_same_source_only: bool = True
+    d43_headline_vs_column_min_gap: float = 0.1
+    # E212: the storey a letting states as the OFFER — `přízemní podlaží` against `samostatné
+    # 1. patro`. Judged by the storey convention every other reading uses: two storeys anywhere,
+    # one only inside one feed.
+    d43_offered_storey: bool = False
+    # E214: a designator printed under an explicit unit-identity LABEL (`ID jednotky: DOUBLE
+    # B`). `printed_unit_codes` needs a digit; the label is what makes a letters-only value a
+    # unit name rather than prose.
+    d43_labelled_unit_ids: bool = False
+    # E215: the cellar/storage size the body states. `printed_area` scopes it out of the
+    # headline comparison and nothing else reads it.
+    d43_accessory_area: bool = False
+    d43_accessory_area_colive_only: bool = True
+    # E216: the capacity written in English. One serviced-office operator publishes the same
+    # building's products in both languages and the Czech-only reader saw one of them.
+    d43_capacity_english: bool = False
+    d43_stated_beds: bool = False
+    # E217: the obec the BODY names, against the other advert's stored locality. E135's refusal
+    # of the raw column conflict stands (D64): this reads the body, requires the speaker's own
+    # body to name its own place, and requires the other side's locality to be known at part
+    # grain so a village filed under its town cannot look like a different place.
+    d43_body_obec: bool = False
+    d43_body_obec_colive_only: bool = False
+    # E218: the land the body states — the measurement written before the noun, read at the
+    # EXACT bar where the parcel is the object (E182's rule, on the prose carrier); and the row
+    # a seller's own price list assigns to this advert.
+    d43_prose_plot_exact: bool = False
+    d43_priced_land_rows: bool = False
+    # E219: a stated difference between two plots whose bodies BOTH say a neighbouring plot is
+    # also on offer. D63 keeps the general refusal: absence is not a statement.
+    d43_neighbour_plot_attribute: bool = False
+
+    # --- W22 / S7 -----------------------------------------------------------------------
+    # E220: two lets of one house on sale at the same moment, parted by one stated fact. The
+    # co-live window is the whole guard — a re-post with a changed deposit is ONE flat, and
+    # sequential postings never overlap. Each item of the named list carries its own dial so
+    # its cost on certain rental duplicates can be read alone.
+    d43_rental_colive: bool = False
+    d43_rental_colive_min_overlap_days: float = 1.0
+    d43_rental_colive_same_source_only: bool = True
+    # The NUMBER limbs carry their own portal scope: a service advance is quoted per
+    # portal convention and two portals' numbers for one flat are two conventions,
+    # while a lavatory is a lavatory whoever prints it.
+    d43_rental_colive_number_same_source_only: bool = True
+    # The limbs the portal scope is LIFTED for, by name. A lavatory reads across two
+    # portals as one false split on cohort 4; what is under foot reads as none.
+    d43_rental_colive_cross_portal_limbs: tuple[str, ...] = ()
+    # A tenancy's second numbers, read honestly: the co-live window on W8's SIGHTING
+    # clock, a charge capped at a multiple of the rent (a bazos advert id is not a
+    # deposit), an estimate refused, and the two rents required to MEET — a deposit
+    # that tracks a price cut is the price cut restated, and D49 already refused that.
+    d43_rental_colive_honest_clock: bool = True
+    d43_rental_colive_charge_rent_multiple: float = 6.0
+    d43_rental_colive_services_below_rent: bool = True
+    d43_rental_colive_charge_requires_equal_rent: bool = True
+    d43_rental_colive_charges: bool = False
+    d43_rental_colive_house_number: bool = False
+    d43_rental_colive_sanitary: bool = False
+    d43_rental_colive_renovation: bool = False
+    d43_rental_colive_flooring: bool = False
+    d43_rental_colive_furnishing: bool = False
+    d43_rental_colive_parking_level: bool = False
+    # E203's charge table, widened to the spellings E220 met. Separate from the limb, because
+    # widening the shipped table would move E203 under w21.
+    d43_charge_keywords_wide: bool = False
+    # E221: the unit code nobody wrote in Czech — `Unit NJ1` against `Unit NJ2` of one hall,
+    # `budova A2` against `budova B2`, and the building letter a portal files in its own slug.
+    # Read per KIND: two adverts of one hall share the hall and part on the unit.
+    d43_unit_codes_english: bool = False
+    d43_unit_codes_slug: bool = False
+    d43_slug_area: bool = False
+    d43_slug_area_same_source_only: bool = True
+    # E222: D61 stands — two order codes are not a fact BY THEMSELVES. What lifts them is a
+    # second stated difference on two adverts that are on sale together on one portal.
+    d43_agency_code_with_difference: bool = False
+    d43_commercial_subtype_colive: bool = False
+    d43_offered_use_conflict: bool = False
+    # The same reading WITHOUT the order code beside it: one portal, on sale together,
+    # and two disjoint lists of what the space is offered FOR.
+    d43_offered_use_alone: bool = False
+    # E223: the plot attribute a seller picked from a dropdown, on two plots of one parcelling
+    # that are on sale together.
+    d43_plot_attribute_conflict: bool = False
+    d43_plot_attribute_requires_colive: bool = True
+    d43_plot_attribute_code_escape: bool = False
+    # E224: the serviced-office PRODUCT an offer leads with — a desk and a room are not one
+    # let of one building.
+    d43_commercial_product_class: bool = False
+    d43_commercial_product_class_requires_colive: bool = True
+    # D65: the per-category merge policy. `<category_type>|<category_main>` (either side `*`)
+    # mapped to `merge` or `propose` — a cell held propose-only never reaches the merge zone,
+    # so the operator can hold rentals back at rollout while sales merge. An empty table holds
+    # nothing, which is every generation up to and including S6.
+    merge_policy: dict[str, str] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -647,6 +784,10 @@ class Settings:
         }
         self.floor_camps = {str(key): int(value)
                             for key, value in dict(self.floor_camps).items()}
+        self.merge_policy = {str(key): str(value)
+                             for key, value in dict(self.merge_policy).items()}
+        self.d43_rental_colive_cross_portal_limbs = tuple(
+            str(name) for name in self.d43_rental_colive_cross_portal_limbs)
         self.validate()
 
     def validate(self) -> None:
@@ -730,9 +871,10 @@ class Settings:
                 "d43_price_colive_min_overlap_days must not be negative: "
                 f"{self.d43_price_colive_min_overlap_days}"
             )
-        if self.floor_same_source_feed not in ("portal", "broker"):
+        if self.floor_same_source_feed not in ("portal", "broker", "firm"):
             raise ValueError(
-                f"floor_same_source_feed must be portal/broker: {self.floor_same_source_feed}"
+                "floor_same_source_feed must be portal/broker/firm: "
+                f"{self.floor_same_source_feed}"
             )
         if self.d43_promote_photo_alternative and not self.d43_promote:
             raise ValueError("d43_promote_photo_alternative needs d43_promote")
@@ -805,6 +947,20 @@ class Settings:
             )
         if set(self.floor_camps.values()) - {0, 1}:
             raise ValueError(f"floor_camps levels must be 0 or 1: {sorted(set(self.floor_camps.values()))}")
+        if not 0.0 <= self.d43_agency_code_body_floor <= self.d43_agency_code_body_ceiling <= 1.0:
+            raise ValueError(
+                "d43_agency_code_body_floor must be in [0, ceiling] and the ceiling in "
+                f"[floor, 1]: {self.d43_agency_code_body_floor} "
+                f"{self.d43_agency_code_body_ceiling}"
+            )
+        if self.d43_agency_code_max_codes < 1:
+            raise ValueError(
+                f"d43_agency_code_max_codes must be at least 1: {self.d43_agency_code_max_codes}"
+            )
+        if not 0.0 <= self.d43_part_whole_min_gap < 1.0:
+            raise ValueError(
+                f"d43_part_whole_min_gap must be in [0, 1): {self.d43_part_whole_min_gap}"
+            )
         if self.d43_stated_unit_count not in ("off", "colive_price", "always"):
             raise ValueError(
                 "d43_stated_unit_count must be off/colive_price/always: "
@@ -1020,6 +1176,28 @@ class Settings:
             raise ValueError(
                 f"max_attr_contradictions must be positive: {self.max_attr_contradictions}"
             )
+        limbs = ("charges", "house_number", "sanitary", "renovation", "flooring",
+                 "furnishing", "parking")
+        unknown = sorted(set(self.d43_rental_colive_cross_portal_limbs) - set(limbs))
+        if unknown:
+            raise ValueError(
+                f"d43_rental_colive_cross_portal_limbs names no such limb: {unknown}")
+        if self.d43_rental_colive_charge_rent_multiple <= 0.0:
+            raise ValueError(
+                "d43_rental_colive_charge_rent_multiple must be positive: "
+                f"{self.d43_rental_colive_charge_rent_multiple}")
+        if self.d43_rental_colive_min_overlap_days < 0.0:
+            raise ValueError(
+                "d43_rental_colive_min_overlap_days must not be negative: "
+                f"{self.d43_rental_colive_min_overlap_days}"
+            )
+        for key, value in self.merge_policy.items():
+            if value not in ("merge", "propose"):
+                raise ValueError(
+                    f"merge_policy[{key}] must be merge/propose: {value}")
+            if key.count("|") != 1:
+                raise ValueError(
+                    f"merge_policy key must be <category_type>|<category_main>: {key}")
 
     def band_width(self) -> float:
         """`w = -ln(1 - t)` — the log-band width lifted from `toolkit/dedup_candidates_sql.py`,
