@@ -1353,6 +1353,27 @@ def _unit_split_corroborated(a: Listing, b: Listing, settings: Settings) -> bool
     return False
 
 
+def _rent_per_square_metre(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """E254: one rent quoted per SQUARE METRE against the same rent quoted whole.
+
+    The Tanvaldská surgery of 96 m² is let at 24,000 Kč on sreality, idnes and ceskereality,
+    and realitymix files it as `250` with `price_unit: za měsíc` — 250 × 96 = 24,000 to the
+    koruna. The column is wrong and the arithmetic says so: this is not a price gap, it is one
+    price in two units. The identity IS the guard — it has to hold to the tolerance the price
+    path is read at, on an area both sides state and agree on — so no genuine gap can wear it.
+    """
+    if not cfg.d43_price_per_square_metre or not _rental_pair(a, b):
+        return False
+    low, high = sorted((float(a.price or 0.0), float(b.price or 0.0)))
+    areas = [value for value in (a.area_m2, b.area_m2) if value and value > 0.0]
+    if low <= 0.0 or len(areas) != 2 or rel_diff(areas[0], areas[1]) > cfg.d43_gate_area_tol:
+        return False
+    area = min(areas)
+    if area < cfg.d43_price_per_square_metre_min_area:
+        return False
+    return rel_diff(low * area, high) <= cfg.d43_price_path_tol
+
+
 def _tenancy_charge_conflict(
     a: Listing, b: Listing, settings: Settings
 ) -> tuple[str, str] | None:
@@ -1940,7 +1961,8 @@ def distinguishing_facts(
     if plot_conflict is not None:
         add("plot_area", plot_conflict[0], plot_conflict[1])
 
-    if a.price and b.price and a.price > 0 and b.price > 0:
+    if (a.price and b.price and a.price > 0 and b.price > 0
+            and not _rent_per_square_metre(a, b, cfg)):
         price_gap = rel_diff(float(a.price), float(b.price))
         cross = a.source is not None and b.source is not None and a.source != b.source
         over = price_gap > (PRICE_CROSS_TOL if cross else PRICE_SAME_SOURCE_TOL)

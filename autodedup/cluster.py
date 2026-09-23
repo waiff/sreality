@@ -208,7 +208,8 @@ def _repartition_clusters(
                               settings.repartition_rejoin_cells, strict_invariants,
                               blockers if settings.repartition_shed_blockers else None,
                               settings.repartition_shed_max,
-                              settings.repartition_shed_max_union)
+                              settings.repartition_shed_max_union,
+                              settings.repartition_outer_rounds)
         for cell in cells:
             grouped[min(cell)] = sorted(cell)
 

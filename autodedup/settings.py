@@ -386,6 +386,9 @@ class Settings:
     repartition_shed_blockers: bool = False
     repartition_shed_max: int = 1
     repartition_shed_max_union: int = 64
+    # The repairs feed each other, so the whole sequence is run to a fixed point rather than
+    # once. 1 is every generation up to S9.
+    repartition_outer_rounds: int = 1
 
     # ------------------------------------------------------- W15 (g8b, 2026-09-21): the repairs
     #
@@ -765,6 +768,12 @@ class Settings:
     d43_rental_colive_furnishing_needs_ruian: bool = True
     d43_rental_colive_furnishing_corroboration: str = "split"
     d43_rental_colive_facility: bool = False
+    # E254 (W25): a rent quoted per SQUARE METRE is the same rent. `250` against `24,000` on a
+    # 96 m² surgery is 250 x 96 to the koruna, and the portal's own `price_unit` says `za
+    # měsíc` on both — the arithmetic identity is the only honest reading, and it is also the
+    # guard, so a genuine gap can never wear it.
+    d43_price_per_square_metre: bool = False
+    d43_price_per_square_metre_min_area: float = 10.0
     # E203's charge table, widened to the spellings E220 met. Separate from the limb, because
     # widening the shipped table would move E203 under w21.
     d43_charge_keywords_wide: bool = False
@@ -958,6 +967,10 @@ class Settings:
         if self.repartition_shed_max < 1:
             raise ValueError(
                 f"repartition_shed_max must be at least 1: {self.repartition_shed_max}")
+        if self.repartition_outer_rounds < 1:
+            raise ValueError(
+                "repartition_outer_rounds must be at least 1: "
+                f"{self.repartition_outer_rounds}")
         if self.repartition_shed_max_union < 2:
             raise ValueError(
                 "repartition_shed_max_union must be at least 2: "

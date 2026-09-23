@@ -81,6 +81,7 @@ def partition(
     shed_blockers: Blockers | None = None,
     shed_max: int = 1,
     shed_max_union: int = 64,
+    outer_rounds: int = 1,
 ) -> list[list[int]]:
     """Cut one component into consistent groups, maximising the merge evidence kept inside.
 
@@ -133,7 +134,8 @@ def partition(
                 out += edge.weight
         return out
 
-    for _round in range(max_rounds):
+    def search() -> bool:
+        """One sweep of the single-member local search. True when something moved."""
         moved = False
         for member in sorted(members):
             current = home[member]
@@ -157,29 +159,44 @@ def partition(
             cells[best_target].sort()
             home[member] = best_target
             moved = True
-        if not moved:
+        return moved
+
+    def repair() -> bool:
+        """Search, then every repair pass in turn. True when any of them moved something."""
+        touched = False
+        for _round in range(max_rounds):
+            if not search():
+                break
+            touched = True
+        if keep_factless:
+            for _round in range(max_rounds):
+                if not _reconcile(ordered, home, cells, invariants):
+                    break
+                touched = True
+        if rejoin_cells:
+            strict = rejoin_invariants or invariants
+            for _round in range(max_rounds):
+                if not _rejoin(ordered, home, cells, strict):
+                    break
+                touched = True
+                if keep_factless:
+                    _reconcile(ordered, home, cells, invariants)
+        if shed_blockers is not None:
+            for _round in range(max_rounds):
+                if not _shed(ordered, neighbours, home, cells, invariants, shed_blockers,
+                             shed_max, shed_max_union):
+                    break
+                touched = True
+                if keep_factless:
+                    _reconcile(ordered, home, cells, invariants)
+        return touched
+
+    # E253: the repairs feed each other — a cell a shed has just made smaller is a cell the
+    # local search can now move into — so the whole sequence is run to a FIXED POINT rather
+    # than once. `outer_rounds` of 1 is the pass every generation up to S9 took.
+    for _outer in range(max(1, outer_rounds)):
+        if not repair():
             break
-
-    if keep_factless:
-        for _round in range(max_rounds):
-            if not _reconcile(ordered, home, cells, invariants):
-                break
-
-    if rejoin_cells:
-        strict = rejoin_invariants or invariants
-        for _round in range(max_rounds):
-            if not _rejoin(ordered, home, cells, strict):
-                break
-            if keep_factless:
-                _reconcile(ordered, home, cells, invariants)
-
-    if shed_blockers is not None:
-        for _round in range(max_rounds):
-            if not _shed(ordered, neighbours, home, cells, invariants, shed_blockers,
-                         shed_max, shed_max_union):
-                break
-            if keep_factless:
-                _reconcile(ordered, home, cells, invariants)
 
     return [sorted(cell) for cell in cells if cell]
 
