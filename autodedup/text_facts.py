@@ -1481,3 +1481,323 @@ def built_connection(text: str | None) -> bool:
     if not text:
         return False
     return bool(_BUILT_CONNECTION.search(fact_text(text)))
+
+
+# --- W22 / S7 --------------------------------------------------------------------------------
+# E220's named list. Every reader here answers one question about one advert and answers it in
+# a CLOSED vocabulary, because the pairwise limb that reads them (`rental_colive_conflict`)
+# fires on a disagreement between two singletons: a reader that returns a set of two says
+# "the body describes both" and refuses, which is the fail-safe direction.
+
+# The charge keywords E203 reads are the ones a bazos landlord writes. One Ostrava serviced
+# residence writes the same number as `Služby včetně elektřiny a topení: 3.900 Kč` and another
+# as `platby za služby spojené s provozem bytové jednotky jen ve výši 3 400,-Kč/měsíc`, and
+# neither spelling contains `zálohy`. The wider table is a separate dial because widening the
+# shipped one would move E203 under w21.
+_CHARGE_KEYWORDS_WIDE: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("services", re.compile(
+        r"sluzb\w*\s+(?:vcetne|a\s+energie|spojene)[^.;:]{0,40}?"
+        r"|platb\w*\s+za\s+sluzb\w*[^.;:]{0,40}?"
+        r"|mesicni\s+zalohy\b|provozni\s+naklad\w*")),
+    ("deposit", re.compile(r"\bvratn\w+\s+kauc\w*|\bvratn\w+\s+jistot\w*")),
+)
+
+
+def stated_charges_wide(text: str | None) -> dict[str, frozenset[float]]:
+    """`stated_charges` plus the spellings E220 met that E203's table does not carry."""
+    if not text:
+        return {}
+    out = {kind: set(values) for kind, values in _stated_charges(text)}
+    for kind, values in _stated_charges_wide(text):
+        out.setdefault(kind, set()).update(values)
+    return {kind: frozenset(values) for kind, values in sorted(out.items())}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _stated_charges_wide(text: str) -> tuple[tuple[str, frozenset[float]], ...]:
+    folded = fold(text)
+    found: dict[str, set[float]] = {}
+    for kind, keyword in _CHARGE_KEYWORDS_WIDE:
+        for match in keyword.finditer(folded):
+            window = folded[match.end(): match.end() + CHARGE_WINDOW]
+            for money in _CHARGE_MONEY.finditer(window):
+                value = _area_value(money.group(1))
+                if value is None or not CHARGE_MIN_CZK <= value <= CHARGE_MAX_CZK:
+                    continue
+                found.setdefault(kind, set()).add(value)
+                break
+    return tuple((kind, frozenset(values)) for kind, values in sorted(found.items()))
+
+
+# Where the lavatory is. Two Vnější adverts uploaded two seconds apart run one template and
+# part on four words: `koupelnu se sprchovým koutem a samostatnou toaletu` against `koupelnu se
+# sprchovým koutem a toaletou`. One flat has a separate WC and the other has not.
+_WC_SEPARATE = re.compile(
+    r"samostatn\w+\s+(?:toalet\w*|wc\b|zachod\w*)"
+    r"|(?:toalet\w*|wc|zachod)\s+(?:je\s+)?(?:samostatn\w+|oddelen\w+)"
+    r"|oddelen\w+\s+(?:toalet\w*|wc\b)")
+_WC_COMBINED = re.compile(
+    r"koupeln\w*[^.;:]{0,40}?\bs\s+(?:toaletou|wc\b|zachodem)"
+    r"|(?:toalet\w*|wc)\s+(?:je\s+)?(?:soucasti|v)\s+koupeln\w*"
+    r"|koupeln\w*\s+a\s+(?:toaletou|wc\b)")
+
+
+def sanitary_arrangement(text: str | None) -> frozenset[str]:
+    """`{'separate'}` or `{'combined'}` — where the body puts the lavatory, or nothing."""
+    return _sanitary_arrangement(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _sanitary_arrangement(text: str) -> frozenset[str]:
+    folded = fact_text(text)
+    out: set[str] = set()
+    if _WC_SEPARATE.search(folded):
+        out.add("separate")
+    if _WC_COMBINED.search(folded):
+        out.add("combined")
+    return frozenset(out)
+
+
+# Whether the work is DONE or still to come. The two Přívozská adverts describe one address at
+# one moment: `Původní dveře byly citlivě obnoveny` against `Byt bude po rekonstrukci`. A
+# building site and a finished flat are not one let.
+_RENOVATION_DONE = re.compile(
+    r"(?<!bude )(?<!budou )\bpo\s+(?:kompletni\s+|celkove\s+|castecne\s+)?rekonstrukci\b"
+    r"|\bzrekonstruovan\w+|\bprosel\w*\s+rekonstrukci\b|\bprosla\s+rekonstrukci\b")
+_RENOVATION_FUTURE = re.compile(
+    r"\bbude\s+(?:po\s+rekonstrukci|zrekonstruovan\w+|rekonstruovan\w+)"
+    r"|\bpred\s+rekonstrukci\b|\bk\s+rekonstrukci\b|\bprobiha\s+rekonstrukce\s+bytu\b"
+    r"|\bv\s+rekonstrukci\b|\brekonstrukce\s+bude\s+dokoncena\b")
+
+
+def renovation_state(text: str | None) -> frozenset[str]:
+    """`{'done'}` / `{'future'}` — the tense the body puts the refurbishment in."""
+    return _renovation_state(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _renovation_state(text: str) -> frozenset[str]:
+    folded = fact_text(text)
+    out: set[str] = set()
+    if _RENOVATION_FUTURE.search(folded):
+        out.add("future")
+    if _RENOVATION_DONE.search(folded):
+        out.add("done")
+    return frozenset(out)
+
+
+# What is under foot. `krásné broušené parkety ve světlém odstínu` against `novými plovoucími
+# podlahami` is one room described twice only if it is one room.
+_FLOORING: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("parquet", re.compile(r"\bparket\w*|\bvlysy\b")),
+    ("floating", re.compile(r"\bplovouc\w+\s+podlah\w*|\blaminatov\w+\s+podlah\w*")),
+    ("vinyl", re.compile(r"\bvinyl\w*")),
+    ("carpet", re.compile(r"\bkoberc\w*")),
+    ("board", re.compile(r"\bdrevene?\s+podlah\w*|\bpalubk\w*")),
+)
+
+
+def floor_coverings(text: str | None) -> frozenset[str]:
+    """Every floor covering the body names for the living rooms."""
+    return _floor_coverings(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _floor_coverings(text: str) -> frozenset[str]:
+    folded = fact_text(text)
+    return frozenset(name for name, pattern in _FLOORING if pattern.search(folded))
+
+
+# Whether the let comes furnished. A furnished and an unfurnished let of one address at one
+# moment are two tenancies; a body that says both is describing a part-furnished flat.
+_FURNISHED = re.compile(
+    r"\b(?:plne\s+|kompletne\s+|castecne\s+)?(?:zarizen|vybaven)\w*\s+byt\w*"
+    r"|\bbyt\s+je\s+(?:plne\s+|kompletne\s+)?(?:zarizen|vybaven)\w*"
+    r"|\bpronajem\s+(?:plne\s+)?zarizeneho\b")
+_UNFURNISHED = re.compile(r"\bnezarizen\w*|\bnevybaven\w*|\bbez\s+vybaveni\b")
+
+
+def furnished_state(text: str | None) -> frozenset[str]:
+    """`{'furnished'}` / `{'unfurnished'}` — what the body says about the fit-out."""
+    return _furnished_state(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _furnished_state(text: str) -> frozenset[str]:
+    folded = fact_text(text)
+    out: set[str] = set()
+    if _UNFURNISHED.search(folded):
+        out.add("unfurnished")
+    if _FURNISHED.search(folded):
+        out.add("furnished")
+    return frozenset(out)
+
+
+# --- E221: the unit code in English, in a title and in a slug ---------------------------------
+# `printed_unit_codes` is anchored on a CZECH unit noun and needs two segments, so the whole of
+# `Hala M2 / Unit NJ1 - 4084 m2` is invisible to it. The English forms are read per KIND rather
+# than as one set: two adverts of the DOV park share the hall and part on the unit, and a set
+# reader sees `{M2, NJ1}` against `{M2, NJ2}` meeting on M2.
+_CODE_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("unit", re.compile(r"\bunits?\s+([a-z]{1,3}\s?-?\s?\d{1,3})\b")),
+    ("hall", re.compile(r"\b(?:hall|hala|haly|hale)\s+([a-z]{1,3}\s?-?\s?\d{1,3})\b")),
+    ("building", re.compile(
+        r"\b(?:building|budov[aěy]|budove|objekt|blok|block)\s+([a-z]{1,2}\s?-?\s?\d{1,2})\b")),
+)
+CODE_KINDS: tuple[str, ...] = ("unit", "hall", "building")
+ENGLISH_CODE_MAX_PER_KIND: int = 3
+
+
+def english_unit_codes(text: str | None) -> dict[str, frozenset[str]]:
+    """`{kind: {codes}}` for the `Unit NJ1` / `Hala M2` / `budova A2` forms."""
+    return dict(_english_unit_codes(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _english_unit_codes(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fact_text(text)
+    out: list[tuple[str, frozenset[str]]] = []
+    for kind, pattern in _CODE_KINDS:
+        found = {re.sub(r"[\s-]+", "", match.group(1)).upper()
+                 for match in pattern.finditer(folded)}
+        # A price list names every unit in the building; an identity names one.
+        if found and len(found) <= ENGLISH_CODE_MAX_PER_KIND:
+            out.append((kind, frozenset(found)))
+    return tuple(out)
+
+
+# The code a portal writes into its own URL. realitymix files one Velká Polom development as
+# `...velka-polom-c1-nebytovy-prostor-103-m2-2211-8582601.html` and the next unit as
+# `...-b1-nebytovy-prostor-113-m2-1211-8206931.html`: the building letter, the size and the
+# unit number are all in the slug and none of them is in the body, which is one shared blurb.
+# `-103-m2-` is a measurement, not a building: the unit tokens are excluded by name because
+# the shape of a slug token cannot tell them apart from `c1`.
+_SLUG_UNIT_TOKENS: frozenset[str] = frozenset({"M2", "M3", "KM", "KK", "NP", "PP"})
+_SLUG_BUILDING = re.compile(r"(?:^|-)([a-z]\d{1,2})(?=-)")
+_SLUG_AREA = re.compile(r"(?:^|-)(\d{1,5})-m2(?=-|$)")
+
+
+def slug_unit_codes(url: str | None) -> frozenset[str]:
+    """The building letter+digit tokens a listing URL's own slug carries."""
+    return _slug_unit_codes(url) if url else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _slug_unit_codes(url: str) -> frozenset[str]:
+    slug = _slug_of(url)
+    found = {match.group(1).upper() for match in _SLUG_BUILDING.finditer(slug)}
+    return frozenset(found - _SLUG_UNIT_TOKENS)
+
+
+def slug_areas(url: str | None) -> frozenset[float]:
+    """The floor area a listing URL's own slug states, in m²."""
+    return _slug_areas(url) if url else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _slug_areas(url: str) -> frozenset[float]:
+    out = {float(match.group(1)) for match in _SLUG_AREA.finditer(_slug_of(url))}
+    return frozenset(v for v in out if 1.0 <= v <= STATED_AREA_MAX_M2)
+
+
+def _slug_of(url: str) -> str:
+    """The last path segment of a listing URL, lowercased and without its extension."""
+    path = url.split("?")[0].split("#")[0].rstrip("/")
+    last = path.rsplit("/", 1)[-1].lower()
+    for suffix in (".html", ".htm", ".php", ".aspx"):
+        if last.endswith(suffix):
+            last = last[: -len(suffix)]
+    return last
+
+
+# --- E223: the plot attribute a dropdown states ----------------------------------------------
+# bazos prints a seller's chosen dropdown value as a labelled line. Four Vávrovice parcels of
+# one agency are each 500 m² at 925,000 and part only there: `Sklon pozemku: mírný svah`
+# against `Sklon pozemku: rovina`. Read in a CLOSED vocabulary per attribute, so a body that
+# offers two values (`rovina až mírný svah`) says nothing.
+_PLOT_ATTRS: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
+    ("slope", r"sklon\s+pozemku",
+     (("flat", r"rovin\w*"), ("mild", r"mirn\w+\s+svah"), ("steep", r"(?<!mirny )svazit\w*"))),
+    ("orientation_plot", r"orientace\s+pozemku",
+     (("north", r"\bsever\w*"), ("south", r"\bjizn\w*|\bjih\b"),
+      ("east", r"\bvychod\w*"), ("west", r"\bzapad\w*"))),
+)
+PLOT_ATTR_WINDOW: int = 40
+_PLOT_WIDTH = re.compile(
+    r"(?:sirk\w*|sirka)\s+(?:pozemku|parcely)?\s*(?:je|cini|:)?\s*"
+    + _AREA_NUMBER + r"\s*(?:m\b|metr\w*)")
+_PLOT_FRONTAGE = re.compile(
+    r"(?:ulicni\s+fronta|fronta\s+do\s+ulice|celni\s+strana)\s*(?:je|cini|:)?\s*"
+    + _AREA_NUMBER + r"\s*(?:m\b|metr\w*)")
+
+
+def plot_attributes(text: str | None) -> dict[str, frozenset[str]]:
+    """`{attribute: {values}}` — the plot attributes the body states in a closed vocabulary."""
+    return dict(_plot_attributes(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _plot_attributes(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fact_text(text)
+    out: list[tuple[str, frozenset[str]]] = []
+    for name, label, vocabulary in _PLOT_ATTRS:
+        found: set[str] = set()
+        for match in re.finditer(label, folded):
+            window = folded[match.end(): match.end() + PLOT_ATTR_WINDOW]
+            for value, pattern in vocabulary:
+                if re.search(pattern, window):
+                    found.add(value)
+        if found:
+            out.append((name, frozenset(found)))
+    for name, pattern in (("width", _PLOT_WIDTH), ("frontage", _PLOT_FRONTAGE)):
+        numbers = {f"{value:.2f}" for value in
+                   (_area_value(m.group(1)) for m in pattern.finditer(folded))
+                   if value is not None and 1.0 <= value <= 500.0}
+        if numbers:
+            out.append((name, frozenset(numbers)))
+    return tuple(out)
+
+
+# --- E224: the commercial product, and the storey a parking space is on -----------------------
+# One serviced-office operator sells a desk and a room from the same building under the same
+# template: `coworkingové prostory ... v naší sdílené kanceláři` at 3,290 against `soukromé
+# kancelářské prostory pro 2 osoby` at 8,090, both carried at 10 m². The product class is what
+# the offer IS, and it is stated in the first sentence of each.
+_PRODUCT_CLASSES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("coworking", re.compile(r"coworking\w*|sdilen\w+\s+kancelar\w*|flexibilni\s+mist\w*")),
+    ("private_office", re.compile(r"soukrom\w+\s+kancelar\w*|privatni\s+kancelar\w*")),
+    ("virtual", re.compile(r"virtualni\s+(?:kancelar\w*|sidlo)|registracni\s+sidlo")),
+)
+# The FIRST sentence, and only it: this operator's second sentence names the whole catalogue
+# (`pronájem soukromých kanceláří a coworkingových prostor`) and would read as both products.
+PRODUCT_LEAD_CHARS: int = 160
+
+
+def commercial_product_class(text: str | None) -> frozenset[str]:
+    """The product class the offer LEADS with — read off the opening sentences only."""
+    return _commercial_product_class(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _commercial_product_class(text: str) -> frozenset[str]:
+    lead = re.split(r"(?<=[.!?])\s", fact_text(text)[:PRODUCT_LEAD_CHARS], maxsplit=1)[0]
+    return frozenset(name for name, pattern in _PRODUCT_CLASSES if pattern.search(lead))
+
+
+# Where the parking space is. Two Provaznická adverts of one building are both 18 m² at 1,500:
+# `Garážové stání se nachází v přízemí bytového domu` against `Parkovací místo je v 1. PP`.
+_PARKING_LEVELS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ground", re.compile(r"\b(?:v|ve)\s+prizemi\b")),
+    ("basement", re.compile(r"\b\d?\.?\s*pp\b|\bpodzemnim?\s+podlazi|\bsuterenu?\b")),
+)
+
+
+def parking_level(text: str | None) -> frozenset[str]:
+    """`{'ground'}` / `{'basement'}` — the storey a parking advert puts its space on."""
+    return _parking_level(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _parking_level(text: str) -> frozenset[str]:
+    folded = fact_text(text)
+    return frozenset(name for name, pattern in _PARKING_LEVELS if pattern.search(folded))
