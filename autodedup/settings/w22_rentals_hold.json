@@ -28,6 +28,7 @@
  "d43_cluster_invariant": true,
  "d43_colive_charge_conflict": true,
  "d43_commercial_product_class": true,
+ "d43_commercial_product_class_requires_colive": false,
  "d43_floor_cross_form_agreement": true,
  "d43_floor_within_camp": true,
  "d43_floor_within_camp_colive": true,
@@ -87,9 +88,12 @@
  "d43_rental_colive_charges": true,
  "d43_rental_colive_cross_portal_limbs": [
   "flooring",
-  "renovation"
+  "parking",
+  "renovation",
+  "sanitary"
  ],
  "d43_rental_colive_flooring": true,
+ "d43_rental_colive_min_overlap_days": 0.5,
  "d43_rental_colive_parking_level": true,
  "d43_rental_colive_renovation": true,
  "d43_rental_colive_sanitary": true,

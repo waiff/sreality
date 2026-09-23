@@ -1739,8 +1739,11 @@ _PLOT_ATTRS: tuple[tuple[str, str, tuple[tuple[str, str], ...]], ...] = (
       ("east", r"\bvychod\w*"), ("west", r"\bzapad\w*"))),
 )
 PLOT_ATTR_WINDOW: int = 40
+# `má u obecní asfaltové komunikace šířku 28,5 m` and `Parcela je u obecní asfaltové
+# komunikace široká 25,65 m` are one seller's two ways of stating one measurement of two
+# different Klimkovice parcels, so both the noun and the adjective are read.
 _PLOT_WIDTH = re.compile(
-    r"(?:sirk\w*|sirka)\s+(?:pozemku|parcely)?\s*(?:je|cini|:)?\s*"
+    r"(?:sirk\w*|sirok\w*)\s+(?:pozemku|parcely)?\s*(?:je|cini|:)?\s*"
     + _AREA_NUMBER + r"\s*(?:m\b|metr\w*)")
 _PLOT_FRONTAGE = re.compile(
     r"(?:ulicni\s+fronta|fronta\s+do\s+ulice|celni\s+strana)\s*(?:je|cini|:)?\s*"

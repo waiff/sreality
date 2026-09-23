@@ -731,7 +731,8 @@ class Settings:
     # deposit), an estimate refused, and the two rents required to MEET — a deposit
     # that tracks a price cut is the price cut restated, and D49 already refused that.
     d43_rental_colive_honest_clock: bool = True
-    d43_rental_colive_charge_rent_multiple: float = 12.0
+    d43_rental_colive_charge_rent_multiple: float = 6.0
+    d43_rental_colive_services_below_rent: bool = True
     d43_rental_colive_charge_requires_equal_rent: bool = True
     d43_rental_colive_charges: bool = False
     d43_rental_colive_house_number: bool = False
@@ -749,6 +750,7 @@ class Settings:
     d43_unit_codes_english: bool = False
     d43_unit_codes_slug: bool = False
     d43_slug_area: bool = False
+    d43_slug_area_same_source_only: bool = True
     # E222: D61 stands — two order codes are not a fact BY THEMSELVES. What lifts them is a
     # second stated difference on two adverts that are on sale together on one portal.
     d43_agency_code_with_difference: bool = False
@@ -762,6 +764,7 @@ class Settings:
     # E224: the serviced-office PRODUCT an offer leads with — a desk and a room are not one
     # let of one building.
     d43_commercial_product_class: bool = False
+    d43_commercial_product_class_requires_colive: bool = True
     # D65: the per-category merge policy. `<category_type>|<category_main>` (either side `*`)
     # mapped to `merge` or `propose` — a cell held propose-only never reaches the merge zone,
     # so the operator can hold rentals back at rollout while sales merge. An empty table holds

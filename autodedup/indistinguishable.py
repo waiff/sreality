@@ -1305,7 +1305,13 @@ def _tenancy_charge_conflict(
         values_a, values_b = left.get(kind), right.get(kind)
         if not values_a or not values_b or not _one_each(values_a, values_b):
             continue
-        if rent > 0.0 and max(max(values_a), max(values_b)) > rent * cap:
+        biggest = max(max(values_a), max(values_b))
+        if rent > 0.0 and biggest > rent * cap:
+            continue
+        # A service advance ABOVE the rent is the rent read twice: one Olomouc bazos body
+        # prints `18 850 Kč` as the total and the reader met it beside `zálohy`.
+        if (settings.d43_rental_colive_services_below_rent and kind == "services"
+                and rent > 0.0 and biggest >= rent):
             continue
         return (f"{kind}={sorted(values_a)}", f"{kind}={sorted(values_b)}")
     return None
@@ -1347,16 +1353,30 @@ def slug_conflict(a: Listing, b: Listing, settings: Settings) -> tuple[str, str]
     for one of the three and null for the other two, so no area reader can see the difference.
     """
     if settings.d43_unit_codes_slug:
-        codes_a = slug_unit_codes(a.source_url)
-        codes_b = slug_unit_codes(b.source_url)
+        codes_a = _building_codes(a, settings)
+        codes_b = _building_codes(b, settings)
         if _set_conflict(codes_a, codes_b):
             return (f"slug={sorted(codes_a)}", f"slug={sorted(codes_b)}")
-    if settings.d43_slug_area:
+    if settings.d43_slug_area and not (
+            settings.d43_slug_area_same_source_only
+            and (a.source is None or a.source != b.source)):
         areas_a, areas_b = slug_areas(a.source_url), slug_areas(b.source_url)
         if areas_a and areas_b and not any(
                 rel_diff(x, y) <= PLOT_TOL for x in areas_a for y in areas_b):
             return (f"slug_m2={sorted(areas_a)}", f"slug_m2={sorted(areas_b)}")
     return None
+
+
+def _building_codes(listing: Listing, settings: Settings) -> frozenset[str]:
+    """The building this advert names — in its url's slug OR in its own body.
+
+    One Rezidence Důl Michal flat is `Prodej bytu 2+kk budova A2` on idnes and realitymix files
+    its neighbour as `prodej-bytu-2-kk-budova-b2-...`. The two carriers hold one fact, so they
+    are read as one set: separating them would mean a code never met a code."""
+    out = set(slug_unit_codes(listing.source_url))
+    if settings.d43_unit_codes_english:
+        out |= set(english_unit_codes(listing.description).get("building", ()))
+    return frozenset(out)
 
 
 def agency_code_with_difference(
@@ -1465,7 +1485,8 @@ def product_class_conflict(
         return None
     if COMMERCIAL_CATEGORY not in (a.category_main, b.category_main):
         return None
-    if not _live_together(a, b, settings):
+    if settings.d43_commercial_product_class_requires_colive and not _live_together(
+            a, b, settings):
         return None
     left = commercial_product_class(a.description)
     right = commercial_product_class(b.description)

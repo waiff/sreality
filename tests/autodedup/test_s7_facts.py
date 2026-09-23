@@ -539,10 +539,11 @@ def test_w22_differs_from_w21_only_in_the_dials_this_wave_names() -> None:
         "d43_rental_colive", "d43_rental_colive_charges", "d43_charge_keywords_wide",
         "d43_rental_colive_cross_portal_limbs", "d43_rental_colive_sanitary",
         "d43_rental_colive_renovation", "d43_rental_colive_flooring",
-        "d43_rental_colive_parking_level", "d43_unit_codes_english",
-        "d43_unit_codes_slug", "d43_agency_code_with_difference",
-        "d43_offered_use_conflict", "d43_plot_attribute_conflict",
-        "d43_plot_attribute_code_escape", "d43_commercial_product_class",
+        "d43_rental_colive_parking_level", "d43_rental_colive_min_overlap_days",
+        "d43_unit_codes_english", "d43_unit_codes_slug",
+        "d43_agency_code_with_difference", "d43_offered_use_conflict",
+        "d43_plot_attribute_conflict", "d43_plot_attribute_code_escape",
+        "d43_commercial_product_class", "d43_commercial_product_class_requires_colive",
     }
 
 
@@ -569,6 +570,8 @@ def test_no_shipped_generation_before_w22_names_an_s7_dial() -> None:
         "d43_rental_colive_cross_portal_limbs", "d43_rental_colive_honest_clock",
         "d43_rental_colive_charge_rent_multiple",
         "d43_rental_colive_charge_requires_equal_rent",
+        "d43_rental_colive_services_below_rent", "d43_slug_area_same_source_only",
+        "d43_commercial_product_class_requires_colive",
     }
     for arm in ("w13", "w15", "w17", "w18", "w19", "w20", "w21"):
         raw = json.loads((SETTINGS / f"{arm}.json").read_text(encoding="utf-8"))
