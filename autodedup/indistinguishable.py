@@ -1424,6 +1424,25 @@ def _offered_use_conflict(a: Listing, b: Listing) -> tuple[str, str] | None:
     return (f"use={sorted(left)}", f"use={sorted(right)}")
 
 
+def offered_use_colive(a: Listing, b: Listing, settings: Settings) -> tuple[str, str] | None:
+    """E226: what one seller says two of its co-live spaces are FOR, with no code to lean on.
+
+    E223 needs an order code beside it because a code is what tells a re-post from a second
+    contract. idnes prints none, and the same two Opava MG Medical units are there too — one
+    `k využití pro obchodní, poradenské, či podobné využití`, the other `k využití jako menší
+    kavárna` with `svůj samostatný vchod, s případnou předzahrádkou` — uploaded 24 minutes
+    apart and live together five weeks. The comparison is DISJOINTNESS of the two lists, so a
+    re-pitch of ONE space repeats its own list and says nothing.
+    """
+    if not settings.d43_offered_use_alone:
+        return None
+    if a.source is None or a.source != b.source:
+        return None
+    if not _co_live(a, b, settings.d43_rental_colive_min_overlap_days):
+        return None
+    return _offered_use_conflict(a, b)
+
+
 def commercial_subtype_colive(
     a: Listing, b: Listing, settings: Settings
 ) -> tuple[str, str] | None:
@@ -1901,6 +1920,10 @@ def distinguishing_facts(
     coded = agency_code_with_difference(a, b, cfg)
     if coded is not None:
         add("agency_code_plus", coded[0], coded[1])
+
+    use = offered_use_colive(a, b, cfg)
+    if use is not None:
+        add("offered_use", use[0], use[1])
 
     subtype = commercial_subtype_colive(a, b, cfg)
     if subtype is not None:

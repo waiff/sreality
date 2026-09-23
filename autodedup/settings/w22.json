@@ -52,6 +52,7 @@
  "d43_offered_extent": true,
  "d43_offered_extent_requires_price_gap": false,
  "d43_offered_storey": true,
+ "d43_offered_use_alone": true,
  "d43_offered_use_conflict": true,
  "d43_parcel_forms_wide": true,
  "d43_parcel_numbers": true,
@@ -92,7 +93,7 @@
   "renovation"
  ],
  "d43_rental_colive_flooring": true,
- "d43_rental_colive_min_overlap_days": 0.5,
+ "d43_rental_colive_min_overlap_days": 0.25,
  "d43_rental_colive_parking_level": true,
  "d43_rental_colive_renovation": true,
  "d43_rental_colive_sanitary": true,

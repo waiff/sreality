@@ -756,6 +756,9 @@ class Settings:
     d43_agency_code_with_difference: bool = False
     d43_commercial_subtype_colive: bool = False
     d43_offered_use_conflict: bool = False
+    # The same reading WITHOUT the order code beside it: one portal, on sale together,
+    # and two disjoint lists of what the space is offered FOR.
+    d43_offered_use_alone: bool = False
     # E223: the plot attribute a seller picked from a dropdown, on two plots of one parcelling
     # that are on sale together.
     d43_plot_attribute_conflict: bool = False

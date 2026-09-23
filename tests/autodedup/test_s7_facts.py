@@ -376,6 +376,36 @@ def test_e222_reads_what_the_body_offers_the_space_for_not_the_portal_filing() -
     assert "agency_code_plus" in names(a, b, variant(d43_offered_use_conflict=False))
 
 
+def test_e226_reads_the_offered_use_where_no_portal_prints_a_code() -> None:
+    """idnes prints no order number, and the same two Opava units are there too."""
+    a = listing(253379, source="idnes", category_main="komercni", subtype="obchodni_prostor",
+                first=0, last=40, area_m2=25.0, price=20000.0,
+                description=MG_RETAIL.replace(" Evidenční číslo: 933144", ""))
+    b = listing(254222, source="idnes", category_main="komercni", subtype="restaurace",
+                first=0, last=36, area_m2=25.0, price=20000.0,
+                description=MG_CAFE.replace(" Evidenční číslo: 933138", ""))
+    assert names(a, b, S6) == []
+    assert "offered_use" in names(a, b, S7)
+    assert "offered_use" not in names(a, b, variant(d43_offered_use_alone=False))
+
+
+def test_e226_refuses_a_re_pitch_that_repeats_its_own_list() -> None:
+    body = ("Prostor je nabízen k využití jako kavárna, cukrárna nebo vinárna.")
+    a = listing(1, source="bazos", category_main="komercni", area_m2=60.0, price=30000.0,
+                description=body)
+    b = listing(2, source="bazos", category_main="komercni", area_m2=60.0, price=30000.0,
+                description=body + " Evidenční číslo: 100200")
+    assert "offered_use" not in names(a, b, S7)
+
+
+def test_e226_refuses_across_portals() -> None:
+    a = listing(1, source="bazos", category_main="komercni", area_m2=25.0, price=20000.0,
+                description=MG_RETAIL)
+    b = listing(2, source="idnes", category_main="komercni", area_m2=25.0, price=20000.0,
+                description=MG_CAFE)
+    assert "offered_use" not in names(a, b, S7)
+
+
 def test_e222_refuses_two_codes_across_portals() -> None:
     a = listing(1, source="bazos", category_main="komercni", subtype="obchodni_prostor",
                 area_m2=25.0, price=20000.0, description=MG_RETAIL)
@@ -544,6 +574,7 @@ def test_w22_differs_from_w21_only_in_the_dials_this_wave_names() -> None:
         "d43_agency_code_with_difference", "d43_offered_use_conflict",
         "d43_plot_attribute_conflict", "d43_plot_attribute_code_escape",
         "d43_commercial_product_class", "d43_commercial_product_class_requires_colive",
+        "d43_offered_use_alone",
     }
 
 
@@ -563,6 +594,7 @@ def test_no_shipped_generation_before_w22_names_an_s7_dial() -> None:
         "d43_rental_colive_furnishing", "d43_rental_colive_parking_level",
         "d43_charge_keywords_wide", "d43_unit_codes_english", "d43_unit_codes_slug",
         "d43_slug_area", "d43_agency_code_with_difference", "d43_offered_use_conflict",
+        "d43_offered_use_alone",
         "d43_commercial_subtype_colive", "d43_plot_attribute_conflict",
         "d43_plot_attribute_requires_colive", "d43_plot_attribute_code_escape",
         "d43_commercial_product_class", "merge_policy",
