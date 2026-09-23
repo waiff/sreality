@@ -241,11 +241,25 @@ _NEGATION_RE = re.compile(
     r"\b(bez|neni|nema|nemaji|nemame|zadn\w*|chybi|nenachazi|nedisponuje)\b"
 )
 _WS_RE = re.compile(r"\s+")
-# A figure in a flattened quote: Czech spaced thousands, a decimal comma or point, and the
-# unit token that follows it ("m2", "m²", "ha", "aru"). Ares and hectares are the only
-# conversions a quantity check accepts, because they are the only ones a Czech advert
-# writes an area in; anything else is arithmetic, and the model is not allowed any.
-_FIGURE_RE = re.compile(r"(\d{1,3}(?:[ \u00a0\u202f]\d{3})+|\d+)(?:[.,](\d+))?\s*([a-z\u00b2]*)")
+# A figure WITH AN AREA UNIT in a flattened quote. The number half is `scraper.area`'s own
+# shape (its lookbehind keeps "3+1 174" from reading as 1 174; its separator class is
+# normalised to a plain space first, so the two grammars agree on what a digit group is).
+# The unit half is a closed list: square metres at 1, ares at 100, hectares at 10 000 —
+# the only conversions a Czech advert writes an area in, so the only ones a quantity
+# check accepts. A figure with any other tail (a price, a distance, a ceiling height, a
+# storey) is not an area statement and never validates; anything else is arithmetic,
+# and the model is not allowed any.
+_AREA_UNIT_RE = (
+    r"(?P<m2>m2|m\^2|m 2|m\u00b2|metr\w*\s+ctvere\w*|m\s+ctvere\w*)"
+    r"|(?P<ar>ar|ary|aru|arech)"
+    r"|(?P<ha>ha|hektar\w*)"
+)
+_FIGURE_RE = re.compile(
+    r"(?<![\d+.,])(?P<whole>\d{1,3}(?: \d{3})+|\d+)(?:[.,](?P<frac>\d+))?\s*"
+    rf"(?:{_AREA_UNIT_RE})(?![a-z\d])"
+)
+_UNIT_FACTOR = {"m2": 1.0, "ar": 100.0, "ha": 10_000.0}
+_SEPARATOR_TO_SPACE = str.maketrans({c: " " for c in area_grammar.AREA_THOUSANDS_SEPS})
 
 
 def _flat(text: str | None) -> str:
@@ -264,16 +278,15 @@ def _flat(text: str | None) -> str:
 
 
 def _quote_states_figure(quote: str, value: float) -> bool:
-    """True when some figure in the quote IS `value` in m² — as written, or via ares /
-    hectares. Half a square metre or 0.5 % of tolerance, whichever is larger, covers a
-    rounded decimal and nothing else."""
-    tolerance = max(0.5, 0.005 * value)
-    for match in _FIGURE_RE.finditer(_flat(quote)):
-        whole = re.sub(r"\D", "", match.group(1))
-        figure = float(f"{whole}.{match.group(2)}" if match.group(2) else whole)
-        unit = match.group(3)
-        factor = 10_000.0 if unit.startswith("ha") else 100.0 if unit in ("a", "ar", "ary", "aru") or unit.startswith("aru") else 1.0
-        if any(abs(figure * k - value) <= tolerance for k in {1.0, factor}):
+    """True when some AREA figure in the quote IS `value` in m²: the unit the advert wrote
+    beside the number decides the one multiplier, and half a square metre of tolerance
+    covers a rounded decimal and nothing else."""
+    flat = _flat(quote).translate(_SEPARATOR_TO_SPACE)
+    for match in _FIGURE_RE.finditer(flat):
+        whole = match.group("whole").replace(" ", "")
+        figure = float(f"{whole}.{match.group('frac')}" if match.group("frac") else whole)
+        unit = next(name for name in _UNIT_FACTOR if match.group(name) is not None)
+        if abs(figure * _UNIT_FACTOR[unit] - value) <= 0.5:
             return True
     return False
 
@@ -322,13 +335,18 @@ def merge_extraction(
     if "area_m2" in values:
         # The grammar's own category bounds (5 m² for a flat / house / commercial unit,
         # none for land), applied by the one function that stamps `area_basis` at ingest.
-        area, _basis = area_grammar.derive_headline_area(
-            category_main=category_main, fallback=values["area_m2"])
-        if area is None:
+        # No category, no bound and no basis to stamp: the value is refused, not guessed.
+        if category_main is None:
             del values["area_m2"]
-            dropped["area_m2"] = "area_out_of_range"
+            dropped["area_m2"] = "area_without_category"
         else:
-            values["area_m2"] = area
+            area, _basis = area_grammar.derive_headline_area(
+                category_main=category_main, fallback=values["area_m2"])
+            if area is None:
+                del values["area_m2"]
+                dropped["area_m2"] = "area_out_of_range"
+            else:
+                values["area_m2"] = area
     return values, dropped
 
 
@@ -345,10 +363,12 @@ def _coerce(field: str, raw: Any, quote: str) -> tuple[Any, str | None]:
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             return None, "not_number"
         value = float(raw)
-        if not 0 < value < area_grammar.MAX_AREA_M2:
-            return None, "area_out_of_range"
+        # Statement before size: "the text does not say this" is the refusal that means
+        # something; a quoted figure the column cannot hold is the rarer, second one.
         if not _quote_states_figure(quote, value):
             return None, "figure_not_in_quote"
+        if not 0 < value < area_grammar.MAX_AREA_M2:
+            return None, "area_out_of_range"
         return value, None
     if "boolean" in value_type:
         if not isinstance(raw, bool):
@@ -525,6 +545,16 @@ def write_sql(columns: Sequence[str], companions: Mapping[str, str] | None = Non
     )
 
 
+# The writer over every declared cell plus its one companion, spelled as a constant so
+# CI's schema replay PREPAREs the casts and the CASE arm (`tests/sql_corpus` reads
+# module-level `*_SQL` names; a statement only ever built inside a function is invisible
+# to it). Never executed as such: the lane writes the subset a row actually filled.
+_DECLARED_WRITE_SQL = write_sql(
+    sorted({f for fields in contract.gated_cells().values() for f in fields}),
+    {follower: leader for leader, follower in [_AREA_BASIS_FOLLOWS]},
+)
+
+
 # --- the pass ---------------------------------------------------------------
 
 def resolve_model(conn: Any) -> str | None:
@@ -575,7 +605,8 @@ def record_extraction(
     if "area_m2" in filled:
         # The same stamp ingest gives a grammar-read area (`plot` on land, `unknown`
         # elsewhere), so a lane-filled row is indistinguishable downstream (rule 20's
-        # ppm2 basis included). In `filled` too: the rollback script reverts by its keys.
+        # ppm2 basis included). In `filled` too, and the rollback script blanks both
+        # (`clear_unmeasured_enrichment_fills.FOLLOWERS`) — never the stamp on its own.
         leader, follower = _AREA_BASIS_FOLLOWS
         _area, basis = area_grammar.derive_headline_area(
             category_main=row.get("category_main"), fallback=filled[leader])

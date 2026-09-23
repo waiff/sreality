@@ -61,3 +61,13 @@ def test_a_dry_run_writes_nothing() -> None:
 def test_the_backup_table_name_must_be_a_plain_identifier() -> None:
     with pytest.raises(ValueError):
         clr.create_backup_table(_Conn([]), "listings; drop table listings")
+
+
+def test_area_is_cleared_together_with_its_basis_stamp_and_never_the_stamp_alone() -> None:
+    from scripts import clear_unmeasured_enrichment_fills as c
+
+    assert c.TARGETS["area_m2"] == "any" and c.FOLLOWERS == {"area_m2": "area_basis"}
+    sets = c.clear_sql("area_m2").split("SET ")[1].split("\n")[0]
+    assert sets == "area_m2 = NULL, area_basis = NULL"
+    assert c.clear_sql("floor").split("SET ")[1].split("\n")[0] == "floor = NULL"
+

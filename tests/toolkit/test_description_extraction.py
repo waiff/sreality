@@ -485,8 +485,10 @@ def test_a_fatal_provider_error_does_not_burn_a_listings_attempts() -> None:
 # --- area: a quantity the grammar could not read ------------------------------
 
 AREA_DESCRIPTION = (
-    "Prodám byt 2+kk, plocha padesát čtyři metrů čtverečních, ve 3. patře. "
-    "K domu patří pozemek o výměře 12 arů a zahrada 0,5 ha. Cena 5 000 000 Kč."
+    "Prodám byt 3+1 174 metrů čtverečních, plocha padesát čtyři metrů čtverečních, ve "
+    "3. patře, výška stropu 2,8 m, 120 m od centra, sklep 3 m². K domu patří pozemek o "
+    "výměře 12 arů, louka na 12 arech, zahrada 0,5 ha a les 1,5 hektaru, hala 2 haly. "
+    "Cena 5 000 000 Kč, tj. 54 000 Kč/m2. Parcela 1\u200b200 m2."
 )
 AREA_FIELDS = (*FIELDS, "area_m2")
 
@@ -506,27 +508,51 @@ def test_an_area_figure_must_itself_appear_in_the_quote() -> None:
 
 @pytest.mark.parametrize("value,quote,category,expected", [
     (1200, "pozemek o výměře 12 arů", "pozemek", 1200.0),   # ares convert, and only ares
+    (12, "pozemek o výměře 12 arů", "pozemek", None),       # the unconverted reading is not
+    (1200, "louka na 12 arech", "pozemek", 1200.0),         # the locative too
     (5000, "zahrada 0,5 ha", "pozemek", 5000.0),            # hectares, decimal comma
+    (15000, "les 1,5 hektaru", "pozemek", 15000.0),
+    (20000, "hala 2 haly", "komercni", None),               # 'haly' is not hectares
     (5000000, "Cena 5 000 000 Kč", "pozemek", None),        # a price is not an area
+    (54, "54 000 Kč/m2", "byt", None),                      # nor a price per metre
+    (2.8, "výška stropu 2,8 m", "byt", None),               # nor a height
+    (120, "120 m od centra", "byt", None),                  # nor a distance
+    (174, "byt 3+1 174 metrů čtverečních", "byt", 174.0),   # the grammar's lookbehind
+    (1174, "byt 3+1 174 metrů čtverečních", "byt", None),   # never 1 174
+    (1200, "Parcela 1\u200b200 m2", "pozemek", 1200.0),     # zero-width thousands separator
 ])
-def test_ares_and_hectares_are_the_only_conversions(value, quote, category, expected) -> None:
+def test_only_an_area_unit_makes_a_figure_an_area(value, quote, category, expected) -> None:
     values, dropped = merge_area({"area_m2": _cell(value, quote)}, category_main=category)
     if expected is None:
-        assert dropped["area_m2"] == "area_out_of_range"
+        assert "area_m2" not in values
+        assert dropped["area_m2"] == "figure_not_in_quote"
     else:
         assert values["area_m2"] == expected and "area_m2" not in dropped
 
 
 def test_the_grammars_category_bounds_apply_to_a_lane_area() -> None:
     """5 m² is the floor for a flat (scraper.area.MIN_AREA_M2) and no bound for land —
-    the one function that stamps `area_basis` at ingest decides, not this lane."""
-    values, dropped = merge_area({"area_m2": _cell(3, "pozemek o výměře 12 arů")})
-    assert dropped["area_m2"] == "figure_not_in_quote"
-    values, dropped = merge_area({"area_m2": _cell(12, "pozemek o výměře 12 arů")},
-                                 category_main="byt")
-    assert values["area_m2"] == 12.0
-    values, dropped = merge_area({"area_m2": _cell(4, "0,5 ha")}, category_main="byt")
-    assert dropped["area_m2"] == "figure_not_in_quote"
+    the one function that stamps `area_basis` at ingest decides, not this lane. And with
+    no category there is no bound and no basis to stamp, so the value is refused."""
+    values, dropped = merge_area({"area_m2": _cell(3, "sklep 3 m²")}, category_main="byt")
+    assert dropped["area_m2"] == "area_out_of_range"
+    values, dropped = merge_area({"area_m2": _cell(3, "sklep 3 m²")}, category_main="pozemek")
+    assert values["area_m2"] == 3.0
+    values, dropped = merge_area({"area_m2": _cell(3, "sklep 3 m²")}, category_main=None)
+    assert dropped["area_m2"] == "area_without_category"
+
+
+def test_a_lane_area_tolerates_a_rounded_decimal_and_nothing_more() -> None:
+    assert tx._quote_states_figure("68 m2", 68.4)
+    assert not tx._quote_states_figure("68 m2", 68.6)
+    assert not tx._quote_states_figure("pozemek 896 000 m2", 900000)
+
+
+def test_the_declared_writer_carries_every_gated_cell_and_the_basis_companion() -> None:
+    sql = tx._DECLARED_WRITE_SQL
+    for field in contract.gated_cells()["bazos"]:
+        assert f"{field} = coalesce(l.{field}," in sql
+    assert "area_basis = CASE WHEN l.area_m2 IS NULL" in sql
 
 
 def test_an_area_is_a_number_never_words() -> None:

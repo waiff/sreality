@@ -89,3 +89,30 @@ def test_area_is_labelled_only_where_the_grammar_reads_nothing() -> None:
     unstated = bk._panel_row(_record("Byt 2+kk o výměře padesát čtyři metrů", None),
                              label_source="idnes")
     assert "area_m2" not in unstated["labels"]
+
+
+def test_the_bazos_slice_never_labels_area() -> None:
+    """Its sibling key IS the grammar's area, so a label there would score the grammar."""
+    row = _record("Byt bez jediného čísla", 75.0)
+    row["source"] = "bazos"
+    assert "area_m2" not in bk._panel_row(row, label_source="idnes")["labels"]
+
+
+def test_a_gate_needs_a_sample_and_the_receipt_says_why_a_value_was_refused() -> None:
+    rows = [{"id": i, "category_main": "byt" if i % 2 else "pozemek",
+             "labels": {"area_m2": 54.0}, "values": {"area_m2": 54.0},
+             "dropped": {}, "cost_usd": 0.0, "ms": 1} for i in range(3)]
+    rows.append({"id": 9, "category_main": "byt", "labels": {"area_m2": 54.0},
+                 "values": {}, "dropped": {"area_m2": "figure_not_in_quote"},
+                 "cost_usd": 0.0, "ms": 1})
+    s = bk.score(rows)["per_field"]["area_m2"]
+    assert s["precision"] == 1.0 and s["passes_gate"] is False   # 3 < MIN_ANSWERED
+    assert s["dropped"] == {"figure_not_in_quote": 1}
+    assert set(s["by_category"]) == {"byt", "pozemek"}
+    assert s["by_category"]["pozemek"]["answered"] == 2
+    assert s["by_category"]["byt"]["dropped"] == {"figure_not_in_quote": 1}
+
+
+def test_the_pool_is_drawn_on_the_eight_prose_fields_not_on_area() -> None:
+    assert "l.area_m2 IS NOT NULL" not in bk.panel_sql([f for f in bk.FIELDS if f != "area_m2"])
+

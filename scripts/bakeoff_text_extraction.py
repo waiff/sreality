@@ -33,6 +33,7 @@ import argparse
 import json
 import logging
 import os
+from collections import Counter
 import statistics
 import sys
 import time
@@ -75,6 +76,8 @@ FLOOR_TOLERANCE = 1
 # An area read from prose against the portal's table: a rounded decimal or a
 # 68 vs 68,5 restatement, never a different measure. 3 % or one square metre.
 AREA_TOLERANCE = 0.03
+# A gate needs a sample, not a ratio: three correct answers are 100 % and prove nothing.
+MIN_ANSWERED = 100
 
 # STRATIFIED BY CATEGORY, in SQL, because drawing the newest N and sorting them afterwards
 # is not stratification: idnes's newest 500 are ~40 % flats and a field measured almost
@@ -166,8 +169,12 @@ def build_panel(conn: Any, *, per_source: int, bazos: int) -> list[dict[str, Any
     rows: list[dict[str, Any]] = []
     columns = ("id", "source", "category_main", "description", *FIELDS)
     with conn.cursor() as cur:
+        # The pool is drawn on the eight prose-comparable fields; area is labelled
+        # wherever it happens to be present, so adding it never displaces the rows the
+        # other eight are measured on.
         for source in LABEL_SOURCES:
-            cur.execute(panel_sql(FIELDS), {"source": source, "limit": per_source})
+            cur.execute(panel_sql([f for f in FIELDS if f != "area_m2"]),
+                        {"source": source, "limit": per_source})
             for row in cur.fetchall():
                 rows.append(_panel_row(dict(zip(columns, row)), label_source=source))
         if bazos:
@@ -181,7 +188,9 @@ def build_panel(conn: Any, *, per_source: int, bazos: int) -> list[dict[str, Any
 def _panel_row(record: dict[str, Any], *, label_source: str) -> dict[str, Any]:
     labels = {f: record.get(f) for f in FIELDS}
     labels["floor"] = _label_floor(label_source, labels.get("floor"))
-    labels["area_m2"] = _label_area(record["description"], labels.get("area_m2"))
+    # The bazos slice's sibling key IS the grammar's area, so it cannot label area at all.
+    labels["area_m2"] = (None if record["source"] == "bazos" else
+                         _label_area(record["description"], labels.get("area_m2")))
     return {
         "id": record["id"],
         "source": record["source"],
@@ -204,24 +213,41 @@ def agrees(field: str, predicted: Any, label: Any) -> bool:
     return predicted == label
 
 
+def _score_field(field: str, results: list[dict[str, Any]]) -> dict[str, Any]:
+    labelled = [r for r in results if field in r["labels"]]
+    answered = [r for r in labelled if field in r["values"]]
+    correct = sum(
+        1 for r in answered if agrees(field, r["values"][field], r["labels"][field]))
+    dropped = Counter(r["dropped"][field] for r in results if field in r["dropped"])
+    return {
+        "labelled": len(labelled),
+        "answered": len(answered),
+        "answer_rate": round(len(answered) / len(labelled), 4) if labelled else None,
+        "correct": correct,
+        "precision": round(correct / len(answered), 4) if answered else None,
+        "quote_invalid": dropped.get("quote_not_in_text", 0),
+        # Every refusal reason, so abstention (null) and refusal (a value the rail
+        # rejected) can be told apart in the receipt.
+        "dropped": dict(sorted(dropped.items())),
+        "passes_gate": (len(answered) >= MIN_ANSWERED
+                        and correct / len(answered) >= PRECISION_GATE),
+    }
+
+
 def score(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Per field: precision where the model ANSWERED, answer rate, quote validity."""
     per_field: dict[str, Any] = {}
     for field in FIELDS:
-        labelled = [r for r in results if field in r["labels"]]
-        answered = [r for r in labelled if field in r["values"]]
-        correct = sum(
-            1 for r in answered if agrees(field, r["values"][field], r["labels"][field]))
-        bad_quote = sum(1 for r in results if r["dropped"].get(field) == "quote_not_in_text")
-        per_field[field] = {
-            "labelled": len(labelled),
-            "answered": len(answered),
-            "answer_rate": round(len(answered) / len(labelled), 4) if labelled else None,
-            "correct": correct,
-            "precision": round(correct / len(answered), 4) if answered else None,
-            "quote_invalid": bad_quote,
-            "passes_gate": bool(answered) and correct / len(answered) >= PRECISION_GATE,
-        }
+        per_field[field] = _score_field(field, results)
+        if field == "area_m2":
+            # One number over land (label = the plot, easy) and dwellings (label = the
+            # interior, hard) would hide the arm that fails; the split is what to read.
+            per_field[field]["by_category"] = {
+                category: _score_field(field, [r for r in results
+                                               if r.get("category_main") == category])
+                for category in sorted({str(r.get("category_main")) for r in results
+                                        if field in r["labels"]})
+            }
     latencies = [r["ms"] for r in results if r.get("ms")]
     costs = [r["cost_usd"] for r in results]
     return {
@@ -261,13 +287,15 @@ def _extract_one(model: str, tool: dict[str, Any], row: dict[str, Any]) -> dict[
             payload, description=row["description"], fields=FIELDS,
             category_main=row.get("category_main"))
         return {
-            "id": row["id"], "labels": row["labels"], "values": values,
+            "id": row["id"], "category_main": row.get("category_main"),
+            "labels": row["labels"], "values": values,
             "dropped": dropped, "cost_usd": float(res.cost_usd or 0.0),
             "ms": int((time.monotonic() - started) * 1000),
         }
     except Exception as exc:  # noqa: BLE001 — one advert must not end the arm
         LOG.warning("%s listing=%s failed: %s", model, row["id"], str(exc)[:200])
-        return {"id": row["id"], "labels": row["labels"], "values": {},
+        return {"id": row["id"], "category_main": row.get("category_main"),
+                "labels": row["labels"], "values": {},
                 "dropped": {}, "cost_usd": 0.0, "ms": None, "error": str(exc)[:300]}
 
 
@@ -358,8 +386,10 @@ def summarise(report: dict[str, Any]) -> str:
         "are the structured portals' own stated fields on the same advert. No hand "
         "labelling.",
         "",
-        f"Gate: precision >= {PRECISION_GATE:.0%} where the model answers "
-        f"(floor: within +-{FLOOR_TOLERANCE}).",
+        f"Gate: precision >= {PRECISION_GATE:.0%} where the model answers, on at least "
+        f"{MIN_ANSWERED} answers (floor: within +-{FLOOR_TOLERANCE}; area: within "
+        f"{AREA_TOLERANCE:.0%} or 1 m², labelled only where `scraper.area` reads nothing "
+        f"from the prose, never on the bazos slice).",
         "",
         "| model | field | labelled | answered | answer rate | precision | gate |",
         "| --- | --- | ---: | ---: | ---: | ---: | :-: |",
@@ -372,6 +402,15 @@ def summarise(report: dict[str, Any]) -> str:
                 f"| {arm['model']} | {field} | {s['labelled']} | {s['answered']} | "
                 f"{_pct(s['answer_rate'])} | {_pct(s['precision'])} | "
                 f"{'PASS' if s['passes_gate'] else 'no'} |")
+            for category, c in s.get("by_category", {}).items():
+                lines.append(
+                    f"| {arm['model']} | {field} / {category} | {c['labelled']} | "
+                    f"{c['answered']} | {_pct(c['answer_rate'])} | {_pct(c['precision'])} "
+                    f"| {'PASS' if c['passes_gate'] else 'no'} |")
+            if s["dropped"]:
+                lines.append(f"| {arm['model']} | {field} dropped | "
+                             f"{', '.join(f'{k} {v}' for k, v in s['dropped'].items())} "
+                             "| | | | |")
     lines += ["", "| model | $/1k adverts | p50 ms | errors | pod |",
               "| --- | ---: | ---: | ---: | --- |"]
     for arm in report["arms"]:
@@ -433,7 +472,9 @@ def main() -> int:
             by_source[row["source"]] = by_source.get(row["source"], 0) + 1
             key = str(row["category_main"])
             by_category[key] = by_category.get(key, 0) + 1
-        LOG.info("PANEL n=%d %s %s", len(panel), by_source, by_category)
+        labelled = Counter(field for row in panel for field in row["labels"])
+        LOG.info("PANEL n=%d %s %s labelled=%s", len(panel), by_source, by_category,
+                 dict(sorted(labelled.items())))
         (out_dir / "panel.json").write_text(
             json.dumps(panel, ensure_ascii=False, default=str), encoding="utf-8")
         if args.panel_only:
@@ -453,6 +494,8 @@ def main() -> int:
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "gate": PRECISION_GATE,
         "floor_tolerance": FLOOR_TOLERANCE,
+        "area_tolerance": AREA_TOLERANCE,
+        "min_answered": MIN_ANSWERED,
         "panel": {"n": len(panel), "by_source": by_source,
                   "by_category": by_category},
         "arms": arms,

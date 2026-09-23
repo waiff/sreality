@@ -53,7 +53,12 @@ TARGETS: dict[str, str] = {
     "has_lift": "false",
     "has_balcony": "false",
     "has_parking": "false",
+    "area_m2": "any",
 }
+# A derived column the lane stamps beside the one it fills (`scraper.db._AREA_BASIS_FOLLOWS`)
+# is blanked in the same statement as its leader and backed up beside it: an `area_basis`
+# left standing on a NULL `area_m2` is the inconsistency ingest never produces.
+FOLLOWERS: dict[str, str] = {"area_m2": "area_basis"}
 
 # The ledger join, once. `filled` is the lane's own record of the columns it wrote, and
 # `to_jsonb(l.<col>) = f.value` is the compare-and-set: a value the regex or a later detail
@@ -77,7 +82,7 @@ SELECT DISTINCT l.id
 _CLEAR_SQL_TEMPLATE = """
 WITH updated AS (
     UPDATE listings AS l
-       SET {column} = NULL
+       SET {sets}
      WHERE l.id = ANY(%(ids)s::bigint[])
        AND l.{column} IS NOT NULL
     RETURNING l.property_id
@@ -119,7 +124,9 @@ def candidate_sql(column: str, *, only_false: bool) -> str:
 
 
 def clear_sql(column: str) -> str:
-    return _CLEAR_SQL_TEMPLATE.format(column=column)
+    columns = [column, *([FOLLOWERS[column]] if column in FOLLOWERS else [])]
+    return _CLEAR_SQL_TEMPLATE.format(
+        column=column, sets=", ".join(f"{c} = NULL" for c in columns))
 
 
 def backup_sql(column: str, table: str) -> str:
@@ -171,6 +178,10 @@ def run(conn: Any, columns: list[str], *, apply: bool, page: int,
             if apply:
                 with conn.cursor() as cur:
                     cur.execute(backup_sql(column, backup_table), {"column": column, "ids": ids})
+                    if column in FOLLOWERS:
+                        follower = FOLLOWERS[column]
+                        cur.execute(backup_sql(follower, backup_table),
+                                    {"column": follower, "ids": ids})
                     cur.execute(clear, {"ids": ids})
             after = ids[-1]
             if len(ids) < page:

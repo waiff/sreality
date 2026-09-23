@@ -713,14 +713,28 @@ quoted span — as digits, or as an ares / hectares figure that converts to it (
   digits + "metr". The realistic yield is therefore a few hundred to ~2,000 rows, i.e. 1–4 pp of
   bazos fill — the W1 ceiling was right in size, and the operator chose to buy it anyway.
 - **What the model returns**: one number in m² (the property's OWN area: usable for a flat or house,
-  the parcel for land), quoted. `scraper.area.derive_headline_area` then applies the same category
-  bounds and stamps the same `area_basis` (`plot` on land, `unknown` elsewhere) it gives a
-  grammar-read fallback, in the SAME UPDATE as `area_m2` (`write_sql(companions=...)`), and both ride
-  in the cache row's `filled` so the rollback script reverts both. The selector now carries
-  `category_main` for that stamp.
+  the parcel for land), quoted. The quote must carry that figure WITH AN AREA UNIT — m² / m2 / "metrů
+  čtverečních" at 1, ares (ar / arů / arech) at 100, hectares (ha / hektarů) at 10 000 — and the unit
+  decides the one multiplier, so "12 arů" validates 1 200 and never 12, and a price ("5 000 000 Kč"), a
+  distance ("120 m od centra"), a ceiling height ("2,8 m") or a storey never validate at all. The
+  number half is `scraper.area`'s own shape (lookbehind, so "3+1 174" is 174; separators normalised
+  through `AREA_THOUSANDS_SEPS`); tolerance is an absolute 0,5 m². `scraper.area.derive_headline_area`
+  then applies the same category bounds and stamps the same `area_basis` (`plot` on land, `unknown`
+  elsewhere) it gives a grammar-read fallback — a row with no category is refused, not guessed — in
+  the SAME UPDATE as `area_m2` (`write_sql(companions=...)`). Both ride in the cache row's `filled`,
+  and `clear_unmeasured_enrichment_fills` blanks both together (`FOLLOWERS`), never the stamp alone.
+  The selector now carries `category_main` for that stamp. `area_m2` is a content-hash field and the
+  lane mints no snapshot (by design, like floor): a lane-filled row disagrees with its own newest
+  snapshot until the next content change, which comparables and Browse never read.
 - **Panel**: the harness labels area from the structured portals' own `area_m2`, but ONLY on adverts
-  whose prose `parse_area_text` reads nothing from — the rows the lane will ever be asked. Agreement
-  is within 3 % or 1 m². The bazos slice cannot label area (its sibling key IS the grammar's area).
+  whose prose `parse_area_text` reads nothing from — a proxy for the rows the lane will ever be asked
+  (the lane's population is `area_m2 IS NULL` after title + description; the panel's is "no m² token
+  in the description"). Agreement is within 3 % or 1 m²; a gate needs ≥ 100 answered
+  (`MIN_ANSWERED`); the receipt splits area by category (land = the plot, easy; dwellings = the
+  interior, hard) and lists every refusal reason. The bazos slice never labels area (its sibling key
+  IS the grammar's area), and the panel pool is still drawn on the eight prose fields, so adding area
+  displaced none of their rows. The first dispatched run (35828494057) measured the pre-review check
+  and is superseded by the run recorded below.
 - **Cost of the gate flip**: `extractor_version` carries the open-gate set, so opening area re-reads
   every eligible bazos row once (~$11 at the 3-field shape); steady state adds ~300 area-less
   adverts a day to a lane that already reads them for floor / lift.
