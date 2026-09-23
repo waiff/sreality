@@ -768,6 +768,17 @@ class Settings:
     # let of one building.
     d43_commercial_product_class: bool = False
     d43_commercial_product_class_requires_colive: bool = True
+    # E230: the space number a COMMERCIAL body prints under its own noun and an explicit
+    # `č.` — `prostor č.201` against `prostor č.303`. `off` / `colive` (only while both
+    # adverts are genuinely on sale) / `always` (a re-post that renumbers is a second space).
+    d43_space_numbers: str = "off"
+    d43_space_numbers_same_source_only: bool = False
+    # E231: two commercial adverts that each decompose ONE stored column into the part they
+    # lead with plus a stated addition, and lead with different parts.
+    d43_part_addition: bool = False
+    d43_part_addition_same_source_only: bool = True
+    d43_part_addition_colive_only: bool = True
+    d43_part_addition_sum_tol: float = 0.05
     # D65: the per-category merge policy. `<category_type>|<category_main>` (either side `*`)
     # mapped to `merge` or `propose` — a cell held propose-only never reaches the merge zone,
     # so the operator can hold rentals back at rollout while sales merge. An empty table holds
@@ -961,6 +972,15 @@ class Settings:
             raise ValueError(
                 f"d43_part_whole_min_gap must be in [0, 1): {self.d43_part_whole_min_gap}"
             )
+        if self.d43_space_numbers not in ("off", "colive", "always"):
+            raise ValueError(
+                f"d43_space_numbers must be off/colive/always: {self.d43_space_numbers}")
+        if not 0.0 <= self.d43_part_addition_sum_tol < 1.0:
+            raise ValueError(
+                "d43_part_addition_sum_tol must be in [0, 1): "
+                f"{self.d43_part_addition_sum_tol}")
+        if self.d43_space_numbers_same_source_only and self.d43_space_numbers == "off":
+            raise ValueError("d43_space_numbers_same_source_only needs d43_space_numbers")
         if self.d43_stated_unit_count not in ("off", "colive_price", "always"):
             raise ValueError(
                 "d43_stated_unit_count must be off/colive_price/always: "

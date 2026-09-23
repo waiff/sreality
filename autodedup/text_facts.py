@@ -1864,3 +1864,76 @@ def _offered_use(text: str) -> frozenset[str]:
                 out.add(name)
     # A body that lists the whole high street is advertising flexibility, not an identity.
     return frozenset(out) if len(out) <= USE_MAX_PER_ADVERT else frozenset()
+
+
+# --- the SPACE number a commercial body prints (E230) ----------------------------------------
+# `printed_unit_codes` is anchored on a DWELLING noun and needs two dotted segments, because a
+# bare three-digit number after `byt` is as often a price as a name. A commercial sheet writes
+# the other way round: `prostor č.201`, `kancelář č. 12`, `nebytový prostor č. 4` — one noun,
+# one explicit `č.`, one flat number, and that number is the space's name on the letting plan.
+# One Na Zlaté stoce agency runs ONE template over nine adverts of two 15 m² offices at 4,000
+# Kč under one order number (Ev. číslo 652795), and the only thing that parts them is
+# `prostor č.201 v prvním patře` against `prostor č.303 ve druhém patře`.
+#
+# The anchor is mandatory and the noun is mandatory. Without the noun `Ev. číslo: 652795` is a
+# space number; without the anchor `prostor 15 m2` is an area. Read on COMMERCIAL rows only —
+# a flat's body that says `místnost č. 2` is numbering a room inside the offer, which is the
+# reason `accessory_designators` is scoped the way it is.
+_SPACE_NOUN: str = (
+    r"(?:nebytov\w*\s+|obchodn\w*\s+|kancelarsk\w*\s+|skladov\w*\s+|vyrobn\w*\s+)?"
+    r"(?:prostor\w*|kancelar\w*|mistnost\w*|mistnosti|jednotk\w*|ordinac\w*|provozovn\w*"
+    r"|sklad\w*|hal[ayeu]|atelier\w*|showroom\w*|box\w*)"
+)
+_SPACE_ANCHOR: str = r"(?:c\.|cis\.|cislo|cisle|oznacen\w{0,4}|pod\s+cislem)"
+_PRINTED_SPACE_NUMBER = re.compile(
+    _SPACE_NOUN + r"\s*" + _SPACE_ANCHOR + r"\s*:?\s*"
+    r"(\d{1,4}(?:\s*[./]\s*[a-z0-9]{1,3})?)\b(?!\s*(?:m2|kc|,-))"
+)
+# More than this many numbered spaces in one body is a letting PLAN, and a plan must never
+# refuse anything — an empty set is not a conflict.
+SPACE_NUMBER_MAX_PER_ADVERT: int = 3
+
+
+def printed_space_numbers(text: str | None) -> frozenset[str]:
+    """Every space number the body prints under a commercial noun and an explicit `č.`."""
+    return _printed_space_numbers(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_space_numbers(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    out = {re.sub(r"\s+", "", match.group(1)).upper().strip("./")
+           for match in _PRINTED_SPACE_NUMBER.finditer(folded)}
+    out.discard("")
+    return frozenset(out) if len(out) <= SPACE_NUMBER_MAX_PER_ADVERT else frozenset()
+
+
+# --- the part this advert offers, and the part it says can be ADDED (E231) --------------------
+# `printed_area` compares two bodies' area SETS and abstains the moment they meet, which is
+# exactly what two adverts for two halves of one building do: each prints its own size and the
+# other half's. One Jindřichův Hradec bakery is let twice on one portal under one 460 m²
+# column — `o celkové výměře přes 200 m²` plus `kancelářské/skladové místnosti ve 2. a 3. NP
+# objektu, které nabízí dalších téměř 250 m²`, and `o celkové výměře téměř 260 m²` plus
+# `přízemní prostory ... které nabízí dalších 200 m² plochy`.
+#
+# `dalších N m²` is the whole reading: a body that says "a FURTHER N m²" has said the N is NOT
+# what it offers. The guard is arithmetic and the advert supplies it — the lead plus the
+# further area is the column the portal stored for the whole object — so a body that has not
+# decomposed its own column says nothing here.
+_FURTHER_AREA = re.compile(
+    r"\bdals\w+\s+(?:cca\s+|temer\s+|pres\s+|priblizne\s+|az\s+)?" + _AREA_NUMBER + r"\s*m2")
+
+
+def further_areas(text: str | None) -> frozenset[float]:
+    """The sizes the body offers as an ADDITION to what it is letting, in m²."""
+    return _further_areas(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _further_areas(text: str) -> frozenset[float]:
+    out: set[float] = set()
+    for match in _FURTHER_AREA.finditer(fact_text(unescape(text))):
+        value = _area_value(match.group(1))
+        if value is not None and value > 0.0:
+            out.add(value)
+    return frozenset(out)

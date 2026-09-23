@@ -147,7 +147,9 @@ from autodedup.text_facts import (
     streets_agree,
     subject_floors,
     subject_floors_by_form,
+    printed_space_numbers,
     printed_unit_codes,
+    further_areas,
     unit_designators,
 )
 from toolkit.room_taxonomy import category_main_compatible
@@ -231,6 +233,8 @@ FACT_NAMES: tuple[str, ...] = (
     "plot_prose_exact",
     "priced_row",
     "neighbour_plot",
+    "space_number",
+    "part_addition",
 )
 
 
@@ -1513,6 +1517,79 @@ def product_class_conflict(
         left, right) else None
 
 
+def space_number_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E230: the number one commercial seller prints for two of its own spaces.
+
+    E61's designator reader is anchored on a dwelling noun and E161's code reader needs two
+    dotted segments, so a letting plan's own `prostor č.201` against `prostor č.303` is read by
+    nothing. One Na Zlaté stoce agency runs one template over nine adverts of two 15 m² offices
+    at 4,000 Kč under one order number, and that pair of numbers is the whole difference.
+
+    Read on commercial rows only, and read with no place gate: the engine asks this question
+    of candidate pairs, which already share a place, while `address_block_key` disagrees with
+    itself across portals (street grain, a RÚIAN key and a pin for one building here).
+    """
+    if settings.d43_space_numbers == "off":
+        return None
+    if {a.category_main, b.category_main} != {COMMERCIAL_CATEGORY}:
+        return None
+    if settings.d43_space_numbers_same_source_only and not (
+            a.source is not None and a.source == b.source):
+        return None
+    if settings.d43_space_numbers == "colive" and not _live_together(a, b, settings):
+        return None
+    left, right = (printed_space_numbers(a.description),
+                   printed_space_numbers(b.description))
+    if not _set_conflict(left, right):
+        return None
+    return (str(sorted(left)), str(sorted(right)))
+
+
+def part_addition_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E231: two adverts that each lead with one part of a building and offer the other.
+
+    `printed_area` compares sets and abstains here by construction — each body prints its own
+    size AND the other half's, so the two sets meet. What makes this a statement rather than
+    two leads is the arithmetic the advert supplies: a body that says `o celkové výměře přes
+    200 m²` and `dalších téměř 250 m²` has decomposed the 460 m² its own portal stored for the
+    whole object, and the lead is then which part it is letting. Both bodies must decompose
+    their own column, and the two leads must differ by more than the rounding of the coarser.
+    """
+    if not settings.d43_part_addition:
+        return None
+    if {a.category_main, b.category_main} != {COMMERCIAL_CATEGORY}:
+        return None
+    if settings.d43_part_addition_same_source_only and not (
+            a.source is not None and a.source == b.source):
+        return None
+    if settings.d43_part_addition_colive_only and not _live_together(a, b, settings):
+        return None
+    if area_ranges(a.description) or area_ranges(b.description):
+        return None
+
+    def decomposed(listing: Listing) -> tuple[float, int] | None:
+        """The lead, when lead + a stated addition is this advert's own stored column."""
+        column = float(listing.area_m2 or 0.0)
+        lead = leading_area(listing.description, UNIT_SCOPE)
+        if lead is None or column <= 0.0:
+            return None
+        for extra in further_areas(listing.description):
+            if rel_diff(lead[0] + extra, column) <= settings.d43_part_addition_sum_tol:
+                return lead
+        return None
+
+    lead_a, lead_b = decomposed(a), decomposed(b)
+    if lead_a is None or lead_b is None:
+        return None
+    if rounding_equal_values(lead_a[0], lead_a[1], lead_b[0], lead_b[1]):
+        return None
+    return (f"part {lead_a[0]} of {a.area_m2}", f"part {lead_b[0]} of {b.area_m2}")
+
+
 def distinguishing_facts(
     a: Listing,
     b: Listing,
@@ -1938,6 +2015,16 @@ def distinguishing_facts(
     product = product_class_conflict(a, b, cfg)
     if product is not None:
         add("product_class", product[0], product[1])
+
+    # E230: the space number a commercial letting plan prints for this space.
+    space = space_number_conflict(a, b, cfg)
+    if space is not None:
+        add("space_number", space[0], space[1])
+
+    # E231: two adverts that each decompose one stored column and lead with a different part.
+    addition = part_addition_conflict(a, b, cfg)
+    if addition is not None:
+        add("part_addition", addition[0], addition[1])
 
     # E150: the reader that knows no form. Last, because it is the most expensive — the other
     # readers have already answered for every pair whose form somebody wrote down.
