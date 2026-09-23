@@ -711,6 +711,46 @@ class Settings:
     # also on offer. D63 keeps the general refusal: absence is not a statement.
     d43_neighbour_plot_attribute: bool = False
 
+    # --- W22 / S7 -----------------------------------------------------------------------
+    # E220: two lets of one house on sale at the same moment, parted by one stated fact. The
+    # co-live window is the whole guard — a re-post with a changed deposit is ONE flat, and
+    # sequential postings never overlap. Each item of the named list carries its own dial so
+    # its cost on certain rental duplicates can be read alone.
+    d43_rental_colive: bool = False
+    d43_rental_colive_min_overlap_days: float = 1.0
+    d43_rental_colive_same_source_only: bool = True
+    d43_rental_colive_charges: bool = False
+    d43_rental_colive_house_number: bool = False
+    d43_rental_colive_sanitary: bool = False
+    d43_rental_colive_renovation: bool = False
+    d43_rental_colive_flooring: bool = False
+    d43_rental_colive_furnishing: bool = False
+    d43_rental_colive_parking_level: bool = False
+    # E203's charge table, widened to the spellings E220 met. Separate from the limb, because
+    # widening the shipped table would move E203 under w21.
+    d43_charge_keywords_wide: bool = False
+    # E221: the unit code nobody wrote in Czech — `Unit NJ1` against `Unit NJ2` of one hall,
+    # `budova A2` against `budova B2`, and the building letter a portal files in its own slug.
+    # Read per KIND: two adverts of one hall share the hall and part on the unit.
+    d43_unit_codes_english: bool = False
+    d43_unit_codes_slug: bool = False
+    d43_slug_area: bool = False
+    # E222: D61 stands — two order codes are not a fact BY THEMSELVES. What lifts them is a
+    # second stated difference on two adverts that are on sale together on one portal.
+    d43_agency_code_with_difference: bool = False
+    d43_commercial_subtype_colive: bool = False
+    # E223: the plot attribute a seller picked from a dropdown, on two plots of one parcelling
+    # that are on sale together.
+    d43_plot_attribute_conflict: bool = False
+    # E224: the serviced-office PRODUCT an offer leads with — a desk and a room are not one
+    # let of one building.
+    d43_commercial_product_class: bool = False
+    # D65: the per-category merge policy. `<category_type>|<category_main>` (either side `*`)
+    # mapped to `merge` or `propose` — a cell held propose-only never reaches the merge zone,
+    # so the operator can hold rentals back at rollout while sales merge. An empty table holds
+    # nothing, which is every generation up to and including S6.
+    merge_policy: dict[str, str] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -721,6 +761,8 @@ class Settings:
         }
         self.floor_camps = {str(key): int(value)
                             for key, value in dict(self.floor_camps).items()}
+        self.merge_policy = {str(key): str(value)
+                             for key, value in dict(self.merge_policy).items()}
         self.validate()
 
     def validate(self) -> None:
@@ -1109,6 +1151,18 @@ class Settings:
             raise ValueError(
                 f"max_attr_contradictions must be positive: {self.max_attr_contradictions}"
             )
+        if self.d43_rental_colive_min_overlap_days < 0.0:
+            raise ValueError(
+                "d43_rental_colive_min_overlap_days must not be negative: "
+                f"{self.d43_rental_colive_min_overlap_days}"
+            )
+        for key, value in self.merge_policy.items():
+            if value not in ("merge", "propose"):
+                raise ValueError(
+                    f"merge_policy[{key}] must be merge/propose: {value}")
+            if key.count("|") != 1:
+                raise ValueError(
+                    f"merge_policy key must be <category_type>|<category_main>: {key}")
 
     def band_width(self) -> float:
         """`w = -ln(1 - t)` — the log-band width lifted from `toolkit/dedup_candidates_sql.py`,
