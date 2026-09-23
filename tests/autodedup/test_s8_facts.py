@@ -91,6 +91,23 @@ def test_e230_needs_the_anchor() -> None:
         "Pronájem komerčního prostoru, kanceláře o 15 m² v prvním patře.") == frozenset()
 
 
+def test_e230_never_reads_the_house_number() -> None:
+    """`č.p.` is the číslo popisné — the building's number, which every advert for every space
+    in that building prints. The anchor is `č.` followed by a DIGIT, so `č.p. 92` is not one."""
+    assert printed_space_numbers(
+        "Nabízíme nebytový prostor č.p. 92 v centru města.") == frozenset()
+
+
+def test_e230_never_reads_a_size_or_a_thousands_separator() -> None:
+    assert printed_space_numbers("Nabízíme prostor č. 15 m2 v prvním patře.") == frozenset()
+    assert printed_space_numbers("kancelář o výměře 1 250 m2") == frozenset()
+
+
+def test_e230_takes_the_number_only_where_an_anchor_carries_it() -> None:
+    """`hala B` has no anchor and folds to the same characters as `hala a sklad`."""
+    assert printed_space_numbers("sklad č. 2/B a hala B") == frozenset({"2/B"})
+
+
 def test_e230_abstains_on_a_letting_plan() -> None:
     plan = ("Volné jsou prostor č. 101, prostor č. 102, kancelář č. 203 a kancelář č. 204 "
             "v naší administrativní budově.")
@@ -179,6 +196,10 @@ def test_e231_reads_the_addition_the_body_names() -> None:
 
 def test_e231_reads_no_addition_where_the_body_states_only_its_own_size() -> None:
     assert further_areas("Jedná se o prostor o celkové výměře přes 200 m².") == frozenset()
+
+
+def test_e231_reads_only_an_addition_MEASURED_IN_SQUARE_METRES() -> None:
+    assert further_areas("nabízí dalších 5 minut chůze na náměstí") == frozenset()
 
 
 def test_e231_separates_the_two_halves_of_the_klasterska_bakery() -> None:
