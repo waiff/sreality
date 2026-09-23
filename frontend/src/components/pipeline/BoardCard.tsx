@@ -7,10 +7,12 @@
  * without the drag/remove chrome, and the two must never drift.
  *
  * Reading order on the card:
- *   place (the card's link)  →  price + how it moved  →  disposition/area +
- *   yield  →  broker  →  the municipality's civic indexes
- * The place leads and carries the link because it NAMES the property, the way
- * a Browse card's title does; the price describes it.
+ *   street (the card's link)  →  town  →  price + how it moved  →
+ *   disposition/area + yield  →  broker  →  the municipality's civic indexes
+ * The street leads and carries the link because it NAMES the property, the way
+ * a Browse card's title does; the price describes it. The town is ALWAYS the
+ * second row, on a line of its own: folded into the street's single truncating
+ * line it was the first thing clipped, and it is what the operator triages by.
  */
 
 import { useState } from 'react';
@@ -22,6 +24,7 @@ import { fmtArea, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingKindLabel } from '@/lib/enums';
 import { listingRowPath } from '@/lib/listingUrl';
+import { splitCardPlace } from '@/lib/cardPlace';
 import { TrashIcon } from '@/components/icons';
 import PriceDelta from '@/components/PriceDelta';
 import CityIndexStrip from '@/components/CityIndexStrip';
@@ -98,6 +101,9 @@ export function CardFace({
      The board used to hand-roll `[street, district]`, then placePrimary(); both
      could disagree with what every other surface showed for the same card. */
   const place = card.display_label;
+  /* The label split in two rows so the town can never be the part that truncates.
+     `place` (whole) stays the link's hover title. */
+  const { head, town } = splitCardPlace(place, card.obec);
   /* The per-m² measure with the basis the server published beside it, so a
      rent card and a sale card in the same column are readable against each
      other. fmtMeasuredPricePerM2 renders an em-dash when either half is
@@ -126,7 +132,7 @@ export function CardFace({
       <div className={stacked ? 'flex flex-col gap-2' : 'flex gap-2.5'}>
         <CardThumb url={cover} inactive={inactive} size={size} />
         <div className="min-w-0 flex-1">
-          <p className={`truncate text-sm ${place ? inkColor : 'text-[var(--color-ink-4)]'}`}>
+          <p className={`truncate text-sm ${head ? inkColor : 'text-[var(--color-ink-4)]'}`}>
             {/* listingRowPath is canonical-first (source + source_id_native from
                 properties_public), so the card links straight to the clean
                 /listing/{source}/{native} URL; it falls back to the legacy/property
@@ -141,9 +147,10 @@ export function CardFace({
                 board open).
 
                 The link is the card's ONLY way to its listing, so a property
-                whose place is unresolved still gets words to click rather than
-                the bare em-dash other surfaces print for a missing label. The
-                title carries the full place because the line truncates. */}
+                with no street (a label that is just the town) or no place at all
+                still gets words to click rather than the bare em-dash other
+                surfaces print for a missing label. The title carries the full
+                place because the line truncates. */}
             <Link
               to={listingRowPath(card)}
               target="_blank"
@@ -153,8 +160,16 @@ export function CardFace({
                 .join(' · ') || undefined}
               className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
             >
-              {place || 'Lokalita neurčena'}
+              {head || (town ? 'Ulice neuvedena' : 'Lokalita neurčena')}
             </Link>
+          </p>
+          {/* Always rendered, so the town sits at the same place on every card in
+              a column; a dash rather than a collapsed row when it is unknown. */}
+          <p
+            className={`mt-0.5 truncate text-xs ${town ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink-4)]'}`}
+            title={town ?? undefined}
+          >
+            {town ?? '—'}
           </p>
           {/* Price and its movement are one typographic unit — the delta sits on
               the price's own baseline rather than reading as a separate badge. */}

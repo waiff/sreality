@@ -302,7 +302,7 @@ describe('<Pipeline> board', () => {
     expect(screen.getByText('Zájem')).toBeInTheDocument();
     expect(screen.getByText('Nabídka')).toBeInTheDocument();
     // Enriched card content: street + MF yield + broker name linking to the broker page.
-    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Sadová')).toBeInTheDocument();
     expect(screen.getByText(/MF\s*4,3\s*%/)).toBeInTheDocument();
     /* The broker line is a DECORATION now: the card paints without it and it
        arrives on its own query, so this is findBy (async) rather than getBy.
@@ -323,7 +323,7 @@ describe('<Pipeline> board', () => {
      figure, not a second way in. */
   it('opens the property in a new tab from the address line', async () => {
     renderBoard();
-    const place = await screen.findByText('Sadová, Praha');
+    const place = await screen.findByText('Sadová');
     const link = place.closest('a');
     expect(link).toHaveAttribute('href', '/listing/sreality/111');
     expect(link).toHaveAttribute('target', '_blank');
@@ -340,11 +340,32 @@ describe('<Pipeline> board', () => {
      resolved must still offer something to click. */
   it('still links a card whose place is unresolved', async () => {
     vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([
-      { ...CARDS[0], display_label: null },
+      { ...CARDS[0], display_label: null, obec: null },
     ]);
     renderBoard();
     const link = (await screen.findByText('Lokalita neurčena')).closest('a');
     expect(link).toHaveAttribute('href', '/listing/sreality/111');
+  });
+
+  /* The town is the second row on EVERY card, on a line of its own so a long
+     street can never truncate it away. */
+  it('prints the town on its own second row, after the street link', async () => {
+    renderBoard();
+    const street = await screen.findByText('Sadová');
+    const town = screen.getByText('Praha', { selector: 'p' });
+    expect(town.closest('a')).toBeNull();
+    expect(street.closest('p')).not.toBe(town);
+    expect(street.closest('p')?.nextElementSibling).toBe(town);
+  });
+
+  it('keeps the town row on a card whose label is only the town', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([
+      { ...CARDS[0], display_label: 'Praha' },
+    ]);
+    renderBoard();
+    const street = await screen.findByText('Ulice neuvedena');
+    expect(street.closest('a')).toHaveAttribute('href', '/listing/sreality/111');
+    expect(street.closest('p')?.nextElementSibling).toHaveTextContent('Praha');
   });
 
   /* The point of the split, pinned: with BOTH decoration reads hanging
@@ -365,7 +386,7 @@ describe('<Pipeline> board', () => {
       await screen.findByLabelText('Přetáhnout kartu do jiné fáze'),
     ).toBeInTheDocument();
     expect(screen.getByText('Zájem')).toBeInTheDocument();
-    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Sadová')).toBeInTheDocument();
     expect(screen.getByText(/MF\s*4,3\s*%/)).toBeInTheDocument();
     // Decoration: absent, and no loading string stands in for the board.
     expect(screen.queryByText('Jan Novák')).not.toBeInTheDocument();
@@ -391,16 +412,16 @@ describe('<Pipeline> board', () => {
     vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
     renderBoard();
     // Both cards render; the type chips appear (≥2 types present).
-    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
-    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
+    expect(screen.getByText('Lesní')).toBeInTheDocument();
     const domy = screen.getByRole('button', { name: 'Domy' });
     expect(screen.getByRole('button', { name: 'Byty' })).toBeInTheDocument();
     // Filter to Domy → only the dům card remains.
     fireEvent.click(domy);
     await waitFor(() =>
-      expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
+      expect(screen.queryByText('Sadová')).not.toBeInTheDocument(),
     );
-    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+    expect(screen.getByText('Lesní')).toBeInTheDocument();
   });
 
   /* W3 S3. The board filters its cards in the BROWSER, so it needs the same
@@ -410,7 +431,7 @@ describe('<Pipeline> board', () => {
   it('resolves a pre-code chip in the URL instead of emptying the board', async () => {
     resolveChipNames.mockResolvedValue([[{ level: 'obec', id: 554782 }]]);
     renderBoard('/pipeline?districts=Praha');
-    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
     expect(resolveChipNames).toHaveBeenCalledWith([
       { name: 'Praha', context: null },
     ]);
@@ -421,7 +442,7 @@ describe('<Pipeline> board', () => {
     renderBoard('/pipeline?districts=Brno');
     await waitFor(() => expect(resolveChipNames).toHaveBeenCalled());
     await waitFor(() =>
-      expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
+      expect(screen.queryByText('Sadová')).not.toBeInTheDocument(),
     );
   });
 
@@ -429,22 +450,22 @@ describe('<Pipeline> board', () => {
     vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_INACTIVE]);
     renderBoard();
     // Both cards render; the status pills appear (a delisted card is present).
-    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
-    expect(screen.getByText('Polní, Ostrava')).toBeInTheDocument();
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
+    expect(screen.getByText('Polní')).toBeInTheDocument();
     const aktivni = screen.getByRole('button', { name: 'Aktivní' });
     const neaktivni = screen.getByRole('button', { name: 'Neaktivní' });
     // Filter to Aktivní → only the live card remains.
     fireEvent.click(aktivni);
     await waitFor(() =>
-      expect(screen.queryByText('Polní, Ostrava')).not.toBeInTheDocument(),
+      expect(screen.queryByText('Polní')).not.toBeInTheDocument(),
     );
-    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Sadová')).toBeInTheDocument();
     // Switching to Neaktivní flips which card is visible.
     fireEvent.click(neaktivni);
     await waitFor(() =>
-      expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
+      expect(screen.queryByText('Sadová')).not.toBeInTheDocument(),
     );
-    expect(screen.getByText('Polní, Ostrava')).toBeInTheDocument();
+    expect(screen.getByText('Polní')).toBeInTheDocument();
   });
 
   /* The collection lens (rule #18): the fail-open contract, on both ways the
@@ -455,8 +476,8 @@ describe('<Pipeline> board', () => {
       new Promise(() => {}),
     );
     renderBoard('/pipeline?collections=7');
-    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
-    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
+    expect(screen.getByText('Lesní')).toBeInTheDocument();
     expect(screen.queryByText('Kolekce')).not.toBeInTheDocument();
     // Uncounted: the header reads the plain total, and there is nothing to reset.
     expect(screen.getByText(/nemovitostí/).textContent).toBe('2 nemovitostí');
@@ -470,7 +491,7 @@ describe('<Pipeline> board', () => {
     await waitFor(() =>
       expect(screen.getByText(/nemovitostí/).textContent).toBe('2 nemovitostí'),
     );
-    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Sadová')).toBeInTheDocument();
     expect(screen.queryByText('Kolekce')).not.toBeInTheDocument();
   });
 
@@ -500,16 +521,16 @@ describe('<Pipeline> board', () => {
       new Map([[42, [7]]]),
     );
     renderBoard();
-    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
     // Only the collection with a member ON the board is offered.
     const chip = await screen.findByRole('button', { name: 'Šortlist' });
     expect(screen.getByText('Kolekce')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Archiv' })).not.toBeInTheDocument();
     fireEvent.click(chip);
     await waitFor(() =>
-      expect(screen.queryByText('Lesní, Brno')).not.toBeInTheDocument(),
+      expect(screen.queryByText('Lesní')).not.toBeInTheDocument(),
     );
-    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Sadová')).toBeInTheDocument();
     expect(screen.getByText(/nemovitostí/).textContent).toBe('1 z 2 nemovitostí');
   });
 
@@ -524,8 +545,8 @@ describe('<Pipeline> board', () => {
     await waitFor(() =>
       expect(screen.getByText(/nemovitostí/).textContent).toBe('0 z 2 nemovitostí'),
     );
-    expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument();
-    expect(screen.queryByText('Lesní, Brno')).not.toBeInTheDocument();
+    expect(screen.queryByText('Sadová')).not.toBeInTheDocument();
+    expect(screen.queryByText('Lesní')).not.toBeInTheDocument();
     // Its chip renders pressed although nothing on the board is in it: a
     // constraint you cannot see is one you can only leave through Reset.
     expect(screen.getByRole('button', { name: 'Archiv' })).toHaveAttribute(
@@ -543,8 +564,8 @@ describe('<Pipeline> board', () => {
       new Map([[44, [7]]]),
     );
     renderBoard('/pipeline?collections=7');
-    expect(await screen.findByText('Polní, Ostrava')).toBeInTheDocument();
-    expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument();
+    expect(await screen.findByText('Polní')).toBeInTheDocument();
+    expect(screen.queryByText('Sadová')).not.toBeInTheDocument();
   });
 
   it('clears every filter through the one header Reset', async () => {
@@ -555,10 +576,10 @@ describe('<Pipeline> board', () => {
     renderBoard('/pipeline?cat=dum&collections=7');
     // Type and collection disagree, so the board is empty until Reset.
     const reset = await screen.findByRole('button', { name: 'Reset' });
-    expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument();
+    expect(screen.queryByText('Sadová')).not.toBeInTheDocument();
     fireEvent.click(reset);
-    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
-    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+    expect(await screen.findByText('Sadová')).toBeInTheDocument();
+    expect(screen.getByText('Lesní')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Reset' })).not.toBeInTheDocument();
   });
 
