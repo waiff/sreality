@@ -779,6 +779,28 @@ class Settings:
     d43_part_addition_same_source_only: bool = True
     d43_part_addition_colive_only: bool = True
     d43_part_addition_sum_tol: float = 0.05
+    # E240: the house number the ADVERT prints for its own street, `Krasnoarmejců 2080/8`
+    # against `Krasnoarmejců 2079/10`. Read as the number's component SET, because both orders
+    # are printed — `Freyova 5/236` is the column stored as `236/5`. Two printed numbers MEET
+    # when any component meets (a veto) and CONFLICT only when none does (a fact), so a
+    # collision on a low č.o. costs a missed split and never a merge.
+    d43_printed_house_number: bool = False
+    # E242: the STORED house number, which is the resolver's reading and not a sentence either
+    # advert wrote. Off, or `guarded` — a differing č.p. (one building's entrances share it),
+    # both sides at address grain on one street, both rentals, a price or area that MOVED, and
+    # two bodies that are not one text. `off` for every generation up to and including S8.
+    d43_stored_house_number: str = "off"
+    # Two bodies this alike are one text re-posted, and the number that moved between the two
+    # postings is the resolver's. Measured: every false split the eleven cohorts produced sits
+    # at 0.94 or above, every true one at 0.44 or below.
+    d43_house_number_independent_max: float = 0.5
+    # A price or area that did not move is the strongest sign that one advert was posted twice,
+    # so the stored number may only speak where a second stated number speaks with it.
+    d43_house_number_move_tol: float = 0.002
+    # E243: the interior room match was measured in the HAZARD cell — one address point and
+    # ZERO tight non-catalogue frames in common. Two galleries that share a photograph are
+    # outside the cell the floor was cut in, so the floor does not apply to them.
+    d43_interior_requires_no_tight_photo: bool = False
     # D65: the per-category merge policy. `<category_type>|<category_main>` (either side `*`)
     # mapped to `merge` or `propose` — a cell held propose-only never reaches the merge zone,
     # so the operator can hold rentals back at rollout while sales merge. An empty table holds
@@ -981,6 +1003,16 @@ class Settings:
                 f"{self.d43_part_addition_sum_tol}")
         if self.d43_space_numbers_same_source_only and self.d43_space_numbers == "off":
             raise ValueError("d43_space_numbers_same_source_only needs d43_space_numbers")
+        if self.d43_stored_house_number not in ("off", "guarded"):
+            raise ValueError(
+                f"d43_stored_house_number must be off/guarded: {self.d43_stored_house_number}")
+        if not 0.0 < self.d43_house_number_independent_max <= 1.0:
+            raise ValueError(
+                "d43_house_number_independent_max must be in (0, 1]: "
+                f"{self.d43_house_number_independent_max}")
+        if not 0.0 <= self.d43_house_number_move_tol < 1.0:
+            raise ValueError(
+                f"d43_house_number_move_tol must be in [0, 1): {self.d43_house_number_move_tol}")
         if self.d43_stated_unit_count not in ("off", "colive_price", "always"):
             raise ValueError(
                 "d43_stated_unit_count must be off/colive_price/always: "

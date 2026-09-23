@@ -1937,3 +1937,90 @@ def _further_areas(text: str) -> frozenset[float]:
         if value is not None and value > 0.0:
             out.add(value)
     return frozenset(out)
+
+
+# --- the house number the advert PRINTS for its own street (E240) -----------------------------
+# W24. The stored `location.house_number` is the RESOLVER's reading of the portal's address
+# line, not a sentence either advert wrote, and it moves between two postings of ONE body: the
+# same Ondříčkova 116 m² let, re-posted on sreality with a byte-identical body, is filed at
+# 2128/12 and then at 1774/28, and the same Freyova 1+kk is filed at 236/5 and 235/7 while BOTH
+# bodies print `Freyova 5/236`. That is why the RÚIAN house number was refused at 3.7 % in the
+# first place, and re-measuring it over eleven cohorts reproduces the refusal (2.7 % of the
+# same-street address-grain certain duplicates).
+#
+# What the advert itself PRINTS is a different object. `Krasnoarmejců 2080/8` against
+# `Krasnoarmejců 2079/10` is two sentences by one agency about two flats; a re-post does not
+# rewrite its own house number. So this reader parses only what a body states, and states it as
+# the SET of the number's components, because the two orders are both printed — `Freyova 5/236`
+# is the č.o./č.p. order of the column stored as `236/5`.
+#
+# Comparison is therefore asymmetric on purpose, and the asymmetry is the whole safety argument:
+# two printed numbers AGREE when their components meet at all (a veto, which can only refuse a
+# split), and CONFLICT only when no component of either meets the other (a fact). A component
+# collision on a low č.o. costs a missed split, never a merge.
+_CP_ANCHOR = r"c\s*\.?\s*p\s*\.?(?:\s*/?\s*c\s*\.?\s*o\s*\.?)?"
+_HOUSE_NUMBER = r"(\d{1,4}\s*/\s*\d{1,4}[a-z]?|\d{1,4}[a-z]?)(?![0-9a-z])"
+# A number that is really a size, a price, a floor, a year or a count of anything is not a
+# house number, so the forms that follow one are refused outright.
+_NOT_A_HOUSE_NUMBER = re.compile(
+    r"^\s*(?:m2|m\b|kc|czk|eur|%|np\b|pp\b|patr|podlazi|osob|lozni|pokoj|kk\b|\+|m²)")
+_PRINTED_CP = re.compile(_CP_ANCHOR + r"\s*:?\s*" + _HOUSE_NUMBER)
+# More than this many house numbers in one body is a developer's list of houses ("domy č.p.
+# 12-18"), and a list must never refuse anything — an empty set is not a conflict.
+HOUSE_NUMBER_MAX_PER_ADVERT: int = 2
+
+
+def printed_house_numbers(text: str | None, street_key: str | None = None
+                          ) -> frozenset[frozenset[str]]:
+    """Every house number the body prints under `č.p.` or beside its own street name."""
+    if not text:
+        return frozenset()
+    return _printed_house_numbers(text, street_key or "")
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_house_numbers(text: str, street_key: str) -> frozenset[frozenset[str]]:
+    folded = fact_text(unescape(text))
+    found: set[frozenset[str]] = set()
+    for pattern in _house_number_patterns(street_key):
+        for match in pattern.finditer(folded):
+            tail = folded[match.end():match.end() + 12]
+            if _NOT_A_HOUSE_NUMBER.match(tail):
+                continue
+            parts = _house_number_parts(match.group(1))
+            if parts:
+                found.add(parts)
+    if not found or len(found) > HOUSE_NUMBER_MAX_PER_ADVERT:
+        return frozenset()
+    return frozenset(found)
+
+
+@lru_cache(maxsize=4096)
+def _house_number_patterns(street_key: str) -> tuple[re.Pattern[str], ...]:
+    out = [_PRINTED_CP]
+    street = fact_text(street_key).strip()
+    # A one-word street is too weak an anchor on its own only when that word is also an
+    # ordinary noun; requiring the number to FOLLOW the full street name is what keeps
+    # "na náměstí 3 minuty" out, since the reader below refuses a unit straight after.
+    if len(street) >= 4:
+        out.append(re.compile(re.escape(street) + r"\s*(?:c\s*\.?\s*p\s*\.?)?\s*"
+                              + _HOUSE_NUMBER))
+    return tuple(out)
+
+
+def _house_number_parts(raw: str) -> frozenset[str]:
+    """`1561/9` and `5/236` both become their component set — the two printed orders agree."""
+    cleaned = re.sub(r"\s+", "", raw).strip("/.")
+    parts = {part for part in cleaned.split("/") if part and any(c.isdigit() for c in part)}
+    # A bare year is a renovation date, never a house number.
+    if len(parts) == 1:
+        only = next(iter(parts))
+        if only.isdigit() and 1500 <= int(only) <= 2100:
+            return frozenset()
+    return frozenset(parts)
+
+
+def printed_house_numbers_meet(left: frozenset[frozenset[str]],
+                               right: frozenset[frozenset[str]]) -> bool:
+    """Do the two bodies name the same house at all? Any shared component is enough."""
+    return any(a & b for a in left for b in right)

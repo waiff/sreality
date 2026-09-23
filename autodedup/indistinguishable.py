@@ -109,6 +109,8 @@ from autodedup.text_facts import (
     states_charge_range,
     stated_charges_wide,
     printed_areas,
+    printed_house_numbers,
+    printed_house_numbers_meet,
     accessory_areas,
     accessory_designators,
     body_localities,
@@ -192,6 +194,8 @@ FEATURE_SLOTS: tuple[str, ...] = (
 
 # Every name this module can return, so a caller can tabulate without discovering them.
 FACT_NAMES: tuple[str, ...] = (
+    "printed_house_number",
+    "stored_house_number",
     "category_type",
     "category_main",
     "area",
@@ -1209,6 +1213,8 @@ def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> 
 # --- W22 / S7 --------------------------------------------------------------------------------
 RENTAL_TYPE: str = "pronajem"
 COMMERCIAL_CATEGORY: str = "komercni"
+# The one grain at which a portal has stated an address rather than a neighbourhood.
+ADDRESS_GRAIN: str = "address_point"
 
 
 def _rental_pair(a: Listing, b: Listing) -> bool:
@@ -1329,6 +1335,110 @@ def _house_numbers(listing: Listing) -> str | None:
         return None
     return f"{cp or ''}/{co or ''}"
 
+
+def _printed_numbers(listing: Listing) -> frozenset[frozenset[str]]:
+    return printed_house_numbers(listing.description, listing.location.street_key)
+
+
+def _one_street(a: Listing, b: Listing) -> bool:
+    """One street of one obec. A CORNER building carries two street addresses and prints
+    both — `Svitavská 29/Vranovská 49`, `Měděná 3061/4` re-posted as `Železná 3068/20` —
+    so two numbers read off two different streets are never a conflict."""
+    return bool(a.location.street_key) and a.location.street_key == b.location.street_key and (
+        a.location.obec_kod is not None and a.location.obec_kod == b.location.obec_kod)
+
+
+def _independently_written(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """Are these two bodies two sentences, or one text posted twice?
+
+    A re-post carries its own body and the resolver may file it at a different address point
+    on the way; an agency writing about a second flat writes a second body. Measured over the
+    eleven cohorts' certain duplicates: every pair a house number would have split falsely
+    sits at 0.94 overlap or above, every pair the hand read called two units at 0.44 or below.
+    An overlap that cannot be read at all abstains, because missing is not a difference."""
+    overlap = body_overlap_ratio(a.description, b.description)
+    return overlap is not None and overlap < cfg.d43_house_number_independent_max
+
+
+def printed_house_number_conflict(a: Listing, b: Listing, cfg: Settings
+                                  ) -> tuple[str, str] | None:
+    """E240: two bodies of one street naming two different houses.
+
+    `Nabízíme k pronájmu byt 2+1 na ulici Krasnoarmejců 2080/8` against `na ulici
+    Krasnoarmejců 2079/10` is one agency writing about two flats — different bathroom,
+    different storey, different rent. A re-post does not rewrite its own house number, and the
+    two guards are the two ways one advert ends up printing two: a corner building states both
+    its streets, and a body re-posted with a corrected address states the correction."""
+    if not cfg.d43_printed_house_number or not _one_street(a, b):
+        return None
+    left, right = _printed_numbers(a), _printed_numbers(b)
+    if not left or not right or printed_house_numbers_meet(left, right):
+        return None
+    if not _independently_written(a, b, cfg):
+        return None
+    return (f"printed={_render_numbers(left)}", f"printed={_render_numbers(right)}")
+
+
+def _render_numbers(numbers: frozenset[frozenset[str]]) -> str:
+    return ",".join(sorted("/".join(sorted(one)) for one in numbers))
+
+
+def _cp_of(value: str | None) -> str | None:
+    """The č.p., which is the BUILDING. Two entrances of one house share it and differ only
+    on the č.o. — `701/11` against `701/13`, `2561/45` against `2561/47` — and 255 of the 418
+    same-street conflicts the eleven cohorts' certain duplicates carry are exactly that."""
+    if not value:
+        return None
+    head = str(value).strip().split("/")[0].strip()
+    return head or None
+
+
+def _moved(left: float | None, right: float | None, tol: float) -> bool:
+    if not left or not right or left <= 0.0 or right <= 0.0:
+        return False
+    return abs(left - right) / max(left, right) > tol
+
+
+def stored_house_number_conflict(a: Listing, b: Listing, cfg: Settings
+                                 ) -> tuple[str, str] | None:
+    """E242: the resolver's house number, read only where it can be the advert's own.
+
+    The RÚIAN number was refused at 3.7 % in W14 and re-measuring it over eleven cohorts
+    reproduces the refusal — 418 of 15,603 same-street address-grain certain duplicates carry
+    two different numbers, because the column is the RESOLVER's reading of an address line and
+    it moves between two postings of one body. Four guards cut that to 18, and hand-reading
+    all 18 found 17 pairs of genuinely different flats in a reference that calls one agency's
+    template siblings duplicates, and ONE re-post — which E241's printed agreement then vetoes.
+
+    The guards, each from a shape the cohorts produced: the č.p. must differ (entrances of one
+    house share it); both sides at address grain on one street (a coarser grain has not stated
+    an address); both rentals (the mode is one letting agency's flats of one street); a price
+    or an area that MOVED (two adverts agreeing to the last koruna at two numbers are one
+    advert filed twice); and two bodies that are not one text.
+    """
+    if cfg.d43_stored_house_number != "guarded" or not _rental_pair(a, b):
+        return None
+    if not _one_street(a, b):
+        return None
+    if not (a.location.granularity == ADDRESS_GRAIN == b.location.granularity):
+        return None
+    left, right = a.location.house_number, b.location.house_number
+    if not left or not right or left == right:
+        return None
+    cp_a, cp_b = _cp_of(left), _cp_of(right)
+    if not cp_a or not cp_b or cp_a == cp_b:
+        return None
+    tol = cfg.d43_house_number_move_tol
+    if not (_moved(a.price, b.price, tol) or _moved(a.area_m2, b.area_m2, tol)):
+        return None
+    if not _independently_written(a, b, cfg):
+        return None
+    # E241: what the two bodies PRINT outranks what the resolver filed. The same Freyova 1+kk
+    # is stored at `236/5` and `235/7` and both bodies print `Freyova 5/236`.
+    printed_a, printed_b = _printed_numbers(a), _printed_numbers(b)
+    if printed_a and printed_b and printed_house_numbers_meet(printed_a, printed_b):
+        return None
+    return (f"stored={left}", f"stored={right}")
 
 def english_code_conflict(a: Listing, b: Listing, settings: Settings
                           ) -> tuple[str, str] | None:
@@ -2026,6 +2136,16 @@ def distinguishing_facts(
     if addition is not None:
         add("part_addition", addition[0], addition[1])
 
+    # E240: the house number the two bodies print for their own street.
+    printed_number = printed_house_number_conflict(a, b, cfg)
+    if printed_number is not None:
+        add("printed_house_number", printed_number[0], printed_number[1])
+
+    # E242: the resolver's house number, under the four guards that make it the advert's own.
+    stored_number = stored_house_number_conflict(a, b, cfg)
+    if stored_number is not None:
+        add("stored_house_number", stored_number[0], stored_number[1])
+
     # E150: the reader that knows no form. Last, because it is the most expensive — the other
     # readers have already answered for every pair whose form somebody wrote down.
     if cfg.d43_body_align:
@@ -2044,6 +2164,12 @@ def distinguishing_facts(
     if (floorplan_conflict == 1.0 and room_clip is not None
             and room_clip < FLOORPLAN_ROOM_CLIP_FLOOR):
         add("floorplan", "conflict", f"room_clip_min2={room_clip:.3f}")
+    # E243: the floor was cut in the HAZARD cell — one address point and ZERO tight
+    # non-catalogue frames in common, which is the developer-unit shape. Two galleries holding
+    # the same photograph are not in that cell, and on cohort 11 they are 416 of the 495
+    # address-point certain duplicates S8 refuses, every one of them within 0.07 of the floor.
+    if (cfg.d43_interior_requires_no_tight_photo and tight_photo_match(feats)):
+        room_clip = None
     if room_clip is not None and room_clip < ROOM_CLIP_FLOOR:
         add("interior", f"room_clip_min2={room_clip:.3f}", f"floor={ROOM_CLIP_FLOOR}")
 
