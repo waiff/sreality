@@ -758,10 +758,16 @@ quoted span — as digits, or as an ares / hectares figure that converts to it (
   sum of rooms, a range ("180–210 m²"). Where a label exists the model's figure was the wrong MEASURE
   as often as not (the plot under a flat, a garage, "celková" for "užitná"), so widening the unit rule
   to a cued bare "m" would not clear 95 % either: the limiter is measure selection, not the unit.
-  Not pursued. The dotted-thousands form IS a grammar gap (`scraper.area` reads "1.910 m2" as 1,91):
+  Not pursued. The dotted-thousands form WAS a grammar gap (`scraper.area` read "1.910 m2" as 1,91):
   121 active area-less rows carry it (bazos 69, remax 27, realitymix 20, idnes 5) and bazos holds
-  313 active parcels under 5 m², which is where a mis-read parcel lands. That is the one grammar's to
-  fix, on every portal at once, then healed through the re-parse seam — a separate PR.
+  313 active parcels under 5 m², which is where a mis-read parcel lands. Fixed in the one grammar in
+  this same change — `AREA_NUMBER_SRC` now accepts a dot followed by exactly three digits as a
+  thousands group (Czech decimals take a comma; "1.5 m2" keeps its point) — and the lane's figure
+  check is BUILT FROM that shape (`_FIGURE_RE` embeds `AREA_NUMBER_SRC`, `area_token_to_float`
+  reads the token), so the second number grammar the review found is gone. The stored rows heal
+  through the re-parse seam once this merges: `reparse.yml` with `fields=area_m2` on bazos, remax,
+  realitymix and idnes (the seam replays the parser and overwrites a value it can now read; it
+  never blanks).
 - **A finding the re-runs surfaced, and it is not the model's.** The same runs scored luna's FLOOR
   at 79.6–82.5 % (n 555–630) against the 95.6 % (n 340) that opened the gate. Per label source
   (run 35830742594, rows in the receipt): sreality 96.8 % (n 220), idnes 82.1 % (n 140) with 23

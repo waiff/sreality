@@ -241,25 +241,25 @@ _NEGATION_RE = re.compile(
     r"\b(bez|neni|nema|nemaji|nemame|zadn\w*|chybi|nenachazi|nedisponuje)\b"
 )
 _WS_RE = re.compile(r"\s+")
-# A figure WITH AN AREA UNIT in a flattened quote. The number half is `scraper.area`'s own
-# shape (its lookbehind keeps "3+1 174" from reading as 1 174; its separator class is
-# normalised to a plain space first, so the two grammars agree on what a digit group is).
-# The unit half is a closed list: square metres at 1, ares at 100, hectares at 10 000 —
-# the only conversions a Czech advert writes an area in, so the only ones a quantity
-# check accepts. A figure with any other tail (a price, a distance, a ceiling height, a
-# storey) is not an area statement and never validates; anything else is arithmetic,
-# and the model is not allowed any.
+# A figure WITH AN AREA UNIT in a flattened quote. The number half IS `scraper.area`'s
+# (`AREA_NUMBER_SRC` + `area_token_to_float`: the same lookbehind that keeps "3+1 174"
+# from reading as 1 174, the same separator class, the same dotted thousands), so the
+# lane and the ingest grammar can never disagree on what a figure is (rule 21). The unit
+# half is a closed list: square metres at 1, ares at 100, hectares at 10 000 — the only
+# conversions a Czech advert writes an area in, so the only ones a quantity check
+# accepts. A figure with any other tail (a price, a distance, a ceiling height, a storey)
+# is not an area statement and never validates; anything else is arithmetic, and the
+# model is not allowed any.
 _AREA_UNIT_RE = (
     r"(?P<m2>m2|m\^2|m 2|m\u00b2|metr\w*\s+ctvere\w*|m\s+ctvere\w*)"
     r"|(?P<ar>ar|ary|aru|arech)"
     r"|(?P<ha>ha|hektar\w*)"
 )
 _FIGURE_RE = re.compile(
-    r"(?<![\d+.,])(?P<whole>\d{1,3}(?: \d{3})+|\d+)(?:[.,](?P<frac>\d+))?\s*"
+    rf"(?<![\d+.,])(?P<number>{area_grammar.AREA_NUMBER_SRC})\s*"
     rf"(?:{_AREA_UNIT_RE})(?![a-z\d])"
 )
 _UNIT_FACTOR = {"m2": 1.0, "ar": 100.0, "ha": 10_000.0}
-_SEPARATOR_TO_SPACE = str.maketrans({c: " " for c in area_grammar.AREA_THOUSANDS_SEPS})
 
 
 def _flat(text: str | None) -> str:
@@ -281,10 +281,8 @@ def _quote_states_figure(quote: str, value: float) -> bool:
     """True when some AREA figure in the quote IS `value` in m²: the unit the advert wrote
     beside the number decides the one multiplier, and half a square metre of tolerance
     covers a rounded decimal and nothing else."""
-    flat = _flat(quote).translate(_SEPARATOR_TO_SPACE)
-    for match in _FIGURE_RE.finditer(flat):
-        whole = match.group("whole").replace(" ", "")
-        figure = float(f"{whole}.{match.group('frac')}" if match.group("frac") else whole)
+    for match in _FIGURE_RE.finditer(_flat(quote)):
+        figure = area_grammar.area_token_to_float(match.group("number"))
         unit = next(name for name in _UNIT_FACTOR if match.group(name) is not None)
         if abs(figure * _UNIT_FACTOR[unit] - value) <= 0.5:
             return True
