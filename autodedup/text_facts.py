@@ -1503,6 +1503,19 @@ _CHARGE_KEYWORDS_WIDE: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+# `předpokládané měsíční zálohy na energie: 5.000–8.000 Kč` is an ESTIMATE, not a quote, and
+# the two ends of it are not two tenancies. One Plzeň house let twice by one agency — once as a
+# house and once as offices — states its advance as a range on one side and a single figure on
+# the other, and the limb that reads a quoted advance must not read an estimate at all.
+_CHARGE_RANGE = re.compile(
+    r"\d[\d .]{2,}\s*(?:-|az|\u2013|\u2014)\s*\d[\d .]{2,}\s*(?:kc\b|kč\b|tis)")
+
+
+def states_charge_range(text: str | None) -> bool:
+    """Does the body quote a charge as a RANGE anywhere?"""
+    return bool(_CHARGE_RANGE.search(fold(text))) if text else False
+
+
 def stated_charges_wide(text: str | None) -> dict[str, frozenset[float]]:
     """`stated_charges` plus the spellings E220 met that E203's table does not carry."""
     if not text:
@@ -1536,10 +1549,13 @@ _WC_SEPARATE = re.compile(
     r"samostatn\w+\s+(?:toalet\w*|wc\b|zachod\w*)"
     r"|(?:toalet\w*|wc|zachod)\s+(?:je\s+)?(?:samostatn\w+|oddelen\w+)"
     r"|oddelen\w+\s+(?:toalet\w*|wc\b)")
+# `koupelnu se sprchovým koutem a toaletou` is the combined form and `...a samostatnou
+# toaletu` is the separate one, so the connective may not swallow the adjective: the lavatory
+# noun must follow the connective directly.
 _WC_COMBINED = re.compile(
-    r"koupeln\w*[^.;:]{0,40}?\bs\s+(?:toaletou|wc\b|zachodem)"
+    r"koupeln\w*[^.;:]{0,60}?\b(?:a|i|s|se)\s+(?:toaletou|wc\b|zachodem)\b"
     r"|(?:toalet\w*|wc)\s+(?:je\s+)?(?:soucasti|v)\s+koupeln\w*"
-    r"|koupeln\w*\s+a\s+(?:toaletou|wc\b)")
+    r"|koupeln\w*\s+s\s+(?:toaletou|wc\b)")
 
 
 def sanitary_arrangement(text: str | None) -> frozenset[str]:
@@ -1801,3 +1817,47 @@ def parking_level(text: str | None) -> frozenset[str]:
 def _parking_level(text: str) -> frozenset[str]:
     folded = fact_text(text)
     return frozenset(name for name, pattern in _PARKING_LEVELS if pattern.search(folded))
+
+
+# E222's second difference, read off the BODY rather than off the portal's own filing. Two
+# Masarykova třída adverts of the Opava MG Medical centre are both 25 m² in the 1.NP at 20,000
+# and print two order numbers — and D61 says two numbers are not two objects. What says it here
+# is that one body offers the space `k využití pro obchodní, poradenské, či podobné využití`
+# and the other `k využití jako menší kavárna`: one seller, one building, two products. The
+# comparison is DISJOINTNESS, not a singleton each, because a space is offered for several uses
+# at once and a re-pitch of one object repeats its own list.
+_USE_CUE = re.compile(
+    r"k\s+vyuziti\s+(?:jako|pro|k)?|vhodn\w+\s+(?:jako|na|pro|k)|urcen\w+\s+(?:jako|pro|k)"
+    r"|nabizen\w*\s+(?:jako|k\s+vyuziti)|provozovan\w*\s+jako")
+USE_WINDOW: int = 90
+_USES: tuple[tuple[str, str], ...] = (
+    ("cafe", r"kavarn\w*|cukrarn\w*|caj\w*ovn\w*"),
+    ("restaurant", r"restaurac\w*|hospod\w*|bistr\w*|vinarn\w*|bar\b|pivnic\w*"),
+    ("retail", r"obchod\w*|prodejn\w*|showroom\w*"),
+    ("office", r"kancelar\w*|poradensk\w*|administrativ\w*|coworking\w*"),
+    ("medical", r"ordinac\w*|lekarn\w*|zdravotn\w*|rehabilitac\w*"),
+    ("beauty", r"kadernict\w*|barber\w*|kosmetick\w*|salon\w*|masaz\w*|studi[ou]\b"),
+    ("warehouse", r"sklad\w*"),
+    ("workshop", r"diln\w*|vyrob\w*|servis\w*"),
+    ("accommodation", r"ubytovan\w*|penzion\w*|apartman\w*"),
+    ("fitness", r"fitness\w*|posilovn\w*|telocvicn\w*"),
+)
+USE_MAX_PER_ADVERT: int = 5
+
+
+def offered_use(text: str | None) -> frozenset[str]:
+    """The uses the body offers the space FOR, in a closed vocabulary."""
+    return _offered_use(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _offered_use(text: str) -> frozenset[str]:
+    folded = fact_text(text)
+    out: set[str] = set()
+    for cue in _USE_CUE.finditer(folded):
+        window = folded[cue.end(): cue.end() + USE_WINDOW]
+        for name, pattern in _USES:
+            if re.search(pattern, window):
+                out.add(name)
+    # A body that lists the whole high street is advertising flexibility, not an identity.
+    return frozenset(out) if len(out) <= USE_MAX_PER_ADVERT else frozenset()

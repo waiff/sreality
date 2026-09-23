@@ -719,6 +719,20 @@ class Settings:
     d43_rental_colive: bool = False
     d43_rental_colive_min_overlap_days: float = 1.0
     d43_rental_colive_same_source_only: bool = True
+    # The NUMBER limbs carry their own portal scope: a service advance is quoted per
+    # portal convention and two portals' numbers for one flat are two conventions,
+    # while a lavatory is a lavatory whoever prints it.
+    d43_rental_colive_number_same_source_only: bool = True
+    # The limbs the portal scope is LIFTED for, by name. A lavatory reads across two
+    # portals as one false split on cohort 4; what is under foot reads as none.
+    d43_rental_colive_cross_portal_limbs: tuple[str, ...] = ()
+    # A tenancy's second numbers, read honestly: the co-live window on W8's SIGHTING
+    # clock, a charge capped at a multiple of the rent (a bazos advert id is not a
+    # deposit), an estimate refused, and the two rents required to MEET — a deposit
+    # that tracks a price cut is the price cut restated, and D49 already refused that.
+    d43_rental_colive_honest_clock: bool = True
+    d43_rental_colive_charge_rent_multiple: float = 12.0
+    d43_rental_colive_charge_requires_equal_rent: bool = True
     d43_rental_colive_charges: bool = False
     d43_rental_colive_house_number: bool = False
     d43_rental_colive_sanitary: bool = False
@@ -739,9 +753,12 @@ class Settings:
     # second stated difference on two adverts that are on sale together on one portal.
     d43_agency_code_with_difference: bool = False
     d43_commercial_subtype_colive: bool = False
+    d43_offered_use_conflict: bool = False
     # E223: the plot attribute a seller picked from a dropdown, on two plots of one parcelling
     # that are on sale together.
     d43_plot_attribute_conflict: bool = False
+    d43_plot_attribute_requires_colive: bool = True
+    d43_plot_attribute_code_escape: bool = False
     # E224: the serviced-office PRODUCT an offer leads with — a desk and a room are not one
     # let of one building.
     d43_commercial_product_class: bool = False
@@ -763,6 +780,8 @@ class Settings:
                             for key, value in dict(self.floor_camps).items()}
         self.merge_policy = {str(key): str(value)
                              for key, value in dict(self.merge_policy).items()}
+        self.d43_rental_colive_cross_portal_limbs = tuple(
+            str(name) for name in self.d43_rental_colive_cross_portal_limbs)
         self.validate()
 
     def validate(self) -> None:
@@ -1151,6 +1170,16 @@ class Settings:
             raise ValueError(
                 f"max_attr_contradictions must be positive: {self.max_attr_contradictions}"
             )
+        limbs = ("charges", "house_number", "sanitary", "renovation", "flooring",
+                 "furnishing", "parking")
+        unknown = sorted(set(self.d43_rental_colive_cross_portal_limbs) - set(limbs))
+        if unknown:
+            raise ValueError(
+                f"d43_rental_colive_cross_portal_limbs names no such limb: {unknown}")
+        if self.d43_rental_colive_charge_rent_multiple <= 0.0:
+            raise ValueError(
+                "d43_rental_colive_charge_rent_multiple must be positive: "
+                f"{self.d43_rental_colive_charge_rent_multiple}")
         if self.d43_rental_colive_min_overlap_days < 0.0:
             raise ValueError(
                 "d43_rental_colive_min_overlap_days must not be negative: "

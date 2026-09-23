@@ -105,6 +105,8 @@ from autodedup.text_facts import (
     sanitary_arrangement,
     slug_areas,
     slug_unit_codes,
+    offered_use,
+    states_charge_range,
     stated_charges_wide,
     printed_areas,
     accessory_areas,
@@ -1209,17 +1211,23 @@ def _rental_pair(a: Listing, b: Listing) -> bool:
     return a.category_type == RENTAL_TYPE and b.category_type == RENTAL_TYPE
 
 
-def _colive_side(a: Listing, b: Listing, settings: Settings) -> bool:
+def _colive_side(a: Listing, b: Listing, settings: Settings, limb: str = "") -> bool:
     """On sale together for long enough, on the same portal where the dial asks for it.
 
     The overlap is the whole guard of E220. A trader who re-posts a let with a new deposit
     gets a second advert of ONE flat, and the two are never on sale at the same moment; two
     flats of one house are. `_never_live_together` is W8's honest clock, so a portal that
     stopped answering does not manufacture an overlap."""
-    if settings.d43_rental_colive_same_source_only and (
-            a.source is None or a.source != b.source):
+    scoped = (settings.d43_rental_colive_number_same_source_only
+              if limb in ("charges", "house_number")
+              else settings.d43_rental_colive_same_source_only)
+    if limb and limb in settings.d43_rental_colive_cross_portal_limbs:
+        scoped = False
+    if scoped and (a.source is None or a.source != b.source):
         return False
-    return _co_live(a, b, settings.d43_rental_colive_min_overlap_days)
+    days = (_honest_overlap_days(a, b) if settings.d43_rental_colive_honest_clock
+            else overlap_days(a, b))
+    return days is not None and days >= settings.d43_rental_colive_min_overlap_days
 
 
 def _one_each(left: frozenset[str], right: frozenset[str]) -> bool:
@@ -1246,31 +1254,60 @@ def rental_colive_conflict(
     """
     if not settings.d43_rental_colive or not _rental_pair(a, b):
         return None
-    if not _colive_side(a, b, settings):
-        return None
-    if settings.d43_rental_colive_charges:
-        read = stated_charges_wide if settings.d43_charge_keywords_wide else stated_charges
-        left, right = read(a.description), read(b.description)
-        for kind in CHARGE_KINDS:
-            values_a, values_b = left.get(kind), right.get(kind)
-            if values_a and values_b and _one_each(values_a, values_b):  # type: ignore[arg-type]
-                return (f"{kind}={sorted(values_a)}", f"{kind}={sorted(values_b)}")
-    if settings.d43_rental_colive_house_number:
-        numbers = _house_numbers(a), _house_numbers(b)
-        if numbers[0] and numbers[1] and numbers[0] != numbers[1]:
-            return (f"cp/co={numbers[0]}", f"cp/co={numbers[1]}")
-    for dial, reader, label in (
-        (settings.d43_rental_colive_sanitary, sanitary_arrangement, "wc"),
-        (settings.d43_rental_colive_renovation, renovation_state, "renovation"),
-        (settings.d43_rental_colive_flooring, floor_coverings, "flooring"),
-        (settings.d43_rental_colive_furnishing, furnished_state, "furnishing"),
-        (settings.d43_rental_colive_parking_level, parking_level, "parking"),
+    if settings.d43_rental_colive_charges and _colive_side(a, b, settings, "charges"):
+        charge = _tenancy_charge_conflict(a, b, settings)
+        if charge is not None:
+            return charge
+    if settings.d43_rental_colive_house_number and _colive_side(
+            a, b, settings, "house_number"):
+        printed = _house_numbers(a), _house_numbers(b)
+        if printed[0] and printed[1] and printed[0] != printed[1]:
+            return (f"cp/co={printed[0]}", f"cp/co={printed[1]}")
+    for dial, reader, limb, label in (
+        (settings.d43_rental_colive_sanitary, sanitary_arrangement, "sanitary", "wc"),
+        (settings.d43_rental_colive_renovation, renovation_state, "renovation",
+         "renovation"),
+        (settings.d43_rental_colive_flooring, floor_coverings, "flooring", "flooring"),
+        (settings.d43_rental_colive_furnishing, furnished_state, "furnishing",
+         "furnishing"),
+        (settings.d43_rental_colive_parking_level, parking_level, "parking", "parking"),
     ):
-        if not dial:
+        if not dial or not _colive_side(a, b, settings, limb):
             continue
         left, right = reader(a.description), reader(b.description)
         if _one_each(left, right):
             return (f"{label}={sorted(left)}", f"{label}={sorted(right)}")
+    return None
+
+
+def _tenancy_charge_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """The second number of a tenancy, read only where it can be one.
+
+    Four guards, each from a pair the nine cohorts produced. A bazos body prints its own
+    advert number beside the word `kauce` and 944,918 is not a deposit on a 55,000 Kč let, so
+    a charge above a multiple of the rent is not a charge. `předpokládané zálohy 5.000–8.000
+    Kč` is an estimate and its two ends are not two tenancies. And a deposit that moved with a
+    price cut — 27,000 at 13,500 against 24,000 at 12,000, two months both times — is D49's
+    refused price gap wearing a second number, so the two rents must MEET.
+    """
+    if settings.d43_rental_colive_charge_requires_equal_rent and not _prices_meet(
+            a, b, settings.d43_price_path_tol):
+        return None
+    if states_charge_range(a.description) or states_charge_range(b.description):
+        return None
+    read = stated_charges_wide if settings.d43_charge_keywords_wide else stated_charges
+    left, right = read(a.description), read(b.description)
+    cap = settings.d43_rental_colive_charge_rent_multiple
+    rent = max(float(a.price or 0.0), float(b.price or 0.0))
+    for kind in CHARGE_KINDS:
+        values_a, values_b = left.get(kind), right.get(kind)
+        if not values_a or not values_b or not _one_each(values_a, values_b):
+            continue
+        if rent > 0.0 and max(max(values_a), max(values_b)) > rent * cap:
+            continue
+        return (f"{kind}={sorted(values_a)}", f"{kind}={sorted(values_b)}")
     return None
 
 
@@ -1341,7 +1378,8 @@ def agency_code_with_difference(
     codes_a, codes_b = reference_codes(a.description), reference_codes(b.description)
     if not _set_conflict(codes_a, codes_b):
         return None
-    second = _commercial_subtype_conflict(a, b)
+    second = (_offered_use_conflict(a, b) if settings.d43_offered_use_conflict
+              else _commercial_subtype_conflict(a, b))
     if second is None:
         return None
     return (f"{sorted(codes_a)} {second[0]}", f"{sorted(codes_b)} {second[1]}")
@@ -1354,6 +1392,16 @@ def _commercial_subtype_conflict(a: Listing, b: Listing) -> tuple[str, str] | No
     if not a.subtype or not b.subtype or a.subtype == b.subtype:
         return None
     return (str(a.subtype), str(b.subtype))
+
+
+def _offered_use_conflict(a: Listing, b: Listing) -> tuple[str, str] | None:
+    """Two disjoint lists of what the space is offered FOR — one seller, one building."""
+    if COMMERCIAL_CATEGORY not in (a.category_main, b.category_main):
+        return None
+    left, right = offered_use(a.description), offered_use(b.description)
+    if not _set_conflict(left, right):
+        return None
+    return (f"use={sorted(left)}", f"use={sorted(right)}")
 
 
 def commercial_subtype_colive(
@@ -1386,8 +1434,15 @@ def plot_attribute_conflict(
         return None
     if LAND_CATEGORY not in (a.category_main, b.category_main):
         return None
-    if not _live_together(a, b, settings):
-        return None
+    # D61's one honest use: an order code cannot say two adverts are two objects, but two
+    # DISJOINT codes do say the second posting is a second contract rather than a re-post of
+    # the first — which is the only thing the co-live window was standing in for. One Vávrovice
+    # agency posts `Číslo zakázky: 135653` and, the day the first comes down, `135656`, and the
+    # two 500 m² / 925,000 parcels differ under `Sklon pozemku`.
+    if settings.d43_plot_attribute_requires_colive and not _live_together(a, b, settings):
+        if not (settings.d43_plot_attribute_code_escape and _set_conflict(
+                reference_codes(a.description), reference_codes(b.description))):
+            return None
     left, right = plot_attributes(a.description), plot_attributes(b.description)
     for name in sorted(set(left) & set(right)):
         if _one_each(left[name], right[name]):
