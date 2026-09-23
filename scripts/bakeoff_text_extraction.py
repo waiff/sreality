@@ -311,7 +311,10 @@ def run_model(conn: Any, model: str, panel: list[dict[str, Any]],
     tool = tx.extraction_tool(FIELDS)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         results = list(pool.map(lambda row: _extract_one(model, tool, row), panel))
-    return {"model": model, **score(results)}
+    # The per-advert rows ride in the receipt: a summary is one number per field, and the
+    # question a gate reading raises ("which portal's labels, which category, which
+    # spelling?") can only be answered from the rows it was computed over.
+    return {"model": model, **score(results), "rows": results}
 
 
 def _pod_is_gone(client: Any, pod_id: str) -> bool:
@@ -371,6 +374,10 @@ def run_oss_model(conn: Any, model: str, panel: list[dict[str, Any]],
     result["usd_per_1k_adverts"] = round(
         1000 * result["pod"]["gpu_hours_usd"] / max(result["n"], 1), 3)
     return result
+
+
+def _rows_by_source(panel: list[dict[str, Any]]) -> dict[int, str]:
+    return {row["id"]: row["label_source"] for row in panel}
 
 
 # --- the summary the PR quotes -----------------------------------------------
@@ -500,6 +507,14 @@ def main() -> int:
                   "by_category": by_category},
         "arms": arms,
     }
+    label_source = _rows_by_source(panel)
+    for arm in arms:
+        rows = arm.pop("rows", [])
+        for row in rows:
+            row["label_source"] = label_source.get(row["id"])
+        safe = "".join(c if c.isalnum() else "_" for c in arm["model"])
+        (out_dir / f"rows_{safe}.json").write_text(
+            json.dumps(rows, ensure_ascii=False, default=str), encoding="utf-8")
     (out_dir / "bakeoff.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     summary = summarise(report)

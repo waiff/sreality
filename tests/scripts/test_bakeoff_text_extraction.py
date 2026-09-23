@@ -116,3 +116,16 @@ def test_a_gate_needs_a_sample_and_the_receipt_says_why_a_value_was_refused() ->
 def test_the_pool_is_drawn_on_the_eight_prose_fields_not_on_area() -> None:
     assert "l.area_m2 IS NOT NULL" not in bk.panel_sql([f for f in bk.FIELDS if f != "area_m2"])
 
+
+
+def test_an_arm_returns_its_rows_beside_the_summary(monkeypatch: Any) -> None:
+    """A gate reading that cannot be broken down by portal, category or spelling cannot be
+    questioned; the rows the summary was computed over ride in the receipt."""
+    panel = [{"id": i, "source": "idnes", "label_source": "idnes", "category_main": "byt",
+              "description": "x", "labels": {}} for i in range(3)]
+    monkeypatch.setattr(bk, "_extract_one", lambda model, tool, row: {
+        "id": row["id"], "category_main": "byt", "labels": {}, "values": {},
+        "dropped": {}, "cost_usd": 0.0, "ms": 1})
+    arm = bk.run_model(None, "m", panel, workers=2)
+    assert [r["id"] for r in arm["rows"]] == [0, 1, 2]
+    assert bk._rows_by_source(panel) == {0: "idnes", 1: "idnes", 2: "idnes"}
