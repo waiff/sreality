@@ -263,6 +263,28 @@ The cohort-6 confirmation put S3's SAFETY beyond question on unseen ground — o
 - **E253** **A cell may SHED what blocks a cut merge edge, and the repairs run to a FIXED POINT.** Cohort 12 cost S9 seven families of adverts no fact separates — Švermova 131/67, Březinová 95 m², Krajinská 499/14, Antonína Sovy 2+1, the Tanvaldská ordinace, Žďár 2+1 and Jihlava's Stříbrné terasy, 30 certain pairs in all — and the mechanism is measured rather than guessed. Every one of the seven sits in ONE component whose size and whose family-internal edges are IDENTICAL under S8 and S9; what moves is the cut line, because the cell one half landed in has absorbed a THIRD advert that carries a fact against the other half. That advert was party to neither edge; it is what the greedy pass happened to reach first, and once inside it can veto every later join — which relaxing a rule makes strictly more likely, and E243 relaxed one. Under S9's OWN invariants S8's partition of three of the seven keeps more merge evidence inside and is legal (5,072.9 against 4,059.3; 20,135.7 against 18,108.5; 3,047.8 against 3,039.8), so those three are a SEARCH defect; for the other four S9's partition is the better one by the same objective and the separator is a real fact on a third advert, so those four are refused with numbers rather than fixed (M564, M565). The repair is the move the module could not make: the union of two cells minus a bounded, deterministic cover of its conflicting pairs, accepted only when it keeps MORE evidence inside than the two cells did, with neither end of the cut edge ever eligible to be shed. Where a cell may shed, `_reconcile` must weigh its own move too — the member it drags out to honour one factless edge can be the member three other edges are holding, and it would undo the shed on the next pass. `repartition_max_rounds` beyond 4 is NOT the fix and was measured: 16 rounds buys 23 certain pairs on cohort 12 and heals none of the seven.
 - **E254** **A rent quoted per SQUARE METRE is the same rent.** The Tanvaldská surgery of 96 m² is let at 24,000 Kč on sreality, idnes and ceskereality and filed as `250` by realitymix, with `price_unit: za měsíc` on both sides — and 250 × 96 = 24,000 to the koruna. The column is wrong and the arithmetic says so; this is not a price gap but one price in two units, and the identity IS the guard, because it has to hold to the price path's own tolerance on an area both sides state and agree on. Rentals only.
 
+**What S10 does NOT fix, named.** Seven things, and five of them are a refusal with numbers
+rather than a gap. **Three of the seven cohort-12 families stay cut and a FACT cuts them** —
+Krajinská 499/14 (an `interior` room_clip of 0.638 against a 0.90 floor, between two adverts
+whose bodies are one text), Žďár 2+1 (4,499,000 against 4,300,000 on one portal) and Jihlava's
+Stříbrné terasy (an idnes floor of 3 against 2). In all three S9's partition is the BETTER one
+by the clusterer's own objective (M565), so healing them would mean joining ACROSS a stated fact,
+which is the one thing D43 forbids; they are named rather than papered over. **The Milana Ticháka
+garage entry of cohort 3 (`c3/261802`) goes from broken to WHOLE** — a bare garážové stání at
+2,100 and the same stání `s navazujícím sklepem o výměře 30 m²` at 3,500/4,000, four idnes
+adverts of one template. It is a real regression against the ledger and it is stated as one; what
+it is NOT is a rule's doing — `distinguishing_facts` is EMPTY on all six pairs under g7, S4, S9
+and S10 alike, so S9's 3-of-6 separation was an artefact of edge order, and no reader in the
+chain has ever read `s navazujícím sklepem` as an offered extent (E142 reads parcels, capacity,
+rooms and beds). Reading a one-sided accessory would be reading ABSENCE, which D63 refuses.
+**The private terrace the Masarykova villa states is not read** for the same reason: stated on
+one side, absent on the other. **The portal's own `furnished` column stays refused** — 17 flagged
+against the body reader's 0, and no buy the body has not got already (M562). **The cross-portal
+variant of E252 stays refused** — it flags 1 on cohort 3 and the two villa-office pairs are
+same-portal anyway. And **E250 reads only a MARKED designator**: a body that writes `dům 3`
+with no `č.` is invisible to it, deliberately, because a bare numeral after a Czech noun is
+grammar.
+
 **What S9 does NOT fix, named, and one thing the record had wrong.** The record said the house
 number could not be read because `house_number_cp`/`co` is NULL on every row of every cohort
 (M476). Half of that is true and the wrong half mattered: the JOINED `location.house_number` is
