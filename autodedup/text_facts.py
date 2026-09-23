@@ -2024,3 +2024,61 @@ def printed_house_numbers_meet(left: frozenset[frozenset[str]],
                                right: frozenset[frozenset[str]]) -> bool:
     """Do the two bodies name the same house at all? Any shared component is enough."""
     return any(a & b for a in left for b in right)
+
+
+# --- the PRICED letting plan, and which space on it this advert offers (E244) -----------------
+# W24. E230 reads a space number and abstains above three of them, because a body that numbers
+# four spaces is a letting PLAN rather than a statement about one. That refusal is right and it
+# leaves a shape standing: a plan that PRICES each space has told you, per space, an area and a
+# rent — and the advert carrying that plan is one of them. One Frýdek-Místek office building on
+# Na Poříčí is let under exactly that plan, and the two adverts of it print DIFFERENT plans:
+# `Kancelář č. 302b – 18,51m2, nájemné 4.123,-` heads a bazos list of six, and the idnes row's
+# list omits 302b altogether while its own headline says `Pronájem kanceláře, 20 m²`. So the
+# bazos row is 302b, at 18.51 m² and 4,123 Kč, and the idnes row is 308b at 20.02 m².
+#
+# The reader parses only the plan. Which space an advert offers is resolved by the caller, from
+# the advert's own stated figures, and only where exactly ONE row of the plan answers.
+_PLAN_ROW = re.compile(
+    r"\bkancelar\w*\s*c\s*\.?\s*([0-9]{1,4}[a-z]?)\s*[-–—]?\s*"
+    r"([0-9]{1,4}(?:[.,][0-9]{1,2})?)\s*m2\b[^-–—\n]{0,40}?najemne\s*"
+    r"([0-9][0-9 .,]{2,10})\s*,?-")
+# Below this a body is naming a space, not publishing a plan, and E230 already reads that.
+PLAN_MIN_ROWS: int = 2
+
+
+def priced_letting_plan(text: str | None) -> dict[str, tuple[float, float]]:
+    """Each numbered space a commercial body PRICES, as `{number: (m², rent)}`."""
+    return dict(_priced_letting_plan(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _priced_letting_plan(text: str) -> tuple[tuple[str, tuple[float, float]], ...]:
+    folded = fact_text(unescape(text))
+    rows: dict[str, tuple[float, float]] = {}
+    for match in _PLAN_ROW.finditer(folded):
+        area = _plan_number(match.group(2))
+        rent = _plan_number(match.group(3))
+        if area and rent and area > 0.0 and rent > 0.0:
+            rows[match.group(1)] = (area, rent)
+    return tuple(sorted(rows.items())) if len(rows) >= PLAN_MIN_ROWS else ()
+
+
+def _plan_number(raw: str) -> float | None:
+    cleaned = raw.replace(" ", "").replace(" ", "")
+    # A Czech plan writes the thousands with a dot or a space and the decimal with a comma.
+    cleaned = cleaned.replace(".", "") if "," not in cleaned else cleaned.replace(".", "")
+    try:
+        return float(cleaned.replace(",", "."))
+    except ValueError:
+        return None
+
+
+_PLAN_HEADLINE = re.compile(r"^[^.]{0,80}?([0-9]{1,4}(?:[.,][0-9]{1,2})?)\s*m2\b")
+
+
+def plan_headline_area(text: str | None) -> float | None:
+    """The size an advert leads with, which is how a body says which plan row is its own."""
+    if not text:
+        return None
+    match = _PLAN_HEADLINE.match(fact_text(unescape(text)))
+    return _plan_number(match.group(1)) if match else None

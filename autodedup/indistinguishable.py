@@ -109,6 +109,8 @@ from autodedup.text_facts import (
     states_charge_range,
     stated_charges_wide,
     printed_areas,
+    plan_headline_area,
+    priced_letting_plan,
     printed_house_numbers,
     printed_house_numbers_meet,
     accessory_areas,
@@ -194,6 +196,7 @@ FEATURE_SLOTS: tuple[str, ...] = (
 
 # Every name this module can return, so a caller can tabulate without discovering them.
 FACT_NAMES: tuple[str, ...] = (
+    "plan_space",
     "printed_house_number",
     "stored_house_number",
     "category_type",
@@ -1440,6 +1443,47 @@ def stored_house_number_conflict(a: Listing, b: Listing, cfg: Settings
         return None
     return (f"stored={left}", f"stored={right}")
 
+def _plan_match(rows: Mapping[str, tuple[float, float]], value: float | None,
+                index: int, tol: float) -> list[str]:
+    return [key for key, pair in rows.items()
+            if value and pair[index] > 0.0
+            and abs(pair[index] - value) / max(pair[index], value) <= tol]
+
+
+def offered_plan_space(listing: Listing, cfg: Settings) -> str | None:
+    """E244: which row of its own priced letting plan is this advert?
+
+    Resolved from the advert's own figures, in the order that the plan itself licenses. The
+    column and the rent TOGETHER is the strongest: the portal stored 18 m² and 4,123 Kč and
+    exactly one row says `18,51 m²` at `4.123,-`. Where the column matches no row — because the
+    plan an advert carries need not contain its own space, which is the whole shape — the size
+    the body LEADS with answers instead. Every step demands a UNIQUE row; a plan with two
+    14 m² offices has not said which one, and an ambiguous answer is no answer.
+    """
+    rows = priced_letting_plan(listing.description)
+    if len(rows) < cfg.d43_plan_min_rows:
+        return None
+    area_tol, rent_tol = cfg.d43_plan_area_tol, cfg.d43_plan_rent_tol
+    both = [key for key in _plan_match(rows, listing.area_m2, 0, area_tol)
+            if key in _plan_match(rows, listing.price, 1, rent_tol)]
+    if len(both) == 1:
+        return both[0]
+    by_headline = _plan_match(rows, plan_headline_area(listing.description), 0, area_tol)
+    if len(by_headline) == 1:
+        return by_headline[0]
+    by_rent = _plan_match(rows, listing.price, 1, rent_tol)
+    return by_rent[0] if len(by_rent) == 1 else None
+
+
+def plan_space_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+    """E244: two adverts of one building that its own priced plan puts in different rooms."""
+    if not cfg.d43_plan_space:
+        return None
+    left, right = offered_plan_space(a, cfg), offered_plan_space(b, cfg)
+    if not left or not right or left == right:
+        return None
+    return (f"plan_space={left}", f"plan_space={right}")
+
 def english_code_conflict(a: Listing, b: Listing, settings: Settings
                           ) -> tuple[str, str] | None:
     """E221: the code the offer carries in English, read per KIND rather than as one set.
@@ -2145,6 +2189,11 @@ def distinguishing_facts(
     stored_number = stored_house_number_conflict(a, b, cfg)
     if stored_number is not None:
         add("stored_house_number", stored_number[0], stored_number[1])
+
+    # E244: which room of one building's own priced letting plan each advert is.
+    plan_space = plan_space_conflict(a, b, cfg)
+    if plan_space is not None:
+        add("plan_space", plan_space[0], plan_space[1])
 
     # E150: the reader that knows no form. Last, because it is the most expensive — the other
     # readers have already answered for every pair whose form somebody wrote down.

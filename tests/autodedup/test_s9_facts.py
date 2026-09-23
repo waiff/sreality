@@ -24,9 +24,12 @@ import json
 from pathlib import Path
 
 from autodedup.dataset import Listing
-from autodedup.indistinguishable import CLUSTER, GATE, distinguishing_facts
+from autodedup.indistinguishable import (
+    CLUSTER, GATE, distinguishing_facts, offered_plan_space)
 from autodedup.settings import Settings
-from autodedup.text_facts import printed_house_numbers, printed_house_numbers_meet
+from autodedup.text_facts import (
+    plan_headline_area, priced_letting_plan, printed_house_numbers,
+    printed_house_numbers_meet)
 
 SETTINGS = Path(__file__).resolve().parents[2] / "autodedup/settings"
 S8 = Settings.from_json(SETTINGS / "w23.json")
@@ -302,3 +305,69 @@ def test_without_a_shared_photograph_the_interior_floor_still_holds() -> None:
     b = listing(2, number="735/48", description=JASIOKA_A, price=8150, area_m2=39.0)
     weak = {"tag_room_clip_min2": (0.87, True), "phash_tight_matches": (0.0, True)}
     assert "interior" in [f.name for f in distinguishing_facts(a, b, weak, S9, CLUSTER)]
+
+
+# --- E244: which room of a priced letting plan an advert is ----------------------------------
+# The Na Poříčí office building in Frýdek-Místek, let under one plan that the two portals print
+# DIFFERENTLY: the bazos list opens with 302b, the idnes list omits it and offers 109 and 411a
+# instead. The blind read of cohort 11 called this pair DIFFERENT.
+NA_PORICI_BAZOS = (
+    "Ev.č. 00063 Nabízíme k pronájmu kanceláře na ul. Na Poříčí. - Kancelář č. 302b – "
+    "18,51m2, nájemné 4.123,-/měsíc, zálohy na služby: 1.920,- Kč včetně DPH/měsíc - "
+    "Kancelář č. 308b – 20,02m2, nájemné 4.459,-/měsíc, zálohy na služby: 2.077,- Kč včetně "
+    "DPH/měsíc - Kancelář č. 310 - 14m2, nájemné 3.134,-/měsíc, zálohy na služby: 1.460,- Kč "
+    "včetně DPH/měsíc - Kancelář č. 311 – 14,80m2, nájemné 3.297,-/měsíc, zálohy na na "
+    "služby: 1.536,- Kč včetně DPH/měsíc K dispozici je společná kuchyňka a WC na každém "
+    "patře, výtah, parkovací místo v ceně. Budova je velmi dobře udržovaná, čistá."
+)
+NA_PORICI_IDNES = (
+    "Pronájem kanceláře, 20 m² - Frýdek-Místek - Frýdek Nabízíme k pronájmu kanceláře na ul. "
+    "Na Poříčí. - Kancelář č. 109 – 45m², nájemné 10,024,-/měsíc, zálohy na na služby: "
+    "4.669,- Kč včetně DPH/měsíc - Kancelář č. 308b – 20,02m², nájemné 4.459,-/měsíc, zálohy "
+    "na služby: 2.077,- Kč včetně DPH/měsíc - Kancelář č. 310 - 14m², nájemné 3.134,-/měsíc, "
+    "zálohy na služby: 1.460,- Kč včetně DPH/měsíc - Kancelář č. 311 – 14,80m², nájemné "
+    "3.297,-/měsíc, zálohy na na služby: 1.536,- Kč včetně DPH/měsíc K dispozici je společná "
+    "kuchyňka a WC na každém patře, výtah, parkovací místo v ceně."
+)
+
+
+def office(listing_id: int, body: str, **kwargs: object) -> Listing:
+    return listing(listing_id, street="na porici", category_main="komercni",
+                   description=body, **kwargs)
+
+
+def test_the_plan_reader_takes_each_priced_row() -> None:
+    plan = priced_letting_plan(NA_PORICI_BAZOS)
+    assert plan["302b"] == (18.51, 4123.0)
+    assert plan["310"] == (14.0, 3134.0)
+    assert plan_headline_area(NA_PORICI_IDNES) == 20.0
+
+
+def test_an_advert_resolves_to_its_own_row_by_column_then_by_headline() -> None:
+    a = office(1, NA_PORICI_BAZOS, price=4123, area_m2=18.0)
+    b = office(2, NA_PORICI_IDNES, price=4123, area_m2=18.0, source="idnes")
+    assert offered_plan_space(a, S9) == "302b"
+    # The idnes plan does not contain 302b at all, so the size the body LEADS with answers.
+    assert offered_plan_space(b, S9) == "308b"
+    assert "plan_space" in names(a, b, S9)
+    assert "plan_space" not in names(a, b, S8)
+
+
+def test_two_adverts_on_one_row_of_the_plan_are_not_a_fact() -> None:
+    a = office(1, NA_PORICI_BAZOS, price=4459, area_m2=20.0)
+    b = office(2, NA_PORICI_IDNES, price=4459, area_m2=20.0, source="idnes")
+    assert offered_plan_space(a, S9) == offered_plan_space(b, S9) == "308b"
+    assert "plan_space" not in names(a, b, S9)
+
+
+def test_a_plan_that_cannot_say_which_row_says_nothing() -> None:
+    twins = ("Nabízíme kanceláře. - Kancelář č. 210 - 14m2, nájemné 3.134,-/měsíc - "
+             "Kancelář č. 310 - 14m2, nájemné 3.134,-/měsíc")
+    a = office(1, twins, price=3134, area_m2=14.0)
+    assert offered_plan_space(a, S9) is None
+
+
+def test_a_body_that_publishes_no_plan_says_nothing() -> None:
+    a = office(1, "Nabízíme k pronájmu kancelář č. 302b o výměře 18,51 m2.", price=4123,
+               area_m2=18.0)
+    assert offered_plan_space(a, S9) is None

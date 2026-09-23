@@ -60,6 +60,7 @@
  "d43_parcel_table": true,
  "d43_part_addition": true,
  "d43_part_whole": true,
+ "d43_plan_space": true,
  "d43_plot_area_exact": true,
  "d43_plot_attribute_code_escape": true,
  "d43_plot_attribute_conflict": true,

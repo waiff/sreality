@@ -801,6 +801,14 @@ class Settings:
     # ZERO tight non-catalogue frames in common. Two galleries that share a photograph are
     # outside the cell the floor was cut in, so the floor does not apply to them.
     d43_interior_requires_no_tight_photo: bool = False
+    # E244: a commercial letting plan that PRICES each numbered space has said, per space,
+    # an area and a rent — so the advert carrying the plan is one of its rows, and two adverts
+    # of one building that resolve to different rows are two rooms. Every resolution step
+    # demands a UNIQUE row; an ambiguous plan answers nothing.
+    d43_plan_space: bool = False
+    d43_plan_min_rows: int = 2
+    d43_plan_area_tol: float = 0.03
+    d43_plan_rent_tol: float = 0.01
     # D65: the per-category merge policy. `<category_type>|<category_main>` (either side `*`)
     # mapped to `merge` or `propose` — a cell held propose-only never reaches the merge zone,
     # so the operator can hold rentals back at rollout while sales merge. An empty table holds
@@ -1013,6 +1021,12 @@ class Settings:
         if not 0.0 <= self.d43_house_number_move_tol < 1.0:
             raise ValueError(
                 f"d43_house_number_move_tol must be in [0, 1): {self.d43_house_number_move_tol}")
+        if self.d43_plan_min_rows < 2:
+            raise ValueError(
+                f"d43_plan_min_rows must be at least 2: {self.d43_plan_min_rows}")
+        for name in ("d43_plan_area_tol", "d43_plan_rent_tol"):
+            if not 0.0 <= getattr(self, name) < 1.0:
+                raise ValueError(f"{name} must be in [0, 1): {getattr(self, name)}")
         if self.d43_stated_unit_count not in ("off", "colive_price", "always"):
             raise ValueError(
                 "d43_stated_unit_count must be off/colive_price/always: "
