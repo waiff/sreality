@@ -456,14 +456,20 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         # Gated: the regex writes first (14,563 active rows) and the lane fills the rest.
         # The words, never the arithmetic — `scraper.floor` converts them (R7).
         "floor": _cell("text", note="scraper.floor over the same haystack",
-                       convention="word", gate=_UNGATED),
+                       convention="word",
+                       gate=Gate(passed=True, precision=0.956, panel_n=340,
+                                 measured_on="2026-09-22",
+                                 note="gpt-5.6-luna, within +-1 (R7); run 35700970810")),
         "total_floors": _cell("text", gate=_UNGATED),
         # The six prose-only cells. `none` until W7 because the deleted lane was their only
         # producer and it had been dead since 2026-07-23; the post-publication lane is now
         # declared, which is also what keeps R4 preserving them across a re-fetch.
         "has_balcony": _cell("text", gate=_UNGATED),
         "has_parking": _cell("text", gate=_UNGATED),
-        "has_lift": _cell("text", gate=_UNGATED),
+        "has_lift": _cell("text",
+                          gate=Gate(passed=True, precision=0.967, panel_n=122,
+                                    measured_on="2026-09-22",
+                                    note="gpt-5.6-luna (R7); run 35700970810")),
         "building_type": _cell("text", gate=_UNGATED),
         "condition": _cell("text", gate=_UNGATED),
         "energy_rating": _cell("text", gate=_UNGATED),
