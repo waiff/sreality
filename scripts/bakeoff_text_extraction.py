@@ -289,6 +289,9 @@ def _extract_one(model: str, tool: dict[str, Any], row: dict[str, Any]) -> dict[
         return {
             "id": row["id"], "category_main": row.get("category_main"),
             "labels": row["labels"], "values": values,
+            # The model's raw answer beside the validated one: a refusal reason names the
+            # rule, the payload shows what the rule refused (the quote, the spelling).
+            "payload": dict(payload),
             "dropped": dropped, "cost_usd": float(res.cost_usd or 0.0),
             "ms": int((time.monotonic() - started) * 1000),
         }
