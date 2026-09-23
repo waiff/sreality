@@ -168,9 +168,13 @@ def partition(
             if not search():
                 break
             touched = True
+        # E253: where a cell may shed, the reconciliation has to weigh its own move — the
+        # member it drags out of a cell to honour one factless edge can be the member three
+        # other edges are holding, and it would undo the shed on the next pass.
+        weigh = neighbours if shed_blockers is not None else None
         if keep_factless:
             for _round in range(max_rounds):
-                if not _reconcile(ordered, home, cells, invariants):
+                if not _reconcile(ordered, home, cells, invariants, weigh):
                     break
                 touched = True
         if rejoin_cells:
@@ -180,7 +184,7 @@ def partition(
                     break
                 touched = True
                 if keep_factless:
-                    _reconcile(ordered, home, cells, invariants)
+                    _reconcile(ordered, home, cells, invariants, weigh)
         if shed_blockers is not None:
             for _round in range(max_rounds):
                 if not _shed(ordered, neighbours, home, cells, invariants, shed_blockers,
@@ -188,7 +192,7 @@ def partition(
                     break
                 touched = True
                 if keep_factless:
-                    _reconcile(ordered, home, cells, invariants)
+                    _reconcile(ordered, home, cells, invariants, weigh)
         return touched
 
     # E253: the repairs feed each other — a cell a shed has just made smaller is a cell the
@@ -247,6 +251,7 @@ def _reconcile(
     home: dict[int, int],
     cells: list[list[int]],
     invariants: Invariants,
+    neighbours: Mapping[int, Sequence[Edge]] | None = None,
 ) -> bool:
     """E156: put back every separation no fact justifies. True when something moved.
 
@@ -275,6 +280,8 @@ def _reconcile(
                 continue
             if invariants(sorted(cells[target] + [member])) is not None:
                 continue
+            if neighbours is not None and _move_gain(neighbours, home, member, target) < 0.0:
+                continue
             cells[current].remove(member)
             cells[target].append(member)
             cells[target].sort()
@@ -283,6 +290,23 @@ def _reconcile(
             moved = True
             break
     return moved
+
+
+def _move_gain(
+    neighbours: Mapping[int, Sequence[Edge]], home: Mapping[int, int],
+    member: int, target: int,
+) -> float:
+    """What moving one member to another cell does to the objective — `partition`'s `gain`."""
+    out = 0.0
+    for edge in neighbours[member]:
+        other = edge.hi if edge.lo == member else edge.lo
+        if other == member:
+            continue
+        if home[other] == home[member]:
+            out -= edge.weight
+        elif home[other] == target:
+            out += edge.weight
+    return out
 
 
 def _weight_inside(
