@@ -820,6 +820,48 @@ def _sequential_for_price(a: Listing, b: Listing, settings: Settings) -> bool:
     return overlap <= settings.demonstrate_price_colive_fraction * shortest
 
 
+# E282's reading, memoised per advert: (id, text length) -> the engine's own shingle set.
+_SHINGLE_MEMO: dict[tuple[int, int], frozenset[int]] = {}
+# E282 reads a body only when both say something: the bar `strong_corroboration` keeps.
+TEXT_IDENTITY_MIN_CHARS: int = 200
+
+
+def _text_shingles(listing: Listing) -> frozenset[int]:
+    from autodedup.normalize import fold as engine_fold, normalize_folded, shingles
+
+    text = listing.description or ""
+    key = (listing.id, len(text))
+    hit = _SHINGLE_MEMO.get(key)
+    if hit is None:
+        tokens = normalize_folded(engine_fold(text)).split()
+        hit = frozenset(shingles(tokens)) if tokens else frozenset()
+        _SHINGLE_MEMO[key] = hit
+    return hit
+
+
+def text_containment(a: Listing, b: Listing) -> float | None:
+    """E282: `containment_max` computed from the two bodies exactly as `features` scores it,
+    or None where a body is too short to have said anything (E164's 200 characters)."""
+    if min(len(a.description or ""), len(b.description or "")) < TEXT_IDENTITY_MIN_CHARS:
+        return None
+    left, right = _text_shingles(a), _text_shingles(b)
+    if not left or not right:
+        return None
+    shared = len(left & right)
+    return max(shared / len(left), shared / len(right))
+
+
+def _printed_areas_prevail(a: Listing, b: Listing) -> bool:
+    """E280: both bodies print the SAME floor-area figures, and neither is a development's.
+
+    Set EQUALITY, not overlap: a body that adds a cellar or a terrace to the other's figures is
+    a different statement. Never inside a new development, where the next unit shares the
+    template and a square metre is the unit (E273/E275's line)."""
+    left = {round(value, 1) for value, _decimals, _scope in printed_areas(a.description)}
+    right = {round(value, 1) for value, _decimals, _scope in printed_areas(b.description)}
+    return bool(left) and left == right and not _development_pair(a, b)
+
+
 def _price_sequential_path(
     a: Listing, b: Listing, feats: Feats | None, settings: Settings
 ) -> bool:
@@ -842,16 +884,24 @@ def _price_sequential_path(
     if a.disposition is not None and b.disposition is not None and a.disposition != b.disposition:
         return False
     if a.floor is not None and b.floor is not None and a.floor != b.floor:
-        return False
+        # E281: "agree on the storey" is the floor FACT's question, conventions taken out.
+        if not settings.d43_price_sequential_storey_fact or _floor_fact(a, b, settings):
+            return False
     # An advert that states no area has demonstrated no area (E164's rule, and the reason this
     # limb needs it): one Pouchovská 2+kk at 18,500 and one Slezské Předměstí 2+kk at 21,000
     # were bridged through a bazos row carrying neither, and `area_rel_diff` abstains on a
     # missing side. Both sides must state it, and the two must be the same number.
     photos = _present(feats, "phash_tight_matches") or 0.0
-    contained = _present(feats, "containment_max") or 0.0
+    contained = _present(feats, "containment_max")
+    if contained is None and settings.d43_price_sequential_text_identity:
+        # E282: the pair was never scored, so its feature row is absent — at cluster grain it
+        # always is. The same shingle containment the engine scores, read off the two texts.
+        contained = text_containment(a, b)
+    contained = contained or 0.0
     code = _present(feats, "ref_code_shared") or 0.0
     gap = area_rel_diff(a.area_m2, b.area_m2)
-    if gap is not None and gap > 0.0 and not _column_rounding(a, b, settings):
+    if (gap is not None and gap > 0.0 and not _column_rounding(a, b, settings)
+            and not (settings.d43_printed_area_prevails and _printed_areas_prevail(a, b))):
         return False
     if gap is None:
         # E192: a side that states no area has demonstrated no area — unless the two adverts
@@ -2155,6 +2205,123 @@ def part_addition_conflict(
     return (f"part {lead_a[0]} of {a.area_m2}", f"part {lead_b[0]} of {b.area_m2}")
 
 
+def per_m2_path(a: Listing, b: Listing, tol: float) -> bool:
+    """E285: one advert prints the price PER SQUARE METRE and the other the total it makes.
+
+    realitymix files one Dolní Věstonice plot at 5,844 while idnes, sreality and ceskereality
+    file 4,873,896 — which is 5,844 x 834 m², the area every one of them states. A per-m²
+    figure times a stated area that lands on the other's total within `tol` is one price."""
+    areas = {float(value) for value in (a.area_m2, b.area_m2) if value and value > 0.0}
+    if not areas:
+        return False
+    for left in _price_points(a):
+        for right in _price_points(b):
+            low, high = sorted((left, right))
+            if low <= 0.0 or high <= low * 20.0:
+                continue
+            if any(rel_diff(low * area, high) <= tol for area in areas):
+                return True
+    return False
+
+
+def _plot_column_excused(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """E287: is a plot conflict only a COLUMN its own advert contradicts?
+
+    (a) Valtice / Úvaly: every body prints `Celková plocha pozemku činí 3 205 m²`, and the
+    realitymix commercial row stores 101 — its own floor area — in the plot column. Where each
+    side's body prints the OTHER side's column as its plot, the columns cannot claim two parcels.
+    (b) a plot column that equals the advert's own floor area is that area repeated."""
+    if not (cfg.d43_plot_column_body_prevails or cfg.d43_plot_column_echo):
+        return False
+    plot_a, plot_b = plot_area(a), plot_area(b)
+    if cfg.d43_plot_column_body_prevails:
+        prose_a = prose_plot_areas_wide(a.description)
+        prose_b = prose_plot_areas_wide(b.description)
+        common = prose_a & prose_b
+        if common and ((plot_a in common and plot_b not in prose_b)
+                       or (plot_b in common and plot_a not in prose_a)):
+            return True
+    if cfg.d43_plot_column_echo:
+        def echo(listing: Listing, value: float | None) -> bool:
+            return (value is not None and listing.area_m2 is not None
+                    and listing.category_main != LAND_CATEGORY
+                    and float(listing.area_m2) == float(value))
+        # Only ONE side may be the echo: two echoes are two statements of two floor areas.
+        if echo(a, plot_a) != echo(b, plot_b):
+            return True
+    return False
+
+
+def _one_text_repost(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """E289: a same-portal re-post of ONE text at one stated area, never on sale together."""
+    if a.source is None or a.source != b.source:
+        return False
+    if a.area_m2 is None or b.area_m2 is None or float(a.area_m2) != float(b.area_m2):
+        return False
+    if not _never_live_together(a, b, cfg):
+        return False
+    ratio = body_overlap_ratio(a.description, b.description)
+    return ratio is not None and ratio >= cfg.d43_price_same_source_one_text_min
+
+
+def _floor_fact(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """The `floor` fact of `distinguishing_facts`, read once so E185 can ask the same question.
+
+    E288 and E290 are the W28 readings; with both dials off this is the W27 limb exactly."""
+    reads = cfg.floor_camps_reads
+    if (cfg.d43_floor_column_body_prevails and _bodies_print_one_storey(a, b, cfg)):
+        return False
+    gap = floor_gap(cfg.floor_camps if reads != "joint" else None,
+                    a.source, a.floor, b.source, b.floor)
+    if gap is not None:
+        same_feed = _same_feed(a, b, cfg.floor_same_source_feed,
+                               cfg.floor_feed_unknown_closed)
+        # E154, the other half: with the feed UNKNOWN the one-storey gap is read closed, and a
+        # storey typed two ways then looks exactly like two flats. The asking price is what
+        # separates them. One 131 m² 4+1 in a Jablonec vila is re-posted on ceskereality at
+        # 6,988,000 and 6,980,000 with its storey written both 1. NP and 2. NP; THE FIZZ's
+        # floors 5 and 6 are 11,290 and 12,025. Neither signal is a fact alone; together they
+        # are, and it is the price that makes the difference a unit's rather than a typist's.
+        if (same_feed and abs(gap) == 1 and cfg.floor_feed_unknown_closed
+                and not _feed_known(a, b) and _prices_meet(a, b, cfg.d43_price_path_tol)):
+            same_feed = False
+        # E210, the column limb: a ONE-storey gap between two columns is not read where both
+        # BODIES state the same storey OF THE OFFERED UNIT. Two adverts for one Rezidence
+        # Česká 3+kk both say `situovaný ve druhém patře` and the portal stored 2 then 1. The
+        # reading is the placement clause and not the set, because one Dašice mill advert
+        # names its own 2.NP and a WC in 1.NP and must stay apart from the ground-floor unit.
+        if (same_feed and abs(gap) == 1 and cfg.d43_floor_cross_form_agreement):
+            subject_a = subject_floors(a.description, cfg.d43_prose_floor_words)
+            subject_b = subject_floors(b.description, cfg.d43_prose_floor_words)
+            if subject_a and subject_b and (subject_a & subject_b):
+                same_feed = False
+            elif states_top_storey(a.description) and states_top_storey(b.description):
+                same_feed = False
+        # E290: E180's sequential excuse, carried to the same-feed limb it never reached.
+        if (cfg.d43_floor_same_feed_sequential and same_feed and abs(gap) == 1
+                and _never_live_together(a, b, cfg) and not _filed_apart(a, b, cfg)):
+            same_feed = False
+        strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
+        within = _rounded_floors(a, b, cfg, gap)
+        if (gap != 0) if strict else (within or (abs(gap) == 1 and same_feed)):
+            return True
+    return False
+
+
+def _bodies_print_one_storey(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """E288: do both FLAT bodies print exactly one storey, and the same one?
+
+    Koldům 1580 in Litvínov is posted on four portals under one body, `umístěný v 1.
+    nadzemním podlaží`, while the columns read 12, 11, None and 0. A column the body
+    contradicts is the portal's parse; where the two bodies agree on one storey the two
+    columns cannot claim two."""
+    if a.category_main != FLAT_CATEGORY or b.category_main != FLAT_CATEGORY:
+        return False
+    left = printed_floors(a.description, cfg.d43_prose_floor_words)
+    right = printed_floors(b.description, cfg.d43_prose_floor_words)
+    return len(left) == 1 and left == right
+
+
 def distinguishing_facts(
     a: Listing,
     b: Listing,
@@ -2195,11 +2362,14 @@ def distinguishing_facts(
     # merge already cleared, so a parse gap in the 3-8 % band cannot split a certified merge.
     lenient = mode in (GATE, CLUSTER)
     gate_area_tol = cfg.d43_gate_area_tol if lenient else None
+    # E280: two columns the two bodies' own printed figures contradict are not two areas.
+    printed_prevail = cfg.d43_printed_area_prevails and _printed_areas_prevail(a, b)
     if gate_area_tol is not None:
         gap = area_rel_diff(a.area_m2, b.area_m2)
-        if gap is not None and gap > gate_area_tol:
+        if gap is not None and gap > gate_area_tol and not printed_prevail:
             add("area", a.area_m2, b.area_m2)
-    elif area_relation(a.area_m2, b.area_m2, cfg) not in ("support", "unknown"):
+    elif (area_relation(a.area_m2, b.area_m2, cfg) not in ("support", "unknown")
+            and not printed_prevail):
         add("area", a.area_m2, b.area_m2)
 
     areas_a = stated_areas(a.description, a.area_m2)
@@ -2217,36 +2387,8 @@ def distinguishing_facts(
     # is unknown (bazos posts both ways) a one-floor gap stays the vocabulary difference it is
     # on 45 % of cross-portal known duplicates. With no camp table this is g7's rule exactly.
     reads = cfg.floor_camps_reads
-    gap = floor_gap(cfg.floor_camps if reads != "joint" else None,
-                    a.source, a.floor, b.source, b.floor)
-    if gap is not None:
-        same_feed = _same_feed(a, b, cfg.floor_same_source_feed,
-                               cfg.floor_feed_unknown_closed)
-        # E154, the other half: with the feed UNKNOWN the one-storey gap is read closed, and a
-        # storey typed two ways then looks exactly like two flats. The asking price is what
-        # separates them. One 131 m² 4+1 in a Jablonec vila is re-posted on ceskereality at
-        # 6,988,000 and 6,980,000 with its storey written both 1. NP and 2. NP; THE FIZZ's
-        # floors 5 and 6 are 11,290 and 12,025. Neither signal is a fact alone; together they
-        # are, and it is the price that makes the difference a unit's rather than a typist's.
-        if (same_feed and abs(gap) == 1 and cfg.floor_feed_unknown_closed
-                and not _feed_known(a, b) and _prices_meet(a, b, cfg.d43_price_path_tol)):
-            same_feed = False
-        # E210, the column limb: a ONE-storey gap between two columns is not read where both
-        # BODIES state the same storey OF THE OFFERED UNIT. Two adverts for one Rezidence
-        # Česká 3+kk both say `situovaný ve druhém patře` and the portal stored 2 then 1. The
-        # reading is the placement clause and not the set, because one Dašice mill advert
-        # names its own 2.NP and a WC in 1.NP and must stay apart from the ground-floor unit.
-        if (same_feed and abs(gap) == 1 and cfg.d43_floor_cross_form_agreement):
-            subject_a = subject_floors(a.description, cfg.d43_prose_floor_words)
-            subject_b = subject_floors(b.description, cfg.d43_prose_floor_words)
-            if subject_a and subject_b and (subject_a & subject_b):
-                same_feed = False
-            elif states_top_storey(a.description) and states_top_storey(b.description):
-                same_feed = False
-        strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
-        within = _rounded_floors(a, b, cfg, gap)
-        if (gap != 0) if strict else (within or (abs(gap) == 1 and same_feed)):
-            add("floor", a.floor, b.floor)
+    if _floor_fact(a, b, cfg):
+        add("floor", a.floor, b.floor)
 
     if a.total_floors is not None and b.total_floors is not None:
         delta_total = abs(a.total_floors - b.total_floors)
@@ -2267,7 +2409,7 @@ def distinguishing_facts(
             add("total_floors", a.total_floors, b.total_floors)
 
     plot_conflict = _plot_conflict(a, b, cfg, is_land)
-    if plot_conflict is not None:
+    if plot_conflict is not None and not _plot_column_excused(a, b, cfg):
         add("plot_area", plot_conflict[0], plot_conflict[1])
 
     if (a.price and b.price and a.price > 0 and b.price > 0
@@ -2284,7 +2426,8 @@ def distinguishing_facts(
         over = price_gap > (PRICE_CROSS_TOL if (cross or moved_area)
                             else PRICE_SAME_SOURCE_TOL)
         if cfg.d43_price_path:
-            agree = price_paths_agree(a, b, cfg.d43_price_path_tol)
+            agree = price_paths_agree(a, b, cfg.d43_price_path_tol) or (
+                cfg.d43_price_per_m2_path and per_m2_path(a, b, cfg.d43_price_per_m2_tol))
             # E134: the momentary gap is excused by an agreeing path; a CONTRADICTION — two
             # adverts on sale at the same time that never named one another's price — is a
             # fact at the cross-portal bar whether or not they share a portal.
@@ -2664,6 +2807,9 @@ def distinguishing_facts(
     # address-point certain duplicates S8 refuses, every one of them within 0.07 of the floor.
     if (cfg.d43_interior_requires_no_tight_photo and tight_photo_match(feats)):
         room_clip = None
+    if (room_clip is not None and cfg.d43_interior_sequential_repost
+            and _one_text_repost(a, b, cfg)):
+        room_clip = None
     if room_clip is not None and room_clip < ROOM_CLIP_FLOOR:
         add("interior", f"room_clip_min2={room_clip:.3f}", f"floor={ROOM_CLIP_FLOOR}")
 
@@ -2799,12 +2945,12 @@ def unit_grade_warrant(
     """
     if not settings.d43_promote_unit_evidence:
         return None
-    from autodedup.demonstrate import sequential_postings, strong_corroboration
+    from autodedup.demonstrate import sequential_for, strong_corroboration
 
     grade = strong_corroboration(a, b, feats, settings)
     if grade is None:
         return None
     if (grade == "body" and settings.d43_promote_unit_body_sequential
-            and not sequential_postings(a, b, settings)):
+            and not sequential_for(a, b, settings)):
         return None
     return grade

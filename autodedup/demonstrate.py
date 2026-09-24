@@ -24,8 +24,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Mapping, Sequence
 
-from autodedup.body_align import rounding_equal_values
-from autodedup.dataset import Listing
+from autodedup.body_align import overlap_ratio, rounding_equal_values
+from autodedup.dataset import Listing, live_end_stamp
 from autodedup.features import plot_area, rel_diff
 from autodedup.guards import LAND_CATEGORY
 from autodedup.settings import Settings
@@ -229,6 +229,62 @@ def sequential_postings(a: Listing, b: Listing, settings: Settings) -> bool:
     return _sequential(a, b, settings, overlap_days_local(a, b))
 
 
+def honest_overlap_local(a: Listing, b: Listing) -> float | None:
+    """How long both adverts were SIGHTED live — W8's clock (`live_end_stamp`), repeated here
+    for the same reason `overlap_days_local` is."""
+    starts = [_stamp(a.first_seen_at), _stamp(b.first_seen_at)]
+    ends = [_stamp(live_end_stamp(a)), _stamp(live_end_stamp(b))]
+    if any(value is None for value in starts + ends):
+        return None
+    return max(0.0, (min(ends) - max(starts)).total_seconds() / 86400.0)  # type: ignore[operator]
+
+
+def sequential_for(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E283: `sequential_postings` on W8's honest clock when the dial asks for it."""
+    if settings.demonstrate_sequential_honest_clock:
+        return _sequential(a, b, settings, honest_overlap_local(a, b))
+    return sequential_postings(a, b, settings)
+
+
+def one_text_sequential(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E291: one portal, one text, never on sale together — one advert re-posted."""
+    if a.source is None or a.source != b.source:
+        return False
+    if min(len(a.description or ""), len(b.description or "")) < RECOVER_MIN_BODY_CHARS:
+        return False
+    if not _sequential(a, b, settings, honest_overlap_local(a, b)):
+        return False
+    ratio = overlap_ratio(a.description, b.description)
+    return ratio is not None and ratio >= settings.d43_price_same_source_one_text_min
+
+
+def identical_twin(a: Listing, b: Listing, feats: Mapping[str, tuple[float, bool]] | None,
+                   settings: Settings) -> bool:
+    """E284: two adverts on ONE portal that say the same thing about the same unit.
+
+    One body (containment >= 0.99), one asking price, one stated area, one category and
+    disposition. D43: two adverts are indistinguishable when no stated fact tells the units
+    apart, and nothing a reader can check does here — Dolní Věstonice's 1,941 m² plot is
+    posted twice on ceskereality at 5,046,600 on the same day under one body."""
+    if a.source is None or a.source != b.source:
+        return False
+    if min(len(a.description or ""), len(b.description or "")) < RECOVER_MIN_BODY_CHARS:
+        return False
+    if (a.category_main, a.category_type, a.disposition) != (
+            b.category_main, b.category_type, b.disposition):
+        return False
+    if not (a.price and b.price and float(a.price) > 0.0 and float(a.price) == float(b.price)):
+        return False
+    if a.area_m2 is None or b.area_m2 is None or float(a.area_m2) != float(b.area_m2):
+        return False
+    contained = _slot(feats, "containment_max")
+    if contained is None:
+        from autodedup.indistinguishable import text_containment
+
+        contained = text_containment(a, b)
+    return contained is not None and contained >= 0.99
+
+
 def price_demonstrated(
     a: Listing,
     b: Listing,
@@ -402,7 +458,9 @@ def demonstration_shortfall(
     if not price_demonstrated(a, b, settings, paths_agree, overlap):
         priced = bool(a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0)
         return ("price", CONTRADICTION if priced else MISSING)
-    if settings.demonstrate_require_obec and not obec_demonstrated(a, b):
+    if (settings.demonstrate_require_obec and not obec_demonstrated(a, b)
+            and not (settings.demonstrate_obec_one_text_sequential
+                     and one_text_sequential(a, b, settings))):
         known = a.location.obec_kod is not None and b.location.obec_kod is not None
         return ("obec", CONTRADICTION if known else MISSING)
     if settings.demonstrate_onesided:
@@ -575,11 +633,15 @@ def corroboration_warrant(
     # ninety bazos rows of one Slatinice house, one per day, are one unit and the body is all
     # they have. A body shared by two adverts on sale TOGETHER is the developer's template.
     grade = UNIT_EVIDENCE
-    if development and not _sequential(a, b, settings, overlap_days_local(a, b)):
+    clock = (honest_overlap_local(a, b) if settings.demonstrate_sequential_honest_clock
+             else overlap_days_local(a, b))
+    if development and not _sequential(a, b, settings, clock):
         grade = UNIT_EVIDENCE_IN_DEVELOPMENT
     unit = [name for name in grade if name in found]
     if unit:
         return unit[0]
+    if settings.demonstrate_identical_twin and identical_twin(a, b, feats, settings):
+        return "twin"
     if mode == "unit":
         return None
     if mode == "two_of":

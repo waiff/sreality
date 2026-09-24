@@ -969,6 +969,54 @@ class Settings:
     # bare co-live price and D61 the bare code; this asks whether the CONJUNCTION is a fact.
     d43_agency_code_colive_price: bool = False
     d43_agency_code_colive_price_min_gap: float = 0.15
+    # --- W28 (S13): the false-split residue cohort 15's hazard reader named ---------------------
+    # E280: where BOTH bodies print the same floor-area figures, a difference between the two
+    # stored columns is the portals' parse, not a second unit — read in E185's area identity,
+    # in the pair-grain `area` fact and in the cluster-grain `area_spread` invariant. Most,
+    # K. J. Erbena 299/10 prints `43,79 m²` on every posting while the columns say 43.0 / 43.8.
+    d43_printed_area_prevails: bool = False
+    # E281: E185 asks the two postings to "agree on the storey". It read the raw columns, so
+    # idnes `1` against sreality `0` — both bodies `v 1. patře` — refused the excuse and kept
+    # the Erbena train in two groups. The storey now disagrees only where the floor FACT does.
+    d43_price_sequential_storey_fact: bool = False
+    # E282: E185's identity (one body inside the other) is read off the TEXTS where the pair has
+    # no feature row. The cluster relation only ever carries three image slots, so the body
+    # limb was dead at cluster grain and every never-scored cross pair of a price-cut train
+    # (Starovičky, Morkůvky, Lom, Brod nad Dyjí, Reintal) kept its price as a fact.
+    d43_price_sequential_text_identity: bool = False
+    # E283: (B)'s "a body shared by two SEQUENTIAL postings is one advert re-posted" reads W8's
+    # honest clock, not the detection stamp. Lužice Meadows' 1,215 m² plot is re-posted on
+    # ceskereality four times at 4,252,500; the stamps hand the re-posts weeks of overlap.
+    demonstrate_sequential_honest_clock: bool = False
+    # E284: identical twins on one portal — one body, one price, one area, one category, on
+    # sale together — are corroborated at unit grade: no stated fact tells them apart (D43).
+    demonstrate_identical_twin: bool = False
+    # E285: a per-m² price times the stated area that equals the other advert's total is ONE
+    # price path (Dolní Věstonice: 5,844 Kč/m² x 834 m² = 4,873,896).
+    d43_price_per_m2_path: bool = False
+    d43_price_per_m2_tol: float = 0.001
+    # E286: across the sanctioned dům<->komerční cross the subtype codes differ BECAUSE the
+    # categories do; they are not counted as attribute contradictions.
+    attr_cross_type_subtype_skip: bool = False
+    # E287: a plot COLUMN that its own body contradicts (`Celková plocha pozemku činí 3 205 m²`
+    # against a stored 101) is the portal's column, not a second parcel; and (b) a plot column
+    # that merely echoes the advert's own floor area is the headline repeated, not a parcel.
+    d43_plot_column_body_prevails: bool = False
+    d43_plot_column_echo: bool = False
+    # E288: where both bodies print ONE and the same storey for the flat, the storey columns
+    # (Koldům 1580: sreality 12, ceskereality 11, bažoš 0 — every body `v 1. nadzemním
+    # podlaží`) are not read.
+    d43_floor_column_body_prevails: bool = False
+    # E289: a same-portal re-post of ONE text at one area, never on sale together with its
+    # predecessor, may re-shoot its gallery; the `interior` image fact is not read there.
+    d43_interior_sequential_repost: bool = False
+    # E290: E180's sequential excuse reaches the SAME-FEED one-storey limb too: one ceskereality
+    # advert re-posted a day later with its storey column 5 -> 6 is one flat (Bohnice,
+    # Kostřínská 583/6), exactly as it is across camps.
+    d43_floor_same_feed_sequential: bool = False
+    # E291: (A)'s obec demonstration accepts two ONE-TEXT sequential postings whose stored
+    # towns differ only by the resolver (Břeclav 1/3: `na zvolenci 43` in both bodies).
+    demonstrate_obec_one_text_sequential: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
@@ -1118,6 +1166,8 @@ class Settings:
         if self.d43_train_column_tolerance_m2 < 0.0:
             raise ValueError("d43_train_column_tolerance_m2 must be >= 0: "
                              f"{self.d43_train_column_tolerance_m2}")
+        if not 0.0 < self.d43_price_per_m2_tol < 0.05:
+            raise ValueError(f"d43_price_per_m2_tol must be in (0,0.05): {self.d43_price_per_m2_tol}")
         if not 0.0 < self.d43_agency_code_colive_price_min_gap < 1.0:
             raise ValueError("d43_agency_code_colive_price_min_gap must be in (0,1): "
                              f"{self.d43_agency_code_colive_price_min_gap}")

@@ -62,6 +62,10 @@ class ClusterRelation:
         carries for a merge it already certified are not extended to a join nobody certified."""
         return ClusterRelation(self._listings, self._feats, self._settings, PROMOTE)
 
+    def listings(self) -> Mapping[int, Listing]:
+        """The adverts this relation reads (E280's cluster-grain area limb needs the bodies)."""
+        return self._listings
+
     def ok(self, left: int, right: int) -> bool:
         key = (left, right) if left < right else (right, left)
         hit = self._memo.get(key)
