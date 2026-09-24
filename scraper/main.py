@@ -1815,7 +1815,10 @@ def _run_image_downloads(
     counts = {
         "downloaded": 0, "errors": 0, "attempted": 0,
         "taken_down": 0, "source_unavailable": 0, "not_an_image": 0,
+        # Stored, but the inline hash failed: the rows the hourly backstop exists for.
+        "phash_missed": 0,
     }
+    _PHASH_FAILURES_WARNED.clear()
     by_cat: dict[tuple[str | None, str | None], int] = {}
     # Per-listing classification cache for THIS run, so we never call
     # freshness_check more than once per gone listing.
@@ -1958,6 +1961,8 @@ def _run_image_downloads(
                             rendition=rendition, width=width, height=height,
                         )
                         counts["downloaded"] += 1
+                        if phash is None:
+                            counts["phash_missed"] += 1
                         host_windows[host].append("ok")
                         cat_key = cat_lookup.get(image_id, (None, None))
                         by_cat[cat_key] = by_cat.get(cat_key, 0) + 1
@@ -2034,13 +2039,16 @@ def _run_image_downloads(
 
     LOG.info(
         "IMAGES done downloaded=%d errors=%d taken_down=%d "
-        "source_unavailable=%d not_an_image=%d quarantined=%d attempted=%d",
+        "source_unavailable=%d not_an_image=%d quarantined=%d attempted=%d "
+        "phash_missed=%d",
         counts["downloaded"], counts["errors"],
         counts["taken_down"], counts["source_unavailable"],
         counts["not_an_image"], len(quarantined), counts["attempted"],
+        counts["phash_missed"],
     )
     return {
         "images_stored": counts["downloaded"],
+        "images_phash_missed": counts["phash_missed"],
         "by_category": by_cat,
         "stopped_suspicious": stopped_suspicious,
     }
@@ -2165,6 +2173,12 @@ def client_freshness_check(conn: Any, client: "Any", sreality_id: int) -> str:
     return result["outcome"]
 
 
+# Exception class names already warned about in THIS image run. The miss count
+# rides `IMAGES done phash_missed=`; the warning names the cause once per kind, so
+# a systemic failure (every image) is one line per run, not one per image.
+_PHASH_FAILURES_WARNED: set[str] = set()
+
+
 def _phash_or_none(data: bytes) -> int | None:
     """Best-effort inline dHash of bytes already in hand (realtime Wave C-4).
 
@@ -2178,7 +2192,16 @@ def _phash_or_none(data: bytes) -> int | None:
         from scraper.image_phash import compute_dhash, to_signed64
 
         return to_signed64(compute_dhash(data))
-    except Exception:  # noqa: BLE001 - a pHash failure must never fail the store
+    except Exception as exc:  # noqa: BLE001 - a pHash failure must never fail the store
+        kind = type(exc).__name__
+        if kind not in _PHASH_FAILURES_WARNED:
+            _PHASH_FAILURES_WARNED.add(kind)
+            LOG.warning(
+                "IMAGE phash_inline_failed %s: %s — stored with phash NULL for the "
+                "compute_image_phash backstop; further %s misses are counted in "
+                "IMAGES done phash_missed",
+                kind, exc, kind,
+            )
         return None
 
 

@@ -73,7 +73,7 @@ The engine that was live then was reported as having "zero known false merges". 
 
 ## 6. Latency, storage, spend
 
-- **Latency.** The batch engine decides a listing in under a second. The real-time shadow lane runs on GitHub's ten-minute schedule, which in practice fires hours apart; photo-dependent merges wait a median of 2.5 hours for the hourly fingerprint jobs.
+- **Latency.** The batch engine decides a listing in under a second. The real-time shadow lane runs on GitHub's ten-minute schedule, which in practice fires hours apart; photo-dependent merges wait a median of 2.5 hours for the hourly fingerprint jobs. *Correction, 2026-09-24:* the photo fingerprint (pHash) is already taken at download time, since July (PR #692), and its hourly job is only a backstop, so the wait that remains is the hourly room-tagging job (CLIP, at :40); every image run now reports `phash_missed`, the photos stored without a fingerprint, which should read 0 and will show whether the program's measurement of late fingerprints was a download-time failure.
 - **Storage.** The program's tables hold about 250 MB for the trial area across five kept generations. Corpus-wide, at today's retention, the store would grow about 3.4 GB a month plus about 9.6 GB to seed; cutting the stored reject pairs brings that down by roughly two thirds.
 - **Spend.** About $52 of $200 for development; $0 per month at rollout. The LLM "fact card" experiment cost $2.32 and was refused: no model beat the free text readers cleanly.
 
