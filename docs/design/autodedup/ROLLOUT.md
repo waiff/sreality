@@ -83,7 +83,7 @@ The engine that was live then was reported as having "zero known false merges". 
 2. **Rentals.** *Recommendation: hold rentals at propose-only (the switch in §5.5) until the house-number reader (S9) is confirmed, then merge them too.*
 3. **True real-time.** Sub-minute decisions need the same code inside the always-on worker, which changes the production image. *Recommendation: after production merges have run for a week on the batch lane.*
 4. **Whole corpus and its storage.** *Recommendation: cut stored reject pairs first, then widen by region, watching the 400 MB guard the lane enforces.*
-5. **Photo latency.** Fingerprinting photos at download time removes the 2.5-hour wait. *Recommendation: yes, it is a small change in the image drain and helps every consumer of the fingerprints.*
+5. **Photo latency.** The photo fingerprint (pHash) is already taken at download time (PR #692); its hourly job is only a backstop (§6). The wait that remains is the hourly room-tagging job (CLIP, at :40). *Decision: whether to run CLIP inside the image drain, which adds torch to the scraper image (rule 7, a new heavy dependency); until then photo-dependent merges keep waiting for it, and the measured 2.5-hour median was to the first room tag.*
 
 ## 8. How to look at it yourself
 
