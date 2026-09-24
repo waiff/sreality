@@ -59,11 +59,16 @@ maxima, remax, mmreality, ceskereality).
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
   on-demand estimation by that card's own URL. Badges appear only once the
   page's lookup succeeds; when it fails, one corner notice says why instead of
-  leaving the page silent — **Přihlásit se přes Google** when signed out, the
-  error with **Zkusit znovu** otherwise (automatic re-lookups back off 60 s).
-  The notice only appears where a card could be a sale apartment (not on a
-  rental or house search), steps aside while the panel is open, and clears by
-  itself after a sign-in made anywhere (the panel, another tab).
+  leaving the page silent — **Přihlásit se přes Google** when signed out,
+  **Obnovit stránku** when an extension reload orphaned the tab, the error with
+  **Zkusit znovu** otherwise (automatic re-lookups back off 60 s; a lookup
+  unanswered for 20 s counts as failed). The notice only appears while listing
+  cards wait on the failed lookup — on sreality, idnes and ceskereality, whose
+  card URLs name the category, not on a rental or house search; on the other
+  portals on any search with cards. It steps aside while the panel is open and
+  clears by itself after a sign-in made anywhere (the panel, another tab). A
+  sign-in or sign-out also drops the badges and asks again, because estimates,
+  pipeline and collections belong to the account.
 
 The default display is a **read** of data we already have — no LLM call. It
 maps each portal listing to our row by `(source, native id)` through the

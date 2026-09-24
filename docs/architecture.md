@@ -741,10 +741,13 @@ rules. Identify which one a task belongs to before you start.
   cards the URL doesn't rule out as sale apartments are waiting on it, held back while the
   panel — same corner — is open) — a sign-in button when signed out (the 401 used to leave
   search pages silent, read as a broken extension), the error + retry otherwise — and holds
-  observer-driven re-lookups off for 60 s. One lookup is in flight at a time; the overlay
-  watches the `authSession` storage key, so a sign-in anywhere (panel, another tab) clears the
-  failure and drops any answer asked for before it; the overlay's `stop()` removes the notice
-  on route change. `src/portals.ts` is the single source of truth for host→portal +
+  observer-driven re-lookups off for 60 s (an extension reload that orphaned the tab offers a
+  page reload instead of a retry; a lookup unanswered for 20 s counts as failed). One lookup is
+  in flight per generation: a sign-in, a sign-out or the retry button starts a new one whose
+  lookup goes out past a pending one, and older answers are dropped. The overlay watches the
+  `authSession` storage key, so a sign-in or sign-out anywhere (panel, another tab) clears the
+  failure plus the account-scoped cached rows and badges; the overlay's `stop()` removes the
+  notice on route change. `src/portals.ts` is the single source of truth for host→portal +
   detail-URL→native-id. One entry per Vite pass since #1524 (`npm run build` runs
   `vite build --mode content` then `--mode background`: `content.js` a self-contained IIFE
   classic script with `index_overlay.ts` bundled in, `background.js` ESM) plus a copied-over

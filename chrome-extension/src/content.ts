@@ -12,7 +12,7 @@
 
 import styles from './styles.css?inline';
 import { detailRef, portalForHost, portalForUrl, type PortalRef } from './portals';
-import { runIndexOverlay } from './index_overlay';
+import { EXTENSION_RELOADED_DETAIL, runIndexOverlay } from './index_overlay';
 import type {
   AgentQuota,
   ApiMessage,
@@ -185,10 +185,11 @@ interface PanelState {
  * an open tab (Chrome re-injects only on page load): sendMessage then throws
  * "Extension context invalidated." synchronously. call() resolves with that as
  * a failure instead of rejecting — every caller's busy flag ("Přihlašuji…")
- * waits for a result — and says what actually fixes it. */
+ * waits for a result — and says what actually fixes it (a detail the search
+ * page's notice recognises, to offer a reload instead of a retry). */
 function runtimeDetail(message: string | undefined): string {
   if (message != null && /context invalidated/i.test(message)) {
-    return 'Rozšíření bylo aktualizováno — obnovte stránku';
+    return EXTENSION_RELOADED_DETAIL;
   }
   return message ?? 'runtime error';
 }
