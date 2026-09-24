@@ -893,9 +893,12 @@ def _price_sequential_path(
     # missing side. Both sides must state it, and the two must be the same number.
     photos = _present(feats, "phash_tight_matches") or 0.0
     contained = _present(feats, "containment_max")
-    if contained is None and settings.d43_price_sequential_text_identity:
+    if (contained is None and settings.d43_price_sequential_text_identity
+            and not _development_pair(a, b)):
         # E282: the pair was never scored, so its feature row is absent — at cluster grain it
-        # always is. The same shingle containment the engine scores, read off the two texts.
+        # always is. The same shingle containment the engine scores, read off the two texts —
+        # outside a development, where one text is the developer's template and not one unit
+        # (E164's line for the body limb).
         contained = text_containment(a, b)
     contained = contained or 0.0
     code = _present(feats, "ref_code_shared") or 0.0
@@ -2242,14 +2245,22 @@ def _plot_column_excused(a: Listing, b: Listing, cfg: Settings) -> bool:
                        or (plot_b in common and plot_a not in prose_a)):
             return True
     if cfg.d43_plot_column_echo:
-        def echo(listing: Listing, value: float | None) -> bool:
-            return (value is not None and listing.area_m2 is not None
+        def echo(listing: Listing) -> bool:
+            reading = plot_reading(listing)
+            return (reading is not None and listing.area_m2 is not None
                     and listing.category_main != LAND_CATEGORY
-                    and float(listing.area_m2) == float(value))
+                    and float(listing.area_m2) == float(reading[0]))
         # Only ONE side may be the echo: two echoes are two statements of two floor areas.
-        if echo(a, plot_a) != echo(b, plot_b):
+        if echo(a) != echo(b):
             return True
     return False
+
+
+def _read_one_text(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """ONE text, READ: unlike `_one_text`, a body too short to align is not one text here,
+    because these readings relax a fact rather than add one."""
+    ratio = body_overlap_ratio(a.description, b.description)
+    return ratio is not None and ratio >= cfg.d43_price_same_source_one_text_min
 
 
 def _one_text_repost(a: Listing, b: Listing, cfg: Settings) -> bool:
@@ -2260,8 +2271,7 @@ def _one_text_repost(a: Listing, b: Listing, cfg: Settings) -> bool:
         return False
     if not _never_live_together(a, b, cfg):
         return False
-    ratio = body_overlap_ratio(a.description, b.description)
-    return ratio is not None and ratio >= cfg.d43_price_same_source_one_text_min
+    return _read_one_text(a, b, cfg)
 
 
 def _floor_fact(a: Listing, b: Listing, cfg: Settings) -> bool:
@@ -2297,9 +2307,17 @@ def _floor_fact(a: Listing, b: Listing, cfg: Settings) -> bool:
                 same_feed = False
             elif states_top_storey(a.description) and states_top_storey(b.description):
                 same_feed = False
-        # E290: E180's sequential excuse, carried to the same-feed limb it never reached.
+        # E290: E180's sequential excuse, carried to the same-feed limb it never reached — for
+        # a RE-POST, which copies its own text. Two different texts a day apart on one portal
+        # (Most: `ve třetím patře` at 2,020,000, then another agency's `ve 2. patře` at
+        # 1,890,000) are two flats, and their storey gap stays a fact; so is one text whose
+        # storey WORD was edited (Brandýs, Rozmarýnova: `ve třetím patře` in 2207, then `ve
+        # druhém patře` in 2206 — one landlord, two flats).
         if (cfg.d43_floor_same_feed_sequential and same_feed and abs(gap) == 1
-                and _never_live_together(a, b, cfg) and not _filed_apart(a, b, cfg)):
+                and _never_live_together(a, b, cfg) and not _filed_apart(a, b, cfg)
+                and _read_one_text(a, b, cfg)
+                and printed_floors(a.description, cfg.d43_prose_floor_words)
+                == printed_floors(b.description, cfg.d43_prose_floor_words)):
             same_feed = False
         strict = reads == "strict" and convention_known(cfg.floor_camps, a.source, b.source)
         within = _rounded_floors(a, b, cfg, gap)
