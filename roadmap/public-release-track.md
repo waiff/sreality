@@ -353,6 +353,13 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      generated keypair was handed to the operator out-of-band (not committed, only the
      public half lives in `manifest.json`). **Verified live end-to-end 2026-07-21** (real
      Google sign-in → panel loads real data).
+   - **2026-09-24 — search pages say when they're signed out or failing.** The index overlay
+     dropped a failed `/listings/lookup` silently, so a signed-out operator got no badge, no
+     CTA and no sign-in prompt on search pages (while a detail page showed the panel's
+     prompt) and read it as a broken extension. A failed lookup now raises one page-level
+     corner notice — "Přihlásit se přes Google" when signed out, the error + "Zkusit znovu"
+     otherwise — with a 60 s backoff on automatic re-lookups; badges still come only from a
+     successful lookup.
    - **Latent P0 the first real JWT exposed:** Railway's `TENANT_POOL_DB_URL` carried a bare
      `tenant_pool` username, but the Supabase **shared** pooler routes by a project-ref
      suffix (`tenant_pool.<ref>`) and rejects anything else with `FATAL: (ENOIDENTIFIER) no

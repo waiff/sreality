@@ -736,10 +736,16 @@ rules. Identify which one a task belongs to before you start.
   selectors — robust to markup changes). The default display is a **read** through
   `POST /listings/lookup`, which maps a card's on-page `(source, native id)` to our row +
   MF figures + `sreality_id` (the public views don't expose `source_id_native`, so the
-  browser can't resolve non-sreality listings directly). `src/portals.ts` is the single
-  source of truth for host→portal + detail-URL→native-id. Two-entry Vite build (`content.js` +
-  `background.js`, with `index_overlay.ts` bundled into `content.js`) plus a copied-over
-  `manifest.json` and `icon-128.png`; output lands in `chrome-extension/dist/`.
+  browser can't resolve non-sreality listings directly). Badges come only from a successful
+  lookup; a failed one raises a single page-level corner notice (closed shadow root, only while
+  cards are waiting on it) — a sign-in button when signed out (the 401 used to leave search
+  pages silent, read as a broken extension), the error + retry otherwise — and holds
+  observer-driven re-lookups off for 60 s; the overlay's `stop()` removes it on route change.
+  `src/portals.ts` is the single source of truth for host→portal + detail-URL→native-id. One
+  entry per Vite pass since #1524 (`npm run build` runs `vite build --mode content` then
+  `--mode background`: `content.js` a self-contained IIFE classic script with
+  `index_overlay.ts` bundled in, `background.js` ESM) plus a copied-over `manifest.json` and
+  `icon-128.png`; output lands in `chrome-extension/dist/`.
 - **Vanilla TypeScript only — no React, no Tailwind.** The panel lives inside a closed
   shadow root with its own scoped CSS in `src/styles.css?inline`. Palette mirrors the
   SPA's civic-archive tokens by hand-coded values (no `@theme` import). Keep the bundle

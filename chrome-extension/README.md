@@ -57,7 +57,10 @@ maxima, remax, mmreality, ceskereality).
     into a live stage, lifts the dismissal.
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
-  on-demand estimation by that card's own URL.
+  on-demand estimation by that card's own URL. Badges appear only once the
+  page's lookup succeeds; when it fails, one corner notice says why instead of
+  leaving the page silent — **Přihlásit se přes Google** when signed out, the
+  error with **Zkusit znovu** otherwise (automatic re-lookups back off 60 s).
 
 The default display is a **read** of data we already have — no LLM call. It
 maps each portal listing to our row by `(source, native id)` through the

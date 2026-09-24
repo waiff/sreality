@@ -10,8 +10,15 @@
  *
  * Sale-apartment gating: by our row's category when found; for listings not yet
  * in our DB, by the portal's URL category hint (sreality/idnes encode it in the
- * path) so freshly-listed cards still get the estimate affordance. */
+ * path) so freshly-listed cards still get the estimate affordance.
+ *
+ * Badges only ever come from a SUCCESSFUL lookup. When it fails (signed out,
+ * network / API error) the page gets one corner notice instead — see
+ * "the failure notice" below. */
 
+// The shared product brand (frontend/src/lib/brand.ts) — the notice's wordmark
+// is the same string as the panel header's.
+import { APP_NAME } from '../../frontend/src/lib/brand';
 import { detailRef, portalForHost, type Portal, type PortalRef } from './portals';
 import type { ApiMessage, ApiResult, PortalListing } from './types';
 
@@ -30,10 +37,62 @@ const STYLE_ID = '__mf_badge_style__';
 const SCAN_DEBOUNCE_MS = 400;
 const MAX_LOOKUP_PER_PASS = 50;
 
+/* ---- the failure notice --------------------------------------------------
+ *
+ * A failed lookup leaves nothing to badge, and the page used to stay silent: a
+ * signed-out operator got no badge, no CTA and no sign-in prompt — while a
+ * detail page in the same state shows the panel's prompt — and read it as a
+ * broken extension. Now a failure raises ONE page-level notice in the panel's
+ * corner (sign-in when signed out, the error + retry otherwise). Page-level, not
+ * per-card: for listings we have no row for, the sale-apartment gate is a URL
+ * hint only sreality/idnes/ceskereality provide, so a per-card prompt would be
+ * invisible on the other portals. It shows only while cards are waiting on the
+ * failed lookup (never on a page without listing cards); × holds for the
+ * overlay's lifetime.
+ *
+ * Backoff: after a failure, observer-driven passes don't ask again for
+ * LOOKUP_RETRY_AFTER_MS — a 401 costs no network, but in a real outage every
+ * DOM mutation (re-renders, infinite scroll, the notice mounting itself) would
+ * re-fetch. The notice's button skips the wait.
+ *
+ * Teardown: stop() removes the notice, and everything that awaits re-checks
+ * `stopped` — a sign-in or lookup resolving after a route change must not
+ * re-mount the notice or re-scan a page this overlay no longer owns. */
+const NOTICE_HOST_ID = '__mf_notice_host__';
+const LOOKUP_RETRY_AFTER_MS = 60_000;
+
+/* Mirrors api.ts's NOT_SIGNED_IN_DETAIL — duplicated by value, not imported, as
+ * content.ts does: api.ts runs only in the background service worker, and the
+ * content bundle never fetches directly. */
+const NOT_SIGNED_IN_DETAIL = 'not_signed_in';
+
 interface Hit {
   ref: PortalRef;
   anchor: HTMLAnchorElement;
   href: string;
+}
+
+interface LookupFailure {
+  kind: 'signed_out' | 'error';
+  detail: string;
+}
+
+interface NoticeView {
+  failure: LookupFailure;
+  signingIn: boolean;
+  retrying: boolean;
+  signInError: string | null;
+}
+
+interface NoticeHandlers {
+  signIn: () => void;
+  retry: () => void;
+  dismiss: () => void;
+}
+
+interface NoticeHandle {
+  render: (view: NoticeView) => void;
+  destroy: () => void;
 }
 
 function fmtPct(n: number | null): string {
@@ -46,9 +105,10 @@ function fmtCzk(n: number | null): string {
   return n == null ? '—' : `${Math.round(n).toLocaleString('cs-CZ')} Kč`;
 }
 
-/* Returns a stop() to disconnect the observer + cancel any pending scan —
- * called when a route change (SPA soft-nav) moves the tab off an index page,
- * so repeated navigations don't stack duplicate observers scanning the DOM. */
+/* Returns a stop() to disconnect the observer + cancel any pending scan + remove
+ * the failure notice — called when a route change (SPA soft-nav) moves the tab
+ * off an index page, so repeated navigations don't stack duplicate observers
+ * scanning the DOM. */
 export async function runIndexOverlay(
   call: Caller, openPanel: OpenPanel,
 ): Promise<() => void> {
@@ -59,27 +119,74 @@ export async function runIndexOverlay(
 
   const cache = new Map<string, PortalListing>();
 
+  let stopped = false;
+  let failure: LookupFailure | null = null;
+  let failedAt: number | null = null;  // backoff anchor; null = free to look up
+  let cardsWaiting = false;  // the last pass saw cards with no successful lookup
+  let dismissed = false;
+  let signingIn = false;
+  let retrying = false;
+  let signInError: string | null = null;
+  let notice: NoticeHandle | null = null;
+
   let timer: ReturnType<typeof setTimeout> | null = null;
   const schedule = (): void => {
     if (timer != null) clearTimeout(timer);
     timer = setTimeout(() => { timer = null; void pass(); }, SCAN_DEBOUNCE_MS);
   };
 
+  const backingOff = (): boolean =>
+    failedAt != null && Date.now() - failedAt < LOOKUP_RETRY_AFTER_MS;
+
+  /* The notice is a pure function of the state above: shown, updated in place,
+   * or removed — never a second host. */
+  function syncNotice(): void {
+    if (stopped || dismissed || failure == null || !cardsWaiting) {
+      notice?.destroy();
+      notice = null;
+      return;
+    }
+    notice ??= mountNotice({
+      signIn: () => { void signIn(); },
+      retry: () => { void retry(); },
+      dismiss: () => { dismissed = true; syncNotice(); },
+    });
+    notice.render({ failure, signingIn, retrying, signInError });
+  }
+
   async function pass(): Promise<void> {
+    if (stopped) return;
     const hits = collectHits(portal!.source);
-    if (hits.length === 0) return;
 
-    const needLookup = [...new Set(
+    const missing = [...new Set(
       hits.filter((h) => !cache.has(h.ref.sourceId)).map((h) => h.ref.sourceId),
-    )].slice(0, MAX_LOOKUP_PER_PASS);
+    )];
+    cardsWaiting = missing.length > 0;
+    if (hits.length === 0) {
+      syncNotice();
+      return;
+    }
 
-    if (needLookup.length > 0) {
+    const needLookup = missing.slice(0, MAX_LOOKUP_PER_PASS);
+    if (needLookup.length > 0 && !backingOff()) {
       const res = await call<PortalListing[]>({
         type: 'lookup_listings',
         items: needLookup.map((id) => ({ source: portal!.source, source_id: id })),
       });
-      if (res.ok) for (const l of res.data) cache.set(l.source_id, l);
+      if (stopped) return;
+      if (res.ok) {
+        for (const l of res.data) cache.set(l.source_id, l);
+        failure = null;
+        failedAt = null;
+        signInError = null;
+      } else {
+        const kind = res.detail === NOT_SIGNED_IN_DETAIL ? 'signed_out' : 'error';
+        if (failure?.kind !== kind) signInError = null;
+        failure = { kind, detail: res.detail };
+        failedAt = Date.now();
+      }
     }
+    syncNotice();
 
     for (const hit of hits) {
       const listing = cache.get(hit.ref.sourceId);
@@ -87,13 +194,48 @@ export async function runIndexOverlay(
     }
   }
 
+  /* The same background-owned PKCE sign-in the panel's prompt runs (a content
+   * script can't reach chrome.identity); on success the cards get their lookup. */
+  async function signIn(): Promise<void> {
+    if (signingIn) return;
+    signingIn = true;
+    signInError = null;
+    syncNotice();
+    const res = await call<undefined>({ type: 'sign_in' });
+    if (stopped) return;
+    signingIn = false;
+    if (!res.ok) {
+      signInError = `Přihlášení selhalo: ${res.detail}`;
+      syncNotice();
+      return;
+    }
+    failure = null;
+    failedAt = null;
+    signInError = null;
+    syncNotice();
+    await pass();
+  }
+
+  async function retry(): Promise<void> {
+    if (retrying) return;
+    retrying = true;
+    failedAt = null;
+    syncNotice();
+    await pass();
+    if (stopped) return;
+    retrying = false;
+    syncNotice();
+  }
+
   const obs = new MutationObserver(schedule);
   obs.observe(document.body, { childList: true, subtree: true });
   void pass();
 
   return () => {
+    stopped = true;
     obs.disconnect();
     if (timer != null) clearTimeout(timer);
+    syncNotice();
   };
 }
 
@@ -193,4 +335,136 @@ function injectStyle(): void {
     .__mf_badge--yield:hover, .__mf_badge--est:hover { filter: brightness(1.08); }
   `;
   (document.head ?? document.documentElement).appendChild(style);
+}
+
+/* The notice's own stylesheet — a closed shadow root like the panel's, so the
+ * portal's CSS can't reach in. The panel's civic-archive palette by value:
+ * paper surface, ink edge, the 2px copper "filed" top edge, a copper button. */
+const NOTICE_CSS = `
+  :host { all: initial; }
+  [hidden] { display: none !important; }
+  .__mf_notice {
+    position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 2147483646;
+    box-sizing: border-box; width: max-content;
+    max-width: min(21rem, calc(100vw - 2.5rem));
+    padding: 0.6rem 0.85rem 0.8rem;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    font-size: 0.82rem; line-height: 1.45; text-align: left; color: #1c1c1c;
+    background: #f7f3ec; border: 1px solid #1c1c1c;
+    box-shadow: inset 0 2px 0 #b3592d, 0 10px 34px -10px rgba(28, 20, 10, 0.30);
+  }
+  .n-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; margin-bottom: 0.35rem;
+  }
+  .n-mark { display: inline-flex; align-items: center; gap: 0.45rem; }
+  .n-tick { width: 0.5rem; height: 0.5rem; background: #b3592d; flex-shrink: 0; }
+  .n-word {
+    font-size: 0.64rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.2em; color: #b3592d;
+  }
+  .n-close {
+    margin: -0.2rem -0.3rem -0.2rem 0; padding: 0 0.2rem;
+    font: inherit; font-size: 1.1rem; line-height: 1; color: #8a8a8a;
+    background: transparent; border: 0; cursor: pointer;
+  }
+  .n-close:hover { color: #1c1c1c; }
+  .n-text { margin: 0; }
+  .n-detail, .n-error {
+    margin: 0.15rem 0 0; font-size: 0.74rem; overflow-wrap: anywhere;
+  }
+  .n-detail { color: #555; }
+  .n-error { color: #b34730; }
+  .n-primary {
+    display: block; width: 100%; margin-top: 0.6rem; padding: 0.5rem 0.9rem;
+    font: inherit; font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.1em; color: #fff; background: #b3592d; border: 0;
+    cursor: pointer; transition: background 120ms ease;
+  }
+  .n-primary:hover { background: #9a4b25; }
+  .n-primary:disabled { background: #8a8a8a; cursor: wait; }
+  .n-close:focus-visible, .n-primary:focus-visible {
+    outline: 2px solid #b3592d; outline-offset: 2px;
+  }
+`;
+
+/* Built once, then updated in place: the live region keeps its node (so screen
+ * readers announce changes, not a remount) and a focused button keeps focus. */
+function mountNotice(on: NoticeHandlers): NoticeHandle {
+  document.getElementById(NOTICE_HOST_ID)?.remove();
+  const host = document.createElement('div');
+  host.id = NOTICE_HOST_ID;
+  const shadow = host.attachShadow({ mode: 'closed' });
+  const style = document.createElement('style');
+  style.textContent = NOTICE_CSS;
+  shadow.appendChild(style);
+
+  const box = el('div', '__mf_notice');
+  const head = el('div', 'n-head');
+  const mark = el('span', 'n-mark');
+  mark.append(el('span', 'n-tick'), el('span', 'n-word', APP_NAME));
+  const close = button('n-close', '×');
+  close.title = 'Skrýt';
+  close.setAttribute('aria-label', 'Skrýt');
+  close.onclick = on.dismiss;
+  head.append(mark, close);
+
+  const body = el('div', 'n-body');
+  body.setAttribute('role', 'status');
+  body.setAttribute('aria-live', 'polite');
+  const text = el('p', 'n-text');
+  const detail = el('p', 'n-detail');
+  const error = el('p', 'n-error');
+  body.append(text, detail, error);
+
+  const action = button('n-primary', '');
+  let signedOut = false;
+  action.onclick = () => { if (signedOut) on.signIn(); else on.retry(); };
+
+  box.append(head, body, action);
+  shadow.appendChild(box);
+  document.body.appendChild(host);
+
+  return {
+    render(view: NoticeView): void {
+      signedOut = view.failure.kind === 'signed_out';
+      const busy = signedOut ? view.signingIn : view.retrying;
+      const failLine = signedOut ? view.signInError : null;
+      setText(text, signedOut
+        ? 'Pro výnosy na kartách se prosím přihlaste.'
+        : 'Výnosy se nepodařilo načíst.');
+      setText(detail, signedOut ? '' : view.failure.detail);
+      detail.hidden = signedOut;
+      setText(error, failLine ?? '');
+      error.hidden = failLine == null;
+      action.disabled = busy;
+      setText(action, signedOut
+        ? (busy ? 'Přihlašuji…' : 'Přihlásit se přes Google')
+        : (busy ? 'Načítám…' : 'Zkusit znovu'));
+    },
+    destroy(): void {
+      host.remove();
+    },
+  };
+}
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K, className: string, text?: string,
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function button(className: string, text: string): HTMLButtonElement {
+  const b = el('button', className, text);
+  b.type = 'button';
+  return b;
+}
+
+/* Only on change — rewriting a live region's text re-announces it, and passes
+ * re-render the notice on every DOM mutation while it is up. */
+function setText(node: HTMLElement, value: string): void {
+  if (node.textContent !== value) node.textContent = value;
 }
