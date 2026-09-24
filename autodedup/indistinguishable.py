@@ -128,6 +128,7 @@ from autodedup.text_facts import (
     priced_land_rows,
     prose_plot_areas_wide,
     stated_bed_counts,
+    offered_extent_menu,
     states_second_plot,
     states_top_storey,
     same_form_floor_gap,
@@ -1172,6 +1173,48 @@ def neighbour_plot_conflict(
         return None
     return ("connection built" if built_a else "none stated",
             "connection built" if built_b else "none stated")
+
+
+def extent_variant_conflict(
+    a: Listing, b: Listing, settings: Settings
+) -> tuple[str, str] | None:
+    """E260: which ROW of the extent menu its own body prints each advert is.
+
+    Dolní Břežany / Krátká lets one plot as two rows of one plan — `plně oplocená část pozemku
+    má výměru 585 m²` at 5,000 Kč against `celkem tedy až 827 m²` at 7,000 -> 8,000 — with
+    byte-identical bodies across five portals and both rows live together 64 days on idnes.
+
+    D49 refused the BARE co-live price and that refusal stands: what lifts this reading is the
+    MENU the body itself prints. The seller has said there are two priceable variants and asked
+    the reader to choose one (`vyberete si variantu`); the price then says which. That is E244
+    — which row of a priced plan an advert is — and not a price gap standing on its own, so the
+    limb needs the menu on BOTH sides, the same menu, and the same extent led with.
+    """
+    if not settings.d43_extent_variant:
+        return None
+    menu = offered_extent_menu(a.description)
+    if not menu or menu != offered_extent_menu(b.description):
+        return None
+    own_a, own_b = headline_area(a), headline_area(b)
+    if own_a is None or own_b is None or rel_diff(own_a, own_b) > 0.0:
+        return None
+    whole = max(menu)
+    if own_a >= whole * (1.0 - settings.d43_extent_variant_min_gap):
+        return None
+    if not (a.price and b.price and float(a.price) > 0.0 and float(b.price) > 0.0):
+        return None
+    if rel_diff(float(a.price), float(b.price)) <= settings.d43_extent_variant_min_price_gap:
+        return None
+    if price_paths_agree(a, b, settings.d43_price_path_tol):
+        return None
+    # E261: the row travels with the price PATH, so a re-post of either row keeps its row. Off,
+    # the limb reads only the rows a portal happened to carry at the same moment, and every
+    # re-post re-fuses the plan — which is how S9 fused Krátká and how S10 fused it twice.
+    if not settings.d43_extent_variant_sequential and not _co_live(
+            a, b, settings.d43_price_colive_min_overlap_days):
+        return None
+    return (f"extent {own_a} of {sorted(menu)} at {a.price}",
+            f"extent {own_b} of {sorted(menu)} at {b.price}")
 
 
 def offered_extent(a: Listing, b: Listing, settings: Settings | None = None) -> tuple[str, str] | None:
@@ -2302,6 +2345,11 @@ def distinguishing_facts(
     plan_space = plan_space_conflict(a, b, cfg)
     if plan_space is not None:
         add("plan_space", plan_space[0], plan_space[1])
+
+    # E260: which row of the extent menu its own body prints each advert is.
+    variant = extent_variant_conflict(a, b, cfg)
+    if variant is not None:
+        add("extent_variant", variant[0], variant[1])
 
     # E150: the reader that knows no form. Last, because it is the most expensive — the other
     # readers have already answered for every pair whose form somebody wrote down.

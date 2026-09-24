@@ -209,7 +209,9 @@ def _repartition_clusters(
                               blockers if settings.repartition_shed_blockers else None,
                               settings.repartition_shed_max,
                               settings.repartition_shed_max_union,
-                              settings.repartition_outer_rounds)
+                              settings.repartition_outer_rounds,
+                              settings.repartition_shed_factless_guard,
+                              settings.repartition_reconcile_factless_first)
         for cell in cells:
             grouped[min(cell)] = sorted(cell)
 

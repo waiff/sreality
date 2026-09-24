@@ -848,6 +848,39 @@ class Settings:
     # nothing, which is every generation up to and including S6.
     merge_policy: dict[str, str] = field(default_factory=dict)
 
+    # ---------------------------------------------- W26 (S11, 2026-09-24): the two S10 defects
+    #
+    # E260: the body that offers a CHOICE of extents has printed a priced plan, and the price
+    # says which row. Dolní Břežany / Krátká lets one plot as two rows — `plně oplocená část
+    # pozemku má výměru 585 m²` at 5,000 Kč against `celkem tedy až 827 m²` at 7,000 -> 8,000 —
+    # with byte-identical bodies on five portals. D49 refused the BARE co-live price and that
+    # refusal stands: what lifts this one is the menu the body itself prints, so the reading is
+    # E244's (which row of a priced plan) and not a price gap on its own.
+    d43_extent_variant: bool = False
+    # The larger extent must be larger by this much before the body has offered a CHOICE at all
+    # — `celkem 585 m²` restating the headline is one extent, not two.
+    d43_extent_variant_min_gap: float = 0.1
+    # Two prices this far apart are two rows of the menu; anything closer is one row's own
+    # haggling, and the limb must never read that.
+    d43_extent_variant_min_price_gap: float = 0.15
+    # E261: the row an advert is on travels with its own price PATH, so a re-post inherits it.
+    # Without this the Krátká plan is separated only where the two rows happened to be co-live
+    # across portals, and every re-post of either row re-fuses them (S9 fused 18362921 into the
+    # 5,000 row, S10 fused 321271 into it on one portal).
+    d43_extent_variant_sequential: bool = False
+    # E262: a shed may not sever a merge edge no fact carries. `_shed` evicts the cover of a
+    # union's conflicting pairs, and on a long re-post train of ONE object the cover is the
+    # train's own tail: 504940 and 540892 left a Průhonice cell of twenty identical bodies with
+    # thirty-one certificate edges between them, eleven of which carried a fact and twenty of
+    # which did not. A member is eligible for the cover only when EVERY merge edge it has into
+    # what the cell keeps is itself blocked — then the shed creates no factless separation.
+    repartition_shed_factless_guard: bool = False
+    # E263: the same rule for the reconciliation's weighing. E253 let `_reconcile` refuse a
+    # move that loses merge weight; where every edge the move would sever carries a fact and
+    # every edge it would restore carries none, weight is being asked to overrule a stated
+    # fact, which is exactly what a reconciliation may never do.
+    repartition_reconcile_factless_first: bool = False
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -964,6 +997,21 @@ class Settings:
             raise ValueError("repartition_rejoin_cells needs repartition")
         if self.repartition_shed_blockers and not self.repartition:
             raise ValueError("repartition_shed_blockers needs repartition")
+        if self.repartition_shed_factless_guard and not self.repartition_shed_blockers:
+            raise ValueError("repartition_shed_factless_guard needs repartition_shed_blockers")
+        if self.repartition_reconcile_factless_first and not self.repartition_keep_factless:
+            raise ValueError(
+                "repartition_reconcile_factless_first needs repartition_keep_factless")
+        if not 0.0 < self.d43_extent_variant_min_price_gap < 1.0:
+            raise ValueError(
+                f"d43_extent_variant_min_price_gap must be in (0, 1): "
+                f"{self.d43_extent_variant_min_price_gap}")
+        if not 0.0 < self.d43_extent_variant_min_gap < 1.0:
+            raise ValueError(
+                f"d43_extent_variant_min_gap must be in (0, 1): "
+                f"{self.d43_extent_variant_min_gap}")
+        if self.d43_extent_variant_sequential and not self.d43_extent_variant:
+            raise ValueError("d43_extent_variant_sequential needs d43_extent_variant")
         if self.repartition_shed_max < 1:
             raise ValueError(
                 f"repartition_shed_max must be at least 1: {self.repartition_shed_max}")

@@ -1476,6 +1476,55 @@ def _states_second_plot(text: str) -> bool:
     return False
 
 
+# E260: the m² sign as three portals actually store it. `fact_text` folds `m²` to `m2`, but
+# idnes, mmreality and realitymix carry the HTML entity half-decoded — `585 m and sup2;` — and a
+# reader that does not know that spelling reads the menu on two portals of five.
+_M2_UNIT = r"m\s*(?:2|and\s+sup2;?)"
+# The LARGER extent a body offers as an alternative to the one it leads with: `celkem tedy až
+# 827 m²`, `možnost pronájmu až 827 m²`, `lze pronajmout až 1 200 m²`. The offering word is
+# required — `celkem 827 m²` describing the neighbour's parcel is not an offer.
+_EXTENT_MENU = re.compile(
+    r"\b(?:celkem|celkove|dohromady)\s+(?:tedy\s+)?(?:az\s+)?" + _AREA_NUMBER
+    + r"\s*" + _M2_UNIT
+    + r"|\b(?:moznost|moznosti)\s+(?:\w+\s+){0,2}?(?:pronajmu|najmu|koupe|odkupu|rozsireni)"
+      r"[^.;:]{0,40}?\baz\s+" + _AREA_NUMBER + r"\s*" + _M2_UNIT
+    + r"|\b(?:lze|je\s+mozne|muzete)\s+(?:\w+\s+){0,3}?"
+      r"(?:pronajmout|pronajmout\s+si|koupit|odkoupit|ziskat)[^.;:]{0,40}?"
+      r"\baz\s+" + _AREA_NUMBER + r"\s*" + _M2_UNIT)
+# An offer whose alternatives run past this is a development's size range, not one plot's menu.
+EXTENT_MENU_MAX_M2: float = 100_000.0
+# Somewhere in the same body the seller has to say the two are a CHOICE. Without it `celkem
+# 827 m²` is only the sum of what is on offer, which is one extent stated twice.
+_EXTENT_CHOICE = re.compile(
+    r"\bvariant\w*|\bvyberete\s+si|\bpodle\s+(?:vaseho\s+)?zajmu|\bdle\s+dohody"
+    r"|\bpo\s+dohode\s+(?:je\s+)?(?:mozn|lze)\w*|\bmoznost\s+(?:pronajmu|najmu|koupe)")
+
+
+def offered_extent_menu(text: str | None) -> frozenset[float]:
+    """E260: the alternative extents a body offers beside the one it leads with, in m².
+
+    The Krátká land is let as two rows of one plan — `plně oplocená část pozemku má výměru
+    585 m²` and `po dohodě je možné pronajmout také navazující neoplocenou část, celkem tedy až
+    827 m²` — and the menu is what makes the two prices a ROW each (E244) rather than a bare
+    co-live price gap (D49).
+    """
+    return _offered_extent_menu(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _offered_extent_menu(text: str) -> frozenset[float]:
+    folded = fact_text(text)
+    if not _EXTENT_CHOICE.search(folded):
+        return frozenset()
+    out: set[float] = set()
+    for match in _EXTENT_MENU.finditer(folded):
+        for group in match.groups():
+            value = _area_value(group) if group else None
+            if value is not None and 0.0 < value <= EXTENT_MENU_MAX_M2:
+                out.add(value)
+    return frozenset(out)
+
+
 def built_connection(text: str | None) -> bool:
     """Does the body say a utility connection is already BUILT on this plot?"""
     if not text:
