@@ -929,6 +929,12 @@ class Settings:
     # through which the repartition destroyed both groups and fused the two survivors.
     # `area_moved` reads the price at the cross-portal bar where the area column moved too.
     d43_price_same_source_bar: str = "wide"
+    # …and never where the two bodies are ONE TEXT. A re-post copies its own text: one Zelené
+    # údolí 3+kk is re-posted on ceskereality at 10,990,000 and then 11,990,000 with a
+    # BYTE-IDENTICAL body and a re-parsed column (79 m² then 78), and it is one flat. Na
+    # Mariánské cestě's two units head the same template with two different sentences
+    # (`Máte jedinečnou šanci…` against `LETNÍ SLEVA 3%…`), and they are two.
+    d43_price_same_source_one_text_min: float = 0.99
     # E274: two PACKAGES of one seller are two extents (E244/E260's reading), not a bare
     # co-live price gap (D49's refusal). Radimovice / Petříkov sells one areál as a family
     # package at 45,000,000 stating `pozemek o celkové výměře 3 526 m²` and as an investment
@@ -1094,6 +1100,9 @@ class Settings:
                              f"{self.d43_price_same_source_bar}")
         if self.d43_price_same_source_bar != "wide" and not self.d43_price_path:
             raise ValueError("d43_price_same_source_bar needs d43_price_path")
+        if not 0.0 < self.d43_price_same_source_one_text_min <= 1.0:
+            raise ValueError("d43_price_same_source_one_text_min must be in (0,1]: "
+                             f"{self.d43_price_same_source_one_text_min}")
         if not 0.0 < self.d43_extent_package_min_price_gap < 1.0:
             raise ValueError("d43_extent_package_min_price_gap must be in (0,1): "
                              f"{self.d43_extent_package_min_price_gap}")

@@ -852,6 +852,21 @@ def _live_together(a: Listing, b: Listing, settings: Settings) -> bool:
     return not _never_live_together(a, b, settings)
 
 
+def _one_text(a: Listing, b: Listing, settings: Settings) -> bool:
+    """Are the two bodies THE SAME TEXT — one advert re-posted, not two written?
+
+    The operator's own exception, and the line the fourteenth cohort draws exactly: Rezidence
+    Na Mariánské cestě's two units head their otherwise identical template with two different
+    sentences (`Máte jedinečnou šanci…` against `LETNÍ SLEVA 3%…`, overlap 0.96), while one
+    Zelené údolí 3+kk re-posted on ceskereality at 10,990,000 and then 11,990,000 carries a
+    BYTE-IDENTICAL body under a re-parsed column (79 m² then 78). A re-post copies its text.
+    """
+    ratio = body_overlap_ratio(a.description, b.description)
+    # Unreadable (a body too short to align) counts as ONE TEXT: a new conflict may not rest
+    # on a guard that could not be read.
+    return ratio is None or ratio >= settings.d43_price_same_source_one_text_min
+
+
 def _areas_agree(a: Listing, b: Listing) -> bool:
     """E273: do the two stored area columns name the same number? Silence agrees with anything."""
     gap = area_rel_diff(a.area_m2, b.area_m2)
@@ -2210,7 +2225,8 @@ def distinguishing_facts(
         # of ONE advert — and a re-post does not also move its area column. Where the column
         # moved too, the excuse is gone and the price is read at the cross-portal bar.
         moved_area = (cfg.d43_price_same_source_bar == "area_moved"
-                      and not _areas_agree(a, b) and _development_pair(a, b))
+                      and not _areas_agree(a, b) and _development_pair(a, b)
+                      and not _one_text(a, b, cfg))
         over = price_gap > (PRICE_CROSS_TOL if (cross or moved_area)
                             else PRICE_SAME_SOURCE_TOL)
         if cfg.d43_price_path:

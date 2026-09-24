@@ -208,8 +208,13 @@ def test_the_storey_of_a_re_post_at_ONE_address_is_still_the_portal_drifting() -
 # --- E273: the same-source price bar where the area column moved too ---------------------------
 MARIANSKA_A = (
     "Máte jedinečnou šanci dostat k bytu 4+KK GARÁŽOVÉ STÁNÍ ZDARMA!! Nabízíme poslední byty "
-    "ihned k nastěhování v nejžádanější Rezidenci Na Mariánské cestě, která získala ocenění "
-    "Projekt roku! Pečlivě navržené byty poskytují maximální pohodlí a funkčnost."
+    "ihned k nastěhování v nejžádanější Rezidenci Na Mariánské cestě inspirovaná "
+    "skandinávským stylem, která získala ocenění Projekt roku! Ideální místo pro rodiny s "
+    "dětmi, páry, jednotlivce i starší generaci, kteří si chtějí užívat klidné a harmonické "
+    "prostředí. Pečlivě navržené byty poskytují maximální pohodlí, vzdušnost a funkčnost, "
+    "zatímco okolí rezidence nabízí široké možnosti relaxace i aktivního trávení volného "
+    "času. K dispozici je workoutové hřiště, komunitní zahrádka i sdílené ohniště. Bezpečné "
+    "a pohodlné parkování zajistí vnitřní parkovací stání. Rezervujte si svůj vysněný byt!"
 )
 MARIANSKA_B = MARIANSKA_A.replace(
     "Máte jedinečnou šanci dostat k bytu 4+KK GARÁŽOVÉ STÁNÍ ZDARMA!!",
@@ -217,8 +222,11 @@ MARIANSKA_B = MARIANSKA_A.replace(
 # The same advert without a word of a project in it — a flat, not a development.
 ZELENEC = (
     "Nabízíme k prodeji byt o dispozici 2+kk v obci Zeleneč - Praha východ, která se nachází "
-    "cca 20 min od Prahy. Dominantou bytu je obývací část s kuchyňským koutem a pracovnou. "
-    "Ev.č. 945210"
+    "cca 20 min od Prahy a nabízí okolí plné zeleně. Dominantou bytu je obývací část s "
+    "kuchyňským koutem a pracovnou, ze které je vstup na prostorný balkon orientovaný do "
+    "klidné části. Součástí bytu je koupelna se sprchovým koutem, samostatná toaleta a "
+    "komora. K bytu náleží sklepní kóje a parkovací stání před domem. Byt je volný ihned "
+    "a je připraven k nastěhování. Ev.č. 945210"
 )
 
 
@@ -259,6 +267,15 @@ def test_two_units_of_one_residence_are_parted_by_price_where_the_column_moved()
 def test_one_unit_re_posted_at_a_new_price_is_still_one_unit() -> None:
     a = unit(18482, 101.0, 12438310.0, [12823000.0, 12438310.0], 0, 74)
     b = unit(14063960, 101.0, 11700460.0, [11700460.0], 91, 140, body=MARIANSKA_B)
+    assert "price" not in names(a, b, S12)
+
+
+def test_one_text_re_posted_at_a_new_price_is_one_advert() -> None:
+    # Zelene udoli 3+kk, ceskereality: BYTE-IDENTICAL body, 79 m2 at 10,990,000 re-posted at
+    # 78 m2 and 11,990,000. A re-post copies its own text; two units do not.
+    a = unit(11385029, 79.0, 10990000.0, [10990000.0], 0, 3, source="ceskereality")
+    b = unit(15225124, 78.0, 11990000.0, [11990000.0], 16, 28, source="ceskereality")
+    assert a.description == b.description
     assert "price" not in names(a, b, S12)
 
 
