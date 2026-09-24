@@ -1864,3 +1864,221 @@ def _offered_use(text: str) -> frozenset[str]:
                 out.add(name)
     # A body that lists the whole high street is advertising flexibility, not an identity.
     return frozenset(out) if len(out) <= USE_MAX_PER_ADVERT else frozenset()
+
+
+# --- the SPACE number a commercial body prints (E230) ----------------------------------------
+# `printed_unit_codes` is anchored on a DWELLING noun and needs two dotted segments, because a
+# bare three-digit number after `byt` is as often a price as a name. A commercial sheet writes
+# the other way round: `prostor č.201`, `kancelář č. 12`, `nebytový prostor č. 4` — one noun,
+# one explicit `č.`, one flat number, and that number is the space's name on the letting plan.
+# One Na Zlaté stoce agency runs ONE template over nine adverts of two 15 m² offices at 4,000
+# Kč under one order number (Ev. číslo 652795), and the only thing that parts them is
+# `prostor č.201 v prvním patře` against `prostor č.303 ve druhém patře`.
+#
+# The anchor is mandatory and the noun is mandatory. Without the noun `Ev. číslo: 652795` is a
+# space number; without the anchor `prostor 15 m2` is an area. Read on COMMERCIAL rows only —
+# a flat's body that says `místnost č. 2` is numbering a room inside the offer, which is the
+# reason `accessory_designators` is scoped the way it is.
+_SPACE_NOUN: str = (
+    r"(?:nebytov\w*\s+|obchodn\w*\s+|kancelarsk\w*\s+|skladov\w*\s+|vyrobn\w*\s+)?"
+    r"(?:prostor\w*|kancelar\w*|mistnost\w*|mistnosti|jednotk\w*|ordinac\w*|provozovn\w*"
+    r"|sklad\w*|hal[ayeu]|atelier\w*|showroom\w*|box\w*)"
+)
+_SPACE_ANCHOR: str = r"(?:c\.|cis\.|cislo|cisle|oznacen\w{0,4}|pod\s+cislem)"
+_PRINTED_SPACE_NUMBER = re.compile(
+    _SPACE_NOUN + r"\s*" + _SPACE_ANCHOR + r"\s*:?\s*"
+    r"(\d{1,4}(?:\s*[./]\s*[a-z0-9]{1,3})?)\b(?!\s*(?:m2|kc|,-))"
+)
+# More than this many numbered spaces in one body is a letting PLAN, and a plan must never
+# refuse anything — an empty set is not a conflict.
+SPACE_NUMBER_MAX_PER_ADVERT: int = 3
+
+
+def printed_space_numbers(text: str | None) -> frozenset[str]:
+    """Every space number the body prints under a commercial noun and an explicit `č.`."""
+    return _printed_space_numbers(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_space_numbers(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    out = {re.sub(r"\s+", "", match.group(1)).upper().strip("./")
+           for match in _PRINTED_SPACE_NUMBER.finditer(folded)}
+    out.discard("")
+    return frozenset(out) if len(out) <= SPACE_NUMBER_MAX_PER_ADVERT else frozenset()
+
+
+# --- the part this advert offers, and the part it says can be ADDED (E231) --------------------
+# `printed_area` compares two bodies' area SETS and abstains the moment they meet, which is
+# exactly what two adverts for two halves of one building do: each prints its own size and the
+# other half's. One Jindřichův Hradec bakery is let twice on one portal under one 460 m²
+# column — `o celkové výměře přes 200 m²` plus `kancelářské/skladové místnosti ve 2. a 3. NP
+# objektu, které nabízí dalších téměř 250 m²`, and `o celkové výměře téměř 260 m²` plus
+# `přízemní prostory ... které nabízí dalších 200 m² plochy`.
+#
+# `dalších N m²` is the whole reading: a body that says "a FURTHER N m²" has said the N is NOT
+# what it offers. The guard is arithmetic and the advert supplies it — the lead plus the
+# further area is the column the portal stored for the whole object — so a body that has not
+# decomposed its own column says nothing here.
+_FURTHER_AREA = re.compile(
+    r"\bdals\w+\s+(?:cca\s+|temer\s+|pres\s+|priblizne\s+|az\s+)?" + _AREA_NUMBER + r"\s*m2")
+
+
+def further_areas(text: str | None) -> frozenset[float]:
+    """The sizes the body offers as an ADDITION to what it is letting, in m²."""
+    return _further_areas(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _further_areas(text: str) -> frozenset[float]:
+    out: set[float] = set()
+    for match in _FURTHER_AREA.finditer(fact_text(unescape(text))):
+        value = _area_value(match.group(1))
+        if value is not None and value > 0.0:
+            out.add(value)
+    return frozenset(out)
+
+
+# --- the house number the advert PRINTS for its own street (E240) -----------------------------
+# W24. The stored `location.house_number` is the RESOLVER's reading of the portal's address
+# line, not a sentence either advert wrote, and it moves between two postings of ONE body: the
+# same Ondříčkova 116 m² let, re-posted on sreality with a byte-identical body, is filed at
+# 2128/12 and then at 1774/28, and the same Freyova 1+kk is filed at 236/5 and 235/7 while BOTH
+# bodies print `Freyova 5/236`. That is why the RÚIAN house number was refused at 3.7 % in the
+# first place, and re-measuring it over eleven cohorts reproduces the refusal (2.7 % of the
+# same-street address-grain certain duplicates).
+#
+# What the advert itself PRINTS is a different object. `Krasnoarmejců 2080/8` against
+# `Krasnoarmejců 2079/10` is two sentences by one agency about two flats; a re-post does not
+# rewrite its own house number. So this reader parses only what a body states, and states it as
+# the SET of the number's components, because the two orders are both printed — `Freyova 5/236`
+# is the č.o./č.p. order of the column stored as `236/5`.
+#
+# Comparison is therefore asymmetric on purpose, and the asymmetry is the whole safety argument:
+# two printed numbers AGREE when their components meet at all (a veto, which can only refuse a
+# split), and CONFLICT only when no component of either meets the other (a fact). A component
+# collision on a low č.o. costs a missed split, never a merge.
+_CP_ANCHOR = r"c\s*\.?\s*p\s*\.?(?:\s*/?\s*c\s*\.?\s*o\s*\.?)?"
+_HOUSE_NUMBER = r"(\d{1,4}\s*/\s*\d{1,4}[a-z]?|\d{1,4}[a-z]?)(?![0-9a-z])"
+# A number that is really a size, a price, a floor, a year or a count of anything is not a
+# house number, so the forms that follow one are refused outright.
+_NOT_A_HOUSE_NUMBER = re.compile(
+    r"^\s*(?:m2|m\b|kc|czk|eur|%|np\b|pp\b|patr|podlazi|osob|lozni|pokoj|kk\b|\+|m²)")
+_PRINTED_CP = re.compile(_CP_ANCHOR + r"\s*:?\s*" + _HOUSE_NUMBER)
+# More than this many house numbers in one body is a developer's list of houses ("domy č.p.
+# 12-18"), and a list must never refuse anything — an empty set is not a conflict.
+HOUSE_NUMBER_MAX_PER_ADVERT: int = 2
+
+
+def printed_house_numbers(text: str | None, street_key: str | None = None
+                          ) -> frozenset[frozenset[str]]:
+    """Every house number the body prints under `č.p.` or beside its own street name."""
+    if not text:
+        return frozenset()
+    return _printed_house_numbers(text, street_key or "")
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_house_numbers(text: str, street_key: str) -> frozenset[frozenset[str]]:
+    folded = fact_text(unescape(text))
+    found: set[frozenset[str]] = set()
+    for pattern in _house_number_patterns(street_key):
+        for match in pattern.finditer(folded):
+            tail = folded[match.end():match.end() + 12]
+            if _NOT_A_HOUSE_NUMBER.match(tail):
+                continue
+            parts = _house_number_parts(match.group(1))
+            if parts:
+                found.add(parts)
+    if not found or len(found) > HOUSE_NUMBER_MAX_PER_ADVERT:
+        return frozenset()
+    return frozenset(found)
+
+
+@lru_cache(maxsize=4096)
+def _house_number_patterns(street_key: str) -> tuple[re.Pattern[str], ...]:
+    out = [_PRINTED_CP]
+    street = fact_text(street_key).strip()
+    # A one-word street is too weak an anchor on its own only when that word is also an
+    # ordinary noun; requiring the number to FOLLOW the full street name is what keeps
+    # "na náměstí 3 minuty" out, since the reader below refuses a unit straight after.
+    if len(street) >= 4:
+        out.append(re.compile(re.escape(street) + r"\s*(?:c\s*\.?\s*p\s*\.?)?\s*"
+                              + _HOUSE_NUMBER))
+    return tuple(out)
+
+
+def _house_number_parts(raw: str) -> frozenset[str]:
+    """`1561/9` and `5/236` both become their component set — the two printed orders agree."""
+    cleaned = re.sub(r"\s+", "", raw).strip("/.")
+    parts = {part for part in cleaned.split("/") if part and any(c.isdigit() for c in part)}
+    # A bare year is a renovation date, never a house number.
+    if len(parts) == 1:
+        only = next(iter(parts))
+        if only.isdigit() and 1500 <= int(only) <= 2100:
+            return frozenset()
+    return frozenset(parts)
+
+
+def printed_house_numbers_meet(left: frozenset[frozenset[str]],
+                               right: frozenset[frozenset[str]]) -> bool:
+    """Do the two bodies name the same house at all? Any shared component is enough."""
+    return any(a & b for a in left for b in right)
+
+
+# --- the PRICED letting plan, and which space on it this advert offers (E244) -----------------
+# W24. E230 reads a space number and abstains above three of them, because a body that numbers
+# four spaces is a letting PLAN rather than a statement about one. That refusal is right and it
+# leaves a shape standing: a plan that PRICES each space has told you, per space, an area and a
+# rent — and the advert carrying that plan is one of them. One Frýdek-Místek office building on
+# Na Poříčí is let under exactly that plan, and the two adverts of it print DIFFERENT plans:
+# `Kancelář č. 302b – 18,51m2, nájemné 4.123,-` heads a bazos list of six, and the idnes row's
+# list omits 302b altogether while its own headline says `Pronájem kanceláře, 20 m²`. So the
+# bazos row is 302b, at 18.51 m² and 4,123 Kč, and the idnes row is 308b at 20.02 m².
+#
+# The reader parses only the plan. Which space an advert offers is resolved by the caller, from
+# the advert's own stated figures, and only where exactly ONE row of the plan answers.
+_PLAN_ROW = re.compile(
+    r"\bkancelar\w*\s*c\s*\.?\s*([0-9]{1,4}[a-z]?)\s*[-–—]?\s*"
+    r"([0-9]{1,4}(?:[.,][0-9]{1,2})?)\s*m2\b[^-–—\n]{0,40}?najemne\s*"
+    r"([0-9][0-9 .,]{2,10})\s*,?-")
+# Below this a body is naming a space, not publishing a plan, and E230 already reads that.
+PLAN_MIN_ROWS: int = 2
+
+
+def priced_letting_plan(text: str | None) -> dict[str, tuple[float, float]]:
+    """Each numbered space a commercial body PRICES, as `{number: (m², rent)}`."""
+    return dict(_priced_letting_plan(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _priced_letting_plan(text: str) -> tuple[tuple[str, tuple[float, float]], ...]:
+    folded = fact_text(unescape(text))
+    rows: dict[str, tuple[float, float]] = {}
+    for match in _PLAN_ROW.finditer(folded):
+        area = _plan_number(match.group(2))
+        rent = _plan_number(match.group(3))
+        if area and rent and area > 0.0 and rent > 0.0:
+            rows[match.group(1)] = (area, rent)
+    return tuple(sorted(rows.items())) if len(rows) >= PLAN_MIN_ROWS else ()
+
+
+def _plan_number(raw: str) -> float | None:
+    cleaned = raw.replace(" ", "").replace(" ", "")
+    # A Czech plan writes the thousands with a dot or a space and the decimal with a comma.
+    cleaned = cleaned.replace(".", "") if "," not in cleaned else cleaned.replace(".", "")
+    try:
+        return float(cleaned.replace(",", "."))
+    except ValueError:
+        return None
+
+
+_PLAN_HEADLINE = re.compile(r"^[^.]{0,80}?([0-9]{1,4}(?:[.,][0-9]{1,2})?)\s*m2\b")
+
+
+def plan_headline_area(text: str | None) -> float | None:
+    """The size an advert leads with, which is how a body says which plan row is its own."""
+    if not text:
+        return None
+    match = _PLAN_HEADLINE.match(fact_text(unescape(text)))
+    return _plan_number(match.group(1)) if match else None
