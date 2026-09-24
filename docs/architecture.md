@@ -1210,10 +1210,14 @@ renumber.** Navigate by area:
     stored portal link expanded — with a per-row two-step **Rozdělit** for admin sessions over the
     two routes above), which ships DARK behind two switches in `frontend/src/lib/mergedAdverts.ts`
     (section and unmerge, both off — until the unmerge switch is on, unmerge stays API-only); because
-    the ledger read names no listings and the undo is group-grain, a row splits exactly only a
+    the ledger read (`GET /properties/merges?survivor_property_id=`, one property's groups, exact at
+    any ledger size) names no listings and the undo is group-grain, a row splits exactly only a
     two-advert property one merge joined, one merge that made the whole property is offered whole,
     and anything else says it cannot tell (`planRowUnmerge`) — a per-listing ledger read would make
-    every row exact.
+    every row exact. An AUTODEDUP group (`source='autodedup'` or reason `autodedup…`) is never
+    undone there: this route writes no `autodedup` must-not-link and leaves the engine's
+    applied-merge record standing, so the page points at the engine's review ("Různé") and its
+    own undo instead.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing

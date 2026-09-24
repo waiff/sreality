@@ -37,6 +37,7 @@ import { areaKindOf } from '@/lib/measure';
 import {
   findActivePropertyMergeGroups,
   inzeratu,
+  mergeOriginLabel,
   mergedAdvertsKeys,
   planRowUnmerge,
   refreshAfterUnmerge,
@@ -441,10 +442,6 @@ function allAdverts(n: number): string {
   return n >= 2 && n <= 4 ? `Všechny ${n} inzeráty` : `Všech ${n} inzerátů`;
 }
 
-function groupOrigin(source: string): string {
-  return source === 'auto' ? 'automatické' : 'ruční';
-}
-
 /* Step two of the split: find what can be undone from here, say it in words,
  * and only then offer the write. The ledger is read now, not on page load. */
 function UnmergeConfirm({
@@ -460,8 +457,8 @@ function UnmergeConfirm({
 }) {
   const qc = useQueryClient();
   const scanQ = useQuery({
-    queryKey: mergedAdvertsKeys.groups(propertyId, rowCount),
-    queryFn: () => findActivePropertyMergeGroups(propertyId, rowCount),
+    queryKey: mergedAdvertsKeys.groups(propertyId),
+    queryFn: () => findActivePropertyMergeGroups(propertyId),
     staleTime: 30_000,
   });
   const unmerge = useMutation({
@@ -498,7 +495,7 @@ function UnmergeConfirm({
       <>
         <strong className="font-medium text-[var(--color-ink)]">Oddělit tento inzerát?</strong>{' '}
         Tyto 2 inzeráty přestanou být jedna nemovitost — vrátí se{' '}
-        {groupOrigin(plan.group.source)} sloučení ze dne {fmtDateSlash(plan.group.merged_at)}.
+        {mergeOriginLabel(plan.group.source)} sloučení ze dne {fmtDateSlash(plan.group.merged_at)}.
       </>
     );
     confirm = { label: 'Ano, oddělit', groupId: plan.group.merge_group_id };
@@ -509,7 +506,8 @@ function UnmergeConfirm({
         <strong className="font-medium text-[var(--color-ink)]">
           Jeden inzerát samostatně oddělit nejde.
         </strong>{' '}
-        {allAdverts(rowCount)} spojilo jedno {groupOrigin(plan.group.source)} sloučení ze dne{' '}
+        {allAdverts(rowCount)} spojilo jedno {mergeOriginLabel(plan.group.source)} sloučení ze
+        dne{' '}
         {fmtDateSlash(plan.group.merged_at)}. Vrátit jde jen celé: nemovitost se rozpadne
         zpět na {originals} {nemovitosti(originals)}.
       </>
@@ -523,10 +521,27 @@ function UnmergeConfirm({
         oddělit nejde.
       </>
     );
+  } else if (plan?.kind === 'engine') {
+    body = (
+      <>
+        <strong className="font-medium text-[var(--color-ink)]">
+          Tuto nemovitost sloučil AUTODEDUP — odsud ji rozdělit nejde.
+        </strong>{' '}
+        Vrácení odsud by engine nezaznamenalo a mohl by inzeráty sloučit znovu. Zapište na
+        jeho{' '}
+        <Link
+          to={ROUTES.autodedupGroups.build()}
+          className="text-[var(--color-ink)] underline hover:text-[var(--color-copper-2)]"
+        >
+          revizní stránce
+        </Link>{' '}
+        verdikt „různé“ (trvalé nesmí-spojit) a sloučení vraťte jeho vlastním vrácením.
+      </>
+    );
   } else if (plan?.kind === 'not-found') {
     body = plan.exhaustive
       ? 'Kniha sloučení pro tuto nemovitost nemá žádné sloučení, které by šlo vrátit — její inzeráty spojilo starší seskupení.'
-      : `Mezi posledními ${fmtCount(plan.scanned)} sloučeními tato nemovitost není; starší sloučení odsud vrátit nejde.`;
+      : `Knihu sloučení této nemovitosti se nepodařilo dočíst (${fmtCount(plan.scanned)} skupin); odsud vrátit nejde.`;
   }
 
   return (

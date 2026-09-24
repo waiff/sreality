@@ -3049,7 +3049,7 @@ export const unlinkAssetProperty = (
  * `listMergedProperties` still has no UI caller. These three wrap the surviving
  * `/properties/*` mechanics routes — do not delete them as "dead". */
 export const listPropertyMerges = (
-  params: { limit?: number; offset?: number } = {},
+  params: { limit?: number; offset?: number; survivor_property_id?: number } = {},
 ): Promise<MergesResponse> =>
   request<MergesResponse>('/properties/merges', {
     query: params as Record<string, QueryValue>,

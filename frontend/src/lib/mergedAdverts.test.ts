@@ -11,6 +11,8 @@ import {
   MERGE_LEDGER_PAGE_SIZE,
   findActivePropertyMergeGroups,
   inzeratu,
+  isAutodedupMerge,
+  mergeOriginLabel,
   planRowUnmerge,
   refreshAfterUnmerge,
   type MergeGroupScan,
@@ -33,8 +35,8 @@ function group(over: Partial<MergeGroup> = {}): MergeGroup {
     survivor_property_id: 42,
     retired_count: 1,
     listings_moved: 1,
-    source: 'auto',
-    reason: 'autodedup:test',
+    source: 'operator',
+    reason: 'manual_link',
     fully_undone: false,
     ...over,
   };
@@ -83,6 +85,29 @@ describe('planRowUnmerge', () => {
     expect(planRowUnmerge(scan([g]), 3).kind).toBe('ambiguous');
   });
 
+  it('never offers to undo an AUTODEDUP group, whatever shape it has', () => {
+    // The apply path's own source, and PROGRAM.md's E38 sketch (source 'auto',
+    // reason 'autodedup:…') — both are the engine's, both are refused here.
+    const applied = group({ source: 'autodedup', reason: 'autodedup g12 o:554782' });
+    const sketched = group({ source: 'auto', reason: 'autodedup:v1:1-2' });
+    for (const g of [applied, sketched]) {
+      expect(planRowUnmerge(scan([g]), 2)).toEqual({ kind: 'engine', groups: [g] });
+    }
+    const whole = group({ source: 'autodedup', listings_moved: 2, retired_count: 2 });
+    expect(planRowUnmerge(scan([whole]), 3).kind).toBe('engine');
+    const operator = group({ merge_group_id: 'op' });
+    expect(planRowUnmerge(scan([operator, applied]), 3)).toEqual({
+      kind: 'engine',
+      groups: [applied],
+    });
+  });
+
+  it('a legacy-engine group (source auto, its own reason) is still offered', () => {
+    const legacy = group({ source: 'auto', reason: 'phash_exact' });
+    expect(isAutodedupMerge(legacy)).toBe(false);
+    expect(planRowUnmerge(scan([legacy]), 2)).toEqual({ kind: 'pair', group: legacy });
+  });
+
   it('says whether "none found" is about the property or about the window', () => {
     expect(planRowUnmerge(scan([], { exhaustive: true, scanned: 37 }), 2)).toEqual({
       kind: 'not-found',
@@ -104,43 +129,45 @@ describe('findActivePropertyMergeGroups', () => {
       group({ merge_group_id: `${prefix}${i}`, survivor_property_id: 1_000 + i }),
     );
 
-  it('keeps only this property’s groups that are not undone, paging by rows received', async () => {
-    const mine = group({ merge_group_id: 'mine' });
+  it('reads this property’s groups server-filtered, exhaustively, keeping the active ones', async () => {
+    // However old the merge, one filtered read finds it — no newest-N window.
+    const mine = group({ merge_group_id: 'mine', merged_at: '2019-01-01T00:00:00Z' });
     const undone = group({ merge_group_id: 'undone', fully_undone: true });
+    const list = vi.fn().mockResolvedValueOnce(page([undone, mine]));
+
+    const res = await findActivePropertyMergeGroups(42, list);
+
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith({
+      limit: MERGE_LEDGER_PAGE_SIZE,
+      offset: 0,
+      survivor_property_id: 42,
+    });
+    expect(res).toEqual({ groups: [mine], scanned: 2, exhaustive: true });
+  });
+
+  it('pages on while a page comes back full, and still keeps only this property', async () => {
+    // An API that ignored the filter must not leak another property's groups.
+    const mine = group({ merge_group_id: 'mine' });
     const list = vi
       .fn()
-      .mockResolvedValueOnce(page([...filler(MERGE_LEDGER_PAGE_SIZE - 1, 'x'), undone]))
-      .mockResolvedValueOnce(page([mine, ...filler(3, 'y')]));
+      .mockResolvedValueOnce(page(filler(MERGE_LEDGER_PAGE_SIZE, 'x')))
+      .mockResolvedValueOnce(page([mine]));
 
-    const res = await findActivePropertyMergeGroups(42, 3, list);
+    const res = await findActivePropertyMergeGroups(42, list);
 
-    expect(res.groups).toEqual([mine]);
-    expect(list).toHaveBeenNthCalledWith(1, { limit: MERGE_LEDGER_PAGE_SIZE, offset: 0 });
     expect(list).toHaveBeenNthCalledWith(2, {
       limit: MERGE_LEDGER_PAGE_SIZE,
       offset: MERGE_LEDGER_PAGE_SIZE,
+      survivor_property_id: 42,
     });
-    // The short second page is the end of the ledger.
-    expect(res.exhaustive).toBe(true);
-    expect(res.scanned).toBe(MERGE_LEDGER_PAGE_SIZE + 4);
+    expect(res).toEqual({ groups: [mine], scanned: MERGE_LEDGER_PAGE_SIZE + 1, exhaustive: true });
   });
 
-  it('stops as soon as the groups found account for every advert but one', async () => {
-    const list = vi
-      .fn()
-      .mockResolvedValue(page([group(), ...filler(MERGE_LEDGER_PAGE_SIZE - 1, 'x')]));
-
-    const res = await findActivePropertyMergeGroups(42, 2, list);
-
-    expect(list).toHaveBeenCalledTimes(1);
-    expect(res.groups).toHaveLength(1);
-    expect(res.exhaustive).toBe(false);
-  });
-
-  it('never reads past the page cap, and says the answer is about the window', async () => {
+  it('never reads past the page cap, and says it did not read to the end', async () => {
     const list = vi.fn().mockResolvedValue(page(filler(MERGE_LEDGER_PAGE_SIZE, 'x')));
 
-    const res = await findActivePropertyMergeGroups(42, 2, list);
+    const res = await findActivePropertyMergeGroups(42, list);
 
     expect(list).toHaveBeenCalledTimes(MERGE_LEDGER_MAX_PAGES);
     expect(res).toEqual({
@@ -152,8 +179,17 @@ describe('findActivePropertyMergeGroups', () => {
 
   it('treats an empty page as the end of the ledger', async () => {
     const list = vi.fn().mockResolvedValue(page([]));
-    const res = await findActivePropertyMergeGroups(42, 2, list);
+    const res = await findActivePropertyMergeGroups(42, list);
     expect(res).toEqual({ groups: [], scanned: 0, exhaustive: true });
+  });
+});
+
+describe('mergeOriginLabel', () => {
+  it('names each ledger source explicitly — only the operator’s merges are "ruční"', () => {
+    expect(mergeOriginLabel('operator')).toBe('ruční');
+    expect(mergeOriginLabel('autodedup')).toBe('automatické (AUTODEDUP)');
+    expect(mergeOriginLabel('auto')).toBe('automatické (původní engine)');
+    expect(mergeOriginLabel('something_new')).toBe('„something_new“');
   });
 });
 

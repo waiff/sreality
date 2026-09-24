@@ -101,8 +101,8 @@ function group(over: Partial<MergeGroup> = {}): MergeGroup {
     survivor_property_id: 42,
     retired_count: 1,
     listings_moved: 1,
-    source: 'auto',
-    reason: 'autodedup:test',
+    source: 'operator',
+    reason: 'manual_link',
     fully_undone: false,
     ...over,
   };
@@ -254,7 +254,13 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     expect(api.listPropertyMerges).not.toHaveBeenCalled();
     fireEvent.click(within(rowOf('iDNES Reality')).getByRole('button', { name: /Rozdělit/ }));
     expect(await screen.findByText('Oddělit tento inzerát?')).toBeInTheDocument();
-    expect(api.listPropertyMerges).toHaveBeenCalledWith({ limit: 200, offset: 0 });
+    expect(screen.getByText(/vrátí se ruční sloučení/)).toBeInTheDocument();
+    // One exact read of THIS property's groups, not a window of the whole ledger.
+    expect(api.listPropertyMerges).toHaveBeenCalledWith({
+      limit: 200,
+      offset: 0,
+      survivor_property_id: 42,
+    });
     expect(api.unmergeMergeGroup).not.toHaveBeenCalled();
 
     // Step two is the write.
@@ -281,6 +287,24 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Zrušit' }));
     expect(screen.queryByText('Oddělit tento inzerát?')).toBeNull();
     expect(within(rowOf('Sreality')).getByRole('button', { name: /Rozdělit/ })).toBeInTheDocument();
+    expect(api.unmergeMergeGroup).not.toHaveBeenCalled();
+  });
+
+  it('never undoes an AUTODEDUP merge from here — it points at the engine’s own review', async () => {
+    vi.mocked(api.listPropertyMerges).mockResolvedValue({
+      data: [group({ source: 'autodedup', reason: 'autodedup g12 o:554782' })],
+      total: 1,
+    });
+    setup({ unmergeEnabled: true });
+
+    fireEvent.click(within(rowOf('iDNES Reality')).getByRole('button', { name: /Rozdělit/ }));
+    expect(await screen.findByText(/sloučil AUTODEDUP/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'revizní stránce' })).toHaveAttribute(
+      'href',
+      '/autodedup/groups',
+    );
+    expect(screen.queryByRole('button', { name: /^Ano/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Zavřít' }));
     expect(api.unmergeMergeGroup).not.toHaveBeenCalled();
   });
 
