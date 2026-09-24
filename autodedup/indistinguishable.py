@@ -704,6 +704,24 @@ def _offer_area_conflict(
     return (str(lead_a[0]), str(lead_b[0]))
 
 
+def _two_agencies(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E271/E272: are the two filings two AGENCIES' statements, not one agency re-posting?
+
+    The operator's exception names one text re-posted; the fourteen cohorts name the rest of
+    the shape. One agency re-posting its own advert re-files its address and its storey column
+    freely — Kolmanová 2438/18 then 2438/20 under one byte-identical body and one broker, Podle
+    náhonu 3223/57 then /59 with both bodies saying `ve 2. patře` and the column saying 1 on the
+    second. Zelené údolí's 1497/9 and 1497/11 are filed by two different firms (995 and 2115).
+    An unknown agency is not a second agency."""
+    if not settings.d43_entrance_two_agencies:
+        return True
+    firm_a, firm_b = a.broker_firm_id, b.broker_firm_id
+    if firm_a is not None and firm_b is not None:
+        return firm_a != firm_b
+    key_a, key_b = a.broker_key, b.broker_key
+    return key_a is not None and key_b is not None and key_a != key_b
+
+
 def _filed_apart(a: Listing, b: Listing, settings: Settings) -> bool:
     """E272: one source filed these two at two different address points of one street."""
     if not settings.d43_floor_sequential_address_split:
@@ -716,7 +734,9 @@ def _filed_apart(a: Listing, b: Listing, settings: Settings) -> bool:
     if not left or not right or left == right:
         return False
     kod_a, kod_b = a.location.ruian_adm_kod, b.location.ruian_adm_kod
-    return bool(kod_a) and bool(kod_b) and kod_a != kod_b
+    if not (kod_a and kod_b and kod_a != kod_b):
+        return False
+    return _two_agencies(a, b, settings)
 
 
 def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> bool:
@@ -850,6 +870,18 @@ def _price_sequential_path(
 def _live_together(a: Listing, b: Listing, settings: Settings) -> bool:
     """Genuinely on sale at the same time, on W8's honest clock rather than the detector's."""
     return not _never_live_together(a, b, settings)
+
+
+def _unit_sale(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E273's scope: the SALE of a flat, which is where a development's units are priced.
+
+    A let is re-let at a new rent months later (Zlochova 2405/10: 23,500 -> 23,000 in May, the
+    same flat at 25,500 -> 24,900 in August, one broker) and a house is re-measured on re-post
+    (Velké Březno: 119 m² then 113 m²); neither is a development's next unit."""
+    if not settings.d43_price_same_source_unit_sale_only:
+        return True
+    return all(listing.category_type == "prodej" and listing.category_main == "byt"
+               for listing in (a, b))
 
 
 def _one_text(a: Listing, b: Listing, settings: Settings) -> bool:
@@ -1637,7 +1669,9 @@ def _two_entrances(a: Listing, b: Listing, cfg: Settings) -> bool:
     if not co_a or not co_b or co_a == co_b:
         return False
     kod_a, kod_b = a.location.ruian_adm_kod, b.location.ruian_adm_kod
-    return bool(kod_a) and bool(kod_b) and kod_a != kod_b
+    if not (kod_a and kod_b and kod_a != kod_b):
+        return False
+    return _two_agencies(a, b, cfg)
 
 
 def stored_house_number_conflict(a: Listing, b: Listing, cfg: Settings
@@ -1770,6 +1804,11 @@ def extent_package_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str,
     if not left or not right or left & right:
         return None
     if not _co_live(a, b, cfg.d43_price_colive_min_overlap_days):
+        return None
+    # Two PACKAGES are two offers on sale at once; a re-post that cut the plot on the day it
+    # re-listed is one house re-offered (Olešnice: 1,722 m² at 6,990,000 until 09-10, then
+    # `811 m2 a 911 m2` at 4,990,000 from 09-10), and W8's honest clock says which is which.
+    if cfg.d43_extent_package_honest_colive and not _live_together(a, b, cfg):
         return None
     if price_paths_agree(a, b, cfg.d43_price_path_tol):
         return None
@@ -2226,7 +2265,7 @@ def distinguishing_facts(
         # moved too, the excuse is gone and the price is read at the cross-portal bar.
         moved_area = (cfg.d43_price_same_source_bar == "area_moved"
                       and not _areas_agree(a, b) and _development_pair(a, b)
-                      and not _one_text(a, b, cfg))
+                      and not _one_text(a, b, cfg) and _unit_sale(a, b, cfg))
         over = price_gap > (PRICE_CROSS_TOL if (cross or moved_area)
                             else PRICE_SAME_SOURCE_TOL)
         if cfg.d43_price_path:

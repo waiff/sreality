@@ -935,6 +935,13 @@ class Settings:
     # Mariánské cestě's two units head the same template with two different sentences
     # (`Máte jedinečnou šanci…` against `LETNÍ SLEVA 3%…`), and they are two.
     d43_price_same_source_one_text_min: float = 0.99
+    # …and only for the SALE of a flat: a let is re-let at a new rent and a house re-measured.
+    d43_price_same_source_unit_sale_only: bool = False
+    # E271/E272 read two entrances only where two different AGENCIES filed them; one agency
+    # re-posting its own advert re-files its address and storey column freely.
+    d43_entrance_two_agencies: bool = False
+    # E274 reads two packages only where both are on sale TOGETHER on W8's honest clock.
+    d43_extent_package_honest_colive: bool = False
     # E274: two PACKAGES of one seller are two extents (E244/E260's reading), not a bare
     # co-live price gap (D49's refusal). Radimovice / Petříkov sells one areál as a family
     # package at 45,000,000 stating `pozemek o celkové výměře 3 526 m²` and as an investment

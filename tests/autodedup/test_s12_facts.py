@@ -445,3 +445,27 @@ def test_two_codes_that_never_lived_together_are_a_re_post() -> None:
     a = hall(224525, "03105", 257698.0, first_seen_at=stamp(0), last_seen_at=stamp(20))
     b = hall(224526, "03104", 440370.0, first_seen_at=stamp(30), last_seen_at=stamp(60))
     assert "agency_code_colive" not in names(a, b, on)
+
+
+# --- the refinements the fourteen-cohort hand read of S12's own losses named ----------------
+def test_one_agency_re_filing_its_own_address_is_not_two_entrances() -> None:
+    # Kolmanova 2438/18 then 2438/20: one broker, one firm, one byte-identical body.
+    a = flat(14040386, "2438/18", 1, 2, 25900.0, 24900.0, 0, 10, broker_key="k", broker_firm_id=9)
+    b = flat(17301787, "2438/20", 2, 2, 24900.0, 25900.0, 11, 14, broker_key="k", broker_firm_id=9)
+    assert "stored_house_number" not in names(a, b, S12)
+    assert "floor" not in names(a, b, S12)
+
+
+def test_a_re_let_at_a_new_rent_is_not_a_development_unit() -> None:
+    a = unit(7337, 50.0, 23000.0, [23500.0, 23000.0], 0, 36, category_type="pronajem")
+    b = unit(18597494, 49.0, 24900.0, [25500.0, 24900.0], 116, 141, body=MARIANSKA_B,
+             category_type="pronajem")
+    assert "price" not in names(a, b, S12)
+
+
+def test_a_re_post_that_cut_the_plot_is_not_a_second_package() -> None:
+    a = areal(448583, 6990000.0, RADIMOVICE_FAMILY, first_seen_at=stamp(0),
+              last_seen_at=stamp(72))
+    b = areal(18815653, 4990000.0, RADIMOVICE_INVEST, first_seen_at=stamp(72),
+              last_seen_at=stamp(83))
+    assert "extent_package" not in names(a, b, S12)
