@@ -16,7 +16,9 @@ E98 — with `backfill=false` every in-scope listing is an arrival, and the entr
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,6 +31,7 @@ from autodedup.incremental_lane import (
     PASS_BUDGET_S,
     PASS_RATE_PER_S,
     RESET_CURSORS,
+    SEED_LEASE_TTL_S,
     SqlWork,
     bootstrap_setting_key,
     parity_baseline_key,
@@ -47,6 +50,8 @@ SCOPE = Scope((ScopeBlock("obec", 563510), ScopeBlock("cast_obce", 490245)))
 PARENTS = {490245: 554782}
 SCORER: dict[str, str] = {"settings": "default", "model": "prior"}
 _SETTLED = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+SEED_HOLDER = "rt_seed:test:1:1"
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "autodedup.yml"
 
 
 def _fp_row(is_active: bool = True) -> dict:
@@ -87,7 +92,8 @@ def _populated(db: FakePg) -> FakePg:
                                       "model_version": "w6_gold"}
     for name in RESET_CURSORS:
         db.cursors[name] = {"last_listing_id": 7, "last_snapshot_id": 7, "watermark": None}
-    db.lease[LANE_NAME] = {"holder": "someone", "expires_at": db.now + timedelta(hours=1)}
+    # A lease left behind by a pass that has finished: expired, so a seed can take it.
+    db.lease[LANE_NAME] = {"holder": "someone", "expires_at": db.now - timedelta(minutes=1)}
     # Generation-FREE operator evidence. The reset must not see any of it.
     db.mnl.add((11, 12))
     db.phash_pop[999] = 4
@@ -99,7 +105,7 @@ def _populated(db: FakePg) -> FakePg:
 
 def test_the_reset_empties_this_generation_and_nothing_else() -> None:
     db = _populated(FakePg())
-    deleted = reset_generation(db, GEN)
+    deleted = reset_generation(db, GEN, holder=SEED_HOLDER)
 
     assert deleted == {"pairs": 1, "cluster_members": 2, "cluster_conflicts": 1,
                        "clusters": 1, "rt_fp": 2, "fp_key": 1, "rt_block_cell": 1,
@@ -114,7 +120,7 @@ def test_another_generations_rows_survive_the_reset() -> None:
     """The defect this exists to make impossible is the mirror of the one it fixes: a reset
     that took `g6` with it would destroy the evidence a published number rests on (M47)."""
     db = _populated(FakePg())
-    reset_generation(db, GEN)
+    reset_generation(db, GEN, holder=SEED_HOLDER)
 
     assert [key for key in db.pairs if key[0] == OTHER] == [(OTHER, 11, 12)]
     assert sorted(key for key in db.rt_fp if key[0] == OTHER) == [(OTHER, 11), (OTHER, 12)]
@@ -134,7 +140,7 @@ def test_the_generation_free_tables_survive_the_reset() -> None:
     """Operator verdicts, must-not-links and the frozen population are generation-free — E95
     says a re-seed preserves them and a reset is a re-seed with the rows removed."""
     db = _populated(FakePg())
-    reset_generation(db, GEN)
+    reset_generation(db, GEN, holder=SEED_HOLDER)
 
     assert db.mnl == {(11, 12)}
     assert db.phash_pop == {999: 4}
@@ -196,8 +202,80 @@ def test_a_seed_that_refuses_after_the_reset_puts_every_row_back(tmp_path, monke
                                  "reseed": "true", **SCORER}, tmp_path)
 
     assert (GEN, 11, 12) in db.pairs
-    assert db.lease[LANE_NAME]["holder"] == "someone"
+    # The lease row is the seed's own by now (it took the expired one), and it went back free.
+    assert db.lease[LANE_NAME]["holder"].startswith("rt_seed:")
+    assert db.lease[LANE_NAME]["expires_at"] <= db.now
     assert sorted(db.cursors) == sorted(RESET_CURSORS)
+
+
+# ------------------------------------------------- a seed and a pass never overlap (the lease)
+
+
+def test_the_reset_keeps_the_seeds_own_lease() -> None:
+    db = _populated(FakePg())
+    db.lease[LANE_NAME] = {"holder": SEED_HOLDER, "expires_at": db.now + timedelta(hours=1)}
+
+    deleted = reset_generation(db, GEN, holder=SEED_HOLDER)
+
+    assert deleted["rt_lease"] == 0
+    assert db.lease[LANE_NAME]["holder"] == SEED_HOLDER
+
+
+def test_a_seed_refuses_while_a_pass_holds_the_lease(tmp_path, monkeypatch) -> None:
+    """With two callers (the workflow and the worker's `autodedup` lane) the repository
+    variable no longer stops every pass. A pass mid-transaction when a fresh seed's reset ran
+    would land old-scorer rows in the generation the seed just emptied (E97), so the seed takes
+    the lane's own lease and refuses, having written nothing, while a pass holds it."""
+    monkeypatch.delenv(ENV_FLAG, raising=False)
+    db = _populated(FakePg())
+    db.admin_parents[490245] = 554782
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
+    held = {"holder": "worker:1:1", "expires_at": db.now + timedelta(minutes=10)}
+    db.lease[LANE_NAME] = dict(held)
+    cursors = {k: dict(v) for k, v in db.cursors.items()}
+    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
+
+    with pytest.raises(SystemExit, match="holds autodedup.rt_lease"):
+        run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "fresh": "true",
+                                 "reseed": "true", **SCORER}, tmp_path)
+
+    assert (GEN, 11, 12) in db.pairs and db.calibration[GEN]["digest"] == "d"
+    assert db.cursors == cursors
+    assert db.lease[LANE_NAME] == held, "the pass keeps its lease"
+
+
+def test_a_fresh_seed_holds_the_lease_through_its_transaction(tmp_path, monkeypatch) -> None:
+    from autodedup import incremental_lane
+
+    monkeypatch.delenv(ENV_FLAG, raising=False)
+    db = _populated(FakePg())
+    db.admin_parents[490245] = 554782
+    db.settings["rt_parity_min_checked"] = 0
+    db.settings["rt_parity_min_checked_share"] = 0
+    monkeypatch.setattr("autodedup.dataset.load", lambda path: _dataset())
+    inside: list[dict[str, Any]] = []
+    original = incremental_lane.write_population
+
+    def spy(conn: Any, dataset: Any) -> Any:
+        inside.append(dict(conn.lease[LANE_NAME]))
+        return original(conn, dataset)
+
+    monkeypatch.setattr(incremental_lane, "write_population", spy)
+    out = run_rt_seed(lambda: db, {"artifact": "c.jsonl.gz", "fresh": "true",
+                                   "reseed": "true", **SCORER}, tmp_path)
+
+    assert out["reset"]["rt_lease"] == 0, "the reset kept the seed's own lease"
+    assert inside and inside[0]["holder"].startswith("rt_seed:")
+    assert inside[0]["expires_at"] >= db.now + timedelta(seconds=SEED_LEASE_TTL_S)
+    assert db.lease[LANE_NAME]["expires_at"] <= db.now, "and freed it on the way out"
+
+
+def test_the_seed_lease_outlives_the_seeding_job() -> None:
+    """A seed still running when its lease expired would let a pass in mid-reset."""
+    minutes = [int(m) for m in re.findall(r"timeout-minutes:\s*(\d+)",
+                                           WORKFLOW.read_text(encoding="utf-8"))]
+    assert minutes and SEED_LEASE_TTL_S >= max(minutes) * 60
 
 
 # ------------------------------------------------------------------ E98: the bootstrap phase

@@ -351,17 +351,27 @@ unseeded skip, the storage budget, the parity gate, the pair budget.
   the SAME cursors under the SAME lease: whichever holds it passes, the other is a green
   `skipped: leased`. That is the location-resolve precedent (shared lease, the GH lane stays the
   backstop), not the intake's two cursors — deciding a listing twice into one generation is not free.
+  `rt_seed` takes the same lease through its transaction (and refuses while a pass holds it), so no
+  pass lands in a generation a seed is resetting. Switching the workflow's repository variable off
+  does NOT stop this lane: `autodedup.settings.realtime_enabled = false` stops both.
 - **A hard deadline, because the engine's time budget bounds the claim, not the clock.**
   `AUTODEDUP_PASS_DEADLINE_SECONDS` (1050) wraps the pass's connection: past it every statement
   except the lease release raises, so the one transaction rolls back (nothing written, no cursor
   moved), the lease is freed and the thread ends rather than outliving `LANE_PASS_TIMEOUT_SECONDS`
   with a transaction open. Deadline + one 120 s statement stays under the 1200 s stall warn, the
   lane timeout and the engine's 2100 s lease TTL. Plus the usual in-process pass lock.
+- **Claims sized to fit that deadline.** The engine sizes a claim to FILL its time budget (budget ×
+  its measured rate, E98), and its 900 s default is sized for the workflow's 25-minute job. The
+  lane hands in `max_pass_budget_s` = half the deadline (525 s; the engine uses the smaller of that
+  and `rt_pass_budget_s`). A trip rolls back without recording a rate, so after one the lane halves
+  its cap AND budget for the next pass (down to one listing), back to full only after a clean pass
+  claimed enough to re-measure the rate (`PASS_RATE_MIN_CLAIM`, 20). `last.backoff` shows the divisor.
 - **A refusal is an error, never a crash.** The engine refuses by raising `SystemExit`; carried out
   of `asyncio.to_thread` that would stop the event loop and every lane, so the lane records it as
-  `errors: 1` with the text and logs it on the transition only. Heartbeat
+  `errors: 1` with the text, counts it (and a deadline trip) as a failed pass (`failed_passes`,
+  `last_failure_at`, as for any lane whose pass raised) and logs it on the transition only. Heartbeat
   `details.autodedup.last` = `{ran, claimed, scored (pairs), grouped (groups written), skipped (0/1)
-  + reason, errors (0/1) + refused/aborted, cap, seconds, held, retired, latency_p50_s,
+  + reason, errors (0/1) + refused/aborted, cap, seconds, backoff, held, retired, latency_p50_s,
   latency_p95_s, bound_by}`; an absent store (migrations 539/540) = `skipped: store_absent` + one
   warning.
 - **Latency floor.** The engine ignores rows younger than its settle lag (`SETTLE_LAG_S`, 300 s,

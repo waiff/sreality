@@ -52,6 +52,7 @@ def _fresh_lane_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rw, "_AUTODEDUP_DARK_LOGGED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_STORE_WARNED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
+    monkeypatch.setattr(rw, "_AUTODEDUP_BACKOFF", 1)
 
 
 def _settings(monkeypatch: pytest.MonkeyPatch, **values: Any) -> None:
@@ -95,9 +96,17 @@ def _stub_engine(monkeypatch: pytest.MonkeyPatch, result: Any) -> dict[str, Any]
     """Replace the engine's pass; capture what the lane handed it."""
     seen: dict[str, Any] = {}
 
-    def fake(conn_factory: Any, args: Any, out_dir: Path, *, enabled: Any = None) -> Any:
+    def fake(conn_factory: Any, args: Any, out_dir: Path, *, enabled: Any = None,
+             max_pass_budget_s: Any = None) -> Any:
         seen.update(args=dict(args), enabled=enabled, out_dir=out_dir,
-                    out_dir_existed=Path(out_dir).is_dir(), conn=conn_factory())
+                    out_dir_existed=Path(out_dir).is_dir(), conn=conn_factory(),
+                    budget=max_pass_budget_s)
+        seen["calls"] = seen.get("calls", 0) + 1
+        if callable(result) and not isinstance(result, BaseException):
+            outcome = result(seen["calls"])
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
         if isinstance(result, BaseException):
             raise result
         return result
@@ -219,6 +228,80 @@ def test_the_deadline_sits_inside_every_bound_around_it() -> None:
     assert worst < LEASE_TTL_S
 
 
+def test_claims_are_sized_well_inside_the_deadline() -> None:
+    """The engine sizes a claim to FILL its time budget (budget x measured rate), and its own
+    900 s default would fill all but ~15% of the deadline: a pass a little slower than its rate
+    would trip, roll back without recording a rate, and trip again on the same claim."""
+    assert rw.AUTODEDUP_PASS_BUDGET_SECONDS * 2 <= rw.AUTODEDUP_PASS_DEADLINE_SECONDS
+    assert rw.AUTODEDUP_PASS_BUDGET_SECONDS < incremental_lane.PASS_BUDGET_S
+
+
+def _deadline_then(summaries: dict[int, Any]) -> Any:
+    def outcome(n: int) -> Any:
+        return summaries.get(n, rw._AutodedupDeadline("stopped at the deadline"))
+    return outcome
+
+
+def test_a_deadline_trip_halves_the_next_claim_and_its_budget(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch, realtime_autodedup_max_listings=100)
+    seen = _stub_engine(monkeypatch, _deadline_then({}))
+    caps: list[str] = []
+    budgets: list[float] = []
+
+    for _ in range(3):
+        last = rw._autodedup_sync()
+        caps.append(seen["args"]["max_listings"])
+        budgets.append(seen["budget"])
+        assert last["errors"] == 1 and last["deadline_exceeded"] is True
+
+    assert caps == ["100", "50", "25"]
+    base = rw.AUTODEDUP_PASS_BUDGET_SECONDS
+    assert budgets == [base, base / 2, base / 4]
+    assert last["backoff"] == 8, "the heartbeat says what the next pass claims under"
+
+
+def test_the_back_off_bottoms_out_at_a_one_listing_claim(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch, realtime_autodedup_max_listings=500)
+    seen = _stub_engine(monkeypatch, _deadline_then({}))
+    for _ in range(15):
+        rw._autodedup_sync()
+    assert seen["args"]["max_listings"] == "1"
+    assert rw._AUTODEDUP_BACKOFF == rw.AUTODEDUP_MAX_LISTINGS_CEILING
+
+
+def test_the_back_off_holds_until_a_pass_re_measures_the_rate(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass too small to re-measure the rate leaves the engine on the rate that tripped the
+    deadline, so going straight back to a full claim would just trip it again."""
+    enough = incremental_lane.PASS_RATE_MIN_CLAIM
+    small = _summary(counts={"claimed": enough - 1})
+    full = _summary(counts={"claimed": enough})
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch, realtime_autodedup_max_listings=100)
+    seen = _stub_engine(monkeypatch, _deadline_then({2: small, 3: full, 4: full}))
+
+    rw._autodedup_sync()                       # 1: tripped
+    assert rw._autodedup_sync()["backoff"] == 2   # 2: clean, too small to teach a rate
+    assert seen["args"]["max_listings"] == "50"
+    assert rw._autodedup_sync()["backoff"] == 1   # 3: clean, re-measured: restored
+    assert seen["args"]["max_listings"] == "50"
+    rw._autodedup_sync()                       # 4: the full claim again
+    assert seen["args"]["max_listings"] == "100"
+    assert seen["budget"] == rw.AUTODEDUP_PASS_BUDGET_SECONDS
+
+
+def test_a_refusal_is_not_a_reason_to_back_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A storage budget or a parity breach is not about the claim's size."""
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch)
+    _stub_engine(monkeypatch, SystemExit("PARITY GATE"))
+    assert rw._autodedup_sync()["backoff"] == 1
+
+
 def test_the_cap_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _Conn()
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
@@ -231,6 +314,7 @@ def test_the_cap_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPatch
     # generation was seeded with, and the engine refuses a differing argument.
     assert seen["args"] == {"max_listings": "7"}
     assert seen["enabled"] is True, "the lane's own switch stands in for the repo variable"
+    assert seen["budget"] == rw.AUTODEDUP_PASS_BUDGET_SECONDS
     assert seen["out_dir_existed"]
     assert not Path(seen["out_dir"]).exists(), "the summary file lives for the pass only"
     assert isinstance(seen["conn"], rw._DeadlineConnection)
@@ -238,7 +322,7 @@ def test_the_cap_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPatch
     assert conn.closed
     assert last == {
         "ran": True, "claimed": 12, "scored": 40, "grouped": 3, "skipped": 0, "errors": 0,
-        "cap": 7, "seconds": last["seconds"], "held": 1, "retired": 0,
+        "cap": 7, "seconds": last["seconds"], "backoff": 1, "held": 1, "retired": 0,
         "latency_p50_s": 310.2, "latency_p95_s": 355.0, "bound_by": "count",
     }
 
@@ -282,7 +366,8 @@ def test_the_engines_green_skips_are_skips_not_errors(
 def test_a_refusal_is_recorded_never_raised(
         monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """The engine refuses by raising SystemExit. Carried out of asyncio.to_thread it would
-    stop the event loop — every lane of the worker — so the lane records it instead."""
+    stop the event loop — every lane of the worker — so the lane records it instead, and
+    counts it where a lane's raised passes are counted."""
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
     _settings(monkeypatch)
     _stub_engine(monkeypatch, SystemExit("PARITY GATE: 3 breaches " + "x" * 1000))
@@ -293,7 +378,9 @@ def test_a_refusal_is_recorded_never_raised(
         asyncio.run(rw._autodedup_pass(asyncio.Event(), state))
 
     lane = state["lanes"]["autodedup"]
-    assert lane["passes"] == 2 and lane["failed_passes"] == 0
+    assert lane["failed_passes"] == 2 and lane["last_failure_at"]
+    assert lane.get("passes", 0) == 0, "a refused pass is not a completed one"
+    assert lane["started_at"] is None
     assert lane["last"]["errors"] == 1 and lane["last"]["ran"] is False
     assert lane["last"]["refused"].startswith("PARITY GATE")
     assert len(lane["last"]["refused"]) == rw.AUTODEDUP_REASON_CHARS
@@ -301,6 +388,21 @@ def test_a_refusal_is_recorded_never_raised(
     # Said on the transition, not once a minute for as long as the refusal stands.
     assert sum("AUTODEDUP lane pass stopped" in r.message for r in caplog.records) == 1
     Jsonb(rw._lane_snapshot(state["lanes"]))
+
+
+def test_a_completed_pass_after_a_refusal_keeps_the_failure_count(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
+    _settings(monkeypatch)
+    _stub_engine(monkeypatch, lambda n: SystemExit("STORAGE") if n == 1 else _summary())
+    state = rw._new_state()
+
+    asyncio.run(rw._autodedup_pass(asyncio.Event(), state))
+    asyncio.run(rw._autodedup_pass(asyncio.Event(), state))
+
+    lane = state["lanes"]["autodedup"]
+    assert lane["passes"] == 1 and lane["failed_passes"] == 1
+    assert lane["last"]["ran"] is True and lane["last"]["errors"] == 0
 
 
 def test_an_aborted_pass_ran_but_counts_as_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,6 +514,56 @@ def test_the_cap_binds_the_engines_claim(world, tmp_path, monkeypatch) -> None: 
 
     assert last["ran"] is True and last["cap"] == 1
     assert last["claimed"] == 1 and last["bound_by"] == "count"
+
+
+def test_the_engine_sizes_the_claim_by_the_smaller_budget(
+        world, tmp_path, monkeypatch) -> None:  # noqa: F811
+    """`max_pass_budget_s` is a ceiling on `rt_pass_budget_s`, never a raise over it; the
+    workflow passes nothing and keeps the setting."""
+    conn, artifact = world
+    _seed(conn, artifact, tmp_path)
+    conn.settings[incremental_lane.pass_rate_key(incremental_lane.GENERATION)] = 0.01
+
+    out = run_incremental(lambda: conn, {}, tmp_path / "a", enabled=True,
+                          max_pass_budget_s=300.0)
+    assert out["claim_bound"]["pass_budget_s"] == 300.0
+    assert out["claim_bound"]["by_time"] == 3 and out["claim_bound"]["bound_by"] == "time"
+
+    conn.settings[incremental_lane.PASS_BUDGET_SETTING] = 200
+    out = run_incremental(lambda: conn, {}, tmp_path / "b", enabled=True,
+                          max_pass_budget_s=300.0)
+    assert out["claim_bound"]["pass_budget_s"] == 200.0
+
+    del conn.settings[incremental_lane.PASS_BUDGET_SETTING]
+    monkeypatch.setenv(ENV_FLAG, "true")
+    out = run_incremental(lambda: conn, {}, tmp_path / "c")
+    assert out["claim_bound"]["pass_budget_s"] == incremental_lane.PASS_BUDGET_S
+
+
+def test_a_worker_pass_inside_a_seed_is_a_green_skip(
+        world, tmp_path, monkeypatch) -> None:  # noqa: F811
+    """The worker ignores the repository variable, so switching the workflow off before a
+    re-seed no longer stops every pass. The seed holds the lane's own lease through its
+    transaction instead: a worker pass that fires mid-seed skips, and writes nothing into the
+    generation the seed is emptying."""
+    conn, artifact = world
+    _seed(conn, artifact, tmp_path / "first")
+    _worker_on(monkeypatch, conn)
+    during: list[dict[str, Any]] = []
+    original = incremental_lane.write_population
+
+    def pass_mid_seed(c: Any, dataset: Any) -> Any:
+        during.append(rw._autodedup_sync())
+        return original(c, dataset)
+
+    monkeypatch.setattr(incremental_lane, "write_population", pass_mid_seed)
+    out = _seed(conn, artifact, tmp_path / "again", reseed="true", fresh="true")
+
+    assert during and (during[0]["skipped"], during[0]["reason"]) == (1, "leased")
+    assert out["reset"]["rt_lease"] == 0
+    assert conn.lease[LANE_NAME]["expires_at"] <= conn.now, "the seed freed the lease"
+    after = rw._autodedup_sync()
+    assert after["ran"] is True and after["errors"] == 0, after
 
 
 def test_the_worker_and_the_workflow_never_pass_at_once(

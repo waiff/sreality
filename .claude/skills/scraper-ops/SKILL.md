@@ -390,9 +390,9 @@ Lanes shipped so far:
   interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope
   = the contract's `text` cells whose R7 `gate` has PASSED, so with no gate open it is live and free.
   Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
-- **Autodedup lane** (AUTODEDUP §7.3, migration 557) — THE engine's real-time SHADOW pass (`run_incremental`, as
-  `autodedup_realtime.yml`); DARK until `realtime_autodedup_enabled`, 60 s, claim ≤100. Writes only the `rt` generation
-  (never a merge); shares the engine's lease + cursors with the GH lane; 1050 s deadline; `SystemExit` = `errors: 1`.
+- **Autodedup lane** (AUTODEDUP §7.3, mig 557) — THE engine's real-time SHADOW pass (`run_incremental`); DARK until
+  `realtime_autodedup_enabled`, 60 s, claim ≤100 sized to half a 1050 s deadline, halved per trip; `SystemExit`/trip = a failed
+  pass. Writes only `rt`, never a merge. Lease + cursors shared with the GH lane and `rt_seed`; `autodedup.settings.realtime_enabled=false` stops both.
 
 ## Pipeline verification (migration 274)
 
