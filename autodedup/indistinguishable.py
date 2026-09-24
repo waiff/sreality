@@ -872,6 +872,20 @@ def _live_together(a: Listing, b: Listing, settings: Settings) -> bool:
     return not _never_live_together(a, b, settings)
 
 
+def _bodies_print_one_area(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E273: where both BODIES print the same floor area, the column that moved is the portal's.
+
+    The printed area prevails over the column. One Liberec 3+kk is re-posted on idnes with the
+    body printing `82,7 m²` both times while the column reads 77 and then 83; the price fell
+    10,076,418 -> 8,398,000 on the re-post and it is one flat. Na Mariánské cestě's two unit
+    bodies print no area at all, so the column is all there is and it speaks."""
+    if not settings.d43_price_same_source_printed_area_wins:
+        return False
+    left = {round(value, 1) for value, _decimals, _scope in printed_areas(a.description)}
+    right = {round(value, 1) for value, _decimals, _scope in printed_areas(b.description)}
+    return bool(left & right)
+
+
 def _unit_sale(a: Listing, b: Listing, settings: Settings) -> bool:
     """E273's scope: the SALE of a flat, which is where a development's units are priced.
 
@@ -2265,7 +2279,8 @@ def distinguishing_facts(
         # moved too, the excuse is gone and the price is read at the cross-portal bar.
         moved_area = (cfg.d43_price_same_source_bar == "area_moved"
                       and not _areas_agree(a, b) and _development_pair(a, b)
-                      and not _one_text(a, b, cfg) and _unit_sale(a, b, cfg))
+                      and not _one_text(a, b, cfg) and _unit_sale(a, b, cfg)
+                      and not _bodies_print_one_area(a, b, cfg))
         over = price_gap > (PRICE_CROSS_TOL if (cross or moved_area)
                             else PRICE_SAME_SOURCE_TOL)
         if cfg.d43_price_path:

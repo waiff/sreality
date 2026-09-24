@@ -428,6 +428,14 @@ def hall(listing_id: int, code: str, price: float, **kwargs: object) -> Listing:
     return Listing.from_json({"id": listing_id, "block": "b", **fields})
 
 
+def test_E276_is_REFUSED_in_w27() -> None:
+    # Measured: the conjunction splits the Karlovy Vary Knoll areal (one 2,100 m2 building on
+    # bazos under Ev.c. 897962 at 15,800,000 and Ev.c. 877226 at 19,800,000) on five pairs.
+    assert not S12.d43_agency_code_colive_price
+    a, b = hall(224525, "03105", 257698.0), hall(224526, "03104", 440370.0)
+    assert "agency_code_colive" not in names(a, b, S12)
+
+
 def test_the_herink_conjunction_is_read_when_the_dial_is_on() -> None:
     a, b = hall(224525, "03105", 257698.0), hall(224526, "03104", 440370.0)
     on = variant(d43_agency_code_colive_price=True)
@@ -469,3 +477,10 @@ def test_a_re_post_that_cut_the_plot_is_not_a_second_package() -> None:
     b = areal(18815653, 4990000.0, RADIMOVICE_INVEST, first_seen_at=stamp(72),
               last_seen_at=stamp(83))
     assert "extent_package" not in names(a, b, S12)
+
+
+def test_the_printed_area_prevails_over_a_moved_column() -> None:
+    body = MARIANSKA_A + " Byt o podlahové ploše 82,7 m2."
+    a = unit(13936608, 77.0, 10076418.0, [10076418.0], 0, 9, body=body)
+    b = unit(18761280, 83.0, 8398000.0, [8398000.0], 31, 46, body="IHNED K NASTĚHOVÁNÍ. " + body)
+    assert "price" not in names(a, b, S12)
