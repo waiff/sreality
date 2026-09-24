@@ -81,7 +81,7 @@ The engine that was live then was reported as having "zero known false merges". 
 
 1. **Production merges.** Everything so far writes only to the shadow tables. Going live means the engine's merge groups write through the existing merge function, which already carries your notes, tags, collections and pipeline cards onto the survivor and can be undone group by group. *Recommendation: start with sales in the trial area, watch the review pages for a week, then widen.*
 2. **Rentals.** *Recommendation: hold rentals at propose-only (the switch in §5.5) until the house-number reader (S9) is confirmed, then merge them too.*
-3. **True real-time.** Sub-minute decisions need the same code inside the always-on worker, which changes the production image. *Recommendation: after production merges have run for a week on the batch lane.*
+3. **True real-time.** Sub-minute decisions need the same code inside the always-on worker, which changes the production image. *Recommendation: after production merges have run for a week on the batch lane.* **Built dark (2026-09-24):** the worker's `autodedup` lane runs that same shadow pass and writes no merge; enabling it is the operator's switch, `realtime_autodedup_enabled` on /settings.
 4. **Whole corpus and its storage.** *Recommendation: cut stored reject pairs first, then widen by region, watching the 400 MB guard the lane enforces.*
 5. **Photo latency.** Fingerprinting photos at download time removes the 2.5-hour wait. *Recommendation: yes, it is a small change in the image drain and helps every consumer of the fingerprints.*
 

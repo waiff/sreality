@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast/sold-comps/text-extract lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing per-source HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/INACTIVE/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/estimation/location-resolve/location-intake-fast/sold-comps/text-extract/autodedup lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (currently unscheduled) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, mark_inactive, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, llm_burn_rate.
 ---
 
 # Scraper operations
@@ -328,16 +328,13 @@ A dark-by-default, always-on Railway service (a 2nd process from the SAME image,
 the pipeline — the GH Actions crons above are still the throughput/completeness backbone; the
 worker is the latency layer on top. Design + shipped waves: `docs/design/realtime-scrapers.md`.
 Lanes shipped so far:
-- **Per-source drain-disable knob** (`realtime_drain_disabled_sources`, PR #694) — the bounded
-  detail drain skips sources listed here, letting a portal be pulled from the real-time lane
-  without touching its GH Actions cadence.
-- **sreality count-probe lane** (migration 270, PR #696) — a lightweight per-`(category_main,
-  category_type)` count check that detects a market-wide count swing faster than a full index
-  walk would, feeding the completeness/delisting rails.
-- **Property-maintenance lane**, every 2 min (PR #716) — runs `run_incremental_pass` against
-  `dirty_properties` (rule #20) far more often than the 5-min GH Actions cron. It serializes
-  against the GH cron + daily sweep with the lease-row CAS pattern (PR #717): **never a session
-  advisory lock on a pooled connection** — the first cut stranded within minutes of deploy.
+- **Per-source drain-disable knob** (`realtime_drain_disabled_sources`, PR #694) — the bounded detail
+  drain skips sources listed here: a portal leaves the real-time lane, its GH Actions cadence untouched.
+- **sreality count-probe lane** (migration 270, PR #696) — a per-`(category_main, category_type)` count
+  check that sees a market-wide count swing faster than a full index walk, feeding the delisting rails.
+- **Property-maintenance lane**, every 2 min (PR #716) — `run_incremental_pass` against `dirty_properties`
+  (rule #20), far more often than the 5-min GH cron; serialized with it + the daily sweep by the lease-row
+  CAS (PR #717): **never a session advisory lock on a pooled connection** — the first cut stranded.
 - **Estimation job lane** (migration 349, Wave 1 W1-3 / Phase 1 Amendment A10) — moves agent +
   deterministic rent-estimate EXECUTION off the FastAPI request threadpool (a 240 s agent run used
   to pin a Starlette token; a deploy SIGTERM killed paid runs mid-flight). Claims one `pending`
@@ -393,6 +390,9 @@ Lanes shipped so far:
   interval, no flag / setting / env var (a lane nobody enabled is a lane no monitor can see); scope
   = the contract's `text` cells whose R7 `gate` has PASSED, so with no gate open it is live and free.
   Needs `OPENAI_API_KEY`; rail = `text_extraction_lag`. Sizing, cache key, write gate: `llm-pipelines`.
+- **Autodedup lane** (AUTODEDUP §7.3, migration 557) — THE engine's real-time SHADOW pass (`run_incremental`, as
+  `autodedup_realtime.yml`); DARK until `realtime_autodedup_enabled`, 60 s, claim ≤100. Writes only the `rt` generation
+  (never a merge); shares the engine's lease + cursors with the GH lane; 1050 s deadline; `SystemExit` = `errors: 1`.
 
 ## Pipeline verification (migration 274)
 
