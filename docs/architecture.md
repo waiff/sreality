@@ -1145,7 +1145,8 @@ renumber.** Navigate by area:
     `toolkit/room_taxonomy.py` was reduced to vocabulary plus the merge-chokepoint category
     guard, and `toolkit/property_identity.py` lost its candidate-table stamps.
     **Consequences to hold in mind.** Nothing auto-merges any more, so cross-portal duplicates
-    accumulate in Browse until the new engine ships — that build-up was accepted explicitly.
+    accumulate in Browse until the new engine ships — that build-up was accepted explicitly
+    (the one engine path since, AUTODEDUP's apply lane, is dark; see "Who orders a merge").
     The **publication gate is gone**: since migration 273 a new property stayed invisible in
     Browse/map/stats/watchdogs until something stamped `published_at`, and the only stamper for
     ordinary properties was the old engine, so leaving the gate up would have hidden the entire
@@ -1191,7 +1192,8 @@ renumber.** Navigate by area:
     **asset-link** grain (migration 224), which links genuinely *different* units in one
     building (a `byt` and its ground-floor `komercni`, a `dum` and its `pozemek`) WITHOUT
     collapsing them into one property.
-    **Who orders a merge today.** Only the operator: Browse's `mergeMode` (checkbox
+    **Who orders a merge today.** The operator — and, only when switched on, the AUTODEDUP
+    apply path below. The operator's path: Browse's `mergeMode` (checkbox
     multi-select → merge) posts to `POST /properties/merge`, with the ledger and reversal under
     `GET /properties/merges`, `POST /properties/merges/{group}/unmerge` and
     `GET /properties/merged` (`api/property_merge.py`). Labeling / annotation CRUD that the old
@@ -1206,6 +1208,24 @@ renumber.** Navigate by area:
     itself is superseded but not yet dropped (a separately-gated destructive migration).
     Interim caveat: the unmerge *button* lived on the deleted Dedup page, so until the rebuild
     gives it a home, unmerge is API-only.
+    **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
+    (`docs/design/autodedup/PROGRAM.md` E300–E306) — through the same chokepoint, never around
+    it, and only when `app_settings.autodedup_apply_enabled` is on (migration 558 seeds it
+    `false`; the operator flips it on /settings, and flipping it off stops a running apply
+    between two groups). `autodedup/apply.py` (lane modes `apply` / `unapply` in
+    `.github/workflows/autodedup.yml`) reads one stored generation's groups, picks the survivor
+    (most listings, then oldest `first_seen_at`, then lowest id), and calls `merge_properties`
+    with `source='autodedup'` (migration 558 widened `property_merge_events.source`), ONE
+    `merge_group_id` per engine group inside one transaction, so each group is undoable as a
+    unit (`unmerge_group`, or `mode=unapply` for a whole generation newest-first). A dry run is
+    the default and writes only its own ledger, `autodedup.applied_merges`; a live run also
+    needs `app_settings.autodedup_apply_scope` naming deal types and area, re-reads the switch
+    before every group, and refuses — recording why — any group carrying an operator negative
+    across the listings the merge would move, mixed categories, a non-active property, or a
+    property the engine split across two groups. It stamps
+    `property_merge_events.generation = 'autodedup:<generation>'` write-only and reads nothing
+    from that table. Undo restores listings and pipeline cards; collections, tags and notes stay
+    on the survivor (rule #18: unmerge is best-effort).
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing

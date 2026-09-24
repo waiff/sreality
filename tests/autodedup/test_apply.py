@@ -1,0 +1,764 @@
+"""W29 APPLY (PROGRAM.md E300-E306): engine groups into production merges, dark by default.
+
+The fake below STORES what the apply path writes and serves it back, dispatching on the SQL
+constant itself (the `fake_pg` idiom): a statement this file does not know raises. The merge
+and unmerge it hands the apply path mimic the chokepoint's contract — re-point, soft-retire,
+refuse a category mismatch, replay a group's events — inside nested transactions that roll
+back on an exception, so a group's atomicity is observable here.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import typing
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Mapping
+
+import pytest
+
+from autodedup import apply as A
+from autodedup import apply_sql as S
+from autodedup import lane
+from toolkit import property_identity
+from toolkit.property_identity import MergeError
+from toolkit.room_taxonomy import category_main_compatible
+
+GEN = "g12"
+T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class _Tx:
+    def __init__(self, db: "FakeDb") -> None:
+        self.db = db
+
+    def __enter__(self) -> "_Tx":
+        self.saved = self.db.state()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is not None:
+            self.db.restore(self.saved)
+        return False
+
+
+class _Cursor:
+    def __init__(self, db: "FakeDb") -> None:
+        self.db = db
+        self.rows: list[tuple] = []
+
+    def __enter__(self) -> "_Cursor":
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> None:
+        self.db.statements.append(sql)
+        self.rows = self.db.dispatch(sql, dict(params or {}))
+
+    def executemany(self, sql: str, seq: Any) -> None:
+        for params in seq:
+            self.execute(sql, params)
+
+    def fetchall(self) -> list[tuple]:
+        return list(self.rows)
+
+
+class FakeDb:
+    def __init__(self) -> None:
+        self.clusters: dict[tuple[str, int], dict[str, Any]] = {}
+        self.members: list[tuple[str, int, int]] = []
+        self.listings: dict[int, dict[str, Any]] = {}
+        self.properties: dict[int, dict[str, Any]] = {}
+        self.mnl: list[tuple[int, int, str]] = []
+        self.verdicts: list[dict[str, Any]] = []
+        self.settings: dict[str, Any] = {}
+        self.ledger: list[dict[str, Any]] = []
+        self.events: list[dict[str, Any]] = []
+        self.statements: list[str] = []
+        self.closed = False
+
+    # --- plumbing
+    _STATE = ("listings", "properties", "ledger", "events", "settings")
+
+    def state(self) -> dict[str, Any]:
+        return {name: copy.deepcopy(getattr(self, name)) for name in self._STATE}
+
+    def restore(self, saved: Mapping[str, Any]) -> None:
+        for name, value in saved.items():
+            setattr(self, name, value)
+
+    def cursor(self) -> _Cursor:
+        return _Cursor(self)
+
+    def transaction(self) -> _Tx:
+        return _Tx(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+    # --- builders
+    def prop(self, pid: int, *, ct: str | None = "prodej", cm: str | None = "byt",
+             first: datetime | None = T0, status: str = "active") -> None:
+        self.properties[pid] = {"status": status, "category_type": ct, "category_main": cm,
+                                "first_seen_at": first, "merged_into": None}
+
+    def listing(self, lid: int, pid: int | None, *, ct: str | None = "prodej",
+                cm: str | None = "byt") -> None:
+        self.listings[lid] = {"property_id": pid, "category_type": ct, "category_main": cm}
+
+    def group(self, key: int, lids: list[int], *, gen: str = GEN, status: str = "proposed",
+              block: tuple[str, int] | None = ("o", 563510), score: float | None = 0.99) -> None:
+        self.clusters[(gen, key)] = {
+            "size": len(lids), "status": status,
+            "block_grain": block[0] if block else None, "block_key": block[1] if block else None,
+            "category_main": "byt", "category_type": "prodej", "min_edge_score": score,
+            "model_version": "m1", "feature_version": 9,
+        }
+        self.members.extend((gen, key, lid) for lid in lids)
+
+    def live_scope(self, **extra: Any) -> None:
+        self.settings[A.ENABLED_SETTING] = True
+        self.settings[A.SCOPE_SETTING] = {"category_types": ["prodej"],
+                                          "blocks": ["obec:563510"], **extra}
+
+    # --- the statements
+    def dispatch(self, sql: str, p: dict[str, Any]) -> list[tuple]:  # noqa: C901
+        if sql == S.SETTING_SQL:
+            return [(self.settings[p["key"]],)] if p["key"] in self.settings else []
+        if sql == S.CLUSTERS_SQL:
+            return [(k, c["size"], c["status"], c["block_key"], c["block_grain"],
+                     c["category_main"], c["category_type"], c["min_edge_score"],
+                     c["model_version"], c["feature_version"])
+                    for (g, k), c in sorted(self.clusters.items()) if g == p["generation"]]
+        if sql == S.MEMBERS_SQL:
+            out = []
+            for g, k, lid in sorted(self.members):
+                if g != p["generation"]:
+                    continue
+                row = self.listings.get(lid, {})
+                out.append((k, lid, row.get("property_id"), row.get("category_type"),
+                            row.get("category_main")))
+            return out
+        if sql == S.PROPERTIES_SQL:
+            return [(pid, r["status"], r["category_type"], r["category_main"],
+                     r["first_seen_at"])
+                    for pid, r in self.properties.items() if pid in p["property_ids"]]
+        if sql == S.PROPERTY_LISTINGS_SQL:
+            return [(r["property_id"], lid) for lid, r in self.listings.items()
+                    if r["property_id"] in p["property_ids"]]
+        if sql == S.MUST_NOT_LINK_SQL:
+            ids = set(p["listing_ids"])
+            return [row for row in self.mnl if row[0] in ids and row[1] in ids]
+        if sql == S.PAIR_VERDICTS_SQL:
+            ids = set(p["listing_ids"])
+            return [(v["lo"], v["hi"], v["verdict"]) for v in self.verdicts
+                    if v["kind"] == "pair" and v["verdict"] in p["negatives"]
+                    and v["lo"] in ids and v["hi"] in ids]
+        if sql == S.CLUSTER_VERDICTS_SQL:
+            return [(v["cluster_key"], v["verdict"], v.get("generation"), v.get("member_ids"))
+                    for v in self.verdicts
+                    if v["kind"] == "cluster" and v["verdict"] in p["negatives"]
+                    and v["cluster_key"] in p["cluster_keys"]]
+        if sql == S.LEDGER_HISTORY_SQL:
+            return [(r["generation"], r["cluster_key"], r["survivor_property_id"],
+                     r["retired_property_id"], r["outcome"], r["undone_at"] is not None)
+                    for r in self.ledger
+                    if not r["dry_run"] and r["outcome"] in ("applied", "refused")
+                    and (r["generation"] == p["generation"]
+                         or r["retired_property_id"] in p["property_ids"])]
+        if sql == S.LEDGER_INSERT_SQL:
+            return self._ledger_insert(p)
+        if sql == S.STAMP_GENERATION_SQL:
+            for event in self.events:
+                if event["merge_group_id"] == p["merge_group_id"] and event["generation"] is None:
+                    event["generation"] = p["stamp"]
+            return []
+        if sql == S.UNAPPLY_TARGETS_SQL:
+            groups: dict[str, dict[str, Any]] = {}
+            for r in self.ledger:
+                if (r["generation"] != p["generation"] or r["dry_run"]
+                        or r["outcome"] != "applied" or r["undone_at"] is not None):
+                    continue
+                if p["cluster_key"] is not None and r["cluster_key"] != p["cluster_key"]:
+                    continue
+                g = groups.setdefault(r["merge_group_id"], {
+                    "key": r["cluster_key"], "surv": r["survivor_property_id"],
+                    "retired": [], "last": 0})
+                g["retired"].append(r["retired_property_id"])
+                g["last"] = max(g["last"], r["id"])
+            ordered = sorted(groups.items(), key=lambda kv: -kv[1]["last"])
+            return [(gid, g["key"], g["surv"], g["retired"], g["last"]) for gid, g in ordered]
+        if sql == S.LEDGER_UNDO_SQL:
+            for r in self.ledger:
+                if (r["merge_group_id"] == p["merge_group_id"] and not r["dry_run"]
+                        and r["outcome"] == "applied" and r["undone_at"] is None):
+                    r.update(undone_at=T0, undone_by=p["undone_by"],
+                             undo_result=json.loads(p["undo_result"]))
+            return []
+        raise AssertionError(f"unknown statement: {sql[:80]!r}")
+
+    def _ledger_insert(self, p: dict[str, Any]) -> list[tuple]:
+        # The migration's constraints, enforced where they are cheapest to meet.
+        assert p["outcome"] in ("planned", "applied", "skipped", "refused", "failed")
+        if p["outcome"] == "applied":
+            assert not p["dry_run"] and p["merge_group_id"] is not None
+            assert p["survivor_property_id"] is not None and p["retired_property_id"] is not None
+            for r in self.ledger:
+                if (r["outcome"] == "applied" and r["undone_at"] is None
+                        and r["survivor_property_id"] == p["survivor_property_id"]
+                        and r["retired_property_id"] == p["retired_property_id"]):
+                    raise AssertionError("unique violation: live (survivor, retired) pair")
+        json.loads(p["plan_json"])
+        self.ledger.append({**p, "id": len(self.ledger) + 1, "undone_at": None,
+                            "undone_by": None, "undo_result": None})
+        return []
+
+    # --- the chokepoint's contract, faked
+    def merge(self, calls: list[dict[str, Any]], fail_on: set[int] | None = None) -> Any:
+        def merge(conn: "FakeDb", *, survivor_id: int, retired_id: int, reason: str,
+                  source: str, confidence: float | None = None,
+                  markers: dict[str, Any] | None = None,
+                  merge_group_id: str | None = None) -> dict[str, Any]:
+            calls.append({"survivor_id": survivor_id, "retired_id": retired_id,
+                          "reason": reason, "source": source, "confidence": confidence,
+                          "markers": markers, "merge_group_id": merge_group_id})
+            group = merge_group_id or str(uuid.uuid4())
+            with conn.transaction():
+                s, r = conn.properties[survivor_id], conn.properties[retired_id]
+                if s["status"] != "active" or r["status"] != "active":
+                    raise MergeError("not active")
+                if fail_on and retired_id in fail_on:
+                    raise MergeError(f"category_type mismatch ({retired_id}); refusing to merge")
+                if (s["category_type"] and r["category_type"]
+                        and s["category_type"] != r["category_type"]):
+                    raise MergeError("category_type mismatch; refusing to merge")
+                if not category_main_compatible(s["category_main"], r["category_main"]):
+                    raise MergeError("category_main mismatch; refusing to merge")
+                moved = [lid for lid, row in conn.listings.items()
+                         if row["property_id"] == retired_id]
+                for lid in moved:
+                    conn.listings[lid]["property_id"] = survivor_id
+                    conn.events.append({"merge_group_id": group, "survivor": survivor_id,
+                                        "retired": retired_id, "listing": lid,
+                                        "generation": None, "undone": False,
+                                        "source": source})
+                r.update(status="merged_away", merged_into=survivor_id)
+            return {"data": {"merge_group_id": group, "survivor_id": survivor_id,
+                             "retired_id": retired_id, "listings_moved": len(moved)}}
+        return merge
+
+    def unmerge(self, calls: list[str]) -> Any:
+        def unmerge(conn: "FakeDb", *, merge_group_id: str, undone_by: str) -> dict[str, Any]:
+            calls.append(merge_group_id)
+            with conn.transaction():
+                events = [e for e in conn.events
+                          if e["merge_group_id"] == merge_group_id and not e["undone"]]
+                if not events:
+                    raise MergeError(f"no active merge events for group {merge_group_id}")
+                back = 0
+                for e in events:
+                    if conn.listings[e["listing"]]["property_id"] == e["survivor"]:
+                        conn.listings[e["listing"]]["property_id"] = e["retired"]
+                        back += 1
+                    conn.properties[e["retired"]].update(status="active", merged_into=None)
+                    e["undone"] = True
+            return {"data": {"merge_group_id": merge_group_id, "listings_moved_back": back,
+                             "conflicts": []}}
+        return unmerge
+
+
+def _pair_group(db: FakeDb, key: int, lids: list[int], pids: list[int], **kw: Any) -> None:
+    for lid, pid in zip(lids, pids):
+        if pid not in db.properties:
+            db.prop(pid)
+        db.listing(lid, pid)
+    db.group(key, lids, **kw)
+
+
+def _plan(db: FakeDb, **scope: Any) -> A.Plan:
+    return A.plan_apply(db, GEN, A.Scope(**scope))
+
+
+def _only(plan: A.Plan) -> A.GroupPlan:
+    assert len(plan.groups) == 1, plan.groups
+    return plan.groups[0]
+
+
+# ------------------------------------------------------------------ the plan
+
+
+def test_survivor_is_the_property_with_the_most_listings() -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    db.listing(13, 200)  # 200 carries a second, unclustered listing
+    group = _only(_plan(db))
+    assert group.reasons == []
+    assert group.survivor_id == 200 and group.retired_ids == [100, 300]
+
+
+def test_survivor_tie_goes_to_the_oldest_first_seen_then_the_lowest_id() -> None:
+    db = FakeDb()
+    db.prop(100, first=T0 + timedelta(days=5))
+    db.prop(200, first=T0)
+    db.prop(300, first=T0)
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    group = _only(_plan(db))
+    assert group.survivor_id == 200 and group.retired_ids == [100, 300]
+
+
+def test_a_group_already_on_one_property_is_a_counted_no_op() -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 100])
+    plan = _plan(db)
+    assert plan.groups == [] and plan.counts["already_one_property"] == 1
+
+
+def test_operator_negatives_refuse_a_group() -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    _pair_group(db, 30, [30, 31], [500, 600])
+    db.verdicts.append({"kind": "pair", "lo": 10, "hi": 11, "verdict": "different"})
+    db.mnl.append((20, 21, "operator"))
+    db.verdicts.append({"kind": "cluster", "cluster_key": 30, "verdict": "different",
+                        "generation": GEN, "member_ids": [30, 31]})
+    reasons = {g.cluster_key: g.reasons for g in _plan(db).groups}
+    assert A.SKIP_PAIR_VERDICT in reasons[10]
+    assert reasons[20] == [A.SKIP_MUST_NOT_LINK]
+    assert reasons[30] == [A.SKIP_CLUSTER_VERDICT]
+
+
+def test_a_group_verdict_about_another_membership_does_not_apply() -> None:
+    db = FakeDb()
+    _pair_group(db, 30, [30, 31], [500, 600])
+    db.verdicts.append({"kind": "cluster", "cluster_key": 30, "verdict": "different",
+                        "generation": "g11", "member_ids": [30, 31, 32]})
+    assert _only(_plan(db)).reasons == []
+
+
+def test_a_negative_against_a_listing_the_merge_would_carry_along_refuses() -> None:
+    # 200 holds 11 (clustered) and 12 (not): the merge moves 12 too, so 10 x 12 counts.
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    db.listing(12, 200)
+    db.mnl.append((10, 12, "guard"))
+    group = _only(_plan(db))
+    assert group.reasons == [A.SKIP_MUST_NOT_LINK]
+    assert group.detail["must_not_link"] == [[10, 12, "guard"]]
+
+
+def test_category_guards_mirror_the_chokepoint() -> None:
+    db = FakeDb()
+    db.prop(200, ct="pronajem")
+    _pair_group(db, 10, [10, 11], [100, 200])
+    db.listing(11, 200, ct="pronajem")
+    db.prop(400, cm="dum")
+    _pair_group(db, 20, [20, 21], [300, 400])
+    db.listing(21, 400, cm="dum")
+    db.prop(600, cm="komercni")
+    db.prop(500, cm="dum")
+    _pair_group(db, 30, [30, 31], [500, 600])
+    db.listing(30, 500, cm="dum")
+    db.listing(31, 600, cm="komercni")
+    reasons = {g.cluster_key: g.reasons for g in _plan(db).groups}
+    assert reasons[10] == [A.SKIP_CATEGORY_TYPE]
+    assert reasons[20] == [A.SKIP_CATEGORY_MAIN]
+    assert reasons[30] == []  # dum <-> komercni is the one sanctioned cross-type
+
+
+def test_merged_away_unattached_and_oversize_are_refused() -> None:
+    db = FakeDb()
+    db.prop(200, status="merged_away")
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    db.listing(22, None)
+    db.members.append((GEN, 20, 22))
+    _pair_group(db, 30, [30, 31, 32], [500, 600, 700])
+    reasons = {g.cluster_key: g.reasons for g in _plan(db, max_cluster_size=2).groups}
+    assert reasons[10] == [A.SKIP_INACTIVE_PROPERTY]
+    assert A.SKIP_UNATTACHED in reasons[20]
+    assert reasons[30] == [A.SKIP_OVERSIZE]
+
+
+def test_a_property_the_engine_split_across_two_groups_bridges_nothing() -> None:
+    # 200 carries 11 (group 10) and 21 (group 20): applying either would fuse both.
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 200])
+    reasons = {g.cluster_key: g.reasons for g in _plan(db).groups}
+    assert reasons == {10: [A.SKIP_SPANS_GROUPS], 20: [A.SKIP_SPANS_GROUPS]}
+
+
+def test_scope_filters_categories_blocks_and_listing_ids() -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400], block=("c", 490245))
+    _pair_group(db, 30, [30, 31], [500, 600], block=None)
+    db.listing(40, 700, ct="pronajem")
+    db.listing(41, 800, ct="pronajem")
+    db.prop(700, ct="pronajem")
+    db.prop(800, ct="pronajem")
+    db.group(40, [40, 41])
+    scope = A.effective_scope(
+        None, {"category_types": "prodej", "blocks": "town:563510 quarter:490245"}, live=False)
+    plan = A.plan_apply(db, GEN, scope)
+    assert [g.cluster_key for g in plan.to_apply] == [10, 20]
+    assert plan.counts["out_of_scope"] == 2
+    ids_only = A.plan_apply(db, GEN, A.Scope(listing_ids=frozenset({30, 31})))
+    assert [g.cluster_key for g in ids_only.to_apply] == [30]
+
+
+def test_the_run_cap_defers_the_rest_in_key_order() -> None:
+    db = FakeDb()
+    for key in (10, 20, 30):
+        _pair_group(db, key, [key, key + 1], [key * 10, key * 10 + 1])
+    plan = _plan(db, max_clusters_per_run=2)
+    assert [g.cluster_key for g in plan.to_apply] == [10, 20]
+    assert plan.deferred == [30] and plan.counts["deferred_run_cap"] == 1
+
+
+def test_block_spellings_normalise_and_nonsense_is_refused() -> None:
+    assert A.normalize_block("obec:563510") == "o563510"
+    assert A.normalize_block("town:563510") == "o563510"
+    assert A.normalize_block("cast_obce:490245") == "c490245"
+    assert A.normalize_block("c490245") == "c490245"
+    with pytest.raises(ValueError):
+        A.normalize_block("563510")
+    with pytest.raises(ValueError):
+        A.scope_fields({"blokcs": "o1"})
+
+
+def test_a_live_scope_is_narrowed_by_a_run_and_never_widened() -> None:
+    setting = {"category_types": ["prodej", "pronajem"], "blocks": ["obec:1", "obec:2"],
+               "max_cluster_size": 6}
+    scope = A.effective_scope(setting, {"category_types": "prodej", "blocks": "obec:2 obec:3",
+                                        "max_cluster_size": "12", "all_blocks": "1"},
+                              live=True)
+    assert scope.category_types == frozenset({"prodej"})
+    assert scope.blocks == frozenset({"o2"})
+    assert scope.max_cluster_size == 6 and scope.all_blocks is False
+    with pytest.raises(ValueError):
+        A.effective_scope(None, {"category_types": "prodej", "blocks": "o1"}, live=True)
+    assert A.Scope().live_problems() and A.Scope(category_types=frozenset({"prodej"})) \
+        .live_problems()
+    assert A.Scope(category_types=frozenset({"prodej"}), all_blocks=True).live_problems() == []
+
+
+# ------------------------------------------------------------------ the kill switch
+
+
+def test_live_is_refused_while_the_switch_is_off_and_absent_means_off() -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    scope = A.Scope(category_types=frozenset({"prodej"}), all_blocks=True)
+    calls: list[dict[str, Any]] = []
+    plan = A.plan_apply(db, GEN, scope)
+    with pytest.raises(A.ApplyRefused):
+        A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    db.settings[A.ENABLED_SETTING] = False
+    with pytest.raises(A.ApplyRefused):
+        A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    assert calls == [] and db.ledger == []
+    A.apply_plan(db, plan, dry_run=True, merge=db.merge(calls))
+    assert calls == [] and {r["outcome"] for r in db.ledger} == {"planned"}
+
+
+@pytest.mark.parametrize("value, on", [
+    (True, True), ("true", True), ({"enabled": True}, True),
+    (False, False), (None, False), ("false", False), ({}, False), (1, True), (0, False),
+])
+def test_the_switch_reads_like_every_other_app_settings_flag(value: Any, on: bool) -> None:
+    db = FakeDb()
+    db.settings[A.ENABLED_SETTING] = value
+    assert A.apply_enabled(db) is on
+    assert A.apply_enabled(FakeDb()) is False  # no row at all
+
+
+def test_live_is_refused_on_a_scope_that_names_no_area() -> None:
+    db = FakeDb()
+    db.settings[A.ENABLED_SETTING] = True
+    _pair_group(db, 10, [10, 11], [100, 200])
+    plan = A.plan_apply(db, GEN, A.Scope(category_types=frozenset({"prodej"})))
+    with pytest.raises(A.ApplyRefused, match="area"):
+        A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+
+
+def test_turning_the_switch_off_mid_run_stops_before_the_next_group() -> None:
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    calls: list[dict[str, Any]] = []
+    base = db.merge(calls)
+
+    def merge_then_flip(conn: FakeDb, **kw: Any) -> dict[str, Any]:
+        out = base(conn, **kw)
+        conn.settings[A.ENABLED_SETTING] = False
+        return out
+
+    plan = A.plan_apply(db, GEN, A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True))
+    result = A.apply_plan(db, plan, dry_run=False, merge=merge_then_flip)
+    assert result["counts"]["applied"] == 1 and result["counts"]["not_attempted"] == 1
+    assert "stopped" in result
+
+
+# ------------------------------------------------------------------ dry run and live
+
+
+def test_a_dry_run_writes_the_plan_and_nothing_else() -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    db.mnl.append((20, 21, "operator"))
+    before = copy.deepcopy((db.listings, db.properties, db.events))
+    calls: list[dict[str, Any]] = []
+    result = A.apply_plan(db, _plan(db), dry_run=True, merge=db.merge(calls))
+    assert calls == []
+    assert (db.listings, db.properties, db.events) == before
+    assert all(r["dry_run"] for r in db.ledger)
+    assert sorted((r["cluster_key"], r["outcome"]) for r in db.ledger) == [
+        (10, "planned"), (20, "skipped")]
+    assert result["planned"][0]["survivor_id"] == 100
+    assert not any("property_merge_events" in s for s in db.statements)
+
+
+def test_live_merges_go_through_the_chokepoint_one_group_per_engine_group() -> None:
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    calls: list[dict[str, Any]] = []
+    plan = A.plan_apply(db, GEN, A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True))
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    assert [c["retired_id"] for c in calls] == [200, 300]
+    assert {c["merge_group_id"] for c in calls} == {result["applied"][0]["merge_group_id"]}
+    first = calls[0]
+    assert first["source"] == "autodedup" and first["survivor_id"] == 100
+    assert first["reason"] == f"autodedup {GEN} 10" and first["confidence"] == 0.99
+    assert first["markers"]["generation"] == GEN and first["markers"]["cluster_key"] == 10
+    assert first["markers"]["feature_version"] == 9
+    assert {row["property_id"] for row in db.listings.values()} == {100}
+    assert {e["generation"] for e in db.events} == {f"autodedup:{GEN}"}
+    applied = [r for r in db.ledger if r["outcome"] == "applied"]
+    assert [(r["survivor_property_id"], r["retired_property_id"]) for r in applied] == [
+        (100, 200), (100, 300)]
+    assert result["counts"]["applied"] == 1 and result["counts"]["listings_moved"] == 2
+
+
+def test_the_default_merge_is_the_chokepoint_and_its_source_is_registered() -> None:
+    import inspect
+
+    assert inspect.signature(A.apply_plan).parameters["merge"].default \
+        is property_identity.merge_properties
+    assert inspect.signature(A.unapply).parameters["unmerge"].default \
+        is property_identity.unmerge_group
+    assert A.MERGE_SOURCE in typing.get_args(property_identity.MergeSource)
+
+
+def test_a_second_run_is_idempotent() -> None:
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    calls: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge(calls))
+    again = A.plan_apply(db, GEN, scope)
+    assert again.groups == [] and again.counts["already_one_property"] == 1
+    A.apply_plan(db, again, dry_run=False, merge=db.merge(calls))
+    assert len(calls) == 1
+
+
+def test_a_refusal_rolls_the_whole_group_back_and_is_final_for_the_generation() -> None:
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    calls: list[dict[str, Any]] = []
+    result = A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False,
+                          merge=db.merge(calls, fail_on={300}))
+    assert len(calls) == 2  # 200 merged, then 300 refused ...
+    assert {row["property_id"] for row in db.listings.values()} == {100, 200, 300}  # ... undone
+    assert db.properties[200]["status"] == "active" and db.events == []
+    assert result["counts"]["refused"] == 1 and result["counts"]["applied"] == 0
+    assert {r["outcome"] for r in db.ledger} == {"refused"}
+    assert _only(A.plan_apply(db, GEN, scope)).reasons == [A.SKIP_REFUSED_BEFORE]
+
+
+# ------------------------------------------------------------------ undo
+
+
+def _applied_two(db: FakeDb) -> tuple[A.Scope, list[dict[str, Any]]]:
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    calls: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge(calls))
+    return scope, calls
+
+
+def test_unapply_undoes_a_generation_newest_first_and_it_never_re_applies() -> None:
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    groups = [c["merge_group_id"] for c in calls]
+    listing = A.unapply(db, GEN, dry_run=True)
+    assert [g["merge_group_id"] for g in listing["groups"]] == groups[::-1]
+    assert all(r["undone_at"] is None for r in db.ledger)
+
+    db.settings[A.ENABLED_SETTING] = False  # undo is NOT gated by the switch
+    undone: list[str] = []
+    result = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge(undone))
+    assert undone == groups[::-1] and result["counts"]["undone"] == 2
+    assert {lid: row["property_id"] for lid, row in db.listings.items()} == {
+        10: 100, 11: 200, 20: 300, 21: 400}
+    assert all(r["undone_at"] is not None for r in db.ledger if r["outcome"] == "applied")
+
+    replan = A.plan_apply(db, GEN, scope)
+    assert {g.cluster_key: g.reasons for g in replan.groups} == {
+        10: [A.SKIP_GENERATION_UNAPPLIED], 20: [A.SKIP_GENERATION_UNAPPLIED]}
+    # A LATER generation may merge the same properties again.
+    db.group(10, [10, 11], gen="g13")
+    later = A.plan_apply(db, "g13", scope)
+    assert [g.reasons for g in later.groups] == [[]]
+
+
+def test_unapply_one_group_and_one_already_undone_elsewhere() -> None:
+    db = FakeDb()
+    _scope, calls = _applied_two(db)
+    first, second = calls[0]["merge_group_id"], calls[1]["merge_group_id"]
+    db.unmerge([])(db, merge_group_id=second, undone_by="operator")  # the ledger UI's undo
+    result = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
+    assert result["counts"] == {"groups": 2, "undone": 1, "already_undone": 1,
+                                "listings_moved_back": 1, "conflicts": 0}
+    one = A.unapply(db, GEN, dry_run=True, cluster_key=10)
+    assert one["groups"] == []  # both groups are now recorded as undone
+    assert first != second
+
+
+def test_a_merge_restored_outside_the_engine_is_never_re_merged() -> None:
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    db.unmerge([])(db, merge_group_id=calls[0]["merge_group_id"], undone_by="operator")
+    reasons = {g.cluster_key: g.reasons for g in A.plan_apply(db, GEN, scope).groups}
+    assert reasons == {10: [A.SKIP_RESTORED_ELSEWHERE]}
+
+
+# ------------------------------------------------------------------ the lane
+
+
+def _factory(db: FakeDb) -> Any:
+    return lambda: db
+
+
+def test_the_lane_mode_dry_runs_by_default_and_writes_its_artifact(tmp_path: Path) -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    out = A.run_apply(_factory(db), {"generation": GEN}, tmp_path)
+    assert out["dry_run"] is True and out["counts"]["planned"] == 1
+    body = json.loads((tmp_path / "apply.json").read_text())
+    assert body["plan"][0]["survivor_id"] == 100
+    assert db.closed and all(r["dry_run"] for r in db.ledger)
+    assert lane.MODES["apply"] is A.run_apply and lane.MODES["unapply"] is A.run_unapply
+
+
+def test_the_lane_refuses_live_without_the_switch_or_the_scope(tmp_path: Path) -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    # The switch is read first; the scope decides only once the switch is on.
+    db.settings[A.SCOPE_SETTING] = {"category_types": ["prodej"], "all_blocks": True}
+    with pytest.raises(SystemExit, match=A.ENABLED_SETTING):
+        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
+    db.settings[A.ENABLED_SETTING] = True
+    del db.settings[A.SCOPE_SETTING]
+    with pytest.raises(SystemExit, match="scope"):
+        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
+    # A run's args cannot supply the area the operator's setting does not name.
+    db.settings[A.SCOPE_SETTING] = {"category_types": ["prodej"]}
+    with pytest.raises(SystemExit, match="area"):
+        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0",
+                                   "blocks": "obec:563510"}, tmp_path)
+    # An empty dry_run= is a dry run, never a live one.
+    assert A.run_apply(_factory(db), {"generation": GEN, "dry_run": ""}, tmp_path)["dry_run"]
+    db.ledger.clear()
+    with pytest.raises(SystemExit, match="unknown arg"):
+        A.run_apply(_factory(db), {"generation": GEN, "scope": "x"}, tmp_path)
+    with pytest.raises(SystemExit, match="generation"):
+        A.run_apply(_factory(db), {}, tmp_path)
+    assert db.ledger == []
+
+
+def test_the_lane_applies_live_when_switched_on(tmp_path: Path, monkeypatch: Any) -> None:
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    calls: list[dict[str, Any]] = []
+    original = A.apply_plan
+    monkeypatch.setattr(A, "apply_plan",
+                        lambda conn, plan, dry_run: original(conn, plan, dry_run,
+                                                             merge=db.merge(calls)))
+    out = A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
+    assert out["counts"]["applied"] == 1 and len(calls) == 1
+    un = A.run_unapply(_factory(db), {"generation": GEN}, tmp_path)
+    assert un["dry_run"] is True and len(un["groups"]) == 1
+
+
+def test_the_lane_run_summary_is_a_lane_summary(tmp_path: Path) -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    code = lane.run("apply", f"generation={GEN}", tmp_path, conn_factory=_factory(db))
+    assert code == 0
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["ok"] and summary["result"]["counts"]["planned"] == 1
+
+
+def test_the_seeded_switches_leave_a_live_lane_run_inert(tmp_path: Path) -> None:
+    # Migration 558's seed, in shape: OFF, and a scope with a deal type but no area.
+    db = FakeDb()
+    db.settings[A.ENABLED_SETTING] = False
+    db.settings[A.SCOPE_SETTING] = {
+        "category_types": ["prodej"], "blocks": None, "listing_ids": None,
+        "all_blocks": False, "max_cluster_size": 8, "max_clusters_per_run": 200}
+    _pair_group(db, 10, [10, 11], [100, 200])
+    before = copy.deepcopy((db.listings, db.properties, db.events))
+    with pytest.raises(SystemExit, match=A.ENABLED_SETTING):
+        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
+    db.settings[A.ENABLED_SETTING] = True
+    with pytest.raises(SystemExit, match="area"):
+        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
+    assert (db.listings, db.properties, db.events) == before and db.ledger == []
+
+
+def test_the_run_summary_names_every_refusal(tmp_path: Path, monkeypatch: Any) -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    db.mnl.append((20, 21, "operator"))
+    page = tmp_path / "step_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    A.run_apply(_factory(db), {"generation": GEN}, tmp_path)
+    text = page.read_text()
+    assert "DRY RUN" in text and "| planned | 1 |" in text
+    assert "| must_not_link | 1 |" in text
+    assert "| 10 | 100 | 200 |" in text and "| 20 | 300 | 400 | must_not_link |" in text
+
+
+def test_nothing_but_the_lane_reaches_the_apply_path() -> None:
+    # Inert when off: no module, schedule or worker calls it, only an operator's dispatch.
+    import re
+
+    root = Path(A.__file__).resolve().parent.parent
+    importer = re.compile(r"from autodedup\.apply import|from autodedup import apply\b"
+                          r"|import autodedup\.apply\b")
+    callers = sorted(
+        path.relative_to(root).as_posix()
+        for top in ("autodedup", "scraper", "toolkit", "api", "scripts", "location_data")
+        for path in (root / top).rglob("*.py")
+        if importer.search(path.read_text(encoding="utf-8"))
+    )
+    assert callers == ["autodedup/lane.py"]
+    workflow = (root / ".github" / "workflows" / "autodedup.yml").read_text(encoding="utf-8")
+    trigger = workflow.split("\non:\n", 1)[1].split("\nconcurrency:", 1)[0]
+    assert "schedule" not in trigger and "workflow_dispatch" in trigger

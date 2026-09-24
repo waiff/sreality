@@ -385,6 +385,9 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     "autodedup.resolve_queue",
     "autodedup.scan_cursor",
     "autodedup.judge_queue",
+    # W29's apply ledger (migration 558): what the engine merged in production, dry runs and
+    # refusals included. Backend-only like the rest of the schema.
+    "autodedup.applied_merges",
     # The sold-transaction fetch LEDGER (migration 542). The sales themselves are market
     # data behind `sold_transactions_public`; the ledger is not. A cell is fetched only
     # where some account holds a live deal-pipeline card, so its obec set is a projection

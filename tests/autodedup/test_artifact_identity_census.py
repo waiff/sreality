@@ -26,6 +26,7 @@ PACKAGE = Path(labels_lane.__file__).resolve().parent
 
 # The modules that produce a file under `out/`, and the statements they run to fill it.
 LANE_WRITERS: tuple[str, ...] = (
+    "apply.py", "apply_sql.py",
     "census.py", "compare.py", "errors.py", "evaluate.py", "export.py", "export_sql.py",
     "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
     "judge_lane.py", "judge_prompts.py",

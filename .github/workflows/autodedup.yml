@@ -311,6 +311,32 @@ name: "AUTODEDUP: engine lane"
 #             carries (exit 2, nothing written) rather than reporting a green run that
 #             changed nothing. This run does NOT add a ledger row of its own.
 #
+#   apply   - W29. DRY RUN BY DEFAULT: plans one generation's groups into production merges
+#             and writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json.
+#             Per group it names the survivor (the property with the most listings; a tie
+#             goes to the oldest first_seen_at, then the lowest id) and the properties that
+#             would retire into it, or records why the group is refused: a member with no
+#             property yet, a property not active, oversize, an operator negative (group or
+#             pair verdict, must-not-link) anywhere across the listings the merge would move,
+#             mixed deal types or incompatible categories (the chokepoint's own helper), a
+#             property the engine split across two groups, a chokepoint refusal on an earlier
+#             run, or a property this engine merged once that is active again. `dry_run=0`
+#             merges for real through toolkit.property_identity.merge_properties (source
+#             'autodedup', ONE merge group per engine group) ONLY when
+#             app_settings.autodedup_apply_enabled is true (seeded false by migration 558,
+#             edited on /settings) - re-read before every group, so flipping it off stops a
+#             run between two groups - and only inside app_settings.autodedup_apply_scope,
+#             which must ITSELF name category_types and an area (blocks, listing_ids or
+#             all_blocks=true; a dispatch cannot supply them). An empty dry_run= is a dry run. The run's own scope args can NARROW that row,
+#             never widen it; on a dry run they replace it key by key. At most
+#             max_clusters_per_run groups per run (default 200), in cluster_key order.
+#
+#   unapply - W29. DRY RUN BY DEFAULT: lists every live merge group one generation applied,
+#             newest first. `dry_run=0` undoes them through unmerge_group in that order and
+#             marks them undone in autodedup.applied_merges; `cluster_key=` undoes one group.
+#             NOT gated by autodedup_apply_enabled - undo is the way back. A generation that
+#             was unapplied never re-applies; a later generation may.
+#
 # Every other mode writes its own ledger row automatically - `running` when it starts, a
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
 # without migration 528 costs the row, never the run.
@@ -362,7 +388,12 @@ name: "AUTODEDUP: engine lane"
 # rt_parity accepts export_run, cohort, n, pairs, seed, generation, settings, model and
 # population (frozen, the default, or artifact); rt_equivalence accepts generation (default
 # rt), batch (REQUIRED - the batch generation to compare against) and tol (the score
-# tolerance, default 1e-6).
+# tolerance, default 1e-6); apply accepts generation (REQUIRED), dry_run (1, the default, or
+# 0) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=obec:563510
+# cast_obce:490245`), listing_ids (SPACE-separated), all_blocks, max_cluster_size and
+# max_clusters_per_run - separate args, not one JSON `scope=`, because this workflow's
+# charset check refuses braces and quotes; unapply accepts generation (REQUIRED), dry_run and
+# cluster_key.
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
@@ -372,7 +403,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, switch on) one generation's production merges; unapply = undo them."
         required: true
         default: "census"
         type: string
