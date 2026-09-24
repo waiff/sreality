@@ -49,13 +49,16 @@ if (!BASE_URL) {
  * sign in" — not a network failure. `status: 401` + this sentinel `detail`
  * lets the panel show a sign-in prompt instead of a raw error string. */
 export const NOT_SIGNED_IN_DETAIL = 'not_signed_in';
+/* A build without VITE_API_BASE_URL; the search page's notice (index_overlay.ts,
+ * by value) offers no retry for it. */
+export const API_NOT_CONFIGURED_DETAIL = 'API base URL not configured';
 
 async function request<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<ApiResult<T>> {
   if (!BASE_URL) {
-    return { ok: false, status: 0, detail: 'API base URL not configured' };
+    return { ok: false, status: 0, detail: API_NOT_CONFIGURED_DETAIL };
   }
   const token = await getAccessToken();
   if (!token) {

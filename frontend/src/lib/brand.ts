@@ -8,7 +8,8 @@
  * whole repo checked out. Change the name here and it flows to:
  *   - the SPA header wordmark (components/Shell.tsx, derived from APP_NAME)
  *   - every SPA browser-tab title (lib/pageTitle.tsx)
- *   - the extension panel wordmark (chrome-extension/src/content.ts)
+ *   - the extension panel wordmark (chrome-extension/src/content.ts) and the
+ *     search-page notice's (chrome-extension/src/index_overlay.ts)
  *   - the extension's chrome://extensions name (manifest, built from
  *     EXTENSION_NAME by chrome-extension/vite.config.ts)
  *
