@@ -20,7 +20,7 @@
 // is the same string as the panel header's.
 import { APP_NAME } from '../../frontend/src/lib/brand';
 import { detailRef, portalForHost, type Portal, type PortalRef } from './portals';
-import type { ApiMessage, ApiResult, PortalListing } from './types';
+import type { ApiMessage, ApiResult, AuthState, PortalListing } from './types';
 
 type Caller = <T>(m: ApiMessage) => Promise<ApiResult<T>>;
 type OpenPanel = (
@@ -43,54 +43,50 @@ const MAX_LOOKUP_PER_PASS = 50;
  * A failed lookup leaves nothing to badge, and the page used to stay silent: a
  * signed-out operator got no badge, no CTA and no sign-in prompt — while a
  * detail page in the same state shows the panel's prompt — and read it as a
- * broken extension. Now a failure raises ONE page-level notice in the panel's
- * corner, offering what can fix it: sign-in when signed out, a page reload when
- * an extension update orphaned this script, a retry for other errors, nothing
- * for a build without an API URL. Page-level, not per-card: for listings we
- * have no row for, the sale-apartment gate is a URL hint only
- * sreality/idnes/ceskereality provide, so a per-card prompt would be invisible
- * on the other portals. It shows only while cards the URL doesn't rule out as
- * sale apartments wait on the failed lookup — never on a page without listing
- * cards. On those three portals that also keeps it off rental and house
- * searches; elsewhere any card counts. It steps aside while the panel is open
- * (a badge click opens it in the same corner, with its own sign-in prompt).
- * × holds for the overlay's lifetime.
+ * broken extension (2026-09-24). A failure now raises ONE page-level notice
+ * offering what can fix it: sign-in when signed out, a page reload when an
+ * extension update orphaned this script, a retry for other errors, nothing for
+ * a build without an API URL. Page-level, not per-card: for listings we have
+ * no row for, the sale-apartment gate is a URL hint only sreality / idnes /
+ * ceskereality provide, so a per-card prompt would be invisible on the other
+ * portals. It shows only while cards the URL doesn't rule out as sale
+ * apartments wait on the failed lookup — never on a page without listing
+ * cards, and on those three portals not on a rental or house search. It sits
+ * bottom-LEFT: the panel owns the bottom-right corner and a badge click can
+ * open it while the notice is up (a new card's lookup failing under an open
+ * panel), so the two never share a corner. × hides it for the overlay's
+ * lifetime.
  *
  * Backoff: after a failure, observer-driven passes don't ask again for
  * LOOKUP_RETRY_AFTER_MS — a 401 costs no network, but in a real outage every
- * DOM mutation (re-renders, infinite scroll, the notice mounting itself) would
- * re-fetch. The notice's button skips the wait.
+ * DOM mutation (re-renders, infinite scroll) would re-fetch. The notice's
+ * buttons and the tab becoming visible again skip the wait, so a sign-in made
+ * in the panel or another tab is picked up when the operator comes back — the
+ * content script never sees the session itself (it stays in the background
+ * worker; the sign-in button asks get_auth_state first and skips the Google
+ * round trip when a session already exists).
  *
- * Generations: one lookup is out at a time, but a sign-in, a sign-out or the
- * retry button starts a new generation. Its lookup goes out even while an
- * older one is pending (a hung request can't swallow the click), and answers
- * to older asks are dropped (an old 401 landing after a sign-in would raise a
- * false notice; an old session's rows would badge the new one's cards). A
- * lookup unanswered after LOOKUP_TIMEOUT_MS counts as failed, so a hung one
- * can't leave the page silent either.
- *
- * Sessions: a sign-in or sign-out anywhere — this notice, the panel, another
- * tab — rewrites the session in chrome.storage, so the overlay watches that
- * key. The failure clears and the cards get their lookup without a second
- * click here. Rows are account-scoped (estimation, pipeline, collections), so
- * a session change also drops the cached rows and the badges built from them.
+ * Generations: one lookup is out at a time, but a sign-in or the retry button
+ * starts a new generation whose lookup goes out even while an older one is
+ * pending (a hung request can't swallow the click); answers to older asks are
+ * dropped (an old 401 landing after a sign-in would raise a false notice). A
+ * lookup unanswered after LOOKUP_TIMEOUT_MS is SHOWN as failed so a hung one
+ * can't leave the page silent — but its answer, if it lands later, still
+ * counts: the deadline decides what the notice says, not what the cache holds.
  *
  * Teardown: stop() removes the notice, and everything that awaits re-checks
  * `stopped` — a sign-in or lookup resolving after a route change must not
  * re-mount the notice or re-scan a page this overlay no longer owns. */
 const NOTICE_HOST_ID = '__mf_notice_host__';
 const LOOKUP_RETRY_AFTER_MS = 60_000;
-/* Prod answers in well under a second; past this a lookup counts as failed. */
+/* Prod answers in well under a second; past this a lookup reads as failed. */
 const LOOKUP_TIMEOUT_MS = 20_000;
+/* A retry that fails again within a frame (offline: "Failed to fetch" is
+ * near-instant) would change nothing on screen; the busy state holds this long. */
+const RETRY_MIN_BUSY_MS = 400;
 /* A live region inserted already filled is typically not announced, so the
  * notice goes in empty and gets its text a frame + this long later. */
 const LIVE_REGION_SETTLE_MS = 100;
-
-/* content.ts's HOST_ELEMENT_ID and auth.ts's SESSION_KEY, by value: content.ts
- * imports this module (not the reverse), and auth.ts runs only in the
- * background service worker. */
-const PANEL_HOST_ID = '__sreality_yield_panel_host__';
-const SESSION_KEY = 'authSession';
 
 /* Mirrors api.ts's NOT_SIGNED_IN_DETAIL — duplicated by value, not imported, as
  * content.ts does: api.ts runs only in the background service worker, and the
@@ -121,8 +117,7 @@ interface LookupFailure {
 
 interface NoticeView {
   failure: LookupFailure;
-  signingIn: boolean;
-  retrying: boolean;
+  busy: boolean;
   signInError: string | null;
 }
 
@@ -135,6 +130,7 @@ interface NoticeHandlers {
 
 interface NoticeHandle {
   render: (view: NoticeView) => void;
+  connected: () => boolean;
   destroy: () => void;
 }
 
@@ -155,17 +151,7 @@ function failureKind(detail: string): FailureKind {
   return 'error';
 }
 
-/* call() with a deadline: a lookup the background never answers (a wedged
- * API, a stuck worker) turns into a failure the notice can show and retry. */
-function withTimeout<T>(pending: Promise<ApiResult<T>>, ms: number): Promise<ApiResult<T>> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<ApiResult<T>>((resolve) => {
-    timer = setTimeout(() => resolve({
-      ok: false, status: 0, detail: `Server neodpověděl do ${ms / 1000} s`,
-    }), ms);
-  });
-  return Promise.race([pending, late]).finally(() => clearTimeout(timer));
-}
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /* Returns a stop() to disconnect the observer + cancel any pending scan + remove
  * the failure notice — called when a route change (SPA soft-nav) moves the tab
@@ -183,17 +169,16 @@ export async function runIndexOverlay(
 
   let stopped = false;
   let failure: LookupFailure | null = null;
-  let failedAt: number | null = null;  // backoff anchor (monotonic); null = free to look up
-  let cardsWaiting = false;  // the last pass saw possible sale cards with no successful lookup
+  let failedAt: number | null = null;  // backoff anchor (monotonic); null = free to ask
+  let cardsWaiting = false;  // the last pass saw possible sale cards with no row yet
   let dismissed = false;
   let signingIn = false;
   let retrying = false;
   let signInError: string | null = null;
   let notice: NoticeHandle | null = null;
-  let gen = 0;  // bumped by a sign-in, a sign-out or a retry: older answers are stale
+  let gen = 0;  // bumped by a sign-in or a retry: answers to older asks are stale
   let inFlightGen: number | null = null;  // generation of the lookup that is out
   let rescan = false;  // a pass skipped its lookup because this generation's was out
-  let sessionKnown = false;  // a sign-in or a successful lookup since the last 401 / sign-out
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   const schedule = (): void => {
@@ -205,46 +190,54 @@ export async function runIndexOverlay(
   const backingOff = (): boolean =>
     failedAt != null && performance.now() - failedAt < LOOKUP_RETRY_AFTER_MS;
 
-  /* The notice is a pure function of the state above: shown, updated in place,
-   * or removed — never a second host. */
+  const handlers: NoticeHandlers = {
+    signIn: () => { void signIn(); },
+    retry: () => { void retry(); },
+    reload: () => { location.reload(); },
+    dismiss: () => { dismissed = true; syncNotice(); },
+  };
+
+  /* The notice is a pure function of the state above: shown, updated in
+   * place, or removed — never a second host. While an ask for the current
+   * generation is out, a notice that isn't up stays down (the answer decides;
+   * raising the previous failure meanwhile would offer a retry that throws
+   * that answer away) and one that is up reads busy. */
   function syncNotice(): void {
-    const panelOpen = document.getElementById(PANEL_HOST_ID) != null;
-    if (stopped || dismissed || failure == null || !cardsWaiting || panelOpen) {
+    const current = failure;
+    if (stopped || dismissed || current == null || !cardsWaiting) {
       notice?.destroy();
       notice = null;
       return;
     }
-    notice ??= mountNotice({
-      signIn: () => { void signIn(); },
-      retry: () => { void retry(); },
-      reload: () => { location.reload(); },
-      dismiss: () => { dismissed = true; syncNotice(); },
-    });
-    notice.render({ failure, signingIn, retrying, signInError });
-  }
-
-  /* A new session, or none: start a new generation and forget the old
-   * session's failure, rows and badges. */
-  function sessionChanged(): void {
-    gen++;
-    failure = null;
-    failedAt = null;
-    signInError = null;
-    cache.clear();
-    for (const card of Array.from(document.querySelectorAll<HTMLElement>(`[${PROCESSED_ATTR}]`))) {
-      clearBadge(card);
+    if (notice != null && !notice.connected()) {
+      // The portal re-rendered <body>'s children and took our host with them.
+      notice.destroy();
+      notice = null;
     }
-    syncNotice();
+    const looking = inFlightGen === gen;
+    if (notice == null) {
+      if (looking) return;
+      notice = mountNotice(handlers);
+    }
+    notice.render({
+      failure: current,
+      busy: current.kind === 'signed_out' ? signingIn : looking || retrying,
+      signInError,
+    });
   }
 
-  /* False for a session this overlay already knows: the storage broadcast of
-   * the notice's own sign-in can land after its answer, and must not drop the
-   * lookup that answer already sent. */
-  function sessionAppeared(): boolean {
-    if (sessionKnown) return false;
-    sessionKnown = true;
-    sessionChanged();
-    return true;
+  function settle(res: ApiResult<PortalListing[]>): void {
+    if (res.ok) {
+      for (const l of res.data) cache.set(l.source_id, l);
+      failure = null;
+      failedAt = null;
+      signInError = null;
+      return;
+    }
+    const kind = failureKind(res.detail);
+    if (failure?.kind !== kind) signInError = null;
+    failure = { kind, detail: res.detail };
+    failedAt = performance.now();
   }
 
   async function lookup(hits: Hit[]): Promise<void> {
@@ -258,29 +251,29 @@ export async function runIndexOverlay(
     }
     const asked = gen;
     inFlightGen = asked;
-    let res: ApiResult<PortalListing[]>;
-    try {
-      res = await withTimeout(call<PortalListing[]>({
-        type: 'lookup_listings',
-        items: ids.map((id) => ({ source: portal!.source, source_id: id })),
-      }), LOOKUP_TIMEOUT_MS);
-    } finally {
-      if (inFlightGen === asked) inFlightGen = null;
-    }
+    syncNotice();  // a notice already up reads busy while this ask is out
+    const answer = call<PortalListing[]>({
+      type: 'lookup_listings',
+      items: ids.map((id) => ({ source: portal!.source, source_id: id })),
+    });
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<null>((resolve) => {
+      deadline = setTimeout(() => resolve(null), LOOKUP_TIMEOUT_MS);
+    });
+    const res = await Promise.race([answer, late]);
+    clearTimeout(deadline);
+    if (inFlightGen === asked) inFlightGen = null;
     // Superseded: the newer generation's pass asks (or already has) for itself.
     if (stopped || asked !== gen) return;
-    if (res.ok) {
-      for (const l of res.data) cache.set(l.source_id, l);
-      sessionKnown = true;
-      failure = null;
-      failedAt = null;
-      signInError = null;
+    if (res == null) {
+      settle({ ok: false, status: 0, detail: `Server neodpověděl do ${LOOKUP_TIMEOUT_MS / 1000} s` });
+      void answer.then((eventual) => {
+        if (stopped || asked !== gen || !eventual.ok) return;
+        settle(eventual);
+        schedule();
+      });
     } else {
-      const kind = failureKind(res.detail);
-      if (kind === 'signed_out') sessionKnown = false;
-      if (failure?.kind !== kind) signInError = null;
-      failure = { kind, detail: res.detail };
-      failedAt = performance.now();
+      settle(res);
     }
     if (rescan) {
       rescan = false;
@@ -313,7 +306,9 @@ export async function runIndexOverlay(
   }
 
   /* The same background-owned PKCE sign-in the panel's prompt runs (a content
-   * script can't reach chrome.identity); on success the cards get their lookup. */
+   * script can't reach chrome.identity) — unless a session already exists,
+   * made in the panel or another tab, in which case the cards just get their
+   * lookup. On success the page asks again right away. */
   async function signIn(): Promise<void> {
     if (signingIn) return;
     signingIn = true;
@@ -321,20 +316,33 @@ export async function runIndexOverlay(
     syncNotice();
     let ok = false;
     try {
-      const res = await call<undefined>({ type: 'sign_in' });
-      ok = res.ok;
-      if (!res.ok) signInError = `Přihlášení selhalo: ${res.detail}`;
+      const auth = await call<AuthState>({ type: 'get_auth_state' });
+      if (stopped) return;
+      if (auth.ok && auth.data.signedIn) {
+        ok = true;
+      } else if (!auth.ok && failureKind(auth.detail) === 'reload') {
+        failure = { kind: 'reload', detail: auth.detail };
+      } else {
+        const res = await call<undefined>({ type: 'sign_in' });
+        if (stopped) return;
+        if (res.ok) ok = true;
+        else if (failureKind(res.detail) === 'reload') failure = { kind: 'reload', detail: res.detail };
+        else signInError = `Přihlášení selhalo: ${res.detail}`;
+      }
     } finally {
       signingIn = false;
       syncNotice();
     }
-    if (!ok || stopped) return;
-    sessionAppeared();  // a no-op when the storage broadcast brought it first
+    if (!ok) return;
+    gen++;  // whatever was asked without a session is stale
+    failure = null;
+    failedAt = null;
     await pass();
   }
 
   /* Asks now, past the backoff and past a lookup that is still out; the
-   * button reads "Načítám…" until this lookup settles. */
+   * button reads "Načítám…" until this lookup settles, for at least
+   * RETRY_MIN_BUSY_MS. */
   async function retry(): Promise<void> {
     if (retrying) return;
     retrying = true;
@@ -342,45 +350,30 @@ export async function runIndexOverlay(
     gen++;
     syncNotice();
     try {
-      await pass();
+      await Promise.all([pass(), sleep(RETRY_MIN_BUSY_MS)]);
     } finally {
       retrying = false;
       syncNotice();
     }
   }
 
-  /* A sign-out, or a sign-in: a session where there was none, or a rewrite
-   * while this page is signed out. Any other rewrite is a token refresh. */
-  const onStorage = (
-    changes: { [key: string]: chrome.storage.StorageChange }, area: string,
-  ): void => {
-    const change = changes[SESSION_KEY];
-    if (stopped || area !== 'local' || change == null) return;
-    if (change.newValue == null) {
-      if (change.oldValue == null) return;
-      sessionKnown = false;
-      sessionChanged();
-      schedule();
-      return;
-    }
-    if (change.oldValue != null && failure?.kind !== 'signed_out') return;
-    if (sessionAppeared()) schedule();
+  /* Coming back to this tab: the operator may have signed in (or the outage
+   * ended) meanwhile — ask again now rather than after the backoff. */
+  const onVisibility = (): void => {
+    if (stopped || failure == null || document.visibilityState !== 'visible') return;
+    failedAt = null;
+    schedule();
   };
 
   const obs = new MutationObserver(schedule);
   obs.observe(document.body, { childList: true, subtree: true });
-  /* The panel host sits on <html>, outside the body observer's reach; the
-   * notice steps aside while it's open and comes back when it closes. */
-  const panelObs = new MutationObserver(() => { syncNotice(); });
-  panelObs.observe(document.documentElement, { childList: true });
-  chrome.storage.onChanged?.addListener(onStorage);
+  document.addEventListener('visibilitychange', onVisibility);
   void pass();
 
   return () => {
     stopped = true;
     obs.disconnect();
-    panelObs.disconnect();
-    chrome.storage.onChanged?.removeListener(onStorage);
+    document.removeEventListener('visibilitychange', onVisibility);
     if (timer != null) clearTimeout(timer);
     syncNotice();
   };
@@ -510,7 +503,7 @@ const NOTICE_CSS = `
   :host { all: initial; }
   [hidden] { display: none !important; }
   .__mf_notice {
-    position: fixed; right: 1.25rem; bottom: 1.25rem; z-index: 2147483646;
+    position: fixed; left: 1.25rem; bottom: 1.25rem; z-index: 2147483646;
     box-sizing: border-box; width: max-content;
     max-width: min(21rem, calc(100vw - 2.5rem));
     padding: 0.6rem 0.85rem 0.8rem;
@@ -596,9 +589,10 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
   let busy = false;
   const action = button('n-primary', '');
   action.onclick = () => {
-    if (!live || busy) return;
+    if (!live) return;
+    if (kind === 'reload') { on.reload(); return; }
+    if (busy) return;
     if (kind === 'signed_out') on.signIn();
-    else if (kind === 'reload') on.reload();
     else if (kind === 'error') on.retry();
   };
 
@@ -607,9 +601,9 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
   document.body.appendChild(host);
 
   let latest: NoticeView | null = null;
-  let settle: ReturnType<typeof setTimeout> | null = null;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
   const frame = requestAnimationFrame(() => {
-    settle = setTimeout(() => {
+    settleTimer = setTimeout(() => {
       live = true;
       box.classList.remove('is-pending');
       if (latest != null) paint(latest);
@@ -618,14 +612,17 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
 
   function paint(view: NoticeView): void {
     kind = view.failure.kind;
+    busy = view.busy;
     const signedOut = kind === 'signed_out';
-    busy = signedOut ? view.signingIn : kind === 'error' && view.retrying;
-    const failLine = signedOut ? view.signInError : null;
     setText(text, signedOut
       ? 'Pro výnosy na kartách se prosím přihlaste.'
       : 'Výnosy se nepodařilo načíst.');
-    setText(detail, signedOut ? '' : view.failure.detail);
-    detail.hidden = signedOut;
+    /* The detail line sits in the live region: "Načítám…" and then the error
+     * again is what tells a screen reader (and the eye) a retry ran and failed. */
+    const detailLine = signedOut ? '' : busy ? 'Načítám…' : view.failure.detail;
+    setText(detail, detailLine);
+    detail.hidden = detailLine === '';
+    const failLine = signedOut ? view.signInError : null;
     setText(error, failLine ?? '');
     error.hidden = failLine == null;
     if (busy) action.setAttribute('aria-disabled', 'true');
@@ -644,9 +641,10 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
       latest = view;
       if (live) paint(view);
     },
+    connected: () => host.isConnected,
     destroy(): void {
       cancelAnimationFrame(frame);
-      if (settle != null) clearTimeout(settle);
+      if (settleTimer != null) clearTimeout(settleTimer);
       host.remove();
     },
   };

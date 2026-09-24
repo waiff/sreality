@@ -737,18 +737,18 @@ rules. Identify which one a task belongs to before you start.
   `POST /listings/lookup`, which maps a card's on-page `(source, native id)` to our row +
   MF figures + `sreality_id` (the public views don't expose `source_id_native`, so the
   browser can't resolve non-sreality listings directly). Badges come only from a successful
-  lookup; a failed one raises a single page-level corner notice (closed shadow root, only while
-  cards the URL doesn't rule out as sale apartments are waiting on it, held back while the
-  panel — same corner — is open) — a sign-in button when signed out (the 401 used to leave
-  search pages silent, read as a broken extension), the error + retry otherwise — and holds
-  observer-driven re-lookups off for 60 s (an extension reload that orphaned the tab offers a
-  page reload instead of a retry; a lookup unanswered for 20 s counts as failed). One lookup is
-  in flight per generation: a sign-in, a sign-out or the retry button starts a new one whose
-  lookup goes out past a pending one, and older answers are dropped. The overlay watches the
-  `authSession` storage key, so a sign-in or sign-out anywhere (panel, another tab) clears the
-  failure plus the account-scoped cached rows and badges; the overlay's `stop()` removes the
-  notice on route change. `src/portals.ts` is the single source of truth for host→portal +
-  detail-URL→native-id. One entry per Vite pass since #1524 (`npm run build` runs
+  lookup; a failed one raises ONE page-level notice (bottom-LEFT corner — the panel owns the
+  right one — in a closed shadow root, shown only while cards the URL doesn't rule out as sale
+  apartments wait on it): a sign-in button when signed out (that 401 used to leave search pages
+  silent, read as a broken extension — 2026-09-24), "Obnovit stránku" when an extension reload
+  orphaned the tab, the error + "Zkusit znovu" otherwise (no button for a build without an API
+  URL). Automatic re-lookups back off 60 s, `visibilitychange` re-asks at once (a sign-in made in
+  the panel or another tab heals the page — the content script never receives the session; the
+  sign-in button asks `get_auth_state` first and skips the Google round trip if one exists); one
+  lookup is out per generation (a sign-in or the retry starts a new one, older answers are
+  dropped); a lookup unanswered after 20 s shows as failed but a late `ok` still badges;
+  `stop()` removes the notice on route change. `src/portals.ts` is the single source of truth for
+  host→portal + detail-URL→native-id. One entry per Vite pass since #1524 (`npm run build` runs
   `vite build --mode content` then `--mode background`: `content.js` a self-contained IIFE
   classic script with `index_overlay.ts` bundled in, `background.js` ESM) plus a copied-over
   `manifest.json` and `icon-{16,48,128}.png`; output lands in `chrome-extension/dist/`.

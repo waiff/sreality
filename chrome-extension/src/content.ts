@@ -2485,12 +2485,18 @@ export async function openPanel(
   /* Every route needs a real session now (Wave 1) — check first so a
    * signed-out operator sees one clean prompt instead of a lookup 401. */
   const auth = await call<AuthState>({ type: 'get_auth_state' });
-  const authEmail = auth.ok && auth.data.signedIn ? auth.data.email : null;
-  if (!auth.ok || !auth.data.signedIn) {
+  if (!auth.ok) {
+    /* The background is unreachable (an extension reload orphaned this tab):
+     * not a sign-in problem, so say what happened instead of prompting for
+     * one — the same state the search page's notice reports. */
+    setStateIf(epoch, (prev) => ({ ...prev, phase: 'error', errorMessage: auth.detail }));
+    return;
+  }
+  if (!auth.data.signedIn) {
     setStateIf(epoch, (prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
     return;
   }
-  setStateIf(epoch, (prev) => ({ ...prev, authEmail }));
+  setStateIf(epoch, (prev) => ({ ...prev, authEmail: auth.data.email }));
 
   let listing: PortalListing | null;
   if (prefetched !== undefined) {

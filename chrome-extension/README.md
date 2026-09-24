@@ -57,18 +57,20 @@ maxima, remax, mmreality, ceskereality).
     into a live stage, lifts the dismissal.
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
-  on-demand estimation by that card's own URL. Badges appear only once the
-  page's lookup succeeds; when it fails, one corner notice says why instead of
-  leaving the page silent — **Přihlásit se přes Google** when signed out,
-  **Obnovit stránku** when an extension reload orphaned the tab, the error with
-  **Zkusit znovu** otherwise (automatic re-lookups back off 60 s; a lookup
-  unanswered for 20 s counts as failed). The notice only appears while listing
-  cards wait on the failed lookup — on sreality, idnes and ceskereality, whose
-  card URLs name the category, not on a rental or house search; on the other
-  portals on any search with cards. It steps aside while the panel is open and
-  clears by itself after a sign-in made anywhere (the panel, another tab). A
-  sign-in or sign-out also drops the badges and asks again, because estimates,
-  pipeline and collections belong to the account.
+  on-demand estimation by that card's own URL. Badges come only from a
+  successful lookup; when it fails the page is not left silent — one small
+  notice in the **bottom-left** corner (the panel owns the bottom-right) says
+  why: **Přihlásit se přes Google** when signed out (a click first checks for
+  a session made elsewhere — the panel, another tab — and skips the Google
+  round trip if there is one), **Obnovit stránku** when an extension reload
+  orphaned the tab, the error + **Zkusit znovu** otherwise (no button for a
+  build without an API URL, which only a rebuild fixes). Automatic re-lookups
+  back off 60 s; the tab becoming visible again asks at once; a lookup
+  unanswered for 20 s shows as failed, though a late answer still badges. The
+  notice appears only while listing cards the URL doesn't rule out as sale
+  apartments are waiting on the failed lookup — never on a page without cards,
+  and on sreality / idnes / ceskereality not on a rental or house search. ×
+  hides it until the next page load.
 
 The default display is a **read** of data we already have — no LLM call. It
 maps each portal listing to our row by `(source, native id)` through the
