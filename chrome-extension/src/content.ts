@@ -181,12 +181,13 @@ interface PanelState {
   errorMessage: string | null;
 }
 
-/* An extension reload or auto-update orphans the content script already in
- * an open tab (Chrome re-injects only on page load): sendMessage then throws
- * "Extension context invalidated." synchronously. call() resolves with that as
- * a failure instead of rejecting — every caller's busy flag ("Přihlašuji…")
- * waits for a result — and says what actually fixes it (a detail the search
- * page's notice recognises, to offer a reload instead of a retry). */
+/* An extension reload, update, disable or removal orphans the content script
+ * already in an open tab (Chrome re-injects only on page load): sendMessage
+ * then throws "Extension context invalidated." synchronously. call() resolves
+ * with that as a failure instead of rejecting — every caller's busy flag
+ * ("Přihlašuji…") waits for a result — and says what actually fixes it (a
+ * detail the search page's notice recognises, to offer a reload instead of a
+ * retry). */
 function runtimeDetail(message: string | undefined): string {
   if (message != null && /context invalidated/i.test(message)) {
     return EXTENSION_RELOADED_DETAIL;

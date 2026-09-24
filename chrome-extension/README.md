@@ -62,8 +62,9 @@ maxima, remax, mmreality, ceskereality).
   notice in the **bottom-left** corner (the panel owns the bottom-right) says
   why: **Přihlásit se přes Google** when signed out (a click first checks for
   a session made elsewhere — the panel, another tab — and skips the Google
-  round trip if there is one), **Obnovit stránku** when an extension reload
-  orphaned the tab, the error + **Zkusit znovu** otherwise (no button for a
+  round trip if there is one), **Obnovit stránku** when the extension was
+  reloaded, updated, disabled or removed under the open tab (the overlay then
+  stops scanning), the error + **Zkusit znovu** otherwise (no button for a
   build without an API URL, which only a rebuild fixes). Automatic re-lookups
   back off 60 s; the tab becoming visible again asks at once; a lookup
   unanswered for 20 s shows as failed, though a late answer still badges. The

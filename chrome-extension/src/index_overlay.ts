@@ -54,8 +54,8 @@ const MAX_LOOKUP_PER_PASS = 50;
  * cards, and on those three portals not on a rental or house search. It sits
  * bottom-LEFT: the panel owns the bottom-right corner and a badge click can
  * open it while the notice is up (a new card's lookup failing under an open
- * panel), so the two never share a corner. × hides it for the overlay's
- * lifetime.
+ * panel), so the two never share a corner. × hides it until the next page
+ * load (a soft-nav round trip through a listing keeps it hidden).
  *
  * Backoff: after a failure, observer-driven passes don't ask again for
  * LOOKUP_RETRY_AFTER_MS — a 401 costs no network, but in a real outage every
@@ -68,11 +68,14 @@ const MAX_LOOKUP_PER_PASS = 50;
  *
  * Generations: one lookup is out at a time, but a sign-in or the retry button
  * starts a new generation whose lookup goes out even while an older one is
- * pending (a hung request can't swallow the click); answers to older asks are
- * dropped (an old 401 landing after a sign-in would raise a false notice). A
- * lookup unanswered after LOOKUP_TIMEOUT_MS is SHOWN as failed so a hung one
- * can't leave the page silent — but its answer, if it lands later, still
- * counts: the deadline decides what the notice says, not what the cache holds.
+ * pending (a hung request can't swallow the click), as does the tab becoming
+ * visible while one is out. Only the current generation decides the notice:
+ * an older ask's FAILURE is dropped (an old 401 landing after a sign-in would
+ * raise a false notice), but an older ask's OK answer still fills the cache
+ * and badges — rows are rows. A lookup unanswered after LOOKUP_TIMEOUT_MS is
+ * SHOWN as failed so a hung one can't leave the page silent, and its answer,
+ * whenever it lands, still counts: the deadline decides what the notice says,
+ * not what the cache holds.
  *
  * Teardown: stop() removes the notice, and everything that awaits re-checks
  * `stopped` — a sign-in or lookup resolving after a route change must not
@@ -96,10 +99,18 @@ const NOT_SIGNED_IN_DETAIL = 'not_signed_in';
  * without VITE_API_BASE_URL, which neither a retry nor a reload can fix. */
 const API_NOT_CONFIGURED_DETAIL = 'API base URL not configured';
 
-/* call()'s detail when an extension reload or update has orphaned this content
- * script (content.ts's runtimeDetail uses it; it lives here because content.ts
- * imports this module, not the reverse). Only a page reload helps. */
-export const EXTENSION_RELOADED_DETAIL = 'Rozšíření bylo aktualizováno — obnovte stránku';
+/* call()'s detail when this content script has been orphaned — Chrome throws
+ * the same "Extension context invalidated" for a reload, an update, a disable
+ * and a removal, so the copy names none of them (content.ts's runtimeDetail
+ * uses it; it lives here because content.ts imports this module, not the
+ * reverse). Only a page reload helps. */
+export const EXTENSION_RELOADED_DETAIL = 'Spojení s rozšířením se přerušilo — obnovte stránku';
+
+/* × lasts for the page, not for one overlay run: content.ts restarts the
+ * overlay on every soft-nav back from a listing, and a signed-out operator who
+ * hid the notice must not get it again after each card they open. A real page
+ * load starts a fresh content script, and with it a fresh flag. */
+let noticeDismissed = false;
 
 interface Hit {
   ref: PortalRef;
@@ -171,7 +182,6 @@ export async function runIndexOverlay(
   let failure: LookupFailure | null = null;
   let failedAt: number | null = null;  // backoff anchor (monotonic); null = free to ask
   let cardsWaiting = false;  // the last pass saw possible sale cards with no row yet
-  let dismissed = false;
   let signingIn = false;
   let retrying = false;
   let signInError: string | null = null;
@@ -194,17 +204,18 @@ export async function runIndexOverlay(
     signIn: () => { void signIn(); },
     retry: () => { void retry(); },
     reload: () => { location.reload(); },
-    dismiss: () => { dismissed = true; syncNotice(); },
+    dismiss: () => { noticeDismissed = true; syncNotice(); },
   };
 
   /* The notice is a pure function of the state above: shown, updated in
    * place, or removed — never a second host. While an ask for the current
    * generation is out, a notice that isn't up stays down (the answer decides;
    * raising the previous failure meanwhile would offer a retry that throws
-   * that answer away) and one that is up reads busy. */
+   * that answer away); an error notice that is up reads busy ("Načítám…"),
+   * a sign-in notice keeps its button (busy there means a sign-in is running). */
   function syncNotice(): void {
     const current = failure;
-    if (stopped || dismissed || current == null || !cardsWaiting) {
+    if (stopped || noticeDismissed || current == null || !cardsWaiting) {
       notice?.destroy();
       notice = null;
       return;
@@ -226,15 +237,32 @@ export async function runIndexOverlay(
     });
   }
 
+  function keep(rows: PortalListing[]): void {
+    for (const l of rows) cache.set(l.source_id, l);
+  }
+
+  /* The extension is gone from this tab (update, disable, removal): stop
+   * scanning the page — the notice, if one is due, offers the reload. */
+  function orphaned(detail: string): void {
+    failure = { kind: 'reload', detail };
+    failedAt = performance.now();
+    obs.disconnect();
+    document.removeEventListener('visibilitychange', onVisibility);
+  }
+
   function settle(res: ApiResult<PortalListing[]>): void {
     if (res.ok) {
-      for (const l of res.data) cache.set(l.source_id, l);
+      keep(res.data);
       failure = null;
       failedAt = null;
       signInError = null;
       return;
     }
     const kind = failureKind(res.detail);
+    if (kind === 'reload') {
+      orphaned(res.detail);
+      return;
+    }
     if (failure?.kind !== kind) signInError = null;
     failure = { kind, detail: res.detail };
     failedAt = performance.now();
@@ -263,19 +291,26 @@ export async function runIndexOverlay(
     const res = await Promise.race([answer, late]);
     clearTimeout(deadline);
     if (inFlightGen === asked) inFlightGen = null;
-    // Superseded: the newer generation's pass asks (or already has) for itself.
-    if (stopped || asked !== gen) return;
+    if (stopped) return;
+    // Superseded: the newer generation decides the notice, but its rows still count.
+    const current = asked === gen;
     if (res == null) {
-      settle({ ok: false, status: 0, detail: `Server neodpověděl do ${LOOKUP_TIMEOUT_MS / 1000} s` });
+      if (current) {
+        settle({ ok: false, status: 0, detail: `Server neodpověděl do ${LOOKUP_TIMEOUT_MS / 1000} s` });
+      }
       void answer.then((eventual) => {
-        if (stopped || asked !== gen || !eventual.ok) return;
-        settle(eventual);
+        if (stopped || !eventual.ok) return;
+        if (asked === gen) settle(eventual);
+        else keep(eventual.data);
         schedule();
       });
-    } else {
+    } else if (current) {
       settle(res);
+    } else if (res.ok) {
+      keep(res.data);
+      schedule();
     }
-    if (rescan) {
+    if (current && rescan) {
       rescan = false;
       schedule();
     }
@@ -321,12 +356,12 @@ export async function runIndexOverlay(
       if (auth.ok && auth.data.signedIn) {
         ok = true;
       } else if (!auth.ok && failureKind(auth.detail) === 'reload') {
-        failure = { kind: 'reload', detail: auth.detail };
+        orphaned(auth.detail);
       } else {
         const res = await call<undefined>({ type: 'sign_in' });
         if (stopped) return;
         if (res.ok) ok = true;
-        else if (failureKind(res.detail) === 'reload') failure = { kind: 'reload', detail: res.detail };
+        else if (failureKind(res.detail) === 'reload') orphaned(res.detail);
         else signInError = `Přihlášení selhalo: ${res.detail}`;
       }
     } finally {
@@ -358,10 +393,13 @@ export async function runIndexOverlay(
   }
 
   /* Coming back to this tab: the operator may have signed in (or the outage
-   * ended) meanwhile — ask again now rather than after the backoff. */
+   * ended) meanwhile — ask again now rather than after the backoff, past any
+   * outage-era request still hanging (its failure must not re-arm the backoff
+   * over this fresh ask; its rows, should it answer, still count). */
   const onVisibility = (): void => {
     if (stopped || failure == null || document.visibilityState !== 'visible') return;
     failedAt = null;
+    if (inFlightGen === gen) gen++;
     schedule();
   };
 

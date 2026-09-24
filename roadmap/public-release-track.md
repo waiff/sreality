@@ -358,9 +358,10 @@ remediation R3 closes that. Full spec: `docs/design/public-release-remediation-2
      CTA and no sign-in prompt on search pages (while a detail page showed the panel's
      prompt) and read it as a broken extension. A failed lookup now raises one page-level
      notice (bottom-left, the panel keeps the right corner) — "Přihlásit se přes Google" when
-     signed out, "Obnovit stránku" when an extension reload orphaned the tab, the error +
-     "Zkusit znovu" otherwise — with a 60 s backoff on automatic re-lookups (the tab becoming
-     visible re-asks at once); badges still come only from a successful lookup.
+     signed out, "Obnovit stránku" when an extension reload/update/disable orphaned the tab, the
+     error + "Zkusit znovu" otherwise (no button for a build without an API URL) — with a 60 s
+     backoff on automatic re-lookups (the tab becoming visible re-asks at once); badges still
+     come only from a successful lookup.
    - **Latent P0 the first real JWT exposed:** Railway's `TENANT_POOL_DB_URL` carried a bare
      `tenant_pool` username, but the Supabase **shared** pooler routes by a project-ref
      suffix (`tenant_pool.<ref>`) and rejects anything else with `FATAL: (ENOIDENTIFIER) no
