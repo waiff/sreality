@@ -26,6 +26,7 @@ from autodedup.indistinguishable import (
     CLUSTER,
     PROMOTE,
     distinguishing_facts,
+    honest_overlap_days,
     overlap_days,
     price_paths_agree,
 )
@@ -72,10 +73,15 @@ class ClusterRelation:
             hit = not distinguishing_facts(a, b, self._feats.get(key), self._settings,
                                            self._mode)
             if hit and self._settings.demonstrate_cluster_price:
+                # E264: on W8's clock when asked for it — `inactive_at` is when the delisting
+                # was DETECTED, and a re-post train's tail is co-live only on that stamp.
+                overlap = (honest_overlap_days(a, b)
+                           if self._settings.demonstrate_cluster_price_honest_clock
+                           else overlap_days(a, b))
                 hit = not price_conflict(
                     a, b, self._settings,
                     price_paths_agree(a, b, self._settings.d43_price_path_tol),
-                    overlap_days(a, b))
+                    overlap)
             self._memo[key] = hit
         return hit
 

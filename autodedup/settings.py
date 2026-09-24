@@ -872,9 +872,23 @@ class Settings:
     # union's conflicting pairs, and on a long re-post train of ONE object the cover is the
     # train's own tail: 504940 and 540892 left a Průhonice cell of twenty identical bodies with
     # thirty-one certificate edges between them, eleven of which carried a fact and twenty of
-    # which did not. A member is eligible for the cover only when EVERY merge edge it has into
+    # which did not. A member is eligible for the cover only when every merge edge it has into
     # what the cell keeps is itself blocked — then the shed creates no factless separation.
-    repartition_shed_factless_guard: bool = False
+    # `off` is S10. `core` refuses only where the member's factless edges OUTNUMBER the
+    # conflicts its eviction clears — a stranger conflicts with many and holds few, a train's
+    # tail the other way round. `certificate` reads only the CERTIFIED edges, whose precision is
+    # structural (§6); `any` reads every merge edge, which on cohort 13 refuses a fifth of the
+    # sheds that BOUGHT certain pairs to recover a hundred of the carvings.
+    repartition_shed_factless_guard: str = "off"
+    # E264: the cluster-grain price limb reads W8's HONEST clock. `overlap_days` ends an
+    # advert's life at `inactive_at`, which rule #3 stamps when the delisting was DETECTED and
+    # not when the advert went — the lag runs to 70 days. Průhonice / Pod Valem II is one house
+    # re-posted twenty times on idnes at 75,000 and then 70,000; 504940 was last SIGHTED on
+    # 07-09 and its successor first sighted on 07-16, so the two never met, but the detection
+    # stamp of 08-05 hands the limb 1.41 days of overlap and it refuses the pair as two co-live
+    # prices. `distinguishing_facts` reads the same pair and finds NOTHING — the limb is the
+    # only thing separating them, and it is separating them on a clock W8 already corrected.
+    demonstrate_cluster_price_honest_clock: bool = False
     # E263: the same rule for the reconciliation's weighing. E253 let `_reconcile` refuse a
     # move that loses merge weight; where every edge the move would sever carries a fact and
     # every edge it would restore carries none, weight is being asked to overrule a stated
@@ -997,7 +1011,12 @@ class Settings:
             raise ValueError("repartition_rejoin_cells needs repartition")
         if self.repartition_shed_blockers and not self.repartition:
             raise ValueError("repartition_shed_blockers needs repartition")
-        if self.repartition_shed_factless_guard and not self.repartition_shed_blockers:
+        if self.repartition_shed_factless_guard not in ("off", "core", "certificate", "any"):
+            raise ValueError(
+                "repartition_shed_factless_guard must be off, core, certificate or any: "
+                f"{self.repartition_shed_factless_guard}")
+        if (self.repartition_shed_factless_guard != "off"
+                and not self.repartition_shed_blockers):
             raise ValueError("repartition_shed_factless_guard needs repartition_shed_blockers")
         if self.repartition_reconcile_factless_first and not self.repartition_keep_factless:
             raise ValueError(

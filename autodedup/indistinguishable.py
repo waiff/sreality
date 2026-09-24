@@ -419,6 +419,11 @@ def _honest_overlap_days(a: Listing, b: Listing) -> float | None:
     return max(0.0, (min(ends) - max(starts)).total_seconds() / 86400.0)  # type: ignore[operator]
 
 
+def honest_overlap_days(a: Listing, b: Listing) -> float | None:
+    """`_honest_overlap_days` under a name other modules may read (E264)."""
+    return _honest_overlap_days(a, b)
+
+
 def _never_live_together(a: Listing, b: Listing, settings: Settings) -> bool:
     """`sequential_postings`, read on the clock W8 established when asked for it."""
     if not settings.d43_floor_within_camp_honest_window:

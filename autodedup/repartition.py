@@ -82,7 +82,7 @@ def partition(
     shed_max: int = 1,
     shed_max_union: int = 64,
     outer_rounds: int = 1,
-    shed_factless_guard: bool = False,
+    shed_factless_guard: str = "off",
     reconcile_factless_first: bool = False,
 ) -> list[list[int]]:
     """Cut one component into consistent groups, maximising the merge evidence kept inside.
@@ -364,7 +364,7 @@ def _shed(
     blockers: Blockers,
     shed_max: int,
     max_union: int,
-    factless_guard: bool = False,
+    factless_guard: str = "off",
 ) -> bool:
     """E253: let a cell SHED the members that block a cut merge edge. True when one did.
 
@@ -406,13 +406,19 @@ def _shed(
         conflicts = [(lo, hi) for lo, hi in blockers(union)]
         if not conflicts or any(lo in keep and hi in keep for lo, hi in conflicts):
             continue
-        cover = _cover(conflicts, keep, shed_max)
+        # E262: where the guard is on, the cover is chosen in the currency the guard reads —
+        # a candidate that severs no factless merge edge first — because the greedy-by-degree
+        # cover names the train's tail exactly when the tail is what two conflicts run through.
+        dirty = (_dirty_members(neighbours, blocked_pairs(conflicts), union, factless_guard)
+                 if factless_guard != "off" else frozenset())
+        cover = _cover(conflicts, keep, shed_max, dirty)
         if cover is None:
             continue
         kept = [member for member in union if member not in cover]
         if invariants(kept) is not None:
             continue
-        if factless_guard and _severs_factless(neighbours, conflicts, cover, kept):
+        if factless_guard != "off" and _severs_factless(
+                neighbours, conflicts, cover, kept, factless_guard):
             continue
         before = _weight_inside(neighbours, cells[left]) + _weight_inside(
             neighbours, cells[right])
@@ -434,27 +440,74 @@ def _shed(
 
 def _severs_factless(
     neighbours: Mapping[int, Sequence[Edge]], conflicts: Sequence[tuple[int, int]],
-    cover: Sequence[int], kept: Sequence[int],
+    cover: Sequence[int], kept: Sequence[int], mode: str,
 ) -> bool:
-    """E262: would this shed cut a merge edge that no stated fact carries?"""
-    blocked = {(lo, hi) for lo, hi in conflicts}
+    """E262: would this shed cut a merge edge that no stated fact carries?
+
+    `certificate` asks it of the CERTIFIED edges only. `core` asks a weaker question that tells
+    the two shapes the census found apart: a genuine intruder conflicts with MANY of the union
+    and holds few edges no fact carries, while the tail of a re-post train is the other way
+    round — 504940 severs 20 factless edges to clear 11 conflicts. A member whose factless edges
+    outnumber the conflicts its eviction clears is the cell's own, not a stranger in it.
+    """
+    certified_only = mode == "certificate"
+    blocked = blocked_pairs(conflicts)
     inside = set(kept)
     for member in cover:
+        factless = 0
         for edge in neighbours[member]:
+            if certified_only and not edge.certificate:
+                continue
             other = edge.hi if edge.lo == member else edge.lo
             if other in inside and (min(member, other), max(member, other)) not in blocked:
+                if mode != "core":
+                    return True
+                factless += 1
+        if mode == "core":
+            facts = sum(1 for lo, hi in blocked if member in (lo, hi))
+            if factless > facts:
                 return True
     return False
 
 
+def blocked_pairs(conflicts: Sequence[tuple[int, int]]) -> frozenset[tuple[int, int]]:
+    """The conflict list as a lookup — one spelling of the pair key for the whole module."""
+    return frozenset((min(lo, hi), max(lo, hi)) for lo, hi in conflicts)
+
+
+def _dirty_members(
+    neighbours: Mapping[int, Sequence[Edge]], blocked: frozenset[tuple[int, int]],
+    union: Sequence[int], mode: str,
+) -> frozenset[int]:
+    """E262: the union's members whose eviction would sever a merge edge no fact carries."""
+    certified_only = mode == "certificate"
+    inside = set(union)
+    out: set[int] = set()
+    for member in union:
+        for edge in neighbours[member]:
+            if certified_only and not edge.certificate:
+                continue
+            other = edge.hi if edge.lo == member else edge.lo
+            if (other in inside and other != member
+                    and (min(member, other), max(member, other)) not in blocked):
+                out.add(member)
+                break
+    return frozenset(out)
+
+
 def _cover(
-    conflicts: Sequence[tuple[int, int]], keep: set[int], limit: int
+    conflicts: Sequence[tuple[int, int]], keep: set[int], limit: int,
+    dirty: frozenset[int] = frozenset(),
 ) -> list[int] | None:
     """The smallest set of members whose removal clears every conflict, greedily, or None.
 
     Greedy by degree with the smallest id breaking every tie, so the answer is a function of
     the conflict SET. A member the cut edge asked about is never a candidate, so a conflict
-    with both ends protected has no cover at all."""
+    with both ends protected has no cover at all.
+
+    E262: `dirty` names the members whose eviction would sever a factless merge edge, and they
+    are chosen LAST. The order is still a total one — (dirty, -degree, id) — so the answer stays
+    a function of the set, and the guard still has the last word on the cover that comes out."""
     remaining = [(lo, hi) for lo, hi in conflicts]
     chosen: list[int] = []
     while remaining:
@@ -467,7 +520,7 @@ def _cover(
                     degree[member] = degree.get(member, 0) + 1
         if not degree:
             return None
-        pick = min(degree, key=lambda member: (-degree[member], member))
+        pick = min(degree, key=lambda member: (member in dirty, -degree[member], member))
         chosen.append(pick)
         remaining = [(lo, hi) for lo, hi in remaining if lo != pick and hi != pick]
     return sorted(chosen)
