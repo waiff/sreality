@@ -3043,9 +3043,10 @@ export const unlinkAssetProperty = (
     { method: 'POST', json: { property_id: propertyId }, jwt: true },
   );
 
-/* Merge ledger (list / browse-results / unmerge). Retained without a UI caller on
- * purpose: the buttons lived on the deleted Dedup page, and until the new production
- * wave gives them a permanent home unmerge is API-only. These three wrap the surviving
+/* Merge ledger (list / browse-results / unmerge). The buttons lived on the deleted
+ * Dedup page; `listPropertyMerges` + `unmergeMergeGroup` are now called by the listing
+ * page's merged-adverts section (lib/mergedAdverts — shipped dark behind its switch),
+ * `listMergedProperties` still has no UI caller. These three wrap the surviving
  * `/properties/*` mechanics routes — do not delete them as "dead". */
 export const listPropertyMerges = (
   params: { limit?: number; offset?: number } = {},

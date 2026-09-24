@@ -1204,8 +1204,16 @@ renumber.** Navigate by area:
     carries only border-case flagging (`image_border_cases`) — `image_tag_annotations` and
     `phash_pair_notes` had zero live callers even before the cutover. `image_training_examples`
     itself is superseded but not yet dropped (a separately-gated destructive migration).
-    Interim caveat: the unmerge *button* lived on the deleted Dedup page, so until the rebuild
-    gives it a home, unmerge is API-only.
+    The unmerge *button* lived on the deleted Dedup page; its new home is the listing page's
+    **Sloučené inzeráty** section (`frontend/src/components/listing-detail/MergedAdvertsSection.tsx`:
+    one expandable row per child advert — photos collapsed, description / full gallery / broker /
+    stored portal link expanded — with a per-row two-step **Rozdělit** for admin sessions over the
+    two routes above), which ships DARK behind two switches in `frontend/src/lib/mergedAdverts.ts`
+    (section and unmerge, both off — until the unmerge switch is on, unmerge stays API-only); because
+    the ledger read names no listings and the undo is group-grain, a row splits exactly only a
+    two-advert property one merge joined, one merge that made the whole property is offered whole,
+    and anything else says it cannot tell (`planRowUnmerge`) — a per-listing ledger read would make
+    every row exact.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing

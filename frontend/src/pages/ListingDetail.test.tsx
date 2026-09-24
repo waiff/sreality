@@ -507,3 +507,62 @@ describe('<BrokerVizitka>', () => {
     expect(screen.queryByText(/e-mail —/)).not.toBeInTheDocument();
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* Merged-adverts section — ships dark (lib/mergedAdverts)                    */
+/* -------------------------------------------------------------------------- */
+
+describe('<ListingDetail> merged-adverts section, switches at their shipped values', () => {
+  const TWO_SOURCES = [
+    {
+      property_id: 774,
+      id: 105053,
+      sreality_id: -11876,
+      source: 'idnes',
+      source_url: 'https://reality.idnes.cz/detail/x/',
+      source_id_native: '6a147cfde222cf687509e018',
+      is_active: true,
+      price_czk: 5_000_000,
+      first_seen_at: '2026-01-01T00:00:00Z',
+      last_seen_at: '2026-01-02T00:00:00Z',
+    },
+    {
+      property_id: 774,
+      id: 205,
+      sreality_id: 999,
+      source: 'sreality',
+      source_url: 'https://www.sreality.cz/detail/y',
+      source_id_native: '999',
+      is_active: true,
+      price_czk: 5_100_000,
+      first_seen_at: '2026-01-01T00:00:00Z',
+      last_seen_at: '2026-01-02T00:00:00Z',
+    },
+  ];
+
+  it('is provably inert: no section, no extra read, the history block keeps its advert list', async () => {
+    vi.mocked(queries.fetchListingIdByNaturalKey).mockResolvedValue(105053);
+    vi.mocked(queries.fetchListingById).mockResolvedValue(RESOLVER_LISTING);
+    vi.mocked(queries.fetchPropertySources).mockResolvedValue({
+      property_id: 774,
+      sources: TWO_SOURCES,
+    });
+    const detailsRead = vi.spyOn(queries, 'fetchListingsForListingIds');
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={['/listing/idnes/6a147cfde222cf687509e018']}>
+          <Routes>
+            <Route path="listing/:source/:nativeId" element={<ListingDetail />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    // The history block's own per-advert list is what the section would replace.
+    expect(await screen.findByText('this listing')).toBeInTheDocument();
+    expect(screen.queryByText('Sloučené inzeráty')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Rozdělit/ })).not.toBeInTheDocument();
+    expect(detailsRead).not.toHaveBeenCalled();
+  });
+});
