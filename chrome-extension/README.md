@@ -61,6 +61,9 @@ maxima, remax, mmreality, ceskereality).
   page's lookup succeeds; when it fails, one corner notice says why instead of
   leaving the page silent — **Přihlásit se přes Google** when signed out, the
   error with **Zkusit znovu** otherwise (automatic re-lookups back off 60 s).
+  The notice only appears where a card could be a sale apartment (not on a
+  rental or house search), steps aside while the panel is open, and clears by
+  itself after a sign-in made anywhere (the panel, another tab).
 
 The default display is a **read** of data we already have — no LLM call. It
 maps each portal listing to our row by `(source, native id)` through the

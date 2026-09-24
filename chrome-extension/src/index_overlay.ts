@@ -30,7 +30,8 @@ type OpenPanel = (
 /* Holds the listing id the card was badged FOR, not a boolean: SPA routers
  * recycle card DOM nodes between result sets, so a node can still carry the
  * badge of the listing it previously held. Storing the id lets a recycled node
- * be detected and re-badged instead of silently showing another listing's yield. */
+ * be detected and re-badged (or, while its lookup is failing, unbadged) instead
+ * of silently showing another listing's yield. */
 const PROCESSED_ATTR = 'data-mf-processed';
 const BADGE_CLASS = '__mf_badge';
 const STYLE_ID = '__mf_badge_style__';
@@ -46,8 +47,11 @@ const MAX_LOOKUP_PER_PASS = 50;
  * corner (sign-in when signed out, the error + retry otherwise). Page-level, not
  * per-card: for listings we have no row for, the sale-apartment gate is a URL
  * hint only sreality/idnes/ceskereality provide, so a per-card prompt would be
- * invisible on the other portals. It shows only while cards are waiting on the
- * failed lookup (never on a page without listing cards); × holds for the
+ * invisible on the other portals. It shows only while cards the URL doesn't
+ * rule out as sale apartments wait on the failed lookup — never on a page
+ * without listing cards, nor on a rental/house search where signing in would
+ * badge nothing — and steps aside while the panel is open (a badge click opens
+ * it in the same corner, with its own sign-in prompt). × holds for the
  * overlay's lifetime.
  *
  * Backoff: after a failure, observer-driven passes don't ask again for
@@ -55,11 +59,28 @@ const MAX_LOOKUP_PER_PASS = 50;
  * DOM mutation (re-renders, infinite scroll, the notice mounting itself) would
  * re-fetch. The notice's button skips the wait.
  *
+ * One lookup at a time, and an answer asked for before a sign-in is dropped
+ * and re-asked: an older failure landing after a newer success would otherwise
+ * raise a false notice and block lookups for a whole backoff window.
+ *
+ * Sessions: a sign-in anywhere — this notice, the panel, another tab — writes
+ * the session to chrome.storage, so the overlay watches that key; the failure
+ * clears and the cards get their lookup without a second click here.
+ *
  * Teardown: stop() removes the notice, and everything that awaits re-checks
  * `stopped` — a sign-in or lookup resolving after a route change must not
  * re-mount the notice or re-scan a page this overlay no longer owns. */
 const NOTICE_HOST_ID = '__mf_notice_host__';
 const LOOKUP_RETRY_AFTER_MS = 60_000;
+/* A live region inserted already filled is typically not announced, so the
+ * notice goes in empty and gets its text a frame + this long later. */
+const LIVE_REGION_SETTLE_MS = 100;
+
+/* content.ts's HOST_ELEMENT_ID and auth.ts's SESSION_KEY, by value: content.ts
+ * imports this module (not the reverse), and auth.ts runs only in the
+ * background service worker. */
+const PANEL_HOST_ID = '__sreality_yield_panel_host__';
+const SESSION_KEY = 'authSession';
 
 /* Mirrors api.ts's NOT_SIGNED_IN_DETAIL — duplicated by value, not imported, as
  * content.ts does: api.ts runs only in the background service worker, and the
@@ -121,13 +142,16 @@ export async function runIndexOverlay(
 
   let stopped = false;
   let failure: LookupFailure | null = null;
-  let failedAt: number | null = null;  // backoff anchor; null = free to look up
-  let cardsWaiting = false;  // the last pass saw cards with no successful lookup
+  let failedAt: number | null = null;  // backoff anchor (monotonic); null = free to look up
+  let cardsWaiting = false;  // the last pass saw possible sale cards with no successful lookup
   let dismissed = false;
   let signingIn = false;
   let retrying = false;
   let signInError: string | null = null;
   let notice: NoticeHandle | null = null;
+  let inFlight = false;  // a lookup is out; the next waits for it
+  let rescan = false;    // a pass skipped its lookup because one was out
+  let authGen = 0;       // bumped when a session appears: answers asked before are stale
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   const schedule = (): void => {
@@ -135,13 +159,15 @@ export async function runIndexOverlay(
     timer = setTimeout(() => { timer = null; void pass(); }, SCAN_DEBOUNCE_MS);
   };
 
+  // performance.now, not Date.now: a wall-clock step back must not stretch it.
   const backingOff = (): boolean =>
-    failedAt != null && Date.now() - failedAt < LOOKUP_RETRY_AFTER_MS;
+    failedAt != null && performance.now() - failedAt < LOOKUP_RETRY_AFTER_MS;
 
   /* The notice is a pure function of the state above: shown, updated in place,
    * or removed — never a second host. */
   function syncNotice(): void {
-    if (stopped || dismissed || failure == null || !cardsWaiting) {
+    const panelOpen = document.getElementById(PANEL_HOST_ID) != null;
+    if (stopped || dismissed || failure == null || !cardsWaiting || panelOpen) {
       notice?.destroy();
       notice = null;
       return;
@@ -154,43 +180,69 @@ export async function runIndexOverlay(
     notice.render({ failure, signingIn, retrying, signInError });
   }
 
+  function sessionAppeared(): void {
+    authGen++;
+    failure = null;
+    failedAt = null;
+    signInError = null;
+    syncNotice();
+  }
+
+  async function lookup(hits: Hit[]): Promise<void> {
+    const ids = [...new Set(
+      hits.filter((h) => !cache.has(h.ref.sourceId)).map((h) => h.ref.sourceId),
+    )].slice(0, MAX_LOOKUP_PER_PASS);
+    if (ids.length === 0 || backingOff()) return;
+    if (inFlight) {
+      rescan = true;
+      return;
+    }
+    inFlight = true;
+    const gen = authGen;
+    let res: ApiResult<PortalListing[]>;
+    try {
+      res = await call<PortalListing[]>({
+        type: 'lookup_listings',
+        items: ids.map((id) => ({ source: portal!.source, source_id: id })),
+      });
+    } finally {
+      inFlight = false;
+    }
+    if (stopped) return;
+    if (gen !== authGen) {
+      rescan = true;
+    } else if (res.ok) {
+      for (const l of res.data) cache.set(l.source_id, l);
+      failure = null;
+      failedAt = null;
+      signInError = null;
+    } else {
+      const kind = res.detail === NOT_SIGNED_IN_DETAIL ? 'signed_out' : 'error';
+      if (failure?.kind !== kind) signInError = null;
+      failure = { kind, detail: res.detail };
+      failedAt = performance.now();
+    }
+    if (rescan) {
+      rescan = false;
+      schedule();
+    }
+  }
+
   async function pass(): Promise<void> {
     if (stopped) return;
     const hits = collectHits(portal!.source);
+    if (hits.length > 0) await lookup(hits);
+    if (stopped) return;
 
-    const missing = [...new Set(
-      hits.filter((h) => !cache.has(h.ref.sourceId)).map((h) => h.ref.sourceId),
-    )];
-    cardsWaiting = missing.length > 0;
-    if (hits.length === 0) {
-      syncNotice();
-      return;
-    }
-
-    const needLookup = missing.slice(0, MAX_LOOKUP_PER_PASS);
-    if (needLookup.length > 0 && !backingOff()) {
-      const res = await call<PortalListing[]>({
-        type: 'lookup_listings',
-        items: needLookup.map((id) => ({ source: portal!.source, source_id: id })),
-      });
-      if (stopped) return;
-      if (res.ok) {
-        for (const l of res.data) cache.set(l.source_id, l);
-        failure = null;
-        failedAt = null;
-        signInError = null;
-      } else {
-        const kind = res.detail === NOT_SIGNED_IN_DETAIL ? 'signed_out' : 'error';
-        if (failure?.kind !== kind) signInError = null;
-        failure = { kind, detail: res.detail };
-        failedAt = Date.now();
-      }
-    }
+    cardsWaiting = hits.some(
+      (h) => !cache.has(h.ref.sourceId) && urlSaleHint(portal!, h.href) !== false,
+    );
     syncNotice();
 
     for (const hit of hits) {
       const listing = cache.get(hit.ref.sourceId);
       if (listing != null) process(hit, listing, portal!, openPanel);
+      else unbadgeRecycled(hit);
     }
   }
 
@@ -201,18 +253,17 @@ export async function runIndexOverlay(
     signingIn = true;
     signInError = null;
     syncNotice();
-    const res = await call<undefined>({ type: 'sign_in' });
-    if (stopped) return;
-    signingIn = false;
-    if (!res.ok) {
-      signInError = `Přihlášení selhalo: ${res.detail}`;
+    let ok = false;
+    try {
+      const res = await call<undefined>({ type: 'sign_in' });
+      ok = res.ok;
+      if (!res.ok) signInError = `Přihlášení selhalo: ${res.detail}`;
+    } finally {
+      signingIn = false;
       syncNotice();
-      return;
     }
-    failure = null;
-    failedAt = null;
-    signInError = null;
-    syncNotice();
+    if (!ok || stopped) return;
+    sessionAppeared();
     await pass();
   }
 
@@ -221,19 +272,40 @@ export async function runIndexOverlay(
     retrying = true;
     failedAt = null;
     syncNotice();
-    await pass();
-    if (stopped) return;
-    retrying = false;
-    syncNotice();
+    try {
+      await pass();
+    } finally {
+      retrying = false;
+      syncNotice();
+    }
   }
+
+  /* A token refresh rewrites the session too; only a sign-in (a session where
+   * there was none, or while this page is signed out) matters here. */
+  const onStorage = (
+    changes: { [key: string]: chrome.storage.StorageChange }, area: string,
+  ): void => {
+    const change = changes[SESSION_KEY];
+    if (stopped || area !== 'local' || change?.newValue == null) return;
+    if (change.oldValue != null && failure?.kind !== 'signed_out') return;
+    sessionAppeared();
+    schedule();
+  };
 
   const obs = new MutationObserver(schedule);
   obs.observe(document.body, { childList: true, subtree: true });
+  /* The panel host sits on <html>, outside the body observer's reach; the
+   * notice steps aside while it's open and comes back when it closes. */
+  const panelObs = new MutationObserver(() => { syncNotice(); });
+  panelObs.observe(document.documentElement, { childList: true });
+  chrome.storage.onChanged?.addListener(onStorage);
   void pass();
 
   return () => {
     stopped = true;
     obs.disconnect();
+    panelObs.disconnect();
+    chrome.storage.onChanged?.removeListener(onStorage);
     if (timer != null) clearTimeout(timer);
     syncNotice();
   };
@@ -271,12 +343,31 @@ function urlSaleHint(portal: Portal, href: string): boolean | null {
   }
 }
 
+function clearBadge(card: HTMLElement): void {
+  card.querySelector(`:scope > .${BADGE_CLASS}`)?.remove();
+  card.removeAttribute(PROCESSED_ATTR);
+}
+
+/* A card still waiting on its lookup whose node was recycled from another
+ * listing (see PROCESSED_ATTR) drops that listing's badge and click target now,
+ * not on the next successful lookup — a failing or backed-off lookup would
+ * leave it up for a whole backoff window. A card that still links the badged
+ * listing wasn't recycled, just holds two links; it is left alone. */
+function unbadgeRecycled(hit: Hit): void {
+  const card = cardFor(hit.anchor);
+  const prevId = card.getAttribute(PROCESSED_ATTR);
+  if (prevId == null || prevId === hit.ref.sourceId) return;
+  const stillLinked = Array.from(card.querySelectorAll<HTMLAnchorElement>('a[href]'))
+    .some((a) => detailRef(a.href, location.hostname)?.sourceId === prevId);
+  if (!stillLinked) clearBadge(card);
+}
+
 function process(hit: Hit, listing: PortalListing, portal: Portal, openPanel: OpenPanel): void {
   const card = cardFor(hit.anchor);
   const prevId = card.getAttribute(PROCESSED_ATTR);
   if (prevId === hit.ref.sourceId) return;
   // Recycled node — drop the previous listing's badge before re-badging.
-  if (prevId != null) card.querySelector(`:scope > .${BADGE_CLASS}`)?.remove();
+  if (prevId != null) clearBadge(card);
   card.setAttribute(PROCESSED_ATTR, hit.ref.sourceId);
 
   const saleApt = listing.found
@@ -352,7 +443,12 @@ const NOTICE_CSS = `
     font-size: 0.82rem; line-height: 1.45; text-align: left; color: #1c1c1c;
     background: #f7f3ec; border: 1px solid #1c1c1c;
     box-shadow: inset 0 2px 0 #b3592d, 0 10px 34px -10px rgba(28, 20, 10, 0.30);
+    transition: opacity 140ms ease;
   }
+  /* Transparent, not hidden: the empty live region must already be in the
+   * accessibility tree when its first text arrives. */
+  .__mf_notice.is-pending { opacity: 0; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) { .__mf_notice { transition: none; } }
   .n-head {
     display: flex; align-items: center; justify-content: space-between;
     gap: 1rem; margin-bottom: 0.35rem;
@@ -389,7 +485,8 @@ const NOTICE_CSS = `
 `;
 
 /* Built once, then updated in place: the live region keeps its node (so screen
- * readers announce changes, not a remount) and a focused button keeps focus. */
+ * readers announce changes, not a remount) and a focused button keeps focus.
+ * The first text waits LIVE_REGION_SETTLE_MS after mount (see there). */
 function mountNotice(on: NoticeHandlers): NoticeHandle {
   document.getElementById(NOTICE_HOST_ID)?.remove();
   const host = document.createElement('div');
@@ -399,7 +496,7 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
   style.textContent = NOTICE_CSS;
   shadow.appendChild(style);
 
-  const box = el('div', '__mf_notice');
+  const box = el('div', '__mf_notice is-pending');
   const head = el('div', 'n-head');
   const mark = el('span', 'n-mark');
   mark.append(el('span', 'n-tick'), el('span', 'n-word', APP_NAME));
@@ -417,32 +514,53 @@ function mountNotice(on: NoticeHandlers): NoticeHandle {
   const error = el('p', 'n-error');
   body.append(text, detail, error);
 
-  const action = button('n-primary', '');
+  let live = false;  // the first text is in (the box is transparent until then)
   let signedOut = false;
-  action.onclick = () => { if (signedOut) on.signIn(); else on.retry(); };
+  const action = button('n-primary', '');
+  action.onclick = () => {
+    if (!live) return;
+    if (signedOut) on.signIn(); else on.retry();
+  };
 
   box.append(head, body, action);
   shadow.appendChild(box);
   document.body.appendChild(host);
 
+  let latest: NoticeView | null = null;
+  let settle: ReturnType<typeof setTimeout> | null = null;
+  const frame = requestAnimationFrame(() => {
+    settle = setTimeout(() => {
+      live = true;
+      box.classList.remove('is-pending');
+      if (latest != null) paint(latest);
+    }, LIVE_REGION_SETTLE_MS);
+  });
+
+  function paint(view: NoticeView): void {
+    signedOut = view.failure.kind === 'signed_out';
+    const busy = signedOut ? view.signingIn : view.retrying;
+    const failLine = signedOut ? view.signInError : null;
+    setText(text, signedOut
+      ? 'Pro výnosy na kartách se prosím přihlaste.'
+      : 'Výnosy se nepodařilo načíst.');
+    setText(detail, signedOut ? '' : view.failure.detail);
+    detail.hidden = signedOut;
+    setText(error, failLine ?? '');
+    error.hidden = failLine == null;
+    action.disabled = busy;
+    setText(action, signedOut
+      ? (busy ? 'Přihlašuji…' : 'Přihlásit se přes Google')
+      : (busy ? 'Načítám…' : 'Zkusit znovu'));
+  }
+
   return {
     render(view: NoticeView): void {
-      signedOut = view.failure.kind === 'signed_out';
-      const busy = signedOut ? view.signingIn : view.retrying;
-      const failLine = signedOut ? view.signInError : null;
-      setText(text, signedOut
-        ? 'Pro výnosy na kartách se prosím přihlaste.'
-        : 'Výnosy se nepodařilo načíst.');
-      setText(detail, signedOut ? '' : view.failure.detail);
-      detail.hidden = signedOut;
-      setText(error, failLine ?? '');
-      error.hidden = failLine == null;
-      action.disabled = busy;
-      setText(action, signedOut
-        ? (busy ? 'Přihlašuji…' : 'Přihlásit se přes Google')
-        : (busy ? 'Načítám…' : 'Zkusit znovu'));
+      latest = view;
+      if (live) paint(view);
     },
     destroy(): void {
+      cancelAnimationFrame(frame);
+      if (settle != null) clearTimeout(settle);
       host.remove();
     },
   };

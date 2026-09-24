@@ -181,19 +181,39 @@ interface PanelState {
   errorMessage: string | null;
 }
 
+/* An extension reload or auto-update orphans the content script already in
+ * an open tab (Chrome re-injects only on page load): sendMessage then throws
+ * "Extension context invalidated." synchronously. call() resolves with that as
+ * a failure instead of rejecting — every caller's busy flag ("Přihlašuji…")
+ * waits for a result — and says what actually fixes it. */
+function runtimeDetail(message: string | undefined): string {
+  if (message != null && /context invalidated/i.test(message)) {
+    return 'Rozšíření bylo aktualizováno — obnovte stránku';
+  }
+  return message ?? 'runtime error';
+}
+
 export function call<T>(message: ApiMessage): Promise<ApiResult<T>> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage(message, (response: ApiResult<T>) => {
-      if (chrome.runtime.lastError) {
-        resolve({
-          ok: false,
-          status: 0,
-          detail: chrome.runtime.lastError.message ?? 'runtime error',
-        });
-        return;
-      }
-      resolve(response);
-    });
+    try {
+      chrome.runtime.sendMessage(message, (response: ApiResult<T>) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            status: 0,
+            detail: runtimeDetail(chrome.runtime.lastError.message),
+          });
+          return;
+        }
+        resolve(response);
+      });
+    } catch (err) {
+      resolve({
+        ok: false,
+        status: 0,
+        detail: runtimeDetail(err instanceof Error ? err.message : String(err)),
+      });
+    }
   });
 }
 
