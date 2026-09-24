@@ -93,6 +93,11 @@ from autodedup.settings import Settings
 from autodedup.structural_truth import areas_disjoint
 from autodedup.text_facts import (
     CHARGE_KINDS,
+    block_plot_area,
+    named_villa_units,
+    outdoor_accessory_areas,
+    position_designators,
+    residence_codes,
     CODE_KINDS,
     area_ranges,
     commercial_product_class,
@@ -914,7 +919,7 @@ def _price_sequential_path(
         contained = text_containment(a, b)
     contained = contained or 0.0
     code = _present(feats, "ref_code_shared") or 0.0
-    gap = area_rel_diff(a.area_m2, b.area_m2)
+    gap = area_rel_diff(effective_area(a, settings), effective_area(b, settings))
     if (gap is not None and gap > 0.0 and not _column_rounding(a, b, settings)
             and not (settings.d43_printed_area_prevails and _printed_areas_prevail(a, b))):
         return False
@@ -2355,6 +2360,122 @@ def _bodies_print_one_storey(a: Listing, b: Listing, cfg: Settings) -> bool:
     return len(left) == 1 and left == right and _read_one_text(a, b, cfg)
 
 
+def effective_area(listing: Listing, cfg: Settings) -> float | None:
+    """E293: the stored column, or — for a LAND advert whose column is empty — the one plot
+    figure its bažoš attribute block prints (`celková plocha (m2): 312`).
+
+    An advert that prints its plot has stated it; reading it as silent is what let E192/E282
+    excuse a 101,900 -> 124,400 price move between two lots of one seller's two-lot template
+    at Jestřabice. Only ever FILLS an empty column, so it can add a fact and never remove one."""
+    if listing.area_m2 is not None or not cfg.d43_block_plot_area:
+        return listing.area_m2
+    if listing.category_main != LAND_CATEGORY:
+        return None
+    return block_plot_area(listing.description)
+
+
+def _accessory_sets_apart(a: Listing, b: Listing, cfg: Settings
+                          ) -> tuple[list[float], list[float]] | None:
+    """E294: both bodies state an outdoor accessory's size and no size of one meets any of the
+    other's — within the rounding of the coarser print AND within `d43_outdoor_accessory_rel_tol`
+    (`cca 20 m2` against `22 m2` is one terrace measured twice)."""
+    if LAND_CATEGORY in (a.category_main, b.category_main):
+        return None
+    left, right = outdoor_accessory_areas(a.description), outdoor_accessory_areas(b.description)
+    if not left or not right:
+        return None
+    # A house's `zahrada`/`terasa` is its plot and its built-up area as often as an accessory
+    # (Úvaly: `se zahradou na pozemku 312 m2` against `se zahradou o výměře 231 m2`, one house
+    # re-posted at a cut price), so only two FLATS are read unless the table widens it.
+    if not cfg.d43_outdoor_accessory_all_categories and not (
+            a.category_main == b.category_main == "byt"):
+        return None
+    for _kind_a, value_a, dec_a in left:
+        for _kind_b, value_b, dec_b in right:
+            if rounding_equal_values(value_a, dec_a, value_b, dec_b):
+                return None
+            if rel_diff(value_a, value_b) <= cfg.d43_outdoor_accessory_rel_tol:
+                return None
+    return (sorted({value for _k, value, _d in left}), sorted({value for _k, value, _d in right}))
+
+
+def outdoor_accessory_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+    """E294: the balcony, terrace or loggia the two bodies state, apart.
+
+    Kovářov `vyhlídka Kovářov – západ`: one template, one 58 m² unit area, one portal, live
+    together all summer — `balkon o rozloze 12,6 m2` at 7,590,000 against `terasu o rozloze 58
+    m2` at 10,665,000. E215 reads only a cellar's total and `printed_areas` scopes these figures
+    out of the headline, so nothing read them. Where `d43_outdoor_accessory_colive_only` is set
+    only two adverts on sale together are read — a sequential re-post that corrects its
+    balcony's size is E294b's question, where the price must move too."""
+    if not cfg.d43_outdoor_accessory_area:
+        return None
+    if cfg.d43_outdoor_accessory_colive_only and not _live_together(a, b, cfg):
+        return None
+    # ONE portal: two authors describe one flat's loggia as 3 m2 and its balcony as 4 m2 (Hradec
+    # Králové, Jana Masaryka: the agency's text on sreality, the owner's on bezrealitky, one
+    # 3,799,999). Across portals only E294b's price conjunction reads the accessory.
+    if (cfg.d43_outdoor_accessory_same_source
+            and (a.source is None or b.source is None or a.source != b.source)):
+        return None
+    apart = _accessory_sets_apart(a, b, cfg)
+    if apart is None:
+        return None
+    return (f"outdoor={apart[0]}", f"outdoor={apart[1]}")
+
+
+def accessory_price_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+    """E294b: two stated accessories apart AND two prices neither path ever named, whenever.
+
+    The Kovářov trains are daily ceskereality re-posts, so most of their cross pairs were never
+    on sale together and E294's co-live limb cannot see them — while their prices, 7,590,000
+    against 10,665,000 (40 % over the lower), sit under the 60 % same-portal bar that exists for
+    ONE advert's moving price. A moving price does not also turn a 12,6 m² balcony into a 58 m²
+    terrace: with the accessory apart, the gap is read at the cross-portal bar."""
+    if not cfg.d43_outdoor_accessory_price:
+        return None
+    if not (a.price and b.price and a.price > 0 and b.price > 0):
+        return None
+    if price_paths_agree(a, b, cfg.d43_price_path_tol):
+        return None
+    if rel_diff(float(a.price), float(b.price)) <= PRICE_CROSS_TOL:
+        return None
+    apart = _accessory_sets_apart(a, b, cfg)
+    if apart is None:
+        return None
+    return (f"outdoor={apart[0]}@{a.price:.0f}", f"outdoor={apart[1]}@{b.price:.0f}")
+
+
+def position_designator_conflict(a: Listing, b: Listing, cfg: Settings
+                                 ) -> tuple[str, str] | None:
+    """E295: which half, side or position of one building each body says it sells.
+
+    Lipno-Kobylnice `levou polovinu novostavby` / `pravou stranu novostavby`; Polná `Jednotka je
+    druhá zleva` / `čtvrtá zleva` / `pátá zleva`. Per family, and a family one body names twice
+    is a roster that abstains (the reader drops it)."""
+    if not cfg.d43_position_designator:
+        return None
+    left, right = position_designators(a.description), position_designators(b.description)
+    for family in sorted(set(left) & set(right)):
+        if not (left[family] & right[family]):
+            return (f"{family}={sorted(left[family])}", f"{family}={sorted(right[family])}")
+    return None
+
+
+def named_villa_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+    """E296 (T4): two named villas of one project, or two residence codes each body names as
+    its own subject (`Rezidence A2 …` against `Rezidence A3 … jako A2`)."""
+    if not cfg.d43_named_villa:
+        return None
+    left, right = named_villa_units(a.description), named_villa_units(b.description)
+    if len(left) == 1 and len(right) == 1 and left != right:
+        return (next(iter(left)), next(iter(right)))
+    codes_a, codes_b = residence_codes(a.description), residence_codes(b.description)
+    if len(codes_a) == 1 and len(codes_b) == 1 and codes_a != codes_b:
+        return (f"code={next(iter(codes_a))}", f"code={next(iter(codes_b))}")
+    return None
+
+
 def distinguishing_facts(
     a: Listing,
     b: Listing,
@@ -2397,13 +2518,15 @@ def distinguishing_facts(
     gate_area_tol = cfg.d43_gate_area_tol if lenient else None
     # E280: two columns the two bodies' own printed figures contradict are not two areas.
     printed_prevail = cfg.d43_printed_area_prevails and _printed_areas_prevail(a, b)
+    # E293: an empty land column is filled from the bažoš attribute block (identity when off).
+    area_a, area_b = effective_area(a, cfg), effective_area(b, cfg)
     if gate_area_tol is not None:
-        gap = area_rel_diff(a.area_m2, b.area_m2)
+        gap = area_rel_diff(area_a, area_b)
         if gap is not None and gap > gate_area_tol and not printed_prevail:
-            add("area", a.area_m2, b.area_m2)
-    elif (area_relation(a.area_m2, b.area_m2, cfg) not in ("support", "unknown")
+            add("area", area_a, area_b)
+    elif (area_relation(area_a, area_b, cfg) not in ("support", "unknown")
             and not printed_prevail):
-        add("area", a.area_m2, b.area_m2)
+        add("area", area_a, area_b)
 
     areas_a = stated_areas(a.description, a.area_m2)
     areas_b = stated_areas(b.description, b.area_m2)
@@ -2815,6 +2938,24 @@ def distinguishing_facts(
     colive_code = agency_code_colive_price_conflict(a, b, cfg)
     if colive_code is not None:
         add("agency_code_colive", colive_code[0], colive_code[1])
+
+    # E294/E294b: the outdoor accessory's stated size (co-live), and with a price gap (any time).
+    outdoor = outdoor_accessory_conflict(a, b, cfg)
+    if outdoor is not None:
+        add("outdoor_accessory", outdoor[0], outdoor[1])
+    accessory_price = accessory_price_conflict(a, b, cfg)
+    if accessory_price is not None:
+        add("accessory_price", accessory_price[0], accessory_price[1])
+
+    # E295: which half, side or position of one building.
+    position = position_designator_conflict(a, b, cfg)
+    if position is not None:
+        add("position_designator", position[0], position[1])
+
+    # E296 (T4): the named villa / the residence code a body names as its subject.
+    villa = named_villa_conflict(a, b, cfg)
+    if villa is not None:
+        add("named_villa", villa[0], villa[1])
 
     # E150: the reader that knows no form. Last, because it is the most expensive — the other
     # readers have already answered for every pair whose form somebody wrote down.

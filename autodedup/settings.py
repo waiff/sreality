@@ -1017,6 +1017,26 @@ class Settings:
     # E291: (A)'s obec demonstration accepts two ONE-TEXT sequential postings whose stored
     # towns differ only by the resolver (Břeclav 1/3: `na zvolenci 43` in both bodies).
     demonstrate_obec_one_text_sequential: bool = False
+    # --- W29 (S14): TIGHTENING ONLY — every reading below can add a fact, none removes one ------
+    # E293: a LAND advert whose column is empty states the plot its bažoš attribute block prints
+    # (`celková plocha (m2): 312`). Read in the `area` fact and in E185's area identity, so a
+    # price move from a 257 m² lot to a body that prints 312 is not one advert's path.
+    d43_block_plot_area: bool = False
+    # E294: the balcony/terrace/loggia/garden size two bodies state, apart (Kovářov: `balkon o
+    # rozloze 12,6 m2` against `terasu o rozloze 58 m2`). E294b: the same apartness together
+    # with a price gap neither path ever named, read whatever the timing.
+    d43_outdoor_accessory_area: bool = False
+    d43_outdoor_accessory_colive_only: bool = True
+    d43_outdoor_accessory_same_source: bool = True
+    d43_outdoor_accessory_all_categories: bool = False
+    d43_outdoor_accessory_rel_tol: float = 0.10
+    d43_outdoor_accessory_price: bool = False
+    # E295: which half, side or position of one building the body sells (`levou polovinu
+    # novostavby` / `pravou stranu novostavby`; `druhá zleva` / `čtvrtá zleva`).
+    d43_position_designator: bool = False
+    # E296 (T4): the named villa of a multi-villa project and the residence code a body names
+    # as its own subject (`VILA LOUKA REZIDENCE A3`; `Rezidence A2` against `Rezidence A3`).
+    d43_named_villa: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
@@ -1097,6 +1117,9 @@ class Settings:
             raise ValueError(
                 f"repartition_max_rounds must be at least 1: {self.repartition_max_rounds}"
             )
+        if not 0.0 <= self.d43_outdoor_accessory_rel_tol < 1.0:
+            raise ValueError(f"d43_outdoor_accessory_rel_tol must be in [0, 1): "
+                             f"{self.d43_outdoor_accessory_rel_tol}")
         for name in ("d43_two_unit_area_tol", "d43_two_unit_price_tol",
                      "d43_two_unit_stated_tol", "d43_offered_extent_price_tol"):
             value = getattr(self, name)
