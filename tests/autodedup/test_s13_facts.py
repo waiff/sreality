@@ -25,7 +25,7 @@ from autodedup.fingerprint import build_fingerprint
 from autodedup.d43 import ClusterRelation
 from autodedup.guards import cluster_invariants_ok
 from autodedup.indistinguishable import (
-    CLUSTER, GATE, distinguishing_facts, per_m2_path, price_paths_agree, text_containment,
+    CLUSTER, GATE, PROMOTE, distinguishing_facts, per_m2_path, price_paths_agree, text_containment,
 )
 from autodedup.settings import Settings
 
@@ -325,7 +325,11 @@ def test_E287b_a_plot_column_that_echoes_the_floor_area_is_not_a_parcel() -> Non
 # --- E288: Koldům 1580 ------------------------------------------------------------------------
 KOLDUM = ("Nabízím k prodeji družstevní byt o dispozici 2+kk s lodžií a celkovou výměrou 53 m², "
           "z čehož 4 m² tvoří lodžie, umístěný v 1. nadzemním podlaží domu Koldům 1580 v "
-          "Litvínově, část Horní Litvínov.")
+          "Litvínově, část Horní Litvínov. Byt má plně bezbariérový přístup z ulice i z "
+          "parkoviště – ideální pro seniory, osoby s omezenou hybností nebo rodiny s malými "
+          "dětmi. Dispozice: Byt tvoří vstupní chodba, prostorný obývací pokoj s kuchyňským "
+          "koutem, samostatná ložnice s přímým vstupem na lodžii orientovanou do klidné zeleně, "
+          "koupelna s vanou a samostatná toaleta.")
 
 
 def koldum(listing_id: int, source: str, floor: int, body: str = KOLDUM) -> Listing:
@@ -343,6 +347,33 @@ def test_E288_two_printed_storeys_keep_the_column() -> None:
     a = koldum(16302, "sreality", 12)
     b = koldum(18124833, "bazos", 0, body=KOLDUM.replace("1. nadzemním", "3. nadzemním"))
     assert "floor" in names(a, b, variant(d43_floor_column_body_prevails=True))
+
+
+def test_E288_two_edited_texts_keep_their_columns() -> None:
+    # Velká Brána (Horoměřice): two lettings `ve 4.NP` under two edited texts, columns 3 and 2.
+    a = koldum(68449, "sreality", 3)
+    b = koldum(18788687, "sreality", 2,
+               body=KOLDUM.replace("Byt má plně", "Nájemné 21 000 Kč, kauce 25 600 Kč. Byt má"))
+    assert "floor" in names(a, b, variant(d43_floor_column_body_prevails=True))
+
+
+# --- W28's guard: no relaxation reaches two bodies that print two storeys ---------------------
+PARDUBICE = ("Nabízím k pronájmu světlý a prakticky řešený byt o dispozici 1+1, který se nachází "
+             "v {n}. nadzemním podlaží bytového domu na sídlišti Dubina v Pardubicích. Byt má "
+             "výměru 36 m² a náleží k němu sklep o velikosti cca 2 m². Dispozici tvoří samostatný "
+             "pokoj, kuchyň, koupelna s vanou a s WC a chodba s vestavěnou skříní.")
+
+
+def test_the_printed_area_does_not_prevail_across_two_printed_storeys() -> None:
+    a = advert(14657, "sreality", PARDUBICE.format(n=2), 5, 11, area_m2=36.0, price=11000.0,
+               category_type="pronajem", disposition="1+1")
+    b = advert(18670116, "sreality", PARDUBICE.format(n=1), 124, 129, area_m2=38.0,
+               price=11000.0, category_type="pronajem", disposition="1+1")
+    cfg = variant(d43_printed_area_prevails=True)
+    assert "area" in names(a, b, cfg, PROMOTE)
+    c = advert(3, "sreality", PARDUBICE.format(n=2), 124, 129, area_m2=38.0, price=11000.0,
+               category_type="pronajem", disposition="1+1")
+    assert "area" not in names(a, c, cfg, PROMOTE)
 
 
 # --- E289: Český Jiřetín, a re-post that re-shot its gallery ---------------------------------
@@ -459,3 +490,57 @@ def test_every_W28_dial_is_off_by_default() -> None:
     default = Settings()
     assert not any(getattr(default, dial) for dial in W28_DIALS)
     assert not any(getattr(S12, dial) for dial in W28_DIALS)
+
+
+S13 = Settings.from_json(SETTINGS / "w28.json")
+
+
+def test_w28_differs_from_w27_only_in_the_W28_dials() -> None:
+    w27 = S12.to_dict()
+    w28 = S13.to_dict()
+    assert {key for key in w28 if w27.get(key) != w28[key]} == W28_DIALS
+    assert all(getattr(S13, dial) for dial in W28_DIALS)
+
+
+def test_the_w28_holds_are_w28_plus_one_table() -> None:
+    w28 = S13.to_dict()
+    for name, table in (("w28_rentals_hold", {"pronajem|*": "propose"}),
+                        ("w28_land_hold", {"*|pozemek": "propose"})):
+        hold = Settings.from_json(SETTINGS / f"{name}.json").to_dict()
+        assert {key for key in hold if w28.get(key) != hold[key]} == {"merge_policy"}
+        assert hold["merge_policy"] == table
+
+
+# Replay parity: every earlier settings file, w13..w27 and every hold, byte for byte.
+EARLIER_DIGESTS = {
+    "w13.json": "ac3e4b9a912353ff978f40e8ac2132ea87cf357aa278c5b769c6a8ad0e9a6018",
+    "w13_strata.json": "ae4d2c6930168c496398232749e0c1dd8bedaf3189da3395d3749eb427e935c8",
+    "w14.json": "0e7081e6d52d338d7783770254dc7d953ead3c72f605d9d4df13db51060b6f76",
+    "w15.json": "4f9b6c25a39feca617c915345fb8691f0a2bf955c426c252cbe769c1ef05e16d",
+    "w16_l.json": "bbad5441f078162e08bc499af98b58eea35b7fd851ab3654f5e6e1bb5f798c6b",
+    "w16_m.json": "4b10faeebee4fb4a3d1d869e70d4b2ae75a856f00b0ba385aebfa2b99dd193cc",
+    "w16_s.json": "0725dc3ae28a381117b489d8669b4c2d2f5748cc35669847bff26a914a514cb0",
+    "w17.json": "e35d06197ea40e062139464b411dc7de50a0f04adf541e8e73a1022468c8b55e",
+    "w18.json": "48a15b2e840ab6d589f7a79e8a879ec5d1e88b4707bea90d95764e8c158511f9",
+    "w19.json": "2d0b5cd410146fb5cfb7589320b08757f064f43fe51ac3cd4ee46427d96e991c",
+    "w20.json": "603cc3ae6e441a16def4b74ce7a3327a6ed747009a46df0bf72576aec2d1313e",
+    "w21.json": "a51155e68073f1ca68470a5bc701a51e79dc623c44c2b7c396d0dd34d267b2e9",
+    "w22.json": "4551fa5d6c8c23b2c312cef8c582c1098e029336a9b319b5c6b672e9d0f5675d",
+    "w22_rentals_hold.json": "215ea4d535c28b258b588bf3d21adc4be525fa26852dfcf23c3b347380658e49",
+    "w23.json": "ebb763f863b06f9b6353b34bed60e791e35b34c448ae5d1b504bbdd5b50b593b",
+    "w23_rentals_hold.json": "43330dc68839350374eeb52eb6dcfc8ec17c016c6382043101aa2a9737017331",
+    "w24.json": "161a390e357c7e8620f72bdd25050e4e4944379e9af2045315cf82d5af30150a",
+    "w24_rentals_hold.json": "12aba47e34ac5794af7a06c82ce51929351071d5176c23fe6ef38e9d563a1d9e",
+    "w25.json": "1f710c54a29627923bbf78c62bf108099615f3934e42f5bed38cf1a8d24fd06c",
+    "w25_rentals_hold.json": "7e2831a5021b8c4bddf1a1c9619c4ba5c58cf81bf33dda340370816a32999744",
+    "w26.json": "b889f3277cd7a298b3331192f3bb7bf86c83a4d323a3fc013ca793f9887ff24f",
+    "w26_rentals_hold.json": "35a4abb6ad2cea1ff13609a6ae1eba4b8f148adcc8f129082233306968e93626",
+    "w27.json": "2d1435e4f4489c0989bc4dff8fa4510e9f406fae38e161c66d3f1991785fef45",
+    "w27_land_hold.json": "21910cbcd02a141de012bd80b5b9951e132a219f51995181b694af5c175a2cf9",
+    "w27_rentals_hold.json": "af33cc82a740295d1d2242322bce0787fd32af6558d2eb291cfc19fea3656369",
+}
+
+
+def test_every_earlier_settings_file_is_byte_identical() -> None:
+    for name, digest in EARLIER_DIGESTS.items():
+        assert hashlib.sha256((SETTINGS / name).read_bytes()).hexdigest() == digest, name

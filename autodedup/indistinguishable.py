@@ -851,6 +851,16 @@ def text_containment(a: Listing, b: Listing) -> float | None:
     return max(shared / len(left), shared / len(right))
 
 
+def storeys_disagree(a: Listing, b: Listing) -> bool:
+    """W28's guard on every relaxation it adds: both bodies PRINT a storey and no storey is
+    common to the two. The prose-floor limb reads a one-storey worded gap as vocabulary, so a
+    relaxation that removes the only other fact would otherwise merge across it: one Pardubice
+    1+1 re-let `v 2. nadzemním podlaží` and then `v 1. nadzemním podlaží` (36 m² printed, 36
+    and 38 stored); one Třebíč 3+kk template sold `ve 3.` and then `ve 4.` patře."""
+    left, right = printed_floors(a.description, True), printed_floors(b.description, True)
+    return bool(left) and bool(right) and not (left & right)
+
+
 def _printed_areas_prevail(a: Listing, b: Listing) -> bool:
     """E280: both bodies print the SAME floor-area figures, and neither is a development's.
 
@@ -859,7 +869,8 @@ def _printed_areas_prevail(a: Listing, b: Listing) -> bool:
     template and a square metre is the unit (E273/E275's line)."""
     left = {round(value, 1) for value, _decimals, _scope in printed_areas(a.description)}
     right = {round(value, 1) for value, _decimals, _scope in printed_areas(b.description)}
-    return bool(left) and left == right and not _development_pair(a, b)
+    return (bool(left) and left == right and not _development_pair(a, b)
+            and not storeys_disagree(a, b))
 
 
 def _price_sequential_path(
@@ -885,7 +896,8 @@ def _price_sequential_path(
         return False
     if a.floor is not None and b.floor is not None and a.floor != b.floor:
         # E281: "agree on the storey" is the floor FACT's question, conventions taken out.
-        if not settings.d43_price_sequential_storey_fact or _floor_fact(a, b, settings):
+        if (not settings.d43_price_sequential_storey_fact or _floor_fact(a, b, settings)
+                or storeys_disagree(a, b)):
             return False
     # An advert that states no area has demonstrated no area (E164's rule, and the reason this
     # limb needs it): one Pouchovská 2+kk at 18,500 and one Slezské Předměstí 2+kk at 21,000
@@ -894,7 +906,7 @@ def _price_sequential_path(
     photos = _present(feats, "phash_tight_matches") or 0.0
     contained = _present(feats, "containment_max")
     if (contained is None and settings.d43_price_sequential_text_identity
-            and not _development_pair(a, b)):
+            and not _development_pair(a, b) and not storeys_disagree(a, b)):
         # E282: the pair was never scored, so its feature row is absent — at cluster grain it
         # always is. The same shingle containment the engine scores, read off the two texts —
         # outside a development, where one text is the developer's template and not one unit
@@ -2269,7 +2281,7 @@ def _one_text_repost(a: Listing, b: Listing, cfg: Settings) -> bool:
         return False
     if a.area_m2 is None or b.area_m2 is None or float(a.area_m2) != float(b.area_m2):
         return False
-    if not _never_live_together(a, b, cfg):
+    if not _never_live_together(a, b, cfg) or storeys_disagree(a, b):
         return False
     return _read_one_text(a, b, cfg)
 
@@ -2337,7 +2349,10 @@ def _bodies_print_one_storey(a: Listing, b: Listing, cfg: Settings) -> bool:
         return False
     left = printed_floors(a.description, cfg.d43_prose_floor_words)
     right = printed_floors(b.description, cfg.d43_prose_floor_words)
-    return len(left) == 1 and left == right
+    # ...and only where the two bodies are ONE text: Velká Brána (Horoměřice) lets two
+    # 2+kk flats `ve 4.NP` under two edited texts (N118012: poplatky 4 000, kauce 25 000;
+    # N119617: poplatky 4 600, kauce 25 600), and there the columns 3 and 2 are what parts them.
+    return len(left) == 1 and left == right and _read_one_text(a, b, cfg)
 
 
 def distinguishing_facts(

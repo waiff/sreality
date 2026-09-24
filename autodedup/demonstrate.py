@@ -254,6 +254,10 @@ def one_text_sequential(a: Listing, b: Listing, settings: Settings) -> bool:
         return False
     if not _sequential(a, b, settings, honest_overlap_local(a, b)):
         return False
+    from autodedup.indistinguishable import storeys_disagree
+
+    if storeys_disagree(a, b):
+        return False
     ratio = overlap_ratio(a.description, b.description)
     return ratio is not None and ratio >= settings.d43_price_same_source_one_text_min
 
@@ -277,9 +281,12 @@ def identical_twin(a: Listing, b: Listing, feats: Mapping[str, tuple[float, bool
         return False
     if a.area_m2 is None or b.area_m2 is None or float(a.area_m2) != float(b.area_m2):
         return False
+    from autodedup.indistinguishable import storeys_disagree, text_containment
+
+    if storeys_disagree(a, b):
+        return False
     contained = _slot(feats, "containment_max")
     if contained is None:
-        from autodedup.indistinguishable import text_containment
 
         contained = text_containment(a, b)
     return contained is not None and contained >= 0.99
@@ -633,8 +640,14 @@ def corroboration_warrant(
     # ninety bazos rows of one Slatinice house, one per day, are one unit and the body is all
     # they have. A body shared by two adverts on sale TOGETHER is the developer's template.
     grade = UNIT_EVIDENCE
-    clock = (honest_overlap_local(a, b) if settings.demonstrate_sequential_honest_clock
-             else overlap_days_local(a, b))
+    clock = overlap_days_local(a, b)
+    if settings.demonstrate_sequential_honest_clock:
+        from autodedup.indistinguishable import storeys_disagree
+
+        # E283 reads the honest clock only where the bodies do not print two storeys: a
+        # template sold `ve 3. patře` and then `ve 4. patře` is the development's next unit.
+        if not storeys_disagree(a, b):
+            clock = honest_overlap_local(a, b)
     if development and not _sequential(a, b, settings, clock):
         grade = UNIT_EVIDENCE_IN_DEVELOPMENT
     unit = [name for name in grade if name in found]
