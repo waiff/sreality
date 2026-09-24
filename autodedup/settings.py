@@ -942,6 +942,13 @@ class Settings:
     # 2+kk at 44 m² and its own next posting at 45 m² under `Ev.č. 945210` on both rows and one
     # byte-identical body.
     d43_train_column_tolerance_m2: float = 0.0
+    # E277: E185's own clock, corrected the way E264 corrected the cluster-grain price limb.
+    # `sequential_postings` reads `inactive_at`, which rule #3 stamps when a DELISTING was
+    # DETECTED and not when the advert went. One Říčany plot re-posted across five portals at
+    # 7,900,000 and then 7,390,000 has twelve of its cross pairs handed hours of overlap they
+    # never had, so E185 refuses its own escape, the price becomes a fact and the train is torn
+    # into three cells — the last re-post landing in a cell of its own.
+    d43_price_sequential_honest_clock: bool = False
     # E276: the Herínk conjunction — co-live on one portal, two disjoint agency evidence codes,
     # two price paths that never meet, and no sentence that explains the gap. D49 refuses the
     # bare co-live price and D61 the bare code; this asks whether the CONJUNCTION is a fact.

@@ -753,6 +753,53 @@ def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> boo
     return True
 
 
+def _development_pair(a: Listing, b: Listing) -> bool:
+    """Do BOTH bodies speak a new development's vocabulary? (`development.PROJECT_TERMS`.)"""
+    from autodedup.development import PROJECT_TERMS
+
+    return all(any(term in fold(listing.description or "") for term in PROJECT_TERMS)
+               for listing in (a, b))
+
+
+def _column_rounding(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E275: is this area gap the PORTAL's rounding rather than a different unit?
+
+    A re-post train of ONE body is one object, and bažoš stores one Zeleneč 2+kk at 44 m² and
+    its own next posting at 45 m² under `Ev.č. 945210` on both rows and one byte-identical
+    body. E185 refuses its own escape on any area gap at all, so that one square metre severs
+    the train and the whole five-portal component with it.
+
+    Never inside a NEW DEVELOPMENT: there a square metre is the next unit, which is exactly
+    the ground the standing ruling protects, and E273 reads it the other way round.
+    """
+    tol = settings.d43_train_column_tolerance_m2
+    if tol <= 0.0 or a.area_m2 is None or b.area_m2 is None:
+        return False
+    if abs(float(a.area_m2) - float(b.area_m2)) > tol:
+        return False
+    return not _development_pair(a, b)
+
+
+def _sequential_for_price(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E277: E185's own clock, corrected the way E264 corrected the cluster limb.
+
+    `sequential_postings` reads `inactive_at`, the stamp rule #3 writes when a DELISTING was
+    detected; the lag runs to weeks. One Říčany plot is re-posted across five portals at
+    7,900,000 and then 7,390,000, and the detection stamps hand twelve of its cross pairs
+    hours of overlap they never had — so E185 refuses them, the price becomes a fact, and the
+    train is torn into three.
+    """
+    if not settings.d43_price_sequential_honest_clock:
+        return sequential_postings(a, b, settings)
+    overlap = _honest_overlap_days(a, b)
+    if overlap is None or overlap >= settings.demonstrate_price_colive_days:
+        return False
+    shortest = min(live_days(a), live_days(b))
+    if shortest <= 0.0:
+        return True
+    return overlap <= settings.demonstrate_price_colive_fraction * shortest
+
+
 def _price_sequential_path(
     a: Listing, b: Listing, feats: Feats | None, settings: Settings
 ) -> bool:
@@ -768,7 +815,7 @@ def _price_sequential_path(
     """
     if not settings.d43_price_sequential_path:
         return False
-    if not sequential_postings(a, b, settings):
+    if not _sequential_for_price(a, b, settings):
         return False
     if settings.d43_price_sequential_same_feed and not _same_feed(a, b, "broker", True):
         return False
@@ -784,7 +831,7 @@ def _price_sequential_path(
     contained = _present(feats, "containment_max") or 0.0
     code = _present(feats, "ref_code_shared") or 0.0
     gap = area_rel_diff(a.area_m2, b.area_m2)
-    if gap is not None and gap > 0.0:
+    if gap is not None and gap > 0.0 and not _column_rounding(a, b, settings):
         return False
     if gap is None:
         # E192: a side that states no area has demonstrated no area — unless the two adverts
@@ -2163,7 +2210,7 @@ def distinguishing_facts(
         # of ONE advert — and a re-post does not also move its area column. Where the column
         # moved too, the excuse is gone and the price is read at the cross-portal bar.
         moved_area = (cfg.d43_price_same_source_bar == "area_moved"
-                      and not _areas_agree(a, b))
+                      and not _areas_agree(a, b) and _development_pair(a, b))
         over = price_gap > (PRICE_CROSS_TOL if (cross or moved_area)
                             else PRICE_SAME_SOURCE_TOL)
         if cfg.d43_price_path:
