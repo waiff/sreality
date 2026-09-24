@@ -156,6 +156,7 @@ from autodedup.text_facts import (
     subject_floors_by_form,
     printed_space_numbers,
     printed_designators,
+    printed_lot_labels,
     printed_unit_codes,
     further_areas,
     unit_designators,
@@ -703,6 +704,21 @@ def _offer_area_conflict(
     return (str(lead_a[0]), str(lead_b[0]))
 
 
+def _filed_apart(a: Listing, b: Listing, settings: Settings) -> bool:
+    """E272: one source filed these two at two different address points of one street."""
+    if not settings.d43_floor_sequential_address_split:
+        return False
+    if a.source is None or a.source != b.source:
+        return False
+    if not (a.location.granularity == ADDRESS_GRAIN == b.location.granularity):
+        return False
+    left, right = a.location.house_number, b.location.house_number
+    if not left or not right or left == right:
+        return False
+    kod_a, kod_b = a.location.ruian_adm_kod, b.location.ruian_adm_kod
+    return bool(kod_a) and bool(kod_b) and kod_a != kod_b
+
+
 def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> bool:
     """E180: is a `gap`-storey difference a difference the convention cannot explain?
 
@@ -723,7 +739,11 @@ def _rounded_floors(a: Listing, b: Listing, settings: Settings, gap: int) -> boo
     elif not same_camp(settings.floor_camps, a.source, b.source):
         return False
     if settings.d43_floor_within_camp_colive and _never_live_together(a, b, settings):
-        return False
+        # E272: the sequential excuse is about ONE portal's parse drifting between re-posts of
+        # one advert. Two postings the portal filed at DIFFERENT address points are not one
+        # advert re-parsed, and the drift excuse does not reach them.
+        if not _filed_apart(a, b, settings):
+            return False
     # E154, kept: with the feed UNKNOWN a price that MOVED is one advert at two moments, and
     # the storey moved with it. A price that did not move is two simultaneous statements.
     if (settings.d43_floor_within_camp_price_escape and not _feed_known(a, b)
@@ -783,6 +803,12 @@ def _price_sequential_path(
 def _live_together(a: Listing, b: Listing, settings: Settings) -> bool:
     """Genuinely on sale at the same time, on W8's honest clock rather than the detector's."""
     return not _never_live_together(a, b, settings)
+
+
+def _areas_agree(a: Listing, b: Listing) -> bool:
+    """E273: do the two stored area columns name the same number? Silence agrees with anything."""
+    gap = area_rel_diff(a.area_m2, b.area_m2)
+    return gap is None or gap <= 0.0
 
 
 def _price_contradiction(a: Listing, b: Listing, settings: Settings) -> bool:
@@ -1531,6 +1557,27 @@ def _moved(left: float | None, right: float | None, tol: float) -> bool:
     return abs(left - right) / max(left, right) > tol
 
 
+def _co_of(value: str | None) -> str | None:
+    """The č.o., which is the ENTRANCE — the tail of `1497/11`, absent where none was filed."""
+    if not value:
+        return None
+    parts = [part.strip() for part in str(value).strip().split("/")]
+    return parts[1] if len(parts) > 1 and parts[1] else None
+
+
+def _two_entrances(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """E271: did ONE portal file these two at two entrances of one building?"""
+    if cfg.d43_house_number_entrance != "stored":
+        return False
+    if a.source is None or a.source != b.source:
+        return False
+    co_a, co_b = _co_of(a.location.house_number), _co_of(b.location.house_number)
+    if not co_a or not co_b or co_a == co_b:
+        return False
+    kod_a, kod_b = a.location.ruian_adm_kod, b.location.ruian_adm_kod
+    return bool(kod_a) and bool(kod_b) and kod_a != kod_b
+
+
 def stored_house_number_conflict(a: Listing, b: Listing, cfg: Settings
                                  ) -> tuple[str, str] | None:
     """E242: the resolver's house number, read only where it can be the advert's own.
@@ -1558,12 +1605,22 @@ def stored_house_number_conflict(a: Listing, b: Listing, cfg: Settings
     if not left or not right or left == right:
         return None
     cp_a, cp_b = _cp_of(left), _cp_of(right)
-    if not cp_a or not cp_b or cp_a == cp_b:
+    if not cp_a or not cp_b:
+        return None
+    # E271: a SHARED č.p. with a different č.o. is two ENTRANCES of one building, not one
+    # address. E242 refused it outright on the reading that entrances share the č.p., which is
+    # the claim the other way round: the č.p. IS the building. The reading is taken only where
+    # the PORTAL ITSELF filed the two — one source, two RÚIAN address points — so the resolver
+    # drift the 3.7 % refusal was measured on cannot reach it; and there the two bodies need
+    # not be independently written, because one template over two entrances is the shape
+    # (Zelené údolí / Kunratice lets 1497/9 and 1497/11 under one text).
+    entrance = cp_a == cp_b and _two_entrances(a, b, cfg)
+    if cp_a == cp_b and not entrance:
         return None
     tol = cfg.d43_house_number_move_tol
     if not (_moved(a.price, b.price, tol) or _moved(a.area_m2, b.area_m2, tol)):
         return None
-    if not _independently_written(a, b, cfg):
+    if not entrance and not _independently_written(a, b, cfg):
         return None
     # E241: what the two bodies PRINT outranks what the resolver filed. The same Freyova 1+kk
     # is stored at `236/5` and `235/7` and both bodies print `Freyova 5/236`.
@@ -1591,6 +1648,95 @@ def printed_designator_conflict(a: Listing, b: Listing, cfg: Settings
         if not (left[kind] & right[kind]):
             return (f"{kind}={sorted(left[kind])}", f"{kind}={sorted(right[kind])}")
     return None
+
+
+def lot_label_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+    """E270: two plots of ONE project, each printing its own lot label.
+
+    idnes `Pod Sekvojí` (Trutnov, Horní Staré Město) sells ten plots under bodies that are
+    byte-identical but for a trailing `Označení pozemku v projektu A13` / `A14` / ... / `A40`,
+    all 1,001 m² at 3,900 Kč/m² = 3,903,900, nine of them live together — and every generation
+    since S4 fused them into one group. The labels are DISJOINT and every member prints one.
+
+    Read per KIND, like E250. A body that prints several labels for one kind, or whose label
+    has siblings elsewhere in the same text, has published the project's ROSTER and abstains —
+    a project advert naming every plot must never refuse anything."""
+    if cfg.d43_lot_labels == "off":
+        return None
+    land_only = cfg.d43_lot_labels == "land"
+    left = printed_lot_labels(a.description, land_only)
+    right = printed_lot_labels(b.description, land_only)
+    if not left or not right:
+        return None
+    for kind in sorted(set(left) & set(right)):
+        if not (left[kind] & right[kind]):
+            return (f"{kind}={sorted(left[kind])}", f"{kind}={sorted(right[kind])}")
+    return None
+
+
+def _stated_extents(listing: Listing, cfg: Settings) -> frozenset[str]:
+    """What one body states its offer COVERS — its parcels and its total plot area."""
+    parcels = parcel_numbers(listing.description, cfg.d43_parcel_forms_wide)
+    areas = prose_plot_areas_wide(listing.description)
+    return frozenset({f"parc {one}" for one in parcels}
+                     | {f"{value:.0f}m2" for value in areas if value > 0.0})
+
+
+def _path_price_gap(a: Listing, b: Listing) -> float:
+    """The CLOSEST the two adverts' price paths ever came, relatively. 0.0 where one is silent."""
+    left, right = _price_points(a), _price_points(b)
+    if not left or not right:
+        return 0.0
+    return min(rel_diff(x, y) for x in left for y in right)
+
+
+def extent_package_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+    """E274: two PACKAGES of one object, each stating its own extent and its own price.
+
+    Radimovice / Petříkov is one areál sold twice by one seller: a family package at 45,000,000
+    stating `pozemek o celkové výměře 3 526 m²`, and an investment package at 57,000,000 adding
+    `pozemek parc. č. 45/1` with `možnost parcelace 2-3 stavebních parcel`. The two live
+    together 104 days on remax and again on sreality, and their price paths never meet.
+
+    D49 refuses the bare co-live price gap and that refusal stands: what lifts this reading is
+    the EXTENT, exactly as E244 and E260 lift it. Each body must state an extent — a parcel or
+    a total plot area — and the two statements must be wholly disjoint, so an advert that
+    states nothing about its extent can never be refused by one that does."""
+    if not cfg.d43_extent_package:
+        return None
+    left, right = _stated_extents(a, cfg), _stated_extents(b, cfg)
+    if not left or not right or left & right:
+        return None
+    if not _co_live(a, b, cfg.d43_price_colive_min_overlap_days):
+        return None
+    if price_paths_agree(a, b, cfg.d43_price_path_tol):
+        return None
+    if _path_price_gap(a, b) <= cfg.d43_extent_package_min_price_gap:
+        return None
+    return (f"extent={sorted(left)}", f"extent={sorted(right)}")
+
+
+def agency_code_colive_price_conflict(a: Listing, b: Listing, cfg: Settings
+                                      ) -> tuple[str, str] | None:
+    """E276: the Herínk conjunction — two order codes, one portal, two prices that never meet.
+
+    Herínk lets two 1,106 m² halls of one park on bažoš under `Ev.č. 03105` at 257,698 and
+    `Ev.č. 03104` at 440,370, live together 56 days, bodies otherwise identical and no sentence
+    explaining the gap. D49 refuses the bare co-live price and D61 refuses the bare code; the
+    claim here is only about their CONJUNCTION, and it ships only where its measured cost on
+    the certain duplicates of the fourteen cohorts is near zero."""
+    if not cfg.d43_agency_code_colive_price:
+        return None
+    if a.source is None or a.source != b.source or not _live_together(a, b, cfg):
+        return None
+    codes_a, codes_b = reference_codes(a.description), reference_codes(b.description)
+    if not codes_a or not codes_b or codes_a & codes_b:
+        return None
+    if price_paths_agree(a, b, cfg.d43_price_path_tol):
+        return None
+    if _path_price_gap(a, b) <= cfg.d43_agency_code_colive_price_min_gap:
+        return None
+    return (f"code={sorted(codes_a)}@{a.price}", f"code={sorted(codes_b)}@{b.price}")
 
 
 def _plan_match(rows: Mapping[str, tuple[float, float]], value: float | None,
@@ -2013,7 +2159,13 @@ def distinguishing_facts(
             and not _rent_per_square_metre(a, b, cfg)):
         price_gap = rel_diff(float(a.price), float(b.price))
         cross = a.source is not None and b.source is not None and a.source != b.source
-        over = price_gap > (PRICE_CROSS_TOL if cross else PRICE_SAME_SOURCE_TOL)
+        # E273: the same-source bar is 60 % because one portal's price MOVES between re-posts
+        # of ONE advert — and a re-post does not also move its area column. Where the column
+        # moved too, the excuse is gone and the price is read at the cross-portal bar.
+        moved_area = (cfg.d43_price_same_source_bar == "area_moved"
+                      and not _areas_agree(a, b))
+        over = price_gap > (PRICE_CROSS_TOL if (cross or moved_area)
+                            else PRICE_SAME_SOURCE_TOL)
         if cfg.d43_price_path:
             agree = price_paths_agree(a, b, cfg.d43_price_path_tol)
             # E134: the momentary gap is excused by an agreeing path; a CONTRADICTION — two
@@ -2355,6 +2507,21 @@ def distinguishing_facts(
     variant = extent_variant_conflict(a, b, cfg)
     if variant is not None:
         add("extent_variant", variant[0], variant[1])
+
+    # E270: the lot label a land project prints for its own plot.
+    lot = lot_label_conflict(a, b, cfg)
+    if lot is not None:
+        add("lot_label", lot[0], lot[1])
+
+    # E274: two packages of one object, each stating its own extent and its own price.
+    package = extent_package_conflict(a, b, cfg)
+    if package is not None:
+        add("extent_package", package[0], package[1])
+
+    # E276: two agency order codes on one portal whose price paths never meet.
+    colive_code = agency_code_colive_price_conflict(a, b, cfg)
+    if colive_code is not None:
+        add("agency_code_colive", colive_code[0], colive_code[1])
 
     # E150: the reader that knows no form. Last, because it is the most expensive — the other
     # readers have already answered for every pair whose form somebody wrote down.

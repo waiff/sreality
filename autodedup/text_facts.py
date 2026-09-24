@@ -2265,3 +2265,114 @@ def _furnished_state_wide(text: str) -> frozenset[str]:
     if "part" in out:
         out.discard("furnished")
     return frozenset(out)
+
+
+# --- the LOT LABEL a project prints for its own plot (E270) ------------------------------------
+# W27. `unit_designators` reads `označením B36` — marker then code, with nothing between.
+# `printed_unit_codes` needs two dotted segments, because a single segment after a DWELLING noun
+# is as often the building as the flat. `printed_designators` (E250) reads a noun, then `č.`,
+# then a number under 100. Between them they miss the form a Czech LAND PROJECT writes, which
+# puts the noun BETWEEN the marker and the code: idnes sells ten plots of `Pod Sekvojí` (Trutnov,
+# Horní Staré Město) under bodies byte-identical but for a trailing `Označení pozemku v projektu
+# A13` / `A14` / ... / `A40`, every one 1,001 m² at 3,900 Kč/m² = 3,903,900, nine of them live
+# together. Every generation since S4 fused them into one group, because nothing in the chain
+# reads the only sentence that tells them apart.
+#
+# Read per KIND, like E250, and never as one set. Two refusals keep it fail-safe, because an
+# empty set is never a conflict: a kind that prints more than one label has published the
+# project's ROSTER rather than named its own plot, and a label whose own prefix appears again
+# anywhere in the body (`pozemky A13, A14 a A15`) is a roster the noun happened to precede.
+_LOT_KINDS: tuple[tuple[str, str, bool], ...] = (
+    ("pozemek", r"pozemek|pozemku|pozemky|pozemkem", True),
+    ("parcela", r"parcela|parcely|parcele|parcelu|parcelou", True),
+    ("jednotka", r"jednotka|jednotky|jednotce|jednotku|jednotkou", False),
+    ("byt", r"byt|bytu|byte|bytem", False),
+    ("dum", r"dum|domu|dome|domem|domku|domek", False),
+    ("stani", r"stani", False),
+)
+# `Označení`, `označením`, `označena`, `označen`, `označeno` — and `číslo`, which the same
+# sentence writes instead (`číslo pozemku v projektu 13`).
+_LOT_MARKER: str = r"(?:oznacen\w{0,4}|cislo|c\.)"
+# The phrase that says WHERE the label lives. Optional: `označení pozemku A13` is the same
+# sentence with the phrase left out.
+_LOT_SCOPE: str = (r"(?:v\s+projektu|v\s+projektove\s+dokumentaci|projektove"
+                   r"|v\s+katastru|dle\s+projektu)")
+# One or two letters and up to three digits — the shape a plan roster uses (`A13`, `B7`).
+_LOT_CODE_ALNUM: str = r"[a-z]{1,2}\s?\d{1,3}[a-z]?"
+# A bare numeral is read only behind a marker, and never where the next thing is a unit or more
+# digits — `Označení pozemku 1 001 m2` names an area, not a lot.
+_LOT_CODE_NUM: str = r"\d{1,3}(?!\s*[\d.,])(?!\s*(?:m2|m\b|kc|czk|%|\+|kk\b))"
+_LOT_CODE: str = "(" + _LOT_CODE_ALNUM + "|" + _LOT_CODE_NUM + ")"
+_LOT_NOT_AFTER = re.compile(r"^\s*(?:m2|m\b|kc|czk|%|\+|kk\b|,-|mil|tis)")
+
+
+def _lot_patterns() -> tuple[tuple[str, bool, re.Pattern[str]], ...]:
+    out: list[tuple[str, bool, re.Pattern[str]]] = []
+    for kind, forms, is_land in _LOT_KINDS:
+        nouns = r"(?:" + forms + r")"
+        # `Označení pozemku v projektu A13`, `číslo pozemku v projektu 13`, `označení parcely A7`.
+        out.append((kind, is_land, re.compile(
+            _LOT_MARKER + r"\s*:?\s*" + nouns + r"\s+(?:" + _LOT_SCOPE + r"\s+)?"
+            r"(?:c\.?\s*|cislo\s+)?" + _LOT_CODE + r"\b")))
+        # `pozemek s označením A13`, `parcela označená A7`, `dům označený B2`.
+        out.append((kind, is_land, re.compile(
+            nouns + r"\s+(?:je\s+)?(?:s\s+)?oznacen\w{0,4}\s+(?:" + _LOT_SCOPE + r"\s+)?"
+            r"(?:c\.?\s*|cislo\s+)?" + _LOT_CODE + r"\b")))
+        # `pozemek A13`, `parcela B7` — the bare form, LETTERS AND DIGITS, land nouns only. A
+        # bare `B2` after a dwelling noun is the BUILDING (E161's refusal), and reading it would
+        # part every flat in that building from every other.
+        if is_land:
+            out.append((kind, is_land, re.compile(nouns + r"\s+(" + _LOT_CODE_ALNUM + r")\b")))
+    return tuple(out)
+
+
+_LOT_PATTERNS: tuple[tuple[str, bool, re.Pattern[str]], ...] = _lot_patterns()
+# The English roster the same developers publish beside the Czech one.
+_LOT_ENGLISH = re.compile(r"\b(?:lot|plot)\s+(?:no\.?\s*|number\s+|#\s*)?" + _LOT_CODE + r"\b")
+LOT_ENGLISH_KIND: str = "lot"
+# More than one label for one kind is the project's roster, not this advert's own plot.
+LOT_LABEL_MAX_PER_KIND: int = 1
+
+
+def printed_lot_labels(text: str | None, land_only: bool = False) -> dict[str, frozenset[str]]:
+    """E270: `{kind: {label}}` for `Označení pozemku v projektu A13` and its siblings."""
+    return dict(_printed_lot_labels(text, land_only)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_lot_labels(text: str, land_only: bool) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fact_text(unescape(text))
+    found: dict[str, set[str]] = {}
+    for kind, is_land, pattern in _LOT_PATTERNS:
+        if land_only and not is_land:
+            continue
+        for match in pattern.finditer(folded):
+            if _LOT_NOT_AFTER.match(folded[match.end():match.end() + 6]):
+                continue
+            label = re.sub(r"\s+", "", match.group(1)).upper()
+            if label:
+                found.setdefault(kind, set()).add(label)
+    for match in _LOT_ENGLISH.finditer(folded):
+        if _LOT_NOT_AFTER.match(folded[match.end():match.end() + 6]):
+            continue
+        label = re.sub(r"\s+", "", match.group(1)).upper()
+        if label:
+            found.setdefault(LOT_ENGLISH_KIND, set()).add(label)
+    out: list[tuple[str, frozenset[str]]] = []
+    for kind, labels in sorted(found.items()):
+        if len(labels) > LOT_LABEL_MAX_PER_KIND or _lot_roster(folded, labels):
+            continue
+        out.append((kind, frozenset(labels)))
+    return tuple(out)
+
+
+def _lot_roster(folded: str, labels: Iterable[str]) -> bool:
+    """Does the body name SIBLINGS of this label? Then it published a roster, not its own plot."""
+    for label in labels:
+        head = re.match(r"([a-z]{1,2})\d", label.lower())
+        if head is None:
+            continue
+        siblings = set(re.findall(r"\b" + head.group(1) + r"\s?\d{1,3}[a-z]?\b", folded))
+        if len({re.sub(r"\s+", "", one).upper() for one in siblings}) > 1:
+            return True
+    return False

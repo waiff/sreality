@@ -895,6 +895,59 @@ class Settings:
     # fact, which is exactly what a reconciliation may never do.
     repartition_reconcile_factless_first: bool = False
 
+    # --- W27 / S12: what the fourteenth cohort's confirmation named (E270-E277) --------------
+    # E270: the LOT LABEL a land project prints for its own plot. `Označení pozemku v projektu
+    # A13` puts the noun BETWEEN the marker and the code, which is the one arrangement no
+    # reader in the chain knows (E61 wants marker-then-code, E161 wants two dotted segments,
+    # E250 wants noun-then-`č.`-then-a-number-under-100). Ten plots of idnes `Pod Sekvojí` are
+    # byte-identical but for that trailing line, all 1,001 m² at 3,903,900, and every
+    # generation since S4 fused them. `land` reads the pozemek/parcela nouns and the English
+    # `lot`/`plot`, which is where the form is unambiguous; `all` adds the dwelling nouns
+    # behind an explicit `označení` marker (never bare — a bare `B2` after `byt` is the
+    # BUILDING, which is E161's own refusal).
+    d43_lot_labels: str = "off"
+    # E271: `č.p.` is the BUILDING and `č.o.` the ENTRANCE. E242 refuses outright where the
+    # č.p. is shared, on the reading that entrances of one house share it — which is the claim
+    # the other way round. Zelené údolí / Kunratice lets `Pod Haltýřem 1497/9` (3. patro,
+    # 15,000 -> 14,500) and `1497/11` (2. patro, 14,000 -> 13,500) under ONE template body, and
+    # the shared 1497 is the only thing making them one address. The entrance reading is taken
+    # only where the PORTAL ITSELF filed the two — one source, two RÚIAN address points — so
+    # the resolver-drift shape the 3.7 % refusal was measured on cannot reach it, and that is
+    # also why this branch does not ask for two independently written bodies: one template over
+    # two entrances is precisely the shape.
+    d43_house_number_entrance: str = "off"
+    # E272: E180's co-live guard keeps the one-storey excuse for two SEQUENTIAL postings,
+    # because there the gap is one portal's parse drifting between re-posts of ONE advert. Two
+    # postings the portal filed at DIFFERENT address points are not one advert re-parsed, so
+    # the drift excuse does not reach them.
+    d43_floor_sequential_address_split: bool = False
+    # E273: the same-source price bar is 60 % because one portal's price MOVES between re-posts
+    # of one advert; a re-post does not also move its area column. Rezidence Na Mariánské cestě
+    # sells 18482 (101 m², 12,823,000 -> 12,438,310) and 14063960 (102 m², 11,700,460) as two
+    # units of one residence: 19 of the 20 cross pairs of their two cross-portal groups already
+    # carry a fact, and the ONE hole is the sreality x sreality pair the 60 % bar excuses —
+    # through which the repartition destroyed both groups and fused the two survivors.
+    # `area_moved` reads the price at the cross-portal bar where the area column moved too.
+    d43_price_same_source_bar: str = "wide"
+    # E274: two PACKAGES of one seller are two extents (E244/E260's reading), not a bare
+    # co-live price gap (D49's refusal). Radimovice / Petříkov sells one areál as a family
+    # package at 45,000,000 stating `pozemek o celkové výměře 3 526 m²` and as an investment
+    # package at 57,000,000 stating `pozemek parc. č. 45/1` with `možnost parcelace 2-3
+    # stavebních parcel`, live together 104 days on remax and on sreality. Each body states an
+    # extent the other never states and the two price paths never meet.
+    d43_extent_package: bool = False
+    d43_extent_package_min_price_gap: float = 0.1
+    # E275: a re-post train of ONE body is ONE object. A column difference this small inside a
+    # train carrying one agency order code is the portal's rounding — bažoš stores one Zeleneč
+    # 2+kk at 44 m² and its own next posting at 45 m² under `Ev.č. 945210` on both rows and one
+    # byte-identical body.
+    d43_train_column_tolerance_m2: float = 0.0
+    # E276: the Herínk conjunction — co-live on one portal, two disjoint agency evidence codes,
+    # two price paths that never meet, and no sentence that explains the gap. D49 refuses the
+    # bare co-live price and D61 the bare code; this asks whether the CONJUNCTION is a fact.
+    d43_agency_code_colive_price: bool = False
+    d43_agency_code_colive_price_min_gap: float = 0.15
+
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
         self.vocabulary_attr_keys = tuple(str(key) for key in self.vocabulary_attr_keys)
@@ -1021,6 +1074,28 @@ class Settings:
         if self.repartition_reconcile_factless_first and not self.repartition_keep_factless:
             raise ValueError(
                 "repartition_reconcile_factless_first needs repartition_keep_factless")
+        if self.d43_lot_labels not in ("off", "land", "all"):
+            raise ValueError(f"d43_lot_labels must be off, land or all: {self.d43_lot_labels}")
+        if self.d43_house_number_entrance not in ("off", "stored"):
+            raise ValueError("d43_house_number_entrance must be off or stored: "
+                             f"{self.d43_house_number_entrance}")
+        if (self.d43_house_number_entrance != "off"
+                and self.d43_stored_house_number != "guarded"):
+            raise ValueError("d43_house_number_entrance needs d43_stored_house_number=guarded")
+        if self.d43_price_same_source_bar not in ("wide", "area_moved"):
+            raise ValueError("d43_price_same_source_bar must be wide or area_moved: "
+                             f"{self.d43_price_same_source_bar}")
+        if self.d43_price_same_source_bar != "wide" and not self.d43_price_path:
+            raise ValueError("d43_price_same_source_bar needs d43_price_path")
+        if not 0.0 < self.d43_extent_package_min_price_gap < 1.0:
+            raise ValueError("d43_extent_package_min_price_gap must be in (0,1): "
+                             f"{self.d43_extent_package_min_price_gap}")
+        if self.d43_train_column_tolerance_m2 < 0.0:
+            raise ValueError("d43_train_column_tolerance_m2 must be >= 0: "
+                             f"{self.d43_train_column_tolerance_m2}")
+        if not 0.0 < self.d43_agency_code_colive_price_min_gap < 1.0:
+            raise ValueError("d43_agency_code_colive_price_min_gap must be in (0,1): "
+                             f"{self.d43_agency_code_colive_price_min_gap}")
         if not 0.0 < self.d43_extent_variant_min_price_gap < 1.0:
             raise ValueError(
                 f"d43_extent_variant_min_price_gap must be in (0, 1): "
