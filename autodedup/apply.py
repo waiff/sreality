@@ -5,11 +5,12 @@
     python3 -m autodedup.lane --mode unapply --args "generation=g12,dry_run=0" --out out/
     python3 -m autodedup.lane --mode unapply --args "since=2026-09-25T08:00Z" --out out/
 
-`plan_apply` reads a generation's groups and, per group, names the survivor and the properties
-that would retire into it — or the reasons the group is refused (E903). `apply_plan` records
-that plan (dry run) or executes it through `toolkit.property_identity.merge_properties`, one
-merge group per engine group (E901), so `unmerge_group` undoes a whole group and `unapply`
-undoes groups newest-first, picked by generation, run or time window. Nothing here decides
+`plan_apply` reads a generation's groups and, per group, names the survivor (the toolkit's one
+rule, `survivor_of`) and the properties that would retire into it — or the reasons the group is
+refused (E903). `apply_plan` records that plan (dry run) or executes it through
+`toolkit.property_identity.merge_property_set`, one merge group per engine group (E901), and
+`unapply` undoes groups newest-first, picked by generation, run or time window, each as a loop
+of `detach_listing` over the adverts its merge moved. Nothing here decides
 anything the engine did not: the groups are read as stored, and every refusal only removes a
 group from the plan.
 
@@ -20,8 +21,8 @@ before EVERY group (E39), so emptying its area on /settings stops a run between 
 a run's own arguments can narrow it and never widen it.
 
 D7 holds: nothing here reads `property_merge_events`, and only the chokepoint writes it
-(`source='autodedup'` says who merged). The apply path's own ledger is the only history it
-consults.
+(`source='autodedup'` says who merged; a detach reads it inside the toolkit). The apply path's
+own ledger is the only history it consults.
 """
 
 from __future__ import annotations
@@ -39,7 +40,13 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from autodedup import apply_sql as S
 from autodedup.census import write_json
 from autodedup.ui_sql import NEGATIVE_VERDICTS
-from toolkit.property_identity import MergeError, merge_properties, unmerge_group
+from toolkit.property_identity import (
+    AssetLinkConflict,
+    MergeError,
+    detach_listing,
+    merge_property_set,
+    survivor_of,
+)
 from toolkit.room_taxonomy import category_main_compatible
 
 SCOPE_SETTING: str = "autodedup_apply_scope"
@@ -76,8 +83,7 @@ SKIP_MUST_NOT_LINK = "must_not_link"
 SKIP_CATEGORY_TYPE = "category_type_mix"
 SKIP_CATEGORY_MAIN = "category_main_incompatible"
 SKIP_CARRIES_OUT_OF_SCOPE = "carries_out_of_scope_listings"
-# Two involved properties carry an asset link (their own, or one a property merged into them
-# left behind): the operator linked them as units never to collapse (rule 15, migration 224).
+# The merge itself refused two different asset links (decision 17): one survivor keeps one.
 SKIP_ASSET_LINKED = "asset_linked_units"
 SKIP_SPANS_GROUPS = "property_spans_groups"
 SKIP_CARRIES_UNGROUPED = "carries_ungrouped_listings"
@@ -273,7 +279,7 @@ class GroupPlan:
     # of the involved properties. Re-read inside the group's transaction before it merges.
     listing_ids: list[int] = field(default_factory=list)
     # Which involved property each of those listings sits on — re-recorded over the locked rows
-    # as the group merges, so `unapply` can tell what `unmerge_group` would move back (E905).
+    # as the group merges, so `unapply` knows which adverts its detach loop moves back (E905).
     listings_by_property: dict[int, list[int]] = field(default_factory=dict)
 
     @property
@@ -375,27 +381,6 @@ def scope_closed(conn: Any) -> str | None:
     except ValueError as exc:
         return str(exc)
     return "; ".join(problems) or None
-
-
-def _survivor(
-    property_ids: Sequence[int],
-    props: Mapping[int, Mapping[str, Any]],
-    children: Mapping[int, set[int]],
-    assets: Mapping[int, Sequence[int]],
-) -> int:
-    """The one asset-linked property, when only one is: the chokepoint leaves `asset_id` on the
-    row it retires, so an asset-linked unit is never the one retired (E901). Otherwise most
-    listings wins; a tie goes to the oldest `first_seen_at`, then the lowest id."""
-    carriers = [pid for pid in property_ids if assets.get(pid)]
-    if len(carriers) == 1:
-        return carriers[0]
-
-    def key(pid: int) -> tuple:
-        first = props[pid].get("first_seen_at")
-        stamp = first.timestamp() if isinstance(first, datetime) else 0.0
-        return (-len(children.get(pid, ())), 0 if first is not None else 1, stamp, pid)
-
-    return min(property_ids, key=key)
 
 
 def is_realtime_generation(generation: str) -> bool:
@@ -534,33 +519,14 @@ def _separated_merges(
     return sorted(out, key=lambda m: (m["generation"], m["cluster_key"]))
 
 
-def _asset_links(
-    conn: Any, property_ids: Iterable[int], props: Mapping[int, Mapping[str, Any]]
-) -> dict[int, list[int]]:
-    """Each property's asset links: its own `asset_id` and that of every property merged into
-    it (the chokepoint leaves a retired unit's link on the retired row), so an earlier merge
-    never erases the operator's "different units, do not collapse" (E903)."""
-    ids = sorted(set(property_ids))
-    links: dict[int, set[int]] = {}
-    for pid in ids:
-        own = (props.get(pid) or {}).get("asset_id")
-        if own is not None:
-            links.setdefault(pid, set()).add(int(own))
-    for chunk in _chunks(ids):
-        for root, asset in _rows(conn, S.ABSORBED_ASSETS_SQL, {"property_ids": chunk}):
-            links.setdefault(int(root), set()).add(int(asset))
-    return {pid: sorted(assets) for pid, assets in links.items()}
-
-
 def _set_reasons(
     listings: set[int],
     category_of: Mapping[int, tuple[str | None, str | None]],
     props: Sequence[Mapping[str, Any]],
     scope: Scope,
-    assets: Mapping[int, Sequence[int]],
 ) -> tuple[list[str], dict[str, Any]]:
-    """What the merge would build, checked as the chokepoint would plus the run's scope and the
-    operator's asset links: at plan time and again, over locked rows, just before it merges."""
+    """What the merge would build, checked as the chokepoint would plus the run's scope: at
+    plan time and again, over locked rows, just before it merges."""
     reasons: list[str] = []
     detail: dict[str, Any] = {}
     types = {category_of.get(lid, (None, None))[0] for lid in listings} - {None}
@@ -584,13 +550,6 @@ def _set_reasons(
     if outside:
         reasons.append(SKIP_CARRIES_OUT_OF_SCOPE)
         detail["out_of_scope_listings"] = outside[:20]
-    # Two involved properties with any asset link — one asset or two — are units the operator
-    # kept apart; the merge could keep only one link on the survivor.
-    carriers = sorted(pid for pid, links in assets.items() if links)
-    if len(carriers) > 1:
-        reasons.append(SKIP_ASSET_LINKED)
-        detail["asset_ids"] = sorted({int(a) for pid in carriers for a in assets[pid]})
-        detail["asset_linked_properties"] = carriers
     return reasons, detail
 
 
@@ -664,12 +623,11 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     prop_of: dict[int, int] = {}
     category_of: dict[int, tuple[str | None, str | None]] = {}
     for chunk in _chunks(all_props):
-        for pid, status, ctype, cmain, first, asset in _rows(
+        for pid, status, ctype, cmain, first in _rows(
             conn, S.PROPERTIES_SQL, {"property_ids": chunk}
         ):
             props[int(pid)] = {"status": status, "category_type": ctype,
-                               "category_main": cmain, "first_seen_at": first,
-                               "asset_id": asset}
+                               "category_main": cmain, "first_seen_at": first}
         for pid, lid, ctype, cmain in _rows(conn, S.PROPERTY_LISTINGS_SQL,
                                             {"property_ids": chunk}):
             children.setdefault(int(pid), set()).add(int(lid))
@@ -678,7 +636,6 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     for _c, ms in everyone:
         for m in ms:
             category_of.setdefault(m.listing_id, (m.category_type, m.category_main))
-    assets_of = _asset_links(conn, all_props, props)
 
     every_listing: set[int] = {m.listing_id for _c, ms in everyone for m in ms}
     for pid in all_props:
@@ -755,8 +712,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         detail.update(hit_detail)
 
         set_reasons, set_detail = _set_reasons(
-            extended, category_of, [props[pid] for pid in property_ids if pid in props], scope,
-            {pid: assets_of.get(pid, []) for pid in property_ids})
+            extended, category_of, [props[pid] for pid in property_ids if pid in props], scope)
         reasons += set_reasons
         detail.update(set_detail)
 
@@ -798,7 +754,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         survivor: int | None = None
         retired: list[int] = []
         if not inactive and len(property_ids) >= 2:
-            survivor = _survivor(property_ids, props, children, assets_of)
+            survivor = survivor_of({pid: props[pid]["first_seen_at"] for pid in property_ids})
             retired = [pid for pid in property_ids if pid != survivor]
         group = _group_plan(cluster, members, property_ids, survivor, retired, reasons, detail,
                             extended)
@@ -928,13 +884,12 @@ def recheck_group(
     """The plan's word, re-read inside the group's own transaction just before it merges, over
     rows it LOCKS (the properties FOR UPDATE, their listings FOR SHARE) so nothing re-points or
     re-categorises them before the merge commits: the listings must be the ones planned, every
-    property still active, the deal types, categories, scope and asset links still clean, and no
-    operator negative may have landed on them since the plan read the negatives (E903). The
-    locked placement is recorded on the group, for its ledger row's plan (E905)."""
+    property still active, the deal types, categories and scope still clean, and no operator
+    negative may have landed on them since the plan read the negatives (E903). The locked
+    placement is recorded on the group, for its ledger row's plan and for `unapply` (E905)."""
     locked = {
-        int(pid): {"status": status, "category_type": ctype, "category_main": cmain,
-                   "first_seen_at": first, "asset_id": asset}
-        for pid, status, ctype, cmain, first, asset in _rows(
+        int(pid): {"status": status, "category_type": ctype, "category_main": cmain}
+        for pid, status, ctype, cmain in _rows(
             conn, S.LOCK_PROPERTIES_SQL, {"property_ids": group.property_ids})
     }
     rows = _rows(conn, S.LOCK_PROPERTY_LISTINGS_SQL, {"property_ids": group.property_ids})
@@ -960,16 +915,9 @@ def recheck_group(
     reasons += hit_reasons
     detail.update(hit_detail)
     category_of = {int(lid): (ctype, cmain) for _pid, lid, ctype, cmain in rows}
-    assets = _asset_links(conn, group.property_ids, locked)
-    set_reasons, set_detail = _set_reasons(now, category_of, list(locked.values()), scope,
-                                           assets)
+    set_reasons, set_detail = _set_reasons(now, category_of, list(locked.values()), scope)
     reasons += set_reasons
     detail.update(set_detail)
-    carriers = [pid for pid in group.property_ids if assets.get(pid)]
-    if len(carriers) == 1 and carriers[0] != group.survivor_id:
-        # Linked since the plan named its survivor: that unit would be the one retired.
-        reasons.append(SKIP_ASSET_LINKED)
-        detail["asset_linked_properties"] = carriers
     prop_of = {int(lid): int(pid) for pid, lid, _ct, _cm in rows}
     separated = _separated_merges(now, prop_of, _engine_merges(conn, now))
     if separated:
@@ -983,7 +931,7 @@ def apply_plan(
     plan: Plan,
     dry_run: bool,
     *,
-    merge: Callable[..., dict[str, Any]] = merge_properties,
+    merge: Callable[..., dict[str, Any]] = merge_property_set,
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """Record the plan (dry run) or execute it: one transaction and one merge group per engine
@@ -1051,19 +999,21 @@ def apply_plan(
                     late_reasons, late_detail = recheck_group(conn, group, plan.scope)
                     if late_reasons:
                         raise _SkipAtApply(late_reasons, late_detail)
-                    moved: list[int] = []
-                    for retired in group.retired_ids:
+                    try:
                         res = merge(
-                            conn,
-                            survivor_id=group.survivor_id,
-                            retired_id=retired,
+                            conn, group.property_ids, source=MERGE_SOURCE,
                             reason=f"autodedup {gen} {group.cluster_key}",
-                            source=MERGE_SOURCE,
-                            confidence=group.confidence,
+                            merge_group_id=group_id, confidence=group.confidence,
                             markers=markers,
-                            merge_group_id=group_id,
                         )
-                        moved.append(int((res.get("data") or {}).get("listings_moved") or 0))
+                    except AssetLinkConflict as exc:
+                        raise _SkipAtApply([SKIP_ASSET_LINKED], {"asset_links": str(exc)}) \
+                            from exc
+                    data = res.get("data") or {}
+                    group.survivor_id = int(data["survivor_id"])
+                    group.retired_ids = [int(r) for r in data["retired_ids"]]
+                    moved = [len(group.listings_by_property.get(r, ()))
+                             for r in group.retired_ids]
                     _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
                         run_id, gen, group, dry_run=False, outcome="applied",
                         merge_group_id=group_id, moved=moved))
@@ -1124,15 +1074,6 @@ def _attach_partial(exc: BaseException, result: dict[str, Any]) -> None:
         pass
 
 
-class _NothingMovedBack(Exception):
-    """Raised inside an undo's transaction when it would reactivate properties and move no
-    listing back: rolled back, so the ledger never calls a merge undone that still stands."""
-
-    def __init__(self, conflicts: list[Any]) -> None:
-        super().__init__(f"{len(conflicts)} conflicts, nothing moved back")
-        self.conflicts = conflicts
-
-
 def _nothing_back(conflicts: Sequence[Any]) -> dict[str, Any]:
     return {"blocked": (f"nothing would move back ({len(conflicts)} listings moved on since the "
                         "merge); left as it stands"),
@@ -1171,10 +1112,10 @@ def _merge_stands(
 def _undo_state(conn: Any, target: Mapping[str, Any]) -> dict[str, Any]:
     """Where a group stands now, read before any later merge is named (E905): its survivor's
     status and what it is merged into; its retired properties no longer merged into the
-    survivor by this group's merge (someone undid it: `unmerge_group` finds nothing live to
-    replay); its members off the survivor; and, of the listings the merge moved off its
-    retired properties, the ones `unmerge_group` would move back (still on the survivor) and
-    the ones it would report as conflicts."""
+    survivor by this group's merge (someone undid it: its detach loop finds nothing live to
+    undo); its members off the survivor; and, of the listings the merge moved off its retired
+    properties, the ones the loop would move back (still on the survivor) and the ones it would
+    report as conflicts."""
     survivor = target["survivor_id"]
     ids = [pid for pid in (survivor, *target["retired_ids"]) if pid is not None]
     props = {int(pid): (status, merged_into, merged_at)
@@ -1197,7 +1138,7 @@ def _undo_state(conn: Any, target: Mapping[str, Any]) -> dict[str, Any]:
 
 def _moves_nothing_back(state: Mapping[str, Any]) -> bool:
     """A merge that still stands, none of whose moved listings is on its survivor any more:
-    `unmerge_group` would only reactivate empty properties, so the live undo is refused."""
+    its detach loop would move nothing, so the live undo is refused."""
     return not state["undone_outside"] and bool(state["conflicts"]) and not state["back"]
 
 
@@ -1245,7 +1186,7 @@ def _undo_block(
     """Why a group cannot be undone yet (E905), decided from where it stands (`_undo_state`)
     BEFORE any later engine merge is looked for, so `unapply_first` only ever names an undo
     that would free it. A group someone already undid is never blocked, wherever its survivor
-    has gone since: `unmerge_group` finds nothing live and `unapply` notes the undo as theirs.
+    has gone since: its detach loop finds nothing live and `unapply` notes the undo as theirs.
     A survivor still active: a group whose moved listings have all left it would move nothing
     back whatever came later; otherwise a LATER live engine merge that put more listings on it
     (and whose own undo would not be refused for moving nothing back) is undone first, or
@@ -1286,12 +1227,13 @@ def unapply(
     run: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
-    unmerge: Callable[..., dict[str, Any]] = unmerge_group,
+    detach: Callable[..., dict[str, Any]] = detach_listing,
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """Undo the live merge groups a generation (or one of its groups), an apply run (`run`) or
     a time window (`since` <= applied_at < `until`) made — every selector given must hold —
-    newest-first, each through `unmerge_group`; `dry_run=True` only lists them. `dry_run` has
+    newest-first, each as a loop of `detach_listing` over the adverts its merge moved (no
+    ruling: an engine undo is not the operator's word); `dry_run=True` only lists them. `dry_run` has
     no default: this writes to production. NOT gated by the scope: undo is the way back, and
     an undone group is free to merge again on a later apply. A group someone else already
     undid is noted undone, as THEIR undo, wherever its survivor has gone since. A
@@ -1352,7 +1294,7 @@ def unapply(
                 counts["taken_apart_before"] += 1
         return result
     try:
-        _unapply_live(conn, targets, result, unmerge, run_id)
+        _unapply_live(conn, targets, result, detach, run_id)
     except BaseException as exc:
         # A crash or a cancelled job after groups were undone for real: the result rides on
         # the error, so the lane still publishes what WAS undone before re-raising.
@@ -1371,9 +1313,25 @@ def _taken_apart(conn: Any, target: Mapping[str, Any]) -> list[int]:
     return [lid for lid in target["member_ids"] if placed.get(lid) != target["survivor_id"]]
 
 
+def _detach_group(
+    conn: Any, target: Mapping[str, Any], detach: Callable[..., dict[str, Any]], undone_by: str,
+) -> dict[str, Any]:
+    """A group undone as a loop of detaches over the adverts its merge moved (its recorded
+    placement); one that moved on since is a conflict, left where it is."""
+    back, conflicts = 0, []
+    for lid in target.get("moved_listings") or []:
+        out = detach(conn, lid, decided_by=undone_by, source=MERGE_SOURCE,
+                     merge_group_id=target["merge_group_id"])["data"]
+        back += int(out["detached"])
+        if not out["detached"] and out["outcome"] != "not_merged":
+            conflicts.append(lid)
+    return {"merge_group_id": target["merge_group_id"], "listings_moved_back": back,
+            "conflicts": conflicts}
+
+
 def _unapply_live(
     conn: Any, targets: list[dict[str, Any]], result: dict[str, Any],
-    unmerge: Callable[..., dict[str, Any]], run_id: str,
+    detach: Callable[..., dict[str, Any]], run_id: str,
 ) -> None:
     counts = result["counts"]
     undone_by = f"{UNAPPLY_BY_PREFIX}{run_id}"
@@ -1386,43 +1344,32 @@ def _unapply_live(
             target.update(block, outcome="blocked")
             counts["blocked"] += 1
             continue
-        try:
-            with conn.transaction():
-                taken = _taken_apart(conn, target)
-                res = unmerge(conn, merge_group_id=target["merge_group_id"],
-                              undone_by=undone_by)
-                data = res.get("data") or {}
-                if not int(data.get("listings_moved_back") or 0) and data.get("conflicts"):
-                    raise _NothingMovedBack(list(data["conflicts"]))
-                # Someone else had already taken the merge apart (an operator split): this
-                # undo finishes the job, but the separation is THEIR word on those listings,
-                # so it is recorded as theirs and a later generation never re-unites them.
-                external = bool(taken or data.get("conflicts"))
-                record = {**data, "noted_by": undone_by, "taken_apart": taken} if external \
-                    else data
+        with conn.transaction():
+            taken = _taken_apart(conn, target)
+            data = _detach_group(conn, target, detach, undone_by)
+            # Someone else had already taken the merge apart (an operator split), or wholly
+            # undone it: the separation is THEIR word on those listings, recorded as theirs so a
+            # later generation never re-unites them (E905).
+            external = bool(taken or data["conflicts"]) or not data["listings_moved_back"]
+            record = {**data, "noted_by": undone_by, "taken_apart": taken} if external \
+                else data
+            if data["listings_moved_back"] or not data["conflicts"]:
                 _exec(conn, S.LEDGER_UNDO_SQL, {
                     "merge_group_id": target["merge_group_id"],
                     "undone_by": EXTERNAL_UNDO if external else undone_by,
                     "undo_result": json.dumps(record, sort_keys=True, default=str)})
-        except _NothingMovedBack as nothing:
-            target.update(_nothing_back(nothing.conflicts), outcome="blocked")
-            counts["blocked"] += 1
-            continue
-        except MergeError as exc:
-            # Nothing left to undo: the group was reversed outside the engine (the merge
-            # ledger's own unmerge). The engine's ledger records that it no longer stands —
-            # as SOMEONE ELSE's undo, so the property stays restored-elsewhere (E905).
-            with conn.transaction():
-                _exec(conn, S.LEDGER_UNDO_SQL, {
-                    "merge_group_id": target["merge_group_id"], "undone_by": EXTERNAL_UNDO,
-                    "undo_result": json.dumps({"error": str(exc), "noted_by": undone_by})})
-            counts["already_undone"] += 1
-            target.update(error=str(exc), outcome="already_undone")
+        if not data["listings_moved_back"]:
+            if data["conflicts"]:
+                target.update(_nothing_back(data["conflicts"]), outcome="blocked")
+                counts["blocked"] += 1
+            else:
+                counts["already_undone"] += 1
+                target.update(error="nothing live left to undo", outcome="already_undone")
             continue
         counts["undone"] += 1
-        counts["listings_moved_back"] += int(data.get("listings_moved_back") or 0)
-        counts["conflicts"] += len(data.get("conflicts") or [])
-        target.update(conflicts=list(data.get("conflicts") or []), outcome="undone")
+        counts["listings_moved_back"] += data["listings_moved_back"]
+        counts["conflicts"] += len(data["conflicts"])
+        target.update(conflicts=list(data["conflicts"]), outcome="undone")
         if external:
             counts["taken_apart_before"] += 1
             target.update(taken_apart=taken, outcome="undone_after_outside_split")

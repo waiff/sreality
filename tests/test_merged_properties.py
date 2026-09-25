@@ -174,29 +174,8 @@ def test_page_orders_biggest_first_and_rolls_up_children() -> None:
     assert "count(*) FILTER (WHERE l.is_active)" in page_sql
 
 
-# --- GET /properties/merges: the optional one-survivor filter ---------------
-
-def test_merges_unfiltered_reads_the_whole_ledger() -> None:
+def test_merges_reads_the_ledger_one_row_per_group() -> None:
     conn = _FakeConn()
     pm.list_merges(conn, limit=200, offset=0)
     (sql, params), = conn.executed
-    assert "survivor_property_id = %(survivor_property_id)s" not in sql
-    assert params == {"limit": 200, "offset": 0, "survivor_property_id": None}
-
-
-def test_merges_survivor_filter_narrows_events_before_grouping() -> None:
-    # The listing page's per-row unmerge reads ONE property's groups exactly, not
-    # the newest window of the whole ledger.
-    conn = _FakeConn()
-    pm.list_merges(conn, limit=200, offset=0, survivor_property_id=42)
-    (sql, params), = conn.executed
-    where = sql.index("WHERE survivor_property_id = %(survivor_property_id)s")
-    assert where < sql.index("GROUP BY merge_group_id")
-    assert params["survivor_property_id"] == 42
-
-
-def test_merges_route_passes_the_survivor_filter_through() -> None:
-    conn = _FakeConn()
-    out = pm.get_merges(limit=200, offset=0, survivor_property_id=42, conn=conn, _={})
-    assert out == {"data": [], "total": 0}
-    assert conn.executed[0][1]["survivor_property_id"] == 42
+    assert "GROUP BY merge_group_id" in sql and params == {"limit": 200, "offset": 0}

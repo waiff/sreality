@@ -88,8 +88,8 @@ extend to collections, tags, notes, or deal-pipeline stage moves:
 
 | Mutation | Chokepoint | Touches `properties`? | In `browse_projection`'s column list? | Affected |
 |---|---|---|---|---|
-| Merge (candidate / bulk / cluster / property-set) | `merge_properties` | Yes, inline recompute | Yes (most columns) | **Yes** |
-| Unmerge | `unmerge_group` | Yes, inline recompute | Yes | **Yes** |
+| Merge (the operator's set, the AUTODEDUP apply path) | `merge_property_set` (through `merge_properties` per retired property) | Yes, one inline recompute per set | Yes (most columns) | **Yes** |
+| Detach (one advert back; a group undo is a loop of them) | `detach_listing` | Yes, inline recompute of both properties | Yes | **Yes** |
 | Asset link/unlink | `link_properties`/`unlink_property` (`toolkit/asset_identity.py`) | Yes, `asset_id` only, no recompute | Yes — `p.asset_id` is the last column in `browse_projection` (migration 276 line 86) | **Yes, latent** (not the reported bug — Browse doesn't currently render `asset_id` on cards — but the same gap exists the moment it does; see Rollout) |
 | Dismiss (cluster/candidate), decision feedback, archive-reset | candidate-table writes only | No | — | No |
 | Collections, tags, notes, pipeline-stage moves, watchdog/collection monitoring toggle | `api/curation.py`, `toolkit/pipeline_identity.py` | Different tables entirely (`collection_properties`, `property_tags`, `property_notes`, `property_pipeline`, `collections`) | **No** — none of these columns exist in `browse_projection`'s SELECT (migration 276 lines 57-86) | **No** — these are read live via dedicated `*_public` views/routes, never via `browse_list`, so they were never subject to the 5-min snapshot lag to begin with |
@@ -220,10 +220,11 @@ projection-migration window regardless.)
 Called at the two recompute chokepoints — the whole change, so every current
 and future caller (including the Tier-2 auto-merge sweep) gets it for free:
 
-- `merge_properties`, after `recompute_mf_one(conn, survivor_id)`:
-  `sync_browse_list(conn, [survivor_id, retired_id])`
-- `unmerge_group`, after the per-retired recompute loop:
+- `merge_property_set`, after the survivor's one recompute (W3 of the AUTODEDUP production
+  sprint moved it out of the per-pair `merge_properties`):
   `sync_browse_list(conn, [survivor_id, *retired_ids])`
+- `detach_listing`, after recomputing the property the advert left and the one it returned to:
+  `sync_browse_list(conn, [left_id, restored_id])`
 
 **[as-built] Also wired into `toolkit/asset_identity.py`** (`link_properties` →
 the surviving asset's members; `unlink_property` → the cleared property + any
@@ -268,14 +269,8 @@ direction, no cross-waiting).
 
 **Volume note for the future auto-merge sweep:** each patch is two tiny
 indexed statements (PK lookup on `browse_list_pk`), not a scan — cheap even at
-thousands of merges/hour. If `merge_property_set`/`merge_cluster` merge 3+
-properties into one survivor, the survivor's row gets redundantly
-DELETE+re-INSERTed once per retired property in the loop — correct (idempotent,
-each pass uses the latest state) but slightly wasteful. Not worth optimizing
-away for typical operator-scale merges (2-5 properties); if the Tier-2 sweep's
-measured volume ever makes this material, batch one `_sync_browse_list` call
-at the end of the loop instead of per-pair — a pure micro-optimization,
-deferred until there's a number to justify it.
+thousands of merges/hour. [as-built, W3] A set of 3+ properties is recomputed and
+patched once per set, not once per retired property.
 
 ### Layer 2 — one shared invalidation contract (closes findings #1-3)
 
@@ -435,7 +430,7 @@ that was just made**: it shows what looks like two separate active listings
 for a property the system just declared to be one. That's a direct, visible
 regression in the exact metric the entire dedup program (rules #15-16) exists to
 improve — perceived duplicate rate. Because the fix lives at the shared
-`merge_properties`/`unmerge_group` chokepoint,
+`merge_property_set`/`detach_listing` chokepoint,
 it closes this window for **every** merge path, including the much
 higher-volume Tier-2 automatic sweep, not just the rare manual click — a
 standing data-quality improvement market-wide, beyond the one reported bug.
