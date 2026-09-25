@@ -117,7 +117,7 @@ def main() -> int:
             lng=float(target_row["lng"]),
             area_m2=float(target_row["area_m2"]) if target_row["area_m2"] else None,
             disposition=target_row["disposition"],
-            exclude_ids=[int(target_row["sreality_id"])],
+            exclude_listing_ids=[int(target_row["id"])],
         )
         filters = ComparableFilters(
             radius_m=args.radius_m,
@@ -154,7 +154,7 @@ def main() -> int:
 def _pick_target(conn: Any, sreality_id: int | None) -> dict[str, Any] | None:
     """Pick a real recent Prague 2+kk apartment rental (or the explicit id)."""
     sql = (
-        "SELECT l.sreality_id, ll.obec_name AS locality, l.disposition, l.area_m2, "
+        "SELECT l.id, l.sreality_id, ll.obec_name AS locality, l.disposition, l.area_m2, "
         "l.price_czk, "
         "ROUND(ST_Y(ll.geom)::numeric, 5) AS lat, "
         "ROUND(ST_X(ll.geom)::numeric, 5) AS lng "

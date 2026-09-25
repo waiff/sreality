@@ -81,6 +81,7 @@ def _patch_persistence(monkeypatch) -> _State:
     # resolution falls through to the (mocked) dispatcher. Tests that want the
     # match path override this.
     monkeypatch.setattr(er, "_match_listing_by_url", lambda conn, url: None)
+    monkeypatch.setattr(er, "_listing_id_of", lambda conn, sid: None)
 
     def fake_insert(conn, **fields: Any) -> int:
         rid = state.next_id
@@ -125,9 +126,7 @@ def _patch_persistence(monkeypatch) -> _State:
         }
 
     def fake_bg(*, run_id, body, resolution):
-        target = er._build_target(
-            resolution.target_spec, resolution.input_sreality_id,
-        )
+        target = er._build_target(resolution.target_spec, resolution.input_listing_id)
         filters = er._build_filters(body, er.load_filter_defaults(None))
         er._execute_estimation_run(
             object(), object(), object(), run_id,
@@ -329,19 +328,20 @@ def test_post_with_url_calls_url_parser(client, monkeypatch):
 def test_post_with_sreality_url_excludes_target_from_comparables(
     client, monkeypatch,
 ):
-    """Target listing's own sreality_id is auto-injected into
-    target.exclude_ids so an estimate can never quote the target as
-    its own comparable.
+    """The scraped row a sreality URL resolves to leaves its whole property out of the
+    cohort (decision 13), so an estimate can never quote the target, or its sibling on
+    another portal, as its own comparable.
     """
     _patch_persistence(monkeypatch)
     _patch_url_parser(monkeypatch, sreality_id=2836292428)
+    monkeypatch.setattr(er, "_listing_id_of", lambda conn, sid: 777 if sid == 2836292428 else None)
 
     captured: dict[str, Any] = {}
 
     def fake(conn, target, filters, purchase_price_czk=None, *,
              estimate_kind="rent", expected_monthly_rent_czk=None,
              trace_recorder=None):
-        captured["exclude_ids"] = list(target.exclude_ids)
+        captured["exclude_listing_ids"] = list(target.exclude_listing_ids)
         return {
             "data": {
                 "estimate_kind": "rent",
@@ -361,7 +361,7 @@ def test_post_with_sreality_url_excludes_target_from_comparables(
         json={"url": "https://www.sreality.cz/detail/.../2836292428"},
     )
     assert res.status_code == 200
-    assert 2836292428 in captured["exclude_ids"]
+    assert captured["exclude_listing_ids"] == [777]
 
 
 def test_post_with_url_and_spec_overrides_merges(client, monkeypatch):
@@ -785,7 +785,7 @@ def test_preview_returns_normalised_spec(client, monkeypatch):
     assert body["spec"]["area_m2"] == 50.0
     assert body["spec"]["disposition"] == "2+kk"
     assert body["spec"]["floor"] == 3
-    assert body["spec"]["exclude_ids"] == []
+    assert "exclude_ids" not in body["spec"]
     # Preview must not persist anything.
     assert len(state.inserts) == 0
 
@@ -1350,7 +1350,7 @@ def _result(**overrides: Any) -> sd.ParseResult:
     base = dict(
         spec={
             "lat": 50.087, "lng": 14.42, "area_m2": 50.0,
-            "disposition": "2+kk", "floor": 3, "exclude_ids": [],
+            "disposition": "2+kk", "floor": 3,
         },
         source_kind="sreality",
         parse_confidence="high",
@@ -1640,7 +1640,7 @@ def test_post_known_portal_url_reuses_scraped_listing(client, monkeypatch):
         "listing_id": 917,
         "spec": {
             "lat": 50.0, "lng": 14.4, "area_m2": 60.0,
-            "disposition": "2+kk", "floor": 3, "exclude_ids": [],
+            "disposition": "2+kk", "floor": 3,
         },
         "price_czk": 5_000_000,
         "category_type": "prodej",
@@ -1794,8 +1794,9 @@ def test_post_with_sreality_id_resolves_listing_row(client, monkeypatch):
             "sreality_id": int(sid),
             "spec": {
                 "lat": 50.05, "lng": 14.40, "area_m2": 43.0,
-                "disposition": "1+1", "floor": 2, "exclude_ids": [],
+                "disposition": "1+1", "floor": 2,
             },
+            "listing_id": 777,
             "price_czk": 3_898_000,
             "category_type": "prodej",
         },

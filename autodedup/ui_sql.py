@@ -1615,3 +1615,33 @@ WHERE v.kind = 'cluster'
   AND coalesce(array_length(coalesce(v.member_ids, fb.ids), 1), 0)
       > %(max_cluster_size)s::int
 """
+
+# ------------------------------------------------------------ the proposed splits (Decision 9)
+
+# Every advert of every LIVE property the generation touches (`autodedup/proposed_splits.py`
+# decides which are proposals), with the group it holds (NULL = none) and whether the generation
+# SAW it (a group member or a scored pair's side); with `property_id`, that property only.
+PROPOSED_SPLIT_ADVERTS_SQL = """
+WITH grouped AS (
+    SELECT s.listing_id, max(s.cluster_key) AS cluster_key
+    FROM (
+        SELECT m.listing_id, m.cluster_key FROM autodedup.cluster_members m
+         WHERE m.generation = %(generation)s::text
+        UNION ALL
+        SELECT e.listing_id, NULL::bigint FROM autodedup.pairs p
+         CROSS JOIN LATERAL (VALUES (p.listing_lo), (p.listing_hi)) AS e(listing_id)
+         WHERE p.generation = %(generation)s::text
+    ) s
+    GROUP BY s.listing_id
+), touched AS (
+    SELECT DISTINCT l.property_id FROM grouped g JOIN public.listings l ON l.id = g.listing_id
+     WHERE %(property_id)s::bigint IS NULL OR l.property_id = %(property_id)s::bigint
+)
+SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
+       g.cluster_key, g.listing_id IS NOT NULL
+  FROM touched t
+  JOIN public.properties pr ON pr.id = t.property_id AND pr.status = 'active'
+  JOIN public.listings l ON l.property_id = pr.id
+  LEFT JOIN grouped g ON g.listing_id = l.id
+ ORDER BY l.property_id, l.id
+"""

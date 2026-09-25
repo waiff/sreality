@@ -23,7 +23,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { fmtArea, fmtCzk, fmtMeasuredPricePerM2 } from '@/lib/format';
 import { ppm2BasisFromToken } from '@/lib/measure';
 import { listingKindLabel } from '@/lib/enums';
-import { listingRowPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 import { splitCardPlace } from '@/lib/cardPlace';
 import { TrashIcon } from '@/components/icons';
 import PriceDelta from '@/components/PriceDelta';
@@ -133,18 +133,10 @@ export function CardFace({
         <CardThumb url={cover} inactive={inactive} size={size} />
         <div className="min-w-0 flex-1">
           <p className={`truncate text-sm ${head ? inkColor : 'text-[var(--color-ink-4)]'}`}>
-            {/* listingRowPath is canonical-first (source + source_id_native from
-                properties_public), so the card links straight to the clean
-                /listing/{source}/{native} URL; it falls back to the legacy/property
-                route only for a representative with no natural key.
+            {/* The card is a property, so it links to the property page.
 
                 Opens in a NEW TAB: the board is a triage surface the operator
                 works a column at a time, so following a card must not unload it.
-                No `state` seeding here — react-router hands a `target="_blank"`
-                link to the browser rather than navigating, so the new document
-                starts with no history state and ListingDetail resolves the
-                natural key itself (one round trip, the price of keeping the
-                board open).
 
                 The link is the card's ONLY way to its listing, so a property
                 with no street (a label that is just the town) or no place at all
@@ -152,7 +144,7 @@ export function CardFace({
                 surfaces print for a missing label. The title carries the full
                 place because the line truncates. */}
             <Link
-              to={listingRowPath(card)}
+              to={propertyPath(card.property_id)}
               target="_blank"
               rel="noopener"
               title={[place, inactive ? 'neaktivní inzerát' : null]

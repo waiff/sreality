@@ -690,8 +690,8 @@ def upsert_listing_with_property(
 
     The listing write and its property linkage commit in one transaction so a
     partial failure can't leave a listing unlinked. New listings become their
-    own singleton property (`_create_singleton_property`); cross-listing
-    grouping is out-of-band and operator-ordered, never the insert path.
+    own singleton property (`_ensure_property`); cross-listing grouping is
+    out-of-band, never the insert path.
     """
     sreality_id = row["sreality_id"]
     with conn.transaction():
@@ -702,7 +702,7 @@ def upsert_listing_with_property(
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM listings WHERE sreality_id = %s", (sreality_id,))
             listing_id = int(cur.fetchone()[0])
-        _ensure_property(conn, listing_id, "sreality")
+        _ensure_property(conn, listing_id)
     return result
 
 
@@ -870,18 +870,13 @@ def ingest_scraped_listing(
                     (listing.source, listing.source_id_native),
                 )
                 listing_id = int(cur.fetchone()[0])
-        _ensure_property(conn, listing_id, listing.source)
+        _ensure_property(conn, listing_id)
         if result != "unchanged":
-            # Enqueue for the incremental property-stats recompute — the exact
-            # counterpart of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL,
-            # which only ever covered sreality. Without this the OTHER EIGHT
-            # portals never enqueued on a content change, so their price-history
-            # columns (price_change_count*, total_price_change_pct) were
-            # refreshed only by the 04:15 full sweep — while _cheap_property_rollup
-            # updates current_price_czk INLINE for singletons. A price could
-            # therefore be up to 24h out of step with its own change history.
-            # Set-based off the surrogate so a listing not yet attached to a
-            # property (property_id NULL) is skipped, not crashed on.
+            # Enqueue for the incremental maintenance pass (rule 20), the counterpart
+            # of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL: the singleton mirror
+            # above refreshes the price inline, its history and `browse_list` are that
+            # pass's. Set-based off the surrogate so a listing not yet attached to a
+            # property is skipped, not crashed on.
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO dirty_properties (property_id) "
@@ -914,88 +909,54 @@ def ingest_scraped_listing(
     return listing_id, result
 
 
-def _ensure_property(conn: psycopg.Connection, listing_id: int, source: str) -> None:
-    """Attach the listing to its canonical property, or refresh it if linked.
+# THE one way a property is born (rule 15): a bare row naming its one advert, linked in the same
+# statement; `scripts.recompute_property_stats` fills every other column from that advert.
+# `is_active` rides along only so the status-history trigger (migration 392) logs the advert's
+# real state at birth. A listing linked meanwhile is skipped, never re-pointed.
+NEW_SINGLETONS_SQL = """
+    WITH born AS (
+        INSERT INTO properties (repr_listing_ref_id, is_active)
+        SELECT l.id, l.is_active FROM listings l
+        WHERE l.id = ANY(%(ids)s::bigint[]) AND l.property_id IS NULL
+        RETURNING id, repr_listing_ref_id
+    )
+    UPDATE listings l SET property_id = born.id
+    FROM born
+    WHERE l.id = born.repr_listing_ref_id AND l.property_id IS NULL
+    RETURNING born.id
+"""
 
-    Keyed on the surrogate `listings.id` — `listing_id` is a real PK, never a
-    sreality_id (which is NULL for post-Gate-2 portal rows). Runs inside the
-    caller's transaction (no own transaction block). A new (unlinked) listing goes
-    through the Tier-1 matcher; an already-linked one gets a cheap rollup of its
-    property. (The legacy source_id_native heal is gone: migration 314 enforces
-    source_id_native NOT NULL and upsert_listing stamps it inline, so the old
-    heal-if-NULL was provably dead — and keyed on the wrong id besides.)
-    """
+
+def create_singleton_properties(
+    conn: psycopg.Connection, listing_ids: Collection[int],
+) -> list[int]:
+    """Give each still-unlinked listing its own bare property; returns the new property ids."""
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT property_id FROM listings WHERE id = %s",
-            (listing_id,),
-        )
+        cur.execute(NEW_SINGLETONS_SQL, {"ids": sorted({int(i) for i in listing_ids})})
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def _ensure_property(conn: psycopg.Connection, listing_id: int) -> None:
+    """Link the listing to its property, or refresh the one it has; keyed on the surrogate
+    `listings.id`, inside the caller's transaction. First sight: a new singleton (no insert-time
+    matching, rule 15) and the rollup's own recompute. Linked: `_cheap_property_rollup`."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT property_id FROM listings WHERE id = %s", (listing_id,))
         found = cur.fetchone()
-        property_id = found[0] if found else None
-
-    if property_id is None:
-        _create_singleton_property(conn, listing_id, source)
-    else:
+    if found and found[0] is not None:
         _cheap_property_rollup(conn, listing_id)
+        return
+    from scripts.recompute_property_stats import recompute_one  # it imports this module
 
-
-def _create_singleton_property(
-    conn: psycopg.Connection, listing_id: int, source: str,
-) -> None:
-    """Give a newly-seen listing its own singleton `properties` parent.
-
-    No matching at insert time, ever. The old geo Tier-1 spatial probe
-    (20m/price/area) was removed long ago, and the automatic decision engine
-    that replaced it was itself removed in the 2026-08 "NEW DEDUP" cutoff
-    (CLAUDE.md rule 15). Every new listing starts as a singleton and stays one
-    until an operator orders a merge through `toolkit.property_identity`.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO properties (
-                repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
-                area_m2, current_price_czk,
-                has_balcony, has_parking, has_lift, building_type, condition,
-                ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
-                estate_area, usable_area, garden_area, parking_lots,
-                source, energy_rating,
-                building_condition_level, apartment_condition_level,
-                is_active, first_seen_at, last_seen_at,
-                source_count, distinct_site_count, price_per_m2_source_listing_id
-            )
-            SELECT
-                sreality_id, id, category_main, category_type, disposition,
-                area_m2, price_czk,
-                has_balcony, has_parking, has_lift, building_type, condition,
-                ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
-                estate_area, usable_area, garden_area, parking_lots,
-                source, energy_rating,
-                building_condition_level, apartment_condition_level,
-                is_active, first_seen_at, last_seen_at, 1, 1,
-                -- One child, so price and area trivially come from one row:
-                -- stamp the per-m2 basis now rather than leave it NULL until the
-                -- next maintenance pass (migration 424).
-                price_per_m2_source_id(price_czk, area_m2, id)
-            FROM listings WHERE id = %s
-            RETURNING id
-            """,
-            (listing_id,),
-        )
-        new_pid = int(cur.fetchone()[0])
-        cur.execute(
-            "UPDATE listings SET property_id = %s WHERE id = %s",
-            (new_pid, listing_id),
-        )
+    recompute_one(conn, create_singleton_properties(conn, [listing_id])[0])
 
 
 def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
-    """Insert-time rollup for one property: counts + lifecycle always; the
-    display columns are mirrored from this child only while the property is a
-    singleton. For multi-source properties the representative + price-history +
-    denormalised filter columns are owned by the async recompute job
-    (decision #2), so we leave them untouched here.
-    """
+    """Re-scrape rollup for one property: counts + lifecycle always; the display columns are
+    mirrored from this child only while the property is a singleton (its one advert IS its
+    canonical advert). A multi-advert property's canonical fields and price history are the
+    dirty-set recompute's (rule 20). Kept until the full recompute is measured no slower here
+    (the W4 latency gate)."""
     with conn.cursor() as cur:
         cur.execute(
             """

@@ -41,6 +41,7 @@ from api import dependencies as deps
 from autodedup import agreement as agreement_math
 from autodedup import candidates as candidate_groups
 from autodedup import progress_sql as psql
+from autodedup import proposed_splits as splits
 from autodedup import ui_sql as usql
 from autodedup import verdict_reasons as reasons_registry
 from autodedup.dataset import Listing, hamming64
@@ -2883,3 +2884,52 @@ def verdict_candidate_split(
         },
         "store_ready": True,
     }
+
+
+# ------------------------------------------------------------------ proposed splits (Decision 9)
+
+
+def _proposed(conn: Any, generation: str | None, property_id: int | None = None) -> Any:
+    """(generation, proposals) off the newest batch pass by default, or None: store not ready.
+    Propose-only: the split itself is `POST /properties/{id}/detach`, advert by advert."""
+    if not store_ready(conn):
+        return None
+    try:
+        generation = _resolve_generation(conn, generation)
+        return generation, (splits.proposed_splits(conn, generation, property_id=property_id)
+                            if generation else [])
+    except _STORE_BEHIND:
+        return None
+
+
+@router.get("/proposed-splits")
+def proposed_splits(
+    request: Request,
+    generation: str | None = Query(None),
+    after: int | None = Query(None),
+    limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Every live property the generation would take apart, by property id (keyset `after`)."""
+    _reject_unknown_filters(request, frozenset({"generation", "after", "limit"}))
+    if (found := _proposed(conn, generation)) is None:
+        return _not_ready()
+    generation, items = found
+    page = [i for i in items if after is None or i["property_id"] > after][: limit + 1]
+    return {"data": {"generation": generation, "total": len(items), "items": page[:limit],
+                     "next_after": page[limit - 1]["property_id"] if len(page) > limit else None},
+            "store_ready": True}
+
+
+@router.get("/proposed-splits/{property_id}")
+def proposed_split(
+    request: Request, property_id: int, generation: str | None = Query(None),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """One live property as the generation groups its adverts, a proposal or not."""
+    _reject_unknown_filters(request, frozenset({"generation"}))
+    if (found := _proposed(conn, generation, property_id)) is None:
+        return _not_ready()
+    if not found[1]:
+        raise HTTPException(status_code=404, detail="no live property of two or more adverts")
+    return {"data": {"generation": found[0], **found[1][0]}, "store_ready": True}

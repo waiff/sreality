@@ -32,7 +32,6 @@ class TargetIn(BaseModel):
     area_m2: float | None = None
     disposition: str | None = None
     floor: int | None = None
-    exclude_ids: list[int] = Field(default_factory=list)
     exclude_listing_ids: list[int] = Field(default_factory=list)
 
 

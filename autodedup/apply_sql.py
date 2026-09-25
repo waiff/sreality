@@ -4,7 +4,8 @@ Reads: the `app_settings` scope row, one generation's groups and members from sc
 `autodedup`, the member listings' `property_id` and categories and the involved properties from
 `public` (the same facts the chokepoint itself re-checks), the operator's negatives
 (`verdicts`, `must_not_link`) and the engine's own apply ledger. NOTHING here reads or writes
-`public.property_merge_events` (D7): only the chokepoint writes it.
+`public.property_merge_events` (D7): only `toolkit.property_identity` writes it (merges, detaches
+and the operator's native splits).
 
 Every nullable parameter carries an explicit cast: psycopg sends no type OID for a Python
 `None`, so an uncast NULL fails Parse with 42P18.

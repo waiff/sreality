@@ -9,7 +9,7 @@ import Login from './pages/Login';
 import ForgotPassword from './pages/ForgotPassword';
 import UpdatePassword from './pages/UpdatePassword';
 import Browse from './pages/Browse';
-import ListingDetail from './pages/ListingDetail';
+import PropertyDetail, { AdvertRedirect } from './pages/PropertyDetail';
 import BuildingDetail from './pages/BuildingDetail';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
@@ -48,6 +48,7 @@ const AutodedupProgress = lazyChunk(() => import('./pages/AutodedupProgress'));
 const AutodedupGroups = lazyChunk(() => import('./pages/AutodedupGroups'));
 const AutodedupResidual = lazyChunk(() => import('./pages/AutodedupResidual'));
 const AutodedupPair = lazyChunk(() => import('./pages/AutodedupPair'));
+const AutodedupProposedSplits = lazyChunk(() => import('./pages/AutodedupProposedSplits'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazyChunk(() => import('./pages/DevConfidencePreview'));
@@ -85,18 +86,14 @@ export const routes: RouteObject[] = [
       // and refine it at runtime with usePageTitle — see lib/pageTitle.tsx.
       { index: true, element: <Navigate to={ROUTES.browse.build()} replace /> },
       { path: ROUTES.browse.childPath, element: <Browse />, handle: { title: 'Browse' } },
-      // Bare /listing handles the ?property=ID query form (Browse merge links
-      // use it); ListingDetail resolves it to the property's representative
-      // listing and redirects to /listing/:id.
-      { path: ROUTES.listing.childPath, element: <ListingDetail />, handle: { title: 'Listing' } },
-      // Canonical natural-key form (migration 091). ListingDetail redirects the
-      // legacy numeric route below to this one so no negative synthetic id
-      // (migration 097) is ever shown in the URL bar.
-      { path: ROUTES.listingCanonical.childPath, element: <ListingDetail />, handle: { title: 'Listing' } },
-      // Legacy/resolver form, kept forever: positive → sreality's real id,
-      // negative → frozen pre-cutover alias; also the target of every deep link
-      // ever sent before the natural-key cutover.
-      { path: ROUTES.listingLegacy.childPath, element: <ListingDetail />, handle: { title: 'Listing' } },
+      { path: ROUTES.property.childPath, element: <PropertyDetail />, handle: { title: 'Property' } },
+      // Advert addresses, kept forever (emails, the extension, bookmarks): the
+      // natural key (migration 091), the legacy numeric id (negative for
+      // non-sreality, migration 097) and the old ?property=ID query form all
+      // land on the property page with that advert's row open.
+      { path: ROUTES.listing.childPath, element: <AdvertRedirect />, handle: { title: 'Property' } },
+      { path: ROUTES.listingCanonical.childPath, element: <AdvertRedirect />, handle: { title: 'Property' } },
+      { path: ROUTES.listingLegacy.childPath, element: <AdvertRedirect />, handle: { title: 'Property' } },
       { path: ROUTES.health.childPath, element: <AdminPage><Health /></AdminPage>, handle: { title: 'Health' } },
       { path: ROUTES.costs.childPath, element: <AdminPage><Costs /></AdminPage>, handle: { title: 'LLM costs' } },
       { path: 'estimate', element: <Navigate to={ROUTES.estimations.build()} replace /> },
@@ -132,6 +129,7 @@ export const routes: RouteObject[] = [
       { path: ROUTES.autodedupGroups.childPath, element: <AdminPage><AutodedupGroups /></AdminPage>, handle: { title: 'AUTODEDUP · Groups' } },
       { path: ROUTES.autodedupResidual.childPath, element: <AdminPage><AutodedupResidual /></AdminPage>, handle: { title: 'AUTODEDUP · Residual' } },
       { path: ROUTES.autodedupPair.childPath, element: <AdminPage><AutodedupPair /></AdminPage>, handle: { title: 'AUTODEDUP · Pair' } },
+      { path: ROUTES.autodedupProposedSplits.childPath, element: <AdminPage><AutodedupProposedSplits /></AdminPage>, handle: { title: 'AUTODEDUP · Návrhy rozdělení' } },
       { path: ROUTES.scrapers.childPath, element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: ROUTES.devConfidenceIndicator.childPath, element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },

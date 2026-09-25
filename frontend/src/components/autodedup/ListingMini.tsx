@@ -28,19 +28,14 @@ import { Link } from 'react-router-dom';
 import type { AutodedupMember } from '@/lib/api';
 import ImageCarousel from '@/components/ImageCarousel';
 import { imageSrc } from '@/lib/imageUrl';
-import { listingRowPath } from '@/lib/listingUrl';
+import { advertPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
 import { categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
 import { fmtArea, fmtCzk, fmtFloor, fmtShortDate } from '@/lib/format';
 import { type RoutePath } from '@/lib/routes';
 
 export function memberListingPath(m: AutodedupMember): RoutePath | null {
-  return listingRowPath({
-    source: m.source,
-    source_id_native: m.source_id_native ?? null,
-    sreality_id: m.sreality_id ?? null,
-    property_id: null,
-  });
+  return advertPath(m);
 }
 
 /* The attribute line, in one place so the card and the diff table cannot word

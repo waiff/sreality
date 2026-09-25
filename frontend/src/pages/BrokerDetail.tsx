@@ -14,7 +14,7 @@ import { portalShort } from '../lib/portals';
 import { PickButton } from '../components/controls';
 import BrokerContactCard from '@/components/BrokerContactCard';
 import { useExploreBrokerModal } from '@/components/ExploreBrokerModal';
-import { listingRowPath } from '@/lib/listingUrl';
+import { advertPath, propertyPath } from '@/lib/listingUrl';
 import { categoryMainLabel, categoryTypeLabel, listingKindLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
 
@@ -176,10 +176,7 @@ function LocalityCell({ l }: { l: BrokerListing }) {
       title="neaktivní"
     />
   );
-  const path = listingRowPath({
-    sreality_id: l.sreality_id,
-    property_id: l.property_id,
-  });
+  const path = l.property_id != null ? propertyPath(l.property_id, l.listing_id) : advertPath(l);
 
   if (path == null) {
     return (

@@ -26,7 +26,7 @@ describe('<PriceDelta>', () => {
   });
 
   /* A cut is favourable in a buyer's pipeline — sage, not the stock-market red.
-   * Matches the polarity ListingDetail's Stat has always used. */
+   * Matches the polarity PropertyDetail's Stat has always used. */
   it('colours a drop sage and a rise brick', () => {
     const { container: drop } = render(<PriceDelta pct={-4.2} changes={1} />);
     expect(drop.querySelector('span')).toHaveStyle({ color: 'var(--color-sage)' });

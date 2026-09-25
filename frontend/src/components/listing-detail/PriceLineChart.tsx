@@ -19,7 +19,7 @@ import {
   type PriceSeries,
 } from '@/lib/priceHistory';
 
-/* One price track = one URL/listing under the property (see lib/priceHistory).
+/* One price track = one advert's own series (see lib/priceHistory).
  * Lazy-loaded so recharts stays out of the detail-page entry chunk.
  *
  * Ticks and labels come from lib/chartAxis, shared with every other time series

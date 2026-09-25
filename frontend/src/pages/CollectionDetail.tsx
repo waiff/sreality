@@ -15,7 +15,7 @@ import {
 } from '@/lib/api';
 import { revalidateCollections } from '@/lib/collectionCache';
 import { curationKeys } from '@/lib/queries';
-import { listingPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
 import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
 import { Field } from '@/components/controls';
@@ -430,7 +430,7 @@ function PropertyRowView({
     <tr className="border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors">
       <td className="px-3 py-2.5 align-middle font-mono tabular-nums text-[var(--color-ink-3)]">
         <Link
-          to={listingPath(row.sreality_id)}
+          to={propertyPath(row.property_id)}
           className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           {/* Only sreality has a meaningful public id; other portals carry a

@@ -3050,10 +3050,11 @@ export const listMergedProperties = (
     jwt: true,
   });
 
-/* The one undo: ONE advert back to the property its merge ledger says it came
- * from, ruled "different" from every advert that stays, with the operator's
- * optional reason (≤ DETACH_REASON_MAX chars). `detached: false` says why nothing
- * moved (`outcome`) — a second click answers `not_on_property`. */
+/* The one split: ONE advert back to the property its merge ledger says it came
+ * from, or — no merge brought it — to a new record of its own (`outcome:
+ * 'split_native'`), ruled "different" from every advert that stays, with the
+ * operator's optional reason (≤ DETACH_REASON_MAX chars). `detached: false` says
+ * why nothing moved (`outcome`) — a second click answers `not_on_property`. */
 export const DETACH_REASON_MAX = 500;
 
 export interface DetachResult {
@@ -3077,12 +3078,16 @@ export const detachListing = (
   });
 
 /* Where each advert came from — the merge ledger is admin-only, hence a route and
- * not a view. All three fields null: the property's own advert, never detachable. */
+ * not a view. All three origin fields null: no merge brought it. `detach_outcome`:
+ * what a detach would answer now; `splittable`: that moves it (back to its origin,
+ * or to a new record). */
 export interface AdvertOrigin {
   listing_id: number;
   origin_property_id: number | null;
   merge_source: string | null;
   merged_at: string | null;
+  detach_outcome: string | null;
+  splittable: boolean;
 }
 
 export const fetchPropertyOrigins = (
@@ -3092,6 +3097,51 @@ export const fetchPropertyOrigins = (
     `/properties/${propertyId}/origins`,
     { jwt: true },
   );
+
+/* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
+ * generation groups its adverts apart (the canonical advert's group first), each
+ * split pair with the engine's stated reason and the operator's newest ruling.
+ * The split itself is `detachListing`, advert by advert; `detach_outcome` is what
+ * that detach would answer now and `splittable` says it moves the advert (one no
+ * merge brought gets a new record while another own advert stays). */
+export interface ProposedSplitAdvert {
+  listing_id: number;
+  source: string;
+  is_active: boolean;
+  origin_property_id: number | null;
+  detach_outcome: string | null;
+  splittable: boolean;
+}
+
+export interface ProposedSplit {
+  property_id: number;
+  canonical_listing_id: number;
+  proposed: boolean;
+  groups: { cluster_key: number | null; adverts: ProposedSplitAdvert[] }[];
+  /* Adverts of the property the generation never saw: not spoken for. */
+  unseen: ProposedSplitAdvert[];
+  splits: {
+    listing_lo: number;
+    listing_hi: number;
+    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none';
+    reason: string;
+    ruling: {
+      verdict: string;
+      decided_by: string;
+      decided_at: string | null;
+      note: string | null;
+      reasons: string[];
+    } | null;
+  }[];
+  ruled: boolean;
+}
+
+export const getProposedSplits = (
+  f: { generation?: string | null; after?: number | null; limit?: number } = {},
+): Promise<
+  AutodedupEnvelope<{ generation: string | null; total: number; items: ProposedSplit[]; next_after: number | null }>
+> =>
+  request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
 
 /* ----- price-stats datasets ---------------------------------------------- */
 

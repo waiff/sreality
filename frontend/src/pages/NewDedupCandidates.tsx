@@ -52,7 +52,7 @@ import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import { categoryMainLabel, categoryTypeLabel } from '@/lib/enums';
 import { fmtAbsolute, fmtArea, fmtCount, fmtCzk, fmtPct } from '@/lib/format';
-import { listingRowPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
 import { Link } from 'react-router-dom';
 
@@ -1066,7 +1066,7 @@ function DrillListings({ target, onClear }: { target: DrillTarget | null; onClea
           </thead>
           <tbody>
             {pages.map((r) => {
-              const to = listingRowPath(r);
+              const to = r.property_id != null ? propertyPath(r.property_id, r.listing_id) : null;
               return (
                 <tr key={r.listing_id} className={ROW} data-testid={`drill-row-${r.listing_id}`}>
                   <td className={TD}>

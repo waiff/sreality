@@ -49,7 +49,7 @@ import {
   type WaterfallStep,
 } from '@/lib/locationWaterfall';
 import { stepLabel, stepNote } from '@/lib/locationSteps';
-import { listingRowPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 import { portalLabel } from '@/lib/portals';
 import { useInfiniteList } from '@/lib/useInfiniteList';
 import type { SortSpec } from '@/lib/queries';
@@ -710,12 +710,7 @@ export default function LocationPinAudit() {
               </thead>
               <tbody>
                 {list.rows.map((r) => {
-                  const href = listingRowPath({
-                    source: r.source,
-                    source_id_native: r.source_id_native,
-                    sreality_id: r.sreality_id,
-                    property_id: r.property_id,
-                  });
+                  const href = propertyPath(r.property_id, r.listing_id);
                   const name = [
                     categoryMainLabel(r.category_main),
                     r.disposition,

@@ -261,22 +261,13 @@ describe('LocationPinAudit', () => {
     });
   });
 
-  it('links the listing through the shared route helper', async () => {
-    const spy = vi.spyOn(listingUrl, 'listingRowPath');
+  it('links the advert’s row on its property page', async () => {
     renderPage();
     await screen.findByTestId('pin-audit-row-4242');
-
-    const expected = listingUrl.listingRowPath({
-      source: 'sreality',
-      source_id_native: '876654668',
-      sreality_id: 876654668,
-      property_id: 77,
-    });
     const link = screen
       .getByTestId('pin-audit-row-4242')
       .querySelector('a[href]') as HTMLAnchorElement;
-    expect(link.getAttribute('href')).toBe(expected);
-    spy.mockRestore();
+    expect(link.getAttribute('href')).toBe(listingUrl.propertyPath(77, 4242));
   });
 
   it('keeps the portal link and the resolver verdict on the row', async () => {

@@ -558,67 +558,30 @@ def test_condition_level_filters_absent_when_none():
     assert "apartment_condition_level_min" not in params
 
 
-def test_exclude_ids_uses_array_not_equal():
+def test_a_property_counts_once_as_its_canonical_advert():
+    """Decision 13: an advert is a comparable only as its property's canonical advert, so a
+    property on two portals is weighted once. Rendered in `_shared_filter_where`, so the
+    velocity and transit-corridor cohorts count properties the same way."""
+    sql, _ = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert ("EXISTS (SELECT 1 FROM properties canon_p "
+            "WHERE canon_p.id = l.property_id AND canon_p.repr_listing_ref_id = l.id)") in sql
+
+
+def test_the_subjects_whole_property_is_left_out():
+    """ONE exclusion, property grain: naming any advert of the subject leaves out every advert
+    of its property, its siblings on other portals included. The sreality-keyed twin list and
+    its NULL guard are gone with it."""
     sql, params = build_query(
-        TargetSpec(lat=50.0, lng=14.0, exclude_ids=[1, 2, 3]),
-        ComparableFilters(),
+        TargetSpec(lat=50.0, lng=14.0, exclude_listing_ids=[7, 8]), ComparableFilters(),
     )
-    assert "l.sreality_id <> ALL(%(exclude_ids)s)" in sql
-    assert params["exclude_ids"] == [1, 2, 3]
-
-
-def test_exclude_ids_is_null_guarded():
-    """The legacy arm must never drop a NULL-sreality_id listing (R2/Gate 2).
-
-    `NULL <> ALL(...)` evaluates to NULL and a WHERE keeps only TRUE, so the
-    UNGUARDED predicate silently DELETES every post-Gate-2 listing from the
-    cohort instead of merely failing to exclude it. `_build_target` puts the
-    run's own subject into exclude_ids, so it is non-empty on essentially every
-    listing-anchored estimation — i.e. this would have skewed nearly every
-    estimate, with no error. Asserted as a whole clause (the old substring
-    assertion above also matches the buggy form)."""
-    sql, _ = build_query(
-        TargetSpec(lat=50.0, lng=14.0, exclude_ids=[1]),
-        ComparableFilters(),
-    )
-    assert "(l.sreality_id IS NULL OR l.sreality_id <> ALL(%(exclude_ids)s))" in sql
-
-
-def test_exclude_listing_ids_needs_no_null_guard():
-    """The surrogate arm is plain two-valued logic — l.id is NOT NULL — so it
-    must NOT carry the IS NULL guard (which would be dead weight and, worse,
-    imply the column is nullable)."""
-    sql, params = build_query(
-        TargetSpec(lat=50.0, lng=14.0, exclude_listing_ids=[7, 8]),
-        ComparableFilters(),
-    )
-    assert "l.id <> ALL(%(exclude_listing_ids)s)" in sql
-    assert "l.id IS NULL" not in sql
+    assert ("NOT EXISTS (SELECT 1 FROM listings subj WHERE subj.id = "
+            "ANY(%(exclude_listing_ids)s) AND subj.property_id = l.property_id)") in sql
     assert params["exclude_listing_ids"] == [7, 8]
-
-
-def test_both_exclude_arms_can_coexist():
-    """A caller mid-cutover may know both handles; the arms are independent
-    AND-ed clauses, not an either/or."""
-    sql, params = build_query(
-        TargetSpec(lat=50.0, lng=14.0, exclude_ids=[1], exclude_listing_ids=[7]),
-        ComparableFilters(),
-    )
-    assert "%(exclude_ids)s" in sql and "%(exclude_listing_ids)s" in sql
-    assert params["exclude_ids"] == [1] and params["exclude_listing_ids"] == [7]
-
-
-def test_filters_used_records_both_exclude_arms():
-    """The trace's record of what was filtered must name both arms — a silent
-    exclusion is an unauditable one."""
+    assert "exclude_ids" not in params and "sreality_id <> ALL" not in sql
     from toolkit.comparables import _filters_used
 
-    used = _filters_used(
-        TargetSpec(lat=50.0, lng=14.0, exclude_ids=[1], exclude_listing_ids=[7]),
-        ComparableFilters(),
-    )
-    assert used["target"]["exclude_ids"] == [1]
-    assert used["target"]["exclude_listing_ids"] == [7]
+    assert _filters_used(TargetSpec(lat=50.0, lng=14.0, exclude_listing_ids=[7]),
+                         ComparableFilters())["target"]["exclude_listing_ids"] == [7]
 
 
 def test_user_values_never_string_interpolated():

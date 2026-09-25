@@ -752,18 +752,6 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         "table — the same vocabulary PPM2_UNIT_CS holds, crossing into a "
         "fourth territory that cannot import it.",
     ),
-    # -- Prose the arms legitimately find ------------------------------------
-    RegisteredSite(
-        path="scraper/db.py",
-        arm="division",
-        hits=1,
-        measure=None,
-        kind=KIND_PROSE,
-        why="Not arithmetic: `_create_singleton_property`'s docstring names the "
-        "removed geo Tier-1 spatial probe by its three signals, slash-separated. "
-        "A sentence about a deleted matcher, in the module that refuses to match "
-        "at insert time (rule #15).",
-    ),
     # -- The vocabulary arm: every file that CONSUMES the shared labels -------
     # One entry per file, hits=1 by construction. This arm exists because the
     # other two are spelling filters: a site that imports the label correctly and
