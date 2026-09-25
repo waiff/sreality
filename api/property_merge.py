@@ -9,17 +9,25 @@ The transaction mechanics live in `toolkit.property_identity` (`merge_properties
 `unmerge_group` — operator state re-pointing, pipeline reconcile, browse sync, the
 `property_merge_events` ledger) and `toolkit.asset_identity`; this module is the
 HTTP + read layer over them. Mounted under `/properties/*`, admin-gated.
+
+Every operator merge and undo is also a RULING (decision 8): a merge records "same" and
+an undo "different" on every cross pair of the listing sets it united or separated, in
+the pair-grain store the review pages write (`autodedup.verdicts` + the operator
+must-not-link), inside the merge's own transaction. The rulings are written HERE and
+not in the chokepoint because the engine's merges and its bulk undo also run through
+`merge_properties` / `unmerge_group`, and a machine decision is never a human ruling.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from api import dependencies as deps
+from autodedup import ui_sql as usql
 from toolkit.asset_identity import (
     AssetError,
     get_asset,
@@ -44,14 +52,80 @@ class AssetUnlinkAction(BaseModel):
     property_id: int
 
 
+class UnmergeAction(BaseModel):
+    # The operator's optional free-text reason (decision 8), kept on the "different" ruling.
+    reason: str | None = Field(default=None, max_length=500)
+
+
+_LISTING_SIDES_SQL = """
+    SELECT property_id, id FROM listings
+    WHERE property_id = ANY(%(ids)s::bigint[])
+    ORDER BY property_id, id
+"""
+
+
+def _listing_sides(conn: psycopg.Connection, property_ids: list[int]) -> list[list[int]]:
+    """Each property's current child listings.id set, one list per property holding any."""
+    with conn.cursor() as cur:
+        cur.execute(_LISTING_SIDES_SQL, {"ids": sorted(set(property_ids))})
+        rows = cur.fetchall()
+    sides: dict[int, list[int]] = {}
+    for pid, lid in rows:
+        sides.setdefault(int(pid), []).append(int(lid))
+    return list(sides.values())
+
+
+def record_rulings(
+    conn: psycopg.Connection,
+    sides: list[list[int]],
+    *,
+    verdict: Literal["same", "different"],
+    decided_by: str,
+    note: str,
+) -> int:
+    """Rule every cross pair of the disjoint listings.id `sides` exactly as `POST
+    /autodedup/verdict` does (pair verdict; "different" upserts, "same" retracts the operator
+    must-not-link). Returns the number of pairs ruled."""
+    pairs = sorted({
+        (min(a, b), max(a, b))
+        for i, left in enumerate(sides) for right in sides[i + 1:]
+        for a in left for b in right
+    })
+    if not pairs:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(usql.VERDICT_PAIR_UPSERT_SQL, [
+            {"listing_lo": lo, "listing_hi": hi, "verdict": verdict, "note": note,
+             "reasons": [], "decided_by": decided_by}
+            for lo, hi in pairs
+        ])
+        if verdict == "same":
+            cur.executemany(usql.MUST_NOT_LINK_RETRACT_SQL, [
+                {"listing_lo": lo, "listing_hi": hi} for lo, hi in pairs
+            ])
+        else:
+            cur.executemany(usql.MUST_NOT_LINK_UPSERT_SQL, [
+                {"listing_lo": lo, "listing_hi": hi, "reason": note} for lo, hi in pairs
+            ])
+    return len(pairs)
+
+
+def _decider(claims: dict) -> str:
+    decided_by = claims.get("email") or claims.get("sub")
+    if not decided_by:
+        raise HTTPException(status_code=403, detail="the admin identity carries no email")
+    return str(decided_by)
+
+
 def merge_property_set(
-    conn: psycopg.Connection, property_ids: list[int],
+    conn: psycopg.Connection, property_ids: list[int], *, decided_by: str,
 ) -> dict[str, Any] | None:
     """Merge an explicit SET of properties into one (the operator-checked subset).
 
     Takes the property ids the operator ticked — "merge exactly these" — with no
     reference to any proposal or candidate edge. The oldest is the survivor; every
-    other merges into it under one reversible group. None = nothing to do (fewer
+    other merges into it under one reversible group, and every cross pair of their
+    listings is ruled "same" in the same transaction. None = nothing to do (fewer
     than two distinct ids).
     """
     ids = sorted({int(p) for p in property_ids})
@@ -74,6 +148,7 @@ def merge_property_set(
     group: str | None = None
     moved = 0
     with conn.transaction():
+        sides = _listing_sides(conn, active)
         for retired in retired_ids:
             result = merge_properties(
                 conn, survivor_id=survivor, retired_id=retired,
@@ -81,12 +156,17 @@ def merge_property_set(
             )
             group = result["data"]["merge_group_id"]
             moved += int(result["data"]["listings_moved"])
+        ruled = record_rulings(
+            conn, sides, verdict="same", decided_by=decided_by,
+            note=f"operator merge {group}",
+        )
 
     return {
         "merge_group_id": group,
         "survivor_id": survivor,
         "retired_ids": retired_ids,
         "listings_moved": moved,
+        "pairs_ruled_same": ruled,
     }
 
 
@@ -231,21 +311,34 @@ def list_merges(
 
 
 def unmerge(
-    conn: psycopg.Connection, merge_group_id: str, *, undone_by: str,
+    conn: psycopg.Connection,
+    merge_group_id: str,
+    *,
+    decided_by: str,
+    reason: str | None = None,
 ) -> dict[str, Any]:
-    """Reverse a merge group. Raises MergeError if it has no active events."""
-    return unmerge_group(conn, merge_group_id=merge_group_id, undone_by=undone_by)
+    """Reverse a merge group and, in the same transaction, rule "different" the sides the
+    replay left (a conflict child re-merged elsewhere is on neither). MergeError if none."""
+    with conn.transaction():
+        result = unmerge_group(conn, merge_group_id=merge_group_id, undone_by="operator")
+        data = result["data"]
+        note = f"operator unmerge {merge_group_id}" + (f": {reason}" if reason else "")
+        data["pairs_ruled_different"] = record_rulings(
+            conn, _listing_sides(conn, [data["survivor_id"], *data["retired_ids"]]),
+            verdict="different", decided_by=decided_by, note=note,
+        )
+    return result
 
 
 @router.post("/merge")
 def post_merge_property_set(
     body: PropertySetAction,
     conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Merge an explicit operator-chosen set of properties into one (subset merge)."""
     try:
-        result = merge_property_set(conn, body.property_ids)
+        result = merge_property_set(conn, body.property_ids, decided_by=_decider(claims))
     except MergeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result is None:
@@ -267,12 +360,17 @@ def get_merges(
 @router.post("/merges/{merge_group_id}/unmerge")
 def post_unmerge(
     merge_group_id: str,
+    body: UnmergeAction | None = Body(default=None),
     conn: Any = Depends(deps.get_db_conn),
-    _: dict = Depends(deps.require_admin),
+    claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """Undo one merge group (reversible curation, never a delete)."""
+    """Undo one merge group (reversible curation, never a delete) and rule it "different",
+    with the operator's optional free-text `reason`."""
     try:
-        return unmerge(conn, merge_group_id, undone_by="operator")
+        return unmerge(
+            conn, merge_group_id, decided_by=_decider(claims),
+            reason=body.reason if body else None,
+        )
     except MergeError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

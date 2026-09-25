@@ -896,20 +896,18 @@ def test_every_recompute_variant_writes_the_stamp():
 
 
 def test_every_singleton_creation_path_stamps_the_basis():
-    """Four writers create a property from ONE listing (straggler attach,
-    insert-time singleton, the cheap singleton rollup, the unmerge split). A
-    singleton's price and area are trivially one row's, so each stamps the basis
-    rather than leaving it NULL until the next maintenance pass — and each calls
-    the shared price_per_m2_source_id() instead of restating its validity bound."""
+    """Three writers create a property from ONE listing (straggler attach,
+    insert-time singleton, the cheap singleton rollup). A singleton's price and
+    area are trivially one row's, so each stamps the basis rather than leaving it
+    NULL until the next maintenance pass — and each calls the shared
+    price_per_m2_source_id() instead of restating its validity bound."""
     import inspect
 
     from scraper import db
     from scripts.recompute_property_stats import _ATTACH_INSERT_SQL
-    from toolkit.property_identity import _SPLIT_INSERT_ONE_SQL
 
     sources = {
         "attach": _ATTACH_INSERT_SQL,
-        "split": _SPLIT_INSERT_ONE_SQL,
         "singleton": inspect.getsource(db._create_singleton_property),
         "cheap_rollup": inspect.getsource(db._cheap_property_rollup),
     }
@@ -941,15 +939,14 @@ def test_one_survivorship_rule_for_every_golden_record_field():
         ), f"{column} must take the best non-NULL value in source-trust order"
     assert "bool_or(l.is_active)" in _RECOMPUTE_BATCH_SQL
 
-    # The other two writers of these columns are SINGLETON paths (one child, or
-    # `agg.cnt = 1`), where the two rules are identical by construction — so there is no
-    # second survivorship rule to keep in step, and none may appear.
+    # The other writer of these columns is a SINGLETON path (`agg.cnt = 1`), where the
+    # two rules are identical by construction — so there is no second survivorship rule
+    # to keep in step, and none may appear.
     import inspect
 
     from scraper import db
-    from toolkit.property_identity import _SPLIT_INSERT_ONE_SQL
 
-    for mirror in (inspect.getsource(db._cheap_property_rollup), _SPLIT_INSERT_ONE_SQL):
+    for mirror in (inspect.getsource(db._cheap_property_rollup),):
         for column in booleans:
             assert f"bool_or({column})" not in mirror
             assert f"bool_or(l.{column})" not in mirror

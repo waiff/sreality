@@ -1179,9 +1179,16 @@ renumber.** Navigate by area:
     operator state onto the survivor (`toolkit/operator_state.py`, rule #18), reconciles the
     deal pipeline (`reconcile_pipeline_on_merge`, rule #22) and re-syncs the browse read model
     (`sync_browse_list`, so Browse reads its own writes). `unmerge_group` replays the event
-    ledger deterministically and `split_property_to_singletons` breaks a group apart; both
-    reconcile the same operator state. Concurrent callers serialize per-property on the row
-    locks, and a redundant re-merge is an `already_merged` no-op.
+    ledger deterministically and reconciles the same operator state; it is the one way a
+    group comes apart (`split_property_to_singletons` and its two category-mix fix-up
+    scripts were deleted by migration 559's PR — they re-split without a ruling on the
+    premise that a daily engine would re-merge the rest). Concurrent callers serialize
+    per-property on the row locks, and a redundant re-merge is an `already_merged` no-op.
+    **A merge writes no status event (migration 559).** The status-history trigger
+    (migration 392) skips a row that is or was `merged_away`: the retirement sets
+    `is_active = false` with the status, and `unmerge_group` restores `is_active` in the
+    same statement that clears it, so neither half logs a false transition — the absorbed
+    property's history rides to the survivor (rule #18) and an unmerged one shows no gap.
     **Category compatibility is enforced at the chokepoint** via the single
     `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental (`category_type`), and a
     flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔ komercni** (the same
@@ -1194,7 +1201,14 @@ renumber.** Navigate by area:
     **Who orders a merge today.** Only the operator: Browse's `mergeMode` (checkbox
     multi-select → merge) posts to `POST /properties/merge`, with the ledger and reversal under
     `GET /properties/merges`, `POST /properties/merges/{group}/unmerge` and
-    `GET /properties/merged` (`api/property_merge.py`). Labeling / annotation CRUD that the old
+    `GET /properties/merged` (`api/property_merge.py`). **Every operator merge and undo is a
+    ruling (migration 559's PR, decision 8):** the merge route rules every cross pair of the
+    listing sets it united `same`, the undo route (optional free-text `reason`, max 500) every
+    cross pair it separated `different`, in the pair-grain store the review pages write
+    (`autodedup.verdicts` + the operator `autodedup.must_not_link`, `decided_by` = the admin's
+    email), inside the merge's own transaction. The writes live in the ROUTE, not the
+    chokepoint, because the engine's merges and its bulk undo (`unapply`) also call
+    `merge_properties` / `unmerge_group`, and a machine decision is never a human ruling. Labeling / annotation CRUD that the old
     dedup page carried — training examples, border cases, image annotations, pHash pair notes —
     first re-homed under `/labeling/*` (`api/labeling.py`), then (docs/design/tag-annotation-matrix.md,
     2026-08) superseded: the confirmed-training-set half moved to a permanent, per-(image, tag)
@@ -1283,7 +1297,12 @@ renumber.** Navigate by area:
     subject, change_kind)`,
     deduped by a single per-event **`dedupe_key`** (`wd:{sub}:new:{property_id}` once-ever;
     `wd:{sub}:price_drop:{snapshot_id}` **per-snapshot**, so a property that keeps dropping fires
-    once per real cut — and so does the collection-monitor producer). Each row carries provenance
+    once per real cut — and so does the collection-monitor producer). **A price step is one
+    advert's change against its OWN previous priced snapshot** — `listing_price_steps`
+    (migration 559) is the one definition, read by the watchdog, the collection monitor and
+    the property rollup alike; the two notification producers used to window every advert of
+    a property into one series, so two portals quoting 5.0M and 5.2M fired a drop and a rise
+    on every scrape and a merge alone sent false alerts. Each row carries provenance
     (`trigger_price_czk` / `prev_price_czk` / `trigger_snapshot_id`) and producer-stamped
     `target_channels` (the delivery-layer contract, see `docs/design/notifications-unified.md`).
     Rows are re-pointed onto the survivor on a property merge by the operator-state reconciler

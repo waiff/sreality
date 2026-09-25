@@ -15,6 +15,8 @@ import pytest
 import api.property_merge as pm
 from toolkit.property_identity import MergeError
 
+OP = "operator@example.com"
+
 
 class _Ctx:
     def __enter__(self) -> "_Ctx":
@@ -40,8 +42,18 @@ class _Cur:
         self._conn.executed.append((s, params))
         if "FROM properties WHERE id = ANY" in s and "status = 'active'" in s:
             self._rows = [(pid,) for pid in self._conn.active_ids]
+        elif "SELECT property_id, id FROM listings" in s:
+            self._rows = [
+                (pid, lid) for pid, lids in self._conn.children.items()
+                if pid in params["ids"] for lid in lids
+            ]
         else:
             self._rows = []
+
+    def executemany(self, sql: str, params_seq: Any) -> None:
+        s = " ".join(sql.split())
+        for params in params_seq:
+            self._conn.executed.append((s, params))
 
     def fetchone(self) -> Any:
         return self._rows[0] if self._rows else None
@@ -51,8 +63,11 @@ class _Cur:
 
 
 class _SetConn:
-    def __init__(self, active_ids: list[int]) -> None:
+    def __init__(
+        self, active_ids: list[int], children: dict[int, list[int]] | None = None,
+    ) -> None:
         self.active_ids = active_ids
+        self.children = children or {}
         self.executed: list[tuple[str, Any]] = []
 
     def cursor(self) -> _Cur:
@@ -82,7 +97,7 @@ def test_merge_property_set_oldest_survives(monkeypatch):
     calls = _stub_merge(monkeypatch)
     # active query returns oldest-first; survivor=3
     conn = _SetConn(active_ids=[3, 7, 9])
-    result = pm.merge_property_set(conn, [7, 3, 9])
+    result = pm.merge_property_set(conn, [7, 3, 9], decided_by=OP)
     assert result is not None
     assert result["survivor_id"] == 3
     assert result["retired_ids"] == [7, 9]
@@ -97,16 +112,16 @@ def test_merge_property_set_oldest_survives(monkeypatch):
 
 def test_merge_property_set_needs_two(monkeypatch):
     _stub_merge(monkeypatch)
-    assert pm.merge_property_set(_SetConn(active_ids=[5]), [5]) is None
+    assert pm.merge_property_set(_SetConn(active_ids=[5]), [5], decided_by=OP) is None
     # de-dups, so a single distinct id is a no-op
-    assert pm.merge_property_set(_SetConn(active_ids=[5]), [5, 5]) is None
+    assert pm.merge_property_set(_SetConn(active_ids=[5]), [5, 5], decided_by=OP) is None
 
 
 def test_merge_property_set_one_active_raises(monkeypatch):
     _stub_merge(monkeypatch)
     with pytest.raises(MergeError):
         # two requested but only one is still active
-        pm.merge_property_set(_SetConn(active_ids=[3]), [3, 7])
+        pm.merge_property_set(_SetConn(active_ids=[3]), [3, 7], decided_by=OP)
 
 
 def test_merge_property_set_touches_no_candidate_table(monkeypatch):
@@ -114,7 +129,7 @@ def test_merge_property_set_touches_no_candidate_table(monkeypatch):
     property_identity_candidates (dropped) or dedup_pair_audit (frozen)."""
     _stub_merge(monkeypatch)
     conn = _SetConn(active_ids=[3, 7])
-    pm.merge_property_set(conn, [3, 7])
+    pm.merge_property_set(conn, [3, 7], decided_by=OP)
     sqls = " ".join(s for s, _ in conn.executed)
     assert "property_identity_candidates" not in sqls
     assert "dedup_pair_audit" not in sqls
@@ -145,7 +160,7 @@ def test_merge_property_set_partial_failure_rolls_back(monkeypatch):
     monkeypatch.setattr(pm, "merge_properties", fake_merge)
     # survivor=3, retired=[7, 9]; the merge of 9 is refused after 7 succeeded.
     with pytest.raises(MergeError):
-        pm.merge_property_set(_RecConn(active_ids=[3, 7, 9]), [3, 7, 9])
+        pm.merge_property_set(_RecConn(active_ids=[3, 7, 9]), [3, 7, 9], decided_by=OP)
     # the merge loop ran inside a transaction that received the exception →
     # a real DB would ROLLBACK the already-applied merge of 7 (no partial merge).
     assert MergeError in exits
