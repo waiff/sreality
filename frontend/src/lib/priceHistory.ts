@@ -1,30 +1,20 @@
-/* Pure helpers behind the listing-detail "Listing & price history" section:
- * turn a property's URL records + price snapshots into chart series and the
- * summary stats. Kept side-effect-free (now injected, never Date.now()) so the
- * transforms are unit-testable. */
+/* Pure helpers behind the property page's price history: the canonical
+ * advert's own price snapshots as a chart series, the property's active windows,
+ * and the dated price moves. Kept side-effect-free (now injected, never
+ * Date.now()) so the transforms are unit-testable. */
 import type {
   ListingSnapshotPublic,
-  PropertySource,
-  ListingPublic,
   PropertyStatusEventPublic,
 } from '@/lib/types';
 
-const DAY_MS = 86_400_000;
-
-/* One place the property has been seen = one URL record. Re-listings on the
- * same portal with a fresh URL are separate `listings` rows → separate rows. */
-export interface UrlRow {
-  // The SURROGATE listing id (property_sources_public.id / the viewed
-  // listing's own id), never sreality_id — a post-Gate-2 non-sreality source
-  // has a NULL sreality_id, and every such row would collide onto the same
-  // key (`null === null`) instead of getting its own price track.
+/* The advert whose price the property shows (its canonical advert). A price step
+ * never spans two adverts, so the history is this advert's own series. */
+export interface PriceAdvert {
   id: number;
-  source: string;
-  url: string | null;
-  isActive: boolean;
-  price: number | null;
-  firstSeen: string;
-  lastSeen: string;
+  is_active: boolean;
+  price_czk: number | null;
+  first_seen_at: string;
+  last_seen_at: string;
 }
 
 export interface PriceSeries {
@@ -34,92 +24,23 @@ export interface PriceSeries {
   endT: number;
 }
 
-export interface PriceHistoryStats {
-  changes: number;
-  pct: number | null;
-  firstSeenT: number;
-  lastSeenT: number;
-  anyActive: boolean;
-  days: number;
-}
-
-function capitalise(s: string): string {
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
-}
-
-/* Property's URL records, newest-seen first. Falls back to a single
- * synthesized row for the rare listing with no property_sources entry. */
-export function listingUrlRows(
-  sources: PropertySource[],
-  listing: ListingPublic,
-): UrlRow[] {
-  // Each row's URL is ITS OWN stored `source_url` (migration 494 / the URL-contract
-  // sprint): a merged property's siblings carry different category triples, so
-  // the parent-derived reconstruction this used to do could never be right per row.
-  if (sources.length > 0) {
-    return [...sources]
-      .sort(
-        (a, b) =>
-          new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime(),
-      )
-      .map((s) => ({
-        // s.id is the surrogate (property_sources_public.id) — NEVER null on a
-        // real row.
-        id: s.id,
-        source: s.source,
-        url: s.source_url ?? null,
-        isActive: s.is_active,
-        price: s.price_czk,
-        firstSeen: s.first_seen_at,
-        lastSeen: s.last_seen_at,
-      }));
-  }
-  return [
-    {
-      id: listing.id,
-      source: listing.source ?? 'sreality',
-      url: listing.source_url ?? null,
-      isActive: listing.is_active,
-      price: listing.price_czk,
-      firstSeen: listing.first_seen_at,
-      lastSeen: listing.last_seen_at,
-    },
-  ];
-}
-
-/* One step-line per URL: its price snapshots (held flat between changes),
- * extended to `nowMs` while the URL is live. */
+/* The advert's price snapshots as one step-line (held flat between changes),
+ * extended to `nowMs` while it is live; none when it never had a price. */
 export function buildPriceSeries(
-  urls: UrlRow[],
+  advert: PriceAdvert,
   snapshots: ListingSnapshotPublic[],
   nowMs: number,
 ): PriceSeries[] {
-  const byId = new Map<number, { t: number; price: number }[]>();
-  for (const s of snapshots) {
-    if (s.price_czk == null) continue;
-    // Grouped on the surrogate listing_id, not sreality_id: a post-Gate-2
-    // non-sreality source's snapshots all carry NULL sreality_id and would
-    // otherwise collapse onto one shared (wrong) track.
-    const arr = byId.get(s.listing_id) ?? [];
-    arr.push({ t: new Date(s.scraped_at).getTime(), price: s.price_czk });
-    byId.set(s.listing_id, arr);
+  const points = snapshots
+    .filter((s) => s.listing_id === advert.id && s.price_czk != null)
+    .map((s) => ({ t: new Date(s.scraped_at).getTime(), price: s.price_czk as number }))
+    .sort((a, b) => a.t - b.t);
+  if (points.length === 0 && advert.price_czk != null) {
+    points.push({ t: new Date(advert.first_seen_at).getTime(), price: advert.price_czk });
   }
-  const out: PriceSeries[] = [];
-  for (const u of urls) {
-    const pts = (byId.get(u.id) ?? []).sort((a, b) => a.t - b.t);
-    if (pts.length === 0 && u.price != null) {
-      pts.push({ t: new Date(u.firstSeen).getTime(), price: u.price });
-    }
-    if (pts.length === 0) continue;
-    const endT = u.isActive ? nowMs : new Date(u.lastSeen).getTime();
-    out.push({
-      id: u.id,
-      label: urls.length > 1 ? capitalise(u.source) : 'Price',
-      points: pts,
-      endT: Math.max(endT, pts[pts.length - 1].t),
-    });
-  }
-  return out;
+  if (points.length === 0) return [];
+  const endT = advert.is_active ? nowMs : new Date(advert.last_seen_at).getTime();
+  return [{ id: advert.id, label: 'Price', points, endT: Math.max(endT, points[points.length - 1].t) }];
 }
 
 /* Property-grain windows (ms) during which >=1 source was active, derived
@@ -132,7 +53,9 @@ export function buildPriceSeries(
  * to close a trailing window the trigger hasn't stamped a deactivation for.
  * With no events this returns one window spanning the whole fallback range,
  * i.e. today's pre-gap-logic behavior exactly — a strict narrowing, never a
- * regression, once real events are present. */
+ * regression, once real events are present. A property is born active, so a
+ * FIRST event that is a deactivation closes a window opened at `fallback.start`
+ * (an unmerged property whose only row was the pre-559 merge's 'inactive'). */
 export function buildActiveWindows(
   events: PropertyStatusEventPublic[],
   fallback: { start: number; end: number },
@@ -143,7 +66,7 @@ export function buildActiveWindows(
   if (sorted.length === 0) return [[fallback.start, fallback.end]];
 
   const windows: [number, number][] = [];
-  let openAt: number | null = null;
+  let openAt: number | null = sorted[0].isActive ? null : fallback.start;
   for (const e of sorted) {
     if (e.isActive) {
       if (openAt == null) openAt = e.t;
@@ -244,7 +167,7 @@ export function buildChartRows(
 export interface PriceChangeEvent {
   t: number;
   seriesId: number;
-  /** Track label — only distinguishing when the property has several URLs. */
+  /** The track's label. */
   label: string;
   from: number;
   to: number;
@@ -252,9 +175,9 @@ export interface PriceChangeEvent {
 }
 
 /* The moments the asking price actually moved, newest first. Derived from the
- * same series the chart draws, so the chart, the event list, and the "price
- * changes" stat can never disagree. Changes are counted WITHIN a track: two
- * portals quoting different prices are not a price change. */
+ * same series the chart draws, so the chart and the event list can never
+ * disagree. Changes are counted WITHIN a track: two portals quoting different
+ * prices are not a price change. */
 export function priceChangeEvents(series: PriceSeries[]): PriceChangeEvent[] {
   const events: PriceChangeEvent[] = [];
   for (const s of series) {
@@ -273,49 +196,4 @@ export function priceChangeEvents(series: PriceSeries[]): PriceChangeEvent[] {
     }
   }
   return events.sort((a, b) => b.t - a.t);
-}
-
-/* Summary across every snapshot of the property, chronologically. */
-export function summarizePriceHistory(
-  urls: UrlRow[],
-  snapshots: ListingSnapshotPublic[],
-  currentPrice: number | null,
-  nowMs: number,
-): PriceHistoryStats {
-  const priced = [...snapshots]
-    .filter((s) => s.price_czk != null)
-    .sort(
-      (a, b) =>
-        new Date(a.scraped_at).getTime() - new Date(b.scraped_at).getTime(),
-    );
-  // Count moves WITHIN each URL's own track. Counting them over the merged
-  // chronology would read two portals quoting different prices as a price
-  // change on every alternating snapshot.
-  const byTrack = new Map<number, (number | null)[]>();
-  for (const s of priced) {
-    const arr = byTrack.get(s.listing_id) ?? [];
-    arr.push(s.price_czk);
-    byTrack.set(s.listing_id, arr);
-  }
-  let changes = 0;
-  for (const prices of byTrack.values()) {
-    for (let i = 1; i < prices.length; i++) {
-      if (prices[i] !== prices[i - 1]) changes++;
-    }
-  }
-  const firstPrice = priced.length ? priced[0].price_czk : currentPrice;
-  const lastPrice = priced.length ? priced[priced.length - 1].price_czk : currentPrice;
-  const pct =
-    firstPrice != null && lastPrice != null && firstPrice !== 0
-      ? ((lastPrice - firstPrice) / firstPrice) * 100
-      : null;
-
-  const firstSeenT = Math.min(...urls.map((u) => new Date(u.firstSeen).getTime()));
-  const anyActive = urls.some((u) => u.isActive);
-  const lastSeenT = Math.max(...urls.map((u) => new Date(u.lastSeen).getTime()));
-  const days = Math.max(
-    0,
-    Math.floor(((anyActive ? nowMs : lastSeenT) - firstSeenT) / DAY_MS),
-  );
-  return { changes, pct, firstSeenT, lastSeenT, anyActive, days };
 }

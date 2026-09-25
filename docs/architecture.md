@@ -708,9 +708,9 @@ rules. Identify which one a task belongs to before you start.
   + a save-to-collection control (rule #18 — the SPA header's "Uložit do kolekce": a checklist of
   every collection, monitored first) + **operator notes** (list existing + add a new
   one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
-  the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA page
-  (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
-  uses, negative for non-sreality portals) + subject facts; for sale apartments it ALSO
+  the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA
+  (`{VITE_APP_BASE_URL}/listing/{source}/{native}` — an advert alias that lands on the
+  property page with that advert's row open) + subject facts; for sale apartments it ALSO
   shows the precomputed `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") with
   the comparables estimation as the deeper tool/fallback (MF + estimation gated to
   byt+prodej, the bookmark + link + facts are not). The estimation's editable **net-yield
@@ -1104,10 +1104,11 @@ renumber.** Navigate by area:
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091).** Each
     `listings` row carries `(source, source_id_native)` (unique together) plus `source_url`,
     and an FK `property_id` to a `properties` row that groups observations of the same
-    real-world property across portals. `properties` holds a representative display row plus
-    derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
-    `first/last_seen_at`), maintained by an **async property-maintenance job**, never inline in
-    the scrape (see rule #20 for the dirty-set incremental cadence). `is_active` /
+    real-world property across portals. `properties` holds the canonical advert's display row
+    plus derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
+    `first/last_seen_at`), written by ONE recompute (`scripts/recompute_property_stats.py`): the
+    property-maintenance job (rule #20 for the dirty-set cadence) and, per listing, the ingest
+    path's `_ensure_property`. `is_active` /
     `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
     derived, not authoritative per source. `db.mark_inactive` / `db.active_count` are
     **source-scoped** to enforce this — a portal's index walk only flips its own rows.
@@ -1118,6 +1119,35 @@ renumber.** Navigate by area:
     neither `scraper/db.py` nor the maintenance job's straggler-attach does any spatial/geo
     probe. Frontend Browse reads `properties_public`; region stats read the property grain
     (migration 103).
+    **One property, one voice (W4, migration 561, decision 18).** A property speaks with its
+    CANONICAL advert, rank 1 of `property_canonical_listings(property_id)`: active first, then
+    `source_trust_rank`, then the most recently seen, then the lowest id. ONE RULE PER FIELD:
+    every advert field (price and ITS OWN `listing_price_steps` history, area with no fallback,
+    layout, category, subtype, source, condition with both derived levels -- rule #14 --,
+    furnished) is the canonical advert's, and `repr_listing_ref_id` names it for every read model
+    (`properties_public.listing_id` IS it); every physical fact (building type, ownership,
+    energy rating, amenities, estate/usable/garden area, parking) is the first non-empty value
+    in the same order. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL` (a bare row
+    linked in the same statement) then that recompute: on ingest (`_ensure_property`) and in the
+    straggler-attach alike. A re-scrape of a linked advert keeps the singleton mirror
+    (`_cheap_property_rollup`: counts and lifecycle, the one advert's fields while a singleton)
+    until the full recompute is measured no slower there (the W4 latency gate).
+    `all_sources` / `active_sources` (never written) left the read model; the physical columns
+    are W8's destructive drop (the SPA never read them).
+    **The SPA shows it one way (decision 11): ONE property page, `/property/:propertyId`**
+    (`frontend/src/pages/PropertyDetail.tsx`). Its header is the `properties_public` row
+    (`PROPERTY_COLS`, pinned to the view by `tests/test_property_page_read_contract.py`) -- the
+    facts the Browse card shows -- with the canonical advert's photos, broker, own price series
+    and freshness checks; the price-change figures are the row's, as Browse filters on them. The
+    merged-adverts section is the ONLY list of adverts (a singleton's one advert included), each
+    advert's own facts and stored portal link in its row. Every property-grain surface links
+    `propertyPath(property_id)` (`lib/listingUrl`). Old advert addresses -- `/listing/{source}/
+    {native}` (emails, the extension), `/listing/{sreality_id}`, `/listing?property=` -- are
+    aliases (`AdvertRedirect`) that resolve the advert's property and open its row
+    (`?advert=`; ignored for the canonical advert), `?run=` and the hash preserved; a merged-away
+    property id follows its survivor through `GET /properties/{id}/origins`. Gone: the per-portal
+    chips, the "current active listing" jump, the history block's URL list, the price-mismatch
+    note and the repr-resolving `?property=` redirect.
     **What changed: the NEW DEDUP cutoff (2026-08).** The whole *automatic decision layer* that
     used to order merges was removed wholesale — a deliberate teardown, not a regression. It had
     grown into a many-rung machine (street+disposition and geo-proximity candidate paths, a
@@ -1145,7 +1175,8 @@ renumber.** Navigate by area:
     `toolkit/room_taxonomy.py` was reduced to vocabulary plus the merge-chokepoint category
     guard, and `toolkit/property_identity.py` lost its candidate-table stamps.
     **Consequences to hold in mind.** Nothing auto-merges any more, so cross-portal duplicates
-    accumulate in Browse until the new engine ships — that build-up was accepted explicitly.
+    accumulate in Browse until the new engine ships — that build-up was accepted explicitly
+    (the one engine path since, AUTODEDUP's apply lane, is dark; see "Who orders a merge").
     The **publication gate is gone**: since migration 273 a new property stayed invisible in
     Browse/map/stats/watchdogs until something stamped `published_at`, and the only stamper for
     ordinary properties was the old engine, so leaving the gate up would have hidden the entire
@@ -1171,17 +1202,49 @@ renumber.** Navigate by area:
     again for any purpose.** They survive in git history and on branch
     `backup/pre-new-dedup-2026-08` for forensic recovery only. The operator owns all
     merge/no-merge logic in the rebuild; thresholds, weights and rules are not to be invented.
-    **The link mechanics (live, unchanged).** `toolkit/property_identity.py` is the single
-    chokepoint through which any grouping change passes. `merge_properties` row-locks both
-    properties `FOR UPDATE`, gates on `status='active'`, re-points `listings.property_id` onto
-    the survivor, writes one `property_merge_events` row per moved child, soft-retires the loser
-    (`status='merged_away'`, `merged_into`), and — inside the same transaction — carries
-    operator state onto the survivor (`toolkit/operator_state.py`, rule #18), reconciles the
-    deal pipeline (`reconcile_pipeline_on_merge`, rule #22) and re-syncs the browse read model
-    (`sync_browse_list`, so Browse reads its own writes). `unmerge_group` replays the event
-    ledger deterministically and `split_property_to_singletons` breaks a group apart; both
-    reconcile the same operator state. Concurrent callers serialize per-property on the row
-    locks, and a redundant re-merge is an `already_merged` no-op.
+    **The link mechanics: one merge, one undo.** `toolkit/property_identity.py` is the single
+    chokepoint. `merge_property_set` is the ONE merge (operator and engine alike): it refuses a
+    non-active property, a category clash between ANY two members, two DIFFERENT asset links,
+    or (the engine only) two linked units of one asset (`AssetLinkConflict`), keeps the OLDEST
+    record (`first_seen_at`, then the lowest id — decision 17, `survivor_of`), merges the rest
+    through `merge_properties` under ONE `merge_group_id` in one transaction, and recomputes the
+    survivor and patches Browse (`sync_browse_list`) once. `merge_properties` row-locks both,
+    gates on `status='active'`, re-points `listings.property_id`, writes one
+    `property_merge_events` row per moved advert, CARRIES the one asset link onto the survivor,
+    carries operator state (rule #18), the pipeline (rule #22) and dismissals, and soft-retires
+    the loser (`merged_away`). `detach_listing` is the ONE split and the ONE undo, per advert:
+    back to its ORIGIN (the `prev_property_id` of its oldest live ledger row), reactivating that
+    property with its pipeline card and carried asset link if merged away INTO that merge's
+    survivor (else the advert stays: `origin_moved_on`, read under the lock), stamping its ledger
+    rows `undone_at`/`undone_by` (never deleted), recomputing both once. An advert NO standing
+    merge moved (an ingest-time grouping, ~15.9k `native_multi` properties) is, while ANOTHER
+    such own advert stays, a BIRTH through the one birth path (`split_native`, the operator's
+    only: any other source answers `propose_only`, decision 9): the property locked first and
+    the plan re-read under the lock, then the advert unlinked and born by
+    `scraper.db.create_singleton_properties` and both recomputed; ONE ledger row records it in
+    the existing shape — the ingest grouping as the merge it amounts to (`survivor` = the
+    property left, `retired` = `prev` = the new record) written already undone by the split (no
+    migration) — so the new record IS the advert's origin, and a later merge of the two
+    (operator or engine, `merge_property_set` as ever) comes apart by the same detach. A
+    property's LAST own advert stays (`last_native`): the merged ones go home instead, so no
+    detach, `unapply` loop included, can leave an active property with no advert. Operator
+    state, the pipeline card and the asset link stay on the property left (rules 18, 22).
+    Idempotent (`not_merged` = alone on its property; a group-scoped detach never births). One
+    undo covers both kinds. A group comes apart as a
+    loop of detaches scoped to it (`merge_group_id=`: only while that merge is the newest to
+    move the advert, else a conflict left in place) — `unmerge_group`,
+    `split_property_to_singletons` and their fix-up scripts are gone. Merge-then-detach gives
+    back every original property and asset link in any order (one asset held twice in a chained
+    operator merge excepted; tests/test_detach_listing.py, executed in
+    tests/test_merge_safety_live.py). Callers serialize per-property on the row locks.
+    **A merge writes no status event (migration 559).** The status-history trigger
+    (migration 392) skips the retirement (`is_active = false` set with `merged_away`), and
+    `property_status_events` is NOT carried onto the survivor: each property keeps its own
+    activity log, so the survivor never charts two series as one. A detach restores
+    `is_active` in the statement that clears `merged_away`, and the trigger logs that only
+    where the property's own last row disagrees (a pre-559 absorbed property ends on the old
+    merge's false 'inactive' and gets its 'active' back). **Apply 559 before its code merges**
+    — the rollup and both notification producers read `listing_price_steps` with no fallback.
     **Category compatibility is enforced at the chokepoint** via the single
     `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental (`category_type`), and a
     flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔ komercni** (the same
@@ -1191,10 +1254,23 @@ renumber.** Navigate by area:
     **asset-link** grain (migration 224), which links genuinely *different* units in one
     building (a `byt` and its ground-floor `komercni`, a `dum` and its `pozemek`) WITHOUT
     collapsing them into one property.
-    **Who orders a merge today.** Only the operator: Browse's `mergeMode` (checkbox
-    multi-select → merge) posts to `POST /properties/merge`, with the ledger and reversal under
-    `GET /properties/merges`, `POST /properties/merges/{group}/unmerge` and
-    `GET /properties/merged` (`api/property_merge.py`). Labeling / annotation CRUD that the old
+    **Who orders a merge today.** The operator — and, only inside the area its scope row
+    names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
+    multi-select → merge) posts to `POST /properties/merge`; `POST /properties/{id}/detach`
+    (`{listing_id, reason?}` → `{listing_id, detached, outcome, survivor_property_id,
+    restored_property_id, rulings_written}`; an advert no longer on it answers `detached: false`)
+    sends one advert back; `GET /properties/{id}/origins` names each advert's origin; the ledger
+    is `GET /properties/merges` (`api/property_merge.py`). **Every operator merge and detach is a
+    ruling (decision 8)** (`toolkit.property_identity.record_rulings`, same transaction, only
+    for `source='operator'`: an engine merge or `unapply` never is): the merge rules every cross
+    pair of the ticked properties' CANONICAL adverts (`repr_listing_ref_id` — never a child the
+    removed engine or ingest grouped there) `same`; the detach rules the advert `different` from
+    every advert that stays, with the optional `reason` (max 500) — both into the review pages'
+    store (`autodedup.verdicts` + operator `must_not_link`, `decided_by` = the admin's email).
+    **Migration 560** copied the operator's live pre-ruling merges (362 groups) into `same`
+    rulings — pairs that sat on different properties of a group (a side is an advert's origin)
+    and share one now — `decided_by='operator'`, dated at the merge, never over an existing
+    ruling or veto, so the engine can never undo them. Labeling / annotation CRUD that the old
     dedup page carried — training examples, border cases, image annotations, pHash pair notes —
     first re-homed under `/labeling/*` (`api/labeling.py`), then (docs/design/tag-annotation-matrix.md,
     2026-08) superseded: the confirmed-training-set half moved to a permanent, per-(image, tag)
@@ -1204,8 +1280,82 @@ renumber.** Navigate by area:
     carries only border-case flagging (`image_border_cases`) — `image_tag_annotations` and
     `phash_pair_notes` had zero live callers even before the cutover. `image_training_examples`
     itself is superseded but not yet dropped (a separately-gated destructive migration).
-    Interim caveat: the unmerge *button* lived on the deleted Dedup page, so until the rebuild
-    gives it a home, unmerge is API-only.
+    The unmerge *button* lived on the deleted Dedup page; its new home is the property page's
+    **Sloučené inzeráty** section (`frontend/src/components/listing-detail/MergedAdvertsSection.tsx`:
+    the page's only advert list, one expandable row per child advert — photos and the stored
+    portal link collapsed, description / full gallery / broker expanded). For an admin
+    session each expanded row also names its origin (`GET /properties/{id}/origins`: the property
+    a detach returns it to, and the source and date of the merge that took it from there), and
+    every row WITH an origin carries a two-step **Rozdělit** that calls
+    `POST /properties/{id}/detach` for exactly that advert — any property size, a merge of any
+    origin (operator, legacy `auto`, `autodedup`), the optional free-text `reason` kept on the
+    "different" ruling — then re-reads the property page (keyed on the property) and refreshes
+    Browse (`lib/mergedAdverts.refreshAfterDetach`). The property's own advert (null origin) has none.
+    The page's former guess at which merge group a row came in with (a ledger scan plus a
+    two-advert-only rule) and the group-grain unmerge it called are gone.
+    **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
+    (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around
+    it, and only inside `app_settings.autodedup_apply_scope`, the ONE rollout control: a scope
+    naming no deal types or no area merges nothing (migration 558 seeds it with no area), and
+    it is re-read before every group, so emptying its area on /settings stops a running apply
+    between two groups. `autodedup/apply.py` (lane modes `apply` / `unapply` in
+    `.github/workflows/autodedup.yml`) reads one stored generation's groups, names the survivor
+    by the one rule (`survivor_of`: the oldest record), and calls `merge_property_set`
+    with `source='autodedup'` (migration 558 widened `property_merge_events.source`; that is
+    the whole record of who merged), ONE `merge_group_id` per engine group inside one
+    transaction, so each group is undoable as a unit (`mode=unapply`, newest-first, by
+    generation, run or time window: a loop of `detach_listing` over the adverts the group's
+    merge moved, from the placement its ledger row recorded; the dry run reads each detach's
+    answer from `detach_outcomes`). A dry run is the default and writes only
+    its own ledger, `autodedup.applied_merges`; a live run refuses — recording why — any group
+    whose merge would unite, across EVERY listing it moves (both properties' full sets, not
+    just the members), an operator
+    negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
+    inside — any superset, under any key, the newest ruling per operator winning), mixed
+    categories, a listing outside the scope — inside = LOCATED in a scope block by its live
+    `listing_location` obec_kod / cast_obce_kod, never the engine's blocking key; out-of-scope
+    groups are counted per reason — (and the merge's own refusal of two **asset-linked**
+    properties is recorded as `asset_linked_units`), a non-active property, a
+    property the engine split across two groups, or a listing no group holds (unless this
+    engine's own live merge already put it
+    there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
+    and their listings `FOR SHARE`, and every one of those checks runs again over the locked
+    rows before it merges; `rt…` generations are refused. An engine merge the operator took
+    apart stays apart: its separated LISTINGS are never re-united by a later generation, even
+    once the restored property has been merged into another one, and an `unapply` that finds
+    the merge already partly taken apart records its undo as the operator's. `unapply` skips a
+    group a later engine merge still builds on (more listings merged onto its survivor by a
+    merge whose own undo is not refused for moving nothing back, or a retirement of its
+    survivor that still stands) and names the merge to undo first — and only then: a group
+    taken apart outside the engine, or with nothing left to move back (from the placement each
+    ledger row records over its locked rows as it merges), is skipped naming nothing; a group
+    someone else already undid (a retired property no longer merged into the survivor by its
+    merge — told apart from a later hand re-merge of the same pair by `properties.merged_at`
+    against the ledger's `applied_at`, both now() of the group's one transaction) is noted
+    undone as theirs wherever its survivor went since; and the dry run reports each group as
+    the live run would treat it; an undone group may merge again on a later apply (undo is a
+    brake, not a ruling). **Splits are propose-only (decision 9):** `GET
+    /autodedup/proposed-splits` (+ `/{property_id}`; `autodedup/proposed_splits.py`, read-only)
+    lists each live multi-advert property a generation touches with a pair STATED apart: grouped
+    apart AND scored reject/veto/band or named by a conflict (a pair never scored is not spoken
+    for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
+    `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
+    pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
+    the operator's ruling; the batch split is the detach per advert, each advert carrying its
+    `detach_outcome` (what `detach_outcomes` answers now) and `splittable` (that moves it: back
+    to its origin, or a native advert to a new record); `GET /properties/{id}/origins` carries
+    both for the property page, whose rows that would not move say why (and link where a
+    retired origin went). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
+    "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a card per proposal
+    with each group's adverts side by side (`MemberGrid`), the reason and ruling per pair, a
+    checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's
+    own adverts stays (else the canonical advert's), and an advert leaves only when it is alone
+    in its group (a detach rules it different from every advert left behind), is `splittable`
+    and is stated apart from the staying group; the optional shared reason rides each ruling,
+    with progress and a per-advert outcome. Group size is the engine's own cap alone. A group already on one
+    property that the operator has since ruled different is reported, never acted on. It reads
+    nothing from `property_merge_events`. Undo restores listings and pipeline cards;
+    collections, tags and notes stay on the survivor (rule #18: a detach is best-effort).
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing
@@ -1238,6 +1388,13 @@ renumber.** Navigate by area:
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
     (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
     helper), so the two surfaces can never disagree on what a filter means.
+    **Every surface reads the same canonical advert (migration 561).** Both watchdog producers
+    and the collection monitor alert only on the canonical advert's own steps scraped after it
+    became canonical (`properties.repr_since`, stamped by the rollup when the canonical advert
+    changes: a merge, detach or delisting that hands the slot over replays nothing), and
+    `_shared_filter_where` admits an advert only as its property's canonical advert and drops
+    every advert of the subject's property (`exclude_listing_ids`, the one exclusion; decision
+    13), so comparables, velocity and the corridor count each property once.
     **PLACE is the same rule (W3 S3, migration 504): ONE code predicate,
     `<level>_id = any(codes)`, plain equality per level.** A location chip is a LEVEL plus a
     RÚIAN CODE at four levels — `region_id` / `okres_id` / `obec_id` / `cast_obce_id` — and
@@ -1283,7 +1440,12 @@ renumber.** Navigate by area:
     subject, change_kind)`,
     deduped by a single per-event **`dedupe_key`** (`wd:{sub}:new:{property_id}` once-ever;
     `wd:{sub}:price_drop:{snapshot_id}` **per-snapshot**, so a property that keeps dropping fires
-    once per real cut — and so does the collection-monitor producer). Each row carries provenance
+    once per real cut — and so does the collection-monitor producer). **A price step is one
+    advert's change against its OWN previous priced snapshot** — `listing_price_steps`
+    (migration 559) is the one definition, read by the watchdog, the collection monitor and
+    the property rollup alike; the two notification producers used to window every advert of
+    a property into one series, so two portals quoting 5.0M and 5.2M fired a drop and a rise
+    on every scrape and a merge alone sent false alerts. Each row carries provenance
     (`trigger_price_czk` / `prev_price_czk` / `trigger_snapshot_id`) and producer-stamped
     `target_channels` (the delivery-layer contract, see `docs/design/notifications-unified.md`).
     Rows are re-pointed onto the survivor on a property merge by the operator-state reconciler
@@ -1375,7 +1537,7 @@ renumber.** Navigate by area:
     tag_id)`, `property_notes(property_id, body, origin_listing_id)`, migration 202 — was
     listing-grain on `sreality_id` pre-202). A tag, collection membership, or note is a fact
     about the real-world property, not one portal's advert, so it is keyed on `property_id`
-    and **follows the property across merge/unmerge/split**. `toolkit/operator_state.py`
+    and **follows the property across a merge** (a detach leaves it where it is, best-effort). `toolkit/operator_state.py`
     (`carry_operator_state_on_merge` + `OPERATOR_STATE_TABLES`, the single registry of every
     property-anchored operator-state table — collections, tags, notes, AND `notification_dispatches`)
     re-points that state onto the survivor inside the `merge_properties` transaction (SET tables
@@ -1392,8 +1554,8 @@ renumber.** Navigate by area:
     affordance must resolve alike. A write that needs a real target 4xx's on an unresolvable id; a
     remove falls through to the raw id and stays idempotent, because no caller reads the boolean.
     Resolution is wrong in exactly two places, both enumerated in the rail: the merge route itself
-    (it CREATES survivors) and `properties.asset_id` (a column on the property row, not carried
-    state). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
+    (it CREATES survivors) and `properties.asset_id` (a column on the property row: the merge carries it
+    onto the survivor, but a link or an unlink names one row). The rail is `tests/api/test_property_anchored_write_census.py` — an enumeration in a
     commit message is not one. Adding a
     new property-anchored operator-state table = one registry line. Unmerge/split are deliberately
     **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
@@ -1671,7 +1833,7 @@ renumber.** Navigate by area:
     237 s against a 900 s cadence). The drain is race-free +
     terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
     since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
-    New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
+    New listings (`property_id` NULL) are born + recomputed by straggler-attach, not the queue. The
     **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
     reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
     self-heals within 24h *provided the sweep completes*: since the 2026-08-06 incident it runs
@@ -1686,7 +1848,7 @@ renumber.** Navigate by area:
     hours. (There is no scheduled dedup job any more — the automatic decision
     layer was removed in the 2026-08 cutoff, rule #15.) Both
     maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
-    mutate `properties` concurrently. Inline merge/unmerge still call `recompute_one` directly
+    mutate `properties` concurrently. Inline merge/detach still call `recompute_one` directly
     (they keep the survivor current without waiting for the cron). One accepted lag: a
     byte-identical reactivation (a delisted listing reappears with no content change) produces
     no snapshot, so it waits for the daily sweep — rare, documented.
@@ -1755,12 +1917,11 @@ renumber.** Navigate by area:
     most-advanced stage on the survivor — **TERMINAL-AWARE**: a live (non-terminal) stage
     always beats a closed/terminal one, so a merge never buries a live deal under `lost`/`won`;
     within the same terminality the higher `position` wins (tie → later `updated_at`).
-    `reconcile_pipeline_on_unmerge` restores the reactivated retired property's card from that
-    snapshot (**lossless**: the reactivated property gets its pre-merge stage back, and in the
-    move-if-empty case the survivor's absorbed card is dropped so it isn't duplicated); the
-    survivor's own stage is left as-is — a chained-merge-safe best-effort, so a survivor that
-    absorbed the retired's stage keeps it until the operator adjusts. Split stays best-effort
-    (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
+    `reconcile_pipeline_on_detach` restores a retired property's card from that snapshot when a
+    detach reactivates it (**lossless**: the reactivated property gets its pre-merge stage back,
+    and in the move-if-empty case the survivor's absorbed card is dropped so it isn't
+    duplicated); the survivor's own stage is left as-is — a chained-merge-safe best-effort, so a
+    survivor that absorbed the retired's stage keeps it until the operator adjusts. Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
     `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<PipelineMark>`
@@ -2359,7 +2520,8 @@ renumber.** Navigate by area:
 
 ## Broker identity merges — auto-merge and the suppression rail
 
-Unlike property merges (rule #15, operator-only), broker identities DO auto-merge. The nightly
+Unlike property merges (rule #15: operator-ordered, plus the dark AUTODEDUP apply lane that
+merges only inside the area `autodedup_apply_scope` names), broker identities DO auto-merge. The nightly
 sweep (`scripts/resolve_brokers.py::_auto_merge`, cron 04:35 UTC) hands the WHOLE identity +
 contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-20 is
 **portal-agnostic and name-gated** — one rule, no per-portal exceptions:

@@ -325,7 +325,7 @@ describe('<Pipeline> board', () => {
     renderBoard();
     const place = await screen.findByText('Sadová');
     const link = place.closest('a');
-    expect(link).toHaveAttribute('href', '/listing/sreality/111');
+    expect(link).toHaveAttribute('href', '/property/42');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
 
@@ -344,7 +344,7 @@ describe('<Pipeline> board', () => {
     ]);
     renderBoard();
     const link = (await screen.findByText('Lokalita neurčena')).closest('a');
-    expect(link).toHaveAttribute('href', '/listing/sreality/111');
+    expect(link).toHaveAttribute('href', '/property/42');
   });
 
   /* The town is the second row on EVERY card, on a line of its own so a long
@@ -364,7 +364,7 @@ describe('<Pipeline> board', () => {
     ]);
     renderBoard();
     const street = await screen.findByText('Ulice neuvedena');
-    expect(street.closest('a')).toHaveAttribute('href', '/listing/sreality/111');
+    expect(street.closest('a')).toHaveAttribute('href', '/property/42');
     expect(street.closest('p')?.nextElementSibling).toHaveTextContent('Praha');
   });
 

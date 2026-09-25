@@ -160,8 +160,7 @@ export interface ListingSnapshotPublic {
   /* The owning listing's SURROGATE id (listing_snapshots_public.listing_id,
    * migration 334/343). Group/join snapshots on this, not sreality_id — a
    * post-Gate-2 non-sreality listing's snapshots all carry NULL sreality_id
-   * and would otherwise collide onto one shared bucket. Only populated by
-   * fetchSnapshotsForListings' select; fetchSnapshotsByListing omits it. */
+   * and would otherwise collide onto one shared bucket. */
   listing_id: number;
   scraped_at: string;
   price_czk: number | null;
@@ -473,7 +472,8 @@ export interface TargetSpecIn {
   area_m2: number | null;
   disposition: Disposition | null;
   floor: number | null;
-  exclude_ids: number[];
+  /* The subject's advert(s): every advert of their property leaves the cohort (decision 13). */
+  exclude_listing_ids?: number[];
 }
 
 export interface ComparableUsed {
@@ -1614,22 +1614,6 @@ export interface ScraperHealthChecks {
 
 /* ----- Operator merge mechanics (multi-portal) --------------------------- */
 
-export interface MergeGroup {
-  merge_group_id: string;
-  merged_at: string;
-  survivor_property_id: number;
-  retired_count: number;
-  listings_moved: number;
-  source: 'auto' | 'operator';
-  reason: string;
-  fully_undone: boolean;
-}
-
-export interface MergesResponse {
-  data: MergeGroup[];
-  total: number;
-}
-
 /* One already-merged property (survivor) in the merged-properties audit
  * browse. `source_count` is every
  * child listing ever grouped under it (active or delisted); `active_count` the
@@ -1661,14 +1645,13 @@ export interface MergedPropertiesResponse {
   returned: number;    // rows on this page
 }
 
-/* One row of property_sources_public — a property's per-portal observations.
- * Drives the Listing Detail "listed on N sites" panel. */
+/* One row of property_sources_public — one advert of a property: a row of the
+ * property page's merged-adverts section. */
 export interface PropertySource {
   property_id: number;
   /* The child listing's SURROGATE id (property_sources_public.id = listings.id,
-   * migration 334). NEVER null on rows read from property_sources_public — the
-   * R2 resolver-chain keys child loaders (snapshots, sibling links) on this
-   * instead of sreality_id, which a post-Gate-2 non-sreality row may not have. */
+   * migration 334). NEVER null — per-advert loaders key on it, never on
+   * sreality_id, which a post-Gate-2 non-sreality row may not have. */
   id: number;
   sreality_id: number;
   source: string;

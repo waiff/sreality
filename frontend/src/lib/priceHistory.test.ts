@@ -1,22 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
-  listingUrlRows,
   buildPriceSeries,
-  summarizePriceHistory,
   buildChartRows,
   buildActiveWindows,
   priceChangeEvents,
   seriesValueKey,
   seriesObservedKey,
-  type UrlRow,
+  type PriceAdvert,
   type PriceSeries,
 } from './priceHistory';
-import type {
-  ListingPublic,
-  ListingSnapshotPublic,
-  PropertySource,
-  PropertyStatusEventPublic,
-} from './types';
+import type { ListingSnapshotPublic, PropertyStatusEventPublic } from './types';
 
 const NOW = Date.parse('2026-03-01T00:00:00Z');
 
@@ -35,140 +28,42 @@ function snap(
   };
 }
 
-function source(over: Partial<PropertySource>): PropertySource {
-  return {
-    property_id: 1,
-    id: 100,
-    sreality_id: 100,
-    source: 'sreality',
-    source_url: 'https://example.cz/1',
-    source_id_native: '100',
-    is_active: true,
-    price_czk: 2_500_000,
-    first_seen_at: '2026-01-01T00:00:00Z',
-    last_seen_at: '2026-03-01T00:00:00Z',
-    ...over,
-  };
-}
-
-const listing = {
+const ADVERT: PriceAdvert = {
   id: 100,
-  sreality_id: 100,
-  source: 'sreality',
   is_active: true,
-  price_czk: 2_500_000,
+  price_czk: 2_400_000,
   first_seen_at: '2026-01-01T00:00:00Z',
   last_seen_at: '2026-03-01T00:00:00Z',
-} as unknown as ListingPublic;
-
-describe('listingUrlRows', () => {
-  it('maps property sources newest-seen first', () => {
-    const rows = listingUrlRows(
-      [
-        source({ id: 1, sreality_id: 1, last_seen_at: '2026-01-10T00:00:00Z' }),
-        source({ id: 2, sreality_id: 2, last_seen_at: '2026-02-20T00:00:00Z' }),
-      ],
-      listing,
-    );
-    expect(rows.map((r) => r.id)).toEqual([2, 1]);
-  });
-
-  it('falls back to a single synthesized row when there are no sources', () => {
-    const rows = listingUrlRows([], listing);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ id: 100, source: 'sreality', url: null });
-  });
-
-  it('reads each row its OWN stored source_url — never a URL derived from the parent', () => {
-    // A merged property: two sreality siblings with different sub-types. The old
-    // reconstruction applied the parent's category triple to both and 404'd one.
-    const rows = listingUrlRows(
-      [
-        source({
-          id: 100, sreality_id: 100, source: 'sreality',
-          source_url: 'https://www.sreality.cz/detail/prodej/byt/2+1/praha-zizkov-kristanova/100',
-          last_seen_at: '2026-02-01T00:00:00Z',
-        }),
-        source({
-          id: 101, sreality_id: 101, source: 'sreality',
-          source_url: 'https://www.sreality.cz/detail/prodej/byt/3+kk/praha-zizkov-kristanova/101',
-          last_seen_at: '2026-01-01T00:00:00Z',
-        }),
-        source({ id: 102, sreality_id: 102, source: 'sreality', source_url: null,
-                 last_seen_at: '2025-12-01T00:00:00Z' }),
-      ],
-      { ...listing, category_sub_cb: 5 } as unknown as ListingPublic,
-    );
-    expect(rows.map((r) => r.url)).toEqual([
-      'https://www.sreality.cz/detail/prodej/byt/2+1/praha-zizkov-kristanova/100',
-      'https://www.sreality.cz/detail/prodej/byt/3+kk/praha-zizkov-kristanova/101',
-      null, // no stored fact → in-app view, never a guess
-    ]);
-  });
-
-  it('the no-sources fallback row reads the listing\'s own stored source_url', () => {
-    const rows = listingUrlRows(
-      [],
-      { ...listing, source_url: 'https://www.sreality.cz/detail/prodej/byt/2+1/x-x-/100' } as unknown as ListingPublic,
-    );
-    expect(rows[0].url).toBe('https://www.sreality.cz/detail/prodej/byt/2+1/x-x-/100');
-  });
-
-  it('keys rows on the surrogate id, not sreality_id, so two NULL-sreality sources never collide', () => {
-    const rows = listingUrlRows(
-      [
-        source({
-          id: 11,
-          sreality_id: null as unknown as number,
-          source: 'idnes',
-          source_url: 'https://idnes.cz/a',
-          last_seen_at: '2026-01-10T00:00:00Z',
-        }),
-        source({
-          id: 12,
-          sreality_id: null as unknown as number,
-          source: 'bezrealitky',
-          source_url: 'https://bezrealitky.cz/b',
-          last_seen_at: '2026-02-20T00:00:00Z',
-        }),
-      ],
-      listing,
-    );
-    expect(rows.map((r) => r.id)).toEqual([12, 11]);
-  });
-});
+};
 
 describe('buildPriceSeries', () => {
-  const urls: UrlRow[] = [
-    {
-      id: 100,
-      source: 'sreality',
-      url: null,
-      isActive: true,
-      price: 2_400_000,
-      firstSeen: '2026-01-01T00:00:00Z',
-      lastSeen: '2026-03-01T00:00:00Z',
-    },
-  ];
-
-  it('groups snapshots into a track and extends a live URL to now', () => {
+  it('draws the advert’s own snapshots as one track, extended to now while live', () => {
     const series = buildPriceSeries(
-      urls,
+      ADVERT,
       [
-        snap(100, '2026-01-01T00:00:00Z', 2_600_000),
         snap(100, '2026-02-01T00:00:00Z', 2_400_000),
+        snap(100, '2026-01-01T00:00:00Z', 2_600_000),
       ],
       NOW,
     );
     expect(series).toHaveLength(1);
-    expect(series[0].label).toBe('Price'); // single URL → generic label
+    expect(series[0].label).toBe('Price');
     expect(series[0].points.map((p) => p.price)).toEqual([2_600_000, 2_400_000]);
     expect(series[0].endT).toBe(NOW);
   });
 
-  it('synthesizes a single point when a URL has no snapshots but a price', () => {
+  it('never mixes in another advert’s snapshots — a step never spans two adverts', () => {
     const series = buildPriceSeries(
-      [{ ...urls[0], isActive: false, lastSeen: '2026-02-15T00:00:00Z' }],
+      ADVERT,
+      [snap(100, '2026-01-01T00:00:00Z', 2_600_000), snap(200, '2026-01-15T00:00:00Z', 2_500_000)],
+      NOW,
+    );
+    expect(series[0].points.map((p) => p.price)).toEqual([2_600_000]);
+  });
+
+  it('synthesizes a single point when the advert has no snapshots but a price', () => {
+    const series = buildPriceSeries(
+      { ...ADVERT, is_active: false, last_seen_at: '2026-02-15T00:00:00Z' },
       [],
       NOW,
     );
@@ -179,102 +74,15 @@ describe('buildPriceSeries', () => {
     expect(series[0].endT).toBe(Date.parse('2026-02-15T00:00:00Z'));
   });
 
-  it('labels each track by its portal when more than one URL exists', () => {
-    const series = buildPriceSeries(
-      [
-        { ...urls[0], id: 1, source: 'sreality' },
-        { ...urls[0], id: 2, source: 'bazos' },
-      ],
-      [snap(1, '2026-01-01T00:00:00Z', 1), snap(2, '2026-01-01T00:00:00Z', 2)],
-      NOW,
-    );
-    expect(series.map((s) => s.label)).toEqual(['Sreality', 'Bazos']);
-  });
-});
-
-describe('summarizePriceHistory', () => {
-  const liveUrls: UrlRow[] = [
-    {
-      id: 100,
-      source: 'sreality',
-      url: null,
-      isActive: true,
-      price: 2_400_000,
-      firstSeen: '2026-01-01T00:00:00Z',
-      lastSeen: '2026-03-01T00:00:00Z',
-    },
-  ];
-
-  it('counts price changes and computes the % move first→last', () => {
-    const stats = summarizePriceHistory(
-      liveUrls,
-      [
-        snap(100, '2026-01-01T00:00:00Z', 2_500_000),
-        snap(100, '2026-01-15T00:00:00Z', 2_500_000), // unchanged → not a change
-        snap(100, '2026-02-01T00:00:00Z', 2_400_000), // change #1
-        snap(100, '2026-02-20T00:00:00Z', 2_300_000), // change #2
-      ],
-      2_300_000,
-      NOW,
-    );
-    expect(stats.changes).toBe(2);
-    expect(stats.pct).toBeCloseTo(((2_300_000 - 2_500_000) / 2_500_000) * 100, 5);
-    expect(stats.anyActive).toBe(true);
-    // active → days measured to NOW (2026-01-01 → 2026-03-01 = 59 days)
-    expect(stats.days).toBe(59);
-  });
-
-  it('measures days-on-market to last-seen for a fully delisted property', () => {
-    const stats = summarizePriceHistory(
-      [{ ...liveUrls[0], isActive: false, lastSeen: '2026-01-31T00:00:00Z' }],
-      [snap(100, '2026-01-01T00:00:00Z', 2_500_000)],
-      2_500_000,
-      NOW,
-    );
-    expect(stats.anyActive).toBe(false);
-    expect(stats.days).toBe(30); // 2026-01-01 → 2026-01-31
-    expect(stats.changes).toBe(0);
-    expect(stats.pct).toBe(0);
-  });
-});
-
-describe('summarizePriceHistory — multi-portal', () => {
-  it('counts moves within a track, not portal-to-portal price differences', () => {
-    const urls: UrlRow[] = [
-      {
-        id: 1, source: 'sreality', url: null, isActive: true, price: 2_500_000,
-        firstSeen: '2026-01-01T00:00:00Z', lastSeen: '2026-03-01T00:00:00Z',
-      },
-      {
-        id: 2, source: 'bazos', url: null, isActive: true, price: 2_600_000,
-        firstSeen: '2026-01-01T00:00:00Z', lastSeen: '2026-03-01T00:00:00Z',
-      },
-    ];
-    // Two portals quoting steady but different prices, interleaved in time.
-    const stats = summarizePriceHistory(
-      urls,
-      [
-        snap(1, '2026-01-01T00:00:00Z', 2_500_000),
-        snap(2, '2026-01-02T00:00:00Z', 2_600_000),
-        snap(1, '2026-01-03T00:00:00Z', 2_500_000),
-        snap(2, '2026-01-04T00:00:00Z', 2_600_000),
-      ],
-      2_500_000,
-      NOW,
-    );
-    expect(stats.changes).toBe(0);
+  it('draws nothing for an advert that never had a price', () => {
+    expect(buildPriceSeries({ ...ADVERT, price_czk: null }, [], NOW)).toEqual([]);
   });
 });
 
 describe('buildChartRows', () => {
   const series = () =>
     buildPriceSeries(
-      [
-        {
-          id: 100, source: 'sreality', url: null, isActive: true, price: 2_400_000,
-          firstSeen: '2026-01-01T00:00:00Z', lastSeen: '2026-03-01T00:00:00Z',
-        },
-      ],
+      ADVERT,
       [
         snap(100, '2026-01-01T00:00:00Z', 2_600_000),
         snap(100, '2026-02-01T00:00:00Z', 2_400_000),
@@ -441,6 +249,23 @@ describe('buildActiveWindows', () => {
     expect(windows).toEqual([
       [Date.parse('2026-01-01T00:00:00Z'), Date.parse('2026-03-01T00:00:00Z')],
     ]);
+  });
+
+  it('opens at the fallback start when the first event is a deactivation', () => {
+    const windows = buildActiveWindows(
+      [
+        evt(false, '2026-01-10T00:00:00Z'),
+        evt(true, '2026-01-20T00:00:00Z'),
+      ],
+      { start: 0, end: Date.parse('2026-02-01T00:00:00Z') },
+    );
+    expect(windows).toEqual([
+      [0, Date.parse('2026-01-10T00:00:00Z')],
+      [Date.parse('2026-01-20T00:00:00Z'), Date.parse('2026-02-01T00:00:00Z')],
+    ]);
+    expect(
+      buildActiveWindows([evt(false, '2026-01-10T00:00:00Z')], { start: 0, end: 99 }),
+    ).toEqual([[0, Date.parse('2026-01-10T00:00:00Z')]]);
   });
 
   it('sorts out-of-order events before pairing them', () => {

@@ -1,4 +1,4 @@
-/* Collections + tags + notes for a single PROPERTY. Wired into ListingDetail.
+/* Collections + tags + notes for a single PROPERTY. Wired into PropertyDetail.
  *
  * Curation is property-grain (migration 202): a tag / collection membership /
  * note describes the real-world property, so this block operates on the

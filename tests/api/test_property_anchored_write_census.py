@@ -28,8 +28,8 @@ entry saying what makes a raw id correct there.
 WHY A CENSUS AND NOT A BAN. Resolution is genuinely wrong in two places, and the
 reasons are the product: the merge route itself CREATES survivors (resolving would
 ask it to merge a property into itself), and `properties.asset_id` is a column on
-the property row rather than carried state, so following the pointer would mutate a
-different row than the caller named.
+the property row — the merge carries it onto the survivor, but a link or an unlink
+that followed the pointer would mutate a different row than the caller named.
 
 TWO HALVES, ONE MEANING: the add and remove halves of one affordance must resolve
 alike. `<PipelineMark>` (rule #22) and the collection/tag toggles are single
@@ -76,7 +76,6 @@ _CARRIED_TABLES = (
     "property_pipeline",
     "property_pipeline_events",
     "property_dismissals",
-    "property_status_events",
     "notification_dispatches",
 )
 

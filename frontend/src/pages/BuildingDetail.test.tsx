@@ -22,7 +22,7 @@ const building: BuildingRun = {
   input_sreality_id: 999,
   input_spec: {
     lat: 50.08, lng: 14.42, area_m2: null, disposition: null,
-    floor: null, exclude_ids: [],
+    floor: null,
   },
   source_kind: 'sreality',
   parse_confidence: 'high',

@@ -237,7 +237,7 @@ def test_listing_velocity_classification_fast():
         True,                     # is_active
         "2+kk",
         50.0, 14.0,               # lat, lng
-        "byt", "pronajem",        # category_main, category_type
+        "byt", "pronajem", 42,        # category_main, category_type
     )
     peer_rows = [
         _row(i + 1, days_first=20 + i, days_last=0, is_active=True)
@@ -264,7 +264,7 @@ def test_listing_velocity_classification_stuck():
         True,
         "2+kk",
         50.0, 14.0,
-        "byt", "pronajem",
+        "byt", "pronajem", 42,
     )
     peer_rows = [
         _row(i + 1, days_first=10 + i, days_last=0, is_active=True)
@@ -289,7 +289,7 @@ def test_listing_velocity_classification_typical():
         True,
         "2+kk",
         50.0, 14.0,
-        "byt", "pronajem",
+        "byt", "pronajem", 42,
     )
     peer_rows = [
         _row(i + 1, days_first=10 + i, days_last=0, is_active=True)
@@ -303,27 +303,28 @@ def test_listing_velocity_classification_typical():
     assert d["classification"] == "typical"
 
 
-def test_listing_velocity_excludes_self_via_exclude_ids():
-    """Cohort SQL must include exclude_ids = [target sreality_id]."""
+def test_listing_velocity_leaves_out_the_subjects_property():
+    """Addressed by sreality_id, the subject's surrogate (read with it) leaves its whole
+    property out of the peer cohort (decision 13)."""
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem",
+        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem", 42,
     )
     peer_cur = _FakeCursor([])
     conn = _FakeConn(listing_cur, peer_cur)
 
     compute_listing_velocity(conn, sreality_id=42)  # type: ignore[arg-type]
     cohort_sql, cohort_params = peer_cur.executed[0]
-    assert "l.sreality_id <> ALL" in cohort_sql
-    assert cohort_params["exclude_ids"] == [42]
+    assert "subj.property_id = l.property_id" in cohort_sql
+    assert cohort_params["exclude_listing_ids"] == [42]
 
 
 def test_listing_velocity_thresholds_in_data():
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem",
+        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem", 42,
     )
     peer_rows = [_row(i + 1, 10, 0, True) for i in range(10)]
     peer_cur = _FakeCursor(peer_rows)
@@ -341,7 +342,7 @@ def test_listing_velocity_all_tied_with_peers_is_typical():
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=15), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem",
+        n - timedelta(days=15), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem", 42,
     )
     peer_rows = [_row(i + 1, 15, 0, True) for i in range(20)]
     peer_cur = _FakeCursor(peer_rows)
@@ -360,7 +361,7 @@ def test_listing_velocity_median_among_mixed_peers_is_about_50():
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=15), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem",
+        n - timedelta(days=15), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem", 42,
     )
     # 10 peers with TOM<15, 10 peers with TOM>15 -> mid-rank = 50
     peer_rows = (
@@ -381,7 +382,7 @@ def test_listing_velocity_null_geom_returns_envelope_with_zero_cohort():
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=12), n, True, "2+kk", None, None, "byt", "pronajem",
+        n - timedelta(days=12), n, True, "2+kk", None, None, "byt", "pronajem", 42,
     )
     conn = _FakeConn(listing_cur)
     res = compute_listing_velocity(conn, sreality_id=42)  # type: ignore[arg-type]
@@ -408,7 +409,7 @@ def test_listing_velocity_cohort_uses_subject_category():
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=10), n, True, "4+1", 50.0, 14.0, "dum", "prodej",
+        n - timedelta(days=10), n, True, "4+1", 50.0, 14.0, "dum", "prodej", 42,
     )
     peer_cur = _FakeCursor([])
     conn = _FakeConn(listing_cur, peer_cur)
@@ -425,7 +426,7 @@ def test_listing_velocity_small_peer_cohort_emits_note():
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem",
+        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem", 42,
     )
     peer_rows = [_row(i + 1, 10, 0, True) for i in range(3)]
     peer_cur = _FakeCursor(peer_rows)
@@ -440,13 +441,12 @@ def test_listing_velocity_small_peer_cohort_emits_note():
 
 
 def test_listing_velocity_by_listing_id_uses_id_arm_and_surrogate_exclude():
-    """Addressed by listing_id: subject fetched via listings.id and excluded
-    from its own peer cohort via the surrogate arm (exclude_listing_ids), NOT
-    the sreality-space exclude_ids that a NULL sreality_id would void."""
+    """Addressed by listing_id: subject fetched via listings.id and its property excluded
+    from its own peer cohort."""
     n = _now()
     listing_cur = _FakeCursor()
     listing_cur._fetchone_row = (
-        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem",
+        n - timedelta(days=10), n, True, "2+kk", 50.0, 14.0, "byt", "pronajem", 42,
     )
     peer_cur = _FakeCursor([])
     conn = _FakeConn(listing_cur, peer_cur)
@@ -458,9 +458,7 @@ def test_listing_velocity_by_listing_id_uses_id_arm_and_surrogate_exclude():
     assert fetch_params == (42,)
 
     cohort_sql, cohort_params = peer_cur.executed[0]
-    assert "l.id <> ALL" in cohort_sql
     assert cohort_params["exclude_listing_ids"] == [42]
-    assert "exclude_ids" not in cohort_params
 
     assert res["data"]["found"] is True
     assert res["data"]["listing_id"] == 42

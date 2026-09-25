@@ -321,12 +321,14 @@ describe('<ListingCards> the card is not a link — its TITLE is', () => {
     expect(locationNow()).toBe('/');
   });
 
-  it('navigates to the listing on a plain click of the title link', async () => {
+  it('navigates to the property page on a plain click of the title link', async () => {
     renderGrid();
 
     fireEvent.click(await screen.findByRole('link', { name: /^Byt na prodej/ }));
 
-    expect(locationNow()).toBe('/listing/sreality/900');
+    // The card's own advert rides along; the page ignores it when it is the
+    // canonical one and opens its row when the card is one portal's advert.
+    expect(locationNow()).toBe('/property/42?advert=111');
   });
 
   /* Same rule lib/linkGestures encodes for the surfaces the router does not

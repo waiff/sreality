@@ -38,7 +38,7 @@ import { listingTypeLabel } from '@/lib/enums';
 import { portalLabel } from '@/lib/portals';
 import type { ListingEstimate } from '@/lib/types';
 import { runSurfaceUrl } from '@/lib/runLinks';
-import { listingRowPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 
 /* The card grid is CONTAINER-intrinsic, not viewport-keyed: columns flow to
  * fit the cards COLUMN's own width via `auto-fill`, each at least --card-min
@@ -553,11 +553,7 @@ function Card({
                spreads its hit area over the whole card, so the card still opens
                end-to-end while the anchor's accessible name is the listing
                itself rather than the card's every control and figure. */
-            <Link
-              to={listingRowPath(r)}
-              state={{ listingId: r.listing_id }}
-              className="stretched-link"
-            >
+            <Link to={propertyPath(r.property_id, r.listing_id)} className="stretched-link">
               {title}
             </Link>
           )}

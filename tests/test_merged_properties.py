@@ -1,6 +1,7 @@
 """Tests for the GET /properties/merged over-merge audit browse:
 api.property_merge.list_merged_properties + its WHERE builder
-(_merged_property_filters). Hermetic: a scripted fake conn, no DB.
+(_merged_property_filters), and the ledger read GET /properties/merges' optional
+survivor filter. Hermetic: a scripted fake conn, no DB.
 """
 
 from __future__ import annotations
@@ -171,3 +172,10 @@ def test_page_orders_biggest_first_and_rolls_up_children() -> None:
     assert "ORDER BY p.source_count DESC, p.id DESC" in page_sql
     assert "LEFT JOIN LATERAL" in page_sql
     assert "count(*) FILTER (WHERE l.is_active)" in page_sql
+
+
+def test_merges_reads_the_ledger_one_row_per_group() -> None:
+    conn = _FakeConn()
+    pm.list_merges(conn, limit=200, offset=0)
+    (sql, params), = conn.executed
+    assert "GROUP BY merge_group_id" in sql and params == {"limit": 200, "offset": 0}

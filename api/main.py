@@ -311,9 +311,10 @@ app.include_router(new_dedup_candidates_router)
 # never forecast here. Answers store_ready=false instead of failing when the migration
 # is not applied. ONE write exception (W5): `POST /autodedup/verdict` records the
 # operator's decision in `autodedup.verdicts` and, for a negative pair verdict, the
-# permanent `autodedup.must_not_link` (retracted when that verdict is reversed). Both
-# tables live inside schema `autodedup`, so shadow mode (D4) is intact — no production
-# table is written, and `listings`/`images` are read for display only. Everything else
+# permanent `autodedup.must_not_link` (retracted when that verdict is reversed). The
+# operator merge and detach routes (`/properties/merge`, `/properties/{id}/detach`, through
+# toolkit.property_identity.record_rulings) write the same two tables. Both live inside schema `autodedup`, so shadow mode (D4) is
+# intact — no production table is written, and `listings`/`images` are read for display only. Everything else
 # is written by the lane (`python -m autodedup.lane`). See autodedup/progress_sql.py,
 # autodedup/ui_sql.py and docs/design/autodedup/PROGRAM.md (Q11, §9, §12).
 app.include_router(autodedup_router)
@@ -542,7 +543,6 @@ def post_compute_market_velocity(
         area_m2=body.target.area_m2,
         disposition=body.target.disposition,
         floor=body.target.floor,
-        exclude_ids=list(body.target.exclude_ids),
         exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(
@@ -838,7 +838,6 @@ def get_estimation_preview(
             "area_m2":     spec.get("area_m2"),
             "disposition": spec.get("disposition"),
             "floor":       spec.get("floor"),
-            "exclude_ids": [],
         },
         "listing": {
             "price_czk":            spec.get("price_czk"),
@@ -1273,7 +1272,6 @@ def post_estimate_yield(
         area_m2=body.target.area_m2,
         disposition=body.target.disposition,
         floor=body.target.floor,
-        exclude_ids=list(body.target.exclude_ids),
         exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(
@@ -1787,7 +1785,6 @@ def _build_comparables_inputs(
         area_m2=body.target.area_m2,
         disposition=body.target.disposition,
         floor=body.target.floor,
-        exclude_ids=list(body.target.exclude_ids),
         exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(

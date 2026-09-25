@@ -378,6 +378,17 @@ class Settings:
     # 6's unrecovered certain duplicates are exactly that — two cells whose union no invariant
     # refuses, left apart because the join was offered too early.
     repartition_rejoin_cells: bool = False
+    # E253: and let a cell SHED what blocks a cut merge edge. Cohort 12 cut seven families of
+    # adverts no fact separates, every one of them because the cell one half landed in had
+    # absorbed a THIRD advert carrying a fact against the other half — a member neither edge
+    # was about. `shed_max` bounds the cover, `shed_max_union` the component work, and the
+    # move is accepted only when it keeps MORE merge evidence inside than the two cells did.
+    repartition_shed_blockers: bool = False
+    repartition_shed_max: int = 1
+    repartition_shed_max_union: int = 64
+    # The repairs feed each other, so the whole sequence is run to a fixed point rather than
+    # once. 1 is every generation up to S9.
+    repartition_outer_rounds: int = 1
 
     # ------------------------------------------------------- W15 (g8b, 2026-09-21): the repairs
     #
@@ -542,6 +553,10 @@ class Settings:
     # numeral, the number word and the single letter, each behind an explicit marker.
     d43_unit_codes: bool = False
     d43_unit_codes_wide: bool = False
+    # E250 (W25): the designator noun in its Czech INFLECTIONS — `k domu č.1`, `na domě č.3`,
+    # `v bytě č. 7`. Read per kind; a kind that prints several numbers is a project's menu
+    # and abstains, and a number on one side only is never a conflict.
+    d43_printed_designator: bool = False
     # E162: a fact ONE side prints and the other is silent about. Outside a development that is
     # E12's missing datum and no refusal; inside one it is the whole hazard, so the silent side
     # fails closed. `development_context_mode` says how narrowly "inside" is read — `vocab` is
@@ -741,6 +756,24 @@ class Settings:
     d43_rental_colive_flooring: bool = False
     d43_rental_colive_furnishing: bool = False
     d43_rental_colive_parking_level: bool = False
+    # E251/E252 (W25). The fit-out, refused at a cost of seven in W22 as a limb of its OWN,
+    # read again with a second statement beside it that there are two units — two address
+    # points the resolver numbers differently, or two rents diverging on one portal while
+    # both adverts are live. The reader is the wide one, which knows the letting's own
+    # sentence (`Pronajímá se nezařízený`) and, behind its own dial, the portal's column.
+    # And whose the kitchen and the lavatory ARE: `sdílené zázemí` against `vlastním
+    # sociálním zařízením` is two lettings of one villa, not one let described twice.
+    d43_rental_colive_furnishing_corroborated: bool = False
+    d43_rental_colive_furnishing_column: bool = False
+    d43_rental_colive_furnishing_needs_ruian: bool = True
+    d43_rental_colive_furnishing_corroboration: str = "split"
+    d43_rental_colive_facility: bool = False
+    # E254 (W25): a rent quoted per SQUARE METRE is the same rent. `250` against `24,000` on a
+    # 96 m² surgery is 250 x 96 to the koruna, and the portal's own `price_unit` says `za
+    # měsíc` on both — the arithmetic identity is the only honest reading, and it is also the
+    # guard, so a genuine gap can never wear it.
+    d43_price_per_square_metre: bool = False
+    d43_price_per_square_metre_min_area: float = 10.0
     # E203's charge table, widened to the spellings E220 met. Separate from the limb, because
     # widening the shipped table would move E203 under w21.
     d43_charge_keywords_wide: bool = False
@@ -814,6 +847,199 @@ class Settings:
     # so the operator can hold rentals back at rollout while sales merge. An empty table holds
     # nothing, which is every generation up to and including S6.
     merge_policy: dict[str, str] = field(default_factory=dict)
+
+    # ---------------------------------------------- W26 (S11, 2026-09-24): the two S10 defects
+    #
+    # E260: the body that offers a CHOICE of extents has printed a priced plan, and the price
+    # says which row. Dolní Břežany / Krátká lets one plot as two rows — `plně oplocená část
+    # pozemku má výměru 585 m²` at 5,000 Kč against `celkem tedy až 827 m²` at 7,000 -> 8,000 —
+    # with byte-identical bodies on five portals. D49 refused the BARE co-live price and that
+    # refusal stands: what lifts this one is the menu the body itself prints, so the reading is
+    # E244's (which row of a priced plan) and not a price gap on its own.
+    d43_extent_variant: bool = False
+    # The larger extent must be larger by this much before the body has offered a CHOICE at all
+    # — `celkem 585 m²` restating the headline is one extent, not two.
+    d43_extent_variant_min_gap: float = 0.1
+    # Two prices this far apart are two rows of the menu; anything closer is one row's own
+    # haggling, and the limb must never read that.
+    d43_extent_variant_min_price_gap: float = 0.15
+    # E261: the row an advert is on travels with its own price PATH, so a re-post inherits it.
+    # Without this the Krátká plan is separated only where the two rows happened to be co-live
+    # across portals, and every re-post of either row re-fuses them (S9 fused 18362921 into the
+    # 5,000 row, S10 fused 321271 into it on one portal).
+    d43_extent_variant_sequential: bool = False
+    # E262: a shed may not sever a merge edge no fact carries. `_shed` evicts the cover of a
+    # union's conflicting pairs, and on a long re-post train of ONE object the cover is the
+    # train's own tail: 504940 and 540892 left a Průhonice cell of twenty identical bodies with
+    # thirty-one certificate edges between them, eleven of which carried a fact and twenty of
+    # which did not. A member is eligible for the cover only when every merge edge it has into
+    # what the cell keeps is itself blocked — then the shed creates no factless separation.
+    # `off` is S10. `core` refuses only where the member's factless edges OUTNUMBER the
+    # conflicts its eviction clears — a stranger conflicts with many and holds few, a train's
+    # tail the other way round. `certificate` reads only the CERTIFIED edges, whose precision is
+    # structural (§6); `any` reads every merge edge, which on cohort 13 refuses a fifth of the
+    # sheds that BOUGHT certain pairs to recover a hundred of the carvings.
+    repartition_shed_factless_guard: str = "off"
+    # E264: the cluster-grain price limb reads W8's HONEST clock. `overlap_days` ends an
+    # advert's life at `inactive_at`, which rule #3 stamps when the delisting was DETECTED and
+    # not when the advert went — the lag runs to 70 days. Průhonice / Pod Valem II is one house
+    # re-posted twenty times on idnes at 75,000 and then 70,000; 504940 was last SIGHTED on
+    # 07-09 and its successor first sighted on 07-16, so the two never met, but the detection
+    # stamp of 08-05 hands the limb 1.41 days of overlap and it refuses the pair as two co-live
+    # prices. `distinguishing_facts` reads the same pair and finds NOTHING — the limb is the
+    # only thing separating them, and it is separating them on a clock W8 already corrected.
+    demonstrate_cluster_price_honest_clock: bool = False
+    # E263: the same rule for the reconciliation's weighing. E253 let `_reconcile` refuse a
+    # move that loses merge weight; where every edge the move would sever carries a fact and
+    # every edge it would restore carries none, weight is being asked to overrule a stated
+    # fact, which is exactly what a reconciliation may never do.
+    repartition_reconcile_factless_first: bool = False
+
+    # --- W27 / S12: what the fourteenth cohort's confirmation named (E270-E277) --------------
+    # E270: the LOT LABEL a land project prints for its own plot. `Označení pozemku v projektu
+    # A13` puts the noun BETWEEN the marker and the code, which is the one arrangement no
+    # reader in the chain knows (E61 wants marker-then-code, E161 wants two dotted segments,
+    # E250 wants noun-then-`č.`-then-a-number-under-100). Ten plots of idnes `Pod Sekvojí` are
+    # byte-identical but for that trailing line, all 1,001 m² at 3,903,900, and every
+    # generation since S4 fused them. `land` reads the pozemek/parcela nouns and the English
+    # `lot`/`plot`, which is where the form is unambiguous; `all` adds the dwelling nouns
+    # behind an explicit `označení` marker (never bare — a bare `B2` after `byt` is the
+    # BUILDING, which is E161's own refusal).
+    d43_lot_labels: str = "off"
+    # E271: `č.p.` is the BUILDING and `č.o.` the ENTRANCE. E242 refuses outright where the
+    # č.p. is shared, on the reading that entrances of one house share it — which is the claim
+    # the other way round. Zelené údolí / Kunratice lets `Pod Haltýřem 1497/9` (3. patro,
+    # 15,000 -> 14,500) and `1497/11` (2. patro, 14,000 -> 13,500) under ONE template body, and
+    # the shared 1497 is the only thing making them one address. The entrance reading is taken
+    # only where the PORTAL ITSELF filed the two — one source, two RÚIAN address points — so
+    # the resolver-drift shape the 3.7 % refusal was measured on cannot reach it, and that is
+    # also why this branch does not ask for two independently written bodies: one template over
+    # two entrances is precisely the shape.
+    d43_house_number_entrance: str = "off"
+    # E272: E180's co-live guard keeps the one-storey excuse for two SEQUENTIAL postings,
+    # because there the gap is one portal's parse drifting between re-posts of ONE advert. Two
+    # postings the portal filed at DIFFERENT address points are not one advert re-parsed, so
+    # the drift excuse does not reach them.
+    d43_floor_sequential_address_split: bool = False
+    # E273: the same-source price bar is 60 % because one portal's price MOVES between re-posts
+    # of one advert; a re-post does not also move its area column. Rezidence Na Mariánské cestě
+    # sells 18482 (101 m², 12,823,000 -> 12,438,310) and 14063960 (102 m², 11,700,460) as two
+    # units of one residence: 19 of the 20 cross pairs of their two cross-portal groups already
+    # carry a fact, and the ONE hole is the sreality x sreality pair the 60 % bar excuses —
+    # through which the repartition destroyed both groups and fused the two survivors.
+    # `area_moved` reads the price at the cross-portal bar where the area column moved too.
+    d43_price_same_source_bar: str = "wide"
+    # …and never where the two bodies are ONE TEXT. A re-post copies its own text: one Zelené
+    # údolí 3+kk is re-posted on ceskereality at 10,990,000 and then 11,990,000 with a
+    # BYTE-IDENTICAL body and a re-parsed column (79 m² then 78), and it is one flat. Na
+    # Mariánské cestě's two units head the same template with two different sentences
+    # (`Máte jedinečnou šanci…` against `LETNÍ SLEVA 3%…`), and they are two.
+    d43_price_same_source_one_text_min: float = 0.99
+    # …and only for the SALE of a flat: a let is re-let at a new rent and a house re-measured.
+    d43_price_same_source_unit_sale_only: bool = False
+    # …and never where both bodies PRINT the same floor area: the printed area prevails.
+    d43_price_same_source_printed_area_wins: bool = False
+    # E271/E272 read two entrances only where two different AGENCIES filed them; one agency
+    # re-posting its own advert re-files its address and storey column freely.
+    d43_entrance_two_agencies: bool = False
+    # E274 reads two packages only where both are on sale TOGETHER on W8's honest clock.
+    d43_extent_package_honest_colive: bool = False
+    # E274: two PACKAGES of one seller are two extents (E244/E260's reading), not a bare
+    # co-live price gap (D49's refusal). Radimovice / Petříkov sells one areál as a family
+    # package at 45,000,000 stating `pozemek o celkové výměře 3 526 m²` and as an investment
+    # package at 57,000,000 stating `pozemek parc. č. 45/1` with `možnost parcelace 2-3
+    # stavebních parcel`, live together 104 days on remax and on sreality. Each body states an
+    # extent the other never states and the two price paths never meet.
+    d43_extent_package: bool = False
+    d43_extent_package_min_price_gap: float = 0.1
+    # E275: a re-post train of ONE body is ONE object. A column difference this small inside a
+    # train carrying one agency order code is the portal's rounding — bažoš stores one Zeleneč
+    # 2+kk at 44 m² and its own next posting at 45 m² under `Ev.č. 945210` on both rows and one
+    # byte-identical body.
+    d43_train_column_tolerance_m2: float = 0.0
+    # E277: E185's own clock, corrected the way E264 corrected the cluster-grain price limb.
+    # `sequential_postings` reads `inactive_at`, which rule #3 stamps when a DELISTING was
+    # DETECTED and not when the advert went. One Říčany plot re-posted across five portals at
+    # 7,900,000 and then 7,390,000 has twelve of its cross pairs handed hours of overlap they
+    # never had, so E185 refuses its own escape, the price becomes a fact and the train is torn
+    # into three cells — the last re-post landing in a cell of its own.
+    d43_price_sequential_honest_clock: bool = False
+    # E276: the Herínk conjunction — co-live on one portal, two disjoint agency evidence codes,
+    # two price paths that never meet, and no sentence that explains the gap. D49 refuses the
+    # bare co-live price and D61 the bare code; this asks whether the CONJUNCTION is a fact.
+    d43_agency_code_colive_price: bool = False
+    d43_agency_code_colive_price_min_gap: float = 0.15
+    # --- W28 (S13): the false-split residue cohort 15's hazard reader named ---------------------
+    # E280: where BOTH bodies print the same floor-area figures, a difference between the two
+    # stored columns is the portals' parse, not a second unit — read in E185's area identity,
+    # in the pair-grain `area` fact and in the cluster-grain `area_spread` invariant. Most,
+    # K. J. Erbena 299/10 prints `43,79 m²` on every posting while the columns say 43.0 / 43.8.
+    d43_printed_area_prevails: bool = False
+    # E281: E185 asks the two postings to "agree on the storey". It read the raw columns, so
+    # idnes `1` against sreality `0` — both bodies `v 1. patře` — refused the excuse and kept
+    # the Erbena train in two groups. The storey now disagrees only where the floor FACT does.
+    d43_price_sequential_storey_fact: bool = False
+    # E282: E185's identity (one body inside the other) is read off the TEXTS where the pair has
+    # no feature row. The cluster relation only ever carries three image slots, so the body
+    # limb was dead at cluster grain and every never-scored cross pair of a price-cut train
+    # (Starovičky, Morkůvky, Lom, Brod nad Dyjí, Reintal) kept its price as a fact.
+    d43_price_sequential_text_identity: bool = False
+    # E283: (B)'s "a body shared by two SEQUENTIAL postings is one advert re-posted" reads W8's
+    # honest clock, not the detection stamp. Lužice Meadows' 1,215 m² plot is re-posted on
+    # ceskereality four times at 4,252,500; the stamps hand the re-posts weeks of overlap.
+    demonstrate_sequential_honest_clock: bool = False
+    # E284: identical twins on one portal — one body, one price, one area, one category, on
+    # sale together — are corroborated at unit grade: no stated fact tells them apart (D43).
+    demonstrate_identical_twin: bool = False
+    # E285: a per-m² price times the stated area that equals the other advert's total is ONE
+    # price path (Dolní Věstonice: 5,844 Kč/m² x 834 m² = 4,873,896).
+    d43_price_per_m2_path: bool = False
+    d43_price_per_m2_tol: float = 0.001
+    # E286: across the sanctioned dům<->komerční cross the subtype codes differ BECAUSE the
+    # categories do; they are not counted as attribute contradictions.
+    attr_cross_type_subtype_skip: bool = False
+    # E287: a plot COLUMN that its own body contradicts (`Celková plocha pozemku činí 3 205 m²`
+    # against a stored 101) is the portal's column, not a second parcel; and (b) a plot column
+    # that merely echoes the advert's own floor area is the headline repeated, not a parcel.
+    d43_plot_column_body_prevails: bool = False
+    d43_plot_column_echo: bool = False
+    # E288: where both bodies print ONE and the same storey for the flat, the storey columns
+    # (Koldům 1580: sreality 12, ceskereality 11, bažoš 0 — every body `v 1. nadzemním
+    # podlaží`) are not read.
+    d43_floor_column_body_prevails: bool = False
+    # E289: a same-portal re-post of ONE text at one area, never on sale together with its
+    # predecessor, may re-shoot its gallery; the `interior` image fact is not read there.
+    d43_interior_sequential_repost: bool = False
+    # E290: E180's sequential excuse reaches the SAME-FEED one-storey limb too: one ceskereality
+    # advert re-posted a day later with its storey column 5 -> 6 is one flat (Bohnice,
+    # Kostřínská 583/6), exactly as it is across camps.
+    d43_floor_same_feed_sequential: bool = False
+    # E291: (A)'s obec demonstration accepts two ONE-TEXT sequential postings whose stored
+    # towns differ only by the resolver (Břeclav 1/3: `na zvolenci 43` in both bodies).
+    demonstrate_obec_one_text_sequential: bool = False
+    # --- W29 (S14): TIGHTENING ONLY — every reading below can add a fact, none removes one ------
+    # E293: a LAND advert whose column is empty states the plot its bažoš attribute block prints
+    # (`celková plocha (m2): 312`). Read in the `area` fact and in E185's area identity, so a
+    # price move from a 257 m² lot to a body that prints 312 is not one advert's path.
+    d43_block_plot_area: bool = False
+    # E294: the balcony/terrace/loggia/garden size two bodies state, apart (Kovářov: `balkon o
+    # rozloze 12,6 m2` against `terasu o rozloze 58 m2`). E294b: the same apartness together
+    # with a price gap neither path ever named, read whatever the timing.
+    d43_outdoor_accessory_area: bool = False
+    d43_outdoor_accessory_colive_only: bool = True
+    d43_outdoor_accessory_same_source: bool = True
+    d43_outdoor_accessory_all_categories: bool = False
+    d43_outdoor_accessory_rel_tol: float = 0.10
+    d43_outdoor_accessory_price: bool = False
+    # E295: which half, side or position of one building the body sells (`levou polovinu
+    # novostavby` / `pravou stranu novostavby`; `druhá zleva` / `čtvrtá zleva`).
+    d43_position_designator: bool = False
+    # E296 (T4): the named villa of a multi-villa project and the residence code a body names
+    # as its own subject (`VILA LOUKA REZIDENCE A3`; `Rezidence A2` against `Rezidence A3`).
+    # REFUSED with numbers (D84): off in w29 and both holds. The sreality twins print no villa,
+    # so the fact strands each idnes advert from its own sreality copy and frees the other
+    # villa's twins to take it — a merge S13 never made (cohort 16, `13435813`).
+    d43_named_villa: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
@@ -894,6 +1120,9 @@ class Settings:
             raise ValueError(
                 f"repartition_max_rounds must be at least 1: {self.repartition_max_rounds}"
             )
+        if not 0.0 <= self.d43_outdoor_accessory_rel_tol < 1.0:
+            raise ValueError(f"d43_outdoor_accessory_rel_tol must be in [0, 1): "
+                             f"{self.d43_outdoor_accessory_rel_tol}")
         for name in ("d43_two_unit_area_tol", "d43_two_unit_price_tol",
                      "d43_two_unit_stated_tol", "d43_offered_extent_price_tol"):
             value = getattr(self, name)
@@ -929,6 +1158,66 @@ class Settings:
             raise ValueError("d43_price_sequential_identity needs d43_price_sequential_path")
         if self.repartition_rejoin_cells and not self.repartition:
             raise ValueError("repartition_rejoin_cells needs repartition")
+        if self.repartition_shed_blockers and not self.repartition:
+            raise ValueError("repartition_shed_blockers needs repartition")
+        if self.repartition_shed_factless_guard not in ("off", "core", "certificate", "any"):
+            raise ValueError(
+                "repartition_shed_factless_guard must be off, core, certificate or any: "
+                f"{self.repartition_shed_factless_guard}")
+        if (self.repartition_shed_factless_guard != "off"
+                and not self.repartition_shed_blockers):
+            raise ValueError("repartition_shed_factless_guard needs repartition_shed_blockers")
+        if self.repartition_reconcile_factless_first and not self.repartition_keep_factless:
+            raise ValueError(
+                "repartition_reconcile_factless_first needs repartition_keep_factless")
+        if self.d43_lot_labels not in ("off", "land", "all"):
+            raise ValueError(f"d43_lot_labels must be off, land or all: {self.d43_lot_labels}")
+        if self.d43_house_number_entrance not in ("off", "stored"):
+            raise ValueError("d43_house_number_entrance must be off or stored: "
+                             f"{self.d43_house_number_entrance}")
+        if (self.d43_house_number_entrance != "off"
+                and self.d43_stored_house_number != "guarded"):
+            raise ValueError("d43_house_number_entrance needs d43_stored_house_number=guarded")
+        if self.d43_price_same_source_bar not in ("wide", "area_moved"):
+            raise ValueError("d43_price_same_source_bar must be wide or area_moved: "
+                             f"{self.d43_price_same_source_bar}")
+        if self.d43_price_same_source_bar != "wide" and not self.d43_price_path:
+            raise ValueError("d43_price_same_source_bar needs d43_price_path")
+        if not 0.0 < self.d43_price_same_source_one_text_min <= 1.0:
+            raise ValueError("d43_price_same_source_one_text_min must be in (0,1]: "
+                             f"{self.d43_price_same_source_one_text_min}")
+        if not 0.0 < self.d43_extent_package_min_price_gap < 1.0:
+            raise ValueError("d43_extent_package_min_price_gap must be in (0,1): "
+                             f"{self.d43_extent_package_min_price_gap}")
+        if self.d43_train_column_tolerance_m2 < 0.0:
+            raise ValueError("d43_train_column_tolerance_m2 must be >= 0: "
+                             f"{self.d43_train_column_tolerance_m2}")
+        if not 0.0 < self.d43_price_per_m2_tol < 0.05:
+            raise ValueError(f"d43_price_per_m2_tol must be in (0,0.05): {self.d43_price_per_m2_tol}")
+        if not 0.0 < self.d43_agency_code_colive_price_min_gap < 1.0:
+            raise ValueError("d43_agency_code_colive_price_min_gap must be in (0,1): "
+                             f"{self.d43_agency_code_colive_price_min_gap}")
+        if not 0.0 < self.d43_extent_variant_min_price_gap < 1.0:
+            raise ValueError(
+                f"d43_extent_variant_min_price_gap must be in (0, 1): "
+                f"{self.d43_extent_variant_min_price_gap}")
+        if not 0.0 < self.d43_extent_variant_min_gap < 1.0:
+            raise ValueError(
+                f"d43_extent_variant_min_gap must be in (0, 1): "
+                f"{self.d43_extent_variant_min_gap}")
+        if self.d43_extent_variant_sequential and not self.d43_extent_variant:
+            raise ValueError("d43_extent_variant_sequential needs d43_extent_variant")
+        if self.repartition_shed_max < 1:
+            raise ValueError(
+                f"repartition_shed_max must be at least 1: {self.repartition_shed_max}")
+        if self.repartition_outer_rounds < 1:
+            raise ValueError(
+                "repartition_outer_rounds must be at least 1: "
+                f"{self.repartition_outer_rounds}")
+        if self.repartition_shed_max_union < 2:
+            raise ValueError(
+                "repartition_shed_max_union must be at least 2: "
+                f"{self.repartition_shed_max_union}")
         if self.corroboration not in ("off", "unit", "two_of", "development_only"):
             raise ValueError(
                 "corroboration must be off/unit/two_of/development_only: "
@@ -980,6 +1269,14 @@ class Settings:
                 raise ValueError(f"{name} needs demonstrate_identity")
         if self.d43_unit_codes_wide and not self.d43_unit_codes:
             raise ValueError("d43_unit_codes_wide needs d43_unit_codes")
+        if self.d43_rental_colive_furnishing_corroboration not in ("split", "any"):
+            raise ValueError(
+                "d43_rental_colive_furnishing_corroboration must be 'split' or 'any': "
+                f"{self.d43_rental_colive_furnishing_corroboration}")
+        for name in ("d43_rental_colive_furnishing_corroborated",
+                     "d43_rental_colive_facility"):
+            if getattr(self, name) and not self.d43_rental_colive:
+                raise ValueError(f"{name} needs d43_rental_colive")
         if self.d43_body_align_heal and not self.d43_body_align:
             raise ValueError("d43_body_align_heal needs d43_body_align")
         if self.floor_camps_reads not in ("off", "joint", "slack", "strict"):
@@ -1243,7 +1540,7 @@ class Settings:
                 f"max_attr_contradictions must be positive: {self.max_attr_contradictions}"
             )
         limbs = ("charges", "house_number", "sanitary", "renovation", "flooring",
-                 "furnishing", "parking")
+                 "furnishing", "parking", "facility")
         unknown = sorted(set(self.d43_rental_colive_cross_portal_limbs) - set(limbs))
         if unknown:
             raise ValueError(

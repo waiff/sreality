@@ -52,7 +52,6 @@ import type {
   WatchdogSeenFilter,
   WatchdogSubscription,
   FilterPreset,
-  MergesResponse,
   MergedPropertiesResponse,
 } from './types';
 import type { PresetSpec } from './filters';
@@ -2984,26 +2983,16 @@ export const reorderFilterPresets = (
  * new-dedup/CUTOFF.md §2/S5) — the mechanics that survived the decision-layer
  * removal. Every route is `require_admin`, so each call sends `jwt: true`. */
 
-export interface UnmergeResult {
-  data: {
-    merge_group_id: string;
-    survivor_id: number;
-    retired_ids: number[];
-    listings_moved_back: number;
-    conflicts: number[];
-  };
-}
-
 export interface ClusterMergeResult {
   merge_group_id: string;
   survivor_id: number;
   retired_ids: number[];
   listings_moved: number;
-  candidates_resolved: number;
+  pairs_ruled_same: number;
 }
 
-/* Merge an operator-checked SET of properties (Browse mergeMode) into one
- * survivor under one reversible merge group. */
+/* Merge an operator-checked SET of properties (Browse mergeMode) into its oldest
+ * record under one merge group; a detach undoes it advert by advert. */
 export const mergePropertySet = (
   propertyIds: number[],
 ): Promise<ClusterMergeResult> =>
@@ -3043,18 +3032,6 @@ export const unlinkAssetProperty = (
     { method: 'POST', json: { property_id: propertyId }, jwt: true },
   );
 
-/* Merge ledger (list / browse-results / unmerge). Retained without a UI caller on
- * purpose: the buttons lived on the deleted Dedup page, and until the new production
- * wave gives them a permanent home unmerge is API-only. These three wrap the surviving
- * `/properties/*` mechanics routes — do not delete them as "dead". */
-export const listPropertyMerges = (
-  params: { limit?: number; offset?: number } = {},
-): Promise<MergesResponse> =>
-  request<MergesResponse>('/properties/merges', {
-    query: params as Record<string, QueryValue>,
-    jwt: true,
-  });
-
 /* Browse the RESULTS of merging: already-merged properties whose child-listing
  * count (`source_count`) is in [min_listings, max_listings], biggest groups
  * first. `max_listings`/`category_main` omitted => no upper bound / any type
@@ -3073,13 +3050,98 @@ export const listMergedProperties = (
     jwt: true,
   });
 
-export const unmergeMergeGroup = (
-  mergeGroupId: string,
-): Promise<UnmergeResult> =>
-  request<UnmergeResult>(
-    `/properties/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
-    { method: 'POST', jwt: true },
+/* The one split: ONE advert back to the property its merge ledger says it came
+ * from, or — no merge brought it — to a new record of its own (`outcome:
+ * 'split_native'`), ruled "different" from every advert that stays, with the
+ * operator's optional reason (≤ DETACH_REASON_MAX chars). `detached: false` says
+ * why nothing moved (`outcome`) — a second click answers `not_on_property`. */
+export const DETACH_REASON_MAX = 500;
+
+export interface DetachResult {
+  listing_id: number;
+  detached: boolean;
+  outcome: string;
+  survivor_property_id: number | null;
+  restored_property_id: number | null;
+  rulings_written: number;
+}
+
+export const detachListing = (
+  propertyId: number,
+  listingId: number,
+  reason?: string,
+): Promise<DetachResult> =>
+  request<DetachResult>(`/properties/${propertyId}/detach`, {
+    method: 'POST',
+    json: { listing_id: listingId, ...(reason ? { reason } : {}) },
+    jwt: true,
+  });
+
+/* Where each advert came from — the merge ledger is admin-only, hence a route and
+ * not a view. All three origin fields null: no merge brought it. `detach_outcome`:
+ * what a detach would answer now; `splittable`: that moves it (back to its origin,
+ * or to a new record). */
+export interface AdvertOrigin {
+  listing_id: number;
+  origin_property_id: number | null;
+  merge_source: string | null;
+  merged_at: string | null;
+  detach_outcome: string | null;
+  splittable: boolean;
+}
+
+export const fetchPropertyOrigins = (
+  propertyId: number,
+): Promise<{ property_id: number; adverts: AdvertOrigin[] }> =>
+  request<{ property_id: number; adverts: AdvertOrigin[] }>(
+    `/properties/${propertyId}/origins`,
+    { jwt: true },
   );
+
+/* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
+ * generation groups its adverts apart (the canonical advert's group first), each
+ * split pair with the engine's stated reason and the operator's newest ruling.
+ * The split itself is `detachListing`, advert by advert; `detach_outcome` is what
+ * that detach would answer now and `splittable` says it moves the advert (one no
+ * merge brought gets a new record while another own advert stays). */
+export interface ProposedSplitAdvert {
+  listing_id: number;
+  source: string;
+  is_active: boolean;
+  origin_property_id: number | null;
+  detach_outcome: string | null;
+  splittable: boolean;
+}
+
+export interface ProposedSplit {
+  property_id: number;
+  canonical_listing_id: number;
+  proposed: boolean;
+  groups: { cluster_key: number | null; adverts: ProposedSplitAdvert[] }[];
+  /* Adverts of the property the generation never saw: not spoken for. */
+  unseen: ProposedSplitAdvert[];
+  splits: {
+    listing_lo: number;
+    listing_hi: number;
+    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none';
+    reason: string;
+    ruling: {
+      verdict: string;
+      decided_by: string;
+      decided_at: string | null;
+      note: string | null;
+      reasons: string[];
+    } | null;
+  }[];
+  ruled: boolean;
+}
+
+export const getProposedSplits = (
+  f: { generation?: string | null; after?: number | null; limit?: number } = {},
+): Promise<
+  AutodedupEnvelope<{ generation: string | null; total: number; items: ProposedSplit[]; next_after: number | null }>
+> =>
+  request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
 
 /* ----- price-stats datasets ---------------------------------------------- */
 

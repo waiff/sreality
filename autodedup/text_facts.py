@@ -1476,6 +1476,55 @@ def _states_second_plot(text: str) -> bool:
     return False
 
 
+# E260: the m² sign as three portals actually store it. `fact_text` folds `m²` to `m2`, but
+# idnes, mmreality and realitymix carry the HTML entity half-decoded — `585 m and sup2;` — and a
+# reader that does not know that spelling reads the menu on two portals of five.
+_M2_UNIT = r"m\s*(?:2|and\s+sup2;?)"
+# The LARGER extent a body offers as an alternative to the one it leads with: `celkem tedy až
+# 827 m²`, `možnost pronájmu až 827 m²`, `lze pronajmout až 1 200 m²`. The offering word is
+# required — `celkem 827 m²` describing the neighbour's parcel is not an offer.
+_EXTENT_MENU = re.compile(
+    r"\b(?:celkem|celkove|dohromady)\s+(?:tedy\s+)?(?:az\s+)?" + _AREA_NUMBER
+    + r"\s*" + _M2_UNIT
+    + r"|\b(?:moznost|moznosti)\s+(?:\w+\s+){0,2}?(?:pronajmu|najmu|koupe|odkupu|rozsireni)"
+      r"[^.;:]{0,40}?\baz\s+" + _AREA_NUMBER + r"\s*" + _M2_UNIT
+    + r"|\b(?:lze|je\s+mozne|muzete)\s+(?:\w+\s+){0,3}?"
+      r"(?:pronajmout|pronajmout\s+si|koupit|odkoupit|ziskat)[^.;:]{0,40}?"
+      r"\baz\s+" + _AREA_NUMBER + r"\s*" + _M2_UNIT)
+# An offer whose alternatives run past this is a development's size range, not one plot's menu.
+EXTENT_MENU_MAX_M2: float = 100_000.0
+# Somewhere in the same body the seller has to say the two are a CHOICE. Without it `celkem
+# 827 m²` is only the sum of what is on offer, which is one extent stated twice.
+_EXTENT_CHOICE = re.compile(
+    r"\bvariant\w*|\bvyberete\s+si|\bpodle\s+(?:vaseho\s+)?zajmu|\bdle\s+dohody"
+    r"|\bpo\s+dohode\s+(?:je\s+)?(?:mozn|lze)\w*|\bmoznost\s+(?:pronajmu|najmu|koupe)")
+
+
+def offered_extent_menu(text: str | None) -> frozenset[float]:
+    """E260: the alternative extents a body offers beside the one it leads with, in m².
+
+    The Krátká land is let as two rows of one plan — `plně oplocená část pozemku má výměru
+    585 m²` and `po dohodě je možné pronajmout také navazující neoplocenou část, celkem tedy až
+    827 m²` — and the menu is what makes the two prices a ROW each (E244) rather than a bare
+    co-live price gap (D49).
+    """
+    return _offered_extent_menu(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _offered_extent_menu(text: str) -> frozenset[float]:
+    folded = fact_text(text)
+    if not _EXTENT_CHOICE.search(folded):
+        return frozenset()
+    out: set[float] = set()
+    for match in _EXTENT_MENU.finditer(folded):
+        for group in match.groups():
+            value = _area_value(group) if group else None
+            if value is not None and 0.0 < value <= EXTENT_MENU_MAX_M2:
+                out.add(value)
+    return frozenset(out)
+
+
 def built_connection(text: str | None) -> bool:
     """Does the body say a utility connection is already BUILT on this plot?"""
     if not text:
@@ -2082,3 +2131,458 @@ def plan_headline_area(text: str | None) -> float | None:
         return None
     match = _PLAN_HEADLINE.match(fact_text(unescape(text)))
     return _plan_number(match.group(1)) if match else None
+
+
+# --- the designator noun in its Czech INFLECTIONS (E250) --------------------------------------
+# W25. `printed_unit_codes` is anchored on a unit noun and needs a MULTI-SEGMENT code, and
+# `unit_designators` reads `byt č. 3` and `jednotka č. 12` and nothing else. Between them they
+# miss the plainest designator a Czech advert writes: the noun in an oblique case followed by a
+# bare number. The Stará Lípa project of three houses parts on exactly that — `Pro více
+# informací k domu č.1`, `domluvte si schůzku na domě č. 2`, `na domě č.3` — and no reader in
+# the chain knows `domu`, `domě` or `domem` at all.
+#
+# Read per KIND, never as one set: `byt č.2 v domě č.3` states two different things, and a set
+# reader would meet on the 2 or the 3. A kind that prints more than one number is a MENU (the
+# project advert that lists all three houses) and abstains, which is the fail-safe direction —
+# an empty set is never a conflict.
+_DESIGNATOR_KINDS: tuple[tuple[str, str], ...] = (
+    ("dum", r"dum|domu|dome|domem|domku|domek"),
+    ("byt", r"byt|bytu|byte|bytem"),
+    ("jednotka", r"jednotka|jednotky|jednotce|jednotku|jednotkou"),
+    ("prostor", r"prostor|prostoru|prostoru|prostorem"),
+    ("kancelar", r"kancelar|kancelare|kancelari|kancelarem"),
+    ("garaz", r"garaz|garaze|garazi"),
+    ("stani", r"stani"),
+    ("parcela", r"parcela|parcely|parcele|parcelu"),
+    ("pozemek", r"pozemek|pozemku|pozemkem"),
+)
+# `č.`, `č. p.`, `číslo`, `č.p.` — the marker is MANDATORY. A bare numeral after a Czech noun
+# is grammar (`tři domy`, `dům 4+kk`), never a name.
+_DESIGNATOR_MARKER: str = r"(?:c\s*\.?\s*p\s*\.?\s*|c\s*\.\s*|cislo\s+|c\s+)"
+# A designator inside one project is a small number; a big one is an address, and E240 owns
+# the address. Bounding it here is what keeps the two readings from arguing.
+DESIGNATOR_MAX_VALUE: int = 99
+# More than one number for one kind is a list of the project's houses, not this advert's own.
+DESIGNATOR_MAX_PER_KIND: int = 1
+_DESIGNATOR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (kind, re.compile(r"\b(?:" + forms + r")\s+" + _DESIGNATOR_MARKER
+                      + r"(\d{1,3})(?![\d+]|[.,]\d|\s*m2|\s*kk)"))
+    for kind, forms in _DESIGNATOR_KINDS
+)
+
+
+def printed_designators(text: str | None) -> dict[str, frozenset[str]]:
+    """`{kind: {number}}` for `k domu č.1` / `na domě č. 2` / `v bytě č. 7`."""
+    return dict(_printed_designators(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fold(unescape(text))
+    out: list[tuple[str, frozenset[str]]] = []
+    for kind, pattern in _DESIGNATOR_PATTERNS:
+        found = {match.group(1).lstrip("0") or "0" for match in pattern.finditer(folded)
+                 if int(match.group(1)) <= DESIGNATOR_MAX_VALUE}
+        if found and len(found) <= DESIGNATOR_MAX_PER_KIND:
+            out.append((kind, frozenset(found)))
+    return tuple(out)
+
+
+# --- whose lavatory and whose kitchen it is (E252) ---------------------------------------------
+# W25. `sanitary_arrangement` reads where the lavatory IS — separate from the bathroom or in
+# it. The Masarykova villa parts two 35 m² offices at one 6,000 Kč on a different question:
+# whose it is. `sdílené zázemí (kuchyň, koupelna, WC)` against `Samostatná kancelář s vlastním
+# sociálním zařízením (WC)` is one office that shares the facilities of the house and one that
+# does not, and both bodies are on one portal for 8.7 days together.
+#
+# The adjective must reach a SANITARY noun: the same villa body writes `ve společných obytných
+# prostorech vily`, and a reader that took `společných` on its own would answer `shared` for
+# the advert that states the opposite. A body that says both abstains.
+_FACILITY_NOUN: str = (r"zazemi|socialni\w*\s+zarizeni\w*|soc\.?\s*zarizeni\w*|kuchyn\w*"
+                       r"|koupeln\w*|wc\b|toalet\w*|zachod\w*")
+_FACILITY_SHARED = re.compile(
+    r"\b(?:sdilen\w+|spolecn\w+)\s+(?:[a-z]+\s+){0,2}?(?:" + _FACILITY_NOUN + r")"
+    r"|\b(?:sdilen\w+|spolecn\w+)\s+prostor\w*\s*[-–—:,]?\s*(?:" + _FACILITY_NOUN + r")")
+_FACILITY_OWN = re.compile(
+    r"\b(?:vlastni\w*|soukrom\w+|samostatn\w+\s+vlastni\w*)\s+(?:[a-z]+\s+){0,2}?(?:"
+    + _FACILITY_NOUN + r")")
+
+
+def facility_tenure(text: str | None) -> frozenset[str]:
+    """`{'shared'}` / `{'own'}` — whose the kitchen and the lavatory are, or nothing."""
+    return _facility_tenure(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _facility_tenure(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    out: set[str] = set()
+    if _FACILITY_SHARED.search(folded):
+        out.add("shared")
+    if _FACILITY_OWN.search(folded):
+        out.add("own")
+    return frozenset(out)
+
+
+# --- the fit-out a LETTING states about itself (E251) ------------------------------------------
+# W25. `furnished_state` reads `zařízený byt` and `byt je zařízen`; the Rezidence Chodovec
+# adverts write neither. They write `Pronajímá se nezařízený` against `Pronajímá se částečně
+# zařízený – k dispozici je postel a prostorná šatní skříň v ložnici`, which is the letting's
+# own sentence about its own fit-out and the plainest form there is. The wide reader adds that
+# form and the portal's own `furnished` column, and it separates PART-furnished from furnished,
+# because `nezařízený` against `částečně zařízený` is the Chodovec pair and a three-valued
+# answer is what makes it readable.
+_FURNISHED_LET = re.compile(
+    r"\bpronajima\s+se\s+(?:plne\s+|kompletne\s+|castecne\s+)?(?:zarizen|vybaven)\w*"
+    r"|\bpronajima\s+se\s+(?:nezarizen|nevybaven)\w*"
+    r"|\bk\s+pronajmu\s+(?:plne\s+|kompletne\s+|castecne\s+)?(?:zarizen|vybaven)\w*")
+_PART_FURNISHED = re.compile(r"\bcastecne\s+(?:zarizen|vybaven)\w*")
+_FURNISHED_COLUMN: dict[str, str] = {
+    "ano": "furnished", "castecne": "part", "ne": "unfurnished",
+}
+
+
+def furnished_state_wide(text: str | None, column: str | None = None) -> frozenset[str]:
+    """`{'furnished'}` / `{'part'}` / `{'unfurnished'}` — the fit-out, body first, column after."""
+    out = _furnished_state_wide(text) if text else frozenset()
+    if out:
+        return out
+    stated = _FURNISHED_COLUMN.get(str(column).strip().lower()) if column else None
+    return frozenset({stated}) if stated else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _furnished_state_wide(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    out: set[str] = set()
+    if _PART_FURNISHED.search(folded):
+        out.add("part")
+    if _UNFURNISHED.search(folded):
+        out.add("unfurnished")
+    if _FURNISHED.search(folded) or (_FURNISHED_LET.search(folded)
+                                     and not _UNFURNISHED.search(folded)):
+        out.add("furnished")
+    if "part" in out:
+        out.discard("furnished")
+    return frozenset(out)
+
+
+# --- the LOT LABEL a project prints for its own plot (E270) ------------------------------------
+# W27. `unit_designators` reads `označením B36` — marker then code, with nothing between.
+# `printed_unit_codes` needs two dotted segments, because a single segment after a DWELLING noun
+# is as often the building as the flat. `printed_designators` (E250) reads a noun, then `č.`,
+# then a number under 100. Between them they miss the form a Czech LAND PROJECT writes, which
+# puts the noun BETWEEN the marker and the code: idnes sells ten plots of `Pod Sekvojí` (Trutnov,
+# Horní Staré Město) under bodies byte-identical but for a trailing `Označení pozemku v projektu
+# A13` / `A14` / ... / `A40`, every one 1,001 m² at 3,900 Kč/m² = 3,903,900, nine of them live
+# together. Every generation since S4 fused them into one group, because nothing in the chain
+# reads the only sentence that tells them apart.
+#
+# Read per KIND, like E250, and never as one set. Two refusals keep it fail-safe, because an
+# empty set is never a conflict: a kind that prints more than one label has published the
+# project's ROSTER rather than named its own plot, and a label whose own prefix appears again
+# anywhere in the body (`pozemky A13, A14 a A15`) is a roster the noun happened to precede.
+_LOT_KINDS: tuple[tuple[str, str, bool], ...] = (
+    ("pozemek", r"pozemek|pozemku|pozemky|pozemkem", True),
+    ("parcela", r"parcela|parcely|parcele|parcelu|parcelou", True),
+    ("jednotka", r"jednotka|jednotky|jednotce|jednotku|jednotkou", False),
+    ("byt", r"byt|bytu|byte|bytem", False),
+    ("dum", r"dum|domu|dome|domem|domku|domek", False),
+    ("stani", r"stani", False),
+)
+# `Označení`, `označením`, `označena`, `označen`, `označeno` — and `číslo`, which the same
+# sentence writes instead (`číslo pozemku v projektu 13`).
+_LOT_MARKER: str = r"(?:oznacen\w{0,4}|cislo|c\.)"
+# The phrase that says WHERE the label lives. Optional: `označení pozemku A13` is the same
+# sentence with the phrase left out.
+_LOT_SCOPE: str = (r"(?:v\s+projektu|v\s+projektove\s+dokumentaci|projektove"
+                   r"|v\s+katastru|dle\s+projektu)")
+# One or two letters and up to three digits — the shape a plan roster uses (`A13`, `B7`).
+_LOT_CODE_ALNUM: str = r"[a-z]{1,2}\s?\d{1,3}[a-z]?"
+# A bare numeral is read only behind a marker, and never where the next thing is a unit or more
+# digits — `Označení pozemku 1 001 m2` names an area, not a lot.
+_LOT_CODE_NUM: str = r"\d{1,3}(?!\s*[\d.,])(?!\s*(?:m2|m\b|kc|czk|%|\+|kk\b))"
+_LOT_CODE: str = "(" + _LOT_CODE_ALNUM + "|" + _LOT_CODE_NUM + ")"
+_LOT_NOT_AFTER = re.compile(r"^\s*(?:m2|m\b|kc|czk|%|\+|kk\b|,-|mil|tis)")
+
+
+def _lot_patterns() -> tuple[tuple[str, bool, re.Pattern[str]], ...]:
+    out: list[tuple[str, bool, re.Pattern[str]]] = []
+    for kind, forms, is_land in _LOT_KINDS:
+        nouns = r"(?:" + forms + r")"
+        # `Označení pozemku v projektu A13`, `číslo pozemku v projektu 13`, `označení parcely A7`.
+        out.append((kind, is_land, re.compile(
+            _LOT_MARKER + r"\s*:?\s*" + nouns + r"\s+(?:" + _LOT_SCOPE + r"\s+)?"
+            r"(?:c\.?\s*|cislo\s+)?" + _LOT_CODE + r"\b")))
+        # `pozemek s označením A13`, `parcela označená A7`, `dům označený B2`.
+        out.append((kind, is_land, re.compile(
+            nouns + r"\s+(?:je\s+)?(?:s\s+)?oznacen\w{0,4}\s+(?:" + _LOT_SCOPE + r"\s+)?"
+            r"(?:c\.?\s*|cislo\s+)?" + _LOT_CODE + r"\b")))
+        # `pozemek A13`, `parcela B7` — the bare form, LETTERS AND DIGITS, land nouns only. A
+        # bare `B2` after a dwelling noun is the BUILDING (E161's refusal), and reading it would
+        # part every flat in that building from every other.
+        if is_land:
+            out.append((kind, is_land, re.compile(nouns + r"\s+(" + _LOT_CODE_ALNUM + r")\b")))
+    return tuple(out)
+
+
+_LOT_PATTERNS: tuple[tuple[str, bool, re.Pattern[str]], ...] = _lot_patterns()
+# The English roster the same developers publish beside the Czech one.
+_LOT_ENGLISH = re.compile(r"\b(?:lot|plot)\s+(?:no\.?\s*|number\s+|#\s*)?" + _LOT_CODE + r"\b")
+LOT_ENGLISH_KIND: str = "lot"
+# More than one label for one kind is the project's roster, not this advert's own plot.
+LOT_LABEL_MAX_PER_KIND: int = 1
+
+
+def printed_lot_labels(text: str | None, land_only: bool = False) -> dict[str, frozenset[str]]:
+    """E270: `{kind: {label}}` for `Označení pozemku v projektu A13` and its siblings."""
+    return dict(_printed_lot_labels(text, land_only)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _printed_lot_labels(text: str, land_only: bool) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fact_text(unescape(text))
+    found: dict[str, set[str]] = {}
+    for kind, is_land, pattern in _LOT_PATTERNS:
+        if land_only and not is_land:
+            continue
+        for match in pattern.finditer(folded):
+            if _LOT_NOT_AFTER.match(folded[match.end():match.end() + 6]):
+                continue
+            label = re.sub(r"\s+", "", match.group(1)).upper()
+            if label:
+                found.setdefault(kind, set()).add(label)
+    for match in _LOT_ENGLISH.finditer(folded):
+        if _LOT_NOT_AFTER.match(folded[match.end():match.end() + 6]):
+            continue
+        label = re.sub(r"\s+", "", match.group(1)).upper()
+        if label:
+            found.setdefault(LOT_ENGLISH_KIND, set()).add(label)
+    out: list[tuple[str, frozenset[str]]] = []
+    for kind, labels in sorted(found.items()):
+        if len(labels) > LOT_LABEL_MAX_PER_KIND or _lot_roster(folded, labels):
+            continue
+        out.append((kind, frozenset(labels)))
+    return tuple(out)
+
+
+def _lot_roster(folded: str, labels: Iterable[str]) -> bool:
+    """Does the body name SIBLINGS of this label? Then it published a roster, not its own plot."""
+    for label in labels:
+        head = re.match(r"([a-z]{1,2})\d", label.lower())
+        if head is None:
+            continue
+        siblings = set(re.findall(r"\b" + head.group(1) + r"\s?\d{1,3}[a-z]?\b", folded))
+        if len({re.sub(r"\s+", "", one).upper() for one in siblings}) > 1:
+            return True
+    return False
+
+
+# --- W29 (S14): the tightening wave cohort 16's confirmation named ----------------------------
+# E293: the plot figure a bažoš ATTRIBUTE BLOCK prints. bažoš appends the portal's own form to
+# the body — `ev.č.: 8483 umístění objektu: Klidná část obce celková plocha (m2): 312` — and its
+# parser leaves the column empty when the form is all it has. No prose reader knows the
+# `(m2): N` shape, so the advert was read as stating NO area, and E192/E282 let a price move
+# between it and the 257 m² lot of one seller's two-lot template pass as one advert's path
+# (Jestřabice). On land the block's `celková plocha` is the plot: 116 of 148 bažoš land rows
+# whose column is filled carry the same number (cohorts 14-16); the rest are the column's own
+# thousands truncation (14.3 against 14 307).
+_BLOCK_PLOT = re.compile(
+    r"\b(?:celkova\s+plocha|plocha\s+parcely|plocha\s+pozemku)\s*\(\s*m2\s*\)\s*:\s*"
+    r"(\d{1,3}(?:[ .]\d{3})+|\d+(?:[.,]\d+)?)"
+)
+
+
+def block_plot_area(text: str | None) -> float | None:
+    """E293: the ONE plot figure a bažoš attribute block prints, or None (none or several)."""
+    return _block_plot_area(text) if text else None
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _block_plot_area(text: str) -> float | None:
+    found = {value for value in (_area_value(match.group(1))
+                                 for match in _BLOCK_PLOT.finditer(fact_text(text)))
+             if value is not None and value > 0.0}
+    return next(iter(found)) if len(found) == 1 else None
+
+
+# E294: the size of the OUTDOOR accessory the body sells with the flat — the balcony, the
+# terrace, the loggia, the front garden. E215 reads only the cellar's TOTAL, and `printed_areas`
+# scopes these figures OUT of the headline comparison, so one Kovářov block's attic unit
+# (`přímý vstup na balkon o rozloze 12,6 m2`, 7,590,000) and its terrace unit (`přímý vstup na
+# terasu o rozloze 58 m2`, 10,665,000) — one template, one 58 m² floor area, one portal, live
+# together all summer — were read as one flat. The size must be the NOUN's: either the noun
+# names it through a size word (`o rozloze`, `o výměře`, `o velikosti`, `o ploše`), or the
+# figure sits right against the noun (`balkon 5 m2`, `terasa (12 m2)`, `12 m2 terasa`). A
+# figure after `s terasou` with a comma between (`byt s balkonem, 58 m2`) is the flat's.
+_OUTDOOR_NOUN: str = (r"(balkon\w*|teras\w*|lodzi\w*|lodgi\w*|predzahradk\w*"
+                      r"|zahradk\w*|zahrad[auoey]\b|zahradou)")
+_SIZE_WORD: str = (r"(o\s+(?:celkove\s+)?(?:rozloze|vymere|velikosti|ploche|plose)"
+                   r"|rozlohou|vymerou|velikosti|plochou)")
+_APPROX: str = r"(?:cca\.?\s*|priblizne\s+|zhruba\s+|asi\s+|pres\s+|temer\s+)?"
+# `(?<!s )` etc. is applied in code: a noun in the instrumental after `s`/`se`/`včetně` names
+# what the FLAT comes with, and a figure written straight after it is the flat's (`byt 3+1 s
+# balkonem 60m2`, `zastavěnou plochou s terasou 175 m2`, `s balkonem o celkové výměře 26,4 m2`).
+_OUTDOOR_AFTER = re.compile(
+    r"\b" + _OUTDOOR_NOUN + r"(?:\s+(?!s\b|a\b|i\b|se\b|m2\b)[a-z]+){0,3}?\s+" + _SIZE_WORD
+    + r"\s+" + _APPROX + _AREA_NUMBER + r"\s*m2\b"
+    r"|\b" + _OUTDOOR_NOUN + r"\s*[:(\-–]?\s*" + _APPROX + _AREA_NUMBER + r"\s*m2\b"
+)
+_OUTDOOR_BEFORE = re.compile(
+    r"(?<![\d,.])" + _AREA_NUMBER + r"\s*m2\s+(?:(?:velk\w+|prostorn\w+|jizni\w*|zapadni\w*"
+    r"|vychodni\w*|kryt\w+|stresni\w*|vyhledov\w+)\s+)?" + _OUTDOOR_NOUN
+)
+# `dvě lodžie o celkové ploše 2,60 m2 a 1,65 m2`, `dvěma terasami (40m2 + 60m2)`, `dvěma
+# soukromými předzahrádkami (cca 12 m2 a 15 m2)`: a body that names SEVERAL outdoor spaces of
+# one kind states a list, and one number out of a list is not the flat's accessory — abstain.
+_OUTDOOR_PLURAL = re.compile(
+    r"\b(?:dve|dva|dvema|dvou|tri|trema|trech|ctyri|2|3|4|obe|oba|nekolik)\s+(?:[a-z]+\s+){0,2}?"
+    r"(?:balkon\w*|teras\w*|lodzi\w*|lodgi\w*|predzahradk\w*|zahrad\w*)")
+_OUTDOOR_WITH = re.compile(r"(?:\bs|\bse|\bvcetne)\s+$")
+OUTDOOR_ACCESSORY_MAX_M2: float = 400.0
+
+
+def _outdoor_kind(noun: str) -> str:
+    if noun.startswith(("balk", "lodz", "lodg")):
+        return "balcony"
+    if noun.startswith("teras"):
+        return "terrace"
+    return "garden"
+
+
+def outdoor_accessory_areas(text: str | None) -> frozenset[tuple[str, float, int]]:
+    """E294: `(kind, m², printed decimals)` for every balcony/terrace/loggia/garden size."""
+    return _outdoor_accessory_areas(text) if text else frozenset()
+
+
+def _decimals_of(raw: str) -> int:
+    cleaned = raw.replace(" ", "").replace(" ", "")
+    if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", cleaned):
+        return 0
+    cleaned = cleaned.replace(",", ".")
+    return len(cleaned.split(".", 1)[1]) if "." in cleaned else 0
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _outdoor_accessory_areas(text: str) -> frozenset[tuple[str, float, int]]:
+    folded = fact_text(unescape(text))
+    if _OUTDOOR_PLURAL.search(folded):
+        return frozenset()
+    out: set[tuple[str, float, int]] = set()
+    for match in _OUTDOOR_AFTER.finditer(folded):
+        with_noun = bool(_OUTDOOR_WITH.search(folded[max(0, match.start() - 9):match.start()]))
+        if match.group(1):
+            noun, size_word, raw = match.group(1), match.group(2), match.group(3)
+            if with_noun and "celkov" in size_word:
+                continue
+        else:
+            noun, raw = match.group(4), match.group(5)
+            if with_noun:
+                continue
+        value = _area_value(raw)
+        if value is not None and 0.0 < value <= OUTDOOR_ACCESSORY_MAX_M2:
+            out.add((_outdoor_kind(noun), value, _decimals_of(raw)))
+    for match in _OUTDOOR_BEFORE.finditer(folded):
+        raw, noun = match.group(1), match.group(2)
+        value = _area_value(raw)
+        if value is not None and 0.0 < value <= OUTDOOR_ACCESSORY_MAX_M2:
+            out.add((_outdoor_kind(noun), value, _decimals_of(raw)))
+    return frozenset(out)
+
+
+# E295: WHICH HALF, SIDE OR POSITION of one building the advert sells. Lipno-Kobylnice's new
+# two-flat house is `nabízíme levou polovinu novostavby` on one advert and `nabízíme pravou
+# stranu novostavby` on the other, one 113 m², one price path, on every portal; Polná's five
+# unit commercial row posts three 153 m² units at one 9,865,000 whose only difference is
+# `Jednotka je druhá zleva` / `čtvrtá zleva` / `pátá zleva, tedy poslední od vjezdu`.
+# Read per FAMILY (side, position counted from one landmark, `část A`), and a family whose body
+# names two values is a ROSTER (`levá část hlavní budovy … pravá část hlavní budovy`) and
+# abstains. `po pravé straně`, `v levé části bytu` is a room's place inside ONE unit: a side or
+# part is read only of a BUILDING noun and, for `strana`/`část`, only as the object of an offer
+# verb; a HALF (`polovina`, `půlka`) is read of a building noun wherever it stands.
+_BUILDING_GEN: str = (r"(?:[a-z]+\s+)?(?:novostavb\w*|dvojdom\w*|dvojdomk\w*|domu|domku|objektu"
+                      r"|budovy|stavby|nemovitosti|chalupy|chaty|vily|trojdom\w*|radoveho\s+domu"
+                      r"|rodinneho\s+domu|dvougeneracniho\s+domu|haly|arealu)\b")
+_SIDE_ADJ: str = r"(lev|prav)(?:a|ou|e|eho|emu|em|ych)"
+_HALF = re.compile(r"\b" + _SIDE_ADJ + r"\s+(?:polovin\w*|polovic\w*|pulk\w*)\s+" + _BUILDING_GEN)
+_OFFER_SIDE = re.compile(
+    r"\b(?:nabizime|nabizim|prodavame|prodavam|prodam|prodej|k\s+prodeji\s+je|tvori|predstavuje"
+    r"|jedna\s+se\s+o|jde\s+o)\s+(?:k\s+prodeji\s+)?(?:[a-z]+\s+)?" + _SIDE_ADJ
+    + r"\s+(?:stran\w*|cast\w*)\s+" + _BUILDING_GEN)
+_SIDE_HOUSE = re.compile(r"\b(lev|prav)(?:y|eho|em)\s+(?:dum|domu|domek|domku|dvojdomek)\b")
+_ORDINALS: dict[str, str] = {
+    "prvni": "1", "druha": "2", "druhy": "2", "druhe": "2", "treti": "3", "ctvrta": "4",
+    "ctvrty": "4", "ctvrte": "4", "pata": "5", "paty": "5", "pate": "5", "sesta": "6",
+    "sesty": "6", "seste": "6", "sedma": "7", "sedmy": "7", "sedme": "7", "osma": "8",
+    "osmy": "8", "osme": "8", "devata": "9", "devaty": "9", "devate": "9", "desata": "10",
+    "desaty": "10", "desate": "10", "posledni": "last", "krajni": "end",
+}
+_POSITION = re.compile(
+    r"\b(?:je|jsou|jednotka|jednotku|byt|dum|domek|garaz|stani|vila|prostor|objekt|budova)"
+    r"\s+(?:[a-z]+\s+){0,1}?(" + "|".join(sorted(_ORDINALS, key=len, reverse=True))
+    + r"|\d{1,2}\.)\s+(?:v\s+poradi\s+)?(zleva|zprava|z\s+leva|z\s+prava"
+    r"|od\s+(?:vchodu|vjezdu|silnice|ulice|leva|prava))"
+)
+# `část A` is read CASE-KEPT: the letter must be a capital, because `obytná část a kuchyně`
+# is the conjunction, not a designator (every fold lowercases the two alike).
+_PART_LETTER = re.compile(r"\b[Cc]ast\s+([A-D])\b(?!\s*[.)]?\s*\d)")
+POSITION_MAX_PER_FAMILY: int = 1
+
+
+def position_designators(text: str | None) -> dict[str, frozenset[str]]:
+    """E295: `{family: {value}}` — `side` L/R, `pos:<landmark>` ordinal, `part` A-D."""
+    return dict(_position_designators(text)) if text else {}
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _position_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
+    folded = fact_text(unescape(text))
+    found: dict[str, set[str]] = {}
+    for pattern in (_HALF, _OFFER_SIDE, _SIDE_HOUSE):
+        for match in pattern.finditer(folded):
+            found.setdefault("side", set()).add("L" if match.group(1) == "lev" else "R")
+    for match in _POSITION.finditer(folded):
+        ordinal = match.group(1)
+        value = _ORDINALS.get(ordinal, ordinal.rstrip("."))
+        landmark = re.sub(r"\s+", " ", match.group(2)).replace("z leva", "zleva").replace(
+            "z prava", "zprava")
+        found.setdefault(f"pos:{landmark}", set()).add(value)
+    kept = _ACCENTS.sub("", unicodedata.normalize("NFKD", unescape(text)))
+    for match in _PART_LETTER.finditer(kept):
+        found.setdefault("part", set()).add(match.group(1).upper())
+    return tuple((family, frozenset(values)) for family, values in sorted(found.items())
+                 if len(values) <= POSITION_MAX_PER_FAMILY)
+
+
+# E296 (T4, measured): the named VILLA a multi-villa project prints before the residence code.
+# Lipno Forest Residences' idnes adverts lead `VILA ARKTIDA REZIDENCE A3` and `VILA LOUKA
+# REZIDENCE A3`; the residence code alone repeats across the seven villas.
+_NAMED_VILLA = re.compile(
+    r"\bvil(?:a|y|e|u|ou)\s+([a-z]{3,20})\s+(?:rezidenc\w*|apartman\w*|jednotk\w*)\s+"
+    r"([a-z]\d{1,3})\b")
+# E296's second half: the residence code a body names as its SUBJECT (`Rezidence A3 nabízí …
+# jako A2`): the unit noun directly before a one-letter code. `jako A2` names a sibling without
+# the noun and is not read.
+_RESIDENCE_CODE = re.compile(r"\b(?:rezidenc\w*|apartman\w*)\s+([a-z]\d{1,3})\b")
+
+
+def named_villa_units(text: str | None) -> frozenset[str]:
+    """E296: `{villa/code}` pairs the body prints (`arktida/A3`)."""
+    return _named_villa_units(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _named_villa_units(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    return frozenset(f"{m.group(1)}/{m.group(2).upper()}" for m in _NAMED_VILLA.finditer(folded))
+
+
+def residence_codes(text: str | None) -> frozenset[str]:
+    """E296: the one-letter residence/apartment codes the body names with the noun."""
+    return _residence_codes(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _residence_codes(text: str) -> frozenset[str]:
+    folded = fact_text(unescape(text))
+    return frozenset(m.group(1).upper() for m in _RESIDENCE_CODE.finditer(folded))

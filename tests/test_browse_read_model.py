@@ -93,9 +93,8 @@ def test_all_identity_and_asset_mutations_call_sync():
     from toolkit import asset_identity, property_identity
 
     required = [
-        property_identity.merge_properties,
-        property_identity.split_property_to_singletons,
-        property_identity.unmerge_group,
+        property_identity.merge_property_set,
+        property_identity.detach_listing,
         asset_identity.link_properties,
         asset_identity.unlink_property,
     ]

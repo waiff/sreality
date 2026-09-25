@@ -15,7 +15,7 @@ import {
 import { ppm2BasisFromToken } from '@/lib/measure';
 import type { Furnished, Ownership } from '@/lib/types';
 import { listingKindLabel } from '@/lib/enums';
-import { listingRowPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 
 interface Column {
   field: SortField | 'furnished' | 'ownership' | 'pipeline';
@@ -246,12 +246,11 @@ function Row({
       </td>
       <td className="px-4 py-2.5 align-middle">
         <Link
-          to={listingRowPath(row)}
-          state={{ listingId: row.listing_id }}
+          to={propertyPath(row.property_id, row.listing_id)}
           className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           {/* Portal-native id; a post-Gate-2 non-sreality row has none, so the
-              cell shows a dash while the link falls back to the property route. */}
+              cell shows a dash — the link is the property's either way. */}
           {row.sreality_id ?? '—'}
         </Link>
       </td>

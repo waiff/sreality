@@ -39,7 +39,6 @@ import type {
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
-  ReferenceRent,
   PipelineCardBroker,
   PortalHealth,
   PropertySource,
@@ -1102,9 +1101,21 @@ export const fetchBrowseCount = async (
   type CountQuery = PromiseLike<CountResp> & {
     abortSignal: (s: AbortSignal) => PromiseLike<CountResp>;
   };
+  /* The estimate reads the PLAIN relation, never the dismissal-aware function:
+   * PostgREST plans a count only for a table or view, so a function call answers
+   * `Content-Range: 0-N/*` and the client parses the `*` to NaN (the "~NaN"
+   * header, 2026-09-25). The plain relation also counts dismissed properties;
+   * the "~" already says the figure is not exact. */
   const build = (mode: 'exact' | 'planned') =>
     applyPrefilters(
-      applyFilters(listSource(f, keysetTiebreak(f), { count: mode, head: true }), f),
+      applyFilters(
+        listSource(
+          mode === 'planned' ? { ...f, showDismissed: true } : f,
+          keysetTiebreak(f),
+          { count: mode, head: true },
+        ),
+        f,
+      ),
       pre,
     ) as unknown as CountQuery;
   try {
@@ -1112,13 +1123,17 @@ export const fetchBrowseCount = async (
       AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
     );
     if (error) throw error;
-    if (count != null) return { value: count, precise: true };
+    if (count != null && Number.isFinite(count)) return { value: count, precise: true };
   } catch {
     // Exact didn't finish under budget — fall through to the estimate.
   }
   const planned = await build('planned');
   if (planned.error) throw planned.error;
-  const estimate = planned.count ?? 0;
+  const estimate = planned.count;
+  /* No number is an error the header shows as one (dimmed + retry), never a NaN. */
+  if (estimate == null || !Number.isFinite(estimate)) {
+    throw new Error('Browse count unavailable: no exact count within budget and no estimate');
+  }
   return { value: estimate, precise: estimate === 0 };
 };
 
@@ -1438,11 +1453,8 @@ export const fetchBrowseStats = async (
   return data as BrowseStats;
 };
 
-/* `source_id_native` + `property_id` are migration 420 (W9b): the listing's own
- * identity, which used to be reachable only through property_sources_public — a
- * thin view over `listings` itself, so that read re-fetched THIS row's heap tuple
- * one round trip later to learn two of its own columns. They cost nothing here
- * (measured: the detail read is 7 buffers with them, and was 7 without). */
+/* The listings_public select list: every column the view carries (the width is
+ * pinned to its readers by tests/test_location_w6c_narrow_public_views.py). */
 const DETAIL_COLS =
   'id,sreality_id,first_seen_at,last_seen_at,is_active,source,source_id_native,property_id,tom_days,' +
   'category_main,category_type,price_czk,price_unit,' +
@@ -1451,190 +1463,89 @@ const DETAIL_COLS =
   'building_type,condition,energy_rating,' +
   'estate_area,usable_area,garden_area,category_sub_cb,' +
   'furnished,terrace,cellar,garage,parking_lots,ownership,' +
-  /* The measure AND its published label. Unlike the two Browse snapshots,
-   * `listings_public` is a plain view over `listings`, so it carries
-   * `price_per_m2_basis` as soon as the migration-425 view bodies land, with no
-   * rebuild in between. The detail surfaces read the published label rather
-   * than re-deriving it, which is the point of the program. (No apostrophes in
-   * here: a guardrail test parses these constants by quote pairing.) */
+  /* The measure AND its published label (migration 425): detail surfaces read
+   * the published label rather than re-deriving it. (No apostrophes in here: a
+   * guardrail test parses these constants by quote pairing.) */
   'price_per_m2,price_per_m2_basis,' +
   'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent,source_url';
 
-/* Legacy /listing/{id} route: URL literally IS the sreality_id, one round trip,
- * unchanged forever — a listing only ever gets a legacy numeric URL when it HAS a
- * sreality_id to put in it, so there's no forward-compat concern here. */
-export const fetchListingBySreality = async (
-  sreality_id: number,
-): Promise<ListingPublic | null> => {
-  const { data, error } = await supabase
-    .from('listings_public')
-    .select(DETAIL_COLS)
-    .eq('sreality_id', sreality_id)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as unknown as ListingPublic | null) ?? null;
-};
+/* THE PROPERTY as its Browse card shows it (decision 11): the `properties_public`
+ * row, whose every advert field is its canonical advert's and every physical fact
+ * the first non-empty in the same order (migration 561). Selected in the
+ * ListingPublic shape the detail components render, `id` being the canonical
+ * advert (`listing_id`); the price-change pair is the canonical advert's own
+ * series, as Browse filters on it. The row carries no portal URL: each advert's
+ * is on its row of the merged-adverts section. (No apostrophes: see above.) */
+const PROPERTY_COLS =
+  'id:listing_id,property_id,sreality_id,first_seen_at,last_seen_at,is_active,source,source_id_native,tom_days,' +
+  'category_main,category_type,price_czk,price_unit,' +
+  'area_m2,disposition,subtype,display_label,' +
+  'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
+  'building_type,condition,energy_rating,' +
+  'estate_area,usable_area,garden_area,category_sub_cb,' +
+  'furnished,terrace,cellar,garage,parking_lots,ownership,' +
+  'price_per_m2,price_per_m2_basis,' +
+  'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent,' +
+  'price_change_count,total_price_change_pct';
 
-/* Canonical /listing/{source}/{native} route, second half: fetch by the surrogate
- * id fetchListingIdByNaturalKey resolved. Keyed on id, not sreality_id (R2 Phase C
- * resolver-chain cutover) — a listing reachable only by natural key (a future
- * non-sreality row created after Gate 2 stops drawing the synthetic sreality_id
- * sequence) may have no sreality_id to filter on at all. */
-export const fetchListingById = async (
-  id: number,
-): Promise<ListingPublic | null> => {
-  const { data, error } = await supabase
-    .from('listings_public')
-    .select(DETAIL_COLS)
-    .eq('id', id)
-    .maybeSingle();
-  if (error) throw error;
-  return (data as unknown as ListingPublic | null) ?? null;
-};
-
-/* Resolve a listing's natural key (source, source_id_native) to its surrogate id
- * (migration 334 exposes it — was sreality_id before the R2 Phase C cutover), so
- * the canonical /listing/{source}/{native} route can reuse fetchListingById. Uses
- * listing_natural_key_public (migration 315) — an UNFILTERED view over every
- * listing — NOT property_sources_public, which filters `property_id is not null`
- * and so cannot resolve a freshly-scraped listing during its ~5-min pre-attach
- * window (the canonical URL would 404 while the legacy one loaded). The key
- * (source, source_id_native) is unique (migration 091), so maybeSingle is safe. */
-export const fetchListingIdByNaturalKey = async (
-  source: string,
-  sourceIdNative: string,
-): Promise<number | null> => {
-  const { data, error } = await supabase
-    .from('listing_natural_key_public')
-    .select('id')
-    .eq('source', source)
-    .eq('source_id_native', sourceIdNative)
-    .maybeSingle();
-  if (error) throw error;
-  const row = data as unknown as { id: number | null } | null;
-  return row?.id ?? null;
-};
-
-/* Resolve a property_id to its representative listing's NATURAL KEY
- * (source, source_id_native). Lets /listing?property=ID (a property-grain
- * link) land on the survivor's detail page via the canonical natural-key
- * route. NOT the surrogate id: listingPath() builds the LEGACY sreality route,
- * and the id-spaces overlap (~435 collisions), so routing the surrogate through
- * it would load the WRONG listing. NOT sreality_id either: a post-Gate-2 repr may
- * have none, which is exactly why the old sreality-id form dead-ended (returned
- * null → NoListingState). properties_public exposes source + source_id_native for
- * the repr child (migration 343). */
-export const fetchPropertyReprNaturalKey = async (
-  property_id: number,
-): Promise<{ source: string; source_id_native: string; listing_id: number | null } | null> => {
-  const { data, error } = await supabase
-    .from('properties_public')
-    .select('source, source_id_native, listing_id')
-    .eq('property_id', property_id)
-    .maybeSingle();
-  if (error) throw error;
-  const row = data as unknown as {
-    source: string | null;
-    source_id_native: string | null;
-    listing_id: number | null;
-  } | null;
-  return row?.source != null && row.source_id_native != null
-    ? { source: row.source, source_id_native: row.source_id_native, listing_id: row.listing_id }
-    : null;
-};
-
-/* The PROPERTY-grain MF reference rent/yield (the golden record, migration 257):
- * one figure per real-world property, so every portal's advert of the same flat
- * shows the same MF. The listing-detail header reads THIS, not the subject
- * advert's per-listing listings.mf_* (which could be one portal's under-stated
- * parse). */
-export interface PropertyMf {
-  mf_reference_rent: ReferenceRent | null;
-  mf_gross_yield_pct: number | null;
-  /* The property's canonical asking price (current_price_czk = most-recently-seen
-   * active ask) — the price the golden-record estimate/yield is built on, so the
-   * UI can flag any active sibling advertised at a different number. */
-  price_czk: number | null;
+export interface PropertyPublic extends ListingPublic {
+  property_id: number;
+  price_change_count: number | null;
+  total_price_change_pct: number | null;
 }
 
-export const fetchPropertyMf = async (
-  property_id: number,
-): Promise<PropertyMf | null> => {
+/* An active property by id; null for a merged-away or unknown id. */
+export const fetchProperty = async (propertyId: number): Promise<PropertyPublic | null> => {
   const { data, error } = await supabase
     .from('properties_public')
-    .select('mf_reference_rent, mf_gross_yield_pct, price_czk')
-    .eq('property_id', property_id)
+    .select(PROPERTY_COLS)
+    .eq('property_id', propertyId)
     .maybeSingle();
   if (error) throw error;
-  return (data as unknown as PropertyMf | null) ?? null;
+  if (!data) return null;
+  const row = data as unknown as PropertyPublic;
+  return {
+    ...row,
+    source_url: null,
+    // numeric arrives as a string from PostgREST.
+    total_price_change_pct:
+      row.total_price_change_pct == null ? null : Number(row.total_price_change_pct),
+  };
 };
 
-export const fetchSnapshotsByListing = async (
-  sreality_id: number,
-): Promise<ListingSnapshotPublic[]> => {
-  const { data, error } = await supabase
-    .from('listing_snapshots_public')
-    .select('id,sreality_id,scraped_at,price_czk,description')
-    .eq('sreality_id', sreality_id)
-    .order('scraped_at', { ascending: true });
+/* An advert address (the natural key, or the legacy sreality id) → the advert's
+ * surrogate id and its property, which is all the alias routes need to land on
+ * the property page. listings_public is unfiltered, so a just-scraped advert
+ * resolves too; (source, source_id_native) is unique (migration 091). */
+export const fetchAdvertProperty = async (
+  key: { source: string; nativeId: string } | { srealityId: number },
+): Promise<{ id: number; property_id: number | null } | null> => {
+  let q = supabase.from('listings_public').select('id,property_id');
+  q = 'srealityId' in key
+    ? q.eq('sreality_id', key.srealityId)
+    : q.eq('source', key.source).eq('source_id_native', key.nativeId);
+  const { data, error } = await q.maybeSingle();
   if (error) throw error;
-  return (data ?? []) as unknown as ListingSnapshotPublic[];
+  return (data as unknown as { id: number; property_id: number | null } | null) ?? null;
 };
 
-/* Multi-portal: resolve the property a listing belongs to (works from ANY
- * child listing's surrogate id via property_sources_public, not just the
- * representative), then return all of that property's per-portal observations.
- * Keyed on id, not sreality_id (R2 Phase C resolver-chain cutover) — property_
- * sources_public.id is the same listings.id migration 334 exposed.
- *
- * `knownPropertyId` (W9b) skips the resolve hop. That hop asks
- * property_sources_public — a thin view over `listings` filtered to
- * `property_id is not null` — for one column of the SAME row listings_public has
- * already returned, so a caller holding the listing row already knows the answer.
- * Verified live: property_id and source_id_native agree between the two paths on
- * every row the view exposes (0 mismatches), and no listing points at a
- * non-active property, so they cannot disagree about which side of a merge won.
- *
- * Only a NUMBER takes the fast path. NULL/undefined means "ask" — a NULL
- * property_id is the ~5-min pre-attach window after a scrape, rare enough that
- * paying the hop beats reasoning about how stale the caller's row might be. Note
- * the caller must NOT gate the whole query on having a property_id: on the
- * canonical route this read fires in PARALLEL with the listing read (W9a), and
- * making it wait would trade one hop back for a whole waterfall level. */
-export const fetchPropertySources = async (
-  id: number,
-  knownPropertyId?: number | null,
-): Promise<{ property_id: number | null; sources: PropertySource[] }> => {
-  let property_id: number | null = null;
-  if (typeof knownPropertyId === 'number') {
-    property_id = knownPropertyId;
-  } else {
-    const { data: row, error: e1 } = await supabase
-      .from('property_sources_public')
-      .select('property_id')
-      .eq('id', id)
-      .maybeSingle();
-    if (e1) throw e1;
-    property_id = (row as { property_id: number } | null)?.property_id ?? null;
-  }
-  if (property_id == null) return { property_id: null, sources: [] };
+/* Every advert of one property, oldest first — the merged-adverts section's rows. */
+export const fetchPropertySources = async (propertyId: number): Promise<PropertySource[]> => {
   const { data, error } = await supabase
     .from('property_sources_public')
     .select(
       'id,property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
     )
-    .eq('property_id', property_id)
+    .eq('property_id', propertyId)
     .order('first_seen_at', { ascending: true });
   if (error) throw error;
-  return { property_id, sources: (data ?? []) as unknown as PropertySource[] };
+  return (data ?? []) as unknown as PropertySource[];
 };
 
-/* Snapshots across several listings (a property's children) — the union that
- * makes the Listing Detail price chart cross-source. Keyed on the surrogate
- * `listing_id` (listing_snapshots_public.listing_id, migration 343), NOT
- * sreality_id — the caller passes the children's surrogate ids, and a post-
- * Gate-2 non-sreality child has a NULL sreality_id (the old sreality filter
- * would then get `[null]` and the chart would silently go empty). */
+/* Price snapshots of the given adverts (the property page reads its canonical
+ * advert's). Keyed on the surrogate `listing_id` (listing_snapshots_public.
+ * listing_id, migration 343), NOT sreality_id — a post-Gate-2 non-sreality
+ * advert has a NULL sreality_id, and the chart would silently go empty. */
 export const fetchSnapshotsForListings = async (
   ids: number[],
 ): Promise<ListingSnapshotPublic[]> => {

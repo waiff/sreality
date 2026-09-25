@@ -126,6 +126,29 @@ def floor_relation(a: GuardSide, b: GuardSide) -> str:
     return "band" if delta == 1 else "support"
 
 
+def _spread_is_printed_one(
+    members: Sequence["Fingerprint"], cfg: Settings, relation: "ClusterRelation"
+) -> bool:
+    """E280 at cluster grain: every pair of members whose COLUMNS are further apart than the
+    spread prints the same floor-area figures in both bodies, so the spread is the portals'."""
+    from autodedup.indistinguishable import _printed_areas_prevail
+
+    reader = getattr(relation, "listings", None)
+    if reader is None:
+        return False
+    listings = reader()
+    sized = [(fp.listing_id, float(fp.area_m2)) for fp in members
+             if fp.area_m2 is not None and fp.area_m2 > 0.0]
+    for index, (left_id, left) in enumerate(sized):
+        for right_id, right in sized[index + 1:]:
+            if abs(left - right) / max(left, right) <= cfg.cluster_area_spread:
+                continue
+            a, b = listings.get(left_id), listings.get(right_id)
+            if a is None or b is None or not _printed_areas_prevail(a, b):
+                return False
+    return True
+
+
 def cluster_invariants_ok(
     members: Sequence["Fingerprint"],
     settings: Settings | None = None,
@@ -155,7 +178,9 @@ def cluster_invariants_ok(
 
     areas = [fp.area_m2 for fp in members if fp.area_m2 is not None and fp.area_m2 > 0.0]
     if areas and (max(areas) - min(areas)) / max(areas) > cfg.cluster_area_spread:
-        return "area_spread"
+        if not (cfg.d43_printed_area_prevails and relation is not None
+                and _spread_is_printed_one(members, cfg, relation)):
+            return "area_spread"
 
     is_land = any(fp.category_main == LAND_CATEGORY for fp in members)
     if cfg.cluster_disposition and not is_land:

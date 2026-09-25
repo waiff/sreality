@@ -114,8 +114,8 @@ class FakePg:
             "cluster_conflicts": [dict(row) for row in self.cluster_conflicts],
             "cells": {k: dict(v) for k, v in self.cells.items()},
             "cursors": {k: dict(v) for k, v in self.cursors.items()},
-            # The clean reset (E97) deletes the lease row inside the seed's transaction, so a
-            # refusal has to put it back the way Postgres would.
+            # The seed takes the lease and the clean reset (E97) runs inside its transaction, so
+            # a refusal has to put the lease row back the way Postgres would.
             "lease": {k: dict(v) for k, v in self.lease.items()},
             "scope_ids": {k: dict(v) for k, v in self.scope_ids.items()},
             "scope_scans": [dict(row) for row in self.scope_scans],
@@ -597,7 +597,11 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
             db.cursors.pop(name)
         return [(len(gone),)]
     if sql == S.RT_FRESH_LEASE_SQL:
-        return [(1,)] if db.lease.pop(str(p["name"]), None) is not None else [(0,)]
+        held = db.lease.get(str(p["name"]))
+        if held is None or held["holder"] == p["holder"]:
+            return [(0,)]
+        db.lease.pop(str(p["name"]))
+        return [(1,)]
 
     # ---------------------------------------------------------------- live equivalence (E99)
     if sql == S.RT_EQUIV_PAIRS_SQL:

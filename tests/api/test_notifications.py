@@ -808,7 +808,7 @@ def test_collection_monitor_gates_every_detector_on_monitor_since() -> None:
         assert anchor in sql  # every detector shares the anchored CTE
 
     price_sql = next(s for s in inserts if "'price_drop'" in s)
-    assert "st.scraped_at > st.monitor_since" in price_sql
+    assert "st.scraped_at > m.monitor_since" in price_sql
 
     # The inactive insert references 'inactive' but not 'reactivated'.
     inactive_sql = next(
@@ -1231,7 +1231,7 @@ def test_match_changes_once_emits_price_drop_for_matching_subs() -> None:
         (lambda s: "FROM app_settings" in s, [], 0),
         # recent price-drop steps: (property_id, snapshot_id, price, prev)
         (
-            lambda s: "FROM steps" in s,
+            lambda s: "FROM listing_price_steps" in s,
             [(101, 5001, 4_900_000, 5_000_000), (102, 5002, 2_400_000, 2_500_000)],
             0,
         ),
@@ -1276,7 +1276,7 @@ def test_match_changes_once_noops_when_no_recent_drops() -> None:
     """No recent price drops → no subscription scan, no inserts."""
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (lambda s: "FROM app_settings" in s, [], 0),
-        (lambda s: "FROM steps" in s, [], 0),
+        (lambda s: "FROM listing_price_steps" in s, [], 0),
     ]
     conn = _FakeConn(script)
 
@@ -1310,7 +1310,7 @@ def test_insert_pending_run_does_not_reference_nonexistent_columns() -> None:
 
     spec = {
         "lat": 50.0, "lng": 14.0, "area_m2": 60.0, "disposition": "2+kk",
-        "floor": 3, "exclude_ids": [99],
+        "floor": 3, "exclude_listing_ids": [99],
         "category_main": "byt", "category_type": "prodej",
     }
     run_id = _insert_pending_run(
@@ -1374,15 +1374,14 @@ def test_kickoff_always_runs_a_rent_estimate_even_for_a_sale_listing(monkeypatch
     # Forces a rental comparable cohort even though the subject is 'prodej'.
     assert captured["spec"]["category_type"] == "pronajem"
     assert captured["spec"]["category_main"] == "byt"
-    # The subject is excluded from its own cohort on the surrogate arm (the only
-    # one that can exclude a NULL-sreality listing).
+    # The subject's property is left out of its own cohort (decision 13).
     assert captured["spec"]["exclude_listing_ids"] == [987]
 
 
 def test_kickoff_null_sreality_dispatch_resolves_on_the_surrogate(monkeypatch) -> None:
     """Post-Gate-2 a listing has sreality_id NULL. The kickoff must resolve it on
     listing_id, not `int(dispatch["sreality_id"])` (which raised TypeError -> 500),
-    and must exclude the subject from its own cohort on the surrogate arm."""
+    and must exclude the subject's property from its own cohort."""
     monkeypatch.setattr(
         nf, "_fetch_dispatch",
         lambda conn, did: {
@@ -1413,10 +1412,8 @@ def test_kickoff_null_sreality_dispatch_resolves_on_the_surrogate(monkeypatch) -
 
     assert run_id == 42
     assert captured["listing_id"] == 555
-    # The surrogate arm carries the exclusion; the legacy arm is empty (no
-    # sreality_id to exclude), NOT [None] — a NULL there would empty the cohort.
     assert captured["spec"]["exclude_listing_ids"] == [555]
-    assert captured["spec"]["exclude_ids"] == []
+    assert "exclude_ids" not in captured["spec"]
 
 
 def test_kickoff_listing_less_dispatch_schedules_nothing(monkeypatch) -> None:
@@ -1441,12 +1438,9 @@ def test_kickoff_listing_less_dispatch_schedules_nothing(monkeypatch) -> None:
     assert dispatch["listing_id"] is None
 
 
-def test_run_pending_never_excludes_a_null_into_the_cohort_filter(monkeypatch) -> None:
-    """Regression for the empty-cohort trap: the old default
-    `exclude_ids=[sreality_id]` put [None] into the filter for a NULL-sreality
-    subject, and `l.sreality_id <> ALL(ARRAY[NULL])` is NULL for EVERY row, so
-    the whole comparable cohort silently emptied. On rehydration each arm now
-    falls back only to an id that exists.
+def test_run_pending_excludes_the_subjects_property_by_its_listing(monkeypatch) -> None:
+    """On rehydration the one exclusion falls back to the run's own input_listing_id: never
+    a NULL (the old sreality arm's empty-cohort trap), never a sreality id.
 
     _update_run_terminal, estimate_yield and load_filter_defaults are imported
     lazily from their own modules inside run_pending_estimation (cycle-avoidance),
@@ -1457,7 +1451,6 @@ def test_run_pending_never_excludes_a_null_into_the_cohort_filter(monkeypatch) -
     captured: dict[str, Any] = {}
 
     def _fake_estimate(conn, target, filters, _client=None, **kw):
-        captured["exclude_ids"] = list(target.exclude_ids)
         captured["exclude_listing_ids"] = list(target.exclude_listing_ids)
         return {"data": {}}
 
@@ -1484,8 +1477,4 @@ def test_run_pending_never_excludes_a_null_into_the_cohort_filter(monkeypatch) -
 
     nf.run_pending_estimation(999)
 
-    # The subject's NULL sreality_id must NOT reach exclude_ids; the surrogate
-    # arm carries the self-exclusion instead.
-    assert None not in captured.get("exclude_ids", [])
-    assert captured.get("exclude_ids") == []
     assert captured.get("exclude_listing_ids") == [555]

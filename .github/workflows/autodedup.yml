@@ -262,15 +262,19 @@ name: "AUTODEDUP: engine lane"
 #             pick it for you, E90a), generation, rt_scope, backfill, reseed, parity_n,
 #             fresh and rt_bootstrap.
 #             It is deliberately NOT behind the dark switch: seeding is the step before it.
+#             Every seed takes the real-time lane's lease (`autodedup.rt_lease`) for its
+#             transaction and refuses, writing nothing, while a pass holds it - the worker's
+#             `autodedup` lane ignores the repository variable, so stop both callers with
+#             `autodedup.settings` `realtime_enabled = false` before seeding.
 #             `fresh=true` (only valid with `reseed=true`) is the CLEAN RESET: inside the same
 #             transaction, before anything is written, it deletes THIS generation's pairs,
 #             clusters, cluster members, cluster conflicts, fingerprints, postings, census
-#             cells, scope snapshot, scan and retirement ledgers, cursors and lease - and
-#             nothing else. Operator verdicts, must-not-links, judge verdicts, every other
-#             generation and every `public` table are untouched, and the summary reports the
-#             rows removed per table. Without it a re-seed re-cuts the calibration and leaves
-#             every pair the generation already holds in place, which is how 15,923 rows
-#             scored by a superseded scorer survived the 2026-09-20 re-seed.
+#             cells, scope snapshot, scan and retirement ledgers and cursors (keeping the
+#             seed's own lease) - and nothing else. Operator verdicts, must-not-links, judge
+#             verdicts, every other generation and every `public` table are untouched, and the
+#             summary reports the rows removed per table. Without it a re-seed re-cuts the
+#             calibration and leaves every pair the generation already holds in place, which
+#             is how 15,923 rows scored by a superseded scorer survived the 2026-09-20 re-seed.
 #             `rt_bootstrap=true` (which requires `backfill=false`) persists the BUILD PHASE
 #             as a settings row. A backfilled seed writes the fingerprints and not one pair,
 #             so a seeded generation never holds the pairs among the listings that already
@@ -312,6 +316,81 @@ name: "AUTODEDUP: engine lane"
 #             so a mis-waved entry is a new row, not an edit - and refuses an id no row
 #             carries (exit 2, nothing written) rather than reporting a green run that
 #             changed nothing. This run does NOT add a ledger row of its own.
+#
+#   apply   - A1. DRY RUN BY DEFAULT: plans one generation's groups into production merges and
+#             writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json. Per
+#             group it names the survivor (the one asset-linked property if exactly one is
+#             linked; else the property with the most listings, a tie going to the oldest
+#             first_seen_at, then the lowest id) and the properties that would retire into it,
+#             or records why the group is refused. Every check reads EVERY listing the merge
+#             would put on the survivor, not only the members: a member with no property yet,
+#             a property not active, an operator negative (a pair verdict or must-not-link
+#             with both sides in it, a group verdict with its whole set in it), mixed deal
+#             types or incompatible categories (the chokepoint's own helper), a listing
+#             outside the scope (inside = LOCATED in a scope block by its live listing_location
+#             obec_kod / cast_obce_kod, never the engine's block key; out-of-scope groups are
+#             counted per reason in the summary), two properties the operator asset-linked
+#             (asset_linked_units), a property the engine split across two groups, a property
+#             carrying a listing no group holds (unless this engine already merged it there
+#             with a member), a chokepoint refusal on an earlier run, listings of an engine
+#             merge the operator took apart, or a property this engine merged once that is
+#             active again. Group size is capped by the engine alone, when it builds the
+#             group. A group already on one property that an operator negative covers is
+#             REPORTED (ruled_different_after_merge, with the unapply args when the engine
+#             made that merge), never acted on. Real-time lane generations (rt...) are
+#             refused. `dry_run=0` merges for real through
+#             toolkit.property_identity.merge_properties (source 'autodedup', ONE merge group
+#             per engine group) ONLY inside app_settings.autodedup_apply_scope, the ONE
+#             rollout control (seeded by migration 558 with no area, edited on /settings),
+#             which must ITSELF name category_types and an area (blocks, listing_ids or
+#             all_blocks=true; a dispatch cannot supply them) - re-read before every group, so
+#             emptying its area stops a run between two groups. Inside each group's own
+#             transaction the properties are locked and every check runs again over the locked
+#             rows; a change since the plan skips the group. A crash mid-run still writes
+#             out/apply.json and the step summary with what DID merge. An empty dry_run= is a
+#             dry run. The run's own scope args can NARROW that row, never widen it; on a dry
+#             run they replace it key by key. At most max_clusters_per_run groups per run
+#             (default 200), in cluster_key order.
+#             `retire_legacy=1` (TEMPORARY, sprint A2, deleted in W5) first undoes, in the same
+#             dispatch and under the same dry_run, the old engine's intact merges
+#             (property_merge_events source 'auto') whose adverts ALL sit inside the scope's
+#             blocks AND all carry one of its category_types - or whose merge CREATED a
+#             sale/rental mix (retired:mixed_deal_type whatever the scope names) - newest first,
+#             one transaction per group, as detach_listing loops stamped
+#             undone_by='autodedup-legacy-retire:<run>' that write no ruling, pass after pass
+#             until no newly intact group appears (a chain R1 -> S -> T; at most 10 passes, then
+#             it stops and says so). It is refused before anything moves with listing_ids (it
+#             reads blocks only) and for a generation with no proposed group inside the scope.
+#             Every other group touching the area is reported, never touched: straddling,
+#             outside_scope_categories, operator_ruled_same (the undo would separate an
+#             operator "same" pair), operator_ruled_different (it would newly join a pair the
+#             operator ruled apart; machine guards do not count), engine_agrees_out_of_scope
+#             (every advert sits in ONE engine group this run may not merge - not proposed, or
+#             cut by the scope's edge - so undoing it would split what the engine calls one
+#             property; left for W6, reported with that group and why), operator_split (the
+#             operator already took an advert of it back), built_on, children_moved,
+#             survivor_merged_on, listing_gone. A group the engine itself splits (different
+#             engine groups, or ungrouped adverts) is undone. Engine groups count only when this run may
+#             merge them (proposed, inside the scope); the others touching the retire set are
+#             counted apart. max_clusters_per_run caps only the engine's merges: live, undone
+#             groups whose engine group it deferred are counted and a re-dispatch merges them;
+#             a dry run predicts the deferral. It reads the scope's area once per dispatch and
+#             drives every later read from those listing ids through indexes; the summary shows
+#             each read's wall time (timings). Writes out/apply/legacy_retire.json and a step
+#             summary section; a dry run writes nothing.
+#
+#   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group a generation, an apply run
+#             (run=) or a time window (since= / until=) applied, newest first. `dry_run=0`
+#             undoes them through unmerge_group in that order and marks them undone in
+#             autodedup.applied_merges; `cluster_key=` (with generation=) undoes one group.
+#             NOT gated by the scope - undo is the way back - and an undone group may merge
+#             again on a later apply. A group a later engine merge still builds on (more
+#             listings merged onto its survivor, or its survivor retired) is skipped and names
+#             the merge to undo first; a group taken apart outside the engine (its survivor
+#             merged on by another merge, or nothing of it left to move back) is skipped
+#             naming nothing - the dry run reports each group as the live run would treat it;
+#             a group the operator already undid is noted as undone by someone else, and its
+#             listings stay apart in every later generation's merges.
 #
 # Every other mode writes its own ledger row automatically - `running` when it starts, a
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
@@ -364,7 +443,12 @@ name: "AUTODEDUP: engine lane"
 # rt_parity accepts export_run, cohort, n, pairs, seed, generation, settings, model and
 # population (frozen, the default, or artifact); rt_equivalence accepts generation (default
 # rt), batch (REQUIRED - the batch generation to compare against) and tol (the score
-# tolerance, default 1e-6).
+# tolerance, default 1e-6); apply accepts generation (REQUIRED), dry_run (1, the default, or
+# 0), retire_legacy (0, the default, or 1) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=town:563510
+# quarter:490245`), listing_ids (SPACE-separated), all_blocks and max_clusters_per_run -
+# separate args, not one JSON `scope=`, because this workflow's charset check refuses braces
+# and quotes; unapply accepts dry_run and at least one of generation (with cluster_key), run
+# and since / until (ISO times, e.g. `since=2026-09-25T08:00Z`).
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
@@ -374,7 +458,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges; unapply = undo them."
         required: true
         default: "census"
         type: string

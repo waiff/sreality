@@ -21,6 +21,7 @@ const NOT_DESTINATIONS = new Set(['/', '*', 'estimate']);
  * fixture fails `builds every pattern` below rather than silently skipping. */
 const PARAM_FIXTURES: Record<string, string | number> = {
   id: 7,
+  propertyId: 42,
   source: 'bazos',
   nativeId: 'abc-123',
   sreality_id: -284913,

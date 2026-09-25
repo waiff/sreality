@@ -1049,14 +1049,8 @@ def kickoff_estimation_for_dispatch(
         "area_m2": float(listing["area_m2"]) if listing.get("area_m2") else None,
         "disposition": listing.get("disposition"),
         "floor": listing.get("floor"),
-        # Exclude the subject from its own cohort on BOTH arms. The surrogate
-        # arm is the only one that can exclude a listing with no sreality_id;
-        # the legacy arm stays populated (when there is one) for frozen specs.
+        # The subject's property is left out of its own cohort (decision 13).
         "exclude_listing_ids": [listing_id],
-        "exclude_ids": (
-            [int(listing["sreality_id"])]
-            if listing.get("sreality_id") is not None else []
-        ),
         # category_main/type are NOT columns on estimation_runs; carry them in
         # input_spec so run_pending_estimation can build ComparableFilters.
         "category_main": listing.get("category_main"),
@@ -1186,7 +1180,6 @@ def run_pending_estimation(run_id: int) -> None:
             LOG.warning("run_pending_estimation: run %s missing", run_id)
             return
 
-        sreality_id = row[0]
         spec = row[1] or {}
         estimate_kind = row[2] or "rent"
         listing_id = row[3]
@@ -1211,14 +1204,6 @@ def run_pending_estimation(run_id: int) -> None:
             area_m2=spec.get("area_m2"),
             disposition=spec.get("disposition"),
             floor=spec.get("floor"),
-            # NEVER fall back to a bare [sreality_id]: a NULL in this list makes
-            # `l.sreality_id <> ALL(...)` evaluate to NULL for every row that HAS
-            # a sreality_id, which empties the whole cohort rather than excluding
-            # one listing. Each arm falls back only to an id that actually exists.
-            exclude_ids=list(
-                spec.get("exclude_ids")
-                or ([sreality_id] if sreality_id is not None else [])
-            ),
             exclude_listing_ids=list(
                 spec.get("exclude_listing_ids")
                 or ([listing_id] if listing_id is not None else [])
@@ -1415,15 +1400,8 @@ def _insert_new_dispatches(
             "  (subscription_id, source_kind, property_id, sreality_id, listing_id, "
             "   change_kind, status, channel, trigger_price_czk, "
             "   target_channels, dedupe_key) "
-            "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
-            # `l` is properties_public, which exposes only the repr listing's LEGACY
-            # handle. Resolve the surrogate off the property parent instead of
-            # via listings.sreality_id, so a post-Gate-2 repr listing (sreality_id
-            # NULL) still stamps listing_id. Verified live: properties_public
-            # .sreality_id == properties.repr_listing_id and repr_listing_ref_id
-            # resolves to the same listing for all 461,163 rows, zero gaps.
-            "       (SELECT p.repr_listing_ref_id FROM properties p "
-            "         WHERE p.id = l.property_id), "
+            # `l` is properties_public: `listing_id` is the canonical advert (migration 561).
+            "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, l.listing_id, "
             "       'new', 'sent', 'in_app', l.price_czk, "
             "       %(target_channels)s::text[], "
             "       'wd:' || %(subscription_id)s || ':new:' || l.property_id::text "
@@ -1623,31 +1601,22 @@ def _recent_price_drops(
 
     Returns one `(property_id, snapshot_id, price_czk, prev_price_czk)` tuple
     PER in-window drop step — not one per property — so each genuine price cut
-    is its own notification event (the per-snapshot dedup grain). The window
-    function runs over the full per-property price series (so `prev` is correct
-    even when it predates the window); the candidate set is pre-narrowed to
-    properties touched in the window so the scan stays bounded.
+    is its own notification event (the per-snapshot dedup grain). Steps come from
+    `listing_price_steps` (migration 559): `prev` is the SAME advert's previous
+    priced snapshot, so a step never spans two adverts. Only the CANONICAL
+    advert's steps since it became canonical count (`repr_since`, migration 561):
+    the price an alert quotes is the price the property shows, and a merge,
+    detach or delisting that hands the slot to another advert fires nothing.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "WITH steps AS ("
-            "  SELECT c.property_id, s.id AS snapshot_id, s.scraped_at, s.price_czk, "
-            "         lag(s.price_czk) OVER w AS prev "
-            "  FROM listing_snapshots s "
-            "  JOIN listings c ON c.id = s.listing_id "
-            "  WHERE c.property_id IS NOT NULL AND s.price_czk IS NOT NULL "
-            "    AND c.property_id IN ("
-            "      SELECT c2.property_id FROM listing_snapshots s2 "
-            "      JOIN listings c2 ON c2.id = s2.listing_id "
-            "      WHERE s2.scraped_at > now() - %(win)s::interval "
-            "        AND c2.property_id IS NOT NULL"
-            "    ) "
-            "  WINDOW w AS (PARTITION BY c.property_id ORDER BY s.scraped_at, s.id)"
-            ") "
-            "SELECT property_id, snapshot_id, price_czk, prev FROM steps "
-            "WHERE prev IS NOT NULL AND price_czk < prev "
-            "  AND scraped_at > now() - %(win)s::interval "
-            "ORDER BY property_id, snapshot_id",
+            "SELECT ps.property_id, ps.snapshot_id, ps.price_czk, ps.prev_price_czk "
+            "FROM listing_price_steps ps "
+            "JOIN properties p ON p.id = ps.property_id "
+            " AND p.repr_listing_ref_id = ps.listing_id AND ps.scraped_at > p.repr_since "
+            "WHERE ps.price_czk < ps.prev_price_czk "
+            "  AND ps.scraped_at > now() - %(win)s::interval "
+            "ORDER BY ps.property_id, ps.snapshot_id",
             {"win": f"{window_days} days"},
         )
         return [
@@ -1731,15 +1700,8 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                     "   change_kind, status, channel, target_channels, "
                     "   trigger_snapshot_id, trigger_price_czk, prev_price_czk, dedupe_key) "
                     "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
-                    # `l` is properties_public, which exposes only the repr listing's LEGACY
-            # handle. Resolve the surrogate off the property parent instead of
-            # via listings.sreality_id, so a post-Gate-2 repr listing (sreality_id
-            # NULL) still stamps listing_id. Verified live: properties_public
-            # .sreality_id == properties.repr_listing_id and repr_listing_ref_id
-            # resolves to the same listing for all 461,163 rows, zero gaps.
-            "       (SELECT p.repr_listing_ref_id FROM properties p "
-            "         WHERE p.id = l.property_id), "
-                    "       'price_drop', 'sent', 'in_app', %(target_channels)s::text[], "
+                    "       l.listing_id, 'price_drop', 'sent', 'in_app', "
+                    "       %(target_channels)s::text[], "
                     "       d.snapshot_id, d.price_czk, d.prev_price, "
                     "       'wd:' || %(subscription_id)s || ':price_drop:' || d.snapshot_id::text "
                     "FROM properties_public l "
@@ -1788,7 +1750,7 @@ def _read_monitor_window_days(conn: "psycopg.Connection") -> int:
 _MONITORED_CTE = (
     "monitored AS ("
     "  SELECT cp.collection_id, p.id AS property_id, p.repr_listing_id, "
-    "         p.repr_listing_ref_id, "
+    "         p.repr_listing_ref_id, p.repr_since, "
     "         c.notify_channels, "
     "         greatest(cp.added_at, coalesce(c.monitoring_enabled_at, cp.added_at)) "
     "           AS monitor_since "
@@ -1847,38 +1809,29 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
     inserted = 0
 
     with conn.cursor() as cur:
-        # 1+2) price_drop / price_rise — per-snapshot transitions on the
-        # property's listings, replicated per monitored collection so each
+        # 1+2) price_drop / price_rise — the canonical advert's own price steps
+        # since it became canonical (`listing_price_steps`, migration 559;
+        # `repr_since`, migration 561), replicated per monitored collection so each
         # collection alerts independently. Snapshot grain == the watchdog's.
         cur.execute(
-            f"WITH {_MONITORED_CTE}, "
-            "steps AS ("
-            "  SELECT m.collection_id, m.notify_channels, m.monitor_since, l.property_id, "
-            "         l.sreality_id, l.id AS listing_id, "
-            "         s.id AS snapshot_id, s.scraped_at, s.price_czk, "
-            "         lag(s.price_czk) OVER ("
-            "           PARTITION BY m.collection_id, l.property_id "
-            "           ORDER BY s.scraped_at, s.id) AS prev "
-            "  FROM monitored m "
-            "  JOIN listings l ON l.property_id = m.property_id "
-            "  JOIN listing_snapshots s ON s.listing_id = l.id "
-            "  WHERE s.price_czk IS NOT NULL"
-            ") "
+            f"WITH {_MONITORED_CTE} "
             "INSERT INTO notification_dispatches "
             "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, trigger_snapshot_id, trigger_price_czk, "
             "   prev_price_czk, dedupe_key) "
-            "SELECT 'collection_monitor', st.collection_id, st.property_id, st.sreality_id, "
+            "SELECT 'collection_monitor', m.collection_id, st.property_id, m.repr_listing_id, "
             "       st.listing_id, "
-            "       CASE WHEN st.price_czk < st.prev THEN 'price_drop' ELSE 'price_rise' END, "
-            "       'sent', st.notify_channels, st.snapshot_id, st.price_czk, st.prev, "
-            "       'cm:' || st.collection_id::text || ':' || "
-            "         CASE WHEN st.price_czk < st.prev THEN 'price_drop' ELSE 'price_rise' END || "
+            "       CASE WHEN st.price_czk < st.prev_price_czk "
+            "            THEN 'price_drop' ELSE 'price_rise' END, "
+            "       'sent', m.notify_channels, st.snapshot_id, st.price_czk, st.prev_price_czk, "
+            "       'cm:' || m.collection_id::text || ':' || "
+            "         CASE WHEN st.price_czk < st.prev_price_czk "
+            "              THEN 'price_drop' ELSE 'price_rise' END || "
             "         ':' || st.snapshot_id::text "
-            "FROM steps st "
-            "WHERE st.prev IS NOT NULL AND st.price_czk <> st.prev "
-            "  AND st.scraped_at > now() - %(win)s::interval "
-            "  AND st.scraped_at > st.monitor_since "
+            "FROM monitored m "
+            "JOIN listing_price_steps st ON st.listing_id = m.repr_listing_ref_id "
+            "WHERE st.scraped_at > now() - %(win)s::interval "
+            "  AND st.scraped_at > m.monitor_since AND st.scraped_at > m.repr_since "
             "ON CONFLICT (dedupe_key) DO NOTHING",
             {"win": win},
         )

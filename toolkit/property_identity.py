@@ -1,42 +1,50 @@
-"""Merge / unmerge the canonical `properties` parent (multi-portal dedup PR2).
+"""One merge, one undo for the canonical `properties` parent (rule 15, decisions 8 and 17).
 
-A merge re-points a retired property's child listings onto the survivor and
-soft-retires the loser; the 19 FK child columns (15 tables) key on listings.sreality_id, so
-all history stays put. Every re-pointed child is logged to
-`property_merge_events`, which makes unmerge a deterministic replay even after
-the survivor later absorbs a third property. The survivor's stats are recomputed
-inline (reusing the recompute job's exact SQL) so there is no stale window.
-
-This module is the single merge chokepoint. Since the 2026-08 "NEW DEDUP" cutoff
-there is no automatic decision path at all — every merge is operator-ordered via
-`api.property_merge` (`POST /properties/merge`) — but the mechanics stay in one
-tested place, and every merge is reversible (`unmerge_group`).
+`merge_property_set` keeps the OLDEST record of a set and merges the rest into it through THE
+chokepoint, `merge_properties`, recomputing the survivor once; `detach_listing` moves ONE
+advert back to the property the ledger says it came from, or gives an advert no merge brought
+(an ingest-time grouping) a new record through the one birth path — a group undo is a loop of
+it. Callers:
+the operator's routes (`api.property_merge`) and, inside `app_settings.autodedup_apply_scope`
+only, the AUTODEDUP apply path. With `source='operator'` each is also a ruling (decision 8) in
+the review pages' store; an engine merge or its bulk undo never is.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 import psycopg
 from psycopg.types.json import Jsonb
 
+from autodedup import ui_sql as usql
+from scraper.db import create_singleton_properties
 from scripts.recompute_property_stats import recompute_mf_one, recompute_one
 from toolkit.browse_read_model import sync_browse_list
 from toolkit.dismissal_identity import reconcile_dismissals_on_merge
 from toolkit.operator_state import carry_operator_state_on_merge
 from toolkit.pipeline_identity import (
+    reconcile_pipeline_on_detach,
     reconcile_pipeline_on_merge,
-    reconcile_pipeline_on_unmerge,
 )
 from toolkit.room_taxonomy import category_main_compatible
 
-MergeSource = Literal["auto", "operator"]
+# "auto" = the removed legacy engine (historic rows only); "autodedup" = migration 558.
+MergeSource = Literal["auto", "operator", "autodedup"]
+
+# The `detach_listing` outcomes that move the advert: back to its origin, or to a new record.
+MOVED = frozenset({"detached", "split_native"})
 
 
 class MergeError(ValueError):
-    """A merge/unmerge precondition failed (e.g. a property is already merged)."""
+    """A merge/detach precondition failed (e.g. a property is already merged)."""
+
+
+class AssetLinkConflict(MergeError):
+    """Two different asset links in one merge (the survivor could keep only one, decision 17),
+    or two linked units in an engine merge (the operator's "different units", E903)."""
 
 
 def _now_iso() -> str:
@@ -59,6 +67,121 @@ WITH RECURSIVE chain(root, id, status, merged_into, depth) AS (
     WHERE c.status <> 'active' AND c.depth < 20
 )
 SELECT root, id FROM chain WHERE status = 'active'
+"""
+
+_LOCK_SET_SQL = """
+SELECT id, status, first_seen_at, asset_id, category_type, category_main
+FROM properties WHERE id = ANY(%(ids)s::bigint[])
+ORDER BY id
+FOR UPDATE
+"""
+
+# Decision 17: the one asset link moves onto the survivor, never left on a merged_away row; each
+# membership change is logged as `toolkit.asset_identity` logs a link or an unlink, the reason
+# naming the merge group so a detach can give the link back (`_RESTORE_ASSET_LINK_SQL`).
+_CARRY_ASSET_LINK_SQL = """
+WITH moved AS (
+    UPDATE properties
+    SET asset_id = CASE WHEN id = %(survivor)s::bigint THEN %(asset)s::bigint END
+    WHERE id IN (%(survivor)s::bigint, %(retired)s::bigint)
+      AND asset_id IS DISTINCT FROM
+          CASE WHEN id = %(survivor)s::bigint THEN %(asset)s::bigint END
+    RETURNING id, asset_id
+)
+INSERT INTO asset_membership_events (asset_id, property_id, action, reason, source)
+SELECT %(asset)s::bigint, m.id,
+       CASE WHEN m.asset_id IS NULL THEN 'unlinked' ELSE 'linked' END,
+       %(reason)s::text, %(source)s::text
+FROM moved m
+"""
+
+# The carry's inverse, when a detach reactivates the property a merge unlinked: the link it lost
+# (unless its asset dissolved since) comes back while a survivor on the advert's path (`path`, the
+# merges it undoes: `merges`) still holds it, and leaves each such survivor one of those merges
+# linked it to — so detaches in any order give every link back to where it was.
+_RESTORE_ASSET_LINK_SQL = """
+WITH carried AS (
+    SELECT e.asset_id FROM asset_membership_events e
+    JOIN assets a ON a.id = e.asset_id AND a.status = 'active'
+    WHERE e.property_id = %(restored)s::bigint AND e.action = 'unlinked'
+      AND e.reason = %(merge)s::text
+    ORDER BY e.id DESC LIMIT 1
+), holders AS (
+    SELECT p.id, EXISTS (
+             SELECT 1 FROM asset_membership_events s
+             WHERE s.property_id = p.id AND s.asset_id = p.asset_id AND s.action = 'linked'
+               AND s.reason = ANY(%(merges)s::text[])) AS carried_here
+    FROM properties p JOIN carried c ON p.asset_id = c.asset_id
+    WHERE p.id = ANY(%(path)s::bigint[])
+), moved AS (
+    UPDATE properties p
+    SET asset_id = CASE WHEN p.id = %(restored)s::bigint THEN c.asset_id END
+    FROM carried c
+    WHERE EXISTS (SELECT 1 FROM holders)
+      AND ((p.id = %(restored)s::bigint AND p.asset_id IS NULL)
+           OR p.id IN (SELECT h.id FROM holders h WHERE h.carried_here))
+    RETURNING p.id, p.asset_id, c.asset_id AS carried
+)
+INSERT INTO asset_membership_events (asset_id, property_id, action, reason, source)
+SELECT m.carried, m.id, CASE WHEN m.asset_id IS NULL THEN 'unlinked' ELSE 'linked' END,
+       %(detach)s::text, %(source)s::text
+FROM moved m
+"""
+
+# The advert each property's Browse card shows, while still its child: the card the operator ticked.
+_CANONICAL_ADVERTS_SQL = """
+SELECT p.repr_listing_ref_id FROM properties p
+JOIN listings l ON l.id = p.repr_listing_ref_id AND l.property_id = p.id
+WHERE p.id = ANY(%(ids)s::bigint[])
+"""
+
+_PLACES_SQL = "SELECT id, property_id FROM listings WHERE id = ANY(%(ids)s::bigint[])"
+
+# Each property's adverts, and its own among them: no standing merge moved them there.
+_SIZES_SQL = """
+SELECT l.property_id, count(*), count(*) FILTER (WHERE NOT EXISTS (
+         SELECT 1 FROM property_merge_events e
+         WHERE e.listing_ref_id = l.id AND e.undone_at IS NULL))
+FROM listings l WHERE l.property_id = ANY(%(ids)s::bigint[])
+GROUP BY l.property_id
+"""
+
+# A native split's ONE ledger row: the ingest-time grouping no merge ever recorded, written as
+# the merge it amounts to (the new record `born` merged into the property the advert leaves)
+# and closed as undone by the operator's split, so the advert's origin is its new record and
+# the row replays like any detached merge.
+_INGEST_GROUPING_SQL = """
+INSERT INTO property_merge_events
+    (merge_group_id, survivor_property_id, retired_property_id, listing_id, listing_ref_id,
+     prev_property_id, reason, source, undone_at, undone_by)
+SELECT %(group)s, %(left)s, %(born)s, l.sreality_id, l.id, %(born)s, 'ingest_grouping',
+       'operator', now(), %(by)s
+FROM listings l WHERE l.id = %(listing)s
+RETURNING id
+"""
+
+_STATUS_SQL = """
+SELECT id, status, merged_into FROM properties WHERE id = ANY(%(ids)s::bigint[]) ORDER BY id
+"""
+
+# Every live ledger row of these adverts, oldest first: the first row's `prev_property_id` is the
+# advert's ORIGIN (where it sat before every merge that still stands), the last row's survivor
+# where the newest merge put it.
+_LIVE_MOVES_SQL = """
+SELECT e.listing_ref_id, e.id, e.merge_group_id::text, e.survivor_property_id,
+       e.prev_property_id, e.source, e.created_at
+FROM property_merge_events e
+WHERE e.listing_ref_id = ANY(%(ids)s::bigint[]) AND e.undone_at IS NULL
+ORDER BY e.listing_ref_id, e.id
+"""
+
+# One statement, so the status-event trigger (migration 559) logs only where history disagrees.
+_REACTIVATE_SQL = """
+UPDATE properties p
+SET status = 'active', merged_into = NULL, merged_at = NULL,
+    is_active = EXISTS (
+      SELECT 1 FROM listings l WHERE l.property_id = p.id AND l.is_active)
+WHERE p.id = %(pid)s AND p.status = 'merged_away'
 """
 
 
@@ -85,6 +208,60 @@ def resolve_active_property_id(
     return resolve_active_property_ids(conn, [property_id]).get(property_id)
 
 
+def survivor_of(first_seen: Mapping[int, datetime | None]) -> int:
+    """Decision 17: the oldest record (`first_seen_at`, unknown last), then the lowest id."""
+    return min(first_seen, key=lambda pid: (first_seen[pid] is None, first_seen[pid] or 0, pid))
+
+
+def record_rulings(
+    conn: psycopg.Connection,
+    pairs: set[tuple[int, int]],
+    *,
+    verdict: Literal["same", "different"],
+    decided_by: str,
+    note: str,
+) -> int:
+    """Rule each (lo, hi) listings.id pair as `POST /autodedup/verdict` does; returns the count."""
+    ordered = sorted(pairs)
+    if not ordered:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(usql.VERDICT_PAIR_UPSERT_SQL, [
+            {"listing_lo": lo, "listing_hi": hi, "verdict": verdict, "note": note,
+             "reasons": [], "decided_by": decided_by}
+            for lo, hi in ordered
+        ])
+        if verdict in usql.NEGATIVE_VERDICTS:
+            cur.executemany(usql.MUST_NOT_LINK_UPSERT_SQL, [
+                {"listing_lo": lo, "listing_hi": hi, "reason": note} for lo, hi in ordered
+            ])
+        else:
+            cur.executemany(usql.MUST_NOT_LINK_RETRACT_SQL, [
+                {"listing_lo": lo, "listing_hi": hi} for lo, hi in ordered
+            ])
+    return len(ordered)
+
+
+def _category_refusal(
+    a: tuple[str | None, str | None], b: tuple[str | None, str | None],
+) -> str | None:
+    """Rule 15's gate on two (category_type, category_main): sale != rent, flat != house, except
+    the one sanctioned dum <-> komercni. NULL = unknown, not a conflict."""
+    if a[0] is not None and b[0] is not None and a[0] != b[0]:
+        return f"category_type mismatch ({a[0]} vs {b[0]}); refusing to merge"
+    if not category_main_compatible(a[1], b[1]):
+        return f"category_main mismatch ({a[1]} vs {b[1]}); refusing to merge"
+    return None
+
+
+def _canonical_pairs(conn: psycopg.Connection, property_ids: list[int]) -> set[tuple[int, int]]:
+    """Every (lo, hi) pair of the properties' canonical adverts."""
+    with conn.cursor() as cur:
+        cur.execute(_CANONICAL_ADVERTS_SQL, {"ids": sorted(set(property_ids))})
+        ids = sorted({int(r[0]) for r in cur.fetchall()})
+    return {(a, b) for i, a in enumerate(ids) for b in ids[i + 1:]}
+
+
 def merge_properties(
     conn: psycopg.Connection,
     *,
@@ -95,16 +272,9 @@ def merge_properties(
     confidence: float | None = None,
     markers: dict[str, Any] | None = None,
     merge_group_id: str | None = None,
-) -> dict[str, Any]:
-    """Merge `retired_id` into `survivor_id`. One transaction, reversible.
-
-    Re-points every child of the retired property onto the survivor, logs one
-    `property_merge_events` row per child, carries the retired property's
-    property-anchored operator state (collections/tags/notes/watchdog dispatches,
-    see `toolkit.operator_state`) onto the survivor, soft-retires the loser, and
-    recomputes the survivor inline.
-    Returns the standard toolkit envelope with the new merge_group_id.
-    """
+) -> int:
+    """THE chokepoint: one retired property into the survivor, returning the adverts moved;
+    `merge_property_set` recomputes."""
     if survivor_id == retired_id:
         raise MergeError("survivor and retired must differ")
     group = merge_group_id or str(uuid.uuid4())
@@ -112,7 +282,7 @@ def merge_properties(
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, status, category_type, category_main "
+                "SELECT id, status, category_type, category_main, asset_id "
                 "FROM properties WHERE id IN (%s, %s) FOR UPDATE",
                 (survivor_id, retired_id),
             )
@@ -123,28 +293,17 @@ def merge_properties(
                 raise MergeError(f"survivor {survivor_id} is not active")
             if rows[retired_id][1] != "active":
                 raise MergeError(f"retired {retired_id} is not active")
-            # Final category guard at THE chokepoint every merge path funnels
-            # through (operator one-click, Browse merge-mode).
-            # A sale and a rental are never the same property, and a flat and a
-            # house aren't either — but dum <-> komercni IS allowed (the same
-            # building listed as a house on one portal, commercial on another).
-            # `category_main_compatible` encodes that one sanctioned cross-type;
-            # refuse everything else even on an operator-initiated merge. NULL =
-            # unknown, not a conflict. With no automatic decision layer left,
-            # this is the ONLY category gate — nothing upstream pre-screens.
-            s_ct, s_cm = rows[survivor_id][2], rows[survivor_id][3]
-            r_ct, r_cm = rows[retired_id][2], rows[retired_id][3]
-            if s_ct is not None and r_ct is not None and s_ct != r_ct:
-                raise MergeError(
-                    f"category_type mismatch ({s_ct} vs {r_ct}); refusing to merge"
-                )
-            if not category_main_compatible(s_cm, r_cm):
-                raise MergeError(
-                    f"category_main mismatch ({s_cm} vs {r_cm}); refusing to merge"
+            # The category gate no caller can route around.
+            refusal = _category_refusal(rows[survivor_id][2:4], rows[retired_id][2:4])
+            if refusal:
+                raise MergeError(refusal)
+            s_asset, r_asset = rows[survivor_id][4], rows[retired_id][4]
+            if s_asset is not None and r_asset is not None and s_asset != r_asset:
+                raise AssetLinkConflict(
+                    f"two asset links ({s_asset} vs {r_asset}); refusing to merge"
                 )
 
-            # `listing_id` here is a LEGACY sreality_id; `listing_ref_id` (migration
-            # 323) carries the surrogate listings.id alongside it during dual-write.
+            # `listing_id` is the LEGACY sreality_id; a detach reads `listing_ref_id` (mig 323).
             cur.execute(
                 """
                 INSERT INTO property_merge_events
@@ -170,14 +329,15 @@ def merge_properties(
                 "UPDATE listings SET property_id = %s WHERE property_id = %s",
                 (survivor_id, retired_id),
             )
-            # Property-anchored operator state (collections/tags/notes/watchdog
-            # dispatches) follows the property onto the survivor in this same
-            # transaction, so it never orphans onto the merged_away loser.
+            if r_asset is not None:
+                cur.execute(_CARRY_ASSET_LINK_SQL, {
+                    "survivor": survivor_id, "retired": retired_id, "asset": r_asset,
+                    "reason": f"merge {group}",
+                    "source": "operator" if source == "operator" else "auto",
+                })
             carry_operator_state_on_merge(
                 cur, retired_id=retired_id, survivor_id=survivor_id
             )
-            # The single-valued deal-pipeline stage can't be a generic re-point
-            # (PK on property_id); keep the most-advanced stage on the survivor.
             reconcile_pipeline_on_merge(
                 cur, retired_id=retired_id, survivor_id=survivor_id,
                 merge_group_id=group,
@@ -196,23 +356,78 @@ def merge_properties(
                 """,
                 (survivor_id, retired_id),
             )
+    return moved
 
-        recompute_one(conn, survivor_id)
-        recompute_mf_one(conn, survivor_id)
-        # Patch the Browse read model in the same txn so the merge is visible
-        # before the next 5-min rebuild (the survivor updates, the retired row
-        # drops out — it no longer matches browse_projection's active filter).
-        sync_browse_list(conn, [survivor_id, retired_id])
+
+def merge_property_set(
+    conn: psycopg.Connection,
+    property_ids: list[int],
+    *,
+    source: MergeSource,
+    reason: str,
+    merge_group_id: str | None = None,
+    confidence: float | None = None,
+    markers: dict[str, Any] | None = None,
+    decided_by: str | None = None,
+) -> dict[str, Any]:
+    """Merge an active SET into its oldest record under ONE group, in one transaction; two
+    different asset links, any rule-15 category clash within the set, or (not the operator's
+    own merge) two linked units refuse it. `source='operator'` rules the canonical adverts
+    "same"."""
+    ids = sorted({int(p) for p in property_ids})
+    if len(ids) < 2:
+        raise MergeError("need at least two distinct properties")
+    if source == "operator" and not decided_by:
+        raise MergeError("an operator merge is a ruling: decided_by is required")
+    group = merge_group_id or str(uuid.uuid4())
+
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(_LOCK_SET_SQL, {"ids": ids})
+            rows = {int(r[0]): r for r in cur.fetchall()}
+        missing = [pid for pid in ids if pid not in rows]
+        inactive = [pid for pid in ids if pid in rows and rows[pid][1] != "active"]
+        if missing or inactive:
+            raise MergeError(f"properties not found {missing} or not active {inactive}")
+        carriers = [pid for pid in ids if rows[pid][3] is not None]
+        assets = sorted({int(rows[pid][3]) for pid in carriers})
+        if len(assets) > 1 or (len(carriers) > 1 and source != "operator"):
+            raise AssetLinkConflict(
+                f"asset links {assets} on {carriers}; refusing to merge")
+        # Every pair, not only against the survivor: its stored category is not recomputed
+        # until the whole set has merged, so a NULL there would let a sale and a rent through.
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                refusal = _category_refusal(rows[a][4:6], rows[b][4:6])
+                if refusal:
+                    raise MergeError(refusal)
+        survivor = survivor_of({pid: rows[pid][2] for pid in ids})
+        retired = [pid for pid in ids if pid != survivor]
+        pairs = _canonical_pairs(conn, ids) if source == "operator" else set()
+        moved = 0
+        for rid in retired:
+            moved += merge_properties(
+                conn, survivor_id=survivor, retired_id=rid, reason=reason, source=source,
+                confidence=confidence, markers=markers, merge_group_id=group,
+            )
+        recompute_one(conn, survivor)
+        recompute_mf_one(conn, survivor)
+        sync_browse_list(conn, [survivor, *retired])
+        ruled = record_rulings(
+            conn, pairs, verdict="same", decided_by=str(decided_by),
+            note=f"operator merge {group}",
+        ) if pairs else 0
 
     return {
         "data": {
             "merge_group_id": group,
-            "survivor_id": survivor_id,
-            "retired_id": retired_id,
+            "survivor_id": survivor,
+            "retired_ids": retired,
             "listings_moved": moved,
+            "pairs_ruled_same": ruled,
         },
         "metadata": {
-            "tool": "merge_properties",
+            "tool": "merge_property_set",
             "reason": reason,
             "source": source,
             "queried_at": _now_iso(),
@@ -220,232 +435,221 @@ def merge_properties(
     }
 
 
-# One scoped singleton insert, mirroring scripts.recompute_property_stats
-# _ATTACH_INSERT_SQL's column contract (the path every new listing takes to get
-# its own property). Scoped to one sreality_id + RETURNING so the split links
-# unambiguously, rather than relying on the global repr_listing_id join.
-_SPLIT_INSERT_ONE_SQL = """
-    INSERT INTO properties (
-        repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
-        area_m2, current_price_czk,
-        has_balcony, has_parking, has_lift, building_type, condition,
-        ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
-        estate_area, usable_area, garden_area, parking_lots,
-        source, energy_rating,
-        building_condition_level, apartment_condition_level,
-        is_active, first_seen_at, last_seen_at, last_change_at,
-        source_count, distinct_site_count, price_per_m2_source_listing_id
-    )
-    SELECT
-        l.sreality_id, l.id, l.category_main, l.category_type, l.disposition,
-        l.area_m2, l.price_czk,
-        l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
-        l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
-        l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
-        l.source, l.energy_rating,
-        l.building_condition_level, l.apartment_condition_level,
-        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1,
-        -- One child: price and area come from one row by construction (mig 424).
-        price_per_m2_source_id(l.price_czk, l.area_m2, l.id)
-    FROM listings l
-    WHERE l.id = %(lid)s
-    RETURNING id
-"""
+def listing_origins(
+    conn: psycopg.Connection, listing_ids: list[int],
+) -> dict[int, tuple[int, str, datetime]]:
+    """Each advert's ORIGIN, where a detach returns it, with the source and time of the merge
+    that took it from there; one no standing merge moved is absent."""
+    if not listing_ids:
+        return {}
+    out: dict[int, tuple[int, str, datetime]] = {}
+    with conn.cursor() as cur:
+        cur.execute(_LIVE_MOVES_SQL, {"ids": sorted({int(i) for i in listing_ids})})
+        for lid, _id, _group, _survivor, prev, source, at in cur.fetchall():
+            out.setdefault(int(lid), (int(prev), source, at))
+    return out
 
 
-def split_property_to_singletons(
+def _detach_plan(
+    current: int | None, moves: list[tuple], merge_group_id: str | None,
+    size: tuple[int, int],
+) -> tuple[str, list[tuple], int | None]:
+    """(outcome, the ledger rows it undoes, where the advert goes; None = a record not yet born).
+    A move is one live ledger row, oldest first: (id, merge_group_id, survivor_property_id,
+    prev_property_id); `size` = (adverts, own adverts) on the advert's property. A native advert
+    leaves only while another own advert stays: the merged ones go home, never leaving a
+    property with no advert of its own (`last_native`)."""
+    if not moves:
+        if merge_group_id is not None or size[0] < 2:
+            return "not_merged", [], current
+        if size[1] < 2:
+            return "last_native", [], current
+        return "split_native", [], None
+    if merge_group_id is not None:
+        last = moves[-1]
+        if last[1] != merge_group_id:
+            live = any(m[1] == merge_group_id for m in moves)
+            return ("moved_on" if live else "not_merged"), [], current
+        undo, target = [last], int(last[3])
+    else:
+        undo, target = list(moves), int(moves[0][3])
+    if current != int(moves[-1][2]):
+        return "moved_since", [], current
+    if target == current:
+        return "on_origin", [], current
+    return "detached", undo, target
+
+
+def _origin_gone(state: tuple[str, int | None] | None, undo: list[tuple]) -> bool:
+    """The origin was retired since into another property by a merge that still stands: bringing
+    it back would half-undo that merge, so the advert stays (`origin_moved_on`)."""
+    return state is None or (state[0] != "active" and state[1] != int(undo[0][2]))
+
+
+def _plan_detaches(
+    cur: psycopg.Cursor, listing_ids: list[int], merge_group_id: str | None,
+) -> dict[int, tuple[int | None, str, list[tuple], int | None]]:
+    """(current property, `_detach_plan`) per advert found, from unlocked reads."""
+    cur.execute(_PLACES_SQL, {"ids": listing_ids})
+    places = {int(lid): int(pid) if pid is not None else None for lid, pid in cur.fetchall()}
+    cur.execute(_LIVE_MOVES_SQL, {"ids": listing_ids})
+    moves: dict[int, list[tuple]] = {}
+    for row in cur.fetchall():
+        moves.setdefault(int(row[0]), []).append(tuple(row[1:5]))
+    native = sorted({pid for lid, pid in places.items() if pid is not None and lid not in moves})
+    sizes: dict[int, tuple[int, int]] = {}
+    if merge_group_id is None and native:
+        cur.execute(_SIZES_SQL, {"ids": native})
+        sizes = {int(pid): (int(n), int(own)) for pid, n, own in cur.fetchall()}
+    return {lid: (at, *_detach_plan(at, moves.get(lid, []), merge_group_id,
+                                    sizes.get(at, (0, 0))))
+            for lid, at in places.items()}
+
+
+def detach_outcomes(
+    conn: psycopg.Connection, listing_ids: list[int], *, merge_group_id: str | None = None,
+) -> dict[int, str]:
+    """The `outcome` `detach_listing` would answer for each advert now, read-only: what a bulk
+    undo's dry run reports, and (in `MOVED`) whether a split would move it."""
+    ids = sorted({int(i) for i in listing_ids})
+    if not ids:
+        return {}
+    with conn.cursor() as cur:
+        plans = _plan_detaches(cur, ids, merge_group_id)
+        cur.execute(_STATUS_SQL, {"ids": sorted(
+            {t for _at, out, _u, t in plans.values() if out == "detached"})})
+        state = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+    return {lid: "origin_moved_on" if out == "detached" and _origin_gone(state.get(t), undo)
+            else out for lid, (_at, out, undo, t) in plans.items()}
+
+
+def _split_native(
+    conn: psycopg.Connection, listing_id: int, current: int, *, decided_by: str,
+) -> tuple[str, list[tuple], int | None]:
+    """A native advert leaves for a NEW record born through THE birth path
+    (`scraper.db.create_singleton_properties`); ONE closed ledger row (`_INGEST_GROUPING_SQL`)
+    records it. The merge's lock order: the property, then the advert, re-planned under it."""
+    with conn.cursor() as cur:
+        cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": [current]})
+        at, outcome, _undo, _target = _plan_detaches(cur, [listing_id], None)[listing_id]
+        if at == current and outcome in ("not_merged", "last_native"):
+            return outcome, [], current
+        if at != current or outcome != "split_native":
+            return "moved_since", [], current
+        cur.execute(
+            "UPDATE listings SET property_id = %s WHERE id = %s AND property_id = %s",
+            (None, listing_id, current),
+        )
+        if not cur.rowcount:
+            return "moved_since", [], current
+    (born,) = create_singleton_properties(conn, [listing_id])
+    group = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(_INGEST_GROUPING_SQL, {
+            "group": group, "left": current, "born": born, "by": decided_by,
+            "listing": listing_id,
+        })
+        (row_id,) = cur.fetchone()
+    return "split_native", [(int(row_id), group, current, born)], born
+
+
+def detach_listing(
     conn: psycopg.Connection,
+    listing_id: int,
     *,
-    property_id: int,
+    decided_by: str,
+    reason: str | None = None,
+    source: MergeSource = "operator",
+    merge_group_id: str | None = None,
 ) -> dict[str, Any]:
-    """Dissolve a wrongly-grouped property back into singletons. One transaction.
-
-    Keeps the representative child on the property (the same row recompute_one
-    would pick) and detaches every other child onto its own fresh singleton
-    property (mirroring how a brand-new listing gets one). Nothing is deleted;
-    the survivor and each new singleton end up as valid, single-child properties.
-    Corrects legacy geo-matcher groupings the street+disposition engine would
-    never make — a flat merged with a house, a sale with a rental, a flat with a
-    commercial unit (rule #15). The dedup engine re-merges any legitimate
-    same-category pairs on its next run.
-    """
+    """Split ONE advert off its property: a merged one back to its ORIGIN (with `merge_group_id`,
+    to where it sat before that merge, only while it is the newest to move it), its origin
+    reactivated with its pipeline card and asset link if that merge retired it; a native one (no
+    standing merge moved it), while another own advert stays, to a NEW record (`split_native`:
+    the operator only, never group-scoped; any other source answers `propose_only`, decision 9).
+    Other state, the pipeline card included, stays on the property left (rules 18, 22).
+    Idempotent, the `outcome` saying why nothing moved. `source='operator'` rules it "different"
+    from every advert that stays. Stable signature: the operator's routes, `unapply` and the
+    engine's W5 reconcile call it."""
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, status FROM properties WHERE id = %s FOR UPDATE",
-                (property_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise MergeError(f"property {property_id} not found")
-            if row[1] != "active":
-                raise MergeError(f"property {property_id} is not active")
-
-            # Same ordering recompute_one's representative (repr) pick uses, so the
-            # child that stays on this property is the one it would choose anyway:
-            # active-first, then the shared trust order (migration 311), then
-            # recency, then id DESC (was sreality_id DESC — same total order
-            # today, but the surrogate is the one that survives Gate 2).
-            cur.execute(
-                """
-                SELECT id FROM listings WHERE property_id = %s
-                ORDER BY is_active DESC, source_trust_rank(source),
-                         last_seen_at DESC NULLS LAST, id DESC
-                FOR UPDATE
-                """,
-                (property_id,),
-            )
-            child_ids = [int(r[0]) for r in cur.fetchall()]
-            if len(child_ids) <= 1:
-                return {
-                    "data": {
-                        "property_id": property_id,
-                        "anchor_listing_id": child_ids[0] if child_ids else None,
-                        "detached_listing_ids": [],
-                        "new_property_ids": [],
-                    },
-                    "metadata": {
-                        "tool": "split_property_to_singletons",
-                        "queried_at": _now_iso(),
-                    },
-                }
-
-            anchor, detach = child_ids[0], child_ids[1:]
-            new_ids: list[int] = []
-            for lid in detach:
-                cur.execute(_SPLIT_INSERT_ONE_SQL, {"lid": lid})
-                new_id = int(cur.fetchone()[0])
-                cur.execute(
-                    "UPDATE listings SET property_id = %s WHERE id = %s",
-                    (new_id, lid),
-                )
-                new_ids.append(new_id)
-
-        recompute_one(conn, property_id)
-        recompute_mf_one(conn, property_id)
-        for nid in new_ids:
-            recompute_mf_one(conn, nid)
-        # The kept property plus every detached singleton are all newly active
-        # rows Browse must show — patch them into the read model in the same txn.
-        sync_browse_list(conn, [property_id, *new_ids])
-
-    return {
-        "data": {
-            "property_id": property_id,
-            "anchor_listing_id": anchor,
-            "detached_listing_ids": detach,
-            "new_property_ids": new_ids,
-        },
-        "metadata": {
-            "tool": "split_property_to_singletons",
-            "queried_at": _now_iso(),
-        },
-    }
-
-
-def unmerge_group(
-    conn: psycopg.Connection,
-    *,
-    merge_group_id: str,
-    undone_by: str,
-) -> dict[str, Any]:
-    """Reverse one merge group: a deterministic replay of its ledger.
-
-    Each not-yet-undone event moves its child back to the retired property — but
-    only if the child still points at the survivor (a child re-merged elsewhere
-    since is left alone and reported as a conflict, never yanked). Retired
-    properties are reactivated and both sides recomputed inline.
-    """
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT survivor_property_id, retired_property_id,
-                       -- Prefer the surrogate (mig 323); fall back to resolving the
-                       -- legacy handle for ledger rows written before dual-write.
-                       -- NOTE: property_merge_events.listing_id is SREALITY-valued
-                       -- despite its name — listing_ref_id is the surrogate twin.
-                       coalesce(
-                         e.listing_ref_id,
-                         (SELECT l.id FROM listings l WHERE l.sreality_id = e.listing_id)
-                       ) AS listing_ref_id
-                FROM property_merge_events e
-                WHERE merge_group_id = %s AND undone_at IS NULL
-                ORDER BY id
-                """,
-                (merge_group_id,),
-            )
-            events = cur.fetchall()
-            if not events:
-                raise MergeError(
-                    f"no active merge events for group {merge_group_id}"
-                )
-
-            survivor_id = int(events[0][0])
-            retired_ids: set[int] = set()
-            moved_back = 0
-            conflicts: list[int] = []
-            for _surv, retired, listing_ref_id in events:
-                retired_ids.add(int(retired))
-                if listing_ref_id is None:
-                    # Neither handle resolves (the listing is gone entirely) —
-                    # nothing to move back; record it as a conflict, don't crash.
-                    conflicts.append(0)
-                    continue
-                cur.execute(
-                    "UPDATE listings SET property_id = %s "
-                    "WHERE id = %s AND property_id = %s",
-                    (retired, listing_ref_id, survivor_id),
-                )
-                if (cur.rowcount or 0) == 1:
-                    moved_back += 1
+            plan = _plan_detaches(cur, [int(listing_id)], merge_group_id).get(int(listing_id))
+        if plan is None:
+            raise MergeError(f"listing {listing_id} not found")
+        current, outcome, undo, target = plan
+        reactivated, ruled = False, 0
+        if outcome == "split_native":
+            assert current is not None
+            outcome, undo, target = _split_native(
+                conn, int(listing_id), current, decided_by=decided_by,
+            ) if source == "operator" else ("propose_only", [], current)
+        if outcome == "detached":
+            # The merge's lock order, properties before the advert; the origin's state is read
+            # under the lock, and the advert moves only if it still sits where the ledger was read.
+            with conn.cursor() as cur:
+                cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": sorted({current, target})})
+                locked = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+                if _origin_gone(locked.get(target), undo):
+                    outcome, undo, target = "origin_moved_on", [], current
                 else:
-                    conflicts.append(int(listing_ref_id))
-
-            cur.execute(
-                """
-                UPDATE properties
-                SET status = 'active', merged_into = NULL, merged_at = NULL
-                WHERE id = ANY(%s)
-                """,
-                (list(retired_ids),),
-            )
-            # Reactivated retired properties get their pre-merge pipeline card
-            # back from the snapshot (lossless); runs after the reactivation so
-            # the restore targets active properties.
-            reconcile_pipeline_on_unmerge(
-                cur, merge_group_id=merge_group_id, survivor_id=survivor_id
-            )
-            cur.execute(
-                """
-                UPDATE property_merge_events
-                SET undone_at = now(), undone_by = %s
-                WHERE merge_group_id = %s AND undone_at IS NULL
-                """,
-                (undone_by, merge_group_id),
-            )
-
-        recompute_one(conn, survivor_id)
-        recompute_mf_one(conn, survivor_id)
-        for rid in retired_ids:
-            recompute_one(conn, rid)
-            recompute_mf_one(conn, rid)
-        # The survivor plus every reactivated retired property are all active
-        # again — patch them into the read model in the same txn so the unmerge
-        # is visible before the next rebuild.
-        sync_browse_list(conn, [survivor_id, *retired_ids])
+                    cur.execute(
+                        "UPDATE listings SET property_id = %s WHERE id = %s AND property_id = %s",
+                        (target, listing_id, current),
+                    )
+                    if not cur.rowcount:
+                        outcome, undo, target = "moved_since", [], current
+        if outcome == "detached":
+            assert current is not None and target is not None
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE property_merge_events SET undone_at = now(), undone_by = %s "
+                    "WHERE id = ANY(%s) AND undone_at IS NULL",
+                    (decided_by, [int(m[0]) for m in undo]),
+                )
+                cur.execute(_REACTIVATE_SQL, {"pid": target})
+                reactivated = (cur.rowcount or 0) == 1
+                if reactivated:
+                    restore_group, restore_survivor = str(undo[0][1]), int(undo[0][2])
+                    reconcile_pipeline_on_detach(
+                        cur, merge_group_id=restore_group, restored_id=target,
+                        survivor_id=current if current == restore_survivor else None,
+                    )
+                    cur.execute(_RESTORE_ASSET_LINK_SQL, {
+                        "restored": target, "merge": f"merge {restore_group}",
+                        "merges": [f"merge {m[1]}" for m in undo],
+                        "path": [int(m[2]) for m in undo], "detach": f"detach {restore_group}",
+                        "source": "operator" if source == "operator" else "auto",
+                    })
+        if outcome in MOVED:
+            if source == "operator":
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id FROM listings WHERE property_id = %s", (current,))
+                    staying = {int(r[0]) for r in cur.fetchall()}
+                ruled = record_rulings(
+                    conn, {(min(listing_id, s), max(listing_id, s)) for s in staying},
+                    verdict="different", decided_by=decided_by,
+                    note=f"operator detach from {current}" + (f": {reason}" if reason else ""),
+                )
+            for pid in (current, target):
+                recompute_one(conn, pid)
+                recompute_mf_one(conn, pid)
+            sync_browse_list(conn, [current, target])
 
     return {
         "data": {
-            "merge_group_id": merge_group_id,
-            "survivor_id": survivor_id,
-            "retired_ids": sorted(retired_ids),
-            "listings_moved_back": moved_back,
-            "conflicts": conflicts,
+            "listing_id": int(listing_id),
+            "detached": outcome in MOVED,
+            "outcome": outcome,
+            "survivor_property_id": current,
+            "restored_property_id": target,
+            "reactivated": reactivated,
+            "merge_group_ids": sorted({str(m[1]) for m in undo}),
+            "rulings_written": ruled,
         },
         "metadata": {
-            "tool": "unmerge_group",
-            "undone_by": undone_by,
+            "tool": "detach_listing",
+            "source": source,
+            "decided_by": decided_by,
             "queried_at": _now_iso(),
         },
     }

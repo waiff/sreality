@@ -7,6 +7,8 @@
     python3 -m autodedup.lane --mode labels --args "generation=g4" --out out/
     python3 -m autodedup.lane --mode record --args "wave=W0,title=Region census,cost_usd=0"
     python3 -m autodedup.lane --mode record --args "id=12,cost_usd=3.10,status=done"
+    python3 -m autodedup.lane --mode apply --args "generation=g12" --out out/
+    python3 -m autodedup.lane --mode unapply --args "generation=g12,dry_run=0" --out out/
 
 `probes` carries the corpus-wide measurements (ingest rate, one portal's location posture)
 that are block-independent, so the census never pays for them once per block. `export` dumps
@@ -45,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from autodedup import iterations
+from autodedup.apply import run_apply, run_unapply
 from autodedup.census import run_census, run_probes, write_json
 from autodedup.export import run_export
 from autodedup.incremental_lane import run_incremental, run_rt_seed
@@ -71,6 +74,8 @@ MODES: dict[str, Mode] = {
     "labels": run_labels,
     "record": run_record,
     "town": run_town,
+    "apply": run_apply,
+    "unapply": run_unapply,
 }
 
 # `incremental`, `rt_seed`, `rt_parity`, `rt_equivalence` and `town` are deliberately ABSENT
@@ -144,6 +149,35 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         ),
         "tools": [
             "autodedup.labels_lane", "autodedup.labels", "autodedup.lane", "GitHub Actions",
+            "Postgres (schema autodedup)",
+        ],
+    },
+    "apply": {
+        "wave": "A1",
+        "title": "Apply a generation's groups",
+        "approach": (
+            "One generation's groups planned into production merges - survivor = the "
+            "oldest record (first_seen_at, then the lowest id); every refusal recorded with "
+            "its reason - and, only when dry_run=0 and inside the autodedup_apply_scope row, "
+            "written through merge_property_set with source 'autodedup' and one merge "
+            "group per engine group."
+        ),
+        "tools": [
+            "autodedup.apply", "toolkit.property_identity", "autodedup.lane", "GitHub Actions",
+            "Postgres (schema autodedup)",
+        ],
+    },
+    "unapply": {
+        "wave": "A1",
+        "title": "Undo the engine's merges",
+        "approach": (
+            "Every live merge group one generation, one apply run or one time window applied, "
+            "undone newest-first through unmerge_group and marked undone in "
+            "autodedup.applied_merges - a group a later engine merge builds on waits for that "
+            "one; dry_run=1 lists them."
+        ),
+        "tools": [
+            "autodedup.apply", "toolkit.property_identity", "autodedup.lane", "GitHub Actions",
             "Postgres (schema autodedup)",
         ],
     },
