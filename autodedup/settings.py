@@ -1036,6 +1036,9 @@ class Settings:
     d43_position_designator: bool = False
     # E296 (T4): the named villa of a multi-villa project and the residence code a body names
     # as its own subject (`VILA LOUKA REZIDENCE A3`; `Rezidence A2` against `Rezidence A3`).
+    # REFUSED with numbers (D84): off in w29 and both holds. The sreality twins print no villa,
+    # so the fact strands each idnes advert from its own sreality copy and frees the other
+    # villa's twins to take it — a merge S13 never made (cohort 16, `13435813`).
     d43_named_villa: bool = False
 
     def __post_init__(self) -> None:

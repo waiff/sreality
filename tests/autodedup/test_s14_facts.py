@@ -6,7 +6,8 @@ the portal's attribute block (`celková plocha (m2): 312`), so E192/E282 read it
 area and let the 257 m² lot's price path take it. Kovářov is E294/E294b: the attic unit's
 `balkon o rozloze 12,6 m2` at 7,590,000 against the terrace unit's `terasu o rozloze 58 m2` at
 10,665,000. Lipno-Kobylnice and Polná are E295 (`levou polovinu` / `pravou stranu`, `druhá` /
-`čtvrtá zleva`), and the Lipno Forest villas E296 (`VILA ARKTIDA` / `VILA LOUKA REZIDENCE A3`).
+`čtvrtá zleva`), and the Lipno Forest villas E296 (`VILA ARKTIDA` / `VILA LOUKA REZIDENCE A3`),
+a reader that is kept but REFUSED (off in every table, D84).
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ S14 = Settings.from_json(SETTINGS / "w29.json")
 
 W29_DIALS = {"d43_block_plot_area", "d43_outdoor_accessory_area", "d43_outdoor_accessory_price",
              "d43_position_designator", "d43_named_villa"}
+# E296 is REFUSED with numbers (D84): the reader stays in code, off in every table.
+W29_REFUSED = {"d43_named_villa"}
+W29_ON = W29_DIALS - W29_REFUSED
+S14_E296 = Settings.from_dict({**S14.to_dict(), "d43_named_villa": True})
 
 
 def variant(**kwargs: object) -> Settings:
@@ -247,9 +252,12 @@ def test_E296_the_named_villa_and_the_residence_code() -> None:
                 area_m2=86.0)
     twin = advert(13667012, "sreality", "Rezidence A3 nabízí stejnou promyšlenou architekturu "
                   "jako A2.", 96, 146, area_m2=86.0)
-    assert names(arktida, louka, S13) == [] and names(arktida, louka, S14) == ["named_villa"]
-    assert names(a2, twin, S14) == ["named_villa"]
-    assert names(arktida, twin, S14) == []
+    assert names(arktida, louka, S13) == [] and names(arktida, louka, S14_E296) == ["named_villa"]
+    assert names(a2, twin, S14_E296) == ["named_villa"]
+    assert names(arktida, twin, S14_E296) == []
+    # Refused: the sreality twins print no villa, so the fact strands each idnes advert from its
+    # own sreality copy and frees the other villa's twins to take it (cohort 16, D84).
+    assert names(arktida, louka, S14) == []
 
 
 # --- the table itself ------------------------------------------------------------------------
@@ -261,8 +269,9 @@ def test_every_W29_dial_is_off_by_default() -> None:
 
 def test_w29_differs_from_w28_only_in_the_W29_dials() -> None:
     w28, w29 = S13.to_dict(), S14.to_dict()
-    assert {key for key in w29 if w28.get(key) != w29[key]} == W29_DIALS
-    assert all(getattr(S14, dial) for dial in W29_DIALS)
+    assert {key for key in w29 if w28.get(key) != w29[key]} == W29_ON
+    assert all(getattr(S14, dial) for dial in W29_ON)
+    assert not any(getattr(S14, dial) for dial in W29_REFUSED)
 
 
 def test_the_w29_holds_are_w29_plus_one_table() -> None:

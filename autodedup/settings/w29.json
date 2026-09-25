@@ -60,7 +60,7 @@
     "d43_interior_sequential_repost": true,
     "d43_labelled_unit_ids": true,
     "d43_lot_labels": "all",
-    "d43_named_villa": true,
+    "d43_named_villa": false,
     "d43_neighbour_plot_attribute": true,
     "d43_obec_street_grain_only": true,
     "d43_offer_area": false,
