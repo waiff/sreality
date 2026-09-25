@@ -1209,7 +1209,7 @@ renumber.** Navigate by area:
     Interim caveat: the unmerge *button* lived on the deleted Dedup page, so until the rebuild
     gives it a home, unmerge is API-only.
     **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
-    (`docs/design/autodedup/PROGRAM.md` E300–E306) — through the same chokepoint, never around
+    (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around
     it, and only when `app_settings.autodedup_apply_enabled` is on (migration 558 seeds it
     `false`; the operator flips it on /settings, and flipping it off stops a running apply
     between two groups). `autodedup/apply.py` (lane modes `apply` / `unapply` in
@@ -1223,13 +1223,20 @@ renumber.** Navigate by area:
     before every group, and refuses — recording why — any group whose merge would unite, across
     EVERY listing it moves (both properties' full sets, not just the members), an operator
     negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
-    inside — any superset, under any key), mixed categories, a listing outside the scope, a
-    non-active property, more than `max_cluster_size` listings, a property the engine split
-    across two groups, or a listing no group holds (unless this engine's own live merge already
-    put it there with a member). Listings and negatives are re-read inside each group's
-    transaction before it merges; `rt…` generations are refused. A property the operator
-    restored stays unmerged by every later generation, even after `unapply` has noted it;
-    `unapply` skips a group whose survivor a later merge retired; a group already on one
+    inside — any superset, under any key, the newest ruling per operator winning), mixed
+    categories, a listing outside the scope, two properties the operator **asset-linked**
+    (`properties.asset_id`, "different units in one building, do not collapse"), a non-active
+    property, more than `max_cluster_size` listings, a property the engine split across two
+    groups, or a listing no group holds (unless this engine's own live merge already put it
+    there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
+    and their listings `FOR SHARE`, and every one of those checks runs again over the locked
+    rows before it merges; `rt…` generations are refused. An engine merge the operator took
+    apart stays apart: its separated LISTINGS are never re-united by a later generation, even
+    once the restored property has been merged into another one. `unapply` skips a group a
+    later engine merge still builds on (same survivor or shared listings) and names the merge
+    to undo first; a whole-generation `unapply` stamps the generation
+    (`autodedup.unapplied_generations`) so none of its groups — undone or never reached —
+    applies again until an apply with `reapply=1`. A group already on one
     property that the operator has since ruled different is reported, never acted on. It stamps
     `property_merge_events.generation = 'autodedup:<generation>'` write-only and reads nothing
     from that table. Undo restores listings and pipeline cards; collections, tags and notes stay

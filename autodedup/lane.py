@@ -153,7 +153,7 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         ],
     },
     "apply": {
-        "wave": "W30",
+        "wave": "A1",
         "title": "Apply a generation's groups",
         "approach": (
             "One generation's groups planned into production merges - survivor = the property "
@@ -167,11 +167,13 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         ],
     },
     "unapply": {
-        "wave": "W30",
+        "wave": "A1",
         "title": "Undo a generation's merges",
         "approach": (
             "Every live merge group one generation applied, undone newest-first through "
-            "unmerge_group and marked undone in autodedup.applied_merges; dry_run=1 lists them."
+            "unmerge_group and marked undone in autodedup.applied_merges - a group a later "
+            "engine merge builds on waits for that one - and, undone as a whole, the "
+            "generation stamped so none of it re-applies until reapply=1; dry_run=1 lists them."
         ),
         "tools": [
             "autodedup.apply", "toolkit.property_identity", "autodedup.lane", "GitHub Actions",

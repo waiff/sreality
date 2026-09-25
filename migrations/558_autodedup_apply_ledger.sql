@@ -1,10 +1,10 @@
 -- 558_autodedup_apply_ledger.sql
 --
--- AUTODEDUP W30: the ledger of the engine's production merges, and the merge
--- chokepoint's third `source`. Design: docs/design/autodedup/PROGRAM.md E300-E306; operator
+-- AUTODEDUP A1: the ledger of the engine's production merges, and the merge
+-- chokepoint's third `source`. Design: docs/design/autodedup/PROGRAM.md E900-E906; operator
 -- summary: docs/design/autodedup/ROLLOUT.md section 7.1. Purely ADDITIVE.
 --
--- WHAT CHANGES. Until W30 the engine wrote only its own schema (shadow mode, D4). The apply
+-- WHAT CHANGES. Until A1 the engine wrote only its own schema (shadow mode, D4). The apply
 -- path (autodedup/apply.py, lane modes `apply` / `unapply`) turns ONE generation's groups into
 -- production merges through THE chokepoint, `toolkit.property_identity.merge_properties`
 -- (CLAUDE.md rule 15), which already carries operator state (rule 18) and the deal pipeline
@@ -23,10 +23,12 @@
 --
 -- 2. `autodedup.applied_merges`: one row per (engine group, retired property) the apply path
 --    planned, applied, refused or skipped, dry runs included (`dry_run`). ONE merge_group_id
---    per engine group (E301), so `unmerge_group` undoes a whole group and `unapply` undoes a
+--    per engine group (E901), so `unmerge_group` undoes a whole group and `unapply` undoes a
 --    generation newest-first. The partial UNIQUE index is the idempotency rail: two live
 --    merges of the same (survivor, retired) pair can never both be recorded. `member_ids`
---    (GIN-indexed over live merges) is the group's listing set, read back by later plans.
+--    (GIN-indexed over every applied merge, undone ones included: an engine merge someone
+--    else took apart is the operator's negative on its LISTINGS) is the group's listing set,
+--    read back by later plans and by `unapply`'s later-merge guard.
 --
 --    WHY NOT `autodedup.merges` (migration 528's reserved ledger). Its grain is one retired
 --    property per group keyed on merge_group_id with a listing PAIR (listing_lo < listing_hi);
@@ -37,9 +39,15 @@
 --    READS NOTHING FROM `property_merge_events` (D7): the ledger is the engine's own record.
 --    The apply path's one touch of the production ledger is a WRITE-ONLY stamp of
 --    `generation = 'autodedup:<generation>'` on rows of merge groups it created itself, inside
---    the same transaction as the merges (E302, which makes E40's non-atomic seam atomic).
+--    the same transaction as the merges (E902, which makes E40's non-atomic seam atomic).
 --
--- 3. Two `public.app_settings` rows, the operator's switches, seeded OFF (E304). They live in
+-- 3. `autodedup.unapplied_generations`: one row per WHOLE-generation `unapply` (E905), written
+--    before it undoes anything. While a row of a generation stands unreleased, every plan of
+--    that generation refuses every group — the ones it undid and the ones it never reached —
+--    until an apply dispatched with `reapply=1` releases it (`released_at`). An unapply scoped
+--    to one cluster_key writes no row. Same posture as the ledger.
+--
+-- 4. Two `public.app_settings` rows, the operator's switches, seeded OFF (E904). They live in
 --    app_settings, not `autodedup.settings`, because /settings edits app_settings and
 --    `PUT /admin/app_settings/{key}` 404s on a key with no row: an off switch the operator
 --    cannot reach without SQL is not a kill switch. The `autodedup_apply_` prefix keeps them
@@ -141,12 +149,12 @@ create index if not exists autodedup_applied_merges_retired_idx
 create unique index if not exists autodedup_applied_merges_live_pair_uidx
   on autodedup.applied_merges (survivor_property_id, retired_property_id)
   where outcome = 'applied' and undone_at is null;
-create index if not exists autodedup_applied_merges_live_members_idx
+create index if not exists autodedup_applied_merges_members_idx
   on autodedup.applied_merges using gin (member_ids)
-  where outcome = 'applied' and undone_at is null;
+  where outcome = 'applied';
 
 comment on table autodedup.applied_merges is
-  'AUTODEDUP W30: every group the apply path planned (dry run), applied, refused or skipped, '
+  'AUTODEDUP A1: every group the apply path planned (dry run), applied, refused or skipped, '
   'one row per retired property. ONE merge_group_id per engine group, so unmerge_group '
   'undoes a whole group. The engine''s own record; nothing reads property_merge_events (D7).';
 
@@ -157,15 +165,41 @@ revoke all on sequence autodedup.applied_merges_id_seq from anon, authenticated;
 comment on column autodedup.applied_merges.member_ids is
   'The engine group''s listings as planned. A live merge''s set is the one thing that lets a '
   'later merge carry a listing its own group does not hold: only a listing this engine '
-  'already merged onto the property together with a grouped member (E303).';
+  'already merged onto the property together with a grouped member (E903).';
 
 comment on column autodedup.applied_merges.undone_by is
   'Who undid this merge: ''autodedup-unapply:<run_id>'' = the engine''s own unapply, which '
   'releases the properties to a later generation; ''external'' = someone else had already '
-  'undone it when unapply reached it, so the engine never re-merges those properties (E305).';
+  'undone it when unapply reached it, so the engine never re-unites those listings nor '
+  're-merges those properties (E905).';
 
 ------------------------------------------------------------------
--- 3. the operator's switches, seeded OFF
+-- 3. the whole-generation unapply stamp
+------------------------------------------------------------------
+
+create table if not exists autodedup.unapplied_generations (
+  id           bigserial   primary key,
+  generation   text        not null,
+  run_id       text        not null,
+  undone_by    text        not null,
+  unapplied_at timestamptz not null default now(),
+  released_at  timestamptz,
+  released_by  text
+);
+
+create index if not exists autodedup_unapplied_generations_gen_idx
+  on autodedup.unapplied_generations (generation);
+
+comment on table autodedup.unapplied_generations is
+  'AUTODEDUP A1: one row per whole-generation unapply. While a row stands unreleased, no group '
+  'of that generation applies again; an apply dispatched with reapply=1 releases it (E905).';
+
+alter table autodedup.unapplied_generations enable row level security;
+revoke all on autodedup.unapplied_generations from anon, authenticated;
+revoke all on sequence autodedup.unapplied_generations_id_seq from anon, authenticated;
+
+------------------------------------------------------------------
+-- 4. the operator's switches, seeded OFF
 ------------------------------------------------------------------
 
 insert into app_settings (key, value, description)

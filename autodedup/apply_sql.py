@@ -1,9 +1,10 @@
-"""Every statement the W30 apply path runs (PROGRAM.md E300-E306), as constants.
+"""Every statement the A1 apply path runs (PROGRAM.md E900-E906), as constants.
 
 Reads: the two `app_settings` switches, one generation's groups and members from schema
 `autodedup`, the member listings' `property_id` and categories and the involved properties
-from `public` (the same facts the chokepoint itself re-checks), the operator's negatives
-(`verdicts`, `must_not_link`) and the engine's own apply ledger. NOTHING here reads
+(with their asset link) from `public` (the same facts the chokepoint itself re-checks), the
+operator's negatives (`verdicts`, `must_not_link`) and the engine's own apply ledger and
+unapplied-generation stamps. NOTHING here reads
 `public.property_merge_events` (D7) — the one statement that names it is a write-only stamp
 scoped to a merge group this path just created.
 
@@ -42,8 +43,10 @@ select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_m
  order by m.cluster_key, m.listing_id
 """
 
+# `asset_id` is the operator's Browse-side "different units in one building, do not collapse"
+# (migration 224): two involved properties sharing one refuse the group (E903).
 PROPERTIES_SQL = """
-select p.id, p.status, p.category_type, p.category_main, p.first_seen_at
+select p.id, p.status, p.category_type, p.category_main, p.first_seen_at, p.asset_id
   from public.properties p
  where p.id = any(%(property_ids)s::bigint[])
 """
@@ -55,6 +58,26 @@ PROPERTY_LISTINGS_SQL = """
 select l.property_id, l.id, l.category_type, l.category_main
   from public.listings l
  where l.property_id = any(%(property_ids)s::bigint[])
+"""
+
+# The apply-time re-check (E903), inside the group's own transaction: the involved properties
+# locked in id order (the chokepoint's own FOR UPDATE, taken early and for all of them, so no
+# concurrent merge or unmerge can re-point one between the re-check and the merge), then
+# their listings held FOR SHARE, so none is re-categorised or moved away before it commits.
+LOCK_PROPERTIES_SQL = """
+select p.id, p.status, p.category_type, p.category_main, p.first_seen_at, p.asset_id
+  from public.properties p
+ where p.id = any(%(property_ids)s::bigint[])
+ order by p.id
+   for update
+"""
+
+LOCK_PROPERTY_LISTINGS_SQL = """
+select l.property_id, l.id, l.category_type, l.category_main
+  from public.listings l
+ where l.property_id = any(%(property_ids)s::bigint[])
+ order by l.id
+   for share
 """
 
 MUST_NOT_LINK_SQL = """
@@ -75,16 +98,20 @@ select v.listing_lo, v.listing_hi, v.verdict
 
 # A group ruling is about a SET of listings (E58), so it is fetched by the listings it names,
 # never by the key it was taken under: a later group holding that set plus one more listing may
-# carry another key and must still be refused. A row without `member_ids` (538 backfilled every
-# earlier ruling; only the old API's migration window can have left one) names no set, so it
-# is fetched by key and refuses that key in EVERY generation (fail closed).
+# carry another key and must still be refused. EVERY verdict on a set is read, positive ones
+# too: per set and per operator only the NEWEST ruling stands, so a set ruled different and
+# later ruled same by the same operator no longer refuses (E903). A row without `member_ids`
+# (538 backfilled every earlier ruling; only the old API's migration window can have left one)
+# names no set, so only its negatives are read, by key, and refuse that key in EVERY
+# generation (fail closed).
 CLUSTER_VERDICTS_SQL = """
-select v.cluster_key, v.verdict, v.generation, v.member_ids
+select v.cluster_key, v.verdict, v.generation, v.member_ids, v.decided_by, v.decided_at, v.id
   from autodedup.verdicts v
  where v.kind = 'cluster'
-   and v.verdict = any(%(negatives)s::text[])
    and ((v.member_ids is not null and v.member_ids && %(listing_ids)s::bigint[])
-        or (v.member_ids is null and v.cluster_key = any(%(cluster_keys)s::bigint[])))
+        or (v.member_ids is null
+            and v.verdict = any(%(negatives)s::text[])
+            and v.cluster_key = any(%(cluster_keys)s::bigint[])))
 """
 
 # The engine's own history that can refuse a group: a live merge of one of these properties
@@ -100,30 +127,37 @@ select a.generation, a.cluster_key, a.survivor_property_id, a.retired_property_i
         or a.retired_property_id = any(%(property_ids)s::bigint[]))
 """
 
-# Every live engine merge whose group named one of these listings: the only thing that lets
-# a merge carry a listing its own group does not hold (E303 `carries_ungrouped_listings`), and
-# what names the engine merge behind a group the operator ruled different after it merged.
-LIVE_ENGINE_MERGES_SQL = """
+# Every engine merge whose group named one of these listings, undone or not. A LIVE one is the
+# only thing that lets a merge carry a listing its own group does not hold (E903
+# `carries_ungrouped_listings`) and names the engine merge behind a group the operator ruled
+# different after it merged. One the engine did NOT undo itself whose members no longer share
+# a property was taken apart by someone else: its separated listings are the operator's
+# negative, keyed on LISTINGS, so it survives any later re-merge of the properties (E905).
+ENGINE_MERGES_SQL = """
 select distinct on (a.merge_group_id)
        a.generation, a.cluster_key, a.merge_group_id::text, a.survivor_property_id,
-       a.member_ids
+       a.member_ids, a.undone_at is not null as undone, a.undone_by
   from autodedup.applied_merges a
  where not a.dry_run
    and a.outcome = 'applied'
-   and a.undone_at is null
    and a.member_ids && %(listing_ids)s::bigint[]
  order by a.merge_group_id, a.id
 """
 
-# A live engine merge that retired this property: what `unapply` must undo FIRST before it can
-# undo a group whose survivor has since been merged away.
-LIVE_RETIRING_SQL = """
-select a.generation, a.cluster_key, a.retired_property_id
+# A LATER live engine merge (any generation) that shares this group's survivor as its own
+# survivor or retired property, or any of its listings: undoing this group first would leave
+# listings on one property that no generation ever grouped, so `unapply` names it to undo
+# first (E905).
+LATER_LIVE_MERGES_SQL = """
+select a.generation, a.cluster_key, a.merge_group_id::text
   from autodedup.applied_merges a
  where not a.dry_run
    and a.outcome = 'applied'
    and a.undone_at is null
-   and a.retired_property_id = any(%(property_ids)s::bigint[])
+   and a.id > %(after_id)s::bigint
+   and (a.survivor_property_id = %(property_id)s::bigint
+        or a.retired_property_id = %(property_id)s::bigint
+        or a.member_ids && %(member_ids)s::bigint[])
  order by a.id
 """
 
@@ -139,7 +173,7 @@ insert into autodedup.applied_merges (
 )
 """
 
-# E302: WRITE-ONLY, and only rows of a group this run created in the same transaction.
+# E902: WRITE-ONLY, and only rows of a group this run created in the same transaction.
 STAMP_GENERATION_SQL = """
 update public.property_merge_events
    set generation = %(stamp)s::text
@@ -147,10 +181,11 @@ update public.property_merge_events
    and generation is null
 """
 
-# Newest-first, so a generation is undone in the reverse of the order it was applied.
+# Newest-first, so a generation is undone in the reverse of the order it was applied. Every
+# row of a group carries the same survivor and member set.
 UNAPPLY_TARGETS_SQL = """
 select a.merge_group_id::text, a.cluster_key, max(a.survivor_property_id),
-       array_agg(a.retired_property_id order by a.id), max(a.id)
+       array_agg(a.retired_property_id order by a.id), max(a.id), max(a.member_ids)
   from autodedup.applied_merges a
  where a.generation = %(generation)s::text
    and not a.dry_run
@@ -170,4 +205,28 @@ update autodedup.applied_merges
    and not dry_run
    and outcome = 'applied'
    and undone_at is null
+"""
+
+# E905: a WHOLE-generation `unapply` stamps the generation first, and every later plan of it
+# refuses every group — the ones it undid and the ones it never reached (deferred under the
+# run cap, skipped for a transient reason) — until an apply dispatched with `reapply=1`
+# releases the stamp. An unapply scoped to one `cluster_key` writes no stamp.
+UNAPPLIED_GENERATION_SQL = """
+select u.id, u.undone_by, u.unapplied_at, u.released_at is not null as released
+  from autodedup.unapplied_generations u
+ where u.generation = %(generation)s::text
+ order by u.id
+"""
+
+STAMP_UNAPPLIED_SQL = """
+insert into autodedup.unapplied_generations (generation, run_id, undone_by)
+values (%(generation)s::text, %(run_id)s::text, %(undone_by)s::text)
+"""
+
+RELEASE_UNAPPLIED_SQL = """
+update autodedup.unapplied_generations
+   set released_at = now(),
+       released_by = %(released_by)s::text
+ where id = any(%(ids)s::bigint[])
+   and released_at is null
 """

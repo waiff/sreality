@@ -1,10 +1,10 @@
-"""Shape gate for migration 558 — W30's apply ledger, the chokepoint's third source and the
+"""Shape gate for migration 558 — A1's apply ledger, the chokepoint's third source and the
 operator's two switches, seeded OFF.
 
 Offline, no DB. The generic RLS/grant rails see every statement; this checks what they cannot
 know: the source CHECK is WIDENED (never narrowed, never dropped without a replacement), the
 ledger lives in schema `autodedup` with no foreign key into production, the idempotency
-index is the one E305 names, and the seeded switches cannot drive a live run on their own.
+index is the one E905 names, and the seeded switches cannot drive a live run on their own.
 """
 
 from __future__ import annotations
@@ -40,11 +40,25 @@ def test_the_source_check_is_widened_to_the_three_sources() -> None:
 def test_the_ledger_is_isolated_and_posture_is_locked() -> None:
     code = _code()
     created = set(re.findall(r"create table (?:if not exists )?([a-z0-9_.]+) \(", code))
-    assert created == {"autodedup.applied_merges"}
+    assert created == {"autodedup.applied_merges", "autodedup.unapplied_generations"}
     assert "references" not in code
-    assert "alter table autodedup.applied_merges enable row level security;" in code
-    assert "revoke all on autodedup.applied_merges from anon, authenticated;" in code
+    for table in sorted(created):
+        assert f"alter table {table} enable row level security;" in code
+        assert f"revoke all on {table} from anon, authenticated;" in code
+        assert f"revoke all on sequence {table}_id_seq from anon, authenticated;" in code
     assert "grant " not in code
+
+
+def test_the_stamp_sql_the_apply_path_writes_matches_its_table() -> None:
+    from autodedup import apply_sql
+
+    table = _code().split("create table if not exists autodedup.unapplied_generations (")[1] \
+        .split(");")[0]
+    insert = apply_sql.STAMP_UNAPPLIED_SQL.split("(")[1].split(")")[0]
+    for column in (c.strip() for c in insert.split(",")):
+        assert re.search(rf"\b{column}\b", table), column
+    for column in ("released_at", "released_by", "unapplied_at"):
+        assert re.search(rf"\b{column}\b", table), column
 
 
 def test_idempotency_is_a_unique_live_pair() -> None:

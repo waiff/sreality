@@ -311,7 +311,7 @@ name: "AUTODEDUP: engine lane"
 #             carries (exit 2, nothing written) rather than reporting a green run that
 #             changed nothing. This run does NOT add a ledger row of its own.
 #
-#   apply   - W30. DRY RUN BY DEFAULT: plans one generation's groups into production merges
+#   apply   - A1. DRY RUN BY DEFAULT: plans one generation's groups into production merges
 #             and writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json.
 #             Per group it names the survivor (the property with the most listings; a tie
 #             goes to the oldest first_seen_at, then the lowest id) and the properties that
@@ -321,10 +321,13 @@ name: "AUTODEDUP: engine lane"
 #             would build), an operator negative (a pair verdict or must-not-link with both
 #             sides in it, a group verdict with its whole set in it), mixed deal types or
 #             incompatible categories (the chokepoint's own helper), a listing outside the
-#             scope, a property the engine split across two groups, a property carrying a
-#             listing no group holds (unless this engine already merged it there with a
-#             member), a chokepoint refusal on an earlier run, or a property this engine
-#             merged once that is active again. A group already on one property that an
+#             scope, two properties the operator asset-linked (asset_linked_units), a
+#             property the engine split across two groups, a property carrying a listing no
+#             group holds (unless this engine already merged it there with a member), a
+#             chokepoint refusal on an earlier run, listings of an engine merge the operator
+#             took apart, or a property this engine merged once that is active again. A
+#             generation unapplied as a whole applies NO group until a run passes reapply=1
+#             (a live one releases it for good). A group already on one property that an
 #             operator negative covers is REPORTED (ruled_different_after_merge, with the
 #             unapply args when the engine made that merge), never acted on. Real-time lane
 #             generations (rt...) are refused. `dry_run=0`
@@ -335,19 +338,23 @@ name: "AUTODEDUP: engine lane"
 #             run between two groups - and only inside app_settings.autodedup_apply_scope,
 #             which must ITSELF name category_types and an area (blocks, listing_ids or
 #             all_blocks=true; a dispatch cannot supply them). Inside each group's own
-#             transaction the listings and the negatives are read again; a change since the
-#             plan skips the group. An empty dry_run= is a dry run. The run's own scope args
+#             transaction the properties are locked and every check runs again over the
+#             locked rows; a change since the plan skips the group. A crash mid-run still
+#             writes out/apply.json and the step summary with what DID merge. An empty dry_run= is a dry run. The run's own scope args
 #             can NARROW that row, never widen it; on a dry run they replace it key by key.
 #             At most max_clusters_per_run groups per run (default 200), in cluster_key order.
 #
-#   unapply - W30. DRY RUN BY DEFAULT: lists every live merge group one generation applied,
+#   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group one generation applied,
 #             newest first. `dry_run=0` undoes them through unmerge_group in that order and
 #             marks them undone in autodedup.applied_merges; `cluster_key=` undoes one group.
-#             NOT gated by autodedup_apply_enabled - undo is the way back. A generation that
-#             was unapplied never re-applies; a later generation may. A group whose survivor a
-#             later merge retired is skipped and names the merge to undo first; a group the
-#             operator already undid is noted as undone by someone else, and its properties
-#             stay out of every later generation's merges.
+#             NOT gated by autodedup_apply_enabled - undo is the way back. Without
+#             cluster_key it first STAMPS the generation: none of its groups (undone or never
+#             reached) applies again until an apply passes reapply=1; with cluster_key only
+#             that group stays out. A later generation may merge the same listings. A group a
+#             later engine merge still builds on (same survivor, or shared listings) is
+#             skipped and names the merge to undo first; a group the operator already undid is
+#             noted as undone by someone else, and its listings stay apart in every later
+#             generation's merges.
 #
 # Every other mode writes its own ledger row automatically - `running` when it starts, a
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
@@ -401,7 +408,7 @@ name: "AUTODEDUP: engine lane"
 # population (frozen, the default, or artifact); rt_equivalence accepts generation (default
 # rt), batch (REQUIRED - the batch generation to compare against) and tol (the score
 # tolerance, default 1e-6); apply accepts generation (REQUIRED), dry_run (1, the default, or
-# 0) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=obec:563510
+# 0), reapply (0, the default, or 1: release a whole-generation unapply) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=obec:563510
 # cast_obce:490245`), listing_ids (SPACE-separated), all_blocks, max_cluster_size and
 # max_clusters_per_run - separate args, not one JSON `scope=`, because this workflow's
 # charset check refuses braces and quotes; unapply accepts generation (REQUIRED), dry_run and

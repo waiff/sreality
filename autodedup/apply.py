@@ -1,17 +1,17 @@
-"""W30 — one generation's groups into production merges, through THE chokepoint.
+"""A1 — one generation's groups into production merges, through THE chokepoint.
 
     python3 -m autodedup.lane --mode apply   --args "generation=g12" --out out/
     python3 -m autodedup.lane --mode apply   --args "generation=g12,dry_run=0" --out out/
     python3 -m autodedup.lane --mode unapply --args "generation=g12,dry_run=0" --out out/
 
 `plan_apply` reads a generation's groups and, per group, names the survivor and the properties
-that would retire into it — or the reasons the group is refused (E303). `apply_plan` records
+that would retire into it — or the reasons the group is refused (E903). `apply_plan` records
 that plan (dry run) or executes it through `toolkit.property_identity.merge_properties`, one
-merge group per engine group (E301), so `unmerge_group` undoes a whole group and `unapply`
+merge group per engine group (E901), so `unmerge_group` undoes a whole group and `unapply`
 undoes a generation newest-first. Nothing here decides anything the engine did not: the
 groups are read as stored, and every refusal only removes a group from the plan.
 
-DARK THREE WAYS (E304). A dry run is the default and writes only `autodedup.applied_merges`.
+DARK THREE WAYS (E904). A dry run is the default and writes only `autodedup.applied_merges`.
 A live run needs `app_settings.autodedup_apply_enabled = true` — re-read before EVERY group
 (E39), so flipping it off on /settings stops a run between two groups — and a live scope
 (`app_settings.autodedup_apply_scope`) that names its deal types and its area; a run's own
@@ -19,7 +19,7 @@ arguments can narrow that scope and never widen it. Absent rows mean OFF.
 
 D7 holds: nothing here reads `property_merge_events`. The apply path's own ledger is the only
 history it consults, and its one touch of the production ledger is a write-only stamp on rows
-of a merge group it created in the same transaction (E302).
+of a merge group it created in the same transaction (E902).
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ MERGE_SOURCE: str = "autodedup"
 STAMP_PREFIX: str = "autodedup:"
 UNAPPLY_BY_PREFIX: str = "autodedup-unapply:"
 # `undone_by` on a ledger row whose merge someone else had already undone when `unapply` came
-# to it: the engine records that the merge no longer stands, never that it undid it (E305).
+# to it: the engine records that the merge no longer stands, never that it undid it (E905).
 EXTERNAL_UNDO: str = "external"
 DEFAULT_MAX_CLUSTER_SIZE: int = 8
 DEFAULT_MAX_CLUSTERS_PER_RUN: int = 200
@@ -57,7 +57,7 @@ SCOPE_KEYS: tuple[str, ...] = (
     "category_types", "blocks", "listing_ids", "all_blocks", "max_cluster_size",
     "max_clusters_per_run",
 )
-APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", *SCOPE_KEYS})
+APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "reapply", *SCOPE_KEYS})
 UNAPPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "cluster_key"})
 
 # The engine's block key is grain-prefixed (`o` obec, `c` cast obce); the rt lane's scope
@@ -67,7 +67,7 @@ GRAIN_ALIASES: dict[str, str] = {
     "c": "c", "cast_obce": "c", "quarter": "c",
 }
 
-# E303 — why a group is refused. Order is the order they are checked and reported in.
+# E903 — why a group is refused. Order is the order they are checked and reported in.
 SKIP_UNATTACHED = "unattached_member"
 SKIP_INACTIVE_PROPERTY = "property_not_active"
 SKIP_OVERSIZE = "oversize"
@@ -77,15 +77,18 @@ SKIP_MUST_NOT_LINK = "must_not_link"
 SKIP_CATEGORY_TYPE = "category_type_mix"
 SKIP_CATEGORY_MAIN = "category_main_incompatible"
 SKIP_CARRIES_OUT_OF_SCOPE = "carries_out_of_scope_listings"
+# Two involved properties share an asset: the operator linked them as different units in one
+# building instead of merging them (rule 15, migration 224).
+SKIP_ASSET_LINKED = "asset_linked_units"
 SKIP_SPANS_GROUPS = "property_spans_groups"
 SKIP_CARRIES_UNGROUPED = "carries_ungrouped_listings"
 SKIP_REFUSED_BEFORE = "refused_at_chokepoint_before"
 SKIP_RESTORED_ELSEWHERE = "restored_outside_engine"
 SKIP_GENERATION_UNAPPLIED = "generation_unapplied"
-# Re-checked inside the group's own transaction, just before the merge (E303).
+# Re-checked inside the group's own transaction, just before the merge (E903).
 SKIP_CHANGED_SINCE_PLAN = "changed_since_plan"
 # Not a merge at all: a group ALREADY on one property that an operator negative now covers.
-# Reported, never acted on — `unapply` is the operator's call (E305).
+# Reported, never acted on — `unapply` is the operator's call (E905).
 RULED_AFTER_MERGE = "ruled_different_after_merge"
 
 # The real-time lane's generations (`rt…`, `left(generation, 2) = 'rt'` on the review pages)
@@ -96,6 +99,11 @@ REALTIME_PREFIX: str = "rt"
 
 class ApplyRefused(RuntimeError):
     """A live apply was asked for while a switch or the scope forbids it."""
+
+
+# An error that stops a live run mid-way carries the run's partial result under this
+# attribute, so the lane still writes apply.json and the step summary before re-raising.
+PARTIAL_RESULT_ATTR: str = "autodedup_apply_result"
 
 
 # ------------------------------------------------------------------ scope
@@ -308,6 +316,9 @@ class Plan:
     groups: list[GroupPlan]
     deferred: list[int]
     counts: dict[str, Any]
+    reapply: bool = False
+    # The generation's standing whole-generation unapply stamps (E905), JSON-ready.
+    unapplied: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def to_apply(self) -> list[GroupPlan]:
@@ -418,22 +429,37 @@ class Negatives:
         for lo, hi, _verdict in _rows(conn, S.PAIR_VERDICTS_SQL, {
                 "listing_ids": ids, "negatives": negatives}):
             out.pairs.setdefault(int(lo), []).append(int(hi))
-        for key, _verdict, _gen, member_ids in _rows(conn, S.CLUSTER_VERDICTS_SQL, {
-                "listing_ids": ids, "cluster_keys": sorted(set(cluster_keys)),
-                "negatives": negatives}):
+        # Per (set, operator), only the newest ruling stands: a set ruled different and later
+        # ruled same by the same operator no longer refuses. A setless row fails closed.
+        newest: dict[tuple[frozenset[int], str], tuple[tuple[float, int], str]] = {}
+        for key, verdict, _gen, member_ids, decided_by, decided_at, vid in _rows(
+                conn, S.CLUSTER_VERDICTS_SQL, {
+                    "listing_ids": ids, "cluster_keys": sorted(set(cluster_keys)),
+                    "negatives": negatives}):
             if member_ids is None:
-                out.setless_keys.add(int(key))
+                if verdict in NEGATIVE_VERDICTS:
+                    out.setless_keys.add(int(key))
                 continue
             ruled = frozenset(int(x) for x in member_ids)
-            if len(ruled) >= 2:
-                out.sets.setdefault(min(ruled), []).append(ruled)
+            if len(ruled) < 2:
+                continue
+            order = (decided_at.timestamp() if isinstance(decided_at, datetime) else 0.0,
+                     int(vid or 0))
+            slot = (ruled, str(decided_by))
+            if slot not in newest or order > newest[slot][0]:
+                newest[slot] = (order, str(verdict))
+        for (ruled, _by), (_order, verdict) in sorted(
+                newest.items(), key=lambda kv: (sorted(kv[0][0]), kv[0][1])):
+            bucket = out.sets.setdefault(min(ruled), [])
+            if verdict in NEGATIVE_VERDICTS and ruled not in bucket:
+                bucket.append(ruled)
         return out
 
     def hits(self, listings: set[int], cluster_key: int) -> tuple[list[str], dict[str, Any]]:
         """Which negatives a property holding exactly `listings` would contradict. A pair
         ruling or must-not-link is contradicted when BOTH its sides are in the set; a group
         ruling ("these are not one property") when its WHOLE set is — this group's exact
-        membership or any superset, under whichever key it was taken (E303)."""
+        membership or any superset, under whichever key it was taken (E903)."""
         reasons: list[str] = []
         detail: dict[str, Any] = {}
         ordered = sorted(listings)
@@ -454,32 +480,98 @@ class Negatives:
         return reasons, detail
 
 
+def _unapply_args(generation: str, cluster_key: int) -> str:
+    return f"generation={generation},cluster_key={int(cluster_key)}"
+
+
 @dataclass(frozen=True)
 class EngineMerge:
-    """A live merge this engine made (its own ledger, never property_merge_events — D7)."""
+    """A merge this engine made (its own ledger, never property_merge_events — D7)."""
 
     generation: str
     cluster_key: int
     merge_group_id: str
     survivor_id: int | None
     member_ids: frozenset[int]
+    live: bool = True
+    # Undone by `unapply` itself — the one undo that states nothing about the listings.
+    undone_by_engine: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {"generation": self.generation, "cluster_key": self.cluster_key,
                 "merge_group_id": self.merge_group_id,
-                "unapply": f"generation={self.generation},cluster_key={self.cluster_key}"}
+                "unapply": _unapply_args(self.generation, self.cluster_key)}
 
 
-def _live_engine_merges(conn: Any, listing_ids: Iterable[int]) -> list[EngineMerge]:
+def _engine_merges(conn: Any, listing_ids: Iterable[int]) -> list[EngineMerge]:
     ids = sorted(set(listing_ids))
     if not ids:
         return []
     return [
         EngineMerge(str(gen), int(key), str(group), int(surv) if surv is not None else None,
-                    frozenset(int(x) for x in (members or ())))
-        for gen, key, group, surv, members in _rows(
-            conn, S.LIVE_ENGINE_MERGES_SQL, {"listing_ids": ids})
+                    frozenset(int(x) for x in (members or ())), live=not undone,
+                    undone_by_engine=bool(undone)
+                    and str(undone_by or "").startswith(UNAPPLY_BY_PREFIX))
+        for gen, key, group, surv, members, undone, undone_by in _rows(
+            conn, S.ENGINE_MERGES_SQL, {"listing_ids": ids})
     ]
+
+
+def _separated_merges(
+    listings: set[int], prop_of: Mapping[int, int], merges: Iterable[EngineMerge],
+) -> list[dict[str, Any]]:
+    """Engine merges someone other than `unapply` took apart, whose listings this set holds on
+    two or more properties: a merge of the set would re-unite what was separated (E905). Keyed
+    on listings, so it survives the restored property being merged on into another one."""
+    out: list[dict[str, Any]] = []
+    for merge in merges:
+        if merge.undone_by_engine:
+            continue
+        inside = merge.member_ids & listings
+        if len({prop_of.get(lid) for lid in inside} - {None}) > 1:
+            out.append({"generation": merge.generation, "cluster_key": merge.cluster_key,
+                        "merge_group_id": merge.merge_group_id,
+                        "listings": sorted(inside)[:20]})
+    return sorted(out, key=lambda m: (m["generation"], m["cluster_key"]))
+
+
+def _set_reasons(
+    listings: set[int],
+    category_of: Mapping[int, tuple[str | None, str | None]],
+    props: Sequence[Mapping[str, Any]],
+    scope: Scope,
+) -> tuple[list[str], dict[str, Any]]:
+    """What the merge would build, checked as the chokepoint would plus the run's scope and the
+    operator's asset links: at plan time and again, over locked rows, just before it merges."""
+    reasons: list[str] = []
+    detail: dict[str, Any] = {}
+    types = {category_of.get(lid, (None, None))[0] for lid in listings} - {None}
+    types |= {p["category_type"] for p in props if p["category_type"] is not None}
+    if len(types) > 1:
+        reasons.append(SKIP_CATEGORY_TYPE)
+        detail["category_types"] = sorted(types)
+    mains = {category_of.get(lid, (None, None))[1] for lid in listings}
+    mains |= {p["category_main"] for p in props}
+    if not all(category_main_compatible(a, b) for a, b in combinations(
+            sorted(mains, key=lambda x: (x is None, x or "")), 2)):
+        reasons.append(SKIP_CATEGORY_MAIN)
+        detail["category_mains"] = sorted(m for m in mains if m is not None)
+    # The scope admitted the members; everything the merge puts on the survivor must be inside
+    # it too — and still be, when it is re-read just before the merge.
+    outside = sorted(
+        lid for lid in listings
+        if (scope.listing_ids is not None and lid not in scope.listing_ids)
+        or (scope.category_types is not None
+            and category_of.get(lid, (None, None))[0] not in scope.category_types))
+    if outside:
+        reasons.append(SKIP_CARRIES_OUT_OF_SCOPE)
+        detail["out_of_scope_listings"] = outside[:20]
+    assets = Counter(p.get("asset_id") for p in props if p.get("asset_id") is not None)
+    linked = sorted(int(a) for a, n in assets.items() if n > 1)
+    if linked:
+        reasons.append(SKIP_ASSET_LINKED)
+        detail["asset_ids"] = linked
+    return reasons, detail
 
 
 def _engine_vouched(
@@ -505,8 +597,18 @@ def _engine_vouched(
     return vouched
 
 
-def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
-    """Read-only: which groups of `generation` would merge, into what, and which are refused."""
+def _unapplied_stamps(conn: Any, generation: str) -> list[dict[str, Any]]:
+    return [
+        {"id": int(sid), "undone_by": str(by), "released": bool(released),
+         "unapplied_at": at.isoformat() if isinstance(at, datetime) else at}
+        for sid, by, at, released in _rows(conn, S.UNAPPLIED_GENERATION_SQL,
+                                            {"generation": generation})
+    ]
+
+
+def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = False) -> Plan:
+    """Read-only: which groups of `generation` would merge, into what, and which are refused.
+    `reapply` plans past a whole-generation `unapply` stamp, as a release of it would (E905)."""
     if is_realtime_generation(generation):
         raise ValueError(
             f"generation {generation!r} belongs to the real-time lane: it is rewritten while a "
@@ -552,11 +654,12 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     prop_of: dict[int, int] = {}
     category_of: dict[int, tuple[str | None, str | None]] = {}
     for chunk in _chunks(all_props):
-        for pid, status, ctype, cmain, first in _rows(
+        for pid, status, ctype, cmain, first, asset in _rows(
             conn, S.PROPERTIES_SQL, {"property_ids": chunk}
         ):
             props[int(pid)] = {"status": status, "category_type": ctype,
-                               "category_main": cmain, "first_seen_at": first}
+                               "category_main": cmain, "first_seen_at": first,
+                               "asset_id": asset}
         for pid, lid, ctype, cmain in _rows(conn, S.PROPERTY_LISTINGS_SQL,
                                             {"property_ids": chunk}):
             children.setdefault(int(pid), set()).add(int(lid))
@@ -571,13 +674,21 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         every_listing |= children.get(pid, set())
     negatives = Negatives.read(conn, every_listing,
                                [int(c["cluster_key"]) for c, _m in everyone])
-    engine_merges = _live_engine_merges(conn, every_listing)
+    all_merges = _engine_merges(conn, every_listing)
     merges_by_listing: dict[int, list[EngineMerge]] = {}
-    for merge in engine_merges:
+    standing_by_listing: dict[int, list[EngineMerge]] = {}
+    for merge in all_merges:
         for lid in merge.member_ids:
-            merges_by_listing.setdefault(lid, []).append(merge)
+            if merge.live:
+                merges_by_listing.setdefault(lid, []).append(merge)
+            if not merge.undone_by_engine:
+                standing_by_listing.setdefault(lid, []).append(merge)
     refused_keys: set[int] = set()
     applied_by_retired: dict[int, list[dict[str, Any]]] = {}
+    stamps = _unapplied_stamps(conn, generation)
+    standing_stamps = [st for st in stamps if not st["released"]]
+    # The engine undos a released whole-generation stamp covered no longer refuse their groups.
+    released = {st["undone_by"] for st in stamps if st["released"] or reapply}
     if candidates:
         for gen, key, _surv, retired, outcome, undone, undone_by in _rows(
                 conn, S.LEDGER_HISTORY_SQL, {
@@ -587,7 +698,8 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
             elif outcome == "applied" and retired is not None:
                 by_engine = bool(undone) and str(undone_by or "").startswith(UNAPPLY_BY_PREFIX)
                 applied_by_retired.setdefault(int(retired), []).append(
-                    {"generation": gen, "undone_by_engine": by_engine})
+                    {"generation": gen, "undone_by_engine": by_engine,
+                     "undone_by": str(undone_by or "")})
 
     groups: list[GroupPlan] = []
     for cluster, members in settled:
@@ -638,27 +750,10 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         reasons += hit_reasons
         detail.update(hit_detail)
 
-        live_props = [props[pid] for pid in property_ids if pid in props]
-        types = {category_of.get(lid, (None, None))[0] for lid in extended} - {None}
-        types |= {p["category_type"] for p in live_props if p["category_type"] is not None}
-        if len(types) > 1:
-            reasons.append(SKIP_CATEGORY_TYPE)
-            detail["category_types"] = sorted(types)
-        mains = {category_of.get(lid, (None, None))[1] for lid in extended}
-        mains |= {p["category_main"] for p in live_props}
-        if not all(category_main_compatible(a, b) for a, b in combinations(
-                sorted(mains, key=lambda x: (x is None, x or "")), 2)):
-            reasons.append(SKIP_CATEGORY_MAIN)
-            detail["category_mains"] = sorted(m for m in mains if m is not None)
-        # The scope admitted the members; what rides along with them must be inside it too.
-        outside = sorted(
-            lid for lid in carried
-            if (scope.listing_ids is not None and lid not in scope.listing_ids)
-            or (scope.category_types is not None
-                and category_of.get(lid, (None, None))[0] not in scope.category_types))
-        if outside:
-            reasons.append(SKIP_CARRIES_OUT_OF_SCOPE)
-            detail["out_of_scope_listings"] = outside[:20]
+        set_reasons, set_detail = _set_reasons(
+            extended, category_of, [props[pid] for pid in property_ids if pid in props], scope)
+        reasons += set_reasons
+        detail.update(set_detail)
 
         # E37 at property grain: a property whose OTHER children the engine grouped elsewhere
         # would fuse two of its groups through a link the engine never made.
@@ -676,21 +771,34 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
             reasons.append(SKIP_CARRIES_UNGROUPED)
             detail["ungrouped_listings"] = ungrouped[:20]
 
-        # The engine's own ledger (never property_merge_events, D7). A property this engine
-        # retired that is active again was restored by someone: the engine never re-merges
-        # it on its own. After `unapply`, the SAME generation never re-applies; a later one may.
-        # A merge the operator undid first stays restored-elsewhere even once `unapply` has
-        # noted it (E305): only the engine's own undo releases a property to a later generation.
+        # The engine's own ledger (never property_merge_events, D7). An engine merge someone
+        # else took apart is the operator's word on its LISTINGS: a merge that would re-unite
+        # them is refused whatever property they sit on now. A property this engine retired
+        # that is active again was restored by someone: never re-merged on the engine's own
+        # authority. Only the engine's own undo releases a property to a later generation; a
+        # merge the operator undid first stays restored-elsewhere even once `unapply` has
+        # noted it (E905). After `unapply` the SAME generation never re-applies: a group it
+        # undid, and — after a whole-generation unapply — every group, until `reapply=1`.
         if key in refused_keys:
             reasons.append(SKIP_REFUSED_BEFORE)
+        separated = _separated_merges(
+            extended, prop_of,
+            {mg for lid in extended for mg in standing_by_listing.get(lid, ())})
+        if separated:
+            reasons.append(SKIP_RESTORED_ELSEWHERE)
+            detail["separated_engine_merges"] = separated[:20]
         for pid in property_ids:
             if pid in inactive:
                 continue
             for row in applied_by_retired.get(pid, ()):
                 if not row["undone_by_engine"]:
                     reasons.append(SKIP_RESTORED_ELSEWHERE)
-                elif row["generation"] == generation:
+                elif row["generation"] == generation and row["undone_by"] not in released:
                     reasons.append(SKIP_GENERATION_UNAPPLIED)
+        if standing_stamps and not reapply:
+            reasons.append(SKIP_GENERATION_UNAPPLIED)
+            detail["generation_unapplied"] = {
+                "unapplied_at": standing_stamps[-1]["unapplied_at"], "release": "reapply=1"}
         reasons = list(dict.fromkeys(reasons))
 
         survivor: int | None = None
@@ -717,6 +825,8 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         groups=groups,
         deferred=deferred,
         counts={**dict(counts), "skipped_by_reason": dict(sorted(by_reason.items()))},
+        reapply=reapply,
+        unapplied=standing_stamps,
     )
 
 
@@ -818,18 +928,48 @@ class _SkipAtApply(Exception):
         self.detail = detail
 
 
-def recheck_group(conn: Any, group: GroupPlan) -> tuple[list[str], dict[str, Any]]:
-    """The plan's word, re-read inside the group's own transaction just before it merges: the
-    listings the merge would unite must be the ones planned, and no operator negative may
-    have landed on them since the plan read the negatives (E303)."""
-    now = {int(row[1]) for row in _rows(conn, S.PROPERTY_LISTINGS_SQL,
-                                        {"property_ids": group.property_ids})}
+def recheck_group(
+    conn: Any, group: GroupPlan, scope: Scope
+) -> tuple[list[str], dict[str, Any]]:
+    """The plan's word, re-read inside the group's own transaction just before it merges, over
+    rows it LOCKS (the properties FOR UPDATE, their listings FOR SHARE) so nothing re-points or
+    re-categorises them before the merge commits: the listings must be the ones planned, every
+    property still active, the deal types, categories, scope and asset links still clean, and no
+    operator negative may have landed on them since the plan read the negatives (E903)."""
+    locked = {
+        int(pid): {"status": status, "category_type": ctype, "category_main": cmain,
+                   "first_seen_at": first, "asset_id": asset}
+        for pid, status, ctype, cmain, first, asset in _rows(
+            conn, S.LOCK_PROPERTIES_SQL, {"property_ids": group.property_ids})
+    }
+    rows = _rows(conn, S.LOCK_PROPERTY_LISTINGS_SQL, {"property_ids": group.property_ids})
+    now = {int(row[1]) for row in rows}
     planned = set(group.listing_ids)
     if now != planned:
         return [SKIP_CHANGED_SINCE_PLAN], {
             "arrived_since_plan": sorted(now - planned)[:20],
             "left_since_plan": sorted(planned - now)[:20]}
-    return Negatives.read(conn, now, [group.cluster_key]).hits(now, group.cluster_key)
+    reasons: list[str] = []
+    detail: dict[str, Any] = {}
+    inactive = [pid for pid in group.property_ids
+                if pid not in locked or locked[pid]["status"] != "active"]
+    if inactive:
+        reasons.append(SKIP_INACTIVE_PROPERTY)
+        detail["inactive_property_ids"] = inactive
+    hit_reasons, hit_detail = Negatives.read(conn, now, [group.cluster_key]).hits(
+        now, group.cluster_key)
+    reasons += hit_reasons
+    detail.update(hit_detail)
+    category_of = {int(lid): (ctype, cmain) for _pid, lid, ctype, cmain in rows}
+    set_reasons, set_detail = _set_reasons(now, category_of, list(locked.values()), scope)
+    reasons += set_reasons
+    detail.update(set_detail)
+    prop_of = {int(lid): int(pid) for pid, lid, _ct, _cm in rows}
+    separated = _separated_merges(now, prop_of, _engine_merges(conn, now))
+    if separated:
+        reasons.append(SKIP_RESTORED_ELSEWHERE)
+        detail["separated_engine_merges"] = separated[:20]
+    return list(dict.fromkeys(reasons)), detail
 
 
 def apply_plan(
@@ -859,6 +999,8 @@ def apply_plan(
         "generation": gen,
         "dry_run": dry_run,
         "scope": plan.scope.to_json(),
+        "reapply": plan.reapply,
+        "generation_unapplied": list(plan.unapplied),
         "counts": dict(plan.counts),
         "planned": [_brief(g) for g in plan.to_apply],
         "skipped": [_brief(g, reasons=g.reasons) for g in plan.skipped
@@ -882,6 +1024,12 @@ def apply_plan(
         return result
 
     with conn.transaction():
+        if plan.reapply and plan.unapplied:
+            # E905: the operator's explicit `reapply=1` releases the whole-generation stamp the
+            # plan read, for this run and every later one.
+            _exec(conn, S.RELEASE_UNAPPLIED_SQL, {
+                "ids": [st["id"] for st in plan.unapplied], "released_by": run_id})
+            result["released_unapply"] = [st["id"] for st in plan.unapplied]
         _exec_many(conn, S.LEDGER_INSERT_SQL, skipped_rows)
 
     counts = result["counts"]
@@ -902,7 +1050,7 @@ def apply_plan(
         }
         try:
             with conn.transaction():
-                late_reasons, late_detail = recheck_group(conn, group)
+                late_reasons, late_detail = recheck_group(conn, group, plan.scope)
                 if late_reasons:
                     raise _SkipAtApply(late_reasons, late_detail)
                 moved: list[int] = []
@@ -943,13 +1091,22 @@ def apply_plan(
             continue
         except Exception as exc:
             # Not a refusal the chokepoint names: record what can be recorded and stop, rather
-            # than carry on merging over a database in a state nobody has looked at.
+            # than carry on merging over a database in a state nobody has looked at. The partial
+            # result rides on the error, so the lane still publishes what DID merge.
+            error = f"{type(exc).__name__}: {exc}"
+            counts["failed"] += 1
+            counts["not_attempted"] = len(todo) - index - 1
+            result["failed"].append(_brief(group, error=error))
+            result["aborted"] = f"stopped at group {group.cluster_key}: {error}"
             try:
                 with conn.transaction():
                     _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                        run_id, gen, group, dry_run=False, outcome="failed",
-                        error=f"{type(exc).__name__}: {exc}"))
+                        run_id, gen, group, dry_run=False, outcome="failed", error=error))
             except Exception:  # noqa: BLE001 — the original error is the one to surface
+                pass
+            try:
+                setattr(exc, PARTIAL_RESULT_ATTR, result)
+            except Exception:  # noqa: BLE001 — an error that takes no attribute still surfaces
                 pass
             raise
         counts["applied"] += 1
@@ -968,67 +1125,93 @@ class _NothingMovedBack(Exception):
         self.conflicts = conflicts
 
 
-def _survivor_block(conn: Any, target: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Why a group cannot be undone yet: its survivor has since been merged away (a LATER
-    merge moved every listing on), so `unmerge_group` would only reactivate empty retired
-    properties. Names the live engine merge to undo first, when the engine made it."""
+def _undo_block(
+    conn: Any, target: Mapping[str, Any], undone_in_run: set[str]
+) -> dict[str, Any] | None:
+    """Why a group cannot be undone yet (E905). A LATER live engine merge, of any generation,
+    that shares its survivor (as survivor or as retired property) or any of its listings: undo
+    this one first and the listings it moved back leave that later merge's survivor holding a
+    set no generation grouped. Or its survivor has since been merged away by a merge this engine
+    did not make, so `unmerge_group` would only reactivate empty retired properties.
+    `undone_in_run`: later groups a dry run expects this same run to undo first."""
     survivor = target.get("survivor_id")
+    later: dict[str, dict[str, Any]] = {}
+    for gen, key, group in _rows(conn, S.LATER_LIVE_MERGES_SQL, {
+            "after_id": target["last_id"], "property_id": survivor,
+            "member_ids": target["member_ids"]}):
+        if str(group) not in undone_in_run:
+            later.setdefault(str(group), {"generation": gen, "cluster_key": int(key),
+                                          "unapply": _unapply_args(gen, key)})
+    if later:
+        return {"blocked": f"a later engine merge still holds survivor {survivor} or this "
+                           "group's listings: undo the later engine merge first",
+                "unapply_first": list(later.values())}
     if survivor is None:
         return None
     rows = _rows(conn, S.PROPERTIES_SQL, {"property_ids": [survivor]})
     status = rows[0][1] if rows else None
     if status == "active":
         return None
-    first = [{"generation": gen, "cluster_key": int(key),
-              "unapply": f"generation={gen},cluster_key={int(key)}"}
-             for gen, key, _retired in _rows(conn, S.LIVE_RETIRING_SQL,
-                                             {"property_ids": [survivor]})]
-    reason = (f"survivor {survivor} is {status or 'missing'}: "
-              + ("undo the later engine merge first" if first
-                 else "a merge this engine did not make moved it on"))
-    return {"blocked": reason, "unapply_first": first}
+    return {"blocked": f"survivor {survivor} is {status or 'missing'}: a merge this engine did "
+                       "not make moved it on",
+            "unapply_first": []}
 
 
 def unapply(
     conn: Any,
     generation: str,
     *,
-    dry_run: bool = False,
+    dry_run: bool,
     cluster_key: int | None = None,
     unmerge: Callable[..., dict[str, Any]] = unmerge_group,
     run_id: str | None = None,
 ) -> dict[str, Any]:
     """Undo a generation's live merges newest-first (or one group), each through
-    `unmerge_group`; `dry_run=True` only lists them (the lane's default). NOT gated by
-    `autodedup_apply_enabled`: undo is the way back. A group whose survivor a later merge has
-    since retired is skipped with the reason and the merge to undo first."""
+    `unmerge_group`; `dry_run=True` only lists them. `dry_run` has no default: this writes to
+    production. NOT gated by `autodedup_apply_enabled`: undo is the way back. A group a later
+    engine merge still builds on, or whose survivor a later merge retired, is skipped with the
+    reason and the merge to undo first. Without `cluster_key` the generation is STAMPED
+    unapplied first, so none of its groups applies again until `reapply=1` (E905)."""
     run_id = run_id or new_run_id()
     targets = [
         {"merge_group_id": str(group), "cluster_key": int(key),
          "survivor_id": int(surv) if surv is not None else None,
-         "retired_ids": [int(r) for r in (retired or []) if r is not None]}
-        for group, key, surv, retired, _last in _rows(conn, S.UNAPPLY_TARGETS_SQL, {
-            "generation": generation, "cluster_key": cluster_key})
+         "retired_ids": [int(r) for r in (retired or []) if r is not None],
+         "member_ids": sorted(int(x) for x in (members or ())), "last_id": int(last)}
+        for group, key, surv, retired, last, members in _rows(
+            conn, S.UNAPPLY_TARGETS_SQL, {"generation": generation, "cluster_key": cluster_key})
     ]
     result: dict[str, Any] = {
         "run_id": run_id, "generation": generation, "dry_run": dry_run,
         "cluster_key": cluster_key, "groups": targets,
+        "generation_stamp": None,
         "counts": {"groups": len(targets), "undone": 0, "already_undone": 0, "blocked": 0,
                    "listings_moved_back": 0, "conflicts": 0},
     }
     counts = result["counts"]
     if dry_run:
+        expected: set[str] = set()
         for target in targets:
-            block = _survivor_block(conn, target)
+            block = _undo_block(conn, target, expected)
             if block:
                 target.update(block)
                 counts["blocked"] += 1
+            else:
+                expected.add(target["merge_group_id"])
+        if cluster_key is None:
+            result["generation_stamp"] = "would be written"
         return result
     undone_by = f"{UNAPPLY_BY_PREFIX}{run_id}"
+    if cluster_key is None:
+        # FIRST, so a run that stops half-way still leaves no group of it free to re-apply.
+        with conn.transaction():
+            _exec(conn, S.STAMP_UNAPPLIED_SQL, {
+                "generation": generation, "run_id": run_id, "undone_by": undone_by})
+        result["generation_stamp"] = "written"
     for target in targets:
         # Read per group, just before it is undone: an earlier undo in this run may have
-        # restored the survivor this one needs.
-        block = _survivor_block(conn, target)
+        # released what this one needs.
+        block = _undo_block(conn, target, set())
         if block:
             target.update(block)
             counts["blocked"] += 1
@@ -1052,7 +1235,7 @@ def unapply(
         except MergeError as exc:
             # Nothing left to undo: the group was reversed outside the engine (the merge
             # ledger's own unmerge). The engine's ledger records that it no longer stands —
-            # as SOMEONE ELSE's undo, so the property stays restored-elsewhere (E305).
+            # as SOMEONE ELSE's undo, so the property stays restored-elsewhere (E905).
             with conn.transaction():
                 _exec(conn, S.LEDGER_UNDO_SQL, {
                     "merge_group_id": target["merge_group_id"], "undone_by": EXTERNAL_UNDO,
@@ -1070,15 +1253,19 @@ def unapply(
 # ------------------------------------------------------------------ lane modes
 
 
-def _dry_run_arg(args: Mapping[str, str]) -> bool:
-    """Only an explicit `dry_run=0` (or false/no/off) is live; absent or empty is a dry run."""
-    raw = (args.get("dry_run") or "").strip()
+def _flag_arg(args: Mapping[str, str], key: str, *, default: bool) -> bool:
+    raw = (args.get(key) or "").strip()
     if not raw:
-        return True
+        return default
     try:
         return _truthy(raw)
     except ValueError as exc:
-        raise SystemExit(f"dry_run: {exc}") from exc
+        raise SystemExit(f"{key}: {exc}") from exc
+
+
+def _dry_run_arg(args: Mapping[str, str]) -> bool:
+    """Only an explicit `dry_run=0` (or false/no/off) is live; absent or empty is a dry run."""
+    return _flag_arg(args, "dry_run", default=True)
 
 
 def _generation_arg(args: Mapping[str, str]) -> str:
@@ -1118,6 +1305,20 @@ def summary_markdown(result: Mapping[str, Any], *, mode: str) -> str:
     lines = [f"## autodedup {mode} {result.get('generation')} — {head}", ""]
     if result.get("stopped"):
         lines += [f"**Stopped:** {result['stopped']}", ""]
+    if result.get("aborted"):
+        lines += [f"**Aborted:** {result['aborted']} - the groups listed under `applied` "
+                  "below DID merge.", ""]
+    stamps = result.get("generation_unapplied") or []
+    if stamps and not result.get("reapply"):
+        lines += [f"**Generation unapplied** (unapply ran on it as a whole, "
+                  f"{stamps[-1].get('unapplied_at')}): none of its groups applies. Dispatch "
+                  "with `reapply=1` to release it.", ""]
+    elif stamps:
+        verb = "would release" if result.get("dry_run") else "released"
+        lines += [f"**`reapply=1`** {verb} the whole-generation unapply of this generation.", ""]
+    if result.get("generation_stamp"):
+        lines += [f"**Whole-generation stamp:** {result['generation_stamp']} - no group of "
+                  "this generation applies again until an apply runs with `reapply=1`.", ""]
     lines += ["| count | n |", "| --- | --- |"]
     lines += [f"| {key} | {value} |" for key, value in counts.items()
               if not isinstance(value, dict)]
@@ -1170,7 +1371,9 @@ def run_apply(
             "this lane (it is rewritten while a plan reads it)"
         )
     dry_run = _dry_run_arg(args)
+    reapply = _flag_arg(args, "reapply", default=False)
     override = {key: args[key] for key in SCOPE_KEYS if key in args}
+    out_dir = Path(out_dir)
     conn = conn_factory()
     try:
         # The switch first: a refused live run costs one query and reads no plan.
@@ -1183,14 +1386,23 @@ def run_apply(
             scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
         except ValueError as exc:
             raise SystemExit(f"scope: {exc}") from exc
-        plan = plan_apply(conn, generation, scope)
+        plan = plan_apply(conn, generation, scope, reapply=reapply)
         try:
             result = apply_plan(conn, plan, dry_run)
         except ApplyRefused as exc:
             raise SystemExit(str(exc)) from exc
+        except Exception as exc:
+            # A live run that stops mid-way has merged for real: publish what it did, then fail.
+            partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
+            if isinstance(partial, dict):
+                _publish_apply(out_dir, partial, plan)
+            raise
     finally:
         _close(conn)
-    out_dir = Path(out_dir)
+    return _publish_apply(out_dir, result, plan)
+
+
+def _publish_apply(out_dir: Path, result: dict[str, Any], plan: Plan) -> dict[str, Any]:
     write_json(out_dir / "apply.json", {
         **result, "plan": [g.to_json() for g in plan.groups]})
     summary = _capped(result, ("planned", "skipped", RULED_AFTER_MERGE, "applied",
