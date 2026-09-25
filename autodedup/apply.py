@@ -29,7 +29,7 @@ import os
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -48,6 +48,9 @@ UNAPPLY_BY_PREFIX: str = "autodedup-unapply:"
 # `undone_by` on a ledger row whose merge someone else had already undone when `unapply` came
 # to it: the engine records that the merge no longer stands, never that it undid it (E905).
 EXTERNAL_UNDO: str = "external"
+# `properties.merged_at` (the chokepoint) and the ledger's `applied_at` are both now() of one
+# group's transaction; a wider gap is another merge of the same pair, after an undo (E905).
+SAME_MERGE_TOLERANCE: timedelta = timedelta(seconds=1)
 DEFAULT_MAX_CLUSTER_SIZE: int = 8
 DEFAULT_MAX_CLUSTERS_PER_RUN: int = 200
 SUMMARY_LIST_CAP: int = 200
@@ -1207,47 +1210,91 @@ def _recorded_moves(plan_json: Any, retired_ids: Sequence[int]) -> list[int] | N
                    for lid in lids})
 
 
+def _merge_stands(
+    state: tuple[Any, Any, Any] | None, into: int | None, applied_at: datetime | str | None
+) -> bool:
+    """Whether a property is still merged into `into` by the merge a ledger row recorded at
+    `applied_at`: the chokepoint's `merged_at` is now() of that same transaction, so the same
+    pair merged again at another time (by hand, after an undo) is a different merge (E905)."""
+    if state is None or into is None or state[1] != into:
+        return False
+    merged_at = state[2]
+    if isinstance(applied_at, str):
+        applied_at = datetime.fromisoformat(applied_at)
+    if merged_at is None or applied_at is None:
+        return True
+    return abs(merged_at - applied_at) <= SAME_MERGE_TOLERANCE
+
+
 def _undo_state(conn: Any, target: Mapping[str, Any]) -> dict[str, Any]:
     """Where a group stands now, read before any later merge is named (E905): its survivor's
-    status; its retired properties no longer merged into the survivor (someone undid the
-    merge: `unmerge_group` finds nothing live to replay); its members off the survivor; and,
-    of the listings the merge moved off its retired properties, the ones `unmerge_group` would
-    move back (still on the survivor) and the ones it would report as conflicts."""
+    status and what it is merged into; its retired properties no longer merged into the
+    survivor by this group's merge (someone undid it: `unmerge_group` finds nothing live to
+    replay); its members off the survivor; and, of the listings the merge moved off its
+    retired properties, the ones `unmerge_group` would move back (still on the survivor) and
+    the ones it would report as conflicts."""
     survivor = target["survivor_id"]
     ids = [pid for pid in (survivor, *target["retired_ids"]) if pid is not None]
-    props = {int(pid): (status, merged_into) for pid, status, merged_into in _rows(
-        conn, S.PROPERTY_STATE_SQL, {"property_ids": ids})}
+    props = {int(pid): (status, merged_into, merged_at)
+             for pid, status, merged_into, merged_at in _rows(
+                 conn, S.PROPERTY_STATE_SQL, {"property_ids": ids})}
     moved = target.get("moved_listings") or []
+    members = target.get("member_ids") or []
     placed = {int(lid): pid for lid, pid in _rows(conn, S.MEMBER_PROPERTIES_SQL, {
-        "listing_ids": sorted(set(target["member_ids"]) | set(moved))})}
+        "listing_ids": sorted(set(members) | set(moved))})}
     return {
-        "status": props.get(survivor, (None, None))[0],
-        "undone_outside": [pid for pid in target["retired_ids"]
-                           if props.get(pid, (None, None))[1] != survivor],
-        "taken": [lid for lid in target["member_ids"] if placed.get(lid) != survivor],
+        "survivor": props.get(survivor),
+        "status": (props.get(survivor) or (None,))[0],
+        "undone_outside": [pid for pid in target["retired_ids"] if not _merge_stands(
+            props.get(pid), survivor, target.get("applied_at"))],
+        "taken": [lid for lid in members if placed.get(lid) != survivor],
         "back": [lid for lid in moved if placed.get(lid) == survivor],
         "conflicts": [lid for lid in moved if placed.get(lid) != survivor],
     }
 
 
+def _moves_nothing_back(state: Mapping[str, Any]) -> bool:
+    """A merge that still stands, none of whose moved listings is on its survivor any more:
+    `unmerge_group` would only reactivate empty properties, so the live undo is refused."""
+    return not state["undone_outside"] and bool(state["conflicts"]) and not state["back"]
+
+
 def _later_merges(
-    conn: Any, target: Mapping[str, Any], undone_in_run: set[str]
+    conn: Any, target: Mapping[str, Any], undone_in_run: set[str], state: Mapping[str, Any]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The LATER live engine merges on a group's survivor: those that merged more listings onto
-    it, and those that retired it."""
+    """The LATER live engine merges whose undo would free a group: those that merged more
+    listings onto its survivor and whose own undo is not refused for moving nothing back
+    (some of what they moved is still on the survivor, or someone already undid them and
+    `unapply` notes it), and the one whose retirement of the survivor still stands (the
+    survivor merged into that merge's survivor at that merge's `applied_at`)."""
     survivor = target["survivor_id"]
-    onto: dict[str, dict[str, Any]] = {}
-    retiring: dict[str, dict[str, Any]] = {}
-    for gen, key, group, surv, retired in _rows(conn, S.LATER_LIVE_MERGES_SQL, {
-            "after_id": target["last_id"], "property_id": survivor}):
+    later: dict[str, dict[str, Any]] = {}
+    for gen, key, group, surv, retired, applied_at, plan_json in _rows(
+            conn, S.LATER_LIVE_MERGES_SQL,
+            {"after_id": target["last_id"], "property_id": survivor}):
         if str(group) in undone_in_run:
             continue
-        merge = {"generation": gen, "cluster_key": int(key), "unapply": _unapply_args(gen, key)}
-        if surv == survivor:
-            onto.setdefault(str(group), merge)
-        if retired == survivor:
-            retiring.setdefault(str(group), merge)
-    return list(onto.values()), list(retiring.values())
+        merge = later.setdefault(str(group), {
+            "generation": gen, "cluster_key": int(key), "survivor_id": surv,
+            "retired_ids": [], "applied_at": applied_at, "plan_json": plan_json})
+        if retired is not None:
+            merge["retired_ids"].append(int(retired))
+    onto: list[dict[str, Any]] = []
+    retiring: list[dict[str, Any]] = []
+    for merge in later.values():
+        named = {"generation": merge["generation"], "cluster_key": merge["cluster_key"],
+                 "unapply": _unapply_args(merge["generation"], merge["cluster_key"])}
+        if merge["survivor_id"] == survivor:
+            own = _undo_state(conn, {
+                "survivor_id": survivor, "retired_ids": merge["retired_ids"],
+                "applied_at": merge["applied_at"],
+                "moved_listings": _recorded_moves(merge["plan_json"], merge["retired_ids"])})
+            if not _moves_nothing_back(own):
+                onto.append(named)
+        elif survivor in merge["retired_ids"] and _merge_stands(
+                state["survivor"], merge["survivor_id"], merge["applied_at"]):
+            retiring.append(named)
+    return onto, retiring
 
 
 def _undo_block(
@@ -1255,24 +1302,23 @@ def _undo_block(
 ) -> dict[str, Any] | None:
     """Why a group cannot be undone yet (E905), decided from where it stands (`_undo_state`)
     BEFORE any later engine merge is looked for, so `unapply_first` only ever names an undo
-    that would free it. A survivor still active: a group someone already undid is not blocked
-    (`unmerge_group` finds nothing live), and one whose moved listings have all left the
-    survivor would move nothing back whatever came later; otherwise a LATER live engine merge
-    that put more listings on the survivor is undone first, or undoing this one would leave it
-    holding a set no generation grouped. A survivor merged away: by a later live engine merge
-    (undo that and it is back), or by a merge this engine did not make — its listings are off
-    it, the group was taken apart outside the engine, and there is nothing to name.
+    that would free it. A group someone already undid is never blocked, wherever its survivor
+    has gone since: `unmerge_group` finds nothing live and `unapply` notes the undo as theirs.
+    A survivor still active: a group whose moved listings have all left it would move nothing
+    back whatever came later; otherwise a LATER live engine merge that put more listings on it
+    (and whose own undo would not be refused for moving nothing back) is undone first, or
+    undoing this one would leave the survivor holding a set no generation grouped. A survivor
+    merged away: by a later engine merge that still stands (undo that and it is back), or else
+    by a merge this engine did not make — its listings are off it, the group was taken apart
+    outside the engine, and there is nothing to name.
     `undone_in_run`: later groups a dry run expects this same run to undo first."""
     survivor = target.get("survivor_id")
-    if survivor is None:
+    if survivor is None or state["undone_outside"]:
         return None
     status = state["status"]
-    if status == "active":
-        if state["undone_outside"]:
-            return None
-        if state["conflicts"] and not state["back"]:
-            return _nothing_back(state["conflicts"])
-    onto, retiring = _later_merges(conn, target, undone_in_run)
+    if status == "active" and _moves_nothing_back(state):
+        return _nothing_back(state["conflicts"])
+    onto, retiring = _later_merges(conn, target, undone_in_run, state)
     if status == "active":
         if not onto:
             return None
@@ -1300,17 +1346,19 @@ def unapply(
 ) -> dict[str, Any]:
     """Undo a generation's live merges newest-first (or one group), each through
     `unmerge_group`; `dry_run=True` only lists them. `dry_run` has no default: this writes to
-    production. NOT gated by `autodedup_apply_enabled`: undo is the way back. A group a later
-    engine merge still builds on, or whose survivor a later engine merge retired, is skipped
-    with the reason and the merge to undo first; one taken apart outside the engine, or with
-    nothing left to move back, is skipped naming nothing — and the dry run says so from the
-    same reads. A merge someone else had already partly taken apart is undone but recorded as
-    THEIR undo (`undone_by='external'`), so the listings they separated stay apart in every
-    later generation. Without `cluster_key` the generation is STAMPED unapplied first, so none
-    of its groups applies again until `reapply=1` (E905)."""
+    production. NOT gated by `autodedup_apply_enabled`: undo is the way back. A group someone
+    else already undid is noted undone, as THEIR undo, wherever its survivor has gone since. A
+    group a later engine merge still builds on (more listings merged onto its survivor, by a
+    merge whose own undo would not be refused), or whose survivor a later engine merge that
+    still stands retired, is skipped with the reason and the merge to undo first; one taken
+    apart outside the engine, or with nothing left to move back, is skipped naming nothing —
+    and the dry run says so from the same reads. A merge someone else had already partly taken
+    apart is undone but recorded as THEIR undo (`undone_by='external'`), so the listings they
+    separated stay apart in every later generation. Without `cluster_key` the generation is
+    STAMPED unapplied first, so none of its groups applies again until `reapply=1` (E905)."""
     run_id = run_id or new_run_id()
     targets = []
-    for group, key, surv, retired, last, members, plan_json in _rows(
+    for group, key, surv, retired, last, members, plan_json, applied_at in _rows(
             conn, S.UNAPPLY_TARGETS_SQL, {"generation": generation, "cluster_key": cluster_key}):
         retired_ids = [int(r) for r in (retired or []) if r is not None]
         targets.append({
@@ -1318,7 +1366,9 @@ def unapply(
             "survivor_id": int(surv) if surv is not None else None,
             "retired_ids": retired_ids,
             "member_ids": sorted(int(x) for x in (members or ())), "last_id": int(last),
-            "moved_listings": _recorded_moves(plan_json, retired_ids)})
+            "moved_listings": _recorded_moves(plan_json, retired_ids),
+            "applied_at": (applied_at.isoformat() if isinstance(applied_at, datetime)
+                           else applied_at)})
     result: dict[str, Any] = {
         "run_id": run_id, "generation": generation, "dry_run": dry_run,
         "cluster_key": cluster_key, "groups": targets,
