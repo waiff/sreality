@@ -12,7 +12,7 @@
 
 import styles from './styles.css?inline';
 import { detailRef, portalForHost, portalForUrl, type PortalRef } from './portals';
-import { runIndexOverlay } from './index_overlay';
+import { EXTENSION_RELOADED_DETAIL, runIndexOverlay } from './index_overlay';
 import type {
   AgentQuota,
   ApiMessage,
@@ -181,19 +181,41 @@ interface PanelState {
   errorMessage: string | null;
 }
 
+/* An extension reload, update, disable or removal orphans the content script
+ * already in an open tab (Chrome re-injects only on page load): sendMessage
+ * then throws "Extension context invalidated." synchronously. call() resolves
+ * with that as a failure instead of rejecting — every caller's busy flag
+ * ("Přihlašuji…") waits for a result — and says what actually fixes it (a
+ * detail the search page's notice recognises, to offer a reload instead of a
+ * retry). */
+function runtimeDetail(message: string | undefined): string {
+  if (message != null && /context invalidated/i.test(message)) {
+    return EXTENSION_RELOADED_DETAIL;
+  }
+  return message ?? 'runtime error';
+}
+
 export function call<T>(message: ApiMessage): Promise<ApiResult<T>> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage(message, (response: ApiResult<T>) => {
-      if (chrome.runtime.lastError) {
-        resolve({
-          ok: false,
-          status: 0,
-          detail: chrome.runtime.lastError.message ?? 'runtime error',
-        });
-        return;
-      }
-      resolve(response);
-    });
+    try {
+      chrome.runtime.sendMessage(message, (response: ApiResult<T>) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            status: 0,
+            detail: runtimeDetail(chrome.runtime.lastError.message),
+          });
+          return;
+        }
+        resolve(response);
+      });
+    } catch (err) {
+      resolve({
+        ok: false,
+        status: 0,
+        detail: runtimeDetail(err instanceof Error ? err.message : String(err)),
+      });
+    }
   });
 }
 
@@ -2464,12 +2486,18 @@ export async function openPanel(
   /* Every route needs a real session now (Wave 1) — check first so a
    * signed-out operator sees one clean prompt instead of a lookup 401. */
   const auth = await call<AuthState>({ type: 'get_auth_state' });
-  const authEmail = auth.ok && auth.data.signedIn ? auth.data.email : null;
-  if (!auth.ok || !auth.data.signedIn) {
+  if (!auth.ok) {
+    /* The background is unreachable (an extension reload orphaned this tab):
+     * not a sign-in problem, so say what happened instead of prompting for
+     * one — the same state the search page's notice reports. */
+    setStateIf(epoch, (prev) => ({ ...prev, phase: 'error', errorMessage: auth.detail }));
+    return;
+  }
+  if (!auth.data.signedIn) {
     setStateIf(epoch, (prev) => ({ ...prev, phase: 'signed_out', authEmail: null }));
     return;
   }
-  setStateIf(epoch, (prev) => ({ ...prev, authEmail }));
+  setStateIf(epoch, (prev) => ({ ...prev, authEmail: auth.data.email }));
 
   let listing: PortalListing | null;
   if (prefetched !== undefined) {

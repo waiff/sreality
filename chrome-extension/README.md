@@ -57,7 +57,21 @@ maxima, remax, mmreality, ceskereality).
     into a live stage, lifts the dismissal.
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
-  on-demand estimation by that card's own URL.
+  on-demand estimation by that card's own URL. Badges come only from a
+  successful lookup; when it fails the page is not left silent — one small
+  notice in the **bottom-left** corner (the panel owns the bottom-right) says
+  why: **Přihlásit se přes Google** when signed out (a click first checks for
+  a session made elsewhere — the panel, another tab — and skips the Google
+  round trip if there is one), **Obnovit stránku** when the extension was
+  reloaded, updated, disabled or removed under the open tab (the overlay then
+  stops scanning), the error + **Zkusit znovu** otherwise (no button for a
+  build without an API URL, which only a rebuild fixes). Automatic re-lookups
+  back off 60 s; the tab becoming visible again asks at once; a lookup
+  unanswered for 20 s shows as failed, though a late answer still badges. The
+  notice appears only while listing cards the URL doesn't rule out as sale
+  apartments are waiting on the failed lookup — never on a page without cards,
+  and on sreality / idnes / ceskereality not on a rental or house search. ×
+  hides it until the next page load.
 
 The default display is a **read** of data we already have — no LLM call. It
 maps each portal listing to our row by `(source, native id)` through the
