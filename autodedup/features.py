@@ -653,6 +653,24 @@ def vocabulary_attr_keys(settings: "Settings | None") -> frozenset[str]:
     return frozenset(settings.vocabulary_attr_keys)
 
 
+# E286: the slots that name a CATEGORY's own subtype. Across the sanctioned dům <-> komerční
+# cross they differ because the categories do (`vicegeneracni_dum` against `apartmany`, 54
+# against 57), which is the one difference rule #15 already allows.
+CROSS_TYPE_SUBTYPE_KEYS: frozenset[str] = frozenset({"subtype", "category_sub_cb"})
+CROSS_TYPE_PAIR: frozenset[str] = frozenset({"dum", "komercni"})
+
+
+def cross_type_attr_keys(
+    la: Listing, lb: Listing, settings: "Settings | None"
+) -> frozenset[str]:
+    """E286: the subtype slots, where the two adverts sit across the dům <-> komerční cross."""
+    if settings is None or not getattr(settings, "attr_cross_type_subtype_skip", False):
+        return frozenset()
+    if {la.category_main, lb.category_main} != CROSS_TYPE_PAIR:
+        return frozenset()
+    return CROSS_TYPE_SUBTYPE_KEYS
+
+
 def _emitted(listing: Listing, key: str, value: object) -> bool:
     """Is this a value the portal PUBLISHES? A `false` from a portal that only ever publishes the
     positive is a parser default (`FALSE_BY_OMISSION`), and a default is absence, not a fact."""
@@ -698,7 +716,7 @@ def attribute_conflicts(
     dropped), because a prompt that named a conflict the model cannot see in the feature vector
     would be arguing with it — the values are returned RAW so the digest can print
     `energy_rating A=B vs B=C` rather than the lower-cased form the comparison runs on."""
-    skip = vocabulary_attr_keys(settings)
+    skip = vocabulary_attr_keys(settings) | cross_type_attr_keys(la, lb, settings)
     raw_a = _attr_raw(la, skip)
     raw_b = _attr_raw(lb, skip)
     norm_a = _attr_map(la, skip)
@@ -1405,7 +1423,7 @@ def pair_features(
     )
     feats["total_floors_equal"] = _eq(fa.total_floors, fb.total_floors)
 
-    skip = vocabulary_attr_keys(settings)
+    skip = vocabulary_attr_keys(settings) | cross_type_attr_keys(la, lb, settings)
     attrs_a = _attr_map(la, skip)
     attrs_b = _attr_map(lb, skip)
     block_a = _block_of(fa)

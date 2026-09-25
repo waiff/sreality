@@ -169,6 +169,21 @@ def _repartition_clusters(
     strict_relation = (relation.strict()
                        if settings.repartition_rejoin_cells and relation is not None else None)
 
+    def blockers(members: Sequence[int]) -> list[tuple[int, int]]:
+        """E253: the pairwise refusals inside a member set — what a cell could shed its way
+        out of. The set-level invariants are deliberately absent: `partition` re-tests the
+        whole of `invariants` on what is left, so an area spread no eviction can fix simply
+        makes the move fail."""
+        ids = sorted(members)
+        out: list[tuple[int, int]] = []
+        for index, left in enumerate(ids):
+            for right in ids[index + 1:]:
+                if (left, right) in must_not_link:
+                    out.append((left, right))
+                elif relation is not None and not relation.ok(left, right):
+                    out.append((left, right))
+        return out
+
     def strict_invariants(members: Sequence[int]) -> str | None:
         broken = invariants(members)
         if broken is not None:
@@ -190,7 +205,13 @@ def _repartition_clusters(
             local = [edge for edge in graph if edge.lo in inside and edge.hi in inside]
             cells = partition(component, local, invariants, settings.repartition_max_rounds,
                               settings.repartition_keep_factless,
-                              settings.repartition_rejoin_cells, strict_invariants)
+                              settings.repartition_rejoin_cells, strict_invariants,
+                              blockers if settings.repartition_shed_blockers else None,
+                              settings.repartition_shed_max,
+                              settings.repartition_shed_max_union,
+                              settings.repartition_outer_rounds,
+                              settings.repartition_shed_factless_guard,
+                              settings.repartition_reconcile_factless_first)
         for cell in cells:
             grouped[min(cell)] = sorted(cell)
 
