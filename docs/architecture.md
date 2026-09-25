@@ -1236,8 +1236,11 @@ renumber.** Navigate by area:
     apart stays apart: its separated LISTINGS are never re-united by a later generation, even
     once the restored property has been merged into another one, and an `unapply` that finds
     the merge already partly taken apart records its undo as the operator's. `unapply` skips a
-    group a later engine merge still builds on (same survivor or shared listings) and names the merge
-    to undo first; a whole-generation `unapply` stamps the generation
+    group a later engine merge still builds on (more listings merged onto its survivor, or its
+    survivor retired) and names the merge to undo first — and only then: a group taken apart
+    outside the engine, or with nothing left to move back (from the placement each ledger row
+    records as it merges), is skipped naming nothing, and the dry run reports each group as the
+    live run would treat it; a whole-generation `unapply` stamps the generation
     (`autodedup.unapplied_generations`) so none of its groups — undone or never reached —
     applies again until an apply with `reapply=1`. A group already on one
     property that the operator has since ruled different is reported, never acted on. It stamps

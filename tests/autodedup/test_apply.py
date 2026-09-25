@@ -206,14 +206,16 @@ class FakeDb:
                             r["undone_at"] is not None, r["undone_by"]))
             return out
         if sql == S.LATER_LIVE_MERGES_SQL:
-            members = set(p["member_ids"])
-            return [(r["generation"], r["cluster_key"], r["merge_group_id"])
+            return [(r["generation"], r["cluster_key"], r["merge_group_id"],
+                     r["survivor_property_id"], r["retired_property_id"])
                     for r in self.ledger
                     if not r["dry_run"] and r["outcome"] == "applied"
                     and r["undone_at"] is None and r["id"] > p["after_id"]
-                    and (p["property_id"] in (r["survivor_property_id"],
-                                              r["retired_property_id"])
-                         or members & set(r["member_ids"]))]
+                    and p["property_id"] in (r["survivor_property_id"],
+                                             r["retired_property_id"])]
+        if sql == S.PROPERTY_STATE_SQL:
+            return [(pid, r["status"], r["merged_into"])
+                    for pid, r in sorted(self.properties.items()) if pid in p["property_ids"]]
         if sql == S.UNAPPLIED_GENERATION_SQL:
             return [(u["id"], u["undone_by"], u["unapplied_at"], u["released_at"] is not None)
                     for u in self.unapplied if u["generation"] == p["generation"]]
@@ -243,12 +245,13 @@ class FakeDb:
                     continue
                 g = groups.setdefault(r["merge_group_id"], {
                     "key": r["cluster_key"], "surv": r["survivor_property_id"],
-                    "retired": [], "last": 0, "members": list(r["member_ids"])})
+                    "retired": [], "last": 0, "members": list(r["member_ids"]),
+                    "plan": json.loads(r["plan_json"])})  # jsonb reads back as a dict
                 g["retired"].append(r["retired_property_id"])
                 g["last"] = max(g["last"], r["id"])
             ordered = sorted(groups.items(), key=lambda kv: -kv[1]["last"])
-            return [(gid, g["key"], g["surv"], g["retired"], g["last"], g["members"])
-                    for gid, g in ordered]
+            return [(gid, g["key"], g["surv"], g["retired"], g["last"], g["members"],
+                     g["plan"]) for gid, g in ordered]
         if sql == S.LEDGER_UNDO_SQL:
             for r in self.ledger:
                 if (r["merge_group_id"] == p["merge_group_id"] and not r["dry_run"]
@@ -1039,6 +1042,9 @@ def test_unapply_one_group_and_one_already_undone_elsewhere() -> None:
     _scope, calls = _applied_two(db)
     first, second = calls[0]["merge_group_id"], calls[1]["merge_group_id"]
     db.unmerge([])(db, merge_group_id=second, undone_by="operator")  # the ledger UI's undo
+    dry = A.unapply(db, GEN, dry_run=True)
+    assert dry["counts"]["already_undone"] == 1 and dry["counts"]["blocked"] == 0
+    assert "already undone outside the engine" in dry["groups"][0]["note"]
     result = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
     assert result["counts"] == {"groups": 2, "undone": 1, "already_undone": 1, "blocked": 0,
                                 "taken_apart_before": 0, "listings_moved_back": 1,
@@ -1111,6 +1117,100 @@ def test_unapply_never_calls_undone_a_merge_that_would_move_nothing_back() -> No
     assert result["groups"][0]["conflicts"] == [11]
     assert (db.listings, db.properties) == before  # rolled back: 200 stays merged away
     assert all(r["undone_at"] is None for r in db.ledger if r["outcome"] == "applied")
+
+
+def _outcome(target: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (target.get("blocked"), sorted(target.get("conflicts") or []),
+            target.get("unapply_first"), target.get("taken_apart"))
+
+
+def test_the_ledger_records_which_property_each_listing_sat_on_as_it_merged() -> None:
+    db = FakeDb()
+    _applied_two(db)
+    plans = {r["cluster_key"]: json.loads(r["plan_json"]) for r in db.ledger}
+    assert plans[10]["listings_by_property"] == {"100": [10], "200": [11]}
+    assert plans[20]["listings_by_property"] == {"300": [20], "400": [21]}
+
+
+def test_a_dry_run_blocks_a_split_group_exactly_as_the_live_run_does() -> None:
+    # g12 merged 200 (11) into 100 (10). The operator split 100: 10 stayed, 11 went to 901.
+    # Nothing the merge moved off 200 is on 100 any more, so the live undo would move nothing
+    # back and is refused — and the dry run the operator approves says so, not "undoable".
+    db = FakeDb()
+    _applied_two(db)
+    db.prop(901)
+    db.listings[11]["property_id"] = 901
+    before = copy.deepcopy((db.listings, db.properties))
+    dry = A.unapply(db, GEN, dry_run=True, cluster_key=10)
+    live = A.unapply(db, GEN, dry_run=False, cluster_key=10, unmerge=db.unmerge([]))
+    assert dry["counts"] == live["counts"] == {
+        "groups": 1, "undone": 0, "already_undone": 0, "blocked": 1, "taken_apart_before": 0,
+        "listings_moved_back": 0, "conflicts": 0}
+    assert _outcome(dry["groups"][0]) == _outcome(live["groups"][0]) == (
+        "nothing would move back (1 listings moved on since the merge); left as it stands",
+        [11], [], None)
+    assert live["groups"][0]["outcome"] == "blocked"
+    assert (db.listings, db.properties) == before
+    assert all(r["undone_at"] is None for r in db.ledger if r["outcome"] == "applied")
+
+
+def test_a_later_merge_on_the_survivor_is_not_named_when_undoing_it_frees_nothing() -> None:
+    # As above, and then g13 merged 700 (70) into 100 alongside 10. Undoing g13 would leave
+    # 11 on 901 all the same, so g12's group is refused for what it is, naming nothing.
+    db = FakeDb()
+    scope, _calls = _applied_two(db)
+    db.prop(901)
+    db.listings[11]["property_id"] = 901
+    db.prop(700)
+    db.listing(70, 700)
+    db.group(10, [10, 70], gen="g13")
+    g13 = A.plan_apply(db, "g13", scope)
+    assert [(g.survivor_id, g.retired_ids, g.reasons) for g in g13.groups] == [(100, [700], [])]
+    A.apply_plan(db, g13, dry_run=False, merge=db.merge([]))
+    dry = A.unapply(db, GEN, dry_run=True, cluster_key=10)
+    live = A.unapply(db, GEN, dry_run=False, cluster_key=10, unmerge=db.unmerge([]))
+    for result in (dry, live):
+        assert result["counts"]["blocked"] == 1
+        assert result["groups"][0]["unapply_first"] == []
+        assert result["groups"][0]["blocked"].startswith("nothing would move back")
+    assert db.listings[70]["property_id"] == 100  # g13 stands
+
+
+def test_unapply_never_names_a_later_merge_of_a_group_taken_apart_outside_the_engine() -> None:
+    # g12 merged 200 (11) into 100 (10). The operator undid it on the merge ledger, then merged
+    # 100 into an older 500 holding 50. g13 grouped {10, 50, 60} and merged 600 into 500 — a
+    # good merge. Undoing it would not bring 100 back (an operator merge retired it), so
+    # `unapply` of g12 reports the group taken apart outside the engine and names nothing.
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    _pair_group(db, 10, [10, 11], [100, 200])
+    calls: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge(calls))
+    db.unmerge([])(db, merge_group_id=calls[0]["merge_group_id"], undone_by="operator")
+    db.prop(500, first=T0 - timedelta(days=30))
+    db.listing(50, 500)
+    db.merge([])(db, survivor_id=500, retired_id=100, reason="operator", source="operator")
+    db.prop(600)
+    db.listing(60, 600)
+    db.group(50, [10, 50, 60], gen="g13")
+    g13 = A.plan_apply(db, "g13", scope)
+    assert [(g.survivor_id, g.retired_ids, g.reasons) for g in g13.groups] == [(500, [600], [])]
+    A.apply_plan(db, g13, dry_run=False, merge=db.merge([]))
+    before = copy.deepcopy((db.listings, db.properties))
+
+    dry = A.unapply(db, GEN, dry_run=True)
+    live = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
+    assert _outcome(dry["groups"][0]) == _outcome(live["groups"][0])
+    for result in (dry, live):
+        (group,) = result["groups"]
+        assert result["counts"]["blocked"] == 1
+        assert group["unapply_first"] == []
+        assert "taken apart outside the engine" in group["blocked"]
+        assert "g13" not in json.dumps(group)
+    assert (db.listings, db.properties) == before
+    assert [r["undone_at"] for r in db.ledger
+            if r["generation"] == "g13" and r["outcome"] == "applied"] == [None]
 
 
 def test_a_merge_restored_outside_the_engine_is_never_re_merged() -> None:

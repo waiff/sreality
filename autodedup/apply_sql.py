@@ -167,20 +167,21 @@ select distinct on (a.merge_group_id)
  order by a.merge_group_id, a.id
 """
 
-# A LATER live engine merge (any generation) that shares this group's survivor as its own
-# survivor or retired property, or any of its listings: undoing this group first would leave
-# listings on one property that no generation ever grouped, so `unapply` names it to undo
-# first (E905).
+# A LATER live engine merge (any generation) with this group's survivor as its own survivor
+# or retired property. `unapply` names one to undo first only where that undo is what this
+# group waits on (E905): one that put more listings on a survivor still active, or one that
+# retired the survivor. A later merge sharing only listings is neither: undoing this group
+# moves back only what sits on its own survivor.
 LATER_LIVE_MERGES_SQL = """
-select a.generation, a.cluster_key, a.merge_group_id::text
+select a.generation, a.cluster_key, a.merge_group_id::text, a.survivor_property_id,
+       a.retired_property_id
   from autodedup.applied_merges a
  where not a.dry_run
    and a.outcome = 'applied'
    and a.undone_at is null
    and a.id > %(after_id)s::bigint
    and (a.survivor_property_id = %(property_id)s::bigint
-        or a.retired_property_id = %(property_id)s::bigint
-        or a.member_ids && %(member_ids)s::bigint[])
+        or a.retired_property_id = %(property_id)s::bigint)
  order by a.id
 """
 
@@ -205,10 +206,12 @@ update public.property_merge_events
 """
 
 # Newest-first, so a generation is undone in the reverse of the order it was applied. Every
-# row of a group carries the same survivor and member set.
+# row of a group carries the same survivor, member set and plan (with the property each moved
+# listing sat on when it merged, so a dry run can tell what `unmerge_group` would move back).
 UNAPPLY_TARGETS_SQL = """
 select a.merge_group_id::text, a.cluster_key, max(a.survivor_property_id),
-       array_agg(a.retired_property_id order by a.id), max(a.id), max(a.member_ids)
+       array_agg(a.retired_property_id order by a.id), max(a.id), max(a.member_ids),
+       (array_agg(a.plan_json order by a.id))[1]
   from autodedup.applied_merges a
  where a.generation = %(generation)s::text
    and not a.dry_run
@@ -219,8 +222,18 @@ select a.merge_group_id::text, a.cluster_key, max(a.survivor_property_id),
  order by max(a.id) desc
 """
 
-# Where a group's members sit now, read in the undo's own transaction before `unmerge_group`:
-# a member off the survivor means someone else took the merge apart first (E905).
+# Where a group's survivor and retired properties stand now. A retired property still merged
+# into the survivor means the merge stands: only the chokepoint and `unmerge_group` write
+# `merged_into`, so one active again (or merged on into another property) was restored by an
+# undo of this group, and `unmerge_group` would find nothing live to replay (E905).
+PROPERTY_STATE_SQL = """
+select p.id, p.status, p.merged_into
+  from public.properties p
+ where p.id = any(%(property_ids)s::bigint[])
+"""
+
+# Where a group's listings sit now, read before `unmerge_group` and again in the undo's own
+# transaction: a member off the survivor means someone else took the merge apart first (E905).
 MEMBER_PROPERTIES_SQL = """
 select l.id, l.property_id
   from public.listings l

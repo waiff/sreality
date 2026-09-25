@@ -313,9 +313,10 @@ name: "AUTODEDUP: engine lane"
 #
 #   apply   - A1. DRY RUN BY DEFAULT: plans one generation's groups into production merges
 #             and writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json.
-#             Per group it names the survivor (the property with the most listings; a tie
-#             goes to the oldest first_seen_at, then the lowest id) and the properties that
-#             would retire into it, or records why the group is refused. Every check reads
+#             Per group it names the survivor (the one asset-linked property if exactly one
+#             is linked; else the property with the most listings, a tie going to the oldest
+#             first_seen_at, then the lowest id) and the properties that would retire into
+#             it, or records why the group is refused. Every check reads
 #             EVERY listing the merge would put on the survivor, not only the members: a
 #             member with no property yet, a property not active, oversize (the property it
 #             would build), an operator negative (a pair verdict or must-not-link with both
@@ -351,8 +352,11 @@ name: "AUTODEDUP: engine lane"
 #             cluster_key it first STAMPS the generation: none of its groups (undone or never
 #             reached) applies again until an apply passes reapply=1; with cluster_key only
 #             that group stays out. A later generation may merge the same listings. A group a
-#             later engine merge still builds on (same survivor, or shared listings) is
-#             skipped and names the merge to undo first; a group the operator already undid is
+#             later engine merge still builds on (more listings merged onto its survivor, or
+#             its survivor retired) is skipped and names the merge to undo first; a group
+#             taken apart outside the engine (its survivor merged on by another merge, or
+#             nothing of it left to move back) is skipped naming nothing - the dry run reports
+#             each group as the live run would treat it; a group the operator already undid is
 #             noted as undone by someone else, and its listings stay apart in every later
 #             generation's merges.
 #
