@@ -1,9 +1,10 @@
 """The realtime worker's `autodedup` lane: THE engine's real-time shadow pass, run from the
 always-on worker (AUTODEDUP rollout §7.3).
 
-Two halves. The lane's own contract — dark until `app_settings.realtime_autodedup_enabled`,
-fail-safe when the settings read raises, a clamped claim, a hard deadline, a refusal recorded
-rather than raised, heartbeat counters on every path — is pinned against stubs. And the pass
+Two halves. The lane's own contract — one integer, `app_settings.realtime_autodedup_interval_seconds`,
+as cadence and kill switch (seeded 0), fail-safe when the settings read raises, a claim the engine
+sizes under the lane's budget, a hard deadline, a refusal recorded rather than raised, heartbeat
+counters on every path — is pinned against stubs. And the pass
 itself is driven END TO END through `autodedup.incremental_lane.run_incremental` over the
 engine's own Postgres stand-in (`tests/autodedup/fake_pg.py`, which raises on any statement it
 does not know), seeded the way `test_rt_gate` seeds it: so "the same code the GitHub lane runs"
@@ -24,7 +25,6 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from autodedup import incremental_lane
-from autodedup.incremental import Limits
 from autodedup.incremental_lane import (
     ENV_FLAG,
     LANE_NAME,
@@ -49,7 +49,6 @@ def _fresh_lane_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ENV_FLAG, raising=False)
     monkeypatch.setattr(rw, "_AUTODEDUP_PASS_LOCK", threading.Lock())
     monkeypatch.setattr(rw, "_AUTODEDUP_WEDGE_LOGGED", False)
-    monkeypatch.setattr(rw, "_AUTODEDUP_DARK_LOGGED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_STORE_WARNED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
     monkeypatch.setattr(rw, "_AUTODEDUP_BACKOFF", 1)
@@ -131,46 +130,37 @@ def _summary(**over: Any) -> dict[str, Any]:
 
 
 def test_the_lane_is_registered_dark_and_fail_safe() -> None:
-    # default_interval=0: _lane_loop keeps it when the settings read RAISES, and the flag
-    # lives inside that read — a pooler blip must not run a pass of a lane left dark.
+    # default_interval=0: _lane_loop keeps it when the settings read RAISES, and the interval
+    # is the kill switch — a pooler blip must not run a pass of a lane left dark.
     lane = inspect.getsource(rw._amain).split('("autodedup"', 1)[1].split(")),", 1)[0]
     assert "_read_autodedup_interval" in lane
     assert "default_interval=0" in lane
 
 
-def test_the_interval_is_zero_until_the_flag_is_on_and_says_so_once(
-        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    _settings(monkeypatch)
-    with caplog.at_level(logging.INFO, logger="scraper.realtime_worker"):
-        assert rw._read_autodedup_interval() == 0
-        assert rw._read_autodedup_interval() == 0
-    assert sum("AUTODEDUP lane dark" in r.message for r in caplog.records) == 1
+def test_the_interval_is_the_only_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One integer is cadence AND kill switch, the worker's convention: an absent row reads as
+    0, and no other row — the deleted `realtime_autodedup_enabled` included — can open it."""
+    read: list[str] = []
 
-    _settings(monkeypatch, realtime_autodedup_enabled=False,
-              realtime_autodedup_interval_seconds=15)
-    assert rw._read_autodedup_interval() == 0, "an explicit false is off too"
+    def setting(values: dict[str, Any]) -> Any:
+        def fake(key: str) -> Any:
+            read.append(key)
+            return values.get(key)
+        return fake
 
-    _settings(monkeypatch, realtime_autodedup_enabled=True)
-    assert rw._read_autodedup_interval() == rw.AUTODEDUP_INTERVAL_DEFAULT == 60
-    _settings(monkeypatch, realtime_autodedup_enabled=True,
-              realtime_autodedup_interval_seconds=15)
-    assert rw._read_autodedup_interval() == 15
-    _settings(monkeypatch, realtime_autodedup_enabled=True,
-              realtime_autodedup_interval_seconds=0)
-    assert rw._read_autodedup_interval() == 0, "interval 0 idles an enabled lane"
-
-    # Switched off again: said once more, because it is news again.
-    caplog.clear()
-    _settings(monkeypatch)
-    with caplog.at_level(logging.INFO, logger="scraper.realtime_worker"):
-        rw._read_autodedup_interval()
-    assert sum("AUTODEDUP lane dark" in r.message for r in caplog.records) == 1
+    for values, expected in (({}, 0), ({"realtime_autodedup_interval_seconds": 0}, 0),
+                             ({"realtime_autodedup_interval_seconds": 60}, 60),
+                             ({"realtime_autodedup_interval_seconds": "junk"}, 0),
+                             ({"realtime_autodedup_enabled": True}, 0)):
+        monkeypatch.setattr(rw, "_read_setting", setting(values))
+        assert rw._read_autodedup_interval() == expected, values
+    assert set(read) == {rw.AUTODEDUP_INTERVAL_SETTING}
 
 
 def test_a_dark_lane_opens_no_connection_and_runs_no_pass(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provably inert: the real reader, the real loop, the flag absent."""
-    _settings(monkeypatch)
+    """Provably inert: the real reader, the real loop, the seeded 0."""
+    _settings(monkeypatch, realtime_autodedup_interval_seconds=0)
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: pytest.fail(
         "a dark lane must not open a connection"))
     monkeypatch.setattr(rw, "_autodedup_sync", lambda: pytest.fail(
@@ -191,31 +181,18 @@ def test_a_dark_lane_opens_no_connection_and_runs_no_pass(
     assert "autodedup" not in state["lanes"]
 
 
-def test_the_seeded_settings_ship_the_lane_dark() -> None:
-    """The rows exist so /settings can flip them (PUT 404s on an absent key); the flag is
-    seeded OFF and an operator's value is never overwritten."""
+def test_the_seeded_setting_ships_the_lane_dark() -> None:
+    """ONE row, so /settings can set it (PUT 404s on an absent key); seeded 0 = stopped, and
+    an operator's value is never overwritten."""
     sql = MIGRATION.read_text(encoding="utf-8")
     body = "\n".join(line for line in sql.splitlines() if not line.lstrip().startswith("--"))
-    assert "'realtime_autodedup_enabled',\n    'false'::jsonb" in body
-    assert "'realtime_autodedup_interval_seconds',\n    '60'::jsonb" in body
-    assert "'realtime_autodedup_max_listings',\n    '100'::jsonb" in body
+    assert f"'{rw.AUTODEDUP_INTERVAL_SETTING}',\n  '0'::jsonb" in body
+    assert re.findall(r"'realtime_\w+'", body) == [f"'{rw.AUTODEDUP_INTERVAL_SETTING}'"]
     assert "on conflict (key) do nothing" in body
     assert not re.search(r"\b(create|alter|drop|delete|update|truncate)\b", body, re.I)
-    for key in (rw.AUTODEDUP_LANE_SETTING, rw.AUTODEDUP_INTERVAL_SETTING,
-                rw.AUTODEDUP_MAX_LISTINGS_SETTING):
-        assert f"'{key}'" in body
 
 
 # ------------------------------------------------------------------------------ the bounds
-
-
-def test_the_claim_cap_is_clamped_to_the_engines_own_default(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    assert rw.AUTODEDUP_MAX_LISTINGS_CEILING == Limits().max_listings
-    for stored, expected in ((None, rw.AUTODEDUP_MAX_LISTINGS_DEFAULT), (0, 1), (-5, 1),
-                             (37, 37), (10_000, rw.AUTODEDUP_MAX_LISTINGS_CEILING)):
-        _settings(monkeypatch, realtime_autodedup_max_listings=stored)
-        assert rw._read_autodedup_max_listings() == expected
 
 
 def test_the_deadline_sits_inside_every_bound_around_it() -> None:
@@ -242,56 +219,55 @@ def _deadline_then(summaries: dict[int, Any]) -> Any:
     return outcome
 
 
-def test_a_deadline_trip_halves_the_next_claim_and_its_budget(
-        monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_deadline_trip_halves_the_next_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
-    _settings(monkeypatch, realtime_autodedup_max_listings=100)
+    _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _deadline_then({}))
-    caps: list[str] = []
     budgets: list[float] = []
 
     for _ in range(3):
         last = rw._autodedup_sync()
-        caps.append(seen["args"]["max_listings"])
         budgets.append(seen["budget"])
         assert last["errors"] == 1 and last["deadline_exceeded"] is True
 
-    assert caps == ["100", "50", "25"]
     base = rw.AUTODEDUP_PASS_BUDGET_SECONDS
     assert budgets == [base, base / 2, base / 4]
+    assert seen["args"] == {}, "the claim is the engine's: its rate under this budget"
     assert last["backoff"] == 8, "the heartbeat says what the next pass claims under"
 
 
-def test_the_back_off_bottoms_out_at_a_one_listing_claim(
+def test_the_back_off_bottoms_out_at_a_one_second_budget(
         monkeypatch: pytest.MonkeyPatch) -> None:
+    """One second of budget is a one-listing claim below two listings a second (the lane's only
+    production measurement is 0.088/s), and the divisor stops growing there."""
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
-    _settings(monkeypatch, realtime_autodedup_max_listings=500)
+    _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _deadline_then({}))
     for _ in range(15):
         rw._autodedup_sync()
-    assert seen["args"]["max_listings"] == "1"
-    assert rw._AUTODEDUP_BACKOFF == rw.AUTODEDUP_MAX_LISTINGS_CEILING
+    assert seen["budget"] == 1.0
+    assert rw._AUTODEDUP_BACKOFF == int(rw.AUTODEDUP_PASS_BUDGET_SECONDS)
 
 
 def test_the_back_off_holds_until_a_pass_re_measures_the_rate(
         monkeypatch: pytest.MonkeyPatch) -> None:
     """A pass too small to re-measure the rate leaves the engine on the rate that tripped the
-    deadline, so going straight back to a full claim would just trip it again."""
+    deadline, so going straight back to a full budget would just trip it again."""
     enough = incremental_lane.PASS_RATE_MIN_CLAIM
     small = _summary(counts={"claimed": enough - 1})
     full = _summary(counts={"claimed": enough})
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
-    _settings(monkeypatch, realtime_autodedup_max_listings=100)
+    _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _deadline_then({2: small, 3: full, 4: full}))
+    base = rw.AUTODEDUP_PASS_BUDGET_SECONDS
 
     rw._autodedup_sync()                       # 1: tripped
     assert rw._autodedup_sync()["backoff"] == 2   # 2: clean, too small to teach a rate
-    assert seen["args"]["max_listings"] == "50"
+    assert seen["budget"] == base / 2
     assert rw._autodedup_sync()["backoff"] == 1   # 3: clean, re-measured: restored
-    assert seen["args"]["max_listings"] == "50"
-    rw._autodedup_sync()                       # 4: the full claim again
-    assert seen["args"]["max_listings"] == "100"
-    assert seen["budget"] == rw.AUTODEDUP_PASS_BUDGET_SECONDS
+    assert seen["budget"] == base / 2
+    rw._autodedup_sync()                       # 4: the full budget again
+    assert seen["budget"] == base
 
 
 def test_a_refusal_is_not_a_reason_to_back_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -302,18 +278,18 @@ def test_a_refusal_is_not_a_reason_to_back_off(monkeypatch: pytest.MonkeyPatch) 
     assert rw._autodedup_sync()["backoff"] == 1
 
 
-def test_the_cap_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_budget_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _Conn()
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
-    _settings(monkeypatch, realtime_autodedup_max_listings=7)
+    _settings(monkeypatch)
     seen = _stub_engine(monkeypatch, _summary())
 
     last = rw._autodedup_sync()
 
-    # The cap and nothing else: no scope, settings or model — a pass runs under what its
-    # generation was seeded with, and the engine refuses a differing argument.
-    assert seen["args"] == {"max_listings": "7"}
-    assert seen["enabled"] is True, "the lane's own switch stands in for the repo variable"
+    # No argument: no scope, settings or model — a pass runs under what its generation was
+    # seeded with, and the engine refuses a differing argument — and no count either.
+    assert seen["args"] == {}
+    assert seen["enabled"] is True, "the lane's interval stands in for the repo variable"
     assert seen["budget"] == rw.AUTODEDUP_PASS_BUDGET_SECONDS
     assert seen["out_dir_existed"]
     assert not Path(seen["out_dir"]).exists(), "the summary file lives for the pass only"
@@ -322,7 +298,7 @@ def test_the_cap_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPatch
     assert conn.closed
     assert last == {
         "ran": True, "claimed": 12, "scored": 40, "grouped": 3, "skipped": 0, "errors": 0,
-        "cap": 7, "seconds": last["seconds"], "backoff": 1, "held": 1, "retired": 0,
+        "seconds": last["seconds"], "backoff": 1, "held": 1, "retired": 0,
         "latency_p50_s": 310.2, "latency_p95_s": 355.0, "bound_by": "count",
     }
 
@@ -485,7 +461,7 @@ def _write_targets(statements: list[str]) -> set[str]:
 
 
 def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    """With the workflow's variable absent, the worker's switch alone opens a pass, and the
+    """With the workflow's variable absent, the worker's interval alone opens a pass, and the
     pass is the engine's: it claims, decides, moves its cursors under the shared lease, frees
     the lease, and every row it writes is in schema autodedup."""
     conn, artifact = world
@@ -496,7 +472,7 @@ def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> No
     last = rw._autodedup_sync()
 
     assert last["ran"] is True and last["errors"] == 0 and last["skipped"] == 0, last
-    assert last["claimed"] > 0 and last["cap"] == rw.AUTODEDUP_MAX_LISTINGS_DEFAULT
+    assert last["claimed"] > 0
     assert conn.cursors, "the pass moved the engine's own watermark"
     assert conn.lease[LANE_NAME]["expires_at"] <= conn.now, "the lease was released"
     targets = _write_targets(conn.statements[before:])
@@ -505,15 +481,18 @@ def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> No
     assert conn.statements_in_tx, "the pass ran as the engine's one transaction"
 
 
-def test_the_cap_binds_the_engines_claim(world, tmp_path, monkeypatch) -> None:  # noqa: F811
+def test_a_backed_off_budget_binds_the_engines_claim(
+        world, tmp_path, monkeypatch) -> None:  # noqa: F811
+    """The bottom of the back-off, end to end: one second of budget is a one-listing claim."""
     conn, artifact = world
     _seed(conn, artifact, tmp_path)
-    _worker_on(monkeypatch, conn, realtime_autodedup_max_listings=1)
+    _worker_on(monkeypatch, conn)
+    monkeypatch.setattr(rw, "_AUTODEDUP_BACKOFF", int(rw.AUTODEDUP_PASS_BUDGET_SECONDS))
 
     last = rw._autodedup_sync()
 
-    assert last["ran"] is True and last["cap"] == 1
-    assert last["claimed"] == 1 and last["bound_by"] == "count"
+    assert last["ran"] is True and last["errors"] == 0, last
+    assert last["claimed"] == 1 and last["bound_by"] == "time"
 
 
 def test_the_engine_sizes_the_claim_by_the_smaller_budget(
@@ -623,14 +602,11 @@ def test_a_pass_past_its_deadline_is_an_error_not_a_crash(
     assert conn.cursors == cursors
 
 
-def test_the_workflow_path_keeps_its_own_gate(tmp_path, monkeypatch) -> None:
-    """`enabled` is a keyword the worker passes; the workflow passes nothing and still needs
+def test_the_workflow_path_keeps_its_own_gate(tmp_path) -> None:
+    """`enabled=True` is the worker's keyword; the workflow passes nothing and still needs
     the repository variable."""
     def never() -> Any:
         raise AssertionError("a dark pass must not open a connection")
 
-    assert run_incremental(never, {}, tmp_path)["skipped"] == "dark"
-    assert run_incremental(never, {}, tmp_path, enabled=False)["skipped"] == "dark"
-    monkeypatch.setenv(ENV_FLAG, "true")
-    assert run_incremental(never, {}, tmp_path, enabled=False)["skipped"] == "dark", (
-        "a caller's own switch, when given, is the one that counts")
+    out = run_incremental(never, {}, tmp_path)
+    assert out["skipped"] == "dark" and ENV_FLAG in out["reason"]

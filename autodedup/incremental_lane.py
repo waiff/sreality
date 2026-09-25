@@ -6,9 +6,9 @@ the same variable here, so a manual dispatch cannot bypass it; and `autodedup.se
 `realtime_enabled` row stops a lane that is already on WITHOUT a repository change. Shadow
 mode's own posture (E39/D4) is untouched: nothing here reaches `public.listings`, a
 `property_id` or a merge. The always-on worker runs this same pass as its `autodedup` lane
-(dark behind `app_settings.realtime_autodedup_enabled`, which it hands in as `enabled=`): one
-lease and one set of cursors, so the worker and the workflow can never pass at once — and
-`rt_seed` takes that same lease, so no pass runs inside a seed.
+(stopped while `app_settings.realtime_autodedup_interval_seconds` is 0; it hands in
+`enabled=True`): one lease and one set of cursors, so the worker and the workflow can never pass
+at once — and `rt_seed` takes that same lease, so no pass runs inside a seed.
 
 The pass itself is `incremental.run_pass_bounded`; this module is the three adapters it needs —
 the store, the read-only fact source and the watermark — plus the lease that keeps two runs out
@@ -2153,14 +2153,14 @@ def _measure_rate(result: Any, control: Mapping[str, Any], generation: str,
 
 def run_incremental(
     conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path,
-    *, enabled: bool | None = None, max_pass_budget_s: float | None = None,
+    *, enabled: bool = False, max_pass_budget_s: float | None = None,
 ) -> dict[str, Any]:
     """One bounded real-time pass. Dark unless BOTH switches are on; writes nothing else.
 
-    `enabled` is a caller's OWN dark switch standing in for the repository variable: the
-    always-on worker (`scraper/realtime_worker.py`, lane `autodedup`) has no repository variable
-    to read, and passes its `app_settings.realtime_autodedup_enabled` instead. None — the
-    workflow's path — reads the variable exactly as before. The database stop button
+    `enabled=True` is a caller whose OWN switch already opened the pass, standing in for the
+    repository variable: the always-on worker (`scraper/realtime_worker.py`, lane `autodedup`)
+    has none to read and runs only while its interval is above 0. False — the workflow's path —
+    reads the variable exactly as before. The database stop button
     (`autodedup.settings.realtime_enabled`), the lease and every rail bind both callers alike.
 
     `max_pass_budget_s` is a caller's ceiling on the time budget the claim is sized by (E98): the
@@ -2173,10 +2173,8 @@ def run_incremental(
         max_pairs=int(args.get("max_pairs") or Limits().max_pairs),
         max_component=int(args.get("max_component") or 400),
     )
-    if not (env_enabled() if enabled is None else enabled):
-        reason = (f"{ENV_FLAG} is not true" if enabled is None
-                  else "the calling lane's own switch is off")
-        return {"skipped": "dark", "reason": reason, "spent_usd": 0.0}
+    if not (enabled or env_enabled()):
+        return {"skipped": "dark", "reason": f"{ENV_FLAG} is not true", "spent_usd": 0.0}
 
     holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()

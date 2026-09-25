@@ -84,16 +84,15 @@ matcher/outbox pattern from api/notifications + api/notification_outbox):
              switch; no boolean flag, no env var, no queue. A cell attempt always
              ends in the ledger (`scraper.sold_fetch.fetch_cell` never raises), and
              an unmigrated database skips with one warning.
-- autodedup: every `realtime_autodedup_interval_seconds` (default 60), ONE bounded
-             pass of THE autodedup real-time shadow lane
+- autodedup: every `realtime_autodedup_interval_seconds` (DARK: the seeded row is
+             0), ONE bounded pass of THE autodedup real-time shadow lane
              (autodedup.incremental_lane.run_incremental — the function
-             autodedup_realtime.yml runs), claim capped at
-             `realtime_autodedup_max_listings` (default 100), sized to half of a hard
-             per-pass deadline and halved again after each deadline trip; a refusal
-             or a trip counts as a failed pass. Writes only the `rt` shadow
-             generation inside schema autodedup — never a production merge. DARK
-             until `realtime_autodedup_enabled` is set; the engine's own lease row and
-             cursors are shared with the GH lane (and `rt_seed` takes the same
+             autodedup_realtime.yml runs); the engine sizes the claim by its measured
+             rate under half of a hard per-pass deadline, halved again after each
+             deadline trip; a refusal or a trip counts as a failed pass. Writes only
+             the `rt` shadow generation inside schema autodedup — never a production
+             merge. One integer is cadence AND kill switch; the engine's own lease row
+             and cursors are shared with the GH lane (and `rt_seed` takes the same
              lease), so no two of them overlap. An absent autodedup store skips with
              one warning.
 - heartbeat: every 30s, upsert this worker's beat + per-lane counters into
@@ -406,7 +405,7 @@ _TEXT_EXTRACT_WEDGE_LOGGED = False
 # autodedup lane (AUTODEDUP rollout §7.3): THE real-time shadow pass of the dedup engine
 # (autodedup.incremental_lane.run_incremental — the function autodedup_realtime.yml runs via
 # `python -m autodedup.lane --mode incremental`, imported and never copied) from here, because
-# GitHub fires that `*/10` schedule hours apart and "sub-minute decisions" cannot ride it.
+# GitHub fires that `*/10` schedule hours apart and decisions within minutes cannot ride it.
 #
 # SHADOW ONLY. The pass writes the `rt` generation inside schema `autodedup` (fingerprints,
 # probe postings, pairs, groups, cursors) and nothing else: no `public.listings` row, no
@@ -423,20 +422,9 @@ _TEXT_EXTRACT_WEDGE_LOGGED = False
 # bind the workflow — the `autodedup.settings.realtime_enabled` stop button, the unseeded skip,
 # the storage budget, the parity gate, the pair budget.
 #
-# DARK behind a boolean setting plus an interval, the estimation lane's shape, and registered
-# with default_interval=0 for the resolve lane's fail-safe reason: the flag lives inside the
-# settings read, so a read that RAISES must not wake the lane for a pass.
-AUTODEDUP_LANE_SETTING = "realtime_autodedup_enabled"
+# ONE integer is cadence AND kill switch (the sold_comps lane's shape): the seeded row is 0, and
+# the lane is registered with default_interval=0 so a settings read that RAISES cannot wake it.
 AUTODEDUP_INTERVAL_SETTING = "realtime_autodedup_interval_seconds"
-AUTODEDUP_MAX_LISTINGS_SETTING = "realtime_autodedup_max_listings"
-AUTODEDUP_INTERVAL_DEFAULT = 60
-# Listings one pass may claim. The engine bounds the claim a second way on its own — by its
-# measured rate times its time budget (`rt_pass_budget_s`, E98) — and applies the smaller.
-# A minute of arrivals in a scoped generation is a handful, so 100 is headroom, not a target.
-AUTODEDUP_MAX_LISTINGS_DEFAULT = 100
-# The engine's own default claim (`autodedup.incremental.Limits().max_listings`), duplicated to
-# keep autodedup off the worker's startup path; a test pins the two together.
-AUTODEDUP_MAX_LISTINGS_CEILING = 500
 # The HARD per-pass deadline, in seconds of wall clock. The engine's time budget bounds what a
 # pass CLAIMS, not how long it runs, and a pass abandoned at LANE_PASS_TIMEOUT_SECONDS keeps its
 # thread — and its open transaction and its lease — running. So after this deadline the pass's
@@ -459,17 +447,17 @@ AUTODEDUP_PASS_BUDGET_SECONDS = AUTODEDUP_PASS_DEADLINE_SECONDS / 2
 AUTODEDUP_REASON_CHARS = 300
 _AUTODEDUP_PASS_LOCK = threading.Lock()
 _AUTODEDUP_WEDGE_LOGGED = False
-# log-once-per-process guards: the setting is off; the autodedup store is absent.
-_AUTODEDUP_DARK_LOGGED = False
+# log-once-per-process guard: the autodedup store is absent.
 _AUTODEDUP_STORE_WARNED = False
 # Logged on the TRANSITION, never per pass: at a 60 s interval a lease held by the GH lane or a
 # standing refusal would otherwise write the same line 1,440 times a day.
 _AUTODEDUP_LAST_OUTCOME: str | None = None
-# The in-process back-off after a deadline trip: the claim cap AND the time budget are divided by
-# this, doubling per trip (down to a one-listing claim). It returns to 1 only after a clean pass
-# that claimed enough for the engine to re-measure its rate (`PASS_RATE_MIN_CLAIM`): a smaller
-# pass teaches the engine nothing, and going back to a full claim on the same stale rate is
-# exactly the trip that set it. A restart resets it.
+# The in-process back-off after a deadline trip: the time budget the engine sizes its claim by is
+# divided by this, doubling per trip, down to a one-second budget (a one-listing claim at any rate
+# below two listings a second). It returns to 1 only after a clean pass that claimed enough for
+# the engine to re-measure its rate (`PASS_RATE_MIN_CLAIM`): a smaller pass teaches the engine
+# nothing, and going back to a full claim on the same stale rate is exactly the trip that set
+# it. A restart resets it.
 _AUTODEDUP_BACKOFF = 1
 
 # sreality count-probe lane (W3): sreality's v1 search API ignores every sort
@@ -751,25 +739,8 @@ def _read_sold_comps_interval() -> int:
 
 
 def _read_autodedup_interval() -> int:
-    # The flag gates the lane via interval<=0 (idle-not-dead, the _lane_loop contract):
-    # disabled => 0 (no connection, no lease attempt), enabled => the configured interval.
-    # Ships dark because the flag defaults absent/false. Said ONCE per switch-off, not per
-    # idle wake, so the log shows the lane exists without shouting every minute.
-    global _AUTODEDUP_DARK_LOGGED
-    if not _read_flag(AUTODEDUP_LANE_SETTING):
-        if not _AUTODEDUP_DARK_LOGGED:
-            _AUTODEDUP_DARK_LOGGED = True
-            LOG.info("AUTODEDUP lane dark: app_settings.%s is off", AUTODEDUP_LANE_SETTING)
-        return 0
-    _AUTODEDUP_DARK_LOGGED = False
-    return _read_int(AUTODEDUP_INTERVAL_SETTING, AUTODEDUP_INTERVAL_DEFAULT)
-
-
-def _read_autodedup_max_listings() -> int:
-    # Clamped, not trusted: the engine's own default is the ceiling, and a claim can never be 0
-    # (the engine reads 0 as "use the default", i.e. the ceiling).
-    value = _read_int(AUTODEDUP_MAX_LISTINGS_SETTING, AUTODEDUP_MAX_LISTINGS_DEFAULT)
-    return max(1, min(value, AUTODEDUP_MAX_LISTINGS_CEILING))
+    # The sold_comps reader's contract: an absent row reads as 0, the lane dark.
+    return _read_int(AUTODEDUP_INTERVAL_SETTING, 0)
 
 
 def _location_resolve_lease_ttl(max_seconds: int, batch_size: int) -> int:
@@ -2023,7 +1994,6 @@ def _autodedup_store_present(conn: Any) -> bool:
 
 def _autodedup_outcome(
     started: float,
-    cap: int | None,
     *,
     summary: dict[str, Any] | None = None,
     skipped: str | None = None,
@@ -2035,8 +2005,8 @@ def _autodedup_outcome(
     `skipped` 0/1 with its `reason`, `errors` 0/1 with the refusal or abort text."""
     last: dict[str, Any] = {
         "ran": False, "claimed": 0, "scored": 0, "grouped": 0, "skipped": 0, "errors": 0,
-        "cap": cap, "seconds": round(time.monotonic() - started, 1),
-        # The divisor the NEXT pass claims under: above 1 the lane is backing off a deadline.
+        "seconds": round(time.monotonic() - started, 1),
+        # The divisor of the NEXT pass's time budget: above 1 the lane is backing off a deadline.
         "backoff": _AUTODEDUP_BACKOFF,
     }
     if skipped is not None:
@@ -2093,14 +2063,13 @@ def _autodedup_sync() -> dict[str, Any]:
             LOG.warning(
                 "AUTODEDUP lane skipped: the previous pass was abandoned and its thread is "
                 "still running")
-        return _autodedup_outcome(started, None, skipped="previous_pass_running")
+        return _autodedup_outcome(started, skipped="previous_pass_running")
     _AUTODEDUP_WEDGE_LOGGED = False
     try:
         from autodedup import incremental_lane
         from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL
 
         backoff = _AUTODEDUP_BACKOFF
-        cap = max(1, _read_autodedup_max_listings() // backoff)
         budget = AUTODEDUP_PASS_BUDGET_SECONDS / backoff
         conn = db.connect()
         try:
@@ -2110,7 +2079,7 @@ def _autodedup_sync() -> dict[str, Any]:
                     LOG.warning(
                         "AUTODEDUP: the autodedup real-time store (migrations 539/540) is "
                         "absent on this database; the lane skips every tick")
-                return _autodedup_outcome(started, cap, skipped="store_absent")
+                return _autodedup_outcome(started, skipped="store_absent")
             _AUTODEDUP_STORE_WARNED = False
             guarded = _DeadlineConnection(
                 conn, started + AUTODEDUP_PASS_DEADLINE_SECONDS,
@@ -2119,18 +2088,19 @@ def _autodedup_sync() -> dict[str, Any]:
             # reads it (the heartbeat is the readout), so it lives for the pass and no longer.
             with tempfile.TemporaryDirectory(prefix="autodedup-rt-") as out_dir:
                 try:
-                    # No scope, settings or model argument: a pass runs under the scope and
-                    # scorer its generation was SEEDED with, and a dispatch argument that
-                    # differs is a re-scope the engine refuses unless asked by name.
+                    # No argument at all: a pass runs under the scope and scorer its
+                    # generation was SEEDED with (a differing one is a re-scope the engine
+                    # refuses), and the claim is the engine's own — its measured rate times
+                    # this budget. `enabled=True`: the interval above 0 is the lane's switch.
                     summary = incremental_lane.run_incremental(
-                        lambda: guarded, {"max_listings": str(cap)}, Path(out_dir),
+                        lambda: guarded, {}, Path(out_dir),
                         enabled=True, max_pass_budget_s=budget)
                 except SystemExit as exc:
-                    return _autodedup_outcome(started, cap, refused=str(exc))
+                    return _autodedup_outcome(started, refused=str(exc))
                 except _AutodedupDeadline as exc:
-                    _AUTODEDUP_BACKOFF = min(backoff * 2, AUTODEDUP_MAX_LISTINGS_CEILING)
-                    return _autodedup_outcome(started, cap, refused=str(exc), deadline=True)
-            last = _autodedup_outcome(started, cap, summary=summary)
+                    _AUTODEDUP_BACKOFF = min(backoff * 2, int(AUTODEDUP_PASS_BUDGET_SECONDS))
+                    return _autodedup_outcome(started, refused=str(exc), deadline=True)
+            last = _autodedup_outcome(started, summary=summary)
             if (backoff > 1 and last["ran"] and not last["errors"]
                     and last["claimed"] >= incremental_lane.PASS_RATE_MIN_CLAIM):
                 _AUTODEDUP_BACKOFF = 1
@@ -2164,7 +2134,7 @@ def _autodedup_note(last: dict[str, Any]) -> None:
     elif last.get("skipped"):
         LOG.info("AUTODEDUP lane skipping: %s %s", last.get("reason"), last.get("detail") or "")
     else:
-        LOG.info("AUTODEDUP lane passing (cap=%s)", last.get("cap"))
+        LOG.info("AUTODEDUP lane passing")
 
 
 async def _autodedup_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None:
@@ -2429,9 +2399,8 @@ async def _amain() -> int:
             lambda: _text_extract_pass(stop_event, state),
             state,
             default_interval=TEXT_EXTRACT_INTERVAL_SECONDS)),
-        # default_interval=0 for the location_resolve lane's reason above: the flag lives
-        # inside the settings read, so a read that RAISES must not run a pass of a lane the
-        # operator left dark.
+        # default_interval=0 for the sold_comps lane's reason above: the interval IS the kill
+        # switch, so a settings-read failure must not wake a lane the operator left dark.
         ("autodedup", lambda: _lane_loop(
             "autodedup", stop_event, _read_autodedup_interval,
             lambda: _autodedup_pass(stop_event, state),
