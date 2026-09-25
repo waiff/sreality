@@ -2,6 +2,7 @@
  * the UI actually reads are typed here; expand as Parts B–E need more. */
 
 import type { DistrictChip, ListingFilters, PresetSpec } from './filters';
+import type { ReferenceRent } from './mfReference';
 
 /* The whole Czech grammar, 1 through 9 — the same span
  * `filter_registry.DISPOSITION_OPTIONS` generates. It used to stop at 5+1,
@@ -23,41 +24,13 @@ export type Disposition =
 export type Furnished = 'ano' | 'ne' | 'castecne';
 export type Ownership = 'osobni' | 'druzstevni' | 'statni' | 'jine';
 
-/* THE MF "Cenová mapa nájemného" reference-rent breakdown — ONE shape for both
- * columns that store it: `listings.mf_reference_rent` (migration 134) and
- * `estimation_runs.reference_rent` (migration 131). They were modelled as three
- * parallel interfaces — MfReferenceRent, ReferenceRent, and MfReferenceCard's
- * own structural "MfReferenceLike" — which is three chances for the same JSON to
- * be described three different ways. The two genuinely per-column fields are
- * optional here rather than duplicated into a second interface.
- *
- * Every `*_per_m2` field is CZK per m² per MONTH: this is a rent map. The card
- * renders them through the shared rent-basis formatter so they carry /měs. */
-export interface ReferenceRentAdjustment {
-  attribute: string;
-  czk_per_m2: number;
-}
-
-export interface ReferenceRent {
-  territory: {
-    ruian_code: number;
-    level: 'ku' | 'obec';
-    name: string;
-    kraj: string | null;
-  };
-  vk: number;
-  is_novostavba: boolean;
-  source_revision: number;
-  /* estimation_runs.reference_rent only (migration 131). */
-  source_date?: string | null;
-  base_per_m2: number;
-  adjustments: ReferenceRentAdjustment[];
-  /* listings.mf_reference_rent only (migration 134). */
-  adjustments_sum_per_m2?: number;
-  total_per_m2: number;
-  area_m2: number;
-  monthly_rent_czk: number;
-}
+/* The MF reference-rent result and the one rule for rendering it live in a
+ * zero-dependency module the Chrome extension imports too. */
+export type {
+  ReferenceRent,
+  ReferenceRentAdjustment,
+  ReferenceRentRange,
+} from './mfReference';
 
 export interface ListingPublic {
   /* Surrogate PK (migration 312/334) — the stable identifier the R2 resolver-chain
@@ -137,13 +110,6 @@ export interface ListingPublic {
    * haven't been re-fetched and had no description in their last
    * snapshot. */
   description: string | null;
-  /* Migration 133/134 — MF Cenová mapa secondary rent reference (sale
-   * apartments only; null otherwise). `_czk` is the monthly reference rent,
-   * `_pct` the gross yield, and `mf_reference_rent` the formula breakdown
-   * behind both. */
-  mf_reference_rent_czk: number | null;
-  mf_gross_yield_pct: number | null;
-  mf_reference_rent: ReferenceRent | null;
   /* Migration 425 — THE per-m² measure and its published basis label, straight
    * off listings_public. Every detail surface reads this pair instead of
    * dividing price_czk by area_m2: the measure is basis-resolved and floored, so
