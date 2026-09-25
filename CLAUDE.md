@@ -181,12 +181,12 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     deterministic replay), carries operator state (rule #18) + the deal pipeline (rule #22) onto the
     survivor, re-syncs the browse read model, and enforces **category compatibility** (sale≠rent,
     flat≠house — except the sanctioned **dům↔komerční**). `db.mark_inactive` / `active_count` are
-    source-scoped. **Merges are ordered ONLY by the operator.** **The automatic decision engine was
-    REMOVED wholesale (2026-08, the "NEW DEDUP" cutoff)** — nothing auto-merges and duplicates accumulate
-    in Browse until the replacement ships; signal producers (pHash, CLIP, `/labeling`) stay live, and the
-    replacement is being rebuilt **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`).
-    **Never resurrect or consult the removed engine or its design docs**; the operator owns all
-    merge/no-merge logic. Full detail: `docs/architecture.md` § rule 15.
+    source-scoped. **Merges are ordered by the operator, or by the dark AUTODEDUP apply lane (`autodedup/apply.py`,
+    source `autodedup`) only while `app_settings.autodedup_apply_enabled` is on.** **The old automatic decision
+    engine was REMOVED wholesale (2026-08, the "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers
+    (pHash, CLIP, `/labeling`) stay live; the rebuild is **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`).
+    **Never resurrect or consult the removed engine or its design docs**; the operator owns the apply switch, its
+    scope and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"** (`_shared_filter_where` + `_city_quality_clauses`).
     `notification_dispatches` is the unified append-only event table with **three producers**: `watchdog` +
     `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}` per-snapshot;

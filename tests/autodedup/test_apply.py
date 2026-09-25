@@ -150,6 +150,20 @@ class FakeDb:
             return [(pid, r["status"], r["category_type"], r["category_main"],
                      r["first_seen_at"], r["asset_id"])
                     for pid, r in sorted(self.properties.items()) if pid in p["property_ids"]]
+        if sql == S.ABSORBED_ASSETS_SQL:
+            out = []
+            for root in p["property_ids"]:
+                seen, frontier = {root}, [root]
+                while frontier:  # down merged_into, as the recursive CTE walks it
+                    frontier = [q for q, r in self.properties.items()
+                                if r["merged_into"] in frontier and q not in seen]
+                    seen |= set(frontier)
+                out += [(root, self.properties[q]["asset_id"]) for q in sorted(seen)
+                        if q in self.properties and self.properties[q]["asset_id"] is not None]
+            return out
+        if sql == S.MEMBER_PROPERTIES_SQL:
+            return [(lid, self.listings[lid]["property_id"]) for lid in p["listing_ids"]
+                    if lid in self.listings]
         if sql in (S.PROPERTY_LISTINGS_SQL, S.LOCK_PROPERTY_LISTINGS_SQL):
             return [(r["property_id"], lid, r["category_type"], r["category_main"])
                     for lid, r in sorted(self.listings.items())
@@ -562,13 +576,71 @@ def test_properties_the_operator_asset_linked_are_never_merged() -> None:
     db.listing(11, 200, cm="komercni")
     db.prop(300, asset=8)
     db.prop(400, asset=9)
-    _pair_group(db, 20, [20, 21], [300, 400])  # two different assets
+    _pair_group(db, 20, [20, 21], [300, 400])  # two different assets: one link would be lost
     db.prop(500, asset=5)
-    _pair_group(db, 30, [30, 31], [500, 600])  # only one side linked
+    _pair_group(db, 30, [30, 31, 32], [500, 600, 600])  # only one side linked
     plan = _plan(db)
-    reasons = {g.cluster_key: g.reasons for g in plan.groups}
-    assert reasons == {10: [A.SKIP_ASSET_LINKED], 20: [], 30: []}
-    assert plan.groups[0].detail["asset_ids"] == [7]
+    groups = {g.cluster_key: g for g in plan.groups}
+    assert {k: g.reasons for k, g in groups.items()} == {
+        10: [A.SKIP_ASSET_LINKED], 20: [A.SKIP_ASSET_LINKED], 30: []}
+    assert groups[10].detail["asset_ids"] == [7]
+    assert groups[20].detail["asset_linked_properties"] == [300, 400]
+    # The chokepoint leaves asset_id on the row it retires, so the linked unit survives even
+    # where 600's two listings would otherwise win.
+    assert (groups[30].survivor_id, groups[30].retired_ids) == (500, [600])
+
+
+def test_an_asset_link_left_on_a_retired_property_still_keeps_its_units_apart() -> None:
+    # The operator asset-linked A=100 (10) and C=300 (30). g12 grouped {10, 20}: the linked A
+    # survives, not the older B, so its link stays live. Even had a merge retired A first (an
+    # operator's, say, leaving asset 7 on the merged_away row), g13 grouping {10, 30} is refused.
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    db.prop(100, asset=7)
+    db.prop(200, first=T0 - timedelta(days=9))  # older: it would win the size tie
+    db.prop(300, asset=7)
+    for lid, pid in ((10, 100), (20, 200), (30, 300)):
+        db.listing(lid, pid)
+    db.group(10, [10, 20], gen="g12")
+    calls: list[dict[str, Any]] = []
+    A.apply_plan(db, A.plan_apply(db, "g12", scope), dry_run=False, merge=db.merge(calls))
+    assert [(c["survivor_id"], c["retired_id"]) for c in calls] == [(100, 200)]
+    db.group(10, [10, 30], gen="g13")
+    group = _only(A.plan_apply(db, "g13", scope))
+    assert group.reasons == [A.SKIP_ASSET_LINKED] and group.detail["asset_ids"] == [7]
+
+    # B survived and A retired still holding asset 7 (B has none): the link is read down
+    # merged_into, a `properties` read (D7).
+    db = FakeDb()
+    db.live_scope()
+    db.prop(100, asset=7)
+    db.prop(200, first=T0 - timedelta(days=9))
+    db.prop(300, asset=7)
+    for lid, pid in ((10, 100), (20, 200), (30, 300)):
+        db.listing(lid, pid)
+    db.merge([])(db, survivor_id=200, retired_id=100, reason="operator", source="operator")
+    db.group(10, [10, 20, 30], gen="g13")
+    group = _only(A.plan_apply(db, "g13", scope))
+    assert group.property_ids == [200, 300]
+    assert group.reasons == [A.SKIP_ASSET_LINKED]
+    assert group.detail["asset_linked_properties"] == [200, 300]
+    # Different assets (7 on the absorbed A, 8 on C) refuse too: one link would be lost.
+    db.properties[300]["asset_id"] = 8
+    assert _only(A.plan_apply(db, "g13", scope)).detail["asset_ids"] == [7, 8]
+
+
+def test_an_asset_link_set_after_the_plan_on_a_retiree_stops_the_group() -> None:
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    _pair_group(db, 10, [10, 11], [100, 200])
+    plan = A.plan_apply(db, GEN, scope)
+    assert [(g.survivor_id, g.retired_ids) for g in plan.groups] == [(100, [200])]
+    db.properties[200]["asset_id"] = 4  # the operator links the unit about to retire
+    calls: list[dict[str, Any]] = []
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    assert calls == [] and result["skipped_at_apply"][0]["reasons"] == [A.SKIP_ASSET_LINKED]
 
 
 def test_merged_away_unattached_and_oversize_are_refused() -> None:
@@ -969,7 +1041,8 @@ def test_unapply_one_group_and_one_already_undone_elsewhere() -> None:
     db.unmerge([])(db, merge_group_id=second, undone_by="operator")  # the ledger UI's undo
     result = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
     assert result["counts"] == {"groups": 2, "undone": 1, "already_undone": 1, "blocked": 0,
-                                "listings_moved_back": 1, "conflicts": 0}
+                                "taken_apart_before": 0, "listings_moved_back": 1,
+                                "conflicts": 0}
     one = A.unapply(db, GEN, dry_run=True, cluster_key=10)
     assert one["groups"] == []  # both groups are now recorded as undone
     assert first != second
@@ -1069,6 +1142,53 @@ def test_an_operator_undo_survives_the_restored_property_being_merged_on() -> No
     A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
     assert [r["undone_by"] for r in db.ledger if r["merge_group_id"]
             == calls[0]["merge_group_id"]] == [A.EXTERNAL_UNDO]
+    assert _only(A.plan_apply(db, "g13", scope)).reasons == [A.SKIP_RESTORED_ELSEWHERE]
+
+
+def test_unapply_after_an_operator_split_records_the_split_as_the_operators() -> None:
+    # g12 merged 200 (11) into 100 (10). The operator split 100 into singletons: 11 stayed, 10
+    # went to a fresh 901. `unapply` then moves 11 back to 200 — but separating 10 and 11 was
+    # the operator's word, so the ledger records the undo as theirs and g13 never re-unites them.
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    db.prop(901)
+    db.listings[10]["property_id"] = 901
+    db.group(10, [10, 11], gen="g13")
+    assert [g.reasons for g in A.plan_apply(db, "g13", scope).groups] == [
+        [A.SKIP_RESTORED_ELSEWHERE]]
+    dry = A.unapply(db, GEN, dry_run=True, cluster_key=10)
+    assert dry["groups"][0]["taken_apart"] == [10] and dry["counts"]["taken_apart_before"] == 1
+    result = A.unapply(db, GEN, dry_run=False, cluster_key=10, unmerge=db.unmerge([]))
+    assert result["counts"]["undone"] == 1 and result["counts"]["taken_apart_before"] == 1
+    assert result["groups"][0]["outcome"] == "undone_after_outside_split"
+    assert db.listings[11]["property_id"] == 200
+    rows = [r for r in db.ledger if r["merge_group_id"] == calls[0]["merge_group_id"]]
+    assert [r["undone_by"] for r in rows] == [A.EXTERNAL_UNDO]
+    assert rows[0]["undo_result"]["noted_by"].startswith(A.UNAPPLY_BY_PREFIX)
+    assert rows[0]["undo_result"]["taken_apart"] == [10]
+    group = _only(A.plan_apply(db, "g13", scope))
+    assert group.property_ids == [200, 901] and group.reasons == [A.SKIP_RESTORED_ELSEWHERE]
+
+
+def test_a_whole_generation_unapply_after_a_split_with_conflicts_keeps_the_split() -> None:
+    # g12 retired 200 (11) and 300 (12) into 100 (10). The operator split 100: 11 stayed, 10
+    # and 12 went to 901 / 902. The whole-generation undo moves 11 back and reports 12 as a
+    # conflict; recorded as the operator's undo, so g13's {10, 11} stays refused.
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    db.prop(100, first=T0 - timedelta(days=5))
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge([]))
+    db.prop(901)
+    db.prop(902)
+    db.listings[10]["property_id"] = 901
+    db.listings[12]["property_id"] = 902
+    result = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
+    assert result["counts"]["conflicts"] == 1 and result["counts"]["taken_apart_before"] == 1
+    assert {r["undone_by"] for r in db.ledger if r["outcome"] == "applied"} == {
+        A.EXTERNAL_UNDO}
+    db.group(10, [10, 11], gen="g13")
     assert _only(A.plan_apply(db, "g13", scope)).reasons == [A.SKIP_RESTORED_ELSEWHERE]
 
 
@@ -1274,6 +1394,74 @@ def test_a_crash_mid_run_still_publishes_what_merged(tmp_path: Path, monkeypatch
     text = page.read_text()
     assert "**Aborted:**" in text and "| 10 | 100 | 200 |" in text
     assert db.closed and db.listings[11]["property_id"] == 100
+
+
+def test_a_cancelled_run_still_publishes_what_merged(tmp_path: Path, monkeypatch: Any) -> None:
+    # GitHub's cancel sends SIGINT: a KeyboardInterrupt, not an Exception.
+    db = FakeDb()
+    db.live_scope()
+    for key in (10, 20, 30):
+        _pair_group(db, key, [key, key + 1], [key * 10, key * 10 + 1])
+    calls: list[dict[str, Any]] = []
+    base = db.merge(calls)
+
+    def merge_or_cancel(conn: FakeDb, **kw: Any) -> dict[str, Any]:
+        if kw["retired_id"] == 201:
+            raise KeyboardInterrupt()
+        return base(conn, **kw)
+
+    original = A.apply_plan
+    monkeypatch.setattr(A, "apply_plan",
+                        lambda conn, plan, dry_run: original(conn, plan, dry_run,
+                                                             merge=merge_or_cancel))
+    page = tmp_path / "step_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    with pytest.raises(KeyboardInterrupt):
+        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
+    body = json.loads((tmp_path / "apply.json").read_text())
+    assert [row["cluster_key"] for row in body["applied"]] == [10]
+    assert body["aborted"].startswith("stopped at group 20: KeyboardInterrupt")
+    assert body["counts"]["not_attempted"] == 2
+    assert "**Aborted:**" in page.read_text() and db.closed
+    assert db.listings[21]["property_id"] == 201  # the interrupted group rolled back whole
+
+
+def test_an_unapply_that_crashes_mid_run_still_publishes_what_it_undid(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    db = FakeDb()
+    _applied_two(db)
+    undo = db.unmerge([])
+    seen: list[str] = []
+
+    def unmerge_or_crash(conn: FakeDb, **kw: Any) -> dict[str, Any]:
+        seen.append(kw["merge_group_id"])
+        if len(seen) == 2:
+            raise RuntimeError("canceling statement due to statement timeout")
+        return undo(conn, **kw)
+
+    original = A.unapply
+    monkeypatch.setattr(A, "unapply", lambda conn, gen, *, dry_run, cluster_key=None: original(
+        conn, gen, dry_run=dry_run, cluster_key=cluster_key, unmerge=unmerge_or_crash))
+    page = tmp_path / "step_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    with pytest.raises(RuntimeError, match="statement timeout"):
+        A.run_unapply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
+    body = json.loads((tmp_path / "unapply.json").read_text())
+    assert [(g["cluster_key"], g["outcome"]) for g in body["groups"]] == [
+        (20, "undone"), (10, "aborted")]
+    assert body["counts"]["undone"] == 1 and body["generation_stamp"] == "written"
+    assert body["aborted"].startswith("stopped at group 10: RuntimeError")
+    text = page.read_text()
+    assert "**Aborted:**" in text and "WERE undone" in text and db.closed
+
+
+def test_an_empty_cluster_key_never_widens_unapply_to_the_generation(tmp_path: Path) -> None:
+    db = FakeDb()
+    _applied_two(db)
+    with pytest.raises(SystemExit, match="cluster_key= is empty"):
+        A.run_unapply(_factory(db), lane.parse_kv_args(
+            f"generation={GEN},dry_run=0,cluster_key="), tmp_path)
+    assert db.unapplied == [] and all(r["undone_at"] is None for r in db.ledger)
 
 
 def test_the_lane_run_summary_is_a_lane_summary(tmp_path: Path) -> None:

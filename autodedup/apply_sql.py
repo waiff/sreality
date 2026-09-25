@@ -2,7 +2,8 @@
 
 Reads: the two `app_settings` switches, one generation's groups and members from schema
 `autodedup`, the member listings' `property_id` and categories and the involved properties
-(with their asset link) from `public` (the same facts the chokepoint itself re-checks), the
+(with their asset links, and those of every property merged into them) from `public` (the
+same facts the chokepoint itself re-checks), the
 operator's negatives (`verdicts`, `must_not_link`) and the engine's own apply ledger and
 unapplied-generation stamps. NOTHING here reads
 `public.property_merge_events` (D7) — the one statement that names it is a write-only stamp
@@ -49,6 +50,28 @@ PROPERTIES_SQL = """
 select p.id, p.status, p.category_type, p.category_main, p.first_seen_at, p.asset_id
   from public.properties p
  where p.id = any(%(property_ids)s::bigint[])
+"""
+
+# The asset links a merge would otherwise lose: every property merged INTO one of these,
+# followed down `merged_into` (indexed, migration 100), carries its `asset_id` still — the
+# chokepoint does not move it onto the survivor. Each is counted as the involved property's own
+# link, so a unit the operator asset-linked stays "different units" after an earlier merge
+# retired it (E903). A `properties` read only, never `property_merge_events` (D7).
+ABSORBED_ASSETS_SQL = """
+with recursive absorbed(root, id, depth) as (
+    select p.id, p.id, 0
+      from public.properties p
+     where p.id = any(%(property_ids)s::bigint[])
+    union all
+    select a.root, q.id, a.depth + 1
+      from public.properties q
+      join absorbed a on q.merged_into = a.id
+     where a.depth < 20
+)
+select a.root, q.asset_id
+  from absorbed a
+  join public.properties q on q.id = a.id
+ where q.asset_id is not null
 """
 
 # EVERY listing on the involved properties, not only the group's members: a merge moves all
@@ -194,6 +217,14 @@ select a.merge_group_id::text, a.cluster_key, max(a.survivor_property_id),
    and (%(cluster_key)s::bigint is null or a.cluster_key = %(cluster_key)s::bigint)
  group by a.merge_group_id, a.cluster_key
  order by max(a.id) desc
+"""
+
+# Where a group's members sit now, read in the undo's own transaction before `unmerge_group`:
+# a member off the survivor means someone else took the merge apart first (E905).
+MEMBER_PROPERTIES_SQL = """
+select l.id, l.property_id
+  from public.listings l
+ where l.id = any(%(listing_ids)s::bigint[])
 """
 
 LEDGER_UNDO_SQL = """

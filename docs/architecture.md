@@ -1214,7 +1214,8 @@ renumber.** Navigate by area:
     `false`; the operator flips it on /settings, and flipping it off stops a running apply
     between two groups). `autodedup/apply.py` (lane modes `apply` / `unapply` in
     `.github/workflows/autodedup.yml`) reads one stored generation's groups, picks the survivor
-    (most listings, then oldest `first_seen_at`, then lowest id), and calls `merge_properties`
+    (the one asset-linked property if exactly one is, else most listings, then oldest
+    `first_seen_at`, then lowest id), and calls `merge_properties`
     with `source='autodedup'` (migration 558 widened `property_merge_events.source`), ONE
     `merge_group_id` per engine group inside one transaction, so each group is undoable as a
     unit (`unmerge_group`, or `mode=unapply` for a whole generation newest-first). A dry run is
@@ -1224,16 +1225,18 @@ renumber.** Navigate by area:
     EVERY listing it moves (both properties' full sets, not just the members), an operator
     negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
     inside — any superset, under any key, the newest ruling per operator winning), mixed
-    categories, a listing outside the scope, two properties the operator **asset-linked**
-    (`properties.asset_id`, "different units in one building, do not collapse"), a non-active
+    categories, a listing outside the scope, two properties carrying an operator **asset link**
+    (`properties.asset_id`, "different units in one building, do not collapse" — including one
+    left on a property merged into them, read down `merged_into`), a non-active
     property, more than `max_cluster_size` listings, a property the engine split across two
     groups, or a listing no group holds (unless this engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
     and their listings `FOR SHARE`, and every one of those checks runs again over the locked
     rows before it merges; `rt…` generations are refused. An engine merge the operator took
     apart stays apart: its separated LISTINGS are never re-united by a later generation, even
-    once the restored property has been merged into another one. `unapply` skips a group a
-    later engine merge still builds on (same survivor or shared listings) and names the merge
+    once the restored property has been merged into another one, and an `unapply` that finds
+    the merge already partly taken apart records its undo as the operator's. `unapply` skips a
+    group a later engine merge still builds on (same survivor or shared listings) and names the merge
     to undo first; a whole-generation `unapply` stamps the generation
     (`autodedup.unapplied_generations`) so none of its groups — undone or never reached —
     applies again until an apply with `reapply=1`. A group already on one

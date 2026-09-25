@@ -77,8 +77,8 @@ SKIP_MUST_NOT_LINK = "must_not_link"
 SKIP_CATEGORY_TYPE = "category_type_mix"
 SKIP_CATEGORY_MAIN = "category_main_incompatible"
 SKIP_CARRIES_OUT_OF_SCOPE = "carries_out_of_scope_listings"
-# Two involved properties share an asset: the operator linked them as different units in one
-# building instead of merging them (rule 15, migration 224).
+# Two involved properties carry an asset link (their own, or one a property merged into them
+# left behind): the operator linked them as units never to collapse (rule 15, migration 224).
 SKIP_ASSET_LINKED = "asset_linked_units"
 SKIP_SPANS_GROUPS = "property_spans_groups"
 SKIP_CARRIES_UNGROUPED = "carries_ungrouped_listings"
@@ -391,8 +391,14 @@ def _survivor(
     property_ids: Sequence[int],
     props: Mapping[int, Mapping[str, Any]],
     children: Mapping[int, set[int]],
+    assets: Mapping[int, Sequence[int]],
 ) -> int:
-    """Most listings wins; a tie goes to the oldest `first_seen_at`, then the lowest id."""
+    """The one asset-linked property, when only one is: the chokepoint leaves `asset_id` on the
+    row it retires, so an asset-linked unit is never the one retired (E901). Otherwise most
+    listings wins; a tie goes to the oldest `first_seen_at`, then the lowest id."""
+    carriers = [pid for pid in property_ids if assets.get(pid)]
+    if len(carriers) == 1:
+        return carriers[0]
 
     def key(pid: int) -> tuple:
         first = props[pid].get("first_seen_at")
@@ -535,11 +541,30 @@ def _separated_merges(
     return sorted(out, key=lambda m: (m["generation"], m["cluster_key"]))
 
 
+def _asset_links(
+    conn: Any, property_ids: Iterable[int], props: Mapping[int, Mapping[str, Any]]
+) -> dict[int, list[int]]:
+    """Each property's asset links: its own `asset_id` and that of every property merged into
+    it (the chokepoint leaves a retired unit's link on the retired row), so an earlier merge
+    never erases the operator's "different units, do not collapse" (E903)."""
+    ids = sorted(set(property_ids))
+    links: dict[int, set[int]] = {}
+    for pid in ids:
+        own = (props.get(pid) or {}).get("asset_id")
+        if own is not None:
+            links.setdefault(pid, set()).add(int(own))
+    for chunk in _chunks(ids):
+        for root, asset in _rows(conn, S.ABSORBED_ASSETS_SQL, {"property_ids": chunk}):
+            links.setdefault(int(root), set()).add(int(asset))
+    return {pid: sorted(assets) for pid, assets in links.items()}
+
+
 def _set_reasons(
     listings: set[int],
     category_of: Mapping[int, tuple[str | None, str | None]],
     props: Sequence[Mapping[str, Any]],
     scope: Scope,
+    assets: Mapping[int, Sequence[int]],
 ) -> tuple[list[str], dict[str, Any]]:
     """What the merge would build, checked as the chokepoint would plus the run's scope and the
     operator's asset links: at plan time and again, over locked rows, just before it merges."""
@@ -566,11 +591,13 @@ def _set_reasons(
     if outside:
         reasons.append(SKIP_CARRIES_OUT_OF_SCOPE)
         detail["out_of_scope_listings"] = outside[:20]
-    assets = Counter(p.get("asset_id") for p in props if p.get("asset_id") is not None)
-    linked = sorted(int(a) for a, n in assets.items() if n > 1)
-    if linked:
+    # Two involved properties with any asset link — one asset or two — are units the operator
+    # kept apart; the merge could keep only one link on the survivor.
+    carriers = sorted(pid for pid, links in assets.items() if links)
+    if len(carriers) > 1:
         reasons.append(SKIP_ASSET_LINKED)
-        detail["asset_ids"] = linked
+        detail["asset_ids"] = sorted({int(a) for pid in carriers for a in assets[pid]})
+        detail["asset_linked_properties"] = carriers
     return reasons, detail
 
 
@@ -668,6 +695,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
     for _c, ms in everyone:
         for m in ms:
             category_of.setdefault(m.listing_id, (m.category_type, m.category_main))
+    assets_of = _asset_links(conn, all_props, props)
 
     every_listing: set[int] = {m.listing_id for _c, ms in everyone for m in ms}
     for pid in all_props:
@@ -751,7 +779,8 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
         detail.update(hit_detail)
 
         set_reasons, set_detail = _set_reasons(
-            extended, category_of, [props[pid] for pid in property_ids if pid in props], scope)
+            extended, category_of, [props[pid] for pid in property_ids if pid in props], scope,
+            {pid: assets_of.get(pid, []) for pid in property_ids})
         reasons += set_reasons
         detail.update(set_detail)
 
@@ -804,7 +833,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
         survivor: int | None = None
         retired: list[int] = []
         if not inactive and len(property_ids) >= 2:
-            survivor = _survivor(property_ids, props, children)
+            survivor = _survivor(property_ids, props, children, assets_of)
             retired = [pid for pid in property_ids if pid != survivor]
         groups.append(_group_plan(cluster, members, property_ids, survivor, retired, reasons,
                                   detail, extended))
@@ -961,9 +990,16 @@ def recheck_group(
     reasons += hit_reasons
     detail.update(hit_detail)
     category_of = {int(lid): (ctype, cmain) for _pid, lid, ctype, cmain in rows}
-    set_reasons, set_detail = _set_reasons(now, category_of, list(locked.values()), scope)
+    assets = _asset_links(conn, group.property_ids, locked)
+    set_reasons, set_detail = _set_reasons(now, category_of, list(locked.values()), scope,
+                                           assets)
     reasons += set_reasons
     detail.update(set_detail)
+    carriers = [pid for pid in group.property_ids if assets.get(pid)]
+    if len(carriers) == 1 and carriers[0] != group.survivor_id:
+        # Linked since the plan named its survivor: that unit would be the one retired.
+        reasons.append(SKIP_ASSET_LINKED)
+        detail["asset_linked_properties"] = carriers
     prop_of = {int(lid): int(pid) for pid, lid, _ct, _cm in rows}
     separated = _separated_merges(now, prop_of, _engine_merges(conn, now))
     if separated:
@@ -1035,85 +1071,100 @@ def apply_plan(
     counts = result["counts"]
     counts.update(applied=0, skipped_at_apply=0, refused=0, failed=0, listings_moved=0)
     todo = plan.to_apply
-    for index, group in enumerate(todo):
-        # E39: read fresh before every group, so the operator's switch stops a run mid-way.
-        if not apply_enabled(conn):
-            result["stopped"] = f"{ENABLED_SETTING} turned off during the run"
-            counts["not_attempted"] = len(todo) - index
-            break
-        group_id = str(uuid.uuid4())
-        markers = {
-            "engine": "autodedup", "generation": gen, "cluster_key": group.cluster_key,
-            "run_id": run_id, "model_version": group.model_version,
-            "feature_version": group.feature_version, "members": group.member_ids,
-            "scope": plan.scope.to_json(),
-        }
-        try:
-            with conn.transaction():
-                late_reasons, late_detail = recheck_group(conn, group, plan.scope)
-                if late_reasons:
-                    raise _SkipAtApply(late_reasons, late_detail)
-                moved: list[int] = []
-                for retired in group.retired_ids:
-                    res = merge(
-                        conn,
-                        survivor_id=group.survivor_id,
-                        retired_id=retired,
-                        reason=f"autodedup {gen} {group.cluster_key}",
-                        source=MERGE_SOURCE,
-                        confidence=group.confidence,
-                        markers=markers,
-                        merge_group_id=group_id,
-                    )
-                    moved.append(int((res.get("data") or {}).get("listings_moved") or 0))
-                _exec(conn, S.STAMP_GENERATION_SQL,
-                      {"stamp": f"{STAMP_PREFIX}{gen}", "merge_group_id": group_id})
-                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                    run_id, gen, group, dry_run=False, outcome="applied",
-                    merge_group_id=group_id, moved=moved))
-        except _SkipAtApply as skip:
-            group.reasons = skip.reasons
-            group.detail = {**group.detail, **skip.detail, "at_apply": True}
-            counts["skipped_at_apply"] += 1
-            result["skipped_at_apply"].append(_brief(group, reasons=skip.reasons))
-            with conn.transaction():
-                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                    run_id, gen, group, dry_run=False, outcome="skipped",
-                    error=skip.reasons[0]))
-            continue
-        except MergeError as exc:
-            outcome = "refused" if _terminal(exc) else "failed"
-            counts[outcome] += 1
-            result[outcome].append(_brief(group, error=str(exc)))
-            with conn.transaction():
-                _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                    run_id, gen, group, dry_run=False, outcome=outcome, error=str(exc)))
-            continue
-        except Exception as exc:
-            # Not a refusal the chokepoint names: record what can be recorded and stop, rather
-            # than carry on merging over a database in a state nobody has looked at. The partial
-            # result rides on the error, so the lane still publishes what DID merge.
-            error = f"{type(exc).__name__}: {exc}"
-            counts["failed"] += 1
-            counts["not_attempted"] = len(todo) - index - 1
-            result["failed"].append(_brief(group, error=error))
-            result["aborted"] = f"stopped at group {group.cluster_key}: {error}"
+    at = 0
+    try:
+        for index, group in enumerate(todo):
+            at = index
+            # E39: read fresh before every group, so the operator's switch stops a run mid-way.
+            if not apply_enabled(conn):
+                result["stopped"] = f"{ENABLED_SETTING} turned off during the run"
+                counts["not_attempted"] = len(todo) - index
+                break
+            group_id = str(uuid.uuid4())
+            markers = {
+                "engine": "autodedup", "generation": gen, "cluster_key": group.cluster_key,
+                "run_id": run_id, "model_version": group.model_version,
+                "feature_version": group.feature_version, "members": group.member_ids,
+                "scope": plan.scope.to_json(),
+            }
             try:
                 with conn.transaction():
+                    late_reasons, late_detail = recheck_group(conn, group, plan.scope)
+                    if late_reasons:
+                        raise _SkipAtApply(late_reasons, late_detail)
+                    moved: list[int] = []
+                    for retired in group.retired_ids:
+                        res = merge(
+                            conn,
+                            survivor_id=group.survivor_id,
+                            retired_id=retired,
+                            reason=f"autodedup {gen} {group.cluster_key}",
+                            source=MERGE_SOURCE,
+                            confidence=group.confidence,
+                            markers=markers,
+                            merge_group_id=group_id,
+                        )
+                        moved.append(int((res.get("data") or {}).get("listings_moved") or 0))
+                    _exec(conn, S.STAMP_GENERATION_SQL,
+                          {"stamp": f"{STAMP_PREFIX}{gen}", "merge_group_id": group_id})
                     _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
-                        run_id, gen, group, dry_run=False, outcome="failed", error=error))
-            except Exception:  # noqa: BLE001 — the original error is the one to surface
-                pass
-            try:
-                setattr(exc, PARTIAL_RESULT_ATTR, result)
-            except Exception:  # noqa: BLE001 — an error that takes no attribute still surfaces
-                pass
-            raise
-        counts["applied"] += 1
-        counts["listings_moved"] += sum(moved)
-        result["applied"].append(_brief(group, merge_group_id=group_id,
-                                        listings_moved=sum(moved)))
+                        run_id, gen, group, dry_run=False, outcome="applied",
+                        merge_group_id=group_id, moved=moved))
+            except _SkipAtApply as skip:
+                group.reasons = skip.reasons
+                group.detail = {**group.detail, **skip.detail, "at_apply": True}
+                counts["skipped_at_apply"] += 1
+                result["skipped_at_apply"].append(_brief(group, reasons=skip.reasons))
+                with conn.transaction():
+                    _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                        run_id, gen, group, dry_run=False, outcome="skipped",
+                        error=skip.reasons[0]))
+                continue
+            except MergeError as exc:
+                outcome = "refused" if _terminal(exc) else "failed"
+                counts[outcome] += 1
+                result[outcome].append(_brief(group, error=str(exc)))
+                with conn.transaction():
+                    _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                        run_id, gen, group, dry_run=False, outcome=outcome, error=str(exc)))
+                continue
+            except Exception as exc:
+                # Not a refusal the chokepoint names: record what can be recorded and stop,
+                # rather than carry on merging over a database in a state nobody has looked at.
+                error = f"{type(exc).__name__}: {exc}"
+                counts["failed"] += 1
+                counts["not_attempted"] = len(todo) - index - 1
+                result["failed"].append(_brief(group, error=error))
+                result["aborted"] = f"stopped at group {group.cluster_key}: {error}"
+                try:
+                    with conn.transaction():
+                        _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
+                            run_id, gen, group, dry_run=False, outcome="failed", error=error))
+                except Exception:  # noqa: BLE001 — the original error is the one to surface
+                    pass
+                raise
+            counts["applied"] += 1
+            counts["listings_moved"] += sum(moved)
+            result["applied"].append(_brief(group, merge_group_id=group_id,
+                                            listings_moved=sum(moved)))
+    except BaseException as exc:
+        # Any stop — an error, or a cancelled job (SIGINT raises KeyboardInterrupt) — after
+        # groups merged for real: the result rides on the error, so the lane still publishes
+        # what DID merge before re-raising.
+        if "aborted" not in result:
+            result["aborted"] = (f"stopped at group {todo[at].cluster_key}: "
+                                 f"{type(exc).__name__}: {exc}")
+            counts["not_attempted"] = len(todo) - at
+        _attach_partial(exc, result)
+        raise
     return result
+
+
+def _attach_partial(exc: BaseException, result: dict[str, Any]) -> None:
+    try:
+        setattr(exc, PARTIAL_RESULT_ATTR, result)
+    except Exception:  # noqa: BLE001 — an error that takes no attribute still surfaces
+        pass
 
 
 class _NothingMovedBack(Exception):
@@ -1170,7 +1221,9 @@ def unapply(
     `unmerge_group`; `dry_run=True` only lists them. `dry_run` has no default: this writes to
     production. NOT gated by `autodedup_apply_enabled`: undo is the way back. A group a later
     engine merge still builds on, or whose survivor a later merge retired, is skipped with the
-    reason and the merge to undo first. Without `cluster_key` the generation is STAMPED
+    reason and the merge to undo first. A merge someone else had already partly taken apart is
+    undone but recorded as THEIR undo (`undone_by='external'`), so the listings they separated
+    stay apart in every later generation. Without `cluster_key` the generation is STAMPED
     unapplied first, so none of its groups applies again until `reapply=1` (E905)."""
     run_id = run_id or new_run_id()
     targets = [
@@ -1186,7 +1239,7 @@ def unapply(
         "cluster_key": cluster_key, "groups": targets,
         "generation_stamp": None,
         "counts": {"groups": len(targets), "undone": 0, "already_undone": 0, "blocked": 0,
-                   "listings_moved_back": 0, "conflicts": 0},
+                   "taken_apart_before": 0, "listings_moved_back": 0, "conflicts": 0},
     }
     counts = result["counts"]
     if dry_run:
@@ -1196,40 +1249,78 @@ def unapply(
             if block:
                 target.update(block)
                 counts["blocked"] += 1
-            else:
-                expected.add(target["merge_group_id"])
+                continue
+            expected.add(target["merge_group_id"])
+            taken = _taken_apart(conn, target)
+            if taken:
+                target["taken_apart"] = taken
+                counts["taken_apart_before"] += 1
         if cluster_key is None:
             result["generation_stamp"] = "would be written"
         return result
+    try:
+        _unapply_live(conn, generation, targets, result, unmerge, run_id)
+    except BaseException as exc:
+        # A crash or a cancelled job after groups were undone for real: the result rides on
+        # the error, so the lane still publishes what WAS undone before re-raising.
+        stuck = [t["cluster_key"] for t in targets if t.get("outcome") == "aborted"]
+        where = f"stopped at group {stuck[0]}" if stuck else "stopped"
+        result.setdefault("aborted", f"{where}: {type(exc).__name__}: {exc}")
+        _attach_partial(exc, result)
+        raise
+    return result
+
+
+def _taken_apart(conn: Any, target: Mapping[str, Any]) -> list[int]:
+    """The group's members no longer on its survivor: someone else took the merge apart."""
+    placed = {int(lid): pid for lid, pid in _rows(
+        conn, S.MEMBER_PROPERTIES_SQL, {"listing_ids": target["member_ids"]})}
+    return [lid for lid in target["member_ids"] if placed.get(lid) != target["survivor_id"]]
+
+
+def _unapply_live(
+    conn: Any, generation: str, targets: list[dict[str, Any]], result: dict[str, Any],
+    unmerge: Callable[..., dict[str, Any]], run_id: str,
+) -> None:
+    counts = result["counts"]
     undone_by = f"{UNAPPLY_BY_PREFIX}{run_id}"
-    if cluster_key is None:
+    if result["cluster_key"] is None:
         # FIRST, so a run that stops half-way still leaves no group of it free to re-apply.
         with conn.transaction():
             _exec(conn, S.STAMP_UNAPPLIED_SQL, {
                 "generation": generation, "run_id": run_id, "undone_by": undone_by})
         result["generation_stamp"] = "written"
     for target in targets:
+        target["outcome"] = "aborted"
         # Read per group, just before it is undone: an earlier undo in this run may have
         # released what this one needs.
         block = _undo_block(conn, target, set())
         if block:
-            target.update(block)
+            target.update(block, outcome="blocked")
             counts["blocked"] += 1
             continue
         try:
             with conn.transaction():
+                taken = _taken_apart(conn, target)
                 res = unmerge(conn, merge_group_id=target["merge_group_id"],
                               undone_by=undone_by)
                 data = res.get("data") or {}
                 if not int(data.get("listings_moved_back") or 0) and data.get("conflicts"):
                     raise _NothingMovedBack(list(data["conflicts"]))
+                # Someone else had already taken the merge apart (an operator split): this
+                # undo finishes the job, but the separation is THEIR word on those listings,
+                # so it is recorded as theirs and a later generation never re-unites them.
+                external = bool(taken or data.get("conflicts"))
+                record = {**data, "noted_by": undone_by, "taken_apart": taken} if external \
+                    else data
                 _exec(conn, S.LEDGER_UNDO_SQL, {
-                    "merge_group_id": target["merge_group_id"], "undone_by": undone_by,
-                    "undo_result": json.dumps(data, sort_keys=True, default=str)})
+                    "merge_group_id": target["merge_group_id"],
+                    "undone_by": EXTERNAL_UNDO if external else undone_by,
+                    "undo_result": json.dumps(record, sort_keys=True, default=str)})
         except _NothingMovedBack as nothing:
             target["blocked"] = (f"nothing would move back ({len(nothing.conflicts)} listings "
                                  "moved on since the merge); left as it stands")
-            target["conflicts"] = nothing.conflicts
+            target.update(conflicts=nothing.conflicts, outcome="blocked")
             counts["blocked"] += 1
             continue
         except MergeError as exc:
@@ -1241,13 +1332,15 @@ def unapply(
                     "merge_group_id": target["merge_group_id"], "undone_by": EXTERNAL_UNDO,
                     "undo_result": json.dumps({"error": str(exc), "noted_by": undone_by})})
             counts["already_undone"] += 1
-            target["error"] = str(exc)
+            target.update(error=str(exc), outcome="already_undone")
             continue
         counts["undone"] += 1
         counts["listings_moved_back"] += int(data.get("listings_moved_back") or 0)
         counts["conflicts"] += len(data.get("conflicts") or [])
-        target["conflicts"] = list(data.get("conflicts") or [])
-    return result
+        target.update(conflicts=list(data.get("conflicts") or []), outcome="undone")
+        if external:
+            counts["taken_apart_before"] += 1
+            target.update(taken_apart=taken, outcome="undone_after_outside_split")
 
 
 # ------------------------------------------------------------------ lane modes
@@ -1306,8 +1399,9 @@ def summary_markdown(result: Mapping[str, Any], *, mode: str) -> str:
     if result.get("stopped"):
         lines += [f"**Stopped:** {result['stopped']}", ""]
     if result.get("aborted"):
-        lines += [f"**Aborted:** {result['aborted']} - the groups listed under `applied` "
-                  "below DID merge.", ""]
+        done = ("the groups marked `undone` below WERE undone" if mode == "unapply"
+                else "the groups listed under `applied` below DID merge")
+        lines += [f"**Aborted:** {result['aborted']} - {done}.", ""]
     stamps = result.get("generation_unapplied") or []
     if stamps and not result.get("reapply"):
         lines += [f"**Generation unapplied** (unapply ran on it as a whole, "
@@ -1341,7 +1435,8 @@ def summary_markdown(result: Mapping[str, Any], *, mode: str) -> str:
                   "", "| group | survivor | retired | note |", "| --- | --- | --- | --- |"]
         for row in rows[:shown]:
             note = row.get("note") or row.get("blocked") or row.get("error") \
-                or ", ".join(row.get("reasons") or []) or row.get("merge_group_id") or ""
+                or ", ".join(row.get("reasons") or []) or row.get("outcome") \
+                or row.get("merge_group_id") or ""
             lines.append(f"| {row.get('cluster_key')} | {row.get('survivor_id')} | "
                          f"{' '.join(str(r) for r in row.get('retired_ids') or [])} | {note} |")
         if len(rows) > shown:
@@ -1391,8 +1486,9 @@ def run_apply(
             result = apply_plan(conn, plan, dry_run)
         except ApplyRefused as exc:
             raise SystemExit(str(exc)) from exc
-        except Exception as exc:
-            # A live run that stops mid-way has merged for real: publish what it did, then fail.
+        except BaseException as exc:
+            # A live run that stops mid-way (a crash, or a cancelled job's KeyboardInterrupt)
+            # has merged for real: publish what it did, then fail.
             partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
             if isinstance(partial, dict):
                 _publish_apply(out_dir, partial, plan)
@@ -1418,6 +1514,9 @@ def run_unapply(
     generation = _generation_arg(args)
     dry_run = _dry_run_arg(args)
     raw_key = (args.get("cluster_key") or "").strip()
+    if "cluster_key" in args and not raw_key:
+        # Absent means the whole generation; an empty value must never widen one group to it.
+        raise SystemExit("cluster_key= is empty; omit it to unapply the whole generation")
     try:
         cluster_key = int(raw_key) if raw_key else None
     except ValueError as exc:
@@ -1425,8 +1524,18 @@ def run_unapply(
     conn = conn_factory()
     try:
         result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key)
+    except BaseException as exc:
+        # A live undo that stops mid-way has undone groups for real: publish them, then fail.
+        partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
+        if isinstance(partial, dict):
+            _publish_unapply(out_dir, partial)
+        raise
     finally:
         _close(conn)
+    return _publish_unapply(out_dir, result)
+
+
+def _publish_unapply(out_dir: Path, result: dict[str, Any]) -> dict[str, Any]:
     write_json(Path(out_dir) / "unapply.json", result)
     summary = _capped(result, ("groups",))
     _step_summary(summary, mode="unapply")
