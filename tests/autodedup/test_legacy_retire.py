@@ -113,7 +113,10 @@ class RetireDb(FakeDb):
                 current = conn.listings[listing_id]["property_id"]
                 moves = [(e["id"], e["merge_group_id"], e["survivor"], e["retired"])
                          for e in conn.events if e["listing"] == listing_id and not e["undone"]]
-                outcome, undo, target = _detach_plan(current, moves, merge_group_id)
+                here = [lid for lid, row in conn.listings.items() if row["property_id"] == current]
+                merged = {e["listing"] for e in conn.events if not e["undone"]}
+                outcome, undo, target = _detach_plan(current, moves, merge_group_id,
+                                                     (len(here), len(set(here) - merged)))
                 if outcome == "detached" and _origin_gone(
                         (conn.properties[target]["status"],
                          conn.properties[target]["merged_into"]), undo):
