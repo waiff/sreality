@@ -2,6 +2,7 @@
 
     python3 -m autodedup.lane --mode apply   --args "generation=g12" --out out/
     python3 -m autodedup.lane --mode apply   --args "generation=g12,dry_run=0" --out out/
+    python3 -m autodedup.lane --mode apply   --args "generation=g12,retire_legacy=1" --out out/
     python3 -m autodedup.lane --mode unapply --args "generation=g12,dry_run=0" --out out/
     python3 -m autodedup.lane --mode unapply --args "since=2026-09-25T08:00Z" --out out/
 
@@ -25,6 +26,9 @@ it (the chokepoint's merge rows, `source='autodedup'` saying who merged; a detac
 an operator's native split's one closed row). A detach and its read-only preview,
 `detach_outcomes`, read it inside the toolkit. The apply path's own ledger is the only history
 it consults.
+The one carve-out is TEMPORARY: `retire_legacy=1` runs `autodedup.legacy_retire` (A2, deleted
+in W5) before the plan, which reads it to undo the old engine's merges in the scope's blocks and
+deal types (plus any that mixes deal types).
 """
 
 from __future__ import annotations
@@ -40,6 +44,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup import apply_sql as S
+from autodedup import legacy_retire
 from autodedup.census import write_json
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import (
@@ -68,7 +73,8 @@ ID_CHUNK: int = 5000
 SCOPE_KEYS: tuple[str, ...] = (
     "category_types", "blocks", "listing_ids", "all_blocks", "max_clusters_per_run",
 )
-APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", *SCOPE_KEYS})
+# `retire_legacy`: A2's pre-step (autodedup/legacy_retire.py), temporary, deleted in W5.
+APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy", *SCOPE_KEYS})
 # What `unapply` selects by: a generation (and one of its groups), a run, a time window.
 UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since", "until")
 UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", *UNAPPLY_SELECTORS})
@@ -579,6 +585,15 @@ def _engine_vouched(
     return vouched
 
 
+def _cluster_rows(conn: Any, generation: str) -> list[dict[str, Any]]:
+    return [
+        dict(zip(("cluster_key", "size", "status", "block_key", "block_grain",
+                  "category_main", "category_type", "min_edge_score", "model_version",
+                  "feature_version"), row))
+        for row in _rows(conn, S.CLUSTERS_SQL, {"generation": generation})
+    ]
+
+
 def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     """Read-only: which groups of `generation` would merge, into what, and which are refused."""
     if is_realtime_generation(generation):
@@ -586,12 +601,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
             f"generation {generation!r} belongs to the real-time lane: it is rewritten while a "
             "plan reads it and cannot be applied from this lane"
         )
-    cluster_rows = [
-        dict(zip(("cluster_key", "size", "status", "block_key", "block_grain",
-                  "category_main", "category_type", "min_edge_score", "model_version",
-                  "feature_version"), row))
-        for row in _rows(conn, S.CLUSTERS_SQL, {"generation": generation})
-    ]
+    cluster_rows = _cluster_rows(conn, generation)
     members_by: dict[int, list[Member]] = {}
     listing_group: dict[int, int] = {}
     for key, lid, pid, ctype, cmain in _rows(conn, S.MEMBERS_SQL, {"generation": generation}):
@@ -1393,6 +1403,14 @@ def _dry_run_arg(args: Mapping[str, str]) -> bool:
         raise SystemExit(f"dry_run: {exc}") from exc
 
 
+def _retire_arg(args: Mapping[str, str]) -> bool:
+    raw = (args.get("retire_legacy") or "").strip()
+    try:
+        return _truthy(raw) if raw else False
+    except ValueError as exc:
+        raise SystemExit(f"retire_legacy: {exc}") from exc
+
+
 def _generation_arg(args: Mapping[str, str]) -> str:
     generation = (args.get("generation") or "").strip()
     if not generation:
@@ -1501,15 +1519,26 @@ def run_apply(
             "this lane (it is rewritten while a plan reads it)"
         )
     dry_run = _dry_run_arg(args)
+    retire = _retire_arg(args)
     override = {key: args[key] for key in SCOPE_KEYS if key in args}
     out_dir = Path(out_dir)
     conn = conn_factory()
+    retired: dict[str, Any] | None = None
     try:
         try:
             scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
         except ValueError as exc:
             raise SystemExit(f"scope: {exc}") from exc
         plan = plan_apply(conn, generation, scope)
+        if retire:
+            retired = _retire_legacy(conn, generation, scope, plan, dry_run=dry_run,
+                                     out_dir=out_dir)
+            if not dry_run:
+                plan = plan_apply(conn, generation, scope)
+            retired = legacy_retire.note_deferred(
+                out_dir, retired, deferred=plan.deferred,
+                planned=[g.cluster_key for g in plan.to_apply],
+                cap=plan.scope.max_clusters_per_run)
         try:
             result = apply_plan(conn, plan, dry_run)
         except ApplyRefused as exc:
@@ -1519,11 +1548,51 @@ def run_apply(
             # has merged for real: publish what it did, then fail.
             partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
             if isinstance(partial, dict):
-                _publish_apply(out_dir, partial, plan)
+                _publish_apply(out_dir, _with_retire(partial, retired), plan)
             raise
     finally:
         _close(conn)
-    return _publish_apply(out_dir, result, plan)
+    return _publish_apply(out_dir, _with_retire(result, retired), plan)
+
+
+def _retire_legacy(
+    conn: Any, generation: str, scope: Scope, plan: Plan, *, dry_run: bool, out_dir: Path,
+) -> dict[str, Any]:
+    """A2 (temporary, deleted in W5): the old engine's merges in the scope undone first, in this
+    same dispatch, so the plan that follows reads them apart. Refused before anything moves when
+    the run narrows by listing (the step reads blocks only) or when `plan`, read first, holds no
+    proposed group inside the scope: a typo'd or unstored generation would re-merge nothing."""
+    if scope.listing_ids is not None:
+        raise SystemExit("retire_legacy=1 cannot run with listing_ids: the retire step reads the "
+                         "scope's blocks only; nothing was undone")
+    counts = plan.counts
+    proposed = counts.get("clusters", 0) - sum(
+        counts.get(key, 0) for key in ("not_proposed", "no_members", "out_of_scope"))
+    if proposed <= 0:
+        raise SystemExit(f"retire_legacy=1: generation {plan.generation!r} holds no proposed "
+                         "group inside the scope, so nothing would merge again; nothing was undone")
+    # Only a group this run may merge (proposed, admitted by the scope) re-merges what the
+    # step undoes; the rest touching it are reported apart.
+    members: dict[int, list[Member]] = {}
+    for key, lid, pid, ctype, cmain in _rows(conn, S.MEMBERS_SQL, {"generation": generation}):
+        members.setdefault(int(key), []).append(Member(
+            int(lid), int(pid) if pid is not None else None, ctype, cmain))
+    merging: dict[int, int] = {}
+    other: dict[int, int] = {}
+    for cluster in _cluster_rows(conn, generation):
+        key = int(cluster["cluster_key"])
+        found = members.get(key, [])
+        into = merging if (cluster["status"] == "proposed" and found
+                           and scope.admits(cluster, found)) else other
+        for member in found:
+            into.setdefault(member.listing_id, key)
+    return legacy_retire.run(conn, scope.blocks, category_types=scope.category_types,
+                             dry_run=dry_run, run_id=new_run_id(), out_dir=out_dir,
+                             closed=scope_closed, cluster_of=merging, other_of=other)
+
+
+def _with_retire(result: dict[str, Any], retired: dict[str, Any] | None) -> dict[str, Any]:
+    return {**result, "legacy_retire": retired} if retired is not None else result
 
 
 def _publish_apply(out_dir: Path, result: dict[str, Any], plan: Plan) -> dict[str, Any]:
