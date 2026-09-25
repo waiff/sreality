@@ -1225,8 +1225,20 @@ renumber.** Navigate by area:
     carries only border-case flagging (`image_border_cases`) — `image_tag_annotations` and
     `phash_pair_notes` had zero live callers even before the cutover. `image_training_examples`
     itself is superseded but not yet dropped (a separately-gated destructive migration).
-    Interim caveat: the unmerge *button* lived on the deleted Dedup page, so until the rebuild
-    gives it a home, unmerge is API-only.
+    The unmerge *button* lived on the deleted Dedup page; its new home is the listing page's
+    **Sloučené inzeráty** section (`frontend/src/components/listing-detail/MergedAdvertsSection.tsx`:
+    shown on any property of two or more adverts, one expandable row per child advert — photos
+    collapsed, description / full gallery / broker / stored portal link expanded — with a per-row
+    two-step **Rozdělit** for admin sessions over the two routes above); because the ledger read
+    (`GET /properties/merges?survivor_property_id=`, one property's groups, exact at any ledger
+    size) names no listings and the undo is group-grain, a row splits only a two-advert property
+    one merge joined; anything else says that row cannot be split from here (`planRowUnmerge`) —
+    never a whole-group undo from a row, which would also separate adverts the operator did not
+    object to. A per-advert detach (W3) makes every row exact. The split is available for every
+    merge, whatever its origin (operator, legacy `auto`, `autodedup` — shown as information only),
+    with an optional free-text `reason` (≤500 chars, sent as the unmerge POST body). Recording the
+    split as a "different" ruling the engine obeys, and storing the reason, are the undo route's
+    job once it writes rulings (the merge-safety change); until then the route ignores the body.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing

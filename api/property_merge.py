@@ -280,9 +280,14 @@ def list_merged_properties(
 
 def list_merges(
     conn: psycopg.Connection, *, limit: int = 50, offset: int = 0,
+    survivor_property_id: int | None = None,
 ) -> dict[str, Any]:
-    """The merge ledger, one row per reversible group (newest first)."""
-    sql = """
+    """The merge ledger, one row per reversible group (newest first), optionally one survivor's."""
+    # A group has one survivor, so filtering its events before GROUP BY keeps every
+    # aggregate whole (property_merge_events_survivor_idx, migration 100).
+    where = ("WHERE survivor_property_id = %(survivor_property_id)s"
+             if survivor_property_id is not None else "")
+    sql = f"""
         SELECT
           merge_group_id::text,
           min(created_at)                       AS merged_at,
@@ -293,12 +298,14 @@ def list_merges(
           max(reason)                           AS reason,
           bool_and(undone_at IS NOT NULL)       AS fully_undone
         FROM property_merge_events
+        {where}
         GROUP BY merge_group_id
         ORDER BY min(created_at) DESC
         LIMIT %(limit)s OFFSET %(offset)s
     """
     with conn.cursor() as cur:
-        cur.execute(sql, {"limit": limit, "offset": offset})
+        cur.execute(sql, {"limit": limit, "offset": offset,
+                          "survivor_property_id": survivor_property_id})
         rows = cur.fetchall()
     data = [
         {
@@ -366,11 +373,13 @@ def post_merge_property_set(
 def get_merges(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    survivor_property_id: int | None = Query(default=None, ge=1),
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """The merge ledger — one row per reversible group, newest first."""
-    return list_merges(conn, limit=limit, offset=offset)
+    """The merge ledger — one row per reversible group, newest first (optionally one survivor's)."""
+    return list_merges(conn, limit=limit, offset=offset,
+                       survivor_property_id=survivor_property_id)
 
 
 @router.post("/merges/{merge_group_id}/unmerge")
