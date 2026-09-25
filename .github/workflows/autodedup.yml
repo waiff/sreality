@@ -370,7 +370,9 @@ name: "AUTODEDUP: engine lane"
 #             merge them (proposed, inside the scope); the others touching the retire set are
 #             counted apart. max_clusters_per_run caps only the engine's merges: live, undone
 #             groups whose engine group it deferred are counted and a re-dispatch merges them;
-#             a dry run predicts the deferral. Writes out/apply/legacy_retire.json and a step
+#             a dry run predicts the deferral. It reads the scope's area once per dispatch and
+#             drives every later read from those listing ids through indexes; the summary shows
+#             each read's wall time (timings). Writes out/apply/legacy_retire.json and a step
 #             summary section; a dry run writes nothing.
 #
 #   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group a generation, an apply run

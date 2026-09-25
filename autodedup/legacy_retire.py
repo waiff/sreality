@@ -48,6 +48,12 @@ admitted by the scope); the rest touching the retire set are counted apart.
 the cap deferred are counted, and a re-dispatch merges them; a dry run (whose plan still reads
 the old merges) predicts the engine groups the live run would plan against the cap.
 
+COST: the area (the scope's blocks as listing ids, AREA_SQL) is read ONCE per dispatch; every
+later read - each pass and each group's re-check - takes those ids and is driven from them into
+the ledger's indexes (see each statement's comment), never across the whole ledger: the first
+shape scanned every live old-engine row with two correlated lookups each and hit the 2-minute
+statement timeout (dry run 36148892044). Every read's wall time is in the summary (`timings`).
+
 D7 carve-out, like the W0 probe's: this reads `property_merge_events` only to find what to undo.
 Nothing read here becomes engine input.
 """
@@ -55,6 +61,7 @@ Nothing read here becomes engine input.
 from __future__ import annotations
 
 import os
+import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -81,47 +88,71 @@ ARTIFACT: tuple[str, str] = ("apply", "legacy_retire.json")
 PARTIAL_ATTR: str = "autodedup_retire_result"
 SUMMARY_ROWS: int = 50
 
+# The area, read ONCE per dispatch: every later read takes these listing ids, so no pass and no
+# per-group re-check scans `listing_location` again. The export lane's per-grain membership
+# (`town:` = obec_kod, `quarter:` = cast_obce_kod). The town arm rides
+# listing_location_obec_granularity (obec_kod, granularity) (migration 501); cast_obce_kod has no
+# index, so the quarter arm is the dispatch's one scan of the table (timed in the summary).
+AREA_SQL = """
+select ll.listing_id
+  from public.listing_location ll
+ where ll.obec_kod = any(%(towns)s::bigint[])
+union
+select ll.listing_id
+  from public.listing_location ll
+ where ll.cast_obce_kod = any(%(quarters)s::bigint[])
+"""
+
 # Every row, live or undone, of every legacy group with a live row that touches the area through
-# an advert it moved (the probe's `touches_trial`) or through an advert now on its survivor or
-# retired property. The area is the export lane's per-grain membership (`town:` = obec_kod,
-# `quarter:` = cast_obce_kod). `merge_group_id` narrows the read to one group (the re-check).
+# an advert it moved (the probe's `touches_trial`) or through an advert now on its survivor.
+# Driven FROM the area (a few thousand adverts), never across the ledger: area adverts ->
+# property_merge_events_listing_live_idx (listing_ref_id, id) WHERE undone_at IS NULL (migration
+# 560); area adverts -> listings pkey -> their properties -> property_merge_events_survivor_idx
+# (migration 100); the touching groups' rows -> property_merge_events_group_idx (merge_group_id)
+# (migration 100); each row's advert -> listings pkey. A group touching ONLY through an advert
+# on its RETIRED property is not read: `retired_property_id` has no index, and such a group
+# (moved adverts and survivor all outside) could only ever be `straddling`, never undone.
+# `merge_group_id` narrows the read to one group (the in-transaction re-check).
 GROUPS_SQL = """
-with touching as (
-  select distinct e.merge_group_id
-    from public.property_merge_events e
+with area as materialized (
+  select distinct unnest(%(area_ids)s::bigint[]) as listing_id
+),
+area_properties as materialized (
+  select distinct l.property_id
+    from area a
+    join public.listings l on l.id = a.listing_id
+   where l.property_id is not null
+),
+touching as (
+  select e.merge_group_id
+    from area a
+    join public.property_merge_events e on e.listing_ref_id = a.listing_id
    where e.undone_at is null
      and e.source = 'auto'
      and (%(merge_group_id)s::uuid is null or e.merge_group_id = %(merge_group_id)s::uuid)
-     and (exists (select 1 from public.listing_location ll
-                   where ll.listing_id = e.listing_ref_id
-                     and (ll.obec_kod = any(%(towns)s::bigint[])
-                          or ll.cast_obce_kod = any(%(quarters)s::bigint[])))
-          or exists (select 1 from public.listings l
-                       join public.listing_location ll on ll.listing_id = l.id
-                      where l.property_id in (e.survivor_property_id, e.retired_property_id)
-                        and (ll.obec_kod = any(%(towns)s::bigint[])
-                             or ll.cast_obce_kod = any(%(quarters)s::bigint[]))))
+  union
+  select e.merge_group_id
+    from area_properties ap
+    join public.property_merge_events e on e.survivor_property_id = ap.property_id
+   where e.undone_at is null
+     and e.source = 'auto'
+     and (%(merge_group_id)s::uuid is null or e.merge_group_id = %(merge_group_id)s::uuid)
 )
 select e.id, e.merge_group_id::text, e.source, e.created_at, e.survivor_property_id,
        e.retired_property_id, e.listing_ref_id, l.id is not null, l.property_id,
-       exists (select 1 from public.listing_location ll
-                where ll.listing_id = e.listing_ref_id
-                  and (ll.obec_kod = any(%(towns)s::bigint[])
-                       or ll.cast_obce_kod = any(%(quarters)s::bigint[]))),
+       e.listing_ref_id in (select a.listing_id from area a),
        e.undone_at is not null, e.undone_by
-  from public.property_merge_events e
-  join touching t on t.merge_group_id = e.merge_group_id
+  from touching t
+  join public.property_merge_events e on e.merge_group_id = t.merge_group_id
   left join public.listings l on l.id = e.listing_ref_id
  order by e.merge_group_id, e.id
 """
 
-# Every advert now on the groups' survivors and retired properties, inside the area or not.
+# Every advert now on the groups' survivors and retired properties, inside the area or not:
+# listings_property_id_idx (migration 091), the area as the ids AREA_SQL read.
 ADVERTS_SQL = """
 select l.property_id, l.id, l.category_type,
-       exists (select 1 from public.listing_location ll
-                where ll.listing_id = l.id
-                  and (ll.obec_kod = any(%(towns)s::bigint[])
-                       or ll.cast_obce_kod = any(%(quarters)s::bigint[])))
+       l.id in (select unnest(%(area_ids)s::bigint[]))
   from public.listings l
  where l.property_id = any(%(property_ids)s::bigint[])
  order by l.property_id, l.id
@@ -129,6 +160,7 @@ select l.property_id, l.id, l.category_type,
 
 # Which of these adverts a live old-engine row moved: the rest of a survivor's adverts are its own
 # (or an operator's merge), the side a merge that CREATED a deal-type mix is read against.
+# property_merge_events_listing_live_idx (migration 560).
 AUTO_MOVED_SQL = """
 select distinct e.listing_ref_id
   from public.property_merge_events e
@@ -138,7 +170,7 @@ select distinct e.listing_ref_id
 """
 
 # The newest live merge onto each survivor by anyone but the old engine: one after the legacy
-# group's own builds on it.
+# group's own builds on it. property_merge_events_survivor_idx (migration 100).
 BUILT_ON_SQL = """
 select e.survivor_property_id, e.source, max(e.created_at)
   from public.property_merge_events e
@@ -211,10 +243,39 @@ def area_params(blocks: Iterable[str] | None) -> dict[str, list[int]]:
     return out
 
 
+# Wall time of every read, by statement, since the step started: a slow read shows in the
+# summary before it reaches the database's statement timeout. One step per lane process.
+_CLOCK: dict[str, list[float]] = {}
+
+
+def _statement(sql: str) -> str:
+    names = {AREA_SQL: "area", GROUPS_SQL: "groups", ADVERTS_SQL: "adverts",
+             AUTO_MOVED_SQL: "auto_moved", BUILT_ON_SQL: "built_on",
+             S.PROPERTY_STATE_SQL: "property_state", S.PAIR_VERDICTS_SQL: "pair_verdicts",
+             S.MUST_NOT_LINK_SQL: "must_not_link", S.LOCK_PROPERTIES_SQL: "lock_properties"}
+    return names.get(sql, "other")
+
+
 def _rows(conn: Any, sql: str, params: Mapping[str, Any]) -> list[tuple]:
-    with conn.cursor() as cur:
-        cur.execute(sql, dict(params))
-        return list(cur.fetchall())
+    started = time.monotonic()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, dict(params))
+            return list(cur.fetchall())
+    finally:
+        _CLOCK.setdefault(_statement(sql), []).append(time.monotonic() - started)
+
+
+def read_area(conn: Any, blocks: Iterable[str] | None) -> dict[str, list[int]]:
+    """The scope's blocks as the listing ids every later read takes (`area_ids`)."""
+    ids = {int(r[0]) for r in _rows(conn, AREA_SQL, area_params(blocks))}
+    return {"area_ids": sorted(ids)}
+
+
+def _timings() -> dict[str, dict[str, float]]:
+    return {name: {"n": len(took), "total_s": round(sum(took), 3),
+                   "max_s": round(max(took), 3)}
+            for name, took in sorted(_CLOCK.items())}
 
 
 def _health(group: LegacyGroup, status: str | None, later: Iterable[Any]) -> str:
@@ -448,7 +509,8 @@ def retire_legacy(
     """Select, then (live) undo pass after pass, the qualifying legacy groups. `closed` is the
     scope row's re-read before every group (E39); `engine` is the generation being applied
     (`EngineMaps`); a dry run writes nothing."""
-    area = area_params(blocks)
+    _CLOCK.clear()
+    area = read_area(conn, blocks)
     categories = frozenset(category_types) if category_types is not None else None
     detach = detach or detach_listing
     undone_by = f"{RETIRE_BY}:{run_id}"
@@ -457,6 +519,7 @@ def retire_legacy(
     final: dict[str, LegacyGroup] = {g.merge_group_id: g for g in first}
     result: dict[str, Any] = {
         "run_id": run_id, "dry_run": dry_run, "blocks": sorted(blocks or ()),
+        "area_listings": len(area["area_ids"]),
         "category_types": sorted(categories) if categories is not None else None,
         "undone_by": undone_by, "passes": 0}
     todo = [g for g in first if g.selected]
@@ -513,7 +576,7 @@ def _finish(
     result: dict[str, Any], first: list[LegacyGroup], final: dict[str, LegacyGroup],
 ) -> dict[str, Any]:
     groups = sorted(final.values(), key=lambda g: (g.merged_at, g.merge_group_id), reverse=True)
-    return {**result, "counts": _counts(first, groups),
+    return {**result, "counts": _counts(first, groups), "timings": _timings(),
             "engine_clusters": sorted({k for g in groups if g.selected
                                        for k in g.engine_clusters}),
             "engine_clusters_not_merging": sorted({k for g in groups if g.selected
@@ -558,7 +621,8 @@ def summary_markdown(result: Mapping[str, Any]) -> str:
              f"Blocks: {' '.join(result.get('blocks') or [])}; deal types: "
              f"{' '.join(result.get('category_types') or ['all'])} (a merge that created a "
              f"sale/rental mix is retired whatever they are); stamp `{result.get('undone_by')}`; "
-             f"passes: {result.get('passes')}.", ""]
+             f"passes: {result.get('passes')}; adverts in the area: "
+             f"{result.get('area_listings')}.", ""]
     if result.get("dry_run"):
         lines += ["The engine's dry-run plan below reads the old engine's merges as they "
                   "stand; the live run plans after they are undone. "
@@ -567,6 +631,11 @@ def summary_markdown(result: Mapping[str, Any]) -> str:
     for key in ("stopped", "aborted"):
         if result.get(key):
             lines += [f"**{key.capitalize()}:** {result[key]}", ""]
+    if result.get("timings"):
+        lines += ["| read | n | total s | max s |", "| --- | --- | --- | --- |"]
+        lines += [f"| {name} | {t['n']} | {t['total_s']} | {t['max_s']} |"
+                  for name, t in result["timings"].items()]
+        lines += [""]
     lines += ["| count | n |", "| --- | --- |"]
     for key, value in counts.items():
         if isinstance(value, dict):
@@ -612,7 +681,8 @@ def _publish(out_dir: Path, result: dict[str, Any]) -> None:
 
 def _brief(result: Mapping[str, Any]) -> dict[str, Any]:
     return {key: result[key] for key in (
-        "counts", "stopped", "aborted", "undone_by", "category_types", "passes")
+        "counts", "stopped", "aborted", "undone_by", "category_types", "passes", "timings",
+        "area_listings")
         if key in result}
 
 
