@@ -895,6 +895,26 @@ def test_dispatch_feed_reads_listings_through_the_public_view() -> None:
     assert " l." not in f" {_LISTING_PROJECTION}"
 
 
+def test_feed_mf_yield_is_the_number_the_matcher_filtered_on() -> None:
+    """The feed shows the MF yield of the dispatch's PROPERTY, read off the same
+    `properties_public` row, by the same key, that the matcher's yield bound was
+    evaluated against — so a row that fired on `yield >= 4` can never show a
+    different yield next to it (the listing-grain column it replaced could)."""
+    import inspect
+
+    from api import notifications as nf
+
+    where, _ = _build_match_clauses(WatchdogFilterSpec(min_mf_gross_yield_pct=4.0))
+    assert "l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s" in where
+    insert = inspect.getsource(nf._insert_new_dispatches)
+    assert "FROM properties_public l " in insert
+    assert "SELECT %(subscription_id)s, 'watchdog', l.property_id," in insert
+
+    assert "LEFT JOIN properties_public pp ON pp.property_id = d.property_id" in nf._DISPATCH_FROM
+    assert "pp.mf_gross_yield_pct" in nf._LISTING_PROJECTION
+    assert "lp.mf_" not in nf._LISTING_PROJECTION
+
+
 def test_mark_all_seen_scoped_filters_by_source() -> None:
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (lambda s: "UPDATE notification_dispatches d SET seen_at" in s, [], 5),
