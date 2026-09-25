@@ -8,8 +8,8 @@
  * pipeline's accent — out of every collection this button is neutral, and only
  * the SAVED state borrows the soft copper tint the card glyph already uses.
  *
- * Membership reads the ONE shared member map (the CurationBlock further down the
- * page and every Browse card glyph subscribe to the same key), so a save made in
+ * Membership reads the ONE shared member map (the CurationBlock under the
+ * description and every Browse card glyph subscribe to the same key), so a save made in
  * any of them is immediately true in the others.
  */
 

@@ -1,6 +1,6 @@
 /* Shared "what is this property" overview — the dossier header (identity +
  * price left, location map anchored top-right), a dense facts strip,
- * description, an optional estimates slot, and the photo gallery. Extracted
+ * description, optional curation and estimates slots, and the photo gallery. Extracted
  * from the Listing Detail page so the Estimation Detail page renders its
  * subject with the SAME structure (one surface, not two). Driven by a
  * ListingPublic row; the estimation page passes the subject's resolved
@@ -29,6 +29,7 @@ export function ListingOverview({
   showStatus = true,
   headerExtras,
   mapFooter,
+  curationSlot,
   estimatesSlot,
 }: {
   listing: ListingPublic;
@@ -44,6 +45,11 @@ export function ListingOverview({
    * "Explore area" button; Estimation Detail leaves it empty (so the button
    * doesn't appear on the estimation subject). */
   mapFooter?: React.ReactNode;
+  /* The operator's own curation (collections, tags, notes), rendered directly
+   * under the description and above the estimates — what the operator has
+   * already decided about this property comes before the numbers. Gets its
+   * leading hairline here; Estimation Detail leaves it empty. */
+  curationSlot?: React.ReactNode;
   /* The estimation chapter, rendered between description and gallery — the
    * listing page passes its EstimationsBlock here so the estimates sit in
    * the prime slot the location map used to occupy (the map lives in the
@@ -55,6 +61,12 @@ export function ListingOverview({
       <Header listing={listing} showStatus={showStatus} extras={headerExtras} mapFooter={mapFooter} />
       <KeyFactsBlock listing={listing} />
       <DescriptionBlock listing={listing} />
+      {curationSlot && (
+        <>
+          <Hairline />
+          {curationSlot}
+        </>
+      )}
       {estimatesSlot}
       <Hairline />
       <GalleryBlock
