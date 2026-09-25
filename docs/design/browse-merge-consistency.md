@@ -90,7 +90,6 @@ extend to collections, tags, notes, or deal-pipeline stage moves:
 |---|---|---|---|---|
 | Merge (candidate / bulk / cluster / property-set) | `merge_properties` | Yes, inline recompute | Yes (most columns) | **Yes** |
 | Unmerge | `unmerge_group` | Yes, inline recompute | Yes | **Yes** |
-| Split to singletons | `split_property_to_singletons` | Yes, inline recompute | Yes | **Yes** |
 | Asset link/unlink | `link_properties`/`unlink_property` (`toolkit/asset_identity.py`) | Yes, `asset_id` only, no recompute | Yes — `p.asset_id` is the last column in `browse_projection` (migration 276 line 86) | **Yes, latent** (not the reported bug — Browse doesn't currently render `asset_id` on cards — but the same gap exists the moment it does; see Rollout) |
 | Dismiss (cluster/candidate), decision feedback, archive-reset | candidate-table writes only | No | — | No |
 | Collections, tags, notes, pipeline-stage moves, watchdog/collection monitoring toggle | `api/curation.py`, `toolkit/pipeline_identity.py` | Different tables entirely (`collection_properties`, `property_tags`, `property_notes`, `property_pipeline`, `collections`) | **No** — none of these columns exist in `browse_projection`'s SELECT (migration 276 lines 57-86) | **No** — these are read live via dedicated `*_public` views/routes, never via `browse_list`, so they were never subject to the 5-min snapshot lag to begin with |
@@ -218,13 +217,11 @@ is column-compatible by the same definition — no hand-maintained column list.
 post-deploy check is in the verification plan; the SAVEPOINT covers the narrow
 projection-migration window regardless.)
 
-Called at the three recompute chokepoints — the whole change, so every current
+Called at the two recompute chokepoints — the whole change, so every current
 and future caller (including the Tier-2 auto-merge sweep) gets it for free:
 
 - `merge_properties`, after `recompute_mf_one(conn, survivor_id)`:
   `sync_browse_list(conn, [survivor_id, retired_id])`
-- `split_property_to_singletons`, after the `recompute_mf_one` loop:
-  `sync_browse_list(conn, [property_id, *new_ids])`
 - `unmerge_group`, after the per-retired recompute loop:
   `sync_browse_list(conn, [survivor_id, *retired_ids])`
 
@@ -438,7 +435,7 @@ that was just made**: it shows what looks like two separate active listings
 for a property the system just declared to be one. That's a direct, visible
 regression in the exact metric the entire dedup program (rules #15-16) exists to
 improve — perceived duplicate rate. Because the fix lives at the shared
-`merge_properties`/`unmerge_group`/`split_property_to_singletons` chokepoint,
+`merge_properties`/`unmerge_group` chokepoint,
 it closes this window for **every** merge path, including the much
 higher-volume Tier-2 automatic sweep, not just the rare manual click — a
 standing data-quality improvement market-wide, beyond the one reported bug.

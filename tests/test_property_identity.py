@@ -15,7 +15,6 @@ import pytest
 from toolkit.property_identity import (
     MergeError,
     merge_properties,
-    split_property_to_singletons,
     unmerge_group,
 )
 
@@ -198,7 +197,6 @@ def test_merge_carries_operator_state_to_survivor():
     for tbl in (
         "collection_properties", "property_tags",
         "property_notes", "notification_dispatches",
-        "property_status_events",
     ):
         up = _find(conn.executed, f"UPDATE {tbl} SET property_id =")
         assert up is not None, f"{tbl} not re-pointed"
@@ -292,6 +290,26 @@ def test_unmerge_replays_ledger_and_reactivates():
     assert _find(conn.executed, "merge_absorb") is not None
 
 
+def test_unmerge_restores_is_active_with_the_status_so_no_status_event_fires():
+    """The reactivation clears `merged_away` and restores `is_active` in ONE statement:
+    the status-event trigger (migration 559) skips a row that is or was merged_away, so
+    neither the merge's retirement nor this reactivation logs a false transition — and
+    the recompute that follows finds is_active already right, so it flips nothing."""
+    conn = _FakeConn([
+        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
+         [(10, 20, 1001)]),
+        (lambda s: "UPDATE listings SET property_id = %s WHERE id" in s, [(1,)]),
+    ])
+    unmerge_group(conn, merge_group_id="grp", undone_by="operator")
+    sql, params = _find(conn.executed, "SET status = 'active'")
+    assert "is_active = EXISTS" in sql and "l.is_active" in sql
+    assert params == ([20],)
+    idx = [e[0] for e in conn.executed]
+    reactivate = next(i for i, e in enumerate(idx) if "SET status = 'active'" in e)
+    recompute = next(i for i, e in enumerate(idx) if "WITH batch AS" in e)
+    assert reactivate < recompute
+
+
 def test_unmerge_conflict_when_child_repointed_elsewhere():
     conn = _FakeConn([
         (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
@@ -334,19 +352,6 @@ def test_merge_patches_browse_read_model():
     idx_recompute = next(i for i, e in enumerate(conn.executed) if "WITH batch AS" in e[0])
     idx_patch = next(i for i, e in enumerate(conn.executed) if "DELETE FROM browse_list" in e[0])
     assert idx_recompute < idx_patch
-
-
-def test_split_patches_browse_read_model():
-    conn = _FakeConn([
-        (lambda s: "SELECT id, status FROM properties WHERE id = %s FOR UPDATE" in s,
-         [(100, "active")]),
-        (lambda s: "SELECT id FROM listings WHERE property_id" in s,
-         [(1,), (2,)]),
-        (lambda s: "INSERT INTO properties (" in s, [(999,)]),
-    ])
-    split_property_to_singletons(conn, property_id=100)
-    insert = _find(conn.executed, "INSERT INTO browse_list SELECT * FROM browse_projection")
-    assert insert is not None and insert[1] == ([100, 999],)
 
 
 def test_unmerge_patches_browse_read_model():

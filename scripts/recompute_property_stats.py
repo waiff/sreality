@@ -47,7 +47,9 @@ Two phases, both idempotent:
    a counted before/after.
 
    PRICE SERIES GRAIN (changed 2026-08; migration 173 introduced these columns).
-   The window PARTITIONs by listing, NOT by property. Interleaving every child's
+   Steps are per listing, NOT per property, read from `listing_price_steps`
+   (migration 559) — the one step definition the watchdog and the collection
+   monitor read too. Interleaving every child's
    snapshots into one property-level series — the original behaviour — makes a
    multi-portal property whose portals quote slightly different asking prices
    register a "change" on every single scrape, and simultaneously HIDES real
@@ -288,95 +290,60 @@ _RECOMPUTE_BATCH_SQL = """
       -- current state (never a delisted sibling's stale price), then the shared
       -- trust order (migration 311) as the tiebreak among equally-active
       -- siblings — replacing the old bare sreality_id DESC, whose sign made the
-      -- pick arbitrary across portals. Split-picker (property_identity.py) mirrors
-      -- this. NB: the golden-record field CTEs above are trust-FIRST instead —
+      -- pick arbitrary across portals. NB: the golden-record field CTEs above are
+      -- trust-FIRST instead —
       -- a field's best-known value should come from the most trusted source even
       -- if that listing later delisted; the two goals legitimately differ.
       ORDER BY l.property_id, l.is_active DESC, source_trust_rank(l.source),
                l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
     ),
-    -- PER-LISTING price series. The window PARTITIONs by listing, not by
-    -- property: a multi-portal property's children are independent asking-price
-    -- streams, and interleaving them by scraped_at (as this did until now) makes
-    -- every alternating read look like a price change. A property listed at
-    -- 5.0M on one portal and 5.2M on another registered a "change" on EVERY
-    -- scrape, inflating price_change_count without bound; the same interleaving
-    -- also HID real changes, because a genuine cut could be masked by the other
-    -- portal's unchanged price landing between the two readings. Measured
-    -- market-wide over all multi-source properties with priced snapshots, this
-    -- cut both ways. A change is now only ever a change WITHIN one listing.
-    prices AS (
-      SELECT
-        l.property_id AS pid,
-        s.listing_id,
-        s.price_czk,
-        s.scraped_at,
-        row_number() OVER (
-          PARTITION BY s.listing_id ORDER BY s.scraped_at, s.id
-        ) AS rn
-      FROM listing_snapshots s
-      JOIN listings l ON l.id = s.listing_id
-      JOIN batch b ON b.id = l.property_id
-      WHERE s.price_czk IS NOT NULL
-    ),
-    steps AS (
-      SELECT
-        pid, listing_id, price_czk, scraped_at, rn,
-        lag(price_czk) OVER (PARTITION BY listing_id ORDER BY rn) AS prev
-      FROM prices
-    ),
-    -- Endpoints of each child's own series.
-    listing_span AS (
-      SELECT
-        pid, listing_id,
-        (array_agg(price_czk ORDER BY rn))[1]      AS first_price,
-        (array_agg(price_czk ORDER BY rn DESC))[1] AS last_price,
-        count(*)                                   AS price_points
-      FROM prices
-      GROUP BY pid, listing_id
-    ),
-    -- The property's headline delta is anchored on the REPRESENTATIVE child —
-    -- the same listing whose price becomes properties.current_price_czk below.
-    -- That coupling is the point: a delta computed over a different series than
-    -- the displayed price is how a card ends up quoting a headline price and a
-    -- drop that describe two different numbers. (No literal percent sign in this
-    -- comment on purpose -- prose percent inside executed SQL is an
-    -- `incomplete placeholder` crash in psycopg; tests/test_sql_placeholders.py
-    -- guards it.) NULL when the representative has fewer than two priced
-    -- snapshots -- a narrower claim than the old any-child version, but a true one.
-    repr_span AS (
-      SELECT ls.pid, ls.first_price, ls.last_price, ls.price_points
-      FROM listing_span ls
-      JOIN repr r ON r.listing_ref_id = ls.listing_id
-    ),
-    -- Windowed change counts (migration 173): a "change" is any consecutive
-    -- pair WITHIN A CHILD where the price moved, dated by the later snapshot's
-    -- scraped_at, then summed across the property's children — a change on any
-    -- portal is a change for the property. The windowed counts decay as events
-    -- age out, so they are only as fresh as the last recompute of the row --
-    -- the daily full sweep is the bound.
+    -- Price steps come from `listing_price_steps` (migration 559), the ONE step
+    -- definition this rollup shares with the watchdog and the collection monitor: a
+    -- step is a change WITHIN one child's own snapshot series, never across two
+    -- children -- interleaving a multi-portal property's children by scraped_at
+    -- made every alternating read (5.0M on one portal, 5.2M on another) a change
+    -- and hid real cuts between them. Each step is dated by its own scraped_at and
+    -- the counts sum across children: a change on any portal is a change for the
+    -- property. The windowed counts decay as events age out, so they are only as
+    -- fresh as the last recompute of the row -- the daily full sweep is the bound.
     price_hist AS (
       SELECT
-        pid,
-        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk < prev) AS drops,
-        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk > prev) AS rises,
-        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev) AS changes,
-        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev
-                         AND scraped_at >= now() - interval '30 days')  AS changes_30d,
-        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev
-                         AND scraped_at >= now() - interval '90 days')  AS changes_90d,
-        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev
-                         AND scraped_at >= now() - interval '365 days') AS changes_365d,
-        max(CASE WHEN prev IS NOT NULL AND price_czk < prev
-                 THEN (prev - price_czk)::numeric / prev * 100 END)   AS max_drop_pct
-      FROM steps
-      GROUP BY pid
+        ps.property_id AS pid,
+        count(*) FILTER (WHERE ps.price_czk < ps.prev_price_czk) AS drops,
+        count(*) FILTER (WHERE ps.price_czk > ps.prev_price_czk) AS rises,
+        count(*)                                                 AS changes,
+        count(*) FILTER (WHERE ps.scraped_at >= now() - interval '30 days')  AS changes_30d,
+        count(*) FILTER (WHERE ps.scraped_at >= now() - interval '90 days')  AS changes_90d,
+        count(*) FILTER (WHERE ps.scraped_at >= now() - interval '365 days') AS changes_365d,
+        max((ps.prev_price_czk - ps.price_czk)::numeric / ps.prev_price_czk * 100)
+          FILTER (WHERE ps.price_czk < ps.prev_price_czk)        AS max_drop_pct
+      FROM listing_price_steps ps
+      JOIN batch b ON b.id = ps.property_id
+      GROUP BY ps.property_id
+    ),
+    -- The property's headline delta is anchored on the REPRESENTATIVE child --
+    -- the same listing whose price becomes properties.current_price_czk below, so
+    -- a card never quotes a headline price and a drop that describe two different
+    -- numbers: first-to-last of that child's own priced snapshots. (No literal
+    -- percent sign in this comment on purpose -- prose percent inside executed SQL
+    -- is an `incomplete placeholder` crash in psycopg; tests/test_sql_placeholders.py
+    -- guards it.) NULL when the representative has fewer than two priced snapshots.
+    repr_span AS (
+      SELECT
+        r.pid,
+        (array_agg(s.price_czk ORDER BY s.scraped_at, s.id))[1]           AS first_price,
+        (array_agg(s.price_czk ORDER BY s.scraped_at DESC, s.id DESC))[1] AS last_price,
+        count(*)                                                          AS price_points
+      FROM repr r
+      JOIN listing_snapshots s ON s.listing_id = r.listing_ref_id
+      WHERE s.price_czk IS NOT NULL
+      GROUP BY r.pid
     ),
     -- Last content change = newest snapshot across all children. Snapshots are
     -- inserted only on a content-hash change (rule #2), so this is the "recently
     -- changed" timestamp the Browse filter reads (exposed via properties_public,
-    -- migration 158). Includes price-less snapshots (any field change), so it is
-    -- a separate CTE from `prices` above (which filters price_czk IS NOT NULL).
+    -- migration 158). Includes price-less snapshots (any field change), so it
+    -- reads the snapshots directly rather than the priced-only step view.
     changes AS (
       SELECT l.property_id AS pid, max(s.scraped_at) AS last_change_at
       FROM listing_snapshots s

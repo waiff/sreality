@@ -808,7 +808,7 @@ def test_collection_monitor_gates_every_detector_on_monitor_since() -> None:
         assert anchor in sql  # every detector shares the anchored CTE
 
     price_sql = next(s for s in inserts if "'price_drop'" in s)
-    assert "st.scraped_at > st.monitor_since" in price_sql
+    assert "st.scraped_at > m.monitor_since" in price_sql
 
     # The inactive insert references 'inactive' but not 'reactivated'.
     inactive_sql = next(
@@ -1231,7 +1231,7 @@ def test_match_changes_once_emits_price_drop_for_matching_subs() -> None:
         (lambda s: "FROM app_settings" in s, [], 0),
         # recent price-drop steps: (property_id, snapshot_id, price, prev)
         (
-            lambda s: "FROM steps" in s,
+            lambda s: "FROM listing_price_steps" in s,
             [(101, 5001, 4_900_000, 5_000_000), (102, 5002, 2_400_000, 2_500_000)],
             0,
         ),
@@ -1276,7 +1276,7 @@ def test_match_changes_once_noops_when_no_recent_drops() -> None:
     """No recent price drops → no subscription scan, no inserts."""
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (lambda s: "FROM app_settings" in s, [], 0),
-        (lambda s: "FROM steps" in s, [], 0),
+        (lambda s: "FROM listing_price_steps" in s, [], 0),
     ]
     conn = _FakeConn(script)
 
