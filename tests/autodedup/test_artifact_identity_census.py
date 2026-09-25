@@ -31,7 +31,7 @@ LANE_WRITERS: tuple[str, ...] = (
     "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
     "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
-    "parity.py",
+    "legacy_retire.py", "parity.py",
     "progress_sql.py", "replay.py", "rt_equivalence.py", "score_lane.py", "score_sql.py",
     "seals.py",
     "structural_truth.py", "town_probe.py",
@@ -56,6 +56,9 @@ DECLARED: dict[str, frozenset[str]] = {
     # written: the plan names ruled SETS, never who ruled them (test_apply pins it).
     "apply.py": frozenset({"decided_by"}),
     "apply_sql.py": frozenset({"decided_by"}),
+    # A2 (temporary): `decided_by` is the argument it hands `detach_listing`, the fixed stamp
+    # 'autodedup-legacy-retire:<run>'; no person's identity is read or written.
+    "legacy_retire.py": frozenset({"decided_by"}),
     # E28's broker rail: two columns selected as hash inputs, one never selected at all.
     "export.py": frozenset({"broker_email", "broker_phone"}),
     "export_sql.py": frozenset({"broker_name", "broker_email", "broker_phone"}),

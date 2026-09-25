@@ -2,6 +2,7 @@
 
     python3 -m autodedup.lane --mode apply   --args "generation=g12" --out out/
     python3 -m autodedup.lane --mode apply   --args "generation=g12,dry_run=0" --out out/
+    python3 -m autodedup.lane --mode apply   --args "generation=g12,retire_legacy=1" --out out/
     python3 -m autodedup.lane --mode unapply --args "generation=g12,dry_run=0" --out out/
     python3 -m autodedup.lane --mode unapply --args "since=2026-09-25T08:00Z" --out out/
 
@@ -23,6 +24,8 @@ a run's own arguments can narrow it and never widen it.
 D7 holds: nothing here reads `property_merge_events`, and only the chokepoint writes it
 (`source='autodedup'` says who merged; a detach and its read-only preview, `detach_outcomes`,
 read it inside the toolkit). The apply path's own ledger is the only history it consults.
+The one carve-out is TEMPORARY: `retire_legacy=1` runs `autodedup.legacy_retire` (A2, deleted
+in W5) before the plan, which reads it to undo the old engine's merges in the scope's blocks.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup import apply_sql as S
+from autodedup import legacy_retire
 from autodedup.census import write_json
 from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import (
@@ -66,7 +70,8 @@ ID_CHUNK: int = 5000
 SCOPE_KEYS: tuple[str, ...] = (
     "category_types", "blocks", "listing_ids", "all_blocks", "max_clusters_per_run",
 )
-APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", *SCOPE_KEYS})
+# `retire_legacy`: A2's pre-step (autodedup/legacy_retire.py), temporary, deleted in W5.
+APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy", *SCOPE_KEYS})
 # What `unapply` selects by: a generation (and one of its groups), a run, a time window.
 UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since", "until")
 UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", *UNAPPLY_SELECTORS})
@@ -1391,6 +1396,14 @@ def _dry_run_arg(args: Mapping[str, str]) -> bool:
         raise SystemExit(f"dry_run: {exc}") from exc
 
 
+def _retire_arg(args: Mapping[str, str]) -> bool:
+    raw = (args.get("retire_legacy") or "").strip()
+    try:
+        return _truthy(raw) if raw else False
+    except ValueError as exc:
+        raise SystemExit(f"retire_legacy: {exc}") from exc
+
+
 def _generation_arg(args: Mapping[str, str]) -> str:
     generation = (args.get("generation") or "").strip()
     if not generation:
@@ -1499,14 +1512,21 @@ def run_apply(
             "this lane (it is rewritten while a plan reads it)"
         )
     dry_run = _dry_run_arg(args)
+    retire = _retire_arg(args)
     override = {key: args[key] for key in SCOPE_KEYS if key in args}
     out_dir = Path(out_dir)
     conn = conn_factory()
+    retired: dict[str, Any] | None = None
     try:
         try:
             scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
         except ValueError as exc:
             raise SystemExit(f"scope: {exc}") from exc
+        if retire:
+            # A2 (temporary, deleted in W5): the old engine's merges in the scope's blocks
+            # undone first, in this same dispatch, so the plan below reads them apart.
+            retired = legacy_retire.run(conn, scope.blocks, dry_run=dry_run, run_id=new_run_id(),
+                                        out_dir=out_dir, closed=scope_closed)
         plan = plan_apply(conn, generation, scope)
         try:
             result = apply_plan(conn, plan, dry_run)
@@ -1517,11 +1537,15 @@ def run_apply(
             # has merged for real: publish what it did, then fail.
             partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
             if isinstance(partial, dict):
-                _publish_apply(out_dir, partial, plan)
+                _publish_apply(out_dir, _with_retire(partial, retired), plan)
             raise
     finally:
         _close(conn)
-    return _publish_apply(out_dir, result, plan)
+    return _publish_apply(out_dir, _with_retire(result, retired), plan)
+
+
+def _with_retire(result: dict[str, Any], retired: dict[str, Any] | None) -> dict[str, Any]:
+    return {**result, "legacy_retire": retired} if retired is not None else result
 
 
 def _publish_apply(out_dir: Path, result: dict[str, Any], plan: Plan) -> dict[str, Any]:
