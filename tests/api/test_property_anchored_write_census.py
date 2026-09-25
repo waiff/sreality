@@ -76,7 +76,6 @@ _CARRIED_TABLES = (
     "property_pipeline",
     "property_pipeline_events",
     "property_dismissals",
-    "property_status_events",
     "notification_dispatches",
 )
 

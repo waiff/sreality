@@ -5,7 +5,10 @@ unless the repository variable `AUTODEDUP_REALTIME_ENABLED` is `true`; `env_enab
 the same variable here, so a manual dispatch cannot bypass it; and `autodedup.settings`'s
 `realtime_enabled` row stops a lane that is already on WITHOUT a repository change. Shadow
 mode's own posture (E39/D4) is untouched: nothing here reaches `public.listings`, a
-`property_id` or a merge.
+`property_id` or a merge. The always-on worker runs this same pass as its `autodedup` lane
+(stopped while `app_settings.realtime_autodedup_interval_seconds` is 0; it hands in
+`enabled=True`): one lease and one set of cursors, so the worker and the workflow can never pass
+at once — and `rt_seed` takes that same lease, so no pass runs inside a seed.
 
 The pass itself is `incremental.run_pass_bounded`; this module is the three adapters it needs —
 the store, the read-only fact source and the watermark — plus the lease that keeps two runs out
@@ -200,6 +203,11 @@ LANE_NAME: str = "autodedup_realtime"
 # Longer than the workflow's own 25-minute timeout: a lease that expires while its holder is
 # still running invites a second pass to write over the first.
 LEASE_TTL_S: int = 2100
+# `rt_seed` takes the SAME lease (E97b's reset, the calibration and the cursors it rewrites are
+# exactly what a pass reads and writes): a pass inside a seed would land old-scorer rows in a
+# generation the seed just emptied. Its TTL is the seeding job's own timeout (`autodedup.yml`,
+# `timeout-minutes: 300`), so a seed that is still running can never lose the lease to a pass.
+SEED_LEASE_TTL_S: int = 300 * 60
 CURSOR_NEW: str = "rt_new"
 CURSOR_CHANGED: str = "rt_changed"
 CURSOR_FLIPPED: str = "rt_flipped"
@@ -1729,7 +1737,7 @@ RESET_TABLES: tuple[tuple[str, str], ...] = (
 )
 
 
-def reset_generation(conn: Any, generation: str) -> dict[str, int]:
+def reset_generation(conn: Any, generation: str, *, holder: str) -> dict[str, int]:
     """Empty ONE generation and nothing else (E97), counting what went.
 
     `reseed=true` re-cuts the calibration, the frozen population and the parity baseline, and
@@ -1743,14 +1751,15 @@ def reset_generation(conn: Any, generation: str) -> dict[str, int]:
 
     The caller runs it inside the seed's transaction: a seed that refuses after this point — an
     empty scope, a refused parity baseline, a storage guard — leaves the store exactly as it
-    found it."""
+    found it. `holder` is the seed's own lease, which the reset keeps: the seed holds it so no
+    pass can write into the generation while it is being emptied."""
     deleted: dict[str, int] = {}
     for name, sql in RESET_TABLES:
         rows = _rows(conn, sql, {"generation": generation})
         deleted[name] = int(rows[0][0] or 0) if rows else 0
     rows = _rows(conn, RT_FRESH_CURSORS_SQL, {"names": list(RESET_CURSORS)})
     deleted["scan_cursor"] = int(rows[0][0] or 0) if rows else 0
-    rows = _rows(conn, RT_FRESH_LEASE_SQL, {"name": LANE_NAME})
+    rows = _rows(conn, RT_FRESH_LEASE_SQL, {"name": LANE_NAME, "holder": holder})
     deleted["rt_lease"] = int(rows[0][0] or 0) if rows else 0
     return deleted
 
@@ -2143,16 +2152,28 @@ def _measure_rate(result: Any, control: Mapping[str, Any], generation: str,
 
 
 def run_incremental(
-    conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path
+    conn_factory: Callable[[], Any], args: Mapping[str, str], out_dir: Path,
+    *, enabled: bool = False, max_pass_budget_s: float | None = None,
 ) -> dict[str, Any]:
-    """One bounded real-time pass. Dark unless BOTH switches are on; writes nothing else."""
+    """One bounded real-time pass. Dark unless BOTH switches are on; writes nothing else.
+
+    `enabled=True` is a caller whose OWN switch already opened the pass, standing in for the
+    repository variable: the always-on worker (`scraper/realtime_worker.py`, lane `autodedup`)
+    has none to read and runs only while its interval is above 0. False — the workflow's path —
+    reads the variable exactly as before. The database stop button
+    (`autodedup.settings.realtime_enabled`), the lease and every rail bind both callers alike.
+
+    `max_pass_budget_s` is a caller's ceiling on the time budget the claim is sized by (E98): the
+    pass uses the smaller of it and `rt_pass_budget_s`. The worker's hard deadline is far closer
+    to the default budget than the workflow's 25-minute timeout is, so it sizes its claims to
+    fit inside that deadline. None — the workflow's path — leaves the setting alone."""
     generation = (args.get("generation") or "").strip() or GENERATION
     limits = Limits(
         max_listings=int(args.get("max_listings") or 500),
         max_pairs=int(args.get("max_pairs") or Limits().max_pairs),
         max_component=int(args.get("max_component") or 400),
     )
-    if not env_enabled():
+    if not (enabled or env_enabled()):
         return {"skipped": "dark", "reason": f"{ENV_FLAG} is not true", "spent_usd": 0.0}
 
     holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
@@ -2214,6 +2235,8 @@ def run_incremental(
             # The build phase and the clock the claim is bounded by (E98), both data.
             bootstrap = setting_flag(control.get(bootstrap_setting_key(generation)))
             pass_budget_s = _setting_number(control.get(PASS_BUDGET_SETTING), PASS_BUDGET_S)
+            if max_pass_budget_s is not None:
+                pass_budget_s = min(pass_budget_s, float(max_pass_budget_s))
             rate_per_s = max(1e-6, _setting_number(control.get(pass_rate_key(generation)),
                                                    PASS_RATE_PER_S))
         except ScopeError as exc:
@@ -2458,7 +2481,9 @@ def run_rt_seed(
             "already in the store, and would still hold no pairs. Pass backfill=false.")
     parity_n = int(_setting_number(args.get("parity_n"), float(PARITY_BASELINE_N)))
 
+    holder = f"rt_seed:{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()
+    leased = False
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
@@ -2518,12 +2543,25 @@ def run_rt_seed(
         payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
         written = 0
         reset: dict[str, int] = {}
+        # THE LANE'S LEASE, taken by the passes' own CAS and held through the transaction. A seed
+        # rewrites the calibration and the cursors every pass reads, and `fresh=true` empties the
+        # generation a pass writes into; with two callers (the workflow and the worker's
+        # `autodedup` lane) the repository variable no longer stops every pass, so the seed does
+        # not rely on a switch being off. While a pass holds the lease the seed refuses, having
+        # written nothing; while the seed holds it every pass is a green `skipped: leased`.
+        if not take_lease(conn, holder, ttl=SEED_LEASE_TTL_S):
+            raise SystemExit(
+                "rt_seed refused: a real-time pass holds autodedup.rt_lease. Stop both callers "
+                "(`update autodedup.settings set value = 'false' where key = "
+                "'realtime_enabled'` stops the workflow and the worker's autodedup lane alike), "
+                "wait for the lease to clear, and seed again. Nothing was written.")
+        leased = True
         with _transaction(conn):
             # FIRST, inside the seed's own transaction (E97): a refusal anywhere below — an
             # empty scope, a parity baseline that cannot clear the floors — puts every deleted
             # row back, so there is no state in which the generation is emptied and unseeded.
             if fresh:
-                reset = reset_generation(conn, generation)
+                reset = reset_generation(conn, generation, holder=holder)
             # THE FROZEN POPULATION FIRST (E91). Everything below — the parity gate included —
             # reads galleries through `SqlFacts`, which joins this table, so it has to be
             # written before anything looks at an image.
@@ -2628,6 +2666,10 @@ def run_rt_seed(
             json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
         return summary
     finally:
-        close = getattr(conn, "close", None)
-        if callable(close):
-            close()
+        try:
+            if leased:
+                release_lease(conn, holder)
+        finally:
+            close = getattr(conn, "close", None)
+            if callable(close):
+                close()

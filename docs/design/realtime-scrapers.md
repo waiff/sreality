@@ -330,6 +330,55 @@ one `app_settings` integer, `realtime_sold_comps_interval_seconds`, seeded 0 by 
   not of the +5 km box a cell actually sends, which is why the cap records truncation instead of
   being assumed generous.
 
+**Autodedup lane (AUTODEDUP rollout §7.3, ships DARK):** the dedup engine's real-time SHADOW pass
+(`autodedup.incremental_lane.run_incremental`, the function `autodedup_realtime.yml` runs as
+`python -m autodedup.lane --mode incremental` — imported, never copied) from this worker, because
+GitHub fires that `*/10` schedule hours apart. One integer, `realtime_autodedup_interval_seconds`,
+is its cadence AND kill switch (the sold_comps lane's shape; no flag, no count): migration 557 seeds
+it at `0` (stopped) so /settings can set it, an absent row reads as 0, and 60 is the running value.
+The worker has no repository variable, so it hands the engine `enabled=True`; everything else the
+engine enforces binds it exactly as it binds the workflow — the `autodedup.settings.realtime_enabled`
+stop button, the unseeded skip, the storage budget, the parity gate, the pair budget.
+
+- **Shadow only.** A pass writes the `rt` generation inside schema `autodedup` (fingerprints,
+  postings, pairs, groups, cursors) and nothing else — no `public.listings` row, no `property_id`,
+  no merge. Turning engine groups into production merges is a separate adapter over
+  `merge_properties`; this lane neither calls nor imports it (a test drives a real pass over the
+  engine's Postgres stand-in and checks every write target is `autodedup.*`).
+- **One position, not two.** The engine keeps its watermark in `autodedup.scan_cursor` and its
+  lease in `autodedup.rt_lease`, both keyed by name, so this lane and the workflow read and advance
+  the SAME cursors under the SAME lease: whichever holds it passes, the other is a green
+  `skipped: leased`. That is the location-resolve precedent (shared lease, the GH lane stays the
+  backstop), not the intake's two cursors — deciding a listing twice into one generation is not free.
+  `rt_seed` takes the same lease through its transaction (and refuses while a pass holds it), so no
+  pass lands in a generation a seed is resetting. Switching the workflow's repository variable off
+  does NOT stop this lane: `autodedup.settings.realtime_enabled = false` stops both.
+- **A hard deadline, because the engine's time budget bounds the claim, not the clock.**
+  `AUTODEDUP_PASS_DEADLINE_SECONDS` (1050) wraps the pass's connection: past it every statement
+  except the lease release raises, so the one transaction rolls back (nothing written, no cursor
+  moved), the lease is freed and the thread ends rather than outliving `LANE_PASS_TIMEOUT_SECONDS`
+  with a transaction open. Deadline + one 120 s statement stays under the 1200 s stall warn, the
+  lane timeout and the engine's 2100 s lease TTL. Plus the usual in-process pass lock.
+- **Claims sized to fit that deadline, by the engine.** The lane sets no count: the engine sizes a
+  claim to FILL its time budget (budget × its measured rate, E98), and its 900 s default is sized
+  for the workflow's 25-minute job. The lane hands in `max_pass_budget_s` = half the deadline
+  (525 s; the engine uses the smaller of that and `rt_pass_budget_s`). A trip rolls back without
+  recording a rate, so after one the lane halves the budget for the next pass (down to 1 s, a
+  one-listing claim), back to full only after a clean pass claimed enough to re-measure the rate
+  (`PASS_RATE_MIN_CLAIM`, 20). `last.backoff` shows the divisor.
+- **A refusal is an error, never a crash.** The engine refuses by raising `SystemExit`; carried out
+  of `asyncio.to_thread` that would stop the event loop and every lane, so the lane records it as
+  `errors: 1` with the text, counts it (and a deadline trip) as a failed pass (`failed_passes`,
+  `last_failure_at`, as for any lane whose pass raised) and logs it on the transition only. Heartbeat
+  `details.autodedup.last` = `{ran, claimed, scored (pairs), grouped (groups written), skipped (0/1)
+  + reason, errors (0/1) + refused/aborted, seconds, backoff, held, retired, latency_p50_s,
+  latency_p95_s, bound_by}`; an absent store (migrations 539/540) = `skipped: store_absent` + one
+  warning.
+- **Latency floor.** The engine ignores rows younger than its settle lag (`SETTLE_LAG_S`, 300 s,
+  E73 — the changed-listing feed has no straggler sweep), and a photo-dependent merge waits for the
+  pHash/CLIP producers (E93). So this lane brings decisions from hours to ~5–6 minutes; sub-minute
+  needs those two moved, which is an engine decision, not a worker one.
+
 **Deferred — W5b (health/SLO re-derivation):** cadence-scale the fixed thresholds
 (`detail_queue_backlog` by oldest-row AGE not count — matview line ~301; `delisting_spike` as
 % of portal size — line ~264), close silent-greens (image-pipeline liveness, dedup

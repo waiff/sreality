@@ -260,15 +260,19 @@ name: "AUTODEDUP: engine lane"
 #             pick it for you, E90a), generation, rt_scope, backfill, reseed, parity_n,
 #             fresh and rt_bootstrap.
 #             It is deliberately NOT behind the dark switch: seeding is the step before it.
+#             Every seed takes the real-time lane's lease (`autodedup.rt_lease`) for its
+#             transaction and refuses, writing nothing, while a pass holds it - the worker's
+#             `autodedup` lane ignores the repository variable, so stop both callers with
+#             `autodedup.settings` `realtime_enabled = false` before seeding.
 #             `fresh=true` (only valid with `reseed=true`) is the CLEAN RESET: inside the same
 #             transaction, before anything is written, it deletes THIS generation's pairs,
 #             clusters, cluster members, cluster conflicts, fingerprints, postings, census
-#             cells, scope snapshot, scan and retirement ledgers, cursors and lease - and
-#             nothing else. Operator verdicts, must-not-links, judge verdicts, every other
-#             generation and every `public` table are untouched, and the summary reports the
-#             rows removed per table. Without it a re-seed re-cuts the calibration and leaves
-#             every pair the generation already holds in place, which is how 15,923 rows
-#             scored by a superseded scorer survived the 2026-09-20 re-seed.
+#             cells, scope snapshot, scan and retirement ledgers and cursors (keeping the
+#             seed's own lease) - and nothing else. Operator verdicts, must-not-links, judge
+#             verdicts, every other generation and every `public` table are untouched, and the
+#             summary reports the rows removed per table. Without it a re-seed re-cuts the
+#             calibration and leaves every pair the generation already holds in place, which
+#             is how 15,923 rows scored by a superseded scorer survived the 2026-09-20 re-seed.
 #             `rt_bootstrap=true` (which requires `backfill=false`) persists the BUILD PHASE
 #             as a settings row. A backfilled seed writes the fingerprints and not one pair,
 #             so a seeded generation never holds the pairs among the listings that already
