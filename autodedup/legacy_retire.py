@@ -10,9 +10,14 @@ removed engine; NOT `generation = 'legacy'`, which migration 475 stamped on ever
 2026-09-05) and its live rows. Its health is the W0 probe's `r1c_live_group_health`, checked in
 the probe's order: `survivor_merged_on`, `listing_gone`, `children_moved` (a moved advert is off
 the survivor), `built_on` (a later live merge onto the survivor by the operator or, once it
-merges, by this engine), else `intact`. Only an intact group whose adverts ALL sit inside the
-scope's blocks (the survivor's, the retired properties' and every advert the merge moved) is
-undone. Every other group touching the area is reported and left alone. Groups go newest
+merges, by this engine), else `intact`. An intact group is undone only when its adverts (the
+survivor's, the retired properties' and every advert the merge moved) ALL sit inside the scope's
+blocks AND all carry one of the scope's deal types (`category_types`, decision 1: sales first),
+so nothing the engine will not re-merge this wave comes apart. The one exception is a group that
+MIXES deal types (a sale and a rental on one property): wrong by construction, never re-made by
+the engine, so undone whatever the scope's deal types (`retired:mixed_deal_type`). Every other
+group touching the area is reported and left alone (`skipped:<health>`, `skipped:straddling`,
+`skipped:outside_scope_categories`, counted per deal type). Groups go newest
 first, each in its own transaction, as a loop of `detach_listing` over the adverts it moved (in
 ledger order) with `source='auto'`, so NO ruling is written: an old-engine merge is not the
 operator's word in either direction. Its ledger rows are stamped
@@ -38,6 +43,8 @@ RETIRE_BY: str = "autodedup-legacy-retire"
 LEGACY_SOURCE: str = "auto"
 INTACT: str = "intact"
 TO_RETIRE: str = "to_retire"
+MIXED: str = "mixed_deal_type"
+OUTSIDE_CATEGORIES: str = "outside_scope_categories"
 ARTIFACT: tuple[str, str] = ("apply", "legacy_retire.json")
 PARTIAL_ATTR: str = "autodedup_retire_result"
 SUMMARY_ROWS: int = 50
@@ -112,6 +119,7 @@ class LegacyGroup:
     off_survivor: list[int]
     outside: list[int] = field(default_factory=list)
     category_types: list[str] = field(default_factory=list)
+    uncategorised: bool = False
     health: str = INTACT
     selected: bool = False
     outcome: str = ""
@@ -122,8 +130,19 @@ class LegacyGroup:
     def touches_by_moved(self) -> bool:
         return len(self.moved_outside) < len(self.moved)
 
+    @property
+    def mixed(self) -> bool:
+        return len(self.category_types) > 1
+
+    @property
+    def category_label(self) -> str:
+        if self.mixed:
+            return "mixed"
+        return "/".join(self.category_types + (["none"] if self.uncategorised else [])) or "none"
+
     def to_json(self) -> dict[str, Any]:
-        return {**asdict(self), "touches_by_moved": self.touches_by_moved}
+        return {**asdict(self), "touches_by_moved": self.touches_by_moved,
+                "category_label": self.category_label}
 
 
 class _Refused(Exception):
@@ -162,10 +181,24 @@ def _health(group: LegacyGroup, status: str | None, later: Iterable[Any]) -> str
     return INTACT
 
 
+def _outcome(g: LegacyGroup, categories: frozenset[str] | None) -> str:
+    if g.health != INTACT:
+        return f"skipped:{g.health}"
+    if g.outside:
+        return "skipped:straddling"
+    if g.mixed:
+        return f"{TO_RETIRE}:{MIXED}"
+    if categories is not None and (g.uncategorised or not set(g.category_types) <= categories):
+        return f"skipped:{OUTSIDE_CATEGORIES}"
+    return TO_RETIRE
+
+
 def read_groups(
-    conn: Any, area: Mapping[str, list[int]], merge_group_id: str | None = None,
+    conn: Any, area: Mapping[str, list[int]], categories: frozenset[str] | None,
+    merge_group_id: str | None = None,
 ) -> list[LegacyGroup]:
-    """Every live legacy group touching the area, classified, newest first."""
+    """Every live legacy group touching the area, classified, newest first. `categories`
+    None admits every deal type (a scope that names none), as `apply.Scope` reads it."""
     by_group: dict[str, list[tuple]] = {}
     for row in _rows(conn, GROUPS_SQL, {**area, "merge_group_id": merge_group_id}):
         by_group.setdefault(str(row[1]), []).append(row)
@@ -198,17 +231,17 @@ def read_groups(
         g.outside = sorted({lid for lid, _ct, inside in sides if not inside}
                            | set(g.moved_outside))
         g.category_types = sorted({ct for _lid, ct, _in in sides if ct})
+        g.uncategorised = any(ct is None for _lid, ct, _in in sides)
         g.health = _health(g, status.get(g.survivor_id), later.get(g.survivor_id, ()))
-        g.selected = g.health == INTACT and not g.outside
-        g.outcome = (TO_RETIRE if g.selected else
-                     f"skipped:{g.health if g.health != INTACT else 'straddling'}")
+        g.outcome = _outcome(g, categories)
+        g.selected = g.outcome.startswith(TO_RETIRE)
     groups.sort(key=lambda g: (g.merged_at, g.merge_group_id), reverse=True)
     return groups
 
 
 def _retire_one(
     conn: Any, group: LegacyGroup, area: Mapping[str, list[int]],
-    detach: Callable[..., dict[str, Any]], undone_by: str,
+    categories: frozenset[str] | None, detach: Callable[..., dict[str, Any]], undone_by: str,
 ) -> None:
     """One group, one transaction: re-checked over its locked properties, then every advert it
     moved detached back to where that merge took it from; any refusal rolls the group back."""
@@ -217,10 +250,10 @@ def _retire_one(
         with conn.transaction():
             _rows(conn, S.LOCK_PROPERTIES_SQL,
                   {"property_ids": sorted({group.survivor_id, *group.retired_ids})})
-            fresh = read_groups(conn, area, group.merge_group_id)
+            fresh = read_groups(conn, area, categories, group.merge_group_id)
             if not fresh:
                 raise _Refused("no_longer_live")
-            if fresh[0].outcome != TO_RETIRE:
+            if not fresh[0].selected:
                 raise _Refused(fresh[0].outcome.removeprefix("skipped:"))
             if fresh[0].moved != group.moved:
                 raise _Refused("changed_since_selection")
@@ -234,12 +267,13 @@ def _retire_one(
     except (_Refused, MergeError) as exc:
         group.outcome = f"refused:{exc}"
         return
-    group.outcome = "retired"
+    group.outcome = "retired" + fresh[0].outcome.removeprefix(TO_RETIRE)
     group.listings_moved_back, group.reactivated = back, reactivated
 
 
 def _counts(groups: list[LegacyGroup]) -> dict[str, Any]:
     by_moved = [g for g in groups if g.touches_by_moved]
+    inside = [g for g in groups if g.health == INTACT and not g.outside]
     chosen = [g for g in groups if g.selected]
     return {
         "groups_touching": len(groups),
@@ -248,10 +282,16 @@ def _counts(groups: list[LegacyGroup]) -> dict[str, Any]:
         "probe_r1c_by_health": dict(sorted(Counter(g.health for g in by_moved).items())),
         "probe_r1_area": {"inside": sum(not g.moved_outside for g in by_moved),
                           "straddles": sum(bool(g.moved_outside) for g in by_moved)},
-        "intact_both_sides_inside": len(chosen),
-        "intact_straddling": sum(g.health == INTACT and not g.selected for g in groups),
-        "both_sides_inside_by_category_type": dict(sorted(Counter(
-            ct for g in chosen for ct in (g.category_types or ["none"])).items())),
+        # Blocks only, every deal type: the probe's grain, beside the deal-type-filtered set.
+        "intact_both_sides_inside": len(inside),
+        "intact_both_sides_inside_by_category_type": dict(sorted(Counter(
+            g.category_label for g in inside).items())),
+        "intact_straddling": sum(g.health == INTACT and bool(g.outside) for g in groups),
+        "retire_set": len(chosen),
+        "retire_set_mixed_deal_type": sum(g.mixed for g in chosen),
+        "outside_scope_categories_by_category_type": dict(sorted(Counter(
+            g.category_label for g in groups
+            if g.outcome == f"skipped:{OUTSIDE_CATEGORIES}").items())),
         "outcomes": dict(sorted(Counter(g.outcome for g in groups).items())),
         "listings_moved_back": sum(g.listings_moved_back for g in groups),
         "properties_reactivated": sum(g.reactivated for g in groups),
@@ -259,22 +299,26 @@ def _counts(groups: list[LegacyGroup]) -> dict[str, Any]:
 
 
 def retire_legacy(
-    conn: Any, blocks: Iterable[str] | None, *, dry_run: bool, run_id: str,
-    closed: Callable[[Any], str | None] | None = None,
+    conn: Any, blocks: Iterable[str] | None, *, category_types: Iterable[str] | None,
+    dry_run: bool, run_id: str, closed: Callable[[Any], str | None] | None = None,
     detach: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Select, then (live) undo, the intact legacy groups inside `blocks`. `closed` is the scope
-    row's re-read before every group (E39); a dry run writes nothing."""
+    """Select, then (live) undo, the intact legacy groups inside `blocks` and the scope's deal
+    types. `closed` is the scope row's re-read before every group (E39); a dry run writes
+    nothing."""
     area = area_params(blocks)
+    categories = frozenset(category_types) if category_types is not None else None
     detach = detach or detach_listing
     undone_by = f"{RETIRE_BY}:{run_id}"
-    groups = read_groups(conn, area)
-    result: dict[str, Any] = {"run_id": run_id, "dry_run": dry_run, "blocks": sorted(blocks or ()),
-                              "undone_by": undone_by}
-    todo = [g for g in groups if g.outcome == TO_RETIRE]
+    groups = read_groups(conn, area, categories)
+    result: dict[str, Any] = {
+        "run_id": run_id, "dry_run": dry_run, "blocks": sorted(blocks or ()),
+        "category_types": sorted(categories) if categories is not None else None,
+        "undone_by": undone_by}
+    todo = [g for g in groups if g.selected]
     if dry_run:
         for g in todo:
-            g.outcome = "would_retire"
+            g.outcome = "would_retire" + g.outcome.removeprefix(TO_RETIRE)
         return _finish(result, groups)
     current: LegacyGroup | None = None
     try:
@@ -286,13 +330,13 @@ def retire_legacy(
                     g.outcome = "not_attempted"
                 break
             current = group
-            _retire_one(conn, group, area, detach, undone_by)
+            _retire_one(conn, group, area, categories, detach, undone_by)
             current = None
     except BaseException as exc:
         if current is not None:
             current.outcome = "failed"
         for g in todo:
-            if g.outcome == TO_RETIRE:
+            if g.outcome.startswith(TO_RETIRE):
                 g.outcome = "not_attempted"
         result["aborted"] = f"{type(exc).__name__}: {exc}"
         try:
@@ -311,8 +355,9 @@ def summary_markdown(result: Mapping[str, Any]) -> str:
     counts = result.get("counts") or {}
     head = "DRY RUN - nothing undone" if result.get("dry_run") else "LIVE"
     lines = [f"## autodedup apply - legacy retire (A2, temporary) - {head}", "",
-             f"Blocks: {' '.join(result.get('blocks') or [])}; stamp `{result.get('undone_by')}`.",
-             ""]
+             f"Blocks: {' '.join(result.get('blocks') or [])}; deal types: "
+             f"{' '.join(result.get('category_types') or ['all'])} (a group mixing deal types "
+             f"is retired whatever they are); stamp `{result.get('undone_by')}`.", ""]
     if result.get("dry_run"):
         lines += ["The engine's dry-run plan below reads the old engine's merges as they "
                   "stand; the live run plans after they are undone.", ""]
@@ -350,8 +395,8 @@ def _publish(out_dir: Path, result: dict[str, Any]) -> None:
 
 
 def run(
-    conn: Any, blocks: Iterable[str] | None, *, dry_run: bool, run_id: str, out_dir: Path,
-    closed: Callable[[Any], str | None] | None = None,
+    conn: Any, blocks: Iterable[str] | None, *, category_types: Iterable[str] | None,
+    dry_run: bool, run_id: str, out_dir: Path, closed: Callable[[Any], str | None] | None = None,
 ) -> dict[str, Any]:
     """The apply mode's pre-step: retire, publish the artifact and the step summary (a crash
     included), and return the counts the apply result carries."""
@@ -360,13 +405,13 @@ def run(
     except ValueError as exc:
         raise SystemExit(f"retire_legacy: {exc}") from exc
     try:
-        result = retire_legacy(conn, blocks or (), dry_run=dry_run, run_id=run_id,
-                               closed=closed)
+        result = retire_legacy(conn, blocks or (), category_types=category_types,
+                               dry_run=dry_run, run_id=run_id, closed=closed)
     except BaseException as exc:
         partial = getattr(exc, PARTIAL_ATTR, None)
         if isinstance(partial, dict):
             _publish(out_dir, partial)
         raise
     _publish(out_dir, result)
-    return {key: result[key] for key in ("counts", "stopped", "aborted", "undone_by")
-            if key in result}
+    return {key: result[key] for key in (
+        "counts", "stopped", "aborted", "undone_by", "category_types") if key in result}

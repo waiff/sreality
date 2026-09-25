@@ -12,7 +12,8 @@
 -- Nothing merges on this alone: a live run still needs a dispatch with dry_run=0, and
 -- emptying the area on /settings stops a run between two groups (E39 / E904). With
 -- `retire_legacy=1` the same dispatch first undoes the old engine's intact merges inside
--- these blocks (autodedup/legacy_retire.py, temporary, deleted in W5).
+-- these blocks whose adverts are all sales, plus any that mixes a sale and a rental
+-- (autodedup/legacy_retire.py, temporary, deleted in W5).
 --
 -- Decision 1 of 2026-09-25 is the authority for this value. W6 deletes the row, when every
 -- area and category merges (decision 6).

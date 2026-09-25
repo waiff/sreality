@@ -25,7 +25,8 @@ D7 holds: nothing here reads `property_merge_events`, and only the chokepoint wr
 (`source='autodedup'` says who merged; a detach and its read-only preview, `detach_outcomes`,
 read it inside the toolkit). The apply path's own ledger is the only history it consults.
 The one carve-out is TEMPORARY: `retire_legacy=1` runs `autodedup.legacy_retire` (A2, deleted
-in W5) before the plan, which reads it to undo the old engine's merges in the scope's blocks.
+in W5) before the plan, which reads it to undo the old engine's merges in the scope's blocks and
+deal types (plus any that mixes deal types).
 """
 
 from __future__ import annotations
@@ -1525,8 +1526,9 @@ def run_apply(
         if retire:
             # A2 (temporary, deleted in W5): the old engine's merges in the scope's blocks
             # undone first, in this same dispatch, so the plan below reads them apart.
-            retired = legacy_retire.run(conn, scope.blocks, dry_run=dry_run, run_id=new_run_id(),
-                                        out_dir=out_dir, closed=scope_closed)
+            retired = legacy_retire.run(conn, scope.blocks, category_types=scope.category_types,
+                                        dry_run=dry_run, run_id=new_run_id(), out_dir=out_dir,
+                                        closed=scope_closed)
         plan = plan_apply(conn, generation, scope)
         try:
             result = apply_plan(conn, plan, dry_run)

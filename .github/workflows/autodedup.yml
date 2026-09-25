@@ -350,11 +350,14 @@ name: "AUTODEDUP: engine lane"
 #             `retire_legacy=1` (TEMPORARY, sprint A2, deleted in W5) first undoes, in the same
 #             dispatch and under the same dry_run, the old engine's intact merges
 #             (property_merge_events source 'auto') whose adverts ALL sit inside the scope's
-#             blocks, newest first, one transaction per group, as detach_listing loops stamped
+#             blocks AND all carry one of its category_types - or that MIX deal types (a sale
+#             and a rental on one property, retired:mixed_deal_type whatever the scope names) -
+#             newest first, one transaction per group, as detach_listing loops stamped
 #             undone_by='autodedup-legacy-retire:<run>' that write no ruling; every other group
-#             touching the area (straddling, built on, children moved, survivor merged on) is
-#             reported, never touched. Writes out/apply/legacy_retire.json and a step summary
-#             section; a dry run lists what it would retire and writes nothing.
+#             touching the area (straddling, outside_scope_categories, built on, children
+#             moved, survivor merged on) is reported, never touched. Writes
+#             out/apply/legacy_retire.json and a step summary section; a dry run lists what it
+#             would retire and writes nothing.
 #
 #   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group a generation, an apply run
 #             (run=) or a time window (since= / until=) applied, newest first. `dry_run=0`
