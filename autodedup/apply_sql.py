@@ -1,8 +1,9 @@
 """Every statement the A1 apply path runs (PROGRAM.md E900-E906), as constants.
 
 Reads: the `app_settings` scope row, one generation's groups and members from schema
-`autodedup`, the member listings' `property_id` and categories and the involved properties from
-`public` (the same facts the chokepoint itself re-checks), the operator's negatives
+`autodedup`, the member listings' `property_id`, categories and live location
+(`listing_location`) and the involved properties from `public` (the facts the chokepoint itself
+re-checks, plus where each advert is), the operator's negatives
 (`verdicts`, `must_not_link`) and the engine's own apply ledger. NOTHING here reads or writes
 `public.property_merge_events` (D7): only `toolkit.property_identity` writes it (merges, detaches
 and the operator's native splits).
@@ -25,20 +26,23 @@ select s.value
 # Every group of the generation. `status` is read, not filtered: a group that is not
 # `proposed` is counted in the run summary rather than silently absent from it.
 CLUSTERS_SQL = """
-select c.cluster_key, c.size, c.status, c.block_key, c.block_grain,
-       c.category_main, c.category_type, c.min_edge_score,
-       c.model_version, c.feature_version
+select c.cluster_key, c.size, c.status, c.min_edge_score, c.model_version, c.feature_version
   from autodedup.clusters c
  where c.generation = %(generation)s::text
  order by c.cluster_key
 """
 
 # A member whose listing row is missing, or that has no property yet (rule 19: new rows land
-# with a NULL property_id until maintenance attaches a singleton), comes back with NULLs.
+# with a NULL property_id until maintenance attaches a singleton), comes back with NULLs. Where
+# an advert IS is its live `listing_location` row (primary key listing_id): the scope's blocks
+# are `town:` = obec_kod and `quarter:` = cast_obce_kod, the area legacy_retire.AREA_SQL reads
+# (E904); an advert with no row comes back with both NULL and is inside no block.
 MEMBERS_SQL = """
-select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_main
+select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_main,
+       ll.obec_kod, ll.cast_obce_kod
   from autodedup.cluster_members m
   left join public.listings l on l.id = m.listing_id
+  left join public.listing_location ll on ll.listing_id = l.id
  where m.generation = %(generation)s::text
  order by m.cluster_key, m.listing_id
 """
@@ -51,11 +55,13 @@ select p.id, p.status, p.category_type, p.category_main, p.first_seen_at
 """
 
 # EVERY listing on the involved properties, not only the group's members: a merge moves all
-# of a property's children, so the negatives, the size, category and scope checks and the
-# carry-along check read the whole set — at plan time and again inside each group's transaction.
+# of a property's children, so the negatives, the size, category and scope checks (location
+# included, as MEMBERS_SQL reads it) and the carry-along check read the whole set — at plan time
+# and again inside each group's transaction. Columns in `apply.Member` order.
 PROPERTY_LISTINGS_SQL = """
-select l.property_id, l.id, l.category_type, l.category_main
+select l.id, l.property_id, l.category_type, l.category_main, ll.obec_kod, ll.cast_obce_kod
   from public.listings l
+  left join public.listing_location ll on ll.listing_id = l.id
  where l.property_id = any(%(property_ids)s::bigint[])
 """
 
@@ -71,12 +77,15 @@ select p.id, p.status, p.category_type, p.category_main
    for update
 """
 
+# `for share of l`: the listings only — a lock may not reach the nullable side of the outer
+# join, and the resolver's writes to listing_location are not held up by a merge.
 LOCK_PROPERTY_LISTINGS_SQL = """
-select l.property_id, l.id, l.category_type, l.category_main
+select l.id, l.property_id, l.category_type, l.category_main, ll.obec_kod, ll.cast_obce_kod
   from public.listings l
+  left join public.listing_location ll on ll.listing_id = l.id
  where l.property_id = any(%(property_ids)s::bigint[])
  order by l.id
-   for share
+   for share of l
 """
 
 MUST_NOT_LINK_SQL = """
