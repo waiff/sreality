@@ -1,6 +1,7 @@
 /* ListingOverview — the vertical order of the dossier sections. The operator's
  * own curation (collections / tags / notes) sits directly under the description
- * and above the estimates, which sit above the photos. */
+ * and above the estimates, which sit above the photos. The key facts live in the
+ * header's price column, not as their own row between header and description. */
 
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -21,6 +22,7 @@ const LISTING = {
   price_czk: 5_000_000,
   disposition: '2+kk',
   description: 'Světlý byt po rekonstrukci.',
+  building_type: 'cihlova',
 } as unknown as ListingPublic;
 
 function precedes(a: HTMLElement, b: HTMLElement): boolean {
@@ -28,6 +30,22 @@ function precedes(a: HTMLElement, b: HTMLElement): boolean {
 }
 
 describe('<ListingOverview> section order', () => {
+  it('renders the key facts in the price column, ahead of the description', () => {
+    render(
+      <MemoryRouter>
+        <ListingOverview listing={LISTING} />
+      </MemoryRouter>,
+    );
+
+    const price = screen.getByRole('heading', { level: 1 });
+    const facts = screen.getByText('Building');
+    const description = screen.getByText('Description');
+
+    expect(price.parentElement).toContainElement(facts);
+    expect(precedes(price, facts)).toBe(true);
+    expect(precedes(facts, description)).toBe(true);
+  });
+
   it('renders description, then curation, then estimates, then photos', () => {
     render(
       <MemoryRouter>
