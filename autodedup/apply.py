@@ -21,8 +21,8 @@ before EVERY group (E39), so emptying its area on /settings stops a run between 
 a run's own arguments can narrow it and never widen it.
 
 D7 holds: nothing here reads `property_merge_events`, and only the chokepoint writes it
-(`source='autodedup'` says who merged; a detach reads it inside the toolkit). The apply path's
-own ledger is the only history it consults.
+(`source='autodedup'` says who merged; a detach and its read-only preview, `detach_outcomes`,
+read it inside the toolkit). The apply path's own ledger is the only history it consults.
 """
 
 from __future__ import annotations
@@ -44,6 +44,7 @@ from toolkit.property_identity import (
     AssetLinkConflict,
     MergeError,
     detach_listing,
+    detach_outcomes,
     merge_property_set,
     survivor_of,
 )
@@ -1111,35 +1112,37 @@ def _merge_stands(
 
 def _undo_state(conn: Any, target: Mapping[str, Any]) -> dict[str, Any]:
     """Where a group stands now, read before any later merge is named (E905): its survivor's
-    status and what it is merged into; its retired properties no longer merged into the
-    survivor by this group's merge (someone undid it: its detach loop finds nothing live to
-    undo); its members off the survivor; and, of the listings the merge moved off its retired
-    properties, the ones the loop would move back (still on the survivor) and the ones it would
-    report as conflicts."""
+    status and what it is merged into; its members off the survivor; and, per listing the merge
+    moved off its retired properties, what its detach loop would answer (`detach_outcomes`, the
+    loop's own rule): the ones it would move back, the ones it would report as conflicts, and
+    `undone` when it would find nothing live at all (someone undid every advert of it)."""
     survivor = target["survivor_id"]
-    ids = [pid for pid in (survivor, *target["retired_ids"]) if pid is not None]
     props = {int(pid): (status, merged_into, merged_at)
              for pid, status, merged_into, merged_at in _rows(
-                 conn, S.PROPERTY_STATE_SQL, {"property_ids": ids})}
+                 conn, S.PROPERTY_STATE_SQL,
+                 {"property_ids": [survivor] if survivor is not None else []})}
     moved = target.get("moved_listings") or []
     members = target.get("member_ids") or []
     placed = {int(lid): pid for lid, pid in _rows(conn, S.MEMBER_PROPERTIES_SQL, {
-        "listing_ids": sorted(set(members) | set(moved))})}
+        "listing_ids": sorted(set(members))})}
+    outcomes = detach_outcomes(conn, moved, merge_group_id=target["merge_group_id"])
+    back = [lid for lid in moved if outcomes.get(lid) == "detached"]
+    conflicts = [lid for lid in moved
+                 if outcomes.get(lid, "not_merged") not in ("detached", "not_merged")]
     return {
         "survivor": props.get(survivor),
         "status": (props.get(survivor) or (None,))[0],
-        "undone_outside": [pid for pid in target["retired_ids"] if not _merge_stands(
-            props.get(pid), survivor, target.get("applied_at"))],
+        "undone": not back and not conflicts,
         "taken": [lid for lid in members if placed.get(lid) != survivor],
-        "back": [lid for lid in moved if placed.get(lid) == survivor],
-        "conflicts": [lid for lid in moved if placed.get(lid) != survivor],
+        "back": back,
+        "conflicts": conflicts,
     }
 
 
 def _moves_nothing_back(state: Mapping[str, Any]) -> bool:
-    """A merge that still stands, none of whose moved listings is on its survivor any more:
-    its detach loop would move nothing, so the live undo is refused."""
-    return not state["undone_outside"] and bool(state["conflicts"]) and not state["back"]
+    """A merge that still stands, none of whose moved listings would move back: its detach loop
+    would move nothing, so the live undo is refused."""
+    return bool(state["conflicts"]) and not state["back"]
 
 
 def _later_merges(
@@ -1158,7 +1161,7 @@ def _later_merges(
         if str(group) in undone_in_run:
             continue
         merge = later.setdefault(str(group), {
-            "generation": gen, "cluster_key": int(key), "survivor_id": surv,
+            "group": str(group), "generation": gen, "cluster_key": int(key), "survivor_id": surv,
             "retired_ids": [], "applied_at": applied_at, "plan_json": plan_json})
         if retired is not None:
             merge["retired_ids"].append(int(retired))
@@ -1169,8 +1172,7 @@ def _later_merges(
                  "unapply": _unapply_args(merge["generation"], merge["cluster_key"])}
         if merge["survivor_id"] == survivor:
             own = _undo_state(conn, {
-                "survivor_id": survivor, "retired_ids": merge["retired_ids"],
-                "applied_at": merge["applied_at"],
+                "merge_group_id": merge["group"], "survivor_id": survivor,
                 "moved_listings": _recorded_moves(merge["plan_json"], merge["retired_ids"])})
             if not _moves_nothing_back(own):
                 onto.append(named)
@@ -1196,7 +1198,7 @@ def _undo_block(
     outside the engine, and there is nothing to name.
     `undone_in_run`: later groups a dry run expects this same run to undo first."""
     survivor = target.get("survivor_id")
-    if survivor is None or state["undone_outside"]:
+    if survivor is None or state["undone"]:
         return None
     status = state["status"]
     if status == "active" and _moves_nothing_back(state):
@@ -1282,7 +1284,7 @@ def unapply(
                 counts["blocked"] += 1
                 continue
             expected.add(target["merge_group_id"])
-            if state["undone_outside"]:
+            if state["undone"]:
                 target["note"] = ("already undone outside the engine: would be recorded as "
                                   "someone else's undo")
                 counts["already_undone"] += 1

@@ -44,11 +44,38 @@ def test_the_set_needs_two_active_properties_and_an_operator_merge_an_identity()
 
 def test_the_one_asset_link_rides_onto_the_older_survivor():
     db = _Ledger({1: 3, 2: 7}, first_seen={7: T0 + timedelta(days=1)}, assets={7: 42})
-    assert _merge(db, [3, 7])["survivor_id"] == 3
+    out = _merge(db, [3, 7])
+    assert out["survivor_id"] == 3 and db.assets == {3: 42, 7: None}
     assert db.sql("INSERT INTO asset_membership_events") == [
-        {"survivor": 3, "retired": 7, "asset": 42, "source": "auto"}]
+        {"survivor": 3, "retired": 7, "asset": 42,
+         "reason": f"merge {out['merge_group_id']}", "source": "auto"}]
+
+
+def test_two_units_linked_into_one_asset_are_the_operators_to_merge_never_the_engines():
+    """The link is the operator's "different units, do not collapse" (rule 15, E903): the
+    engine is refused; the operator's own merge keeps the one link on the survivor."""
     held_twice = _Ledger({1: 3, 2: 7}, assets={3: 41, 7: 41})
-    assert _merge(held_twice, [3, 7])["survivor_id"] == 3, "one link held twice is one link"
+    with pytest.raises(AssetLinkConflict):
+        _merge(held_twice, [3, 7])
+    assert held_twice.events == []
+    assert _merge(held_twice, [3, 7], source="operator", decided_by=OP)["survivor_id"] == 3
+    assert held_twice.assets == {3: 41, 7: None}
+
+
+@pytest.mark.parametrize("cats, clash", [
+    ({3: (None, "byt"), 7: ("prodej", "byt"), 9: ("pronajem", "byt")}, "category_type"),
+    ({3: ("prodej", None), 7: ("prodej", "byt"), 9: ("prodej", "dum")}, "category_main"),
+])
+def test_a_set_whose_members_clash_is_refused_though_the_survivor_is_unknown(cats, clash):
+    """The survivor's stored category is recomputed once, after the whole set: a NULL there
+    must not let a sale and a rent (or a flat and a house) through, pair by pair."""
+    db = _Ledger({1: 3, 2: 7, 3: 9}, cats=cats)
+    with pytest.raises(MergeError, match=clash):
+        _merge(db, [3, 7, 9])
+    assert db.events == [] and db.listings == {1: 3, 2: 7, 3: 9}
+    sanctioned = _Ledger({1: 3, 2: 7, 3: 9},
+                         cats={3: ("prodej", None), 7: ("prodej", "dum"), 9: ("prodej", "komercni")})
+    assert _merge(sanctioned, [3, 7, 9])["retired_ids"] == [7, 9]
 
 
 def test_two_different_asset_links_refuse_the_set_before_anything_merges():

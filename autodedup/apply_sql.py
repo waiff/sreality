@@ -197,12 +197,10 @@ select a.merge_group_id::text, max(a.generation), a.cluster_key, max(a.survivor_
  order by max(a.id) desc
 """
 
-# Where a group's survivor and retired properties stand now. Only the chokepoint and
-# `detach_listing` write `merged_into` and `merged_at`, and the chokepoint stamps `merged_at`
-# with now() of the transaction that also wrote the group's ledger rows (`applied_at`). So a
-# retired property merged into the survivor at the group's `applied_at` means the merge
-# stands; one active again, merged on into another property, or merged back into the survivor
-# at another time (by hand, after an undo) was restored by a detach of one of its adverts (E905).
+# Where a group's survivor stands now. Only the chokepoint and `detach_listing` write
+# `merged_into` and `merged_at`, and the chokepoint stamps `merged_at` with now() of the
+# transaction that also wrote the group's ledger rows (`applied_at`). So a survivor merged into
+# a later merge's survivor at that merge's `applied_at` is still retired by it (E905).
 PROPERTY_STATE_SQL = """
 select p.id, p.status, p.merged_into, p.merged_at
   from public.properties p

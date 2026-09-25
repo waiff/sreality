@@ -39,6 +39,7 @@ describe('detachOutcomeNote', () => {
     expect(detachOutcomeNote('moved_since')).toBe(
       'Nic se nepřesunulo — inzerát se mezitím přesunul jinam.',
     );
+    expect(detachOutcomeNote('origin_moved_on')).toMatch(/byla mezitím sloučena jinam/);
     expect(detachOutcomeNote('moved_on')).toBe('Nic se nepřesunulo — moved_on.');
   });
 });

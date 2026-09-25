@@ -105,7 +105,9 @@ def test_merge_carries_the_one_asset_link_onto_the_survivor():
     merge_properties(conn, survivor_id=10, retired_id=20, reason="manual", source="operator")
     sql, params = _find(conn.executed, "INSERT INTO asset_membership_events")
     assert "SET asset_id = CASE WHEN id = %(survivor)s::bigint THEN %(asset)s::bigint END" in sql
-    assert params == {"survivor": 10, "retired": 20, "asset": 7, "source": "operator"}
+    group = _find(conn.executed, "INSERT INTO property_merge_events")[1]["group"]
+    assert params == {"survivor": 10, "retired": 20, "asset": 7, "reason": f"merge {group}",
+                      "source": "operator"}
     idx = [e[0] for e in conn.executed]
     carry = next(i for i, e in enumerate(idx) if "asset_membership_events" in e)
     retire = next(i for i, e in enumerate(idx) if "status = 'merged_away'" in e)

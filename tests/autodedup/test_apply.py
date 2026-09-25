@@ -3,8 +3,10 @@
 The fake below STORES what the apply path writes and serves it back, dispatching on the SQL
 constant itself (the `fake_pg` idiom): a statement this file does not know raises. The set merge
 and the per-advert detach it hands the apply path mimic the toolkit's contract — the oldest
-record survives, one asset link is carried and two refuse, re-point, soft-retire, refuse a
-category mismatch, move one advert back off the ledger (the toolkit's own `_detach_plan`) —
+record survives, one asset link is carried and two refuse (two linked units, too, for the
+engine), re-point, soft-retire, refuse a category mismatch, move one advert back off the ledger
+(the toolkit's own `_detach_plan` and `_origin_gone`; a dry run reads the real
+`detach_outcomes` over the fake ledger) —
 inside nested transactions that roll back on an exception, so a group's atomicity is
 observable here.
 """
@@ -25,7 +27,13 @@ from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import lane
 from toolkit import property_identity
-from toolkit.property_identity import AssetLinkConflict, MergeError, _detach_plan, survivor_of
+from toolkit.property_identity import (
+    AssetLinkConflict,
+    MergeError,
+    _detach_plan,
+    _origin_gone,
+    survivor_of,
+)
 from toolkit.room_taxonomy import category_main_compatible
 
 GEN = "g12"
@@ -216,6 +224,17 @@ class FakeDb:
                     for pid, r in sorted(self.properties.items()) if pid in p["property_ids"]]
         if sql == S.LEDGER_INSERT_SQL:
             return self._ledger_insert(p)
+        if sql == property_identity._PLACES_SQL:
+            return [(lid, self.listings[lid]["property_id"]) for lid in p["ids"]
+                    if lid in self.listings]
+        if sql == property_identity._LIVE_MOVES_SQL:
+            return [(e["listing"], e["id"], e["merge_group_id"], e["survivor"], e["retired"],
+                     e["source"], None)
+                    for e in sorted(self.events, key=lambda e: (e["listing"], e["id"]))
+                    if e["listing"] in p["ids"] and not e["undone"]]
+        if sql == property_identity._STATUS_SQL:
+            return [(pid, r["status"], r["merged_into"])
+                    for pid, r in sorted(self.properties.items()) if pid in p["ids"]]
         if sql == S.UNAPPLY_TARGETS_SQL:
             groups: dict[str, dict[str, Any]] = {}
             for r in self.ledger:
@@ -300,9 +319,10 @@ class FakeDb:
             with conn.transaction():
                 if any(conn.properties[pid]["status"] != "active" for pid in ids):
                     raise MergeError("not active")
-                assets = {conn.properties[pid]["asset_id"] for pid in ids} - {None}
-                if len(assets) > 1:
-                    raise AssetLinkConflict(f"two different asset links {sorted(assets)}")
+                carriers = [pid for pid in ids if conn.properties[pid]["asset_id"] is not None]
+                assets = {conn.properties[pid]["asset_id"] for pid in carriers}
+                if len(assets) > 1 or (len(carriers) > 1 and source != "operator"):
+                    raise AssetLinkConflict(f"asset links {sorted(assets)} on {carriers}")
                 survivor = survivor_of({pid: conn.properties[pid]["first_seen_at"]
                                         for pid in ids})
                 retired = [pid for pid in ids if pid != survivor]
@@ -327,6 +347,10 @@ class FakeDb:
                 moves = [(e["id"], e["merge_group_id"], e["survivor"], e["retired"])
                          for e in conn.events if e["listing"] == listing_id and not e["undone"]]
                 outcome, undo, target = _detach_plan(current, moves, merge_group_id)
+                if outcome == "detached" and _origin_gone(
+                        (conn.properties[target]["status"],
+                         conn.properties[target]["merged_into"]), undo):
+                    outcome = "origin_moved_on"
                 if outcome == "detached":
                     conn.listings[listing_id]["property_id"] = target
                     for e in (e for e in conn.events if e["id"] in {m[0] for m in undo}):
@@ -578,7 +602,9 @@ def test_category_guards_mirror_the_chokepoint() -> None:
 
 def test_the_merges_own_asset_refusal_is_reported_as_asset_linked_units() -> None:
     # The plan does not second-guess asset links: the merge carries one onto the survivor and
-    # refuses two different ones (decision 17), and that refusal is the group's reason.
+    # refuses two different ones (decision 17) — and, the engine's, two units the operator
+    # linked into ONE asset, "different units, do not collapse" (rule 15, E903) — and that
+    # refusal is the group's reason.
     db = FakeDb()
     db.live_scope()
     scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
@@ -588,14 +614,18 @@ def test_the_merges_own_asset_refusal_is_reported_as_asset_linked_units() -> Non
     db.prop(300, asset=8)
     db.prop(400, asset=9)
     _pair_group(db, 20, [20, 21], [300, 400])
+    db.prop(500, asset=5)
+    db.prop(600, asset=5)
+    _pair_group(db, 30, [30, 31], [500, 600])
     plan = A.plan_apply(db, GEN, scope)
-    assert [g.reasons for g in plan.groups] == [[], []]
+    assert [g.reasons for g in plan.groups] == [[], [], []]
     calls: list[dict[str, Any]] = []
     result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
     assert [(c["survivor_id"], c["retired_id"]) for c in calls] == [(100, 200)]
     assert db.properties[100]["asset_id"] == 7 and db.properties[200]["asset_id"] is None
     assert [(g["cluster_key"], g["reasons"]) for g in result["skipped_at_apply"]] == [
-        (20, [A.SKIP_ASSET_LINKED])]
+        (20, [A.SKIP_ASSET_LINKED]), (30, [A.SKIP_ASSET_LINKED])]
+    assert {db.listings[lid]["property_id"] for lid in (30, 31)} == {500, 600}
     skipped = next(r for r in db.ledger if r["cluster_key"] == 20)
     assert skipped["outcome"] == "skipped" and skipped["error"] == A.SKIP_ASSET_LINKED
     assert {db.listings[lid]["property_id"] for lid in (20, 21)} == {300, 400}
@@ -1186,6 +1216,36 @@ def _undone_the_same(dry: Mapping[str, Any], live: Mapping[str, Any]) -> None:
     assert {k: v for k, v in dry["counts"].items() if k != "undone"} == {
         k: v for k, v in live["counts"].items() if k != "undone"}
     assert [_outcome(g) for g in dry["groups"]] == [_outcome(g) for g in live["groups"]]
+
+
+@pytest.mark.parametrize("built_on", [False, True])
+def test_a_group_the_operator_partly_detached_is_undone_or_blocked_as_its_dry_run_says(
+        built_on: bool) -> None:
+    # g12 merged 200 (11) and 300 (12) into 100 (10); the operator detached 11 from the page
+    # (200 back). The rest stands: both runs move 12 back, or, once g13 merged 700 onto 100,
+    # both name g13 to undo first.
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge([]))
+    db.detach([])(db, 11, decided_by="operator")
+    if built_on:
+        db.prop(700)
+        db.listing(70, 700)
+        db.group(10, [10, 12, 70], gen="g13")
+        A.apply_plan(db, A.plan_apply(db, "g13", scope), dry_run=False, merge=db.merge([]))
+    dry = A.unapply(db, GEN, dry_run=True)
+    live = A.unapply(db, GEN, dry_run=False, detach=db.detach([]))
+    _undone_the_same(dry, live)
+    if built_on:
+        assert [g["cluster_key"] for g in live["groups"][0]["unapply_first"]] == [10]
+        assert db.listings[12]["property_id"] == 100
+    else:
+        assert live["groups"][0]["outcome"] == "undone_after_outside_split"
+        assert live["counts"]["listings_moved_back"] == 1
+        assert {lid: row["property_id"] for lid, row in db.listings.items()} == {
+            10: 100, 11: 200, 12: 300}
 
 
 def test_a_group_the_operator_undid_is_noted_undone_after_its_survivor_merged_on() -> None:

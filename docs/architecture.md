@@ -1174,7 +1174,8 @@ renumber.** Navigate by area:
     merge/no-merge logic in the rebuild; thresholds, weights and rules are not to be invented.
     **The link mechanics: one merge, one undo.** `toolkit/property_identity.py` is the single
     chokepoint. `merge_property_set` is the ONE merge (operator and engine alike): it refuses a
-    non-active property or two DIFFERENT asset links (`AssetLinkConflict`), keeps the OLDEST
+    non-active property, a category clash between ANY two members, two DIFFERENT asset links,
+    or (the engine only) two linked units of one asset (`AssetLinkConflict`), keeps the OLDEST
     record (`first_seen_at`, then the lowest id — decision 17, `survivor_of`), merges the rest
     through `merge_properties` under ONE `merge_group_id` in one transaction, and recomputes the
     survivor and patches Browse (`sync_browse_list`) once. `merge_properties` row-locks both,
@@ -1182,13 +1183,16 @@ renumber.** Navigate by area:
     `property_merge_events` row per moved advert, CARRIES the one asset link onto the survivor,
     carries operator state (rule #18), the pipeline (rule #22) and dismissals, and soft-retires
     the loser (`merged_away`). `detach_listing` is the ONE undo, per advert: back to its ORIGIN
-    (the `prev_property_id` of its oldest live ledger row), reactivating that property and its
-    pipeline card if merged away, stamping its ledger rows `undone_at`/`undone_by` (never
+    (the `prev_property_id` of its oldest live ledger row), reactivating that property with its
+    pipeline card and carried asset link if merged away INTO that merge's survivor (else the
+    advert stays: `origin_moved_on`, read under the lock), stamping its ledger rows
+    `undone_at`/`undone_by` (never
     deleted), recomputing both once; idempotent (`not_merged` says so). A group comes apart as a
     loop of detaches scoped to it (`merge_group_id=`: only while that merge is the newest to
     move the advert, else a conflict left in place) — `unmerge_group`,
     `split_property_to_singletons` and their fix-up scripts are gone. Merge-then-detach gives
-    back every original property (tests/test_detach_listing.py; executed in
+    back every original property and asset link in any order (one asset held twice in a chained
+    operator merge excepted; tests/test_detach_listing.py, executed in
     tests/test_merge_safety_live.py). Callers serialize per-property on the row locks.
     **A merge writes no status event (migration 559).** The status-history trigger
     (migration 392) skips the retirement (`is_active = false` set with `merged_away`), and
@@ -1258,14 +1262,15 @@ renumber.** Navigate by area:
     the whole record of who merged), ONE `merge_group_id` per engine group inside one
     transaction, so each group is undoable as a unit (`mode=unapply`, newest-first, by
     generation, run or time window: a loop of `detach_listing` over the adverts the group's
-    merge moved, from the placement its ledger row recorded). A dry run is the default and writes only
+    merge moved, from the placement its ledger row recorded; the dry run reads each detach's
+    answer from `detach_outcomes`). A dry run is the default and writes only
     its own ledger, `autodedup.applied_merges`; a live run refuses — recording why — any group
     whose merge would unite, across EVERY listing it moves (both properties' full sets, not
     just the members), an operator
     negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
     inside — any superset, under any key, the newest ruling per operator winning), mixed
-    categories, a listing outside the scope (and the merge's own refusal of two different
-    **asset links** is recorded as `asset_linked_units`), a non-active property, a
+    categories, a listing outside the scope (and the merge's own refusal of two **asset-linked**
+    properties is recorded as `asset_linked_units`), a non-active property, a
     property the engine split across two groups, or a listing no group holds (unless this
     engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`

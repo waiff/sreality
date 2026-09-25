@@ -37,7 +37,8 @@ class MergeError(ValueError):
 
 
 class AssetLinkConflict(MergeError):
-    """Two different asset links in one merge: the survivor could keep only one (decision 17)."""
+    """Two different asset links in one merge (the survivor could keep only one, decision 17),
+    or two linked units in an engine merge (the operator's "different units", E903)."""
 
 
 def _now_iso() -> str:
@@ -63,14 +64,15 @@ SELECT root, id FROM chain WHERE status = 'active'
 """
 
 _LOCK_SET_SQL = """
-SELECT id, status, first_seen_at, asset_id
+SELECT id, status, first_seen_at, asset_id, category_type, category_main
 FROM properties WHERE id = ANY(%(ids)s::bigint[])
 ORDER BY id
 FOR UPDATE
 """
 
 # Decision 17: the one asset link moves onto the survivor, never left on a merged_away row; each
-# membership change is logged as `toolkit.asset_identity` logs a link or an unlink.
+# membership change is logged as `toolkit.asset_identity` logs a link or an unlink, the reason
+# naming the merge group so a detach can give the link back (`_RESTORE_ASSET_LINK_SQL`).
 _CARRY_ASSET_LINK_SQL = """
 WITH moved AS (
     UPDATE properties
@@ -83,7 +85,40 @@ WITH moved AS (
 INSERT INTO asset_membership_events (asset_id, property_id, action, reason, source)
 SELECT %(asset)s::bigint, m.id,
        CASE WHEN m.asset_id IS NULL THEN 'unlinked' ELSE 'linked' END,
-       'merge', %(source)s::text
+       %(reason)s::text, %(source)s::text
+FROM moved m
+"""
+
+# The carry's inverse, when a detach reactivates the property a merge unlinked: the link it lost
+# (unless its asset dissolved since) comes back while a survivor on the advert's path (`path`, the
+# merges it undoes: `merges`) still holds it, and leaves each such survivor one of those merges
+# linked it to — so detaches in any order give every link back to where it was.
+_RESTORE_ASSET_LINK_SQL = """
+WITH carried AS (
+    SELECT e.asset_id FROM asset_membership_events e
+    JOIN assets a ON a.id = e.asset_id AND a.status = 'active'
+    WHERE e.property_id = %(restored)s::bigint AND e.action = 'unlinked'
+      AND e.reason = %(merge)s::text
+    ORDER BY e.id DESC LIMIT 1
+), holders AS (
+    SELECT p.id, EXISTS (
+             SELECT 1 FROM asset_membership_events s
+             WHERE s.property_id = p.id AND s.asset_id = p.asset_id AND s.action = 'linked'
+               AND s.reason = ANY(%(merges)s::text[])) AS carried_here
+    FROM properties p JOIN carried c ON p.asset_id = c.asset_id
+    WHERE p.id = ANY(%(path)s::bigint[])
+), moved AS (
+    UPDATE properties p
+    SET asset_id = CASE WHEN p.id = %(restored)s::bigint THEN c.asset_id END
+    FROM carried c
+    WHERE EXISTS (SELECT 1 FROM holders)
+      AND ((p.id = %(restored)s::bigint AND p.asset_id IS NULL)
+           OR p.id IN (SELECT h.id FROM holders h WHERE h.carried_here))
+    RETURNING p.id, p.asset_id, c.asset_id AS carried
+)
+INSERT INTO asset_membership_events (asset_id, property_id, action, reason, source)
+SELECT m.carried, m.id, CASE WHEN m.asset_id IS NULL THEN 'unlinked' ELSE 'linked' END,
+       %(detach)s::text, %(source)s::text
 FROM moved m
 """
 
@@ -92,6 +127,12 @@ _CANONICAL_ADVERTS_SQL = """
 SELECT p.repr_listing_ref_id FROM properties p
 JOIN listings l ON l.id = p.repr_listing_ref_id AND l.property_id = p.id
 WHERE p.id = ANY(%(ids)s::bigint[])
+"""
+
+_PLACES_SQL = "SELECT id, property_id FROM listings WHERE id = ANY(%(ids)s::bigint[])"
+
+_STATUS_SQL = """
+SELECT id, status, merged_into FROM properties WHERE id = ANY(%(ids)s::bigint[]) ORDER BY id
 """
 
 # Every live ledger row of these adverts, oldest first: the first row's `prev_property_id` is the
@@ -172,6 +213,18 @@ def record_rulings(
     return len(ordered)
 
 
+def _category_refusal(
+    a: tuple[str | None, str | None], b: tuple[str | None, str | None],
+) -> str | None:
+    """Rule 15's gate on two (category_type, category_main): sale != rent, flat != house, except
+    the one sanctioned dum <-> komercni. NULL = unknown, not a conflict."""
+    if a[0] is not None and b[0] is not None and a[0] != b[0]:
+        return f"category_type mismatch ({a[0]} vs {b[0]}); refusing to merge"
+    if not category_main_compatible(a[1], b[1]):
+        return f"category_main mismatch ({a[1]} vs {b[1]}); refusing to merge"
+    return None
+
+
 def _canonical_pairs(conn: psycopg.Connection, property_ids: list[int]) -> set[tuple[int, int]]:
     """Every (lo, hi) pair of the properties' canonical adverts."""
     with conn.cursor() as cur:
@@ -211,18 +264,10 @@ def merge_properties(
                 raise MergeError(f"survivor {survivor_id} is not active")
             if rows[retired_id][1] != "active":
                 raise MergeError(f"retired {retired_id} is not active")
-            # The category gate no caller can route around: sale != rent, flat != house, except
-            # the one sanctioned dum <-> komercni. NULL = unknown, not a conflict.
-            s_ct, s_cm = rows[survivor_id][2], rows[survivor_id][3]
-            r_ct, r_cm = rows[retired_id][2], rows[retired_id][3]
-            if s_ct is not None and r_ct is not None and s_ct != r_ct:
-                raise MergeError(
-                    f"category_type mismatch ({s_ct} vs {r_ct}); refusing to merge"
-                )
-            if not category_main_compatible(s_cm, r_cm):
-                raise MergeError(
-                    f"category_main mismatch ({s_cm} vs {r_cm}); refusing to merge"
-                )
+            # The category gate no caller can route around.
+            refusal = _category_refusal(rows[survivor_id][2:4], rows[retired_id][2:4])
+            if refusal:
+                raise MergeError(refusal)
             s_asset, r_asset = rows[survivor_id][4], rows[retired_id][4]
             if s_asset is not None and r_asset is not None and s_asset != r_asset:
                 raise AssetLinkConflict(
@@ -258,6 +303,7 @@ def merge_properties(
             if r_asset is not None:
                 cur.execute(_CARRY_ASSET_LINK_SQL, {
                     "survivor": survivor_id, "retired": retired_id, "asset": r_asset,
+                    "reason": f"merge {group}",
                     "source": "operator" if source == "operator" else "auto",
                 })
             carry_operator_state_on_merge(
@@ -296,7 +342,9 @@ def merge_property_set(
     decided_by: str | None = None,
 ) -> dict[str, Any]:
     """Merge an active SET into its oldest record under ONE group, in one transaction; two
-    different asset links refuse it. `source='operator'` rules the canonical adverts "same"."""
+    different asset links, any rule-15 category clash within the set, or (not the operator's
+    own merge) two linked units refuse it. `source='operator'` rules the canonical adverts
+    "same"."""
     ids = sorted({int(p) for p in property_ids})
     if len(ids) < 2:
         raise MergeError("need at least two distinct properties")
@@ -312,9 +360,18 @@ def merge_property_set(
         inactive = [pid for pid in ids if pid in rows and rows[pid][1] != "active"]
         if missing or inactive:
             raise MergeError(f"properties not found {missing} or not active {inactive}")
-        assets = sorted({int(r[3]) for r in rows.values() if r[3] is not None})
-        if len(assets) > 1:
-            raise AssetLinkConflict(f"two different asset links {assets}; refusing to merge")
+        carriers = [pid for pid in ids if rows[pid][3] is not None]
+        assets = sorted({int(rows[pid][3]) for pid in carriers})
+        if len(assets) > 1 or (len(carriers) > 1 and source != "operator"):
+            raise AssetLinkConflict(
+                f"asset links {assets} on {carriers}; refusing to merge")
+        # Every pair, not only against the survivor: its stored category is not recomputed
+        # until the whole set has merged, so a NULL there would let a sale and a rent through.
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                refusal = _category_refusal(rows[a][4:6], rows[b][4:6])
+                if refusal:
+                    raise MergeError(refusal)
         survivor = survivor_of({pid: rows[pid][2] for pid in ids})
         retired = [pid for pid in ids if pid != survivor]
         pairs = _canonical_pairs(conn, ids) if source == "operator" else set()
@@ -386,6 +443,43 @@ def _detach_plan(
     return "detached", undo, target
 
 
+def _origin_gone(state: tuple[str, int | None] | None, undo: list[tuple]) -> bool:
+    """The origin was retired since into another property by a merge that still stands: bringing
+    it back would half-undo that merge, so the advert stays (`origin_moved_on`)."""
+    return state is None or (state[0] != "active" and state[1] != int(undo[0][2]))
+
+
+def _plan_detaches(
+    cur: psycopg.Cursor, listing_ids: list[int], merge_group_id: str | None,
+) -> dict[int, tuple[int | None, str, list[tuple], int | None]]:
+    """(current property, `_detach_plan`) per advert found, from unlocked reads."""
+    cur.execute(_PLACES_SQL, {"ids": listing_ids})
+    places = {int(lid): int(pid) if pid is not None else None for lid, pid in cur.fetchall()}
+    cur.execute(_LIVE_MOVES_SQL, {"ids": listing_ids})
+    moves: dict[int, list[tuple]] = {}
+    for row in cur.fetchall():
+        moves.setdefault(int(row[0]), []).append(tuple(row[1:5]))
+    return {lid: (at, *_detach_plan(at, moves.get(lid, []), merge_group_id))
+            for lid, at in places.items()}
+
+
+def detach_outcomes(
+    conn: psycopg.Connection, listing_ids: list[int], *, merge_group_id: str | None = None,
+) -> dict[int, str]:
+    """The `outcome` `detach_listing` would answer for each advert now, read-only: what a bulk
+    undo's dry run reports."""
+    ids = sorted({int(i) for i in listing_ids})
+    if not ids:
+        return {}
+    with conn.cursor() as cur:
+        plans = _plan_detaches(cur, ids, merge_group_id)
+        cur.execute(_STATUS_SQL, {"ids": sorted(
+            {t for _at, out, _u, t in plans.values() if out == "detached"})})
+        state = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+    return {lid: "origin_moved_on" if out == "detached" and _origin_gone(state.get(t), undo)
+            else out for lid, (_at, out, undo, t) in plans.items()}
+
+
 def detach_listing(
     conn: psycopg.Connection,
     listing_id: int,
@@ -397,32 +491,30 @@ def detach_listing(
 ) -> dict[str, Any]:
     """Move ONE advert back to its ORIGIN, or with `merge_group_id` to where it sat before that
     merge (only while it is the newest to move it); idempotent, the `outcome` says why not.
-    The origin comes back if merged away, with its pipeline card; other state stays (rule 18)."""
+    The origin comes back if merged away by that merge, with its pipeline card and asset link;
+    other state stays (rule 18)."""
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("SELECT property_id FROM listings WHERE id = %s", (listing_id,))
-            row = cur.fetchone()
-            if row is None:
-                raise MergeError(f"listing {listing_id} not found")
-            current = int(row[0]) if row[0] is not None else None
-            cur.execute(_LIVE_MOVES_SQL, {"ids": [listing_id]})
-            moves = [tuple(r[1:5]) for r in cur.fetchall()]
-        outcome, undo, target = _detach_plan(current, moves, merge_group_id)
+            plan = _plan_detaches(cur, [int(listing_id)], merge_group_id).get(int(listing_id))
+        if plan is None:
+            raise MergeError(f"listing {listing_id} not found")
+        current, outcome, undo, target = plan
         reactivated, ruled = False, 0
         if outcome == "detached":
-            # The merge's lock order, properties before the advert; it moves only if it still
-            # sits where the ledger was read.
+            # The merge's lock order, properties before the advert; the origin's state is read
+            # under the lock, and the advert moves only if it still sits where the ledger was read.
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id FROM properties WHERE id IN (%s, %s) ORDER BY id FOR UPDATE",
-                    (current, target),
-                )
-                cur.execute(
-                    "UPDATE listings SET property_id = %s WHERE id = %s AND property_id = %s",
-                    (target, listing_id, current),
-                )
-                if not cur.rowcount:
-                    outcome, undo, target = "moved_since", [], current
+                cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": sorted({current, target})})
+                locked = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+                if _origin_gone(locked.get(target), undo):
+                    outcome, undo, target = "origin_moved_on", [], current
+                else:
+                    cur.execute(
+                        "UPDATE listings SET property_id = %s WHERE id = %s AND property_id = %s",
+                        (target, listing_id, current),
+                    )
+                    if not cur.rowcount:
+                        outcome, undo, target = "moved_since", [], current
         if outcome == "detached":
             assert current is not None and target is not None
             with conn.cursor() as cur:
@@ -439,6 +531,12 @@ def detach_listing(
                         cur, merge_group_id=restore_group, restored_id=target,
                         survivor_id=current if current == restore_survivor else None,
                     )
+                    cur.execute(_RESTORE_ASSET_LINK_SQL, {
+                        "restored": target, "merge": f"merge {restore_group}",
+                        "merges": [f"merge {m[1]}" for m in undo],
+                        "path": [int(m[2]) for m in undo], "detach": f"detach {restore_group}",
+                        "source": "operator" if source == "operator" else "auto",
+                    })
             if source == "operator":
                 with conn.cursor() as cur:
                     cur.execute("SELECT id FROM listings WHERE property_id = %s", (current,))

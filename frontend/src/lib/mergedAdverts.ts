@@ -45,6 +45,7 @@ const UNMOVED: Record<string, string> = {
   not_merged: 'inzerát sem nepřivedlo žádné platné sloučení',
   on_origin: 'inzerát už je v nemovitosti, ze které přišel',
   moved_since: 'inzerát se mezitím přesunul jinam',
+  origin_moved_on: 'nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam',
 };
 
 export function detachOutcomeNote(outcome: string): string {
