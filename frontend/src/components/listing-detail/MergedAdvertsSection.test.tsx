@@ -14,6 +14,7 @@ import * as api from '@/lib/api';
 import * as auth from '@/lib/auth';
 import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
+import { STATE_STAYS } from '@/lib/mergedAdverts';
 import * as toast from '@/lib/toast';
 import type { ImagePublic, ListingPublic, PropertySource } from '@/lib/types';
 
@@ -96,8 +97,9 @@ function images(listingId: number, n: number): ImagePublic[] {
   }));
 }
 
-/* 101 is the property's own advert; 202 came from #43 by the operator's merge. */
-function origins(extra: api.AdvertOrigin[] = [], { ownSplittable = true } = {}) {
+/* 101 is the property's own advert (the header's, grouped at ingest with another
+ * own advert unless `own` says otherwise); 202 came from #43 by the operator's merge. */
+function origins(extra: api.AdvertOrigin[] = [], { own = 'split_native' } = {}) {
   return {
     property_id: 42,
     adverts: [
@@ -106,13 +108,15 @@ function origins(extra: api.AdvertOrigin[] = [], { ownSplittable = true } = {}) 
         origin_property_id: null,
         merge_source: null,
         merged_at: null,
-        splittable: ownSplittable,
+        detach_outcome: own,
+        splittable: own === 'split_native',
       },
       {
         listing_id: 202,
         origin_property_id: 43,
         merge_source: 'operator',
         merged_at: '2026-09-21T09:00:00Z',
+        detach_outcome: 'detached',
         splittable: true,
       },
       ...extra,
@@ -273,16 +277,43 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     expect(within(rowOf('Sreality')).getByRole('button', { name: /Rozdělit/ })).toBeInTheDocument();
   });
 
-  it('is absent on a row whose detach would move nothing (e.g. already on its origin)', async () => {
-    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([], { ownSplittable: false }));
+  it('says why instead on a row whose detach would move nothing', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins([], { own: 'last_native' }));
     setup();
     expect(
       await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
     ).toBeInTheDocument();
-    expect(within(rowOf('Sreality')).queryByRole('button', { name: /Rozdělit/ })).toBeNull();
+    const own = rowOf('Sreality');
+    expect(within(own).queryByRole('button', { name: /Rozdělit/ })).toBeNull();
+    expect(
+      within(own).getByText(/Nelze oddělit: je to poslední vlastní inzerát nemovitosti; oddělte místo něj sloučené inzeráty/),
+    ).toBeInTheDocument();
   });
 
-  it('splits the property’s own advert off to a new record of its own', async () => {
+  it('points to where an origin merged elsewhere went, and says nothing on a lone advert', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue({
+      property_id: 42,
+      adverts: [
+        { ...origins().adverts[0], detach_outcome: 'not_merged', splittable: false },
+        {
+          ...origins().adverts[1],
+          detach_outcome: 'origin_moved_on',
+          splittable: false,
+        },
+      ],
+    });
+    setup();
+    const moved = rowOf('iDNES Reality');
+    expect(await within(moved).findByText(/Nelze oddělit: nemovitost, ze které přišel/)).toBeInTheDocument();
+    expect(within(moved).getByRole('link', { name: 'kam odešla #43' })).toHaveAttribute(
+      'href',
+      '/property/43',
+    );
+    expect(within(rowOf('Sreality')).queryByText(/Nelze oddělit/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Rozdělit/ })).toBeNull();
+  });
+
+  it('splits the header’s own advert off to a new record, saying the property’s state stays', async () => {
     vi.mocked(api.detachListing).mockResolvedValue({
       listing_id: 101,
       detached: true,
@@ -293,15 +324,15 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     });
     setup();
     fireEvent.click(await within(rowOf('Sreality')).findByRole('button', { name: /Rozdělit/ }));
-    expect(
-      screen.getByText(/Nepřivedlo ho sloučení: dostane novou vlastní nemovitost/),
-    ).toBeInTheDocument();
+    const confirm = screen.getByRole('group', { name: 'Oddělit inzerát' });
+    expect(confirm.textContent).toMatch(/Nepřivedlo ho sloučení: dostane novou vlastní nemovitost/);
+    expect(confirm.textContent).toContain(STATE_STAYS);
     fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
     await waitFor(() => expect(api.detachListing).toHaveBeenCalledWith(42, 101, undefined));
     await waitFor(() =>
       expect(toast.pushToast).toHaveBeenCalledWith(
         'ok',
-        'Odděleno — inzerát má novou vlastní nemovitost #9001.',
+        `Odděleno — inzerát má novou vlastní nemovitost #9001. ${STATE_STAYS}`,
       ),
     );
   });
@@ -359,6 +390,7 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
           origin_property_id: 44,
           merge_source: 'autodedup',
           merged_at: '2026-09-22T09:00:00Z',
+          detach_outcome: 'detached',
           splittable: true,
         },
       ]),

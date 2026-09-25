@@ -34,7 +34,13 @@ import {
 import { fmtCount } from '@/lib/format';
 import { useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { propertyPath } from '@/lib/listingUrl';
-import { detachOutcomeNote, inzeratu, mergedAdvertsKeys, refreshAfterDetach } from '@/lib/mergedAdverts';
+import {
+  detachOutcomeNote,
+  inzeratu,
+  mergedAdvertsKeys,
+  refreshAfterDetach,
+  unmovedReason,
+} from '@/lib/mergedAdverts';
 import { fetchListingsForListingIds } from '@/lib/queries';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 
@@ -72,7 +78,7 @@ function splitPlan(item: ProposedSplit): { kept: number; take: ProposedSplitAdve
 }
 
 function stayNote(a: ProposedSplitAdvert, groupSize: number): string {
-  if (!a.splittable) return 'oddělení by ho nepřesunulo — zůstane';
+  if (!a.splittable) return `${unmovedReason(a.detach_outcome ?? '')} — zůstane`;
   if (groupSize > 1) return 'skupinu nelze oddělit po jednom — zůstane';
   return 'engine ho od zůstávající skupiny neodlišil — zůstane';
 }

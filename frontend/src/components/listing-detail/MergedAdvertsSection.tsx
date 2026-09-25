@@ -42,13 +42,16 @@ import { fetchListingBroker } from '@/lib/brokers';
 import { fmtArea, fmtCount, fmtCzk, fmtDateSlash, fmtFloor } from '@/lib/format';
 import { taggedImageUrls, useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { imageSrc } from '@/lib/imageUrl';
+import { propertyPath } from '@/lib/listingUrl';
 import { areaKindOf } from '@/lib/measure';
 import {
+  STATE_STAYS,
   detachOutcomeNote,
   inzeratu,
   mergeOriginLabel,
   mergedAdvertsKeys,
   refreshAfterDetach,
+  unmovedReason,
 } from '@/lib/mergedAdverts';
 import { portalLabel } from '@/lib/portals';
 import { fetchListingsForListingIds } from '@/lib/queries';
@@ -180,6 +183,11 @@ function MergedAdvertRow({
   }, [opened]);
   const [detachArmed, setDetachArmed] = useState(false);
   const origin = originRead?.origin?.splittable ? originRead.origin : null;
+  /* Why a row of a bigger property offers no split (an advert alone has nothing to leave). */
+  const unmoved =
+    originRead?.origin && !originRead.origin.splittable && originRead.origin.detach_outcome !== 'not_merged'
+      ? originRead.origin
+      : null;
   const panelId = `merged-advert-${source.id}`;
   const portal = portalLabel(source.source) ?? source.source;
   const facts = [
@@ -263,6 +271,7 @@ function MergedAdvertRow({
             </button>
           )}
         </div>
+        {unmoved && <UnmovedLine origin={unmoved} />}
         {/* Outside the toggle (a button may hold only phrasing content); a click on
             a photo opens the row too, the header stays the keyboard control. */}
         <ThumbStrip
@@ -277,6 +286,7 @@ function MergedAdvertRow({
         <DetachConfirm
           propertyId={propertyId}
           origin={origin}
+          isCanonical={isCanonical}
           onCancel={() => setDetachArmed(false)}
         />
       )}
@@ -456,17 +466,43 @@ function OriginLine({ read }: { read: OriginRead }) {
   );
 }
 
+/* A row a detach would not move, and why; where its origin went, when a later
+   merge took it (the property page follows the merge to its survivor). */
+function UnmovedLine({ origin }: { origin: AdvertOrigin }) {
+  return (
+    <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
+      Nelze oddělit: {unmovedReason(origin.detach_outcome ?? '')}
+      {origin.detach_outcome === 'origin_moved_on' && origin.origin_property_id != null && (
+        <>
+          {' '}
+          <Link
+            to={propertyPath(origin.origin_property_id)}
+            className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+          >
+            kam odešla #{origin.origin_property_id}
+          </Link>
+        </>
+      )}
+      .
+    </p>
+  );
+}
+
 /* Step two of the split: say where the advert goes, then offer the write. */
 function DetachConfirm({
   propertyId,
   origin,
+  isCanonical,
   onCancel,
 }: {
   propertyId: number;
   origin: AdvertOrigin;
+  isCanonical: boolean;
   onCancel: () => void;
 }) {
   const qc = useQueryClient();
+  /* The header's own advert leaving for a new record: the property's state stays here. */
+  const stateStays = isCanonical && origin.origin_property_id == null;
   const [reason, setReason] = useState('');
   const detach = useMutation({
     mutationFn: () => detachListing(propertyId, origin.listing_id, reason.trim() || undefined),
@@ -477,7 +513,8 @@ function DetachConfirm({
         pushToast(
           'ok',
           res.outcome === 'split_native'
-            ? `Odděleno — inzerát má novou vlastní nemovitost #${res.restored_property_id}.`
+            ? `Odděleno — inzerát má novou vlastní nemovitost #${res.restored_property_id}.` +
+                (stateStays ? ` ${STATE_STAYS}` : '')
             : `Odděleno — inzerát je zpět v nemovitosti #${res.restored_property_id}.`,
         );
       } else {
@@ -506,6 +543,7 @@ function DetachConfirm({
           </>
         )}
         , a zapíše se, že se zbylými inzeráty nejde o stejnou nemovitost.
+        {stateStays && ` ${STATE_STAYS}`}
       </p>
       <textarea
         aria-label="Důvod rozdělení (nepovinné)"

@@ -31,6 +31,7 @@ describe('detachOutcomeNote', () => {
       'Nic se nepřesunulo — inzerát se mezitím přesunul jinam.',
     );
     expect(detachOutcomeNote('origin_moved_on')).toMatch(/byla mezitím sloučena jinam/);
+    expect(detachOutcomeNote('last_native')).toMatch(/poslední vlastní inzerát nemovitosti/);
     expect(detachOutcomeNote('moved_on')).toBe('Nic se nepřesunulo — moved_on.');
   });
 });

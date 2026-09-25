@@ -90,7 +90,10 @@ class _Conn:
         elif sql == pi._PLACES_SQL:
             self.rows = [(r[1], r[0]) for r in ADVERTS if r[1] in params["ids"]]
         elif sql == pi._SIZES_SQL:
-            self.rows = [(pid, sum(r[0] == pid for r in ADVERTS)) for pid in params["ids"]]
+            merged = {m[0] for m in self.moves}
+            self.rows = [(pid, sum(r[0] == pid for r in ADVERTS),
+                          sum(r[0] == pid and r[1] not in merged for r in ADVERTS))
+                         for pid in params["ids"]]
         elif sql == pi._STATUS_SQL:
             self.rows = [(pid, *self.status[pid]) for pid in params["ids"] if pid in self.status]
         else:
@@ -117,9 +120,10 @@ def client(conn: _Conn):
 
 
 def _advert(lid: int, source: str, origin: int | None = None, *,
-            splittable: bool = True) -> dict[str, Any]:
+            outcome: str | None = None) -> dict[str, Any]:
+    outcome = outcome or ("split_native" if origin is None else "detached")
     return {"listing_id": lid, "source": source, "is_active": True, "origin_property_id": origin,
-            "splittable": splittable}
+            "detach_outcome": outcome, "splittable": outcome in pi.MOVED}
 
 
 def test_the_list_is_every_split_the_latest_generation_proposes(client, conn):
@@ -170,20 +174,22 @@ def test_a_pair_never_scored_or_ruled_same_is_not_a_proposal(client):
     assert [[a["listing_id"] for a in g["adverts"]] for g in one["groups"]] == [[501], [502], [503]]
 
 
-def test_each_advert_says_whether_its_split_would_move_it(client, conn):
-    """Every advert of a live multi-advert property is splittable, one no merge brought
-    included (it is born a new record); not one a split would leave where it is: 302 already
-    sits on its origin (merged off 30 and back), and 103 once its origin was merged elsewhere."""
+def test_each_advert_says_what_its_split_would_do(client, conn):
+    """Each advert carries its detach's answer now: a merged one goes home, one no merge brought
+    is born a new record while another own advert stays; not one a split would leave where it
+    is: 302 already sits on its origin (merged off 30 and back) — which leaves 301 the last own
+    advert of 30 — and 103 once its origin was merged elsewhere."""
     conn.moves += [(302, 6, "out", 31, 30, "operator", AT), (302, 7, "back", 30, 31, "operator", AT)]
     one = client.get("/autodedup/proposed-splits/30").json()["data"]
-    assert [a for g in one["groups"] for a in g["adverts"]] == [_advert(301, "sreality")]
-    assert one["unseen"] == [{**_advert(302, "idnes", origin=30, splittable=False),
+    assert [a for g in one["groups"] for a in g["adverts"]] == [
+        _advert(301, "sreality", outcome="last_native")]
+    assert one["unseen"] == [{**_advert(302, "idnes", origin=30, outcome="on_origin"),
                               "is_active": False}]
     assert client.get("/autodedup/proposed-splits/10").json()["data"]["groups"][1]["adverts"] == [
         _advert(103, "bazos", origin=13)]
     conn.status[13] = ("merged_away", 77)
     assert client.get("/autodedup/proposed-splits/10").json()["data"]["groups"][1]["adverts"] == [
-        _advert(103, "bazos", origin=13, splittable=False)]
+        _advert(103, "bazos", origin=13, outcome="origin_moved_on")]
 
 
 def test_an_unmigrated_store_renders_and_unknown_filters_are_refused(client, conn):

@@ -3078,13 +3078,15 @@ export const detachListing = (
   });
 
 /* Where each advert came from — the merge ledger is admin-only, hence a route and
- * not a view. All three origin fields null: no merge brought it. `splittable`: a
- * detach would move it (back to its origin, or to a new record). */
+ * not a view. All three origin fields null: no merge brought it. `detach_outcome`:
+ * what a detach would answer now; `splittable`: that moves it (back to its origin,
+ * or to a new record). */
 export interface AdvertOrigin {
   listing_id: number;
   origin_property_id: number | null;
   merge_source: string | null;
   merged_at: string | null;
+  detach_outcome: string | null;
   splittable: boolean;
 }
 
@@ -3099,13 +3101,15 @@ export const fetchPropertyOrigins = (
 /* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
  * generation groups its adverts apart (the canonical advert's group first), each
  * split pair with the engine's stated reason and the operator's newest ruling.
- * The split itself is `detachListing`, advert by advert; `splittable` says the
- * detach would move the advert (an advert no merge brought gets a new record). */
+ * The split itself is `detachListing`, advert by advert; `detach_outcome` is what
+ * that detach would answer now and `splittable` says it moves the advert (one no
+ * merge brought gets a new record while another own advert stays). */
 export interface ProposedSplitAdvert {
   listing_id: number;
   source: string;
   is_active: boolean;
   origin_property_id: number | null;
+  detach_outcome: string | null;
   splittable: boolean;
 }
 

@@ -277,8 +277,8 @@ def get_origins(
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Each advert's origin (where a detach returns it) and the source and time of the merge
-    that took it from there, all null when no standing merge moved it; `splittable` = a detach
-    would move it (`detach_outcomes`)."""
+    that took it from there, all null when no standing merge moved it; what a detach would
+    answer now (`detach_outcomes`), and `splittable` = that moves it."""
     survivor = resolve_active_property_id(conn, property_id)
     if survivor is None:
         raise HTTPException(status_code=404, detail=f"property {property_id} not found")
@@ -287,8 +287,10 @@ def get_origins(
         ids = sorted(int(r[0]) for r in cur.fetchall())
     origins, outcomes = listing_origins(conn, ids), detach_outcomes(conn, ids)
     return {"property_id": survivor, "adverts": [
-        dict(zip(("listing_id", "origin_property_id", "merge_source", "merged_at", "splittable"),
-                 (lid, *origins.get(lid, (None, None, None)), outcomes.get(lid) in MOVED)))
+        dict(zip(("listing_id", "origin_property_id", "merge_source", "merged_at",
+                  "detach_outcome", "splittable"),
+                 (lid, *origins.get(lid, (None, None, None)), outcomes.get(lid),
+                  outcomes.get(lid) in MOVED)))
         for lid in ids]}
 
 

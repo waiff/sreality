@@ -1217,16 +1217,20 @@ renumber.** Navigate by area:
     property with its pipeline card and carried asset link if merged away INTO that merge's
     survivor (else the advert stays: `origin_moved_on`, read under the lock), stamping its ledger
     rows `undone_at`/`undone_by` (never deleted), recomputing both once. An advert NO standing
-    merge moved (an ingest-time grouping, ~15.9k `native_multi` properties) on a property of two
-    or more is a BIRTH through the one birth path (`split_native`): the property locked first,
-    then the advert unlinked and born by `scraper.db.create_singleton_properties` and both
-    recomputed; ONE ledger row records it in the existing shape — the ingest grouping as the
-    merge it amounts to (`survivor` = the property left, `retired` = `prev` = the new record)
-    written already undone by the split (no migration) — so the new record IS the advert's
-    origin, and a later merge of the two (operator or engine, `merge_property_set` as ever)
-    comes apart by the same detach. Operator state, the pipeline card and the asset link stay
-    on the property left (rules 18, 22). Idempotent (`not_merged` = alone on its property; a
-    group-scoped detach never births). One undo covers both kinds. A group comes apart as a
+    merge moved (an ingest-time grouping, ~15.9k `native_multi` properties) is, while ANOTHER
+    such own advert stays, a BIRTH through the one birth path (`split_native`, the operator's
+    only: any other source answers `propose_only`, decision 9): the property locked first and
+    the plan re-read under the lock, then the advert unlinked and born by
+    `scraper.db.create_singleton_properties` and both recomputed; ONE ledger row records it in
+    the existing shape — the ingest grouping as the merge it amounts to (`survivor` = the
+    property left, `retired` = `prev` = the new record) written already undone by the split (no
+    migration) — so the new record IS the advert's origin, and a later merge of the two
+    (operator or engine, `merge_property_set` as ever) comes apart by the same detach. A
+    property's LAST own advert stays (`last_native`): the merged ones go home instead, so no
+    detach, `unapply` loop included, can leave an active property with no advert. Operator
+    state, the pipeline card and the asset link stay on the property left (rules 18, 22).
+    Idempotent (`not_merged` = alone on its property; a group-scoped detach never births). One
+    undo covers both kinds. A group comes apart as a
     loop of detaches scoped to it (`merge_group_id=`: only while that merge is the newest to
     move the advert, else a conflict left in place) — `unmerge_group`,
     `split_property_to_singletons` and their fix-up scripts are gone. Merge-then-detach gives
@@ -1335,10 +1339,11 @@ renumber.** Navigate by area:
     for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
     `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
     pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
-    the operator's ruling; the batch split is the detach per advert, each advert carrying
-    `splittable` (its `detach_outcomes` answer moves it: back to its origin, or a native advert
-    to a new record; `GET /properties/{id}/origins` carries the same flag for the property
-    page's per-row split). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
+    the operator's ruling; the batch split is the detach per advert, each advert carrying its
+    `detach_outcome` (what `detach_outcomes` answers now) and `splittable` (that moves it: back
+    to its origin, or a native advert to a new record); `GET /properties/{id}/origins` carries
+    both for the property page, whose rows that would not move say why (and link where a
+    retired origin went). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
     "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a card per proposal
     with each group's adverts side by side (`MemberGrid`), the reason and ruling per pair, a
     checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's

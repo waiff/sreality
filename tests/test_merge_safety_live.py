@@ -218,6 +218,7 @@ def test_a_native_advert_splits_off_to_a_new_record_and_a_merge_back_is_undone_t
     pid = _property(cur)
     stay, leave = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
     _recompute(cur, pid)
+    assert _detach(cur, leave, source="autodedup")["outcome"] == "propose_only"
 
     out = _detach(cur, leave, reason="jiné patro")
     born = out["restored_property_id"]
@@ -238,6 +239,18 @@ def test_a_native_advert_splits_off_to_a_new_record_and_a_merge_back_is_undone_t
     assert (back["outcome"], back["restored_property_id"], back["reactivated"]) == (
         "detached", born, True)
     assert _placed(cur, [stay, leave]) == {stay: pid, leave: born}
+
+
+def test_a_propertys_last_own_advert_stays_while_merged_ones_share_it(cur):
+    """Splitting it would leave the survivor with only merged adverts, and their detach an
+    active property with none: its own advert stays and the merged one goes home instead."""
+    survivor, absorbed, moved = _merged_pair(cur)
+    _merge(cur, [survivor, absorbed])
+    cur.execute("SELECT id FROM listings WHERE property_id = %s AND id <> %s", (survivor, moved))
+    (own,) = (int(r[0]) for r in cur.fetchall())
+    assert _detach(cur, own)["outcome"] == "last_native"
+    assert _detach(cur, moved)["outcome"] == "detached"
+    assert _placed(cur, [own, moved]) == {own: survivor, moved: absorbed}
 
 
 def _rulings(cur: Any, ids: list[int], by: str = OP) -> list[tuple[int, int, str]]:

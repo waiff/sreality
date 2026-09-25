@@ -8,8 +8,9 @@ must-not-link, or a negative operator ruling). A pair whose newest ruling is `sa
 proposed: the engine obeys it (decision 8). Each split pair carries its reason -- the conflict that
 refused the union, else the pair's own decision, else the must-not-link, else `no stated fact` (a
 negative ruling alone) -- and the operator's newest ruling. The batch split is
-`POST /properties/{id}/detach`, advert by advert, from the page; each advert says whether that
-detach would move it (`splittable`: back to its origin, or a native advert to a new record).
+`POST /properties/{id}/detach`, advert by advert, from the page; each advert carries what that
+detach would answer now (`detach_outcome`) and whether it moves it (`splittable`: back to its
+origin, or a native advert beside another to a new record).
 """
 
 from __future__ import annotations
@@ -105,6 +106,7 @@ def proposed_splits(
     def advert(a: tuple) -> dict[str, Any]:
         return {"listing_id": a[0], "source": a[1], "is_active": a[2],
                 "origin_property_id": origins[a[0]][0] if a[0] in origins else None,
+                "detach_outcome": outcomes.get(a[0]),
                 "splittable": outcomes.get(a[0]) in MOVED}
 
     items = []

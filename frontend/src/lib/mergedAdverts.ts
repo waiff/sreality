@@ -46,18 +46,28 @@ export function mergeOriginLabel(source: string): string {
   }
 }
 
-/* Why a detach moved nothing; an outcome not listed here is shown raw. */
+/* Why a detach moves nothing; an outcome not listed here is shown raw. */
 const UNMOVED: Record<string, string> = {
   not_on_property: 'inzerát už v této nemovitosti není',
   not_merged: 'inzerát je v nemovitosti sám',
   on_origin: 'inzerát už je v nemovitosti, ze které přišel',
   moved_since: 'inzerát se mezitím přesunul jinam',
   origin_moved_on: 'nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam',
+  last_native: 'je to poslední vlastní inzerát nemovitosti; oddělte místo něj sloučené inzeráty',
+  propose_only: 'engine rozdělení jen navrhuje',
 };
 
-export function detachOutcomeNote(outcome: string): string {
-  return `Nic se nepřesunulo — ${UNMOVED[outcome] ?? outcome}.`;
+export function unmovedReason(outcome: string): string {
+  return UNMOVED[outcome] ?? outcome;
 }
+
+export function detachOutcomeNote(outcome: string): string {
+  return `Nic se nepřesunulo — ${unmovedReason(outcome)}.`;
+}
+
+/* A native split of the advert the header speaks with: what stays behind (rules 18, 22). */
+export const STATE_STAYS =
+  'Poznámky, štítky, kolekce a karta v pipeline zůstanou u zbylých inzerátů této nemovitosti.';
 
 /* Read-your-writes after a detach, for the property page, the proposals page
  * AND every Browse surface. The property page is keyed on the property, so a

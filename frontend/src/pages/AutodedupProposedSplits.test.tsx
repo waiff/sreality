@@ -28,13 +28,14 @@ const advert = (
   listing_id: number,
   source: string,
   origin_property_id: number | null,
-  splittable = true,
+  detach_outcome = origin_property_id == null ? 'split_native' : 'detached',
 ) => ({
   listing_id,
   source,
   is_active: true,
   origin_property_id,
-  splittable,
+  detach_outcome,
+  splittable: detach_outcome === 'split_native' || detach_outcome === 'detached',
 });
 
 const pair = (
@@ -127,7 +128,7 @@ const ITEMS: api.ProposedSplit[] = [
     proposed: true,
     groups: [
       { cluster_key: 9, adverts: [advert(701, 'sreality', null)] },
-      { cluster_key: null, adverts: [advert(702, 'idnes', 70, false)] },
+      { cluster_key: null, adverts: [advert(702, 'idnes', 70, 'on_origin')] },
     ],
     unseen: [],
     splits: [pair(701, 702)],
@@ -206,7 +207,9 @@ describe('<AutodedupProposedSplits> the list', () => {
 
     // A detach that would move nothing is no split.
     expect(within(card(70)).getByRole('checkbox')).toBeDisabled();
-    expect(within(card(70)).getByText('oddělení by ho nepřesunulo — zůstane')).toBeInTheDocument();
+    expect(
+      within(card(70)).getByText('inzerát už je v nemovitosti, ze které přišel — zůstane'),
+    ).toBeInTheDocument();
     expect(within(card(70)).getByText(/nelze rozdělit/)).toBeInTheDocument();
 
     const p60 = card(60);

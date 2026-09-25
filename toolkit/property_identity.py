@@ -137,21 +137,25 @@ WHERE p.id = ANY(%(ids)s::bigint[])
 
 _PLACES_SQL = "SELECT id, property_id FROM listings WHERE id = ANY(%(ids)s::bigint[])"
 
+# Each property's adverts, and its own among them: no standing merge moved them there.
 _SIZES_SQL = """
-SELECT property_id, count(*) FROM listings WHERE property_id = ANY(%(ids)s::bigint[])
-GROUP BY property_id
+SELECT l.property_id, count(*), count(*) FILTER (WHERE NOT EXISTS (
+         SELECT 1 FROM property_merge_events e
+         WHERE e.listing_ref_id = l.id AND e.undone_at IS NULL))
+FROM listings l WHERE l.property_id = ANY(%(ids)s::bigint[])
+GROUP BY l.property_id
 """
 
 # A native split's ONE ledger row: the ingest-time grouping no merge ever recorded, written as
 # the merge it amounts to (the new record `born` merged into the property the advert leaves)
-# and closed as undone by this split, so the advert's origin is its new record and the row
-# replays like any detached merge.
+# and closed as undone by the operator's split, so the advert's origin is its new record and
+# the row replays like any detached merge.
 _INGEST_GROUPING_SQL = """
 INSERT INTO property_merge_events
     (merge_group_id, survivor_property_id, retired_property_id, listing_id, listing_ref_id,
      prev_property_id, reason, source, undone_at, undone_by)
 SELECT %(group)s, %(left)s, %(born)s, l.sreality_id, l.id, %(born)s, 'ingest_grouping',
-       %(source)s, now(), %(by)s
+       'operator', now(), %(by)s
 FROM listings l WHERE l.id = %(listing)s
 RETURNING id
 """
@@ -447,15 +451,20 @@ def listing_origins(
 
 
 def _detach_plan(
-    current: int | None, moves: list[tuple], merge_group_id: str | None, size: int,
+    current: int | None, moves: list[tuple], merge_group_id: str | None,
+    size: tuple[int, int],
 ) -> tuple[str, list[tuple], int | None]:
     """(outcome, the ledger rows it undoes, where the advert goes; None = a record not yet born).
     A move is one live ledger row, oldest first: (id, merge_group_id, survivor_property_id,
-    prev_property_id); `size` counts the adverts on the advert's property."""
+    prev_property_id); `size` = (adverts, own adverts) on the advert's property. A native advert
+    leaves only while another own advert stays: the merged ones go home, never leaving a
+    property with no advert of its own (`last_native`)."""
     if not moves:
-        if merge_group_id is None and size >= 2:
-            return "split_native", [], None
-        return "not_merged", [], current
+        if merge_group_id is not None or size[0] < 2:
+            return "not_merged", [], current
+        if size[1] < 2:
+            return "last_native", [], current
+        return "split_native", [], None
     if merge_group_id is not None:
         last = moves[-1]
         if last[1] != merge_group_id:
@@ -488,11 +497,12 @@ def _plan_detaches(
     for row in cur.fetchall():
         moves.setdefault(int(row[0]), []).append(tuple(row[1:5]))
     native = sorted({pid for lid, pid in places.items() if pid is not None and lid not in moves})
-    sizes: dict[int, int] = {}
+    sizes: dict[int, tuple[int, int]] = {}
     if merge_group_id is None and native:
         cur.execute(_SIZES_SQL, {"ids": native})
-        sizes = {int(pid): int(n) for pid, n in cur.fetchall()}
-    return {lid: (at, *_detach_plan(at, moves.get(lid, []), merge_group_id, sizes.get(at, 0)))
+        sizes = {int(pid): (int(n), int(own)) for pid, n, own in cur.fetchall()}
+    return {lid: (at, *_detach_plan(at, moves.get(lid, []), merge_group_id,
+                                    sizes.get(at, (0, 0))))
             for lid, at in places.items()}
 
 
@@ -514,20 +524,18 @@ def detach_outcomes(
 
 
 def _split_native(
-    conn: psycopg.Connection, listing_id: int, current: int, *, source: MergeSource,
-    decided_by: str,
+    conn: psycopg.Connection, listing_id: int, current: int, *, decided_by: str,
 ) -> tuple[str, list[tuple], int | None]:
-    """A native advert leaves a property of two or more for a NEW record born through THE birth
-    path (`scraper.db.create_singleton_properties`); ONE closed ledger row
-    (`_INGEST_GROUPING_SQL`) records it. The merge's lock order: the property, then the advert."""
+    """A native advert leaves for a NEW record born through THE birth path
+    (`scraper.db.create_singleton_properties`); ONE closed ledger row (`_INGEST_GROUPING_SQL`)
+    records it. The merge's lock order: the property, then the advert, re-planned under it."""
     with conn.cursor() as cur:
         cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": [current]})
-        cur.execute("SELECT id FROM listings WHERE property_id = %s", (current,))
-        here = {int(r[0]) for r in cur.fetchall()}
-        if listing_id not in here:
+        at, outcome, _undo, _target = _plan_detaches(cur, [listing_id], None)[listing_id]
+        if at == current and outcome in ("not_merged", "last_native"):
+            return outcome, [], current
+        if at != current or outcome != "split_native":
             return "moved_since", [], current
-        if len(here) < 2:
-            return "not_merged", [], current
         cur.execute(
             "UPDATE listings SET property_id = %s WHERE id = %s AND property_id = %s",
             (None, listing_id, current),
@@ -538,8 +546,8 @@ def _split_native(
     group = str(uuid.uuid4())
     with conn.cursor() as cur:
         cur.execute(_INGEST_GROUPING_SQL, {
-            "group": group, "left": current, "born": born, "source": source,
-            "by": decided_by, "listing": listing_id,
+            "group": group, "left": current, "born": born, "by": decided_by,
+            "listing": listing_id,
         })
         (row_id,) = cur.fetchone()
     return "split_native", [(int(row_id), group, current, born)], born
@@ -557,11 +565,12 @@ def detach_listing(
     """Split ONE advert off its property: a merged one back to its ORIGIN (with `merge_group_id`,
     to where it sat before that merge, only while it is the newest to move it), its origin
     reactivated with its pipeline card and asset link if that merge retired it; a native one (no
-    standing merge moved it) of a property of two or more to a NEW record (`split_native`, never
-    group-scoped). Other state, the pipeline card included, stays on the property left (rules 18,
-    22). Idempotent, the `outcome` saying why nothing moved. `source='operator'` rules it
-    "different" from every advert that stays. Stable signature: the operator's routes, `unapply`
-    and the engine's W5 reconcile call it; engine splits stay propose-only (decision 9)."""
+    standing merge moved it), while another own advert stays, to a NEW record (`split_native`:
+    the operator only, never group-scoped; any other source answers `propose_only`, decision 9).
+    Other state, the pipeline card included, stays on the property left (rules 18, 22).
+    Idempotent, the `outcome` saying why nothing moved. `source='operator'` rules it "different"
+    from every advert that stays. Stable signature: the operator's routes, `unapply` and the
+    engine's W5 reconcile call it."""
     with conn.transaction():
         with conn.cursor() as cur:
             plan = _plan_detaches(cur, [int(listing_id)], merge_group_id).get(int(listing_id))
@@ -572,7 +581,8 @@ def detach_listing(
         if outcome == "split_native":
             assert current is not None
             outcome, undo, target = _split_native(
-                conn, int(listing_id), current, source=source, decided_by=decided_by)
+                conn, int(listing_id), current, decided_by=decided_by,
+            ) if source == "operator" else ("propose_only", [], current)
         if outcome == "detached":
             # The merge's lock order, properties before the advert; the origin's state is read
             # under the lock, and the advert moves only if it still sits where the ledger was read.
