@@ -1212,12 +1212,21 @@ renumber.** Navigate by area:
     gates on `status='active'`, re-points `listings.property_id`, writes one
     `property_merge_events` row per moved advert, CARRIES the one asset link onto the survivor,
     carries operator state (rule #18), the pipeline (rule #22) and dismissals, and soft-retires
-    the loser (`merged_away`). `detach_listing` is the ONE undo, per advert: back to its ORIGIN
-    (the `prev_property_id` of its oldest live ledger row), reactivating that property with its
-    pipeline card and carried asset link if merged away INTO that merge's survivor (else the
-    advert stays: `origin_moved_on`, read under the lock), stamping its ledger rows
-    `undone_at`/`undone_by` (never
-    deleted), recomputing both once; idempotent (`not_merged` says so). A group comes apart as a
+    the loser (`merged_away`). `detach_listing` is the ONE split and the ONE undo, per advert:
+    back to its ORIGIN (the `prev_property_id` of its oldest live ledger row), reactivating that
+    property with its pipeline card and carried asset link if merged away INTO that merge's
+    survivor (else the advert stays: `origin_moved_on`, read under the lock), stamping its ledger
+    rows `undone_at`/`undone_by` (never deleted), recomputing both once. An advert NO standing
+    merge moved (an ingest-time grouping, ~15.9k `native_multi` properties) on a property of two
+    or more is a BIRTH through the one birth path (`split_native`): the property locked first,
+    then the advert unlinked and born by `scraper.db.create_singleton_properties` and both
+    recomputed; ONE ledger row records it in the existing shape — the ingest grouping as the
+    merge it amounts to (`survivor` = the property left, `retired` = `prev` = the new record)
+    written already undone by the split (no migration) — so the new record IS the advert's
+    origin, and a later merge of the two (operator or engine, `merge_property_set` as ever)
+    comes apart by the same detach. Operator state, the pipeline card and the asset link stay
+    on the property left (rules 18, 22). Idempotent (`not_merged` = alone on its property; a
+    group-scoped detach never births). One undo covers both kinds. A group comes apart as a
     loop of detaches scoped to it (`merge_group_id=`: only while that merge is the newest to
     move the advert, else a conflict left in place) — `unmerge_group`,
     `split_property_to_singletons` and their fix-up scripts are gone. Merge-then-detach gives
@@ -1326,13 +1335,15 @@ renumber.** Navigate by area:
     for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
     `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
     pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
-    the operator's ruling; the batch split is the detach per advert (no `origin_property_id` =
-    never merged = `not_merged`). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
+    the operator's ruling; the batch split is the detach per advert, each advert carrying
+    `splittable` (its `detach_outcomes` answer moves it: back to its origin, or a native advert
+    to a new record; `GET /properties/{id}/origins` carries the same flag for the property
+    page's per-row split). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
     "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a card per proposal
     with each group's adverts side by side (`MemberGrid`), the reason and ruling per pair, a
     checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's
     own adverts stays (else the canonical advert's), and an advert leaves only when it is alone
-    in its group (a detach rules it different from every advert left behind), came by a merge
+    in its group (a detach rules it different from every advert left behind), is `splittable`
     and is stated apart from the staying group; the optional shared reason rides each ruling,
     with progress and a per-advert outcome. Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads

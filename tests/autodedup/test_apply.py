@@ -346,7 +346,8 @@ class FakeDb:
                 current = conn.listings[listing_id]["property_id"]
                 moves = [(e["id"], e["merge_group_id"], e["survivor"], e["retired"])
                          for e in conn.events if e["listing"] == listing_id and not e["undone"]]
-                outcome, undo, target = _detach_plan(current, moves, merge_group_id)
+                size = sum(row["property_id"] == current for row in conn.listings.values())
+                outcome, undo, target = _detach_plan(current, moves, merge_group_id, size)
                 if outcome == "detached" and _origin_gone(
                         (conn.properties[target]["status"],
                          conn.properties[target]["merged_into"]), undo):

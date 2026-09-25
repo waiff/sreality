@@ -109,6 +109,22 @@ class _Ledger:
             self._restore(p)
         if s.startswith("SELECT p.repr_listing_ref_id FROM properties p"):
             return [(self.canonical[pid],) for pid in p["ids"] if pid in self.canonical]
+        if s.startswith("INSERT INTO property_merge_events") and "born" in p:
+            self.events.append({"id": len(self.events) + 1, "group": p["group"],
+                                "survivor": p["left"], "listing": p["listing"], "prev": p["born"],
+                                "source": p["source"], "undone_by": p["by"]})
+            return [(len(self.events),)]
+        if s.startswith("WITH born AS ( INSERT INTO properties"):
+            born = []
+            for lid in p["ids"]:
+                if lid in self.listings and self.listings[lid] is None:
+                    pid = max(self.props) + 1
+                    self.props[pid], self.listings[lid] = "active", pid
+                    born.append((pid,))
+            return born
+        if s.startswith("SELECT property_id, count(*) FROM listings"):
+            sizes = {pid: sum(at == pid for at in self.listings.values()) for pid in p["ids"]}
+            return [(pid, n) for pid, n in sizes.items() if n]
         if s.startswith("INSERT INTO property_merge_events"):
             moved = sorted(lid for lid, pid in self.listings.items() if pid == p["retired"])
             self.events += [{"id": len(self.events) + i + 1, "group": p["group"],
@@ -325,9 +341,9 @@ def test_a_detach_leaves_curation_where_it_is_and_recomputes_both_once():
 @pytest.mark.parametrize("backwards", [False, True])
 def test_merging_then_detaching_every_advert_restores_every_original_property(backwards):
     """W3's gate at unit scale — a refactor of the mechanics changes no grouping: three set
-    merges, one built on another; every advert detached in turn, in either order, returns to
-    its own record, and every asset link to its own property — 30's rode 30 -> 10 -> 60 (the
-    oldest)."""
+    merges, one built on another; every advert a merge moved detached in turn, in either order,
+    returns to its own record, and every asset link to its own property — 30's rode 30 -> 10 ->
+    60 (the oldest)."""
     original = {1: 10, 2: 10, 3: 20, 4: 30, 5: 30, 6: 40, 7: 50, 8: 60, 9: 70, 11: 80,
                 12: 80, 13: 20}
     links = {30: 7, 50: 8}
@@ -337,11 +353,103 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(ba
     _merged(db, [40, 50], source="autodedup")
     _merged(db, [60, 10, 80])
     assert len(set(db.listings.values())) == 3 and db.assets[60] == 7
-    for lid in sorted(original, reverse=backwards):
+    for lid in sorted(pi.listing_origins(db, list(original)), reverse=backwards):
         detach_listing(db, lid, decided_by=OP)
     assert db.listings == original and set(db.props.values()) == {"active"}
     assert {pid: a for pid, a in db.assets.items() if a} == links
     assert all(e["undone_by"] for e in db.events), "a detach left a live ledger row behind"
+
+
+# --- a native advert (grouped at ingest, no merge moved it) --------------------------------
+
+
+def test_a_native_advert_is_born_a_new_record_through_the_one_birth_path():
+    """1, 2, 3 were grouped at ingest: no ledger row moved any of them. Splitting 2 gives it a
+    NEW record by `scraper.db.NEW_SINGLETONS_SQL` and writes ONE ledger row — the ingest grouping
+    as the merge it amounts to (the new record into 10), closed as undone by this split."""
+    from scraper.db import NEW_SINGLETONS_SQL
+
+    db = _Ledger({1: 10, 2: 10, 3: 10})
+    assert pi.detach_outcomes(db, [1, 2, 3]) == dict.fromkeys((1, 2, 3), "split_native")
+    out = detach_listing(db, 2, decided_by=OP, reason="jiné patro")["data"]
+    born = out["restored_property_id"]
+    assert born not in (None, 10) and db.listings == {1: 10, 2: born, 3: 10}
+    assert out == {**out, "detached": True, "outcome": "split_native", "listing_id": 2,
+                   "survivor_property_id": 10, "reactivated": False, "rulings_written": 2}
+    (birth,) = [(s, p) for s, p in db.log if "INSERT INTO properties" in s]
+    assert birth == (" ".join(NEW_SINGLETONS_SQL.split()), {"ids": [2]})
+    (row,) = db.events
+    assert row == {**row, "survivor": 10, "prev": born, "listing": 2, "source": "operator",
+                   "undone_by": OP}
+    assert out["merge_group_ids"] == [row["group"]]
+    (written,) = [p for s, p in db.log if s.startswith("INSERT INTO property_merge_events")]
+    assert (written["left"], written["born"], written["by"]) == (10, born, OP)
+    # the advert's origin is its new record: no live row, alone there -> a second split is a no-op
+    assert pi.listing_origins(db, [2]) == {} and pi.detach_outcomes(db, [2]) == {2: "not_merged"}
+    note = "operator detach from 10: jiné patro"
+    assert _verdicts(db) == [(1, 2, "different", note), (2, 3, "different", note)]
+    again = detach_listing(db, 2, decided_by=OP)["data"]
+    assert (again["detached"], again["outcome"], again["restored_property_id"]) == (
+        False, "not_merged", born)
+    assert len(db.events) == 1 and len(_verdicts(db)) == 2
+
+
+def test_a_native_split_takes_the_merges_lock_order_and_leaves_curation_behind():
+    db = _Ledger({1: 10, 2: 10})
+    detach_listing(db, 2, decided_by=OP)
+    order = [s for s, _p in db.log]
+    lock = next(i for i, s in enumerate(order) if s.endswith("FOR UPDATE"))
+    move = next(i for i, s in enumerate(order) if s.startswith("UPDATE listings SET property_id"))
+    assert lock < move < next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
+    assert db.sql("SELECT id, status, merged_into FROM properties")[-1] == {"ids": [10]}
+    written = " ".join(order)
+    for table in ("collection_properties", "property_tags", "property_notes",
+                  "notification_dispatches", "property_dismissals", "property_pipeline",
+                  "asset_membership_events", "DELETE FROM properties"):
+        assert table not in written, f"a native split touched {table} (rules 18, 22)"
+    born = db.listings[2]
+    assert db.sql("recompute_property_mf") == [(10,), (born,)]
+    assert db.sql("DELETE FROM browse_list") == [([10, born],)]
+
+
+def test_a_split_advert_merged_back_is_detached_to_its_new_record():
+    """The round trip: the operator (or the engine) merges the two records again through the
+    one merge; a detach then returns the advert to the record it was born on."""
+    db = _Ledger({1: 10, 2: 10})
+    born = detach_listing(db, 2, decided_by=OP)["data"]["restored_property_id"]
+    merged = _merged(db, [10, born], source="autodedup")
+    assert merged["survivor_id"] == 10 and db.listings == {1: 10, 2: 10}
+    assert pi.listing_origins(db, [1, 2]) == {2: (born, "autodedup", T0)}
+    back = detach_listing(db, 2, decided_by=OP)["data"]
+    assert (back["outcome"], back["restored_property_id"], back["reactivated"]) == (
+        "detached", born, True)
+    assert db.listings == {1: 10, 2: born} and db.props[born] == "active"
+
+
+def test_an_engine_split_rules_nothing_and_a_group_undo_never_splits_a_native_advert():
+    db = _Ledger({1: 10, 2: 10, 3: 30})
+    group = _merged(db, [10, 30], source="autodedup")["merge_group_id"]
+    scoped = {"decided_by": "autodedup-unapply:r", "source": "autodedup"}
+    assert pi.detach_outcomes(db, [1, 2], merge_group_id=group) == {1: "not_merged",
+                                                                    2: "not_merged"}
+    assert detach_listing(db, 1, merge_group_id=group, **scoped)["data"]["outcome"] == "not_merged"
+    out = detach_listing(db, 1, decided_by="autodedup-reconcile", source="autodedup")["data"]
+    assert out["outcome"] == "split_native" and out["rulings_written"] == 0
+    assert db.events[-1]["source"] == "autodedup" and db.sql("autodedup.") == []
+
+
+def test_a_native_split_rechecks_under_the_lock():
+    """Between the unlocked plan and the property lock, the only sibling left (nothing to split
+    off any more) or the advert itself moved: nothing is born and nothing is ruled."""
+    db = _Ledger({1: 10, 2: 10, 7: 70})
+    dispatch = db.dispatch
+    db.dispatch = lambda s, p: (db.listings.update({1: 70}) if "FOR UPDATE" in s
+                                else None) or dispatch(s, p)
+    assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "not_merged"
+    db.listings[1], db.dispatch = 10, lambda s, p: (db.listings.update({2: 70}) if "FOR UPDATE" in s
+                                                    else None) or dispatch(s, p)
+    assert detach_listing(db, 2, decided_by=OP)["data"]["outcome"] == "moved_since"
+    assert db.events == [] and _verdicts(db) == [] and set(db.props) == {10, 70}
 
 
 # --- the routes --------------------------------------------------------------------------
@@ -384,6 +492,17 @@ def test_the_detach_route_returns_the_contract_and_a_second_click_moves_nothing(
     assert again.json()["survivor_property_id"] == 10 and db.listings[2] == 20
 
 
+def test_the_detach_route_splits_the_propertys_own_advert_off_to_a_new_record(client):
+    http, db = client
+    res = http.post("/properties/10/detach", json={"listing_id": 1})
+    assert res.status_code == 200
+    born = db.listings[1]
+    assert res.json() == {"listing_id": 1, "detached": True, "outcome": "split_native",
+                          "survivor_property_id": 10, "restored_property_id": born,
+                          "rulings_written": 1}
+    assert born not in (10, 20, 30) and db.listings[2] == 10
+
+
 def test_the_detach_route_validates_its_input_and_needs_an_identity(client):
     from api import dependencies as deps
     from api import main as api_main
@@ -405,6 +524,7 @@ def test_the_origins_route_says_where_each_advert_came_from(client):
     res = http.get("/properties/10/origins")
     assert res.status_code == 200
     assert res.json() == {"property_id": 10, "adverts": [
-        {"listing_id": 1, "origin_property_id": None, "merge_source": None, "merged_at": None},
+        {"listing_id": 1, "origin_property_id": None, "merge_source": None, "merged_at": None,
+         "splittable": True},
         {"listing_id": 2, "origin_property_id": 20, "merge_source": "operator",
-         "merged_at": T0.isoformat().replace("+00:00", "Z")}]}
+         "merged_at": T0.isoformat().replace("+00:00", "Z"), "splittable": True}]}

@@ -18,9 +18,10 @@
  * out is the row's stored `source_url`, never rebuilt.
  *
  * Admin sessions also see where each advert came from (the merge ledger's origin,
- * on expand) and a per-row two-step 'Rozdělit' on every advert that has one: it
- * detaches exactly that advert back to its origin, any property size, any merge
- * origin, with an optional free-text reason kept on the "different" ruling. */
+ * on expand) and a per-row two-step 'Rozdělit' on every advert a detach would
+ * move: exactly that advert goes back to its origin — or, if no merge brought it,
+ * to a new record of its own — any property size, any merge origin, with an
+ * optional free-text reason kept on the "different" ruling. */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -178,7 +179,7 @@ function MergedAdvertRow({
     if (opened) rowRef.current?.scrollIntoView?.({ block: 'start' });
   }, [opened]);
   const [detachArmed, setDetachArmed] = useState(false);
-  const origin = originRead?.origin?.origin_property_id != null ? originRead.origin : null;
+  const origin = originRead?.origin?.splittable ? originRead.origin : null;
   const panelId = `merged-advert-${source.id}`;
   const portal = portalLabel(source.source) ?? source.source;
   const facts = [
@@ -473,7 +474,12 @@ function DetachConfirm({
      * MutationCache toast; the panel stays open so nothing looks done. */
     onSuccess: (res) => {
       if (res.detached) {
-        pushToast('ok', `Odděleno — inzerát je zpět v nemovitosti #${res.restored_property_id}.`);
+        pushToast(
+          'ok',
+          res.outcome === 'split_native'
+            ? `Odděleno — inzerát má novou vlastní nemovitost #${res.restored_property_id}.`
+            : `Odděleno — inzerát je zpět v nemovitosti #${res.restored_property_id}.`,
+        );
       } else {
         pushToast('info', detachOutcomeNote(res.outcome));
       }
@@ -490,10 +496,16 @@ function DetachConfirm({
     >
       <p className="text-[0.75rem] leading-snug text-[var(--color-ink-2)]">
         <strong className="font-medium text-[var(--color-ink)]">Oddělit tento inzerát?</strong>{' '}
-        Vrátí se do nemovitosti #{origin.origin_property_id}, odkud ho přivedlo{' '}
-        {mergeOriginLabel(origin.merge_source ?? '')} sloučení ze dne{' '}
-        {fmtDateSlash(origin.merged_at)}, a zapíše se, že se zbylými inzeráty nejde o stejnou
-        nemovitost.
+        {origin.origin_property_id == null ? (
+          <>Nepřivedlo ho sloučení: dostane novou vlastní nemovitost</>
+        ) : (
+          <>
+            Vrátí se do nemovitosti #{origin.origin_property_id}, odkud ho přivedlo{' '}
+            {mergeOriginLabel(origin.merge_source ?? '')} sloučení ze dne{' '}
+            {fmtDateSlash(origin.merged_at)}
+          </>
+        )}
+        , a zapíše se, že se zbylými inzeráty nejde o stejnou nemovitost.
       </p>
       <textarea
         aria-label="Důvod rozdělení (nepovinné)"

@@ -8,7 +8,8 @@ must-not-link, or a negative operator ruling). A pair whose newest ruling is `sa
 proposed: the engine obeys it (decision 8). Each split pair carries its reason -- the conflict that
 refused the union, else the pair's own decision, else the must-not-link, else `no stated fact` (a
 negative ruling alone) -- and the operator's newest ruling. The batch split is
-`POST /properties/{id}/detach`, advert by advert, from the page.
+`POST /properties/{id}/detach`, advert by advert, from the page; each advert says whether that
+detach would move it (`splittable`: back to its origin, or a native advert to a new record).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from typing import Any
 
 from autodedup import apply_sql as A
 from autodedup import ui_sql as U
-from toolkit.property_identity import listing_origins
+from toolkit.property_identity import MOVED, detach_outcomes, listing_origins
 
 NO_STATED_FACT = "no stated fact"
 _SPLIT_ZONES = frozenset({"reject", "veto", "band"})  # a merge-zone pair speaks FOR one property
@@ -99,11 +100,12 @@ def proposed_splits(
     shown = sorted(a[0] for pid in splits for a in props[pid][1])
     if not shown:
         return []
-    origins = listing_origins(conn, shown)
+    origins, outcomes = listing_origins(conn, shown), detach_outcomes(conn, shown)
 
     def advert(a: tuple) -> dict[str, Any]:
         return {"listing_id": a[0], "source": a[1], "is_active": a[2],
-                "origin_property_id": origins[a[0]][0] if a[0] in origins else None}
+                "origin_property_id": origins[a[0]][0] if a[0] in origins else None,
+                "splittable": outcomes.get(a[0]) in MOVED}
 
     items = []
     for pid in sorted(splits):

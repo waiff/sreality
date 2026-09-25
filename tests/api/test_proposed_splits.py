@@ -4,6 +4,7 @@ The connection is faked and dispatches on the statement (the adapter's and the r
 constants, reused). Live properties: 10 is split by the generation (two groups, and one advert it
 never saw), 20 is one group, 30 carries a must-not-link, 40 has an unseen advert beside one group,
 50 is grouped apart only by a pair the generation never scored and one the operator ruled `same`.
+Each advert says whether its split would move it (`detach_outcomes` over the same fake).
 """
 
 from __future__ import annotations
@@ -58,7 +59,6 @@ CANNED = {
              decision="certificate:K-A"),
         _row(usql.PAIR_COLUMNS, listing_lo=501, listing_hi=503, zone="reject",
              decision="auto_reject:area")],
-    pi._LIVE_MOVES_SQL: [(103, 5, "grp", 10, 13, "operator", AT)],
     usql.LATEST_GENERATION_SQL: [("g12",)],
 }
 
@@ -66,6 +66,9 @@ CANNED = {
 class _Conn:
     def __init__(self) -> None:
         self.ready, self.calls = True, []
+        # 103 came from 13 by the merge that retired 13 into 10: its split takes it back there.
+        self.moves = [(103, 5, "grp", 10, 13, "operator", AT)]
+        self.status = {13: ("merged_away", 10)}
 
     def cursor(self) -> "_Conn":
         return self
@@ -82,6 +85,14 @@ class _Conn:
             self.rows = [(self.ready,)]
         elif sql == usql.PROPOSED_SPLIT_ADVERTS_SQL:
             self.rows = [r for r in ADVERTS if params["property_id"] in (None, r[0])]
+        elif sql == pi._LIVE_MOVES_SQL:
+            self.rows = [m for m in self.moves if m[0] in params["ids"]]
+        elif sql == pi._PLACES_SQL:
+            self.rows = [(r[1], r[0]) for r in ADVERTS if r[1] in params["ids"]]
+        elif sql == pi._SIZES_SQL:
+            self.rows = [(pid, sum(r[0] == pid for r in ADVERTS)) for pid in params["ids"]]
+        elif sql == pi._STATUS_SQL:
+            self.rows = [(pid, *self.status[pid]) for pid in params["ids"] if pid in self.status]
         else:
             self.rows = CANNED[sql]
 
@@ -105,8 +116,10 @@ def client(conn: _Conn):
     api_main.app.dependency_overrides.clear()
 
 
-def _advert(lid: int, source: str, origin: int | None = None) -> dict[str, Any]:
-    return {"listing_id": lid, "source": source, "is_active": True, "origin_property_id": origin}
+def _advert(lid: int, source: str, origin: int | None = None, *,
+            splittable: bool = True) -> dict[str, Any]:
+    return {"listing_id": lid, "source": source, "is_active": True, "origin_property_id": origin,
+            "splittable": splittable}
 
 
 def test_the_list_is_every_split_the_latest_generation_proposes(client, conn):
@@ -155,6 +168,22 @@ def test_a_pair_never_scored_or_ruled_same_is_not_a_proposal(client):
     one = client.get("/autodedup/proposed-splits/50").json()["data"]
     assert (one["proposed"], one["splits"]) == (False, [])
     assert [[a["listing_id"] for a in g["adverts"]] for g in one["groups"]] == [[501], [502], [503]]
+
+
+def test_each_advert_says_whether_its_split_would_move_it(client, conn):
+    """Every advert of a live multi-advert property is splittable, one no merge brought
+    included (it is born a new record); not one a split would leave where it is: 302 already
+    sits on its origin (merged off 30 and back), and 103 once its origin was merged elsewhere."""
+    conn.moves += [(302, 6, "out", 31, 30, "operator", AT), (302, 7, "back", 30, 31, "operator", AT)]
+    one = client.get("/autodedup/proposed-splits/30").json()["data"]
+    assert [a for g in one["groups"] for a in g["adverts"]] == [_advert(301, "sreality")]
+    assert one["unseen"] == [{**_advert(302, "idnes", origin=30, splittable=False),
+                              "is_active": False}]
+    assert client.get("/autodedup/proposed-splits/10").json()["data"]["groups"][1]["adverts"] == [
+        _advert(103, "bazos", origin=13)]
+    conn.status[13] = ("merged_away", 77)
+    assert client.get("/autodedup/proposed-splits/10").json()["data"]["groups"][1]["adverts"] == [
+        _advert(103, "bazos", origin=13, splittable=False)]
 
 
 def test_an_unmigrated_store_renders_and_unknown_filters_are_refused(client, conn):

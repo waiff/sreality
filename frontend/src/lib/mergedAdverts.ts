@@ -1,9 +1,10 @@
 /* The merged-adverts section on the property page: its query keys, its words for
  * a merge's origin and a detach's outcome, and the refresh after a detach. A row's
  * 'Rozdělit' is exact for any property size and any merge origin: it detaches that
- * one advert back to the property the merge ledger says it came from
- * (`GET /properties/{id}/origins`), offered only on a row that has one. The
- * proposed-splits page detaches the same way, advert by advert. */
+ * one advert back to the property the merge ledger says it came from, or one no
+ * merge brought to a new record (`GET /properties/{id}/origins`), offered on every
+ * row a detach would move (`splittable`). The proposed-splits page detaches the
+ * same way, advert by advert. */
 
 import type { QueryClient } from '@tanstack/react-query';
 
@@ -48,7 +49,7 @@ export function mergeOriginLabel(source: string): string {
 /* Why a detach moved nothing; an outcome not listed here is shown raw. */
 const UNMOVED: Record<string, string> = {
   not_on_property: 'inzerát už v této nemovitosti není',
-  not_merged: 'inzerát sem nepřivedlo žádné platné sloučení',
+  not_merged: 'inzerát je v nemovitosti sám',
   on_origin: 'inzerát už je v nemovitosti, ze které přišel',
   moved_since: 'inzerát se mezitím přesunul jinam',
   origin_moved_on: 'nemovitost, ze které přišel, byla mezitím sloučena jinam; nejdřív rozdělte tam',

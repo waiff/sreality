@@ -3050,10 +3050,11 @@ export const listMergedProperties = (
     jwt: true,
   });
 
-/* The one undo: ONE advert back to the property its merge ledger says it came
- * from, ruled "different" from every advert that stays, with the operator's
- * optional reason (≤ DETACH_REASON_MAX chars). `detached: false` says why nothing
- * moved (`outcome`) — a second click answers `not_on_property`. */
+/* The one split: ONE advert back to the property its merge ledger says it came
+ * from, or — no merge brought it — to a new record of its own (`outcome:
+ * 'split_native'`), ruled "different" from every advert that stays, with the
+ * operator's optional reason (≤ DETACH_REASON_MAX chars). `detached: false` says
+ * why nothing moved (`outcome`) — a second click answers `not_on_property`. */
 export const DETACH_REASON_MAX = 500;
 
 export interface DetachResult {
@@ -3077,12 +3078,14 @@ export const detachListing = (
   });
 
 /* Where each advert came from — the merge ledger is admin-only, hence a route and
- * not a view. All three fields null: the property's own advert, never detachable. */
+ * not a view. All three origin fields null: no merge brought it. `splittable`: a
+ * detach would move it (back to its origin, or to a new record). */
 export interface AdvertOrigin {
   listing_id: number;
   origin_property_id: number | null;
   merge_source: string | null;
   merged_at: string | null;
+  splittable: boolean;
 }
 
 export const fetchPropertyOrigins = (
@@ -3096,13 +3099,14 @@ export const fetchPropertyOrigins = (
 /* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
  * generation groups its adverts apart (the canonical advert's group first), each
  * split pair with the engine's stated reason and the operator's newest ruling.
- * The split itself is `detachListing`, advert by advert; an advert with no
- * `origin_property_id` never came by a merge and answers `not_merged`. */
+ * The split itself is `detachListing`, advert by advert; `splittable` says the
+ * detach would move the advert (an advert no merge brought gets a new record). */
 export interface ProposedSplitAdvert {
   listing_id: number;
   source: string;
   is_active: boolean;
   origin_property_id: number | null;
+  splittable: boolean;
 }
 
 export interface ProposedSplit {

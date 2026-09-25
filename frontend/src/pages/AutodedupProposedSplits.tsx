@@ -8,10 +8,11 @@
  * has already ruled on it.
  *
  * The split is the operator's: tick proposals, then "Rozdělit vybrané" detaches
- * adverts back to the property they came from (`POST /properties/{id}/detach`,
- * one advert at a time, the optional shared reason kept on each "different"
- * ruling), behind a two-step confirm, with progress and a per-advert outcome.
- * See `splitPlan` for which group stays and which adverts may leave. */
+ * adverts (`POST /properties/{id}/detach`, one advert at a time, the optional
+ * shared reason kept on each "different" ruling) back to the property they came
+ * from, one no merge brought to a new record of its own, behind a two-step
+ * confirm, with progress and a per-advert outcome. See `splitPlan` for which
+ * group stays and which adverts may leave. */
 
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -50,10 +51,11 @@ const REASON_SOURCE: Record<ProposedSplit['splits'][number]['reason_source'], st
 
 /* Which group stays and which adverts a split takes away. The group holding the
  * property's own adverts (no merge brought them) stays, else the canonical
- * advert's. An advert leaves only when it is alone in its group (a detach rules
- * it different from every advert left behind, a group-mate included), a merge
- * brought it (it has somewhere to return to) and a split pair states it apart
- * from the staying group. */
+ * advert's, so merged adverts go back where they came from rather than the
+ * property's own being born anew. An advert leaves only when it is alone in its
+ * group (a detach rules it different from every advert left behind, a group-mate
+ * included), its detach would move it (`splittable`) and a split pair states it
+ * apart from the staying group. */
 function splitPlan(item: ProposedSplit): { kept: number; take: ProposedSplitAdvert[] } {
   const kept = Math.max(0, item.groups.findIndex((g) => g.adverts.some((a) => a.origin_property_id == null)));
   const stays = new Set(item.groups[kept]?.adverts.map((a) => a.listing_id));
@@ -65,12 +67,12 @@ function splitPlan(item: ProposedSplit): { kept: number; take: ProposedSplitAdve
   const take = item.groups
     .filter((g, i) => i !== kept && g.adverts.length === 1)
     .map((g) => g.adverts[0])
-    .filter((a) => a.origin_property_id != null && apart.has(a.listing_id));
+    .filter((a) => a.splittable && apart.has(a.listing_id));
   return { kept, take };
 }
 
 function stayNote(a: ProposedSplitAdvert, groupSize: number): string {
-  if (a.origin_property_id == null) return 'nepřišel sloučením — zůstane';
+  if (!a.splittable) return 'oddělení by ho nepřesunulo — zůstane';
   if (groupSize > 1) return 'skupinu nelze oddělit po jednom — zůstane';
   return 'engine ho od zůstávající skupiny neodlišil — zůstane';
 }
@@ -125,7 +127,7 @@ export default function AutodedupProposedSplits() {
             listing_id: advert.listing_id,
             ok: res.detached,
             text: res.detached
-              ? `odděleno → nemovitost #${res.restored_property_id}`
+              ? `odděleno → ${res.outcome === 'split_native' ? 'nová ' : ''}nemovitost #${res.restored_property_id}`
               : detachOutcomeNote(res.outcome),
           });
         } catch (e) {
@@ -165,9 +167,9 @@ export default function AutodedupProposedSplits() {
         <p className="mt-1 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-[52rem]">
           Nemovitosti, jejichž inzeráty by engine po poslední generaci rozdělil. Engine sám nikdy
           nerozděluje: rozhodujete vy. Zůstává skupina s vlastními inzeráty nemovitosti (jinak ta
-          s inzerátem v záhlaví). Oddělí se inzerát, který je ve skupině sám, přivedlo ho sloučení
-          a engine ho od zůstávající skupiny odlišil: vrátí se do nemovitosti, ze které přišel, a
-          zapíše se pravidlo „různé“.
+          s inzerátem v záhlaví). Oddělí se inzerát, který je ve skupině sám a engine ho od
+          zůstávající skupiny odlišil: vrátí se do nemovitosti, ze které přišel (ten, který
+          nepřišel sloučením, dostane novou vlastní nemovitost), a zapíše se pravidlo „různé“.
         </p>
         {page && (
           <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
@@ -230,8 +232,8 @@ export default function AutodedupProposedSplits() {
               Oddělit {fmtCount(queue.length)} {inzeratu(queue.length)} z {fmtCount(chosen.length)}{' '}
               {chosen.length === 1 ? 'nemovitosti' : 'nemovitostí'}?
             </strong>{' '}
-            Každý se vrátí do nemovitosti, ze které přišel, a zapíše se, že se zbylými inzeráty
-            nejde o stejnou nemovitost.
+            Každý se vrátí do nemovitosti, ze které přišel (ten, který nepřišel sloučením, dostane
+            novou vlastní), a zapíše se, že se zbylými inzeráty nejde o stejnou nemovitost.
           </p>
           <textarea
             aria-label="Společný důvod rozdělení (nepovinné)"
@@ -377,7 +379,7 @@ function ProposalCard({
         )}
         {take.length === 0 && (
           <span className="text-[0.72rem] text-[var(--color-ink-4)]">
-            nelze rozdělit: žádný inzerát nelze samostatně vrátit, odkud přišel
+            nelze rozdělit: žádný inzerát nelze oddělit samostatně
           </span>
         )}
       </div>
