@@ -201,6 +201,12 @@ def test_E295_a_room_inside_one_unit_is_not_a_side() -> None:
     assert position_designators("V případě zájmu prosíme, aby první zpráva obsahovala údaje.") == {}
 
 
+def test_E295_the_part_letter_is_a_capital_not_the_conjunction() -> None:
+    assert position_designators("Prodej objektu, část B, přízemí.") == {"part": frozenset({"B"})}
+    assert position_designators("Obytná část a kuchyně jsou propojeny, denní část a noční.") == {}
+    assert position_designators("Nabízíme část A i část B areálu.") == {}
+
+
 def test_E295_a_body_naming_both_sides_is_a_roster() -> None:
     body = ("Dispozice: levá část hlavní budovy 1. NP kanceláře, pravá část hlavní budovy byt 2+1. "
             "Nabízíme levou polovinu domu i pravou polovinu domu.")

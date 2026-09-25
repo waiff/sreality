@@ -2523,7 +2523,9 @@ _POSITION = re.compile(
     + r"|\d{1,2}\.)\s+(?:v\s+poradi\s+)?(zleva|zprava|z\s+leva|z\s+prava"
     r"|od\s+(?:vchodu|vjezdu|silnice|ulice|leva|prava))"
 )
-_PART_LETTER = re.compile(r"\bcast\s+([a-d])\b(?!\s*[.)]?\s*\d)")
+# `část A` is read CASE-KEPT: the letter must be a capital, because `obytná část a kuchyně`
+# is the conjunction, not a designator (every fold lowercases the two alike).
+_PART_LETTER = re.compile(r"\b[Cc]ast\s+([A-D])\b(?!\s*[.)]?\s*\d)")
 POSITION_MAX_PER_FAMILY: int = 1
 
 
@@ -2545,7 +2547,8 @@ def _position_designators(text: str) -> tuple[tuple[str, frozenset[str]], ...]:
         landmark = re.sub(r"\s+", " ", match.group(2)).replace("z leva", "zleva").replace(
             "z prava", "zprava")
         found.setdefault(f"pos:{landmark}", set()).add(value)
-    for match in _PART_LETTER.finditer(folded):
+    kept = _ACCENTS.sub("", unicodedata.normalize("NFKD", unescape(text)))
+    for match in _PART_LETTER.finditer(kept):
         found.setdefault("part", set()).add(match.group(1).upper())
     return tuple((family, frozenset(values)) for family, values in sorted(found.items())
                  if len(values) <= POSITION_MAX_PER_FAMILY)
