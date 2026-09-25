@@ -1,5 +1,5 @@
 /* Shared "what is this property" overview — the dossier header (identity +
- * price left, location map anchored top-right), a dense facts strip,
+ * price and a dense facts strip left, location map anchored top-right),
  * description, optional curation and estimates slots, and the photo gallery. Extracted
  * from the Listing Detail page so the Estimation Detail page renders its
  * subject with the SAME structure (one surface, not two). Driven by a
@@ -59,7 +59,6 @@ export function ListingOverview({
   return (
     <>
       <Header listing={listing} showStatus={showStatus} extras={headerExtras} mapFooter={mapFooter} />
-      <KeyFactsBlock listing={listing} />
       <DescriptionBlock listing={listing} />
       {curationSlot && (
         <>
@@ -175,6 +174,7 @@ function Header({
             )}
           </p>
         )}
+        <KeyFactsBlock listing={listing} />
       </div>
       {/* The dossier's "file photo": the location map anchored top-right.
           Missing coordinates keep the slot with an explicit note — silence
@@ -333,7 +333,9 @@ function DescriptionBody({ text }: { text: string }) {
 /* One dense data strip instead of the old Property/Building grids: the kind
  * (subtype and/or disposition), area, floor and district live in the header.
  * What remains — lot/garden for houses, the building facts — renders as inline
- * label·value pairs on one wrapping line, with the amenity chips below. */
+ * label·value pairs on one wrapping line, with the amenity chips below. Rendered
+ * inside the header's left column, under the price, so it fills the space beside
+ * the map instead of pushing the description down. */
 function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
   const facts = buildFacts(listing);
   const amenities = buildAmenities(listing);
@@ -341,7 +343,7 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
     return null;
   }
   return (
-    <div className="mt-7 space-y-3">
+    <div className="mt-5 space-y-3">
       <FactsList facts={facts} />
       <AmenityChips amenities={amenities} />
     </div>
