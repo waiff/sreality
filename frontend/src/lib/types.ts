@@ -472,6 +472,8 @@ export interface TargetSpecIn {
   area_m2: number | null;
   disposition: Disposition | null;
   floor: number | null;
+  /* The subject's advert(s): every advert of their property leaves the cohort (decision 13). */
+  exclude_listing_ids?: number[];
 }
 
 export interface ComparableUsed {

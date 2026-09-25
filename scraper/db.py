@@ -873,9 +873,10 @@ def ingest_scraped_listing(
         _ensure_property(conn, listing_id)
         if result != "unchanged":
             # Enqueue for the incremental maintenance pass (rule 20), the counterpart
-            # of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL: the recompute above
-            # leaves `browse_list` to that pass's patch. Set-based off the surrogate so
-            # a listing not yet attached to a property is skipped, not crashed on.
+            # of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL: the singleton mirror
+            # above refreshes the price inline, its history and `browse_list` are that
+            # pass's. Set-based off the surrogate so a listing not yet attached to a
+            # property is skipped, not crashed on.
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO dirty_properties (property_id) "
@@ -936,22 +937,72 @@ def create_singleton_properties(
 
 
 def _ensure_property(conn: psycopg.Connection, listing_id: int) -> None:
-    """Link the listing to its property (a new singleton on first sight: no insert-time
-    matching, rule 15), then recompute that property: the one rollup every property gets.
-
-    Keyed on the surrogate `listings.id`; runs inside the caller's transaction. It costs the
-    round trips the retired singleton mirror did: SELECT + birth + recompute on first sight
-    (was SELECT + INSERT + link), SELECT + recompute after (was SELECT + mirror UPDATE).
-    """
-    from scripts.recompute_property_stats import recompute_one  # it imports this module
-
+    """Link the listing to its property, or refresh the one it has; keyed on the surrogate
+    `listings.id`, inside the caller's transaction. First sight: a new singleton (no insert-time
+    matching, rule 15) and the rollup's own recompute. Linked: `_cheap_property_rollup`."""
     with conn.cursor() as cur:
         cur.execute("SELECT property_id FROM listings WHERE id = %s", (listing_id,))
         found = cur.fetchone()
-    property_id = found[0] if found else None
-    if property_id is None:
-        property_id = create_singleton_properties(conn, [listing_id])[0]
-    recompute_one(conn, int(property_id))
+    if found and found[0] is not None:
+        _cheap_property_rollup(conn, listing_id)
+        return
+    from scripts.recompute_property_stats import recompute_one  # it imports this module
+
+    recompute_one(conn, create_singleton_properties(conn, [listing_id])[0])
+
+
+def _cheap_property_rollup(conn: psycopg.Connection, listing_id: int) -> None:
+    """Re-scrape rollup for one property: counts + lifecycle always; the display columns are
+    mirrored from this child only while the property is a singleton (its one advert IS its
+    canonical advert). A multi-advert property's canonical fields and price history are the
+    dirty-set recompute's (rule 20). Kept until the full recompute is measured no slower here
+    (the W4 latency gate)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE properties p SET
+                source_count        = agg.cnt,
+                distinct_site_count = agg.dcnt,
+                last_seen_at        = agg.last_seen,
+                is_active           = agg.active,
+                current_price_czk   = CASE WHEN agg.cnt = 1 THEN l.price_czk      ELSE p.current_price_czk END,
+                area_m2             = CASE WHEN agg.cnt = 1 THEN l.area_m2         ELSE p.area_m2 END,
+                price_per_m2_source_listing_id = CASE WHEN agg.cnt = 1
+                    THEN price_per_m2_source_id(l.price_czk, l.area_m2, l.id)
+                    ELSE p.price_per_m2_source_listing_id END,
+                disposition         = CASE WHEN agg.cnt = 1 THEN l.disposition     ELSE p.disposition END,
+                category_main       = CASE WHEN agg.cnt = 1 THEN l.category_main   ELSE p.category_main END,
+                category_type       = CASE WHEN agg.cnt = 1 THEN l.category_type   ELSE p.category_type END,
+                has_balcony         = CASE WHEN agg.cnt = 1 THEN l.has_balcony     ELSE p.has_balcony END,
+                has_parking         = CASE WHEN agg.cnt = 1 THEN l.has_parking     ELSE p.has_parking END,
+                has_lift            = CASE WHEN agg.cnt = 1 THEN l.has_lift        ELSE p.has_lift END,
+                building_type       = CASE WHEN agg.cnt = 1 THEN l.building_type   ELSE p.building_type END,
+                condition           = CASE WHEN agg.cnt = 1 THEN l.condition       ELSE p.condition END,
+                ownership           = CASE WHEN agg.cnt = 1 THEN l.ownership       ELSE p.ownership END,
+                furnished           = CASE WHEN agg.cnt = 1 THEN l.furnished       ELSE p.furnished END,
+                terrace             = CASE WHEN agg.cnt = 1 THEN l.terrace         ELSE p.terrace END,
+                cellar              = CASE WHEN agg.cnt = 1 THEN l.cellar          ELSE p.cellar END,
+                garage              = CASE WHEN agg.cnt = 1 THEN l.garage          ELSE p.garage END,
+                category_sub_cb     = CASE WHEN agg.cnt = 1 THEN l.category_sub_cb ELSE p.category_sub_cb END,
+                subtype             = CASE WHEN agg.cnt = 1 THEN l.subtype         ELSE p.subtype END,
+                estate_area         = CASE WHEN agg.cnt = 1 THEN l.estate_area     ELSE p.estate_area END,
+                usable_area         = CASE WHEN agg.cnt = 1 THEN l.usable_area     ELSE p.usable_area END,
+                garden_area         = CASE WHEN agg.cnt = 1 THEN l.garden_area     ELSE p.garden_area END,
+                parking_lots        = CASE WHEN agg.cnt = 1 THEN l.parking_lots    ELSE p.parking_lots END,
+                source              = CASE WHEN agg.cnt = 1 THEN l.source          ELSE p.source END,
+                energy_rating       = CASE WHEN agg.cnt = 1 THEN l.energy_rating   ELSE p.energy_rating END,
+                building_condition_level  = CASE WHEN agg.cnt = 1 THEN l.building_condition_level  ELSE p.building_condition_level END,
+                apartment_condition_level = CASE WHEN agg.cnt = 1 THEN l.apartment_condition_level ELSE p.apartment_condition_level END
+            FROM listings l
+            JOIN LATERAL (
+                SELECT count(*) AS cnt, count(DISTINCT source) AS dcnt,
+                       max(last_seen_at) AS last_seen, bool_or(is_active) AS active
+                FROM listings WHERE property_id = l.property_id
+            ) agg ON true
+            WHERE p.id = l.property_id AND l.id = %s
+            """,
+            (listing_id,),
+        )
 
 
 def mark_properties_dirty(

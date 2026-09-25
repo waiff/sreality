@@ -7,6 +7,10 @@
 --    CANONICAL advert. Its caller is the rollup (scripts/recompute_property_stats.py): every
 --    advert field is the canonical advert's, every physical fact the first non-empty value in
 --    this same order. Language sql, stable, invoker, no SET: the planner inlines it.
+--    `properties.repr_since` is when the canonical advert last changed (the rollup stamps it);
+--    the two price-alert producers count only its steps scraped after that, so a merge, detach
+--    or delisting that hands the slot to another advert does not replay that advert's older
+--    steps as alerts. '-infinity' = canonical since birth; a constant default, no table rewrite.
 -- 2. `all_sources` / `active_sources` leave the Browse read model. Nothing ever wrote them (425
 --    projected two columns that exist only on production). Removing a view column is DROP +
 --    CREATE, which takes the view's row-type dependants with it (537's two dismissal-aware
@@ -18,8 +22,9 @@
 -- APPLY BEFORE THE CODE MERGES (the rollup calls the function with no fallback), OFF-HOURS: the
 -- map is absent for its ~5-minute rebuild, the window 508 took. Statement autocommit around one
 -- explicit transaction for the swap, every statement idempotent (like 522/535), so a retried
--- file resumes. Verify: `select * from property_canonical_listings(<id>)`, and `all_sources` is in
--- no pg_attribute row of browse_projection / browse_list / properties_map_mv.
+-- file resumes. Verify: `select * from property_canonical_listings(<id>)`, `properties.repr_since`
+-- exists, and `all_sources` is in no pg_attribute row of browse_projection / browse_list /
+-- properties_map_mv.
 
 set statement_timeout = '900s';
 set lock_timeout = 0;
@@ -45,6 +50,9 @@ $$;
 
 revoke execute on function public.property_canonical_listings(bigint) from public, anon, authenticated;
 grant execute on function public.property_canonical_listings(bigint) to service_role;
+
+alter table public.properties
+  add column if not exists repr_since timestamptz not null default '-infinity';
 
 -- 2. 535's projection less the two columns, every other expression and its order unchanged
 --    (each re-sourced column is explained where 503/514/522/535 introduced it).

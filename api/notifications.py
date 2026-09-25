@@ -1603,16 +1603,17 @@ def _recent_price_drops(
     PER in-window drop step — not one per property — so each genuine price cut
     is its own notification event (the per-snapshot dedup grain). Steps come from
     `listing_price_steps` (migration 559): `prev` is the SAME advert's previous
-    priced snapshot, so a step never spans two adverts and a merge alone cannot
-    fire a drop. Only the CANONICAL advert's steps count (migration 561): the
-    price an alert quotes is the price the property shows.
+    priced snapshot, so a step never spans two adverts. Only the CANONICAL
+    advert's steps since it became canonical count (`repr_since`, migration 561):
+    the price an alert quotes is the price the property shows, and a merge,
+    detach or delisting that hands the slot to another advert fires nothing.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT ps.property_id, ps.snapshot_id, ps.price_czk, ps.prev_price_czk "
             "FROM listing_price_steps ps "
             "JOIN properties p ON p.id = ps.property_id "
-            " AND p.repr_listing_ref_id = ps.listing_id "
+            " AND p.repr_listing_ref_id = ps.listing_id AND ps.scraped_at > p.repr_since "
             "WHERE ps.price_czk < ps.prev_price_czk "
             "  AND ps.scraped_at > now() - %(win)s::interval "
             "ORDER BY ps.property_id, ps.snapshot_id",
@@ -1749,7 +1750,7 @@ def _read_monitor_window_days(conn: "psycopg.Connection") -> int:
 _MONITORED_CTE = (
     "monitored AS ("
     "  SELECT cp.collection_id, p.id AS property_id, p.repr_listing_id, "
-    "         p.repr_listing_ref_id, "
+    "         p.repr_listing_ref_id, p.repr_since, "
     "         c.notify_channels, "
     "         greatest(cp.added_at, coalesce(c.monitoring_enabled_at, cp.added_at)) "
     "           AS monitor_since "
@@ -1809,9 +1810,9 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
 
     with conn.cursor() as cur:
         # 1+2) price_drop / price_rise — the canonical advert's own price steps
-        # (`listing_price_steps`, migration 559; the price the property shows,
-        # migration 561), replicated per monitored collection so each collection
-        # alerts independently. Snapshot grain == the watchdog's.
+        # since it became canonical (`listing_price_steps`, migration 559;
+        # `repr_since`, migration 561), replicated per monitored collection so each
+        # collection alerts independently. Snapshot grain == the watchdog's.
         cur.execute(
             f"WITH {_MONITORED_CTE} "
             "INSERT INTO notification_dispatches "
@@ -1830,7 +1831,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "FROM monitored m "
             "JOIN listing_price_steps st ON st.listing_id = m.repr_listing_ref_id "
             "WHERE st.scraped_at > now() - %(win)s::interval "
-            "  AND st.scraped_at > m.monitor_since "
+            "  AND st.scraped_at > m.monitor_since AND st.scraped_at > m.repr_since "
             "ON CONFLICT (dedupe_key) DO NOTHING",
             {"win": win},
         )

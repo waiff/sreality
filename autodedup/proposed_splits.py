@@ -1,12 +1,14 @@
 """Decision 9: the splits a stored generation proposes. Read-only: auto-merge yes, auto-split never.
 
-A LIVE property of two or more adverts that the generation touches is a proposal when the
-generation puts the adverts it saw into different groups (a seen advert no group holds is a group
-of its own; one it never saw is not spoken for), or when two of its adverts carry a stored
-negative (a must-not-link, or a negative operator ruling). Each split pair carries the engine's
-stated reason -- the conflict that refused the union, else the pair's own reject/veto/band
-decision, else the must-not-link, else `no stated fact` -- and the operator's newest ruling.
-The batch split is `POST /properties/{id}/detach`, advert by advert, from the page.
+A LIVE property of two or more adverts that the generation touches is a proposal when a pair of
+its adverts is STATED apart: the generation groups the two apart (a seen advert no group holds is
+a group of its own) and scored that pair reject/veto/band or a conflict names it -- a pair it never
+scored is not spoken for, like an advert it never saw -- or the pair carries a stored negative (a
+must-not-link, or a negative operator ruling). A pair whose newest ruling is `same` is never
+proposed: the engine obeys it (decision 8). Each split pair carries its reason -- the conflict that
+refused the union, else the pair's own decision, else the must-not-link, else `no stated fact` (a
+negative ruling alone) -- and the operator's newest ruling. The batch split is
+`POST /properties/{id}/detach`, advert by advert, from the page.
 """
 
 from __future__ import annotations
@@ -61,7 +63,7 @@ def proposed_splits(
             "decided_at": at.isoformat() if isinstance(at, datetime) else at,
             "reasons": list(v["reasons"] or [])})
 
-    splits: dict[int, list[tuple[int, int]]] = {}
+    candidates: dict[int, list[tuple[int, int]]] = {}
     for pid, (canonical, adverts) in props.items():
         group = {lid: i for i, (_k, lids) in enumerate(_groups(adverts, canonical)) for lid in lids}
         lids = sorted(a[0] for a in adverts)
@@ -70,23 +72,33 @@ def proposed_splits(
                  or (lo, hi) in negatives
                  or (rulings.get((lo, hi)) or {}).get("verdict") in U.NEGATIVE_VERDICTS]
         if pairs or property_id is not None:
-            splits[pid] = pairs
-    shown = sorted(a[0] for pid in splits for a in props[pid][1])
-    if not shown:
+            candidates[pid] = pairs
+    scope = sorted(a[0] for pid in candidates for a in props[pid][1])
+    if not scope:
         return []
 
     reasons: dict[tuple[int, int], tuple[str, str]] = {
         pair: ("must_not_link", text) for pair, text in negatives.items()}
-    for row in _fetch(conn, U.CLUSTER_PAIRS_SQL, {"generation": generation, "ids": shown}):
+    for row in _fetch(conn, U.CLUSTER_PAIRS_SQL, {"generation": generation, "ids": scope}):
         p = dict(zip(U.PAIR_COLUMNS, row))
         if p["zone"] in _SPLIT_ZONES:
             reasons[(p["listing_lo"], p["listing_hi"])] = ("pair", f"guard: {p['guard_veto']}"
                 if p["guard_veto"] else f"{p['zone']}: {p['decision']}")
-    for row in _fetch(conn, U.CLUSTER_CONFLICTS_SQL, {"cluster_key": None, "ids": shown}):
+    for row in _fetch(conn, U.CLUSTER_CONFLICTS_SQL, {"cluster_key": None, "ids": scope}):
         c = dict(zip(U.CONFLICT_COLUMNS, row))
         if c["listing_lo"] is not None and (c["detail"] or {}).get("generation") in (None, generation):
             reasons[(c["listing_lo"], c["listing_hi"])] = (
                 "conflict", f"{c['kind']}: {c['invariant'] or 'no invariant named'}")
+
+    def stated(pair: tuple[int, int]) -> bool:
+        verdict = (rulings.get(pair) or {}).get("verdict")
+        return verdict != "same" and (pair in reasons or verdict in U.NEGATIVE_VERDICTS)
+
+    splits = {pid: [pair for pair in pairs if stated(pair)] for pid, pairs in candidates.items()}
+    splits = {pid: pairs for pid, pairs in splits.items() if pairs or property_id is not None}
+    shown = sorted(a[0] for pid in splits for a in props[pid][1])
+    if not shown:
+        return []
     origins = listing_origins(conn, shown)
 
     def advert(a: tuple) -> dict[str, Any]:

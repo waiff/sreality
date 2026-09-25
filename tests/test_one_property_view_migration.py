@@ -31,7 +31,8 @@ def test_the_read_model_loses_the_two_columns_in_one_swap_and_properties_keeps_t
     assert "drop view if exists public.browse_projection;" in swap
     assert ("alter table public.browse_list drop column if exists all_sources, "
             "drop column if exists active_sources;") in swap
-    assert not re.search(r"alter table (public\.)?properties\b", CODE), "the physical drop is W8's"
+    assert not re.search(r"alter table (public\.)?properties\b[^;]*\bdrop\b", CODE), \
+        "the physical drop is W8's"
 
 
 def test_both_dismissal_aware_sources_come_back_verbatim_with_their_acl():

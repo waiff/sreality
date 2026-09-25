@@ -4,15 +4,14 @@
  * apart. It never acts on that: this page lists each such property (the newest
  * pass, `GET /autodedup/proposed-splits`) with its adverts as the engine groups
  * them — photos side by side (MemberGrid), the group of the canonical advert
- * first, which is the part that stays — the engine's stated reason per split
- * pair and whether the operator has already ruled on it.
+ * first — the engine's stated reason per split pair and whether the operator
+ * has already ruled on it.
  *
  * The split is the operator's: tick proposals, then "Rozdělit vybrané" detaches
- * every advert outside the first group back to the property it came from
- * (`POST /properties/{id}/detach`, one advert at a time, the optional shared
- * reason kept on each "different" ruling), behind a two-step confirm, with
- * progress and a per-advert outcome. An advert that never came by a merge has no
- * origin to return to and is not offered. */
+ * adverts back to the property they came from (`POST /properties/{id}/detach`,
+ * one advert at a time, the optional shared reason kept on each "different"
+ * ruling), behind a two-step confirm, with progress and a per-advert outcome.
+ * See `splitPlan` for which group stays and which adverts may leave. */
 
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -49,13 +48,31 @@ const REASON_SOURCE: Record<ProposedSplit['splits'][number]['reason_source'], st
   none: 'bez uvedeného důvodu',
 };
 
-/* The adverts a split takes away: every group but the canonical advert's, and
- * only those a merge brought (the rest have nowhere to return to). */
-function detachable(item: ProposedSplit): ProposedSplitAdvert[] {
-  return item.groups
-    .slice(1)
-    .flatMap((g) => g.adverts)
-    .filter((a) => a.origin_property_id != null);
+/* Which group stays and which adverts a split takes away. The group holding the
+ * property's own adverts (no merge brought them) stays, else the canonical
+ * advert's. An advert leaves only when it is alone in its group (a detach rules
+ * it different from every advert left behind, a group-mate included), a merge
+ * brought it (it has somewhere to return to) and a split pair states it apart
+ * from the staying group. */
+function splitPlan(item: ProposedSplit): { kept: number; take: ProposedSplitAdvert[] } {
+  const kept = Math.max(0, item.groups.findIndex((g) => g.adverts.some((a) => a.origin_property_id == null)));
+  const stays = new Set(item.groups[kept]?.adverts.map((a) => a.listing_id));
+  const apart = new Set(
+    item.splits.flatMap((s) =>
+      stays.has(s.listing_lo) ? [s.listing_hi] : stays.has(s.listing_hi) ? [s.listing_lo] : [],
+    ),
+  );
+  const take = item.groups
+    .filter((g, i) => i !== kept && g.adverts.length === 1)
+    .map((g) => g.adverts[0])
+    .filter((a) => a.origin_property_id != null && apart.has(a.listing_id));
+  return { kept, take };
+}
+
+function stayNote(a: ProposedSplitAdvert, groupSize: number): string {
+  if (a.origin_property_id == null) return 'nepřišel sloučením — zůstane';
+  if (groupSize > 1) return 'skupinu nelze oddělit po jednom — zůstane';
+  return 'engine ho od zůstávající skupiny neodlišil — zůstane';
 }
 
 type Outcome = { property_id: number; listing_id: number; ok: boolean; text: string };
@@ -93,7 +110,7 @@ export default function AutodedupProposedSplits() {
   const [outcomes, setOutcomes] = useState<Outcome[]>([]);
 
   const chosen = items.filter((i) => selected.has(i.property_id));
-  const queue = chosen.flatMap((i) => detachable(i).map((a) => ({ item: i, advert: a })));
+  const queue = chosen.flatMap((i) => splitPlan(i).take.map((a) => ({ item: i, advert: a })));
 
   const split = useMutation({
     mutationFn: async () => {
@@ -147,9 +164,10 @@ export default function AutodedupProposedSplits() {
         <h1 className="text-2xl leading-tight">AUTODEDUP · Návrhy rozdělení</h1>
         <p className="mt-1 text-sm text-[var(--color-ink-2)] leading-relaxed max-w-[52rem]">
           Nemovitosti, jejichž inzeráty by engine po poslední generaci rozdělil. Engine sám nikdy
-          nerozděluje: rozhodujete vy. První skupina (s inzerátem v záhlaví) zůstává; inzeráty
-          ostatních skupin se vrátí do nemovitosti, ze které je přivedlo sloučení, a zapíše se
-          pravidlo „různé“.
+          nerozděluje: rozhodujete vy. Zůstává skupina s vlastními inzeráty nemovitosti (jinak ta
+          s inzerátem v záhlaví). Oddělí se inzerát, který je ve skupině sám, přivedlo ho sloučení
+          a engine ho od zůstávající skupiny odlišil: vrátí se do nemovitosti, ze které přišel, a
+          zapíše se pravidlo „různé“.
         </p>
         {page && (
           <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
@@ -324,7 +342,8 @@ function ProposalCard({
   onToggle: () => void;
   member: (a: ProposedSplitAdvert) => AutodedupMember;
 }) {
-  const takeable = detachable(item).length;
+  const { kept, take } = splitPlan(item);
+  const taken = new Set(take.map((a) => a.listing_id));
   const adverts = item.groups.reduce((n, g) => n + g.adverts.length, item.unseen.length);
   return (
     <li
@@ -336,7 +355,7 @@ function ProposalCard({
           <input
             type="checkbox"
             checked={checked}
-            disabled={takeable === 0}
+            disabled={take.length === 0}
             onChange={onToggle}
             aria-label={`Vybrat nemovitost #${item.property_id}`}
           />
@@ -356,9 +375,9 @@ function ProposalCard({
             rozhodnuto
           </span>
         )}
-        {takeable === 0 && (
+        {take.length === 0 && (
           <span className="text-[0.72rem] text-[var(--color-ink-4)]">
-            nelze rozdělit: žádný inzerát mimo první skupinu nepřišel sloučením
+            nelze rozdělit: žádný inzerát nelze samostatně vrátit, odkud přišel
           </span>
         )}
       </div>
@@ -367,15 +386,20 @@ function ProposalCard({
         {item.groups.map((g, i) => (
           <section key={g.cluster_key ?? `solo-${g.adverts[0]?.listing_id}`}>
             <p className="mb-1.5 text-[0.7rem] uppercase tracking-[0.12em] text-[var(--color-ink-3)]">
-              {i === 0 ? 'Zůstává' : `Oddělit · skupina ${i + 1}`}
+              {i === kept
+                ? 'Zůstává'
+                : g.adverts.some((a) => taken.has(a.listing_id))
+                  ? `Oddělit · skupina ${i + 1}`
+                  : `Skupina ${i + 1}`}
             </p>
             <MemberGrid
               members={g.adverts.map(member)}
-              renderUnder={(m) =>
-                i > 0 && g.adverts.find((a) => a.listing_id === m.listing_id)?.origin_property_id == null ? (
-                  <p className="text-[0.66rem] text-[var(--color-ink-4)]">nepřišel sloučením — zůstane</p>
-                ) : null
-              }
+              renderUnder={(m) => {
+                const a = g.adverts.find((x) => x.listing_id === m.listing_id);
+                return i !== kept && a && !taken.has(a.listing_id) ? (
+                  <p className="text-[0.66rem] text-[var(--color-ink-4)]">{stayNote(a, g.adverts.length)}</p>
+                ) : null;
+              }}
             />
           </section>
         ))}

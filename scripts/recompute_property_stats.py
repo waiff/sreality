@@ -11,6 +11,7 @@
    models take place, floor, description, photos, broker and link. Every physical fact (building
    type, ownership, energy rating, amenities, estate/usable/garden area, parking) is the first
    non-empty value in the same order. Lifecycle: any advert active, min/max seen, newest snapshot.
+   `repr_since` is stamped when the canonical advert changes (the price alerts start there).
 
 Batched by property-id range so each statement stays well under the
 transaction-pooler statement timeout. autocommit=True means each batch
@@ -155,6 +156,7 @@ _RECOMPUTE_BATCH_SQL = """
       first_seen_at       = r.first_seen_at,
       last_seen_at        = r.last_seen_at,
       repr_listing_id     = c.sreality_id,
+      repr_since          = CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END,
       repr_listing_ref_id = c.id,
       category_main       = c.category_main,
       category_type       = c.category_type,

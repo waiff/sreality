@@ -106,7 +106,9 @@ def test_new_listing_is_born_bare_then_recomputed(monkeypatch):
     assert _find(conn.executed, "property_identity_candidates") is None
 
 
-def test_linked_listing_is_recomputed_by_the_rollup(monkeypatch):
+def test_linked_listing_refreshes_via_the_singleton_mirror(monkeypatch):
+    """A re-scrape keeps the singleton mirror, not the full recompute: its deletion waits for
+    the W4 latency measurement."""
     _stub_upsert(monkeypatch, "updated")
     conn = _FakeConn([
         (lambda s: "SELECT id FROM listings WHERE sreality_id" in s, [(8002,)]),  # resolve surrogate
@@ -117,24 +119,13 @@ def test_linked_listing_is_recomputed_by_the_rollup(monkeypatch):
 
     assert result == "updated"
     roll = _find(conn.executed, "UPDATE properties p SET")
-    assert roll is not None and roll[1] == {"pid": 7}
+    assert roll is not None
+    # Keyed on the surrogate (l.id = 8002); mirrors the display payload, no place column.
+    assert "condition" in roll[0] and "property_canonical_listings" not in roll[0]
+    for gone in ("locality", "district", "geom", "obec_id", "ku_id"):
+        assert gone not in roll[0], f"inline rollup still writes properties.{gone}"
+    assert roll[1] == (8002,)
     assert _find(conn.executed, "INSERT INTO properties") is None
-
-
-def test_the_full_recompute_costs_the_round_trips_the_singleton_mirror_did():
-    """The ledger's gate for deleting the 28-column mirror: counted on the fake, a first
-    sight is SELECT + birth + recompute (the old path: SELECT + INSERT + link) and a
-    re-scrape is SELECT + recompute (the old path: SELECT + mirror UPDATE)."""
-    fresh = _FakeConn([
-        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
-        (lambda s: "INSERT INTO properties" in s, [(42,)]),
-    ])
-    db._ensure_property(fresh, 8001)
-    assert len(fresh.executed) == 3
-
-    linked = _FakeConn([(lambda s: "SELECT property_id FROM listings WHERE id" in s, [(7,)])])
-    db._ensure_property(linked, 8001)
-    assert len(linked.executed) == 2
 
 
 # --- ingest_scraped_listing (non-sreality path) ---------------------------
@@ -196,7 +187,7 @@ def test_ingest_reuses_surrogate_on_refetch(monkeypatch):
     assert _find(conn.executed, "nextval(") is None       # no new id drawn on refetch
     # no post-upsert re-resolve either — the surrogate was already in hand
     assert _find(conn.executed, "SELECT id FROM listings WHERE source") is None
-    assert _find(conn.executed, "UPDATE properties p SET") is not None  # the recompute
+    assert _find(conn.executed, "UPDATE properties p SET") is not None  # rollup
 
 
 def test_ingest_first_sight_null_sreality_id_when_flip_enabled(monkeypatch):

@@ -1128,8 +1128,10 @@ renumber.** Navigate by area:
     (`properties_public.listing_id` IS it); every physical fact (building type, ownership,
     energy rating, amenities, estate/usable/garden area, parking) is the first non-empty value
     in the same order. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL` (a bare row
-    linked in the same statement) then that recompute: on ingest (`_ensure_property`, at the
-    round trips the deleted singleton mirror cost) and in the straggler-attach alike.
+    linked in the same statement) then that recompute: on ingest (`_ensure_property`) and in the
+    straggler-attach alike. A re-scrape of a linked advert keeps the singleton mirror
+    (`_cheap_property_rollup`: counts and lifecycle, the one advert's fields while a singleton)
+    until the full recompute is measured no slower there (the W4 latency gate).
     `all_sources` / `active_sources` (never written) left the read model; the physical columns
     are W8's destructive drop (the SPA never read them).
     **The SPA shows it one way (decision 11): ONE property page, `/property/:propertyId`**
@@ -1319,16 +1321,20 @@ renumber.** Navigate by area:
     the live run would treat it; an undone group may merge again on a later apply (undo is a
     brake, not a ruling). **Splits are propose-only (decision 9):** `GET
     /autodedup/proposed-splits` (+ `/{property_id}`; `autodedup/proposed_splits.py`, read-only)
-    lists each live multi-advert property a generation touches whose seen adverts it groups
-    apart, or whose adverts carry a stored negative, with the engine's stated reason per split
-    pair (conflict, else the pair's decision, else must-not-link, else `no stated fact`) and
+    lists each live multi-advert property a generation touches with a pair STATED apart: grouped
+    apart AND scored reject/veto/band or named by a conflict (a pair never scored is not spoken
+    for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
+    `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
+    pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
     the operator's ruling; the batch split is the detach per advert (no `origin_property_id` =
     never merged = `not_merged`). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
     "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a card per proposal
     with each group's adverts side by side (`MemberGrid`), the reason and ruling per pair, a
-    checkbox, and a two-step "Rozdělit vybrané" that detaches every advert with an origin outside
-    the canonical advert's group, the optional shared reason on each ruling, with progress and a
-    per-advert outcome. Group size is the engine's own cap alone. A group already on one
+    checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's
+    own adverts stays (else the canonical advert's), and an advert leaves only when it is alone
+    in its group (a detach rules it different from every advert left behind), came by a merge
+    and is stated apart from the staying group; the optional shared reason rides each ruling,
+    with progress and a per-advert outcome. Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings and pipeline cards;
     collections, tags and notes stay on the survivor (rule #18: a detach is best-effort).
@@ -1365,7 +1371,9 @@ renumber.** Navigate by area:
     (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
     helper), so the two surfaces can never disagree on what a filter means.
     **Every surface reads the same canonical advert (migration 561).** Both watchdog producers
-    and the collection monitor alert only on the canonical advert's own steps, and
+    and the collection monitor alert only on the canonical advert's own steps scraped after it
+    became canonical (`properties.repr_since`, stamped by the rollup when the canonical advert
+    changes: a merge, detach or delisting that hands the slot over replays nothing), and
     `_shared_filter_where` admits an advert only as its property's canonical advert and drops
     every advert of the subject's property (`exclude_listing_ids`, the one exclusion; decision
     13), so comparables, velocity and the corridor count each property once.

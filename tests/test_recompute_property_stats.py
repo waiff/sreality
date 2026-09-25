@@ -851,6 +851,23 @@ def test_the_price_history_is_the_canonical_adverts_own():
     assert "ps.property_id" not in sql
 
 
+def test_the_canonical_handover_is_stamped_for_the_price_alerts():
+    """`repr_since` moves only when the canonical advert changes from one advert to another,
+    and both alert producers count only steps after it (migration 561)."""
+    import inspect
+
+    from api import notifications as nf
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    assert _rhs(_set_clause(_RECOMPUTE_BATCH_SQL), "repr_since") == (
+        "CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END")
+    assert ("add column if not exists repr_since timestamptz not null default '-infinity'"
+            in " ".join(MIGRATION_561.read_text().split()))
+    assert "ps.scraped_at > p.repr_since" in inspect.getsource(nf._recent_price_drops)
+    assert "st.scraped_at > m.repr_since" in inspect.getsource(nf.match_monitored_collections_once)
+    assert "p.repr_since" in nf._MONITORED_CTE
+
+
 def test_every_recompute_variant_writes_the_stamp():
     """The one/scoped variants are derived from the batch SQL by narrowing the
     batch CTE; if that ever becomes a copy, they must not lose the measure."""

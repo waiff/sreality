@@ -2,7 +2,8 @@
 
 The connection is faked and dispatches on the statement (the adapter's and the review pages' own
 constants, reused). Live properties: 10 is split by the generation (two groups, and one advert it
-never saw), 20 is one group, 30 carries a must-not-link, 40 has an unseen advert beside one group.
+never saw), 20 is one group, 30 carries a must-not-link, 40 has an unseen advert beside one group,
+50 is grouped apart only by a pair the generation never scored and one the operator ruled `same`.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ ADVERTS = [  # property, listing, source, active, canonical, cluster, seen
     (20, 201, "sreality", True, 201, 950, True), (20, 202, "idnes", True, 201, 950, True),
     (30, 301, "sreality", True, 301, None, True), (30, 302, "idnes", False, 301, None, False),
     (40, 401, "sreality", True, 401, 960, True), (40, 402, "idnes", True, 401, None, False),
+    (50, 501, "sreality", True, 501, 970, True), (50, 502, "idnes", True, 501, None, True),
+    (50, 503, "bazos", True, 501, None, True),
 ]
 
 
@@ -37,9 +40,11 @@ def _row(columns: tuple[str, ...], **values: Any) -> tuple[Any, ...]:
 
 CANNED = {
     asql.MUST_NOT_LINK_SQL: [(301, 302, "operator")],
-    usql.MEMBER_PAIR_VERDICTS_SQL: [_row(
-        usql.VERDICT_COLUMNS, listing_lo=101, listing_hi=103, verdict="different",
-        note="other floor", reasons=["floor"], decided_by="op@example.com", decided_at=AT)],
+    usql.MEMBER_PAIR_VERDICTS_SQL: [
+        _row(usql.VERDICT_COLUMNS, listing_lo=101, listing_hi=103, verdict="different",
+             note="other floor", reasons=["floor"], decided_by="op@example.com", decided_at=AT),
+        _row(usql.VERDICT_COLUMNS, listing_lo=501, listing_hi=503, verdict="same",
+             decided_by="op@example.com", decided_at=AT)],
     usql.CLUSTER_CONFLICTS_SQL: [
         _row(usql.CONFLICT_COLUMNS, kind="invariant", listing_lo=102, listing_hi=103,
              invariant="floor_spread", detail={"generation": "g12"}),
@@ -50,7 +55,9 @@ CANNED = {
              decision="auto_reject:area"),
         _row(usql.PAIR_COLUMNS, listing_lo=102, listing_hi=103, zone="veto", guard_veto="floor"),
         _row(usql.PAIR_COLUMNS, listing_lo=101, listing_hi=102, zone="merge",
-             decision="certificate:K-A")],
+             decision="certificate:K-A"),
+        _row(usql.PAIR_COLUMNS, listing_lo=501, listing_hi=503, zone="reject",
+             decision="auto_reject:area")],
     pi._LIVE_MOVES_SQL: [(103, 5, "grp", 10, 13, "operator", AT)],
     usql.LATEST_GENERATION_SQL: [("g12",)],
 }
@@ -140,6 +147,14 @@ def test_one_property_is_the_generations_view_of_it_proposal_or_not(client):
     unseen = client.get("/autodedup/proposed-splits/40").json()["data"]
     assert unseen["proposed"] is False and unseen["unseen"] == [_advert(402, "idnes")]
     assert client.get("/autodedup/proposed-splits/99").status_code == 404
+
+
+def test_a_pair_never_scored_or_ruled_same_is_not_a_proposal(client):
+    """Grouped apart is not stated apart: 501/502 were never scored against each other, and the
+    operator's newest ruling on 501/503 is `same`, which the engine obeys (decision 8)."""
+    one = client.get("/autodedup/proposed-splits/50").json()["data"]
+    assert (one["proposed"], one["splits"]) == (False, [])
+    assert [[a["listing_id"] for a in g["adverts"]] for g in one["groups"]] == [[501], [502], [503]]
 
 
 def test_an_unmigrated_store_renders_and_unknown_filters_are_refused(client, conn):

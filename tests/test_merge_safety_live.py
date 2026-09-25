@@ -345,6 +345,30 @@ def test_the_price_history_and_the_alerts_are_the_canonical_adverts_own(cur):
     assert drops == [(pid, cut, 4_900_000, 5_000_000)]
 
 
+def test_a_merge_that_changes_the_canonical_advert_replays_no_older_step(cur):
+    """The absorbed sreality advert outranks the survivor's bazos one, so it becomes canonical;
+    its cut from yesterday was never the price the property showed, so neither producer fires
+    it. A cut after the handover does fire."""
+    from api.notifications import _recent_price_drops
+
+    survivor, absorbed = _property(cur), _property(cur)
+    _advert(cur, survivor, source="bazos", price=5_200_000)
+    moved = _advert(cur, absorbed, source="sreality", price=5_000_000)
+    _snapshot(cur, moved, 5_300_000, 30)
+    _snapshot(cur, moved, 5_000_000, 20)
+    for pid in (survivor, absorbed):
+        _recompute(cur, pid)
+    _merge(cur, [survivor, absorbed])
+    cur.execute("SELECT repr_listing_ref_id, repr_since > '-infinity' FROM properties "
+                "WHERE id = %s", (survivor,))
+    assert cur.fetchone() == (moved, True)
+    assert [d for d in _recent_price_drops(cur.connection, window_days=2) if d[0] == survivor] == []
+
+    after = _snapshot(cur, moved, 4_900_000, -0.01)
+    drops = [d for d in _recent_price_drops(cur.connection, window_days=2) if d[0] == survivor]
+    assert drops == [(survivor, after, 4_900_000, 5_000_000)]
+
+
 def test_comparables_count_a_property_once_and_leave_out_the_subjects_siblings(cur):
     """Decision 13: a two-portal comparable is ONE comparable (its canonical advert), and the
     subject's sibling on another portal is not the subject's comparable."""

@@ -1,6 +1,7 @@
 /* The proposed-splits page (decision 9): the engine proposes, the operator
  * splits — a checkbox per proposal, a two-step batch, one detach per advert
- * outside the canonical advert's group, progress, and an outcome per advert. */
+ * that may leave (alone in its group, merged in, stated apart from the group
+ * that stays), progress, and an outcome per advert. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -29,6 +30,13 @@ const advert = (listing_id: number, source: string, origin_property_id: number |
   origin_property_id,
 });
 
+const pair = (
+  listing_lo: number,
+  listing_hi: number,
+  reason_source: api.ProposedSplit['splits'][number]['reason_source'] = 'pair',
+  reason = 'reject: plocha 55 vs 72',
+) => ({ listing_lo, listing_hi, reason_source, reason, ruling: null });
+
 const ITEMS: api.ProposedSplit[] = [
   {
     property_id: 42,
@@ -36,18 +44,38 @@ const ITEMS: api.ProposedSplit[] = [
     proposed: true,
     groups: [
       { cluster_key: 1, adverts: [advert(101, 'sreality', null)] },
-      { cluster_key: 2, adverts: [advert(202, 'idnes', 43), advert(203, 'bazos', null)] },
+      { cluster_key: 2, adverts: [advert(202, 'idnes', 43)] },
     ],
     unseen: [],
-    splits: [
-      {
-        listing_lo: 101,
-        listing_hi: 202,
-        reason_source: 'pair',
-        reason: 'reject: plocha 55 vs 72',
-        ruling: null,
-      },
+    splits: [pair(101, 202)],
+    ruled: false,
+  },
+  {
+    /* Two adverts the engine calls one flat: detaching them one by one would
+     * rule them different from each other. */
+    property_id: 44,
+    canonical_listing_id: 111,
+    proposed: true,
+    groups: [
+      { cluster_key: 6, adverts: [advert(111, 'sreality', null)] },
+      { cluster_key: 7, adverts: [advert(112, 'idnes', 45), advert(113, 'bazos', 45)] },
     ],
+    unseen: [],
+    splits: [pair(111, 112), pair(111, 113)],
+    ruled: false,
+  },
+  {
+    /* The canonical advert came by a merge: the property's own advert stays. */
+    property_id: 46,
+    canonical_listing_id: 461,
+    proposed: true,
+    groups: [
+      { cluster_key: 8, adverts: [advert(461, 'sreality', 47)] },
+      { cluster_key: null, adverts: [advert(462, 'bazos', null)] },
+      { cluster_key: null, adverts: [advert(463, 'remax', 48)] },
+    ],
+    unseen: [],
+    splits: [pair(461, 462, 'conflict', 'invariant: floor_spread')],
     ruled: false,
   },
   {
@@ -59,9 +87,7 @@ const ITEMS: api.ProposedSplit[] = [
       { cluster_key: null, adverts: [advert(302, 'idnes', null)] },
     ],
     unseen: [],
-    splits: [
-      { listing_lo: 301, listing_hi: 302, reason_source: 'none', reason: 'no stated fact', ruling: null },
-    ],
+    splits: [pair(301, 302, 'must_not_link', 'must_not_link (operator)')],
     ruled: false,
   },
   {
@@ -75,10 +101,7 @@ const ITEMS: api.ProposedSplit[] = [
     unseen: [advert(403, 'bazos', null)],
     splits: [
       {
-        listing_lo: 401,
-        listing_hi: 402,
-        reason_source: 'must_not_link',
-        reason: 'must_not_link (operator)',
+        ...pair(401, 402, 'must_not_link', 'must_not_link (operator)'),
         ruling: {
           verdict: 'different',
           decided_by: 'operator',
@@ -113,7 +136,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.getProposedSplits).mockResolvedValue({
     store_ready: true,
-    data: { generation: 'g12', total: 3, items: ITEMS, next_after: null },
+    data: { generation: 'g12', total: 5, items: ITEMS, next_after: null },
   });
   vi.mocked(api.detachListing).mockImplementation(async (propertyId, listingId) => ({
     listing_id: listingId,
@@ -128,20 +151,38 @@ beforeEach(() => {
 describe('<AutodedupProposedSplits> the list', () => {
   it('shows each proposal as the engine groups it, with the reason and any ruling', async () => {
     setup();
-    expect(await screen.findByText('generace g12 · 3 návrhů')).toBeInTheDocument();
+    expect(await screen.findByText('generace g12 · 5 návrhů')).toBeInTheDocument();
 
     const p42 = card(42);
     expect(within(p42).getByText('Zůstává')).toBeInTheDocument();
     expect(within(p42).getByText('Oddělit · skupina 2')).toBeInTheDocument();
     expect(within(p42).getByText(/dvojice: reject: plocha 55 vs 72/)).toBeInTheDocument();
     // Photos side by side: one member card per advert.
-    for (const id of ['#101', '#202', '#203']) expect(within(p42).getByText(id)).toBeInTheDocument();
-    expect(within(p42).getByText('nepřišel sloučením — zůstane')).toBeInTheDocument();
+    for (const id of ['#101', '#202']) expect(within(p42).getByText(id)).toBeInTheDocument();
+    expect(within(p42).getByRole('checkbox')).toBeEnabled();
     expect(within(p42).getByRole('link', { name: 'detail' })).toHaveAttribute('href', '/property/42');
-    expect(queries.fetchListingsForListingIds).toHaveBeenCalledWith([101, 202, 203, 301, 302, 401, 402, 403]);
+    expect(queries.fetchListingsForListingIds).toHaveBeenCalledWith([
+      101, 202, 111, 112, 113, 461, 462, 463, 301, 302, 401, 402, 403,
+    ]);
 
-    // Nothing outside the first group came by a merge: nothing to split.
+    // A group of two cannot leave one advert at a time.
+    const p44 = card(44);
+    expect(within(p44).getByRole('checkbox')).toBeDisabled();
+    expect(within(p44).getAllByText('skupinu nelze oddělit po jednom — zůstane')).toHaveLength(2);
+    expect(within(p44).getByText('Skupina 2')).toBeInTheDocument();
+
+    // The canonical advert came by a merge: the property's own group stays, it leaves;
+    // an advert the engine never stated apart from the staying group stays too.
+    const p46 = card(46);
+    expect(within(p46).getByText('Oddělit · skupina 1')).toBeInTheDocument();
+    expect(within(p46).getByText('Zůstává')).toBeInTheDocument();
+    expect(within(p46).getByText('Skupina 3')).toBeInTheDocument();
+    expect(within(p46).getByText('engine ho od zůstávající skupiny neodlišil — zůstane')).toBeInTheDocument();
+    expect(within(p46).getByRole('checkbox')).toBeEnabled();
+
+    // Nothing came by a merge: nothing to split.
     expect(within(card(50)).getByRole('checkbox')).toBeDisabled();
+    expect(within(card(50)).getByText('nepřišel sloučením — zůstane')).toBeInTheDocument();
 
     const p60 = card(60);
     expect(within(p60).getByText('rozhodnuto')).toBeInTheDocument();
@@ -157,7 +198,7 @@ describe('<AutodedupProposedSplits> the list', () => {
 });
 
 describe('<AutodedupProposedSplits> Rozdělit vybrané', () => {
-  it('asks twice, detaches each advert outside the first group with the shared reason, and reports each', async () => {
+  it('asks twice, detaches each advert that may leave with the shared reason, and reports each', async () => {
     vi.mocked(api.detachListing).mockImplementation(async (propertyId, listingId) => {
       if (listingId === 402) throw new Error('HTTP 409');
       return {
@@ -172,11 +213,12 @@ describe('<AutodedupProposedSplits> Rozdělit vybrané', () => {
     const { invalidate } = setup();
 
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Vybrat nemovitost #42' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Vybrat nemovitost #46' }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Vybrat nemovitost #60' }));
-    expect(screen.getByText(/Vybráno 2 · 2 inzeráty k/)).toBeInTheDocument();
+    expect(screen.getByText(/Vybráno 3 · 3 inzeráty k/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Rozdělit vybrané' }));
-    expect(screen.getByText('Oddělit 2 inzeráty z 2 nemovitostí?')).toBeInTheDocument();
+    expect(screen.getByText('Oddělit 3 inzeráty z 3 nemovitostí?')).toBeInTheDocument();
     expect(api.detachListing).not.toHaveBeenCalled();
 
     fireEvent.change(screen.getByRole('textbox', { name: /Společný důvod/ }), {
@@ -184,12 +226,13 @@ describe('<AutodedupProposedSplits> Rozdělit vybrané', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Ano, rozdělit' }));
 
-    await waitFor(() => expect(api.detachListing).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(api.detachListing).toHaveBeenCalledTimes(3));
     expect(api.detachListing).toHaveBeenNthCalledWith(1, 42, 202, 'jiné patro');
-    expect(api.detachListing).toHaveBeenNthCalledWith(2, 60, 402, 'jiné patro');
+    expect(api.detachListing).toHaveBeenNthCalledWith(2, 46, 461, 'jiné patro');
+    expect(api.detachListing).toHaveBeenNthCalledWith(3, 60, 402, 'jiné patro');
 
     const result = await screen.findByRole('region', { name: 'Výsledek rozdělení' });
-    expect(within(result).getByText('Odděleno 1 z 2 inzeráty.')).toBeInTheDocument();
+    expect(within(result).getByText('Odděleno 2 z 3 inzeráty.')).toBeInTheDocument();
     expect(within(result).getByText(/inzerát #202: odděleno → nemovitost #43/)).toBeInTheDocument();
     expect(within(result).getByText(/inzerát #402: chyba: HTTP 409/)).toBeInTheDocument();
     // Read-your-writes: the proposals and every surface re-read.
