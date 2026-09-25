@@ -187,9 +187,9 @@ path C = same town + disposition/area; `estimate`/`verify` read only). **Read th
 its batch warmer, its geo/byt-geo runs, the model-compare and vision A/B harnesses, the publication gate) was
 removed wholesale in the 2026-08 NEW DEDUP cutoff (architectural rule #15; `docs/design/new-dedup/CUTOFF.md`)
 and its workflows/scripts must never be resurrected; nothing auto-merges (merges are operator-ordered through
-`POST /properties/merge`). The tagging/pHash/embedding lanes above ARE kept running because the rebuilt engine
-(`docs/design/new-dedup/PROGRAM.md`) consumes them, so treat a stalled `clip_tag.yml` or
-`compute_image_phash.yml` as a real problem even though nothing reads their output for decisions today.
+`POST /properties/merge`; AUTODEDUP's `mode=apply` is dark until `app_settings.autodedup_apply_scope` names an area). The
+tagging/pHash/embedding lanes above ARE kept running because the rebuilt engine (`docs/design/new-dedup/PROGRAM.md`)
+consumes them, so treat a stalled `clip_tag.yml` or `compute_image_phash.yml` as a real problem.
 
 **CLIP tagging persists an embedding for every TAGGED image** (PR #748, ~19% coverage gap; PR #751 backfilled the tagged-but-vectorless backlog).
 **Any job that REPLACES an image's bytes under its existing `storage_path`** (the sreality re-master lane — `images.rendition` / `stored_width` /

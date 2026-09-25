@@ -26,6 +26,7 @@ PACKAGE = Path(labels_lane.__file__).resolve().parent
 
 # The modules that produce a file under `out/`, and the statements they run to fill it.
 LANE_WRITERS: tuple[str, ...] = (
+    "apply.py", "apply_sql.py",
     "census.py", "compare.py", "errors.py", "evaluate.py", "export.py", "export_sql.py",
     "harness.py", "incremental_lane.py", "incremental_sql.py", "iterations.py", "judge.py",
     "judge_lane.py", "judge_prompts.py",
@@ -51,6 +52,10 @@ DECLARED: dict[str, frozenset[str]] = {
     "labels_sql.py": frozenset({"decided_by"}),
     # Reads the artifact, where the value is ALREADY a digest.
     "labels.py": frozenset({"decided_by"}),
+    # Read only as a grouping key (the newest group ruling per operator stands) and never
+    # written: the plan names ruled SETS, never who ruled them (test_apply pins it).
+    "apply.py": frozenset({"decided_by"}),
+    "apply_sql.py": frozenset({"decided_by"}),
     # E28's broker rail: two columns selected as hash inputs, one never selected at all.
     "export.py": frozenset({"broker_email", "broker_phone"}),
     "export_sql.py": frozenset({"broker_name", "broker_email", "broker_phone"}),
