@@ -360,9 +360,13 @@ name: "AUTODEDUP: engine lane"
 #             Every other group touching the area is reported, never touched: straddling,
 #             outside_scope_categories, operator_ruled_same (the undo would separate an
 #             operator "same" pair), operator_ruled_different (it would newly join a pair the
-#             operator ruled apart; machine guards do not count), operator_split (the operator
-#             already took an advert of it back), built_on, children_moved,
-#             survivor_merged_on, listing_gone. Engine groups count only when this run may
+#             operator ruled apart; machine guards do not count), engine_agrees_out_of_scope
+#             (every advert sits in ONE engine group this run may not merge - not proposed, or
+#             cut by the scope's edge - so undoing it would split what the engine calls one
+#             property; left for W6, reported with that group and why), operator_split (the
+#             operator already took an advert of it back), built_on, children_moved,
+#             survivor_merged_on, listing_gone. A group the engine itself splits (different
+#             engine groups, or ungrouped adverts) is undone. Engine groups count only when this run may
 #             merge them (proposed, inside the scope); the others touching the retire set are
 #             counted apart. max_clusters_per_run caps only the engine's merges: live, undone
 #             groups whose engine group it deferred are counted and a re-dispatch merges them;
