@@ -75,12 +75,13 @@ class RetireDb(FakeDb):
                              or e["retired"] in area_props)}
             out = []
             for e in sorted(self.events, key=lambda e: (e["merge_group_id"], e["id"])):
-                if e["undone"] or e["merge_group_id"] not in touching:
+                if e["merge_group_id"] not in touching:
                     continue
                 row = self.listings.get(e["listing"])
                 out.append((e["id"], e["merge_group_id"], e["source"], e["created_at"],
                             e["survivor"], e["retired"], e["listing"], row is not None,
-                            row["property_id"] if row else None, self.inside(e["listing"], p)))
+                            row["property_id"] if row else None, self.inside(e["listing"], p),
+                            e["undone"], e.get("undone_by")))
             return out
         if sql == L.ADVERTS_SQL:
             return [(r["property_id"], lid, r["category_type"], self.inside(lid, p))
@@ -209,7 +210,8 @@ def test_selection_reads_every_class_the_probe_names_and_retires_only_both_sides
     }
     # newest first
     assert [x.merge_group_id for x in groups] == [
-        g[k] for k in ("mixed", "rental", "listing_gone", "built_on", "children_moved", "survivor_merged_on",
+        g[k] for k in ("mixed", "rental", "listing_gone", "built_on", "children_moved",
+                       "survivor_merged_on",
                        "survivor_side_only", "survivor_straddle", "moved_straddle", "intact")]
     assert next(x for x in groups if x.merge_group_id == g["survivor_straddle"]).outside == [7]
 
@@ -222,7 +224,7 @@ def test_the_dry_run_counts_reproduce_the_probe_and_write_nothing() -> None:
                           detach=db.detach_recording(calls))
     assert calls == [] and db.state() == before
     assert set(db.statements) == {L.GROUPS_SQL, S.PROPERTY_STATE_SQL, L.ADVERTS_SQL,
-                                  L.BUILT_ON_SQL}
+                                  L.BUILT_ON_SQL, S.PAIR_VERDICTS_SQL}
     counts = out["counts"]
     assert counts["groups_touching"] == 10
     assert counts["touching_only_through_survivor_side"] == 1
@@ -294,7 +296,8 @@ def test_a_group_whose_detach_refuses_rolls_back_whole_and_the_run_goes_on() -> 
             return {"data": {"detached": False, "outcome": "moved_since"}}
         return base(conn, lid, **kw)
 
-    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", detach=detach)
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=detach)
     by = {x["merge_group_id"]: x["outcome"] for x in out["groups"]}
     assert by == {newer: "refused:moved_since", older: "retired"}
     assert db.listings[11]["property_id"] == 300, "the advert detached first is rolled back"
@@ -314,7 +317,8 @@ def test_a_group_that_changed_since_selection_is_refused_over_a_fresh_read() -> 
         conn.listings[2]["property_id"] = 900          # the older group's advert moves away
         return base(conn, lid, **kw)
 
-    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", detach=detach)
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=detach)
     by = {x["merge_group_id"]: x["outcome"] for x in out["groups"]}
     assert by == {newer: "retired", older: "refused:children_moved"}
     assert [c["merge_group_id"] for c in calls] == [newer]
@@ -336,9 +340,10 @@ def test_a_group_the_operator_split_in_part_since_selection_is_left_to_them() ->
         operator(conn, 3, decided_by="operator", merge_group_id=older)
         return base(conn, lid, **kw)
 
-    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", detach=detach)
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=detach)
     by = {x["merge_group_id"]: x["outcome"] for x in out["groups"]}
-    assert by == {newer: "retired", older: "refused:changed_since_selection"}
+    assert by == {newer: "retired", older: "refused:operator_split"}
     assert db.listings[2]["property_id"] == 100 and db.listings[3]["property_id"] == 200
 
 
@@ -432,6 +437,7 @@ def test_the_apply_mode_runs_it_only_when_asked_and_reports_it(
         tmp_path: Path, monkeypatch: Any) -> None:
     db, _g = _world()
     db.live_scope(blocks=sorted(TRIAL))
+    db.group(10, [1, 2])                               # the engine groups the intact pair
     A.run_apply(_factory(db), {"generation": GEN}, tmp_path)
     assert L.GROUPS_SQL not in db.statements and not (tmp_path / "apply").exists()
 
@@ -481,3 +487,157 @@ def test_live_the_old_merge_is_undone_before_the_plan_reads_the_area(
     assert sources == ["auto", "autodedup"] and db.events[0]["undone"]
     assert db.events[0]["undone_by"].startswith(f"{L.RETIRE_BY}:")
     assert db.listings[2]["property_id"] == 100
+
+
+# ------------------------------------------------------------------ review round (fix-first)
+
+
+def test_1_a_group_the_operator_split_in_part_before_selection_is_reported_not_retired() -> None:
+    """Reviewer S1: X taken back by hand (ruled apart from Y); undoing the rest would put Y
+    beside X on the origin."""
+    db = RetireDb()
+    db.advert(1, 100)                                  # the survivor's own advert Z
+    db.advert(2, 200)                                  # X
+    db.advert(3, 200)                                  # Y
+    g = db.merged(100, 200)
+    db.detach([])(db, 2, decided_by="operator")        # no merge_group_id: X back to 200
+    calls: list[dict[str, Any]] = []
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording(calls))
+    assert {x["merge_group_id"]: x["outcome"] for x in out["groups"]} == {
+        g: "skipped:operator_split"}
+    assert calls == [] and db.listings[3]["property_id"] == 100
+    group = out["groups"][0]
+    assert group["undone_by_others"] == ["unknown"] and group["moved"] == [3]
+    # the probe's intact is ours plus operator_split
+    assert out["counts"]["probe_r1c_by_health"] == {"operator_split": 1}
+
+
+def test_1_the_undo_never_lands_an_advert_beside_one_an_operator_negative_keeps_it_from() -> None:
+    db = RetireDb()
+    older = _intact_pair(db, 100, 200, 1)
+    newer = _intact_pair(db, 300, 400, 3)
+    db.listing(9, 200)                                 # an advert on the older origin since
+    db.location[9] = IN_TOWN
+    db.listing(8, 400)
+    db.location[8] = IN_TOWN
+    db.mnl.append((2, 9, "operator"))
+    db.verdicts.append({"kind": "pair", "lo": 4, "hi": 8, "verdict": "different"})
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    assert {x["merge_group_id"]: x["outcome"] for x in out["groups"]} == {
+        older: "refused:ruled_different", newer: "refused:ruled_different"}
+    assert db.listings[2]["property_id"] == 100 and db.listings[4]["property_id"] == 300
+
+
+def test_7_a_group_whose_undo_would_separate_an_operator_same_pair_is_left() -> None:
+    db = RetireDb()
+    ruled = _intact_pair(db, 100, 200, 1)
+    free = _intact_pair(db, 300, 400, 3)
+    db.verdicts.append({"kind": "pair", "lo": 1, "hi": 2, "verdict": "same"})
+    db.verdicts.append({"kind": "pair", "lo": 3, "hi": 99, "verdict": "same"})  # not on it
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    by = {x["merge_group_id"]: x for x in out["groups"]}
+    assert by[ruled]["outcome"] == "skipped:operator_ruled_same"
+    assert by[ruled]["separates_same"] == [[1, 2]]
+    assert by[free]["outcome"] == "retired" and db.listings[2]["property_id"] == 100
+
+
+def test_4_a_native_sale_beside_rentals_is_not_a_mix_the_merge_made() -> None:
+    """Reviewer S4: the survivor already held a sale and a rental; the old merge added a
+    rental. Not created by the merge, so the deal types decide: a rental merge, left."""
+    db = RetireDb()
+    db.advert(1, 100, ct="pronajem")
+    db.listing(9, 100, ct="prodej")
+    db.location[9] = IN_TOWN
+    db.advert(2, 200, ct="pronajem")
+    g = db.merged(100, 200)
+    calls: list[dict[str, Any]] = []
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording(calls))
+    assert {x["merge_group_id"]: x["outcome"] for x in out["groups"]} == {
+        g: "skipped:outside_scope_categories"}
+    assert calls == [] and db.listings[2]["property_id"] == 100
+    assert out["groups"][0]["mixed"] is False
+
+
+def test_5_a_chain_is_undone_in_one_dispatch_pass_after_pass() -> None:
+    """Reviewer S6: R1 -> S, then S -> T. The newer merge first; its undo leaves the older one
+    intact, and the next pass of the same dispatch takes it."""
+    db = RetireDb()
+    db.advert(1, 100)
+    db.advert(2, 200)
+    older = db.merged(100, 200)
+    db.advert(3, 50)
+    newer = db.merged(50, 100)
+    dry = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r0")
+    assert dry["counts"]["chained_behind_retire_set"] == 1
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    by = {x["merge_group_id"]: (x["outcome"], x["retired_in_pass"]) for x in out["groups"]}
+    assert by == {newer: ("retired", 1), older: ("retired", 2)}
+    assert out["passes"] == 2 and out["counts"]["retire_set_after_first_pass"] == 1
+    assert {lid: db.listings[lid]["property_id"] for lid in (1, 2, 3)} == {1: 100, 2: 200, 3: 50}
+    # the probe's grain is the selection as first read
+    assert out["counts"]["probe_r1c_by_health"] == {"intact": 1, "survivor_merged_on": 1}
+
+
+def test_6_the_dry_run_lists_the_engine_groups_touching_the_retire_set() -> None:
+    db = RetireDb()
+    _intact_pair(db, 100, 200, 1)
+    _intact_pair(db, 300, 400, 3)
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r0",
+                          cluster_of={1: 10, 2: 10, 3: 20, 77: 30})
+    assert out["engine_clusters"] == [10, 20]
+    assert out["counts"]["engine_clusters_touching_retire_set"] == 2
+    assert out["counts"]["retire_set_without_engine_cluster"] == 0
+    assert "Engine groups touching the retire set: 10 20" in L.summary_markdown(out)
+
+
+def test_2_a_generation_with_nothing_to_re_merge_undoes_nothing(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Reviewer S2: a typo'd generation would have undone every old merge and merged nothing."""
+    db = RetireDb()
+    db.live_scope(blocks=sorted(TRIAL))
+    _intact_pair(db, 100, 200, 1)
+    db.group(10, [1, 2])
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(L, "detach_listing", db.detach_recording(calls))
+    for dry_run in ("1", "0"):
+        with pytest.raises(SystemExit, match="no proposed group inside the scope"):
+            A.run_apply(_factory(db), {"generation": "g21-typo", "retire_legacy": "1",
+                                       "dry_run": dry_run}, tmp_path)
+    assert calls == [] and db.listings[2]["property_id"] == 100
+    assert not (tmp_path / "apply" / "legacy_retire.json").exists()
+
+
+def test_3_listing_ids_are_refused_and_the_cap_is_counted_not_hidden(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Reviewer S3: the step reads blocks only, so a listing narrowing is refused; the run cap
+    limits the engine's merges, so what it deferred is counted for the next dispatch."""
+    db = RetireDb()
+    db.live_scope(blocks=sorted(TRIAL))
+    first = _intact_pair(db, 100, 200, 1)
+    second = _intact_pair(db, 300, 400, 3)
+    db.group(10, [1, 2])
+    db.group(20, [3, 4])
+    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    merged: list[dict[str, Any]] = []
+    original = A.apply_plan
+    monkeypatch.setattr(A, "apply_plan", lambda conn, plan, dry_run: original(
+        conn, plan, dry_run, merge=db.merge(merged)))
+    with pytest.raises(SystemExit, match="listing_ids"):
+        A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1", "dry_run": "0",
+                                   "listing_ids": "1 2"}, tmp_path)
+    assert db.listings[2]["property_id"] == 100 and db.listings[4]["property_id"] == 300
+    page = tmp_path / "step_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    out = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1", "dry_run": "0",
+                                     "max_clusters_per_run": "1"}, tmp_path)
+    assert out["legacy_retire"]["counts"]["outcomes"] == {"retired": 2}
+    assert out["counts"]["applied"] == 1 and out["deferred"] == [20]
+    assert out["legacy_retire"]["counts"]["undone_but_engine_group_deferred_by_cap"] == 1
+    body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())
+    assert body["deferred_by_cap"] == [second] and first not in body["deferred_by_cap"]
+    assert "the run cap deferred" in page.read_text()

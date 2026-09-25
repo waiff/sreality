@@ -1523,13 +1523,13 @@ def run_apply(
             scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
         except ValueError as exc:
             raise SystemExit(f"scope: {exc}") from exc
-        if retire:
-            # A2 (temporary, deleted in W5): the old engine's merges in the scope's blocks
-            # undone first, in this same dispatch, so the plan below reads them apart.
-            retired = legacy_retire.run(conn, scope.blocks, category_types=scope.category_types,
-                                        dry_run=dry_run, run_id=new_run_id(), out_dir=out_dir,
-                                        closed=scope_closed)
         plan = plan_apply(conn, generation, scope)
+        if retire:
+            retired = _retire_legacy(conn, generation, scope, plan, dry_run=dry_run,
+                                     out_dir=out_dir)
+            if not dry_run:
+                plan = plan_apply(conn, generation, scope)
+            retired = legacy_retire.note_deferred(out_dir, retired, plan.deferred)
         try:
             result = apply_plan(conn, plan, dry_run)
         except ApplyRefused as exc:
@@ -1544,6 +1544,29 @@ def run_apply(
     finally:
         _close(conn)
     return _publish_apply(out_dir, _with_retire(result, retired), plan)
+
+
+def _retire_legacy(
+    conn: Any, generation: str, scope: Scope, plan: Plan, *, dry_run: bool, out_dir: Path,
+) -> dict[str, Any]:
+    """A2 (temporary, deleted in W5): the old engine's merges in the scope undone first, in this
+    same dispatch, so the plan that follows reads them apart. Refused before anything moves when
+    the run narrows by listing (the step reads blocks only) or when `plan`, read first, holds no
+    proposed group inside the scope: a typo'd or unstored generation would re-merge nothing."""
+    if scope.listing_ids is not None:
+        raise SystemExit("retire_legacy=1 cannot run with listing_ids: the retire step reads the "
+                         "scope's blocks only; nothing was undone")
+    counts = plan.counts
+    proposed = counts.get("clusters", 0) - sum(
+        counts.get(key, 0) for key in ("not_proposed", "no_members", "out_of_scope"))
+    if proposed <= 0:
+        raise SystemExit(f"retire_legacy=1: generation {plan.generation!r} holds no proposed "
+                         "group inside the scope, so nothing would merge again; nothing was undone")
+    cluster_of = {int(lid): int(key) for key, lid, *_rest in _rows(
+        conn, S.MEMBERS_SQL, {"generation": generation})}
+    return legacy_retire.run(conn, scope.blocks, category_types=scope.category_types,
+                             dry_run=dry_run, run_id=new_run_id(), out_dir=out_dir,
+                             closed=scope_closed, cluster_of=cluster_of)
 
 
 def _with_retire(result: dict[str, Any], retired: dict[str, Any] | None) -> dict[str, Any]:
