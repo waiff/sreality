@@ -160,8 +160,7 @@ export interface ListingSnapshotPublic {
   /* The owning listing's SURROGATE id (listing_snapshots_public.listing_id,
    * migration 334/343). Group/join snapshots on this, not sreality_id — a
    * post-Gate-2 non-sreality listing's snapshots all carry NULL sreality_id
-   * and would otherwise collide onto one shared bucket. Only populated by
-   * fetchSnapshotsForListings' select; fetchSnapshotsByListing omits it. */
+   * and would otherwise collide onto one shared bucket. */
   listing_id: number;
   scraped_at: string;
   price_czk: number | null;
@@ -1644,14 +1643,13 @@ export interface MergedPropertiesResponse {
   returned: number;    // rows on this page
 }
 
-/* One row of property_sources_public — a property's per-portal observations.
- * Drives the Listing Detail "listed on N sites" panel. */
+/* One row of property_sources_public — one advert of a property: a row of the
+ * property page's merged-adverts section. */
 export interface PropertySource {
   property_id: number;
   /* The child listing's SURROGATE id (property_sources_public.id = listings.id,
-   * migration 334). NEVER null on rows read from property_sources_public — the
-   * R2 resolver-chain keys child loaders (snapshots, sibling links) on this
-   * instead of sreality_id, which a post-Gate-2 non-sreality row may not have. */
+   * migration 334). NEVER null — per-advert loaders key on it, never on
+   * sreality_id, which a post-Gate-2 non-sreality row may not have. */
   id: number;
   sreality_id: number;
   source: string;

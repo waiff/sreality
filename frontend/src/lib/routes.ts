@@ -70,9 +70,8 @@ function def<P extends `/${string}`>(pattern: P): RouteDef<P> {
       //   against react-router 6.30.3: a param of "a/b" yields "/listing/a/b",
       //   silently changing the route's shape). A portal's native id is
       //   free-form text, so an unencoded "/" or "?" would build a URL that
-      //   resolves somewhere else entirely. Encoding here preserves what
-      //   listingCanonicalPath did by hand and makes every future builder safe
-      //   by construction.
+      //   resolves somewhere else entirely. Encoding here makes every builder
+      //   safe by construction.
       const safe: Record<string, string> = {};
       for (const [k, v] of Object.entries(params)) safe[k] = encodeURIComponent(String(v));
       return generatePath(pattern, safe as never) as RoutePath;
@@ -88,9 +87,11 @@ export const ROUTES = {
   resetPassword: def('/reset-password'),
 
   browse: def('/browse'),
-  // Bare /listing serves the ?property=<id> query form; the two parameterised
-  // forms are the canonical natural key and the legacy numeric resolver. All
-  // three are documented in lib/listingUrl.ts, which owns the precedence.
+  // THE property page (decision 11): one real property, one stable address.
+  property: def('/property/:propertyId'),
+  // Advert addresses, kept forever as aliases (bookmarks, emails, the
+  // extension): each resolves its advert's property and lands on `property`
+  // with that advert's row open. Bare /listing serves the old ?property=<id>.
   listing: def('/listing'),
   listingCanonical: def('/listing/:source/:nativeId'),
   listingLegacy: def('/listing/:sreality_id'),
@@ -137,6 +138,8 @@ export const ROUTES = {
   autodedupGroups: def('/autodedup/groups'),
   autodedupResidual: def('/autodedup/residual'),
   autodedupPair: def('/autodedup/pair/:lo/:hi'),
+  // Decision 9: engine splits are propose-only; the operator splits from here.
+  autodedupProposedSplits: def('/autodedup/proposed-splits'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;

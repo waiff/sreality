@@ -3093,6 +3093,48 @@ export const fetchPropertyOrigins = (
     { jwt: true },
   );
 
+/* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
+ * generation groups its adverts apart (the canonical advert's group first), each
+ * split pair with the engine's stated reason and the operator's newest ruling.
+ * The split itself is `detachListing`, advert by advert; an advert with no
+ * `origin_property_id` never came by a merge and answers `not_merged`. */
+export interface ProposedSplitAdvert {
+  listing_id: number;
+  source: string;
+  is_active: boolean;
+  origin_property_id: number | null;
+}
+
+export interface ProposedSplit {
+  property_id: number;
+  canonical_listing_id: number;
+  proposed: boolean;
+  groups: { cluster_key: number | null; adverts: ProposedSplitAdvert[] }[];
+  /* Adverts of the property the generation never saw: not spoken for. */
+  unseen: ProposedSplitAdvert[];
+  splits: {
+    listing_lo: number;
+    listing_hi: number;
+    reason_source: 'conflict' | 'pair' | 'must_not_link' | 'none';
+    reason: string;
+    ruling: {
+      verdict: string;
+      decided_by: string;
+      decided_at: string | null;
+      note: string | null;
+      reasons: string[];
+    } | null;
+  }[];
+  ruled: boolean;
+}
+
+export const getProposedSplits = (
+  f: { generation?: string | null; after?: number | null; limit?: number } = {},
+): Promise<
+  AutodedupEnvelope<{ generation: string | null; total: number; items: ProposedSplit[]; next_after: number | null }>
+> =>
+  request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
+
 /* ----- price-stats datasets ---------------------------------------------- */
 
 export interface PriceStatDatasetInput {

@@ -1,6 +1,7 @@
-/* The merged-adverts section: one row per advert, photos collapsed, words on
- * expand, and for an admin session each advert's origin and the exact two-step
- * per-advert split, any property size, any merge origin. */
+/* The merged-adverts section: the property page's only list of adverts — one
+ * row per advert, photos and the portal link collapsed, words on expand, the
+ * asked-for advert's row open, and for an admin session each advert's origin
+ * and the exact two-step per-advert split, any property size, any merge origin. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -32,7 +33,6 @@ vi.mock('@/lib/queries', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/queries')>()),
   fetchListingsForListingIds: vi.fn(),
   fetchImagesForListingIds: vi.fn(),
-  fetchPropertySources: vi.fn(async () => ({ property_id: 42, sources: [] })),
 }));
 vi.mock('@/lib/toast', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/toast')>()),
@@ -112,7 +112,10 @@ function origins(extra: api.AdvertOrigin[] = []) {
   };
 }
 
-function setup({ sources = SOURCES }: { sources?: PropertySource[] } = {}) {
+function setup({
+  sources = SOURCES,
+  openAdvertId = null,
+}: { sources?: PropertySource[]; openAdvertId?: number | null } = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -121,8 +124,9 @@ function setup({ sources = SOURCES }: { sources?: PropertySource[] } = {}) {
       <MemoryRouter>
         <MergedAdvertsSection
           propertyId={42}
-          currentListingId={101}
+          canonicalListingId={101}
           sources={sources}
+          openAdvertId={openAdvertId}
         />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -131,7 +135,7 @@ function setup({ sources = SOURCES }: { sources?: PropertySource[] } = {}) {
 }
 
 function rowOf(portal: string): HTMLElement {
-  return screen.getByText(portal).closest('li') as HTMLElement;
+  return screen.getAllByText(portal)[0].closest('li') as HTMLElement;
 }
 
 beforeEach(() => {
@@ -168,18 +172,21 @@ beforeEach(() => {
 });
 
 describe('<MergedAdvertsSection> rows', () => {
-  it('renders nothing for a property of one advert', () => {
-    const { view } = setup({ sources: SOURCES.slice(0, 1) });
-    expect(view.container).toBeEmptyDOMElement();
-    expect(queries.fetchListingsForListingIds).not.toHaveBeenCalled();
+  it('lists a singleton property’s one advert too — it is the only advert list', () => {
+    setup({ sources: SOURCES.slice(0, 1) });
+    expect(screen.getByText('Inzerát')).toBeInTheDocument();
+    expect(within(rowOf('Sreality')).getByRole('link', { name: 'Na portálu Sreality' })).toHaveAttribute(
+      'href',
+      SOURCES[0].source_url,
+    );
   });
 
-  it('collapsed: portal, price, area + disposition, the seen span and the first photos — no description', async () => {
+  it('collapsed: portal, price, area + disposition, the seen span, the first photos and the link out — no description', async () => {
     setup();
     expect(screen.getByText('Sloučené inzeráty')).toBeInTheDocument();
 
     const sreality = rowOf('Sreality');
-    expect(within(sreality).getByText('tento inzerát')).toBeInTheDocument();
+    expect(within(sreality).getByText('v záhlaví')).toBeInTheDocument();
     expect(within(sreality).getByText('5 000 000 Kč')).toBeInTheDocument();
     expect(await within(sreality).findByText('54 m² · 2+kk')).toBeInTheDocument();
     expect(within(sreality).getByText(/05\/01\/2026 –\s*dosud/)).toBeInTheDocument();
@@ -187,6 +194,11 @@ describe('<MergedAdvertsSection> rows', () => {
     const idnes = rowOf('iDNES Reality');
     expect(within(idnes).getByText('staženo')).toBeInTheDocument();
     expect(within(idnes).getByText(/02\/11\/2025 –\s*14\/02\/2026/)).toBeInTheDocument();
+    // The row's own stored URL — never rebuilt from the category triple.
+    expect(within(idnes).getByRole('link', { name: 'Na portálu iDNES Reality' })).toHaveAttribute(
+      'href',
+      SOURCES[1].source_url,
+    );
 
     // Eight photos: the strip shows the first six and counts the rest.
     const strip = await within(sreality).findByTestId('thumb-strip');
@@ -199,7 +211,7 @@ describe('<MergedAdvertsSection> rows', () => {
     expect(brokers.fetchListingBroker).not.toHaveBeenCalled();
   });
 
-  it('expanded: the description, every photo, the stored portal link and the broker', async () => {
+  it('expanded: the description, every photo and the broker — no link to another detail page', async () => {
     setup();
     const idnes = rowOf('iDNES Reality');
     const toggle = within(idnes).getAllByRole('button')[0];
@@ -210,13 +222,7 @@ describe('<MergedAdvertsSection> rows', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
     // MemberText marks the unit tokens, so the text arrives in runs.
     await waitFor(() => expect(idnes.textContent).toContain('Byt č. 14, orientace na jih.'));
-    const portalLink = within(idnes).getByRole('link', { name: /Na portálu iDNES Reality/ });
-    // The row's own stored URL — never rebuilt from the category triple.
-    expect(portalLink).toHaveAttribute('href', SOURCES[1].source_url);
-    expect(within(idnes).getByRole('link', { name: 'Otevřít detail' })).toHaveAttribute(
-      'href',
-      '/listing/idnes/abc123',
-    );
+    expect(within(idnes).queryByRole('link', { name: 'Otevřít detail' })).toBeNull();
     expect(await within(idnes).findByText('Jana Nováková')).toBeInTheDocument();
     expect(brokers.fetchListingBroker).toHaveBeenCalledWith(202);
     // The carousel pages the whole album (2 photos → a counter).
@@ -227,12 +233,15 @@ describe('<MergedAdvertsSection> rows', () => {
     ).toBeInTheDocument();
   });
 
-  it('the advert the page is open on is never linked to itself', async () => {
-    setup();
+  it('opens the row an old advert address asked for, and only that one', async () => {
+    setup({ openAdvertId: 202 });
+    expect(within(rowOf('iDNES Reality')).getAllByRole('button')[0]).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
     const sreality = rowOf('Sreality');
+    expect(within(sreality).getAllByRole('button')[0]).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(within(sreality).getAllByRole('button')[0]);
-    await within(sreality).findByRole('link', { name: /Na portálu Sreality/ });
-    expect(within(sreality).queryByRole('link', { name: 'Otevřít detail' })).toBeNull();
     expect(
       await within(sreality).findByText('tato nemovitost (nepřišel sloučením)'),
     ).toBeInTheDocument();
@@ -281,10 +290,9 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
         'Odděleno — inzerát je zpět v nemovitosti #43.',
       ),
     );
-    // Read-your-writes: the page's sources re-resolved from the listing alone,
-    // and every Browse surface refetches.
-    await waitFor(() => expect(queries.fetchPropertySources).toHaveBeenCalledWith(101));
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['listing'] });
+    // Read-your-writes: the property and its advert list, and every Browse surface.
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property'] }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property-sources'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['cards'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['browse-count'] });
   });
@@ -336,7 +344,8 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
       restored_property_id: 43,
       rulings_written: 0,
     });
-    setup();
+    const { qc } = setup();
+    const invalidate = vi.spyOn(qc, 'invalidateQueries');
     fireEvent.click(
       await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
     );
@@ -347,6 +356,6 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
         'Nic se nepřesunulo — inzerát už v této nemovitosti není.',
       ),
     );
-    await waitFor(() => expect(queries.fetchPropertySources).toHaveBeenCalledWith(101));
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['property'] }));
   });
 });

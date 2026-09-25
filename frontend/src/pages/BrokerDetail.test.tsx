@@ -22,7 +22,7 @@ vi.mock('@/lib/brokers', async (importOriginal) => ({
 }));
 
 /* The explore-broker modal is provider-mounted in Shell (like the area modal);
- * the page only needs its `open` — same treatment ListingDetail.test.tsx gives
+ * the page only needs its `open` — same treatment PropertyDetail.test.tsx gives
  * useExploreAreaModal. Hoisted so the spy is reachable from the mock factory. */
 const { openExploreBroker } = vi.hoisted(() => ({ openExploreBroker: vi.fn() }));
 vi.mock('@/components/ExploreBrokerModal', () => ({
@@ -151,7 +151,8 @@ describe('<BrokerDetail> honest error states', () => {
 /* broker_listings_public declares BOTH sreality_id and property_id nullable and
  * carries no source_id_native, so a row here can genuinely have no in-app
  * destination. The cell used to pass `property_id ?? 0` and render a link to
- * `/listing?property=0`, which 404s. */
+ * `/listing?property=0`, which 404s. A row with a property opens the property
+ * page on the advert's own row. */
 describe('<BrokerDetail> locality cell never fabricates a listing link', () => {
   it('renders inert text when the row has no resolvable destination', async () => {
     vi.mocked(brokers.fetchBrokerListings).mockResolvedValue([
@@ -171,7 +172,7 @@ describe('<BrokerDetail> locality cell never fabricates a listing link', () => {
     renderPage();
 
     const link = await screen.findByRole('link', { name: /S cilem/ });
-    expect(link).toHaveAttribute('href', '/listing?property=42');
+    expect(link).toHaveAttribute('href', '/property/42?advert=2');
   });
 
   it('still links a row that carries a sreality id', async () => {

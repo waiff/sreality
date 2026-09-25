@@ -32,7 +32,7 @@ import {
   type HoverData,
 } from '@/lib/growthChoropleth';
 import HoverChart from '@/components/HoverChart';
-import { listingRowPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 import {
   drawnUncertaintyRadiusM,
   isPinExact,
@@ -2387,7 +2387,7 @@ function popupHtml(r: MapRow): string {
       ${place ? `<p class="lp-district">${escape(place)}</p>` : ''}
       <p class="lp-precision">${escape(precision)}</p>
       <p class="lp-seen" title="${escape(seenAbs)}">last seen ${escape(seen)}</p>
-      <a href="${listingRowPath(r)}" class="lp-link">View details →</a>
+      <a href="${propertyPath(r.property_id, r.listing_id)}" class="lp-link">View details →</a>
     </div>
   `;
 }

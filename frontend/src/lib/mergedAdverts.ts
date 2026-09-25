@@ -1,20 +1,26 @@
-/* The merged-adverts section on the listing page: its query keys, its words for a
- * merge's origin and a detach's outcome, and the refresh after a detach. A row's
+/* The merged-adverts section on the property page: its query keys, its words for
+ * a merge's origin and a detach's outcome, and the refresh after a detach. A row's
  * 'Rozdělit' is exact for any property size and any merge origin: it detaches that
  * one advert back to the property the merge ledger says it came from
- * (`GET /properties/{id}/origins`), offered only on a row that has one. */
+ * (`GET /properties/{id}/origins`), offered only on a row that has one. The
+ * proposed-splits page detaches the same way, advert by advert. */
 
 import type { QueryClient } from '@tanstack/react-query';
 
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { revalidateCollections } from '@/lib/collectionCache';
 import { revalidatePipeline } from '@/lib/pipelineCache';
-import { fetchPropertySources, propertySourcesKey } from '@/lib/queries';
 
 export const mergedAdvertsKeys = {
   all: ['merged-adverts'] as const,
   listings: (ids: readonly number[]) => ['merged-adverts', 'listings', ids] as const,
   origins: (propertyId: number) => ['merged-adverts', 'origins', propertyId] as const,
+};
+
+/* The property page's own reads, keyed on the property id. */
+export const propertyKeys = {
+  row: (propertyId: number | null) => ['property', propertyId] as const,
+  sources: (propertyId: number | null) => ['property-sources', propertyId] as const,
 };
 
 /* 1 inzerát · 2–4 inzeráty · 0 / 5+ inzerátů. */
@@ -52,27 +58,18 @@ export function detachOutcomeNote(outcome: string): string {
   return `Nic se nepřesunulo — ${UNMOVED[outcome] ?? outcome}.`;
 }
 
-/* Read-your-writes after a detach, for the listing page AND every Browse
- * surface. The page's source list is re-resolved from scratch rather than
- * invalidated: its query hands the listing's (pre-detach) property_id to
- * fetchPropertySources, so a plain refetch would re-read the OLD property when
- * the advert on screen is the one that moved back. Everything else is keyed off
- * the listing row, which is refetched with it. */
-export async function refreshAfterDetach(
-  qc: QueryClient,
-  currentListingId: number,
-): Promise<void> {
-  await qc.fetchQuery({
-    queryKey: propertySourcesKey(currentListingId),
-    queryFn: () => fetchPropertySources(currentListingId),
-    staleTime: 0,
-  });
+/* Read-your-writes after a detach, for the property page, the proposals page
+ * AND every Browse surface. The property page is keyed on the property, so a
+ * plain invalidation re-reads the property (a detached canonical advert hands the
+ * header to the next one) and its advert list. */
+export function refreshAfterDetach(qc: QueryClient): void {
   for (const key of [
-    ['listing'],
-    ['property-mf'],
+    ['property'],
+    ['property-sources'],
     ['property-status-events'],
     ['snapshots'],
     mergedAdvertsKeys.all,
+    ['autodedup', 'proposed-splits'],
   ]) {
     qc.invalidateQueries({ queryKey: key });
   }

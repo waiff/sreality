@@ -1,129 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import {
-  listingCanonicalPath,
-  listingPath,
-  listingRowPath,
-  propertyListingPath,
-} from './listingUrl';
+import { advertPath, listingPath, propertyPath } from './listingUrl';
 
-describe('listingPath (legacy/resolver form)', () => {
+describe('propertyPath (the one detail page)', () => {
+  it('builds the stable property address', () => {
+    expect(propertyPath(42)).toBe('/property/42');
+  });
+  it('opens one advert’s row when asked', () => {
+    expect(propertyPath(42, 105053)).toBe('/property/42?advert=105053');
+  });
+});
+
+describe('listingPath (legacy advert alias)', () => {
   it('builds /listing/{id} for a real sreality id', () => {
     expect(listingPath(4294963276)).toBe('/listing/4294963276');
   });
-  it('accepts the negative synthetic id (the resolver route handles it)', () => {
+  it('accepts the negative synthetic id (the alias resolves it)', () => {
     expect(listingPath(-284913)).toBe('/listing/-284913');
   });
 });
 
-describe('propertyListingPath', () => {
-  it('builds the ?property= entry', () => {
-    expect(propertyListingPath(42)).toBe('/listing?property=42');
+describe('advertPath (natural key first)', () => {
+  it('prefers the self-describing /listing/{source}/{native} url', () => {
+    expect(
+      advertPath({ source: 'idnes', source_id_native: '6a625d608a2b370d4a071f4c', sreality_id: -399151 }),
+    ).toBe('/listing/idnes/6a625d608a2b370d4a071f4c');
   });
-});
-
-describe('listingRowPath (Gate-2 null-safe Browse row link)', () => {
-  it('uses the fast legacy path when the row has a sreality_id', () => {
-    expect(listingRowPath({ sreality_id: 4294963276, property_id: 42 })).toBe(
-      '/listing/4294963276',
+  it('encodes a native id that would otherwise break the path', () => {
+    expect(advertPath({ source: 'mmreality', source_id_native: 'a/b c' })).toBe(
+      '/listing/mmreality/a%2Fb%20c',
     );
   });
-  it('still accepts the negative synthetic id (pre-Gate-2 non-sreality rows)', () => {
-    expect(listingRowPath({ sreality_id: -284913, property_id: 42 })).toBe(
+  it('falls back to the legacy id when the native id is missing', () => {
+    expect(advertPath({ source: 'idnes', source_id_native: null, sreality_id: -284913 })).toBe(
       '/listing/-284913',
     );
   });
-  it('routes a NULL sreality_id to the property route, never /listing/null', () => {
-    // Post-Gate-2 a new non-sreality repr has sreality_id = NULL; listingPath(null)
-    // would build "/listing/null" (and the id-spaces overlap, so the surrogate must
-    // NOT be routed through the legacy sreality route). The property route is the
-    // null-safe fallback ListingDetail resolves canonically.
-    const path = listingRowPath({ sreality_id: null, property_id: 42 });
-    expect(path).toBe('/listing?property=42');
-    expect(path).not.toContain('null');
-  });
-});
-
-describe('listingRowPath (canonical-first precedence)', () => {
-  it('prefers the canonical /listing/{source}/{native} url when the natural key is present', () => {
-    expect(
-      listingRowPath({
-        source: 'idnes',
-        source_id_native: '6a625d608a2b370d4a071f4c',
-        sreality_id: -399151,
-        property_id: 42,
-      }),
-    ).toBe('/listing/idnes/6a625d608a2b370d4a071f4c');
-  });
-  it('canonical form wins even when a sreality_id is also present (no negative-id flash)', () => {
-    const path = listingRowPath({
-      source: 'sreality',
-      source_id_native: '4294963276',
-      sreality_id: 4294963276,
-      property_id: 7,
-    });
-    expect(path).toBe('/listing/sreality/4294963276');
-  });
-  it('falls back to the legacy id when source is present but the native id is missing', () => {
-    expect(
-      listingRowPath({
-        source: 'idnes',
-        source_id_native: null,
-        sreality_id: -284913,
-        property_id: 42,
-      }),
-    ).toBe('/listing/-284913');
-  });
-  it('falls back to the property route when neither the natural key nor a sreality_id is present', () => {
-    const path = listingRowPath({
-      source: 'idnes',
-      source_id_native: null,
-      sreality_id: null,
-      property_id: 42,
-    });
-    expect(path).toBe('/listing?property=42');
-    expect(path).not.toContain('null');
-  });
-});
-
-describe('listingCanonicalPath (natural-key form)', () => {
-  it('builds a self-describing /listing/{source}/{native} url', () => {
-    expect(listingCanonicalPath('bazos', '218865547')).toBe('/listing/bazos/218865547');
-  });
-  it('never emits a negative synthetic id — the native id is the portal key', () => {
-    const path = listingCanonicalPath('idnes', 'abc-123');
-    expect(path).toBe('/listing/idnes/abc-123');
-    expect(path).not.toContain('-284913');
-  });
-  it('encodes a native id that would otherwise break the path', () => {
-    expect(listingCanonicalPath('mmreality', 'a/b c')).toBe('/listing/mmreality/a%2Fb%20c');
-  });
-});
-
-/* A row with no natural key, no sreality_id and no property_id has NOWHERE to
- * go. Callers used to hide that with `property_id ?? 0`, producing
- * `/listing?property=0` — a link that type-checks and 404s. The nullable
- * overload returns null so the caller has to decide what to render. */
-describe('listingRowPath (nothing to link to)', () => {
-  it('returns null rather than fabricating a property id', () => {
-    const path = listingRowPath({ sreality_id: null, property_id: null });
-    expect(path).toBeNull();
-    expect(path).not.toBe('/listing?property=0');
-  });
-
-  it('still resolves a nullable-typed row that does carry a property id', () => {
-    expect(listingRowPath({ sreality_id: null, property_id: 42 as number | null })).toBe(
-      '/listing?property=42',
-    );
-  });
-
-  it('still prefers the canonical form on a nullable-typed row', () => {
-    expect(
-      listingRowPath({
-        source: 'bazos',
-        source_id_native: 'abc-1',
-        sreality_id: null,
-        property_id: null,
-      }),
-    ).toBe('/listing/bazos/abc-1');
+  it('returns null rather than fabricating a destination', () => {
+    expect(advertPath({ source: 'idnes', source_id_native: null, sreality_id: null })).toBeNull();
   });
 });

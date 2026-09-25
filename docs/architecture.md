@@ -708,9 +708,9 @@ rules. Identify which one a task belongs to before you start.
   + a save-to-collection control (rule #18 — the SPA header's "Uložit do kolekce": a checklist of
   every collection, monitored first) + **operator notes** (list existing + add a new
   one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
-  the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA page
-  (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
-  uses, negative for non-sreality portals) + subject facts; for sale apartments it ALSO
+  the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA
+  (`{VITE_APP_BASE_URL}/listing/{source}/{native}` — an advert alias that lands on the
+  property page with that advert's row open) + subject facts; for sale apartments it ALSO
   shows the precomputed `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") with
   the comparables estimation as the deeper tool/fallback (MF + estimation gated to
   byt+prodej, the bookmark + link + facts are not). The estimation's editable **net-yield
@@ -1131,7 +1131,21 @@ renumber.** Navigate by area:
     linked in the same statement) then that recompute: on ingest (`_ensure_property`, at the
     round trips the deleted singleton mirror cost) and in the straggler-attach alike.
     `all_sources` / `active_sources` (never written) left the read model; the physical columns
-    are W8's destructive drop.
+    are W8's destructive drop (the SPA never read them).
+    **The SPA shows it one way (decision 11): ONE property page, `/property/:propertyId`**
+    (`frontend/src/pages/PropertyDetail.tsx`). Its header is the `properties_public` row
+    (`PROPERTY_COLS`, pinned to the view by `tests/test_property_page_read_contract.py`) -- the
+    facts the Browse card shows -- with the canonical advert's photos, broker, own price series
+    and freshness checks; the price-change figures are the row's, as Browse filters on them. The
+    merged-adverts section is the ONLY list of adverts (a singleton's one advert included), each
+    advert's own facts and stored portal link in its row. Every property-grain surface links
+    `propertyPath(property_id)` (`lib/listingUrl`). Old advert addresses -- `/listing/{source}/
+    {native}` (emails, the extension), `/listing/{sreality_id}`, `/listing?property=` -- are
+    aliases (`AdvertRedirect`) that resolve the advert's property and open its row
+    (`?advert=`; ignored for the canonical advert), `?run=` and the hash preserved; a merged-away
+    property id follows its survivor through `GET /properties/{id}/origins`. Gone: the per-portal
+    chips, the "current active listing" jump, the history block's URL list, the price-mismatch
+    note and the repr-resolving `?property=` redirect.
     **What changed: the NEW DEDUP cutoff (2026-08).** The whole *automatic decision layer* that
     used to order merges was removed wholesale — a deliberate teardown, not a regression. It had
     grown into a many-rung machine (street+disposition and geo-proximity candidate paths, a
@@ -1251,17 +1265,17 @@ renumber.** Navigate by area:
     carries only border-case flagging (`image_border_cases`) — `image_tag_annotations` and
     `phash_pair_notes` had zero live callers even before the cutover. `image_training_examples`
     itself is superseded but not yet dropped (a separately-gated destructive migration).
-    The unmerge *button* lived on the deleted Dedup page; its new home is the listing page's
+    The unmerge *button* lived on the deleted Dedup page; its new home is the property page's
     **Sloučené inzeráty** section (`frontend/src/components/listing-detail/MergedAdvertsSection.tsx`:
-    shown on any property of two or more adverts, one expandable row per child advert — photos
-    collapsed, description / full gallery / broker / stored portal link expanded). For an admin
+    the page's only advert list, one expandable row per child advert — photos and the stored
+    portal link collapsed, description / full gallery / broker expanded). For an admin
     session each expanded row also names its origin (`GET /properties/{id}/origins`: the property
     a detach returns it to, and the source and date of the merge that took it from there), and
     every row WITH an origin carries a two-step **Rozdělit** that calls
     `POST /properties/{id}/detach` for exactly that advert — any property size, a merge of any
     origin (operator, legacy `auto`, `autodedup`), the optional free-text `reason` kept on the
-    "different" ruling — then re-resolves the page's sources and refreshes Browse
-    (`lib/mergedAdverts.refreshAfterDetach`). The property's own advert (null origin) has none.
+    "different" ruling — then re-reads the property page (keyed on the property) and refreshes
+    Browse (`lib/mergedAdverts.refreshAfterDetach`). The property's own advert (null origin) has none.
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
     **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
@@ -1309,7 +1323,12 @@ renumber.** Navigate by area:
     apart, or whose adverts carry a stored negative, with the engine's stated reason per split
     pair (conflict, else the pair's decision, else must-not-link, else `no stated fact`) and
     the operator's ruling; the batch split is the detach per advert (no `origin_property_id` =
-    never merged = `not_merged`). Group size is the engine's own cap alone. A group already on one
+    never merged = `not_merged`). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
+    "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a card per proposal
+    with each group's adverts side by side (`MemberGrid`), the reason and ruling per pair, a
+    checkbox, and a two-step "Rozdělit vybrané" that detaches every advert with an origin outside
+    the canonical advert's group, the optional shared reason on each ruling, with progress and a
+    per-advert outcome. Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings and pipeline cards;
     collections, tags and notes stay on the survivor (rule #18: a detach is best-effort).
