@@ -1,8 +1,10 @@
-"""Merge safety, executed (migrations 559 and 560): a price step never spans two adverts, a
+"""Merge safety, executed (migrations 559, 560 and 561): a price step never spans two adverts, a
 merge writes no status row and a detach restores the absorbed property's own state, merging
-then detaching every advert gives back every original property, the operator's merge and
-detach land as rulings the apply adapter reads, and the one-time copy rules only what the
-operator judged. Runs in CI's migrations job (`TEST_DATABASE_URL`); every test rolls back.
+then detaching every advert a merge moved gives back every original property, a native advert
+splits off to a record born the one way, the operator's merge and detach land as rulings the
+apply adapter reads, the one-time copy rules only what the operator judged, and a merged
+property speaks with ONE canonical advert everywhere (decisions 13 and 18). Runs in CI's
+migrations job (`TEST_DATABASE_URL`); every test rolls back.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from toolkit.property_identity import detach_listing, merge_property_set
+from toolkit.property_identity import detach_listing, listing_origins, merge_property_set
 
 _DB_URL = os.environ.get("TEST_DATABASE_URL")
 
@@ -50,13 +52,15 @@ def _property(cur: Any) -> int:
     return int(cur.fetchone()[0])
 
 
-def _advert(cur: Any, pid: int, *, source: str, price: int) -> int:
+def _advert(cur: Any, pid: int, *, source: str, price: int = 5_000_000, active: bool = True,
+            condition: str | None = None, levels: tuple[Any, Any] = (None, None)) -> int:
     cur.execute(
         "INSERT INTO listings (sreality_id, source, source_id_native, raw_json, "
-        "category_main, category_type, price_czk, area_m2, is_active, property_id) "
-        "VALUES (%s, %s, %s, '{}'::jsonb, 'byt', 'prodej', %s, 70, true, %s) RETURNING id",
+        "category_main, category_type, price_czk, area_m2, is_active, property_id, condition, "
+        "building_condition_level, apartment_condition_level) "
+        "VALUES (%s, %s, %s, '{}'::jsonb, 'byt', 'prodej', %s, 70, %s, %s, %s, %s, %s) RETURNING id",
         (next(_SREALITY_IDS) if source == "sreality" else None, source,
-         f"ms-{uuid.uuid4()}", price, pid),
+         f"ms-{uuid.uuid4()}", price, active, pid, condition, *levels),
     )
     return int(cur.fetchone()[0])
 
@@ -175,8 +179,8 @@ def test_a_detach_gives_a_property_ending_on_inactive_its_active_state_back(cur)
 
 def test_merging_then_detaching_every_advert_restores_every_original_property(cur):
     """W3's gate, executed: three set merges, one built on another, then a detach of every
-    advert; every original property_id is back, every property active, no ledger row live, and
-    the asset link the merges carried 4 -> 3 -> 0 is back on 4 alone."""
+    advert a merge moved; every original property_id is back, every property active, no ledger
+    row live, and the asset link the merges carried 4 -> 3 -> 0 is back on 4 alone."""
     props = [_property(cur) for _ in range(6)]
     adverts = [_advert(cur, pid, source=src, price=5_000_000)
                for pid, src in zip(props, ("sreality", "idnes", "remax", "bazos", "maxima",
@@ -192,7 +196,7 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(cu
     _merge(cur, [props[0], props[3], props[5]])
     assert len(set(_placed(cur, adverts).values())) == 1
 
-    for lid in adverts:
+    for lid in sorted(listing_origins(cur.connection, adverts)):
         _detach(cur, lid)
     assert _placed(cur, adverts) == original
     cur.execute("SELECT count(*) FROM properties WHERE id = ANY(%s) AND status = 'active'",
@@ -204,6 +208,49 @@ def test_merging_then_detaching_every_advert_restores_every_original_property(cu
     cur.execute("SELECT id, asset_id FROM properties WHERE id = ANY(%s) AND asset_id IS NOT NULL",
                 (props,))
     assert cur.fetchall() == [(props[4], asset)]
+
+
+def test_a_native_advert_splits_off_to_a_new_record_and_a_merge_back_is_undone_to_it(cur):
+    """A property grouped at ingest (no ledger row moved either advert): the split births the
+    advert a record through the one birth path, writes ONE closed ledger row the constraints
+    accept, and rules it different from the advert that stays; merged back, a detach returns it
+    to the record it was born on."""
+    pid = _property(cur)
+    stay, leave = _advert(cur, pid, source="sreality"), _advert(cur, pid, source="idnes")
+    _recompute(cur, pid)
+    assert _detach(cur, leave, source="autodedup")["outcome"] == "propose_only"
+
+    out = _detach(cur, leave, reason="jiné patro")
+    born = out["restored_property_id"]
+    assert (out["outcome"], out["survivor_property_id"]) == ("split_native", pid)
+    assert _placed(cur, [stay, leave]) == {stay: pid, leave: born}
+    cur.execute("SELECT repr_listing_ref_id, status, is_active FROM properties WHERE id = %s",
+                (born,))
+    assert cur.fetchone() == (leave, "active", True)
+    cur.execute(
+        "SELECT survivor_property_id, retired_property_id, prev_property_id, source, undone_by, "
+        "undone_at IS NOT NULL FROM property_merge_events WHERE listing_ref_id = %s", (leave,))
+    assert cur.fetchall() == [(pid, born, born, "operator", OP, True)]
+    assert _rulings(cur, [stay, leave]) == [(*_pair(stay, leave), "different")]
+    assert _detach(cur, leave)["outcome"] == "not_merged"
+
+    assert _merge(cur, [pid, born], source="autodedup")["survivor_id"] == pid
+    back = _detach(cur, leave)
+    assert (back["outcome"], back["restored_property_id"], back["reactivated"]) == (
+        "detached", born, True)
+    assert _placed(cur, [stay, leave]) == {stay: pid, leave: born}
+
+
+def test_a_propertys_last_own_advert_stays_while_merged_ones_share_it(cur):
+    """Splitting it would leave the survivor with only merged adverts, and their detach an
+    active property with none: its own advert stays and the merged one goes home instead."""
+    survivor, absorbed, moved = _merged_pair(cur)
+    _merge(cur, [survivor, absorbed])
+    cur.execute("SELECT id FROM listings WHERE property_id = %s AND id <> %s", (survivor, moved))
+    (own,) = (int(r[0]) for r in cur.fetchall())
+    assert _detach(cur, own)["outcome"] == "last_native"
+    assert _detach(cur, moved)["outcome"] == "detached"
+    assert _placed(cur, [own, moved]) == {own: survivor, moved: absorbed}
 
 
 def _rulings(cur: Any, ids: list[int], by: str = OP) -> list[tuple[int, int, str]]:
@@ -295,3 +342,98 @@ def test_the_copy_rules_the_operators_live_merge_same_and_nothing_it_did_not_jud
 
     cur.execute(_copy_statement())
     assert cur.rowcount == 0, "a re-run inserts nothing"
+
+
+# --- one property, one voice (migration 561) --------------------------------------------
+
+
+def test_active_beats_trust_and_the_id_breaks_a_tie(cur):
+    pid = _property(cur)
+    _advert(cur, pid, source="sreality", active=False)
+    first, _second = _advert(cur, pid, source="idnes"), _advert(cur, pid, source="idnes")
+    cur.execute("SELECT listing_id FROM property_canonical_listings(%s) WHERE canonical_rank = 1",
+                (pid,))
+    assert cur.fetchone()[0] == first
+    _recompute(cur, pid)
+    cur.execute("SELECT repr_listing_ref_id FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone()[0] == first
+
+
+def test_condition_and_both_levels_come_from_the_one_canonical_advert(cur):
+    """Rule 14: the old golden record took the raw condition trust-first (the delisted
+    sreality here) and the levels from the representative: two flats in one row."""
+    pid = _property(cur)
+    _advert(cur, pid, source="sreality", active=False, condition="novostavba", levels=(1, 1))
+    _advert(cur, pid, source="idnes", condition="velmi_dobry", levels=(2, 3))
+    _recompute(cur, pid)
+    cur.execute("SELECT condition, building_condition_level, apartment_condition_level "
+                "FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == ("velmi_dobry", 2, 3)
+
+
+def test_the_price_history_and_the_alerts_are_the_canonical_adverts_own(cur):
+    from api.notifications import _recent_price_drops
+
+    pid = _property(cur)
+    canon = _advert(cur, pid, source="sreality", price=4_900_000)
+    other = _advert(cur, pid, source="idnes", price=4_000_000)
+    _snapshot(cur, canon, 5_000_000, 3)
+    cut = _snapshot(cur, canon, 4_900_000, 1)
+    _snapshot(cur, other, 4_500_000, 3)
+    _snapshot(cur, other, 4_000_000, 1)
+    _recompute(cur, pid)
+    cur.execute("SELECT current_price_czk, price_drop_count, price_change_count "
+                "FROM properties WHERE id = %s", (pid,))
+    assert cur.fetchone() == (4_900_000, 1, 1)
+    drops = [d for d in _recent_price_drops(cur.connection, window_days=2) if d[0] == pid]
+    assert drops == [(pid, cut, 4_900_000, 5_000_000)]
+
+
+def test_a_merge_that_changes_the_canonical_advert_replays_no_older_step(cur):
+    """The absorbed sreality advert outranks the survivor's bazos one, so it becomes canonical;
+    its cut from yesterday was never the price the property showed, so neither producer fires
+    it. A cut after the handover does fire."""
+    from api.notifications import _recent_price_drops
+
+    survivor, absorbed = _property(cur), _property(cur)
+    _advert(cur, survivor, source="bazos", price=5_200_000)
+    moved = _advert(cur, absorbed, source="sreality", price=5_000_000)
+    _snapshot(cur, moved, 5_300_000, 30)
+    _snapshot(cur, moved, 5_000_000, 20)
+    for pid in (survivor, absorbed):
+        _recompute(cur, pid)
+    _merge(cur, [survivor, absorbed])
+    cur.execute("SELECT repr_listing_ref_id, repr_since > '-infinity' FROM properties "
+                "WHERE id = %s", (survivor,))
+    assert cur.fetchone() == (moved, True)
+    assert [d for d in _recent_price_drops(cur.connection, window_days=2) if d[0] == survivor] == []
+
+    after = _snapshot(cur, moved, 4_900_000, -0.01)
+    drops = [d for d in _recent_price_drops(cur.connection, window_days=2) if d[0] == survivor]
+    assert drops == [(survivor, after, 4_900_000, 5_000_000)]
+
+
+def test_comparables_count_a_property_once_and_leave_out_the_subjects_siblings(cur):
+    """Decision 13: a two-portal comparable is ONE comparable (its canonical advert), and the
+    subject's sibling on another portal is not the subject's comparable."""
+    from toolkit.comparables import ComparableFilters, TargetSpec, build_query
+
+    subject_p, two_portal, single = _property(cur), _property(cur), _property(cur)
+    subject, sibling = (_advert(cur, subject_p, source="sreality"),
+                        _advert(cur, subject_p, source="idnes"))
+    canon, twin = _advert(cur, two_portal, source="sreality"), _advert(cur, two_portal, source="bazos")
+    alone = _advert(cur, single, source="remax")
+    ids = {subject, sibling, canon, twin, alone}
+    for lid in ids:
+        cur.execute(
+            "INSERT INTO listing_location (listing_id, geom, match_confidence, granularity, "
+            "  uncertainty_radius_m, country_status, resolver_version, claim_set_hash, "
+            "  registry_version) VALUES (%s, ST_SetSRID(ST_MakePoint(17.91, 49.01), 4326), "
+            "  'exact', 'building', 5, 'cz', 'test', '\\x00'::bytea, 'test')", (lid,))
+    for pid in (subject_p, two_portal, single):
+        _recompute(cur, pid)
+    sql, params = build_query(
+        TargetSpec(lat=49.01, lng=17.91, area_m2=70, exclude_listing_ids=[subject]),
+        ComparableFilters(radius_m=500, category_main="byt", category_type="prodej"))
+    cur.execute(sql, params)
+    assert {int(r[0]) for r in cur.fetchall()} & ids == {canon, alone}

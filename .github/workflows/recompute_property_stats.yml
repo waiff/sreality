@@ -1,7 +1,7 @@
 name: "Jobs: recompute property stats (daily full reconcile)"
 
 # DAILY FULL SWEEP for the canonical `properties` parent. Attaches any straggler
-# unlinked listings (incl. the one-time native-id backfill), then recomputes
+# unlinked listings, then recomputes
 # EVERY property's is_active rollup, source / site counts, first/last-seen span,
 # representative child, current price, and the price-history aggregates (drop /
 # rise counts, max drop %) from the union of its children's snapshots. Finally it

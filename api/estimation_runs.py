@@ -531,10 +531,7 @@ def execute_pending_run(
         )
         return
     try:
-        target = _build_target(
-            resolution.target_spec, resolution.input_sreality_id,
-            resolution.input_listing_id,
-        )
+        target = _build_target(resolution.target_spec, resolution.input_listing_id)
         filters = _build_filters(body, load_filter_defaults(conn))
     except Exception as exc:  # noqa: BLE001
         LOG.exception(
@@ -877,10 +874,7 @@ def create_estimation_run(
         )
 
     try:
-        target = _build_target(
-            resolution.target_spec, resolution.input_sreality_id,
-            resolution.input_listing_id,
-        )
+        target = _build_target(resolution.target_spec, resolution.input_listing_id)
         filters = _build_filters(body, load_filter_defaults(conn))
     except Exception as exc:
         LOG.warning("target/filters build failed: %s", exc)
@@ -1014,10 +1008,7 @@ def _execute_estimation_run_background(
             sreality_client = deps.get_sreality_client()
             llm_client = LLMClient(conn, providers=deps.get_providers())
             try:
-                target = _build_target(
-                    resolution.target_spec, resolution.input_sreality_id,
-                    resolution.input_listing_id,
-                )
+                target = _build_target(resolution.target_spec, resolution.input_listing_id)
                 filters = _build_filters(body, load_filter_defaults(conn))
             except Exception as exc:
                 LOG.exception("background target/filters build failed for run %s", run_id)
@@ -1539,11 +1530,21 @@ def _match_listing_by_url(
         "spec": {
             "lat": float(row[2]), "lng": float(row[3]),
             "area_m2": float(row[4]) if row[4] is not None else None,
-            "disposition": row[5], "floor": row[6], "exclude_ids": [],
+            "disposition": row[5], "floor": row[6],
         },
         "price_czk": row[7],
         "category_type": row[8],
     }
+
+
+def _listing_id_of(conn: "psycopg.Connection", sreality_id: int | None) -> int | None:
+    """The scraped row a sreality-addressed subject already is, if any."""
+    if sreality_id is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM listings WHERE sreality_id = %s", (int(sreality_id),))
+        row = cur.fetchone()
+    return int(row[0]) if row else None
 
 
 def _match_listing_by_id(
@@ -1554,28 +1555,20 @@ def _match_listing_by_id(
     Mirrors `_match_listing_by_url`; coordinates are required (the comparables
     search is spatial). Returns None when the row is missing or has no geom.
 
-    Subject facts (coords / area / disposition / price / category_type) are
-    sourced from the listing's PROPERTY golden record (migration 257) when it
-    belongs to an active property, so an estimation launched from ANY portal's
-    advert of the same flat resolves the SAME subject — the deterministic
-    counterpart of the property-grain MF. `floor` stays per-advert (not a golden
-    column). For a singleton property the golden record equals the listing, so
-    this is a no-op there. price = the property's canonical current_price_czk
-    (the most-recently-seen active ask)."""
+    Subject facts (coords / area / disposition / price / category_type) are the listing's
+    PROPERTY's -- its canonical advert's (migration 561) -- when it belongs to an active
+    property, so an estimation launched from ANY portal's advert of the same flat resolves the
+    SAME subject; the listing's own row is the fallback. `floor` stays per-advert."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT l.sreality_id, "
-            # W4-a: the golden record's PLACE is its representative listing's
-            # resolved point (properties.geom is unwritten from this wave on and
-            # dropped in W4-c). Same precedence as the other four COALESCEs --
-            # property first, the listing's own row as the fallback.
             "ST_Y(COALESCE(pll.geom, ll.geom)) AS lat, "
             "ST_X(COALESCE(pll.geom, ll.geom)) AS lng, "
             "COALESCE(p.area_m2, l.area_m2) AS area_m2, "
             "COALESCE(p.disposition, l.disposition) AS disposition, "
             "l.floor, "
             "COALESCE(p.current_price_czk, l.price_czk) AS price_czk, "
-            "COALESCE(p.category_type, l.category_type) AS category_type "
+            "COALESCE(p.category_type, l.category_type) AS category_type, l.id "
             "FROM listings l "
             "LEFT JOIN properties p ON p.id = l.property_id AND p.status = 'active' "
             "LEFT JOIN listing_location ll ON ll.listing_id = l.id "
@@ -1588,10 +1581,11 @@ def _match_listing_by_id(
         return None
     return {
         "sreality_id": int(row[0]),
+        "listing_id": int(row[8]),
         "spec": {
             "lat": float(row[1]), "lng": float(row[2]),
             "area_m2": float(row[3]) if row[3] is not None else None,
-            "disposition": row[4], "floor": row[5], "exclude_ids": [],
+            "disposition": row[4], "floor": row[5],
         },
         "price_czk": row[6],
         "category_type": row[7],
@@ -1724,6 +1718,7 @@ def _resolve_input(
             subject_listing_price_czk=_coerce_int(matched.get("price_czk")),
             subject_listing_category_type=matched.get("category_type"),
             subject_attributes=None,
+            input_listing_id=matched.get("listing_id"),
         )
     if body.url is not None:
         # Non-sreality portals don't resolve to a listings row through the
@@ -1779,6 +1774,7 @@ def _resolve_input(
             subject_listing_price_czk=_coerce_int(subject_listing.get("price_czk")),
             subject_listing_category_type=subject_listing.get("category_type"),
             subject_attributes=subject_attributes,
+            input_listing_id=_listing_id_of(conn, result.sreality_id),
         )
     assert body.spec is not None
     return _Resolution(
@@ -1951,12 +1947,10 @@ _STANDARD_MATERIALS = frozenset({"panel", "cihla"})
 def _load_subject_amenities(
     conn: "psycopg.Connection", sreality_id: int,
 ) -> dict[str, Any] | None:
-    """Amenity flags + condition/building_type for the reference-rent calc,
-    sourced from the listing's PROPERTY golden record (migration 257) when it
-    belongs to an active property — so the run's MF reference rent uses the same
-    OR-unioned amenities as the property-grain MF (a portal that under-parsed an
-    amenity no longer under-states the estimate). COALESCE keeps the listing's
-    own value for a singleton / pre-attach row (where they are equal)."""
+    """Amenity flags + condition/building_type for the reference-rent calc, read off the
+    listing's PROPERTY (migration 561: the canonical advert's condition, the physical facts
+    first-non-empty) so the run's MF uses the property-grain MF's inputs; COALESCE keeps the
+    listing's own value for a pre-attach row."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT COALESCE(p.has_balcony, l.has_balcony), "
@@ -2049,9 +2043,7 @@ def _reference_rent_for_run(
 
 
 def _build_target(
-    spec: dict[str, Any] | None,
-    input_sreality_id: int | None = None,
-    input_listing_id: int | None = None,
+    spec: dict[str, Any] | None, input_listing_id: int | None = None,
 ) -> TargetSpec:
     if spec is None:
         raise ValueError("target_spec is required to build a TargetSpec")
@@ -2062,20 +2054,16 @@ def _build_target(
             "target has no coordinates — the URL parse could not geocode the "
             "locality (Mapy geocoding disabled?) and no lat/lng override was given"
         )
-    exclude_ids = list(spec.get("exclude_ids") or [])
-    if input_sreality_id is not None and input_sreality_id not in exclude_ids:
-        exclude_ids.append(int(input_sreality_id))
-    exclude_listing_ids = []
-    if input_listing_id is not None:
-        exclude_listing_ids.append(int(input_listing_id))
     return TargetSpec(
         lat=float(spec["lat"]),
         lng=float(spec["lng"]),
         area_m2=spec.get("area_m2"),
         disposition=spec.get("disposition"),
         floor=spec.get("floor"),
-        exclude_ids=exclude_ids,
-        exclude_listing_ids=exclude_listing_ids,
+        # Decision 13: every advert of the subject's property is left out; a frozen spec's
+        # sreality-keyed `exclude_ids` is its own history and is not re-read (rule 12).
+        exclude_listing_ids=[int(i) for i in spec.get("exclude_listing_ids") or []]
+        + ([int(input_listing_id)] if input_listing_id is not None else []),
     )
 
 

@@ -39,7 +39,6 @@ def test_jsonb_dumps_roundtrips_a_mixed_payload():
         "area_m2": Decimal("108.0"),
         "fetched_at": datetime(2026, 6, 3, 12, 0, tzinfo=timezone.utc),
         "disposition": "2+kk",
-        "exclude_ids": [],
     }
     out = json.loads(db._jsonb_dumps(payload))
     assert out["area_m2"] == 108.0

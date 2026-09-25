@@ -63,11 +63,18 @@ export function buildRerunPayload(
     ...(overrides?.lifecycle ? { lifecycle: overrides.lifecycle } : {}),
   };
 
+  /* A spec re-run resolves no subject, so it carries the parent's: the subject's
+   * property stays out of the cohort (decision 13). A URL re-run resolves its own. */
+  const exclude = new Set(run.input_spec?.exclude_listing_ids ?? []);
+  if (run.input_listing_id != null) exclude.add(run.input_listing_id);
+  const withSubject = (spec: TargetSpecIn): TargetSpecIn =>
+    exclude.size > 0 ? { ...spec, exclude_listing_ids: [...exclude] } : spec;
+
   if (overrides?.spec) {
-    return { ...base, spec: overrides.spec };
+    return { ...base, spec: withSubject(overrides.spec) };
   }
   if (run.input_url) {
     return { ...base, url: run.input_url };
   }
-  return { ...base, spec: (run.input_spec ?? undefined) as TargetSpecIn | undefined };
+  return { ...base, spec: run.input_spec ? withSubject(run.input_spec) : undefined };
 }

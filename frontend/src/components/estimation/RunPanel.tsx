@@ -820,9 +820,6 @@ function InputRecap({ run }: { run: EstimationRun }) {
     facts.push(['Area', spec.area_m2 != null ? fmtArea(spec.area_m2) : null]);
     facts.push(['Disposition', spec.disposition ?? null]);
     if (spec.floor != null) facts.push(['Floor', fmtFloor(spec.floor)]);
-    if (spec.exclude_ids.length > 0) {
-      facts.push(['Excluded', spec.exclude_ids.map(String).join(', ')]);
-    }
   }
 
   if (run.input_purchase_price_czk != null) {
@@ -1458,7 +1455,6 @@ function RerunBlock({
         area_m2: state.area_m2,
         disposition: state.disposition,
         floor: state.floor,
-        exclude_ids: run.input_spec?.exclude_ids ?? [],
       },
       estimate_kind: state.estimate_kind,
       provider: state.provider,

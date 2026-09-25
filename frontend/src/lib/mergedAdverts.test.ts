@@ -1,19 +1,10 @@
 /* lib/mergedAdverts — the words for a merge's origin and a detach's outcome, and
  * the read-your-writes refresh after a detach. */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
 import { detachOutcomeNote, inzeratu, mergeOriginLabel, refreshAfterDetach } from './mergedAdverts';
-import * as queries from './queries';
-
-vi.mock('./queries', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./queries')>();
-  return {
-    ...actual,
-    fetchPropertySources: vi.fn(async () => ({ property_id: 9, sources: [] })),
-  };
-});
 
 describe('inzeratu', () => {
   it('declines the Czech noun by count', () => {
@@ -40,32 +31,25 @@ describe('detachOutcomeNote', () => {
       'Nic se nepřesunulo — inzerát se mezitím přesunul jinam.',
     );
     expect(detachOutcomeNote('origin_moved_on')).toMatch(/byla mezitím sloučena jinam/);
+    expect(detachOutcomeNote('last_native')).toMatch(/poslední vlastní inzerát nemovitosti/);
     expect(detachOutcomeNote('moved_on')).toBe('Nic se nepřesunulo — moved_on.');
   });
 });
 
 describe('refreshAfterDetach', () => {
-  beforeEach(() => vi.mocked(queries.fetchPropertySources).mockClear());
-
-  it('re-resolves the page’s sources from the listing alone, then refreshes every surface', async () => {
+  it('re-reads the property page, the proposals and every Browse surface', () => {
     const qc = new QueryClient();
     const invalidate = vi.spyOn(qc, 'invalidateQueries');
 
-    await refreshAfterDetach(qc, 105053);
+    refreshAfterDetach(qc);
 
-    // ONE argument: no remembered property_id — the advert on screen may be
-    // the one that just moved back to its own property.
-    expect(queries.fetchPropertySources).toHaveBeenCalledWith(105053);
-    expect(qc.getQueryData(queries.propertySourcesKey(105053))).toEqual({
-      property_id: 9,
-      sources: [],
-    });
     for (const key of [
-      ['listing'],
-      ['property-mf'],
+      ['property'],
+      ['property-sources'],
       ['property-status-events'],
       ['snapshots'],
       ['merged-adverts'],
+      ['autodedup', 'proposed-splits'],
       ['cards'],
       ['map'],
       ['table'],

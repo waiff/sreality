@@ -1,93 +1,34 @@
 import { ROUTES, withQuery, type RoutePath } from './routes';
 
-/* The ONE place that builds an internal listing-detail URL.
- *
- * The route is `/listing/:sreality_id` (see `routes.tsx`); `sreality_id` is the
- * app-wide listing identity — negative synthetic for non-sreality portals
- * (migration 097), which the route accepts. Every surface that links to a
- * listing (Browse cards/table/map, estimations, watchdog, dedup, broker,
- * collections, Health, the Chrome extension's mirror) routes through here so a
- * route change is a single edit. Pairs with `runLinks.runSurfaceUrl`, which
- * builds the run-on-listing variant on top of `listingPath`. */
+/* The ONE place that builds an internal detail URL. There is one detail page,
+ * the PROPERTY page (decision 11); every property-grain surface (Browse cards,
+ * table and map, the pipeline board, collections) links to it by property id,
+ * so the address never moves when the property's canonical advert changes. */
+export function propertyPath(propertyId: number, advertId?: number | null): RoutePath {
+  // `advert` opens that advert's row in the merged-adverts section.
+  return withQuery(ROUTES.property.build({ propertyId }), { advert: advertId });
+}
+
+/* An ADVERT's own address, for an advert-grain surface that does not know the
+ * advert's property (estimation runs, comparables, watchdog dispatches). It is an
+ * alias kept forever: the page resolves the advert's property on land and opens
+ * the property page with that advert's row expanded. `sreality_id` is negative
+ * for non-sreality portals (migration 097), which the route accepts. */
 export function listingPath(srealityId: number): RoutePath {
   return ROUTES.listingLegacy.build({ sreality_id: srealityId });
 }
 
-/* Canonical, self-describing listing URL: `/listing/{source}/{native_id}`.
- *
- * The negative synthetic `sreality_id` (migration 097) is an internal artifact
- * that should never appear in a URL. This natural-key form (migration 091's
- * `(source, source_id_native)`) is what external/frozen surfaces emit — the
- * notification-email deep link and the Chrome extension's "Otevřít v aplikaci"
- * link — and what `ListingDetail` redirects the legacy `/listing/{id}` route to
- * on land, so the id-bar shows the clean form regardless of entry point. The
- * legacy numeric route stays forever as a resolver (`listingPath` above):
- * positive → sreality's real id, negative → frozen pre-cutover alias. */
-export function listingCanonicalPath(source: string, sourceIdNative: string): RoutePath {
-  // ROUTES.build percent-encodes every param, so the hand-rolled
-  // encodeURIComponent this used to carry is now structural, not per-call.
-  return ROUTES.listingCanonical.build({ source, nativeId: sourceIdNative });
-}
-
-/* Property-grain entry: `/listing?property=<id>` lands on `ListingDetail`,
- * which resolves the property's representative listing and redirects to its
- * canonical detail URL. Used where only the property id is known. */
-export function propertyListingPath(propertyId: number): RoutePath {
-  return withQuery(ROUTES.listing.build(), { property: propertyId });
-}
-
-/* The detail link for a PROPERTY-GRAIN row (Browse Map / Table / Cards, the
- * pipeline board, …). Precedence is CANONICAL → legacy → property:
- *
- *   1. `source` + `source_id_native` present → the self-describing
- *      `/listing/{source}/{native}` URL. This is the preferred form for every
- *      row that carries the natural key: the URL bar is clean from the first
- *      paint, with no post-load legacy→canonical redirect flashing the negative
- *      synthetic id (migration 097). ListingDetail resolves the natural key to
- *      the repr child; in-SPA navs also seed `listing_id` via Link `state` to
- *      skip that resolver round trip entirely.
- *   2. no natural key but a `sreality_id` → the legacy `/listing/{id}` route
- *      (pre-Gate-2 rows whose row payload doesn't carry the natural key, or
- *      callers that only know the id). ListingDetail canonicalizes on land.
- *   3. neither → the property route `/listing?property=<id>`, which ListingDetail
- *      resolves to the representative's canonical URL. Post-Gate-2 a new
- *      non-sreality listing inserts `sreality_id = NULL`, so a row without the
- *      natural key still links here; `property_id` is never null on the property
- *      grain, so this always yields a working link. Never route the surrogate
- *      through the legacy sreality route — the id-spaces overlap.
- *
- * `source`/`source_id_native` are optional so pre-existing callers that pass only
- * `{ sreality_id, property_id }` keep the legacy→property behavior unchanged.
- *
- * TWO OVERLOADS, because not every surface has a property grain to fall back on.
- * A property-grain row always has a `property_id`, so it always yields a path.
- * A row whose `property_id` is nullable (the broker listings view, which selects
- * neither `property_id` NOT NULL nor `source_id_native`) can have NO resolvable
- * destination — and the honest answer there is `null`, so the caller renders
- * inert text. Callers used to launder that away with `property_id ?? 0`, which
- * type-checked and built `/listing?property=0` — a link that 404s. The overload
- * makes the laundering unrepresentable rather than merely discouraged. */
-export function listingRowPath(row: {
+/* The same alias from whatever identity the row carries: the self-describing
+ * natural key `/listing/{source}/{native}` first, else the legacy numeric id,
+ * else null — no destination, so the caller renders inert text rather than a
+ * link that 404s. */
+export function advertPath(row: {
   source?: string | null;
   source_id_native?: string | null;
-  sreality_id: number | null;
-  property_id: number;
-}): RoutePath;
-export function listingRowPath(row: {
-  source?: string | null;
-  source_id_native?: string | null;
-  sreality_id: number | null;
-  property_id: number | null;
-}): RoutePath | null;
-export function listingRowPath(row: {
-  source?: string | null;
-  source_id_native?: string | null;
-  sreality_id: number | null;
-  property_id: number | null;
+  sreality_id?: number | null;
 }): RoutePath | null {
   if (row.source && row.source_id_native) {
-    return listingCanonicalPath(row.source, row.source_id_native);
+    return ROUTES.listingCanonical.build({ source: row.source, nativeId: row.source_id_native });
   }
-  if (row.sreality_id != null) return listingPath(row.sreality_id);
-  return row.property_id != null ? propertyListingPath(row.property_id) : null;
+  return row.sreality_id != null ? listingPath(row.sreality_id) : null;
 }

@@ -1,6 +1,6 @@
-/* The listing page's estimation chapter — the listing is the primary surface
- * for estimations, so everything the old standalone estimation page showed
- * for a linked run renders HERE.
+/* The property page's estimation chapter — the property page is the primary
+ * surface for estimations, so everything the old standalone estimation page
+ * showed for a linked run renders HERE.
  *
  * Structure: two reference figures side by side — the state's number (MF
  * Cenová mapa reference rent) and ours (the selected run's comparables-based
@@ -40,36 +40,23 @@ import type {
   EstimationListResponse,
   EstimationRun,
   ListingPublic,
-  ReferenceRent,
 } from '@/lib/types';
 import { Hairline, SectionLabel } from '@/components/section';
 
 export default function EstimationsBlock({
   listing,
   listingIds,
-  propertyMf,
-  priceDivergence,
   prefill,
 }: {
+  /* The property as its header shows it: its MF is the property's (migration
+   * 257), built on the canonical advert's price the header states. */
   listing: ListingPublic;
-  /* Every child listing of the property as SURROGATE listings.id values (falls
-   * back to just this listing until property sources load) — runs are fetched
+  /* Every advert of the property as SURROGATE listings.id values (falls back to
+   * the canonical advert until the advert list loads) — runs are fetched
    * property-grain. Never sreality_id: that is NULL for every non-sreality
    * listing, and an array holding one null used to serialize to an empty query
    * param, which the API read as "no filter" and answered with the whole table. */
   listingIds: number[];
-  /* The PROPERTY-grain MF (golden record, migration 257). Preferred over the
-   * subject advert's per-listing mf_* so every portal's advert of one flat
-   * shows the SAME MF; null until the property row loads (then the listing's
-   * own value is the fallback). */
-  propertyMf?: { mf_reference_rent: ReferenceRent | null; mf_gross_yield_pct: number | null } | null;
-  /* Active siblings advertised at a price != the canonical one the MF/estimate
-   * use — surfaced as a note so the operator sees the flat is on the market at
-   * more than one price. Null when every active advert agrees. */
-  priceDivergence?: {
-    usedPrice: number;
-    siblings: { source: string; price_czk: number }[];
-  } | null;
   prefill?: NewEstimationPrefill;
 }) {
   const ids = useMemo(
@@ -140,17 +127,9 @@ export default function EstimationsBlock({
     return () => cancelAnimationFrame(raf);
   }, [wantsScroll, runsQ.isLoading]);
 
-  // Prefer the property-grain golden MF; fall back to the subject advert's own
-  // value (and finally the selected run's reference_rent for orphan runs). The
-  // yield % must track WHICHEVER reference rent we show, so it pairs with the
-  // same source.
-  const colMfRef = propertyMf?.mf_reference_rent ?? listing.mf_reference_rent ?? null;
-  const colMfYield =
-    propertyMf?.mf_reference_rent != null
-      ? propertyMf.mf_gross_yield_pct
-      : listing.mf_reference_rent != null
-        ? listing.mf_gross_yield_pct
-        : null;
+  // The property's MF, else the selected run's reference_rent for orphan runs.
+  // The yield % pairs only with the property's own reference rent.
+  const colMfRef = listing.mf_reference_rent ?? null;
   const mfRef = colMfRef ?? selected?.reference_rent ?? null;
 
   // Nothing to say: no MF reference, no runs. The section disappears
@@ -183,7 +162,7 @@ export default function EstimationsBlock({
           {mfRef ? (
             <MfReferenceCard
               refRent={mfRef}
-              yieldPct={colMfRef != null ? colMfYield : null}
+              yieldPct={colMfRef != null ? listing.mf_gross_yield_pct : null}
             />
           ) : (
             <EmptyCard label="Odhad nájmu · cenová mapa MF">
@@ -196,8 +175,6 @@ export default function EstimationsBlock({
             <NoRunsCard prefill={prefill} loading={runsQ.isLoading} />
           )}
         </div>
-
-        {priceDivergence && <PriceDivergenceNote {...priceDivergence} />}
 
         {selected && (
           <div className="mt-7">
@@ -438,33 +415,5 @@ function RunHistory({
         </table>
       </div>
     </div>
-  );
-}
-
-
-/* The same flat is on the market at more than one price: the MF/estimate use the
- * canonical (most-recent active) ask, so we name the active siblings that differ. */
-function PriceDivergenceNote({
-  usedPrice,
-  siblings,
-}: {
-  usedPrice: number;
-  siblings: { source: string; price_czk: number }[];
-}) {
-  return (
-    <p className="mt-3 text-[0.72rem] leading-relaxed text-[var(--color-ink-3)]">
-      <span className="font-medium text-[var(--color-ink-2)]">Pozn.:</span>{' '}
-      výpočet vychází z ceny{' '}
-      <span className="tabular-nums">{fmtCzk(usedPrice)}</span>. Stejná nemovitost
-      je aktivně inzerována i za{' '}
-      {siblings.map((s, i) => (
-        <span key={`${s.source}-${i}`} className="tabular-nums">
-          {i > 0 ? ', ' : ''}
-          {fmtCzk(s.price_czk)}{' '}
-          <span className="text-[var(--color-ink-4)]">({s.source})</span>
-        </span>
-      ))}
-      .
-    </p>
   );
 }

@@ -1,11 +1,15 @@
-/* "Sloučené inzeráty" — every advert this property is made of, one row each.
+/* "Sloučené inzeráty" — every advert this property is made of, one row each: THE
+ * list of adverts on the property page (decision 11), a singleton's one advert
+ * included. The header above speaks with the canonical advert; each advert's own
+ * facts are here, in its row.
  *
  * The operator's brief: a Browse-like overview of which listings were merged
  * into the property, one expandable row per advert, the photos visible even
  * collapsed and the description on expand. Collapsed, a row answers "which
  * advert is this" (portal, price, area and disposition, the span it was seen
- * over, its first photos); expanded, it answers "is it really the same flat"
- * (every photo, the advert's own words, its broker, the link out).
+ * over, its first photos, the link out); expanded, it answers "is it really the
+ * same flat" (every photo, the advert's own words, its broker). An old advert
+ * address lands here with that advert's row open.
  *
  * Built from parts the review pages already trust rather than a second gallery:
  * ImageCarousel for the photos, MissingPhotoTile for a frame a portal refuses,
@@ -14,11 +18,12 @@
  * out is the row's stored `source_url`, never rebuilt.
  *
  * Admin sessions also see where each advert came from (the merge ledger's origin,
- * on expand) and a per-row two-step 'Rozdělit' on every advert that has one: it
- * detaches exactly that advert back to its origin, any property size, any merge
- * origin, with an optional free-text reason kept on the "different" ruling. */
+ * on expand) and a per-row two-step 'Rozdělit' on every advert a detach would
+ * move: exactly that advert goes back to its origin — or, if no merge brought it,
+ * to a new record of its own — any property size, any merge origin, with an
+ * optional free-text reason kept on the "different" ruling. */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -37,14 +42,16 @@ import { fetchListingBroker } from '@/lib/brokers';
 import { fmtArea, fmtCount, fmtCzk, fmtDateSlash, fmtFloor } from '@/lib/format';
 import { taggedImageUrls, useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { imageSrc } from '@/lib/imageUrl';
-import { listingRowPath } from '@/lib/listingUrl';
+import { propertyPath } from '@/lib/listingUrl';
 import { areaKindOf } from '@/lib/measure';
 import {
+  STATE_STAYS,
   detachOutcomeNote,
   inzeratu,
   mergeOriginLabel,
   mergedAdvertsKeys,
   refreshAfterDetach,
+  unmovedReason,
 } from '@/lib/mergedAdverts';
 import { portalLabel } from '@/lib/portals';
 import { fetchListingsForListingIds } from '@/lib/queries';
@@ -62,19 +69,20 @@ const PHOTOS_PER_ADVERT = 200;
 type OriginRead = { status: 'pending' | 'error' | 'success'; origin: AdvertOrigin | undefined };
 
 interface SectionProps {
-  /* The property the rows belong to (the sources read's own property_id). */
   propertyId: number;
-  /* The advert this page is open on — marked, and never linked to itself. */
-  currentListingId: number;
+  /* The advert the page's header speaks with — marked. */
+  canonicalListingId: number;
   sources: PropertySource[];
+  /* The advert an old advert address asked for: its row opens. */
+  openAdvertId?: number | null;
 }
 
-export default function MergedAdvertsSection(props: SectionProps) {
-  if (props.sources.length < 2) return null;
-  return <SectionBody {...props} />;
-}
-
-function SectionBody({ propertyId, currentListingId, sources }: SectionProps) {
+export default function MergedAdvertsSection({
+  propertyId,
+  canonicalListingId,
+  sources,
+  openAdvertId,
+}: SectionProps) {
   const { isAdmin } = useAuth();
   const ids = useMemo(() => sources.map((s) => s.id), [sources]);
   const originsQ = useQuery({
@@ -84,8 +92,8 @@ function SectionBody({ propertyId, currentListingId, sources }: SectionProps) {
     staleTime: 30_000,
   });
 
-  /* Area, disposition, floor and the description — per advert, from the same
-   * listings_public read the page's own header uses. One request for the set. */
+  /* Area, disposition, floor and the description — per advert, from
+   * listings_public. One request for the set. */
   const detailsQ = useQuery<Map<number, ListingPublic>, Error>({
     queryKey: mergedAdvertsKeys.listings(ids),
     queryFn: () => fetchListingsForListingIds(ids),
@@ -100,7 +108,7 @@ function SectionBody({ propertyId, currentListingId, sources }: SectionProps) {
   return (
     <section aria-label="Sloučené inzeráty">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <SectionLabel>Sloučené inzeráty</SectionLabel>
+        <SectionLabel>{sources.length > 1 ? 'Sloučené inzeráty' : 'Inzerát'}</SectionLabel>
         <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
           {fmtCount(sources.length)} {inzeratu(sources.length)} · {fmtCount(portals)}{' '}
           {portals === 1 ? 'portál' : portals <= 4 ? 'portály' : 'portálů'}
@@ -124,9 +132,9 @@ function SectionBody({ propertyId, currentListingId, sources }: SectionProps) {
             detailsLoading={detailsQ.isLoading}
             images={photos.get(s.id) ?? []}
             imagesLoading={photosPending}
-            isCurrent={s.id === currentListingId}
+            isCanonical={s.id === canonicalListingId}
+            opened={s.id === openAdvertId}
             propertyId={propertyId}
-            currentListingId={currentListingId}
             originRead={
               isAdmin
                 ? {
@@ -153,9 +161,9 @@ function MergedAdvertRow({
   detailsLoading,
   images,
   imagesLoading,
-  isCurrent,
+  isCanonical,
+  opened,
   propertyId,
-  currentListingId,
   originRead,
 }: {
   source: PropertySource;
@@ -163,14 +171,23 @@ function MergedAdvertRow({
   detailsLoading: boolean;
   images: ImagePublic[];
   imagesLoading: boolean;
-  isCurrent: boolean;
+  isCanonical: boolean;
+  opened: boolean;
   propertyId: number;
-  currentListingId: number;
   originRead: OriginRead | null;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(opened);
+  const rowRef = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    if (opened) rowRef.current?.scrollIntoView?.({ block: 'start' });
+  }, [opened]);
   const [detachArmed, setDetachArmed] = useState(false);
-  const origin = originRead?.origin?.origin_property_id != null ? originRead.origin : null;
+  const origin = originRead?.origin?.splittable ? originRead.origin : null;
+  /* Why a row of a bigger property offers no split (an advert alone has nothing to leave). */
+  const unmoved =
+    originRead?.origin && !originRead.origin.splittable && originRead.origin.detach_outcome !== 'not_merged'
+      ? originRead.origin
+      : null;
   const panelId = `merged-advert-${source.id}`;
   const portal = portalLabel(source.source) ?? source.source;
   const facts = [
@@ -180,9 +197,10 @@ function MergedAdvertRow({
 
   return (
     <li
+      ref={rowRef}
       className={[
-        'rounded-[var(--radius-sm)] border bg-[var(--color-paper-2)]',
-        isCurrent ? 'border-[var(--color-rule-strong)]' : 'border-[var(--color-rule-soft)]',
+        'scroll-mt-6 rounded-[var(--radius-sm)] border bg-[var(--color-paper-2)]',
+        isCanonical ? 'border-[var(--color-rule-strong)]' : 'border-[var(--color-rule-soft)]',
       ].join(' ')}
     >
       <div className="px-3 py-2">
@@ -208,9 +226,12 @@ function MergedAdvertRow({
                 />
                 {source.is_active ? 'aktivní' : 'staženo'}
               </span>
-              {isCurrent && (
-                <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-                  tento inzerát
+              {isCanonical && (
+                <span
+                  title="Záhlaví stránky ukazuje údaje tohoto inzerátu"
+                  className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]"
+                >
+                  v záhlaví
                 </span>
               )}
               <span className="font-mono text-[0.85rem] tabular-nums text-[var(--color-ink)]">
@@ -228,6 +249,17 @@ function MergedAdvertRow({
               </span>
             </span>
           </button>
+          {source.source_url && (
+            <a
+              href={source.source_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`Na portálu ${portal}`}
+              className="shrink-0 text-[0.72rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+            >
+              Na portálu ↗
+            </a>
+          )}
           {origin && !detachArmed && (
             <button
               type="button"
@@ -239,6 +271,7 @@ function MergedAdvertRow({
             </button>
           )}
         </div>
+        {unmoved && <UnmovedLine origin={unmoved} />}
         {/* Outside the toggle (a button may hold only phrasing content); a click on
             a photo opens the row too, the header stays the keyboard control. */}
         <ThumbStrip
@@ -253,7 +286,7 @@ function MergedAdvertRow({
         <DetachConfirm
           propertyId={propertyId}
           origin={origin}
-          currentListingId={currentListingId}
+          isCanonical={isCanonical}
           onCancel={() => setDetachArmed(false)}
         />
       )}
@@ -299,28 +332,9 @@ function MergedAdvertRow({
             )}
             <BrokerLine listingId={source.id} />
             {originRead && <OriginLine read={originRead} />}
-            <p className="flex flex-wrap items-center gap-3 text-[0.75rem]">
-              {!isCurrent && (
-                <Link
-                  to={listingRowPath(source)}
-                  className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-                >
-                  Otevřít detail
-                </Link>
-              )}
-              {source.source_url ? (
-                <a
-                  href={source.source_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-                >
-                  Na portálu {portal} ↗
-                </a>
-              ) : (
-                <span className="text-[var(--color-ink-4)]">Odkaz na portál chybí</span>
-              )}
-            </p>
+            {!source.source_url && (
+              <p className="text-[0.75rem] text-[var(--color-ink-4)]">Odkaz na portál chybí</p>
+            )}
           </div>
         </div>
       )}
@@ -452,32 +466,62 @@ function OriginLine({ read }: { read: OriginRead }) {
   );
 }
 
+/* A row a detach would not move, and why; where its origin went, when a later
+   merge took it (the property page follows the merge to its survivor). */
+function UnmovedLine({ origin }: { origin: AdvertOrigin }) {
+  return (
+    <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
+      Nelze oddělit: {unmovedReason(origin.detach_outcome ?? '')}
+      {origin.detach_outcome === 'origin_moved_on' && origin.origin_property_id != null && (
+        <>
+          {' '}
+          <Link
+            to={propertyPath(origin.origin_property_id)}
+            className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+          >
+            kam odešla #{origin.origin_property_id}
+          </Link>
+        </>
+      )}
+      .
+    </p>
+  );
+}
+
 /* Step two of the split: say where the advert goes, then offer the write. */
 function DetachConfirm({
   propertyId,
   origin,
-  currentListingId,
+  isCanonical,
   onCancel,
 }: {
   propertyId: number;
   origin: AdvertOrigin;
-  currentListingId: number;
+  isCanonical: boolean;
   onCancel: () => void;
 }) {
   const qc = useQueryClient();
+  /* The header's own advert leaving for a new record: the property's state stays here. */
+  const stateStays = isCanonical && origin.origin_property_id == null;
   const [reason, setReason] = useState('');
   const detach = useMutation({
     mutationFn: () => detachListing(propertyId, origin.listing_id, reason.trim() || undefined),
     /* Errors (a 409 the merge code refused, a 5xx) surface through the global
      * MutationCache toast; the panel stays open so nothing looks done. */
-    onSuccess: async (res) => {
+    onSuccess: (res) => {
       if (res.detached) {
-        pushToast('ok', `Odděleno — inzerát je zpět v nemovitosti #${res.restored_property_id}.`);
+        pushToast(
+          'ok',
+          res.outcome === 'split_native'
+            ? `Odděleno — inzerát má novou vlastní nemovitost #${res.restored_property_id}.` +
+                (stateStays ? ` ${STATE_STAYS}` : '')
+            : `Odděleno — inzerát je zpět v nemovitosti #${res.restored_property_id}.`,
+        );
       } else {
         pushToast('info', detachOutcomeNote(res.outcome));
       }
       onCancel();
-      await refreshAfterDetach(qc, currentListingId);
+      refreshAfterDetach(qc);
     },
   });
 
@@ -489,10 +533,17 @@ function DetachConfirm({
     >
       <p className="text-[0.75rem] leading-snug text-[var(--color-ink-2)]">
         <strong className="font-medium text-[var(--color-ink)]">Oddělit tento inzerát?</strong>{' '}
-        Vrátí se do nemovitosti #{origin.origin_property_id}, odkud ho přivedlo{' '}
-        {mergeOriginLabel(origin.merge_source ?? '')} sloučení ze dne{' '}
-        {fmtDateSlash(origin.merged_at)}, a zapíše se, že se zbylými inzeráty nejde o stejnou
-        nemovitost.
+        {origin.origin_property_id == null ? (
+          <>Nepřivedlo ho sloučení: dostane novou vlastní nemovitost</>
+        ) : (
+          <>
+            Vrátí se do nemovitosti #{origin.origin_property_id}, odkud ho přivedlo{' '}
+            {mergeOriginLabel(origin.merge_source ?? '')} sloučení ze dne{' '}
+            {fmtDateSlash(origin.merged_at)}
+          </>
+        )}
+        , a zapíše se, že se zbylými inzeráty nejde o stejnou nemovitost.
+        {stateStays && ` ${STATE_STAYS}`}
       </p>
       <textarea
         aria-label="Důvod rozdělení (nepovinné)"

@@ -215,12 +215,8 @@ def compute_listing_velocity(
         lat=listing["lat"],
         lng=listing["lng"],
         disposition=listing["disposition"],
-        # Exclude the subject from its own peer cohort on the id-space it was
-        # addressed by. `exclude_ids` (sreality) carries a NULL guard in
-        # _shared_filter_where; `exclude_listing_ids` (surrogate) is the only
-        # arm that can exclude a subject with no sreality_id.
-        exclude_ids=[sreality_id] if sreality_id is not None else [],
-        exclude_listing_ids=[listing_id] if listing_id is not None else [],
+        # The subject's property is left out of its own peer cohort (decision 13).
+        exclude_listing_ids=[listing["id"]],
     )
     filters = ComparableFilters(
         radius_m=radius_m,
@@ -292,7 +288,7 @@ def _fetch_listing_for_velocity(
         cur.execute(
             "SELECT l.first_seen_at, l.last_seen_at, l.is_active, l.disposition,\n"
             "  ST_Y(ll.geom) AS lat, ST_X(ll.geom) AS lng,\n"
-            "  l.category_main, l.category_type\n"
+            "  l.category_main, l.category_type, l.id\n"
             "FROM listings l\n"
             "LEFT JOIN listing_location ll ON ll.listing_id = l.id\n"
             f"WHERE {id_clause}",
@@ -310,6 +306,7 @@ def _fetch_listing_for_velocity(
         "lng": float(row[5]) if row[5] is not None else None,
         "category_main": row[6],
         "category_type": row[7],
+        "id": int(row[8]),
     }
 
 
@@ -405,7 +402,7 @@ def _filters_used(
             "disposition": target.disposition,
             "area_m2": target.area_m2,
             "floor": target.floor,
-            "exclude_ids": list(target.exclude_ids),
+            "exclude_listing_ids": list(target.exclude_listing_ids),
         },
         "radius_m": filters.radius_m,
         "disposition_match": filters.disposition_match,

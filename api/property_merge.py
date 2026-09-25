@@ -1,8 +1,8 @@
 """Property merge MECHANICS — the operator's curation surface, not a decision engine.
 
 Everything here starts from a merge the operator (or another caller) has already
-ORDERED: collapse this explicit set of properties, detach one advert back to the property
-it came from, list what was merged, or link properties as one asset without collapsing them.
+ORDERED: collapse this explicit set of properties, split one advert off, list what was
+merged, or link properties as one asset without collapsing them.
 Nothing in this module decides *whether* two properties are the same.
 
 The one merge and the one undo live in `toolkit.property_identity` (`merge_property_set` /
@@ -28,8 +28,10 @@ from toolkit.asset_identity import (
     unlink_property,
 )
 from toolkit.property_identity import (
+    MOVED,
     MergeError,
     detach_listing,
+    detach_outcomes,
     listing_origins,
     merge_property_set,
     resolve_active_property_id,
@@ -240,8 +242,8 @@ def post_detach(
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """One advert back to where it came from, ruled "different" from every advert that stays;
-    one no longer on this property (a second click) answers `detached: false`."""
+    """One advert split off: back to where it came from, or (never merged) to a new record; ruled
+    "different" from every advert that stays. One no longer here answers `detached: false`."""
     decided_by = _decider(claims)
     survivor = resolve_active_property_id(conn, property_id)
     if survivor is None:
@@ -275,17 +277,20 @@ def get_origins(
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
     """Each advert's origin (where a detach returns it) and the source and time of the merge
-    that took it from there; all null when no standing merge moved it."""
+    that took it from there, all null when no standing merge moved it; what a detach would
+    answer now (`detach_outcomes`), and `splittable` = that moves it."""
     survivor = resolve_active_property_id(conn, property_id)
     if survivor is None:
         raise HTTPException(status_code=404, detail=f"property {property_id} not found")
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM listings WHERE property_id = %s", (survivor,))
         ids = sorted(int(r[0]) for r in cur.fetchall())
-    origins = listing_origins(conn, ids)
+    origins, outcomes = listing_origins(conn, ids), detach_outcomes(conn, ids)
     return {"property_id": survivor, "adverts": [
-        dict(zip(("listing_id", "origin_property_id", "merge_source", "merged_at"),
-                 (lid, *origins.get(lid, (None, None, None)))))
+        dict(zip(("listing_id", "origin_property_id", "merge_source", "merged_at",
+                  "detach_outcome", "splittable"),
+                 (lid, *origins.get(lid, (None, None, None)), outcomes.get(lid),
+                  outcomes.get(lid) in MOVED)))
         for lid in ids]}
 
 

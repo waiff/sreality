@@ -93,6 +93,8 @@ const autodedupItems: ReadonlyArray<MenuItem> = [
   // is deliberately not a menu entry — it has no meaning without a pair.
   { to: ROUTES.autodedupGroups.build(), label: 'Groups' },
   { to: ROUTES.autodedupResidual.build(), label: 'Residual' },
+  // Decision 9: what a refit would take apart, split only by the operator.
+  { to: ROUTES.autodedupProposedSplits.build(), label: 'Návrhy rozdělení' },
 ];
 
 // The admin-only surfaces that used to sit in the top row, now the first

@@ -234,7 +234,6 @@ def _sreality_branch(
         "area_m2": parser_spec.get("area_m2"),
         "disposition": parser_spec.get("disposition"),
         "floor": parser_spec.get("floor"),
-        "exclude_ids": [],
     }
     return ParseResult(
         spec=spec,
@@ -308,7 +307,6 @@ def _build_spec(
         "area_m2": _coerce_float(values.get("area_m2")),
         "disposition": _coerce_str(values.get("disposition")),
         "floor": _coerce_int(values.get("floor")),
-        "exclude_ids": [],
     }
 
     geocode_warnings: list[str] = []

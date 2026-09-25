@@ -51,10 +51,8 @@ class TargetSpec:
     area_m2: float | None = None
     disposition: str | None = None
     floor: int | None = None
-    exclude_ids: list[int] = field(default_factory=list)
-    # Surrogate-keyed twin of exclude_ids (R2). The legacy list stays for frozen
-    # specs + callers that only know a sreality_id; new callers should populate
-    # this one, which is the only arm that can exclude a post-Gate-2 listing.
+    # The subject's adverts (listings.id): EVERY advert of their properties is left out of
+    # the cohort (decision 13), so naming any one of them excludes all of its siblings.
     exclude_listing_ids: list[int] = field(default_factory=list)
 
 
@@ -350,7 +348,7 @@ def _shared_filter_where(
 
     Includes: spatial radius, category, disposition, area band, floor band,
     condition/building/energy filters, amenity booleans, price bounds,
-    locality IDs, exclude_ids, and the failure-row exclusion.
+    locality IDs, one advert per property minus the subject's, and the failure-row exclusion.
 
     Does NOT include the lifecycle / max_age_days clauses — those are
     operational rather than attribute filters. Each caller appends them
@@ -575,21 +573,18 @@ def _shared_filter_where(
             ")"
         )
 
-    if target.exclude_ids:
-        # `NULL <> ALL(...)` is NULL, and a WHERE keeps only TRUE — so the bare
-        # predicate DROPS every listing with a NULL sreality_id instead of merely
-        # failing to exclude it. Post-Gate-2 that silently deletes ~68% of the
-        # market from every cohort (`_build_target` puts the run's own subject in
-        # exclude_ids, so it is non-empty on essentially every listing-anchored
-        # estimation) — a WRONG estimate, not a logged failure. The IS NULL arm
-        # can never remove a row that survives today; verified against prod:
-        # NULL survives, a normal id survives, an excluded id is still excluded.
-        where.append("(l.sreality_id IS NULL OR l.sreality_id <> ALL(%(exclude_ids)s))")
-        params["exclude_ids"] = list(target.exclude_ids)
-
+    # Decision 13: a property counts ONCE, as its canonical advert (`repr_listing_ref_id`, which
+    # the rollup writes from property_canonical_listings, migration 561), and every advert of
+    # the subject's property is out. An advert not yet attached to a property is no comparable.
+    where.append(
+        "EXISTS (SELECT 1 FROM properties canon_p "
+        "WHERE canon_p.id = l.property_id AND canon_p.repr_listing_ref_id = l.id)"
+    )
     if target.exclude_listing_ids:
-        # l.id is NOT NULL, so this arm is plain two-valued logic — no guard needed.
-        where.append("l.id <> ALL(%(exclude_listing_ids)s)")
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM listings subj "
+            "WHERE subj.id = ANY(%(exclude_listing_ids)s) AND subj.property_id = l.property_id)"
+        )
         params["exclude_listing_ids"] = list(target.exclude_listing_ids)
 
     return where, params
@@ -735,7 +730,6 @@ def _filters_used(
             "area_m2": target.area_m2,
             "disposition": target.disposition,
             "floor": target.floor,
-            "exclude_ids": list(target.exclude_ids),
             "exclude_listing_ids": list(target.exclude_listing_ids),
         },
         "radius_m": filters.radius_m,

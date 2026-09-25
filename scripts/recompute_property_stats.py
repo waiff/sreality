@@ -1,74 +1,17 @@
-"""Slice 1 driver -- recompute the canonical `properties` rollup + stats.
+"""The property rollup -- attach stragglers, then recompute each property from its adverts.
 
-Two phases, both idempotent:
-
-1. Attach stragglers. Any `listings` row with `property_id IS NULL` — an
-   old-code insert, or a row written by the batched detail-drain — gets its own
-   singleton property here, mirroring migration 092. No cross-listing matching
-   happens at this step, ever: grouping is out-of-band and, since the 2026-08
-   "NEW DEDUP" cutoff, operator-ordered only (CLAUDE.md rule 15).
-
-2. Recompute every property from its children. Per property:
-     is_active           = bool_or(children.is_active)   (decision #3 rollup)
-     source_count        = count(children)
-     distinct_site_count = count(distinct children.source)
-     first/last_seen_at  = min/max across children
-     repr_listing_id     = the active, most-recently-seen child
-     category/area/...    + current_price_czk mirror that representative child
-     price_per_m2_source_listing_id = that child again, when it carries BOTH a
-                               price and a positive area (the per-m2 basis)
-     price_drop_count     \\
-     price_rise_count      \\  consecutive-step deltas computed WITHIN EACH
-     max_price_drop_pct     }  CHILD's own snapshot series, then summed across
-     price_change_count*   /   children (+ the *_30d/_90d/_365d window counts)
-     total_price_change_pct =  signed first-to-last of the REPRESENTATIVE
-                               child's series only
-     last_change_at      = max(children snapshots.scraped_at) -- "recently changed"
-     stats_computed_at   = now()
-
-   ONE MEASURE, ONE ROW (migration 424). `current_price_czk` is the
-   representative child's price, so `area_m2` — the denominator every per-m2
-   consumer divides it by — must be that same child's area, with the golden
-   record only as a fallback. Rolling the two up independently (area in trust
-   order over all children, price from the representative) meant a merged
-   property's per-m2 divided one portal's price by another portal's area, and
-   source_trust_rank ranks mmreality above five portals — which is how a
-   listing-grain area defect escaped its own row.
-   `price_per_m2_source_listing_id` records which listing backed the pair, and
-   is NULL when no single child does.
-
-   `usable_area` is deliberately NOT rebound to that child. It is a different
-   measure — never the per-m2 denominator — and it feeds a live Browse +
-   Watchdog filter (browse_list.usable_area, browse_stats_properties'
-   usable_area_min/max_filter, the matcher's min/max_usable_area). Taking it
-   from the representative child would NULL it for every property whose repr
-   carries an area but no usable_area, silently narrowing a saved filter. It
-   keeps its independent golden-record pick; changing it is its own wave, with
-   a counted before/after.
-
-   PRICE SERIES GRAIN (changed 2026-08; migration 173 introduced these columns).
-   Steps are per listing, NOT per property, read from `listing_price_steps`
-   (migration 559) — the one step definition the watchdog and the collection
-   monitor read too. Interleaving every child's
-   snapshots into one property-level series — the original behaviour — makes a
-   multi-portal property whose portals quote slightly different asking prices
-   register a "change" on every single scrape, and simultaneously HIDES real
-   cuts when the other portal's unchanged reading lands between two readings of
-   the one that moved. Both directions were confirmed market-wide across every
-   multi-source property with priced snapshots.
-
-   `total_price_change_pct` is anchored on the representative child because
-   `current_price_czk` is that same child's price: a headline price and a delta
-   drawn from different series is how a card ends up describing two different
-   numbers. The cost is a narrower claim — NULL when the representative alone
-   has fewer than two priced snapshots, even if a sibling has a longer history.
-   These columns also back Browse/Watchdog filters (`price_change_count_min`,
-   `total_price_change_pct`), so cohort membership shifts after the backfill.
-
-   For today's singleton properties this reproduces exactly what the
-   insert-time path (`scraper.db._ensure_property` / `_cheap_property_rollup`)
-   maintains,
-   plus the price-history aggregates the wrapper does not compute.
+1. Attach stragglers: every `property_id IS NULL` listing (the batched detail-drain writes them)
+   is born a bare singleton (`scraper.db.NEW_SINGLETONS_SQL`, the one birth path) and recomputed
+   in the same transaction. No cross-listing matching, ever (CLAUDE.md rule 15).
+2. Recompute, ONE RULE PER FIELD (migration 561, decision 18). The canonical advert is rank 1 of
+   `property_canonical_listings(property_id)` (active, trust, last seen, id). Every advert field
+   is its own: price and ITS price history (`listing_price_steps`, migration 559: no other
+   advert's steps count), area (no fallback), layout, category, subtype, source, condition with
+   both derived levels (rule 14), furnished, and `repr_listing_ref_id`, through which the read
+   models take place, floor, description, photos, broker and link. Every physical fact (building
+   type, ownership, energy rating, amenities, estate/usable/garden area, parking) is the first
+   non-empty value in the same order. Lifecycle: any advert active, min/max seen, newest snapshot.
+   `repr_since` is stamped when the canonical advert changes (the price alerts start there).
 
 Batched by property-id range so each statement stays well under the
 transaction-pooler statement timeout. autocommit=True means each batch
@@ -85,9 +28,8 @@ resulting staleness independently.
 
 Two run modes (Phase 3 -- real-time properties):
 
-  * --incremental (cron */5, property_maintenance.yml): attach new stragglers
-    (skipping the one-time native-id backfill) + recompute ONLY the properties
-    queued in `dirty_properties` by the writers. O(changes), near-real-time.
+  * --incremental (cron */5, property_maintenance.yml): attach new stragglers + recompute
+    ONLY the properties queued in `dirty_properties` by the writers. O(changes).
   * full (default, daily reconcile, recompute_property_stats.yml): attach +
     recompute EVERY property + reconcile childless + clear the queue. The
     self-healing backstop for anything the incremental pass missed.
@@ -121,194 +63,56 @@ def _sigterm_to_systemexit(signum: int, frame: Any) -> None:
     raise SystemExit(143)
 
 
-_ATTACH_BACKFILL_NATIVE_ID_SQL = """
-    UPDATE listings SET source_id_native = sreality_id::text
-    WHERE source_id_native IS NULL
-"""
-
-_ATTACH_INSERT_SQL = """
-    INSERT INTO properties (
-        repr_listing_id, repr_listing_ref_id, category_main, category_type, disposition,
-        area_m2, current_price_czk,
-        has_balcony, has_parking, has_lift, building_type, condition,
-        ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
-        estate_area, usable_area, garden_area, parking_lots,
-        source, energy_rating,
-        building_condition_level, apartment_condition_level,
-        is_active, first_seen_at, last_seen_at, last_change_at,
-        source_count, distinct_site_count, price_per_m2_source_listing_id
-    )
-    SELECT
-        l.sreality_id, l.id, l.category_main, l.category_type, l.disposition,
-        l.area_m2, l.price_czk,
-        l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
-        l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
-        l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
-        l.source, l.energy_rating,
-        l.building_condition_level, l.apartment_condition_level,
-        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1,
-        -- One child: price and area come from one row by construction (mig 424).
-        price_per_m2_source_id(l.price_czk, l.area_m2, l.id)
-    FROM listings l
-    WHERE l.property_id IS NULL
-"""
-
-_ATTACH_LINK_SQL = """
-    UPDATE listings l
-    SET property_id = p.id
-    FROM properties p
-    WHERE p.repr_listing_ref_id = l.id
-      AND l.property_id IS NULL
-"""
+_STRAGGLERS_SQL = "SELECT id FROM listings WHERE property_id IS NULL"
 
 _RECOMPUTE_BATCH_SQL = """
     WITH batch AS (
       SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s
     ),
-    -- Every child of the batch's properties, tagged with the shared per-source
-    -- TRUST rank (source_trust_rank, migration 311; lower = more reliable). The
-    -- golden-record CTEs below pick the best value per field in this trust order.
+    -- Every advert of the batch's properties in THE canonical order (migration 561); rank 1 is
+    -- the canonical advert. The order is spelled there and nowhere else.
     kids AS (
-      SELECT l.*, source_trust_rank(l.source) AS src_rank
-      FROM listings l
-      JOIN batch b ON b.id = l.property_id
+      SELECT l.*, o.canonical_rank
+      FROM batch b
+      CROSS JOIN LATERAL property_canonical_listings(b.id) o
+      JOIN listings l ON l.id = o.listing_id
     ),
+    canon AS (
+      SELECT * FROM kids WHERE canonical_rank = 1
+    ),
+    -- Lifecycle over every advert; each physical fact is the first non-empty value in the
+    -- canonical order.
     child_agg AS (
       SELECT
-        l.property_id              AS pid,
-        bool_or(l.is_active)       AS is_active,
+        k.property_id              AS pid,
+        bool_or(k.is_active)       AS is_active,
         count(*)                   AS source_count,
-        count(distinct l.source)   AS distinct_site_count,
-        min(l.first_seen_at)       AS first_seen_at,
-        max(l.last_seen_at)        AS last_seen_at
-      FROM listings l
-      JOIN batch b ON b.id = l.property_id
-      GROUP BY l.property_id
-    ),
-    -- GOLDEN RECORD (field-level survivorship): ONE rule for every field — the best
-    -- NON-NULL value in source-trust order, (array_agg(x ORDER BY rank) FILTER (WHERE x
-    -- IS NOT NULL))[1]. The amenity booleans used to be a second rule, bool_or, whose
-    -- stated reason was that a portal which simply does not parse an amenity leaves it
-    -- NULL and a sibling that did parse it should recover the fact. Best-non-null
-    -- recovers it identically — it skips NULLs too — so the two rules differ ONLY where
-    -- children disagree true-vs-false, and there presence-wins let the LEAST trusted
-    -- child decide: a bazos text guess beat sreality's stated false. W6/R3: provenance is
-    -- the contract row and rank is source_trust_rank, so the arbiter must be the same one
-    -- at both grains. The order ends on k.id (the surrogate, never NULL) because
-    -- bool_or was order-independent and this is not: sreality_id is NULL on every
-    -- post-Gate-2 non-sreality row, and _touch_chunk stamps one last_seen_at across a
-    -- whole index-walk chunk, so without it two same-portal children that disagree would
-    -- decide by array_agg's unspecified order and the value could oscillate.
-    golden AS (
-      SELECT
-        k.property_id AS pid,
-        (array_agg(k.has_lift ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.has_lift IS NOT NULL))[1]     AS has_lift,
-        (array_agg(k.has_balcony ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.has_balcony IS NOT NULL))[1]  AS has_balcony,
-        (array_agg(k.has_parking ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.has_parking IS NOT NULL))[1]  AS has_parking,
-        (array_agg(k.terrace ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.terrace IS NOT NULL))[1]      AS terrace,
-        (array_agg(k.garage ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.garage IS NOT NULL))[1]       AS garage,
-        (array_agg(k.cellar ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.cellar IS NOT NULL))[1]       AS cellar,
-        (array_agg(k.usable_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.usable_area IS NOT NULL))[1]  AS usable_area,
-        (array_agg(k.estate_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.estate_area IS NOT NULL))[1]  AS estate_area,
-        (array_agg(k.garden_area ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.garden_area IS NOT NULL))[1]  AS garden_area,
-        (array_agg(k.parking_lots ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.parking_lots IS NOT NULL))[1] AS parking_lots,
-        (array_agg(k.building_type ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.building_type IS NOT NULL))[1] AS building_type,
-        (array_agg(k.condition ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.condition IS NOT NULL))[1]    AS condition,
-        (array_agg(k.ownership ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.ownership IS NOT NULL))[1]    AS ownership,
-        (array_agg(k.furnished ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.furnished IS NOT NULL))[1]    AS furnished,
-        (array_agg(k.energy_rating ORDER BY k.src_rank, k.is_active DESC,
-            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC, k.id DESC)
-            FILTER (WHERE k.energy_rating IS NOT NULL))[1] AS energy_rating
+        count(distinct k.source)   AS distinct_site_count,
+        min(k.first_seen_at)       AS first_seen_at,
+        max(k.last_seen_at)        AS last_seen_at,
+        (array_agg(k.has_lift ORDER BY k.canonical_rank) FILTER (WHERE k.has_lift IS NOT NULL))[1] AS has_lift,
+        (array_agg(k.has_balcony ORDER BY k.canonical_rank) FILTER (WHERE k.has_balcony IS NOT NULL))[1] AS has_balcony,
+        (array_agg(k.has_parking ORDER BY k.canonical_rank) FILTER (WHERE k.has_parking IS NOT NULL))[1] AS has_parking,
+        (array_agg(k.terrace ORDER BY k.canonical_rank) FILTER (WHERE k.terrace IS NOT NULL))[1] AS terrace,
+        (array_agg(k.garage ORDER BY k.canonical_rank) FILTER (WHERE k.garage IS NOT NULL))[1] AS garage,
+        (array_agg(k.cellar ORDER BY k.canonical_rank) FILTER (WHERE k.cellar IS NOT NULL))[1] AS cellar,
+        (array_agg(k.usable_area ORDER BY k.canonical_rank) FILTER (WHERE k.usable_area IS NOT NULL))[1] AS usable_area,
+        (array_agg(k.estate_area ORDER BY k.canonical_rank) FILTER (WHERE k.estate_area IS NOT NULL))[1] AS estate_area,
+        (array_agg(k.garden_area ORDER BY k.canonical_rank) FILTER (WHERE k.garden_area IS NOT NULL))[1] AS garden_area,
+        (array_agg(k.parking_lots ORDER BY k.canonical_rank) FILTER (WHERE k.parking_lots IS NOT NULL))[1] AS parking_lots,
+        (array_agg(k.building_type ORDER BY k.canonical_rank) FILTER (WHERE k.building_type IS NOT NULL))[1] AS building_type,
+        (array_agg(k.ownership ORDER BY k.canonical_rank) FILTER (WHERE k.ownership IS NOT NULL))[1] AS ownership,
+        (array_agg(k.energy_rating ORDER BY k.canonical_rank) FILTER (WHERE k.energy_rating IS NOT NULL))[1] AS energy_rating
       FROM kids k
       GROUP BY k.property_id
     ),
-    -- The per-m2 denominator's FALLBACK (migration 424). The UPDATE below takes
-    -- area_m2 from the REPRESENTATIVE child whenever it has one, so the
-    -- denominator belongs to the same listing as the price it divides. Only when
-    -- that child reports no area does the group's best area stand in -- this CTE,
-    -- which is the pre-424 golden-record pick verbatim (best non-NULL area in
-    -- trust order), so no property loses an area it already had and drops out of
-    -- an area filter. Those are exactly the rows price_per_m2_source_listing_id
-    -- leaves NULL. LEFT-JOINed -> no row at all when no child reports an area.
-    best_area AS (
-      SELECT DISTINCT ON (k.property_id)
-        k.property_id AS pid, k.area_m2
-      FROM kids k
-      WHERE k.area_m2 IS NOT NULL
-      ORDER BY k.property_id, k.src_rank,
-               k.is_active DESC, k.last_seen_at DESC NULLS LAST, k.sreality_id DESC
-    ),
-    -- W4-a DELETED `best_geo` and `best_street`. Both picked a property's PLACE
-    -- from a different child than its price, and every one of their readers has
-    -- moved: the Watchdog's lat/lng and chip codes, the kanban town and the merge
-    -- audit's label all come off `properties_public`, which reads
-    -- `repr_listing_ref_id -> listing_location` (migration 507); the MF rent map
-    -- keys on the same point. So a property's place is now the SAME child its
-    -- price and area come from -- `repr` -- and the twelve `properties` columns
-    -- they used to write are unwritten from here on and dropped in W4-c.
-    repr AS (
-      SELECT DISTINCT ON (l.property_id)
-        l.property_id AS pid, l.sreality_id, l.id AS listing_ref_id,
-        l.category_main, l.category_type,
-        l.disposition, l.price_czk, l.area_m2,
-        l.category_sub_cb, l.subtype,
-        l.building_condition_level, l.apartment_condition_level, l.source
-      FROM listings l
-      JOIN batch b ON b.id = l.property_id
-      -- Representative row = the property's DISPLAY listing (drives price,
-      -- AREA, disposition, category -- price and area together, migration 424:
-      -- the per-m2 denominator has to belong to the row the numerator came
-      -- from). Active-first so a live listing represents
-      -- current state (never a delisted sibling's stale price), then the shared
-      -- trust order (migration 311) as the tiebreak among equally-active
-      -- siblings — replacing the old bare sreality_id DESC, whose sign made the
-      -- pick arbitrary across portals. NB: the golden-record field CTEs above are
-      -- trust-FIRST instead —
-      -- a field's best-known value should come from the most trusted source even
-      -- if that listing later delisted; the two goals legitimately differ.
-      ORDER BY l.property_id, l.is_active DESC, source_trust_rank(l.source),
-               l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
-    ),
-    -- Price steps come from `listing_price_steps` (migration 559), the ONE step
-    -- definition this rollup shares with the watchdog and the collection monitor: a
-    -- step is a change WITHIN one child's own snapshot series, never across two
-    -- children -- interleaving a multi-portal property's children by scraped_at
-    -- made every alternating read (5.0M on one portal, 5.2M on another) a change
-    -- and hid real cuts between them. Each step is dated by its own scraped_at and
-    -- the counts sum across children: a change on any portal is a change for the
-    -- property. The windowed counts decay as events age out, so they are only as
-    -- fresh as the last recompute of the row -- the daily full sweep is the bound.
+    -- The canonical advert's OWN steps (`listing_price_steps`, migration 559, the one step
+    -- definition the watchdog and the collection monitor read too), each dated by its own
+    -- scraped_at. The windowed counts decay as events age out, so they are only as fresh as the
+    -- last recompute of the row -- the daily full sweep is the bound.
     price_hist AS (
       SELECT
-        ps.property_id AS pid,
+        c.property_id AS pid,
         count(*) FILTER (WHERE ps.price_czk < ps.prev_price_czk) AS drops,
         count(*) FILTER (WHERE ps.price_czk > ps.prev_price_czk) AS rises,
         count(*)                                                 AS changes,
@@ -317,33 +121,27 @@ _RECOMPUTE_BATCH_SQL = """
         count(*) FILTER (WHERE ps.scraped_at >= now() - interval '365 days') AS changes_365d,
         max((ps.prev_price_czk - ps.price_czk)::numeric / ps.prev_price_czk * 100)
           FILTER (WHERE ps.price_czk < ps.prev_price_czk)        AS max_drop_pct
-      FROM listing_price_steps ps
-      JOIN batch b ON b.id = ps.property_id
-      GROUP BY ps.property_id
+      FROM canon c
+      JOIN listing_price_steps ps ON ps.listing_id = c.id
+      GROUP BY c.property_id
     ),
-    -- The property's headline delta is anchored on the REPRESENTATIVE child --
-    -- the same listing whose price becomes properties.current_price_czk below, so
-    -- a card never quotes a headline price and a drop that describe two different
-    -- numbers: first-to-last of that child's own priced snapshots. (No literal
-    -- percent sign in this comment on purpose -- prose percent inside executed SQL
-    -- is an `incomplete placeholder` crash in psycopg; tests/test_sql_placeholders.py
-    -- guards it.) NULL when the representative has fewer than two priced snapshots.
-    repr_span AS (
+    -- The headline delta: first-to-last of the canonical advert's own priced snapshots, the
+    -- series its price is the last point of. (No literal percent sign in this comment on
+    -- purpose -- prose percent inside executed SQL is an `incomplete placeholder` crash in
+    -- psycopg; tests/test_sql_placeholders.py guards it.) NULL under two priced snapshots.
+    canon_span AS (
       SELECT
-        r.pid,
+        c.property_id AS pid,
         (array_agg(s.price_czk ORDER BY s.scraped_at, s.id))[1]           AS first_price,
         (array_agg(s.price_czk ORDER BY s.scraped_at DESC, s.id DESC))[1] AS last_price,
         count(*)                                                          AS price_points
-      FROM repr r
-      JOIN listing_snapshots s ON s.listing_id = r.listing_ref_id
+      FROM canon c
+      JOIN listing_snapshots s ON s.listing_id = c.id
       WHERE s.price_czk IS NOT NULL
-      GROUP BY r.pid
+      GROUP BY c.property_id
     ),
-    -- Last content change = newest snapshot across all children. Snapshots are
-    -- inserted only on a content-hash change (rule #2), so this is the "recently
-    -- changed" timestamp the Browse filter reads (exposed via properties_public,
-    -- migration 158). Includes price-less snapshots (any field change), so it
-    -- reads the snapshots directly rather than the priced-only step view.
+    -- Last content change = the newest snapshot of any advert (snapshots are content-change
+    -- only, rule 2): the "recently changed" timestamp Browse filters on (migration 158).
     changes AS (
       SELECT l.property_id AS pid, max(s.scraped_at) AS last_change_at
       FROM listing_snapshots s
@@ -352,42 +150,40 @@ _RECOMPUTE_BATCH_SQL = """
       GROUP BY l.property_id
     )
     UPDATE properties p SET
-      is_active           = ca.is_active,
-      source_count        = ca.source_count,
-      distinct_site_count = ca.distinct_site_count,
-      first_seen_at       = ca.first_seen_at,
-      last_seen_at        = ca.last_seen_at,
-      repr_listing_id     = r.sreality_id,
-      repr_listing_ref_id = r.listing_ref_id,
-      category_main       = r.category_main,
-      category_type       = r.category_type,
-      disposition         = r.disposition,
-      area_m2             = coalesce(r.area_m2, ba.area_m2),
-      current_price_czk   = r.price_czk,
-      -- Numerator and denominator, then the row both came from -- NULL unless
-      -- ONE child supplies a price and a positive area (migration 424).
-      price_per_m2_source_listing_id =
-          price_per_m2_source_id(r.price_czk, r.area_m2, r.listing_ref_id),
-      has_balcony         = g.has_balcony,
-      has_parking         = g.has_parking,
-      has_lift            = g.has_lift,
-      building_type       = g.building_type,
-      condition           = g.condition,
-      ownership           = g.ownership,
-      furnished           = g.furnished,
-      terrace             = g.terrace,
-      cellar              = g.cellar,
-      garage              = g.garage,
-      category_sub_cb     = r.category_sub_cb,
-      subtype             = r.subtype,
-      estate_area         = g.estate_area,
-      usable_area         = g.usable_area,
-      garden_area         = g.garden_area,
-      parking_lots        = g.parking_lots,
-      building_condition_level  = r.building_condition_level,
-      apartment_condition_level = r.apartment_condition_level,
-      energy_rating             = g.energy_rating,
-      source                    = r.source,
+      is_active           = r.is_active,
+      source_count        = r.source_count,
+      distinct_site_count = r.distinct_site_count,
+      first_seen_at       = r.first_seen_at,
+      last_seen_at        = r.last_seen_at,
+      repr_listing_id     = c.sreality_id,
+      repr_since          = CASE WHEN p.repr_listing_ref_id <> c.id THEN now() ELSE p.repr_since END,
+      repr_listing_ref_id = c.id,
+      category_main       = c.category_main,
+      category_type       = c.category_type,
+      category_sub_cb     = c.category_sub_cb,
+      subtype             = c.subtype,
+      disposition         = c.disposition,
+      area_m2             = c.area_m2,
+      current_price_czk   = c.price_czk,
+      price_per_m2_source_listing_id = price_per_m2_source_id(c.price_czk, c.area_m2, c.id),
+      condition           = c.condition,
+      building_condition_level  = c.building_condition_level,
+      apartment_condition_level = c.apartment_condition_level,
+      furnished           = c.furnished,
+      source              = c.source,
+      has_lift            = r.has_lift,
+      has_balcony         = r.has_balcony,
+      has_parking         = r.has_parking,
+      terrace             = r.terrace,
+      garage              = r.garage,
+      cellar              = r.cellar,
+      usable_area         = r.usable_area,
+      estate_area         = r.estate_area,
+      garden_area         = r.garden_area,
+      parking_lots        = r.parking_lots,
+      building_type       = r.building_type,
+      ownership           = r.ownership,
+      energy_rating       = r.energy_rating,
       price_drop_count    = coalesce(ph.drops, 0),
       price_rise_count    = coalesce(ph.rises, 0),
       max_price_drop_pct  = ph.max_drop_pct,
@@ -396,19 +192,17 @@ _RECOMPUTE_BATCH_SQL = """
       price_change_count_90d  = coalesce(ph.changes_90d, 0),
       price_change_count_365d = coalesce(ph.changes_365d, 0),
       total_price_change_pct  = CASE
-          WHEN rs.price_points >= 2 AND rs.first_price > 0
-          THEN (rs.last_price - rs.first_price)::numeric / rs.first_price * 100
+          WHEN cs.price_points >= 2 AND cs.first_price > 0
+          THEN (cs.last_price - cs.first_price)::numeric / cs.first_price * 100
       END,
-      last_change_at      = coalesce(ch.last_change_at, ca.first_seen_at),
+      last_change_at      = coalesce(ch.last_change_at, r.first_seen_at),
       stats_computed_at   = now()
-    FROM child_agg ca
-    JOIN repr r ON r.pid = ca.pid
-    JOIN golden g ON g.pid = ca.pid
-    LEFT JOIN best_area ba ON ba.pid = ca.pid
-    LEFT JOIN price_hist ph ON ph.pid = ca.pid
-    LEFT JOIN repr_span rs ON rs.pid = ca.pid
-    LEFT JOIN changes ch ON ch.pid = ca.pid
-    WHERE p.id = ca.pid
+    FROM child_agg r
+    JOIN canon c ON c.property_id = r.pid
+    LEFT JOIN price_hist ph ON ph.pid = r.pid
+    LEFT JOIN canon_span cs ON cs.pid = r.pid
+    LEFT JOIN changes ch ON ch.pid = r.pid
+    WHERE p.id = r.pid
 """
 
 # Single-property recompute, derived from the batch SQL by narrowing the `batch`
@@ -544,43 +338,20 @@ def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
         yield lo, lo + batch_size
 
 
-def _backfill_native_ids(conn: Any) -> None:
-    """One-time legacy whole-table fix (migration 091 era; every writer sets
-    source_id_native now, so it matches ~0 rows). Independent of the attach pair and
-    idempotent on its own, so the full sweep runs it as its OWN retried step rather
-    than re-running the whole-table scan on each replay of the attach."""
-    with conn.cursor() as cur:
-        cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
-
-
-def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
-    """Give every property_id-NULL listing its own singleton property.
-
-    The native-id backfill is a one-time legacy fix that scans the whole listings
-    table, so the */5 incremental pass skips it (daily full mode runs it). No
-    cross-listing matching happens here anymore: the old geo Tier-1 spatial link
-    was removed when grouping moved out-of-band, and grouping is now
-    operator-ordered only (CLAUDE.md rule 15). Fresh singletons are inserted already-correct (one child, no price history),
-    so they need no recompute and are not enqueued dirty.
-    """
-    if not skip_native_backfill:
-        _backfill_native_ids(conn)
-    # INSERT + LINK in ONE transaction: the pair is only JOINTLY idempotent.
-    # Under autocommit a failure between them commits properties rows whose
-    # listings still carry property_id NULL, so the next attempt INSERTs a
-    # SECOND singleton per straggler and the LINK picks one arbitrarily — the
-    # other is a childless orphan nothing but _reconcile_childless's
-    # is_active=false ever touches. That window used to cost one duplicate per
-    # dead run; now that db.run_resilient REPLAYS this op it can cost one per
-    # attempt (a pooler statement-timeout on the un-scoped LINK is the realistic
-    # trigger). All-or-nothing makes the replay a true no-op re-run. The
-    # whole-table native-id backfill stays outside — it is independent and
-    # idempotent on its own, and nothing should hold its locks for the pair.
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(_ATTACH_INSERT_SQL)
-        inserted = cur.rowcount or 0
-        cur.execute(_ATTACH_LINK_SQL)
-    return inserted
+def _attach_stragglers(conn: Any) -> int:
+    """Give every property_id-NULL listing its own singleton property, recomputed at birth.
+    No cross-listing matching happens here, ever (CLAUDE.md rule 15)."""
+    # Birth, link and first recompute in ONE transaction: a replay after a failure (db.
+    # run_resilient replays this op) finds the stragglers still unlinked, never a linked bare
+    # row that Browse could show before its recompute.
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(_STRAGGLERS_SQL)
+            stragglers = [int(r[0]) for r in cur.fetchall()]
+        born = db.create_singleton_properties(conn, stragglers) if stragglers else []
+        if born:
+            _run_recompute_statement(conn, _RECOMPUTE_SCOPED_SQL, {"ids": born})
+    return len(born)
 
 
 def _bind_pending_estimation_listing_ids(conn: Any, *, limit: int = 5000) -> int:
@@ -875,8 +646,7 @@ def _release_lease(conn: Any, holder: str,
 def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
     """ONE incremental property-maintenance pass — THE shared implementation
     behind the GH cron (property_maintenance.yml) and the realtime worker's
-    maintenance lane: attach new stragglers (skip the legacy native-id
-    backfill) + recompute the dirty set + patch `browse_list` for exactly the
+    maintenance lane: attach new stragglers + recompute the dirty set + patch `browse_list` for exactly the
     properties it recomputed, so a change reaches Browse on this lane's cadence
     rather than at the next */15 wholesale rebuild.
     Serialized by the maintenance lease; a caller that
@@ -895,7 +665,7 @@ def run_incremental_pass(conn: Any, batch_size: int = 2000) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute("SELECT now()")
             cutoff = cur.fetchone()[0]
-        attached = _attach_stragglers(conn, skip_native_backfill=True)
+        attached = _attach_stragglers(conn)
         bound = _bind_pending_estimation_listing_ids(conn)
         recomputed = _drain_dirty(
             conn, batch_size, cutoff,
@@ -917,8 +687,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--incremental", action="store_true",
-        help="Dirty-set mode: attach new stragglers (skip the legacy native-id "
-             "backfill) + recompute only queued properties. Default is the full "
+        help="Dirty-set mode: attach new stragglers + recompute only queued "
+             "properties. Default is the full "
              "sweep over every property (the daily reconcile backstop).",
     )
     parser.add_argument(
@@ -1038,13 +808,8 @@ def main() -> int:
             # Lease ACQUISITION stays unwrapped: its CAS/backoff semantics are its
             # own, and nothing has been done yet when it fails.
             _wait_lease(conn, holder, _LEASE_TTL)
-            # Hoisted out of the attach op: the whole-table native-id scan is
-            # independent and idempotent, so replaying the attach must not re-run it.
-            step(_backfill_native_ids, "sweep.backfill")
-            # attempts=2, like sweep.batch: the attach's LINK is un-scoped and
-            # whole-table, so a doomed attach reds in ~4 min instead of ~8.
-            attached = step(lambda c: _attach_stragglers(c, skip_native_backfill=True),
-                            "sweep.attach", attempts=2)
+            # attempts=2, like sweep.batch: a doomed attach reds in ~4 min instead of ~8.
+            attached = step(_attach_stragglers, "sweep.attach", attempts=2)
             LOG.info("RECOMPUTE stragglers attached=%d", attached)
 
             budget = min(args.max_seconds, _MAX_BUDGET_SECONDS)

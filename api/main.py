@@ -543,7 +543,6 @@ def post_compute_market_velocity(
         area_m2=body.target.area_m2,
         disposition=body.target.disposition,
         floor=body.target.floor,
-        exclude_ids=list(body.target.exclude_ids),
         exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(
@@ -839,7 +838,6 @@ def get_estimation_preview(
             "area_m2":     spec.get("area_m2"),
             "disposition": spec.get("disposition"),
             "floor":       spec.get("floor"),
-            "exclude_ids": [],
         },
         "listing": {
             "price_czk":            spec.get("price_czk"),
@@ -1274,7 +1272,6 @@ def post_estimate_yield(
         area_m2=body.target.area_m2,
         disposition=body.target.disposition,
         floor=body.target.floor,
-        exclude_ids=list(body.target.exclude_ids),
         exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(
@@ -1788,7 +1785,6 @@ def _build_comparables_inputs(
         area_m2=body.target.area_m2,
         disposition=body.target.disposition,
         floor=body.target.floor,
-        exclude_ids=list(body.target.exclude_ids),
         exclude_listing_ids=list(body.target.exclude_listing_ids),
     )
     filters = ComparableFilters(

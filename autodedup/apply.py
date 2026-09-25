@@ -20,9 +20,11 @@ deal types and its area; a row that is absent or names no area merges nothing. I
 before EVERY group (E39), so emptying its area on /settings stops a run between two groups, and
 a run's own arguments can narrow it and never widen it.
 
-D7 holds: nothing here reads `property_merge_events`, and only the chokepoint writes it
-(`source='autodedup'` says who merged; a detach and its read-only preview, `detach_outcomes`,
-read it inside the toolkit). The apply path's own ledger is the only history it consults.
+D7 holds: nothing here reads `property_merge_events`, and only `toolkit.property_identity` writes
+it (the chokepoint's merge rows, `source='autodedup'` saying who merged; a detach's undone stamps;
+an operator's native split's one closed row). A detach and its read-only preview,
+`detach_outcomes`, read it inside the toolkit. The apply path's own ledger is the only history
+it consults.
 """
 
 from __future__ import annotations
