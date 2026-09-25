@@ -1,10 +1,11 @@
-"""Every statement the W29 apply path runs (PROGRAM.md E300-E306), as constants.
+"""Every statement the W30 apply path runs (PROGRAM.md E300-E306), as constants.
 
 Reads: the two `app_settings` switches, one generation's groups and members from schema
 `autodedup`, the member listings' `property_id` and categories and the involved properties
 from `public` (the same facts the chokepoint itself re-checks), the operator's negatives
-(`verdicts`, `must_not_link`) and the engine's own apply ledger. NOTHING here reads `public.property_merge_events` (D7) — the one
-statement that names it is a write-only stamp scoped to a merge group this path just created.
+(`verdicts`, `must_not_link`) and the engine's own apply ledger. NOTHING here reads
+`public.property_merge_events` (D7) — the one statement that names it is a write-only stamp
+scoped to a merge group this path just created.
 
 Every nullable parameter carries an explicit cast: psycopg sends no type OID for a Python
 `None`, so an uncast NULL fails Parse with 42P18.
@@ -48,9 +49,10 @@ select p.id, p.status, p.category_type, p.category_main, p.first_seen_at
 """
 
 # EVERY listing on the involved properties, not only the group's members: a merge moves all
-# of a property's children, so the negatives and the bridge check read the whole set.
+# of a property's children, so the negatives, the size, category and scope checks and the
+# carry-along check read the whole set — at plan time and again inside each group's transaction.
 PROPERTY_LISTINGS_SQL = """
-select l.property_id, l.id
+select l.property_id, l.id, l.category_type, l.category_main
   from public.listings l
  where l.property_id = any(%(property_ids)s::bigint[])
 """
@@ -71,19 +73,26 @@ select v.listing_lo, v.listing_hi, v.verdict
    and v.listing_hi = any(%(listing_ids)s::bigint[])
 """
 
+# A group ruling is about a SET of listings (E58), so it is fetched by the listings it names,
+# never by the key it was taken under: a later group holding that set plus one more listing may
+# carry another key and must still be refused. A row without `member_ids` (538 backfilled every
+# earlier ruling; only the old API's migration window can have left one) names no set, so it
+# is fetched by key and refuses that key in EVERY generation (fail closed).
 CLUSTER_VERDICTS_SQL = """
 select v.cluster_key, v.verdict, v.generation, v.member_ids
   from autodedup.verdicts v
  where v.kind = 'cluster'
    and v.verdict = any(%(negatives)s::text[])
-   and v.cluster_key = any(%(cluster_keys)s::bigint[])
+   and ((v.member_ids is not null and v.member_ids && %(listing_ids)s::bigint[])
+        or (v.member_ids is null and v.cluster_key = any(%(cluster_keys)s::bigint[])))
 """
 
 # The engine's own history that can refuse a group: a live merge of one of these properties
 # (restored since, by `unapply` or by someone else) and a chokepoint refusal of this group.
+# `undone_by` tells the two restorers apart: only `unapply`'s own stamp is the engine's undo.
 LEDGER_HISTORY_SQL = """
 select a.generation, a.cluster_key, a.survivor_property_id, a.retired_property_id,
-       a.outcome, a.undone_at is not null as undone
+       a.outcome, a.undone_at is not null as undone, a.undone_by
   from autodedup.applied_merges a
  where not a.dry_run
    and a.outcome in ('applied', 'refused')
@@ -91,15 +100,42 @@ select a.generation, a.cluster_key, a.survivor_property_id, a.retired_property_i
         or a.retired_property_id = any(%(property_ids)s::bigint[]))
 """
 
+# Every live engine merge whose group named one of these listings: the only thing that lets
+# a merge carry a listing its own group does not hold (E303 `carries_ungrouped_listings`), and
+# what names the engine merge behind a group the operator ruled different after it merged.
+LIVE_ENGINE_MERGES_SQL = """
+select distinct on (a.merge_group_id)
+       a.generation, a.cluster_key, a.merge_group_id::text, a.survivor_property_id,
+       a.member_ids
+  from autodedup.applied_merges a
+ where not a.dry_run
+   and a.outcome = 'applied'
+   and a.undone_at is null
+   and a.member_ids && %(listing_ids)s::bigint[]
+ order by a.merge_group_id, a.id
+"""
+
+# A live engine merge that retired this property: what `unapply` must undo FIRST before it can
+# undo a group whose survivor has since been merged away.
+LIVE_RETIRING_SQL = """
+select a.generation, a.cluster_key, a.retired_property_id
+  from autodedup.applied_merges a
+ where not a.dry_run
+   and a.outcome = 'applied'
+   and a.undone_at is null
+   and a.retired_property_id = any(%(property_ids)s::bigint[])
+ order by a.id
+"""
+
 LEDGER_INSERT_SQL = """
 insert into autodedup.applied_merges (
     run_id, generation, cluster_key, survivor_property_id, retired_property_id,
-    merge_group_id, dry_run, outcome, error, listings_moved, plan_json
+    merge_group_id, dry_run, outcome, error, listings_moved, member_ids, plan_json
 ) values (
     %(run_id)s::text, %(generation)s::text, %(cluster_key)s::bigint,
     %(survivor_property_id)s::bigint, %(retired_property_id)s::bigint,
     %(merge_group_id)s::uuid, %(dry_run)s::boolean, %(outcome)s::text, %(error)s::text,
-    %(listings_moved)s::integer, %(plan_json)s::jsonb
+    %(listings_moved)s::integer, %(member_ids)s::bigint[], %(plan_json)s::jsonb
 )
 """
 

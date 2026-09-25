@@ -1,4 +1,4 @@
-"""W29 APPLY (PROGRAM.md E300-E306): engine groups into production merges, dark by default.
+"""W30 (PROGRAM.md E300-E306): engine groups into production merges, dark by default.
 
 The fake below STORES what the apply path writes and serves it back, dispatching on the SQL
 constant itself (the `fake_pg` idiom): a statement this file does not know raises. The merge
@@ -148,7 +148,8 @@ class FakeDb:
                      r["first_seen_at"])
                     for pid, r in self.properties.items() if pid in p["property_ids"]]
         if sql == S.PROPERTY_LISTINGS_SQL:
-            return [(r["property_id"], lid) for lid, r in self.listings.items()
+            return [(r["property_id"], lid, r["category_type"], r["category_main"])
+                    for lid, r in self.listings.items()
                     if r["property_id"] in p["property_ids"]]
         if sql == S.MUST_NOT_LINK_SQL:
             ids = set(p["listing_ids"])
@@ -159,17 +160,37 @@ class FakeDb:
                     if v["kind"] == "pair" and v["verdict"] in p["negatives"]
                     and v["lo"] in ids and v["hi"] in ids]
         if sql == S.CLUSTER_VERDICTS_SQL:
+            ids = set(p["listing_ids"])
             return [(v["cluster_key"], v["verdict"], v.get("generation"), v.get("member_ids"))
                     for v in self.verdicts
                     if v["kind"] == "cluster" and v["verdict"] in p["negatives"]
-                    and v["cluster_key"] in p["cluster_keys"]]
+                    and ((v.get("member_ids") is not None and ids & set(v["member_ids"]))
+                         or (v.get("member_ids") is None
+                             and v["cluster_key"] in p["cluster_keys"]))]
         if sql == S.LEDGER_HISTORY_SQL:
             return [(r["generation"], r["cluster_key"], r["survivor_property_id"],
-                     r["retired_property_id"], r["outcome"], r["undone_at"] is not None)
+                     r["retired_property_id"], r["outcome"], r["undone_at"] is not None,
+                     r["undone_by"])
                     for r in self.ledger
                     if not r["dry_run"] and r["outcome"] in ("applied", "refused")
                     and (r["generation"] == p["generation"]
                          or r["retired_property_id"] in p["property_ids"])]
+        if sql == S.LIVE_ENGINE_MERGES_SQL:
+            ids, seen, out = set(p["listing_ids"]), set(), []
+            for r in self.ledger:
+                if (r["dry_run"] or r["outcome"] != "applied" or r["undone_at"] is not None
+                        or r["merge_group_id"] in seen or not ids & set(r["member_ids"])):
+                    continue
+                seen.add(r["merge_group_id"])
+                out.append((r["generation"], r["cluster_key"], r["merge_group_id"],
+                            r["survivor_property_id"], list(r["member_ids"])))
+            return out
+        if sql == S.LIVE_RETIRING_SQL:
+            return [(r["generation"], r["cluster_key"], r["retired_property_id"])
+                    for r in self.ledger
+                    if not r["dry_run"] and r["outcome"] == "applied"
+                    and r["undone_at"] is None
+                    and r["retired_property_id"] in p["property_ids"]]
         if sql == S.LEDGER_INSERT_SQL:
             return self._ledger_insert(p)
         if sql == S.STAMP_GENERATION_SQL:
@@ -259,15 +280,17 @@ class FakeDb:
                           if e["merge_group_id"] == merge_group_id and not e["undone"]]
                 if not events:
                     raise MergeError(f"no active merge events for group {merge_group_id}")
-                back = 0
+                back, conflicts = 0, []
                 for e in events:
                     if conn.listings[e["listing"]]["property_id"] == e["survivor"]:
                         conn.listings[e["listing"]]["property_id"] = e["retired"]
                         back += 1
+                    else:
+                        conflicts.append(e["listing"])
                     conn.properties[e["retired"]].update(status="active", merged_into=None)
                     e["undone"] = True
             return {"data": {"merge_group_id": merge_group_id, "listings_moved_back": back,
-                             "conflicts": []}}
+                             "conflicts": conflicts}}
         return unmerge
 
 
@@ -293,8 +316,7 @@ def _only(plan: A.Plan) -> A.GroupPlan:
 
 def test_survivor_is_the_property_with_the_most_listings() -> None:
     db = FakeDb()
-    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
-    db.listing(13, 200)  # 200 carries a second, unclustered listing
+    _pair_group(db, 10, [10, 11, 12, 13], [100, 200, 300, 200])  # 200 carries two members
     group = _only(_plan(db))
     assert group.reasons == []
     assert group.survivor_id == 200 and group.retired_ids == [100, 300]
@@ -332,12 +354,74 @@ def test_operator_negatives_refuse_a_group() -> None:
     assert reasons[30] == [A.SKIP_CLUSTER_VERDICT]
 
 
-def test_a_group_verdict_about_another_membership_does_not_apply() -> None:
+def test_a_group_verdict_about_a_wider_set_does_not_refuse_a_subset() -> None:
+    # "30, 31 and 32 are not one property" says nothing against 30 and 31 alone.
     db = FakeDb()
     _pair_group(db, 30, [30, 31], [500, 600])
     db.verdicts.append({"kind": "cluster", "cluster_key": 30, "verdict": "different",
                         "generation": "g11", "member_ids": [30, 31, 32]})
     assert _only(_plan(db)).reasons == []
+
+
+def test_a_group_verdict_refuses_every_later_superset_of_its_set() -> None:
+    # g11 ruled {10, 11} different; g12 regrouped them with a re-listing, 12. Uniting all
+    # three unites the two the operator separated, whatever else joins them.
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11, 12], [100, 200, 300])
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
+                        "generation": "g11", "member_ids": [10, 11]})
+    group = _only(_plan(db))
+    assert group.reasons == [A.SKIP_CLUSTER_VERDICT]
+    assert group.detail["group_verdicts"] == [[10, 11]]
+
+
+def test_a_group_verdict_is_found_under_a_changed_cluster_key() -> None:
+    # The re-listing has the lowest id, so the g12 group is keyed 5, not 10: the ruling is
+    # found by the listings it names, not by the key it was taken under.
+    db = FakeDb()
+    _pair_group(db, 5, [5, 10, 11], [50, 100, 200])
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
+                        "generation": "g11", "member_ids": [10, 11]})
+    assert _only(_plan(db)).reasons == [A.SKIP_CLUSTER_VERDICT]
+
+
+def test_a_group_verdict_with_no_member_set_refuses_its_key_in_every_generation() -> None:
+    # A ruling that names no set cannot be matched to listings, so it fails CLOSED on its key.
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    _pair_group(db, 30, [30, 31], [500, 600])
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
+                        "generation": None, "member_ids": None})
+    db.verdicts.append({"kind": "cluster", "cluster_key": 20, "verdict": "different",
+                        "generation": "g11", "member_ids": None})
+    reasons = {g.cluster_key: g.reasons for g in _plan(db).groups}
+    assert reasons == {10: [A.SKIP_CLUSTER_VERDICT], 20: [A.SKIP_CLUSTER_VERDICT], 30: []}
+
+
+def _engine_merged(db: FakeDb, key: int, lids: list[int], pids: list[int],
+                   gen: str = "g11") -> None:
+    """`gen` merged `lids` (on `pids`) through the apply path, as a live engine merge."""
+    _pair_group(db, key, lids, pids, gen=gen)
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    result = A.apply_plan(db, A.plan_apply(db, gen, scope), dry_run=False, merge=db.merge([]))
+    assert result["counts"]["applied"] == 1, result
+
+
+def test_a_group_verdict_counts_across_both_properties_full_listing_sets() -> None:
+    # g11 merged 12 onto 200 with 11; g12 groups 10 with 11 and leaves 12 out. The operator
+    # ruled {10, 12} different: the merge would put both on one property, so it is refused
+    # although neither the group nor its key is the one the ruling was taken on.
+    db = FakeDb()
+    _engine_merged(db, 11, [11, 12], [200, 250])
+    _pair_group(db, 10, [10, 11], [100, 200])
+    db.verdicts.append({"kind": "cluster", "cluster_key": 12, "verdict": "different",
+                        "generation": "g9", "member_ids": [10, 12]})
+    group = _only(_plan(db))
+    assert group.reasons == [A.SKIP_CLUSTER_VERDICT]
+    assert group.detail["group_verdicts"] == [[10, 12]]
+    assert group.listing_ids == [10, 11, 12]
 
 
 def test_a_negative_against_a_listing_the_merge_would_carry_along_refuses() -> None:
@@ -347,8 +431,51 @@ def test_a_negative_against_a_listing_the_merge_would_carry_along_refuses() -> N
     db.listing(12, 200)
     db.mnl.append((10, 12, "guard"))
     group = _only(_plan(db))
-    assert group.reasons == [A.SKIP_MUST_NOT_LINK]
+    assert group.reasons == [A.SKIP_MUST_NOT_LINK, A.SKIP_CARRIES_UNGROUPED]
     assert group.detail["must_not_link"] == [[10, 12, "guard"]]
+
+
+def test_a_listing_this_engine_merged_with_a_member_may_ride_along() -> None:
+    # g11 merged 12 onto 200 together with 11; g12 groups 10 with 11 and leaves 12 out. 12
+    # shares 200 with a grouped member by THIS engine's live merge, so it may move with it —
+    # and every check reads the property the merge would build: size, scope, categories.
+    db = FakeDb()
+    _engine_merged(db, 11, [11, 12], [200, 250])
+    _pair_group(db, 10, [10, 11], [100, 200])
+    group = _only(_plan(db))
+    assert group.reasons == [] and group.listing_ids == [10, 11, 12]
+    assert group.survivor_id == 200 and group.retired_ids == [100]
+    assert _only(_plan(db, max_cluster_size=2)).reasons == [A.SKIP_OVERSIZE]
+    narrow = _only(_plan(db, listing_ids=frozenset({10, 11})))
+    assert narrow.reasons == [A.SKIP_CARRIES_OUT_OF_SCOPE]
+    assert narrow.detail["out_of_scope_listings"] == [12]
+    db.listings[12]["category_type"] = "pronajem"
+    assert _only(_plan(db)).reasons == [A.SKIP_CATEGORY_TYPE]
+
+
+def test_an_undone_engine_merge_vouches_for_nothing() -> None:
+    db = FakeDb()
+    _engine_merged(db, 11, [11, 12], [200, 250])
+    A.unapply(db, "g11", dry_run=False, unmerge=db.unmerge([]))
+    db.listing(12, 200)  # back on 200 by some other merge: not the engine's word any more
+    _pair_group(db, 10, [10, 11], [100, 200])
+    group = _only(_plan(db))
+    assert group.reasons == [A.SKIP_CARRIES_UNGROUPED]
+    assert group.detail["ungrouped_listings"] == [12]
+
+
+def test_a_property_carrying_listings_no_group_holds_is_refused() -> None:
+    # 100 is an older multi-listing property (10 plus 97-99); g12 grouped 10 with 11 only.
+    # Merging would put 11 on one property with three adverts the engine never matched.
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    for lid in (97, 98, 99):
+        db.listing(lid, 100)
+    group = _only(_plan(db, max_cluster_size=8))
+    assert group.reasons == [A.SKIP_CARRIES_UNGROUPED]
+    assert group.detail["ungrouped_listings"] == [97, 98, 99]
+    # ... and the size cap reads what the merge would build, not the members alone.
+    assert A.SKIP_OVERSIZE in _only(_plan(db, max_cluster_size=4)).reasons
 
 
 def test_category_guards_mirror_the_chokepoint() -> None:
@@ -587,6 +714,92 @@ def test_a_refusal_rolls_the_whole_group_back_and_is_final_for_the_generation() 
     assert _only(A.plan_apply(db, GEN, scope)).reasons == [A.SKIP_REFUSED_BEFORE]
 
 
+def test_a_negative_recorded_during_a_run_stops_the_group_it_names() -> None:
+    # The plan read no negative; the operator rules 20 x 21 different while group 10 merges.
+    # Group 20 re-reads its negatives inside its own transaction and is skipped, not merged.
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    calls: list[dict[str, Any]] = []
+    base = db.merge(calls)
+
+    def merge_then_rule(conn: FakeDb, **kw: Any) -> dict[str, Any]:
+        out = base(conn, **kw)
+        conn.verdicts.append({"kind": "pair", "lo": 20, "hi": 21, "verdict": "different"})
+        return out
+
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    plan = A.plan_apply(db, GEN, scope)
+    assert [g.reasons for g in plan.groups] == [[], []]
+    result = A.apply_plan(db, plan, dry_run=False, merge=merge_then_rule)
+    assert [c["retired_id"] for c in calls] == [200]
+    assert result["counts"]["applied"] == 1 and result["counts"]["skipped_at_apply"] == 1
+    assert result["skipped_at_apply"] == [
+        {"cluster_key": 20, "survivor_id": 300, "retired_ids": [400],
+         "reasons": [A.SKIP_PAIR_VERDICT]}]
+    assert db.listings[21]["property_id"] == 400
+    assert [(r["cluster_key"], r["outcome"], r["error"]) for r in db.ledger
+            if r["cluster_key"] == 20] == [(20, "skipped", A.SKIP_PAIR_VERDICT)]
+
+
+def test_a_property_that_changed_since_the_plan_is_not_merged() -> None:
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    plan = A.plan_apply(db, GEN, scope)
+    db.listing(12, 200)  # merged onto 200 by someone after the plan was read
+    calls: list[dict[str, Any]] = []
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    assert calls == [] and result["counts"]["skipped_at_apply"] == 1
+    assert result["skipped_at_apply"][0]["reasons"] == [A.SKIP_CHANGED_SINCE_PLAN]
+    row = next(r for r in db.ledger if r["outcome"] == "skipped")
+    assert json.loads(row["plan_json"])["detail"]["arrived_since_plan"] == [12]
+
+
+def test_an_engine_merge_ruled_different_afterwards_is_reported_not_counted_away(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    again = A.plan_apply(db, GEN, scope)
+    assert again.groups == [] and again.counts["already_one_property"] == 2
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
+                        "generation": GEN, "member_ids": [10, 11]})
+    # ... and a pair on one property that no engine merge put there.
+    _pair_group(db, 30, [30, 31], [500, 500])
+    db.mnl.append((30, 31, "operator"))
+    plan = A.plan_apply(db, GEN, scope)
+    ruled = {g.cluster_key: g for g in plan.groups}
+    assert set(ruled) == {10, 30} and plan.counts[A.RULED_AFTER_MERGE] == 2
+    assert plan.counts["already_one_property"] == 1 and plan.counts["skipped"] == 0
+    assert ruled[10].reasons == [A.RULED_AFTER_MERGE]
+    assert ruled[10].detail["negatives"] == [A.SKIP_CLUSTER_VERDICT]
+    assert [m["unapply"] for m in ruled[10].detail["engine_merges"]] == [
+        f"generation={GEN},cluster_key=10"]
+    assert ruled[30].detail["engine_merges"] == []
+
+    page = tmp_path / "step_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    out = A.run_apply(_factory(db), {"generation": GEN}, tmp_path)
+    assert [r["cluster_key"] for r in out[A.RULED_AFTER_MERGE]] == [10, 30]
+    assert out["skipped"] == [] and out["planned"] == []
+    text = page.read_text()
+    assert "carry an operator negative" in text
+    assert f"generation={GEN},cluster_key=10" in text
+
+
+def test_real_time_generations_are_refused(tmp_path: Path) -> None:
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200], gen="rt")
+    with pytest.raises(ValueError, match="real-time"):
+        A.plan_apply(db, "rt", A.Scope())
+    for gen in ("rt", "RT", "rt_seed_g12"):
+        with pytest.raises(SystemExit, match="real-time"):
+            A.run_apply(_factory(db), {"generation": gen}, tmp_path)
+    assert db.ledger == [] and not db.statements
+
+
 # ------------------------------------------------------------------ undo
 
 
@@ -631,11 +844,76 @@ def test_unapply_one_group_and_one_already_undone_elsewhere() -> None:
     first, second = calls[0]["merge_group_id"], calls[1]["merge_group_id"]
     db.unmerge([])(db, merge_group_id=second, undone_by="operator")  # the ledger UI's undo
     result = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
-    assert result["counts"] == {"groups": 2, "undone": 1, "already_undone": 1,
+    assert result["counts"] == {"groups": 2, "undone": 1, "already_undone": 1, "blocked": 0,
                                 "listings_moved_back": 1, "conflicts": 0}
     one = A.unapply(db, GEN, dry_run=True, cluster_key=10)
     assert one["groups"] == []  # both groups are now recorded as undone
     assert first != second
+    external = [r for r in db.ledger if r["merge_group_id"] == second]
+    assert [r["undone_by"] for r in external] == [A.EXTERNAL_UNDO]
+    assert external[0]["undo_result"]["noted_by"].startswith(A.UNAPPLY_BY_PREFIX)
+
+
+def test_an_operator_undo_noted_by_unapply_still_blocks_a_later_generation() -> None:
+    # g12 merged 400 into 300; the operator undid it on the merge ledger, then `unapply` rolled
+    # back the rest of g12. g13 may re-merge what the ENGINE undid (group 10), never what the
+    # operator separated (group 20).
+    db = FakeDb()
+    scope, calls = _applied_two(db)
+    db.unmerge([])(db, merge_group_id=calls[1]["merge_group_id"], undone_by="operator")
+    assert {g.cluster_key: g.reasons for g in A.plan_apply(db, GEN, scope).groups} == {
+        20: [A.SKIP_RESTORED_ELSEWHERE]}
+    A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
+    db.group(10, [10, 11], gen="g13")
+    db.group(20, [20, 21], gen="g13")
+    later = {g.cluster_key: g.reasons for g in A.plan_apply(db, "g13", scope).groups}
+    assert later == {10: [], 20: [A.SKIP_RESTORED_ELSEWHERE]}
+
+
+def test_unapply_skips_a_group_whose_survivor_a_later_generation_merged_away() -> None:
+    # g12 merged 200 into 100; g13 then merged 100 into 700. Undoing g12 first would only
+    # reactivate 200 with no listings and call the group undone while Browse still shows it
+    # merged, so it is skipped with the merge to undo first — and works once that is undone.
+    db = FakeDb()
+    scope, _calls = _applied_two(db)
+    db.prop(700, first=T0 - timedelta(days=1))  # a tie on size; the older 700 survives
+    db.listing(70, 700)
+    db.listing(71, 700)
+    db.group(10, [10, 11, 70, 71], gen="g13")
+    g13 = A.plan_apply(db, "g13", scope)
+    assert [(g.cluster_key, g.survivor_id, g.retired_ids, g.reasons) for g in g13.groups] == [
+        (10, 700, [100], [])]
+    A.apply_plan(db, g13, dry_run=False, merge=db.merge([]))
+    before = copy.deepcopy((db.listings, db.properties))
+
+    listing = A.unapply(db, GEN, dry_run=True, cluster_key=10)
+    assert listing["counts"]["blocked"] == 1
+    assert listing["groups"][0]["unapply_first"][0]["unapply"] == "generation=g13,cluster_key=10"
+    result = A.unapply(db, GEN, dry_run=False, cluster_key=10, unmerge=db.unmerge([]))
+    assert result["counts"]["blocked"] == 1 and result["counts"]["undone"] == 0
+    assert "undo the later engine merge first" in result["groups"][0]["blocked"]
+    assert (db.listings, db.properties) == before
+    assert [r["undone_at"] for r in db.ledger
+            if r["generation"] == GEN and r["cluster_key"] == 10 and r["outcome"] == "applied"
+            ] == [None]
+
+    A.unapply(db, "g13", dry_run=False, unmerge=db.unmerge([]))
+    again = A.unapply(db, GEN, dry_run=False, cluster_key=10, unmerge=db.unmerge([]))
+    assert again["counts"]["undone"] == 1 and again["counts"]["blocked"] == 0
+    assert db.listings[11]["property_id"] == 200
+
+
+def test_unapply_never_calls_undone_a_merge_that_would_move_nothing_back() -> None:
+    db = FakeDb()
+    _applied_two(db)
+    db.prop(999)
+    db.listing(11, 999)  # moved on since the merge (an operator split, say)
+    before = copy.deepcopy((db.listings, db.properties))
+    result = A.unapply(db, GEN, dry_run=False, cluster_key=10, unmerge=db.unmerge([]))
+    assert result["counts"]["blocked"] == 1 and result["counts"]["undone"] == 0
+    assert result["groups"][0]["conflicts"] == [11]
+    assert (db.listings, db.properties) == before  # rolled back: 200 stays merged away
+    assert all(r["undone_at"] is None for r in db.ledger if r["outcome"] == "applied")
 
 
 def test_a_merge_restored_outside_the_engine_is_never_re_merged() -> None:

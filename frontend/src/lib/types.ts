@@ -1620,7 +1620,7 @@ export interface MergeGroup {
   survivor_property_id: number;
   retired_count: number;
   listings_moved: number;
-  source: 'auto' | 'operator';
+  source: 'auto' | 'operator' | 'autodedup';
   reason: string;
   fully_undone: boolean;
 }

@@ -1220,9 +1220,17 @@ renumber.** Navigate by area:
     unit (`unmerge_group`, or `mode=unapply` for a whole generation newest-first). A dry run is
     the default and writes only its own ledger, `autodedup.applied_merges`; a live run also
     needs `app_settings.autodedup_apply_scope` naming deal types and area, re-reads the switch
-    before every group, and refuses — recording why — any group carrying an operator negative
-    across the listings the merge would move, mixed categories, a non-active property, or a
-    property the engine split across two groups. It stamps
+    before every group, and refuses — recording why — any group whose merge would unite, across
+    EVERY listing it moves (both properties' full sets, not just the members), an operator
+    negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
+    inside — any superset, under any key), mixed categories, a listing outside the scope, a
+    non-active property, more than `max_cluster_size` listings, a property the engine split
+    across two groups, or a listing no group holds (unless this engine's own live merge already
+    put it there with a member). Listings and negatives are re-read inside each group's
+    transaction before it merges; `rt…` generations are refused. A property the operator
+    restored stays unmerged by every later generation, even after `unapply` has noted it;
+    `unapply` skips a group whose survivor a later merge retired; a group already on one
+    property that the operator has since ruled different is reported, never acted on. It stamps
     `property_merge_events.generation = 'autodedup:<generation>'` write-only and reads nothing
     from that table. Undo restores listings and pipeline cards; collections, tags and notes stay
     on the survivor (rule #18: unmerge is best-effort).
@@ -2379,7 +2387,8 @@ renumber.** Navigate by area:
 
 ## Broker identity merges — auto-merge and the suppression rail
 
-Unlike property merges (rule #15, operator-only), broker identities DO auto-merge. The nightly
+Unlike property merges (rule #15: operator-ordered, plus the dark AUTODEDUP apply lane that
+runs only while `autodedup_apply_enabled` is on), broker identities DO auto-merge. The nightly
 sweep (`scripts/resolve_brokers.py::_auto_merge`, cron 04:35 UTC) hands the WHOLE identity +
 contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-20 is
 **portal-agnostic and name-gated** — one rule, no per-portal exceptions:

@@ -1,10 +1,10 @@
 -- 558_autodedup_apply_ledger.sql
 --
--- AUTODEDUP W29 (APPLY): the ledger of the engine's production merges, and the merge
+-- AUTODEDUP W30: the ledger of the engine's production merges, and the merge
 -- chokepoint's third `source`. Design: docs/design/autodedup/PROGRAM.md E300-E306; operator
 -- summary: docs/design/autodedup/ROLLOUT.md section 7.1. Purely ADDITIVE.
 --
--- WHAT CHANGES. Until W29 the engine wrote only its own schema (shadow mode, D4). The apply
+-- WHAT CHANGES. Until W30 the engine wrote only its own schema (shadow mode, D4). The apply
 -- path (autodedup/apply.py, lane modes `apply` / `unapply`) turns ONE generation's groups into
 -- production merges through THE chokepoint, `toolkit.property_identity.merge_properties`
 -- (CLAUDE.md rule 15), which already carries operator state (rule 18) and the deal pipeline
@@ -25,7 +25,8 @@
 --    planned, applied, refused or skipped, dry runs included (`dry_run`). ONE merge_group_id
 --    per engine group (E301), so `unmerge_group` undoes a whole group and `unapply` undoes a
 --    generation newest-first. The partial UNIQUE index is the idempotency rail: two live
---    merges of the same (survivor, retired) pair can never both be recorded.
+--    merges of the same (survivor, retired) pair can never both be recorded. `member_ids`
+--    (GIN-indexed over live merges) is the group's listing set, read back by later plans.
 --
 --    WHY NOT `autodedup.merges` (migration 528's reserved ledger). Its grain is one retired
 --    property per group keyed on merge_group_id with a listing PAIR (listing_lo < listing_hi);
@@ -116,6 +117,7 @@ create table if not exists autodedup.applied_merges (
     check (outcome in ('planned', 'applied', 'skipped', 'refused', 'failed')),
   error                text,
   listings_moved       integer,
+  member_ids           bigint[],
   plan_json            jsonb,
   applied_at           timestamptz not null default now(),
   undone_at            timestamptz,
@@ -139,15 +141,28 @@ create index if not exists autodedup_applied_merges_retired_idx
 create unique index if not exists autodedup_applied_merges_live_pair_uidx
   on autodedup.applied_merges (survivor_property_id, retired_property_id)
   where outcome = 'applied' and undone_at is null;
+create index if not exists autodedup_applied_merges_live_members_idx
+  on autodedup.applied_merges using gin (member_ids)
+  where outcome = 'applied' and undone_at is null;
 
 comment on table autodedup.applied_merges is
-  'AUTODEDUP W29: every group the apply path planned (dry run), applied, refused or skipped, '
+  'AUTODEDUP W30: every group the apply path planned (dry run), applied, refused or skipped, '
   'one row per retired property. ONE merge_group_id per engine group, so unmerge_group '
   'undoes a whole group. The engine''s own record; nothing reads property_merge_events (D7).';
 
 alter table autodedup.applied_merges enable row level security;
 revoke all on autodedup.applied_merges from anon, authenticated;
 revoke all on sequence autodedup.applied_merges_id_seq from anon, authenticated;
+
+comment on column autodedup.applied_merges.member_ids is
+  'The engine group''s listings as planned. A live merge''s set is the one thing that lets a '
+  'later merge carry a listing its own group does not hold: only a listing this engine '
+  'already merged onto the property together with a grouped member (E303).';
+
+comment on column autodedup.applied_merges.undone_by is
+  'Who undid this merge: ''autodedup-unapply:<run_id>'' = the engine''s own unapply, which '
+  'releases the properties to a later generation; ''external'' = someone else had already '
+  'undone it when unapply reached it, so the engine never re-merges those properties (E305).';
 
 ------------------------------------------------------------------
 -- 3. the operator's switches, seeded OFF

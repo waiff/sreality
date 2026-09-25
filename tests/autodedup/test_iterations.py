@@ -375,7 +375,7 @@ def test_every_mode_is_registered() -> None:
     # `rt_seed` is the operator's one-off cut of a generation's calibration. `rt_parity` is
     # the READ-ONLY instrument — an `iterations` row would be the one write it promises never
     # to make, and `rt_equivalence` and `town` make the same promise.
-    # `apply` / `unapply` (W29) are a unit of work a person reads: each run is a row.
+    # `apply` / `unapply` (W30) are a unit of work a person reads: each run is a row.
     assert set(lane.ITERATION_META) == {"census", "probes", "export", "judge", "score",
                                         "labels", "apply", "unapply"}
     for meta in lane.ITERATION_META.values():

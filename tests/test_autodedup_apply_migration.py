@@ -1,4 +1,4 @@
-"""Shape gate for migration 558 — W29's apply ledger, the chokepoint's third source and the
+"""Shape gate for migration 558 — W30's apply ledger, the chokepoint's third source and the
 operator's two switches, seeded OFF.
 
 Offline, no DB. The generic RLS/grant rails see every statement; this checks what they cannot

@@ -153,7 +153,7 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         ],
     },
     "apply": {
-        "wave": "W29",
+        "wave": "W30",
         "title": "Apply a generation's groups",
         "approach": (
             "One generation's groups planned into production merges - survivor = the property "
@@ -167,7 +167,7 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         ],
     },
     "unapply": {
-        "wave": "W29",
+        "wave": "W30",
         "title": "Undo a generation's merges",
         "approach": (
             "Every live merge group one generation applied, undone newest-first through "
