@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +48,7 @@ def test_args_select_a_set_and_never_carry_sql() -> None:
 
 def test_every_query_has_a_unique_name_statement_why_and_decision() -> None:
     names = [q.name for q in R.READINESS_V1]
-    assert len(set(names)) == len(names) == 28
+    assert len(set(names)) == len(names) == 29
     assert len({q.sql for q in R.READINESS_V1}) == len(names)
     for q in R.READINESS_V1:
         assert q.why.strip() and q.drives.strip(), q.name
@@ -83,6 +85,64 @@ def test_every_query_is_a_constant_the_sql_prepare_gate_discovers() -> None:
     }
     for q in R.READINESS_V1:
         assert " ".join(q.sql.split()) in ours, q.name
+
+
+def _flat(sql: str) -> str:
+    return " ".join(sql.split())
+
+
+def test_the_engine_merge_review_list_explains_the_field_disagreement_count() -> None:
+    (q,) = [q for q in R.READINESS_V1 if q.name == "a_engine_merge_disagreement_list"]
+    assert q.sql is R.A_ENGINE_MERGE_DISAGREEMENT_LIST_SQL
+    assert q.drives.startswith("Decision 18 / trial week: the operator's review list")
+    sql, probe = _flat(q.sql), _flat(R.A_FIELD_DISAGREEMENT_SQL)
+    for shared in (
+        "from public.listings l",
+        "where l.is_active and l.property_id is not null group by l.property_id "
+        "having count(*) > 1",
+        "min(l.area_m2) as area_min, max(l.area_m2) as area_max",
+        "count(distinct l.disposition) as",
+        "count(distinct l.floor) as",
+        "pr.area_max > pr.area_min * 1.05",
+        "join public.properties p on p.id = ",
+        "and p.status = 'active'",
+    ):
+        assert shared in probe and shared in sql, shared
+    assert "count(*) filter (where pr.floors > 1) as floor_differs" in probe
+    assert "count(*) filter (where pr.dispositions > 1) as disposition_differs" in probe
+    assert ("where pr.n_floors > 1 or pr.area_max > pr.area_min * 1.05 "
+            "or pr.n_dispositions > 1") in sql
+    for column in ("pr.n_floors > 1 as floor_differs",
+                   "coalesce(pr.area_max > pr.area_min * 1.05, false) as area_differs_over_5pct",
+                   "pr.n_dispositions > 1 as dispo_differs"):
+        assert column in sql, column
+
+
+def test_the_engine_merge_review_list_reads_live_engine_merges_newest_first() -> None:
+    sql = _flat(R.A_ENGINE_MERGE_DISAGREEMENT_LIST_SQL)
+    migrations = Path(__file__).resolve().parents[2] / "migrations"
+    ledger = _flat(next(migrations.glob("558_*.sql")).read_text(encoding="utf-8"))
+    assert ("check (outcome in ('planned', 'applied', 'skipped', 'refused', 'failed'))"
+            in ledger)
+    assert "from autodedup.applied_merges a where a.outcome = 'applied' and a.undone_at is null" \
+        in sql
+    assert "a.survivor_property_id as property_id, a.generation, a.applied_at as merged_at" in sql
+    select = sql.rsplit(" from merged m ", 1)[0].rsplit(") select ", 1)[1]
+    depth, parts, current = 0, [], ""
+    for ch in select:
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        if ch == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    parts.append(current.strip())
+    assert [part.rsplit(" ", 1)[-1].split(".")[-1] for part in parts] == [
+        "property_id", "generation", "merged_at", "n_active_adverts", "floors", "areas",
+        "dispositions", "sources", "listing_ids", "floor_differs", "area_differs_over_5pct",
+        "dispo_differs",
+    ]
+    assert sql.endswith("order by m.merged_at desc, m.property_id desc limit 200")
 
 
 def test_trial_blocks_use_the_export_spelling_and_every_area_query_uses_them() -> None:
@@ -178,6 +238,13 @@ _CANNED: dict[str, list[dict[str, Any]]] = {
         {"source": "ALL", "clip_p50_s": 8900.0, "clip_p90_s": 16200.0},
     ],
     R.B_TAG_HEAD_MODELS_SQL: [{"version": "v3", "status": "active"}],
+    R.A_ENGINE_MERGE_DISAGREEMENT_LIST_SQL: [
+        {"property_id": 91, "generation": "g12",
+         "merged_at": dt.datetime(2026, 9, 25, 9, 30, tzinfo=dt.timezone.utc),
+         "n_active_adverts": 2, "floors": [2, 3], "areas": [Decimal("61.0")],
+         "dispositions": ["2+kk"], "sources": ["idnes", "sreality"], "listing_ids": [7, 8],
+         "floor_differs": True, "area_differs_over_5pct": False, "dispo_differs": False},
+    ],
 }
 
 
@@ -224,6 +291,10 @@ def test_the_artifact_shape(tmp_path: Path) -> None:
     assert payload["errors"] == []
     assert payload["probes"]["r1c_live_group_health"][0]["health"] == "intact"
     assert payload["probes"]["neg_contradicted_negatives"] == []
+    (review,) = payload["probes"]["a_engine_merge_disagreement_list"]
+    assert review["merged_at"] == "2026-09-25 09:30:00+00:00"
+    assert review["floors"] == [2, 3] and review["areas"] == ["61.0"]
+    assert review["listing_ids"] == [7, 8] and review["floor_differs"] is True
 
     head = payload["headline"]
     assert head == result["headline"]
@@ -237,7 +308,7 @@ def test_the_artifact_shape(tmp_path: Path) -> None:
     assert head["false_alert_share_7d"] == 0.25
     assert head["clip_p90_s"] == 16200.0
     assert head["active_tag_head_model"] == "v3"
-    assert result["queries"] == result["succeeded"] == 28
+    assert result["queries"] == result["succeeded"] == 29
     assert not (tmp_path / "probes.json").exists()
 
 
@@ -253,7 +324,7 @@ def test_a_failed_query_is_recorded_not_raised(tmp_path: Path) -> None:
     assert any(err.startswith("b_legacy_cron_jobs:") for err in payload["errors"])
     assert payload["headline"]["legacy_cron_jobs"] is None
     assert payload["headline"]["legacy_live_groups_inside_trial"] == 12
-    assert result["succeeded"] == 27
+    assert result["succeeded"] == 28
 
 
 def test_the_lane_dispatch_writes_the_artifact_and_a_summary(tmp_path: Path) -> None:

@@ -494,6 +494,45 @@ select p.category_type, count(*) as properties, sum(pr.active_listings) as activ
  order by 2 desc
 """
 
+A_ENGINE_MERGE_DISAGREEMENT_LIST_SQL = """
+with merged as (
+  select distinct on (a.survivor_property_id)
+         a.survivor_property_id as property_id, a.generation, a.applied_at as merged_at
+    from autodedup.applied_merges a
+   where a.outcome = 'applied' and a.undone_at is null
+   order by a.survivor_property_id, a.applied_at desc, a.id desc
+),
+prop as (
+  select l.property_id, count(*) as n_active_adverts,
+         min(l.area_m2) as area_min, max(l.area_m2) as area_max,
+         count(distinct l.disposition) as n_dispositions,
+         count(distinct l.floor) as n_floors,
+         array_agg(distinct l.floor order by l.floor) filter (where l.floor is not null) as floors,
+         array_agg(distinct l.area_m2 order by l.area_m2)
+           filter (where l.area_m2 is not null) as areas,
+         array_agg(distinct l.disposition order by l.disposition)
+           filter (where l.disposition is not null) as dispositions,
+         array_agg(distinct l.source order by l.source) as sources,
+         array_agg(l.id order by l.id) as listing_ids
+    from public.listings l
+    join merged m on m.property_id = l.property_id
+   where l.is_active and l.property_id is not null
+   group by l.property_id
+  having count(*) > 1
+)
+select m.property_id, m.generation, m.merged_at, pr.n_active_adverts,
+       pr.floors, pr.areas, pr.dispositions, pr.sources, pr.listing_ids,
+       pr.n_floors > 1 as floor_differs,
+       coalesce(pr.area_max > pr.area_min * 1.05, false) as area_differs_over_5pct,
+       pr.n_dispositions > 1 as dispo_differs
+  from merged m
+  join prop pr on pr.property_id = m.property_id
+  join public.properties p on p.id = m.property_id and p.status = 'active'
+ where pr.n_floors > 1 or pr.area_max > pr.area_min * 1.05 or pr.n_dispositions > 1
+ order by m.merged_at desc, m.property_id desc
+ limit 200
+"""
+
 A_CANONICAL_ORDER_TIES_SQL = """
 with multi as (
   select l.property_id from public.listings l
@@ -784,6 +823,15 @@ READINESS_V1: tuple[ReadinessQuery, ...] = (
         "disposition or floor, per field (a NULL against a value is not counted).",
         "Decisions 11 and 18: how often the canonical advert decides what the property card "
         "shows.",
+    ),
+    ReadinessQuery(
+        "a_engine_merge_disagreement_list", A_ENGINE_MERGE_DISAGREEMENT_LIST_SQL,
+        "ROWS, not counts: active properties surviving a live engine merge (applied_merges "
+        "outcome 'applied', not undone) whose active adverts disagree on floor, area beyond 5 "
+        "percent or disposition (both stated, a_field_disagreement's own predicates), newest "
+        "merge first, at most 200.",
+        "Decision 18 / trial week: the operator's review list of engine merges whose adverts "
+        "disagree on a stated field",
     ),
     ReadinessQuery(
         "a_canonical_order_ties", A_CANONICAL_ORDER_TIES_SQL,
