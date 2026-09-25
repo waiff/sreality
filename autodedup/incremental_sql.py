@@ -1123,10 +1123,13 @@ with gone as (
 select count(*)::bigint from gone
 """
 
+# The seed resets while HOLDING the lease (so no pass can write into the generation it empties),
+# so its own row is the one row this keeps.
 RT_FRESH_LEASE_SQL = """
 with gone as (
     delete from autodedup.rt_lease
      where name = %(name)s::text
+       and holder is distinct from %(holder)s::text
  returning 1
 )
 select count(*)::bigint from gone

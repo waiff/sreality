@@ -775,9 +775,11 @@ Dark at **three** levels, deliberately not one.
 2. `autodedup/incremental_lane.py` re-reads the same variable, so a manual dispatch cannot bypass it.
 3. `autodedup.settings.realtime_enabled = false` stops a lane that is already on, **without a repository change or a deploy** — the operator's own stop button.
 
+A second caller runs the SAME pass: the always-on worker's `autodedup` lane (`scraper/realtime_worker.py`, §11's design, built dark 2026-09-24). It has no repository variable to read, so its own switch — one integer, `app_settings.realtime_autodedup_interval_seconds` (cadence AND kill switch, seeded 0 = stopped by migration 557) — stands in for levels 1 and 2 (`run_incremental(..., enabled=True)`); level 3, the lease, the cursors and every rail bind it exactly as they bind the workflow, so the two never pass at once. Mechanics: `docs/design/realtime-scrapers.md` § Autodedup lane. **With two callers the repository variable no longer stops every pass, so "the lane is OFF" means level 3:** `update autodedup.settings set value = 'false' where key = 'realtime_enabled'` stops the workflow and the worker alike (set it back to `'true'` to resume). Before any `rt_seed`, set it, then wait for the lease to clear (`select holder, expires_at from autodedup.rt_lease` — `expires_at` at or before `now()`). The seed does not rely on that: it takes the same `rt_lease` by the same CAS and holds it through its transaction (TTL = the seeding job's 300-minute timeout), refusing with nothing written while a pass holds it, and every pass that fires mid-seed is a green `skipped: leased`; `fresh=true`'s reset keeps that lease rather than deleting it.
+
 Beneath all three, shadow mode's posture is untouched: no `public.listings` row, no `property_id`, no merge. Two passes cannot overlap — the lane takes a lease row in `autodedup.rt_lease` by CAS (**never `pg_advisory_lock`**, which strands over the transaction pooler), its TTL outlives the job timeout, and a run that cannot take it exits green as `skipped: leased`. The workflow has **its own concurrency group**, so a long cohort pass can never evict a real-time pass and a real-time pass can never evict a paid judge run.
 
-**Turning it on is five steps, in this order (E80).** Nothing in a merge starts this lane: the schedule exists in `main` and stays dark until the repository variable is flipped, which is a deliberate act the parent session performs AFTER the merge, in **shadow only** — no merge, no `public.listings` write, no `property_id`. Reversing it is the same flip the other way. W9e is what made this sequence real rather than documented: step 3 used to exit 0 having done nothing, because the seed was gated on the switch step 5 flips.
+**Turning it on is five steps, in this order (E80).** Nothing in a merge starts this lane: the schedule exists in `main` and stays dark until the repository variable is flipped, which is a deliberate act the parent session performs AFTER the merge, in **shadow only** — no merge, no `public.listings` write, no `property_id`. Reversing it is the same flip the other way — and once the worker's `autodedup` lane is on as well, level 3 (`realtime_enabled = false`) is the one switch that stops both. W9e is what made this sequence real rather than documented: step 3 used to exit 0 having done nothing, because the seed was gated on the switch step 5 flips.
 
 1. **Apply** migration `539_autodedup_realtime_lane.sql` (additive; `fp_key`, `rt_fp`, `rt_calibration`, `rt_block_cell`, `rt_lease`, `rt_scope_ids`, `rt_scope_scan`, `rt_retire_event` plus the pair-grain columns). Until it is applied the lane exits non-zero rather than running on a guess.
 2. **Merge** the branch. The schedule lands dark; a pass over an unseeded generation exits 0 as `skipped: unseeded` (E80), so nothing is red between this step and the next.
@@ -870,7 +872,7 @@ The joins are avoided because **`images.clip_tagged_at` is the CLIP job's own st
 
 **The staleness rail (E95).** Nothing refused on the frozen population's age or coverage, and the direction of that error is what makes it a defect: a frozen population can only **undercount**, and an undercount is anti-conservative — a frame that spread since the export is still read as rare, E9 does not subtract it, and the pair gets image evidence the batch engine would deny it. Every pass now reports the **export's** age, the calibration row's age and the population's **coverage** (the share of the photographs it actually scored that the table could measure), and refuses beyond `rt_calibration_max_age_days` (**14**). A baseline with no `exported_at` is refused rather than read as fresh.
 
-**The refresh, and what it preserves.** One action: a **fresh export**, then
+**The refresh, and what it preserves.** One action: a **fresh export**, then — with both callers stopped (`realtime_enabled = false`, the lease clear; see *The switches*)
 
 ```
 gh workflow run autodedup.yml --ref main -f mode=rt_seed \
@@ -881,7 +883,7 @@ which re-cuts the frozen calibration, re-materialises `autodedup.phash_pop` from
 
 **The 115-image gap, and what a fresh export can and cannot do (E96, V4).** At three days of export age, **115 of 2,847 sampled images (4.0%)** read an unknown population and **54 of 400 pairs (13.5%)** lose `catalog_ratio_max`; every one of the 115 sits on an image whose `phash` itself moved after the export. A fresh export closes exactly that gap, because `COHORT_PHASH_POP_SQL` re-counts `count(DISTINCT listing_id)` over `public.images` for every hash the new cohort carries — the new hashes included — and the seed copies those counts in. It **cannot** be done without a new export: there is no index from a hash to its carriers (`images_phash_idx` is on `(sreality_id) where phash is not null`), D8 forbids adding one, and schema `autodedup` mirrors nothing, so the only measurement is the export's own sequential scan. A hash that arrives after the new export therefore reads **UNKNOWN** again — and that is confirmed to BAND rather than merge: `pop_is_measured()` false → `catalog_ratio` None → `catalog_ratio_max` absent → `certificate_c` (which requires it present) cannot fire → the pair falls to the model score. The gap reopens with time and closes with an export; it never asserts a photograph is unique.
 
-#### Re-seeding and re-enabling, for the parent (the lane is OFF and stays off until this is done)
+#### Re-seeding and re-enabling, for the parent (the lane is OFF and stays off until this is done; OFF means BOTH callers — `realtime_enabled = false`, see *The switches*)
 
 Unchanged from W9g in shape, with one step added and one argument stronger:
 
@@ -895,7 +897,7 @@ Unchanged from W9g in shape, with one step added and one argument stronger:
    ```
 
 3. **Verify** `out/rt_seed.json`: `model_version` `w6_gold`, `population.hashes_written` > 0, `parity.breaches` 0 over `parity.checked` (which must now clear the floors — a seed that cannot verify itself is refused), `floors` as expected, `in_scope_listings` 4,887. In the database: `autodedup.phash_pop` is no longer empty, `autodedup.settings` carries `rt_parity_baseline:rt`, and `autodedup.rt_fp` rows carry `ev_*` and `first_decided_at`.
-4. **Flip the variable:** `gh variable set AUTODEDUP_REALTIME_ENABLED --body true`.
+4. **Flip the variable:** `gh variable set AUTODEDUP_REALTIME_ENABLED --body true`. If `realtime_enabled` was set `false` to stop both callers, set it back to `'true'` too — the variable alone no longer resumes a lane that level 3 stopped.
 5. **Read the first pass's summary**: `certificates` carries K-C; `parity.ok` true with `checked` above the floor; `calibration.export_age_days` well inside 14; `population.coverage` near 1.0; `evidence.candidates` / `listings_probed` / `images_probed` show the seventh feed's real cost, and `evidence.held_this_pass` is how many merges are waiting for the hourly producers.
 
 ### W9j — the generation was never BUILT, and the re-seed never reset it (E97, E98, E99, M160–M167, D37)
@@ -938,7 +940,7 @@ The steady-state lane is built to stay off `public`: the entrant feed claims a *
 
 `--mode rt_equivalence` — read-only, no ledger row. Given `generation=rt` and `batch=<generation>` **scored on the same export with the same settings and model**, inside the live generation's own scope, it reads both stores and reports: the pairs both sides hold (zone, certificate, score within `tol`, default 1e-6), the pairs one side holds **by cause** — `scope`, `not_in_live_store`, `arrival_after_export`, `store_floor`, `retention` — with anything left over counted as **`unexplained`**, and the clusters by member set and by key, trimmed to the scope on both sides. The verdict is `ok` only when nothing shared differs, nothing one-sided is unexplained, the member sets agree and the build is finished. It is the check that would have caught E90 without `rt_parity` and E97(b) on the day it happened.
 
-#### The build, for the parent (the lane is OFF and stays off until this is done)
+#### The build, for the parent (the lane is OFF and stays off until this is done; OFF means BOTH callers — `realtime_enabled = false`, see *The switches*)
 
 1. **Score the batch generation on the same export.** `rt_equivalence` compares like with like or it compares nothing, so the batch side must be *this* export under *this* scorer:
 
@@ -956,7 +958,7 @@ The steady-state lane is built to stay off `public`: the entrant feed claims a *
    ```
 
    Verify in `out/rt_seed.json`: `reset.pairs` **15923**, `reset.clusters` **703**, `backfilled` **0**, `bootstrap` **true**, `in_scope_listings` **4,976**, `parity.breaches` 0 over a `checked` that clears the floors.
-3. **Flip the variable:** `gh variable set AUTODEDUP_REALTIME_ENABLED --body true`.
+3. **Flip the variable:** `gh variable set AUTODEDUP_REALTIME_ENABLED --body true`. If `realtime_enabled` was set `false` to stop both callers, set it back to `'true'` too — the variable alone no longer resumes a lane that level 3 stopped.
 4. **Let it build: ~11 passes, ~2 hours.** Watch `bootstrap.backlog` fall and `claim_bound.bound_by` move from `time` to `count` after the first pass. The phase ends itself: `bootstrap.ended_this_pass` true once, then `bootstrap.active` false.
 5. **Check it:**
 
