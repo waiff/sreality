@@ -281,9 +281,9 @@ def unmerge_group(
                 else:
                     conflicts.append(int(listing_ref_id))
 
-            # is_active is restored in the SAME statement that clears merged_away, so
-            # the status-event trigger (migration 559) sees neither the retirement nor
-            # this reactivation as an activity transition: no false gap either side.
+            # is_active is restored in the SAME statement that clears merged_away: the
+            # status-event trigger (migration 559) then logs only where the property's
+            # own history disagrees with the restored state.
             cur.execute(
                 """
                 UPDATE properties p

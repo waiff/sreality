@@ -1,9 +1,10 @@
 """Merge safety (migration 559): one price-step definition, no status event on a merge, and
-every operator merge / undo recorded as a ruling.
+every operator merge / undo recorded as a ruling on the adverts the operator judged.
 
 Hermetic: the SQL text and a scripted connection. The executed half — a step never spans
-two adverts, a merge writes no status row onto the absorbed property, the rulings land in
-`autodedup.verdicts` — runs against the replayed schema in tests/test_merge_safety_live.py.
+two adverts, a merge writes no status row, an unmerge restores the absorbed property's own
+state, the rulings land in `autodedup.verdicts` — runs against the replayed schema in
+tests/test_merge_safety_live.py.
 """
 
 from __future__ import annotations
@@ -56,14 +57,30 @@ def test_the_step_view_compares_an_advert_only_with_its_own_previous_price():
 # --- 2. no status event on a merge -----------------------------------------------------
 
 
-def test_the_status_trigger_skips_a_row_that_is_or_was_merged_away():
+def _trigger_body() -> str:
     sql = " ".join(MIGRATION.read_text().split())
-    body = sql.split("create or replace function log_property_status_event()", 1)[1]
-    assert re.search(
-        r"elsif OLD\.is_active is distinct from NEW\.is_active "
-        r"and OLD\.status <> 'merged_away' and NEW\.status <> 'merged_away' then",
-        body,
-    )
+    return sql.split("create or replace function log_property_status_event()", 1)[1].split("$$;", 1)[0]
+
+
+def test_the_status_trigger_skips_a_retirement():
+    assert "elsif NEW.status = 'merged_away' then null;" in _trigger_body()
+
+
+def test_an_unmerge_logs_only_where_the_propertys_own_history_disagrees():
+    """A pre-559 absorbed property ends on the merge's false 'inactive': its reactivation must
+    log 'active', or the chart reads it inactive for good. One that still reads its restored
+    state gets nothing."""
+    body = _trigger_body()
+    branch = body.split("elsif OLD.status = 'merged_away' then", 1)[1].split("elsif", 1)[0]
+    assert "where e.property_id = NEW.id order by e.event_at desc, e.id desc limit 1" in branch
+    assert ") is distinct from NEW.is_active then insert into property_status_events" in branch
+    assert "values (NEW.id, NEW.is_active, now())" in branch
+
+
+def test_the_status_log_stays_with_its_own_property():
+    from toolkit.operator_state import OPERATOR_STATE_TABLES
+
+    assert "property_status_events" not in {t[0] for t in OPERATOR_STATE_TABLES}
 
 
 def test_the_merge_retires_and_the_unmerge_reactivates_in_one_statement_each():
@@ -108,10 +125,12 @@ class _Cur:
         s = " ".join(sql.split())
         self._conn.log.append((s, params))
         if "FROM properties WHERE id = ANY" in s and "status = 'active'" in s:
-            self._rows = [(pid,) for pid in sorted(self._conn.children)]
-        elif "SELECT property_id, id FROM listings" in s:
-            self._rows = [(pid, lid) for pid in params["ids"]
-                          for lid in self._conn.children.get(pid, [])]
+            self._rows = [(pid,) for pid in sorted(self._conn.canonical)]
+        elif "SELECT p.repr_listing_ref_id FROM properties p" in s:
+            self._rows = [(self._conn.canonical[pid],) for pid in params["ids"]
+                          if pid in self._conn.canonical]
+        elif "FROM autodedup.verdicts" in s:
+            self._rows = list(self._conn.same_by_note.get(params["note"], []))
         else:
             self._rows = []
 
@@ -125,8 +144,13 @@ class _Cur:
 
 
 class _Conn:
-    def __init__(self, children: dict[int, list[int]]) -> None:
-        self.children = {k: list(v) for k, v in children.items()}
+    """`canonical` maps a property to the advert its Browse card shows; `same_by_note` is
+    the "same" rulings a merge left, by the note it stamped."""
+
+    def __init__(self, canonical: dict[int, int],
+                 same_by_note: dict[str, list[tuple[int, int]]] | None = None) -> None:
+        self.canonical = dict(canonical)
+        self.same_by_note = same_by_note or {}
         self.log: list[tuple[str, Any]] = []
 
     def cursor(self) -> _Cur:
@@ -144,80 +168,103 @@ MNL_UPSERT = "INSERT INTO autodedup.must_not_link"
 MNL_RETRACT = "DELETE FROM autodedup.must_not_link"
 
 
+def _pairs(rows: list[Any]) -> list[tuple[int, int]]:
+    return [(r["listing_lo"], r["listing_hi"]) for r in rows]
+
+
 def _stub_merge(monkeypatch, conn: _Conn) -> None:
     def fake_merge(c, *, survivor_id, retired_id, merge_group_id=None, **_kw):
         conn.log.append(("merge", (survivor_id, retired_id)))
-        conn.children[survivor_id] += conn.children.pop(retired_id)
+        conn.canonical.pop(retired_id)
         return {"data": {"merge_group_id": merge_group_id or "g-1", "listings_moved": 1}}
 
     monkeypatch.setattr(pm, "merge_properties", fake_merge)
 
 
-def test_a_merge_rules_every_cross_pair_same_and_nothing_inside_a_property(monkeypatch):
-    conn = _Conn({3: [30, 31], 7: [70], 9: [90]})
+def test_a_merge_rules_only_the_canonical_adverts_same(monkeypatch):
+    """Property 3 also holds 31, grouped there by the removed engine: the operator judged the
+    card (30), so 31 enters no ruling and no veto on it is retracted."""
+    conn = _Conn({3: 30, 7: 70, 9: 90})
     _stub_merge(monkeypatch, conn)
 
     result = pm.merge_property_set(conn, [3, 7, 9], decided_by=OP)
 
     rows = conn.writes(VERDICT)
-    pairs = [(r["listing_lo"], r["listing_hi"]) for r in rows]
-    assert pairs == [(30, 70), (30, 90), (31, 70), (31, 90), (70, 90)]
-    assert (30, 31) not in pairs, "a pair already on one property is no ruling"
+    assert _pairs(rows) == [(30, 70), (30, 90), (70, 90)]
     assert {r["verdict"] for r in rows} == {"same"}
     assert {r["decided_by"] for r in rows} == {OP}
     assert {r["note"] for r in rows} == {"operator merge g-1"}
-    assert result is not None and result["pairs_ruled_same"] == 5
+    assert result is not None and result["pairs_ruled_same"] == 3
     # "same" takes back the operator's own veto on each pair; it never writes one.
-    assert [(r["listing_lo"], r["listing_hi"]) for r in conn.writes(MNL_RETRACT)] == pairs
+    assert _pairs(conn.writes(MNL_RETRACT)) == _pairs(rows)
     assert conn.writes(MNL_UPSERT) == []
 
 
 def test_the_merge_rulings_ride_the_merges_own_transaction(monkeypatch):
-    conn = _Conn({3: [30], 7: [70]})
+    conn = _Conn({3: 30, 7: 70})
     _stub_merge(monkeypatch, conn)
     pm.merge_property_set(conn, [3, 7], decided_by=OP)
     begin, commit = conn.log.index(("tx", "begin")), len(conn.log) - 1
-    sides = next(i for i, (s, _) in enumerate(conn.log) if "SELECT property_id, id" in s)
+    canonical = next(i for i, (s, _) in enumerate(conn.log) if "repr_listing_ref_id" in s)
     merge = next(i for i, (s, _) in enumerate(conn.log) if s == "merge")
     verdict = next(i for i, (s, _) in enumerate(conn.log) if VERDICT in s)
-    assert begin < sides < merge < verdict < commit
+    assert begin < canonical < merge < verdict < commit
     assert conn.log[commit] == ("tx", "commit")
 
 
-def _stub_unmerge(monkeypatch, conn: _Conn, *, moved_back: dict[int, list[int]]) -> None:
+def _stub_unmerge(monkeypatch, conn: _Conn, *, retired: list[int],
+                  canonical_after: dict[int, int]) -> None:
     def fake_unmerge(c, *, merge_group_id, undone_by):
         assert undone_by == "operator"
-        for retired, lids in moved_back.items():
-            conn.children[10] = [x for x in conn.children[10] if x not in lids]
-            conn.children[retired] = list(lids)
+        conn.canonical = dict(canonical_after)
         return {"data": {"merge_group_id": merge_group_id, "survivor_id": 10,
-                         "retired_ids": sorted(moved_back), "conflicts": []}}
+                         "retired_ids": sorted(retired), "conflicts": []}}
 
     monkeypatch.setattr(pm, "unmerge_group", fake_unmerge)
 
 
-def test_an_unmerge_rules_every_cross_pair_different_with_the_reason(monkeypatch):
-    conn = _Conn({10: [100, 101, 200, 300]})
-    _stub_unmerge(monkeypatch, conn, moved_back={20: [200], 30: [300]})
+def test_undoing_one_absorbed_property_rules_its_merge_and_the_two_cards_different(monkeypatch):
+    """The merge ruled (100, 200) "same"; since then the survivor's card moved to 101. Both
+    pairs are the operator's statement that the two properties differ."""
+    conn = _Conn({}, {"operator merge grp": [(100, 200)]})
+    _stub_unmerge(monkeypatch, conn, retired=[20], canonical_after={10: 101, 20: 200})
 
     result = pm.unmerge(conn, "grp", decided_by=OP, reason="jiné patro")
 
     rows = conn.writes(VERDICT)
-    pairs = [(r["listing_lo"], r["listing_hi"]) for r in rows]
-    assert pairs == [(100, 200), (100, 300), (101, 200), (101, 300), (200, 300)]
+    assert _pairs(rows) == [(100, 200), (101, 200)]
     assert {r["verdict"] for r in rows} == {"different"}
     assert "different" in usql.NEGATIVE_VERDICTS, "the adapter's negatives read this value"
-    assert all(lo < hi for lo, hi in pairs)
     assert {r["note"] for r in rows} == {"operator unmerge grp: jiné patro"}
-    assert [(r["listing_lo"], r["listing_hi"]) for r in conn.writes(MNL_UPSERT)] == pairs
+    assert _pairs(conn.writes(MNL_UPSERT)) == _pairs(rows)
     assert conn.writes(MNL_RETRACT) == []
-    assert result["data"]["pairs_ruled_different"] == 5
+    assert result["data"]["pairs_ruled_different"] == 2
+    assert result["data"]["pairs_ruled_unsure"] == 0
     assert conn.log[0] == ("tx", "begin") and conn.log[-1] == ("tx", "commit")
 
 
+def test_undoing_a_group_of_three_rules_no_pair_different(monkeypatch):
+    """A (10), B (20) and C (30) were merged as one; the undo says they are not ALL one
+    property, never that A and B differ (E55). The merge's "same" is withdrawn, not reversed."""
+    own = [(100, 200), (100, 300), (200, 300)]
+    conn = _Conn({}, {"operator merge grp": own})
+    _stub_unmerge(monkeypatch, conn, retired=[20, 30],
+                  canonical_after={10: 100, 20: 200, 30: 300})
+
+    result = pm.unmerge(conn, "grp", decided_by=OP)
+
+    rows = conn.writes(VERDICT)
+    assert _pairs(rows) == own
+    assert {r["verdict"] for r in rows} == {"unsure"}
+    assert conn.writes(MNL_UPSERT) == [], "no permanent veto on a pair nobody ruled"
+    assert _pairs(conn.writes(MNL_RETRACT)) == own
+    assert result["data"]["pairs_ruled_different"] == 0
+    assert result["data"]["pairs_ruled_unsure"] == 3
+
+
 def test_an_unmerge_that_moved_nothing_back_rules_nothing(monkeypatch):
-    conn = _Conn({10: [100, 200]})
-    _stub_unmerge(monkeypatch, conn, moved_back={})
+    conn = _Conn({})
+    _stub_unmerge(monkeypatch, conn, retired=[20], canonical_after={10: 100})
     result = pm.unmerge(conn, "grp", decided_by=OP)
     assert conn.writes(VERDICT) == []
     assert result["data"]["pairs_ruled_different"] == 0
@@ -240,8 +287,8 @@ def client(monkeypatch):
     from api import dependencies as deps
     from api import main as api_main
 
-    conn = _Conn({10: [100, 200]})
-    _stub_unmerge(monkeypatch, conn, moved_back={20: [200]})
+    conn = _Conn({})
+    _stub_unmerge(monkeypatch, conn, retired=[20], canonical_after={10: 100, 20: 200})
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: conn
     api_main.app.dependency_overrides[deps.require_admin] = lambda: {
         "is_admin": True, "email": OP}

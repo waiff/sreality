@@ -42,11 +42,6 @@ class _Cur:
         self._conn.executed.append((s, params))
         if "FROM properties WHERE id = ANY" in s and "status = 'active'" in s:
             self._rows = [(pid,) for pid in self._conn.active_ids]
-        elif "SELECT property_id, id FROM listings" in s:
-            self._rows = [
-                (pid, lid) for pid, lids in self._conn.children.items()
-                if pid in params["ids"] for lid in lids
-            ]
         else:
             self._rows = []
 
@@ -63,11 +58,8 @@ class _Cur:
 
 
 class _SetConn:
-    def __init__(
-        self, active_ids: list[int], children: dict[int, list[int]] | None = None,
-    ) -> None:
+    def __init__(self, active_ids: list[int]) -> None:
         self.active_ids = active_ids
-        self.children = children or {}
         self.executed: list[tuple[str, Any]] = []
 
     def cursor(self) -> _Cur:

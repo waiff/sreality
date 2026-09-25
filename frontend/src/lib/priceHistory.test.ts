@@ -443,6 +443,23 @@ describe('buildActiveWindows', () => {
     ]);
   });
 
+  it('opens at the fallback start when the first event is a deactivation', () => {
+    const windows = buildActiveWindows(
+      [
+        evt(false, '2026-01-10T00:00:00Z'),
+        evt(true, '2026-01-20T00:00:00Z'),
+      ],
+      { start: 0, end: Date.parse('2026-02-01T00:00:00Z') },
+    );
+    expect(windows).toEqual([
+      [0, Date.parse('2026-01-10T00:00:00Z')],
+      [Date.parse('2026-01-20T00:00:00Z'), Date.parse('2026-02-01T00:00:00Z')],
+    ]);
+    expect(
+      buildActiveWindows([evt(false, '2026-01-10T00:00:00Z')], { start: 0, end: 99 }),
+    ).toEqual([[0, Date.parse('2026-01-10T00:00:00Z')]]);
+  });
+
   it('sorts out-of-order events before pairing them', () => {
     const windows = buildActiveWindows(
       [

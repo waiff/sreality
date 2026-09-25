@@ -1,6 +1,7 @@
 """Merge safety, executed (migration 559): a price step never spans two adverts, a merge
-writes no status row onto the absorbed property and an unmerge leaves no gap, and the
-operator's merge / undo land as rulings the apply adapter's negatives read.
+writes no status row and an unmerge restores the absorbed property's own state, and the
+operator's merge / undo land as rulings on the cards the operator judged, readable by the
+apply adapter's negatives.
 
 The fakes in tests/test_merge_safety.py pin the SQL shape; only executed SQL can show the
 view, the trigger and the ruling store agree. Runs in CI's migrations job
@@ -114,36 +115,79 @@ def _events(cur: Any, pid: int) -> list[bool]:
     return [bool(r[0]) for r in cur.fetchall()]
 
 
-def test_a_merge_writes_no_status_row_onto_the_absorbed_property_and_an_unmerge_no_gap(cur):
-    import api.property_merge as pm
+def _pair(x: int, y: int) -> tuple[int, int]:
+    return (min(x, y), max(x, y))
 
+
+def _merged_pair(cur: Any) -> tuple[int, int]:
     survivor, absorbed = _property(cur), _property(cur)
     _advert(cur, survivor, source="sreality", price=5_000_000)
     _advert(cur, absorbed, source="idnes", price=5_000_000)
     _recompute(cur, survivor)
     _recompute(cur, absorbed)
-    before = _events(cur, survivor) + _events(cur, absorbed)
+    return survivor, absorbed
+
+
+def test_a_merge_writes_no_status_row_and_the_absorbed_history_stays_its_own(cur):
+    import api.property_merge as pm
+
+    survivor, absorbed = _merged_pair(cur)
+    before_s, before_a = _events(cur, survivor), _events(cur, absorbed)
 
     merged = pm.merge_property_set(cur.connection, [survivor, absorbed], decided_by=OP)
     assert merged is not None and merged["survivor_id"] == survivor
-    assert _events(cur, absorbed) == [], "a merge wrote a status row onto the absorbed property"
-    assert sorted(_events(cur, survivor)) == sorted(before), "history is carried, not invented"
+    assert _events(cur, absorbed) == before_a, "a merge wrote or moved the absorbed history"
+    assert _events(cur, survivor) == before_s
 
     pm.unmerge(cur.connection, merged["merge_group_id"], decided_by=OP)
     cur.execute("SELECT status, is_active FROM properties WHERE id = %s", (absorbed,))
     assert cur.fetchone() == ("active", True)
-    # No rows at all is the chart's full-span window (priceHistory.buildActiveWindows):
-    # no false 'inactive' from the merge, no 'active' stamped at the unmerge instant.
-    assert _events(cur, absorbed) == []
-    assert False not in _events(cur, survivor)
+    assert _events(cur, absorbed) == before_a, "its own history already reads active"
 
-    # A real flip on a live property still logs.
-    cur.execute("UPDATE properties SET is_active = false WHERE id = %s", (survivor,))
-    assert _events(cur, survivor)[-1] is False
+    # Its next real deactivation closes the window its own history opened (no blank chart).
+    cur.execute("UPDATE properties SET is_active = false WHERE id = %s", (absorbed,))
+    assert _events(cur, absorbed) == [True, False]
 
 
-def test_the_operator_merge_and_undo_are_rulings_the_adapter_reads(cur):
+def test_an_unmerge_gives_a_property_ending_on_inactive_its_active_state_back(cur):
+    """Every merge before 559 left the absorbed property on a false 'inactive' (211,026 rows
+    today). Its undo must log 'active', or the chart reads a live property as delisted."""
     import api.property_merge as pm
+
+    survivor, absorbed = _merged_pair(cur)
+    cur.execute(
+        "INSERT INTO property_status_events (property_id, is_active, event_at) "
+        "VALUES (%s, false, now())", (absorbed,))
+    merged = pm.merge_property_set(cur.connection, [survivor, absorbed], decided_by=OP)
+    assert merged is not None
+    assert _events(cur, absorbed) == [True, False]
+
+    pm.unmerge(cur.connection, merged["merge_group_id"], decided_by=OP)
+    assert _events(cur, absorbed) == [True, False, True]
+
+
+def _rulings(cur: Any, ids: list[int]) -> list[tuple[int, int, str]]:
+    cur.execute(
+        "SELECT listing_lo, listing_hi, verdict FROM autodedup.verdicts "
+        "WHERE kind = 'pair' AND decided_by = %s AND listing_lo = ANY(%s) "
+        "AND listing_hi = ANY(%s) ORDER BY listing_lo, listing_hi", (OP, ids, ids))
+    return [(int(lo), int(hi), v) for lo, hi, v in cur.fetchall()]
+
+
+def _vetoes(cur: Any, ids: list[int]) -> list[tuple[int, int]]:
+    cur.execute(
+        "SELECT listing_lo, listing_hi FROM autodedup.must_not_link "
+        "WHERE listing_lo = ANY(%(ids)s) AND listing_hi = ANY(%(ids)s) "
+        "AND source = 'operator' ORDER BY 1, 2", {"ids": ids})
+    return [(int(lo), int(hi)) for lo, hi in cur.fetchall()]
+
+
+def test_the_operator_merge_and_undo_rule_only_the_cards_the_operator_saw(cur):
+    """s2 sits on the survivor beside its card s1 (the removed engine put it there) and the
+    operator vetoed s2 = a1 earlier: the merge of the two cards rules s1 = a1 only and leaves
+    that veto standing; the undo rules s1 != a1 only."""
+    import api.property_merge as pm
+    from autodedup import ui_sql as usql
 
     survivor, absorbed = _property(cur), _property(cur)
     s1 = _advert(cur, survivor, source="sreality", price=5_000_000)
@@ -151,35 +195,48 @@ def test_the_operator_merge_and_undo_are_rulings_the_adapter_reads(cur):
     a1 = _advert(cur, absorbed, source="idnes", price=5_000_000)
     _recompute(cur, survivor)
     _recompute(cur, absorbed)
-    cross = sorted((min(x, a1), max(x, a1)) for x in (s1, s2))
-
-    def rulings() -> list[tuple[int, int, str]]:
-        cur.execute(
-            "SELECT listing_lo, listing_hi, verdict FROM autodedup.verdicts "
-            "WHERE kind = 'pair' AND decided_by = %s AND listing_lo = ANY(%s) "
-            "ORDER BY listing_lo, listing_hi", (OP, [s1, s2, a1]))
-        return [(int(lo), int(hi), v) for lo, hi, v in cur.fetchall()]
+    ids, card, veto = [s1, s2, a1], _pair(s1, a1), _pair(s2, a1)
+    cur.execute(usql.MUST_NOT_LINK_UPSERT_SQL,
+                {"listing_lo": veto[0], "listing_hi": veto[1], "reason": "earlier"})
 
     merged = pm.merge_property_set(cur.connection, [survivor, absorbed], decided_by=OP)
-    assert merged is not None
-    assert rulings() == [(lo, hi, "same") for lo, hi in cross]
+    assert merged is not None and merged["pairs_ruled_same"] == 1
+    assert _rulings(cur, ids) == [(*card, "same")]
+    assert _vetoes(cur, ids) == [veto], "a merge of two cards retracted a veto on a third advert"
 
-    pm.unmerge(cur.connection, merged["merge_group_id"], decided_by=OP, reason="jiné patro")
-    assert rulings() == [(lo, hi, "different") for lo, hi in cross]
-    cur.execute(
-        "SELECT listing_lo, listing_hi, source FROM autodedup.must_not_link "
-        "WHERE listing_lo = ANY(%(ids)s) AND listing_hi = ANY(%(ids)s) ORDER BY 1, 2",
-        {"ids": [s1, s2, a1]})
-    assert cur.fetchall() == [(lo, hi, "operator") for lo, hi in cross]
+    undone = pm.unmerge(cur.connection, merged["merge_group_id"], decided_by=OP, reason="jiné patro")
+    assert undone["data"]["pairs_ruled_different"] == 1
+    assert _rulings(cur, ids) == [(*card, "different")]
+    assert _vetoes(cur, ids) == sorted([card, veto])
 
     # The adapter's negative read (autodedup/apply_sql.py PAIR_VERDICTS_SQL), verbatim in
     # shape: any decider, a negative verdict, both sides in the candidate set.
-    from autodedup.ui_sql import NEGATIVE_VERDICTS
-
     cur.execute(
         "SELECT v.listing_lo, v.listing_hi FROM autodedup.verdicts v "
         "WHERE v.kind = 'pair' AND v.verdict = any(%(negatives)s::text[]) "
         "AND v.listing_lo = any(%(ids)s::bigint[]) AND v.listing_hi = any(%(ids)s::bigint[]) "
         "ORDER BY 1, 2",
-        {"negatives": list(NEGATIVE_VERDICTS), "ids": [s1, s2, a1]})
-    assert [(int(lo), int(hi)) for lo, hi in cur.fetchall()] == cross
+        {"negatives": list(usql.NEGATIVE_VERDICTS), "ids": ids})
+    assert [(int(lo), int(hi)) for lo, hi in cur.fetchall()] == [card]
+
+
+def test_undoing_a_group_of_three_rules_no_pair_different(cur):
+    """A rejected group says its members are not ALL one property, never which pair was wrong
+    (PROGRAM.md E55): the merge's "same" is withdrawn, and no pair is vetoed."""
+    import api.property_merge as pm
+
+    props = [_property(cur) for _ in range(3)]
+    ids = [_advert(cur, pid, source=src, price=5_000_000)
+           for pid, src in zip(props, ("sreality", "idnes", "remax"))]
+    for pid in props:
+        _recompute(cur, pid)
+    every = sorted(_pair(x, y) for i, x in enumerate(ids) for y in ids[i + 1:])
+
+    merged = pm.merge_property_set(cur.connection, props, decided_by=OP)
+    assert merged is not None
+    assert _rulings(cur, ids) == [(*p, "same") for p in every]
+
+    undone = pm.unmerge(cur.connection, merged["merge_group_id"], decided_by=OP)
+    assert undone["data"]["pairs_ruled_different"] == 0
+    assert _rulings(cur, ids) == [(*p, "unsure") for p in every]
+    assert _vetoes(cur, ids) == []

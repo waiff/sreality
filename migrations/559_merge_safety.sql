@@ -16,16 +16,19 @@
 --    monitored set, a scraped_at window) drives it; the probe rides
 --    listing_snapshots_listing_id_scraped_at_idx (migration 333).
 --
--- 2. `log_property_status_event` (migration 392) skips a row that is or was `merged_away`.
---    `merge_properties` carries the retired property's status history onto the survivor and
---    then retires it with `is_active = false`, which fired the trigger and wrote a fresh
---    'inactive' row onto the absorbed property; an unmerge then showed a false inactive gap
---    and wrote an 'active' row at the unmerge instant. Retirement and reactivation are not
---    activity transitions of the real property: `unmerge_group` restores `is_active` in the
---    same statement that clears `merged_away`, so neither side of a merge/unmerge logs.
+-- 2. `log_property_status_event` (migration 392) no longer logs a retirement. `merge_properties`
+--    retires the absorbed property with `is_active = false`, which fired the trigger and wrote
+--    a false 'inactive' row onto it (211,026 such rows sit on merged-away properties today).
+--    The absorbed property now KEEPS its own history (its rows are no longer carried onto the
+--    survivor, toolkit/operator_state.py), so a reactivation by `unmerge_group` — which restores
+--    `is_active` in the same statement that clears `merged_away` — logs only where that history
+--    disagrees with the restored state: an absorbed property whose last row is the old false
+--    'inactive' gets its 'active' back, one that still reads 'active' gets nothing.
 --
 -- ADDITIVE: one new view (service-role only, security_invoker), one function body replaced
 -- in place (same signature, same trigger). No row is written or removed.
+-- APPLY BEFORE THE CODE MERGES: the rollup, the watchdog and the collection monitor read the
+-- view with no fallback. Verify with `select to_regclass('listing_price_steps')` (non-null).
 
 set lock_timeout = '5s';
 
@@ -67,8 +70,17 @@ begin
   if TG_OP = 'INSERT' then
     insert into property_status_events (property_id, is_active, event_at)
     values (NEW.id, NEW.is_active, now());
-  elsif OLD.is_active is distinct from NEW.is_active
-        and OLD.status <> 'merged_away' and NEW.status <> 'merged_away' then
+  elsif NEW.status = 'merged_away' then
+    null;
+  elsif OLD.status = 'merged_away' then
+    if (select e.is_active from property_status_events e
+        where e.property_id = NEW.id
+        order by e.event_at desc, e.id desc
+        limit 1) is distinct from NEW.is_active then
+      insert into property_status_events (property_id, is_active, event_at)
+      values (NEW.id, NEW.is_active, now());
+    end if;
+  elsif OLD.is_active is distinct from NEW.is_active then
     insert into property_status_events (property_id, is_active, event_at)
     values (NEW.id, NEW.is_active, now());
   end if;
