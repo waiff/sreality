@@ -98,7 +98,8 @@ class _Ledger:
             moved = sorted(lid for lid, pid in self.listings.items() if pid == p["retired"])
             self.events += [{"id": len(self.events) + i + 1, "group": p["group"],
                              "survivor": p["survivor"], "listing": lid, "prev": p["retired"],
-                             "undone_by": None} for i, lid in enumerate(moved)]
+                             "source": p["source"], "undone_by": None}
+                            for i, lid in enumerate(moved)]
             self.count = len(moved)
         elif s == "UPDATE listings SET property_id = %s WHERE property_id = %s":
             self.listings = {lid: p[0] if pid == p[1] else pid for lid, pid in self.listings.items()}
@@ -107,7 +108,7 @@ class _Ledger:
         elif s == "SELECT property_id FROM listings WHERE id = %s":
             return [(self.listings[p[0]],)] if p[0] in self.listings else []
         elif s.startswith("SELECT e.listing_ref_id, e.id, e.merge_group_id::text"):
-            return [(e["listing"], e["id"], e["group"], e["survivor"], e["prev"])
+            return [(e["listing"], e["id"], e["group"], e["survivor"], e["prev"], e["source"], T0)
                     for e in sorted(self.events, key=lambda e: (e["listing"], e["id"]))
                     if e["listing"] in p["ids"] and e["undone_by"] is None]
         elif s.startswith("UPDATE listings SET property_id = %s WHERE id = %s AND"):
@@ -172,8 +173,10 @@ def test_an_advert_goes_back_to_its_origin_across_a_chain_of_merges():
     record it sat on before every merge that still stands."""
     db = _Ledger({1: 10, 2: 20, 9: 5}, first_seen={5: T0 - timedelta(days=9)})
     _merged(db, [10, 20])
-    _merged(db, [5, 10])
-    assert pi.listing_origins(db, [1, 2, 9]) == {1: 10, 2: 20}
+    _merged(db, [5, 10], source="autodedup")
+    # with the merge that took each advert from its origin: the oldest that stands
+    assert pi.listing_origins(db, [1, 2, 9]) == {1: (10, "autodedup", T0),
+                                                 2: (20, "operator", T0)}
     out = detach_listing(db, 2, decided_by=OP)["data"]
     assert out["restored_property_id"] == 20 and len(out["merge_group_ids"]) == 2
     assert db.listings == {1: 5, 2: 20, 9: 5}
@@ -319,5 +322,6 @@ def test_the_origins_route_says_where_each_advert_came_from(client):
     res = http.get("/properties/10/origins")
     assert res.status_code == 200
     assert res.json() == {"property_id": 10, "adverts": [
-        {"listing_id": 1, "origin_property_id": None},
-        {"listing_id": 2, "origin_property_id": 20}]}
+        {"listing_id": 1, "origin_property_id": None, "merge_source": None, "merged_at": None},
+        {"listing_id": 2, "origin_property_id": 20, "merge_source": "operator",
+         "merged_at": T0.isoformat().replace("+00:00", "Z")}]}

@@ -274,7 +274,8 @@ def get_origins(
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """Each advert's origin (where a detach returns it); null when no standing merge moved it."""
+    """Each advert's origin (where a detach returns it) and the source and time of the merge
+    that took it from there; all null when no standing merge moved it."""
     survivor = resolve_active_property_id(conn, property_id)
     if survivor is None:
         raise HTTPException(status_code=404, detail=f"property {property_id} not found")
@@ -282,9 +283,10 @@ def get_origins(
         cur.execute("SELECT id FROM listings WHERE property_id = %s", (survivor,))
         ids = sorted(int(r[0]) for r in cur.fetchall())
     origins = listing_origins(conn, ids)
-    return {"property_id": survivor,
-            "adverts": [{"listing_id": lid, "origin_property_id": origins.get(lid)}
-                        for lid in ids]}
+    return {"property_id": survivor, "adverts": [
+        dict(zip(("listing_id", "origin_property_id", "merge_source", "merged_at"),
+                 (lid, *origins.get(lid, (None, None, None)))))
+        for lid in ids]}
 
 
 @router.get("/merged")

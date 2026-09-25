@@ -1614,24 +1614,6 @@ export interface ScraperHealthChecks {
 
 /* ----- Operator merge mechanics (multi-portal) --------------------------- */
 
-export interface MergeGroup {
-  merge_group_id: string;
-  merged_at: string;
-  survivor_property_id: number;
-  retired_count: number;
-  listings_moved: number;
-  /* 'auto' = the removed legacy engine; 'autodedup' = the AUTODEDUP apply path
-   * (a third source it adds). Labelled by lib/mergedAdverts.mergeOriginLabel. */
-  source: 'auto' | 'operator' | 'autodedup';
-  reason: string;
-  fully_undone: boolean;
-}
-
-export interface MergesResponse {
-  data: MergeGroup[];
-  total: number;
-}
-
 /* One already-merged property (survivor) in the merged-properties audit
  * browse. `source_count` is every
  * child listing ever grouped under it (active or delisted); `active_count` the

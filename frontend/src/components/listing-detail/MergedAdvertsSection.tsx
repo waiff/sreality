@@ -13,12 +13,12 @@
  * 4. patře" — are exactly what separates two units of one building). The link
  * out is the row's stored `source_url`, never rebuilt.
  *
- * The per-row 'Rozdělit' is the only UI for the existing unmerge route, admin
- * sessions only, for a merge of any origin, with an optional free-text reason.
- * What it can honestly offer from a row is decided in
- * lib/mergedAdverts.planRowUnmerge — read that header before changing any copy here. */
+ * Admin sessions also see where each advert came from (the merge ledger's origin,
+ * on expand) and a per-row two-step 'Rozdělit' on every advert that has one: it
+ * detaches exactly that advert back to its origin, any property size, any merge
+ * origin, with an optional free-text reason kept on the "different" ruling. */
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -26,7 +26,12 @@ import ImageCarousel from '@/components/ImageCarousel';
 import MemberText from '@/components/autodedup/MemberText';
 import { MissingPhotoTile } from '@/components/autodedup/ListingMini';
 import { SectionLabel } from '@/components/section';
-import { UNMERGE_REASON_MAX, unmergeMergeGroup } from '@/lib/api';
+import {
+  DETACH_REASON_MAX,
+  detachListing,
+  fetchPropertyOrigins,
+  type AdvertOrigin,
+} from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { fetchListingBroker } from '@/lib/brokers';
 import { fmtArea, fmtCount, fmtCzk, fmtDateSlash, fmtFloor } from '@/lib/format';
@@ -35,13 +40,11 @@ import { imageSrc } from '@/lib/imageUrl';
 import { listingRowPath } from '@/lib/listingUrl';
 import { areaKindOf } from '@/lib/measure';
 import {
-  findActivePropertyMergeGroups,
+  detachOutcomeNote,
   inzeratu,
   mergeOriginLabel,
   mergedAdvertsKeys,
-  planRowUnmerge,
-  refreshAfterUnmerge,
-  type UnmergePlan,
+  refreshAfterDetach,
 } from '@/lib/mergedAdverts';
 import { portalLabel } from '@/lib/portals';
 import { fetchListingsForListingIds } from '@/lib/queries';
@@ -54,6 +57,9 @@ export const COLLAPSED_THUMBS = 6;
 /* A client-side retention cap over one read of every advert's album — high
  * enough that no real album is cut, finite so the hydration key stays a number. */
 const PHOTOS_PER_ADVERT = 200;
+
+/* An admin session's read of one advert's origin; null for any other session. */
+type OriginRead = { status: 'pending' | 'error' | 'success'; origin: AdvertOrigin | undefined };
 
 interface SectionProps {
   /* The property the rows belong to (the sources read's own property_id). */
@@ -69,8 +75,14 @@ export default function MergedAdvertsSection(props: SectionProps) {
 }
 
 function SectionBody({ propertyId, currentListingId, sources }: SectionProps) {
-  const { isAdmin: canUnmerge } = useAuth();
+  const { isAdmin } = useAuth();
   const ids = useMemo(() => sources.map((s) => s.id), [sources]);
+  const originsQ = useQuery({
+    queryKey: mergedAdvertsKeys.origins(propertyId),
+    queryFn: () => fetchPropertyOrigins(propertyId),
+    enabled: isAdmin,
+    staleTime: 30_000,
+  });
 
   /* Area, disposition, floor and the description — per advert, from the same
    * listings_public read the page's own header uses. One request for the set. */
@@ -114,9 +126,15 @@ function SectionBody({ propertyId, currentListingId, sources }: SectionProps) {
             imagesLoading={photosPending}
             isCurrent={s.id === currentListingId}
             propertyId={propertyId}
-            rowCount={sources.length}
             currentListingId={currentListingId}
-            canUnmerge={canUnmerge}
+            originRead={
+              isAdmin
+                ? {
+                    status: originsQ.status,
+                    origin: originsQ.data?.adverts.find((a) => a.listing_id === s.id),
+                  }
+                : null
+            }
           />
         ))}
       </ul>
@@ -137,9 +155,8 @@ function MergedAdvertRow({
   imagesLoading,
   isCurrent,
   propertyId,
-  rowCount,
   currentListingId,
-  canUnmerge,
+  originRead,
 }: {
   source: PropertySource;
   detail: ListingPublic | null;
@@ -148,12 +165,12 @@ function MergedAdvertRow({
   imagesLoading: boolean;
   isCurrent: boolean;
   propertyId: number;
-  rowCount: number;
   currentListingId: number;
-  canUnmerge: boolean;
+  originRead: OriginRead | null;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [unmergeArmed, setUnmergeArmed] = useState(false);
+  const [detachArmed, setDetachArmed] = useState(false);
+  const origin = originRead?.origin?.origin_property_id != null ? originRead.origin : null;
   const panelId = `merged-advert-${source.id}`;
   const portal = portalLabel(source.source) ?? source.source;
   const facts = [
@@ -211,10 +228,10 @@ function MergedAdvertRow({
               </span>
             </span>
           </button>
-          {canUnmerge && !unmergeArmed && (
+          {origin && !detachArmed && (
             <button
               type="button"
-              onClick={() => setUnmergeArmed(true)}
+              onClick={() => setDetachArmed(true)}
               className="shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[0.72rem] text-[var(--color-ink-3)] transition-colors hover:border-[var(--color-brick)] hover:bg-[var(--color-brick-soft)] hover:text-[var(--color-brick)]"
             >
               Rozdělit
@@ -232,12 +249,12 @@ function MergedAdvertRow({
         />
       </div>
 
-      {canUnmerge && unmergeArmed && (
-        <UnmergeConfirm
+      {origin && detachArmed && (
+        <DetachConfirm
           propertyId={propertyId}
-          rowCount={rowCount}
+          origin={origin}
           currentListingId={currentListingId}
-          onCancel={() => setUnmergeArmed(false)}
+          onCancel={() => setDetachArmed(false)}
         />
       )}
 
@@ -281,6 +298,7 @@ function MergedAdvertRow({
               </p>
             )}
             <BrokerLine listingId={source.id} />
+            {originRead && <OriginLine read={originRead} />}
             <p className="flex flex-wrap items-center gap-3 text-[0.75rem]">
               {!isCurrent && (
                 <Link
@@ -414,112 +432,95 @@ function BrokerLine({ listingId }: { listingId: number }) {
   );
 }
 
-/* Step two of the split: find what can be undone from here, say it in words,
- * and only then offer the write. The ledger is read now, not on page load. */
-function UnmergeConfirm({
+/* "Came from", as information: the property a detach would return this advert to
+ * and the merge that took it from there; the property's own advert has none. */
+function OriginLine({ read }: { read: OriginRead }) {
+  const o = read.origin;
+  const text =
+    read.status === 'pending'
+      ? 'načítám…'
+      : read.status === 'error'
+        ? 'nepodařilo se načíst'
+        : o?.origin_property_id == null
+          ? 'tato nemovitost (nepřišel sloučením)'
+          : `nemovitost #${o.origin_property_id} · ${mergeOriginLabel(o.merge_source ?? '')} sloučení ze dne ${fmtDateSlash(o.merged_at)}`;
+  return (
+    <p className="text-[0.75rem] text-[var(--color-ink-2)]">
+      <span className="text-[var(--color-ink-4)]">Původ: </span>
+      {text}
+    </p>
+  );
+}
+
+/* Step two of the split: say where the advert goes, then offer the write. */
+function DetachConfirm({
   propertyId,
-  rowCount,
+  origin,
   currentListingId,
   onCancel,
 }: {
   propertyId: number;
-  rowCount: number;
+  origin: AdvertOrigin;
   currentListingId: number;
   onCancel: () => void;
 }) {
   const qc = useQueryClient();
   const [reason, setReason] = useState('');
-  const scanQ = useQuery({
-    queryKey: mergedAdvertsKeys.groups(propertyId),
-    queryFn: () => findActivePropertyMergeGroups(propertyId),
-    staleTime: 30_000,
-  });
-  const unmerge = useMutation({
-    mutationFn: (mergeGroupId: string) =>
-      unmergeMergeGroup(mergeGroupId, reason.trim() || undefined),
-    /* Errors (a 404 for a group undone meanwhile, a 5xx) surface through the
-     * global MutationCache toast; the panel stays open so nothing looks done. */
+  const detach = useMutation({
+    mutationFn: () => detachListing(propertyId, origin.listing_id, reason.trim() || undefined),
+    /* Errors (a 409 the merge code refused, a 5xx) surface through the global
+     * MutationCache toast; the panel stays open so nothing looks done. */
     onSuccess: async (res) => {
-      const moved = res.data.listings_moved_back;
-      pushToast('ok', `Rozděleno — ${moved} ${inzeratu(moved)} zpět v původní nemovitosti.`);
-      const conflicts = res.data.conflicts.length;
-      if (conflicts > 0) {
-        pushToast(
-          'info',
-          `${conflicts} ${inzeratu(conflicts)} mezitím patří jinam a ${
-            conflicts === 1 ? 'zůstal' : 'zůstaly'
-          } na místě.`,
-        );
+      if (res.detached) {
+        pushToast('ok', `Odděleno — inzerát je zpět v nemovitosti #${res.restored_property_id}.`);
+      } else {
+        pushToast('info', detachOutcomeNote(res.outcome));
       }
       onCancel();
-      await refreshAfterUnmerge(qc, currentListingId);
+      await refreshAfterDetach(qc, currentListingId);
     },
   });
-
-  const plan: UnmergePlan | null = scanQ.data ? planRowUnmerge(scanQ.data, rowCount) : null;
-
-  let body: ReactNode;
-  let confirm: { label: string; groupId: string } | null = null;
-  if (scanQ.isLoading) {
-    body = 'Hledám sloučení této nemovitosti…';
-  } else if (scanQ.isError) {
-    body = `Knihu sloučení se nepodařilo načíst: ${(scanQ.error as Error).message}`;
-  } else if (plan?.kind === 'pair') {
-    body = (
-      <>
-        <strong className="font-medium text-[var(--color-ink)]">Oddělit tento inzerát?</strong>{' '}
-        Tyto 2 inzeráty přestanou být jedna nemovitost — vrátí se{' '}
-        {mergeOriginLabel(plan.group.source)} sloučení ze dne {fmtDateSlash(plan.group.merged_at)}.
-      </>
-    );
-    confirm = { label: 'Ano, oddělit', groupId: plan.group.merge_group_id };
-  } else if (plan?.kind === 'ambiguous') {
-    body =
-      'Samotný tento inzerát odsud oddělit nejde: jde to jen u nemovitosti ze dvou inzerátů, kterou spojilo jedno sloučení.';
-  } else if (plan?.kind === 'not-found') {
-    body = plan.exhaustive
-      ? 'Kniha sloučení pro tuto nemovitost nemá žádné sloučení, které by šlo vrátit — její inzeráty spojilo starší seskupení.'
-      : `Knihu sloučení této nemovitosti se nepodařilo dočíst (${fmtCount(plan.scanned)} skupin); odsud vrátit nejde.`;
-  }
 
   return (
     <div
       role="group"
-      aria-label="Rozdělit nemovitost"
+      aria-label="Oddělit inzerát"
       className="mx-3 mb-2 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-3 py-2"
     >
-      <p className="text-[0.75rem] leading-snug text-[var(--color-ink-2)]">{body}</p>
-      {confirm && (
-        <textarea
-          aria-label="Důvod rozdělení (nepovinné)"
-          placeholder="Důvod (nepovinné)"
-          maxLength={UNMERGE_REASON_MAX}
-          rows={2}
-          value={reason}
-          disabled={unmerge.isPending}
-          onChange={(e) => setReason(e.target.value)}
-          className="mt-2 block w-full max-w-[32rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]"
-        />
-      )}
+      <p className="text-[0.75rem] leading-snug text-[var(--color-ink-2)]">
+        <strong className="font-medium text-[var(--color-ink)]">Oddělit tento inzerát?</strong>{' '}
+        Vrátí se do nemovitosti #{origin.origin_property_id}, odkud ho přivedlo{' '}
+        {mergeOriginLabel(origin.merge_source ?? '')} sloučení ze dne{' '}
+        {fmtDateSlash(origin.merged_at)}, a zapíše se, že se zbylými inzeráty nejde o stejnou
+        nemovitost.
+      </p>
+      <textarea
+        aria-label="Důvod rozdělení (nepovinné)"
+        placeholder="Důvod (nepovinné)"
+        maxLength={DETACH_REASON_MAX}
+        rows={2}
+        value={reason}
+        disabled={detach.isPending}
+        onChange={(e) => setReason(e.target.value)}
+        className="mt-2 block w-full max-w-[32rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]"
+      />
       <div className="mt-2 flex items-center gap-1.5">
-        {confirm && (
-          <button
-            type="button"
-            autoFocus
-            disabled={unmerge.isPending}
-            onClick={() => unmerge.mutate(confirm.groupId)}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[0.72rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick)]/10 disabled:opacity-50"
-          >
-            {unmerge.isPending ? 'Rozděluji…' : confirm.label}
-          </button>
-        )}
         <button
           type="button"
-          disabled={unmerge.isPending}
+          autoFocus
+          disabled={detach.isPending}
+          onClick={() => detach.mutate()}
+          className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[0.72rem] text-[var(--color-brick)] transition-colors hover:bg-[var(--color-brick)]/10 disabled:opacity-50"
+        >
+          {detach.isPending ? 'Odděluji…' : 'Ano, oddělit'}
+        </button>
+        <button
+          type="button"
+          disabled={detach.isPending}
           onClick={onCancel}
           className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[0.72rem] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-rule-strong)] hover:bg-[var(--color-rule-soft)] disabled:opacity-50"
         >
-          {confirm ? 'Zrušit' : 'Zavřít'}
+          Zrušit
         </button>
       </div>
     </div>

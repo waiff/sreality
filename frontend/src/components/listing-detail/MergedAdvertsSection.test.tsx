@@ -1,5 +1,6 @@
 /* The merged-adverts section: one row per advert, photos collapsed, words on
- * expand, and the two-step split for an admin session, any merge origin. */
+ * expand, and for an admin session each advert's origin and the exact two-step
+ * per-advert split, any property size, any merge origin. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -12,12 +13,12 @@ import * as auth from '@/lib/auth';
 import * as brokers from '@/lib/brokers';
 import * as queries from '@/lib/queries';
 import * as toast from '@/lib/toast';
-import type { ImagePublic, ListingPublic, MergeGroup, PropertySource } from '@/lib/types';
+import type { ImagePublic, ListingPublic, PropertySource } from '@/lib/types';
 
 vi.mock('@/lib/api', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
-  listPropertyMerges: vi.fn(),
-  unmergeMergeGroup: vi.fn(),
+  fetchPropertyOrigins: vi.fn(),
+  detachListing: vi.fn(),
 }));
 vi.mock('@/lib/auth', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/auth')>()),
@@ -94,17 +95,20 @@ function images(listingId: number, n: number): ImagePublic[] {
   }));
 }
 
-function group(over: Partial<MergeGroup> = {}): MergeGroup {
+/* 101 is the property's own advert; 202 came from #43 by the operator's merge. */
+function origins(extra: api.AdvertOrigin[] = []) {
   return {
-    merge_group_id: 'grp-1',
-    merged_at: '2026-09-21T09:00:00Z',
-    survivor_property_id: 42,
-    retired_count: 1,
-    listings_moved: 1,
-    source: 'operator',
-    reason: 'manual_link',
-    fully_undone: false,
-    ...over,
+    property_id: 42,
+    adverts: [
+      { listing_id: 101, origin_property_id: null, merge_source: null, merged_at: null },
+      {
+        listing_id: 202,
+        origin_property_id: 43,
+        merge_source: 'operator',
+        merged_at: '2026-09-21T09:00:00Z',
+      },
+      ...extra,
+    ],
   };
 }
 
@@ -152,14 +156,14 @@ beforeEach(() => {
     broker_display_name: 'Jana Nováková',
     broker_firm_label: 'RE/MAX Alfa',
   } as unknown as Awaited<ReturnType<typeof brokers.fetchListingBroker>>);
-  vi.mocked(api.unmergeMergeGroup).mockResolvedValue({
-    data: {
-      merge_group_id: 'grp-1',
-      survivor_id: 42,
-      retired_ids: [43],
-      listings_moved_back: 1,
-      conflicts: [],
-    },
+  vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(origins());
+  vi.mocked(api.detachListing).mockResolvedValue({
+    listing_id: 202,
+    detached: true,
+    outcome: 'detached',
+    survivor_property_id: 42,
+    restored_property_id: 43,
+    rulings_written: 1,
   });
 });
 
@@ -217,6 +221,10 @@ describe('<MergedAdvertsSection> rows', () => {
     expect(brokers.fetchListingBroker).toHaveBeenCalledWith(202);
     // The carousel pages the whole album (2 photos → a counter).
     expect(within(idnes).getByText('1 / 2')).toBeInTheDocument();
+    // Where it came from, as information.
+    expect(
+      await within(idnes).findByText('nemovitost #43 · ruční sloučení ze dne 21/09/2026'),
+    ).toBeInTheDocument();
   });
 
   it('the advert the page is open on is never linked to itself', async () => {
@@ -225,46 +233,52 @@ describe('<MergedAdvertsSection> rows', () => {
     fireEvent.click(within(sreality).getAllByRole('button')[0]);
     await within(sreality).findByRole('link', { name: /Na portálu Sreality/ });
     expect(within(sreality).queryByRole('link', { name: 'Otevřít detail' })).toBeNull();
+    expect(
+      await within(sreality).findByText('tato nemovitost (nepřišel sloučením)'),
+    ).toBeInTheDocument();
   });
 });
 
 describe('<MergedAdvertsSection> Rozdělit', () => {
-  it('is absent for a session that is not an admin', () => {
+  it('is absent for a session that is not an admin, which never reads the ledger', () => {
     vi.mocked(auth.useAuth).mockReturnValue({ isAdmin: false } as ReturnType<typeof auth.useAuth>);
     setup();
     expect(screen.queryByRole('button', { name: /Rozdělit/ })).toBeNull();
+    expect(api.fetchPropertyOrigins).not.toHaveBeenCalled();
   });
 
-  it('asks twice, then undoes the one merge that joined the pair with the typed reason and refreshes', async () => {
-    vi.mocked(api.listPropertyMerges).mockResolvedValue({ data: [group()], total: 1 });
+  it('is offered only on an advert with an origin — never on the property’s own', async () => {
+    setup();
+    expect(
+      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
+    ).toBeInTheDocument();
+    expect(api.fetchPropertyOrigins).toHaveBeenCalledWith(42);
+    expect(within(rowOf('Sreality')).queryByRole('button', { name: /Rozdělit/ })).toBeNull();
+  });
+
+  it('asks twice, then detaches that one advert with the typed reason and refreshes', async () => {
     const { qc } = setup();
     const invalidate = vi.spyOn(qc, 'invalidateQueries');
 
-    // Step one reads the ledger — never on page load.
-    expect(api.listPropertyMerges).not.toHaveBeenCalled();
-    fireEvent.click(within(rowOf('iDNES Reality')).getByRole('button', { name: /Rozdělit/ }));
-    expect(await screen.findByText('Oddělit tento inzerát?')).toBeInTheDocument();
-    expect(screen.getByText(/vrátí se ruční sloučení/)).toBeInTheDocument();
-    // One exact read of THIS property's groups, not a window of the whole ledger.
-    expect(api.listPropertyMerges).toHaveBeenCalledWith({
-      limit: 200,
-      offset: 0,
-      survivor_property_id: 42,
-    });
-    expect(api.unmergeMergeGroup).not.toHaveBeenCalled();
+    fireEvent.click(
+      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
+    );
+    expect(screen.getByText('Oddělit tento inzerát?')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Vrátí se do nemovitosti #43, odkud ho přivedlo ruční sloučení ze dne 21\/09\/2026/),
+    ).toBeInTheDocument();
+    expect(api.detachListing).not.toHaveBeenCalled();
 
     // Step two is the write, with the optional reason trimmed.
     fireEvent.change(screen.getByRole('textbox', { name: /Důvod/ }), {
       target: { value: '  jiné patro ' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() =>
-      expect(api.unmergeMergeGroup).toHaveBeenCalledWith('grp-1', 'jiné patro'),
-    );
+    await waitFor(() => expect(api.detachListing).toHaveBeenCalledWith(42, 202, 'jiné patro'));
     await waitFor(() =>
       expect(toast.pushToast).toHaveBeenCalledWith(
         'ok',
-        'Rozděleno — 1 inzerát zpět v původní nemovitosti.',
+        'Odděleno — inzerát je zpět v nemovitosti #43.',
       ),
     );
     // Read-your-writes: the page's sources re-resolved from the listing alone,
@@ -276,61 +290,63 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
   });
 
   it('Zrušit steps back without writing', async () => {
-    vi.mocked(api.listPropertyMerges).mockResolvedValue({ data: [group()], total: 1 });
     setup();
-    fireEvent.click(within(rowOf('Sreality')).getByRole('button', { name: /Rozdělit/ }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Zrušit' }));
+    fireEvent.click(
+      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Zrušit' }));
     expect(screen.queryByText('Oddělit tento inzerát?')).toBeNull();
-    expect(within(rowOf('Sreality')).getByRole('button', { name: /Rozdělit/ })).toBeInTheDocument();
-    expect(api.unmergeMergeGroup).not.toHaveBeenCalled();
+    expect(
+      within(rowOf('iDNES Reality')).getByRole('button', { name: /Rozdělit/ }),
+    ).toBeInTheDocument();
+    expect(api.detachListing).not.toHaveBeenCalled();
   });
 
-  it('splits an AUTODEDUP merge like any other, naming its origin; no reason sends none', async () => {
-    vi.mocked(api.listPropertyMerges).mockResolvedValue({
-      data: [group({ source: 'autodedup', reason: 'autodedup g12 o:554782' })],
-      total: 1,
+  it('splits any row of a bigger property, an AUTODEDUP merge like any other; no reason sends none', async () => {
+    vi.mocked(api.fetchPropertyOrigins).mockResolvedValue(
+      origins([
+        {
+          listing_id: 303,
+          origin_property_id: 44,
+          merge_source: 'autodedup',
+          merged_at: '2026-09-22T09:00:00Z',
+        },
+      ]),
+    );
+    const three = [
+      ...SOURCES,
+      { ...SOURCES[1], id: 303, source: 'bazos', source_id_native: 'z9', source_url: null },
+    ];
+    setup({ sources: three });
+
+    fireEvent.click(await within(rowOf('Bazoš')).findByRole('button', { name: /Rozdělit/ }));
+    expect(
+      screen.getByText(/nemovitosti #44, odkud ho přivedlo automatické \(AUTODEDUP\) sloučení/),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
+    await waitFor(() => expect(api.detachListing).toHaveBeenCalledWith(42, 303, undefined));
+  });
+
+  it('a detach that moved nothing says why, and still refreshes', async () => {
+    vi.mocked(api.detachListing).mockResolvedValue({
+      listing_id: 202,
+      detached: false,
+      outcome: 'not_on_property',
+      survivor_property_id: 42,
+      restored_property_id: 43,
+      rulings_written: 0,
     });
     setup();
-
-    fireEvent.click(within(rowOf('iDNES Reality')).getByRole('button', { name: /Rozdělit/ }));
-    expect(await screen.findByText(/vrátí se automatické \(AUTODEDUP\) sloučení/)).toBeInTheDocument();
+    fireEvent.click(
+      await within(rowOf('iDNES Reality')).findByRole('button', { name: /Rozdělit/ }),
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Ano, oddělit' }));
-    await waitFor(() => expect(api.unmergeMergeGroup).toHaveBeenCalledWith('grp-1', undefined));
-  });
-
-  it('offers no write when the ledger cannot say which merge brought the advert', async () => {
-    vi.mocked(api.listPropertyMerges).mockResolvedValue({
-      data: [group({ merge_group_id: 'a' }), group({ merge_group_id: 'b' })],
-      total: 2,
-    });
-    const three = [
-      ...SOURCES,
-      { ...SOURCES[1], id: 303, source: 'bazos', source_id_native: 'z9', source_url: null },
-    ];
-    vi.mocked(queries.fetchListingsForListingIds).mockResolvedValue(new Map());
-    setup({ sources: three });
-
-    fireEvent.click(within(rowOf('Bazoš')).getByRole('button', { name: /Rozdělit/ }));
-    expect(await screen.findByText(/Samotný tento inzerát odsud oddělit nejde/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Ano/ })).toBeNull();
-    expect(screen.getByRole('button', { name: 'Zavřít' })).toBeInTheDocument();
-  });
-
-  it('never undoes a whole group from a row: one merge that made three adverts offers no write', async () => {
-    vi.mocked(api.listPropertyMerges).mockResolvedValue({
-      data: [group({ listings_moved: 2, retired_count: 2, source: 'autodedup' })],
-      total: 1,
-    });
-    const three = [
-      ...SOURCES,
-      { ...SOURCES[1], id: 303, source: 'bazos', source_id_native: 'z9', source_url: null },
-    ];
-    setup({ sources: three });
-
-    fireEvent.click(within(rowOf('Bazoš')).getByRole('button', { name: /Rozdělit/ }));
-    expect(await screen.findByText(/Samotný tento inzerát odsud oddělit nejde/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Ano/ })).toBeNull();
-    expect(screen.queryByRole('textbox', { name: /Důvod/ })).toBeNull();
-    expect(api.unmergeMergeGroup).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(toast.pushToast).toHaveBeenCalledWith(
+        'info',
+        'Nic se nepřesunulo — inzerát už v této nemovitosti není.',
+      ),
+    );
+    await waitFor(() => expect(queries.fetchPropertySources).toHaveBeenCalledWith(101));
   });
 });

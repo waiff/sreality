@@ -1236,12 +1236,16 @@ renumber.** Navigate by area:
     The unmerge *button* lived on the deleted Dedup page; its new home is the listing page's
     **Sloučené inzeráty** section (`frontend/src/components/listing-detail/MergedAdvertsSection.tsx`:
     shown on any property of two or more adverts, one expandable row per child advert — photos
-    collapsed, description / full gallery / broker / stored portal link expanded — with a per-row
-    two-step **Rozdělit** for admin sessions). The backend half of a row's split is the
-    per-advert detach above — exact for every row, for a merge of any origin (operator, legacy
-    `auto`, `autodedup`), with the optional `reason` kept on the "different" ruling; the
-    group-grain `POST /properties/merges/{group}/unmerge` and the ledger's
-    `survivor_property_id` filter (the page's guess at which group a row came in with) are gone.
+    collapsed, description / full gallery / broker / stored portal link expanded). For an admin
+    session each expanded row also names its origin (`GET /properties/{id}/origins`: the property
+    a detach returns it to, and the source and date of the merge that took it from there), and
+    every row WITH an origin carries a two-step **Rozdělit** that calls
+    `POST /properties/{id}/detach` for exactly that advert — any property size, a merge of any
+    origin (operator, legacy `auto`, `autodedup`), the optional free-text `reason` kept on the
+    "different" ruling — then re-resolves the page's sources and refreshes Browse
+    (`lib/mergedAdverts.refreshAfterDetach`). The property's own advert (null origin) has none.
+    The page's former guess at which merge group a row came in with (a ledger scan plus a
+    two-advert-only rule) and the group-grain unmerge it called are gone.
     **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
     (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around
     it, and only inside `app_settings.autodedup_apply_scope`, the ONE rollout control: a scope

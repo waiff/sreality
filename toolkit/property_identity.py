@@ -99,7 +99,7 @@ WHERE p.id = ANY(%(ids)s::bigint[])
 # where the newest merge put it.
 _LIVE_MOVES_SQL = """
 SELECT e.listing_ref_id, e.id, e.merge_group_id::text, e.survivor_property_id,
-       e.prev_property_id
+       e.prev_property_id, e.source, e.created_at
 FROM property_merge_events e
 WHERE e.listing_ref_id = ANY(%(ids)s::bigint[]) AND e.undone_at IS NULL
 ORDER BY e.listing_ref_id, e.id
@@ -349,15 +349,18 @@ def merge_property_set(
     }
 
 
-def listing_origins(conn: psycopg.Connection, listing_ids: list[int]) -> dict[int, int]:
-    """Each advert's ORIGIN, where a detach returns it; one no standing merge moved is absent."""
+def listing_origins(
+    conn: psycopg.Connection, listing_ids: list[int],
+) -> dict[int, tuple[int, str, datetime]]:
+    """Each advert's ORIGIN, where a detach returns it, with the source and time of the merge
+    that took it from there; one no standing merge moved is absent."""
     if not listing_ids:
         return {}
-    out: dict[int, int] = {}
+    out: dict[int, tuple[int, str, datetime]] = {}
     with conn.cursor() as cur:
         cur.execute(_LIVE_MOVES_SQL, {"ids": sorted({int(i) for i in listing_ids})})
-        for lid, _id, _group, _survivor, prev in cur.fetchall():
-            out.setdefault(int(lid), int(prev))
+        for lid, _id, _group, _survivor, prev, source, at in cur.fetchall():
+            out.setdefault(int(lid), (int(prev), source, at))
     return out
 
 
@@ -403,7 +406,7 @@ def detach_listing(
                 raise MergeError(f"listing {listing_id} not found")
             current = int(row[0]) if row[0] is not None else None
             cur.execute(_LIVE_MOVES_SQL, {"ids": [listing_id]})
-            moves = [tuple(r[1:]) for r in cur.fetchall()]
+            moves = [tuple(r[1:5]) for r in cur.fetchall()]
         outcome, undo, target = _detach_plan(current, moves, merge_group_id)
         reactivated, ruled = False, 0
         if outcome == "detached":
