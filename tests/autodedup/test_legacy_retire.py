@@ -1065,3 +1065,63 @@ def test_a_group_touching_only_through_its_retired_property_is_not_read() -> Non
     db.listing(9, 200)                                 # an inside advert attached to 200 since
     db.location[9] = IN_TOWN
     assert L.read_groups(db, L.read_area(db, TRIAL), SALES) == []
+
+
+# E907: a ruled-same pair the apply re-joins does not hold the legacy group back ------------------
+KRKONOSSKA = {103218: 1, 165670: 2, 103219: 3, 165665: 4}   # advert -> its own property
+HELD = L.EngineMaps(merging={103218: 74935, 165670: 74935, 103219: 74936, 165665: 74936})
+
+
+def _krkonosska(db: RetireDb) -> str:
+    """Krkonošská 353 (trial, g13 export): legacy group 55c53147 put idnes 103218 + remax 165670
+    (95 m², the pair the operator ruled same) and idnes 103219 + remax 165665 (96 m²) on one
+    property. The engine holds the two units apart: groups 74935 and 74936."""
+    for lid, pid in KRKONOSSKA.items():
+        db.advert(lid, pid)
+    group = db.merged(1, 2, 3, 4)
+    db.verdicts.append({"kind": "pair", "lo": 103218, "hi": 165670, "verdict": "same"})
+    return group
+
+
+def test_e907_a_ruled_same_pair_one_mergeable_engine_group_holds_lets_the_group_go() -> None:
+    db = RetireDb()
+    group = _krkonosska(db)
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r1",
+                          engine=HELD)
+    [g] = out["groups"]
+    assert g["merge_group_id"] == group and g["outcome"] == "would_retire"
+    assert g["separates_same"] == g["same_held_by_engine"] == [[103218, 165670]]
+    assert out["counts"]["retire_set_with_ruled_same_held_by_engine"] == 1
+
+    live = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                           detach=db.detach_recording([]), engine=HELD)
+    assert _by(live) == {group: "retired"}
+    assert {lid: db.listings[lid]["property_id"] for lid in KRKONOSSKA} == KRKONOSSKA
+
+
+def test_e907_a_ruled_same_pair_nothing_re_joins_still_holds_the_group() -> None:
+    for engine in (
+        L.EngineMaps(),                                                   # no engine word
+        L.EngineMaps(merging={103218: 74935, 165670: 74936}),             # two engine groups
+        L.EngineMaps(merging={103218: 74935, 103219: 74936}),             # one side ungrouped
+        L.EngineMaps(merging={103219: 74936, 165665: 74936},              # a group this run
+                     other={103218: 74935, 165670: 74935},                # will not merge
+                     why={74935: "status rejected"}),
+    ):
+        db = RetireDb()
+        group = _krkonosska(db)
+        out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                              detach=db.detach_recording([]), engine=engine)
+        assert _by(out) == {group: f"skipped:{L.RULED_SAME}"}, engine
+        assert out["groups"][0]["same_held_by_engine"] == []
+        assert {db.listings[lid]["property_id"] for lid in KRKONOSSKA} == {1}
+
+
+def test_e907_leaves_the_operator_different_protection_as_it_was() -> None:
+    db = RetireDb()
+    group = _krkonosska(db)
+    db.advert(9, 3)          # an advert on the 96 m² idnes origin since: 103219 lands beside it
+    db.verdicts.append({"kind": "pair", "lo": 9, "hi": 103219, "verdict": "different"})
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r1",
+                          engine=HELD)
+    assert _by(out) == {group: f"skipped:{L.RULED_DIFFERENT}"}
