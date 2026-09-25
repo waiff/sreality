@@ -64,7 +64,7 @@ class _Cursor:
         self.rows: list[dict[str, Any]] = []
 
     def execute(self, sql: str, params: Any = None) -> None:
-        if "statement_timeout" in sql:
+        if sql.startswith("SET "):
             self.rows = []
         elif sql is T.COVERAGE_SQL:
             self.rows = [{"source": "sreality", "n_listings": 3, "n_with_obec": 3}]

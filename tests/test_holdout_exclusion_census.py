@@ -171,6 +171,11 @@ _EXEMPT: dict[str, str] = {
     "_LIST_PROPOSALS_SQL":
         "The retiring dedup_sim proposal lane. It feeds no probe and goes with the "
         "rest of dedup_sim.",
+    "B_HAND_LABELS_BY_SOURCE_SQL":
+        "The AUTODEDUP readiness probe (autodedup/readiness_sql.py, W0): counts cells per "
+        "source, author and state before the legacy deletion decides what to keep. An "
+        "aggregate over the whole table that selects no training population and grades "
+        "nothing; deleted with the probe set in W8.",
 
 }
 

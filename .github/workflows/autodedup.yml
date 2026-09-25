@@ -23,6 +23,8 @@ name: "AUTODEDUP: engine lane"
 #             scales with) and one portal's location posture (granularity histogram plus pin
 #             coverage, `source=` picking the portal, default remax). Prints two small tables
 #             and writes out/probes.json.
+#             `set=readiness_v1` runs the go-live readiness probe instead (28 fixed queries in
+#             autodedup/readiness_sql.py, each READ ONLY) into out/probes/readiness_v1.json.
 #
 #   export  - READS ONLY. Dumps the trial cohort - two district towns, one Praha quarter and
 #             the assembled negative control (Praha address points carrying at least three
@@ -318,7 +320,7 @@ name: "AUTODEDUP: engine lane"
 # `args` is a free-form `k=v,k=v` string each mode parses for itself. town accepts batch,
 # max_rows, timeout_s, sample and coverage; census accepts
 # min_n, max_n, top, detail_top, timeout_s, pin_share_min, probes and hash_share_min;
-# probes accepts timeout_s and source; export accepts blocks, timeout_s, phash_timeout_s,
+# probes accepts timeout_s, source and set; export accepts blocks, timeout_s, phash_timeout_s,
 # batch, clip_model and negctl_max (block overrides are SPACE-separated, e.g.
 # `blocks=town:563510 quarter:490245`, because the comma already separates k=v pairs);
 # record accepts wave, title, status, approach, tools, notes, cost_usd and run_id, or

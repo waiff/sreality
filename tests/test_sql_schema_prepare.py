@@ -78,6 +78,13 @@ _ALLOWLIST: list[tuple[str, str, str]] = [
         "job_id bigint, ..., active boolean)",
     ),
     (
+        "autodedup/readiness_sql.py",
+        "cron.job",
+        "the readiness probe lists leftover legacy pg_cron jobs; pg_cron's `cron` schema is "
+        "extension-managed and absent from the replayed schema, so cron.job cannot PREPARE "
+        "here. A production failure is recorded on that one probe, never raised",
+    ),
+    (
         "verify_pipeline.py",
         "cron.job_run_details",
         "pg_cron's run-history lives in the extension-managed `cron` schema, not "

@@ -330,9 +330,12 @@ def test_parse_census_args_carries_the_probe_switches() -> None:
 
 
 def test_parse_probes_args_defaults_and_validation() -> None:
-    assert census.parse_probes_args({}) == {"timeout_s": 540, "source": "remax"}
+    assert census.parse_probes_args({}) == {"timeout_s": 540, "source": "remax", "set": "corpus"}
     assert census.parse_probes_args({"source": "bazos"})["source"] == "bazos"
-    for bad in ({"nope": "1"}, {"source": "nosuchportal"}, {"timeout_s": "x"}, {"timeout_s": "0"}):
+    for bad in (
+        {"nope": "1"}, {"source": "nosuchportal"}, {"timeout_s": "x"}, {"timeout_s": "0"},
+        {"set": "nosuchset"},
+    ):
         with pytest.raises(ValueError):
             census.parse_probes_args(bad)
 
@@ -399,7 +402,7 @@ def _fake_conn(execute, seen: list[str] | None = None):
             self.rows: list[dict[str, object]] = []
 
         def execute(self, sql: str, params: object = None) -> None:
-            if "statement_timeout" in sql:
+            if sql.startswith("SET "):
                 self.rows = []
                 return
             if seen is not None:

@@ -47,6 +47,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from autodedup import readiness_sql
+
 SOURCES: tuple[str, ...] = (
     "sreality", "bazos", "bezrealitky", "idnes", "mmreality", "remax", "ceskereality",
     "realitymix", "maxima",
@@ -625,6 +627,12 @@ CORPUS_PROBES: tuple[Probe, ...] = (
     Probe("ingest_rate", CENSUS_PROBE_INGEST_SQL, True),
 )
 
+# `probes set=<name>`: fixed, versioned query sets only; args never carry SQL.
+PROBE_SETS: dict[str, tuple[Probe, ...]] = {
+    "corpus": CORPUS_PROBES,
+    readiness_sql.SET_NAME: tuple(Probe(q.name, q.sql, True) for q in readiness_sql.READINESS_V1),
+}
+
 BLOCK_SQL_BY_GRAIN: dict[str, str] = {
     "town": CENSUS_TOWNS_SQL,
     "quarter": CENSUS_QUARTERS_SQL,
@@ -911,9 +919,15 @@ def _rows_as_dicts(cur: Any) -> list[dict[str, Any]]:
     return [dict(zip(names, row)) for row in cur.fetchall()]
 
 
+# Every census/probes/town statement runs under it, so a write is refused by the database
+# itself (SQLSTATE 25006), not merely absent from the code.
+READ_ONLY_GUARD = "SET TRANSACTION READ ONLY"
+
+
 def _run(conn: Any, sql: str, params: dict[str, Any], timeout_ms: int) -> list[dict[str, Any]]:
     with conn.transaction():
         with conn.cursor() as cur:
+            cur.execute(READ_ONLY_GUARD)
             cur.execute(f"SET LOCAL statement_timeout = {int(timeout_ms)}")
             cur.execute(sql, params)
             return _rows_as_dicts(cur)
@@ -985,6 +999,7 @@ ARG_DEFAULTS: dict[str, int] = {
 PROBES_ARG_DEFAULTS: dict[str, Any] = {
     "timeout_s": 540,
     "source": "remax",
+    "set": "corpus",
 }
 
 
@@ -1037,7 +1052,64 @@ def parse_probes_args(args: dict[str, str]) -> dict[str, Any]:
         raise ValueError(f"probes arg timeout_s must be between 1 and {TIMEOUT_S_MAX}")
     if out["source"] not in SOURCES:
         raise ValueError(f"probes arg source must be one of {', '.join(SOURCES)}")
+    if out["set"] not in PROBE_SETS:
+        raise ValueError(f"probes arg set must be one of {', '.join(sorted(PROBE_SETS))}")
     return out
+
+
+def _run_readiness(
+    conn_factory: Callable[[], Any], params: dict[str, Any], out_dir: Any
+) -> dict[str, Any]:
+    """One named read-only query set into `out/probes/<set>.json`, landed after every query."""
+    name = str(params["set"])
+    timeout_ms = int(params["timeout_s"]) * 1000
+    timings: dict[str, float] = {}
+    probes: dict[str, Any] = {}
+    errors: list[str] = []
+    out_path = Path(out_dir) / "probes" / f"{name}.json"
+    payload: dict[str, Any] = {
+        "set": name,
+        "trial_blocks": list(readiness_sql.TRIAL_BLOCKS),
+        "parameters": params,
+        "queries": {
+            q.name: {"why": q.why, "drives": q.drives} for q in readiness_sql.READINESS_V1
+        },
+        "timings": timings,
+        "probes": probes,
+        "errors": errors,
+        "headline": {},
+    }
+
+    conn = conn_factory()
+    try:
+        for probe in PROBE_SETS[name]:
+            started = time.monotonic()
+            try:
+                probes[probe.name] = _run(conn, probe.sql, {}, timeout_ms)
+            except Exception as exc:  # noqa: BLE001 — one query must not void the set
+                errors.append(f"{probe.name}: {type(exc).__name__}: {exc}")
+            timings[probe.name] = round(time.monotonic() - started, 3)
+            write_json(out_path, payload)
+    finally:
+        close = getattr(conn, "close", None)
+        if callable(close):
+            close()
+
+    payload["headline"] = readiness_sql.headline(probes)
+    write_json(out_path, payload)
+    for probe in PROBE_SETS[name]:
+        rows = probes.get(probe.name)
+        shape = f"{len(rows)} rows" if isinstance(rows, list) else "FAILED"
+        print(f"{probe.name:<34} {shape:>10} {timings.get(probe.name, 0):>9.1f}s")
+    return {
+        "set": name,
+        "queries": len(PROBE_SETS[name]),
+        "succeeded": len(probes),
+        "headline": payload["headline"],
+        "errors": errors,
+        "timings": timings,
+        "probes_json": str(out_path),
+    }
 
 
 def run_probes(
@@ -1046,6 +1118,8 @@ def run_probes(
     """The corpus-wide probes (B2 location posture, B5 ingest rate). Block-independent, so they
     run once in their own mode rather than once per censused block."""
     params = parse_probes_args(args)
+    if params["set"] != "corpus":
+        return _run_readiness(conn_factory, params, out_dir)
     timeout_ms = int(params["timeout_s"]) * 1000
     source = str(params["source"])
     timings: dict[str, float] = {}
