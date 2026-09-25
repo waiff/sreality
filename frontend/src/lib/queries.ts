@@ -1101,9 +1101,21 @@ export const fetchBrowseCount = async (
   type CountQuery = PromiseLike<CountResp> & {
     abortSignal: (s: AbortSignal) => PromiseLike<CountResp>;
   };
+  /* The estimate reads the PLAIN relation, never the dismissal-aware function:
+   * PostgREST plans a count only for a table or view, so a function call answers
+   * `Content-Range: 0-N/*` and the client parses the `*` to NaN (the "~NaN"
+   * header, 2026-09-25). The plain relation also counts dismissed properties;
+   * the "~" already says the figure is not exact. */
   const build = (mode: 'exact' | 'planned') =>
     applyPrefilters(
-      applyFilters(listSource(f, keysetTiebreak(f), { count: mode, head: true }), f),
+      applyFilters(
+        listSource(
+          mode === 'planned' ? { ...f, showDismissed: true } : f,
+          keysetTiebreak(f),
+          { count: mode, head: true },
+        ),
+        f,
+      ),
       pre,
     ) as unknown as CountQuery;
   try {
@@ -1111,13 +1123,17 @@ export const fetchBrowseCount = async (
       AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
     );
     if (error) throw error;
-    if (count != null) return { value: count, precise: true };
+    if (count != null && Number.isFinite(count)) return { value: count, precise: true };
   } catch {
     // Exact didn't finish under budget — fall through to the estimate.
   }
   const planned = await build('planned');
   if (planned.error) throw planned.error;
-  const estimate = planned.count ?? 0;
+  const estimate = planned.count;
+  /* No number is an error the header shows as one (dimmed + retry), never a NaN. */
+  if (estimate == null || !Number.isFinite(estimate)) {
+    throw new Error('Browse count unavailable: no exact count within budget and no estimate');
+  }
   return { value: estimate, precise: estimate === 0 };
 };
 

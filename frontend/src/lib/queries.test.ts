@@ -542,6 +542,62 @@ describe('Browse select-lists carry the measure with its published basis', () =>
   });
 });
 
+/* The "~NaN" Browse header (2026-09-25). The count asks the dismissal-aware
+ * FUNCTION for an exact total, and when that misses its budget falls back to the
+ * planner's estimate. PostgREST plans a count only for a table or view: over a
+ * function call its Content-Range total is `*`, which the client parses to NaN.
+ * Driven through the real client against a stubbed PostgREST, so the parse that
+ * produced the NaN is the one under test. */
+describe('the Browse cohort total is always a number', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /* Production as observed: the exact count is aborted at the client budget; a
+   * planned count carries a total only when it reads a relation. */
+  const stubPostgrest = (relationEstimate: string) => {
+    const planned: string[] = [];
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      const prefer = new Headers(init?.headers).get('Prefer') ?? '';
+      if (prefer.includes('count=exact')) {
+        throw new DOMException('signal timed out', 'AbortError');
+      }
+      if (prefer.includes('count=planned')) planned.push(path);
+      const total = path.includes('/rpc/') ? '*' : relationEstimate;
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        headers: new Headers({ 'Content-Range': `*/${total}` }),
+        text: async () => '',
+      } as unknown as Response;
+    });
+    return planned;
+  };
+
+  it('falls back to the estimate of the plain relation, never NaN', async () => {
+    const planned = stubPostgrest('72');
+    const total = await fetchBrowseCount(DEFAULT_FILTERS);
+    expect(Number.isFinite(total.value)).toBe(true);
+    expect(total).toEqual({ value: 72, precise: false });
+    expect(planned).toEqual(['/rest/v1/browse_list']);
+  });
+
+  it('estimates the listing-grain feed from its plain view too', async () => {
+    const planned = stubPostgrest('15');
+    const total = await fetchBrowseCount({ ...DEFAULT_FILTERS, portals: ['bazos'] });
+    expect(total).toEqual({ value: 15, precise: false });
+    expect(planned).toEqual(['/rest/v1/listing_feed_public']);
+  });
+
+  it('fails the count, which the header shows as an error, when there is no number at all', async () => {
+    stubPostgrest('*');
+    await expect(fetchBrowseCount(DEFAULT_FILTERS)).rejects.toThrow(/count unavailable/);
+  });
+});
+
 /* Migration 537. Every Browse cohort read starts from ONE source: the
  * relation's dismissal-aware twin by default (the exclusion happens
  * server-side, under the caller's RLS — a dismissed set never rides in the
