@@ -167,6 +167,27 @@ def test_E294b_the_price_is_not_one_path_across_the_re_post_boundary() -> None:
     assert names(a, b, S14) == ["accessory_price"]
 
 
+# Cohort 12, Třebíč, Na Kopcích 5th floor 3+1 76,39 m2 at 7,790,000: one agency template, two flats.
+TREBIC = ("Byt je situován v pátém patře pětipodlažního panelového domu a jeho užitná plocha činí "
+          "76,39 m2. Součástí bytu je {what}. Byt se vyznačuje kvalitním provedením.")
+
+
+def test_E294_trebic_two_terraces_on_one_portal_and_the_copy_that_prints_the_same() -> None:
+    big = advert(118658, "idnes", TREBIC.format(what="krásná terasa o velikosti 29,7 m2"), 29, 75,
+                 area_m2=76.0, price=7790000.0)
+    small = advert(122634, "idnes", TREBIC.format(what="i terasa o velikosti 6,11 m2"), 30, 49,
+                   area_m2=76.0, price=7790000.0)
+    copy = advert(34822, "sreality", TREBIC.format(what="i terasa o velikosti 6,11 m2"), 8, 49,
+                  area_m2=76.0, price=7790000.0)
+    assert outdoor_accessory_areas(small.description) == frozenset({("terrace", 6.11, 2)})
+    assert names(big, small, S13) == [] and names(big, small, S14) == ["outdoor_accessory"]
+    # the sreality copy states the same 6,11 m2: no fact, whatever the portal
+    assert names(small, copy, S14) == []
+    # the 29,7 m2 flat against the 6,11 m2 copy on ANOTHER portal at ONE price: (a) is one portal
+    # only, (b) needs a price gap - neither reads it
+    assert names(big, copy, S14) == []
+
+
 def test_E294_two_authors_of_one_flat_are_not_read_across_portals() -> None:
     # HK Jana Masaryka 1+kk, one 3,799,999: `lodžii o ploše 3 m2` (agency) / `balkon o rozloze 4 m2`.
     body_a = "Byt je v dobrém stavu a disponuje lodžií o ploše 3 m2, která poskytuje prostor."
