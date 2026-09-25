@@ -150,8 +150,11 @@ vi.mock('@/lib/queries', async (importOriginal) => {
     fetchSnapshotsForListings: vi.fn(async () => []),
     fetchFreshnessChecksByListing: vi.fn(async () => []),
     fetchImagesByListing: vi.fn(async () => []),
+    fetchListingsForListingIds: vi.fn(async () => new Map()),
+    fetchImagesForListingIds: vi.fn(async () => new Map()),
   };
 });
+vi.mock('@/lib/auth', () => ({ useAuth: () => ({ isAdmin: false }) }));
 /* Only the network wrapper is stubbed — contactState/prettyPhone stay REAL,
    because the vizitka's whole point is the three states they encode. Since W6
    there is one wrapper to stub, not two: the contact arrives on the attribution
@@ -509,10 +512,10 @@ describe('<BrokerVizitka>', () => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* Merged-adverts section — ships dark (lib/mergedAdverts)                    */
+/* Merged-adverts section (lib/mergedAdverts)                                 */
 /* -------------------------------------------------------------------------- */
 
-describe('<ListingDetail> merged-adverts section, switches at their shipped values', () => {
+describe('<ListingDetail> merged-adverts section', () => {
   const TWO_SOURCES = [
     {
       property_id: 774,
@@ -540,14 +543,13 @@ describe('<ListingDetail> merged-adverts section, switches at their shipped valu
     },
   ];
 
-  it('is provably inert: no section, no extra read, the history block keeps its advert list', async () => {
+  it('shows one row per advert and drops the history block’s duplicate list', async () => {
     vi.mocked(queries.fetchListingIdByNaturalKey).mockResolvedValue(105053);
     vi.mocked(queries.fetchListingById).mockResolvedValue(RESOLVER_LISTING);
     vi.mocked(queries.fetchPropertySources).mockResolvedValue({
       property_id: 774,
       sources: TWO_SOURCES,
     });
-    const detailsRead = vi.spyOn(queries, 'fetchListingsForListingIds');
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <QueryClientProvider client={qc}>
@@ -559,10 +561,11 @@ describe('<ListingDetail> merged-adverts section, switches at their shipped valu
       </QueryClientProvider>,
     );
 
-    // The history block's own per-advert list is what the section would replace.
-    expect(await screen.findByText('this listing')).toBeInTheDocument();
-    expect(screen.queryByText('Sloučené inzeráty')).not.toBeInTheDocument();
+    expect(await screen.findByText('Sloučené inzeráty')).toBeInTheDocument();
+    expect(screen.getByText('tento inzerát')).toBeInTheDocument();
+    expect(queries.fetchListingsForListingIds).toHaveBeenCalledWith([105053, 205]);
+    expect(screen.queryByText('this listing')).not.toBeInTheDocument();
+    // Not an admin session: no write affordance.
     expect(screen.queryByRole('button', { name: /Rozdělit/ })).not.toBeInTheDocument();
-    expect(detailsRead).not.toHaveBeenCalled();
   });
 });

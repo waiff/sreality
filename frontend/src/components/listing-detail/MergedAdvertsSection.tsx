@@ -13,10 +13,10 @@
  * 4. patře" — are exactly what separates two units of one building). The link
  * out is the row's stored `source_url`, never rebuilt.
  *
- * The per-row 'Rozdělit' is the only UI for the existing unmerge route, behind
- * its own switch and admin sessions only. What it can honestly offer from a
- * row is decided in lib/mergedAdverts.planRowUnmerge — read that header before
- * changing any copy here. */
+ * The per-row 'Rozdělit' is the only UI for the existing unmerge route, admin
+ * sessions only, for a merge of any origin, with an optional free-text reason.
+ * What it can honestly offer from a row is decided in
+ * lib/mergedAdverts.planRowUnmerge — read that header before changing any copy here. */
 
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
@@ -26,7 +26,7 @@ import ImageCarousel from '@/components/ImageCarousel';
 import MemberText from '@/components/autodedup/MemberText';
 import { MissingPhotoTile } from '@/components/autodedup/ListingMini';
 import { SectionLabel } from '@/components/section';
-import { unmergeMergeGroup } from '@/lib/api';
+import { UNMERGE_REASON_MAX, unmergeMergeGroup } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { fetchListingBroker } from '@/lib/brokers';
 import { fmtArea, fmtCount, fmtCzk, fmtDateSlash, fmtFloor } from '@/lib/format';
@@ -61,32 +61,15 @@ interface SectionProps {
   /* The advert this page is open on — marked, and never linked to itself. */
   currentListingId: number;
   sources: PropertySource[];
-  /* MERGED_ADVERTS_UNMERGE_ENABLED, handed down by the page. */
-  unmergeEnabled: boolean;
 }
 
 export default function MergedAdvertsSection(props: SectionProps) {
   if (props.sources.length < 2) return null;
-  /* useAuth only when the write can show at all: with the switch off the section
-   * needs no session state, and stays renderable outside an AuthProvider. */
-  return props.unmergeEnabled ? (
-    <WithAdminCheck {...props} />
-  ) : (
-    <SectionBody {...props} canUnmerge={false} />
-  );
+  return <SectionBody {...props} />;
 }
 
-function WithAdminCheck(props: SectionProps) {
-  const { isAdmin } = useAuth();
-  return <SectionBody {...props} canUnmerge={isAdmin} />;
-}
-
-function SectionBody({
-  propertyId,
-  currentListingId,
-  sources,
-  canUnmerge,
-}: SectionProps & { canUnmerge: boolean }) {
+function SectionBody({ propertyId, currentListingId, sources }: SectionProps) {
+  const { isAdmin: canUnmerge } = useAuth();
   const ids = useMemo(() => sources.map((s) => s.id), [sources]);
 
   /* Area, disposition, floor and the description — per advert, from the same
@@ -456,13 +439,15 @@ function UnmergeConfirm({
   onCancel: () => void;
 }) {
   const qc = useQueryClient();
+  const [reason, setReason] = useState('');
   const scanQ = useQuery({
     queryKey: mergedAdvertsKeys.groups(propertyId),
     queryFn: () => findActivePropertyMergeGroups(propertyId),
     staleTime: 30_000,
   });
   const unmerge = useMutation({
-    mutationFn: (mergeGroupId: string) => unmergeMergeGroup(mergeGroupId),
+    mutationFn: (mergeGroupId: string) =>
+      unmergeMergeGroup(mergeGroupId, reason.trim() || undefined),
     /* Errors (a 404 for a group undone meanwhile, a 5xx) surface through the
      * global MutationCache toast; the panel stays open so nothing looks done. */
     onSuccess: async (res) => {
@@ -521,23 +506,6 @@ function UnmergeConfirm({
         oddělit nejde.
       </>
     );
-  } else if (plan?.kind === 'engine') {
-    body = (
-      <>
-        <strong className="font-medium text-[var(--color-ink)]">
-          Tuto nemovitost sloučil AUTODEDUP — odsud ji rozdělit nejde.
-        </strong>{' '}
-        Vrácení odsud by engine nezaznamenalo a mohl by inzeráty sloučit znovu. Zapište na
-        jeho{' '}
-        <Link
-          to={ROUTES.autodedupGroups.build()}
-          className="text-[var(--color-ink)] underline hover:text-[var(--color-copper-2)]"
-        >
-          revizní stránce
-        </Link>{' '}
-        verdikt „různé“ (trvalé nesmí-spojit) a sloučení vraťte jeho vlastním vrácením.
-      </>
-    );
   } else if (plan?.kind === 'not-found') {
     body = plan.exhaustive
       ? 'Kniha sloučení pro tuto nemovitost nemá žádné sloučení, které by šlo vrátit — její inzeráty spojilo starší seskupení.'
@@ -551,6 +519,18 @@ function UnmergeConfirm({
       className="mx-3 mb-2 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] px-3 py-2"
     >
       <p className="text-[0.75rem] leading-snug text-[var(--color-ink-2)]">{body}</p>
+      {confirm && (
+        <textarea
+          aria-label="Důvod rozdělení (nepovinné)"
+          placeholder="Důvod (nepovinné)"
+          maxLength={UNMERGE_REASON_MAX}
+          rows={2}
+          value={reason}
+          disabled={unmerge.isPending}
+          onChange={(e) => setReason(e.target.value)}
+          className="mt-2 block w-full max-w-[32rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.75rem] text-[var(--color-ink)]"
+        />
+      )}
       <div className="mt-2 flex items-center gap-1.5">
         {confirm && (
           <button

@@ -1206,18 +1206,16 @@ renumber.** Navigate by area:
     itself is superseded but not yet dropped (a separately-gated destructive migration).
     The unmerge *button* lived on the deleted Dedup page; its new home is the listing page's
     **Sloučené inzeráty** section (`frontend/src/components/listing-detail/MergedAdvertsSection.tsx`:
-    one expandable row per child advert — photos collapsed, description / full gallery / broker /
-    stored portal link expanded — with a per-row two-step **Rozdělit** for admin sessions over the
-    two routes above), which ships DARK behind two switches in `frontend/src/lib/mergedAdverts.ts`
-    (section and unmerge, both off — until the unmerge switch is on, unmerge stays API-only); because
-    the ledger read (`GET /properties/merges?survivor_property_id=`, one property's groups, exact at
-    any ledger size) names no listings and the undo is group-grain, a row splits exactly only a
+    shown on any property of two or more adverts, one expandable row per child advert — photos
+    collapsed, description / full gallery / broker / stored portal link expanded — with a per-row
+    two-step **Rozdělit** for admin sessions over the two routes above); because the ledger read
+    (`GET /properties/merges?survivor_property_id=`, one property's groups, exact at any ledger
+    size) names no listings and the undo is group-grain, a row splits exactly only a
     two-advert property one merge joined, one merge that made the whole property is offered whole,
     and anything else says it cannot tell (`planRowUnmerge`) — a per-listing ledger read would make
-    every row exact. An AUTODEDUP group (`source='autodedup'` or reason `autodedup…`) is never
-    undone there: this route writes no `autodedup` must-not-link and leaves the engine's
-    applied-merge record standing, so the page points at the engine's review ("Různé") and its
-    own undo instead.
+    every row exact. The split is available for every merge, whatever its origin (operator, legacy
+    `auto`, `autodedup` — shown as information only), with an optional free-text `reason` (≤500
+    chars, the unmerge POST body); the unmerge writes a "different" ruling, and the engine obeys it.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing

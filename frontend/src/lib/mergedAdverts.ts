@@ -1,12 +1,8 @@
-/* The merged-adverts section on the listing page: its switches, its query keys,
- * and the one decision it cannot make from what it can see — which merge group a
- * given advert row came in with.
- *
- * SHIPS DARK. Both switches are off, and with them off the page renders exactly
- * what it did before: no section, no extra read, no write affordance
- * (ListingDetail.test pins that). The section is read-only; the unmerge is a
- * production write through the existing admin-gated route, so it has its own
- * switch and can stay off after the section goes on.
+/* The merged-adverts section on the listing page: its query keys, and the one
+ * decision it cannot make from what it can see — which merge group a given
+ * advert row came in with. The section shows on any property of two or more
+ * adverts; the per-row split is for admin sessions and is offered for a merge of
+ * ANY origin (the origin is shown as information only).
  *
  * WHY UNMERGE IS NOT SIMPLY PER ROW. The only undo that exists is
  * `POST /properties/merges/{group}/unmerge`, which reverses a whole merge GROUP,
@@ -27,14 +23,6 @@ import { revalidateCollections } from '@/lib/collectionCache';
 import { revalidatePipeline } from '@/lib/pipelineCache';
 import { fetchPropertySources, propertySourcesKey } from '@/lib/queries';
 import type { MergeGroup, MergesResponse } from '@/lib/types';
-
-/* The section itself (read-only). Off: the page is unchanged. */
-export const MERGED_ADVERTS_SECTION_ENABLED = false;
-/* The per-row 'Rozdělit' write, admin sessions only. Off: rows carry no action.
- * An AUTODEDUP merge is never undone from here (planRowUnmerge's 'engine'): this
- * route writes no must-not-link and leaves the engine's own applied-merge record
- * standing, so the engine's own verdict + undo path owns those groups. */
-export const MERGED_ADVERTS_UNMERGE_ENABLED = false;
 
 /* The ledger is read only after the operator asks to split — never on page load —
  * and filtered to this property as survivor server-side, so the read is exact and
@@ -96,12 +84,6 @@ export async function findActivePropertyMergeGroups(
   return { groups, scanned, exhaustive: false };
 }
 
-/* A group the AUTODEDUP engine wrote: the apply path's own source, or its reason
- * prefix (PROGRAM.md's E38 sketch writes source 'auto' + reason 'autodedup:…'). */
-export function isAutodedupMerge(g: MergeGroup): boolean {
-  return g.source === 'autodedup' || (g.reason ?? '').startsWith('autodedup');
-}
-
 /* The adjective the confirm copy puts before "sloučení". Explicit per source: an
  * unknown one is shown raw, never passed off as the operator's own. */
 export function mergeOriginLabel(source: string): string {
@@ -127,10 +109,6 @@ export type UnmergePlan =
   /* Several merges, or one that does not account for every advert: which one
    * brought THIS row in is not knowable from the ledger read. */
   | { kind: 'ambiguous'; groups: MergeGroup[] }
-  /* The AUTODEDUP engine made (part of) this property. Undoing its group here
-   * would write no must-not-link, so the engine could merge it again, and would
-   * leave its applied-merge record standing: never offered from this page. */
-  | { kind: 'engine'; groups: MergeGroup[] }
   | { kind: 'not-found'; scanned: number; exhaustive: boolean };
 
 export function planRowUnmerge(scan: MergeGroupScan, rowCount: number): UnmergePlan {
@@ -138,8 +116,6 @@ export function planRowUnmerge(scan: MergeGroupScan, rowCount: number): UnmergeP
   if (groups.length === 0) {
     return { kind: 'not-found', scanned: scan.scanned, exhaustive: scan.exhaustive };
   }
-  const engine = groups.filter(isAutodedupMerge);
-  if (engine.length > 0) return { kind: 'engine', groups: engine };
   if (groups.length === 1 && groups[0].listings_moved === rowCount - 1) {
     return rowCount === 2
       ? { kind: 'pair', group: groups[0] }

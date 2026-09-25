@@ -66,10 +66,6 @@ import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Hairline, SectionLabel } from '@/components/section';
 import MergedAdvertsSection from '@/components/listing-detail/MergedAdvertsSection';
-import {
-  MERGED_ADVERTS_SECTION_ENABLED,
-  MERGED_ADVERTS_UNMERGE_ENABLED,
-} from '@/lib/mergedAdverts';
 
 const PriceLineChart = lazyChunk(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -402,12 +398,11 @@ export default function ListingDetail() {
   const images = imagesQ.data ?? [];
   const sources = sourcesQ.data?.sources ?? [];
   const statusEvents = statusEventsQ.data ?? [];
-  // The merged-adverts section (dark: lib/mergedAdverts). Keyed on the property
-  // the SOURCES read resolved, since its rows are that property's children. When
-  // it shows, it IS the per-advert list, so the history block drops its own.
+  // The merged-adverts section, keyed on the property the SOURCES read resolved,
+  // since its rows are that property's children. When it shows, it IS the
+  // per-advert list, so the history block drops its own.
   const sourcesPid = sourcesQ.data?.property_id ?? null;
-  const showMergedAdverts =
-    MERGED_ADVERTS_SECTION_ENABLED && sourcesPid != null && sources.length >= 2;
+  const showMergedAdverts = sourcesPid != null && sources.length >= 2;
 
   // Property-grain figures (MF / estimate) are built on the canonical asking
   // price; flag any ACTIVE sibling advert listed at a different number so the
@@ -499,7 +494,6 @@ export default function ListingDetail() {
             propertyId={sourcesPid}
             currentListingId={listing.id}
             sources={sources}
-            unmergeEnabled={MERGED_ADVERTS_UNMERGE_ENABLED}
           />
         </>
       )}

@@ -3045,7 +3045,7 @@ export const unlinkAssetProperty = (
 
 /* Merge ledger (list / browse-results / unmerge). The buttons lived on the deleted
  * Dedup page; `listPropertyMerges` + `unmergeMergeGroup` are now called by the listing
- * page's merged-adverts section (lib/mergedAdverts — shipped dark behind its switch),
+ * page's merged-adverts section (lib/mergedAdverts),
  * `listMergedProperties` still has no UI caller. These three wrap the surviving
  * `/properties/*` mechanics routes — do not delete them as "dead". */
 export const listPropertyMerges = (
@@ -3074,12 +3074,16 @@ export const listMergedProperties = (
     jwt: true,
   });
 
+/* `reason`: the operator's optional free text (≤ UNMERGE_REASON_MAX chars), kept
+ * with the "different" ruling the split writes server-side. */
+export const UNMERGE_REASON_MAX = 500;
 export const unmergeMergeGroup = (
   mergeGroupId: string,
+  reason?: string,
 ): Promise<UnmergeResult> =>
   request<UnmergeResult>(
     `/properties/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
-    { method: 'POST', jwt: true },
+    { method: 'POST', jwt: true, ...(reason ? { json: { reason } } : {}) },
   );
 
 /* ----- price-stats datasets ---------------------------------------------- */

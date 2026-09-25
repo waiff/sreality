@@ -1,17 +1,14 @@
-/* lib/mergedAdverts — the switches, the ledger scan, and the one rule that
- * decides what a row's 'Rozdělit' may honestly offer. */
+/* lib/mergedAdverts — the ledger scan, and the one rule that decides what a
+ * row's 'Rozdělit' may honestly offer. */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 
 import {
-  MERGED_ADVERTS_SECTION_ENABLED,
-  MERGED_ADVERTS_UNMERGE_ENABLED,
   MERGE_LEDGER_MAX_PAGES,
   MERGE_LEDGER_PAGE_SIZE,
   findActivePropertyMergeGroups,
   inzeratu,
-  isAutodedupMerge,
   mergeOriginLabel,
   planRowUnmerge,
   refreshAfterUnmerge,
@@ -46,13 +43,6 @@ function scan(groups: MergeGroup[], over: Partial<MergeGroupScan> = {}): MergeGr
   return { groups, scanned: 200, exhaustive: false, ...over };
 }
 
-describe('the switches', () => {
-  it('ship OFF — the page is unchanged until someone turns them on', () => {
-    expect(MERGED_ADVERTS_SECTION_ENABLED).toBe(false);
-    expect(MERGED_ADVERTS_UNMERGE_ENABLED).toBe(false);
-  });
-});
-
 describe('inzeratu', () => {
   it('declines the Czech noun by count', () => {
     expect(inzeratu(1)).toBe('inzerát');
@@ -85,27 +75,11 @@ describe('planRowUnmerge', () => {
     expect(planRowUnmerge(scan([g]), 3).kind).toBe('ambiguous');
   });
 
-  it('never offers to undo an AUTODEDUP group, whatever shape it has', () => {
-    // The apply path's own source, and PROGRAM.md's E38 sketch (source 'auto',
-    // reason 'autodedup:…') — both are the engine's, both are refused here.
-    const applied = group({ source: 'autodedup', reason: 'autodedup g12 o:554782' });
-    const sketched = group({ source: 'auto', reason: 'autodedup:v1:1-2' });
-    for (const g of [applied, sketched]) {
-      expect(planRowUnmerge(scan([g]), 2)).toEqual({ kind: 'engine', groups: [g] });
+  it('offers a merge of any origin alike — the origin is information only', () => {
+    for (const source of ['operator', 'auto', 'autodedup'] as const) {
+      const g = group({ source });
+      expect(planRowUnmerge(scan([g]), 2)).toEqual({ kind: 'pair', group: g });
     }
-    const whole = group({ source: 'autodedup', listings_moved: 2, retired_count: 2 });
-    expect(planRowUnmerge(scan([whole]), 3).kind).toBe('engine');
-    const operator = group({ merge_group_id: 'op' });
-    expect(planRowUnmerge(scan([operator, applied]), 3)).toEqual({
-      kind: 'engine',
-      groups: [applied],
-    });
-  });
-
-  it('a legacy-engine group (source auto, its own reason) is still offered', () => {
-    const legacy = group({ source: 'auto', reason: 'phash_exact' });
-    expect(isAutodedupMerge(legacy)).toBe(false);
-    expect(planRowUnmerge(scan([legacy]), 2)).toEqual({ kind: 'pair', group: legacy });
   });
 
   it('says whether "none found" is about the property or about the window', () => {
