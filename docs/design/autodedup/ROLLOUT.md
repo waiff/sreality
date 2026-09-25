@@ -73,7 +73,7 @@ The engine that was live then was reported as having "zero known false merges". 
 
 ## 6. Latency, storage, spend
 
-- **Latency.** The batch engine decides a listing in under a second. The real-time shadow lane runs on GitHub's ten-minute schedule, which in practice fires hours apart; photo-dependent merges wait a median of 2.5 hours for the hourly fingerprint jobs.
+- **Latency.** The batch engine decides a listing in under a second. The real-time shadow lane runs on GitHub's ten-minute schedule, which in practice fires hours apart; photo-dependent merges wait a median of 2.5 hours for the hourly fingerprint jobs. *Correction, 2026-09-24:* the photo fingerprint (pHash) has been taken at download time since July (PR #692), and its hourly job is only a backstop. That does not fit the program's measurement that about 80% of new listings were decided before any of their photos had a fingerprint, and the cause is not yet known: either the download-time fingerprint is failing, or the photos are stored later than the program measured. The 2.5-hour median was measured to the first room tag (CLIP, hourly at :40), not to the fingerprint. Every image run now reports `phash_missed`, the photos stored without a fingerprint; it should read 0.
 - **Storage.** The program's tables hold about 250 MB for the trial area across five kept generations. Corpus-wide, at today's retention, the store would grow about 3.4 GB a month plus about 9.6 GB to seed; cutting the stored reject pairs brings that down by roughly two thirds.
 - **Spend.** About $52 of $200 for development; $0 per month at rollout. The LLM "fact card" experiment cost $2.32 and was refused: no model beat the free text readers cleanly.
 
@@ -83,7 +83,7 @@ The engine that was live then was reported as having "zero known false merges". 
 2. **Rentals.** *Recommendation: hold rentals at propose-only (the switch in §5.5) until the house-number reader (S9) is confirmed, then merge them too.*
 3. **True real-time.** Decisions within minutes need the same code inside the always-on worker, which changes the production image; the floor is about 5–6 minutes (the engine's five-minute settle lag plus the photo hold), not sub-minute. *Recommendation: after production merges have run for a week on the batch lane.* **Built dark (2026-09-24):** the worker's `autodedup` lane runs that same shadow pass and writes no merge; it runs while `realtime_autodedup_interval_seconds` on /settings is above 0 (seeded 0 = stopped).
 4. **Whole corpus and its storage.** *Recommendation: cut stored reject pairs first, then widen by region, watching the 400 MB guard the lane enforces.*
-5. **Photo latency.** Fingerprinting photos at download time removes the 2.5-hour wait. *Recommendation: yes, it is a small change in the image drain and helps every consumer of the fingerprints.*
+5. **Photo latency.** The photo fingerprint (pHash) has been taken at download time since PR #692, yet the program measured about 80% of new listings decided before any of their photos had one; the cause is not yet known (§6). *Recommendation: decide nothing yet. First read `phash_missed` on the image runs and measure the time from a listing's first sighting to its first fingerprint. If the fingerprint is failing, fix that; if the photos are downloaded late, the fix is the download schedule. Running the room tagger (CLIP) inside the image download is a separate question, because it adds torch, a large new dependency (rule 7).*
 
 ## 8. How to look at it yourself
 

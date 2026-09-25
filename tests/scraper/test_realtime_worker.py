@@ -331,8 +331,20 @@ def test_images_pass_runs_capped_active_only_download(monkeypatch):
     images = state["lanes"]["images"]
     assert images["passes"] == 1
     assert images["last"] == {
-        "downloaded": 4, "stopped_suspicious": False, "cap": 123,
+        "downloaded": 4, "phash_missed": 0, "stopped_suspicious": False, "cap": 123,
     }
+
+
+def test_images_pass_heartbeat_carries_inline_phash_misses(monkeypatch):
+    """A stored image the inline hash missed is the hourly backstop's work; the
+    heartbeat carries the count so a silent inline failure is visible live."""
+    monkeypatch.setattr(rw, "_read_images_slice", lambda: 50)
+    monkeypatch.setattr(rw.image_storage, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        rw, "_run_images_sync", lambda cap: _images_agg(images_phash_missed=3))
+    state = rw._new_state()
+    asyncio.run(rw._images_pass(asyncio.Event(), state))
+    assert state["lanes"]["images"]["last"]["phash_missed"] == 3
 
 
 def test_images_pass_slice_zero_skips_entirely(monkeypatch):

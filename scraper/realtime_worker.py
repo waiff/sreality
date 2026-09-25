@@ -1050,12 +1050,15 @@ async def _images_pass(stop_event: asyncio.Event, state: dict[str, Any]) -> None
     agg = await asyncio.to_thread(_run_images_sync, slice_)
     totals = {
         "downloaded": agg.get("images_stored", 0),
+        # Stored without an inline pHash (left for the hourly backstop); 0 in steady state.
+        "phash_missed": agg.get("images_phash_missed", 0),
         "stopped_suspicious": bool(agg.get("stopped_suspicious", False)),
         "cap": slice_,
     }
     LOG.info(
-        "IMAGES lane downloaded=%d cap=%d stopped_suspicious=%s",
-        totals["downloaded"], slice_, totals["stopped_suspicious"],
+        "IMAGES lane downloaded=%d phash_missed=%d cap=%d stopped_suspicious=%s",
+        totals["downloaded"], totals["phash_missed"], slice_,
+        totals["stopped_suspicious"],
     )
     _record_pass(state, "images", totals)
 

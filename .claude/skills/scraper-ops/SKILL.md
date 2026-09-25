@@ -173,11 +173,11 @@ singletons + recomputes only changed properties; rule #20) and
 property + clears the dirty queue, within a `--max-seconds` budget: on exhaustion it clean-stops
 at a batch boundary, clears only the swept id range, exits RED, and leaves the completion stamp
 unwritten so the `property_maintenance` check alarms). The visual-signal producers run alongside:
-`compute_image_phash.yml` (hourly pHash backfill, active-listing images first), `clip_tag.yml`
-(`scripts/clip_tag_backfill.py` — zero-shot CLIP room/plot tags into `image_clip_tags` + a 512-d
-vector into `image_clip_embeddings`), `clip_retag.yml` (re-runs the zero-shot over each image's
-STORED embedding when the taxonomy changes, per `app_settings.clip_taxonomy_retag_after`; no R2
-download, no re-inference) and `backfill_render_score.yml` (render-vs-photo axis). Newest and
+`compute_image_phash.yml` (hourly pHash BACKSTOP only — the image drain hashes the bytes in hand and writes `phash` in the
+`storage_path` UPDATE, so this job takes just `phash IS NULL` rows: `IMAGES done phash_missed` + re-master re-arms), `clip_tag.yml`
+(`scripts/clip_tag_backfill.py` — zero-shot CLIP room/plot tags into `image_clip_tags` + a 512-d vector into `image_clip_embeddings`),
+`clip_retag.yml` (re-runs the zero-shot over each image's STORED embedding when the taxonomy changes, per
+`app_settings.clip_taxonomy_retag_after`; no R2 download, no re-inference) and `backfill_render_score.yml` (render-vs-photo axis). Newest and
 **dispatch-only**: `dinov3_embed_backfill.yml` (GPU, inert until the encoder config is complete),
 `tagging_bakeoff.yml` (GPU, the encoder EXPERIMENT, `dedup_sim` only), `tag_model.yml` (CPU, ONE
 versioned tag model, mig 490 — the tag is the argmax head) and `new_dedup_candidates.yml` (CPU, Level 0
@@ -485,9 +485,9 @@ shapes for every portal (with its own `source=`), so this reads the same for baz
 - `IMAGES progress=N downloaded=... errors=... taken_down=... source_unavailable=...` every 50
 - `IMAGE listing_taken_down sid=... marked=N` / `IMAGE source_unavailable id=...` per classified
   failure (an inline freshness check flips a taken-down listing inactive + bulk-marks its images)
-- `IMAGES STOP suspicious ...` when the transient-failure circuit-breaker trips (exits 75; the
-  next cron tick retries)
-- `IMAGES done downloaded=... errors=... taken_down=... source_unavailable=... attempted=...`
+- `IMAGES STOP suspicious ...` when the transient-failure circuit-breaker trips (exits 75; the next cron tick retries)
+- `IMAGES done downloaded=... errors=... taken_down=... source_unavailable=... attempted=... phash_missed=...` (`phash_missed` =
+  stored but inline-unhashed, 0 in steady state; its cause is one `IMAGE phash_inline_failed` WARNING per kind per run)
 
 The dispatch-only `scrape.yml` fallback additionally emits the legacy coupled-path lines
 (`PLAN cap=N deferred=M`, `DETAIL starting refetch=N workers=W`, `DETAIL progress=N/M ...`,
