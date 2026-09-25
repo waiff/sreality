@@ -583,6 +583,15 @@ def _engine_vouched(
     return vouched
 
 
+def _cluster_rows(conn: Any, generation: str) -> list[dict[str, Any]]:
+    return [
+        dict(zip(("cluster_key", "size", "status", "block_key", "block_grain",
+                  "category_main", "category_type", "min_edge_score", "model_version",
+                  "feature_version"), row))
+        for row in _rows(conn, S.CLUSTERS_SQL, {"generation": generation})
+    ]
+
+
 def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     """Read-only: which groups of `generation` would merge, into what, and which are refused."""
     if is_realtime_generation(generation):
@@ -590,12 +599,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
             f"generation {generation!r} belongs to the real-time lane: it is rewritten while a "
             "plan reads it and cannot be applied from this lane"
         )
-    cluster_rows = [
-        dict(zip(("cluster_key", "size", "status", "block_key", "block_grain",
-                  "category_main", "category_type", "min_edge_score", "model_version",
-                  "feature_version"), row))
-        for row in _rows(conn, S.CLUSTERS_SQL, {"generation": generation})
-    ]
+    cluster_rows = _cluster_rows(conn, generation)
     members_by: dict[int, list[Member]] = {}
     listing_group: dict[int, int] = {}
     for key, lid, pid, ctype, cmain in _rows(conn, S.MEMBERS_SQL, {"generation": generation}):
@@ -1529,7 +1533,10 @@ def run_apply(
                                      out_dir=out_dir)
             if not dry_run:
                 plan = plan_apply(conn, generation, scope)
-            retired = legacy_retire.note_deferred(out_dir, retired, plan.deferred)
+            retired = legacy_retire.note_deferred(
+                out_dir, retired, deferred=plan.deferred,
+                planned=[g.cluster_key for g in plan.to_apply],
+                cap=plan.scope.max_clusters_per_run)
         try:
             result = apply_plan(conn, plan, dry_run)
         except ApplyRefused as exc:
@@ -1562,11 +1569,24 @@ def _retire_legacy(
     if proposed <= 0:
         raise SystemExit(f"retire_legacy=1: generation {plan.generation!r} holds no proposed "
                          "group inside the scope, so nothing would merge again; nothing was undone")
-    cluster_of = {int(lid): int(key) for key, lid, *_rest in _rows(
-        conn, S.MEMBERS_SQL, {"generation": generation})}
+    # Only a group this run may merge (proposed, admitted by the scope) re-merges what the
+    # step undoes; the rest touching it are reported apart.
+    members: dict[int, list[Member]] = {}
+    for key, lid, pid, ctype, cmain in _rows(conn, S.MEMBERS_SQL, {"generation": generation}):
+        members.setdefault(int(key), []).append(Member(
+            int(lid), int(pid) if pid is not None else None, ctype, cmain))
+    merging: dict[int, int] = {}
+    other: dict[int, int] = {}
+    for cluster in _cluster_rows(conn, generation):
+        key = int(cluster["cluster_key"])
+        found = members.get(key, [])
+        into = merging if (cluster["status"] == "proposed" and found
+                           and scope.admits(cluster, found)) else other
+        for member in found:
+            into.setdefault(member.listing_id, key)
     return legacy_retire.run(conn, scope.blocks, category_types=scope.category_types,
                              dry_run=dry_run, run_id=new_run_id(), out_dir=out_dir,
-                             closed=scope_closed, cluster_of=cluster_of)
+                             closed=scope_closed, cluster_of=merging, other_of=other)
 
 
 def _with_retire(result: dict[str, Any], retired: dict[str, Any] | None) -> dict[str, Any]:

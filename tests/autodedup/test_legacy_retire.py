@@ -83,6 +83,9 @@ class RetireDb(FakeDb):
                             row["property_id"] if row else None, self.inside(e["listing"], p),
                             e["undone"], e.get("undone_by")))
             return out
+        if sql == L.AUTO_MOVED_SQL:
+            return sorted({(e["listing"],) for e in self.events if not e["undone"]
+                           and e["source"] == "auto" and e["listing"] in p["listing_ids"]})
         if sql == L.ADVERTS_SQL:
             return [(r["property_id"], lid, r["category_type"], self.inside(lid, p))
                     for lid, r in sorted(self.listings.items())
@@ -224,7 +227,8 @@ def test_the_dry_run_counts_reproduce_the_probe_and_write_nothing() -> None:
                           detach=db.detach_recording(calls))
     assert calls == [] and db.state() == before
     assert set(db.statements) == {L.GROUPS_SQL, S.PROPERTY_STATE_SQL, L.ADVERTS_SQL,
-                                  L.BUILT_ON_SQL, S.PAIR_VERDICTS_SQL}
+                                  L.BUILT_ON_SQL, S.PAIR_VERDICTS_SQL, S.MUST_NOT_LINK_SQL,
+                                  L.AUTO_MOVED_SQL}
     counts = out["counts"]
     assert counts["groups_touching"] == 10
     assert counts["touching_only_through_survivor_side"] == 1
@@ -523,10 +527,15 @@ def test_1_the_undo_never_lands_an_advert_beside_one_an_operator_negative_keeps_
     db.location[8] = IN_TOWN
     db.mnl.append((2, 9, "operator"))
     db.verdicts.append({"kind": "pair", "lo": 4, "hi": 8, "verdict": "different"})
+    expected = {older: "skipped:operator_ruled_different",
+                newer: "skipped:operator_ruled_different"}
+    dry = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r0")
+    assert {x["merge_group_id"]: x["outcome"] for x in dry["groups"]} == expected
+    calls: list[dict[str, Any]] = []
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
-                          detach=db.detach_recording([]))
-    assert {x["merge_group_id"]: x["outcome"] for x in out["groups"]} == {
-        older: "refused:ruled_different", newer: "refused:ruled_different"}
+                          detach=db.detach_recording(calls))
+    assert {x["merge_group_id"]: x["outcome"] for x in out["groups"]} == expected
+    assert calls == [] and out["groups"][0]["joins_different"] in ([[2, 9]], [[4, 8]])
     assert db.listings[2]["property_id"] == 100 and db.listings[4]["property_id"] == 300
 
 
@@ -641,3 +650,244 @@ def test_3_listing_ids_are_refused_and_the_cap_is_counted_not_hidden(
     body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())
     assert body["deferred_by_cap"] == [second] and first not in body["deferred_by_cap"]
     assert "the run cap deferred" in page.read_text()
+
+
+# ------------------------------------------------------------------ review round 2
+
+
+def _chain(db: RetireDb) -> tuple[str, str]:
+    """G1: R1(200) -> S(100) moves X=2, Y=4; G2: S(100) -> T(50) moves Z=1, X, Y."""
+    db.advert(1, 100)
+    db.advert(2, 200)
+    db.advert(4, 200)
+    g1 = db.merged(100, 200)
+    db.advert(3, 50)
+    g2 = db.merged(50, 100)
+    return g1, g2
+
+
+def _by(out: dict[str, Any]) -> dict[str, str]:
+    return {x["merge_group_id"]: x["outcome"] for x in out["groups"]}
+
+
+def _wire(db: RetireDb, monkeypatch: Any) -> list[dict[str, Any]]:
+    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    merged: list[dict[str, Any]] = []
+    original = A.apply_plan
+    monkeypatch.setattr(A, "apply_plan", lambda conn, plan, dry_run: original(
+        conn, plan, dry_run, merge=db.merge(merged)))
+    return merged
+
+
+def test_r2_1_only_groups_this_run_may_merge_count_as_re_merging(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Reviewer T5b / T5c: a rejected engine group, or one in another block, never merges."""
+    for status, block in (("rejected", ("o", TOWN)), ("proposed", ("o", 999999))):
+        db = RetireDb()
+        db.live_scope(blocks=sorted(TRIAL))
+        _intact_pair(db, 100, 200, 1)
+        db.group(10, [1, 2], status=status, block=block)
+        db.advert(7, 700)
+        db.advert(8, 800)
+        db.group(20, [7, 8])                           # passes the plan-first check
+        page = tmp_path / f"{status}.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+        out = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1"}, tmp_path)
+        counts = out["legacy_retire"]["counts"]
+        assert counts["engine_clusters_touching_retire_set"] == 0
+        assert counts["retire_set_without_engine_cluster"] == 1
+        assert counts["engine_clusters_not_merging_touching_retire_set"] == 1
+        body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())
+        assert body["engine_clusters"] == [] and body["engine_clusters_not_merging"] == [10]
+        assert "this run will not merge (not proposed, or outside the scope): 10" \
+            in page.read_text()
+
+
+def test_r2_2_a_negative_the_undo_does_not_newly_join_refuses_nothing() -> None:
+    """Reviewer T4: q and r already sit together (on S) and go back together (to R): the undo
+    joins nothing new. T4b: a machine must-not-link is not the operator's ruling."""
+    db = RetireDb()
+    db.advert(1, 100)
+    db.advert(2, 200)
+    db.advert(5, 300)
+    g_old = db.merged(200, 300)
+    g_new = db.merged(100, 200)
+    db.verdicts.append({"kind": "pair", "lo": 2, "hi": 5, "verdict": "different"})
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    # the newer undone; the older, now intact, would put q beside... nothing new: q's origin
+    # 300 holds no advert, so it is undone on the next pass too
+    assert _by(out) == {g_new: "retired", g_old: "retired"}
+
+    db = RetireDb()
+    db.advert(1, 100)
+    db.advert(2, 200)
+    db.advert(3, 200)
+    g = db.merged(100, 200)
+    db.mnl.append((2, 3, "guard"))
+    db.listing(9, 200)                                 # the origin holds another advert since
+    db.location[9] = IN_TOWN
+    db.mnl.append((2, 9, "guard"))                     # ... a machine guard would newly join
+    dry = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r0")
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    assert _by(dry) == {g: "would_retire"} and _by(out) == {g: "retired"}
+
+
+def test_r2_3_a_mix_made_in_two_steps_is_recognised() -> None:
+    """Reviewer T10: two old merges each put a rental onto a sale. T8: one merge took a sale and
+    a rental from two properties onto a sale."""
+    db = RetireDb()
+    db.advert(1, 100)
+    for lid, pid in ((2, 200), (3, 300)):
+        db.prop(pid, ct=None)
+        db.listing(lid, pid, ct="pronajem")
+        db.location[lid] = IN_TOWN
+    g0 = db.merged(100, 200)
+    g1 = db.merged(100, 300)
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    assert _by(out) == {g0: "retired:mixed_deal_type", g1: "retired:mixed_deal_type"}
+    assert db.listings[2]["property_id"] == 200 and db.listings[3]["property_id"] == 300
+
+    db = RetireDb()
+    db.advert(1, 100)
+    db.advert(2, 200)
+    db.prop(300, ct=None)
+    db.listing(3, 300, ct="pronajem")
+    db.location[3] = IN_TOWN
+    g = db.merged(100, 200, 300)
+    (group,) = L.read_groups(db, L.area_params(TRIAL), SALES)
+    assert group.mixed and group.outcome == "to_retire:mixed_deal_type"
+
+
+def test_r2_4_later_passes_report_what_they_read_and_the_pass_cap_says_so() -> None:
+    """Reviewer T2 / T3b: a group pass 2 re-reads is reported as pass 2 read it. T9: a chain
+    longer than MAX_PASSES stops, says so, and leaves the rest not attempted."""
+    db = RetireDb()
+    db.advert(1, 100)
+    db.advert(2, 200)
+    db.advert(4, 200)
+    g1 = db.merged(100, 200)
+    db.detach([])(db, 2, decided_by="operator")
+    db.advert(3, 50)
+    g2 = db.merged(50, 100)
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    assert _by(out) == {g2: "retired", g1: "skipped:operator_split"}
+    assert out["counts"]["probe_r1c_by_health"]["survivor_merged_on"] == 1   # the first read
+
+    db = RetireDb()
+    g1, g2 = _chain(db)
+    db.verdicts.append({"kind": "pair", "lo": 1, "hi": 2, "verdict": "same"})
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    assert _by(out) == {g2: "retired", g1: "skipped:operator_ruled_same"}
+
+    db = RetireDb()
+    pid = 1000
+    db.advert(1, pid)
+    chain = []
+    for i in range(12):
+        db.advert(100 + i, pid - 10)
+        chain.append(db.merged(pid - 10, pid))
+        pid -= 10
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
+                          detach=db.detach_recording([]))
+    assert out["passes"] == L.MAX_PASSES and "passes reached" in out["stopped"]
+    assert out["counts"]["outcomes"] == {"not_attempted": 1, "retired": L.MAX_PASSES,
+                                         "skipped:survivor_merged_on": 1}
+
+
+def test_r2_4_a_crash_on_pass_2_reports_its_leftovers_not_attempted(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Reviewer T6b: two chains; pass 2's first group crashes, its second was never tried."""
+    db = RetireDb()
+    g1, g2 = _chain(db)
+    db.advert(11, 1100)
+    db.advert(12, 1200)
+    h1 = db.merged(1100, 1200)
+    db.advert(13, 1050)
+    h2 = db.merged(1050, 1100)
+    base = db.detach_recording([])
+
+    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
+        if kw["merge_group_id"] in (g1, h1):
+            raise RuntimeError("canceling statement due to statement timeout")
+        return base(conn, lid, **kw)
+
+    monkeypatch.setattr(L, "detach_listing", detach)
+    with pytest.raises(RuntimeError):
+        L.run(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", out_dir=tmp_path)
+    body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())
+    got = _by(body)
+    assert got[g2] == got[h2] == "retired"
+    assert sorted((got[g1], got[h1])) == ["failed", "not_attempted"]
+
+
+def test_r2_5_the_dry_run_predicts_what_the_run_cap_will_defer(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Reviewer C1: the dry-run plan sees the old merges (already one property), so it predicts
+    from the engine groups touching the retire set; C2: a refused group is never 'undone'."""
+    db = RetireDb()
+    db.live_scope(blocks=sorted(TRIAL))
+    _intact_pair(db, 100, 200, 1)
+    _intact_pair(db, 300, 400, 3)
+    db.group(10, [1, 2])
+    db.group(20, [3, 4])
+    _wire(db, monkeypatch)
+    page = tmp_path / "s.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    dry = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1",
+                                     "max_clusters_per_run": "1"}, tmp_path)
+    counts = dry["legacy_retire"]["counts"]
+    assert counts["predicted_engine_groups_after_undo"] == 2
+    assert counts["predicted_deferred_by_cap"] == 1
+    assert "a live run defers 1 to a re-dispatch" in page.read_text()
+    live = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1", "dry_run": "0",
+                                      "max_clusters_per_run": "1"}, tmp_path)
+    assert live["legacy_retire"]["counts"]["undone_but_engine_group_deferred_by_cap"] == 1
+
+
+
+def test_r2_5_a_refused_group_is_never_counted_as_undone(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Reviewer C2: a group refused at its detach undid nothing, even if the cap deferred the
+    engine group touching it."""
+    db = RetireDb()
+    db.live_scope(blocks=sorted(TRIAL))
+    _intact_pair(db, 100, 200, 1)
+    db.advert(3, 300)
+    db.advert(4, 400)
+    db.advert(5, 400)
+    held = db.merged(300, 400)
+    db.advert(9, 900)
+    db.group(10, [1, 2])
+    db.group(20, [3, 4, 5, 9])
+    _wire(db, monkeypatch)
+    base = db.detach_recording([])
+
+    def detach(conn: RetireDb, lid: int, **kw: Any) -> dict[str, Any]:
+        if lid == 5:
+            return {"data": {"detached": False, "outcome": "moved_since"}}
+        return base(conn, lid, **kw)
+
+    monkeypatch.setattr(L, "detach_listing", detach)
+    live = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1", "dry_run": "0",
+                                      "max_clusters_per_run": "1"}, tmp_path)
+    assert live["deferred"] == [20]
+    assert live["legacy_retire"]["counts"]["outcomes"] == {"refused:moved_since": 1,
+                                                           "retired": 1}
+    assert _by(json.loads((tmp_path / "apply" / "legacy_retire.json").read_text()))[held] \
+        == "refused:moved_since"
+    assert live["legacy_retire"]["counts"]["undone_but_engine_group_deferred_by_cap"] == 0
+
+
+def test_r2_6_a_ledger_row_with_no_listing_reads_as_a_gone_advert() -> None:
+    db = RetireDb()
+    g = _intact_pair(db, 100, 200, 1)
+    db.events.append({"id": 99, "merge_group_id": g, "survivor": 100, "retired": 200,
+                      "listing": None, "generation": None, "undone": False, "source": "auto",
+                      "created_at": db.now, "undone_by": None})
+    out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r0")
+    assert _by(out) == {g: "skipped:listing_gone"} and out["groups"][0]["moved"] == [2]

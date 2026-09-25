@@ -10,29 +10,37 @@ no proposed group inside the scope (a typo'd or unstored generation would undo a
 A legacy group is one `merge_group_id` of `property_merge_events` with `source = 'auto'` (the
 removed engine; NOT `generation = 'legacy'`, which migration 475 stamped on every row of
 2026-09-05). Its health is the W0 probe's `r1c_live_group_health`, in the probe's order:
-`survivor_merged_on`, `listing_gone`, `children_moved` (a moved advert is off the survivor),
+`survivor_merged_on`, `listing_gone` (a row naming no advert included), `children_moved` (a
+moved advert is off the survivor),
 `built_on` (a later live merge onto the survivor by the operator or, once it merges, by this
 engine); then `operator_split` (a row of it undone by anyone but this step: the operator took an
 advert back by hand and ruled it apart from the rest), else `intact`. An intact group is undone
 only when its adverts (the survivor's, the retired properties' and every advert the merge moved)
-ALL sit inside the scope's blocks, no live operator "same" verdict joins two adverts the undo
-would separate (`skipped:operator_ruled_same`), and every advert carries one of the scope's deal
+ALL sit inside the scope's blocks, the undo would neither separate two adverts an operator
+ruled "same" (`skipped:operator_ruled_same`) nor NEWLY join two the operator ruled apart (a
+negative pair verdict, or a must-not-link whose source is 'operator': a machine guard is not a
+ruling; `skipped:operator_ruled_different`), and every advert carries one of the scope's deal
 types (`category_types`, decision 1: sales first; else `skipped:outside_scope_categories`). The
-one exception to the deal types is a merge that CREATED a mix: the deal types it moved and the
-ones already there are both known and disjoint (a rental merged onto a sale), wrong by
-construction and never re-made by the engine, so undone whatever the scope names
-(`retired:mixed_deal_type`). Every other group touching the area is reported and left alone.
+one exception to the deal types is a merge that CREATED a mix: what it took from one retired
+property and the survivor's own adverts (those no live old-engine row moved there) are both
+typed and disjoint (a rental merged onto a sale, in one step or two), wrong by construction and
+never re-made by the engine, so undone whatever the scope names (`retired:mixed_deal_type`).
+Every other group touching the area is reported and left alone. The dry run reads the same
+classification, so it predicts every skip.
 
 Groups go newest first, each in its own transaction over its locked properties and a fresh read,
 as a loop of `detach_listing` over the adverts it moved (ledger order, each back to where THAT
 merge took it from) with `source='auto'`, so NO ruling is written: an old-engine merge is not the
-operator's word in either direction. A detach that would put an advert beside one an operator
-negative (a pair verdict or must-not-link) keeps it from refuses the group (`refused:
-ruled_different`). Its ledger rows are stamped `undone_by='autodedup-legacy-retire:<run_id>'`.
-Undoing a newer merge can leave an older one intact (a chain R1 -> S -> T), so a live run selects
-again after each pass until no new group qualifies (at most MAX_PASSES). `max_clusters_per_run`
-caps the ENGINE's merges only: groups undone whose engine group the cap deferred are counted, and
-a re-dispatch merges them.
+operator's word in either direction; the in-transaction re-read refuses a group that no longer
+qualifies (`refused:<reason>`). Its ledger rows are stamped
+`undone_by='autodedup-legacy-retire:<run_id>'`. Undoing a newer merge can leave an older one
+intact (a chain R1 -> S -> T), so a live run selects again after each pass until no new group
+qualifies, reporting every group as its latest read saw it; after MAX_PASSES it stops and says
+so, the rest `not_attempted`. Engine groups count only when this run may merge them (proposed,
+admitted by the scope); the rest touching the retire set are counted apart.
+`max_clusters_per_run` caps the ENGINE's merges only: live, the groups undone whose engine group
+the cap deferred are counted, and a re-dispatch merges them; a dry run (whose plan still reads
+the old merges) predicts the engine groups the live run would plan against the cap.
 
 D7 carve-out, like the W0 probe's: this reads `property_merge_events` only to find what to undo.
 Nothing read here becomes engine input.
@@ -59,6 +67,7 @@ TO_RETIRE: str = "to_retire"
 MIXED: str = "mixed_deal_type"
 OUTSIDE_CATEGORIES: str = "outside_scope_categories"
 RULED_SAME: str = "operator_ruled_same"
+RULED_DIFFERENT: str = "operator_ruled_different"
 SAME_VERDICTS: tuple[str, ...] = ("same",)
 MAX_PASSES: int = 10
 ARTIFACT: tuple[str, str] = ("apply", "legacy_retire.json")
@@ -111,6 +120,16 @@ select l.property_id, l.id, l.category_type,
  order by l.property_id, l.id
 """
 
+# Which of these adverts a live old-engine row moved: the rest of a survivor's adverts are its own
+# (or an operator's merge), the side a merge that CREATED a deal-type mix is read against.
+AUTO_MOVED_SQL = """
+select distinct e.listing_ref_id
+  from public.property_merge_events e
+ where e.undone_at is null
+   and e.source = 'auto'
+   and e.listing_ref_id = any(%(listing_ids)s::bigint[])
+"""
+
 # The newest live merge onto each survivor by anyone but the old engine: one after the legacy
 # group's own builds on it.
 BUILT_ON_SQL = """
@@ -141,11 +160,13 @@ class LegacyGroup:
     uncategorised: bool = False
     mixed: bool = False
     separates_same: list[list[int]] = field(default_factory=list)
+    joins_different: list[list[int]] = field(default_factory=list)
     health: str = INTACT
     selected: bool = False
     outcome: str = ""
     retired_in_pass: int | None = None
     engine_clusters: list[int] = field(default_factory=list)
+    engine_clusters_not_merging: list[int] = field(default_factory=list)
     listings_moved_back: int = 0
     reactivated: int = 0
 
@@ -209,6 +230,8 @@ def _outcome(g: LegacyGroup, categories: frozenset[str] | None) -> str:
         return "skipped:straddling"
     if g.separates_same:
         return f"skipped:{RULED_SAME}"
+    if g.joins_different:
+        return f"skipped:{RULED_DIFFERENT}"
     if g.mixed:
         return f"{TO_RETIRE}:{MIXED}"
     if categories is not None and (g.uncategorised or not set(g.category_types) <= categories):
@@ -231,13 +254,15 @@ def read_groups(
         if not live or min(str(r[2]) for r in rows) != LEGACY_SOURCE:
             continue
         survivor = max(int(r[4]) for r in live)
+        # A row with no listing_ref_id names no advert: read as a gone one.
+        real = [r for r in live if r[6] is not None]
         groups.append(LegacyGroup(
             merge_group_id=gid, merged_at=min(r[3] for r in rows), survivor_id=survivor,
-            retired_ids=sorted({int(r[5]) for r in live}), moved=[int(r[6]) for r in live],
-            origin={int(r[6]): int(r[5]) for r in live},
-            moved_outside=[int(r[6]) for r in live if not r[9]],
+            retired_ids=sorted({int(r[5]) for r in live}), moved=[int(r[6]) for r in real],
+            origin={int(r[6]): int(r[5]) for r in real},
+            moved_outside=[int(r[6]) for r in real if not r[9]],
             gone=any(not r[7] for r in live),
-            off_survivor=sorted(int(r[6]) for r in live if r[7] and r[8] != survivor),
+            off_survivor=sorted(int(r[6]) for r in real if r[7] and r[8] != survivor),
             undone_by_others=sorted({str(r[11] or "unknown") for r in rows if r[10]
                                      and not str(r[11] or "").startswith(f"{RETIRE_BY}:")})))
     if not groups:
@@ -253,8 +278,7 @@ def read_groups(
             "property_ids": sorted({g.survivor_id for g in groups})}):
         later.setdefault(int(pid), []).append(last_at)
     every = sorted({a[0] for rows in adverts.values() for a in rows})
-    same = {(int(lo), int(hi)) for lo, hi, _v in _rows(conn, S.PAIR_VERDICTS_SQL, {
-        "listing_ids": every, "negatives": list(SAME_VERDICTS)})} if every else set()
+    same, different, auto_moved = _rulings(conn, every)
     for g in groups:
         sides = [a for pid in (g.survivor_id, *g.retired_ids) for a in adverts.get(pid, ())]
         g.adverts = sorted(a[0] for a in sides)
@@ -262,13 +286,21 @@ def read_groups(
                            | set(g.moved_outside))
         g.category_types = sorted({ct for _l, _p, ct, _i in sides if ct})
         g.uncategorised = any(ct is None for _l, _p, ct, _i in sides)
-        moved_types = {ct for lid, _p, ct, _i in sides if lid in g.origin and ct}
-        staying_types = {ct for lid, _p, ct, _i in sides if lid not in g.origin and ct}
-        g.mixed = bool(moved_types and staying_types and moved_types.isdisjoint(staying_types))
+        # Created a mix: what the merge took from one retired property and the survivor's own
+        # adverts (no live old-engine row moved them) are both typed and disjoint.
+        own = {ct for lid, pid, ct, _i in sides
+               if pid == g.survivor_id and lid not in auto_moved and ct}
+        taken: dict[int, set[str]] = {}
+        for lid, pid, ct, _i in sides:
+            if lid in g.origin and ct:
+                taken.setdefault(g.origin[lid], set()).add(ct)
+        g.mixed = bool(own) and any(types.isdisjoint(own) for types in taken.values())
         now = {lid: pid for lid, pid, _ct, _i in sides}
         after = {lid: g.origin.get(lid, pid) for lid, pid in now.items()}
         g.separates_same = [[lo, hi] for lo, hi in sorted(same) if lo in now and hi in now
                             and now[lo] == now[hi] and after[lo] != after[hi]]
+        g.joins_different = [[lo, hi] for lo, hi in sorted(different) if lo in now
+                             and hi in now and now[lo] != now[hi] and after[lo] == after[hi]]
         g.health = _health(g, status.get(g.survivor_id), later.get(g.survivor_id, ()))
         g.outcome = _outcome(g, categories)
         g.selected = g.outcome.startswith(TO_RETIRE)
@@ -276,16 +308,22 @@ def read_groups(
     return groups
 
 
-def _ruled_apart(conn: Any, listing_id: int, target: int) -> bool:
-    """An operator negative between the advert and any advert now on where it would go."""
-    there = [int(r[1]) for r in _rows(conn, S.PROPERTY_LISTINGS_SQL, {"property_ids": [target]})]
-    if not there:
-        return False
-    ids = sorted({listing_id, *there})
-    pairs = _rows(conn, S.MUST_NOT_LINK_SQL, {"listing_ids": ids})
-    pairs += _rows(conn, S.PAIR_VERDICTS_SQL, {"listing_ids": ids,
-                                               "negatives": list(NEGATIVE_VERDICTS)})
-    return any(listing_id in (int(p[0]), int(p[1])) for p in pairs)
+def _rulings(
+    conn: Any, listing_ids: list[int],
+) -> tuple[set[tuple[int, int]], set[tuple[int, int]], set[int]]:
+    """The operator's "same" pairs and negatives (pair verdicts, and must-not-links whose
+    source is 'operator': a machine guard is not a ruling) among these adverts, and which of
+    them a live old-engine row moved."""
+    if not listing_ids:
+        return set(), set(), set()
+    same = {(int(lo), int(hi)) for lo, hi, _v in _rows(conn, S.PAIR_VERDICTS_SQL, {
+        "listing_ids": listing_ids, "negatives": list(SAME_VERDICTS)})}
+    different = {(int(lo), int(hi)) for lo, hi, _v in _rows(conn, S.PAIR_VERDICTS_SQL, {
+        "listing_ids": listing_ids, "negatives": list(NEGATIVE_VERDICTS)})}
+    different |= {(int(lo), int(hi)) for lo, hi, src in _rows(
+        conn, S.MUST_NOT_LINK_SQL, {"listing_ids": listing_ids}) if src == "operator"}
+    moved = {int(r[0]) for r in _rows(conn, AUTO_MOVED_SQL, {"listing_ids": listing_ids})}
+    return same, different, moved
 
 
 def _retire_one(
@@ -305,8 +343,6 @@ def _retire_one(
             if not fresh[0].selected:
                 raise _Refused(fresh[0].outcome.removeprefix("skipped:"))
             for lid in group.moved:
-                if _ruled_apart(conn, lid, fresh[0].origin[lid]):
-                    raise _Refused("ruled_different")
                 data = detach(conn, lid, decided_by=undone_by, source=LEGACY_SOURCE,
                               merge_group_id=group.merge_group_id)["data"]
                 if not data["detached"]:
@@ -349,9 +385,12 @@ def _counts(first: list[LegacyGroup], final: list[LegacyGroup]) -> dict[str, Any
         "outside_scope_categories_by_category_type": dict(sorted(Counter(
             g.category_label for g in final
             if g.outcome == f"skipped:{OUTSIDE_CATEGORIES}").items())),
+        # Engine groups this run may merge (proposed, inside the scope) vs ones it never will.
         "engine_clusters_touching_retire_set": len({k for g in chosen
                                                     for k in g.engine_clusters}),
         "retire_set_without_engine_cluster": sum(not g.engine_clusters for g in chosen),
+        "engine_clusters_not_merging_touching_retire_set": len({
+            k for g in chosen for k in g.engine_clusters_not_merging}),
         "outcomes": dict(sorted(Counter(g.outcome for g in final).items())),
         "listings_moved_back": sum(g.listings_moved_back for g in final),
         "properties_reactivated": sum(g.reactivated for g in final),
@@ -362,16 +401,17 @@ def retire_legacy(
     conn: Any, blocks: Iterable[str] | None, *, category_types: Iterable[str] | None,
     dry_run: bool, run_id: str, closed: Callable[[Any], str | None] | None = None,
     detach: Callable[..., dict[str, Any]] | None = None,
-    cluster_of: Mapping[int, int] | None = None,
+    cluster_of: Mapping[int, int] | None = None, other_of: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """Select, then (live) undo pass after pass, the qualifying legacy groups. `closed` is the
-    scope row's re-read before every group (E39); `cluster_of` maps a listing to its engine
-    group in the generation being applied; a dry run writes nothing."""
+    scope row's re-read before every group (E39); `cluster_of` maps a listing to the engine
+    group this run may merge it in (proposed, inside the scope), `other_of` to one it never
+    will (not proposed, or outside the scope); a dry run writes nothing."""
     area = area_params(blocks)
     categories = frozenset(category_types) if category_types is not None else None
     detach = detach or detach_listing
     undone_by = f"{RETIRE_BY}:{run_id}"
-    cluster_of = cluster_of or {}
+    maps = (cluster_of or {}, other_of or {})
     first = read_groups(conn, area, categories)
     final: dict[str, LegacyGroup] = {g.merge_group_id: g for g in first}
     result: dict[str, Any] = {
@@ -382,7 +422,7 @@ def retire_legacy(
     if dry_run:
         for g in todo:
             g.outcome = "would_retire" + g.outcome.removeprefix(TO_RETIRE)
-        return _finish(result, first, final, cluster_of)
+        return _finish(result, first, final, maps)
     current: LegacyGroup | None = None
     try:
         while todo and result["passes"] < MAX_PASSES and "stopped" not in result:
@@ -399,9 +439,20 @@ def retire_legacy(
                 final[group.merge_group_id] = group
                 _retire_one(conn, group, area, categories, detach, undone_by)
                 current = None
+            if "stopped" in result:
+                break
             done = {gid for gid, g in final.items() if g.retired_in_pass}
-            todo = [g for g in read_groups(conn, area, categories)
-                    if g.selected and g.merge_group_id not in done]
+            todo = []
+            for g in read_groups(conn, area, categories):
+                if g.merge_group_id not in done:
+                    final[g.merge_group_id] = g
+                    if g.selected:
+                        todo.append(g)
+            if todo and result["passes"] >= MAX_PASSES:
+                result["stopped"] = (f"{MAX_PASSES} passes reached with {len(todo)} group(s) "
+                                     "still qualifying: dispatch again")
+                for g in todo:
+                    g.outcome = "not_attempted"
     except BaseException as exc:
         if current is not None:
             current.outcome = "failed"
@@ -410,40 +461,58 @@ def retire_legacy(
                 g.outcome = "not_attempted"
         result["aborted"] = f"{type(exc).__name__}: {exc}"
         try:
-            setattr(exc, PARTIAL_ATTR, _finish(result, first, final, cluster_of))
+            setattr(exc, PARTIAL_ATTR, _finish(result, first, final, maps))
         except Exception:  # noqa: BLE001 - an error that takes no attribute still surfaces
             pass
         raise
-    return _finish(result, first, final, cluster_of)
+    return _finish(result, first, final, maps)
 
 
-def _finish(result: dict[str, Any], first: list[LegacyGroup], final: dict[str, LegacyGroup],
-            cluster_of: Mapping[int, int]) -> dict[str, Any]:
+def _finish(
+    result: dict[str, Any], first: list[LegacyGroup], final: dict[str, LegacyGroup],
+    maps: tuple[Mapping[int, int], Mapping[int, int]],
+) -> dict[str, Any]:
     groups = sorted(final.values(), key=lambda g: (g.merged_at, g.merge_group_id), reverse=True)
+    merging, other = maps
     for g in groups:
-        g.engine_clusters = sorted({cluster_of[lid] for lid in (*g.adverts, *g.moved)
-                                    if lid in cluster_of})
+        ids = (*g.adverts, *g.moved)
+        g.engine_clusters = sorted({merging[lid] for lid in ids if lid in merging})
+        g.engine_clusters_not_merging = sorted({other[lid] for lid in ids if lid in other})
     return {**result, "counts": _counts(first, groups),
             "engine_clusters": sorted({k for g in groups if g.selected
                                        for k in g.engine_clusters}),
+            "engine_clusters_not_merging": sorted({k for g in groups if g.selected
+                                                   for k in g.engine_clusters_not_merging}),
             "groups": [g.to_json() for g in groups]}
 
 
 def note_deferred(
-    out_dir: Path, result: dict[str, Any], deferred: Iterable[int],
+    out_dir: Path, result: dict[str, Any], *, deferred: Iterable[int], planned: Iterable[int],
+    cap: int,
 ) -> dict[str, Any]:
-    """After the engine's plan: the groups undone whose engine group `max_clusters_per_run`
-    deferred to the next dispatch, counted so nobody reads them as lost."""
-    late = set(deferred)
-    held = [g["merge_group_id"] for g in result.get("groups") or []
-            if g["selected"] and late & set(g["engine_clusters"])]
-    result["counts"]["undone_but_engine_group_deferred_by_cap"] = len(held)
-    result["deferred_by_cap"] = held
+    """After the engine's plan, so nobody reads a capped merge as lost. Live: the groups undone
+    whose engine group `max_clusters_per_run` deferred to the next dispatch. Dry run: its plan
+    still reads the old merges (their engine groups are `already_one_property`), so it
+    predicts: the engine groups the live run would plan after the undo, against the cap."""
+    counts = result["counts"]
+    if result["dry_run"]:
+        predicted = len(set(result.get("engine_clusters") or ()) | set(planned))
+        counts["predicted_engine_groups_after_undo"] = predicted
+        counts["predicted_deferred_by_cap"] = max(0, predicted - cap)
+        note = (f"about {predicted} engine groups to plan after the undo, above the run cap "
+                f"of {cap}: a live run defers {predicted - cap} to a re-dispatch"
+                if predicted > cap else "")
+    else:
+        late = set(deferred)
+        held = [g["merge_group_id"] for g in result.get("groups") or []
+                if g["outcome"].startswith("retired") and late & set(g["engine_clusters"])]
+        counts["undone_but_engine_group_deferred_by_cap"] = len(held)
+        result["deferred_by_cap"] = held
+        note = (f"{len(held)} legacy group(s) undone whose engine group the run cap deferred: "
+                "dispatch apply again to merge them" if held else "")
     write_json(Path(out_dir).joinpath(*ARTIFACT), result)
-    if held:
-        verb = "would be undone" if result["dry_run"] else "undone"
-        _append_summary(f"\n**{len(held)} legacy group(s) {verb} whose engine group the run "
-                        "cap deferred**: dispatch apply again to merge them.\n")
+    if note:
+        _append_summary(f"\n**Run cap:** {note}.\n")
     return _brief(result)
 
 
@@ -471,6 +540,10 @@ def summary_markdown(result: Mapping[str, Any]) -> str:
     if result.get("engine_clusters"):
         lines += ["", "Engine groups touching the retire set: "
                   + " ".join(str(k) for k in result["engine_clusters"][:200])]
+    if result.get("engine_clusters_not_merging"):
+        lines += ["", "Engine groups touching it that this run will not merge (not proposed, "
+                  "or outside the scope): "
+                  + " ".join(str(k) for k in result["engine_clusters_not_merging"][:200])]
     rows = [g for g in result.get("groups") or [] if not g["outcome"].startswith("skipped:")]
     rows += [g for g in result.get("groups") or [] if g["outcome"].startswith("skipped:")]
     lines += ["", "| group | merged | survivor | retired | adverts | engine groups | outcome |",
@@ -509,7 +582,7 @@ def _brief(result: Mapping[str, Any]) -> dict[str, Any]:
 def run(
     conn: Any, blocks: Iterable[str] | None, *, category_types: Iterable[str] | None,
     dry_run: bool, run_id: str, out_dir: Path, closed: Callable[[Any], str | None] | None = None,
-    cluster_of: Mapping[int, int] | None = None,
+    cluster_of: Mapping[int, int] | None = None, other_of: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """The apply mode's pre-step: retire, publish the artifact and the step summary (a crash
     included), and return the full result (`note_deferred` adds the cap's count after the plan)."""
@@ -520,7 +593,7 @@ def run(
     try:
         result = retire_legacy(conn, blocks or (), category_types=category_types,
                                dry_run=dry_run, run_id=run_id, closed=closed,
-                               cluster_of=cluster_of)
+                               cluster_of=cluster_of, other_of=other_of)
     except BaseException as exc:
         partial = getattr(exc, PARTIAL_ATTR, None)
         if isinstance(partial, dict):
