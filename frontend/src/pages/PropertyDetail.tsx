@@ -215,9 +215,21 @@ export default function PropertyDetail() {
             )}
           </div>
         }
+        curationSlot={
+          /* Collections / tags / notes — property-grain (rule #18), directly
+             under the description and above the estimates: what the operator
+             has already decided about this property comes before the numbers. */
+          <Suspense fallback={<Skeleton height={140} />}>
+            <CurationBlock
+              property_id={propertyId}
+              sreality_id={property.sreality_id}
+              listing_id={property.id}
+            />
+          </Suspense>
+        }
         estimatesSlot={
           /* The estimation chapter: MF reference + our runs, side by side —
-             in the prime slot after the description. Renders nothing for a
+             in the prime slot after the curation. Renders nothing for a
              property with no estimable data. */
           <Suspense fallback={<Skeleton height={180} />}>
             <EstimationsBlock
@@ -245,7 +257,7 @@ export default function PropertyDetail() {
       <Suspense fallback={<Skeleton height={120} />}>
         {/* Manual estimates + freshness checks are stored against the legacy
             sreality_id, so both are empty by construction for a non-sreality
-            advert. Curation below is property-grain and stays rendered. */}
+            advert. Curation above is property-grain and stays rendered. */}
         {property.sreality_id != null && (
           <ManualEstimatesBlock sreality_id={property.sreality_id} />
         )}
@@ -268,14 +280,6 @@ export default function PropertyDetail() {
             propertyId={propertyId}
           />
         )}
-      </Suspense>
-      <Hairline />
-      <Suspense fallback={<Skeleton height={140} />}>
-        <CurationBlock
-          property_id={propertyId}
-          sreality_id={property.sreality_id}
-          listing_id={property.id}
-        />
       </Suspense>
       <Hairline />
       <PriceHistoryBlock

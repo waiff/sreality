@@ -1,10 +1,10 @@
 /* Shared "what is this property" overview — the dossier header (identity +
- * price left, location map anchored top-right), a dense facts strip,
- * description, an optional estimates slot, and the photo gallery. The property
- * page and the Estimation Detail page render their subject with the SAME
- * structure (one surface, not two). Driven by a ListingPublic-shaped row: the
- * property page passes the property as its Browse card shows it, the estimation
- * page the subject's resolved listings row. */
+ * price and a dense facts strip left, location map anchored top-right),
+ * description, optional curation and estimates slots, and the photo gallery.
+ * The property page and the Estimation Detail page render their subject with
+ * the SAME structure (one surface, not two). Driven by a ListingPublic-shaped
+ * row: the property page passes the property as its Browse card shows it, the
+ * estimation page the subject's resolved listings row. */
 import { Suspense, useLayoutEffect, useRef, useState } from 'react';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { fmtCzk, fmtArea, fmtFloor, fmtMeasuredPricePerM2, fmtAbsolute } from '@/lib/format';
@@ -28,6 +28,7 @@ export function ListingOverview({
   imagesLoading = false,
   showStatus = true,
   mapFooter,
+  curationSlot,
   estimatesSlot,
 }: {
   listing: ListingPublic;
@@ -39,6 +40,11 @@ export function ListingOverview({
    * "Explore area" button; Estimation Detail leaves it empty (so the button
    * doesn't appear on the estimation subject). */
   mapFooter?: React.ReactNode;
+  /* The operator's own curation (collections, tags, notes), rendered directly
+   * under the description and above the estimates — what the operator has
+   * already decided about this property comes before the numbers. Gets its
+   * leading hairline here; Estimation Detail leaves it empty. */
+  curationSlot?: React.ReactNode;
   /* The estimation chapter, rendered between description and gallery — the
    * property page passes its EstimationsBlock here so the estimates sit in
    * the prime slot the location map used to occupy (the map lives in the
@@ -48,8 +54,13 @@ export function ListingOverview({
   return (
     <>
       <Header listing={listing} showStatus={showStatus} mapFooter={mapFooter} />
-      <KeyFactsBlock listing={listing} />
       <DescriptionBlock listing={listing} />
+      {curationSlot && (
+        <>
+          <Hairline />
+          {curationSlot}
+        </>
+      )}
       {estimatesSlot}
       <Hairline />
       <GalleryBlock
@@ -155,6 +166,7 @@ function Header({
             )}
           </p>
         )}
+        <KeyFactsBlock listing={listing} />
       </div>
       {/* The dossier's "file photo": the location map anchored top-right.
           Missing coordinates keep the slot with an explicit note — silence
@@ -313,7 +325,9 @@ function DescriptionBody({ text }: { text: string }) {
 /* One dense data strip instead of the old Property/Building grids: the kind
  * (subtype and/or disposition), area, floor and district live in the header.
  * What remains — lot/garden for houses, the building facts — renders as inline
- * label·value pairs on one wrapping line, with the amenity chips below. */
+ * label·value pairs on one wrapping line, with the amenity chips below. Rendered
+ * inside the header's left column, under the price, so it fills the space beside
+ * the map instead of pushing the description down. */
 function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
   const facts = buildFacts(listing);
   const amenities = buildAmenities(listing);
@@ -321,7 +335,7 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
     return null;
   }
   return (
-    <div className="mt-7 space-y-3">
+    <div className="mt-5 space-y-3">
       <FactsList facts={facts} />
       <AmenityChips amenities={amenities} />
     </div>
