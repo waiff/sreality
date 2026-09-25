@@ -1,19 +1,20 @@
-"""Carry the single-valued deal-pipeline stage across a property merge/unmerge.
+"""Carry the single-valued deal-pipeline stage across a property merge and a detach.
 
 `property_pipeline` is single-valued (one card per property per account), so
 the generic operator-state reconciler (toolkit.operator_state, which re-points
 SET/APPEND rows) cannot carry it — a plain re-point would violate the PK when
 both the survivor and the retired property hold a card. These dedicated
-reconcilers run in the `merge_properties` / `unmerge_group` transactions:
+reconcilers run in the `merge_properties` / `detach_listing` transactions:
 
   - on merge: snapshot BOTH sides' pre-merge cards to the append-only
     `property_pipeline_events` ledger, then keep the MOST-ADVANCED stage on the
     survivor (TERMINAL-AWARE: an active stage always beats a closed/terminal one,
     so a `lost`/`won` card can never bury a live deal; within the same terminality
     the higher position wins, tie → later updated_at) and drop the retired card.
-  - on unmerge: restore the reactivated retired property's card from its
-    snapshot (lossless); in the move-if-empty case (survivor had no pre-merge
-    card) drop the card the survivor absorbed so the restore isn't duplicated.
+  - on detach: when an advert's return reactivates the retired property, restore
+    its card from that merge's snapshot (lossless); in the move-if-empty case
+    (the survivor had no card of its own in that merge) drop the card the
+    survivor absorbed so the restore isn't duplicated.
 
 Every join/exists/update between the retired and survivor sides is partitioned by
 account with an EXPLICIT, NULL-tolerant predicate. That is the third shape of the
@@ -22,8 +23,8 @@ tenancy doctrine and the only place it is legal: this runs as service-role
 caller RLS already scopes. Doctrine + the other three shapes:
 `.claude/skills/database/references/tenancy.md`.
 
-The survivor's own stage is NOT force-restored on unmerge — that would clobber a
-later merge's effect in a chained merge/unmerge. The retired side (the
+The survivor's own stage is NOT force-restored on a detach — that would clobber a
+later merge's effect in a chained merge/detach. The retired side (the
 reactivated property, the thing that mattered) is always lossless; a survivor
 that absorbed the retired's stage in a both-cards merge keeps it until the
 operator adjusts (documented best-effort).
@@ -87,35 +88,34 @@ def reconcile_pipeline_on_merge(
     )
 
 
-def reconcile_pipeline_on_unmerge(
-    cur: psycopg.Cursor, *, merge_group_id: str, survivor_id: int
+def reconcile_pipeline_on_detach(
+    cur: psycopg.Cursor, *, merge_group_id: str, restored_id: int, survivor_id: int | None
 ) -> None:
-    """Restore the reactivated retired property's pipeline card from the snapshot."""
-    params = {"g": merge_group_id, "s": survivor_id}
+    """Give a reactivated property its card back from the snapshot of the merge that retired it."""
+    params = {"g": merge_group_id, "r": restored_id, "s": survivor_id}
 
-    # restore each retired (non-survivor) snapshot onto its now-active property,
-    # per (account_id, property_id). Bare ON CONFLICT: no inference target, so it
-    # is valid against both the (property_id) PK and 295's (account_id,
-    # property_id) PK; once 295 is the only schema this can become
-    # `ON CONFLICT (account_id, property_id) DO UPDATE`.
+    # Restore per (account_id, property_id). Bare ON CONFLICT: no inference target, so it is
+    # valid against both the (property_id) PK and 295's (account_id, property_id) PK.
     cur.execute(
         "INSERT INTO property_pipeline (account_id, property_id, stage_id, note) "
         "SELECT e.account_id, e.property_id, e.to_stage_id, e.note_snapshot "
         "FROM property_pipeline_events e "
         "WHERE e.merge_group_id = %(g)s AND e.reason = 'merge_absorb' "
-        "  AND e.property_id <> %(s)s AND e.to_stage_id IS NOT NULL "
-        "  AND EXISTS (SELECT 1 FROM properties p "
-        "              WHERE p.id = e.property_id AND p.status = 'active') "
+        "  AND e.property_id = %(r)s AND e.to_stage_id IS NOT NULL "
         "ON CONFLICT DO NOTHING",
         params,
     )
-
-    # move-if-empty cleanup, per account: if an account's survivor card has no
-    # pre-merge snapshot (the survivor had no card for that account), drop the
-    # card it absorbed so the restored retired card isn't duplicated.
+    if survivor_id is None:
+        return
+    # Move-if-empty, per account: a survivor that held no card of its own in that merge got
+    # this property's card; drop it there so the restored card isn't duplicated.
     cur.execute(
         "DELETE FROM property_pipeline "
         "WHERE property_id = %(s)s "
+        "  AND EXISTS (SELECT 1 FROM property_pipeline_events e "
+        "    WHERE e.merge_group_id = %(g)s AND e.reason = 'merge_absorb' "
+        "      AND e.property_id = %(r)s AND e.to_stage_id IS NOT NULL "
+        "      AND e.account_id IS NOT DISTINCT FROM property_pipeline.account_id) "
         "  AND NOT EXISTS (SELECT 1 FROM property_pipeline_events e "
         "    WHERE e.merge_group_id = %(g)s AND e.reason = 'merge_absorb' "
         "      AND e.property_id = %(s)s "

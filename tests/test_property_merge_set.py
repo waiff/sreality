@@ -1,158 +1,154 @@
-"""Tests for the operator subset merge (api.property_merge.merge_property_set).
-
-The operator ticks a set of properties; the oldest ACTIVE one survives and every
-other merges into it under ONE reversible group. Hermetic: a scripted fake conn +
-a stubbed merge_properties, so we assert the survivor/retired choice and the
-atomicity of the loop without a DB.
-"""
+"""The one merge, `toolkit.property_identity.merge_property_set` (decisions 8 and 17): the oldest
+record survives, one asset link rides onto it and two refuse, ONE group and ONE recompute per
+set, the operator's cards ruled "same"; and migration 560's copy. Over tests/test_detach_listing's
+stateful fake."""
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
-import api.property_merge as pm
-from toolkit.property_identity import MergeError
+import toolkit.property_identity as pi
+from tests.test_detach_listing import OP, T0, _Ledger
+from toolkit.property_identity import AssetLinkConflict, MergeError
 
-OP = "operator@example.com"
-
-
-class _Ctx:
-    def __enter__(self) -> "_Ctx":
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        return None
+MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "560_one_merge_one_undo.sql"
 
 
-class _Cur:
-    def __init__(self, conn: "_SetConn") -> None:
-        self._conn = conn
-        self._rows: list[tuple[Any, ...]] = []
-
-    def __enter__(self) -> "_Cur":
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        return None
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        s = " ".join(sql.split())
-        self._conn.executed.append((s, params))
-        if "FROM properties WHERE id = ANY" in s and "status = 'active'" in s:
-            self._rows = [(pid,) for pid in self._conn.active_ids]
-        else:
-            self._rows = []
-
-    def executemany(self, sql: str, params_seq: Any) -> None:
-        s = " ".join(sql.split())
-        for params in params_seq:
-            self._conn.executed.append((s, params))
-
-    def fetchone(self) -> Any:
-        return self._rows[0] if self._rows else None
-
-    def fetchall(self) -> list[tuple[Any, ...]]:
-        return list(self._rows)
+def _merge(db: _Ledger, ids: list[int], source: str = "autodedup", **kw) -> dict:
+    return pi.merge_property_set(db, ids, source=source, reason="r", **kw)["data"]
 
 
-class _SetConn:
-    def __init__(self, active_ids: list[int]) -> None:
-        self.active_ids = active_ids
-        self.executed: list[tuple[str, Any]] = []
-
-    def cursor(self) -> _Cur:
-        return _Cur(self)
-
-    def transaction(self) -> _Ctx:
-        return _Ctx()
-
-
-def _stub_merge(monkeypatch) -> list[dict[str, Any]]:
-    calls: list[dict[str, Any]] = []
-
-    def fake_merge(conn, *, survivor_id, retired_id, reason, source,
-                   confidence=None, markers=None, merge_group_id=None):
-        calls.append({"survivor": survivor_id, "retired": retired_id,
-                      "group": merge_group_id, "reason": reason})
-        group = merge_group_id or "grp-1"
-        return {"data": {"merge_group_id": group, "listings_moved": 2}}
-
-    monkeypatch.setattr(pm, "merge_properties", fake_merge)
-    return calls
+def test_the_oldest_record_survives_whatever_holds_more_adverts():
+    db = _Ledger({1: 7, 2: 7, 3: 7, 4: 3, 5: 9},
+                 first_seen={7: T0 + timedelta(days=3), 3: T0 + timedelta(days=1), 9: T0})
+    out = _merge(db, [7, 3, 9])
+    assert (out["survivor_id"], out["retired_ids"], out["listings_moved"]) == (9, [3, 7], 4)
+    assert {e["group"] for e in db.events} == {out["merge_group_id"]}, "ONE group per set"
+    assert set(db.listings.values()) == {9}
+    assert pi.survivor_of({5: T0, 2: T0, 9: T0 + timedelta(days=1)}) == 2
+    assert pi.survivor_of({1: None, 4: T0}) == 4 and pi.survivor_of({6: None, 3: None}) == 3
 
 
-def test_merge_property_set_oldest_survives(monkeypatch):
-    """Operator ticks properties {7,3,9}; oldest active (3) survives, 7+9 merge in
-    under ONE group (the first call seeds it, the rest reuse it)."""
-    calls = _stub_merge(monkeypatch)
-    # active query returns oldest-first; survivor=3
-    conn = _SetConn(active_ids=[3, 7, 9])
-    result = pm.merge_property_set(conn, [7, 3, 9], decided_by=OP)
-    assert result is not None
-    assert result["survivor_id"] == 3
-    assert result["retired_ids"] == [7, 9]
-    assert result["merge_group_id"] == "grp-1"
-    assert result["listings_moved"] == 4
-    assert [c["retired"] for c in calls] == [7, 9]
-    assert all(c["survivor"] == 3 for c in calls)
-    assert all(c["reason"] == "manual_subset" for c in calls)
-    assert calls[0]["group"] is None        # first call seeds the group
-    assert calls[1]["group"] == "grp-1"     # second reuses it
-
-
-def test_merge_property_set_needs_two(monkeypatch):
-    _stub_merge(monkeypatch)
-    assert pm.merge_property_set(_SetConn(active_ids=[5]), [5], decided_by=OP) is None
-    # de-dups, so a single distinct id is a no-op
-    assert pm.merge_property_set(_SetConn(active_ids=[5]), [5, 5], decided_by=OP) is None
-
-
-def test_merge_property_set_one_active_raises(monkeypatch):
-    _stub_merge(monkeypatch)
+def test_the_set_needs_two_active_properties_and_an_operator_merge_an_identity():
     with pytest.raises(MergeError):
-        # two requested but only one is still active
-        pm.merge_property_set(_SetConn(active_ids=[3]), [3, 7], decided_by=OP)
+        _merge(_Ledger({1: 5}), [5, 5])
+    with pytest.raises(MergeError, match="not active"):
+        _merge(_Ledger({1: 3}, props={7: "merged_away"}), [3, 7])
+    with pytest.raises(MergeError, match="decided_by"):
+        _merge(_Ledger({1: 3, 2: 7}), [3, 7], source="operator")
 
 
-def test_merge_property_set_touches_no_candidate_table(monkeypatch):
-    """The legacy decision layer is gone: a subset merge must never read or write
-    property_identity_candidates (dropped) or dedup_pair_audit (frozen)."""
-    _stub_merge(monkeypatch)
-    conn = _SetConn(active_ids=[3, 7])
-    pm.merge_property_set(conn, [3, 7], decided_by=OP)
-    sqls = " ".join(s for s, _ in conn.executed)
-    assert "property_identity_candidates" not in sqls
-    assert "dedup_pair_audit" not in sqls
+def test_the_one_asset_link_rides_onto_the_older_survivor():
+    db = _Ledger({1: 3, 2: 7}, first_seen={7: T0 + timedelta(days=1)}, assets={7: 42})
+    out = _merge(db, [3, 7])
+    assert out["survivor_id"] == 3 and db.assets == {3: 42, 7: None}
+    assert db.sql("INSERT INTO asset_membership_events") == [
+        {"survivor": 3, "retired": 7, "asset": 42,
+         "reason": f"merge {out['merge_group_id']}", "source": "auto"}]
 
 
-def test_merge_property_set_partial_failure_rolls_back(monkeypatch):
-    """A refusal on a later pair propagates through the OUTER transaction, so a
-    real DB rolls the whole set back instead of committing a partial merge."""
-    exits: list[Any] = []
+def test_two_units_linked_into_one_asset_are_the_operators_to_merge_never_the_engines():
+    """The link is the operator's "different units, do not collapse" (rule 15, E903): the
+    engine is refused; the operator's own merge keeps the one link on the survivor."""
+    held_twice = _Ledger({1: 3, 2: 7}, assets={3: 41, 7: 41})
+    with pytest.raises(AssetLinkConflict):
+        _merge(held_twice, [3, 7])
+    assert held_twice.events == []
+    assert _merge(held_twice, [3, 7], source="operator", decided_by=OP)["survivor_id"] == 3
+    assert held_twice.assets == {3: 41, 7: None}
 
-    class _RecCtx:
-        def __enter__(self) -> "_RecCtx":
-            return self
 
-        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-            exits.append(exc_type)
-            return False  # never suppress — let the error propagate
+@pytest.mark.parametrize("cats, clash", [
+    ({3: (None, "byt"), 7: ("prodej", "byt"), 9: ("pronajem", "byt")}, "category_type"),
+    ({3: ("prodej", None), 7: ("prodej", "byt"), 9: ("prodej", "dum")}, "category_main"),
+])
+def test_a_set_whose_members_clash_is_refused_though_the_survivor_is_unknown(cats, clash):
+    """The survivor's stored category is recomputed once, after the whole set: a NULL there
+    must not let a sale and a rent (or a flat and a house) through, pair by pair."""
+    db = _Ledger({1: 3, 2: 7, 3: 9}, cats=cats)
+    with pytest.raises(MergeError, match=clash):
+        _merge(db, [3, 7, 9])
+    assert db.events == [] and db.listings == {1: 3, 2: 7, 3: 9}
+    sanctioned = _Ledger({1: 3, 2: 7, 3: 9},
+                         cats={3: ("prodej", None), 7: ("prodej", "dum"), 9: ("prodej", "komercni")})
+    assert _merge(sanctioned, [3, 7, 9])["retired_ids"] == [7, 9]
 
-    class _RecConn(_SetConn):
-        def transaction(self) -> _RecCtx:
-            return _RecCtx()
 
-    def fake_merge(conn, *, survivor_id, retired_id, **kwargs):
-        if retired_id == 9:
+def test_two_different_asset_links_refuse_the_set_before_anything_merges():
+    db = _Ledger({1: 3, 2: 7, 3: 9}, assets={3: 41, 9: 42})
+    with pytest.raises(AssetLinkConflict):
+        _merge(db, [3, 7, 9])
+    assert db.events == [] and ("rollback", None) in db.log
+
+
+def test_the_survivor_is_recomputed_once_for_the_whole_set():
+    db = _Ledger({1: 1, 2: 2, 3: 3, 4: 3, 5: 4})
+    _merge(db, [4, 3, 2, 1])
+    assert len(db.sql("WITH batch AS")) == 1
+    assert db.sql("recompute_property_mf") == [(1,)]
+    assert db.sql("DELETE FROM browse_list") == [([1, 2, 3, 4],)]
+    assert db.sql("status = 'merged_away'") == [(1, 2), (1, 3), (1, 4)]
+
+
+def test_a_refusal_on_a_later_pair_rolls_the_whole_set_back(monkeypatch):
+    chokepoint = pi.merge_properties
+
+    def refuse_nine(conn, **kw):
+        if kw["retired_id"] == 9:
             raise MergeError("category_main mismatch (byt vs dum)")
-        return {"data": {"merge_group_id": "grp-1", "listings_moved": 1}}
+        return chokepoint(conn, **kw)
 
-    monkeypatch.setattr(pm, "merge_properties", fake_merge)
-    # survivor=3, retired=[7, 9]; the merge of 9 is refused after 7 succeeded.
+    monkeypatch.setattr(pi, "merge_properties", refuse_nine)
+    db = _Ledger({1: 3, 2: 7, 3: 9})
     with pytest.raises(MergeError):
-        pm.merge_property_set(_RecConn(active_ids=[3, 7, 9]), [3, 7, 9], decided_by=OP)
-    # the merge loop ran inside a transaction that received the exception →
-    # a real DB would ROLLBACK the already-applied merge of 7 (no partial merge).
-    assert MergeError in exits
+        _merge(db, [3, 7, 9])
+    assert db.listings == {1: 3, 2: 7, 3: 9} and db.events == []
+    assert db.sql("WITH batch AS") == []
+
+
+def test_an_operator_merge_rules_every_cross_pair_of_the_ticked_cards_same():
+    db = _Ledger({30: 3, 31: 3, 70: 7, 90: 9}, canonical={3: 30, 7: 70, 9: 90})
+    out = _merge(db, [3, 7, 9], source="operator", decided_by=OP)
+    rows = db.sql("INSERT INTO autodedup.verdicts")
+    assert [(r["listing_lo"], r["listing_hi"]) for r in rows] == [(30, 70), (30, 90), (70, 90)]
+    assert {(r["verdict"], r["decided_by"], r["note"]) for r in rows} == {
+        ("same", OP, f"operator merge {out['merge_group_id']}")}
+    assert out["pairs_ruled_same"] == 3, "31, grouped there by someone else, is never ruled"
+    # "same" takes back the operator's own veto on each pair; it never writes one
+    assert len(db.sql("DELETE FROM autodedup.must_not_link")) == 3
+    assert db.sql("INSERT INTO autodedup.must_not_link") == []
+    order = [s for s, _p in db.log]
+    first_merge = next(i for i, s in enumerate(order) if "INTO property_merge_events" in s)
+    assert order.index(next(s for s in order if "p.repr_listing_ref_id FROM" in s)) < first_merge
+
+
+def test_an_engine_merge_is_never_a_ruling():
+    db = _Ledger({30: 3, 70: 7}, canonical={3: 30, 7: 70})
+    assert _merge(db, [3, 7])["pairs_ruled_same"] == 0
+    assert db.sql("autodedup.") == [] and db.sql("p.repr_listing_ref_id FROM") == []
+
+
+def _code() -> str:
+    body = "\n".join(line.split("--")[0] for line in MIGRATION.read_text().lower().splitlines())
+    return re.sub(r"\s+", " ", body)
+
+
+def test_the_copy_rules_only_live_operator_merges_same_and_is_idempotent():
+    code = _code()
+    for fragment in (
+        "where e.source = 'operator'", "having bool_or(e.undone_at is null)",
+        "'pair', p.lo, p.hi, 'same'", "'operator', p.merged_at",
+        # never over a ruling or an operator veto already on the pair
+        "select 1 from autodedup.verdicts v where v.kind = 'pair'", "n.source = 'operator'",
+        "on conflict (kind, listing_lo, listing_hi, decided_by) where kind = 'pair' do nothing;",
+        # a side is the advert's origin; a pair must still share one property
+        "order by v.listing_ref_id, v.id", "and b.side <> a.side and b.now_on = a.now_on",
+        "create index if not exists property_merge_events_listing_live_idx on "
+        "property_merge_events (listing_ref_id, id) where undone_at is null;",
+    ):
+        assert fragment in code, fragment
+    assert not re.search(r"\b(update|delete from|drop|truncate)\b", code), "additive only"

@@ -1,9 +1,9 @@
-"""Hermetic tests for the property merge/unmerge core (toolkit.property_identity).
+"""Hermetic tests for THE chokepoint, `toolkit.property_identity.merge_properties`.
 
 A scripted fake connection records every executed statement so the test can
-assert the merge/unmerge transaction emitted the right SQL in the right shape.
-The spatial/recompute SQL itself is verified out-of-band via the Supabase MCP;
-here we only check control flow + the statements the functions emit.
+assert the pairwise merge emitted the right SQL in the right shape. The set merge
+around it (survivor rule, one recompute, rulings) is tests/test_property_merge_set.py;
+the one undo is tests/test_detach_listing.py.
 """
 
 from __future__ import annotations
@@ -12,11 +12,7 @@ from typing import Any
 
 import pytest
 
-from toolkit.property_identity import (
-    MergeError,
-    merge_properties,
-    unmerge_group,
-)
+from toolkit.property_identity import AssetLinkConflict, MergeError, merge_properties
 
 
 class _Ctx:
@@ -76,21 +72,17 @@ def _find(executions, needle: str) -> tuple[str, Any] | None:
 # --- merge_properties -----------------------------------------------------
 
 
-def test_merge_repoints_retires_logs_and_recomputes():
+def test_merge_repoints_retires_and_logs_and_leaves_the_recompute_to_the_set():
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "active", "prodej", "byt", None)]),
         (lambda s: "INSERT INTO property_merge_events" in s, [(1,), (2,)]),
     ])
 
-    result = merge_properties(
+    assert merge_properties(
         conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
-    )
-
-    assert result["data"]["survivor_id"] == 10
-    assert result["data"]["retired_id"] == 20
-    assert result["data"]["listings_moved"] == 2
-    assert result["data"]["merge_group_id"]  # a uuid was generated
+    ) == 2
+    assert _find(conn.executed, "INSERT INTO property_merge_events")[1]["group"]  # a uuid
 
     # children re-pointed onto the survivor
     repoint = _find(conn.executed, "UPDATE listings SET property_id =")
@@ -98,31 +90,54 @@ def test_merge_repoints_retires_logs_and_recomputes():
     # loser soft-retired, never deleted
     assert _find(conn.executed, "status = 'merged_away'") is not None
     assert _find(conn.executed, "DELETE FROM properties") is None
-    # survivor recomputed inline
-    assert _find(conn.executed, "WITH batch AS") is not None
+    # one pair of a set: the survivor is recomputed once, by merge_property_set
+    assert _find(conn.executed, "WITH batch AS") is None
+    assert _find(conn.executed, "browse_list") is None
 
 
-def test_merge_refreshes_survivor_mf_inline():
-    # The survivor's property-grain MF is recomputed from the golden record in
-    # the same transaction, so a merge is never one mf-recompute cycle stale.
+def test_merge_carries_the_one_asset_link_onto_the_survivor():
+    """Decision 17: the link never stays on the merged_away row (the census's old gap)."""
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "active", "prodej", "byt", 7)]),
         (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
     ])
+    merge_properties(conn, survivor_id=10, retired_id=20, reason="manual", source="operator")
+    sql, params = _find(conn.executed, "INSERT INTO asset_membership_events")
+    assert "SET asset_id = CASE WHEN id = %(survivor)s::bigint THEN %(asset)s::bigint END" in sql
+    group = _find(conn.executed, "INSERT INTO property_merge_events")[1]["group"]
+    assert params == {"survivor": 10, "retired": 20, "asset": 7, "reason": f"merge {group}",
+                      "source": "operator"}
+    idx = [e[0] for e in conn.executed]
+    carry = next(i for i, e in enumerate(idx) if "asset_membership_events" in e)
+    retire = next(i for i, e in enumerate(idx) if "status = 'merged_away'" in e)
+    assert carry < retire
 
-    merge_properties(
-        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
-    )
 
-    mf = _find(conn.executed, "recompute_property_mf")
-    assert mf is not None and mf[1] == (10,)
+def test_merge_refuses_two_different_asset_links():
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", 7), (20, "active", "prodej", "byt", 8)]),
+    ])
+    with pytest.raises(AssetLinkConflict):
+        merge_properties(conn, survivor_id=10, retired_id=20, reason="m", source="autodedup")
+    assert _find(conn.executed, "UPDATE listings SET property_id =") is None
+
+
+def test_merge_without_an_asset_link_touches_no_asset():
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", 7), (20, "active", "prodej", "byt", None)]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
+    ])
+    merge_properties(conn, survivor_id=10, retired_id=20, reason="m", source="autodedup")
+    assert _find(conn.executed, "asset_membership_events") is None
 
 
 def test_merge_rejects_when_retired_not_active():
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "merged_away", "prodej", "byt")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "merged_away", "prodej", "byt", None)]),
     ])
     with pytest.raises(MergeError):
         merge_properties(
@@ -136,8 +151,8 @@ def test_merge_rejects_sale_vs_rent_at_chokepoint():
     # The operator/cluster merge paths call merge_properties directly (bypassing
     # classify_pair); this final guard must refuse a sale↔rental merge.
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "pronajem", "byt")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "active", "pronajem", "byt", None)]),
     ])
     with pytest.raises(MergeError):
         merge_properties(
@@ -148,8 +163,8 @@ def test_merge_rejects_sale_vs_rent_at_chokepoint():
 
 def test_merge_rejects_byt_vs_dum_at_chokepoint():
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "dum")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "active", "prodej", "dum", None)]),
     ])
     with pytest.raises(MergeError):
         merge_properties(
@@ -161,14 +176,11 @@ def test_merge_allows_dum_komercni_cross_type_at_chokepoint():
     # The ONE sanctioned cross-type (a house on one portal, commercial on another, same
     # building) must NOT be refused — the merge proceeds normally past the category guard.
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "dum"), (20, "active", "prodej", "komercni")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "dum", None), (20, "active", "prodej", "komercni", None)]),
         (lambda s: "INSERT INTO property_merge_events" in s, [(1,), (2,)]),
     ])
-    result = merge_properties(
-        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
-    )
-    assert result["data"]["survivor_id"] == 10
+    merge_properties(conn, survivor_id=10, retired_id=20, reason="manual", source="operator")
     assert _find(conn.executed, "UPDATE listings SET property_id =") is not None
 
 
@@ -185,8 +197,8 @@ def test_merge_carries_operator_state_to_survivor():
     # Property-anchored operator state follows the property onto the survivor in
     # the same transaction, so it never orphans onto the merged_away loser.
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "active", "prodej", "byt", None)]),
         (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
     ])
 
@@ -218,8 +230,8 @@ def test_merge_reconciles_pipeline_stage():
     # The single-valued deal-pipeline stage is reconciled (keep most-advanced)
     # in the same merge transaction, before the loser is soft-retired.
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "active", "prodej", "byt", None)]),
         (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
     ])
 
@@ -245,8 +257,8 @@ def test_merge_carries_dismissals_after_the_pipeline():
     # reconciler (a card that landed on the survivor lifts that account's
     # dismissal) and before the loser is soft-retired.
     conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "SELECT id, status, category_type, category_main, asset_id FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt", None), (20, "active", "prodej", "byt", None)]),
         (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
     ])
 
@@ -262,105 +274,3 @@ def test_merge_carries_dismissals_after_the_pipeline():
     assert idx("DELETE FROM property_pipeline WHERE property_id =") < repoint
     assert repoint < idx("status = 'merged_away'")
     assert _find(conn.executed, "DELETE FROM property_dismissals") is None
-
-
-# --- unmerge_group --------------------------------------------------------
-
-
-def test_unmerge_replays_ledger_and_reactivates():
-    conn = _FakeConn([
-        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
-         [(10, 20, 1001), (10, 20, 1002)]),
-        (lambda s: "UPDATE listings SET property_id = %s WHERE id" in s,
-         [(1,)]),  # each replay re-points exactly one child
-    ])
-
-    result = unmerge_group(conn, merge_group_id="grp", undone_by="operator")
-
-    assert result["data"]["survivor_id"] == 10
-    assert result["data"]["retired_ids"] == [20]
-    assert result["data"]["listings_moved_back"] == 2
-    assert result["data"]["conflicts"] == []
-    # retired reactivated, events stamped undone, recompute ran
-    assert _find(conn.executed, "status = 'active'") is not None
-    assert _find(conn.executed, "undone_at = now()") is not None
-    assert _find(conn.executed, "WITH batch AS") is not None
-    # the reactivated retired property's pipeline card is restored from the ledger
-    assert _find(conn.executed, "INSERT INTO property_pipeline") is not None
-    assert _find(conn.executed, "merge_absorb") is not None
-
-
-def test_unmerge_restores_is_active_with_the_status_so_no_status_event_fires():
-    """The reactivation clears `merged_away` and restores `is_active` in ONE statement:
-    the status-event trigger (migration 559) skips a row that is or was merged_away, so
-    neither the merge's retirement nor this reactivation logs a false transition — and
-    the recompute that follows finds is_active already right, so it flips nothing."""
-    conn = _FakeConn([
-        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
-         [(10, 20, 1001)]),
-        (lambda s: "UPDATE listings SET property_id = %s WHERE id" in s, [(1,)]),
-    ])
-    unmerge_group(conn, merge_group_id="grp", undone_by="operator")
-    sql, params = _find(conn.executed, "SET status = 'active'")
-    assert "is_active = EXISTS" in sql and "l.is_active" in sql
-    assert params == ([20],)
-    idx = [e[0] for e in conn.executed]
-    reactivate = next(i for i, e in enumerate(idx) if "SET status = 'active'" in e)
-    recompute = next(i for i, e in enumerate(idx) if "WITH batch AS" in e)
-    assert reactivate < recompute
-
-
-def test_unmerge_conflict_when_child_repointed_elsewhere():
-    conn = _FakeConn([
-        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
-         [(10, 20, 1001)]),
-        # re-point UPDATE matches nothing (child no longer on survivor) -> rowcount 0
-    ])
-
-    result = unmerge_group(conn, merge_group_id="grp", undone_by="operator")
-
-    assert result["data"]["listings_moved_back"] == 0
-    assert result["data"]["conflicts"] == [1001]
-
-
-def test_unmerge_raises_when_no_active_events():
-    conn = _FakeConn([])
-    with pytest.raises(MergeError):
-        unmerge_group(conn, merge_group_id="grp", undone_by="operator")
-
-
-# --- browse_list read-model patch (docs/design/browse-merge-consistency.md) ---
-
-
-def test_merge_patches_browse_read_model():
-    # Read-your-writes: the merge patches browse_list in the SAME txn, AFTER the
-    # inline recompute (so browse_projection sees the merged state), for both the
-    # survivor and the now-retired id — Browse reflects it immediately instead of
-    # on the next 5-min rebuild.
-    conn = _FakeConn([
-        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
-         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
-        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
-    ])
-    merge_properties(
-        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
-    )
-    delete = _find(conn.executed, "DELETE FROM browse_list")
-    insert = _find(conn.executed, "INSERT INTO browse_list SELECT * FROM browse_projection")
-    assert delete is not None and delete[1] == ([10, 20],)
-    assert insert is not None and insert[1] == ([10, 20],)
-    idx_recompute = next(i for i, e in enumerate(conn.executed) if "WITH batch AS" in e[0])
-    idx_patch = next(i for i, e in enumerate(conn.executed) if "DELETE FROM browse_list" in e[0])
-    assert idx_recompute < idx_patch
-
-
-def test_unmerge_patches_browse_read_model():
-    conn = _FakeConn([
-        (lambda s: "FROM property_merge_events" in s and "merge_group_id = %s" in s,
-         [(10, 20, 1001)]),
-        (lambda s: "UPDATE listings SET property_id = %s WHERE id" in s,
-         [(1,)]),
-    ])
-    unmerge_group(conn, merge_group_id="grp", undone_by="operator")
-    insert = _find(conn.executed, "INSERT INTO browse_list SELECT * FROM browse_projection")
-    assert insert is not None and insert[1] == ([10, 20],)

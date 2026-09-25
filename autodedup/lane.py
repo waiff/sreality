@@ -156,12 +156,11 @@ ITERATION_META: dict[str, dict[str, Any]] = {
         "wave": "A1",
         "title": "Apply a generation's groups",
         "approach": (
-            "One generation's groups planned into production merges - survivor = the one "
-            "asset-linked property if exactly one is linked, else the one with the most "
-            "listings, then the oldest first_seen_at, then the lowest id; every refusal "
-            "recorded with its reason - and, only when dry_run=0 and inside the "
-            "autodedup_apply_scope row, written through merge_properties "
-            "with source 'autodedup' and one merge group per engine group."
+            "One generation's groups planned into production merges - survivor = the "
+            "oldest record (first_seen_at, then the lowest id); every refusal recorded with "
+            "its reason - and, only when dry_run=0 and inside the autodedup_apply_scope row, "
+            "written through merge_property_set with source 'autodedup' and one merge "
+            "group per engine group."
         ),
         "tools": [
             "autodedup.apply", "toolkit.property_identity", "autodedup.lane", "GitHub Actions",

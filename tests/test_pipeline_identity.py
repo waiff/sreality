@@ -1,8 +1,8 @@
-"""Hermetic tests for the single-valued pipeline merge/unmerge reconciler.
+"""Hermetic tests for the single-valued pipeline merge/detach reconciler.
 
 A merge snapshots both sides, keeps the most-advanced (terminal-aware) card on
-the survivor, drops the retired; an unmerge restores the reactivated retired
-property's card from the snapshot. These assert the SQL shape; the real
+the survivor, drops the retired; a detach that reactivates the retired property
+restores its card from the snapshot. These assert the SQL shape; the real
 keep/restore semantics are verified out-of-band via the Supabase MCP on temp tables.
 """
 
@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import Any
 
 from toolkit.pipeline_identity import (
+    reconcile_pipeline_on_detach,
     reconcile_pipeline_on_merge,
-    reconcile_pipeline_on_unmerge,
 )
 
 
@@ -61,26 +61,33 @@ def test_merge_repoints_retired_to_survivor_everywhere():
         assert params == {"r": 20, "s": 10, "g": "grp"}
 
 
-def test_unmerge_restores_retired_and_cleans_moved_survivor_card():
+def test_detach_restores_the_reactivated_property_and_cleans_the_absorbed_card():
     cur = _Cur()
-    reconcile_pipeline_on_unmerge(cur, merge_group_id="grp", survivor_id=10)
+    reconcile_pipeline_on_detach(cur, merge_group_id="grp", restored_id=20, survivor_id=10)
     sqls = [s for s, _ in cur.executed]
     assert len(sqls) == 2
 
-    # restore the retired (non-survivor) snapshot onto its now-active property,
-    # per (account_id, property_id); bare ON CONFLICT is transition-safe across
-    # the 294→295 PK swap
+    # restore THIS property's own snapshot of that merge, per (account_id, property_id);
+    # bare ON CONFLICT is transition-safe across the 294->295 PK swap
     assert "INSERT INTO property_pipeline" in sqls[0]
     assert "merge_absorb" in sqls[0]
-    assert "e.property_id <> %(s)s" in sqls[0]
+    assert "e.property_id = %(r)s" in sqls[0]
     assert "e.account_id" in sqls[0]
     assert "ON CONFLICT DO NOTHING" in sqls[0]
-    assert "status = 'active'" in sqls[0]
-    # move-if-empty cleanup: drop the survivor's absorbed card iff it had no
-    # snapshot, per account
+    # move-if-empty, per account: only a card the survivor absorbed from THIS property,
+    # and only where the survivor held none of its own in that merge
     assert sqls[1].startswith("DELETE FROM property_pipeline WHERE property_id = %(s)s")
+    assert "AND e.property_id = %(r)s AND e.to_stage_id IS NOT NULL" in sqls[1]
     assert "NOT EXISTS" in sqls[1]
     assert "e.account_id IS NOT DISTINCT FROM property_pipeline.account_id" in sqls[1]
 
     for _sql, params in cur.executed:
-        assert params == {"g": "grp", "s": 10}
+        assert params == {"g": "grp", "r": 20, "s": 10}
+
+
+def test_detach_off_a_later_survivor_restores_but_never_cleans_it():
+    """The advert left a property a LATER merge built: that property never held the card of
+    the merge being undone, so only the restore runs."""
+    cur = _Cur()
+    reconcile_pipeline_on_detach(cur, merge_group_id="grp", restored_id=20, survivor_id=None)
+    assert len(cur.executed) == 1 and "INSERT INTO property_pipeline" in cur.executed[0][0]

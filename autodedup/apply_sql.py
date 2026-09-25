@@ -1,10 +1,9 @@
 """Every statement the A1 apply path runs (PROGRAM.md E900-E906), as constants.
 
 Reads: the `app_settings` scope row, one generation's groups and members from schema
-`autodedup`, the member listings' `property_id` and categories and the involved properties
-(with their asset links, and those of every property merged into them) from `public` (the
-same facts the chokepoint itself re-checks), the operator's negatives (`verdicts`,
-`must_not_link`) and the engine's own apply ledger. NOTHING here reads or writes
+`autodedup`, the member listings' `property_id` and categories and the involved properties from
+`public` (the same facts the chokepoint itself re-checks), the operator's negatives
+(`verdicts`, `must_not_link`) and the engine's own apply ledger. NOTHING here reads or writes
 `public.property_merge_events` (D7): only the chokepoint writes it.
 
 Every nullable parameter carries an explicit cast: psycopg sends no type OID for a Python
@@ -43,34 +42,11 @@ select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_m
  order by m.cluster_key, m.listing_id
 """
 
-# `asset_id` is the operator's Browse-side "different units in one building, do not collapse"
-# (migration 224): two involved properties sharing one refuse the group (E903).
+# `first_seen_at` names the survivor the merge will keep (`property_identity.survivor_of`).
 PROPERTIES_SQL = """
-select p.id, p.status, p.category_type, p.category_main, p.first_seen_at, p.asset_id
+select p.id, p.status, p.category_type, p.category_main, p.first_seen_at
   from public.properties p
  where p.id = any(%(property_ids)s::bigint[])
-"""
-
-# The asset links a merge would otherwise lose: every property merged INTO one of these,
-# followed down `merged_into` (indexed, migration 100), carries its `asset_id` still — the
-# chokepoint does not move it onto the survivor. Each is counted as the involved property's own
-# link, so a unit the operator asset-linked stays "different units" after an earlier merge
-# retired it (E903). A `properties` read only, never `property_merge_events` (D7).
-ABSORBED_ASSETS_SQL = """
-with recursive absorbed(root, id, depth) as (
-    select p.id, p.id, 0
-      from public.properties p
-     where p.id = any(%(property_ids)s::bigint[])
-    union all
-    select a.root, q.id, a.depth + 1
-      from public.properties q
-      join absorbed a on q.merged_into = a.id
-     where a.depth < 20
-)
-select a.root, q.asset_id
-  from absorbed a
-  join public.properties q on q.id = a.id
- where q.asset_id is not null
 """
 
 # EVERY listing on the involved properties, not only the group's members: a merge moves all
@@ -84,10 +60,10 @@ select l.property_id, l.id, l.category_type, l.category_main
 
 # The apply-time re-check (E903), inside the group's own transaction: the involved properties
 # locked in id order (the chokepoint's own FOR UPDATE, taken early and for all of them, so no
-# concurrent merge or unmerge can re-point one between the re-check and the merge), then
+# concurrent merge or detach can re-point one between the re-check and the merge), then
 # their listings held FOR SHARE, so none is re-categorised or moved away before it commits.
 LOCK_PROPERTIES_SQL = """
-select p.id, p.status, p.category_type, p.category_main, p.first_seen_at, p.asset_id
+select p.id, p.status, p.category_type, p.category_main
   from public.properties p
  where p.id = any(%(property_ids)s::bigint[])
  order by p.id
@@ -201,8 +177,8 @@ insert into autodedup.applied_merges (
 # Newest-first, so groups are undone in the reverse of the order they were applied, picked by
 # generation (and cluster_key), apply run and time window: every selector given must hold. Every
 # row of a group carries the same generation, run, survivor, member set and plan (with the
-# property each moved listing sat on when it merged, so a dry run can tell what `unmerge_group`
-# would move back) and the same `applied_at`: now() of the group's transaction, the
+# property each moved listing sat on when it merged: the adverts the undo's detach loop moves
+# back) and the same `applied_at`: now() of the group's transaction, the
 # chokepoint's `merged_at`.
 UNAPPLY_TARGETS_SQL = """
 select a.merge_group_id::text, max(a.generation), a.cluster_key, max(a.survivor_property_id),
@@ -221,20 +197,17 @@ select a.merge_group_id::text, max(a.generation), a.cluster_key, max(a.survivor_
  order by max(a.id) desc
 """
 
-# Where a group's survivor and retired properties stand now. Only the chokepoint and
-# `unmerge_group` write `merged_into` and `merged_at`, and the chokepoint stamps `merged_at`
-# with now() of the transaction that also wrote the group's ledger rows (`applied_at`). So a
-# retired property merged into the survivor at the group's `applied_at` means the merge
-# stands; one active again, merged on into another property, or merged back into the survivor
-# at another time (by hand, after an undo) was restored by an undo of this group, and
-# `unmerge_group` would find nothing live to replay (E905).
+# Where a group's survivor stands now. Only the chokepoint and `detach_listing` write
+# `merged_into` and `merged_at`, and the chokepoint stamps `merged_at` with now() of the
+# transaction that also wrote the group's ledger rows (`applied_at`). So a survivor merged into
+# a later merge's survivor at that merge's `applied_at` is still retired by it (E905).
 PROPERTY_STATE_SQL = """
 select p.id, p.status, p.merged_into, p.merged_at
   from public.properties p
  where p.id = any(%(property_ids)s::bigint[])
 """
 
-# Where a group's listings sit now, read before `unmerge_group` and again in the undo's own
+# Where a group's listings sit now, read before the detach loop and again in the undo's own
 # transaction: a member off the survivor means someone else took the merge apart first (E905).
 MEMBER_PROPERTIES_SQL = """
 select l.id, l.property_id

@@ -410,7 +410,7 @@ _TEXT_EXTRACT_WEDGE_LOGGED = False
 # SHADOW ONLY. The pass writes the `rt` generation inside schema `autodedup` (fingerprints,
 # probe postings, pairs, groups, cursors) and nothing else: no `public.listings` row, no
 # `property_id`, no merge. Turning engine groups into production merges is a separate adapter
-# over toolkit/property_identity.merge_properties, and this lane neither calls nor imports it.
+# over toolkit/property_identity.merge_property_set, and this lane neither calls nor imports it.
 #
 # ONE LANE, TWO SCHEDULES, ONE POSITION. The engine keeps its watermark in
 # `autodedup.scan_cursor` and takes the `autodedup.rt_lease` row by CAS, both keyed by name
