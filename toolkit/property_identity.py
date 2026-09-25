@@ -8,11 +8,13 @@ the survivor later absorbs a third property. The survivor's stats are recomputed
 inline (reusing the recompute job's exact SQL) so there is no stale window.
 
 This module is the single merge chokepoint. Since the 2026-08 "NEW DEDUP" cutoff
-there is no automatic decision path at all — every merge is operator-ordered via
-`api.property_merge` (`POST /properties/merge`) — but the mechanics stay in one
-tested place, and every merge is reversible (`unmerge_group`). The operator's
-"same" / "different" rulings are written by that caller, not here, so an engine
-merge or its bulk undo never stands in for a human ruling.
+the removed legacy engine orders nothing: merges are operator-ordered via
+`api.property_merge` (`POST /properties/merge`), or — only inside the area
+`app_settings.autodedup_apply_scope` names — by the AUTODEDUP apply path
+(`autodedup/apply.py`, source 'autodedup', one merge group per engine group). The
+mechanics stay in one tested place, and every merge is reversible (`unmerge_group`).
+The operator's "same" / "different" rulings are written by the calling route, not
+here, so an engine merge or its bulk undo never stands in for a human ruling.
 """
 
 from __future__ import annotations
@@ -34,7 +36,8 @@ from toolkit.pipeline_identity import (
 )
 from toolkit.room_taxonomy import category_main_compatible
 
-MergeSource = Literal["auto", "operator"]
+# "auto" = the removed legacy engine (historic rows only); "autodedup" = migration 558.
+MergeSource = Literal["auto", "operator", "autodedup"]
 
 
 class MergeError(ValueError):
@@ -126,14 +129,15 @@ def merge_properties(
             if rows[retired_id][1] != "active":
                 raise MergeError(f"retired {retired_id} is not active")
             # Final category guard at THE chokepoint every merge path funnels
-            # through (operator one-click, Browse merge-mode).
+            # through (operator one-click, Browse merge-mode, the autodedup apply path).
             # A sale and a rental are never the same property, and a flat and a
             # house aren't either — but dum <-> komercni IS allowed (the same
             # building listed as a house on one portal, commercial on another).
             # `category_main_compatible` encodes that one sanctioned cross-type;
             # refuse everything else even on an operator-initiated merge. NULL =
-            # unknown, not a conflict. With no automatic decision layer left,
-            # this is the ONLY category gate — nothing upstream pre-screens.
+            # unknown, not a conflict. This is the gate no caller can route around;
+            # the autodedup apply path pre-screens with the same helper, and this
+            # still decides.
             s_ct, s_cm = rows[survivor_id][2], rows[survivor_id][3]
             r_ct, r_cm = rows[retired_id][2], rows[retired_id][3]
             if s_ct is not None and r_ct is not None and s_ct != r_ct:
