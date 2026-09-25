@@ -61,18 +61,22 @@ class RetireDb(FakeDb):
         return group
 
     def inside(self, lid: int, p: dict[str, Any]) -> bool:
-        town, quarter = self.location.get(lid, (None, None))
-        return town in p["towns"] or quarter in p["quarters"]
+        """Every read after AREA_SQL takes the area as the listing ids it read."""
+        return lid in set(p["area_ids"])
 
     def dispatch(self, sql: str, p: dict[str, Any]) -> list[tuple]:
+        if sql == L.AREA_SQL:
+            return [(lid,) for lid, (town, quarter) in sorted(self.location.items())
+                    if town in p["towns"] or quarter in p["quarters"]]
         if sql == L.GROUPS_SQL:
-            area_props = {r["property_id"] for lid, r in self.listings.items()
-                          if self.inside(lid, p)} - {None}
+            # Driven from the area: its adverts' own ledger rows, and the rows whose SURVIVOR
+            # holds one of them (never the retired side: `retired_property_id` is unindexed).
+            area_props = {self.listings[lid]["property_id"] for lid in p["area_ids"]
+                          if lid in self.listings} - {None}
             touching = {e["merge_group_id"] for e in self.events
                         if not e["undone"] and e["source"] == "auto"
                         and p["merge_group_id"] in (None, e["merge_group_id"])
-                        and (self.inside(e["listing"], p) or e["survivor"] in area_props
-                             or e["retired"] in area_props)}
+                        and (self.inside(e["listing"], p) or e["survivor"] in area_props)}
             out = []
             for e in sorted(self.events, key=lambda e: (e["merge_group_id"], e["id"])):
                 if e["merge_group_id"] not in touching:
@@ -200,7 +204,7 @@ def _mixed(db: RetireDb, survivor: int, retired: int, lid: int,
 
 def test_selection_reads_every_class_the_probe_names_and_retires_only_both_sides_inside() -> None:
     db, g = _world()
-    groups = L.read_groups(db, L.area_params(TRIAL), SALES)
+    groups = L.read_groups(db, L.read_area(db, TRIAL), SALES)
     outcome = {x.merge_group_id: x.outcome for x in groups}
     assert outcome == {
         g["intact"]: L.TO_RETIRE,
@@ -229,7 +233,7 @@ def test_the_dry_run_counts_reproduce_the_probe_and_write_nothing() -> None:
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r1",
                           detach=db.detach_recording(calls))
     assert calls == [] and db.state() == before
-    assert set(db.statements) == {L.GROUPS_SQL, S.PROPERTY_STATE_SQL, L.ADVERTS_SQL,
+    assert set(db.statements) == {L.AREA_SQL, L.GROUPS_SQL, S.PROPERTY_STATE_SQL, L.ADVERTS_SQL,
                                   L.BUILT_ON_SQL, S.PAIR_VERDICTS_SQL, S.MUST_NOT_LINK_SQL,
                                   L.AUTO_MOVED_SQL}
     counts = out["counts"]
@@ -406,12 +410,12 @@ def test_deal_types_decide_all_but_a_group_that_mixes_them() -> None:
     mixed_straddling = _mixed(db, 900, 1000, 9)
     db.location[10] = OUT                              # its rental sits outside the blocks
     by = {x.merge_group_id: x.outcome
-          for x in L.read_groups(db, L.area_params(TRIAL), SALES)}
+          for x in L.read_groups(db, L.read_area(db, TRIAL), SALES)}
     assert by == {sale: L.TO_RETIRE, rental: "skipped:outside_scope_categories",
                   untyped: "skipped:outside_scope_categories",
                   mixed: "to_retire:mixed_deal_type", mixed_straddling: "skipped:straddling"}
     # a scope naming no deal types admits every one, as `apply.Scope` reads it
-    every = {x.merge_group_id: x.outcome for x in L.read_groups(db, L.area_params(TRIAL), None)}
+    every = {x.merge_group_id: x.outcome for x in L.read_groups(db, L.read_area(db, TRIAL), None)}
     assert every[rental] == every[untyped] == L.TO_RETIRE
 
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1",
@@ -826,7 +830,7 @@ def test_r2_3_a_mix_made_in_two_steps_is_recognised() -> None:
     db.listing(3, 300, ct="pronajem")
     db.location[3] = IN_TOWN
     g = db.merged(100, 200, 300)
-    (group,) = L.read_groups(db, L.area_params(TRIAL), SALES)
+    (group,) = L.read_groups(db, L.read_area(db, TRIAL), SALES)
     assert group.mixed and group.outcome == "to_retire:mixed_deal_type"
 
 
@@ -960,3 +964,107 @@ def test_r2_6_a_ledger_row_with_no_listing_reads_as_a_gone_advert() -> None:
                       "created_at": db.now, "undone_by": None})
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r0")
     assert _by(out) == {g: "skipped:listing_gone"} and out["groups"][0]["moved"] == [2]
+
+
+# ------------------------------------------------------------------ statement cost (dry run 2)
+
+
+MIGRATIONS = Path(__file__).resolve().parents[2] / "migrations"
+
+
+def _migration_code(name: str) -> str:
+    path = MIGRATIONS / name
+    body = "\n".join(line.split("--")[0] for line in path.read_text().lower().splitlines())
+    return " ".join(body.split())
+
+
+def test_every_read_after_the_area_is_driven_by_ids_and_the_indexes_it_names() -> None:
+    """Dry run 2 (36148892044) hit the 2-minute statement timeout: GROUPS_SQL scanned every
+    live old-engine row with two correlated EXISTS each. Only AREA_SQL reads listing_location,
+    once per dispatch; GROUPS_SQL is driven from the area's ids into the ledger's indexes."""
+    sql = {name: getattr(L, name) for name in dir(L) if name.endswith("_SQL")}
+    assert [n for n, text in sql.items() if "listing_location" in text] == ["AREA_SQL"]
+    groups = " ".join(L.GROUPS_SQL.split())
+    assert "exists (" not in groups
+    touching = groups.split("touching as (")[1].split(") select")[0]
+    assert "from area a join public.property_merge_events e on e.listing_ref_id = " \
+        "a.listing_id" in touching
+    assert "from area_properties ap join public.property_merge_events e on " \
+        "e.survivor_property_id = ap.property_id" in touching
+    assert "retired_property_id" not in touching
+    assert "from touching t join public.property_merge_events e on e.merge_group_id = " \
+        "t.merge_group_id" in groups
+    for text in (L.ADVERTS_SQL, L.AUTO_MOVED_SQL, L.BUILT_ON_SQL):
+        assert "%(area_ids)s" in text or "%(listing_ids)s" in text \
+            or "%(property_ids)s" in text
+    # ... and the indexes those joins ride exist, as the comments cite them.
+    assert ("create index listing_location_obec_granularity on listing_location "
+            "(obec_kod, granularity);") in _migration_code("501_location_w2a_listing_location.sql")
+    assert ("create index property_merge_events_group_idx on property_merge_events "
+            "(merge_group_id);") in _migration_code("100_property_merge_audit.sql")
+    assert ("create index property_merge_events_survivor_idx on property_merge_events "
+            "(survivor_property_id);") in _migration_code("100_property_merge_audit.sql")
+    assert ("create index if not exists property_merge_events_listing_live_idx on "
+            "property_merge_events (listing_ref_id, id) where undone_at is null;") \
+        in _migration_code("560_one_merge_one_undo.sql")
+    assert "create index listings_property_id_idx on listings (property_id);" \
+        in _migration_code("091_properties_foundation.sql")
+
+
+def test_the_area_is_read_once_per_dispatch_and_every_read_is_timed(tmp_path: Path,
+                                                                     monkeypatch: Any) -> None:
+    db = RetireDb()
+    older = _intact_pair(db, 100, 200, 1)
+    db.advert(3, 50)
+    newer = db.merged(50, 100)                         # a chain: two passes, re-checks
+    page = tmp_path / "s.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    out = L.run(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", out_dir=tmp_path)
+    assert _by(out) == {newer: "retired", older: "retired"} and out["passes"] == 2
+    assert db.statements.count(L.AREA_SQL) == 1
+    assert db.statements.count(L.GROUPS_SQL) > 3        # passes plus one re-check per group
+    assert out["area_listings"] == 3
+    timings = out["timings"]
+    assert timings["area"]["n"] == 1 and timings["groups"]["n"] == \
+        db.statements.count(L.GROUPS_SQL)
+    assert {"adverts", "auto_moved", "built_on", "lock_properties", "pair_verdicts",
+            "property_state", "must_not_link"} <= set(timings)
+    assert all(t["max_s"] <= t["total_s"] for t in timings.values())
+    assert "| read | n | total s | max s |" in page.read_text()
+    assert "| area | 1 |" in page.read_text()
+
+
+def test_a_read_that_fails_is_still_timed_in_what_is_published(tmp_path: Path,
+                                                                monkeypatch: Any) -> None:
+    db = RetireDb()
+    _intact_pair(db, 100, 200, 1)
+    _intact_pair(db, 300, 400, 3)
+    seen = {"groups": 0}
+    original = db.dispatch
+
+    def dispatch(sql: str, p: dict[str, Any]) -> list[tuple]:
+        if sql == L.GROUPS_SQL:
+            seen["groups"] += 1
+            if seen["groups"] == 3:                    # the second group's re-check
+                raise RuntimeError("canceling statement due to statement timeout")
+        return original(sql, p)
+
+    monkeypatch.setattr(db, "dispatch", dispatch)
+    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    with pytest.raises(RuntimeError, match="statement timeout"):
+        L.run(db, TRIAL, category_types=SALES, dry_run=False, run_id="r1", out_dir=tmp_path)
+    body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())
+    assert body["timings"]["groups"]["n"] == 3 and "statement timeout" in body["aborted"]
+
+
+def test_a_group_touching_only_through_its_retired_property_is_not_read() -> None:
+    """Never a retire: its moved adverts and survivor are outside, so it could only straddle.
+    Not reading it keeps GROUPS_SQL on indexes (retired_property_id has none)."""
+    db = RetireDb()
+    db.advert(1, 100, OUT)
+    db.advert(2, 200, OUT)
+    db.merged(100, 200)
+    db.listing(9, 200)                                 # an inside advert attached to 200 since
+    db.location[9] = IN_TOWN
+    assert L.read_groups(db, L.read_area(db, TRIAL), SALES) == []
