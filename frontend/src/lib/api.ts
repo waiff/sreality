@@ -3043,12 +3043,13 @@ export const unlinkAssetProperty = (
     { method: 'POST', json: { property_id: propertyId }, jwt: true },
   );
 
-/* Merge ledger (list / browse-results / unmerge). Retained without a UI caller on
- * purpose: the buttons lived on the deleted Dedup page, and until the new production
- * wave gives them a permanent home unmerge is API-only. These three wrap the surviving
+/* Merge ledger (list / browse-results / unmerge). The buttons lived on the deleted
+ * Dedup page; `listPropertyMerges` + `unmergeMergeGroup` are now called by the listing
+ * page's merged-adverts section (lib/mergedAdverts),
+ * `listMergedProperties` still has no UI caller. These three wrap the surviving
  * `/properties/*` mechanics routes — do not delete them as "dead". */
 export const listPropertyMerges = (
-  params: { limit?: number; offset?: number } = {},
+  params: { limit?: number; offset?: number; survivor_property_id?: number } = {},
 ): Promise<MergesResponse> =>
   request<MergesResponse>('/properties/merges', {
     query: params as Record<string, QueryValue>,
@@ -3073,12 +3074,17 @@ export const listMergedProperties = (
     jwt: true,
   });
 
+/* `reason`: the operator's optional free text (≤ UNMERGE_REASON_MAX chars), sent as
+ * the POST body. The route keeps it with the "different" ruling once it writes
+ * rulings (the merge-safety change); until then it ignores the body. */
+export const UNMERGE_REASON_MAX = 500;
 export const unmergeMergeGroup = (
   mergeGroupId: string,
+  reason?: string,
 ): Promise<UnmergeResult> =>
   request<UnmergeResult>(
     `/properties/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
-    { method: 'POST', jwt: true },
+    { method: 'POST', jwt: true, ...(reason ? { json: { reason } } : {}) },
   );
 
 /* ----- price-stats datasets ---------------------------------------------- */

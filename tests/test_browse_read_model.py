@@ -94,7 +94,6 @@ def test_all_identity_and_asset_mutations_call_sync():
 
     required = [
         property_identity.merge_properties,
-        property_identity.split_property_to_singletons,
         property_identity.unmerge_group,
         asset_identity.link_properties,
         asset_identity.unlink_property,

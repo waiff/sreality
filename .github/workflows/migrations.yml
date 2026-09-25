@@ -376,6 +376,12 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_property_per_m2_source_live.py -q
 
+      - name: A merge is safe — per-advert price steps, no status event, rulings (migration 559)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_merge_safety_live.py -q
+
       # W4's whole claim is that SIX relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
       # type-checks a statement without ever computing a value -- so a view left

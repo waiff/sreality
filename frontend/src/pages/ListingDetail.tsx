@@ -15,6 +15,7 @@ import {
   fetchListingIdByNaturalKey,
   fetchPropertyReprNaturalKey,
   fetchPropertySources,
+  propertySourcesKey,
   fetchPropertyMf,
   fetchPropertyStatusEvents,
   fetchSnapshotsForListings,
@@ -64,6 +65,7 @@ import ExternalMapLinks from '@/components/listing-detail/ExternalMapLinks';
 import { listingCanonicalPath, listingRowPath } from '@/lib/listingUrl';
 import { lazyChunk } from '@/lib/lazyChunk';
 import { Hairline, SectionLabel } from '@/components/section';
+import MergedAdvertsSection from '@/components/listing-detail/MergedAdvertsSection';
 
 const PriceLineChart = lazyChunk(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -180,7 +182,7 @@ export default function ListingDetail() {
   // this falls back to that once it lands.
   const sourcesId = resolvedListingId ?? listingQ.data?.id ?? null;
   const sourcesQ = useQuery<{ property_id: number | null; sources: PropertySource[] }, Error>({
-    queryKey: ['property-sources', sourcesId],
+    queryKey: propertySourcesKey(sourcesId),
     // W9b: hand over the property_id when the listing row is already in hand, so
     // the resolve hop is skipped. It is NOT in the queryKey and the query is NOT
     // gated on it — on the canonical route this fires alongside listingQ (W9a)
@@ -396,6 +398,11 @@ export default function ListingDetail() {
   const images = imagesQ.data ?? [];
   const sources = sourcesQ.data?.sources ?? [];
   const statusEvents = statusEventsQ.data ?? [];
+  // The merged-adverts section, keyed on the property the SOURCES read resolved,
+  // since its rows are that property's children. When it shows, it IS the
+  // per-advert list, so the history block drops its own.
+  const sourcesPid = sourcesQ.data?.property_id ?? null;
+  const showMergedAdverts = sourcesPid != null && sources.length >= 2;
 
   // Property-grain figures (MF / estimate) are built on the canonical asking
   // price; flag any ACTIVE sibling advert listed at a different number so the
@@ -480,6 +487,16 @@ export default function ListingDetail() {
         }
       />
       <BrokerVizitka listingId={listing.id} />
+      {showMergedAdverts && sourcesPid != null && (
+        <>
+          <Hairline />
+          <MergedAdvertsSection
+            propertyId={sourcesPid}
+            currentListingId={listing.id}
+            sources={sources}
+          />
+        </>
+      )}
       <Hairline />
       <Suspense fallback={<Skeleton height={120} />}>
         {/* Manual estimates + freshness checks are stored against the legacy
@@ -527,6 +544,7 @@ export default function ListingDetail() {
         sources={sources}
         snapshots={snapshots}
         statusEvents={statusEvents}
+        showUrlList={!showMergedAdverts}
       />
       <Hairline />
       {listing.sreality_id != null && (
@@ -821,11 +839,14 @@ function ListingHistoryBlock({
   sources,
   snapshots,
   statusEvents,
+  showUrlList = true,
 }: {
   listing: ListingPublic;
   sources: PropertySource[];
   snapshots: ListingSnapshotPublic[];
   statusEvents: PropertyStatusEventPublic[];
+  /* False while the merged-adverts section lists the same adverts richer. */
+  showUrlList?: boolean;
 }) {
   const urls = useMemo(() => listingUrlRows(sources, listing), [sources, listing]);
   // Date.now() is captured once at mount (not per render) and threaded into the
@@ -941,40 +962,42 @@ function ListingHistoryBlock({
         </ul>
       )}
 
-      <ul className="mt-6 space-y-2">
-        {urls.map((u) => (
-          <li
-            key={u.id}
-            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-sm text-[var(--color-ink)] capitalize">{u.source}</span>
-              {u.id === listing.id ? (
-                <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-                  this listing
+      {showUrlList && (
+        <ul className="mt-6 space-y-2">
+          {urls.map((u) => (
+            <li
+              key={u.id}
+              className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-sm text-[var(--color-ink)] capitalize">{u.source}</span>
+                {u.id === listing.id ? (
+                  <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+                    this listing
+                  </span>
+                ) : null}
+                <UrlStatusPill active={u.isActive} />
+              </div>
+              <div className="flex items-center gap-3 text-[0.8rem] text-[var(--color-ink-3)] tabular-nums">
+                <span className="font-mono text-[var(--color-ink-2)]">{fmtCzk(u.price)}</span>
+                <span title={`${u.firstSeen} – ${u.lastSeen}`}>
+                  {fmtShortDate(u.firstSeen)} – {u.isActive ? 'now' : fmtShortDate(u.lastSeen)}
                 </span>
-              ) : null}
-              <UrlStatusPill active={u.isActive} />
-            </div>
-            <div className="flex items-center gap-3 text-[0.8rem] text-[var(--color-ink-3)] tabular-nums">
-              <span className="font-mono text-[var(--color-ink-2)]">{fmtCzk(u.price)}</span>
-              <span title={`${u.firstSeen} – ${u.lastSeen}`}>
-                {fmtShortDate(u.firstSeen)} – {u.isActive ? 'now' : fmtShortDate(u.lastSeen)}
-              </span>
-              {u.url ? (
-                <a
-                  href={u.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)]"
-                >
-                  open ↗
-                </a>
-              ) : null}
-            </div>
-          </li>
-        ))}
-      </ul>
+                {u.url ? (
+                  <a
+                    href={u.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)]"
+                  >
+                    open ↗
+                  </a>
+                ) : null}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

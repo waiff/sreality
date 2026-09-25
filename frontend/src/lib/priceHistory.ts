@@ -132,7 +132,9 @@ export function buildPriceSeries(
  * to close a trailing window the trigger hasn't stamped a deactivation for.
  * With no events this returns one window spanning the whole fallback range,
  * i.e. today's pre-gap-logic behavior exactly — a strict narrowing, never a
- * regression, once real events are present. */
+ * regression, once real events are present. A property is born active, so a
+ * FIRST event that is a deactivation closes a window opened at `fallback.start`
+ * (an unmerged property whose only row was the pre-559 merge's 'inactive'). */
 export function buildActiveWindows(
   events: PropertyStatusEventPublic[],
   fallback: { start: number; end: number },
@@ -143,7 +145,7 @@ export function buildActiveWindows(
   if (sorted.length === 0) return [[fallback.start, fallback.end]];
 
   const windows: [number, number][] = [];
-  let openAt: number | null = null;
+  let openAt: number | null = sorted[0].isActive ? null : fallback.start;
   for (const e of sorted) {
     if (e.isActive) {
       if (openAt == null) openAt = e.t;

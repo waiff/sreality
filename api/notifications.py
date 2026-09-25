@@ -1623,29 +1623,16 @@ def _recent_price_drops(
 
     Returns one `(property_id, snapshot_id, price_czk, prev_price_czk)` tuple
     PER in-window drop step — not one per property — so each genuine price cut
-    is its own notification event (the per-snapshot dedup grain). The window
-    function runs over the full per-property price series (so `prev` is correct
-    even when it predates the window); the candidate set is pre-narrowed to
-    properties touched in the window so the scan stays bounded.
+    is its own notification event (the per-snapshot dedup grain). Steps come from
+    `listing_price_steps` (migration 559): `prev` is the SAME advert's previous
+    priced snapshot, even when it predates the window, so a step never spans two
+    adverts of one property and a merge alone cannot fire a drop.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "WITH steps AS ("
-            "  SELECT c.property_id, s.id AS snapshot_id, s.scraped_at, s.price_czk, "
-            "         lag(s.price_czk) OVER w AS prev "
-            "  FROM listing_snapshots s "
-            "  JOIN listings c ON c.id = s.listing_id "
-            "  WHERE c.property_id IS NOT NULL AND s.price_czk IS NOT NULL "
-            "    AND c.property_id IN ("
-            "      SELECT c2.property_id FROM listing_snapshots s2 "
-            "      JOIN listings c2 ON c2.id = s2.listing_id "
-            "      WHERE s2.scraped_at > now() - %(win)s::interval "
-            "        AND c2.property_id IS NOT NULL"
-            "    ) "
-            "  WINDOW w AS (PARTITION BY c.property_id ORDER BY s.scraped_at, s.id)"
-            ") "
-            "SELECT property_id, snapshot_id, price_czk, prev FROM steps "
-            "WHERE prev IS NOT NULL AND price_czk < prev "
+            "SELECT property_id, snapshot_id, price_czk, prev_price_czk "
+            "FROM listing_price_steps "
+            "WHERE property_id IS NOT NULL AND price_czk < prev_price_czk "
             "  AND scraped_at > now() - %(win)s::interval "
             "ORDER BY property_id, snapshot_id",
             {"win": f"{window_days} days"},
@@ -1847,38 +1834,30 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
     inserted = 0
 
     with conn.cursor() as cur:
-        # 1+2) price_drop / price_rise — per-snapshot transitions on the
-        # property's listings, replicated per monitored collection so each
-        # collection alerts independently. Snapshot grain == the watchdog's.
+        # 1+2) price_drop / price_rise — the property's per-advert price steps
+        # (`listing_price_steps`, migration 559: a step never spans two adverts),
+        # replicated per monitored collection so each collection alerts
+        # independently. Snapshot grain == the watchdog's.
         cur.execute(
-            f"WITH {_MONITORED_CTE}, "
-            "steps AS ("
-            "  SELECT m.collection_id, m.notify_channels, m.monitor_since, l.property_id, "
-            "         l.sreality_id, l.id AS listing_id, "
-            "         s.id AS snapshot_id, s.scraped_at, s.price_czk, "
-            "         lag(s.price_czk) OVER ("
-            "           PARTITION BY m.collection_id, l.property_id "
-            "           ORDER BY s.scraped_at, s.id) AS prev "
-            "  FROM monitored m "
-            "  JOIN listings l ON l.property_id = m.property_id "
-            "  JOIN listing_snapshots s ON s.listing_id = l.id "
-            "  WHERE s.price_czk IS NOT NULL"
-            ") "
+            f"WITH {_MONITORED_CTE} "
             "INSERT INTO notification_dispatches "
             "  (source_kind, collection_id, property_id, sreality_id, listing_id, change_kind, "
             "   status, target_channels, trigger_snapshot_id, trigger_price_czk, "
             "   prev_price_czk, dedupe_key) "
-            "SELECT 'collection_monitor', st.collection_id, st.property_id, st.sreality_id, "
+            "SELECT 'collection_monitor', m.collection_id, st.property_id, l.sreality_id, "
             "       st.listing_id, "
-            "       CASE WHEN st.price_czk < st.prev THEN 'price_drop' ELSE 'price_rise' END, "
-            "       'sent', st.notify_channels, st.snapshot_id, st.price_czk, st.prev, "
-            "       'cm:' || st.collection_id::text || ':' || "
-            "         CASE WHEN st.price_czk < st.prev THEN 'price_drop' ELSE 'price_rise' END || "
+            "       CASE WHEN st.price_czk < st.prev_price_czk "
+            "            THEN 'price_drop' ELSE 'price_rise' END, "
+            "       'sent', m.notify_channels, st.snapshot_id, st.price_czk, st.prev_price_czk, "
+            "       'cm:' || m.collection_id::text || ':' || "
+            "         CASE WHEN st.price_czk < st.prev_price_czk "
+            "              THEN 'price_drop' ELSE 'price_rise' END || "
             "         ':' || st.snapshot_id::text "
-            "FROM steps st "
-            "WHERE st.prev IS NOT NULL AND st.price_czk <> st.prev "
-            "  AND st.scraped_at > now() - %(win)s::interval "
-            "  AND st.scraped_at > st.monitor_since "
+            "FROM monitored m "
+            "JOIN listing_price_steps st ON st.property_id = m.property_id "
+            "JOIN listings l ON l.id = st.listing_id "
+            "WHERE st.scraped_at > now() - %(win)s::interval "
+            "  AND st.scraped_at > m.monitor_since "
             "ON CONFLICT (dedupe_key) DO NOTHING",
             {"win": win},
         )

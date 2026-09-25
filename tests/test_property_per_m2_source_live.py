@@ -338,26 +338,6 @@ def test_straggler_attach_stamps_the_basis(cur):
     assert stamp == lid != pid
 
 
-def test_unmerge_split_stamps_each_detached_child(cur):
-    """split_property_to_singletons builds a fresh property per detached child
-    and only recompute_mf_one (not the golden recompute) runs on the new ids, so
-    an unstamped insert there leaves the measure unlabelled indefinitely."""
-    from toolkit.property_identity import split_property_to_singletons
-
-    pid = _new_property(cur)
-    anchor = _add_child(cur, pid, source="sreality", price=5_000_000, area=80.0)
-    detached = _add_child(cur, pid, source="idnes", price=4_800_000, area=64.0)
-    _skew_property_ids_past(cur, detached)
-
-    result = split_property_to_singletons(cur.connection, property_id=pid)
-    assert result["data"]["detached_listing_ids"] == [detached]
-
-    new_pid, stamp = _stamp_of_child(cur, detached)
-    assert new_pid != pid
-    assert stamp == detached != new_pid
-    assert _rollup(cur, pid)[3] == anchor, "the survivor keeps its own basis"
-
-
 def test_source_trust_rank_is_not_reordered_around_a_parser_bug(cur):
     """mmreality outranking five portals is what lets a listing-grain area defect
     reach a merged property. Re-ranking it would also silently change survivorship

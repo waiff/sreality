@@ -1601,6 +1601,12 @@ export const fetchSnapshotsByListing = async (
  * the caller must NOT gate the whole query on having a property_id: on the
  * canonical route this read fires in PARALLEL with the listing read (W9a), and
  * making it wait would trade one hop back for a whole waterfall level. */
+/* The listing page's cache key for this read — keyed on the LISTING's surrogate
+ * id, not the property's. One definition, because the merged-adverts unmerge
+ * (lib/mergedAdverts.refreshAfterUnmerge) re-resolves this exact entry. */
+export const propertySourcesKey = (listingId: number | null) =>
+  ['property-sources', listingId] as const;
+
 export const fetchPropertySources = async (
   id: number,
   knownPropertyId?: number | null,

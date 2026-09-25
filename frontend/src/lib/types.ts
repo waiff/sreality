@@ -1620,6 +1620,8 @@ export interface MergeGroup {
   survivor_property_id: number;
   retired_count: number;
   listings_moved: number;
+  /* 'auto' = the removed legacy engine; 'autodedup' = the AUTODEDUP apply path
+   * (a third source it adds). Labelled by lib/mergedAdverts.mergeOriginLabel. */
   source: 'auto' | 'operator' | 'autodedup';
   reason: string;
   fully_undone: boolean;

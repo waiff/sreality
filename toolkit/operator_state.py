@@ -45,11 +45,9 @@ OPERATOR_STATE_TABLES: list[tuple[str, list[str], str]] = [
         ["subscription_id", "collection_id", "change_kind", "trigger_snapshot_id"],
         "set",
     ),
-    # property_status_events (migration 392): a system-generated append-only
-    # log, same shape as notification_dispatches's producers — the retired
-    # property's activity history must follow the survivor or the price chart
-    # would lose it the instant a merge lands.
-    ("property_status_events", [], "append"),
+    # property_status_events is deliberately absent (migration 559): it is the
+    # property's own activity log, and a survivor holding two properties' logs
+    # charts false gaps; the absorbed one keeps its own for an unmerge.
 ]
 
 
