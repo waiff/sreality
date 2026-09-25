@@ -81,7 +81,6 @@ class FakeDb:
         self.verdicts: list[dict[str, Any]] = []
         self.settings: dict[str, Any] = {}
         self.ledger: list[dict[str, Any]] = []
-        self.unapplied: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.statements: list[str] = []
         self.closed = False
@@ -89,7 +88,7 @@ class FakeDb:
         self.depth = 0
 
     # --- plumbing
-    _STATE = ("listings", "properties", "ledger", "unapplied", "events", "settings")
+    _STATE = ("listings", "properties", "ledger", "events", "settings")
 
     def state(self) -> dict[str, Any]:
         return {name: copy.deepcopy(getattr(self, name)) for name in self._STATE}
@@ -130,9 +129,8 @@ class FakeDb:
         self.members.extend((gen, key, lid) for lid in lids)
 
     def live_scope(self, **extra: Any) -> None:
-        self.settings[A.ENABLED_SETTING] = True
         self.settings[A.SCOPE_SETTING] = {"category_types": ["prodej"],
-                                          "blocks": ["obec:563510"], **extra}
+                                          "blocks": ["town:563510"], **extra}
 
     # --- the statements
     def dispatch(self, sql: str, p: dict[str, Any]) -> list[tuple]:  # noqa: C901
@@ -193,9 +191,8 @@ class FakeDb:
                              and v["verdict"] in p["negatives"]
                              and v["cluster_key"] in p["cluster_keys"]))]
         if sql == S.LEDGER_HISTORY_SQL:
-            return [(r["generation"], r["cluster_key"], r["survivor_property_id"],
-                     r["retired_property_id"], r["outcome"], r["undone_at"] is not None,
-                     r["undone_by"])
+            return [(r["generation"], r["cluster_key"], r["retired_property_id"],
+                     r["outcome"], r["undone_at"] is not None, r["undone_by"])
                     for r in self.ledger
                     if not r["dry_run"] and r["outcome"] in ("applied", "refused")
                     and (r["generation"] == p["generation"]
@@ -223,35 +220,23 @@ class FakeDb:
         if sql == S.PROPERTY_STATE_SQL:
             return [(pid, r["status"], r["merged_into"], r["merged_at"])
                     for pid, r in sorted(self.properties.items()) if pid in p["property_ids"]]
-        if sql == S.UNAPPLIED_GENERATION_SQL:
-            return [(u["id"], u["undone_by"], u["unapplied_at"], u["released_at"] is not None)
-                    for u in self.unapplied if u["generation"] == p["generation"]]
-        if sql == S.STAMP_UNAPPLIED_SQL:
-            self.unapplied.append({**p, "id": len(self.unapplied) + 1, "unapplied_at": T0,
-                                   "released_at": None, "released_by": None})
-            return []
-        if sql == S.RELEASE_UNAPPLIED_SQL:
-            for u in self.unapplied:
-                if u["id"] in p["ids"] and u["released_at"] is None:
-                    u.update(released_at=T0, released_by=p["released_by"])
-            return []
         if sql == S.LEDGER_INSERT_SQL:
             return self._ledger_insert(p)
-        if sql == S.STAMP_GENERATION_SQL:
-            for event in self.events:
-                if event["merge_group_id"] == p["merge_group_id"] and event["generation"] is None:
-                    event["generation"] = p["stamp"]
-            return []
         if sql == S.UNAPPLY_TARGETS_SQL:
             groups: dict[str, dict[str, Any]] = {}
             for r in self.ledger:
-                if (r["generation"] != p["generation"] or r["dry_run"]
-                        or r["outcome"] != "applied" or r["undone_at"] is not None):
+                if r["dry_run"] or r["outcome"] != "applied" or r["undone_at"] is not None:
                     continue
-                if p["cluster_key"] is not None and r["cluster_key"] != p["cluster_key"]:
+                if any(p[key] is not None and r[col] != p[key] for key, col in (
+                        ("generation", "generation"), ("cluster_key", "cluster_key"),
+                        ("run", "run_id"))):
+                    continue
+                if ((p["since"] is not None and r["applied_at"] < p["since"])
+                        or (p["until"] is not None and r["applied_at"] >= p["until"])):
                     continue
                 g = groups.setdefault(r["merge_group_id"], {
-                    "key": r["cluster_key"], "surv": r["survivor_property_id"],
+                    "gen": r["generation"], "key": r["cluster_key"],
+                    "surv": r["survivor_property_id"],
                     "retired": [], "last": 0, "members": list(r["member_ids"]),
                     "plan": json.loads(r["plan_json"]),  # jsonb reads back as a dict
                     "at": r["applied_at"]})
@@ -259,7 +244,7 @@ class FakeDb:
                 g["last"] = max(g["last"], r["id"])
                 g["at"] = min(g["at"], r["applied_at"])
             ordered = sorted(groups.items(), key=lambda kv: -kv[1]["last"])
-            return [(gid, g["key"], g["surv"], g["retired"], g["last"], g["members"],
+            return [(gid, g["gen"], g["key"], g["surv"], g["retired"], g["last"], g["members"],
                      g["plan"], g["at"]) for gid, g in ordered]
         if sql == S.LEDGER_UNDO_SQL:
             for r in self.ledger:
@@ -518,14 +503,13 @@ def test_a_negative_against_a_listing_the_merge_would_carry_along_refuses() -> N
 def test_a_listing_this_engine_merged_with_a_member_may_ride_along() -> None:
     # g11 merged 12 onto 200 together with 11; g12 groups 10 with 11 and leaves 12 out. 12
     # shares 200 with a grouped member by THIS engine's live merge, so it may move with it —
-    # and every check reads the property the merge would build: size, scope, categories.
+    # and every check reads the property the merge would build: scope, categories.
     db = FakeDb()
     _engine_merged(db, 11, [11, 12], [200, 250])
     _pair_group(db, 10, [10, 11], [100, 200])
     group = _only(_plan(db))
     assert group.reasons == [] and group.listing_ids == [10, 11, 12]
     assert group.survivor_id == 200 and group.retired_ids == [100]
-    assert _only(_plan(db, max_cluster_size=2)).reasons == [A.SKIP_OVERSIZE]
     narrow = _only(_plan(db, listing_ids=frozenset({10, 11})))
     assert narrow.reasons == [A.SKIP_CARRIES_OUT_OF_SCOPE]
     assert narrow.detail["out_of_scope_listings"] == [12]
@@ -551,11 +535,9 @@ def test_a_property_carrying_listings_no_group_holds_is_refused() -> None:
     _pair_group(db, 10, [10, 11], [100, 200])
     for lid in (97, 98, 99):
         db.listing(lid, 100)
-    group = _only(_plan(db, max_cluster_size=8))
+    group = _only(_plan(db))
     assert group.reasons == [A.SKIP_CARRIES_UNGROUPED]
     assert group.detail["ungrouped_listings"] == [97, 98, 99]
-    # ... and the size cap reads what the merge would build, not the members alone.
-    assert A.SKIP_OVERSIZE in _only(_plan(db, max_cluster_size=4)).reasons
 
 
 def test_category_guards_mirror_the_chokepoint() -> None:
@@ -656,18 +638,19 @@ def test_an_asset_link_set_after_the_plan_on_a_retiree_stops_the_group() -> None
     assert calls == [] and result["skipped_at_apply"][0]["reasons"] == [A.SKIP_ASSET_LINKED]
 
 
-def test_merged_away_unattached_and_oversize_are_refused() -> None:
+def test_merged_away_and_unattached_are_refused_and_size_is_the_engines_cap_alone() -> None:
     db = FakeDb()
     db.prop(200, status="merged_away")
     _pair_group(db, 10, [10, 11], [100, 200])
     _pair_group(db, 20, [20, 21], [300, 400])
     db.listing(22, None)
     db.members.append((GEN, 20, 22))
-    _pair_group(db, 30, [30, 31, 32], [500, 600, 700])
-    reasons = {g.cluster_key: g.reasons for g in _plan(db, max_cluster_size=2).groups}
+    # Twelve listings on twelve properties: the engine capped the group when it built it.
+    _pair_group(db, 30, list(range(30, 42)), list(range(500, 512)))
+    reasons = {g.cluster_key: g.reasons for g in _plan(db).groups}
     assert reasons[10] == [A.SKIP_INACTIVE_PROPERTY]
     assert A.SKIP_UNATTACHED in reasons[20]
-    assert reasons[30] == [A.SKIP_OVERSIZE]
+    assert reasons[30] == []
 
 
 def test_a_property_the_engine_split_across_two_groups_bridges_nothing() -> None:
@@ -707,73 +690,68 @@ def test_the_run_cap_defers_the_rest_in_key_order() -> None:
     assert plan.deferred == [30] and plan.counts["deferred_run_cap"] == 1
 
 
-def test_block_spellings_normalise_and_nonsense_is_refused() -> None:
-    assert A.normalize_block("obec:563510") == "o563510"
-    assert A.normalize_block("town:563510") == "o563510"
-    assert A.normalize_block("cast_obce:490245") == "c490245"
-    assert A.normalize_block("c490245") == "c490245"
+def test_a_block_has_one_spelling_the_export_lanes() -> None:
+    assert A.normalize_block(" Town:0563510 ") == "town:563510"
+    assert A.normalize_block("quarter:490245") == "quarter:490245"
+    assert A.block_of({"block_grain": "c", "block_key": 490245}) == "quarter:490245"
+    for other in ("obec:563510", "cast_obce:490245", "o563510", "563510", "town:x"):
+        with pytest.raises(ValueError, match="town:<code>"):
+            A.normalize_block(other)
     with pytest.raises(ValueError):
-        A.normalize_block("563510")
-    with pytest.raises(ValueError):
-        A.scope_fields({"blokcs": "o1"})
+        A.scope_fields({"blokcs": "town:1"})
+    with pytest.raises(ValueError, match="max_cluster_size"):
+        A.scope_fields({"max_cluster_size": 8})  # the engine's cap is the one cap
 
 
 def test_a_live_scope_is_narrowed_by_a_run_and_never_widened() -> None:
-    setting = {"category_types": ["prodej", "pronajem"], "blocks": ["obec:1", "obec:2"],
-               "max_cluster_size": 6}
-    scope = A.effective_scope(setting, {"category_types": "prodej", "blocks": "obec:2 obec:3",
-                                        "max_cluster_size": "12", "all_blocks": "1"},
+    setting = {"category_types": ["prodej", "pronajem"], "blocks": ["town:1", "town:2"],
+               "max_clusters_per_run": 6}
+    scope = A.effective_scope(setting, {"category_types": "prodej", "blocks": "town:2 town:3",
+                                        "max_clusters_per_run": "12", "all_blocks": "1"},
                               live=True)
     assert scope.category_types == frozenset({"prodej"})
-    assert scope.blocks == frozenset({"o2"})
-    assert scope.max_cluster_size == 6 and scope.all_blocks is False
+    assert scope.blocks == frozenset({"town:2"})
+    assert scope.max_clusters_per_run == 6 and scope.all_blocks is False
     with pytest.raises(ValueError):
-        A.effective_scope(None, {"category_types": "prodej", "blocks": "o1"}, live=True)
+        A.effective_scope(None, {"category_types": "prodej", "blocks": "town:1"}, live=True)
     assert A.Scope().live_problems() and A.Scope(category_types=frozenset({"prodej"})) \
         .live_problems()
     assert A.Scope(category_types=frozenset({"prodej"}), all_blocks=True).live_problems() == []
 
 
-# ------------------------------------------------------------------ the kill switch
+# ------------------------------------------------------------------ the rollout control
 
 
-def test_live_is_refused_while_the_switch_is_off_and_absent_means_off() -> None:
+@pytest.mark.parametrize("row", [
+    None, {"category_types": ["prodej"]}, {"category_types": ["prodej"], "blocks": []},
+    {"category_types": [], "all_blocks": True}, {"category_types": ["prodej"], "x": 1},
+])
+def test_a_scope_row_naming_no_area_merges_nothing(row: Any) -> None:
+    # The scope row is the one rollout control, read before every group: absent, malformed,
+    # or naming no deal types or no area, it stops even a plan made under a scope that did.
     db = FakeDb()
     _pair_group(db, 10, [10, 11], [100, 200])
-    scope = A.Scope(category_types=frozenset({"prodej"}), all_blocks=True)
+    if row is not None:
+        db.settings[A.SCOPE_SETTING] = row
+    plan = A.plan_apply(db, GEN, A.Scope(category_types=frozenset({"prodej"}), all_blocks=True))
     calls: list[dict[str, Any]] = []
-    plan = A.plan_apply(db, GEN, scope)
-    with pytest.raises(A.ApplyRefused):
-        A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
-    db.settings[A.ENABLED_SETTING] = False
-    with pytest.raises(A.ApplyRefused):
-        A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
-    assert calls == [] and db.ledger == []
-    A.apply_plan(db, plan, dry_run=True, merge=db.merge(calls))
-    assert calls == [] and {r["outcome"] for r in db.ledger} == {"planned"}
-
-
-@pytest.mark.parametrize("value, on", [
-    (True, True), ("true", True), ({"enabled": True}, True),
-    (False, False), (None, False), ("false", False), ({}, False), (1, True), (0, False),
-])
-def test_the_switch_reads_like_every_other_app_settings_flag(value: Any, on: bool) -> None:
-    db = FakeDb()
-    db.settings[A.ENABLED_SETTING] = value
-    assert A.apply_enabled(db) is on
-    assert A.apply_enabled(FakeDb()) is False  # no row at all
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    assert calls == [] and db.ledger == [] and result["counts"]["not_attempted"] == 1
+    assert A.SCOPE_SETTING in result["stopped"]
 
 
 def test_live_is_refused_on_a_scope_that_names_no_area() -> None:
     db = FakeDb()
-    db.settings[A.ENABLED_SETTING] = True
     _pair_group(db, 10, [10, 11], [100, 200])
-    plan = A.plan_apply(db, GEN, A.Scope(category_types=frozenset({"prodej"})))
-    with pytest.raises(A.ApplyRefused, match="area"):
-        A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+    for scope in (A.Scope(category_types=frozenset({"prodej"})),
+                  A.Scope(category_types=frozenset({"prodej"}), blocks=frozenset())):
+        plan = A.plan_apply(db, GEN, scope)
+        with pytest.raises(A.ApplyRefused, match="area"):
+            A.apply_plan(db, plan, dry_run=False, merge=db.merge([]))
+    assert db.ledger == []
 
 
-def test_turning_the_switch_off_mid_run_stops_before_the_next_group() -> None:
+def test_emptying_the_scope_area_mid_run_stops_before_the_next_group() -> None:
     db = FakeDb()
     db.live_scope()
     _pair_group(db, 10, [10, 11], [100, 200])
@@ -781,15 +759,15 @@ def test_turning_the_switch_off_mid_run_stops_before_the_next_group() -> None:
     calls: list[dict[str, Any]] = []
     base = db.merge(calls)
 
-    def merge_then_flip(conn: FakeDb, **kw: Any) -> dict[str, Any]:
+    def merge_then_empty(conn: FakeDb, **kw: Any) -> dict[str, Any]:
         out = base(conn, **kw)
-        conn.settings[A.ENABLED_SETTING] = False
+        conn.settings[A.SCOPE_SETTING] = {"category_types": ["prodej"], "blocks": None}
         return out
 
     plan = A.plan_apply(db, GEN, A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True))
-    result = A.apply_plan(db, plan, dry_run=False, merge=merge_then_flip)
+    result = A.apply_plan(db, plan, dry_run=False, merge=merge_then_empty)
     assert result["counts"]["applied"] == 1 and result["counts"]["not_attempted"] == 1
-    assert "stopped" in result
+    assert "names no area" in result["stopped"]
 
 
 # ------------------------------------------------------------------ dry run and live
@@ -827,7 +805,9 @@ def test_live_merges_go_through_the_chokepoint_one_group_per_engine_group() -> N
     assert first["markers"]["generation"] == GEN and first["markers"]["cluster_key"] == 10
     assert first["markers"]["feature_version"] == 9
     assert {row["property_id"] for row in db.listings.values()} == {100}
-    assert {e["generation"] for e in db.events} == {f"autodedup:{GEN}"}
+    # Who merged is the chokepoint's `source`; nothing else touches the production ledger.
+    assert {(e["source"], e["generation"]) for e in db.events} == {("autodedup", None)}
+    assert not any("property_merge_events" in s for s in db.statements)
     applied = [r for r in db.ledger if r["outcome"] == "applied"]
     assert [(r["survivor_property_id"], r["retired_property_id"]) for r in applied] == [
         (100, 200), (100, 300)]
@@ -1022,7 +1002,7 @@ def _applied_two(db: FakeDb) -> tuple[A.Scope, list[dict[str, Any]]]:
     return scope, calls
 
 
-def test_unapply_undoes_a_generation_newest_first_and_it_never_re_applies() -> None:
+def test_unapply_undoes_a_generation_newest_first_and_a_later_apply_may_redo_it() -> None:
     db = FakeDb()
     scope, calls = _applied_two(db)
     groups = [c["merge_group_id"] for c in calls]
@@ -1030,7 +1010,7 @@ def test_unapply_undoes_a_generation_newest_first_and_it_never_re_applies() -> N
     assert [g["merge_group_id"] for g in listing["groups"]] == groups[::-1]
     assert all(r["undone_at"] is None for r in db.ledger)
 
-    db.settings[A.ENABLED_SETTING] = False  # undo is NOT gated by the switch
+    del db.settings[A.SCOPE_SETTING]  # undo is NOT gated by the scope
     undone: list[str] = []
     result = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge(undone))
     assert undone == groups[::-1] and result["counts"]["undone"] == 2
@@ -1038,13 +1018,43 @@ def test_unapply_undoes_a_generation_newest_first_and_it_never_re_applies() -> N
         10: 100, 11: 200, 20: 300, 21: 400}
     assert all(r["undone_at"] is not None for r in db.ledger if r["outcome"] == "applied")
 
-    replan = A.plan_apply(db, GEN, scope)
-    assert {g.cluster_key: g.reasons for g in replan.groups} == {
-        10: [A.SKIP_GENERATION_UNAPPLIED], 20: [A.SKIP_GENERATION_UNAPPLIED]}
-    # A LATER generation may merge the same properties again.
+    # The engine's own undo is a brake, not a ruling: the same generation, or a later one,
+    # may merge the same properties again when an apply is dispatched.
+    assert {g.cluster_key: g.reasons for g in A.plan_apply(db, GEN, scope).groups} == {
+        10: [], 20: []}
     db.group(10, [10, 11], gen="g13")
     later = A.plan_apply(db, "g13", scope)
     assert [g.reasons for g in later.groups] == [[]]
+
+
+def test_unapply_picks_groups_by_generation_run_and_time_window() -> None:
+    db = FakeDb()
+    db.live_scope()
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    _pair_group(db, 10, [10, 11], [100, 200])
+    A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge([]),
+                 run_id="run-a")
+    _pair_group(db, 20, [20, 21], [300, 400], gen="g13")
+    A.apply_plan(db, A.plan_apply(db, "g13", scope), dry_run=False, merge=db.merge([]),
+                 run_id="run-b")
+    second = next(r["applied_at"] for r in db.ledger if r["cluster_key"] == 20)
+
+    def picked(generation: str | None = None, **selectors: Any) -> list[tuple[str, int]]:
+        found = A.unapply(db, generation, dry_run=True, **selectors)["groups"]
+        return [(g["generation"], g["cluster_key"]) for g in found]
+
+    assert picked(GEN) == [(GEN, 10)] and picked(GEN, cluster_key=20) == []
+    assert picked(run="run-b") == [("g13", 20)]
+    assert picked(since=second) == [("g13", 20)] and picked(until=second) == [(GEN, 10)]
+    assert picked(since=second - timedelta(hours=1)) == [("g13", 20), (GEN, 10)]
+    assert picked(GEN, run="run-b") == []  # every selector given must hold
+    for bad in ({}, {"cluster_key": 10}):
+        with pytest.raises(ValueError):
+            A.unapply(db, None, dry_run=True, **bad)
+    live = A.unapply(db, None, dry_run=False, run="run-a", unmerge=db.unmerge([]))
+    assert live["counts"]["undone"] == 1 and "run=run-a" in A.summary_markdown(
+        live, mode="unapply")
+    assert db.listings[11]["property_id"] == 200 and db.listings[21]["property_id"] == 300
 
 
 def test_unapply_one_group_and_one_already_undone_elsewhere() -> None:
@@ -1537,60 +1547,6 @@ def test_a_later_group_the_same_dry_run_undoes_first_blocks_nothing() -> None:
     assert A.unapply(db, GEN, dry_run=True)["counts"]["blocked"] == 1
 
 
-def test_a_whole_generation_unapply_keeps_every_group_of_it_out_until_reapply() -> None:
-    # The first live run applies 10 and defers 20 and 30 under the cap. `unapply` of the whole
-    # generation stamps it: NO group re-applies — not the one it undid, not the two it never
-    # reached — until an apply dispatched with reapply=1 releases the stamp.
-    db = FakeDb()
-    db.live_scope(max_clusters_per_run=1)
-    for key in (10, 20, 30):
-        _pair_group(db, key, [key, key + 1], [key * 10, key * 10 + 1])
-    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
-    first = A.apply_plan(db, A.plan_apply(db, GEN, scope), dry_run=False, merge=db.merge([]))
-    assert [a["cluster_key"] for a in first["applied"]] == [10]
-    assert first["deferred"] == [20, 30]
-    assert A.unapply(db, GEN, dry_run=True)["generation_stamp"] == "would be written"
-    assert db.unapplied == []
-    undo = A.unapply(db, GEN, dry_run=False, unmerge=db.unmerge([]))
-    assert undo["counts"]["undone"] == 1 and undo["generation_stamp"] == "written"
-
-    replan = A.plan_apply(db, GEN, scope)
-    assert {g.cluster_key: g.reasons for g in replan.groups} == {
-        10: [A.SKIP_GENERATION_UNAPPLIED], 20: [A.SKIP_GENERATION_UNAPPLIED],
-        30: [A.SKIP_GENERATION_UNAPPLIED]}
-    assert replan.deferred == [] and replan.groups[1].detail["generation_unapplied"][
-        "release"] == "reapply=1"
-    calls: list[dict[str, Any]] = []
-    blocked = A.apply_plan(db, replan, dry_run=False, merge=db.merge(calls))
-    assert calls == [] and blocked["counts"]["applied"] == 0
-    assert "reapply=1" in A.summary_markdown(blocked, mode="apply")
-
-    # reapply=1 in a dry run previews the release and writes none of it ...
-    preview = A.plan_apply(db, GEN, scope, reapply=True)
-    assert [g.cluster_key for g in preview.to_apply] == [10] and preview.deferred == [20, 30]
-    A.apply_plan(db, preview, dry_run=True)
-    assert [u["released_at"] for u in db.unapplied] == [None]
-    # ... and a live one releases it for this run and every later one.
-    released = A.apply_plan(db, preview, dry_run=False, merge=db.merge(calls))
-    assert released["released_unapply"] == [1] and db.unapplied[0]["released_at"] is not None
-    assert [c["retired_id"] for c in calls] == [101]
-    assert [g.cluster_key for g in A.plan_apply(db, GEN, scope).to_apply] == [20]
-
-
-def test_a_one_group_unapply_writes_no_generation_stamp() -> None:
-    db = FakeDb()
-    scope, _calls = _applied_two(db)
-    _pair_group(db, 30, [30, 31], [500, 600])
-    one = A.unapply(db, GEN, dry_run=False, cluster_key=10, unmerge=db.unmerge([]))
-    assert one["counts"]["undone"] == 1 and one["generation_stamp"] is None
-    assert db.unapplied == []
-    reasons = {g.cluster_key: g.reasons for g in A.plan_apply(db, GEN, scope).groups}
-    assert reasons == {10: [A.SKIP_GENERATION_UNAPPLIED], 30: []}
-    # reapply releases a whole-generation stamp only: the one group undone stays undone.
-    again = {g.cluster_key: g.reasons for g in A.plan_apply(db, GEN, scope, reapply=True).groups}
-    assert again == reasons
-
-
 def test_unapply_has_no_dry_run_default() -> None:
     import inspect
 
@@ -1619,22 +1575,18 @@ def test_the_lane_mode_dry_runs_by_default_and_writes_its_artifact(tmp_path: Pat
     assert lane.MODES["apply"] is A.run_apply and lane.MODES["unapply"] is A.run_unapply
 
 
-def test_the_lane_refuses_live_without_the_switch_or_the_scope(tmp_path: Path) -> None:
+def test_the_lane_refuses_live_without_the_scope(tmp_path: Path) -> None:
     db = FakeDb()
     _pair_group(db, 10, [10, 11], [100, 200])
-    # The switch is read first; the scope decides only once the switch is on.
-    db.settings[A.SCOPE_SETTING] = {"category_types": ["prodej"], "all_blocks": True}
-    with pytest.raises(SystemExit, match=A.ENABLED_SETTING):
-        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
-    db.settings[A.ENABLED_SETTING] = True
-    del db.settings[A.SCOPE_SETTING]
     with pytest.raises(SystemExit, match="scope"):
         A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
     # A run's args cannot supply the area the operator's setting does not name.
     db.settings[A.SCOPE_SETTING] = {"category_types": ["prodej"]}
     with pytest.raises(SystemExit, match="area"):
         A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0",
-                                   "blocks": "obec:563510"}, tmp_path)
+                                   "blocks": "town:563510"}, tmp_path)
+    with pytest.raises(SystemExit, match="unknown arg"):
+        A.run_apply(_factory(db), {"generation": GEN, "reapply": "1"}, tmp_path)
     # An empty dry_run= is a dry run, never a live one.
     assert A.run_apply(_factory(db), {"generation": GEN, "dry_run": ""}, tmp_path)["dry_run"]
     db.ledger.clear()
@@ -1645,7 +1597,7 @@ def test_the_lane_refuses_live_without_the_switch_or_the_scope(tmp_path: Path) -
     assert db.ledger == []
 
 
-def test_the_lane_applies_live_when_switched_on(tmp_path: Path, monkeypatch: Any) -> None:
+def test_the_lane_applies_live_inside_the_scope(tmp_path: Path, monkeypatch: Any) -> None:
     db = FakeDb()
     db.live_scope()
     _pair_group(db, 10, [10, 11], [100, 200])
@@ -1735,8 +1687,8 @@ def test_an_unapply_that_crashes_mid_run_still_publishes_what_it_undid(
         return undo(conn, **kw)
 
     original = A.unapply
-    monkeypatch.setattr(A, "unapply", lambda conn, gen, *, dry_run, cluster_key=None: original(
-        conn, gen, dry_run=dry_run, cluster_key=cluster_key, unmerge=unmerge_or_crash))
+    monkeypatch.setattr(A, "unapply", lambda conn, gen, **kw: original(
+        conn, gen, **kw, unmerge=unmerge_or_crash))
     page = tmp_path / "step_summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
     with pytest.raises(RuntimeError, match="statement timeout"):
@@ -1744,19 +1696,36 @@ def test_an_unapply_that_crashes_mid_run_still_publishes_what_it_undid(
     body = json.loads((tmp_path / "unapply.json").read_text())
     assert [(g["cluster_key"], g["outcome"]) for g in body["groups"]] == [
         (20, "undone"), (10, "aborted")]
-    assert body["counts"]["undone"] == 1 and body["generation_stamp"] == "written"
+    assert body["counts"]["undone"] == 1
     assert body["aborted"].startswith("stopped at group 10: RuntimeError")
     text = page.read_text()
     assert "**Aborted:**" in text and "WERE undone" in text and db.closed
 
 
-def test_an_empty_cluster_key_never_widens_unapply_to_the_generation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("args, error", [
+    (f"generation={GEN},dry_run=0,cluster_key=", "cluster_key= is empty"),
+    (f"generation={GEN},dry_run=0,since=", "since= is empty"),
+    ("dry_run=0,cluster_key=10", "cluster_key= needs generation="),
+    ("dry_run=0", "unapply needs"),
+    ("dry_run=0,since=yesterday", "ISO time"),
+    ("dry_run=0,reapply=1", "unknown arg"),
+])
+def test_the_lane_never_widens_an_unapply_selection(tmp_path: Path, args: str,
+                                                     error: str) -> None:
     db = FakeDb()
     _applied_two(db)
-    with pytest.raises(SystemExit, match="cluster_key= is empty"):
-        A.run_unapply(_factory(db), lane.parse_kv_args(
-            f"generation={GEN},dry_run=0,cluster_key="), tmp_path)
-    assert db.unapplied == [] and all(r["undone_at"] is None for r in db.ledger)
+    with pytest.raises(SystemExit, match=error):
+        A.run_unapply(_factory(db), lane.parse_kv_args(args), tmp_path)
+    assert all(r["undone_at"] is None for r in db.ledger)
+
+
+def test_the_lane_unapplies_by_time_window(tmp_path: Path) -> None:
+    db = FakeDb()
+    _applied_two(db)
+    out = A.run_unapply(_factory(db), {"since": "2026-01-01T00:00", "until": "2027-01-01"},
+                        tmp_path)
+    assert out["dry_run"] is True and [g["cluster_key"] for g in out["groups"]] == [20, 10]
+    assert out["since"] == "2026-01-01T00:00:00+00:00"
 
 
 def test_the_lane_run_summary_is_a_lane_summary(tmp_path: Path) -> None:
@@ -1768,18 +1737,14 @@ def test_the_lane_run_summary_is_a_lane_summary(tmp_path: Path) -> None:
     assert summary["ok"] and summary["result"]["counts"]["planned"] == 1
 
 
-def test_the_seeded_switches_leave_a_live_lane_run_inert(tmp_path: Path) -> None:
-    # Migration 558's seed, in shape: OFF, and a scope with a deal type but no area.
+def test_the_seeded_scope_leaves_a_live_lane_run_inert(tmp_path: Path) -> None:
+    # Migration 558's seed, in shape: a scope with a deal type but no area, so OFF.
     db = FakeDb()
-    db.settings[A.ENABLED_SETTING] = False
     db.settings[A.SCOPE_SETTING] = {
         "category_types": ["prodej"], "blocks": None, "listing_ids": None,
-        "all_blocks": False, "max_cluster_size": 8, "max_clusters_per_run": 200}
+        "all_blocks": False, "max_clusters_per_run": 200}
     _pair_group(db, 10, [10, 11], [100, 200])
     before = copy.deepcopy((db.listings, db.properties, db.events))
-    with pytest.raises(SystemExit, match=A.ENABLED_SETTING):
-        A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
-    db.settings[A.ENABLED_SETTING] = True
     with pytest.raises(SystemExit, match="area"):
         A.run_apply(_factory(db), {"generation": GEN, "dry_run": "0"}, tmp_path)
     assert (db.listings, db.properties, db.events) == before and db.ledger == []

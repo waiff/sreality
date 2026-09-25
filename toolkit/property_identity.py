@@ -9,8 +9,8 @@ inline (reusing the recompute job's exact SQL) so there is no stale window.
 
 This module is the single merge chokepoint. Since the 2026-08 "NEW DEDUP" cutoff
 the removed legacy engine orders nothing: merges are operator-ordered via
-`api.property_merge` (`POST /properties/merge`), or — only when
-`app_settings.autodedup_apply_enabled` is on — by the AUTODEDUP apply path
+`api.property_merge` (`POST /properties/merge`), or — only inside the area
+`app_settings.autodedup_apply_scope` names — by the AUTODEDUP apply path
 (`autodedup/apply.py`, source 'autodedup', one merge group per engine group). The
 mechanics stay in one tested place, and every merge is reversible (`unmerge_group`).
 """

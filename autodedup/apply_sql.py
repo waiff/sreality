@@ -1,13 +1,11 @@
 """Every statement the A1 apply path runs (PROGRAM.md E900-E906), as constants.
 
-Reads: the two `app_settings` switches, one generation's groups and members from schema
+Reads: the `app_settings` scope row, one generation's groups and members from schema
 `autodedup`, the member listings' `property_id` and categories and the involved properties
 (with their asset links, and those of every property merged into them) from `public` (the
-same facts the chokepoint itself re-checks), the
-operator's negatives (`verdicts`, `must_not_link`) and the engine's own apply ledger and
-unapplied-generation stamps. NOTHING here reads
-`public.property_merge_events` (D7) — the one statement that names it is a write-only stamp
-scoped to a merge group this path just created.
+same facts the chokepoint itself re-checks), the operator's negatives (`verdicts`,
+`must_not_link`) and the engine's own apply ledger. NOTHING here reads or writes
+`public.property_merge_events` (D7): only the chokepoint writes it.
 
 Every nullable parameter carries an explicit cast: psycopg sends no type OID for a Python
 `None`, so an uncast NULL fails Parse with 42P18.
@@ -15,8 +13,9 @@ Every nullable parameter carries an explicit cast: psycopg sends no type OID for
 
 from __future__ import annotations
 
-# The operator's two switches (migration 558 seeds both OFF). `public.app_settings`, not
-# `autodedup.settings`: /settings edits the former, and a kill switch must be reachable there.
+# The rollout control, the scope row (migration 558 seeds it with no area: OFF).
+# `public.app_settings`, not `autodedup.settings`: /settings edits the former, and the control
+# that stops merges must be reachable there.
 SETTING_SQL = """
 select s.value
   from public.app_settings s
@@ -141,8 +140,8 @@ select v.cluster_key, v.verdict, v.generation, v.member_ids, v.decided_by, v.dec
 # (restored since, by `unapply` or by someone else) and a chokepoint refusal of this group.
 # `undone_by` tells the two restorers apart: only `unapply`'s own stamp is the engine's undo.
 LEDGER_HISTORY_SQL = """
-select a.generation, a.cluster_key, a.survivor_property_id, a.retired_property_id,
-       a.outcome, a.undone_at is not null as undone, a.undone_by
+select a.generation, a.cluster_key, a.retired_property_id, a.outcome,
+       a.undone_at is not null as undone, a.undone_by
   from autodedup.applied_merges a
  where not a.dry_run
    and a.outcome in ('applied', 'refused')
@@ -199,28 +198,25 @@ insert into autodedup.applied_merges (
 )
 """
 
-# E902: WRITE-ONLY, and only rows of a group this run created in the same transaction.
-STAMP_GENERATION_SQL = """
-update public.property_merge_events
-   set generation = %(stamp)s::text
- where merge_group_id = %(merge_group_id)s::uuid
-   and generation is null
-"""
-
-# Newest-first, so a generation is undone in the reverse of the order it was applied. Every
-# row of a group carries the same survivor, member set and plan (with the property each moved
-# listing sat on when it merged, so a dry run can tell what `unmerge_group` would move back)
-# and the same `applied_at`: now() of the group's transaction, the chokepoint's `merged_at`.
+# Newest-first, so groups are undone in the reverse of the order they were applied, picked by
+# generation (and cluster_key), apply run and time window: every selector given must hold. Every
+# row of a group carries the same generation, run, survivor, member set and plan (with the
+# property each moved listing sat on when it merged, so a dry run can tell what `unmerge_group`
+# would move back) and the same `applied_at`: now() of the group's transaction, the
+# chokepoint's `merged_at`.
 UNAPPLY_TARGETS_SQL = """
-select a.merge_group_id::text, a.cluster_key, max(a.survivor_property_id),
+select a.merge_group_id::text, max(a.generation), a.cluster_key, max(a.survivor_property_id),
        array_agg(a.retired_property_id order by a.id), max(a.id), max(a.member_ids),
        (array_agg(a.plan_json order by a.id))[1], min(a.applied_at)
   from autodedup.applied_merges a
- where a.generation = %(generation)s::text
-   and not a.dry_run
+ where not a.dry_run
    and a.outcome = 'applied'
    and a.undone_at is null
+   and (%(generation)s::text is null or a.generation = %(generation)s::text)
    and (%(cluster_key)s::bigint is null or a.cluster_key = %(cluster_key)s::bigint)
+   and (%(run)s::text is null or a.run_id = %(run)s::text)
+   and (%(since)s::timestamptz is null or a.applied_at >= %(since)s::timestamptz)
+   and (%(until)s::timestamptz is null or a.applied_at < %(until)s::timestamptz)
  group by a.merge_group_id, a.cluster_key
  order by max(a.id) desc
 """
@@ -255,28 +251,4 @@ update autodedup.applied_merges
    and not dry_run
    and outcome = 'applied'
    and undone_at is null
-"""
-
-# E905: a WHOLE-generation `unapply` stamps the generation first, and every later plan of it
-# refuses every group — the ones it undid and the ones it never reached (deferred under the
-# run cap, skipped for a transient reason) — until an apply dispatched with `reapply=1`
-# releases the stamp. An unapply scoped to one `cluster_key` writes no stamp.
-UNAPPLIED_GENERATION_SQL = """
-select u.id, u.undone_by, u.unapplied_at, u.released_at is not null as released
-  from autodedup.unapplied_generations u
- where u.generation = %(generation)s::text
- order by u.id
-"""
-
-STAMP_UNAPPLIED_SQL = """
-insert into autodedup.unapplied_generations (generation, run_id, undone_by)
-values (%(generation)s::text, %(run_id)s::text, %(undone_by)s::text)
-"""
-
-RELEASE_UNAPPLIED_SQL = """
-update autodedup.unapplied_generations
-   set released_at = now(),
-       released_by = %(released_by)s::text
- where id = any(%(ids)s::bigint[])
-   and released_at is null
 """

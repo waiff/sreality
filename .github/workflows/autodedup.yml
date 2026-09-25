@@ -311,54 +311,51 @@ name: "AUTODEDUP: engine lane"
 #             carries (exit 2, nothing written) rather than reporting a green run that
 #             changed nothing. This run does NOT add a ledger row of its own.
 #
-#   apply   - A1. DRY RUN BY DEFAULT: plans one generation's groups into production merges
-#             and writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json.
-#             Per group it names the survivor (the one asset-linked property if exactly one
-#             is linked; else the property with the most listings, a tie going to the oldest
-#             first_seen_at, then the lowest id) and the properties that would retire into
-#             it, or records why the group is refused. Every check reads
-#             EVERY listing the merge would put on the survivor, not only the members: a
-#             member with no property yet, a property not active, oversize (the property it
-#             would build), an operator negative (a pair verdict or must-not-link with both
-#             sides in it, a group verdict with its whole set in it), mixed deal types or
-#             incompatible categories (the chokepoint's own helper), a listing outside the
-#             scope, two properties the operator asset-linked (asset_linked_units), a
-#             property the engine split across two groups, a property carrying a listing no
-#             group holds (unless this engine already merged it there with a member), a
-#             chokepoint refusal on an earlier run, listings of an engine merge the operator
-#             took apart, or a property this engine merged once that is active again. A
-#             generation unapplied as a whole applies NO group until a run passes reapply=1
-#             (a live one releases it for good). A group already on one property that an
-#             operator negative covers is REPORTED (ruled_different_after_merge, with the
-#             unapply args when the engine made that merge), never acted on. Real-time lane
-#             generations (rt...) are refused. `dry_run=0`
-#             merges for real through toolkit.property_identity.merge_properties (source
-#             'autodedup', ONE merge group per engine group) ONLY when
-#             app_settings.autodedup_apply_enabled is true (seeded false by migration 558,
-#             edited on /settings) - re-read before every group, so flipping it off stops a
-#             run between two groups - and only inside app_settings.autodedup_apply_scope,
+#   apply   - A1. DRY RUN BY DEFAULT: plans one generation's groups into production merges and
+#             writes ONLY autodedup.applied_merges (migration 558) plus out/apply.json. Per
+#             group it names the survivor (the one asset-linked property if exactly one is
+#             linked; else the property with the most listings, a tie going to the oldest
+#             first_seen_at, then the lowest id) and the properties that would retire into it,
+#             or records why the group is refused. Every check reads EVERY listing the merge
+#             would put on the survivor, not only the members: a member with no property yet,
+#             a property not active, an operator negative (a pair verdict or must-not-link
+#             with both sides in it, a group verdict with its whole set in it), mixed deal
+#             types or incompatible categories (the chokepoint's own helper), a listing
+#             outside the scope, two properties the operator asset-linked
+#             (asset_linked_units), a property the engine split across two groups, a property
+#             carrying a listing no group holds (unless this engine already merged it there
+#             with a member), a chokepoint refusal on an earlier run, listings of an engine
+#             merge the operator took apart, or a property this engine merged once that is
+#             active again. Group size is capped by the engine alone, when it builds the
+#             group. A group already on one property that an operator negative covers is
+#             REPORTED (ruled_different_after_merge, with the unapply args when the engine
+#             made that merge), never acted on. Real-time lane generations (rt...) are
+#             refused. `dry_run=0` merges for real through
+#             toolkit.property_identity.merge_properties (source 'autodedup', ONE merge group
+#             per engine group) ONLY inside app_settings.autodedup_apply_scope, the ONE
+#             rollout control (seeded by migration 558 with no area, edited on /settings),
 #             which must ITSELF name category_types and an area (blocks, listing_ids or
-#             all_blocks=true; a dispatch cannot supply them). Inside each group's own
-#             transaction the properties are locked and every check runs again over the
-#             locked rows; a change since the plan skips the group. A crash mid-run still
-#             writes out/apply.json and the step summary with what DID merge. An empty dry_run= is a dry run. The run's own scope args
-#             can NARROW that row, never widen it; on a dry run they replace it key by key.
-#             At most max_clusters_per_run groups per run (default 200), in cluster_key order.
+#             all_blocks=true; a dispatch cannot supply them) - re-read before every group, so
+#             emptying its area stops a run between two groups. Inside each group's own
+#             transaction the properties are locked and every check runs again over the locked
+#             rows; a change since the plan skips the group. A crash mid-run still writes
+#             out/apply.json and the step summary with what DID merge. An empty dry_run= is a
+#             dry run. The run's own scope args can NARROW that row, never widen it; on a dry
+#             run they replace it key by key. At most max_clusters_per_run groups per run
+#             (default 200), in cluster_key order.
 #
-#   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group one generation applied,
-#             newest first. `dry_run=0` undoes them through unmerge_group in that order and
-#             marks them undone in autodedup.applied_merges; `cluster_key=` undoes one group.
-#             NOT gated by autodedup_apply_enabled - undo is the way back. Without
-#             cluster_key it first STAMPS the generation: none of its groups (undone or never
-#             reached) applies again until an apply passes reapply=1; with cluster_key only
-#             that group stays out. A later generation may merge the same listings. A group a
-#             later engine merge still builds on (more listings merged onto its survivor, or
-#             its survivor retired) is skipped and names the merge to undo first; a group
-#             taken apart outside the engine (its survivor merged on by another merge, or
-#             nothing of it left to move back) is skipped naming nothing - the dry run reports
-#             each group as the live run would treat it; a group the operator already undid is
-#             noted as undone by someone else, and its listings stay apart in every later
-#             generation's merges.
+#   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group a generation, an apply run
+#             (run=) or a time window (since= / until=) applied, newest first. `dry_run=0`
+#             undoes them through unmerge_group in that order and marks them undone in
+#             autodedup.applied_merges; `cluster_key=` (with generation=) undoes one group.
+#             NOT gated by the scope - undo is the way back - and an undone group may merge
+#             again on a later apply. A group a later engine merge still builds on (more
+#             listings merged onto its survivor, or its survivor retired) is skipped and names
+#             the merge to undo first; a group taken apart outside the engine (its survivor
+#             merged on by another merge, or nothing of it left to move back) is skipped
+#             naming nothing - the dry run reports each group as the live run would treat it;
+#             a group the operator already undid is noted as undone by someone else, and its
+#             listings stay apart in every later generation's merges.
 #
 # Every other mode writes its own ledger row automatically - `running` when it starts, a
 # terminal status plus its summary, metrics and this run's URL when it ends. A database
@@ -412,11 +409,11 @@ name: "AUTODEDUP: engine lane"
 # population (frozen, the default, or artifact); rt_equivalence accepts generation (default
 # rt), batch (REQUIRED - the batch generation to compare against) and tol (the score
 # tolerance, default 1e-6); apply accepts generation (REQUIRED), dry_run (1, the default, or
-# 0), reapply (0, the default, or 1: release a whole-generation unapply) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=obec:563510
-# cast_obce:490245`), listing_ids (SPACE-separated), all_blocks, max_cluster_size and
-# max_clusters_per_run - separate args, not one JSON `scope=`, because this workflow's
-# charset check refuses braces and quotes; unapply accepts generation (REQUIRED), dry_run and
-# cluster_key.
+# 0) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=town:563510
+# quarter:490245`), listing_ids (SPACE-separated), all_blocks and max_clusters_per_run -
+# separate args, not one JSON `scope=`, because this workflow's charset check refuses braces
+# and quotes; unapply accepts dry_run and at least one of generation (with cluster_key), run
+# and since / until (ISO times, e.g. `since=2026-09-25T08:00Z`).
 #
 # Every mode but `judge` costs nothing but GitHub minutes and database time; `judge` spends
 # real money, capped by its own `max_usd`. out/ is uploaded on every outcome; out/summary.json
@@ -426,7 +423,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, switch on) one generation's production merges; unapply = undo them."
+        description: "Which lane mode to run (validated in Python). census = the read-only region census; probes = the corpus-wide probes; export = the gzipped cohort artifact; score = one engine pass persisted into schema autodedup; labels = the operator's own verdicts as a label artifact; judge = the paid LLM judge over a sampled engine pass; record = one retroactive progress-ledger row, or with id=<n> a correction to an existing one; apply = plan (dry_run=1, default) or write (dry_run=0, inside the scope row) one generation's production merges; unapply = undo them."
         required: true
         default: "census"
         type: string

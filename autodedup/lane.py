@@ -159,8 +159,8 @@ ITERATION_META: dict[str, dict[str, Any]] = {
             "One generation's groups planned into production merges - survivor = the one "
             "asset-linked property if exactly one is linked, else the one with the most "
             "listings, then the oldest first_seen_at, then the lowest id; every refusal "
-            "recorded with its reason - and, only when "
-            "autodedup_apply_enabled is on and dry_run=0, written through merge_properties "
+            "recorded with its reason - and, only when dry_run=0 and inside the "
+            "autodedup_apply_scope row, written through merge_properties "
             "with source 'autodedup' and one merge group per engine group."
         ),
         "tools": [
@@ -170,12 +170,12 @@ ITERATION_META: dict[str, dict[str, Any]] = {
     },
     "unapply": {
         "wave": "A1",
-        "title": "Undo a generation's merges",
+        "title": "Undo the engine's merges",
         "approach": (
-            "Every live merge group one generation applied, undone newest-first through "
-            "unmerge_group and marked undone in autodedup.applied_merges - a group a later "
-            "engine merge builds on waits for that one - and, undone as a whole, the "
-            "generation stamped so none of it re-applies until reapply=1; dry_run=1 lists them."
+            "Every live merge group one generation, one apply run or one time window applied, "
+            "undone newest-first through unmerge_group and marked undone in "
+            "autodedup.applied_merges - a group a later engine merge builds on waits for that "
+            "one; dry_run=1 lists them."
         ),
         "tools": [
             "autodedup.apply", "toolkit.property_identity", "autodedup.lane", "GitHub Actions",

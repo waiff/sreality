@@ -3,23 +3,25 @@
     python3 -m autodedup.lane --mode apply   --args "generation=g12" --out out/
     python3 -m autodedup.lane --mode apply   --args "generation=g12,dry_run=0" --out out/
     python3 -m autodedup.lane --mode unapply --args "generation=g12,dry_run=0" --out out/
+    python3 -m autodedup.lane --mode unapply --args "since=2026-09-25T08:00Z" --out out/
 
 `plan_apply` reads a generation's groups and, per group, names the survivor and the properties
 that would retire into it — or the reasons the group is refused (E903). `apply_plan` records
 that plan (dry run) or executes it through `toolkit.property_identity.merge_properties`, one
 merge group per engine group (E901), so `unmerge_group` undoes a whole group and `unapply`
-undoes a generation newest-first. Nothing here decides anything the engine did not: the
-groups are read as stored, and every refusal only removes a group from the plan.
+undoes groups newest-first, picked by generation, run or time window. Nothing here decides
+anything the engine did not: the groups are read as stored, and every refusal only removes a
+group from the plan.
 
-DARK THREE WAYS (E904). A dry run is the default and writes only `autodedup.applied_merges`.
-A live run needs `app_settings.autodedup_apply_enabled = true` — re-read before EVERY group
-(E39), so flipping it off on /settings stops a run between two groups — and a live scope
-(`app_settings.autodedup_apply_scope`) that names its deal types and its area; a run's own
-arguments can narrow that scope and never widen it. Absent rows mean OFF.
+THE SCOPE ROW IS THE ONE ROLLOUT CONTROL (E904). A dry run is the default and writes only
+`autodedup.applied_merges`. A live run needs `app_settings.autodedup_apply_scope` to name its
+deal types and its area; a row that is absent or names no area merges nothing. It is re-read
+before EVERY group (E39), so emptying its area on /settings stops a run between two groups, and
+a run's own arguments can narrow it and never widen it.
 
-D7 holds: nothing here reads `property_merge_events`. The apply path's own ledger is the only
-history it consults, and its one touch of the production ledger is a write-only stamp on rows
-of a merge group it created in the same transaction (E902).
+D7 holds: nothing here reads `property_merge_events`, and only the chokepoint writes it
+(`source='autodedup'` says who merged). The apply path's own ledger is the only history it
+consults.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ import os
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -40,10 +42,8 @@ from autodedup.ui_sql import NEGATIVE_VERDICTS
 from toolkit.property_identity import MergeError, merge_properties, unmerge_group
 from toolkit.room_taxonomy import category_main_compatible
 
-ENABLED_SETTING: str = "autodedup_apply_enabled"
 SCOPE_SETTING: str = "autodedup_apply_scope"
 MERGE_SOURCE: str = "autodedup"
-STAMP_PREFIX: str = "autodedup:"
 UNAPPLY_BY_PREFIX: str = "autodedup-unapply:"
 # `undone_by` on a ledger row whose merge someone else had already undone when `unapply` came
 # to it: the engine records that the merge no longer stands, never that it undid it (E905).
@@ -51,29 +51,25 @@ EXTERNAL_UNDO: str = "external"
 # `properties.merged_at` (the chokepoint) and the ledger's `applied_at` are both now() of one
 # group's transaction; a wider gap is another merge of the same pair, after an undo (E905).
 SAME_MERGE_TOLERANCE: timedelta = timedelta(seconds=1)
-DEFAULT_MAX_CLUSTER_SIZE: int = 8
 DEFAULT_MAX_CLUSTERS_PER_RUN: int = 200
 SUMMARY_LIST_CAP: int = 200
 ID_CHUNK: int = 5000
 
 SCOPE_KEYS: tuple[str, ...] = (
-    "category_types", "blocks", "listing_ids", "all_blocks", "max_cluster_size",
-    "max_clusters_per_run",
+    "category_types", "blocks", "listing_ids", "all_blocks", "max_clusters_per_run",
 )
-APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "reapply", *SCOPE_KEYS})
-UNAPPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "cluster_key"})
+APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", *SCOPE_KEYS})
+# What `unapply` selects by: a generation (and one of its groups), a run, a time window.
+UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since", "until")
+UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", *UNAPPLY_SELECTORS})
 
-# The engine's block key is grain-prefixed (`o` obec, `c` cast obce); the rt lane's scope
-# spells the same blocks `obec:` / `cast_obce:` and the export lane `town:` / `quarter:`.
-GRAIN_ALIASES: dict[str, str] = {
-    "o": "o", "obec": "o", "town": "o",
-    "c": "c", "cast_obce": "c", "quarter": "c",
-}
+# The engine's block grain (`o` obec, `c` cast obce), spelled as the export lane spells a
+# block: `town:<code>` / `quarter:<code>` is the one spelling a scope takes.
+GRAINS: dict[str, str] = {"o": "town", "c": "quarter"}
 
 # E903 — why a group is refused. Order is the order they are checked and reported in.
 SKIP_UNATTACHED = "unattached_member"
 SKIP_INACTIVE_PROPERTY = "property_not_active"
-SKIP_OVERSIZE = "oversize"
 SKIP_CLUSTER_VERDICT = "operator_group_verdict"
 SKIP_PAIR_VERDICT = "operator_pair_verdict"
 SKIP_MUST_NOT_LINK = "must_not_link"
@@ -87,7 +83,6 @@ SKIP_SPANS_GROUPS = "property_spans_groups"
 SKIP_CARRIES_UNGROUPED = "carries_ungrouped_listings"
 SKIP_REFUSED_BEFORE = "refused_at_chokepoint_before"
 SKIP_RESTORED_ELSEWHERE = "restored_outside_engine"
-SKIP_GENERATION_UNAPPLIED = "generation_unapplied"
 # Re-checked inside the group's own transaction, just before the merge (E903).
 SKIP_CHANGED_SINCE_PLAN = "changed_since_plan"
 # Not a merge at all: a group ALREADY on one property that an operator negative now covers.
@@ -101,7 +96,7 @@ REALTIME_PREFIX: str = "rt"
 
 
 class ApplyRefused(RuntimeError):
-    """A live apply was asked for while a switch or the scope forbids it."""
+    """A live apply was asked for while the scope forbids it."""
 
 
 # An error that stops a live run mid-way carries the run's partial result under this
@@ -121,7 +116,6 @@ class Scope:
     blocks: frozenset[str] | None = None
     listing_ids: frozenset[int] | None = None
     all_blocks: bool = False
-    max_cluster_size: int = DEFAULT_MAX_CLUSTER_SIZE
     max_clusters_per_run: int = DEFAULT_MAX_CLUSTERS_PER_RUN
 
     def to_json(self) -> dict[str, Any]:
@@ -131,16 +125,16 @@ class Scope:
             "blocks": sorted(self.blocks) if self.blocks is not None else None,
             "listing_ids": len(self.listing_ids) if self.listing_ids is not None else None,
             "all_blocks": self.all_blocks,
-            "max_cluster_size": self.max_cluster_size,
             "max_clusters_per_run": self.max_clusters_per_run,
         }
 
     def live_problems(self) -> list[str]:
-        """Why this scope may not drive a LIVE run; empty when it may."""
+        """Why this scope may not drive a LIVE run; empty when it may. An empty list names
+        nothing, like an absent key: no deal types or no area merges nothing (E904)."""
         problems: list[str] = []
-        if self.category_types is None:
+        if not self.category_types:
             problems.append("the live scope names no category_types")
-        if self.blocks is None and self.listing_ids is None and not self.all_blocks:
+        if not self.blocks and not self.listing_ids and not self.all_blocks:
             problems.append(
                 "the live scope names no area: set blocks, listing_ids, or all_blocks=true"
             )
@@ -163,25 +157,18 @@ class Scope:
 
 
 def normalize_block(raw: Any) -> str:
-    """`obec:563510` / `town:563510` / `o563510` -> `o563510`; the same for a cast obce."""
-    text = str(raw).strip().lower()
-    if ":" in text:
-        grain, _, code = text.partition(":")
-    else:
-        grain, code = text[:1], text[1:]
-    letter = GRAIN_ALIASES.get(grain)
-    if letter is None or not code.isdigit():
-        raise ValueError(
-            f"block {raw!r}: expected obec:<code> or cast_obce:<code> (or o<code> / c<code>)"
-        )
-    return f"{letter}{int(code)}"
+    """`town:563510` / `quarter:490245`, the export lane's spelling; anything else is refused."""
+    grain, _, code = str(raw).strip().lower().partition(":")
+    if grain not in GRAINS.values() or not code.isdigit():
+        raise ValueError(f"block {raw!r}: expected town:<code> or quarter:<code>")
+    return f"{grain}:{int(code)}"
 
 
 def block_of(cluster: Mapping[str, Any]) -> str | None:
     grain, key = cluster.get("block_grain"), cluster.get("block_key")
-    if grain is None or key is None:
+    if grain not in GRAINS or key is None:
         return None
-    return f"{grain}{int(key)}"
+    return f"{GRAINS[grain]}:{int(key)}"
 
 
 def _words(value: Any) -> list[str]:
@@ -222,12 +209,11 @@ def scope_fields(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         out["listing_ids"] = frozenset(int(w) for w in _words(raw["listing_ids"]))
     if "all_blocks" in raw:
         out["all_blocks"] = _truthy(raw["all_blocks"])
-    for key, floor in (("max_cluster_size", 2), ("max_clusters_per_run", 1)):
-        if key in raw:
-            value = int(raw[key])
-            if value < floor:
-                raise ValueError(f"{key} must be >= {floor}, got {value}")
-            out[key] = value
+    if "max_clusters_per_run" in raw:
+        value = int(raw["max_clusters_per_run"])
+        if value < 1:
+            raise ValueError(f"max_clusters_per_run must be >= 1, got {value}")
+        out["max_clusters_per_run"] = value
     return out
 
 
@@ -324,9 +310,6 @@ class Plan:
     groups: list[GroupPlan]
     deferred: list[int]
     counts: dict[str, Any]
-    reapply: bool = False
-    # The generation's standing whole-generation unapply stamps (E905), JSON-ready.
-    unapplied: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def to_apply(self) -> list[GroupPlan]:
@@ -375,17 +358,6 @@ def read_setting(conn: Any, key: str) -> Any | None:
     return _json_value(rows[0][0]) if rows else None
 
 
-def apply_enabled(conn: Any) -> bool:
-    """The operator's switch, `scraper.db._app_settings_flag`'s reading of it: an absent row,
-    a NULL or anything but true is OFF."""
-    value = read_setting(conn, ENABLED_SETTING)
-    if isinstance(value, dict):
-        value = value.get("enabled", value.get("value"))
-    if value is True:
-        return True
-    return str(value).strip().lower() in ("true", "1", "on", "yes")
-
-
 def read_scope_setting(conn: Any) -> dict[str, Any] | None:
     value = read_setting(conn, SCOPE_SETTING)
     if value is None:
@@ -393,6 +365,16 @@ def read_scope_setting(conn: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise ValueError(f"{SCOPE_SETTING} must be a JSON object, got {type(value).__name__}")
     return value
+
+
+def scope_closed(conn: Any) -> str | None:
+    """Why the operator's scope row, read now, admits no live merge; None while it does. An
+    absent or malformed row, or one naming no deal types or no area, is closed (E904)."""
+    try:
+        problems = Scope(**scope_fields(read_scope_setting(conn))).live_problems()
+    except ValueError as exc:
+        return str(exc)
+    return "; ".join(problems) or None
 
 
 def _survivor(
@@ -517,6 +499,10 @@ class EngineMerge:
                 "unapply": _unapply_args(self.generation, self.cluster_key)}
 
 
+def _undone_by_engine(undone: Any, undone_by: Any) -> bool:
+    return bool(undone) and str(undone_by or "").startswith(UNAPPLY_BY_PREFIX)
+
+
 def _engine_merges(conn: Any, listing_ids: Iterable[int]) -> list[EngineMerge]:
     ids = sorted(set(listing_ids))
     if not ids:
@@ -524,8 +510,7 @@ def _engine_merges(conn: Any, listing_ids: Iterable[int]) -> list[EngineMerge]:
     return [
         EngineMerge(str(gen), int(key), str(group), int(surv) if surv is not None else None,
                     frozenset(int(x) for x in (members or ())), live=not undone,
-                    undone_by_engine=bool(undone)
-                    and str(undone_by or "").startswith(UNAPPLY_BY_PREFIX))
+                    undone_by_engine=_undone_by_engine(undone, undone_by))
         for gen, key, group, surv, members, undone, undone_by in _rows(
             conn, S.ENGINE_MERGES_SQL, {"listing_ids": ids})
     ]
@@ -632,18 +617,8 @@ def _engine_vouched(
     return vouched
 
 
-def _unapplied_stamps(conn: Any, generation: str) -> list[dict[str, Any]]:
-    return [
-        {"id": int(sid), "undone_by": str(by), "released": bool(released),
-         "unapplied_at": at.isoformat() if isinstance(at, datetime) else at}
-        for sid, by, at, released in _rows(conn, S.UNAPPLIED_GENERATION_SQL,
-                                            {"generation": generation})
-    ]
-
-
-def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = False) -> Plan:
-    """Read-only: which groups of `generation` would merge, into what, and which are refused.
-    `reapply` plans past a whole-generation `unapply` stamp, as a release of it would (E905)."""
+def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
+    """Read-only: which groups of `generation` would merge, into what, and which are refused."""
     if is_realtime_generation(generation):
         raise ValueError(
             f"generation {generation!r} belongs to the real-time lane: it is rewritten while a "
@@ -720,22 +695,18 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
             if not merge.undone_by_engine:
                 standing_by_listing.setdefault(lid, []).append(merge)
     refused_keys: set[int] = set()
-    applied_by_retired: dict[int, list[dict[str, Any]]] = {}
-    stamps = _unapplied_stamps(conn, generation)
-    standing_stamps = [st for st in stamps if not st["released"]]
-    # The engine undos a released whole-generation stamp covered no longer refuse their groups.
-    released = {st["undone_by"] for st in stamps if st["released"] or reapply}
+    # Properties this engine retired whose merge `unapply` did not undo: active again, someone
+    # else restored them.
+    restored: set[int] = set()
     if candidates:
-        for gen, key, _surv, retired, outcome, undone, undone_by in _rows(
+        for gen, key, retired, outcome, undone, undone_by in _rows(
                 conn, S.LEDGER_HISTORY_SQL, {
                     "generation": generation, "property_ids": sorted(all_props)}):
             if outcome == "refused" and gen == generation:
                 refused_keys.add(int(key))
-            elif outcome == "applied" and retired is not None:
-                by_engine = bool(undone) and str(undone_by or "").startswith(UNAPPLY_BY_PREFIX)
-                applied_by_retired.setdefault(int(retired), []).append(
-                    {"generation": gen, "undone_by_engine": by_engine,
-                     "undone_by": str(undone_by or "")})
+            elif (outcome == "applied" and retired is not None
+                  and not _undone_by_engine(undone, undone_by)):
+                restored.add(int(retired))
 
     groups: list[GroupPlan] = []
     for cluster, members in settled:
@@ -773,14 +744,11 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
             reasons.append(SKIP_INACTIVE_PROPERTY)
             detail["inactive_property_ids"] = inactive
         # A merge moves EVERY listing of a property, so every check below reads the whole
-        # set it would put on the survivor, and the size cap bounds the property it builds.
+        # set it would put on the survivor.
         extended = set(member_set)
         for pid in property_ids:
             extended |= children.get(pid, set())
         carried = extended - member_set
-        if max(int(cluster["size"] or 0), len(members), len(extended)) > scope.max_cluster_size:
-            reasons.append(SKIP_OVERSIZE)
-            detail["listings_after_merge"] = len(extended)
 
         hit_reasons, hit_detail = negatives.hits(extended, key)
         reasons += hit_reasons
@@ -812,10 +780,9 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
         # else took apart is the operator's word on its LISTINGS: a merge that would re-unite
         # them is refused whatever property they sit on now. A property this engine retired
         # that is active again was restored by someone: never re-merged on the engine's own
-        # authority. Only the engine's own undo releases a property to a later generation; a
+        # authority. Only the engine's own undo releases a property, to any later apply; a
         # merge the operator undid first stays restored-elsewhere even once `unapply` has
-        # noted it (E905). After `unapply` the SAME generation never re-applies: a group it
-        # undid, and — after a whole-generation unapply — every group, until `reapply=1`.
+        # noted it (E905).
         if key in refused_keys:
             reasons.append(SKIP_REFUSED_BEFORE)
         separated = _separated_merges(
@@ -824,18 +791,8 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
         if separated:
             reasons.append(SKIP_RESTORED_ELSEWHERE)
             detail["separated_engine_merges"] = separated[:20]
-        for pid in property_ids:
-            if pid in inactive:
-                continue
-            for row in applied_by_retired.get(pid, ()):
-                if not row["undone_by_engine"]:
-                    reasons.append(SKIP_RESTORED_ELSEWHERE)
-                elif row["generation"] == generation and row["undone_by"] not in released:
-                    reasons.append(SKIP_GENERATION_UNAPPLIED)
-        if standing_stamps and not reapply:
-            reasons.append(SKIP_GENERATION_UNAPPLIED)
-            detail["generation_unapplied"] = {
-                "unapplied_at": standing_stamps[-1]["unapplied_at"], "release": "reapply=1"}
+        if any(pid in restored for pid in property_ids if pid not in inactive):
+            reasons.append(SKIP_RESTORED_ELSEWHERE)
         reasons = list(dict.fromkeys(reasons))
 
         survivor: int | None = None
@@ -864,8 +821,6 @@ def plan_apply(conn: Any, generation: str, scope: Scope, *, reapply: bool = Fals
         groups=groups,
         deferred=deferred,
         counts={**dict(counts), "skipped_by_reason": dict(sorted(by_reason.items()))},
-        reapply=reapply,
-        unapplied=standing_stamps,
     )
 
 
@@ -1035,11 +990,6 @@ def apply_plan(
     group, so a refusal anywhere in a group rolls the whole group back."""
     run_id = run_id or new_run_id()
     if not dry_run:
-        if not apply_enabled(conn):
-            raise ApplyRefused(
-                f"app_settings.{ENABLED_SETTING} is not true: a live apply is refused "
-                "(a dry run is still allowed)"
-            )
         problems = plan.scope.live_problems()
         if problems:
             raise ApplyRefused("; ".join(problems))
@@ -1050,8 +1000,6 @@ def apply_plan(
         "generation": gen,
         "dry_run": dry_run,
         "scope": plan.scope.to_json(),
-        "reapply": plan.reapply,
-        "generation_unapplied": list(plan.unapplied),
         "counts": dict(plan.counts),
         "planned": [_brief(g) for g in plan.to_apply],
         "skipped": [_brief(g, reasons=g.reasons) for g in plan.skipped
@@ -1075,12 +1023,6 @@ def apply_plan(
         return result
 
     with conn.transaction():
-        if plan.reapply and plan.unapplied:
-            # E905: the operator's explicit `reapply=1` releases the whole-generation stamp the
-            # plan read, for this run and every later one.
-            _exec(conn, S.RELEASE_UNAPPLIED_SQL, {
-                "ids": [st["id"] for st in plan.unapplied], "released_by": run_id})
-            result["released_unapply"] = [st["id"] for st in plan.unapplied]
         _exec_many(conn, S.LEDGER_INSERT_SQL, skipped_rows)
 
     counts = result["counts"]
@@ -1090,9 +1032,11 @@ def apply_plan(
     try:
         for index, group in enumerate(todo):
             at = index
-            # E39: read fresh before every group, so the operator's switch stops a run mid-way.
-            if not apply_enabled(conn):
-                result["stopped"] = f"{ENABLED_SETTING} turned off during the run"
+            # E39: the scope row read fresh before every group, so emptying its area stops a
+            # run mid-way.
+            closed = scope_closed(conn)
+            if closed:
+                result["stopped"] = f"app_settings.{SCOPE_SETTING} admits no live merge: {closed}"
                 counts["not_attempted"] = len(todo) - index
                 break
             group_id = str(uuid.uuid4())
@@ -1120,8 +1064,6 @@ def apply_plan(
                             merge_group_id=group_id,
                         )
                         moved.append(int((res.get("data") or {}).get("listings_moved") or 0))
-                    _exec(conn, S.STAMP_GENERATION_SQL,
-                          {"stamp": f"{STAMP_PREFIX}{gen}", "merge_group_id": group_id})
                     _exec_many(conn, S.LEDGER_INSERT_SQL, _rows_for(
                         run_id, gen, group, dry_run=False, outcome="applied",
                         merge_group_id=group_id, moved=moved))
@@ -1337,32 +1279,41 @@ def _undo_block(
 
 def unapply(
     conn: Any,
-    generation: str,
+    generation: str | None,
     *,
     dry_run: bool,
     cluster_key: int | None = None,
+    run: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
     unmerge: Callable[..., dict[str, Any]] = unmerge_group,
     run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Undo a generation's live merges newest-first (or one group), each through
-    `unmerge_group`; `dry_run=True` only lists them. `dry_run` has no default: this writes to
-    production. NOT gated by `autodedup_apply_enabled`: undo is the way back. A group someone
-    else already undid is noted undone, as THEIR undo, wherever its survivor has gone since. A
+    """Undo the live merge groups a generation (or one of its groups), an apply run (`run`) or
+    a time window (`since` <= applied_at < `until`) made — every selector given must hold —
+    newest-first, each through `unmerge_group`; `dry_run=True` only lists them. `dry_run` has
+    no default: this writes to production. NOT gated by the scope: undo is the way back, and
+    an undone group is free to merge again on a later apply. A group someone else already
+    undid is noted undone, as THEIR undo, wherever its survivor has gone since. A
     group a later engine merge still builds on (more listings merged onto its survivor, by a
     merge whose own undo would not be refused), or whose survivor a later engine merge that
     still stands retired, is skipped with the reason and the merge to undo first; one taken
     apart outside the engine, or with nothing left to move back, is skipped naming nothing —
     and the dry run says so from the same reads. A merge someone else had already partly taken
     apart is undone but recorded as THEIR undo (`undone_by='external'`), so the listings they
-    separated stay apart in every later generation. Without `cluster_key` the generation is
-    STAMPED unapplied first, so none of its groups applies again until `reapply=1` (E905)."""
+    separated stay apart in every later generation (E905)."""
+    if generation is None and cluster_key is not None:
+        raise ValueError("cluster_key selects a group of one generation: name the generation")
+    if generation is None and run is None and since is None and until is None:
+        raise ValueError("unapply needs a generation, a run or a time window")
     run_id = run_id or new_run_id()
     targets = []
-    for group, key, surv, retired, last, members, plan_json, applied_at in _rows(
-            conn, S.UNAPPLY_TARGETS_SQL, {"generation": generation, "cluster_key": cluster_key}):
+    for group, gen, key, surv, retired, last, members, plan_json, applied_at in _rows(
+            conn, S.UNAPPLY_TARGETS_SQL, {"generation": generation, "cluster_key": cluster_key,
+                                          "run": run, "since": since, "until": until}):
         retired_ids = [int(r) for r in (retired or []) if r is not None]
         targets.append({
-            "merge_group_id": str(group), "cluster_key": int(key),
+            "merge_group_id": str(group), "generation": str(gen), "cluster_key": int(key),
             "survivor_id": int(surv) if surv is not None else None,
             "retired_ids": retired_ids,
             "member_ids": sorted(int(x) for x in (members or ())), "last_id": int(last),
@@ -1371,8 +1322,9 @@ def unapply(
                            else applied_at)})
     result: dict[str, Any] = {
         "run_id": run_id, "generation": generation, "dry_run": dry_run,
-        "cluster_key": cluster_key, "groups": targets,
-        "generation_stamp": None,
+        "cluster_key": cluster_key, "run": run,
+        "since": since.isoformat() if since else None,
+        "until": until.isoformat() if until else None, "groups": targets,
         "counts": {"groups": len(targets), "undone": 0, "already_undone": 0, "blocked": 0,
                    "taken_apart_before": 0, "listings_moved_back": 0, "conflicts": 0},
     }
@@ -1398,11 +1350,9 @@ def unapply(
             if state["taken"] or state["conflicts"]:
                 target.update(taken_apart=state["taken"], conflicts=state["conflicts"])
                 counts["taken_apart_before"] += 1
-        if cluster_key is None:
-            result["generation_stamp"] = "would be written"
         return result
     try:
-        _unapply_live(conn, generation, targets, result, unmerge, run_id)
+        _unapply_live(conn, targets, result, unmerge, run_id)
     except BaseException as exc:
         # A crash or a cancelled job after groups were undone for real: the result rides on
         # the error, so the lane still publishes what WAS undone before re-raising.
@@ -1422,17 +1372,11 @@ def _taken_apart(conn: Any, target: Mapping[str, Any]) -> list[int]:
 
 
 def _unapply_live(
-    conn: Any, generation: str, targets: list[dict[str, Any]], result: dict[str, Any],
+    conn: Any, targets: list[dict[str, Any]], result: dict[str, Any],
     unmerge: Callable[..., dict[str, Any]], run_id: str,
 ) -> None:
     counts = result["counts"]
     undone_by = f"{UNAPPLY_BY_PREFIX}{run_id}"
-    if result["cluster_key"] is None:
-        # FIRST, so a run that stops half-way still leaves no group of it free to re-apply.
-        with conn.transaction():
-            _exec(conn, S.STAMP_UNAPPLIED_SQL, {
-                "generation": generation, "run_id": run_id, "undone_by": undone_by})
-        result["generation_stamp"] = "written"
     for target in targets:
         target["outcome"] = "aborted"
         # Read per group, just before it is undone: an earlier undo in this run may have
@@ -1487,19 +1431,15 @@ def _unapply_live(
 # ------------------------------------------------------------------ lane modes
 
 
-def _flag_arg(args: Mapping[str, str], key: str, *, default: bool) -> bool:
-    raw = (args.get(key) or "").strip()
+def _dry_run_arg(args: Mapping[str, str]) -> bool:
+    """Only an explicit `dry_run=0` (or false/no/off) is live; absent or empty is a dry run."""
+    raw = (args.get("dry_run") or "").strip()
     if not raw:
-        return default
+        return True
     try:
         return _truthy(raw)
     except ValueError as exc:
-        raise SystemExit(f"{key}: {exc}") from exc
-
-
-def _dry_run_arg(args: Mapping[str, str]) -> bool:
-    """Only an explicit `dry_run=0` (or false/no/off) is live; absent or empty is a dry run."""
-    return _flag_arg(args, "dry_run", default=True)
+        raise SystemExit(f"dry_run: {exc}") from exc
 
 
 def _generation_arg(args: Mapping[str, str]) -> str:
@@ -1507,6 +1447,18 @@ def _generation_arg(args: Mapping[str, str]) -> str:
     if not generation:
         raise SystemExit("generation= is required (e.g. generation=g12)")
     return generation
+
+
+def _time_arg(args: Mapping[str, str], key: str) -> datetime | None:
+    raw = (args.get(key) or "").strip()
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{key} must be an ISO time such as 2026-09-25T08:00Z, got {raw!r}") \
+            from exc
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
 
 def _check_args(args: Mapping[str, str], allowed: frozenset[str]) -> None:
@@ -1536,24 +1488,15 @@ def summary_markdown(result: Mapping[str, Any], *, mode: str) -> str:
     """The run's page on GitHub: what was planned, applied or refused, and why."""
     counts = result.get("counts") or {}
     head = "DRY RUN — nothing merged" if result.get("dry_run") else "LIVE"
-    lines = [f"## autodedup {mode} {result.get('generation')} — {head}", ""]
+    picked = result.get("generation") or " ".join(
+        f"{key}={result[key]}" for key in ("run", "since", "until") if result.get(key))
+    lines = [f"## autodedup {mode} {picked} — {head}", ""]
     if result.get("stopped"):
         lines += [f"**Stopped:** {result['stopped']}", ""]
     if result.get("aborted"):
         done = ("the groups marked `undone` below WERE undone" if mode == "unapply"
                 else "the groups listed under `applied` below DID merge")
         lines += [f"**Aborted:** {result['aborted']} - {done}.", ""]
-    stamps = result.get("generation_unapplied") or []
-    if stamps and not result.get("reapply"):
-        lines += [f"**Generation unapplied** (unapply ran on it as a whole, "
-                  f"{stamps[-1].get('unapplied_at')}): none of its groups applies. Dispatch "
-                  "with `reapply=1` to release it.", ""]
-    elif stamps:
-        verb = "would release" if result.get("dry_run") else "released"
-        lines += [f"**`reapply=1`** {verb} the whole-generation unapply of this generation.", ""]
-    if result.get("generation_stamp"):
-        lines += [f"**Whole-generation stamp:** {result['generation_stamp']} - no group of "
-                  "this generation applies again until an apply runs with `reapply=1`.", ""]
     lines += ["| count | n |", "| --- | --- |"]
     lines += [f"| {key} | {value} |" for key, value in counts.items()
               if not isinstance(value, dict)]
@@ -1607,22 +1550,15 @@ def run_apply(
             "this lane (it is rewritten while a plan reads it)"
         )
     dry_run = _dry_run_arg(args)
-    reapply = _flag_arg(args, "reapply", default=False)
     override = {key: args[key] for key in SCOPE_KEYS if key in args}
     out_dir = Path(out_dir)
     conn = conn_factory()
     try:
-        # The switch first: a refused live run costs one query and reads no plan.
-        if not dry_run and not apply_enabled(conn):
-            raise SystemExit(
-                f"a live apply needs app_settings.{ENABLED_SETTING} = true; it is not. "
-                "Run with dry_run=1, or ask the operator to turn it on."
-            )
         try:
             scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
         except ValueError as exc:
             raise SystemExit(f"scope: {exc}") from exc
-        plan = plan_apply(conn, generation, scope, reapply=reapply)
+        plan = plan_apply(conn, generation, scope)
         try:
             result = apply_plan(conn, plan, dry_run)
         except ApplyRefused as exc:
@@ -1652,19 +1588,27 @@ def run_unapply(
     conn_factory: Callable[[], Any], args: dict[str, str], out_dir: Path
 ) -> dict[str, Any]:
     _check_args(args, UNAPPLY_ARGS)
-    generation = _generation_arg(args)
     dry_run = _dry_run_arg(args)
+    for key in UNAPPLY_SELECTORS:
+        if key in args and not (args[key] or "").strip():
+            # Absent narrows nothing; an empty value must never widen a selection.
+            raise SystemExit(f"{key}= is empty; omit it instead")
+    generation = (args.get("generation") or "").strip() or None
+    run = (args.get("run") or "").strip() or None
     raw_key = (args.get("cluster_key") or "").strip()
-    if "cluster_key" in args and not raw_key:
-        # Absent means the whole generation; an empty value must never widen one group to it.
-        raise SystemExit("cluster_key= is empty; omit it to unapply the whole generation")
     try:
         cluster_key = int(raw_key) if raw_key else None
     except ValueError as exc:
         raise SystemExit(f"cluster_key must be an integer, got {raw_key!r}") from exc
+    since, until = _time_arg(args, "since"), _time_arg(args, "until")
+    if cluster_key is not None and generation is None:
+        raise SystemExit("cluster_key= needs generation= (a key names a group of one generation)")
+    if generation is None and run is None and since is None and until is None:
+        raise SystemExit("unapply needs generation=, run=, since= or until= (e.g. generation=g12)")
     conn = conn_factory()
     try:
-        result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key)
+        result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key, run=run,
+                         since=since, until=until)
     except BaseException as exc:
         # A live undo that stops mid-way has undone groups for real: publish them, then fail.
         partial = getattr(exc, PARTIAL_RESULT_ATTR, None)

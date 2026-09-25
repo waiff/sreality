@@ -1192,8 +1192,8 @@ renumber.** Navigate by area:
     **asset-link** grain (migration 224), which links genuinely *different* units in one
     building (a `byt` and its ground-floor `komercni`, a `dum` and its `pozemek`) WITHOUT
     collapsing them into one property.
-    **Who orders a merge today.** The operator — and, only when switched on, the AUTODEDUP
-    apply path below. The operator's path: Browse's `mergeMode` (checkbox
+    **Who orders a merge today.** The operator — and, only inside the area its scope row
+    names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
     multi-select → merge) posts to `POST /properties/merge`, with the ledger and reversal under
     `GET /properties/merges`, `POST /properties/merges/{group}/unmerge` and
     `GET /properties/merged` (`api/property_merge.py`). Labeling / annotation CRUD that the old
@@ -1210,26 +1210,27 @@ renumber.** Navigate by area:
     gives it a home, unmerge is API-only.
     **AUTODEDUP apply path (dark).** Merges may now ALSO be ordered by the AUTODEDUP engine
     (`docs/design/autodedup/PROGRAM.md` E900–E906) — through the same chokepoint, never around
-    it, and only when `app_settings.autodedup_apply_enabled` is on (migration 558 seeds it
-    `false`; the operator flips it on /settings, and flipping it off stops a running apply
-    between two groups). `autodedup/apply.py` (lane modes `apply` / `unapply` in
+    it, and only inside `app_settings.autodedup_apply_scope`, the ONE rollout control: a scope
+    naming no deal types or no area merges nothing (migration 558 seeds it with no area), and
+    it is re-read before every group, so emptying its area on /settings stops a running apply
+    between two groups. `autodedup/apply.py` (lane modes `apply` / `unapply` in
     `.github/workflows/autodedup.yml`) reads one stored generation's groups, picks the survivor
     (the one asset-linked property if exactly one is, else most listings, then oldest
     `first_seen_at`, then lowest id), and calls `merge_properties`
-    with `source='autodedup'` (migration 558 widened `property_merge_events.source`), ONE
-    `merge_group_id` per engine group inside one transaction, so each group is undoable as a
-    unit (`unmerge_group`, or `mode=unapply` for a whole generation newest-first). A dry run is
-    the default and writes only its own ledger, `autodedup.applied_merges`; a live run also
-    needs `app_settings.autodedup_apply_scope` naming deal types and area, re-reads the switch
-    before every group, and refuses — recording why — any group whose merge would unite, across
-    EVERY listing it moves (both properties' full sets, not just the members), an operator
+    with `source='autodedup'` (migration 558 widened `property_merge_events.source`; that is
+    the whole record of who merged), ONE `merge_group_id` per engine group inside one
+    transaction, so each group is undoable as a unit (`unmerge_group`, or `mode=unapply`,
+    newest-first, by generation, run or time window). A dry run is the default and writes only
+    its own ledger, `autodedup.applied_merges`; a live run refuses — recording why — any group
+    whose merge would unite, across EVERY listing it moves (both properties' full sets, not
+    just the members), an operator
     negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
     inside — any superset, under any key, the newest ruling per operator winning), mixed
     categories, a listing outside the scope, two properties carrying an operator **asset link**
     (`properties.asset_id`, "different units in one building, do not collapse" — including one
-    left on a property merged into them, read down `merged_into`), a non-active
-    property, more than `max_cluster_size` listings, a property the engine split across two
-    groups, or a listing no group holds (unless this engine's own live merge already put it
+    left on a property merged into them, read down `merged_into`), a non-active property, a
+    property the engine split across two groups, or a listing no group holds (unless this
+    engine's own live merge already put it
     there with a member). Inside each group's transaction the properties are locked `FOR UPDATE`
     and their listings `FOR SHARE`, and every one of those checks runs again over the locked
     rows before it merges; `rt…` generations are refused. An engine merge the operator took
@@ -1245,13 +1246,11 @@ renumber.** Navigate by area:
     merge — told apart from a later hand re-merge of the same pair by `properties.merged_at`
     against the ledger's `applied_at`, both now() of the group's one transaction) is noted
     undone as theirs wherever its survivor went since; and the dry run reports each group as
-    the live run would treat it; a whole-generation `unapply` stamps the generation
-    (`autodedup.unapplied_generations`) so none of its groups — undone or never reached —
-    applies again until an apply with `reapply=1`. A group already on one
-    property that the operator has since ruled different is reported, never acted on. It stamps
-    `property_merge_events.generation = 'autodedup:<generation>'` write-only and reads nothing
-    from that table. Undo restores listings and pipeline cards; collections, tags and notes stay
-    on the survivor (rule #18: unmerge is best-effort).
+    the live run would treat it; an undone group may merge again on a later apply (undo is a
+    brake, not a ruling). Group size is the engine's own cap alone. A group already on one
+    property that the operator has since ruled different is reported, never acted on. It reads
+    nothing from `property_merge_events`. Undo restores listings and pipeline cards;
+    collections, tags and notes stay on the survivor (rule #18: unmerge is best-effort).
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing
@@ -2406,7 +2405,7 @@ renumber.** Navigate by area:
 ## Broker identity merges — auto-merge and the suppression rail
 
 Unlike property merges (rule #15: operator-ordered, plus the dark AUTODEDUP apply lane that
-runs only while `autodedup_apply_enabled` is on), broker identities DO auto-merge. The nightly
+merges only inside the area `autodedup_apply_scope` names), broker identities DO auto-merge. The nightly
 sweep (`scripts/resolve_brokers.py::_auto_merge`, cron 04:35 UTC) hands the WHOLE identity +
 contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-20 is
 **portal-agnostic and name-gated** — one rule, no per-portal exceptions:

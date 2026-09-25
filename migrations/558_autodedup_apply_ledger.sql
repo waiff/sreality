@@ -9,8 +9,9 @@
 -- production merges through THE chokepoint, `toolkit.property_identity.merge_properties`
 -- (CLAUDE.md rule 15), which already carries operator state (rule 18) and the deal pipeline
 -- (rule 22) onto the survivor. This file creates nothing that runs by itself: the path is DARK
--- until `app_settings.autodedup_apply_enabled` is true AND a run is dispatched with
--- dry_run=0 AND `app_settings.autodedup_apply_scope` names both its deal types and its area.
+-- until a run is dispatched with dry_run=0 AND `app_settings.autodedup_apply_scope`, the ONE
+-- rollout control, names both its deal types and its area: a scope naming no area merges
+-- nothing.
 -- Migration 557 was taken by the sibling real-time lane branch; this is the next free number.
 --
 -- 1. `property_merge_events.source` gains 'autodedup'. Migration 100's inline CHECK allowed
@@ -19,16 +20,20 @@
 --    nothing here ever reads as the legacy engine (rule 15). The constraint is replaced inside
 --    ONE DO block (a single statement, so autocommit apply leaves no window with neither
 --    constraint) as NOT VALID, then validated separately under SHARE UPDATE EXCLUSIVE. Widening
---    a CHECK rejects no existing row: non-destructive.
+--    a CHECK rejects no existing row: non-destructive. Its `generation` column gets a TRUE
+--    comment: migration 475 stamped 'legacy' on EVERY merge row that existed on 2026-09-05,
+--    operator merges included, so it dates a row and never names an engine (the removed
+--    engine's merges are `source = 'auto'`).
 --
 -- 2. `autodedup.applied_merges`: one row per (engine group, retired property) the apply path
 --    planned, applied, refused or skipped, dry runs included (`dry_run`). ONE merge_group_id
---    per engine group (E901), so `unmerge_group` undoes a whole group and `unapply` undoes a
---    generation newest-first. The partial UNIQUE index is the idempotency rail: two live
+--    per engine group (E901), so `unmerge_group` undoes a whole group and `unapply` undoes
+--    groups newest-first. The partial UNIQUE index is the idempotency rail: two live
 --    merges of the same (survivor, retired) pair can never both be recorded. `member_ids`
 --    (GIN-indexed over every applied merge, undone ones included: an engine merge someone
 --    else took apart is the operator's negative on its LISTINGS) is the group's listing set,
---    read back by later plans and by `unapply`'s later-merge guard.
+--    read back by later plans and by `unapply`'s later-merge guard. `unapply` picks groups by
+--    generation, `run_id` or an `applied_at` window, and undoes each as a whole.
 --
 --    WHY NOT `autodedup.merges` (migration 528's reserved ledger). Its grain is one retired
 --    property per group keyed on merge_group_id with a listing PAIR (listing_lo < listing_hi);
@@ -36,21 +41,14 @@
 --    dry runs and refusals as well, and keys idempotency on (survivor, retired). 528's table
 --    stays reserved and empty.
 --
---    READS NOTHING FROM `property_merge_events` (D7): the ledger is the engine's own record.
---    The apply path's one touch of the production ledger is a WRITE-ONLY stamp of
---    `generation = 'autodedup:<generation>'` on rows of merge groups it created itself, inside
---    the same transaction as the merges (E902, which makes E40's non-atomic seam atomic).
+--    READS NOTHING FROM `property_merge_events` (D7): the ledger is the engine's own record,
+--    and the apply path writes nothing there but what the chokepoint writes (`source` says who
+--    merged).
 --
--- 3. `autodedup.unapplied_generations`: one row per WHOLE-generation `unapply` (E905), written
---    before it undoes anything. While a row of a generation stands unreleased, every plan of
---    that generation refuses every group — the ones it undid and the ones it never reached —
---    until an apply dispatched with `reapply=1` releases it (`released_at`). An unapply scoped
---    to one cluster_key writes no row. Same posture as the ledger.
---
--- 4. Two `public.app_settings` rows, the operator's switches, seeded OFF (E904). They live in
---    app_settings, not `autodedup.settings`, because /settings edits app_settings and
---    `PUT /admin/app_settings/{key}` 404s on a key with no row: an off switch the operator
---    cannot reach without SQL is not a kill switch. The `autodedup_apply_` prefix keeps them
+-- 3. One `public.app_settings` row, the scope: the ONE rollout control, seeded with no area,
+--    so OFF (E904). It lives in app_settings, not `autodedup.settings`, because /settings edits
+--    app_settings and `PUT /admin/app_settings/{key}` 404s on a key with no row: a control the
+--    operator cannot reach without SQL is not one. The `autodedup_apply_` prefix keeps it
 --    apart from every other program's keys (528's reason for its own settings table).
 --    `on conflict do nothing`: an operator's value is never overwritten by a re-run.
 --
@@ -98,15 +96,14 @@ alter table public.property_merge_events
 
 comment on column public.property_merge_events.source is
   'Who ordered the merge: ''operator'' (Browse merge mode / POST /properties/merge), '
-  '''autodedup'' (the AUTODEDUP apply path, migration 558, dark unless '
-  'app_settings.autodedup_apply_enabled), ''auto'' (the legacy engine removed in the '
-  '2026-08 NEW DEDUP cutoff; no new rows).';
+  '''autodedup'' (the AUTODEDUP apply path, migration 558, dark until '
+  'app_settings.autodedup_apply_scope names an area), ''auto'' (the legacy engine removed in '
+  'the 2026-08 NEW DEDUP cutoff; no new rows).';
 
 comment on column public.property_merge_events.generation is
-  'Which dedup engine made this merge: ''legacy'' = the pre-2026-08 engine removed in NEW DEDUP '
-  'Wave 0 (backfilled by migration 475); ''autodedup:<generation>'' = the AUTODEDUP apply path '
-  '(migration 558), stamped inside the merge transaction; ''v2'' is reserved for the NEW DEDUP '
-  'rebuild. NULL means an operator merge. No default: a stamp is a fact about who merged.';
+  '''legacy'' = the row existed on 2026-09-05: migration 475 stamped EVERY such row, operator '
+  'merges included. It dates a row and never names who merged; that is source. NULL on every '
+  'later row; nothing writes this column.';
 
 ------------------------------------------------------------------
 -- 2. the apply ledger
@@ -169,60 +166,28 @@ comment on column autodedup.applied_merges.member_ids is
 
 comment on column autodedup.applied_merges.undone_by is
   'Who undid this merge: ''autodedup-unapply:<run_id>'' = the engine''s own unapply, which '
-  'releases the properties to a later generation; ''external'' = someone else had already '
+  'releases the properties to any later apply; ''external'' = someone else had already '
   'undone it when unapply reached it, so the engine never re-unites those listings nor '
   're-merges those properties (E905).';
 
 ------------------------------------------------------------------
--- 3. the whole-generation unapply stamp
-------------------------------------------------------------------
-
-create table if not exists autodedup.unapplied_generations (
-  id           bigserial   primary key,
-  generation   text        not null,
-  run_id       text        not null,
-  undone_by    text        not null,
-  unapplied_at timestamptz not null default now(),
-  released_at  timestamptz,
-  released_by  text
-);
-
-create index if not exists autodedup_unapplied_generations_gen_idx
-  on autodedup.unapplied_generations (generation);
-
-comment on table autodedup.unapplied_generations is
-  'AUTODEDUP A1: one row per whole-generation unapply. While a row stands unreleased, no group '
-  'of that generation applies again; an apply dispatched with reapply=1 releases it (E905).';
-
-alter table autodedup.unapplied_generations enable row level security;
-revoke all on autodedup.unapplied_generations from anon, authenticated;
-revoke all on sequence autodedup.unapplied_generations_id_seq from anon, authenticated;
-
-------------------------------------------------------------------
--- 4. the operator's switches, seeded OFF
+-- 3. the rollout control, seeded OFF (no area)
 ------------------------------------------------------------------
 
 insert into app_settings (key, value, description)
 values
   (
-    'autodedup_apply_enabled',
-    'false'::jsonb,
-    'Lets the duplicate-finding engine MERGE the adverts it groups, in Browse, through the same '
-    'merge the operator uses (notes, tags, collections and pipeline cards move to the '
-    'surviving entry). Off, a run only writes a plan you can read. On, a run still merges only '
-    'when dispatched with dry_run=0 and only inside autodedup_apply_scope. Every merge it makes '
-    'can be undone group by group (lane mode unapply). Turning it off stops a running merge '
-    'between two groups. Set to true to turn it on, false to turn it off.'
-  ),
-  (
     'autodedup_apply_scope',
-    '{"category_types": ["prodej"], "blocks": null, "listing_ids": null, "all_blocks": false, "max_cluster_size": 8, "max_clusters_per_run": 200}'::jsonb,
-    'Where the duplicate-finding engine may merge while autodedup_apply_enabled is on. '
-    'category_types: the deal types (prodej = sales, pronajem = rentals). An AREA is required '
-    'too, or nothing merges: blocks (a list such as ["obec:563510", "cast_obce:490245"]), '
-    'listing_ids (a list of advert ids), or all_blocks true for the whole country. '
-    'max_cluster_size: the largest group it merges. max_clusters_per_run: the most groups one '
-    'run merges. A run can narrow this scope, never widen it.'
+    '{"category_types": ["prodej"], "blocks": null, "listing_ids": null, "all_blocks": false, "max_clusters_per_run": 200}'::jsonb,
+    'Where the duplicate-finding engine may MERGE the adverts it groups, in Browse, through the '
+    'same merge the operator uses (notes, tags, collections and pipeline cards move to the '
+    'surviving entry). This is the one on/off control: with no area named nothing merges, and '
+    'emptying the area stops a running merge between two groups. category_types: the deal '
+    'types (prodej = sales, pronajem = rentals). The AREA: blocks (a list such as '
+    '["town:563510", "quarter:490245"]), listing_ids (a list of advert ids), or all_blocks true '
+    'for the whole country. max_clusters_per_run: the most groups one run merges. A run still '
+    'merges only when dispatched with dry_run=0, can narrow this scope and never widen it, and '
+    'every merge it makes can be undone group by group (lane mode unapply).'
   )
 on conflict (key) do nothing;
 
