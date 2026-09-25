@@ -1312,7 +1312,9 @@ renumber.** Navigate by area:
     just the members), an operator
     negative (a pair or must-not-link with both sides inside, a group verdict with its whole set
     inside — any superset, under any key, the newest ruling per operator winning), mixed
-    categories, a listing outside the scope (and the merge's own refusal of two **asset-linked**
+    categories, a listing outside the scope — inside = LOCATED in a scope block by its live
+    `listing_location` obec_kod / cast_obce_kod, never the engine's blocking key; out-of-scope
+    groups are counted per reason — (and the merge's own refusal of two **asset-linked**
     properties is recorded as `asset_linked_units`), a non-active property, a
     property the engine split across two groups, or a listing no group holds (unless this
     engine's own live merge already put it

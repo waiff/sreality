@@ -1,9 +1,9 @@
 """A2 (temporary, deleted in W5): the old engine's merges undone in the apply scope's blocks.
 
-Over test_apply's stateful fake (`FakeDb`), extended with the area (`listing_location`) and the
-three reads the retire step runs. Its detach mimics the toolkit's contract (`_detach_plan`,
-`_origin_gone`) and records every call; the one test over the REAL `detach_listing` shows the
-arguments the step passes write no ruling.
+Over test_apply's stateful fake (`FakeDb`, whose `location` is `listing_location`), extended with
+the area and the three reads the retire step runs. Its detach mimics the toolkit's contract
+(`_detach_plan`, `_origin_gone`) and records every call; the one test over the REAL
+`detach_listing` shows the arguments the step passes write no ruling.
 """
 
 from __future__ import annotations
@@ -38,16 +38,11 @@ SALES = frozenset({"prodej"})
 
 
 class RetireDb(FakeDb):
-    def __init__(self) -> None:
-        super().__init__()
-        self.location: dict[int, tuple[int | None, int | None]] = {}
-
     def advert(self, lid: int, pid: int, where: tuple[int | None, int | None] = IN_TOWN,
                ct: str = "prodej") -> None:
         if pid not in self.properties:
             self.prop(pid, ct=ct)
-        self.listing(lid, pid, ct=ct)
-        self.location[lid] = where
+        self.listing(lid, pid, ct=ct, where=where)
 
     def merged(self, survivor: int, *retired: int, source: str = "auto") -> str:
         """History: one merge group, an hour after the previous one."""
@@ -688,14 +683,15 @@ def _wire(db: RetireDb, monkeypatch: Any) -> list[dict[str, Any]]:
 
 def test_r2_1_only_groups_this_run_may_merge_count_as_re_merging(
         tmp_path: Path, monkeypatch: Any) -> None:
-    """Reviewer T5b / T5c: a rejected engine group, or one in another block, never merges; it
-    is counted apart. Here each holds only PART of the legacy group, so the group still goes."""
-    for status, block in (("rejected", ("o", TOWN)), ("proposed", ("o", 999999))):
+    """Reviewer T5b / T5c: a rejected engine group, or one with an advert located outside the
+    blocks, never merges; it is counted apart. Here each holds only PART of the legacy group, so
+    the group still goes."""
+    for status, where in (("rejected", IN_TOWN), ("proposed", OUT)):
         db = RetireDb()
         db.live_scope(blocks=sorted(TRIAL))
         _intact_pair(db, 100, 200, 1)
-        db.group(10, [1, 99], status=status, block=block)
-        db.listing(99, None)
+        db.group(10, [1, 99], status=status)
+        db.listing(99, None, where=where)
         db.advert(7, 700)
         db.advert(8, 800)
         db.group(20, [7, 8])                           # passes the plan-first check
@@ -724,22 +720,26 @@ def test_r3_the_engine_holding_a_whole_group_outside_the_scope_keeps_it_for_w6(
     db.live_scope(blocks=sorted(TRIAL))
     shape: dict[str, str] = {}
     shape["other_block"] = _intact_pair(db, 100, 200, 1)
-    db.group(10, [1, 2], block=("o", 999999))          # reaches outside the trial blocks
+    db.advert(95, 1500, OUT)
+    db.group(10, [1, 2, 95])                           # reaches outside the trial blocks
     shape["not_proposed"] = _intact_pair(db, 300, 400, 3)
     db.group(20, [3, 4], status="rejected")
     shape["different_groups"] = _intact_pair(db, 500, 600, 5)
-    db.group(30, [5], block=("o", 999999))
-    db.group(31, [6], block=("o", 999999))
+    db.group(30, [5])
+    db.group(31, [6])
     shape["partly_grouped"] = _intact_pair(db, 700, 800, 7)
-    db.group(40, [7, 97], block=("o", 999999))
-    db.listing(97, None)
+    db.group(40, [7, 97])
+    db.listing(97, None, where=OUT)
     shape["ungrouped"] = _intact_pair(db, 900, 1000, 9)
-    shape["admitted"] = _intact_pair(db, 1100, 1200, 11)
-    db.group(50, [11, 12])                             # proposed, in scope: merges
+    # proposed, and in scope by where its adverts ARE (a quarter of the scope's town, the
+    # engine's own key naming that quarter): the engine merges it again
+    shape["admitted"] = _intact_pair(db, 1100, 1200, 11, (TOWN, 28258))
+    db.group(50, [11, 12])
     shape["mixed_admitted_and_not"] = _intact_pair(db, 1300, 1400, 13)
     db.group(60, [13, 98])
     db.listing(98, None)
-    db.group(61, [14], block=("o", 999999))
+    db.group(61, [14, 96])
+    db.listing(96, None, where=OUT)
     page = tmp_path / "s.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
     out = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1"}, tmp_path)
@@ -752,16 +752,13 @@ def test_r3_the_engine_holding_a_whole_group_outside_the_scope_keeps_it_for_w6(
         "ungrouped": "would_retire", "admitted": "would_retire",
         "mixed_admitted_and_not": "would_retire"}
     assert (by[shape["other_block"]]["engine_agrees_cluster"],
-            by[shape["other_block"]]["engine_agrees_why"]) == (10, "block town:999999 outside "
-                                                                  "the scope")
+            by[shape["other_block"]]["engine_agrees_why"]) == (10, A.OUT_BLOCKS)
     assert (by[shape["not_proposed"]]["engine_agrees_cluster"],
             by[shape["not_proposed"]]["engine_agrees_why"]) == (20, "status rejected")
     counts = out["legacy_retire"]["counts"]
     assert counts[L.ENGINE_AGREES] == 2 and counts["retire_set"] == 5
-    assert counts[f"{L.ENGINE_AGREES}_by_reason"] == {
-        "block town:999999 outside the scope": 1, "status rejected": 1}
-    assert f"skipped:{L.ENGINE_AGREES} (10: block town:999999 outside the scope)" \
-        in page.read_text()
+    assert counts[f"{L.ENGINE_AGREES}_by_reason"] == {A.OUT_BLOCKS: 1, "status rejected": 1}
+    assert f"skipped:{L.ENGINE_AGREES} (10: {A.OUT_BLOCKS})" in page.read_text()
 
     # live, the same: the two stay merged, the rest come apart
     monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))

@@ -19,7 +19,11 @@ THE SCOPE ROW IS THE ONE ROLLOUT CONTROL (E904). A dry run is the default and wr
 `autodedup.applied_merges`. A live run needs `app_settings.autodedup_apply_scope` to name its
 deal types and its area; a row that is absent or names no area merges nothing. It is re-read
 before EVERY group (E39), so emptying its area on /settings stops a run between two groups, and
-a run's own arguments can narrow it and never widen it.
+a run's own arguments can narrow it and never widen it. A group is inside the area only when
+EVERY advert its merge would move (the members and every other advert on the involved
+properties) is LOCATED in one of its blocks by its live `listing_location` row (`town:` =
+obec_kod, `quarter:` = cast_obce_kod) — never by the engine's own blocking key, which names a
+quarter or nothing where the scope names the town.
 
 D7 holds: nothing here reads `property_merge_events`, and only `toolkit.property_identity` writes
 it (the chokepoint's merge rows, `source='autodedup'` saying who merged; a detach's undone stamps;
@@ -79,9 +83,18 @@ APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy"
 UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since", "until")
 UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", *UNAPPLY_SELECTORS})
 
-# The engine's block grain (`o` obec, `c` cast obce), spelled as the export lane spells a
-# block: `town:<code>` / `quarter:<code>` is the one spelling a scope takes.
-GRAINS: dict[str, str] = {"o": "town", "c": "quarter"}
+# A scope block, spelled as the export lane spells it: `town:<code>` (an advert's
+# listing_location.obec_kod) / `quarter:<code>` (its cast_obce_kod).
+GRAINS: tuple[str, ...] = ("town", "quarter")
+
+# E904 — why a group is outside the scope, counted per reason in the run summary. Order is the
+# order a group's reason is picked in when its members fall outside for several.
+OUT_CATEGORY = "category_outside_scope"
+OUT_BLOCKS = "member_outside_blocks"
+OUT_NO_LOCATION = "member_without_location"
+OUT_LISTING_IDS = "member_outside_listing_ids"
+OUT_OF_SCOPE_REASONS: tuple[str, ...] = (OUT_CATEGORY, OUT_BLOCKS, OUT_NO_LOCATION,
+                                         OUT_LISTING_IDS)
 
 # E903 — why a group is refused. Order is the order they are checked and reported in.
 SKIP_UNATTACHED = "unattached_member"
@@ -155,35 +168,36 @@ class Scope:
             )
         return problems
 
-    def admits(self, cluster: Mapping[str, Any], members: Sequence["Member"]) -> bool:
-        if self.category_types is not None and any(
-            m.category_type not in self.category_types for m in members
-        ):
-            return False
+    def outside(self, listing: "Member") -> str | None:
+        """Why one advert is outside the scope, None when it is inside (E904). Inside the blocks
+        means LOCATED in one: its live obec_kod names a `town:` of the scope or its cast_obce_kod
+        a `quarter:` (legacy_retire.AREA_SQL's area); an advert with neither code is in none."""
+        if self.category_types is not None and listing.category_type not in self.category_types:
+            return OUT_CATEGORY
         if self.blocks is not None:
-            block = block_of(cluster)
-            if block is None or block not in self.blocks:
-                return False
-        if self.listing_ids is not None and any(
-            m.listing_id not in self.listing_ids for m in members
-        ):
-            return False
-        return True
+            if listing.obec_kod is None and listing.cast_obce_kod is None:
+                return OUT_NO_LOCATION
+            if (f"town:{listing.obec_kod}" not in self.blocks
+                    and f"quarter:{listing.cast_obce_kod}" not in self.blocks):
+                return OUT_BLOCKS
+        if self.listing_ids is not None and listing.listing_id not in self.listing_ids:
+            return OUT_LISTING_IDS
+        return None
+
+    def group_outside(self, members: Sequence["Member"]) -> str | None:
+        """Why a group is outside the scope (the first of OUT_OF_SCOPE_REASONS any member
+        gives), None when every member is inside; the advert its merge would carry along is
+        `_set_reasons`' (SKIP_CARRIES_OUT_OF_SCOPE)."""
+        found = {self.outside(m) for m in members}
+        return next((why for why in OUT_OF_SCOPE_REASONS if why in found), None)
 
 
 def normalize_block(raw: Any) -> str:
     """`town:563510` / `quarter:490245`, the export lane's spelling; anything else is refused."""
     grain, _, code = str(raw).strip().lower().partition(":")
-    if grain not in GRAINS.values() or not code.isdigit():
+    if grain not in GRAINS or not code.isdigit():
         raise ValueError(f"block {raw!r}: expected town:<code> or quarter:<code>")
     return f"{grain}:{int(code)}"
-
-
-def block_of(cluster: Mapping[str, Any]) -> str | None:
-    grain, key = cluster.get("block_grain"), cluster.get("block_key")
-    if grain not in GRAINS or key is None:
-        return None
-    return f"{GRAINS[grain]}:{int(key)}"
 
 
 def _words(value: Any) -> list[str]:
@@ -263,12 +277,28 @@ def effective_scope(
 # ------------------------------------------------------------------ plan
 
 
+def _int(value: Any) -> int | None:
+    return int(value) if value is not None else None
+
+
 @dataclass(frozen=True)
 class Member:
+    """One advert as the plan reads it: its property, deal type and category, and where it IS
+    (its live listing_location codes, both None without a row)."""
+
     listing_id: int
     property_id: int | None
     category_type: str | None
     category_main: str | None
+    obec_kod: int | None = None
+    cast_obce_kod: int | None = None
+
+    @classmethod
+    def read(cls, row: Sequence[Any]) -> "Member":
+        """A row of PROPERTY_LISTINGS_SQL / LOCK_PROPERTY_LISTINGS_SQL, or of MEMBERS_SQL
+        after its cluster_key."""
+        lid, pid, ctype, cmain, obec, cast = row
+        return cls(int(lid), _int(pid), ctype, cmain, _int(obec), _int(cast))
 
 
 @dataclass
@@ -530,7 +560,7 @@ def _separated_merges(
 
 def _set_reasons(
     listings: set[int],
-    category_of: Mapping[int, tuple[str | None, str | None]],
+    listing_of: Mapping[int, Member],
     props: Sequence[Mapping[str, Any]],
     scope: Scope,
 ) -> tuple[list[str], dict[str, Any]]:
@@ -538,24 +568,22 @@ def _set_reasons(
     plan time and again, over locked rows, just before it merges."""
     reasons: list[str] = []
     detail: dict[str, Any] = {}
-    types = {category_of.get(lid, (None, None))[0] for lid in listings} - {None}
+    facts = [listing_of.get(lid) or Member(lid, None, None, None) for lid in sorted(listings)]
+    types = {f.category_type for f in facts} - {None}
     types |= {p["category_type"] for p in props if p["category_type"] is not None}
     if len(types) > 1:
         reasons.append(SKIP_CATEGORY_TYPE)
         detail["category_types"] = sorted(types)
-    mains = {category_of.get(lid, (None, None))[1] for lid in listings}
+    mains = {f.category_main for f in facts}
     mains |= {p["category_main"] for p in props}
     if not all(category_main_compatible(a, b) for a, b in combinations(
             sorted(mains, key=lambda x: (x is None, x or "")), 2)):
         reasons.append(SKIP_CATEGORY_MAIN)
         detail["category_mains"] = sorted(m for m in mains if m is not None)
     # The scope admitted the members; everything the merge puts on the survivor must be inside
-    # it too — and still be, when it is re-read just before the merge.
-    outside = sorted(
-        lid for lid in listings
-        if (scope.listing_ids is not None and lid not in scope.listing_ids)
-        or (scope.category_types is not None
-            and category_of.get(lid, (None, None))[0] not in scope.category_types))
+    # it too (located in its blocks included) — and still be, when it is re-read just before
+    # the merge.
+    outside = [f.listing_id for f in facts if scope.outside(f)]
     if outside:
         reasons.append(SKIP_CARRIES_OUT_OF_SCOPE)
         detail["out_of_scope_listings"] = outside[:20]
@@ -587,11 +615,17 @@ def _engine_vouched(
 
 def _cluster_rows(conn: Any, generation: str) -> list[dict[str, Any]]:
     return [
-        dict(zip(("cluster_key", "size", "status", "block_key", "block_grain",
-                  "category_main", "category_type", "min_edge_score", "model_version",
+        dict(zip(("cluster_key", "size", "status", "min_edge_score", "model_version",
                   "feature_version"), row))
         for row in _rows(conn, S.CLUSTERS_SQL, {"generation": generation})
     ]
+
+
+def _members(conn: Any, generation: str) -> dict[int, list[Member]]:
+    members: dict[int, list[Member]] = {}
+    for row in _rows(conn, S.MEMBERS_SQL, {"generation": generation}):
+        members.setdefault(int(row[0]), []).append(Member.read(row[1:]))
+    return members
 
 
 def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
@@ -602,14 +636,11 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
             "plan reads it and cannot be applied from this lane"
         )
     cluster_rows = _cluster_rows(conn, generation)
-    members_by: dict[int, list[Member]] = {}
-    listing_group: dict[int, int] = {}
-    for key, lid, pid, ctype, cmain in _rows(conn, S.MEMBERS_SQL, {"generation": generation}):
-        member = Member(int(lid), int(pid) if pid is not None else None, ctype, cmain)
-        members_by.setdefault(int(key), []).append(member)
-        listing_group[int(lid)] = int(key)
+    members_by = _members(conn, generation)
+    listing_group = {m.listing_id: key for key, ms in members_by.items() for m in ms}
 
     counts: Counter[str] = Counter(clusters=len(cluster_rows))
+    out_of_scope: Counter[str] = Counter()
     candidates: list[tuple[dict[str, Any], list[Member]]] = []
     settled: list[tuple[dict[str, Any], list[Member]]] = []
     for cluster in cluster_rows:
@@ -620,8 +651,10 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         if not members:
             counts["no_members"] += 1
             continue
-        if not scope.admits(cluster, members):
+        why_out = scope.group_outside(members)
+        if why_out:
             counts["out_of_scope"] += 1
+            out_of_scope[why_out] += 1
             continue
         attached = {m.property_id for m in members if m.property_id is not None}
         if len(attached) < 2 and all(m.property_id is not None for m in members):
@@ -634,21 +667,21 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
     props: dict[int, dict[str, Any]] = {}
     children: dict[int, set[int]] = {}
     prop_of: dict[int, int] = {}
-    category_of: dict[int, tuple[str | None, str | None]] = {}
+    listing_of: dict[int, Member] = {}
     for chunk in _chunks(all_props):
         for pid, status, ctype, cmain, first in _rows(
             conn, S.PROPERTIES_SQL, {"property_ids": chunk}
         ):
             props[int(pid)] = {"status": status, "category_type": ctype,
                                "category_main": cmain, "first_seen_at": first}
-        for pid, lid, ctype, cmain in _rows(conn, S.PROPERTY_LISTINGS_SQL,
-                                            {"property_ids": chunk}):
-            children.setdefault(int(pid), set()).add(int(lid))
-            prop_of[int(lid)] = int(pid)
-            category_of[int(lid)] = (ctype, cmain)
+        for row in _rows(conn, S.PROPERTY_LISTINGS_SQL, {"property_ids": chunk}):
+            listing, pid = Member.read(row), int(row[1])
+            children.setdefault(pid, set()).add(listing.listing_id)
+            prop_of[listing.listing_id] = pid
+            listing_of[listing.listing_id] = listing
     for _c, ms in everyone:
         for m in ms:
-            category_of.setdefault(m.listing_id, (m.category_type, m.category_main))
+            listing_of.setdefault(m.listing_id, m)
 
     every_listing: set[int] = {m.listing_id for _c, ms in everyone for m in ms}
     for pid in all_props:
@@ -725,7 +758,7 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         detail.update(hit_detail)
 
         set_reasons, set_detail = _set_reasons(
-            extended, category_of, [props[pid] for pid in property_ids if pid in props], scope)
+            extended, listing_of, [props[pid] for pid in property_ids if pid in props], scope)
         reasons += set_reasons
         detail.update(set_detail)
 
@@ -789,7 +822,8 @@ def plan_apply(conn: Any, generation: str, scope: Scope) -> Plan:
         scope=scope,
         groups=groups,
         deferred=deferred,
-        counts={**dict(counts), "skipped_by_reason": dict(sorted(by_reason.items()))},
+        counts={**dict(counts), "skipped_by_reason": dict(sorted(by_reason.items())),
+                "out_of_scope_by_reason": dict(sorted(out_of_scope.items()))},
     )
 
 
@@ -905,16 +939,19 @@ def recheck_group(
         for pid, status, ctype, cmain in _rows(
             conn, S.LOCK_PROPERTIES_SQL, {"property_ids": group.property_ids})
     }
-    rows = _rows(conn, S.LOCK_PROPERTY_LISTINGS_SQL, {"property_ids": group.property_ids})
-    now = {int(row[1]) for row in rows}
+    rows = [Member.read(row) for row in _rows(
+        conn, S.LOCK_PROPERTY_LISTINGS_SQL, {"property_ids": group.property_ids})]
+    now = {m.listing_id for m in rows}
     planned = set(group.listing_ids)
     if now != planned:
         return [SKIP_CHANGED_SINCE_PLAN], {
             "arrived_since_plan": sorted(now - planned)[:20],
             "left_since_plan": sorted(planned - now)[:20]}
     placed: dict[int, list[int]] = {pid: [] for pid in group.property_ids}
-    for pid, lid, _ct, _cm in rows:
-        placed.setdefault(int(pid), []).append(int(lid))
+    prop_of: dict[int, int] = {}
+    for m in rows:
+        placed.setdefault(int(m.property_id), []).append(m.listing_id)
+        prop_of[m.listing_id] = int(m.property_id)
     group.listings_by_property = {pid: sorted(lids) for pid, lids in placed.items()}
     reasons: list[str] = []
     detail: dict[str, Any] = {}
@@ -927,11 +964,10 @@ def recheck_group(
         now, group.cluster_key)
     reasons += hit_reasons
     detail.update(hit_detail)
-    category_of = {int(lid): (ctype, cmain) for _pid, lid, ctype, cmain in rows}
-    set_reasons, set_detail = _set_reasons(now, category_of, list(locked.values()), scope)
+    set_reasons, set_detail = _set_reasons(
+        now, {m.listing_id: m for m in rows}, list(locked.values()), scope)
     reasons += set_reasons
     detail.update(set_detail)
-    prop_of = {int(lid): int(pid) for pid, lid, _ct, _cm in rows}
     separated = _separated_merges(now, prop_of, _engine_merges(conn, now))
     if separated:
         reasons.append(SKIP_RESTORED_ELSEWHERE)
@@ -1469,10 +1505,12 @@ def summary_markdown(result: Mapping[str, Any], *, mode: str) -> str:
     lines += ["| count | n |", "| --- | --- |"]
     lines += [f"| {key} | {value} |" for key, value in counts.items()
               if not isinstance(value, dict)]
-    by_reason = counts.get("skipped_by_reason") or {}
-    if by_reason:
-        lines += ["", "| skipped because | groups |", "| --- | --- |"]
-        lines += [f"| {reason} | {n} |" for reason, n in by_reason.items()]
+    for key, title in (("out_of_scope_by_reason", "out of scope because"),
+                       ("skipped_by_reason", "skipped because")):
+        by_reason = counts.get(key) or {}
+        if by_reason:
+            lines += ["", f"| {title} | groups |", "| --- | --- |"]
+            lines += [f"| {reason} | {n} |" for reason, n in by_reason.items()]
     shown = 50
     if result.get(RULED_AFTER_MERGE):
         lines += ["", f"**{len(result[RULED_AFTER_MERGE])} group(s) already on one property "
@@ -1571,40 +1609,26 @@ def _retire_legacy(
     if proposed <= 0:
         raise SystemExit(f"retire_legacy=1: generation {plan.generation!r} holds no proposed "
                          "group inside the scope, so nothing would merge again; nothing was undone")
-    # Only a group this run may merge (proposed, admitted by the scope) re-merges what the
-    # step undoes; the rest touching it are reported apart.
-    members: dict[int, list[Member]] = {}
-    for key, lid, pid, ctype, cmain in _rows(conn, S.MEMBERS_SQL, {"generation": generation}):
-        members.setdefault(int(key), []).append(Member(
-            int(lid), int(pid) if pid is not None else None, ctype, cmain))
+    # Only a group this run may merge (proposed, inside the scope by the plan's own rule)
+    # re-merges what the step undoes; the rest touching it are reported apart, with why.
+    members = _members(conn, generation)
     merging: dict[int, int] = {}
     other: dict[int, int] = {}
     why: dict[int, str] = {}
     for cluster in _cluster_rows(conn, generation):
         key = int(cluster["cluster_key"])
         found = members.get(key, [])
-        if cluster["status"] == "proposed" and found and scope.admits(cluster, found):
-            into = merging
-        else:
-            into, why[key] = other, _not_admitted(cluster, found, scope)
+        why_not = (f"status {cluster['status']}" if cluster["status"] != "proposed"
+                   else scope.group_outside(found))
+        into = other if why_not else merging
+        if why_not:
+            why[key] = why_not
         for member in found:
             into.setdefault(member.listing_id, key)
     return legacy_retire.run(conn, scope.blocks, category_types=scope.category_types,
                              dry_run=dry_run, run_id=new_run_id(), out_dir=out_dir,
                              closed=scope_closed,
                              engine=legacy_retire.EngineMaps(merging, other, why))
-
-
-def _not_admitted(cluster: Mapping[str, Any], members: Sequence[Member], scope: Scope) -> str:
-    if cluster["status"] != "proposed":
-        return f"status {cluster['status']}"
-    block = block_of(cluster)
-    if scope.blocks is not None and block not in scope.blocks:
-        return f"block {block} outside the scope"
-    if scope.category_types is not None and any(
-            m.category_type not in scope.category_types for m in members):
-        return "a deal type outside the scope"
-    return "an advert outside the scope"
 
 
 def _with_retire(result: dict[str, Any], retired: dict[str, Any] | None) -> dict[str, Any]:

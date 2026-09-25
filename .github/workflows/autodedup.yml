@@ -325,7 +325,9 @@ name: "AUTODEDUP: engine lane"
 #             a property not active, an operator negative (a pair verdict or must-not-link
 #             with both sides in it, a group verdict with its whole set in it), mixed deal
 #             types or incompatible categories (the chokepoint's own helper), a listing
-#             outside the scope, two properties the operator asset-linked
+#             outside the scope (inside = LOCATED in a scope block by its live listing_location
+#             obec_kod / cast_obce_kod, never the engine's block key; out-of-scope groups are
+#             counted per reason in the summary), two properties the operator asset-linked
 #             (asset_linked_units), a property the engine split across two groups, a property
 #             carrying a listing no group holds (unless this engine already merged it there
 #             with a member), a chokepoint refusal on an earlier run, listings of an engine

@@ -38,6 +38,10 @@ from toolkit.room_taxonomy import category_main_compatible
 
 GEN = "g12"
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+# Where an advert IS (listing_location's obec_kod, cast_obce_kod): Jablonec nad Nisou, the town
+# every fake advert sits in unless a test places it elsewhere (or nowhere: `where=None`).
+JABLONEC = 563510
+IN_JABLONEC = (JABLONEC, None)
 
 
 class _Tx:
@@ -86,6 +90,7 @@ class FakeDb:
         self.clusters: dict[tuple[str, int], dict[str, Any]] = {}
         self.members: list[tuple[str, int, int]] = []
         self.listings: dict[int, dict[str, Any]] = {}
+        self.location: dict[int, tuple[int | None, int | None]] = {}
         self.properties: dict[int, dict[str, Any]] = {}
         self.mnl: list[tuple[int, int, str]] = []
         self.verdicts: list[dict[str, Any]] = []
@@ -125,15 +130,19 @@ class FakeDb:
                                 "merged_at": None, "asset_id": asset}
 
     def listing(self, lid: int, pid: int | None, *, ct: str | None = "prodej",
-                cm: str | None = "byt") -> None:
+                cm: str | None = "byt",
+                where: tuple[int | None, int | None] | None = IN_JABLONEC) -> None:
+        """`where`: the advert's listing_location (obec_kod, cast_obce_kod); None = no row."""
         self.listings[lid] = {"property_id": pid, "category_type": ct, "category_main": cm}
+        if where is None:
+            self.location.pop(lid, None)
+        else:
+            self.location[lid] = where
 
     def group(self, key: int, lids: list[int], *, gen: str = GEN, status: str = "proposed",
-              block: tuple[str, int] | None = ("o", 563510), score: float | None = 0.99) -> None:
+              score: float | None = 0.99) -> None:
         self.clusters[(gen, key)] = {
-            "size": len(lids), "status": status,
-            "block_grain": block[0] if block else None, "block_key": block[1] if block else None,
-            "category_main": "byt", "category_type": "prodej", "min_edge_score": score,
+            "size": len(lids), "status": status, "min_edge_score": score,
             "model_version": "m1", "feature_version": 9,
         }
         self.members.extend((gen, key, lid) for lid in lids)
@@ -147,18 +156,19 @@ class FakeDb:
         if sql == S.SETTING_SQL:
             return [(self.settings[p["key"]],)] if p["key"] in self.settings else []
         if sql == S.CLUSTERS_SQL:
-            return [(k, c["size"], c["status"], c["block_key"], c["block_grain"],
-                     c["category_main"], c["category_type"], c["min_edge_score"],
-                     c["model_version"], c["feature_version"])
+            return [(k, c["size"], c["status"], c["min_edge_score"], c["model_version"],
+                     c["feature_version"])
                     for (g, k), c in sorted(self.clusters.items()) if g == p["generation"]]
         if sql == S.MEMBERS_SQL:
             out = []
             for g, k, lid in sorted(self.members):
                 if g != p["generation"]:
                     continue
-                row = self.listings.get(lid, {})
+                row = self.listings.get(lid)
+                where = self.location.get(lid, (None, None)) if row else (None, None)
+                row = row or {}
                 out.append((k, lid, row.get("property_id"), row.get("category_type"),
-                            row.get("category_main")))
+                            row.get("category_main"), *where))
             return out
         if sql == S.PROPERTIES_SQL:
             return [(pid, r["status"], r["category_type"], r["category_main"],
@@ -171,7 +181,8 @@ class FakeDb:
             return [(lid, self.listings[lid]["property_id"]) for lid in p["listing_ids"]
                     if lid in self.listings]
         if sql in (S.PROPERTY_LISTINGS_SQL, S.LOCK_PROPERTY_LISTINGS_SQL):
-            return [(r["property_id"], lid, r["category_type"], r["category_main"])
+            return [(lid, r["property_id"], r["category_type"], r["category_main"],
+                     *self.location.get(lid, (None, None)))
                     for lid, r in sorted(self.listings.items())
                     if r["property_id"] in p["property_ids"]]
         if sql == S.MUST_NOT_LINK_SQL:
@@ -371,11 +382,13 @@ class FakeDb:
             detach(self, e["listing"], decided_by="operator", merge_group_id=merge_group_id)
 
 
-def _pair_group(db: FakeDb, key: int, lids: list[int], pids: list[int], **kw: Any) -> None:
+def _pair_group(db: FakeDb, key: int, lids: list[int], pids: list[int], *,
+                ct: str = "prodej", where: tuple[int | None, int | None] | None = IN_JABLONEC,
+                **kw: Any) -> None:
     for lid, pid in zip(lids, pids):
         if pid not in db.properties:
-            db.prop(pid)
-        db.listing(lid, pid)
+            db.prop(pid, ct=ct)
+        db.listing(lid, pid, ct=ct, where=where)
     db.group(key, lids, **kw)
 
 
@@ -658,23 +671,119 @@ def test_a_property_the_engine_split_across_two_groups_bridges_nothing() -> None
     assert reasons == {10: [A.SKIP_SPANS_GROUPS], 20: [A.SKIP_SPANS_GROUPS]}
 
 
-def test_scope_filters_categories_blocks_and_listing_ids() -> None:
+TRIAL_SCOPE = {"category_types": ["prodej"],
+               "blocks": ["town:563510", "town:577626", "quarter:490245"]}
+
+
+def test_scope_filters_by_where_every_member_is_located_and_counts_why() -> None:
+    # Inside a block = LOCATED in it by the advert's live listing_location: obec_kod for a
+    # `town:`, cast_obce_kod for a `quarter:` (E904) - never the engine's own blocking key.
     db = FakeDb()
-    _pair_group(db, 10, [10, 11], [100, 200])
-    _pair_group(db, 20, [20, 21], [300, 400], block=("c", 490245))
-    _pair_group(db, 30, [30, 31], [500, 600], block=None)
-    db.listing(40, 700, ct="pronajem")
-    db.listing(41, 800, ct="pronajem")
-    db.prop(700, ct="pronajem")
-    db.prop(800, ct="pronajem")
-    db.group(40, [40, 41])
+    _pair_group(db, 10, [10, 11], [100, 200])                              # in the town
+    _pair_group(db, 20, [20, 21], [300, 400], where=(554782, 490245))      # in the quarter
+    _pair_group(db, 30, [30, 31], [500, 600])
+    db.location[31] = (999999, None)                                       # one member away
+    _pair_group(db, 40, [40, 41], [700, 800], ct="pronajem")               # rentals
+    _pair_group(db, 50, [50, 51], [900, 1000])
+    del db.location[51]                                                    # no location row
     scope = A.effective_scope(
         None, {"category_types": "prodej", "blocks": "town:563510 quarter:490245"}, live=False)
     plan = A.plan_apply(db, GEN, scope)
     assert [g.cluster_key for g in plan.to_apply] == [10, 20]
-    assert plan.counts["out_of_scope"] == 2
+    assert plan.counts["out_of_scope"] == 3
+    assert plan.counts["out_of_scope_by_reason"] == {
+        A.OUT_CATEGORY: 1, A.OUT_BLOCKS: 1, A.OUT_NO_LOCATION: 1}
     ids_only = A.plan_apply(db, GEN, A.Scope(listing_ids=frozenset({30, 31})))
     assert [g.cluster_key for g in ids_only.to_apply] == [30]
+    assert ids_only.counts["out_of_scope_by_reason"] == {A.OUT_LISTING_IDS: 4}
+
+
+def test_a_group_takes_the_first_reason_any_member_gives() -> None:
+    scope = A.effective_scope(None, {**TRIAL_SCOPE, "listing_ids": "1 2 3"}, live=False)
+    home = A.Member(1, 100, "prodej", "byt", JABLONEC, None)
+    away = A.Member(2, 200, "prodej", "byt", 999999, None)
+    nowhere = A.Member(3, 300, "prodej", "byt", None, None)
+    rental = A.Member(1, 100, "pronajem", "byt", JABLONEC, None)
+    stray = A.Member(4, 400, "prodej", "byt", JABLONEC, None)
+    assert scope.group_outside([home]) is None
+    assert scope.group_outside([nowhere, away, home]) == A.OUT_BLOCKS
+    assert scope.group_outside([nowhere, home]) == A.OUT_NO_LOCATION
+    assert scope.group_outside([away, rental]) == A.OUT_CATEGORY
+    assert scope.group_outside([home, stray]) == A.OUT_LISTING_IDS
+    # a quarter code alone places an advert; a quarter of a scope town is inside by its town
+    assert scope.outside(A.Member(3, 3, "prodej", "byt", None, 490245)) is None
+    assert scope.outside(A.Member(3, 3, "prodej", "byt", JABLONEC, 28258)) is None
+
+
+def test_the_trial_admits_the_jablonec_groups_the_cluster_block_kept_out() -> None:
+    # Live run 36151129256: 1,017 of 1,271 g12 groups counted out_of_scope because the scope
+    # read the CLUSTER's stored block (the engine's own key: a quarter where adverts were
+    # located to a cast obce, NULL where members' keys disagreed). Five the operator verified,
+    # in shape: every member a Jablonec sale, some located to a quarter of it, some to the
+    # town only. Each is planned, and merges, on where its adverts ARE.
+    db = FakeDb()
+    db.settings[A.SCOPE_SETTING] = dict(TRIAL_SCOPE)
+    shapes = {
+        528049: [IN_JABLONEC, (JABLONEC, 28258), (JABLONEC, 28258)],  # Hrbitovni, key NULL
+        524598: [(JABLONEC, 28258)] * 4,                                # 209 m2, quarter key
+        517453: [(JABLONEC, 28266), IN_JABLONEC],                       # Liberecka 3429/28
+        518219: [(JABLONEC, 28258), (JABLONEC, 28266)],
+        518142: [(JABLONEC, 28274), IN_JABLONEC],                       # Anenske namesti
+    }
+    for n, (key, places) in enumerate(shapes.items()):
+        lids = [key * 10 + i for i in range(len(places))]
+        _pair_group(db, key, lids, [(n + 1) * 1000 + i for i in range(len(places))])
+        for lid, where in zip(lids, places):
+            db.location[lid] = where
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    plan = A.plan_apply(db, GEN, scope)
+    assert sorted(g.cluster_key for g in plan.to_apply) == sorted(shapes)
+    assert "out_of_scope" not in plan.counts and plan.counts["out_of_scope_by_reason"] == {}
+    calls: list[dict[str, Any]] = []
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    assert result["counts"]["applied"] == 5 and result["counts"]["skipped_at_apply"] == 0
+    assert len(calls) == sum(len(places) - 1 for places in shapes.values())
+
+
+def test_a_carried_advert_located_outside_refuses_the_group_at_plan_and_at_apply() -> None:
+    # The members are inside; an advert the merge would carry along is not (at plan time), or
+    # stops being (a re-geocode between the plan and the group's transaction).
+    db = FakeDb()
+    db.live_scope()
+    _engine_merged(db, 11, [11, 12], [200, 250])        # 12 rides along with 11 on 200
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400])
+    db.location[12] = (999999, None)
+    scope = A.effective_scope(db.settings[A.SCOPE_SETTING], {}, live=True)
+    plan = A.plan_apply(db, GEN, scope)
+    assert {g.cluster_key: g.reasons for g in plan.groups} == {
+        10: [A.SKIP_CARRIES_OUT_OF_SCOPE], 20: []}
+    assert plan.groups[0].detail["out_of_scope_listings"] == [12]
+    del db.location[21]                                  # its location row is gone
+    calls: list[dict[str, Any]] = []
+    result = A.apply_plan(db, plan, dry_run=False, merge=db.merge(calls))
+    assert calls == [] and result["skipped_at_apply"] == [
+        {"cluster_key": 20, "survivor_id": 300, "retired_ids": [400],
+         "reasons": [A.SKIP_CARRIES_OUT_OF_SCOPE]}]
+
+
+def test_the_summary_counts_out_of_scope_by_reason(tmp_path: Path, monkeypatch: Any) -> None:
+    db = FakeDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    _pair_group(db, 20, [20, 21], [300, 400], where=(999999, None))
+    _pair_group(db, 30, [30, 31], [500, 600], where=None)
+    _pair_group(db, 40, [40, 41], [700, 800], ct="pronajem")
+    page = tmp_path / "step_summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    out = A.run_apply(_factory(db), {"generation": GEN}, tmp_path)
+    assert out["counts"]["out_of_scope"] == 3 and out["counts"]["planned"] == 1
+    assert out["counts"]["out_of_scope_by_reason"] == {
+        A.OUT_CATEGORY: 1, A.OUT_BLOCKS: 1, A.OUT_NO_LOCATION: 1}
+    text = page.read_text()
+    assert "| out of scope because | groups |" in text
+    for reason in (A.OUT_CATEGORY, A.OUT_BLOCKS, A.OUT_NO_LOCATION):
+        assert f"| {reason} | 1 |" in text
 
 
 def test_the_run_cap_defers_the_rest_in_key_order() -> None:
@@ -689,7 +798,6 @@ def test_the_run_cap_defers_the_rest_in_key_order() -> None:
 def test_a_block_has_one_spelling_the_export_lanes() -> None:
     assert A.normalize_block(" Town:0563510 ") == "town:563510"
     assert A.normalize_block("quarter:490245") == "quarter:490245"
-    assert A.block_of({"block_grain": "c", "block_key": 490245}) == "quarter:490245"
     for other in ("obec:563510", "cast_obce:490245", "o563510", "563510", "town:x"):
         with pytest.raises(ValueError, match="town:<code>"):
             A.normalize_block(other)
