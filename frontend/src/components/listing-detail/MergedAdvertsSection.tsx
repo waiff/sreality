@@ -414,17 +414,6 @@ function BrokerLine({ listingId }: { listingId: number }) {
   );
 }
 
-function nemovitosti(n: number): string {
-  if (n === 1) return 'nemovitost';
-  if (n >= 2 && n <= 4) return 'nemovitosti';
-  return 'nemovitostí';
-}
-
-/* "Všechny 3 inzeráty" but "všech 5 inzerátů" — the quantifier declines too. */
-function allAdverts(n: number): string {
-  return n >= 2 && n <= 4 ? `Všechny ${n} inzeráty` : `Všech ${n} inzerátů`;
-}
-
 /* Step two of the split: find what can be undone from here, say it in words,
  * and only then offer the write. The ledger is read now, not on page load. */
 function UnmergeConfirm({
@@ -484,28 +473,9 @@ function UnmergeConfirm({
       </>
     );
     confirm = { label: 'Ano, oddělit', groupId: plan.group.merge_group_id };
-  } else if (plan?.kind === 'whole-group') {
-    const originals = plan.group.retired_count + 1;
-    body = (
-      <>
-        <strong className="font-medium text-[var(--color-ink)]">
-          Jeden inzerát samostatně oddělit nejde.
-        </strong>{' '}
-        {allAdverts(rowCount)} spojilo jedno {mergeOriginLabel(plan.group.source)} sloučení ze
-        dne{' '}
-        {fmtDateSlash(plan.group.merged_at)}. Vrátit jde jen celé: nemovitost se rozpadne
-        zpět na {originals} {nemovitosti(originals)}.
-      </>
-    );
-    confirm = { label: 'Ano, vrátit celé sloučení', groupId: plan.group.merge_group_id };
   } else if (plan?.kind === 'ambiguous') {
-    body = (
-      <>
-        Z knihy sloučení nejde poznat, které sloučení přivedlo právě tento inzerát
-        (nemovitost jich má víc, nebo je jedno nevysvětluje celou), takže ho odsud
-        oddělit nejde.
-      </>
-    );
+    body =
+      'Samotný tento inzerát odsud oddělit nejde: jde to jen u nemovitosti ze dvou inzerátů, kterou spojilo jedno sloučení.';
   } else if (plan?.kind === 'not-found') {
     body = plan.exhaustive
       ? 'Kniha sloučení pro tuto nemovitost nemá žádné sloučení, které by šlo vrátit — její inzeráty spojilo starší seskupení.'

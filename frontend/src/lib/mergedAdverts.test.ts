@@ -59,9 +59,9 @@ describe('planRowUnmerge', () => {
     expect(planRowUnmerge(scan([g]), 2)).toEqual({ kind: 'pair', group: g });
   });
 
-  it('one merge that explains every advert but the base offers the whole group', () => {
+  it('one merge that made a bigger property is never undone whole from a row', () => {
     const g = group({ listings_moved: 2, retired_count: 2 });
-    expect(planRowUnmerge(scan([g]), 3)).toEqual({ kind: 'whole-group', group: g });
+    expect(planRowUnmerge(scan([g]), 3)).toEqual({ kind: 'ambiguous', groups: [g] });
   });
 
   it('several merges cannot be told apart from a row', () => {

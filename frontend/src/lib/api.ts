@@ -3074,8 +3074,9 @@ export const listMergedProperties = (
     jwt: true,
   });
 
-/* `reason`: the operator's optional free text (≤ UNMERGE_REASON_MAX chars), kept
- * with the "different" ruling the split writes server-side. */
+/* `reason`: the operator's optional free text (≤ UNMERGE_REASON_MAX chars), sent as
+ * the POST body. The route keeps it with the "different" ruling once it writes
+ * rulings (the merge-safety change); until then it ignores the body. */
 export const UNMERGE_REASON_MAX = 500;
 export const unmergeMergeGroup = (
   mergeGroupId: string,

@@ -1210,12 +1210,14 @@ renumber.** Navigate by area:
     collapsed, description / full gallery / broker / stored portal link expanded — with a per-row
     two-step **Rozdělit** for admin sessions over the two routes above); because the ledger read
     (`GET /properties/merges?survivor_property_id=`, one property's groups, exact at any ledger
-    size) names no listings and the undo is group-grain, a row splits exactly only a
-    two-advert property one merge joined, one merge that made the whole property is offered whole,
-    and anything else says it cannot tell (`planRowUnmerge`) — a per-listing ledger read would make
-    every row exact. The split is available for every merge, whatever its origin (operator, legacy
-    `auto`, `autodedup` — shown as information only), with an optional free-text `reason` (≤500
-    chars, the unmerge POST body); the unmerge writes a "different" ruling, and the engine obeys it.
+    size) names no listings and the undo is group-grain, a row splits only a two-advert property
+    one merge joined; anything else says that row cannot be split from here (`planRowUnmerge`) —
+    never a whole-group undo from a row, which would also separate adverts the operator did not
+    object to. A per-advert detach (W3) makes every row exact. The split is available for every
+    merge, whatever its origin (operator, legacy `auto`, `autodedup` — shown as information only),
+    with an optional free-text `reason` (≤500 chars, sent as the unmerge POST body). Recording the
+    split as a "different" ruling the engine obeys, and storing the reason, are the undo route's
+    job once it writes rulings (the merge-safety change); until then the route ignores the body.
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing

@@ -10,10 +10,10 @@
  * — every group this property survived, with how many adverts each moved, but NOT
  * which adverts. So from the page the per-advert question has an exact answer in
  * one shape only: a two-advert property one merge of one advert produced. For
- * one merge that explains every advert but the base, the honest offer is the
- * whole group; for anything else the page says it cannot tell rather than guess.
- * A per-listing ledger read (listing -> its active merge_group_id) would turn
- * every row into the exact case; until one exists, `planRowUnmerge` is the rule. */
+ * anything else the page says it cannot split that row rather than undo more
+ * than it: a whole-group undo would also separate adverts the operator did not
+ * object to, and a split is recorded pair by pair as "different". A per-advert
+ * detach (W3) makes every row exact; until then `planRowUnmerge` is the rule. */
 
 import type { QueryClient } from '@tanstack/react-query';
 
@@ -103,11 +103,8 @@ export type UnmergePlan =
   /* Two adverts, one merge of one advert joined them: undoing it separates
    * exactly these two, whichever row asked. */
   | { kind: 'pair'; group: MergeGroup }
-  /* One merge explains every advert but the base: undoing it is the only undo
-   * there is, and it dissolves the whole property back into its originals. */
-  | { kind: 'whole-group'; group: MergeGroup }
-  /* Several merges, or one that does not account for every advert: which one
-   * brought THIS row in is not knowable from the ledger read. */
+  /* Anything else: the only undo there is would move more than this row, or
+   * which merge brought it in is not knowable from the ledger read. */
   | { kind: 'ambiguous'; groups: MergeGroup[] }
   | { kind: 'not-found'; scanned: number; exhaustive: boolean };
 
@@ -116,10 +113,8 @@ export function planRowUnmerge(scan: MergeGroupScan, rowCount: number): UnmergeP
   if (groups.length === 0) {
     return { kind: 'not-found', scanned: scan.scanned, exhaustive: scan.exhaustive };
   }
-  if (groups.length === 1 && groups[0].listings_moved === rowCount - 1) {
-    return rowCount === 2
-      ? { kind: 'pair', group: groups[0] }
-      : { kind: 'whole-group', group: groups[0] };
+  if (rowCount === 2 && groups.length === 1 && groups[0].listings_moved === 1) {
+    return { kind: 'pair', group: groups[0] };
   }
   return { kind: 'ambiguous', groups };
 }

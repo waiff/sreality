@@ -311,14 +311,14 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     setup({ sources: three });
 
     fireEvent.click(within(rowOf('Bazoš')).getByRole('button', { name: /Rozdělit/ }));
-    expect(await screen.findByText(/nejde poznat, které/)).toBeInTheDocument();
+    expect(await screen.findByText(/Samotný tento inzerát odsud oddělit nejde/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Ano/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'Zavřít' })).toBeInTheDocument();
   });
 
-  it('names the whole group when one merge made the property and a row cannot leave alone', async () => {
+  it('never undoes a whole group from a row: one merge that made three adverts offers no write', async () => {
     vi.mocked(api.listPropertyMerges).mockResolvedValue({
-      data: [group({ listings_moved: 2, retired_count: 2, source: 'operator' })],
+      data: [group({ listings_moved: 2, retired_count: 2, source: 'autodedup' })],
       total: 1,
     });
     const three = [
@@ -328,8 +328,9 @@ describe('<MergedAdvertsSection> Rozdělit', () => {
     setup({ sources: three });
 
     fireEvent.click(within(rowOf('Bazoš')).getByRole('button', { name: /Rozdělit/ }));
-    expect(await screen.findByText('Jeden inzerát samostatně oddělit nejde.')).toBeInTheDocument();
-    expect(screen.getByText(/rozpadne zpět na 3 nemovitosti/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Ano, vrátit celé sloučení' })).toBeInTheDocument();
+    expect(await screen.findByText(/Samotný tento inzerát odsud oddělit nejde/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Ano/ })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: /Důvod/ })).toBeNull();
+    expect(api.unmergeMergeGroup).not.toHaveBeenCalled();
   });
 });
