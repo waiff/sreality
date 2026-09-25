@@ -27,6 +27,7 @@ from autodedup.indistinguishable import (
     PROMOTE,
     distinguishing_facts,
     honest_overlap_days,
+    kc_house_number_price_excuse,
     overlap_days,
     price_paths_agree,
 )
@@ -38,7 +39,7 @@ Feats = Mapping[str, tuple[float, bool]]
 class ClusterRelation:
     """`ok(a, b)` = no stated fact separates the two adverts, memoised per unordered pair."""
 
-    __slots__ = ("_listings", "_feats", "_settings", "_memo", "_mode")
+    __slots__ = ("_listings", "_feats", "_settings", "_memo", "_mode", "_certificates")
 
     def __init__(
         self,
@@ -46,11 +47,14 @@ class ClusterRelation:
         feats: Mapping[tuple[int, int], Feats] | None = None,
         settings: Settings | None = None,
         mode: str = CLUSTER,
+        certificates: Mapping[tuple[int, int], str] | None = None,
     ) -> None:
         self._listings = listings
         self._feats = feats or {}
         self._settings = settings or Settings()
         self._mode = mode
+        # E303: the certificate each scored pair earned, read only by its price limb.
+        self._certificates = certificates or {}
         self._memo: dict[tuple[int, int], bool] = {}
 
     def strict(self) -> "ClusterRelation":
@@ -60,7 +64,8 @@ class ClusterRelation:
         is the one place the engine has no positive evidence to fall back on — so the area is
         read at 3 % rather than the gate's 8 %, and the geocode and storey slacks the gate
         carries for a merge it already certified are not extended to a join nobody certified."""
-        return ClusterRelation(self._listings, self._feats, self._settings, PROMOTE)
+        return ClusterRelation(self._listings, self._feats, self._settings, PROMOTE,
+                               self._certificates)
 
     def listings(self) -> Mapping[int, Listing]:
         """The adverts this relation reads (E280's cluster-grain area limb needs the bodies)."""
@@ -86,6 +91,10 @@ class ClusterRelation:
                     a, b, self._settings,
                     price_paths_agree(a, b, self._settings.d43_price_path_tol),
                     overlap)
+                # E303 (prepared): a K-C pair at one house number within the cross-portal 5 %.
+                if (not hit and self._settings.d43_cluster_price_kc_house_number
+                        and kc_house_number_price_excuse(a, b, self._certificates.get(key))):
+                    hit = True
             self._memo[key] = hit
         return hit
 
@@ -106,8 +115,9 @@ def relation_for(
     settings: Settings,
     listings: Mapping[int, Listing],
     feats: Mapping[tuple[int, int], Feats] | None = None,
+    certificates: Mapping[tuple[int, int], str] | None = None,
 ) -> ClusterRelation | None:
     """The relation when the settings row asks for the limb, else None — one place to ask."""
     if not settings.d43_cluster_invariant:
         return None
-    return ClusterRelation(listings, feats, settings)
+    return ClusterRelation(listings, feats, settings, certificates=certificates)

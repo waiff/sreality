@@ -1684,6 +1684,34 @@ def _one_street(a: Listing, b: Listing) -> bool:
         a.location.obec_kod is not None and a.location.obec_kod == b.location.obec_kod)
 
 
+def one_house(a: Listing, b: Listing) -> bool:
+    """E303: one street of one obec and ONE house number — the stored č.p. (the building) on
+    both sides, or two printed numbers that meet (E241: what the bodies print outranks what
+    the resolver filed)."""
+    if not _one_street(a, b):
+        return False
+    cp_a = _cp_of(a.location.house_number) or a.location.house_number_cp
+    cp_b = _cp_of(b.location.house_number) or b.location.house_number_cp
+    if cp_a and cp_b and cp_a == cp_b:
+        return True
+    printed_a, printed_b = _printed_numbers(a), _printed_numbers(b)
+    return bool(printed_a and printed_b and printed_house_numbers_meet(printed_a, printed_b))
+
+
+def kc_house_number_price_excuse(a: Listing, b: Listing, certificate: str | None) -> bool:
+    """E303 (prepared, awaiting a ruling): a CROSS-portal pair the engine certified by its
+    photographs (K-C), on one street at one house number, whose two prices sit within the
+    cross-portal 5 % — one flat, one price quoted with and without the agency's commission
+    (Pražská 930/47: 3,997,795 on sreality against 3,950,000 on four portals)."""
+    if certificate != "K-C":
+        return False
+    if a.source is None or b.source is None or a.source == b.source:
+        return False
+    if not _prices_meet(a, b, PRICE_CROSS_TOL):
+        return False
+    return one_house(a, b)
+
+
 def _independently_written(a: Listing, b: Listing, cfg: Settings) -> bool:
     """Are these two bodies two sentences, or one text posted twice?
 
@@ -2291,11 +2319,58 @@ def _one_text_repost(a: Listing, b: Listing, cfg: Settings) -> bool:
     return _read_one_text(a, b, cfg)
 
 
+def floor_total_camp_shift(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """E301: `floor` and `total_floors` shifted TOGETHER by one storey are one counting camp.
+
+    One advert counts the ground floor in both numbers and the other in neither: 3 of 8
+    against 2 of 7 is one flat typed two ways, not a floor fact plus a building fact. E133's
+    `joint_convention_shift` reads exactly this across a portal boundary the camp table cannot
+    place; here it is read on ANY pair of sources — inside one portal two agents type the
+    numbers two ways, and a camp table's offset between two portals says what a portal
+    usually does, not what one agent did. Both numbers stated on both sides, the two gaps
+    equal and of exactly one storey. E301b (`_mixed`, prepared) adds the OPPOSITE-sign shape,
+    the ground floor counted in the floor on one side and in the total on the other (Mechová:
+    3 of 7 against 2 of 8)."""
+    if not cfg.d43_floor_total_camp_shift:
+        return False
+    if None in (a.floor, b.floor, a.total_floors, b.total_floors):
+        return False
+    delta_floor = int(a.floor) - int(b.floor)  # type: ignore[arg-type]
+    delta_total = int(a.total_floors) - int(b.total_floors)  # type: ignore[arg-type]
+    if abs(delta_floor) != 1 or abs(delta_total) != 1:
+        return False
+    return delta_floor == delta_total or cfg.d43_floor_total_camp_shift_mixed
+
+
+def total_floors_agreeing_unit(a: Listing, b: Listing, cfg: Settings) -> bool:
+    """E302 (prepared, awaiting a ruling): the BUILDING's storey count, alone, does not part two
+    adverts that agree on the unit — floor, area, disposition and price.
+
+    Kolmá 4654/4a is posted on bezrealitky with 4 storeys and on realitymix with 3, one body
+    (`ve 2. podlaží ze 3`), floor 1, 59 m², 2+1, 4,490,000. Every clause needs BOTH sides to
+    state it: a silence is not an agreement here, because this reading removes a fact."""
+    if not cfg.d43_total_floors_agreeing_unit:
+        return False
+    if a.floor is None or b.floor is None:
+        return False
+    if a.floor != b.floor and floor_gap(cfg.floor_camps, a.source, a.floor,
+                                        b.source, b.floor) != 0:
+        return False
+    if area_relation(effective_area(a, cfg), effective_area(b, cfg), cfg) != "support":
+        return False
+    if a.disposition is None or b.disposition is None or a.disposition != b.disposition:
+        return False
+    return (_prices_meet(a, b, PRICE_CROSS_TOL)
+            or price_paths_agree(a, b, cfg.d43_price_path_tol))
+
+
 def _floor_fact(a: Listing, b: Listing, cfg: Settings) -> bool:
     """The `floor` fact of `distinguishing_facts`, read once so E185 can ask the same question.
 
     E288 and E290 are the W28 readings; with both dials off this is the W27 limb exactly."""
     reads = cfg.floor_camps_reads
+    if floor_total_camp_shift(a, b, cfg):
+        return False
     if (cfg.d43_floor_column_body_prevails and _bodies_print_one_storey(a, b, cfg)):
         return False
     gap = floor_gap(cfg.floor_camps if reads != "joint" else None,
@@ -2561,7 +2636,10 @@ def distinguishing_facts(
         # ambiguity again — the same slack `floor` already carries across every portal pair.
         ambiguous = (lenient and cfg.d43_gate_total_floors_slack and delta_total == 1
                      and convention_ambiguous(cfg.floor_camps, a.source, b.source))
-        if delta_total and not joint and not camped and not ambiguous:
+        # E301 (one camp shift, both numbers) and E302 (prepared: the unit agrees).
+        excused = (floor_total_camp_shift(a, b, cfg)
+                   or total_floors_agreeing_unit(a, b, cfg))
+        if delta_total and not joint and not camped and not ambiguous and not excused:
             add("total_floors", a.total_floors, b.total_floors)
 
     plot_conflict = _plot_conflict(a, b, cfg, is_land)
