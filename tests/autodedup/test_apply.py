@@ -1781,3 +1781,19 @@ def test_nothing_but_the_lane_reaches_the_apply_path() -> None:
     workflow = (root / ".github" / "workflows" / "autodedup.yml").read_text(encoding="utf-8")
     trigger = workflow.split("\non:\n", 1)[1].split("\nconcurrency:", 1)[0]
     assert "schedule" not in trigger and "workflow_dispatch" in trigger
+
+
+def test_the_rule_docs_name_only_the_control_the_adapter_reads() -> None:
+    # CLAUDE.md is loaded by every session: a deleted switch named there is a stop button that does nothing.
+    import re
+
+    root = Path(A.__file__).resolve().parent.parent
+    docs = [root / "CLAUDE.md", root / "docs" / "architecture.md",
+            *sorted((root / ".claude" / "skills").glob("*/SKILL.md"))]
+    named = {
+        (path.relative_to(root).as_posix(), key)
+        for path in docs
+        for key in re.findall(r"autodedup_apply_\w+", path.read_text(encoding="utf-8"))
+    }
+    assert {key for _, key in named} == {A.SCOPE_SETTING}
+    assert ("CLAUDE.md", A.SCOPE_SETTING) in named
