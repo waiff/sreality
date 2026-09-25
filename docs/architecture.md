@@ -1104,10 +1104,11 @@ renumber.** Navigate by area:
 15. **Multi-portal listings sit behind a thin `properties` parent (migration 091).** Each
     `listings` row carries `(source, source_id_native)` (unique together) plus `source_url`,
     and an FK `property_id` to a `properties` row that groups observations of the same
-    real-world property across portals. `properties` holds a representative display row plus
-    derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
-    `first/last_seen_at`), maintained by an **async property-maintenance job**, never inline in
-    the scrape (see rule #20 for the dirty-set incremental cadence). `is_active` /
+    real-world property across portals. `properties` holds the canonical advert's display row
+    plus derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
+    `first/last_seen_at`), written by ONE recompute (`scripts/recompute_property_stats.py`): the
+    property-maintenance job (rule #20 for the dirty-set cadence) and, per listing, the ingest
+    path's `_ensure_property`. `is_active` /
     `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
     derived, not authoritative per source. `db.mark_inactive` / `db.active_count` are
     **source-scoped** to enforce this — a portal's index walk only flips its own rows.
@@ -1118,6 +1119,19 @@ renumber.** Navigate by area:
     neither `scraper/db.py` nor the maintenance job's straggler-attach does any spatial/geo
     probe. Frontend Browse reads `properties_public`; region stats read the property grain
     (migration 103).
+    **One property, one voice (W4, migration 561, decision 18).** A property speaks with its
+    CANONICAL advert, rank 1 of `property_canonical_listings(property_id)`: active first, then
+    `source_trust_rank`, then the most recently seen, then the lowest id. ONE RULE PER FIELD:
+    every advert field (price and ITS OWN `listing_price_steps` history, area with no fallback,
+    layout, category, subtype, source, condition with both derived levels -- rule #14 --,
+    furnished) is the canonical advert's, and `repr_listing_ref_id` names it for every read model
+    (`properties_public.listing_id` IS it); every physical fact (building type, ownership,
+    energy rating, amenities, estate/usable/garden area, parking) is the first non-empty value
+    in the same order. A property is born one way, `scraper.db.NEW_SINGLETONS_SQL` (a bare row
+    linked in the same statement) then that recompute: on ingest (`_ensure_property`, at the
+    round trips the deleted singleton mirror cost) and in the straggler-attach alike.
+    `all_sources` / `active_sources` (never written) left the read model; the physical columns
+    are W8's destructive drop.
     **What changed: the NEW DEDUP cutoff (2026-08).** The whole *automatic decision layer* that
     used to order merges was removed wholesale — a deliberate teardown, not a regression. It had
     grown into a many-rung machine (street+disposition and geo-proximity candidate paths, a
@@ -1289,7 +1303,13 @@ renumber.** Navigate by area:
     against the ledger's `applied_at`, both now() of the group's one transaction) is noted
     undone as theirs wherever its survivor went since; and the dry run reports each group as
     the live run would treat it; an undone group may merge again on a later apply (undo is a
-    brake, not a ruling). Group size is the engine's own cap alone. A group already on one
+    brake, not a ruling). **Splits are propose-only (decision 9):** `GET
+    /autodedup/proposed-splits` (+ `/{property_id}`; `autodedup/proposed_splits.py`, read-only)
+    lists each live multi-advert property a generation touches whose seen adverts it groups
+    apart, or whose adverts carry a stored negative, with the engine's stated reason per split
+    pair (conflict, else the pair's decision, else must-not-link, else `no stated fact`) and
+    the operator's ruling; the batch split is the detach per advert (no `origin_property_id` =
+    never merged = `not_merged`). Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings and pipeline cards;
     collections, tags and notes stay on the survivor (rule #18: a detach is best-effort).
@@ -1325,6 +1345,11 @@ renumber.** Navigate by area:
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
     (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
     helper), so the two surfaces can never disagree on what a filter means.
+    **Every surface reads the same canonical advert (migration 561).** Both watchdog producers
+    and the collection monitor alert only on the canonical advert's own steps, and
+    `_shared_filter_where` admits an advert only as its property's canonical advert and drops
+    every advert of the subject's property (`exclude_listing_ids`, the one exclusion; decision
+    13), so comparables, velocity and the corridor count each property once.
     **PLACE is the same rule (W3 S3, migration 504): ONE code predicate,
     `<level>_id = any(codes)`, plain equality per level.** A location chip is a LEVEL plus a
     RÚIAN CODE at four levels — `region_id` / `okres_id` / `obec_id` / `cast_obce_id` — and
@@ -1763,7 +1788,7 @@ renumber.** Navigate by area:
     237 s against a 900 s cadence). The drain is race-free +
     terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
     since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
-    New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
+    New listings (`property_id` NULL) are born + recomputed by straggler-attach, not the queue. The
     **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
     reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
     self-heals within 24h *provided the sweep completes*: since the 2026-08-06 incident it runs

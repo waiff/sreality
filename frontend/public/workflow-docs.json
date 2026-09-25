@@ -3511,7 +3511,7 @@
     {
       "filename": "recompute_property_stats.yml",
       "name": "Jobs: recompute property stats (daily full reconcile)",
-      "description": "DAILY FULL SWEEP for the canonical `properties` parent. Attaches any straggler unlinked listings (incl. the one-time native-id backfill), then recomputes EVERY property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots. Finally it clears the dirty_properties queue (everything was just recomputed).",
+      "description": "DAILY FULL SWEEP for the canonical `properties` parent. Attaches any straggler unlinked listings, then recomputes EVERY property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots. Finally it clears the dirty_properties queue (everything was just recomputed).",
       "portal": null,
       "manual": true,
       "schedules": [

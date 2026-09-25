@@ -267,6 +267,13 @@ nothing.) This retired the old `scripts/refresh_map_mv.py` GH Actions cron entir
 pg_cron runs on-the-minute where GH Actions cron was measured ~2× jittered (see
 `gh-actions-cron-throttle-fleet` if you need the numbers).
 
+**A property row is its canonical advert's** (migration 561): `properties.repr_listing_ref_id` =
+rank 1 of `property_canonical_listings(property_id)` (active, trust, last seen, id), written by
+the one rollup; every read model joins place/floor/description/broker through it, and
+`properties_public.listing_id` is it. `browse_projection` (and so `browse_list` /
+`properties_map_mv`) no longer projects `all_sources` / `active_sources`; the two never-written
+`properties` columns wait for W8's destructive drop.
+
 **Three functions depend on `browse_projection`'s row type** (migration 537:
 `browse_list_visible()`, `properties_map_visible()`, and `listing_feed_visible()` on
 `listing_feed_public`'s) — the SPA's default Browse sources, minus the caller's dismissed

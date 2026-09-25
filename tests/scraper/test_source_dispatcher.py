@@ -251,7 +251,6 @@ def test_sreality_branch_uses_existing_parser(monkeypatch):
     assert result.spec == {
         "lat": 50.08, "lng": 14.43,
         "area_m2": 60.0, "disposition": "2+kk", "floor": 2,
-        "exclude_ids": [],
     }
 
 
@@ -305,7 +304,6 @@ def test_cache_hit_skips_llm_and_geocoder():
         "spec": {
             "lat": 50.0, "lng": 14.4,
             "area_m2": 70.0, "disposition": "3+kk", "floor": 1,
-            "exclude_ids": [],
         },
         "extraction": dict(_FAKE_LLM_EXTRACTION),
         "parse_confidence": "high",
@@ -353,7 +351,6 @@ def test_force_refresh_skips_cache_lookup_even_when_fresh():
             "spec": {
                 "lat": 50.0, "lng": 14.4,
                 "area_m2": 99.0, "disposition": "5+1", "floor": 9,
-                "exclude_ids": [],
             },
             "extraction": dict(_FAKE_LLM_EXTRACTION),
             "parse_confidence": "high",

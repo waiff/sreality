@@ -8,6 +8,7 @@ after the migrations apply.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -124,38 +125,8 @@ def _find(conn: _FakeConn, needle: str) -> tuple[str, Any] | None:
     return next((e for e in conn.executed if needle in e[0]), None)
 
 
-def test_attach_stragglers_singletons_only_no_spatial_link():
-    """Stragglers become singletons; the old geo spatial-link step is gone.
-
-    Matching is the out-of-band street+disposition dedup engine's job, so
-    attach must NOT run any ST_DWithin probe or enqueue dirty_properties — it
-    only inserts a singleton per unlinked listing and links it.
-    """
-    conn = _FakeConn()
-    _attach_stragglers(conn)
-    order = _sqls(conn)
-    insert = next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
-    link = next(i for i, s in enumerate(order) if "p.repr_listing_ref_id = l.id" in s)
-    assert insert < link
-    assert not any("ST_DWithin" in s for s in order)
-    assert not any("INSERT INTO dirty_properties" in s for s in order)
-
-
-def test_attach_stragglers_full_runs_native_id_backfill():
-    conn = _FakeConn()
-    _attach_stragglers(conn)
-    assert any("source_id_native = sreality_id::text" in s for s in _sqls(conn))
-
-
-def test_attach_stragglers_incremental_skips_native_id_backfill():
-    """The */5 incremental pass must not scan the whole listings table for the
-    one-time native-id backfill; the daily full sweep handles it."""
-    conn = _FakeConn()
-    _attach_stragglers(conn, skip_native_backfill=True)
-    order = _sqls(conn)
-    assert not any("source_id_native = sreality_id::text" in s for s in order)
-    # still inserts singletons even when the backfill is skipped
-    assert any("INSERT INTO properties" in s for s in order)
+_STRAGGLERS = (lambda s: s == "SELECT id FROM listings WHERE property_id IS NULL", [(11,), (12,)])
+_BORN = (lambda s: "INSERT INTO properties" in s, [(101,), (102,)])
 
 
 class _TxnMarkingConn(_FakeConn):
@@ -176,22 +147,30 @@ class _TxnMarkingConn(_FakeConn):
         return _Txn()
 
 
-def test_attach_stragglers_insert_and_link_are_one_transaction() -> None:
-    """The INSERT and the LINK are only JOINTLY idempotent: committing the
-    INSERT alone leaves listings still unlinked, so the next attempt inserts a
-    SECOND singleton each and orphans one. db.run_resilient now REPLAYS this op
-    on a transient error, so the pair must be all-or-nothing — and the
-    whole-table native-id backfill must stay outside that transaction."""
-    conn = _TxnMarkingConn()
-    _attach_stragglers(conn)
+def test_attach_stragglers_births_and_recomputes_them_in_one_transaction() -> None:
+    """One bare INSERT per straggler (the one birth path) and the normal recompute of the new
+    properties, all-or-nothing: db.run_resilient REPLAYS this op, and a replay must find the
+    stragglers unlinked, never a linked bare row Browse could show. No spatial link, no dirty
+    enqueue, and no native-id backfill (migration 314's validated CHECK left it nothing)."""
+    from scraper.db import NEW_SINGLETONS_SQL
+
+    conn = _TxnMarkingConn([_STRAGGLERS, _BORN])
+    assert _attach_stragglers(conn) == 2
     order = _sqls(conn)
-    backfill = next(i for i, s in enumerate(order)
-                    if "source_id_native = sreality_id::text" in s)
-    begin = order.index("BEGIN")
-    insert = next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
-    link = next(i for i, s in enumerate(order) if "p.repr_listing_ref_id = l.id" in s)
-    commit = order.index("COMMIT")
-    assert backfill < begin < insert < link < commit
+    birth = next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
+    recompute = next(i for i, s in enumerate(order) if "WITH batch AS" in s)
+    assert order[0] == "BEGIN" and birth < recompute and order[-1] == "COMMIT"
+    assert order[birth] == " ".join(NEW_SINGLETONS_SQL.split())
+    assert conn.executed[birth][1] == {"ids": [11, 12]}
+    assert conn.executed[recompute][1] == {"ids": [101, 102]}
+    assert not any("ST_DWithin" in s or "INSERT INTO dirty_properties" in s
+                   or "source_id_native" in s for s in order)
+
+
+def test_attach_without_stragglers_writes_nothing():
+    conn = _FakeConn()
+    assert _attach_stragglers(conn) == 0
+    assert not any("INSERT INTO properties" in s or "WITH batch AS" in s for s in _sqls(conn))
 
 
 class _DrainCur:
@@ -341,6 +320,8 @@ def _lock_script(acquired: bool):
          [(1,)] if acquired else []),
         (lambda s: s == "SELECT now()", [("2026-07-08T00:00:00+00:00",)]),
         (lambda s: "FROM dirty_properties" in s and "SELECT" in s, []),
+        _STRAGGLERS,
+        _BORN,
     ]
 
 
@@ -350,10 +331,8 @@ def test_run_incremental_pass_runs_all_phases_and_unlocks():
     conn = _FakeConn(script=_lock_script(acquired=True))
     stats = run_incremental_pass(conn, batch_size=500)
     assert stats["skipped"] is False
-    sqls = _sqls(conn)
     # every phase of the incremental pass ran...
     assert _find(conn, "INSERT INTO properties")  # straggler attach
-    assert not any("source_id_native = sreality_id" in s for s in sqls)  # skip legacy backfill
     assert _find(conn, "FROM dirty_properties")  # dirty drain claim
     # ...and the lease was released even on the happy path.
     assert _find(conn, "SET holder = NULL")
@@ -790,7 +769,18 @@ def test_late_binding_is_not_fuzzy():
         assert banned not in sql, f"late binding must not use {banned}"
 
 
-# --- one measure, one row (migration 424) -------------------------------------
+# --- one property, one voice (migrations 424 + 561) --------------------------------------
+
+MIGRATION_561 = Path(__file__).resolve().parent.parent / "migrations" / "561_one_property_view.sql"
+ADVERT_FIELDS = (
+    "repr_listing_id", "repr_listing_ref_id", "category_main", "category_type",
+    "category_sub_cb", "subtype", "disposition", "area_m2", "current_price_czk", "condition",
+    "building_condition_level", "apartment_condition_level", "furnished", "source",
+)
+PHYSICAL_FACTS = (
+    "has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar", "usable_area",
+    "estate_area", "garden_area", "parking_lots", "building_type", "ownership", "energy_rating",
+)
 
 
 def _set_clause(sql: str) -> str:
@@ -807,82 +797,58 @@ def _rhs(set_clause: str, column: str) -> str:
     return m[1].strip().rstrip(",")
 
 
-def test_the_denominator_is_read_from_the_same_row_as_the_numerator():
-    """properties.current_price_czk is the representative child's price, so
-    properties.area_m2 — what every per-m2 consumer divides it by — must be that
-    same child's area. Independent rollups made a merged property's ratio divide
-    one portal's price by another portal's area."""
+def test_the_one_order_is_spelled_once_in_the_function():
+    """Decision 18: active first, then portal trust, then the most recently seen, then the id
+    (the tie-break: 1,840 properties were tied at the top). The rollup reads the rank and
+    orders nothing of its own: the trust-first second ordering and the area fallback are gone."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    body = " ".join(MIGRATION_561.read_text().split())
+    assert ("order by l.is_active desc, public.source_trust_rank(l.source), "
+            "l.last_seen_at desc nulls last, l.id))::integer") in body
+    sql = " ".join(_RECOMPUTE_BATCH_SQL.split())
+    assert "CROSS JOIN LATERAL property_canonical_listings(b.id) o" in sql
+    for gone in ("source_trust_rank", "src_rank", "DISTINCT ON", "best_area", "golden", "coalesce(c."):
+        assert gone not in sql, f"a second ordering or fallback is back: {gone}"
+
+
+def test_every_advert_field_comes_from_the_canonical_advert():
+    """Price and area from one row (the per-m2 pair, migration 424) and condition with both
+    derived levels from that same row (rule 14): the canonical advert, never a mix."""
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
-    assert _rhs(setc, "current_price_czk").startswith("r.")
-    assert _rhs(setc, "area_m2").startswith("coalesce(r.area_m2"), (
-        "the area must lead with the representative child; the group-best area "
-        "is a fallback, not the definition"
-    )
+    for column in ADVERT_FIELDS:
+        assert _rhs(setc, column).startswith("c."), f"{column} must be the canonical advert's"
+    assert _rhs(setc, "price_per_m2_source_listing_id") == (
+        "price_per_m2_source_id(c.price_czk, c.area_m2, c.id)")
 
 
-def test_the_denominator_never_goes_back_through_the_golden_record():
-    """The golden-record CTE picks each field's best value from whichever child
-    happens to have one. area_m2 must not go back through it — that is exactly
-    how the denominator split away from the numerator."""
-    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
-
-    assert "g.area_m2" not in _RECOMPUTE_BATCH_SQL, (
-        "g.area_m2 re-introduces a field-by-field pick of the per-m2 denominator"
-    )
-
-
-def test_usable_area_is_left_on_its_own_golden_record_pick():
-    """usable_area is NOT the per-m2 denominator, and it is a live Browse +
-    Watchdog filter column (browse_list.usable_area -> usable_area_min/max_filter,
-    the matcher's min/max_usable_area). Binding it to the representative child
-    would NULL it for every property whose repr carries an area but no
-    usable_area, silently narrowing saved filters. W3 changes the denominator,
-    not this."""
-    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
-
-    setc = _set_clause(_RECOMPUTE_BATCH_SQL)
-    assert _rhs(setc, "usable_area") == "g.usable_area"
-
-
-def test_best_area_is_left_joined_so_an_area_less_property_still_updates():
-    """No child reports an area -> best_area has no row for that property. An
-    inner join would drop it out of the UPDATE entirely, silently freezing
-    is_active and every other rolled-up column."""
+def test_every_physical_fact_is_the_first_non_empty_value_in_the_same_order():
     import re
 
     from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
 
-    assert "LEFT JOIN best_area" in _RECOMPUTE_BATCH_SQL
-    assert not re.search(r"(?<!LEFT )JOIN best_area", _RECOMPUTE_BATCH_SQL)
-
-
-def test_the_area_fallback_is_the_pre_change_pick_verbatim():
-    """The fallback exists so no property loses an area it already had. It must
-    stay restricted to children that carry an area and ordered by trust alone —
-    widening it to usable-area-carrying rows makes the best row's area NULL and
-    drops the property out of every area filter."""
-    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
-
-    body = " ".join(
-        _RECOMPUTE_BATCH_SQL.split("best_area AS (", 1)[1].split("),", 1)[0].split()
-    )
-    assert "WHERE k.area_m2 IS NOT NULL" in body
-    assert "ORDER BY k.property_id, k.src_rank," in body
-
-
-def test_the_basis_stamp_names_the_row_the_price_came_from():
-    """price_per_m2_source_listing_id must be built from the representative
-    child's own price + area, so a non-NULL stamp always means one row backed
-    both halves of the measure."""
-    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
-
     setc = _set_clause(_RECOMPUTE_BATCH_SQL)
-    assert (
-        "price_per_m2_source_id(r.price_czk, r.area_m2, r.listing_ref_id)"
-        in " ".join(setc.split())
-    )
+    rollup = _RECOMPUTE_BATCH_SQL.split("child_agg AS (", 1)[1].split("\n    ),", 1)[0]
+    for column in PHYSICAL_FACTS:
+        assert _rhs(setc, column) == f"r.{column}"
+        assert re.search(
+            rf"\(array_agg\(k\.{column} ORDER BY k\.canonical_rank\) "
+            rf"FILTER \(WHERE k\.{column} IS NOT NULL\)\)\[1\] AS {column}", rollup,
+        ), f"{column} must be the first non-empty value in the canonical order"
+    assert "bool_or(k.is_active)" in rollup, "a property is live while ANY advert is"
+
+
+def test_the_price_history_is_the_canonical_adverts_own():
+    """A step never spans two adverts (migration 559) and no other advert's steps are summed
+    in: the counts, the max drop and the headline delta all read the canonical advert."""
+    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
+
+    sql = " ".join(_RECOMPUTE_BATCH_SQL.split())
+    assert "FROM canon c JOIN listing_price_steps ps ON ps.listing_id = c.id" in sql
+    assert "FROM canon c JOIN listing_snapshots s ON s.listing_id = c.id" in sql
+    assert "ps.property_id" not in sql
 
 
 def test_every_recompute_variant_writes_the_stamp():
@@ -893,60 +859,17 @@ def test_every_recompute_variant_writes_the_stamp():
     for sql in (rps._RECOMPUTE_BATCH_SQL, rps._RECOMPUTE_ONE_SQL,
                 rps._RECOMPUTE_SCOPED_SQL):
         assert "price_per_m2_source_listing_id" in sql
+        assert "property_canonical_listings" in sql
 
 
-def test_every_singleton_creation_path_stamps_the_basis():
-    """Three writers create a property from ONE listing (straggler attach,
-    insert-time singleton, the cheap singleton rollup). A singleton's price and
-    area are trivially one row's, so each stamps the basis rather than leaving it
-    NULL until the next maintenance pass — and each calls the shared
-    price_per_m2_source_id() instead of restating its validity bound."""
-    import inspect
-
-    from scraper import db
-    from scripts.recompute_property_stats import _ATTACH_INSERT_SQL
-
-    sources = {
-        "attach": _ATTACH_INSERT_SQL,
-        "singleton": inspect.getsource(db._create_singleton_property),
-        "cheap_rollup": inspect.getsource(db._cheap_property_rollup),
-    }
-    for name, sql in sources.items():
-        assert "price_per_m2_source_listing_id" in sql, f"{name} drops the stamp"
-        assert "price_per_m2_source_id(" in sql, f"{name} restates the validity bound"
-
-
-def test_one_survivorship_rule_for_every_golden_record_field():
-    """W6/R3: the amenity booleans lost their `bool_or` special case.
-
-    Presence-wins and best-non-null both skip NULLs, so they differ only where two
-    children disagree true-vs-false — and there bool_or let the LEAST trusted child win
-    (a bazos text guess over sreality's stated false). The arbiter is now
-    source_trust_rank at both grains, the one the scalars have always used. `is_active`
-    keeps its own bool_or: a property is live while ANY child is."""
-    import re
-
-    from scripts.recompute_property_stats import _RECOMPUTE_BATCH_SQL
-
-    booleans = ("has_lift", "has_balcony", "has_parking", "terrace", "garage", "cellar")
-    golden = _RECOMPUTE_BATCH_SQL.split("golden AS (", 1)[1].split("\n    ),", 1)[0]
-    for column in booleans:
-        assert f"bool_or(k.{column})" not in _RECOMPUTE_BATCH_SQL
-        assert re.search(
-            rf"array_agg\(k\.{column} ORDER BY k\.src_rank,.*?"
-            rf"FILTER \(WHERE k\.{column} IS NOT NULL\)\)\[1\]",
-            golden, re.S,
-        ), f"{column} must take the best non-NULL value in source-trust order"
-    assert "bool_or(l.is_active)" in _RECOMPUTE_BATCH_SQL
-
-    # The other writer of these columns is a SINGLETON path (`agg.cnt = 1`), where the
-    # two rules are identical by construction — so there is no second survivorship rule
-    # to keep in step, and none may appear.
-    import inspect
-
-    from scraper import db
-
-    for mirror in (inspect.getsource(db._cheap_property_rollup),):
-        for column in booleans:
-            assert f"bool_or({column})" not in mirror
-            assert f"bool_or(l.{column})" not in mirror
+def test_a_property_is_born_one_way():
+    """One bare INSERT (`scraper.db.NEW_SINGLETONS_SQL`) and the normal recompute: no other
+    runtime code writes a new `properties` row, so no copy of the rollup can drift."""
+    root = Path(__file__).resolve().parent.parent
+    writers = sorted(
+        str(path.relative_to(root))
+        for top in ("scraper", "scripts", "toolkit", "api", "autodedup", "location_data")
+        for path in (root / top).rglob("*.py")
+        if "INSERT INTO properties" in path.read_text(encoding="utf-8").replace("\n", " ")
+    )
+    assert writers == ["scraper/db.py"], writers

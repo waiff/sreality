@@ -169,27 +169,6 @@ def test_denominator_comes_from_the_child_that_supplied_the_price(cur):
     assert basis == live == repr_ref, "the measure must name the one row it came from"
 
 
-def test_usable_area_keeps_its_independent_trust_order_pick(cur):
-    """W3 changes the per-m2 DENOMINATOR. usable_area is not it.
-
-    usable_area is a live Browse + Watchdog filter column (properties ->
-    browse_list.usable_area -> browse_stats_properties' usable_area_min/max_filter,
-    and the matcher's min/max_usable_area over properties_public). Binding it to
-    the representative child would silently narrow every saved filter that uses
-    it, so it keeps the golden-record pick it has always had: the best non-NULL
-    value in source-trust order — here the delisted sreality sibling's, because
-    trust beats liveness for a field's best-known value.
-    """
-    pid, stale, _live = _divergent_pair(cur)
-    _recompute(cur, pid)
-    _price, area, usable, _basis, _repr, _active = _rollup(cur, pid)
-    assert area == 78.0, "the denominator still comes from the representative child"
-    assert usable == 1100.0, (
-        f"usable_area must still be the trust-order pick (listing {stale}); "
-        "rebinding it to the representative child is a different measure's wave"
-    )
-
-
 def test_a_siblings_usable_area_survives_a_repr_child_that_has_none(cur):
     """The shape that a coherence rule on usable_area would silently NULL.
 
@@ -211,22 +190,18 @@ def test_a_siblings_usable_area_survives_a_repr_child_that_has_none(cur):
     assert basis == repr_child, "the measure itself is unaffected: one row backs it"
 
 
-def test_the_area_fallback_skips_a_higher_trust_child_that_carries_no_area(cur):
-    """The fallback must reproduce the pre-W3 area pick: the best-ranked child
-    THAT HAS AN AREA. A more-trusted sibling carrying only a usable_area is not a
-    denominator — selecting it would leave properties.area_m2 NULL and drop the
-    property out of every area and per-m2 filter."""
+def test_the_area_is_the_canonical_adverts_with_no_fallback(cur):
+    """Migration 561 deleted the area fallback: a canonical advert with no area leaves the
+    property without one (and without a per-m2 basis) rather than borrowing a sibling's,
+    while a physical fact still takes the first non-empty value in the same order."""
     pid = _new_property(cur)
     priced = _add_child(cur, pid, source="sreality", price=5_000_000, area=None)
     _add_child(cur, pid, source="idnes", price=4_900_000, area=None, usable=90.0)
-    dimensional = _add_child(cur, pid, source="mmreality", price=4_800_000, area=70.0)
+    _add_child(cur, pid, source="mmreality", price=4_800_000, area=70.0)
     _recompute(cur, pid)
-    _price, area, usable, basis, repr_ref, _active = _rollup(cur, pid)
+    price, area, usable, basis, repr_ref, _active = _rollup(cur, pid)
 
-    assert repr_ref == priced
-    assert area == 70.0, f"the area must come from listing {dimensional}, which has one"
-    assert usable == 90.0
-    assert basis is None, "price and area came from two rows — nothing to stamp"
+    assert (repr_ref, price, area, usable, basis) == (priced, 5_000_000, None, 90.0, None)
 
 
 def test_stamp_never_names_a_row_other_than_the_priced_child(cur):
@@ -249,25 +224,6 @@ def test_stamp_never_names_a_row_other_than_the_priced_child(cur):
     assert cur.fetchone()[0] == 0
 
 
-def test_priced_child_without_an_area_leaves_the_measure_unlabelled(cur):
-    """The spec's fixture: mmreality supplies the area, sreality the price.
-
-    area_m2 still falls back to the sibling — it is a display/filter column and
-    NULLing it would drop the property out of every area filter — but the basis
-    stamp stays NULL, which is the whole point: the ratio describes neither
-    listing, and the label says so.
-    """
-    pid = _new_property(cur)
-    priced = _add_child(cur, pid, source="sreality", price=5_000_000, area=None)
-    _add_child(cur, pid, source="mmreality", price=4_900_000, area=1200.0)
-    _recompute(cur, pid)
-    price, area, _usable, basis, repr_ref, _active = _rollup(cur, pid)
-
-    assert (price, area) == (5_000_000, 1200.0)
-    assert repr_ref == priced
-    assert basis is None, "a cross-row ratio must not be stamped as one row's measure"
-
-
 def test_zero_area_is_not_a_valid_basis(cur):
     """The measure's validity bound lives in price_per_m2_source_id, not in callers."""
     pid = _new_property(cur)
@@ -277,8 +233,8 @@ def test_zero_area_is_not_a_valid_basis(cur):
 
 
 def test_property_with_no_area_at_all_is_still_recomputed(cur):
-    """best_area is LEFT-JOINed: an inner join would drop the whole property out
-    of the UPDATE, silently freezing is_active and every other rolled-up column."""
+    """A property whose adverts report no area is still updated: nothing about the area may
+    drop it out of the UPDATE, silently freezing is_active and every other rolled-up column."""
     pid = _new_property(cur)
     _add_child(cur, pid, source="bazos", price=None, area=None, active=False)
     cur.execute("UPDATE properties SET is_active = true WHERE id = %s", (pid,))
@@ -289,34 +245,33 @@ def test_property_with_no_area_at_all_is_still_recomputed(cur):
 
 
 def test_singleton_insert_path_stamps_the_basis(cur):
-    """A brand-new listing gets its property from scraper.db, not the sweep; a
-    5-minute NULL basis on every new listing is a hole in the measure."""
+    """A brand-new listing gets its property from scraper.db (born bare, then the rollup's
+    own recompute), not the sweep; a NULL basis on every new listing is a hole in the measure."""
     from scraper import db
 
     lid = _add_child(cur, None, source="bezrealitky", price=3_000_000, area=55.0)
     _skew_property_ids_past(cur, lid)
-    db._create_singleton_property(cur.connection, lid, "bezrealitky")
+    db._ensure_property(cur.connection, lid)
 
     pid, stamp = _stamp_of_child(cur, lid)
     assert stamp == lid != pid, "the stamp is a listings.id, not the property's own id"
 
 
-def test_cheap_rollup_restamps_an_already_linked_singleton(cur):
-    """_cheap_property_rollup runs on EVERY re-scrape of an already-linked
-    listing (db._ensure_property dispatches to it), so it — not the sweep — is
-    what keeps a singleton's basis true as its price and area move."""
+def test_a_rescrape_restamps_an_already_linked_singleton(cur):
+    """db._ensure_property recomputes the property on EVERY re-scrape of an already-linked
+    listing, so it — not the sweep — keeps a singleton's basis true as its price moves."""
     from scraper import db
 
     lid = _add_child(cur, None, source="bazos", price=2_500_000, area=48.0)
     _skew_property_ids_past(cur, lid)
-    db._ensure_property(cur.connection, lid, "bazos")
+    db._ensure_property(cur.connection, lid)
     pid, _first = _stamp_of_child(cur, lid)
 
     cur.execute(
         "UPDATE properties SET price_per_m2_source_listing_id = NULL WHERE id = %s",
         (pid,),
     )
-    db._ensure_property(cur.connection, lid, "bazos")  # already linked -> cheap rollup
+    db._ensure_property(cur.connection, lid)  # already linked -> the recompute
 
     assert _stamp_of_child(cur, lid) == (pid, lid), (
         "the rollup must stamp the CHILD's listings.id; stamping l.property_id "
@@ -325,14 +280,13 @@ def test_cheap_rollup_restamps_an_already_linked_singleton(cur):
 
 
 def test_straggler_attach_stamps_the_basis(cur):
-    """The sweep's attach path adopts every property_id-NULL listing. It inserts
-    the property directly, so it stamps the basis itself or the row waits a full
-    sweep unlabelled."""
+    """The sweep's attach path adopts every property_id-NULL listing and recomputes it at
+    birth, so the row never waits a full sweep unlabelled."""
     from scripts.recompute_property_stats import _attach_stragglers
 
     lid = _add_child(cur, None, source="remax", price=7_100_000, area=91.0)
     _skew_property_ids_past(cur, lid)
-    _attach_stragglers(cur.connection, skip_native_backfill=True)
+    _attach_stragglers(cur.connection)
 
     pid, stamp = _stamp_of_child(cur, lid)
     assert stamp == lid != pid

@@ -1,11 +1,8 @@
 """Tests for the property linkage (scraper.db).
 
-Hermetic: `upsert_listing` is stubbed so the only SQL reaching the fake conn
-comes from the property linkage. A new (unlinked) listing always becomes its
-own singleton property — the old geo Tier-1 spatial probe was removed when
-matching moved to the out-of-band street+disposition dedup engine. The fake
-conn matches each executed statement against a scripted (predicate -> rows)
-list and records every execution so the test can assert what linkage emitted.
+Hermetic: `upsert_listing` is stubbed so the only SQL reaching the fake conn comes from the
+property linkage (a new listing is born a singleton, then the rollup's recompute). The fake conn
+matches each statement against a scripted (predicate -> rows) list and records every execution.
 """
 
 from __future__ import annotations
@@ -86,13 +83,11 @@ def _find(executions, needle: str) -> tuple[str, Any] | None:
 # --- property linkage branches (via upsert_listing_with_property) ---------
 
 
-def test_new_listing_creates_singleton(monkeypatch):
-    """A new (unlinked) listing always becomes its own singleton property.
-
-    No geo probe, no candidate enqueue — matching is the out-of-band dedup
-    engine's job now. Property linkage keys on the SURROGATE listings.id (resolved
-    from the always-present sreality_id on the sreality path), never on sreality_id.
-    """
+def test_new_listing_is_born_bare_then_recomputed(monkeypatch):
+    """A new (unlinked) listing becomes its own singleton through the one birth path (a bare
+    row naming the advert, linked in the same statement) and the rollup's own recompute: no
+    geo probe, no candidate, no copy of the rollup. Keyed on the SURROGATE listings.id
+    (resolved from the always-present sreality_id on the sreality path), never sreality_id."""
     _stub_upsert(monkeypatch)
     conn = _FakeConn([
         (lambda s: "SELECT id FROM listings WHERE sreality_id" in s, [(8001,)]),  # resolve surrogate
@@ -103,29 +98,15 @@ def test_new_listing_creates_singleton(monkeypatch):
     result = db.upsert_listing_with_property(conn, {"sreality_id": 555}, {}, "h")
 
     assert result == "new"
-    ins = _find(conn.executed, "INSERT INTO properties")
-    assert ins is not None
-    # The singleton must carry the FULL display payload at creation, not just
-    # structural columns — otherwise the Browse card has no condition until the
-    # next full recompute (portal inserts never enter the dirty drain, so that's
-    # up to ~24h). Guards against the column list being trimmed again. PLACE is
-    # the one thing it does NOT carry: W4-c dropped every location column from
-    # `properties`, and a property's place is its representative listing's row in
-    # `listing_location`.
-    assert "condition" in ins[0]
-    for gone in ("locality", "district", "geom", "obec_id", "ku_id"):
-        assert gone not in ins[0], f"singleton insert still writes properties.{gone}"
-    link = _find(conn.executed, "UPDATE listings SET property_id =")
-    # Keyed on the surrogate (8001), NOT the sreality_id (555).
-    assert link is not None and link[1] == (42, 8001)
-    # the removed geo matcher: no probe, no rollup, no candidate
-    assert _find(conn.executed, "SELECT price_czk, area_m2 FROM listings") is None
-    assert _find(conn.executed, "SELECT p.id FROM properties p") is None
-    assert _find(conn.executed, "UPDATE properties p SET") is None
+    birth = _find(conn.executed, "INSERT INTO properties")
+    assert birth == (" ".join(db.NEW_SINGLETONS_SQL.split()), {"ids": [8001]})
+    roll = _find(conn.executed, "UPDATE properties p SET")
+    assert roll is not None and roll[1] == {"pid": 42}
+    assert "property_canonical_listings" in roll[0]
     assert _find(conn.executed, "property_identity_candidates") is None
 
 
-def test_linked_listing_refreshes_via_rollup(monkeypatch):
+def test_linked_listing_is_recomputed_by_the_rollup(monkeypatch):
     _stub_upsert(monkeypatch, "updated")
     conn = _FakeConn([
         (lambda s: "SELECT id FROM listings WHERE sreality_id" in s, [(8002,)]),  # resolve surrogate
@@ -136,15 +117,24 @@ def test_linked_listing_refreshes_via_rollup(monkeypatch):
 
     assert result == "updated"
     roll = _find(conn.executed, "UPDATE properties p SET")
-    assert roll is not None
-    # The singleton rollup keeps the display payload in sync on re-fetch, keyed on
-    # the surrogate (l.id = 8002) — and, since W4-c, mirrors no place column.
-    assert "condition" in roll[0]
-    for gone in ("locality", "district", "geom", "obec_id", "ku_id"):
-        assert gone not in roll[0], f"inline rollup still writes properties.{gone}"
-    assert roll[1] == (8002,)
+    assert roll is not None and roll[1] == {"pid": 7}
     assert _find(conn.executed, "INSERT INTO properties") is None
-    assert _find(conn.executed, "SELECT p.id FROM properties p") is None
+
+
+def test_the_full_recompute_costs_the_round_trips_the_singleton_mirror_did():
+    """The ledger's gate for deleting the 28-column mirror: counted on the fake, a first
+    sight is SELECT + birth + recompute (the old path: SELECT + INSERT + link) and a
+    re-scrape is SELECT + recompute (the old path: SELECT + mirror UPDATE)."""
+    fresh = _FakeConn([
+        (lambda s: "SELECT property_id FROM listings WHERE id" in s, [(None,)]),
+        (lambda s: "INSERT INTO properties" in s, [(42,)]),
+    ])
+    db._ensure_property(fresh, 8001)
+    assert len(fresh.executed) == 3
+
+    linked = _FakeConn([(lambda s: "SELECT property_id FROM listings WHERE id" in s, [(7,)])])
+    db._ensure_property(linked, 8001)
+    assert len(linked.executed) == 2
 
 
 # --- ingest_scraped_listing (non-sreality path) ---------------------------
@@ -206,7 +196,7 @@ def test_ingest_reuses_surrogate_on_refetch(monkeypatch):
     assert _find(conn.executed, "nextval(") is None       # no new id drawn on refetch
     # no post-upsert re-resolve either — the surrogate was already in hand
     assert _find(conn.executed, "SELECT id FROM listings WHERE source") is None
-    assert _find(conn.executed, "UPDATE properties p SET") is not None  # rollup
+    assert _find(conn.executed, "UPDATE properties p SET") is not None  # the recompute
 
 
 def test_ingest_first_sight_null_sreality_id_when_flip_enabled(monkeypatch):
@@ -418,16 +408,10 @@ def test_broker_fields_stay_out_of_the_content_hash():
 
 
 def test_ingest_enqueues_property_stats_work(monkeypatch):
-    """A content-changed write enqueues dirty_properties so the */5 incremental
-    recompute refreshes the price-history columns.
+    """A content-changed write enqueues dirty_properties for the */5 incremental pass.
 
-    This is the counterpart of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL,
-    which only ever covered sreality. The other eight portals ingest through
-    ingest_scraped_listing, so before this they never enqueued on a content
-    change and their price_change_count* / total_price_change_pct were refreshed
-    only by the 04:15 full sweep — while _cheap_property_rollup updates
-    current_price_czk inline. A displayed price could sit up to 24h out of step
-    with its own change history.
+    This is the counterpart of write_detail_batch's _BATCH_DIRTY_FROM_SIDS_SQL; the
+    maintenance pass it feeds patches `browse_list` for what it recomputes (rule 20).
     """
     _stub_upsert(monkeypatch, "changed")
     conn = _FakeConn([

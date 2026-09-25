@@ -473,7 +473,6 @@ export interface TargetSpecIn {
   area_m2: number | null;
   disposition: Disposition | null;
   floor: number | null;
-  exclude_ids: number[];
 }
 
 export interface ComparableUsed {
