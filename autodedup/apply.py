@@ -1579,16 +1579,32 @@ def _retire_legacy(
             int(lid), int(pid) if pid is not None else None, ctype, cmain))
     merging: dict[int, int] = {}
     other: dict[int, int] = {}
+    why: dict[int, str] = {}
     for cluster in _cluster_rows(conn, generation):
         key = int(cluster["cluster_key"])
         found = members.get(key, [])
-        into = merging if (cluster["status"] == "proposed" and found
-                           and scope.admits(cluster, found)) else other
+        if cluster["status"] == "proposed" and found and scope.admits(cluster, found):
+            into = merging
+        else:
+            into, why[key] = other, _not_admitted(cluster, found, scope)
         for member in found:
             into.setdefault(member.listing_id, key)
     return legacy_retire.run(conn, scope.blocks, category_types=scope.category_types,
                              dry_run=dry_run, run_id=new_run_id(), out_dir=out_dir,
-                             closed=scope_closed, cluster_of=merging, other_of=other)
+                             closed=scope_closed,
+                             engine=legacy_retire.EngineMaps(merging, other, why))
+
+
+def _not_admitted(cluster: Mapping[str, Any], members: Sequence[Member], scope: Scope) -> str:
+    if cluster["status"] != "proposed":
+        return f"status {cluster['status']}"
+    block = block_of(cluster)
+    if scope.blocks is not None and block not in scope.blocks:
+        return f"block {block} outside the scope"
+    if scope.category_types is not None and any(
+            m.category_type not in scope.category_types for m in members):
+        return "a deal type outside the scope"
+    return "an advert outside the scope"
 
 
 def _with_retire(result: dict[str, Any], retired: dict[str, Any] | None) -> dict[str, Any]:

@@ -600,7 +600,7 @@ def test_6_the_dry_run_lists_the_engine_groups_touching_the_retire_set() -> None
     _intact_pair(db, 100, 200, 1)
     _intact_pair(db, 300, 400, 3)
     out = L.retire_legacy(db, TRIAL, category_types=SALES, dry_run=True, run_id="r0",
-                          cluster_of={1: 10, 2: 10, 3: 20, 77: 30})
+                          engine=L.EngineMaps(merging={1: 10, 2: 10, 3: 20, 77: 30}))
     assert out["engine_clusters"] == [10, 20]
     assert out["counts"]["engine_clusters_touching_retire_set"] == 2
     assert out["counts"]["retire_set_without_engine_cluster"] == 0
@@ -684,12 +684,14 @@ def _wire(db: RetireDb, monkeypatch: Any) -> list[dict[str, Any]]:
 
 def test_r2_1_only_groups_this_run_may_merge_count_as_re_merging(
         tmp_path: Path, monkeypatch: Any) -> None:
-    """Reviewer T5b / T5c: a rejected engine group, or one in another block, never merges."""
+    """Reviewer T5b / T5c: a rejected engine group, or one in another block, never merges; it
+    is counted apart. Here each holds only PART of the legacy group, so the group still goes."""
     for status, block in (("rejected", ("o", TOWN)), ("proposed", ("o", 999999))):
         db = RetireDb()
         db.live_scope(blocks=sorted(TRIAL))
         _intact_pair(db, 100, 200, 1)
-        db.group(10, [1, 2], status=status, block=block)
+        db.group(10, [1, 99], status=status, block=block)
+        db.listing(99, None)
         db.advert(7, 700)
         db.advert(8, 800)
         db.group(20, [7, 8])                           # passes the plan-first check
@@ -697,6 +699,7 @@ def test_r2_1_only_groups_this_run_may_merge_count_as_re_merging(
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
         out = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1"}, tmp_path)
         counts = out["legacy_retire"]["counts"]
+        assert counts["outcomes"] == {"would_retire": 1}
         assert counts["engine_clusters_touching_retire_set"] == 0
         assert counts["retire_set_without_engine_cluster"] == 1
         assert counts["engine_clusters_not_merging_touching_retire_set"] == 1
@@ -704,6 +707,69 @@ def test_r2_1_only_groups_this_run_may_merge_count_as_re_merging(
         assert body["engine_clusters"] == [] and body["engine_clusters_not_merging"] == [10]
         assert "this run will not merge (not proposed, or outside the scope): 10" \
             in page.read_text()
+
+
+def test_r3_the_engine_holding_a_whole_group_outside_the_scope_keeps_it_for_w6(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """The trial dry run (36147150175): 90 of 177 groups sat whole in ONE engine group the scope
+    does not admit (the trial edge cuts it). Undoing them would split what the engine calls one
+    property, and nothing would re-merge it until the scope widens. Left, with the group and
+    why; where the engine splits the group itself (different groups, some or all ungrouped),
+    it goes."""
+    db = RetireDb()
+    db.live_scope(blocks=sorted(TRIAL))
+    shape: dict[str, str] = {}
+    shape["other_block"] = _intact_pair(db, 100, 200, 1)
+    db.group(10, [1, 2], block=("o", 999999))          # reaches outside the trial blocks
+    shape["not_proposed"] = _intact_pair(db, 300, 400, 3)
+    db.group(20, [3, 4], status="rejected")
+    shape["different_groups"] = _intact_pair(db, 500, 600, 5)
+    db.group(30, [5], block=("o", 999999))
+    db.group(31, [6], block=("o", 999999))
+    shape["partly_grouped"] = _intact_pair(db, 700, 800, 7)
+    db.group(40, [7, 97], block=("o", 999999))
+    db.listing(97, None)
+    shape["ungrouped"] = _intact_pair(db, 900, 1000, 9)
+    shape["admitted"] = _intact_pair(db, 1100, 1200, 11)
+    db.group(50, [11, 12])                             # proposed, in scope: merges
+    shape["mixed_admitted_and_not"] = _intact_pair(db, 1300, 1400, 13)
+    db.group(60, [13, 98])
+    db.listing(98, None)
+    db.group(61, [14], block=("o", 999999))
+    page = tmp_path / "s.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(page))
+    out = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1"}, tmp_path)
+    body = json.loads((tmp_path / "apply" / "legacy_retire.json").read_text())
+    by = {x["merge_group_id"]: x for x in body["groups"]}
+    agrees = f"skipped:{L.ENGINE_AGREES}"
+    assert {name: by[gid]["outcome"] for name, gid in shape.items()} == {
+        "other_block": agrees, "not_proposed": agrees,
+        "different_groups": "would_retire", "partly_grouped": "would_retire",
+        "ungrouped": "would_retire", "admitted": "would_retire",
+        "mixed_admitted_and_not": "would_retire"}
+    assert (by[shape["other_block"]]["engine_agrees_cluster"],
+            by[shape["other_block"]]["engine_agrees_why"]) == (10, "block town:999999 outside "
+                                                                  "the scope")
+    assert (by[shape["not_proposed"]]["engine_agrees_cluster"],
+            by[shape["not_proposed"]]["engine_agrees_why"]) == (20, "status rejected")
+    counts = out["legacy_retire"]["counts"]
+    assert counts[L.ENGINE_AGREES] == 2 and counts["retire_set"] == 5
+    assert counts[f"{L.ENGINE_AGREES}_by_reason"] == {
+        "block town:999999 outside the scope": 1, "status rejected": 1}
+    assert f"skipped:{L.ENGINE_AGREES} (10: block town:999999 outside the scope)" \
+        in page.read_text()
+
+    # live, the same: the two stay merged, the rest come apart
+    monkeypatch.setattr(L, "detach_listing", db.detach_recording([]))
+    merged: list[dict[str, Any]] = []
+    original = A.apply_plan
+    monkeypatch.setattr(A, "apply_plan", lambda conn, plan, dry_run: original(
+        conn, plan, dry_run, merge=db.merge(merged)))
+    live = A.run_apply(_factory(db), {"generation": GEN, "retire_legacy": "1", "dry_run": "0"},
+                       tmp_path)
+    assert live["legacy_retire"]["counts"]["outcomes"] == {agrees: 2, "retired": 5}
+    assert db.listings[2]["property_id"] == 100 and db.listings[4]["property_id"] == 300
+    assert db.listings[6]["property_id"] == 600 and db.listings[10]["property_id"] == 1000
 
 
 def test_r2_2_a_negative_the_undo_does_not_newly_join_refuses_nothing() -> None:
