@@ -471,6 +471,19 @@ export default function ListingDetail() {
             )}
           </div>
         }
+        curationSlot={
+          /* Collections / tags / notes are property-grain (rule #18), so the
+             block needs the property_id and simply doesn't render without one. */
+          propPid != null ? (
+            <Suspense fallback={<Skeleton height={140} />}>
+              <CurationBlock
+                property_id={propPid}
+                sreality_id={listing.sreality_id}
+                listing_id={listing.id}
+              />
+            </Suspense>
+          ) : undefined
+        }
         estimatesSlot={
           /* The estimation chapter: MF reference + our runs, side by side —
              in the prime slot after the description (the map moved into the
@@ -525,16 +538,6 @@ export default function ListingDetail() {
             lat={listing.lat}
             lng={listing.lng}
             propertyId={propPid}
-          />
-        )}
-      </Suspense>
-      <Hairline />
-      <Suspense fallback={<Skeleton height={140} />}>
-        {propPid != null && (
-          <CurationBlock
-            property_id={propPid}
-            sreality_id={listing.sreality_id}
-            listing_id={listing.id}
           />
         )}
       </Suspense>
