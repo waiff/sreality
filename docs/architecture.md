@@ -2155,8 +2155,9 @@ renumber.** Navigate by area:
     **Its sibling, the MF reference rent** (migration 565): one inlinable SQL function,
     `mf_reference(...)`, over the ingest-refreshed `rent_map_cells` matview — a value, the town's
     published range or a reason (six codes, notes only in that migration), rendered by its shape.
-    Estimations call it; the serving views read the stored, writer-less `mf_*` columns until
-    PR-B's view swap passes `katastr_kod`. Rules: the `llm-pipelines` skill.
+    Estimations call it; after 567 applies the serving views call it too, with the stored
+    `katastr_kod` (the feed reads the property's yield from `browse_list`); until then they read
+    the stored, writer-less `mf_*` columns. Rules: the `llm-pipelines` skill.
 
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
