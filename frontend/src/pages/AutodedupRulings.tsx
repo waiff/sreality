@@ -800,6 +800,7 @@ function Consequence({ row }: { row: RulingPairRow }) {
       setArmed(null);
       setReason('');
       refreshAfterDetach(qc);
+      qc.invalidateQueries({ queryKey: ['autodedup'] });
     },
   });
 

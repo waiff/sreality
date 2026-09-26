@@ -55,7 +55,7 @@ import {
 } from '@/lib/mergedAdverts';
 import { portalLabel } from '@/lib/portals';
 import { fetchListingsForListingIds } from '@/lib/queries';
-import { ROUTES } from '@/lib/routes';
+import { ROUTES, withQuery } from '@/lib/routes';
 import { pushToast } from '@/lib/toast';
 import type { ImagePublic, ListingPublic, PropertySource } from '@/lib/types';
 
@@ -117,6 +117,17 @@ export default function MergedAdvertsSection({
       <p className="mt-1 text-[0.75rem] text-[var(--color-ink-3)]">
         Inzeráty, které tvoří tuto nemovitost. Rozbalte řádek pro popis, všechny
         fotky a makléře.
+        {isAdmin && (
+          <>
+            {' '}
+            <Link
+              to={withQuery(ROUTES.autodedupRulings.build(), { property: propertyId })}
+              className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+            >
+              Rozhodnutí o těchto inzerátech
+            </Link>
+          </>
+        )}
       </p>
       {detailsQ.isError && (
         <p className="mt-2 text-[0.75rem] text-[var(--color-brick)]">

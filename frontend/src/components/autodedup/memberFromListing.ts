@@ -1,8 +1,8 @@
 /* One advert in the shape every review surface renders (`AutodedupMember`),
- * built from its `listings_public` row and its hydrated photos — for the pages
- * whose payload names adverts but ships no card (the proposed splits, the
- * rulings). `fallback` carries what the payload itself knows, so a card renders
- * its portal before the facts read lands. */
+ * built from its `listings_public` row and its hydrated photos — for a page
+ * whose payload names adverts but ships no card (the rulings page; the proposed
+ * splits build the same shape). `fallback` carries what the payload itself
+ * knows, so a card renders its portal before the facts read lands. */
 
 import type { AutodedupMember } from '@/lib/api';
 import type { ImagePublic, ListingPublic } from '@/lib/types';

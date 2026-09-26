@@ -50,7 +50,6 @@ describe('refreshAfterDetach', () => {
       ['snapshots'],
       ['merged-adverts'],
       ['autodedup', 'proposed-splits'],
-      ['autodedup', 'rulings'],
       ['cards'],
       ['map'],
       ['table'],

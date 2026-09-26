@@ -21,7 +21,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
 import MemberGrid from '@/components/autodedup/MemberGrid';
-import { PHOTOS_PER_ADVERT, memberFromListing } from '@/components/autodedup/memberFromListing';
 import { VERDICT_LABELS, displayVerdict } from '@/components/autodedup/VerdictButtons';
 import {
   DETACH_REASON_MAX,
@@ -35,7 +34,6 @@ import {
 import { fmtCount } from '@/lib/format';
 import { useListingPhotos } from '@/lib/hydration/useCardHydration';
 import { propertyPath } from '@/lib/listingUrl';
-import { ROUTES, withQuery } from '@/lib/routes';
 import {
   detachOutcomeNote,
   inzeratu,
@@ -47,6 +45,8 @@ import { fetchListingsForListingIds } from '@/lib/queries';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 
 const PAGE_SIZE = 20;
+/* The frames each member card pages, as the review queues ship them. */
+const PHOTOS_PER_ADVERT = 12;
 
 const REASON_SOURCE: Record<ProposedSplit['splits'][number]['reason_source'], string> = {
   conflict: 'konflikt',
@@ -321,7 +321,26 @@ function toMember(
   l: ListingPublic | undefined,
   images: ImagePublic[],
 ): AutodedupMember {
-  return memberFromListing(a.listing_id, a, l, images);
+  return {
+    listing_id: a.listing_id,
+    source: a.source,
+    is_active: a.is_active,
+    source_url: l?.source_url ?? null,
+    source_id_native: l?.source_id_native ?? null,
+    sreality_id: l?.sreality_id ?? null,
+    category_main: l?.category_main ?? null,
+    category_type: l?.category_type ?? null,
+    disposition: l?.disposition ?? null,
+    area_m2: l?.area_m2 ?? null,
+    floor: l?.floor ?? null,
+    total_floors: l?.total_floors ?? null,
+    price_czk: l?.price_czk ?? null,
+    first_seen_at: l?.first_seen_at ?? null,
+    last_seen_at: l?.last_seen_at ?? null,
+    cover: images[0] ?? null,
+    n_images: images.length,
+    images: images.slice(0, PHOTOS_PER_ADVERT),
+  };
 }
 
 function ProposalCard({
@@ -359,12 +378,6 @@ function ProposalCard({
           className="text-[0.8rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
         >
           detail
-        </Link>
-        <Link
-          to={withQuery(ROUTES.autodedupRulings.build(), { property: item.property_id })}
-          className="text-[0.8rem] text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
-        >
-          rozhodnutí
         </Link>
         <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
           {fmtCount(adverts)} {inzeratu(adverts)} · {fmtCount(item.groups.length)} skupiny
