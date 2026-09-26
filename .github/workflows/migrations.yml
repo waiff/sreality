@@ -395,6 +395,17 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_operator_merges_live.py -q
 
+      # Migration 573's destructive backfill, EXECUTED: one seeded hit and one miss per
+      # rail (F1 / F2 / T1 / A0 / A1 / A2), the whole file run over them, then the NULL,
+      # the backup row, the dirty_properties row and a no-op second run read back. The
+      # replay above ran 573 on an empty table, which proves only that it compiles; the
+      # static half (literals == the parser constants) is tests/test_migration_573_rails.py.
+      - name: The contract rails' leftovers clear exactly the hits (migration 573)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_migration_573_live.py tests/test_migration_573_rails.py -q
+
       # W4's whole claim is that SIX relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
       # type-checks a statement without ever computing a value -- so a view left
