@@ -488,3 +488,47 @@ def test_a_live_dispatch_refuses_while_the_lane_holds_the_lease(tmp_path, monkey
     out = AP.run_apply(lambda: db, {"generation": "g12", "dry_run": "0"}, tmp_path)
     assert out["counts"]["applied"] == 1
     assert not db.lease[LANE_NAME]["live"], "and the run frees it"
+
+
+def test_a_score_pass_never_writes_or_prunes_the_live_stream() -> None:
+    """`score` writes g* generations for evaluation; `rt` is the worker lane's alone (E914)."""
+    from autodedup import score_lane
+
+    with pytest.raises(SystemExit, match="live stream"):
+        score_lane.parse_args({"cohort": "c.jsonl.gz", "generation": "rt"})
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.deleted: list[list[str]] = []
+
+        def transaction(self):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+        def cursor(self):
+            conn = self
+
+            class _Cur:
+                rows: list = []
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+
+                def execute(self, sql, params=None):
+                    if "group by c.generation" in sql:
+                        self.rows = [("rt",), ("g11",), ("g12",)]
+                    elif params:
+                        conn.deleted.append(list(params["generations"]))
+
+                def fetchall(self):
+                    return list(self.rows)
+
+            return _Cur()
+
+    conn = _Conn()
+    out = score_lane.prune_generations(conn, keep=1, current="g12")
+    assert out["pruned"] == ["g11"] and all("rt" not in d for d in conn.deleted)

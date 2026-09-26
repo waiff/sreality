@@ -60,6 +60,7 @@ from autodedup.score_sql import (
     STORE_PRESENT_SQL,
 )
 from autodedup.settings import Settings
+from autodedup.incremental import GENERATION as LIVE_GENERATION
 from autodedup.incremental_sql import RT_MUST_LINK_SQL
 from autodedup.store_score import storable
 
@@ -163,6 +164,10 @@ def parse_args(args: dict[str, str]) -> ScoreArgs:
         raise SystemExit(f"export_run must be a GitHub run id, got {export_run!r}")
 
     generation = (args.get("generation") or "").strip() or DEFAULT_GENERATION
+    if generation == LIVE_GENERATION:
+        raise SystemExit(
+            f"generation={generation} is the live stream, written only by the worker's lane "
+            "(E914); a score pass writes a g* generation for evaluation")
     raw_floor = (args.get("store_floor") or "").strip()
     store_floor: float | None = None
     if raw_floor:
@@ -709,8 +714,9 @@ def prune_generations(
         return {"pruned": [], "kept": None}
     rows = _fetchall(conn, GENERATIONS_SQL)
     ordered = [str(_value(row, "generation")) for row in rows]
-    # Oldest first from the statement, so the tail is what survives.
-    survivors = set(ordered[-keep:]) | {current}
+    # Oldest first from the statement, so the tail is what survives — and never the live
+    # stream, which the worker's lane owns (E914).
+    survivors = set(ordered[-keep:]) | {current, LIVE_GENERATION}
     doomed = [name for name in ordered if name not in survivors]
     if not doomed:
         return {"pruned": [], "kept": keep}

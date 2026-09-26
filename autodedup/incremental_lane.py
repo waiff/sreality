@@ -243,7 +243,7 @@ SETTLE_LAG_S: int = 300
 # How far back the anti-join looks for a row that committed after the cursor passed its id.
 STRAGGLER_WINDOW: int = 5000
 # One round-robin slice of the revive sweep. 434k inactive rows at 20k a pass is a full cycle
-# every ~22 passes (~3.7 h at the `*/10` cadence), which is the lane's revival latency.
+# every ~22 passes (~22 min at the worker's 60 s interval), which is the lane's revival latency.
 REVIVE_SLICE: int = 20000
 # How many rows of its OWN cursor index a forward feed reads before the scope is resolved for
 # them (E79). Measured on the live corpus: the three feeds together take 23,234 rows a day —
@@ -267,7 +267,7 @@ ENTER_SLICE: int = 20000
 # probe is the only read of `public.images` this lane makes outside a fact fetch. Measured on
 # the trial scope with `EXPLAIN (ANALYZE, BUFFERS)`: 200 listings = 3,085 images = 2,375
 # buffers (920 heap blocks, 261 of them read cold), 12 buffers a listing. At the shipped slice
-# and the `*/10` cadence that is 400 x 144 = 57,600 listing probes a day IF the candidate set
+# and a ten-minute cadence that is 400 x 144 = 57,600 listing probes a day IF the candidate set
 # were that large; it is not — the trial scope carries 76 rows of incomplete evidence in
 # steady state plus ~74 inside the 48 h horizon, so a pass probes ~150 listings (~1,800
 # buffers, 14 MB) and the day costs ~259,000 buffers, 2.0 GB — the same order as the entrant
@@ -1040,7 +1040,7 @@ class SqlWork:
 
     def claim(self, limit: int) -> list[WorkItem]:
         # THE TIME BUDGET (E98). `max_listings` bounds the work; it does not bound the CLOCK,
-        # and the runner's timeout is a clock. The rate is what the last pass of this
+        # and the pass's deadline is a clock. The rate is what the last pass of this
         # generation measured itself at, so the bound is evidence rather than a guess, and it
         # is applied here — before a statement is issued — because an aborted pass has spent
         # its time whether or not it wrote anything.
