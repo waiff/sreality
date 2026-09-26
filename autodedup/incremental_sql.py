@@ -87,6 +87,13 @@ update autodedup.rt_lease
    and holder = %(holder)s::text
 """
 
+# Who holds it, for a refusal that names the holder (`autodedup/rt_lease.py`).
+RT_LEASE_READ_SQL = """
+select l.holder, l.taken_at, l.expires_at, l.expires_at > now() as live
+  from autodedup.rt_lease l
+ where l.name = %(name)s::text
+"""
+
 # ------------------------------------------------------------------ the watermark feeds
 #
 # SIX bounded feeds, all read-only (D4) and all restricted to `rt_scope` (E79):
@@ -1028,7 +1035,7 @@ select v.listing_lo, v.listing_hi
 
 # ------------------------------------------------------------------ the clean reset (E97)
 #
-# `rt_seed reseed=true fresh=true`: the twelve statements that empty ONE generation and
+# `rt_seed fresh=true`: the twelve statements that empty ONE generation and
 # nothing else, run inside the seed's own transaction so a refusal anywhere after them puts
 # every row back. Each is a `delete ... returning` wrapped in a count, because the summary has
 # to say what it removed per table — a reset whose receipt is "ok" is the reset that left

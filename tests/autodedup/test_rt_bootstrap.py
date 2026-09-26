@@ -218,12 +218,32 @@ def test_a_seed_refuses_while_a_pass_holds_the_lease(tmp_path) -> None:
     db.lease[LANE_NAME] = dict(held)
     cursors = {k: dict(v) for k, v in db.cursors.items()}
 
-    with pytest.raises(SystemExit, match="holds autodedup.rt_lease"):
+    with pytest.raises(SystemExit, match="rt_lease is held by 'worker:1:1'") as raised:
         run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
 
+    assert "release_lease=worker:1:1" in str(raised.value), "it names the way out"
     assert (GEN, 11, 12) in db.pairs and db.calibration[GEN]["digest"] == "d"
     assert db.cursors == cursors
     assert db.lease[LANE_NAME] == held, "the pass keeps its lease"
+
+
+def test_a_seed_may_end_the_lease_a_dead_holder_left_and_only_that_one(tmp_path) -> None:
+    """Review A11/B13: a killed dispatch holds the lease for its whole TTL (5 h). The operator
+    names the holder the refusal printed; a holder that is not the one on record is refused
+    and nothing moves."""
+    db = _with_public(_populated(FakePg()))
+    db.lease[LANE_NAME] = {"holder": "dispatch:gh-1", "expires_at": db.now + timedelta(hours=4)}
+
+    with pytest.raises(SystemExit, match="not that holder's"):
+        run_rt_seed(lambda: db, {"fresh": "true", "release_lease": "dispatch:gh-2", **SCORER},
+                    tmp_path)
+    assert db.lease[LANE_NAME]["holder"] == "dispatch:gh-1"
+    assert db.calibration[GEN]["digest"] == "d"
+
+    out = run_rt_seed(lambda: db, {"fresh": "true", "release_lease": "dispatch:gh-1", **SCORER},
+                      tmp_path)
+    assert out["lease_released"]["released"] == "dispatch:gh-1"
+    assert db.lease[LANE_NAME]["expires_at"] <= db.now, "the seed freed its own lease after"
 
 
 def test_a_fresh_seed_holds_the_lease_through_its_transaction(tmp_path, monkeypatch) -> None:

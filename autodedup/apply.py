@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup import apply_sql as S
-from autodedup import legacy_retire
+from autodedup import legacy_retire, rt_lease
 from autodedup.census import write_json
 from autodedup.incremental import GENERATION
 from autodedup.ui_sql import NEGATIVE_VERDICTS
@@ -63,6 +63,9 @@ from toolkit.property_identity import (
 from toolkit.room_taxonomy import category_main_compatible
 
 SCOPE_SETTING: str = "autodedup_apply_scope"
+# The worker lane's one switch (migrations 557/568): 0 = stopped. A live apply or unapply runs
+# only while it is 0 (`_Writer`).
+LANE_INTERVAL_SETTING: str = "realtime_autodedup_interval_seconds"
 MERGE_SOURCE: str = "autodedup"
 UNAPPLY_BY_PREFIX: str = "autodedup-unapply:"
 # `undone_by` on a ledger row whose merge someone else had already undone when `unapply` came
@@ -79,10 +82,11 @@ SCOPE_KEYS: tuple[str, ...] = (
     "category_types", "blocks", "listing_ids", "all_blocks", "max_clusters_per_run",
 )
 # `retire_legacy`: A2's pre-step (autodedup/legacy_retire.py), temporary, kept until W8.
-APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy", *SCOPE_KEYS})
+APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy",
+                                        rt_lease.RELEASE_ARG, *SCOPE_KEYS})
 # What `unapply` selects by: a generation (and one of its groups), a run, a time window.
 UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since", "until")
-UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", *UNAPPLY_SELECTORS})
+UNAPPLY_ARGS: frozenset[str] = frozenset({"dry_run", rt_lease.RELEASE_ARG, *UNAPPLY_SELECTORS})
 
 # A scope block, spelled as the export lane spells it: `town:<code>` (an advert's
 # listing_location.obec_kod) / `quarter:<code>` (its cast_obce_kod).
@@ -1573,36 +1577,59 @@ def _step_summary(result: Mapping[str, Any], *, mode: str) -> None:
         pass
 
 
+def lane_interval(conn: Any) -> int:
+    """`app_settings.realtime_autodedup_interval_seconds` as the worker reads it: an absent or
+    unreadable row is 0 (the lane idle), anything else its integer."""
+    value = read_setting(conn, LANE_INTERVAL_SETTING)
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 class _Writer:
     """THE lane's lease (`autodedup.rt_lease`), held by a live dispatch: one writer of
     production merges at a time (A9). The worker's lane reconciles under it, so a live apply or
-    unapply takes it for its run and refuses while a pass holds it."""
+    unapply takes it for its run and refuses while a pass holds it — and refuses outright while
+    the lane is RUNNING (its interval above 0): an unapply would be re-merged by the lane's next
+    sweep minutes later, and an apply would race it. The brake is interval 0, THEN unapply. A
+    dry run of the live stream takes the lease too, so the plan it predicts is not moved under
+    it by a pass (review B8); it needs no stopped lane."""
 
-    def __init__(self, conn: Any, live: bool) -> None:
+    def __init__(self, conn: Any, live: bool, *, lease: bool | None = None,
+                 release: str | None = None) -> None:
         self.conn = conn
         self.live = live
+        self.lease = live if lease is None else lease
+        self.release = (release or "").strip() or None
         self.holder = f"dispatch:{new_run_id()}"
         self.held = False
+        self.released: dict[str, Any] | None = None
 
     def __enter__(self) -> "_Writer":
-        if not self.live:
+        if self.live:
+            interval = lane_interval(self.conn)
+            if interval > 0:
+                raise SystemExit(
+                    f"refused: app_settings.{LANE_INTERVAL_SETTING} is {interval} — the worker's "
+                    "autodedup lane is running and would re-merge (or race) what this run "
+                    f"changes. Set {LANE_INTERVAL_SETTING} to 0 on /settings first, then run "
+                    "again. Nothing was written.")
+        if not self.lease:
             return self
-        from autodedup import incremental_lane
-
-        if not incremental_lane.take_lease(self.conn, self.holder,
-                                           ttl=incremental_lane.SEED_LEASE_TTL_S):
+        if self.release:
+            self.released = rt_lease.release_stale(self.conn, self.release)
+        if not rt_lease.take(self.conn, self.holder, rt_lease.DISPATCH_TTL_S):
             raise SystemExit(
-                "refused: the real-time lane holds autodedup.rt_lease. Set "
-                "app_settings.realtime_autodedup_interval_seconds to 0, wait for the lease to "
-                "clear, and run again. Nothing was written.")
+                f"refused: autodedup.rt_lease is {rt_lease.describe(self.conn)}. Set "
+                f"app_settings.{LANE_INTERVAL_SETTING} to 0, wait for the lease to clear, and "
+                "run again. Nothing was written.")
         self.held = True
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, _type: Any, exc: BaseException | None, _tb: Any) -> None:
         if self.held:
-            from autodedup import incremental_lane
-
-            incremental_lane.release_lease(self.conn, self.holder)
+            rt_lease.release_after(self.conn, self.holder, exc)
 
 
 def run_apply(
@@ -1622,7 +1649,8 @@ def run_apply(
     out_dir = Path(out_dir)
     conn = conn_factory()
     try:
-        with _Writer(conn, live=not dry_run):
+        with _Writer(conn, live=not dry_run, lease=not dry_run or generation == GENERATION,
+                     release=args.get(rt_lease.RELEASE_ARG)):
             return _apply_run(conn, generation, dry_run, retire, override, out_dir)
     finally:
         _close(conn)
@@ -1733,7 +1761,7 @@ def run_unapply(
         raise SystemExit("unapply needs generation=, run=, since= or until= (e.g. generation=g12)")
     conn = conn_factory()
     try:
-        with _Writer(conn, live=not dry_run):
+        with _Writer(conn, live=not dry_run, release=args.get(rt_lease.RELEASE_ARG)):
             result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key,
                              run=run, since=since, until=until)
     except BaseException as exc:

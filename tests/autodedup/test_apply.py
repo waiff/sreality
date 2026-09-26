@@ -26,7 +26,7 @@ import pytest
 from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import lane
-from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL, RT_LEASE_TAKE_SQL
+from autodedup.incremental_sql import RT_LEASE_READ_SQL, RT_LEASE_RELEASE_SQL, RT_LEASE_TAKE_SQL
 from toolkit import property_identity
 from toolkit.property_identity import (
     AssetLinkConflict,
@@ -167,6 +167,9 @@ class FakeDb:
             if held and held["holder"] == p["holder"]:
                 held["live"] = False
             return []
+        if sql == RT_LEASE_READ_SQL:
+            held = self.lease.get(p["name"])
+            return [(held["holder"], "T0", "T1", held["live"])] if held else []
         if sql == S.SETTING_SQL:
             return [(self.settings[p["key"]],)] if p["key"] in self.settings else []
         if sql == S.CLUSTERS_SQL:

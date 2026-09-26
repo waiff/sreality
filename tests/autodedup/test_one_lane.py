@@ -573,3 +573,71 @@ def test_the_reconcile_is_skipped_over_a_generation_no_w5_seed_built(tmp_path, s
     conn.settings[seed_version_key()] = SEED_VERSION
     ran = run_incremental(lambda: conn)
     assert ran["reconcile"]["skipped"] == "scope_closed", "with the version it reconciles"
+
+
+# ------------------------------------------------------------------ the brake (review A3)
+
+
+@pytest.mark.parametrize("interval", [60, "60", 1])
+def test_a_live_unapply_or_apply_refuses_while_the_lane_is_running(tmp_path, interval) -> None:
+    """The brake is interval 0, THEN unapply: while the lane runs, an undone group is
+    re-merged by its next sweep minutes later, and a live apply races it. Both refuse and name
+    the row; a dry run still reads."""
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    db.settings[AP.LANE_INTERVAL_SETTING] = interval
+
+    for run, args in ((AP.run_unapply, {"generation": "g12", "dry_run": "0"}),
+                      (AP.run_apply, {"generation": "g12", "dry_run": "0"})):
+        with pytest.raises(SystemExit, match="realtime_autodedup_interval_seconds is") as raised:
+            run(lambda: db, args, tmp_path)
+        assert "Nothing was written" in str(raised.value)
+    assert not db.ledger and db.listings[11]["property_id"] == 200
+    assert not db.lease, "it refused before taking the lease"
+    assert AP.run_apply(lambda: db, {"generation": "g12"}, tmp_path)["dry_run"]
+
+
+@pytest.mark.parametrize("interval", [0, None, "junk"])
+def test_a_stopped_lane_lets_the_brake_run(tmp_path, monkeypatch, interval) -> None:
+    db = LaneDb()
+    original = AP.apply_plan
+    monkeypatch.setattr(AP, "apply_plan", lambda conn, plan, dry_run: original(
+        conn, plan, dry_run, merge=db.merge([])))
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    if interval is not None:
+        db.settings[AP.LANE_INTERVAL_SETTING] = interval
+    assert AP.run_apply(lambda: db, {"generation": "g12", "dry_run": "0"},
+                        tmp_path)["counts"]["applied"] == 1
+
+
+def test_a_dry_run_of_the_live_stream_takes_the_lease(tmp_path) -> None:
+    """Review B8: G3's prediction is a dry run of `rt`; it holds the lane's lease so no pass
+    moves the plan under it, and refuses (naming the holder) while a pass holds it."""
+    from autodedup.incremental_lane import LANE_NAME
+
+    db = LaneDb()
+    db.live_scope()
+    db.lease[LANE_NAME] = {"holder": "worker:1:1", "live": True}
+    with pytest.raises(SystemExit, match="held by 'worker:1:1'"):
+        AP.run_apply(lambda: db, {"generation": RT}, tmp_path)
+    db.lease[LANE_NAME]["live"] = False
+    assert AP.run_apply(lambda: db, {"generation": RT}, tmp_path)["dry_run"]
+    assert db.lease[LANE_NAME]["holder"].startswith("dispatch:") and not db.lease[LANE_NAME]["live"]
+
+
+def test_a_failing_release_never_masks_the_error_that_ended_the_run() -> None:
+    """Review A11: a run that dies with its connection dies again releasing its lease; the
+    first error is the one raised, with the release failure noted on it."""
+    from autodedup import rt_lease
+
+    class _Dead:
+        def cursor(self):
+            raise ConnectionError("server closed the connection")
+
+    original = RuntimeError("the reconcile failed")
+    rt_lease.release_after(_Dead(), "worker:1:1", original)
+    assert any("expires by itself" in note for note in original.__notes__)
+    with pytest.raises(ConnectionError):
+        rt_lease.release_after(_Dead(), "worker:1:1", None)

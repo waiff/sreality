@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, Mapping, Sequence
 
-from autodedup import reconcile
+from autodedup import reconcile, rt_lease
 from autodedup.dataset import Image, Listing
 from autodedup.export import (
     DEFAULT_CLIP_MODEL,
@@ -145,8 +145,6 @@ from autodedup.incremental_sql import (
     RT_KEY_INSERT_SQL,
     RT_KEYS_MANY_SQL,
     RT_KNOWN_SQL,
-    RT_LEASE_RELEASE_SQL,
-    RT_LEASE_TAKE_SQL,
     RT_LOOKUP_MANY_SQL,
     RT_MERGE_NEIGHBOURS_SQL,
     RT_MUST_LINK_SQL,
@@ -196,7 +194,7 @@ from autodedup.model import LogisticModel
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
 from autodedup.settings import Settings
 
-LANE_NAME: str = "autodedup_realtime"
+LANE_NAME: str = rt_lease.NAME
 # THE PASS'S OWN DEADLINE (E913), in seconds of wall clock from the moment it starts. The
 # worker used to wrap the connection in a statement-refusing deadline and back off in process;
 # the engine now bounds itself: `run_pass` checks it between steps, a pass past it rolls back
@@ -210,7 +208,7 @@ LEASE_TTL_S: int = 2400
 # `rt_seed` takes the SAME lease (E97's reset, the calibration and the cursors it rewrites are
 # exactly what a pass reads and writes). Its TTL is the seeding job's own timeout
 # (`autodedup.yml`, `timeout-minutes: 300`), so a running seed can never lose it to a pass.
-SEED_LEASE_TTL_S: int = 300 * 60
+SEED_LEASE_TTL_S: int = rt_lease.DISPATCH_TTL_S
 CURSOR_NEW: str = "rt_new"
 CURSOR_CHANGED: str = "rt_changed"
 CURSOR_FLIPPED: str = "rt_flipped"
@@ -308,7 +306,7 @@ MAX_ENTER_SCANS_PER_DAY: int = 60
 # During the phase the entrant claim is the WHOLE `max_listings` rather than a seventh of it, and
 # the block walks ignore the per-grain cadence until every block has been walked once — a cadence
 # is what keeps a STEADY-STATE lane off `public`, and a scope nothing has listed yet has no
-# steady state. The rolling-day scan cap (`rt_enter_max_scans_per_day`) still holds, because that
+# steady state. The rolling-day scan cap (`MAX_ENTER_SCANS_PER_DAY`) still holds, because that
 # rail exists for the case where the cadence is wrong. The phase ends BY ITSELF — the pass that
 # finds the entrant backlog empty writes the row false — so nothing has to remember to end it.
 BOOTSTRAP_MIN_CLAIM: int = 1
@@ -1262,9 +1260,9 @@ class SqlWork:
         no narrower path (no index on `cast_obce_kod`, D8 forbids adding one, and `listings`
         carries no indexed obec or quarter column either). At ~48 walks a day that was ~11 GB a
         day of cold reads on the instance that serves Browse, whether or not anything had
-        entered. Now it is `rt_enter_interval_hours` a block — 6 h for a quarter, 1 h for a
+        entered. Now it is `ENTER_INTERVAL_HOURS` a block — 6 h for a quarter, 1 h for a
         town — the block the interval has been waiting on longest first, at most ONE a pass,
-        and never more than `rt_enter_max_scans_per_day` in a rolling day. What that cadence
+        and never more than `MAX_ENTER_SCANS_PER_DAY` in a rolling day. What that cadence
         costs in latency it costs only on the TAIL: an entrant that arrived recently is already
         the straggler sweep's.
 
@@ -1688,13 +1686,11 @@ def reset_generation(conn: Any, generation: str, *, holder: str) -> dict[str, in
 
 
 def take_lease(conn: Any, holder: str, ttl: int = LEASE_TTL_S) -> bool:
-    rows = _rows(conn, RT_LEASE_TAKE_SQL,
-                 {"name": LANE_NAME, "holder": holder, "ttl": ttl})
-    return bool(rows) and str(rows[0][0]) == holder
+    return rt_lease.take(conn, holder, ttl)
 
 
 def release_lease(conn: Any, holder: str) -> None:
-    _exec(conn, RT_LEASE_RELEASE_SQL, {"name": LANE_NAME, "holder": holder})
+    rt_lease.release(conn, holder)
 
 
 def _transaction(conn: Any) -> ContextManager[Any]:
@@ -1869,6 +1865,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()
     leased = False
+    original: BaseException | None = None
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
@@ -1895,7 +1892,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
         if not take_lease(conn, holder):
-            return {"skipped": "leased", "reason": "another writer holds the lane's lease",
+            return {"skipped": "leased",
+                    "reason": f"another writer holds autodedup.rt_lease: {rt_lease.describe(conn)}",
                     "spent_usd": 0.0}
         leased = True
         rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation})
@@ -2032,17 +2030,21 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         }
         record_storage(conn, generation, after_bytes)
         return summary
+    except BaseException as exc:
+        original = exc
+        raise
     finally:
         try:
             if leased:
-                release_lease(conn, holder)
+                rt_lease.release_after(conn, holder, original)
         finally:
             close = getattr(conn, "close", None)
             if callable(close):
                 close()
 
 
-RT_SEED_ARGS: frozenset[str] = frozenset({"settings", "model", SCOPE_SETTING, "fresh"})
+RT_SEED_ARGS: frozenset[str] = frozenset({"settings", "model", SCOPE_SETTING, "fresh",
+                                          rt_lease.RELEASE_ARG})
 
 
 def run_rt_seed(
@@ -2068,6 +2070,7 @@ def run_rt_seed(
     holder = f"rt_seed:{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()
     leased = False
+    original: BaseException | None = None
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
@@ -2092,9 +2095,11 @@ def run_rt_seed(
             storage = storage_guard(conn, generation, scope)
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
+        released = (rt_lease.release_stale(conn, str(args[rt_lease.RELEASE_ARG]).strip())
+                    if str(args.get(rt_lease.RELEASE_ARG) or "").strip() else None)
         if not take_lease(conn, holder, ttl=SEED_LEASE_TTL_S):
             raise SystemExit(
-                "rt_seed refused: the lane holds autodedup.rt_lease. Set "
+                f"rt_seed refused: autodedup.rt_lease is {rt_lease.describe(conn)}. Set "
                 "app_settings.realtime_autodedup_interval_seconds to 0, wait for the lease to "
                 "clear, and seed again. Nothing was written.")
         leased = True
@@ -2151,16 +2156,20 @@ def run_rt_seed(
             "scope": scope.as_json(),
             "enter_scan": dict(work.enter_scan),
             "storage": storage,
+            "lease_released": released,
             "spent_usd": 0.0,
         }
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         (Path(out_dir) / "rt_seed.json").write_text(
             json.dumps(summary, indent=2, sort_keys=True, default=str), encoding="utf-8")
         return summary
+    except BaseException as exc:
+        original = exc
+        raise
     finally:
         try:
             if leased:
-                release_lease(conn, holder)
+                rt_lease.release_after(conn, holder, original)
         finally:
             close = getattr(conn, "close", None)
             if callable(close):

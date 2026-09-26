@@ -248,6 +248,10 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         if held and held["holder"] == p["holder"]:
             held["expires_at"] = db.now
         return []
+    if sql == S.RT_LEASE_READ_SQL:
+        held = db.lease.get(p["name"])
+        return ([(held["holder"], held.get("taken_at"), held["expires_at"],
+                  held["expires_at"] > db.now)] if held else [])
 
     # ---------------------------------------------------------------- postings
     if sql == S.RT_LOOKUP_MANY_SQL:
