@@ -17,7 +17,10 @@ engine); then `operator_split` (a row of it undone by anyone but this step: the 
 advert back by hand and ruled it apart from the rest), else `intact`. An intact group is undone
 only when its adverts (the survivor's, the retired properties' and every advert the merge moved)
 ALL sit inside the scope's blocks, the undo would neither separate two adverts an operator
-ruled "same" (`skipped:operator_ruled_same`) nor NEWLY join two the operator ruled apart (a
+ruled "same" that THIS RUN does not re-join (`skipped:operator_ruled_same`; E907: a ruled pair
+the undo separates but that sits inside ONE engine group this run may merge is re-merged by the
+apply that follows, so it does not hold the group back) nor NEWLY join two the operator ruled
+apart (a
 negative pair verdict, or a must-not-link whose source is 'operator': a machine guard is not a
 ruling; `skipped:operator_ruled_different`), and every advert carries one of the scope's deal
 types (`category_types`, decision 1: sales first; else `skipped:outside_scope_categories`). The
@@ -199,6 +202,8 @@ class LegacyGroup:
     uncategorised: bool = False
     mixed: bool = False
     separates_same: list[list[int]] = field(default_factory=list)
+    # E907: the ruled-same pairs of `separates_same` one mergeable engine group re-joins.
+    same_held_by_engine: list[list[int]] = field(default_factory=list)
     joins_different: list[list[int]] = field(default_factory=list)
     health: str = INTACT
     selected: bool = False
@@ -298,7 +303,8 @@ def _outcome(g: LegacyGroup, categories: frozenset[str] | None) -> str:
         return f"skipped:{g.health}"
     if g.outside:
         return "skipped:straddling"
-    if g.separates_same:
+    # E907: only a ruled-same pair nothing re-joins holds the group back.
+    if len(g.same_held_by_engine) < len(g.separates_same):
         return f"skipped:{RULED_SAME}"
     if g.joins_different:
         return f"skipped:{RULED_DIFFERENT}"
@@ -320,8 +326,19 @@ class EngineMaps:
     why: Mapping[int, str] = field(default_factory=dict)
 
 
+def _held_by_engine(pair: list[int], engine: EngineMaps) -> bool:
+    """E907: do both adverts of an operator "same" pair sit in ONE engine group this run may
+    merge? Then the undo separates them only until the apply re-merges that group; a pair
+    across two groups, with a side ungrouped, or in a group this run will not merge (not
+    proposed, not admitted by the scope) stays apart, and the ruling holds the group back."""
+    lo, hi = pair
+    return (lo in engine.merging and hi in engine.merging
+            and engine.merging[lo] == engine.merging[hi])
+
+
 def _engine(g: LegacyGroup, engine: EngineMaps) -> None:
     ids = {*g.adverts, *g.moved}
+    g.same_held_by_engine = [pair for pair in g.separates_same if _held_by_engine(pair, engine)]
     g.engine_clusters = sorted({engine.merging[lid] for lid in ids if lid in engine.merging})
     g.engine_clusters_not_merging = sorted({engine.other[lid] for lid in ids
                                             if lid in engine.other})
@@ -494,6 +511,10 @@ def _counts(first: list[LegacyGroup], final: list[LegacyGroup]) -> dict[str, Any
         f"{ENGINE_AGREES}_by_reason": dict(sorted(Counter(
             g.engine_agrees_why or "unknown" for g in final
             if g.outcome == f"skipped:{ENGINE_AGREES}").items())),
+        # E907: retired although the undo separates an operator "same" pair, because one
+        # engine group this run merges holds the pair and the apply re-joins it.
+        "retire_set_with_ruled_same_held_by_engine": sum(bool(g.same_held_by_engine)
+                                                         for g in chosen),
         "outcomes": dict(sorted(Counter(g.outcome for g in final).items())),
         "listings_moved_back": sum(g.listings_moved_back for g in final),
         "properties_reactivated": sum(g.reactivated for g in final),
@@ -606,6 +627,11 @@ def note_deferred(
                 if g["outcome"].startswith("retired") and late & set(g["engine_clusters"])]
         counts["undone_but_engine_group_deferred_by_cap"] = len(held)
         result["deferred_by_cap"] = held
+        # E907: of those, the groups that also parted an operator "same" pair the deferred
+        # engine group re-joins - apart until the re-dispatch merges it.
+        counts["ruled_same_apart_until_redispatch"] = sum(
+            1 for g in result.get("groups") or []
+            if g["merge_group_id"] in held and g.get("same_held_by_engine"))
         note = (f"{len(held)} legacy group(s) undone whose engine group the run cap deferred: "
                 "dispatch apply again to merge them" if held else "")
     write_json(Path(out_dir).joinpath(*ARTIFACT), result)

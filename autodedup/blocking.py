@@ -13,6 +13,11 @@ Hard guards (E2-E5) are applied INSIDE retrieval, before the fan-out cap spends 
 candidate the rule floor will veto anyway must not displace the one true duplicate (E17 says
 the cap can only discard the weakest evidence class). Every refusal is counted once per pair,
 by the rule that refused it, so the blocking stats still show what the rule floor removed.
+
+E300 (W30) adds a seventh, the `town` probe, behind `attr_probe_town_grain`: the attribute
+probes key on the resolver's finest grain (a cast obce where one was found), so an advert
+located only to the town never met one located to a cast. The home keys are left as they are;
+the town probe is appended after them, keyed town + disposition + area band (path C's C1).
 """
 
 from __future__ import annotations
@@ -32,6 +37,27 @@ PROBE_PRIORITY: tuple[str, ...] = (
 FOREIGN_STATUS: str = "foreign"
 _DECILES: int = 10
 
+# E300 (W30): the operator's location grain (docs/design/new-dedup/PROGRAM.md, 2026-09-10 (d)):
+# quarters split the town ONLY in Praha, Brno and Ostrava; elsewhere the grain is the town.
+SPLIT_CITY_OBEC_KODS: frozenset[int] = frozenset({554782, 582786, 554821})
+# The town probe is the WEAKEST evidence class, so it fills after every other probe and the
+# fan-out cap (E17) can only ever discard it, never a candidate today's probes reach.
+TOWN_PROBE: str = "town"
+
+
+def probe_priority(settings: Settings) -> tuple[str, ...]:
+    """The fill order this settings row blocks with: E300 appends the town probe."""
+    return PROBE_PRIORITY + (TOWN_PROBE,) if settings.attr_probe_town_grain else PROBE_PRIORITY
+
+
+def probes_town_key(fp: Fingerprint) -> bool:
+    """E300: an advert with a known quarter of a split city stays inside its quarter; every
+    other advert — any advert outside the three cities, an unknown-quarter one inside — reaches
+    the whole town. Everyone with a town key POSTS it, so an unknown-quarter advert meets every
+    quarter of its city, and the listings that probe a key are always among those posted
+    under it (what the real-time lane's neighbourhood re-probe relies on, E71)."""
+    return not (fp.obec_kod in SPLIT_CITY_OBEC_KODS and fp.cast_obce_kod is not None)
+
 
 def _percentile(values: Sequence[float], q: float) -> float:
     """Nearest-rank percentile — no interpolation, so a count stays a count."""
@@ -46,9 +72,10 @@ class BlockIndex:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.probes: tuple[str, ...] = probe_priority(settings)
         self.fingerprints: dict[int, Fingerprint] = {}
-        self.postings: dict[str, dict[Any, list[int]]] = {probe: {} for probe in PROBE_PRIORITY}
-        self.exploded: dict[str, set[Any]] = {probe: set() for probe in PROBE_PRIORITY}
+        self.postings: dict[str, dict[Any, list[int]]] = {probe: {} for probe in self.probes}
+        self.exploded: dict[str, set[Any]] = {probe: set() for probe in self.probes}
         self.price_cuts: dict[tuple[str | None, str | None], list[float]] = {}
         self.vetoed_pairs: set[tuple[int, int]] = set()
         self.veto_counts: dict[str, int] = {}
@@ -130,6 +157,12 @@ class BlockIndex:
         if fp.country_status == FOREIGN_STATUS and fp.area_band is not None:
             out.append(("foreign", (fp.country_status, fp.cat_group, fp.category_type,
                                     fp.area_band)))
+        # E300: path C's C1 — town + disposition + area band. An advert with no area states
+        # nothing the key could bound; the disposition may be unknown and then keys as such.
+        if (self.settings.attr_probe_town_grain and fp.obec_kod is not None
+                and fp.area_band is not None):
+            out.append((TOWN_PROBE, (fp.obec_kod, fp.cat_group, fp.category_type,
+                                     fp.disposition, fp.area_band)))
         return out
 
     def probe_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
@@ -140,6 +173,13 @@ class BlockIndex:
                 block_key, cat_group, category_type, band = key
                 for offset in (-1, 0, 1):
                     out.append((probe, (block_key, cat_group, category_type, band + offset)))
+            elif probe == TOWN_PROBE:
+                if not probes_town_key(fp):
+                    continue
+                obec_kod, cat_group, category_type, disposition, band = key
+                for offset in (-1, 0, 1):
+                    out.append((probe, (obec_kod, cat_group, category_type, disposition,
+                                        band + offset)))
             elif probe == "broker" and key[3] is not None:
                 broker_key, cat_group, category_type, decile = key
                 for offset in (-1, 0, 1):
@@ -172,12 +212,12 @@ class BlockIndex:
         Guard-dead candidates are dropped before the cap sees them (E2-E5 ahead of E17)."""
         if not self._finalized:
             raise RuntimeError("BlockIndex.candidates before finalize")
-        by_probe: dict[str, list[tuple[str, Any]]] = {probe: [] for probe in PROBE_PRIORITY}
+        by_probe: dict[str, list[tuple[str, Any]]] = {probe: [] for probe in self.probes}
         for probe, key in self.probe_keys(fp):
             by_probe[probe].append((probe, key))
         out: dict[int, set[str]] = {}
         cap = self.settings.max_candidates_per_listing
-        for probe in PROBE_PRIORITY:
+        for probe in self.probes:
             for _, key in by_probe[probe]:
                 if key in self.exploded[probe]:
                     continue
@@ -231,7 +271,7 @@ def generate_pairs(
             pairs[(lo, hi)] = set(probes)
 
     counts.sort()
-    per_probe: dict[str, int] = {probe: 0 for probe in PROBE_PRIORITY}
+    per_probe: dict[str, int] = {probe: 0 for probe in index.probes}
     for probes in pairs.values():
         for probe in probes:
             per_probe[probe] += 1

@@ -48,7 +48,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
-from autodedup.blocking import PROBE_PRIORITY, BlockIndex
+from autodedup.blocking import BlockIndex
 from autodedup.cluster import cluster_pairs, cluster_rows
 from autodedup.dataset import Image, Listing
 from autodedup.decide import Decision, decide_pair
@@ -442,7 +442,7 @@ class Keyer:
             cuts[(left or None, right or None)] = list(values)
         index.price_cuts = cuts
         index.exploded = {probe: set(calibration.exploded.get(probe, ()))
-                          for probe in PROBE_PRIORITY}
+                          for probe in index.probes}
         index._keys_ready = True  # the cuts are injected, so key derivation is ready
         self.index = index
         self.settings = settings
@@ -607,7 +607,9 @@ def retrieve(
     listing id, exactly as the cohort pass fills it, so the cap can only ever discard the
     weakest evidence class (E17). `tests/autodedup/test_incremental.py` asserts this against
     `BlockIndex.candidates` over the whole cohort rather than trusting the restatement."""
-    by_probe: dict[str, list[str]] = {probe: [] for probe in PROBE_PRIORITY}
+    # `index.probes` is `PROBE_PRIORITY`, plus E300's town probe last when the row asks for it.
+    probes = keyer.index.probes
+    by_probe: dict[str, list[str]] = {probe: [] for probe in probes}
     wanted: list[tuple[str, str]] = []
     for probe, token in keyer.probe_keys(fp):
         by_probe[probe].append(token)
@@ -618,7 +620,7 @@ def retrieve(
     postings = store.lookup_many(wanted)
     out: dict[int, set[str]] = {}
     cap = settings.max_candidates_per_listing
-    for probe in PROBE_PRIORITY:
+    for probe in probes:
         for token in by_probe[probe]:
             if keyer.is_exploded(probe, token):
                 continue

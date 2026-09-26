@@ -620,9 +620,12 @@ def run_engine(
     clock = time.perf_counter()
     # E61 refuses a UNION, not only an edge: two units of one building must not be joined
     # transitively through a third advert either, so the veto joins the must-not-link set.
+    # E303 (prepared) reads which pairs the engine certified K-C; the map exists only when asked.
+    kc_pairs = ({(d.lo, d.hi): d.certificate for d in decisions if d.certificate == "K-C"}
+                if settings.d43_cluster_price_kc_house_number else None)
     clusters = cluster_pairs(
         decisions, dataset.listings, fps, settings, frozenset(must_not_link),
-        relation_for(settings, dataset.listings, pair_slots),
+        relation_for(settings, dataset.listings, pair_slots, kc_pairs),
         must_link=frozenset(must_link), machine_vetoes=frozenset(vetoed),
     )
     rows = cluster_rows(clusters, decisions, fps)

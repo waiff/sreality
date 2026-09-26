@@ -2490,6 +2490,55 @@ def _outdoor_accessory_areas(text: str) -> frozenset[tuple[str, float, int]]:
     return frozenset(out)
 
 
+# E305 (W30): the size of the ONE cellar the flat comes with. E215 reads only a TOTAL (`o celkové
+# ploše`, `celkem N m² úložného`), and a Byty Podlesí 1+kk let on idnes as `sklepní kóje 6,6 m²`
+# and on realitymix as `sklepní kóje cca 3,5 m2` - one project, one template, one 35 m², one
+# rent, never on sale together - was merged although the two bodies state two cellars. The size
+# must be the NOUN's (a size word after it, or the figure against it); a noun after `s`/`se`/
+# `včetně` is what the flat comes with and a figure after it is the flat's; a body naming SEVERAL
+# cellars or several sizes (`sklepní kóje (2 m²) a podíl na sklepní místnosti o velikosti 13,3
+# m²`) states a list and abstains.
+_CELLAR_NOUN: str = r"(sklep\w*|koj\w*)"
+_CELLAR_AFTER = re.compile(
+    r"\b" + _CELLAR_NOUN + r"(?:\s+(?!s\b|a\b|i\b|se\b|m2\b)[a-z]+){0,3}?\s+" + _SIZE_WORD
+    + r"\s+" + _APPROX + _AREA_NUMBER + r"\s*m2\b"
+    r"|\b" + _CELLAR_NOUN + r"(?:\s+(?:koj\w*|mistnost\w*|box\w*))?\s*[:(\-\u2013]?\s*" + _APPROX
+    + _AREA_NUMBER + r"\s*m2\b"
+)
+_CELLAR_BEFORE = re.compile(
+    r"(?<![\d,.])" + _AREA_NUMBER + r"\s*m2\s+(?:velk\w+\s+|prostorn\w+\s+)?" + _CELLAR_NOUN)
+_CELLAR_PLURAL = re.compile(
+    r"\b(?:dve|dva|dvema|dvou|tri|trema|trech|2|3|obe|oba|nekolik)\s+(?:[a-z]+\s+){0,2}?"
+    r"(?:sklep\w*|koj\w*)")
+CELLAR_MAX_M2: float = 60.0
+
+
+def cellar_areas(text: str | None) -> frozenset[tuple[float, int]]:
+    """E305: `(m², printed decimals)` of the one cellar the body states; empty for a list."""
+    return _cellar_areas(text) if text else frozenset()
+
+
+@lru_cache(maxsize=BODY_CACHE)
+def _cellar_areas(text: str) -> frozenset[tuple[float, int]]:
+    folded = fact_text(unescape(text))
+    if _CELLAR_PLURAL.search(folded):
+        return frozenset()
+    out: set[tuple[float, int]] = set()
+    for match in _CELLAR_AFTER.finditer(folded):
+        with_noun = bool(_OUTDOOR_WITH.search(folded[max(0, match.start() - 9):match.start()]))
+        raw = match.group(3) if match.group(1) else match.group(5)
+        if with_noun or (match.group(1) and "celkov" in match.group(2)):
+            continue
+        value = _area_value(raw)
+        if value is not None and 0.0 < value <= CELLAR_MAX_M2:
+            out.add((value, _decimals_of(raw)))
+    for match in _CELLAR_BEFORE.finditer(folded):
+        value = _area_value(match.group(1))
+        if value is not None and 0.0 < value <= CELLAR_MAX_M2:
+            out.add((value, _decimals_of(match.group(1))))
+    return frozenset(out) if len({value for value, _ in out}) == 1 else frozenset()
+
+
 # E295: WHICH HALF, SIDE OR POSITION of one building the advert sells. Lipno-Kobylnice's new
 # two-flat house is `nabízíme levou polovinu novostavby` on one advert and `nabízíme pravou
 # stranu novostavby` on the other, one 113 m², one price path, on every portal; Polná's five

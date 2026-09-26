@@ -1040,6 +1040,31 @@ class Settings:
     # so the fact strands each idnes advert from its own sreality copy and frees the other
     # villa's twins to take it — a merge S13 never made (cohort 16, `13435813`).
     d43_named_villa: bool = False
+    # --- W30 (S15): the trial's leftover duplicates -----------------------------------------------
+    # E300: the operator's location grain (path C, 2026-09-10): quarters split the town only in
+    # Praha, Brno and Ostrava, and an advert whose quarter is unknown reaches the whole town. A
+    # `town` probe (town + disposition + area band) is ADDED after every other probe; the home
+    # attribute probes keep today's key.
+    attr_probe_town_grain: bool = False
+    # E301: floor and total_floors both stated on both sides and shifted by the SAME offset of
+    # one are one storey-counting camp, not two facts. E301b (prepared, awaiting a ruling): the
+    # opposite-sign shape too (floor +1, total -1: the ground floor counted in one number on
+    # each side) — needs E301.
+    d43_floor_total_camp_shift: bool = False
+    d43_floor_total_camp_shift_mixed: bool = False
+    # E302 (prepared, awaiting a ruling): total_floors is not a fact where floor, area,
+    # disposition and price all agree.
+    d43_total_floors_agreeing_unit: bool = False
+    # E303 (prepared, awaiting a ruling): the cluster-grain price limb accepts a cross-portal
+    # K-C pair on one street and house number within the cross-portal price tolerance.
+    d43_cluster_price_kc_house_number: bool = False
+    # E305 (tightening, recorded as a cohort-17 addendum): the one cellar two flat bodies
+    # state, apart beyond E294's accessory tolerance, is a fact (`sklepní kóje 6,6 m²` against
+    # `sklepní kóje cca 3,5 m2`).
+    d43_cellar_area: bool = False
+    # E305r (W31): the stated cellar yields to >= 4 tight photo matches AND agreeing price paths
+    # (one agency corrected `sklep 2m2` to `5 m2` between two versions of its own text).
+    d43_cellar_area_photo_yield: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.
@@ -1554,6 +1579,12 @@ class Settings:
                 "d43_rental_colive_min_overlap_days must not be negative: "
                 f"{self.d43_rental_colive_min_overlap_days}"
             )
+        if self.d43_cellar_area_photo_yield and not self.d43_cellar_area:
+            raise ValueError("d43_cellar_area_photo_yield (E305r) refines d43_cellar_area (E305): "
+                             "switch E305 on first")
+        if self.d43_floor_total_camp_shift_mixed and not self.d43_floor_total_camp_shift:
+            raise ValueError("d43_floor_total_camp_shift_mixed (E301b) extends "
+                             "d43_floor_total_camp_shift (E301): switch E301 on first")
         for key, value in self.merge_policy.items():
             if value not in ("merge", "propose"):
                 raise ValueError(
