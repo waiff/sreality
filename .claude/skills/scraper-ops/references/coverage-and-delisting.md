@@ -346,8 +346,8 @@ statements are idempotent; a lock-wait cancel pauses longer (5 s × attempt) tha
 deadlock (0.5 s × attempt) because the holder is usually committing by then. The
 touch statements are indexed lookups over ≤250 ids and never take two minutes on
 their own, so a cancel there is a lock wait, not slowness. The root cause — one
-multi-minute transaction over a hot table — is the recompute's to fix (commit in
-batches); the retry only stops it costing a category.
+multi-minute transaction over a hot table — left with that job (MF is a read-time
+SQL measure since migration 563); the retry stays for any other long writer.
 
 **Not budget stops:** ceskereality's and bazos's "short" categories all sit at
 99.0-99.5% — the declared count drifting a few rows during the walk, on slices
