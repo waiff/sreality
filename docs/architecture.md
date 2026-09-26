@@ -53,7 +53,9 @@ emits". That is now one table and one module rather than nine copies of each:
   outside 1..40 is absence (`scraper/floor.py` `floor_from_portal` / `total_floors_from_portal`,
   every parser and the text lane); a dwelling headline must sit in `scraper/area.py`
   `dwelling_area_band` — ≥ 5 m² on byt/dum/komercni, ≥ 8 m² a room when a byt/dum states
-  `N+kk`/`N+1`, and < 1,000 m² on a byt — and a declined measure falls through to the next one.
+  `N+kk`/`N+1`, and < 1,000 m² on a byt and on a house's UNLABELLED figure (bazos's first prose
+  m², a title figure: at 1,000 m² or more that is the parcel) — and a declined measure falls
+  through to the next one.
   A portal-specific placeholder is a contract **sentinel** instead (idnes's floor-select top,
   "20. patro a vyšší"). Rows stored before a band existed are NOT cleared by ingest (a `text`
   cell preserves on NULL, inactive rows never refetch, `reparse.py` never blanks): each such heal
@@ -2202,7 +2204,7 @@ renumber.** Navigate by area:
 
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
-    fallback)` picks `area_m2` and stamps `area_basis`; the land arm is
+    fallback, disposition)` picks `area_m2` and stamps `area_basis`; the land arm is
     `plot -> total -> usable -> floor -> fallback`, always stamped `plot`, and the dwelling arm
     never reads `plot` at all (a house's parcel sits beside its floor area in `estate_area`).
     All nine parsers now hand over their "plocha pozemku" / `surfaceLand` / `estate_area` value
@@ -2241,7 +2243,11 @@ renumber.** Navigate by area:
     had to handle (narrow NBSP, thin space), and deleted every copy — ceskereality,
     realitymix, remax, maxima and bazos now call it, so the grammar can no longer diverge per
     portal (rule 21). The negative lookbehind keeps a disposition from being swallowed
-    ("3+1 174 m²" stays 174, never 1174) and a per-m² price from reading as an area. Measured
+    ("3+1 174 m²" stays 174, never 1174) and a per-m² price from reading as an area. Brokers'
+    DOTTED thousands ("1.910 m2", "1.994,71 m²") are the same number (2026-09-26: a dot followed by
+    exactly three digits is a group, since a Czech decimal takes a comma) — with one caveat the
+    grammar cannot see: on a bazos HOUSE the first prose figure is usually the parcel, so the
+    resolver holds a house's unlabelled figure under 1,000 m² (see `dwelling_area_band` above). Measured
     on production 2026-09-17: **ceskereality 17,207 rows** of 98,126 carried the truncation
     fingerprint (stored area = title area mod 1000) and not one of its 19,088 land rows had an
     `area_m2` of 1000 or more; **realitymix 13,164** of 83,051 (its spec cells are unspaced —

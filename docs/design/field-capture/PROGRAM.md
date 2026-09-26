@@ -621,7 +621,18 @@ is now declined at the parse, BEFORE the content hash, in the one module that ow
   falls through to the next one, like the 5 m² rail; re-parsing to "the first plausible figure" instead was measured
   and refused (14 of 20 checkable picks were another room).
 - **Dotted thousands** ("1.910 m2" read 1,91) are one number in the one area grammar (`AREA_NUMBER_SRC`,
-  `area_token_to_float`; the grammar half of PR #1595). Stored rows heal through the re-parse seam.
+  `area_token_to_float`; the grammar half of PR #1595) — and on a HOUSE the unlabelled figure stays under the
+  flat ceiling (1,000 m², `derive_headline_area`), because bazos's first prose m² on a dum is its parcel: the
+  grammar alone turned 21 bazos dum adverts of the A4 union from unknown (1.1 declined) into a parcel-sized
+  headline — 186747 "pozemku o celkové výměře 1.139m²", 204860 "Zahrádka o celkové výměře 1.256 m2" beside a
+  24 m² chata (sreality 60671 / idnes 227954) — and a wrong area is a veto (`autodedup/guards.py`). A labelled
+  house measure keeps no such ceiling. The re-parse seam therefore heals land, halls and ostatni (A4 union: 31
+  bazos parcels, 10 halls, 1 ostatni, e.g. the Příbram hall 2,462 m² its sreality / ceskereality twins state);
+  a bazos dum re-parses to nothing. **Residuals, named:** the 157 bazos dum headlines of 1,000 m² or more
+  stored before the ceiling (spaced parcels, A4 union) stay — a `text` cell preserves on NULL (R4) and no
+  migration clears them; and a declined headline leaves `usable_area` at the declined figure (realitymix
+  378126: usable_area 1,800 m², area_m2 NULL) — the guards read only `area_m2`, but the LLM judge's digest
+  (`autodedup/judge.py` `DIGEST_ATTRS`) still shows it as "usable area".
 
 **W9.** Each item its own PR (status as of 2026-09-21, worked alongside W0):
 

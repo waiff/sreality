@@ -583,3 +583,43 @@ def test_parse_detail_the_cellar_figure_is_not_the_flat():
     stated = parse_detail(html.replace("Byt 3+1 v", "Byt 3+1 o výměře 70 m² v"),
                           source_url=url, category_main="byt", category_type="prodej")
     assert (stated.area_m2, stated.area_basis) == (70.0, "unknown")
+
+
+def _bazos_page(title: str, body: str) -> str:
+    return ("<html><body>"
+            f'<h1 class="nadpisdetail">{title}</h1>'
+            f'<div class="popisdetail">{body}</div>'
+            "</body></html>")
+
+
+def test_parse_detail_a_dotted_parcel_is_not_the_house():
+    """bazos 186747 and 204860 (A4 review, 2026-09-26): the first m² in a house's prose is
+    its parcel written with dotted thousands. The one grammar reads it as the number it is
+    (1,139 / 1,256), and the dum ceiling on the unlabelled figure keeps that parcel out of
+    the headline — unknown, as it was when the grammar read 1.1 — while the same dotted
+    figure on a hall and on a parcel ad is that ad's own area."""
+    url = "https://reality.bazos.cz/inzerat/1/x.php"
+    house = parse_detail(
+        _bazos_page("Prodej rodinného domu 4+1",
+                    "Dům, postavený od základů v roce 2005 na rozlehlém pozemku o celkové "
+                    "výměře 1.139m², nabízí moderní a především kvalitní prostor."),
+        source_url=url, category_main="dum", category_type="prodej")
+    assert (house.area_m2, house.area_basis) == (None, None)
+
+    chata = parse_detail(
+        _bazos_page("Prodej chaty Děčín - Bynov",
+                    "Chata v klidné části Děčína - Bynov. Zahrádka o celkové výměře 1.256 m2 "
+                    "je v osobním vlastnictví a je kompletně oplocená."),
+        source_url=url, category_main="dum", category_type="prodej")
+    assert (chata.area_m2, chata.area_basis) == (None, None)
+
+    hall = parse_detail(
+        _bazos_page("Pronájem haly",
+                    "Nabízíme světlou, vjezdovou, víceúčelovou halu 2.462 m2 + zázemí a kanceláře."),
+        source_url=url, category_main="komercni", category_type="pronajem")
+    assert (hall.area_m2, hall.area_basis) == (2462.0, "unknown")
+
+    parcel = parse_detail(
+        _bazos_page("Prodej pozemku", "Celková plocha pozemku činí 1.910 m2."),
+        source_url=url, category_main="pozemek", category_type="prodej")
+    assert (parcel.area_m2, parcel.area_basis) == (1910.0, "plot")

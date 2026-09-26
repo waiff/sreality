@@ -306,6 +306,25 @@ def test_a_flat_at_a_thousand_square_metres_is_a_site_area_and_the_next_measure_
     assert derive_headline_area(category_main="komercni", total=1800.0) == (1800.0, "total")
 
 
+
+def test_a_house_unlabelled_figure_at_a_thousand_square_metres_is_its_parcel():
+    """Dotted thousands made bazos 186747's "pozemku o celkové výměře 1.139m²" and 204860's
+    "Zahrádka o celkové výměře 1.256 m2" (a 24 m² chata on sreality 60671 / idnes 227954)
+    read as 1,139 / 1,256 m² houses: a wrong area is a veto, where 1.1 had been declined to
+    unknown. An UNLABELLED figure beside a house is held under the flat ceiling; a labelled
+    house measure, a hall and a parcel keep theirs."""
+    from scraper.area import MAX_FLAT_AREA_M2, derive_headline_area
+
+    assert derive_headline_area(category_main="dum", fallback=1139.0, disposition="4+1") == (None, None)
+    assert derive_headline_area(category_main="dum", fallback=1256.0) == (None, None)
+    assert derive_headline_area(category_main="dum", fallback=MAX_FLAT_AREA_M2) == (None, None)
+    assert derive_headline_area(category_main="dum", fallback=999.0) == (999.0, "unknown")
+    assert derive_headline_area(category_main="dum", usable=1800.0) == (1800.0, "usable")
+    assert derive_headline_area(category_main="dum", total=1139.0) == (1139.0, "total")
+    assert derive_headline_area(category_main="komercni", fallback=2462.0) == (2462.0, "unknown")
+    assert derive_headline_area(category_main="ostatni", fallback=1031.0) == (1031.0, "unknown")
+    assert derive_headline_area(category_main="pozemek", fallback=1910.0) == (1910.0, "plot")
+
 def test_bazos_mechova_cellar_is_not_the_flat():
     from scraper import vocabulary
     from scraper.bazos_parser import ad_haystack, areas_from_text

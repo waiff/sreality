@@ -376,14 +376,18 @@ def test_spaced_thousands_in_the_title_fallback_is_one_number():
     """W19: realitymix's spec cells are unspaced ("3028 m²" in the archived capture)
     but its TITLES carry the Czech thousands group, and the title is the resolver's
     fallback — which is where 13,164 rows took a truncated area (stored = title area
-    mod 1000). With no spec area at all the fallback is the whole story."""
+    mod 1000). With no spec area at all the fallback is the whole story — on a hall.
+    On a HOUSE the same unlabelled 5,870 m² is its parcel, held under the flat ceiling
+    (MAX_FLAT_AREA_M2) so it reads as unknown instead of vetoing the house's twins."""
     html = (DUM_HTML
             .replace("<h1>Prodej rodinného domu 214 m²</h1>",
-                     "<h1>Prodej pozemku 5 870 m²</h1>")
+                     "<h1>Prodej haly 5 870 m²</h1>")
             .replace('<li class="detail-information__data-item"><span>Užitná plocha:</span><span>214 m²</span></li>', "")
             .replace('<li class="detail-information__data-item"><span>Plocha parcely:</span><span>3028 m²</span></li>', ""))
-    listing = parse_detail(html, source_url=_DUM_URL)
-    assert (listing.area_m2, listing.area_basis) == (5870.0, "unknown")
+    house = parse_detail(html, source_url=_DUM_URL)
+    assert (house.category_main, house.area_m2, house.area_basis) == ("dum", None, None)
+    hall = parse_detail(html.replace("reality/domy", "reality/komerce"), source_url=_DUM_URL)
+    assert (hall.category_main, hall.area_m2, hall.area_basis) == ("komercni", 5870.0, "unknown")
 
 
 def test_spaced_thousands_in_a_spec_cell_is_one_number():

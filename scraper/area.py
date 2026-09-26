@@ -39,6 +39,9 @@ The dwelling band is scaled by what the advert states (`dwelling_area_band`): a 
 dum of N rooms is at least N x MIN_AREA_PER_ROOM_M2, and a byt stays under
 MAX_FLAT_AREA_M2. A measure outside the band is declined like any other, so the
 resolver tries the next one and a prose figure that named the cellar reads as absence.
+The UNLABELLED fallback is held under MAX_FLAT_AREA_M2 on a house too: a figure of a
+thousand m² or more that no label calls the house's own is its parcel, and a wrong area
+vetoes a true pair where an unknown one does not.
 
 BOTH bounds live HERE, not at the write boundary, because a refused measure has
 to reach the content hash — a value dropped after hashing would leave `listings`
@@ -175,6 +178,13 @@ _ROOMS_RE = re.compile(r"^([1-9])\+(?:kk|1)$")
 
 # And from above, for a FLAT only: no Czech flat reaches 1,000 m², and every stored one
 # that does is a project's site area or a keyed typo (23,000 / 5,989 / 4,095 / 1,800).
+# The same ceiling holds for a HOUSE's unlabelled fallback (bazos's first prose m², a
+# structured portal's title figure): at 1,000 m² or more that figure is the parcel —
+# bazos 186747 "pozemku o celkové výměře 1.139m²", 204860 "Zahrádka o celkové výměře
+# 1.256 m2" beside a 24 m² chata. Measured on the 40,514 A4 rows (2026-09-26): 21 bazos
+# dum adverts whose first figure is a dotted-thousands parcel and 157 stored bazos dum
+# headlines of 1,000 m² or more; every structured dum at or above it is a LABELLED
+# measure (usable_area equal to area_m2), which this ceiling does not touch.
 MAX_FLAT_AREA_M2 = 1_000.0
 
 # The first value `listings.area_m2` (numeric(7,1)) cannot store. Kept equal to
@@ -223,12 +233,14 @@ def derive_headline_area(
                 return value, "plot"
         return None, None
     min_m2, max_m2 = dwelling_area_band(category_main, disposition)
-    for value, basis in (
-        (usable, "usable"),
-        (floor, "floor"),
-        (total, "total"),
-        (fallback, "unknown"),
+    unlabelled_max = (min(max_m2, MAX_FLAT_AREA_M2)
+                      if category_main in ROOMED_CATEGORIES else max_m2)
+    for value, basis, high in (
+        (usable, "usable", max_m2),
+        (floor, "floor", max_m2),
+        (total, "total", max_m2),
+        (fallback, "unknown", unlabelled_max),
     ):
-        if value and min_m2 <= value < max_m2:
+        if value and min_m2 <= value < high:
             return value, basis
     return None, None
