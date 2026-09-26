@@ -25,7 +25,7 @@
  */
 
 import { useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 
 import {
@@ -35,6 +35,7 @@ import {
   type AutodedupPairImage,
 } from '@/lib/api';
 import { imageSrc } from '@/lib/imageUrl';
+import { ROUTES, withQuery } from '@/lib/routes';
 import { fmtCzk, fmtFloor } from '@/lib/format';
 import ErrorBanner from '@/components/ErrorBanner';
 import Spinner from '@/components/Spinner';
@@ -115,6 +116,15 @@ export default function AutodedupPair() {
           Every signal the engine had on these two adverts. Recording a verdict here writes into the
           program's own schema only — a negative verdict also makes the pair permanently
           un-linkable, which is why it takes a second click.
+        </p>
+        <p className="mt-1 text-[0.78rem]">
+          {/* Every ruling on either advert, with its history and the corrections (E920). */}
+          <Link
+            to={withQuery(ROUTES.autodedupRulings.build(), { listing: lo })}
+            className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+          >
+            Všechna rozhodnutí o inzerátu #{lo}
+          </Link>
         </p>
       </header>
 

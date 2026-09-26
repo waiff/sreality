@@ -57,10 +57,10 @@ DECLARED: dict[str, frozenset[str]] = {
     "labels_sql.py": frozenset({"decided_by"}),
     # Reads the artifact, where the value is ALREADY a digest.
     "labels.py": frozenset({"decided_by"}),
-    # Read only as a grouping key (the newest group ruling per operator stands) and never
-    # written: the plan names ruled SETS, never who ruled them (test_apply pins it).
+    # Only the stamp `unapply` hands `detach_listing` (its own run, no person); the group rulings
+    # are read without their decider since E920 (the newest word on a set wins, whoever said it),
+    # so the plan names ruled SETS, never who ruled them (test_apply pins it).
     "apply.py": frozenset({"decided_by"}),
-    "apply_sql.py": frozenset({"decided_by"}),
     # A2 (temporary): `decided_by` is the argument it hands `detach_listing`, the fixed stamp
     # 'autodedup-legacy-retire:<run>'; no person's identity is read or written.
     "legacy_retire.py": frozenset({"decided_by"}),

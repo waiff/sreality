@@ -3152,6 +3152,163 @@ export const getProposedSplits = (
 > =>
   request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
 
+/* ----- the rulings page (E920) ------------------------------------------------
+ *
+ * EVERY operator ruling in one list (`GET /autodedup/rulings`), newest first,
+ * beside the engine's current view and where the adverts sit now. The newest
+ * row per pair / per (group key, pass) IS the ruling (migration 574): `status`
+ * says whether it states something (`standing`), was taken back (`withdrawn`:
+ * a newer `unsure`) or never said more than `unsure`. `agreement` puts it
+ * against production and the engine: a standing `same` disagrees when the two
+ * adverts are apart now or the engine holds them apart; a standing negative
+ * when they are together now or in one engine group. */
+
+export type RulingStatus = 'standing' | 'withdrawn' | 'unsure';
+export type RulingAgreement = 'agrees' | 'disagrees' | 'none';
+export type RulingEngineView = 'together' | 'apart' | 'unseen';
+/* `implied`: a member pair of a group confirmed `same` with no pair ruling of
+ * its own — the lane never binds it; `must_not_link`: a veto with no ruling. */
+export type RulingPairSource = 'pair' | 'browse_merge' | 'implied' | 'must_not_link';
+export type RulingGroupSource = 'group' | 'browse_merge';
+
+export interface RulingPairRow {
+  /* The `verdicts.id` a correction supersedes — the group's row for an implied
+   * pair (`ruling_kind: 'cluster'`), null for a bare veto. */
+  ruling_id: number | null;
+  ruling_kind: 'pair' | 'cluster' | 'must_not_link';
+  listing_lo: number;
+  listing_hi: number;
+  verdict: AutodedupVerdictValue;
+  status: RulingStatus;
+  source: RulingPairSource;
+  merge_group_id: string | null;
+  group_cluster_key: number | null;
+  group_generation: string | null;
+  note: string | null;
+  reasons: string[];
+  decided_by: string;
+  decided_at: string;
+  n_rows: number;
+  /* The veto's source ('operator') when one stands, else null. */
+  must_not_link: string | null;
+  property_lo: number | null;
+  property_hi: number | null;
+  together_now: boolean;
+  adverts_on_property: number | null;
+  obec_kod: number | null;
+  obec_name: string | null;
+  cast_obce_kod: number | null;
+  cast_obce_name: string | null;
+  street_lo: string | null;
+  cp_lo: string | null;
+  street_hi: string | null;
+  cp_hi: string | null;
+  zone: AutodedupZone | null;
+  score: number | null;
+  decision: string | null;
+  guard_veto: string | null;
+  engine_decided_at: string | null;
+  engine_group_lo: number | null;
+  engine_group_hi: number | null;
+  seen_lo: boolean;
+  seen_hi: boolean;
+  engine_view: RulingEngineView;
+  agreement: RulingAgreement;
+  certificate: string | null;
+  why_not_merged: string | null;
+  generation: string | null;
+  /* Every row of the key, newest first — the group's rows for an implied pair. */
+  history: AutodedupVerdictRow[];
+}
+
+export interface RulingGroupRow {
+  ruling_key: string;
+  ruling_id: number | null;
+  source: RulingGroupSource;
+  cluster_key: number | null;
+  generation: string | null;
+  merge_group_id: string | null;
+  member_ids: number[];
+  /* False on a ruling taken before migration 538 recorded its set. */
+  set_recorded: boolean;
+  verdict: AutodedupVerdictValue;
+  status: RulingStatus;
+  note: string | null;
+  reasons: string[];
+  decided_by: string;
+  decided_at: string;
+  n_rows: number;
+  n_members: number;
+  property_ids: number[];
+  n_properties: number;
+  together_now: boolean;
+  n_engine_groups: number;
+  n_grouped: number;
+  n_seen: number;
+  obec_kod: number | null;
+  obec_name: string | null;
+  cast_obce_kod: number | null;
+  cast_obce_name: string | null;
+  engine_view: RulingEngineView;
+  agreement: RulingAgreement;
+  history: AutodedupVerdictRow[];
+}
+
+export interface RulingTown {
+  grain: 'o' | 'c';
+  code: number;
+  name: string | null;
+  n: number;
+}
+
+export interface RulingsPage<T> {
+  grain: 'pair' | 'group';
+  generation: string | null;
+  items: T[];
+  next_after: string | null;
+  total: number;
+  facets: Record<'source' | 'status' | 'verdict' | 'engine', Record<string, number>>;
+  towns: RulingTown[];
+}
+
+/* Filter KEYS the server validates against its registry; a blank value is no
+ * filter and is dropped here rather than sent. */
+export interface RulingFilters {
+  grain?: 'pair' | 'group';
+  verdict?: string | null;
+  source?: string | null;
+  status?: string | null;
+  engine?: string | null;
+  now?: string | null;
+  decided_from?: string | null;
+  decided_to?: string | null;
+  town?: string | null;
+  listing?: number | null;
+  property?: number | null;
+  merge_group?: string | null;
+  generation?: string | null;
+  after?: string | null;
+  limit?: number;
+}
+
+function blankToNull(f: RulingFilters): Record<string, QueryValue> {
+  return Object.fromEntries(
+    Object.entries(f).map(([k, v]) => [k, v === '' || v === undefined ? null : v]),
+  ) as Record<string, QueryValue>;
+}
+
+export function getAutodedupRulings(
+  f: RulingFilters & { grain: 'group' },
+): Promise<AutodedupEnvelope<RulingsPage<RulingGroupRow>>>;
+export function getAutodedupRulings(
+  f: RulingFilters,
+): Promise<AutodedupEnvelope<RulingsPage<RulingPairRow>>>;
+export function getAutodedupRulings(
+  f: RulingFilters,
+): Promise<AutodedupEnvelope<RulingsPage<RulingPairRow | RulingGroupRow>>> {
+  return request('/autodedup/rulings', { query: blankToNull(f), jwt: true });
+}
+
 /* ----- price-stats datasets ---------------------------------------------- */
 
 export interface PriceStatDatasetInput {
@@ -4420,6 +4577,11 @@ export interface AutodedupVerdictInput {
   /* Reason CODES, never labels: the label is the registry's rendering of the
    * code and changing one must not change what a past verdict recorded. */
   reasons?: string[];
+  /* A CORRECTION (the rulings page, E920): the `verdicts.id` the page showed.
+   * The server takes the key from that row — a group's pass and member set
+   * included — and answers 409 when it is no longer the newest word on its key.
+   * The write is a NEW row: a withdrawal is `unsure`, never a delete. */
+  supersedes?: number | null;
 }
 
 /* The route answers `{data: {verdict, must_not_link}}` — the stored row is

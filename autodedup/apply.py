@@ -446,10 +446,11 @@ class Negatives:
         for lo, hi, _verdict in _rows(conn, S.PAIR_VERDICTS_SQL, {
                 "listing_ids": ids, "negatives": negatives}):
             out.pairs.setdefault(int(lo), []).append(int(hi))
-        # Per (set, operator), only the newest ruling stands: a set ruled different and later
-        # ruled same by the same operator no longer refuses. A setless row fails closed.
-        newest: dict[tuple[frozenset[int], str], tuple[tuple[float, int], str]] = {}
-        for key, verdict, _gen, member_ids, decided_by, decided_at, vid in _rows(
+        # Per set, only the NEWEST ruling stands, whoever took it (E903 as amended by E920: the
+        # newest word wins at every reader, as it does for pairs): a set ruled different and
+        # later ruled same or withdrawn (`unsure`) no longer refuses. A setless row fails closed.
+        newest: dict[frozenset[int], tuple[tuple[float, int], str]] = {}
+        for key, verdict, _gen, member_ids, decided_at, vid in _rows(
                 conn, S.CLUSTER_VERDICTS_SQL, {
                     "listing_ids": ids, "cluster_keys": sorted(set(cluster_keys)),
                     "negatives": negatives}):
@@ -462,11 +463,9 @@ class Negatives:
                 continue
             order = (decided_at.timestamp() if isinstance(decided_at, datetime) else 0.0,
                      int(vid or 0))
-            slot = (ruled, str(decided_by))
-            if slot not in newest or order > newest[slot][0]:
-                newest[slot] = (order, str(verdict))
-        for (ruled, _by), (_order, verdict) in sorted(
-                newest.items(), key=lambda kv: (sorted(kv[0][0]), kv[0][1])):
+            if ruled not in newest or order > newest[ruled][0]:
+                newest[ruled] = (order, str(verdict))
+        for ruled, (_order, verdict) in sorted(newest.items(), key=lambda kv: sorted(kv[0])):
             bucket = out.sets.setdefault(min(ruled), [])
             if verdict in NEGATIVE_VERDICTS and ruled not in bucket:
                 bucket.append(ruled)

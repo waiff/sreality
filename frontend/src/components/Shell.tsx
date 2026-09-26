@@ -95,6 +95,8 @@ const autodedupItems: ReadonlyArray<MenuItem> = [
   { to: ROUTES.autodedupResidual.build(), label: 'Residual' },
   // Decision 9: what a refit would take apart, split only by the operator.
   { to: ROUTES.autodedupProposedSplits.build(), label: 'Návrhy rozdělení' },
+  // E920: every ruling the operator ever made, beside the engine's view of it.
+  { to: ROUTES.autodedupRulings.build(), label: 'Rozhodnutí' },
 ];
 
 // The admin-only surfaces that used to sit in the top row, now the first

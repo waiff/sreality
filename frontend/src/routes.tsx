@@ -49,6 +49,7 @@ const AutodedupGroups = lazyChunk(() => import('./pages/AutodedupGroups'));
 const AutodedupResidual = lazyChunk(() => import('./pages/AutodedupResidual'));
 const AutodedupPair = lazyChunk(() => import('./pages/AutodedupPair'));
 const AutodedupProposedSplits = lazyChunk(() => import('./pages/AutodedupProposedSplits'));
+const AutodedupRulings = lazyChunk(() => import('./pages/AutodedupRulings'));
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 const DevConfidencePreview = lazyChunk(() => import('./pages/DevConfidencePreview'));
@@ -130,6 +131,7 @@ export const routes: RouteObject[] = [
       { path: ROUTES.autodedupResidual.childPath, element: <AdminPage><AutodedupResidual /></AdminPage>, handle: { title: 'AUTODEDUP · Residual' } },
       { path: ROUTES.autodedupPair.childPath, element: <AdminPage><AutodedupPair /></AdminPage>, handle: { title: 'AUTODEDUP · Pair' } },
       { path: ROUTES.autodedupProposedSplits.childPath, element: <AdminPage><AutodedupProposedSplits /></AdminPage>, handle: { title: 'AUTODEDUP · Návrhy rozdělení' } },
+      { path: ROUTES.autodedupRulings.childPath, element: <AdminPage><AutodedupRulings /></AdminPage>, handle: { title: 'AUTODEDUP · Rozhodnutí' } },
       { path: ROUTES.scrapers.childPath, element: <AdminPage><Scrapers /></AdminPage>, handle: { title: 'Scrapers' } },
       { path: ROUTES.devConfidenceIndicator.childPath, element: <AdminPage><DevConfidencePreview /></AdminPage>, handle: { title: 'Confidence indicator (dev)' } },
       { path: '*', element: <NotFound />, handle: { title: 'Not found' } },

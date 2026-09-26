@@ -1272,7 +1272,13 @@ renumber.** Navigate by area:
     **Migration 560** copied the operator's live pre-ruling merges (362 groups) into `same`
     rulings — pairs that sat on different properties of a group (a side is an advert's origin)
     and share one now — `decided_by='operator'`, dated at the merge, never over an existing
-    ruling or veto, so the engine can never undo them. Labeling / annotation CRUD that the old
+    ruling or veto, so the engine can never undo them. **The rulings are a ledger (migration 574, PROGRAM.md
+    E920):** a flip or a withdrawal (a newer `unsure`) is a NEW row and the newest row per pair /
+    per (group key, pass) is the ruling every reader obeys; `record_ruling` is the one pair
+    writer. `/autodedup/rulings` lists every ruling (typed, Browse merge, implied by a confirmed
+    group, bare veto; group grain too) beside the engine's view and where the adverts sit now,
+    and corrects it through `POST /autodedup/verdict` `supersedes` (409 when stale); the property
+    page links to it for an admin. Labeling / annotation CRUD that the old
     dedup page carried — training examples, border cases, image annotations, pHash pair notes —
     first re-homed under `/labeling/*` (`api/labeling.py`), then (docs/design/tag-annotation-matrix.md,
     2026-08) superseded: the confirmed-training-set half moved to a permanent, per-(image, tag)
