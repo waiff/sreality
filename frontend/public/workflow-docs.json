@@ -338,42 +338,6 @@
       "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/autodedup.yml"
     },
     {
-      "filename": "autodedup_realtime.yml",
-      "name": "AUTODEDUP: realtime shadow lane",
-      "description": "The real-time half of the autonomous dedup engine: the SAME decisions the cohort lane makes over a whole export, made incrementally as listings arrive. It runs every 10 minutes and is DARK BY DEFAULT — the first step exits 0 unless the repository variable AUTODEDUP_REALTIME_ENABLED is exactly `true`, and `autodedup/incremental_lane.py` re-reads the same variable, so neither a schedule nor a manual dispatch can start a pass the operator has not switched on. Nothing outside schema `autodedup` is written (ruling D4): no `public.listings` row, no `property_id`, no merge. It spends $0 by construction — ruling D19 gives no LLM judge merge authority on the band, so this lane calls no provider at all.",
-      "portal": null,
-      "manual": true,
-      "schedules": [
-        {
-          "cron": "*/10 * * * *",
-          "human": "Every 10 minutes"
-        }
-      ],
-      "onPush": false,
-      "onPullRequest": false,
-      "paths": null,
-      "inputs": [
-        {
-          "name": "args",
-          "description": "Pass arguments as k=v,k=v — generation (default rt), rt_parity_sample (how many baseline listings the gate re-checks, default 25), rt_scope (e.g. 'obec:563510 cast_obce:490245' or all; refused unless it matches the seeded scope or rt_rescope=true), rt_rescope, max_listings, max_pairs, max_component, settle_lag, straggler_window, revive_slice, feed_window, drift_slice, enter_slice, settings and model (a pass may NAME the generation's own scorer, never a different one — changing it is a re-seed). The rails (rt_max_schema_mb, rt_max_retire_fraction, rt_enter_max_scans_per_day, rt_enter_interval_hours) are autodedup.settings rows and are accepted here only beside rt_rescope=true.",
-          "required": false,
-          "type": "string",
-          "default": "",
-          "options": null
-        }
-      ],
-      "secrets": [
-        "SUPABASE_DB_SESSION_URL",
-        "SUPABASE_DB_URL"
-      ],
-      "concurrencyGroup": "autodedup-realtime",
-      "cancelInProgress": false,
-      "timeoutMinutes": 25,
-      "permissions": "contents: read",
-      "runsUrl": "https://github.com/waiff/sreality/actions/workflows/autodedup_realtime.yml",
-      "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/autodedup_realtime.yml"
-    },
-    {
       "filename": "backfill_child_listing_ids.yml",
       "name": "Backfill child listing_id (R2)",
       "description": "One-off, dispatch-only backfill for the R2 leg of the listing-identity refactor (docs/design/listing-identity-r2-pk-swap-runbook.md § 2 A4). Fills the surrogate listings.id onto the 22 carrier tables migrations 320-325 added columns to, for rows written BEFORE dual-write shipped. No re-fetch, no LLM, no snapshots.",
