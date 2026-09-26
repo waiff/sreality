@@ -41,7 +41,7 @@ UNIT_LETTERS = string.ascii_uppercase
 MAX_ADVERTS = 100
 REASON_MAX = 500
 # The lane's per-group bounds (E911): a split never waits long behind the reconcile.
-_BOUND_SQL = ("SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '25s'")
+_TIMEOUTS = ("SET LOCAL lock_timeout = '5s'", "SET LOCAL statement_timeout = '25s'")
 _ADVERTS_ON_SQL = """
 SELECT id, property_id FROM listings WHERE property_id = ANY(%(ids)s::bigint[]) ORDER BY id
 """
@@ -106,7 +106,7 @@ def reversal_message(pairs: list[Pair]) -> str:
 
 def _bound(conn: psycopg.Connection) -> None:
     with conn.cursor() as cur:
-        for sql in _BOUND_SQL:
+        for sql in _TIMEOUTS:
             cur.execute(sql)
 
 

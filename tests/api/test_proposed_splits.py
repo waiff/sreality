@@ -179,6 +179,18 @@ def test_a_pair_never_scored_or_ruled_same_is_not_a_proposal(client):
     assert [[a["listing_id"] for a in g["adverts"]] for g in one["groups"]] == [[501], [502], [503]]
 
 
+@pytest.mark.parametrize(("verdict", "ruled"), [("unsure", False), ("different", True)])
+def test_an_unsure_ruling_is_no_ruling(client, monkeypatch, verdict, ruled):
+    """`unsure` is the withdrawal (A2 §6.2): the card is not "rozhodnuto" on it."""
+    monkeypatch.setitem(CANNED, usql.MEMBER_PAIR_VERDICTS_SQL, [
+        *CANNED[usql.MEMBER_PAIR_VERDICTS_SQL],
+        _row(usql.VERDICT_COLUMNS, listing_lo=301, listing_hi=302, verdict=verdict,
+             decided_by="op@example.com", decided_at=AT)])
+    one = client.get("/autodedup/proposed-splits/30").json()["data"]
+    assert one["splits"][0]["ruling"]["verdict"] == verdict
+    assert (one["proposed"], one["ruled"]) == (True, ruled)
+
+
 def test_each_advert_says_what_its_split_would_do(client, conn):
     """Each advert carries its detach's answer now: a merged one goes home, one no merge brought
     is born a new record while another own advert stays; not one a split would leave where it
