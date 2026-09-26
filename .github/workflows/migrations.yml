@@ -395,6 +395,15 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_operator_merges_live.py -q
 
+      # E919's split statement, EXECUTED: one advert leaves, the rest are confirmed one
+      # property, the lane's must-link read and the operator must-not-links say so, and the
+      # undo gives every advert and every word back. The fakes cannot run the chokepoint's SQL.
+      - name: The operator's split statement and its undo (E919)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+        run: pytest tests/test_property_split_live.py -q
+
       # W4's whole claim is that SIX relations publish ONE number. Nothing else
       # in CI can see that: the fake connections cannot evaluate SQL, and PREPARE
       # type-checks a statement without ever computing a value -- so a view left

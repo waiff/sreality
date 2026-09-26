@@ -18,13 +18,16 @@
  * out is the row's stored `source_url`, never rebuilt.
  *
  * Admin sessions also see where each advert came from (the merge ledger's origin,
- * on expand) and a per-row two-step 'Rozdělit' on every advert a detach would
- * move: exactly that advert goes back to its origin — or, if no merge brought it,
- * to a new record of its own — any property size, any merge origin, with an
- * optional free-text reason kept on the "different" ruling. */
+ * on expand) and a per-row two-step 'Rozdělit' on every advert that would move:
+ * exactly that advert goes back to its origin — or, if no merge brought it, to a
+ * new record of its own — any property size, any merge origin, with an optional
+ * free-text reason kept on the "different" ruling. It is the split route's
+ * statement "this one advert is not this property" (`separate: [[id]],
+ * keep_together: false`, E919), naming every advert the page shows so a newcomer
+ * the lane merged in meanwhile refuses it (`stale`) instead of being ruled. */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import ImageCarousel from '@/components/ImageCarousel';
@@ -33,8 +36,9 @@ import { MissingPhotoTile } from '@/components/autodedup/ListingMini';
 import { SectionLabel } from '@/components/section';
 import {
   DETACH_REASON_MAX,
-  detachListing,
   fetchPropertyOrigins,
+  splitProperty,
+  splitRefusal,
   type AdvertOrigin,
 } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -46,11 +50,10 @@ import { propertyPath } from '@/lib/listingUrl';
 import { areaKindOf } from '@/lib/measure';
 import {
   STATE_STAYS,
-  detachOutcomeNote,
   inzeratu,
   mergeOriginLabel,
   mergedAdvertsKeys,
-  refreshAfterDetach,
+  refreshAfterSplit,
   unmovedReason,
 } from '@/lib/mergedAdverts';
 import { portalLabel } from '@/lib/portals';
@@ -135,6 +138,7 @@ export default function MergedAdvertsSection({
             isCanonical={s.id === canonicalListingId}
             opened={s.id === openAdvertId}
             propertyId={propertyId}
+            adverts={ids}
             originRead={
               isAdmin
                 ? {
@@ -164,6 +168,7 @@ function MergedAdvertRow({
   isCanonical,
   opened,
   propertyId,
+  adverts,
   originRead,
 }: {
   source: PropertySource;
@@ -174,6 +179,7 @@ function MergedAdvertRow({
   isCanonical: boolean;
   opened: boolean;
   propertyId: number;
+  adverts: number[];
   originRead: OriginRead | null;
 }) {
   const [expanded, setExpanded] = useState(opened);
@@ -285,6 +291,7 @@ function MergedAdvertRow({
       {origin && detachArmed && (
         <DetachConfirm
           propertyId={propertyId}
+          adverts={adverts}
           origin={origin}
           isCanonical={isCanonical}
           onCancel={() => setDetachArmed(false)}
@@ -491,37 +498,54 @@ function UnmovedLine({ origin }: { origin: AdvertOrigin }) {
 /* Step two of the split: say where the advert goes, then offer the write. */
 function DetachConfirm({
   propertyId,
+  adverts,
   origin,
   isCanonical,
   onCancel,
 }: {
   propertyId: number;
+  adverts: number[];
   origin: AdvertOrigin;
   isCanonical: boolean;
   onCancel: () => void;
 }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   /* The header's own advert leaving for a new record: the property's state stays here. */
   const stateStays = isCanonical && origin.origin_property_id == null;
   const [reason, setReason] = useState('');
   const detach = useMutation({
-    mutationFn: () => detachListing(propertyId, origin.listing_id, reason.trim() || undefined),
-    /* Errors (a 409 the merge code refused, a 5xx) surface through the global
-     * MutationCache toast; the panel stays open so nothing looks done. */
+    mutationFn: () =>
+      splitProperty(propertyId, {
+        adverts,
+        separate: [[origin.listing_id]],
+        keep_together: false,
+        ...(reason.trim() ? { reason: reason.trim() } : {}),
+      }),
     onSuccess: (res) => {
-      if (res.detached) {
+      const left = res.units.find((u) => u.role === 'separated');
+      const move = left?.moved[0];
+      if (left && move) {
         pushToast(
           'ok',
-          res.outcome === 'split_native'
-            ? `Odděleno — inzerát má novou vlastní nemovitost #${res.restored_property_id}.` +
+          move.outcome === 'split_native'
+            ? `Odděleno — inzerát má novou vlastní nemovitost #${left.property_id}.` +
                 (stateStays ? ` ${STATE_STAYS}` : '')
-            : `Odděleno — inzerát je zpět v nemovitosti #${res.restored_property_id}.`,
+            : `Odděleno — inzerát je zpět v nemovitosti #${left.property_id}.`,
+          0,
+          { label: `Otevřít #${left.property_id}`, onClick: () => navigate(propertyPath(left.property_id)) },
         );
       } else {
-        pushToast('info', detachOutcomeNote(res.outcome));
+        pushToast('info', 'Nic se nepřesunulo — inzerát už je oddělen.');
       }
       onCancel();
-      refreshAfterDetach(qc);
+      refreshAfterSplit(qc);
+    },
+    /* The panel stays open so nothing looks done; a property that changed since the
+     * page read it (`stale`) is re-read. */
+    onError: (e) => {
+      pushToast('err', (e as Error).message);
+      if (splitRefusal(e)?.code === 'stale') refreshAfterSplit(qc);
     },
   });
 

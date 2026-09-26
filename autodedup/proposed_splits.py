@@ -12,10 +12,11 @@ split moves only adverts a STATED reason holds apart) -- or the pair carries a s
 must-not-link, or a negative operator ruling). A pair whose newest ruling is `same` is never
 proposed: the engine obeys it (decision 8). Each split pair carries its reason -- the conflict that
 refused the union, else the pair's own decision, else the must-not-link, else `no stated fact` (a
-negative ruling alone) -- and the operator's newest ruling. The batch split is
-`POST /properties/{id}/detach`, advert by advert, from the page; each advert carries what that
-detach would answer now (`detach_outcome`) and whether it moves it (`splittable`: back to its
-origin, or a native advert beside another to a new record).
+negative ruling alone) -- and the operator's newest ruling (`ruled` once every split pair has
+one that is not `unsure`, the withdrawal). The split is the operator's statement per card,
+`POST /properties/{id}/split` (E919): the units to separate, the rest confirmed one property;
+each advert carries what its detach would answer now (`detach_outcome`) and whether it moves it
+(`splittable`: back to its origin, or a native advert beside another to a new record).
 """
 
 from __future__ import annotations
@@ -136,6 +137,7 @@ def proposed_splits(
                        for key, lids in _groups(adverts, canonical)],
             "unseen": [advert(a) for a in adverts if not a[4]],
             "splits": split,
-            "ruled": bool(split) and all(s["ruling"] is not None for s in split),
+            "ruled": bool(split) and all(
+                s["ruling"] is not None and s["ruling"]["verdict"] != "unsure" for s in split),
         })
     return items

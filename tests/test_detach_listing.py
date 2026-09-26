@@ -1,188 +1,19 @@
-"""The one undo: `toolkit.property_identity.detach_listing` and the routes over it (decision 8).
-
-`_Ledger` is a stateful fake of `listings.property_id`, `properties` and the merge ledger that
-serves the statements the set merge and the detach run, so a merge and its undo replay end to
-end here (and in tests/test_property_merge_set.py); executed: tests/test_merge_safety_live.py.
+"""The one undo: `toolkit.property_identity.detach_listing` and the origins route over it
+(decision 8). Over the stateful fake in tests/_property_ledger.py, so a merge and its undo replay
+end to end here (and in tests/test_property_merge_set.py); executed: tests/test_merge_safety_live.py.
+The operator's split route over it is tests/test_property_split.py.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
 import toolkit.property_identity as pi
+from tests._property_ledger import OP, T0, _Ledger
 from toolkit.property_identity import MergeError, detach_listing, merge_property_set
-
-OP = "operator@example.com"
-T0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
-
-
-class _Tx:
-    def __init__(self, db: "_Ledger") -> None:
-        self.db = db
-
-    def __enter__(self) -> "_Tx":
-        self.saved = (dict(self.db.listings), dict(self.db.props), [dict(e) for e in self.db.events],
-                      dict(self.db.into), dict(self.db.assets))
-        return self
-
-    def __exit__(self, exc_type: Any, *exc: Any) -> bool:
-        if exc_type is not None:
-            (self.db.listings, self.db.props, self.db.events, self.db.into,
-             self.db.assets) = self.saved
-            self.db.log.append(("rollback", None))
-        return False
-
-
-class _Cur:
-    def __init__(self, db: "_Ledger") -> None:
-        self.db, self.rows, self.rowcount = db, [], 0
-
-    def __enter__(self) -> "_Cur":
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        return None
-
-    def execute(self, sql: str, params: Any = None) -> None:
-        s = " ".join(sql.split())
-        self.db.log.append((s, params))
-        self.db.count = None
-        self.rows = self.db.dispatch(s, params)
-        self.rowcount = len(self.rows) if self.db.count is None else self.db.count
-
-    def executemany(self, sql: str, seq: Any) -> None:
-        for params in seq:
-            self.execute(sql, params)
-
-    def fetchone(self) -> Any:
-        return self.rows[0] if self.rows else None
-
-    def fetchall(self) -> list[tuple]:
-        return list(self.rows)
-
-
-class _Ledger:
-    """listings: id -> property_id; props: id -> status; into: id -> merged_into; first_seen /
-    assets / cats / canonical: per property; events: the merge ledger; asset_events: the asset
-    membership log."""
-
-    def __init__(self, listings: dict[int, int], *, first_seen: dict[int, datetime] | None = None,
-                 assets: dict[int, int] | None = None, canonical: dict[int, int] | None = None,
-                 props: dict[int, str] | None = None,
-                 cats: dict[int, tuple[str | None, str | None]] | None = None) -> None:
-        self.listings = dict(listings)
-        self.props = {pid: "active" for pid in set(listings.values())} | (props or {})
-        self.into: dict[int, int] = {}
-        self.first_seen, self.assets = first_seen or {}, dict(assets or {})
-        self.cats = cats or {}
-        self.canonical = canonical or {}
-        self.events: list[dict[str, Any]] = []
-        self.asset_events: list[tuple[int, int, str, str]] = []
-        self.log: list[tuple[str, Any]] = []
-        self.count: int | None = None
-
-    def cursor(self) -> _Cur:
-        return _Cur(self)
-
-    def transaction(self) -> _Tx:
-        return _Tx(self)
-
-    def sql(self, needle: str) -> list[Any]:
-        return [p for s, p in self.log if needle in s]
-
-    def dispatch(self, s: str, p: Any) -> list[tuple]:  # noqa: C901
-        cat = lambda pid: self.cats.get(pid, ("prodej", "byt"))  # noqa: E731
-        if s.startswith("SELECT id, status, first_seen_at, asset_id, category_type"):
-            return [(pid, self.props[pid], self.first_seen.get(pid, T0), self.assets.get(pid),
-                     *cat(pid)) for pid in sorted(p["ids"]) if pid in self.props]
-        if s.startswith("SELECT id, status, category_type, category_main, asset_id"):
-            return [(pid, self.props[pid], *cat(pid), self.assets.get(pid)) for pid in p]
-        if s.startswith("SELECT id, status, merged_into FROM properties"):
-            return [(pid, self.props[pid], self.into.get(pid))
-                    for pid in sorted(p["ids"]) if pid in self.props]
-        if s.startswith("WITH moved AS ( UPDATE properties SET asset_id"):
-            self._carry(p)
-        if s.startswith("WITH carried AS ("):
-            self._restore(p)
-        if s.startswith("SELECT p.repr_listing_ref_id FROM properties p"):
-            return [(self.canonical[pid],) for pid in p["ids"] if pid in self.canonical]
-        if s.startswith("INSERT INTO property_merge_events") and "born" in p:
-            self.events.append({"id": len(self.events) + 1, "group": p["group"],
-                                "survivor": p["left"], "listing": p["listing"], "prev": p["born"],
-                                "source": "operator", "undone_by": p["by"]})
-            return [(len(self.events),)]
-        if s.startswith("WITH born AS ( INSERT INTO properties"):
-            born = []
-            for lid in p["ids"]:
-                if lid in self.listings and self.listings[lid] is None:
-                    pid = max(self.props) + 1
-                    self.props[pid], self.listings[lid] = "active", pid
-                    born.append((pid,))
-            return born
-        if s.startswith("SELECT l.property_id, count(*), count(*) FILTER"):
-            live = {e["listing"] for e in self.events if e["undone_by"] is None}
-            sizes = {pid: [lid for lid, at in self.listings.items() if at == pid]
-                     for pid in p["ids"]}
-            return [(pid, len(ids), len(set(ids) - live)) for pid, ids in sizes.items() if ids]
-        if s.startswith("INSERT INTO property_merge_events"):
-            moved = sorted(lid for lid, pid in self.listings.items() if pid == p["retired"])
-            self.events += [{"id": len(self.events) + i + 1, "group": p["group"],
-                             "survivor": p["survivor"], "listing": lid, "prev": p["retired"],
-                             "source": p["source"], "undone_by": None}
-                            for i, lid in enumerate(moved)]
-            self.count = len(moved)
-        elif s == "UPDATE listings SET property_id = %s WHERE property_id = %s":
-            self.listings = {lid: p[0] if pid == p[1] else pid for lid, pid in self.listings.items()}
-        elif s.startswith("UPDATE properties SET status = 'merged_away'"):
-            self.props[p[1]], self.into[p[1]] = "merged_away", p[0]
-        elif s.startswith("SELECT id, property_id FROM listings WHERE id = ANY("):
-            return [(lid, self.listings[lid]) for lid in p["ids"] if lid in self.listings]
-        elif s == "SELECT property_id FROM listings WHERE id = %s":
-            return [(self.listings[p[0]],)] if p[0] in self.listings else []
-        elif s.startswith("SELECT e.listing_ref_id, e.id, e.merge_group_id::text"):
-            return [(e["listing"], e["id"], e["group"], e["survivor"], e["prev"], e["source"], T0)
-                    for e in sorted(self.events, key=lambda e: (e["listing"], e["id"]))
-                    if e["listing"] in p["ids"] and e["undone_by"] is None]
-        elif s.startswith("UPDATE listings SET property_id = %s WHERE id = %s AND"):
-            self.count = int(self.listings.get(p[1]) == p[2])
-            if self.count:
-                self.listings[p[1]] = p[0]
-        elif s.startswith("UPDATE property_merge_events SET undone_at = now()"):
-            for e in self.events:
-                if e["id"] in p[1] and e["undone_by"] is None:
-                    e["undone_by"] = p[0]
-        elif s.startswith("UPDATE properties p SET status = 'active'"):
-            self.count = int(self.props.get(p["pid"]) == "merged_away")
-            if self.count:
-                self.props[p["pid"]] = "active"
-                self.into.pop(p["pid"], None)
-        elif s == "SELECT id FROM listings WHERE property_id = %s":
-            return [(lid,) for lid, pid in sorted(self.listings.items()) if pid == p[0]]
-        return []
-
-    def _carry(self, p: dict[str, Any]) -> None:
-        for pid, want in ((p["survivor"], p["asset"]), (p["retired"], None)):
-            if self.assets.get(pid) != want:
-                self.assets[pid] = want
-                self.asset_events.append((p["asset"], pid, "linked" if want else "unlinked",
-                                          p["reason"]))
-
-    def _restore(self, p: dict[str, Any]) -> None:
-        carried = [a for a, pid, act, why in self.asset_events
-                   if pid == p["restored"] and act == "unlinked" and why == p["merge"]]
-        holders = [h for h in p["path"] if carried and self.assets.get(h) == carried[-1]]
-        if not holders:
-            return
-        asset = carried[-1]
-        moved = [(p["restored"], asset)] if self.assets.get(p["restored"]) is None else []
-        moved += [(h, None) for h in holders
-                  if any((asset, h, "linked", m) in self.asset_events for m in p["merges"])]
-        for pid, want in moved:
-            self.assets[pid] = want
-            self.asset_events.append((asset, pid, "linked" if want else "unlinked", p["detach"]))
 
 
 def _merged(db: _Ledger, ids: list[int], *, source: str = "operator") -> dict[str, Any]:
@@ -486,7 +317,7 @@ def test_a_native_split_replans_under_the_lock():
     assert db.events == [] and _verdicts(db) == [] and set(db.props) == {10, 70}
 
 
-# --- the routes --------------------------------------------------------------------------
+# --- the origins route (the split route: tests/test_property_split.py) --------------------
 
 
 fastapi = pytest.importorskip("fastapi")
@@ -510,51 +341,6 @@ def client(monkeypatch):
         "is_admin": True, "email": OP}
     yield TestClient(api_main.app), db
     api_main.app.dependency_overrides.clear()
-
-
-def test_the_detach_route_returns_the_contract_and_a_second_click_moves_nothing(client):
-    http, db = client
-    res = http.post("/properties/10/detach", json={"listing_id": 2, "reason": "jiné patro"})
-    assert res.status_code == 200
-    assert res.json() == {"listing_id": 2, "detached": True, "outcome": "detached",
-                          "survivor_property_id": 10, "restored_property_id": 20,
-                          "rulings_written": 1}
-    assert _verdicts(db) == [(1, 2, "different", "operator detach from 10: jiné patro")]
-    # a stale property id follows merged_into; the advert is no longer on it
-    again = http.post("/properties/20/detach", json={"listing_id": 2})
-    assert again.status_code == 200 and again.json()["outcome"] == "not_on_property"
-    assert again.json()["survivor_property_id"] == 10 and db.listings[2] == 20
-
-
-def test_the_detach_route_splits_the_propertys_own_advert_off_to_a_new_record(client):
-    http, db = client
-    # 10 holds its own 1 and 2 merged from 20: its last own advert stays
-    last = http.post("/properties/10/detach", json={"listing_id": 1}).json()
-    assert (last["detached"], last["outcome"]) == (False, "last_native") and db.listings[1] == 10
-    db.listings[4] = 10  # a second advert of its own (grouped at ingest)
-    res = http.post("/properties/10/detach", json={"listing_id": 1})
-    assert res.status_code == 200
-    born = db.listings[1]
-    assert res.json() == {"listing_id": 1, "detached": True, "outcome": "split_native",
-                          "survivor_property_id": 10, "restored_property_id": born,
-                          "rulings_written": 2}
-    assert born not in (10, 20, 30) and db.listings[2] == db.listings[4] == 10
-
-
-def test_the_detach_route_validates_its_input_and_needs_an_identity(client):
-    from api import dependencies as deps
-    from api import main as api_main
-
-    http, db = client
-    assert http.post("/properties/10/detach",
-                     json={"listing_id": 2, "reason": "x" * 501}).status_code == 422
-    assert http.post("/properties/10/detach", json={"listing_id": 99}).status_code == 404
-    assert http.post("/properties/404/detach", json={"listing_id": 2}).status_code == 404
-    assert http.post("/properties/merges/grp/unmerge").status_code in (404, 405)
-    api_main.app.dependency_overrides[deps.require_admin] = lambda: {"is_admin": True}
-    assert http.post("/properties/10/detach", json={"listing_id": 2}).status_code == 403
-    assert http.post("/properties/merge", json={"property_ids": [1, 2]}).status_code == 403
-    assert db.listings[2] == 10
 
 
 def test_the_origins_route_says_where_each_advert_came_from(client):

@@ -208,27 +208,44 @@ def resolve_active_property_id(
     return resolve_active_property_ids(conn, [property_id]).get(property_id)
 
 
+def lock_properties(conn: psycopg.Connection, ids: list[int]) -> dict[int, tuple[str, int | None]]:
+    """Row-lock these properties in id order, the merge's order; (status, merged_into) per id."""
+    with conn.cursor() as cur:
+        cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": sorted({int(i) for i in ids})})
+        return {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+
+
 def survivor_of(first_seen: Mapping[int, datetime | None]) -> int:
     """Decision 17: the oldest record (`first_seen_at`, unknown last), then the lowest id."""
     return min(first_seen, key=lambda pid: (first_seen[pid] is None, first_seen[pid] or 0, pid))
+
+
+def listing_places(conn: psycopg.Connection, listing_ids: list[int]) -> dict[int, int | None]:
+    """Where each advert sits now (None: on no property); an unknown id is absent."""
+    with conn.cursor() as cur:
+        cur.execute(_PLACES_SQL, {"ids": sorted({int(i) for i in listing_ids})})
+        return {int(lid): int(pid) if pid is not None else None for lid, pid in cur.fetchall()}
 
 
 def record_rulings(
     conn: psycopg.Connection,
     pairs: set[tuple[int, int]],
     *,
-    verdict: Literal["same", "different"],
+    verdict: str,
     decided_by: str,
-    note: str,
+    note: str | None,
+    reasons: list[str] | None = None,
 ) -> int:
     """Rule each (lo, hi) listings.id pair as `POST /autodedup/verdict` does; returns the count."""
+    if verdict not in usql.VERDICT_VALUES:
+        raise ValueError(f"not a pair verdict: {verdict!r}")
     ordered = sorted(pairs)
     if not ordered:
         return 0
     with conn.cursor() as cur:
         cur.executemany(usql.VERDICT_PAIR_UPSERT_SQL, [
             {"listing_lo": lo, "listing_hi": hi, "verdict": verdict, "note": note,
-             "reasons": [], "decided_by": decided_by}
+             "reasons": list(reasons or []), "decided_by": decided_by}
             for lo, hi in ordered
         ])
         if verdict in usql.NEGATIVE_VERDICTS:
@@ -240,6 +257,36 @@ def record_rulings(
                 {"listing_lo": lo, "listing_hi": hi} for lo, hi in ordered
             ])
     return len(ordered)
+
+
+def must_not_link_rows(
+    conn: psycopg.Connection, listing_ids: list[int],
+) -> dict[tuple[int, int], tuple[str, str | None]]:
+    """(source, reason) of every must-not-link row among these adverts, whatever wrote it."""
+    ids = sorted({int(i) for i in listing_ids})
+    if len(ids) < 2:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(usql.MUST_NOT_LINK_PAIRS_SQL, {"ids": ids})
+        return {(int(lo), int(hi)): (str(src), reason) for lo, hi, src, reason in cur.fetchall()}
+
+
+def restore_must_not_link(
+    conn: psycopg.Connection, rows: Mapping[tuple[int, int], tuple[str, str | None]],
+) -> int:
+    """Put these must-not-link rows back as a pre-read found them, source and all, writing only
+    those that differ now; returns the count. `record_rulings` makes every negative the
+    operator's, so a split that crossed a machine veto (E919) hands it back through here."""
+    if not rows:
+        return 0
+    now = must_not_link_rows(conn, [i for pair in rows for i in pair])
+    put = sorted((p, row) for p, row in rows.items() if now.get(p) != (row[0], row[1]))
+    with conn.cursor() as cur:
+        cur.executemany(usql.MUST_NOT_LINK_RESTORE_SQL, [
+            {"listing_lo": lo, "listing_hi": hi, "source": src, "reason": reason}
+            for (lo, hi), (src, reason) in put
+        ])
+    return len(put)
 
 
 def _category_refusal(
@@ -486,20 +533,21 @@ def _origin_gone(state: tuple[str, int | None] | None, undo: list[tuple]) -> boo
 
 
 def _plan_detaches(
-    cur: psycopg.Cursor, listing_ids: list[int], merge_group_id: str | None,
+    conn: psycopg.Connection, listing_ids: list[int], merge_group_id: str | None,
 ) -> dict[int, tuple[int | None, str, list[tuple], int | None]]:
     """(current property, `_detach_plan`) per advert found, from unlocked reads."""
-    cur.execute(_PLACES_SQL, {"ids": listing_ids})
-    places = {int(lid): int(pid) if pid is not None else None for lid, pid in cur.fetchall()}
-    cur.execute(_LIVE_MOVES_SQL, {"ids": listing_ids})
+    places = listing_places(conn, listing_ids)
     moves: dict[int, list[tuple]] = {}
-    for row in cur.fetchall():
-        moves.setdefault(int(row[0]), []).append(tuple(row[1:5]))
-    native = sorted({pid for lid, pid in places.items() if pid is not None and lid not in moves})
     sizes: dict[int, tuple[int, int]] = {}
-    if merge_group_id is None and native:
-        cur.execute(_SIZES_SQL, {"ids": native})
-        sizes = {int(pid): (int(n), int(own)) for pid, n, own in cur.fetchall()}
+    with conn.cursor() as cur:
+        cur.execute(_LIVE_MOVES_SQL, {"ids": listing_ids})
+        for row in cur.fetchall():
+            moves.setdefault(int(row[0]), []).append(tuple(row[1:5]))
+        native = sorted({pid for lid, pid in places.items()
+                         if pid is not None and lid not in moves})
+        if merge_group_id is None and native:
+            cur.execute(_SIZES_SQL, {"ids": native})
+            sizes = {int(pid): (int(n), int(own)) for pid, n, own in cur.fetchall()}
     return {lid: (at, *_detach_plan(at, moves.get(lid, []), merge_group_id,
                                     sizes.get(at, (0, 0))))
             for lid, at in places.items()}
@@ -513,8 +561,8 @@ def detach_outcomes(
     ids = sorted({int(i) for i in listing_ids})
     if not ids:
         return {}
+    plans = _plan_detaches(conn, ids, merge_group_id)
     with conn.cursor() as cur:
-        plans = _plan_detaches(cur, ids, merge_group_id)
         cur.execute(_STATUS_SQL, {"ids": sorted(
             {t for _at, out, _u, t in plans.values() if out == "detached"})})
         state = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
@@ -530,7 +578,7 @@ def _split_native(
     records it. The merge's lock order: the property, then the advert, re-planned under it."""
     with conn.cursor() as cur:
         cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": [current]})
-        at, outcome, _undo, _target = _plan_detaches(cur, [listing_id], None)[listing_id]
+        at, outcome, _undo, _target = _plan_detaches(conn, [listing_id], None)[listing_id]
         if at == current and outcome in ("not_merged", "last_native"):
             return outcome, [], current
         if at != current or outcome != "split_native":
@@ -571,8 +619,7 @@ def detach_listing(
     from every advert that stays. Stable signature: the operator's routes, `unapply` and the
     engine's W5 reconcile call it."""
     with conn.transaction():
-        with conn.cursor() as cur:
-            plan = _plan_detaches(cur, [int(listing_id)], merge_group_id).get(int(listing_id))
+        plan = _plan_detaches(conn, [int(listing_id)], merge_group_id).get(int(listing_id))
         if plan is None:
             raise MergeError(f"listing {listing_id} not found")
         current, outcome, undo, target = plan

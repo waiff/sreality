@@ -1,6 +1,6 @@
 """The one merge, `toolkit.property_identity.merge_property_set` (decisions 8 and 17): the oldest
 record survives, one asset link rides onto it and two refuse, ONE group and ONE recompute per
-set, the operator's cards ruled "same"; and migration 560's copy. Over tests/test_detach_listing's
+set, the operator's cards ruled "same"; and migration 560's copy. Over tests/_property_ledger's
 stateful fake."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import toolkit.property_identity as pi
-from tests.test_detach_listing import OP, T0, _Ledger
+from tests._property_ledger import OP, T0, _Ledger
 from toolkit.property_identity import AssetLinkConflict, MergeError
 
 MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "560_one_merge_one_undo.sql"
