@@ -1258,17 +1258,32 @@ renumber.** Navigate by area:
     collapsing them into one property.
     **Who orders a merge today.** The operator — and, only inside the area its scope row
     names, the AUTODEDUP apply path below. The operator's path: Browse's `mergeMode` (checkbox
-    multi-select → merge) posts to `POST /properties/merge`; `POST /properties/{id}/detach`
-    (`{listing_id, reason?}` → `{listing_id, detached, outcome, survivor_property_id,
-    restored_property_id, rulings_written}`; an advert no longer on it answers `detached: false`)
-    sends one advert back; `GET /properties/{id}/origins` names each advert's origin; the ledger
-    is `GET /properties/merges` (`api/property_merge.py`). **Every operator merge and detach is a
-    ruling (decision 8)** (`toolkit.property_identity.record_rulings`, same transaction, only
-    for `source='operator'`: an engine merge or `unapply` never is): the merge rules every cross
-    pair of the ticked properties' CANONICAL adverts (`repr_listing_ref_id` — never a child the
-    removed engine or ingest grouped there) `same`; the detach rules the advert `different` from
-    every advert that stays, with the optional `reason` (max 500) — both into the review pages'
-    store (`autodedup.verdicts` + operator `must_not_link`, `decided_by` = the admin's email).
+    multi-select → merge) posts to `POST /properties/merge`; **`POST /properties/{id}/split`**
+    (E919, `toolkit.property_split.split_property`) is the operator's ONE split statement:
+    `{adverts, separate: [[...], ...], keep_together, reason?, confirm_retract?}` — `adverts` is
+    every advert the operator was shown (a newcomer the lane merged in since is a 409 `stale`,
+    never ruled), each `separate` unit leaves as ONE record (its adverts detached, then joined by
+    the one merge when they landed apart), the rest stays, ruled one property when
+    `keep_together`; ONE transaction (5 s lock / 25 s statement, the lane's bounds), composing
+    `detach_listing` + `merge_property_set` + `record_rulings` and writing no statement of its
+    own. Its refusals (`{code, message, ids}`: 400 `invalid`, 404, 409 `stale` /
+    `reverses_rulings` / `cannot_move` / `join_would_drag` / `refused` / `busy`) write nothing;
+    its response names where each unit sits (`units[].property_id`), which unit keeps the record
+    (`record_kept_by`: the one holding the property's own advert, rules 18/22) and carries the
+    body of its own undo (`{undo}` posted back: the adverts re-joined, each pair's previous word
+    restored, `unsure` where there was none). A re-send changes nothing. `GET
+    /properties/{id}/origins` names each advert's origin; the ledger is `GET /properties/merges`
+    (`api/property_merge.py`). **Every operator merge and split is a ruling (decision 8)**
+    (`toolkit.property_identity.record_rulings`, same transaction, only for `source='operator'`:
+    an engine merge or `unapply` never is): the merge rules every cross pair of the ticked
+    properties' CANONICAL adverts (`repr_listing_ref_id` — never a child the removed engine or
+    ingest grouped there) `same`; the split rules every pair across units `different` (+ an
+    operator must-not-link), every pair inside a separated unit `same`, and (keep_together)
+    every pair of the kept unit `same` — the rest of a proposal confirmed, which stops it — with
+    the optional `reason` (max 500) and the call id in the note; taking back this operator's own
+    negative asks first (E52, `reversed_pairs`, the one helper the Groups page's split and the
+    candidate split share) — all into the review pages' store (`autodedup.verdicts` + operator
+    `must_not_link`, `decided_by` = the admin's email).
     **Migration 560** copied the operator's live pre-ruling merges (362 groups) into `same`
     rulings — pairs that sat on different properties of a group (a side is an advert's origin)
     and share one now — `decided_by='operator'`, dated at the merge, never over an existing
@@ -1287,12 +1302,13 @@ renumber.** Navigate by area:
     the page's only advert list, one expandable row per child advert — photos and the stored
     portal link collapsed, description / full gallery / broker expanded). For an admin
     session each expanded row also names its origin (`GET /properties/{id}/origins`: the property
-    a detach returns it to, and the source and date of the merge that took it from there), and
-    every row WITH an origin carries a two-step **Rozdělit** that calls
-    `POST /properties/{id}/detach` for exactly that advert — any property size, a merge of any
-    origin (operator, legacy `auto`, `autodedup`), the optional free-text `reason` kept on the
-    "different" ruling — then re-reads the property page (keyed on the property) and refreshes
-    Browse (`lib/mergedAdverts.refreshAfterDetach`). The property's own advert (null origin) has none.
+    a split returns it to, and the source and date of the merge that took it from there), and
+    every row that would move carries a two-step **Rozdělit** that posts
+    `POST /properties/{id}/split` with `separate: [[that advert]], keep_together: false` over
+    every advert the page shows — any property size, a merge of any origin (operator, legacy
+    `auto`, `autodedup`), the optional free-text `reason` kept on the "different" rulings —
+    toasts a link to the property it landed on, then re-reads the property page (keyed on the
+    property) and refreshes Browse (`lib/mergedAdverts.refreshAfterSplit`).
     The page's former guess at which merge group a row came in with (a ledger scan plus a
     two-advert-only rule) and the group-grain unmerge it called are gone.
     **AUTODEDUP one lane (W5, dark: interval 0).** The engine's ONE production path is the
@@ -1369,21 +1385,29 @@ renumber.** Navigate by area:
     for, like an unseen advert), or carrying a stored negative; a pair whose newest ruling is
     `same` is never proposed (decision 8). Each pair carries its reason (conflict, else the
     pair's decision, else must-not-link, else `no stated fact` for a negative ruling alone) and
-    the operator's ruling; the batch split is the detach per advert, each advert carrying its
-    `detach_outcome` (what `detach_outcomes` answers now) and `splittable` (that moves it: back
-    to its origin, or a native advert to a new record); `GET /properties/{id}/origins` carries
-    both for the property page, whose rows that would not move say why (and link where a
-    retired origin went). Its page is `/autodedup/proposed-splits` (AUTODEDUP menu,
-    "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a card per proposal
-    with each group's adverts side by side (`MemberGrid`), the reason and ruling per pair, a
-    checkbox, and a two-step "Rozdělit vybrané" (`splitPlan`): the group holding the property's
-    own adverts stays (else the canonical advert's), and an advert leaves only when it is alone
-    in its group (a detach rules it different from every advert left behind), is `splittable`
-    and is stated apart from the staying group (a `not compared` pair states nothing); the optional shared reason rides each ruling,
-    with progress and a per-advert outcome. Group size is the engine's own cap alone. A group already on one
+    the operator's ruling (`ruled` once every pair has one that is not `unsure`); each advert
+    carries its `detach_outcome` (what `detach_outcomes` answers now) and `splittable` (that
+    moves it: back to its origin, or a native advert to a new record); `GET
+    /properties/{id}/origins` carries both for the property page, whose rows that would not move
+    say why (and link where a retired origin went). Its page is `/autodedup/proposed-splits`
+    (AUTODEDUP menu, "Návrhy rozdělení", `frontend/src/pages/AutodedupProposedSplits.tsx`): a
+    card per proposal with each group's adverts side by side (`MemberGrid`; the adverts the
+    engine never saw as groups of their own), the reason and ruling per pair, an **Oddělit**
+    tick per advert (none on one nothing would move: `on_origin` / `moved_since` /
+    `origin_moved_on`) and **Oddělit skupinu** per group, and a plan line. The ticks start at
+    the proposal — every group a pair states apart from the kept group (the one holding the
+    property's own adverts, else the canonical advert's; a `not compared` pair states nothing)
+    has its movable adverts ticked, a group of two or more whole. The ticked adverts of one
+    group leave together, of different groups apart, the unticked rest is confirmed one
+    property; nothing ticked is "confirm as one", all ticked cannot be armed. Selected cards run
+    as ONE `POST /properties/{id}/split` each (`keep_together: true`), behind a two-step
+    "Provést vybrané" with one optional shared reason; the outcome per card links the property
+    each unit sits on now, offers **Vrátit** (the server's undo body) and, for a card that would
+    take back the operator's own "různé" (409 `reverses_rulings`), **Přesto uložit**
+    (`confirm_retract`). Group size is the engine's own cap alone. A group already on one
     property that the operator has since ruled different is reported, never acted on. It reads
     nothing from `property_merge_events`. Undo restores listings and pipeline cards;
-    collections, tags and notes stay on the survivor (rule #18: a detach is best-effort).
+    collections, tags and notes stay on the survivor (rule #18: a detach or split is best-effort).
     **Signal producers keep running** — they are the substrate the new engine will consume, and
     stopping them would leave a cold start: image pHash (`compute_image_phash.yml`), the
     self-hosted CLIP tagger and its embeddings (`clip_tag.yml` / `clip_retag.yml`, writing
