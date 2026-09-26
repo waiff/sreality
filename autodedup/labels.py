@@ -21,11 +21,19 @@ same two classes: `same` is the positive; `different`, `same_building_different_
 `same_project_different_unit` are all negatives; `unsure` is dropped entirely rather than carried
 as an abstention, because an operator who declined to rule made no statement at all.
 
-Each operator label carries a PROVENANCE: `explicit` (a verdict typed against that very pair) or
-`implied` (a member pair of a group whose cluster-grain verdict is `same`). The two are not the
-same strength of claim — an implied pair inside a confirmed group of eight was never compared on
-its own — so `implied` rows can be down-weighted or excluded, and every report can be filtered
-to the explicit ones.
+Each operator label carries a PROVENANCE: `explicit` (a verdict typed against that very pair),
+`implied` (a member pair of a group whose cluster-grain verdict is `same`) or, since migration
+564 (E299), `browse_merge` (a pair the operator united by merging two properties in Browse —
+the 362 groups 560 copied, and every operator merge since). They are not the same strength of
+claim — an implied pair inside a confirmed group of eight was never compared on its own, and a
+Browse merge compared two property cards rather than two adverts — so `implied` and
+`browse_merge` rows can each be down-weighted or excluded, and every report can be filtered to
+the explicit ones. Precedence inside the tier: explicit > browse_merge > implied, so a pair the
+operator separated by hand after merging its properties is the separation.
+
+`operator_merges.jsonl` (the same lane) carries the Browse merges at GROUP grain — who was
+merged with whom and from which side — which is what `harness yardstick` measures the engine
+against; `load_operator_merges` reads it.
 
 The sample file is the other half of the arithmetic. Pairs are drawn with per-stratum quotas, so
 a judged pair stands for `n_total / n_selected` cohort pairs; every cohort-level number in
@@ -65,6 +73,10 @@ OPERATOR_MUST_NOT_LINK_VERDICTS: tuple[str, ...] = (
 
 SOURCE_EXPLICIT: str = "explicit"
 SOURCE_IMPLIED: str = "implied"
+SOURCE_BROWSE_MERGE: str = "browse_merge"
+# Within the operator tier, a higher rank is never overwritten by a lower one — whichever file
+# or line order the rows arrive in.
+SOURCE_RANK: dict[str, int] = {SOURCE_EXPLICIT: 2, SOURCE_BROWSE_MERGE: 1, SOURCE_IMPLIED: 0}
 
 WEIGHT_GOLD_UNANIMOUS: float = 1.0
 WEIGHT_GOLD_MAJORITY: float = 0.67
@@ -339,6 +351,8 @@ class OperatorLabelRow:
     sample_rank: int | None = None
     must_not_link: bool = False
     engine: dict[str, Any] = field(default_factory=dict, repr=False)
+    # The Browse merge this pair ruling was made by (`browse_merge` rows only, migration 564).
+    merge_group_id: str | None = None
 
     @property
     def key(self) -> PairKey:
@@ -347,6 +361,14 @@ class OperatorLabelRow:
     @property
     def is_implied(self) -> bool:
         return self.source == SOURCE_IMPLIED
+
+    @property
+    def is_browse_merge(self) -> bool:
+        return self.source == SOURCE_BROWSE_MERGE
+
+    @property
+    def rank(self) -> int:
+        return SOURCE_RANK.get(self.source, SOURCE_RANK[SOURCE_EXPLICIT])
 
 
 def operator_verdict_class(verdict: str) -> int | None:
@@ -378,6 +400,9 @@ def parse_operator_label(payload: Mapping[str, Any]) -> OperatorLabelRow:
         ),
         must_not_link=bool(payload.get("must_not_link")),
         engine=dict(engine) if isinstance(engine, Mapping) else {},
+        merge_group_id=(
+            str(payload["merge_group_id"]) if payload.get("merge_group_id") else None
+        ),
     )
 
 
@@ -404,22 +429,33 @@ def operator_label_pairs(
     *,
     include_implied: bool = True,
     implied_weight: float = WEIGHT_OPERATOR,
+    include_browse_merge: bool = True,
+    browse_merge_weight: float = WEIGHT_OPERATOR,
 ) -> dict[PairKey, Label]:
-    """The operator tier: one label per pair, `unsure` dropped, explicit beating implied.
+    """The operator tier: one label per pair, `unsure` dropped, explicit > browse_merge > implied.
 
-    Explicit wins inside this function too, not only in the lane that wrote the file: pooling
-    two artifacts (an older export plus a fresh one) must not let a stale implied row overwrite
-    a separation the operator typed by hand."""
+    The precedence holds inside this function too, not only in the lane that wrote the file:
+    pooling two artifacts (an older export plus a fresh one) must not let a stale implied or
+    merge-copied row overwrite a separation the operator typed by hand."""
     out: dict[PairKey, Label] = {}
+    ranks: dict[PairKey, int] = {}
     for row in rows:
         if row.is_implied and not include_implied:
+            continue
+        if row.is_browse_merge and not include_browse_merge:
             continue
         y = operator_verdict_class(row.verdict)
         if y is None:
             continue
-        existing = out.get(row.key)
-        if existing is not None and existing.source == SOURCE_EXPLICIT and row.is_implied:
+        if ranks.get(row.key, -1) > row.rank:
             continue
+        ranks[row.key] = row.rank
+        if row.is_implied:
+            weight = implied_weight
+        elif row.is_browse_merge:
+            weight = browse_merge_weight
+        else:
+            weight = WEIGHT_OPERATOR
         out[row.key] = Label(
             lo=row.key[0],
             hi=row.key[1],
@@ -427,7 +463,7 @@ def operator_label_pairs(
             verdict=row.verdict,
             tier=OPERATOR_TIER,
             confidence=1.0,
-            weight=(implied_weight if row.is_implied else WEIGHT_OPERATOR),
+            weight=weight,
             must_not_link=(
                 row.must_not_link or row.verdict in OPERATOR_MUST_NOT_LINK_VERDICTS
             ),
@@ -438,6 +474,191 @@ def operator_label_pairs(
             source=row.source,
         )
     return out
+
+
+# --- the operator's Browse merges at GROUP grain (migration 564, E299) ---------------------
+
+# How a pair of a merge group stands today, read off the pair's LATEST ruling: the merge's own
+# ruling, a verdict typed against the pair since (or before), a permanent operator negative,
+# or nothing at all (a merge whose rulings were never written).
+STANDING_BROWSE_MERGE: str = SOURCE_BROWSE_MERGE
+STANDING_EXPLICIT: str = SOURCE_EXPLICIT
+STANDING_MUST_NOT_LINK: str = "must_not_link"
+STANDING_UNRULED: str = "unruled"
+STANDINGS: tuple[str, ...] = (
+    STANDING_BROWSE_MERGE, STANDING_EXPLICIT, STANDING_MUST_NOT_LINK, STANDING_UNRULED,
+)
+OPERATOR_MERGES_FILE: str = "operator_merges.jsonl"
+# The group file's own shape version, stamped on every row: consumers read by field name, and a
+# change that is not append-only bumps this.
+OPERATOR_MERGES_FORMAT: int = 1
+
+
+def merge_pairs(
+    member_ids: Sequence[int],
+    member_sides: Sequence[int | None],
+    member_property_ids: Sequence[int | None] | None = None,
+) -> list[PairKey]:
+    """The pairs a merge group asserts — migration 560's rule, in one place.
+
+    Two members on DIFFERENT origin sides; when where-they-sit is known, also on ONE property
+    (an advert detached since, or with no property at all, joins no pair). An advert another
+    merge brought onto a group property carries that other merge's side, never this one's."""
+    ids = [int(member) for member in member_ids]
+    if len(member_sides) != len(ids) or (
+        member_property_ids is not None and len(member_property_ids) != len(ids)
+    ):
+        raise ValueError("member_ids, member_sides and member_property_ids must align")
+    out: set[PairKey] = set()
+    for i, left in enumerate(ids):
+        for j in range(i + 1, len(ids)):
+            right = ids[j]
+            if left == right or member_sides[i] == member_sides[j]:
+                continue
+            if member_property_ids is not None:
+                here, there = member_property_ids[i], member_property_ids[j]
+                if here is None or there is None or here != there:
+                    continue
+            out.add(pair_key(left, right))
+    return sorted(out)
+
+
+@dataclass(slots=True)
+class MergeMember:
+    listing_id: int
+    side: int | None = None
+    property_id: int | None = None
+    source: str | None = None
+    category_type: str | None = None
+    block: str | None = None
+
+
+@dataclass(slots=True)
+class MergePair:
+    lo: int
+    hi: int
+    standing: str = STANDING_UNRULED
+    verdict: str | None = None
+    must_not_link: bool = False
+
+    @property
+    def key(self) -> PairKey:
+        return pair_key(self.lo, self.hi)
+
+    @property
+    def same(self) -> bool:
+        """Whether the operator's word on this pair is still "one property".
+
+        A merge's own ruling and a pair nobody ruled otherwise both say yes; a verdict typed
+        against the pair says what it says; a permanent negative says no, whatever the merge
+        once did — the operator's later word is the word."""
+        if self.must_not_link or self.standing == STANDING_MUST_NOT_LINK:
+            return False
+        if self.standing == STANDING_EXPLICIT:
+            return self.verdict == OPERATOR_POSITIVE_VERDICT
+        return True
+
+
+@dataclass(slots=True)
+class OperatorMerge:
+    """One Browse merge group: its members with their origin sides, and the pairs it asserts."""
+
+    merge_group_id: str
+    members: list[MergeMember] = field(default_factory=list)
+    pairs: list[MergePair] = field(default_factory=list)
+    merged_at: str | None = None
+    status: str = "live"
+    source: str = "browse"
+    survivor_property_id: int | None = None
+
+    @property
+    def ruled_pairs(self) -> list[MergePair]:
+        """The pairs the operator still says are one property — what a yardstick measures."""
+        return [pair for pair in self.pairs if pair.same]
+
+    @property
+    def member_ids(self) -> list[int]:
+        return [member.listing_id for member in self.members]
+
+
+def _opt_int(value: Any) -> int | None:
+    return None if value is None else int(value)
+
+
+def parse_operator_merge(payload: Mapping[str, Any]) -> OperatorMerge:
+    """One group, from the labels lane's `operator_merges.jsonl` row or from a row of
+    `autodedup.operator_merges` dumped as JSON (the parallel `member_*` arrays)."""
+    members: list[MergeMember] = []
+    raw_members = payload.get("members")
+    if isinstance(raw_members, Sequence) and not isinstance(raw_members, (str, bytes)):
+        for item in raw_members:
+            members.append(MergeMember(
+                listing_id=int(item["listing_id"]),
+                side=_opt_int(item.get("side")),
+                property_id=_opt_int(item.get("property_id_at_copy", item.get("property_id"))),
+                source=(str(item["source"]) if item.get("source") else None),
+                category_type=(
+                    str(item["category_type"]) if item.get("category_type") else None
+                ),
+                block=(str(item["block"]) if item.get("block") else None),
+            ))
+    else:
+        ids = list(payload.get("member_ids") or ())
+        sides = list(payload.get("member_sides") or [None] * len(ids))
+        props = list(payload.get("member_property_ids") or [None] * len(ids))
+        if len(sides) != len(ids) or len(props) != len(ids):
+            raise ValueError(
+                f"group {payload.get('merge_group_id')}: member arrays do not align")
+        members = [
+            MergeMember(listing_id=int(listing), side=_opt_int(side), property_id=_opt_int(prop))
+            for listing, side, prop in zip(ids, sides, props)
+        ]
+    raw_pairs = payload.get("pairs")
+    pairs: list[MergePair] = []
+    if raw_pairs is not None:
+        for item in raw_pairs:
+            if isinstance(item, Mapping):
+                lo, hi = pair_key(item["listing_lo"], item["listing_hi"])
+                pairs.append(MergePair(
+                    lo=lo, hi=hi,
+                    standing=str(item.get("standing") or STANDING_UNRULED),
+                    verdict=(str(item["verdict"]) if item.get("verdict") else None),
+                    must_not_link=bool(item.get("must_not_link")),
+                ))
+            else:
+                lo, hi = pair_key(item[0], item[1])
+                pairs.append(MergePair(lo=lo, hi=hi))
+    else:
+        known_places = any(member.property_id is not None for member in members)
+        for lo, hi in merge_pairs(
+            [member.listing_id for member in members],
+            [member.side for member in members],
+            [member.property_id for member in members] if known_places else None,
+        ):
+            pairs.append(MergePair(lo=lo, hi=hi))
+    return OperatorMerge(
+        merge_group_id=str(payload.get("merge_group_id") or ""),
+        members=members,
+        pairs=sorted(pairs, key=lambda pair: pair.key),
+        merged_at=(str(payload["merged_at"]) if payload.get("merged_at") else None),
+        status=str(payload.get("status") or "live"),
+        source=str(payload.get("source") or "browse"),
+        survivor_property_id=_opt_int(payload.get("survivor_property_id")),
+    )
+
+
+def load_operator_merges(path: str | Path) -> list[OperatorMerge]:
+    """`operator_merges.jsonl` (one group per line), or a JSON dump of the table: a list of
+    rows, or an object holding one under `groups` / `operator_merges`."""
+    text = Path(path).read_text(encoding="utf-8")
+    if Path(path).suffix == ".jsonl":
+        payloads = [json.loads(line) for line in text.splitlines() if line.strip()]
+    else:
+        data = json.loads(text)
+        if isinstance(data, Mapping):
+            data = data.get("groups", data.get("operator_merges", []))
+        payloads = list(data or ())
+    return [parse_operator_merge(payload) for payload in payloads]
 
 
 @dataclass(slots=True)

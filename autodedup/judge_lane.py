@@ -202,8 +202,16 @@ def load_engine_model(raw: str | None) -> LogisticModel:
 
 
 
-def load_pair_list(raw: str) -> tuple[tuple[int, int], ...]:
-    """`pairs_file=<name>` under autodedup/pairs/ — a JSON list of `[lo, hi]`, order-free."""
+PAIR_ENTRY_KEYS: frozenset[str] = frozenset({"lo", "hi", "stratum"})
+
+
+def load_pair_set(
+    raw: str,
+) -> tuple[tuple[tuple[int, int], ...], dict[tuple[int, int], str]]:
+    """`pairs_file=<name>` under autodedup/pairs/ — a JSON list whose entries are `[lo, hi]` or
+    `{"lo": .., "hi": .., "stratum": ..}`, order-free. The object form files its pair under the
+    list's OWN stratum (which contested set it was listed for, and the engine's stated reason)
+    instead of `judge_stratum`, so a targeted pass reports per set rather than per zone grid."""
     from autodedup.score_lane import repo_path
 
     path = repo_path(raw, PAIRS_DIR)
@@ -214,17 +222,46 @@ def load_pair_list(raw: str) -> tuple[tuple[int, int], ...]:
     if not isinstance(payload, list) or not payload:
         raise SystemExit(f"pairs_file {raw!r} must be a non-empty JSON list of [lo, hi]")
     pairs: list[tuple[int, int]] = []
+    strata: dict[tuple[int, int], str] = {}
     for entry in payload:
-        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+        stratum: Any = None
+        if isinstance(entry, dict):
+            # Strict keys: a misspelt `stratum` silently judged under the zone grid would read
+            # exactly like a list that never asked for one.
+            if set(entry) - PAIR_ENTRY_KEYS or "lo" not in entry or "hi" not in entry:
+                raise SystemExit(
+                    f"pairs_file {raw!r}: {entry!r} must carry lo, hi and optionally stratum"
+                )
+            values: Any = (entry["lo"], entry["hi"])
+            stratum = entry.get("stratum")
+            if stratum is not None and (not isinstance(stratum, str) or not stratum.strip()):
+                raise SystemExit(f"pairs_file {raw!r}: {entry!r} has an empty stratum")
+        elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+            values = entry
+        else:
             raise SystemExit(f"pairs_file {raw!r}: {entry!r} is not a [lo, hi] pair")
         try:
-            lo, hi = int(entry[0]), int(entry[1])
+            lo, hi = int(values[0]), int(values[1])
         except (TypeError, ValueError) as exc:
             raise SystemExit(f"pairs_file {raw!r}: {entry!r} is not two integers") from exc
         # The store keys pairs lo-first; a list written the other way round would silently
         # match nothing, which reads in the summary exactly like a drifted engine.
-        pairs.append((lo, hi) if lo <= hi else (hi, lo))
-    return tuple(dict.fromkeys(pairs))
+        pair = (lo, hi) if lo <= hi else (hi, lo)
+        if stratum is not None:
+            name = stratum.strip()
+            if strata.get(pair, name) != name:
+                raise SystemExit(
+                    f"pairs_file {raw!r}: {pair} is listed under two strata "
+                    f"({strata[pair]!r} and {name!r}) — a pair is judged once"
+                )
+            strata[pair] = name
+        pairs.append(pair)
+    return tuple(dict.fromkeys(pairs)), strata
+
+
+def load_pair_list(raw: str) -> tuple[tuple[int, int], ...]:
+    """The pairs of `load_pair_set`, without their strata."""
+    return load_pair_set(raw)[0]
 
 
 def judge_module() -> Any:
@@ -299,6 +336,11 @@ class JudgeArgs:
     # partly a string match the prompt handed it. Run under its own judge_version — E29 caches
     # on that key and a masked pass and an unmasked one are two different questions.
     mask_codes: bool = False
+    # With `pairs_file`: score the listed pairs this pass did not STORE (below the floor, or
+    # never paired by blocking) through the engine's own features instead of reporting them
+    # missing. Opt-in, because a list drawn under another settings row should still SAY that it
+    # drifted rather than be quietly re-scored under this one.
+    score_unstored: bool = False
 
 
 def _int_arg(args: dict[str, str], name: str, default: int) -> int:
@@ -385,6 +427,10 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
     pairs_from = (args.get("pairs_from") or "").strip() or None
     if pairs_from not in (None, "gold"):
         raise SystemExit(f"pairs_from accepts only 'gold', got {pairs_from!r}")
+    pairs_file = (args.get("pairs_file") or "").strip() or None
+    score_unstored = _flag(args, "score_unstored")
+    if score_unstored and not pairs_file:
+        raise SystemExit("score_unstored scores the pairs a pairs_file names — name one")
 
     return JudgeArgs(
         export_run=export_run,
@@ -414,13 +460,14 @@ def parse_args(args: dict[str, str]) -> JudgeArgs:
         oss_min_gpu_gb=_float_arg(args, "oss_min_gpu_gb", 0.0),
         oss_s_per_pair=_float_arg(args, "oss_s_per_pair", OSS_EST_S_PER_PAIR),
         pairs_from=pairs_from,
-        pairs_file=(args.get("pairs_file") or "").strip() or None,
+        pairs_file=pairs_file,
         gold_version=(args.get("gold_version") or "").strip() or None,
         settings=(args.get("settings") or "").strip() or None,
         model=(args.get("model") or "").strip() or None,
         presentation=(args.get("presentation") or "").strip() or None,
         llm_model=(args.get("llm_model") or "").strip() or None,
         mask_codes=_flag(args, "mask_codes"),
+        score_unstored=score_unstored,
     )
 
 
@@ -1377,7 +1424,8 @@ def run_judge(
 
     dataset = load(cohort_path)
     settings = load_engine_settings(parsed.settings)
-    engine = harness.run_engine(dataset, settings, load_engine_model(parsed.model), out_dir)
+    engine_model = load_engine_model(parsed.model)
+    engine = harness.run_engine(dataset, settings, engine_model, out_dir)
     (out_dir / RUN_FILE).write_text(
         json.dumps(engine, indent=2, sort_keys=True), encoding="utf-8"
     )
@@ -1404,18 +1452,34 @@ def run_judge(
             )
     pairs_file_requested = 0
     pairs_file_missing: list[list[int]] = []
+    pairs_file_scored: list[list[int]] = []
+    pairs_file_stamped = 0
     if parsed.pairs_file:
         # A named list narrows the POPULATION, not the sample: `n` stays the cost dial and the
         # stratified draw still runs over what is left, so a list longer than the budget is cut
         # the same way every other draw is. A pair the engine did not store cannot be judged —
         # it is reported by id rather than silently shrinking the pass, because "the cohort
-        # drifted under this list" and "the list is wrong" look identical in a count.
-        wanted = load_pair_list(parsed.pairs_file)
+        # drifted under this list" and "the list is wrong" look identical in a count — unless
+        # `score_unstored` asks for it to be scored here, and then it is reported as SCORED.
+        wanted, stamped = load_pair_set(parsed.pairs_file)
         pairs_file_requested = len(wanted)
         present = {(int(row["lo"]), int(row["hi"])) for row in rows}
+        if parsed.score_unstored:
+            extra = harness.score_pairs(
+                dataset, settings, engine_model,
+                [pair for pair in wanted if pair not in present],
+            )
+            rows.extend(extra)
+            pairs_file_scored = [[int(row["lo"]), int(row["hi"])] for row in extra]
+            present.update((lo, hi) for lo, hi in pairs_file_scored)
         pairs_file_missing = [[lo, hi] for lo, hi in wanted if (lo, hi) not in present]
         keep = set(wanted)
         rows = [row for row in rows if (int(row["lo"]), int(row["hi"])) in keep]
+        for row in rows:
+            name = stamped.get((int(row["lo"]), int(row["hi"])))
+            if name:
+                row["stratum"] = name
+                pairs_file_stamped += 1
         if not rows:
             raise SystemExit(
                 f"pairs_file={parsed.pairs_file}: none of its {pairs_file_requested} pair(s) "
@@ -1424,7 +1488,7 @@ def run_judge(
     if parsed.strata:
         rows = [
             row for row in rows
-            if any(harness.judge_stratum(row).startswith(prefix) for prefix in parsed.strata)
+            if any(harness.drawn_stratum(row).startswith(prefix) for prefix in parsed.strata)
         ]
     sample = harness.sample_pairs(rows, parsed.n, parsed.seed)
     sample["tier"] = parsed.tier
@@ -1450,7 +1514,7 @@ def run_judge(
             lo=int(row["lo"]),
             hi=int(row["hi"]),
             row=row,
-            stratum=harness.judge_stratum(row),
+            stratum=harness.drawn_stratum(row),
             votes=plan,
             index=index,
         )
@@ -1493,6 +1557,9 @@ def run_judge(
         "pairs_file": parsed.pairs_file,
         "pairs_file_requested": pairs_file_requested,
         "pairs_file_missing": pairs_file_missing,
+        "score_unstored": parsed.score_unstored,
+        "pairs_file_scored_unstored": pairs_file_scored,
+        "pairs_file_stamped_strata": pairs_file_stamped,
         "gold_version": parsed.gold_version,
         "mask_codes": parsed.mask_codes,
         "pairs_without_gold_dropped": gold_restricted,
