@@ -27,6 +27,7 @@ from autodedup.incremental_lane import (
     CURSOR_FLIPPED,
     CURSOR_NEW,
     CURSOR_SCOPE,
+    MAX_SCHEMA_MB,
     SCOPE_SETTING,
     STORAGE_WATERMARK,
     RetireRefusal,
@@ -38,6 +39,7 @@ from autodedup.incremental_lane import (
     storage_guard,
 )
 from autodedup.incremental_sql import (
+    RT_GENERATION_BYTES_SQL,
     RT_IDLE_GUARD_SQL,
     RT_LOCK_GUARD_SQL,
     RT_STATEMENT_GUARD_SQL,
@@ -158,6 +160,20 @@ def test_the_guard_refuses_a_pass_when_the_schema_is_over_budget() -> None:
     assert "over the 400 MB" in str(raised.value)
     # Loud, non-zero, and nothing moved: no lease taken, no cursor written, no row stored.
     assert not conn.lease and not conn.cursors and not conn.rt_fp and not conn.fp_key
+
+
+def test_a_pass_is_budgeted_on_the_schema_as_it_stands_never_a_projection() -> None:
+    """E916's projection is the fresh seed's alone: a pass deletes nothing first, so what the
+    generation holds is never subtracted from what it is about to add to."""
+    conn = _calibrated(FakePg())
+    conn.schema_bytes = int((MAX_SCHEMA_MB + 1) * 1_048_576)
+    conn.table_bytes = {"rt_fp": 1_000 * 1_048_576}
+    conn.rt_fp[(GEN, 1)] = _fp_row()
+    conn.settings[scope_setting_key(GEN)] = [{"grain": "obec", "code": 563510}]
+    with pytest.raises(SystemExit, match="over the"):
+        run_incremental(lambda: conn)
+    assert RT_GENERATION_BYTES_SQL not in conn.statements
+    assert not conn.lease and not conn.cursors
 
 
 def test_the_guard_reports_size_rows_and_growth_since_the_last_pass() -> None:

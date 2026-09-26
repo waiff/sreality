@@ -26,10 +26,12 @@ from autodedup.incremental_lane import (
     CURSOR_ENTER,
     CURSOR_NEW,
     LANE_NAME,
+    MAX_SCHEMA_MB,
     PASS_BUDGET_S,
     PASS_DEADLINE_S,
     PASS_RATE_PER_S,
     RESET_CURSORS,
+    RESET_TABLES,
     SEED_LEASE_TTL_S,
     SqlWork,
     bootstrap_setting_key,
@@ -38,6 +40,7 @@ from autodedup.incremental_lane import (
     run_rt_seed,
     scope_setting_key,
 )
+from autodedup import incremental_sql as S
 from autodedup.incremental_scope import Scope, ScopeBlock
 from tests.autodedup.fake_pg import FakePg
 from tests.autodedup.lane_world import seed as seed_public
@@ -194,6 +197,75 @@ def test_a_seed_that_refuses_after_the_reset_puts_every_row_back(tmp_path) -> No
     assert db.lease[LANE_NAME]["holder"].startswith("rt_seed:")
     assert db.lease[LANE_NAME]["expires_at"] <= db.now
     assert sorted(db.cursors) == sorted(RESET_CURSORS)
+
+
+# ------------------------------------------------- the budget a fresh seed is held to (E916)
+#
+# 2026-09-26: schema `autodedup` read 442.9 MB against the 400 MB budget and
+# `rt_seed ... fresh=true` refused — refused to delete the very rows whose deletion is the
+# first thing it does. A DELETE does not shrink `pg_total_relation_size`, so the seed is
+# budgeted on a PROJECTION: the schema minus what this generation holds of every table the
+# reset empties, apportioned by its share of the rows.
+
+_MB = 1_048_576
+
+
+def _over_budget(db: FakePg, *, over_mb: float, generation_mb: float) -> FakePg:
+    """The schema `over_mb` past the budget, `generation_mb` of it GEN's. `_populated` puts
+    one GEN and one OTHER row in `pairs` and in `fp_key`, so GEN holds half of each."""
+    db.schema_bytes = int((MAX_SCHEMA_MB + over_mb) * _MB)
+    db.table_bytes = {"pairs": int(generation_mb * _MB), "fp_key": int(generation_mb * _MB)}
+    return db
+
+
+def test_a_fresh_seed_is_never_refused_by_the_generation_it_replaces(tmp_path) -> None:
+    db = _over_budget(_with_public(_populated(FakePg())), over_mb=40, generation_mb=100)
+    out = run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
+
+    storage = out["storage"]
+    assert storage["schema_mb"] == MAX_SCHEMA_MB + 40, "the schema as it stands, reported"
+    assert storage["replaced_mb"] == 100.0
+    assert storage["projected_mb"] == MAX_SCHEMA_MB - 60
+    assert storage["replaced_by_table_mb"]["pairs"] == 50.0
+    assert storage["replaced_by_table_mb"]["fp_key"] == 50.0
+    assert not [key for key in db.pairs if key[0] == GEN], "and the reset ran"
+    assert [key for key in db.pairs if key[0] == OTHER]
+
+
+def test_a_fresh_seed_still_refuses_when_what_remains_is_over_budget(tmp_path) -> None:
+    db = _over_budget(_with_public(_populated(FakePg())), over_mb=150, generation_mb=100)
+    with pytest.raises(SystemExit, match="projected") as raised:
+        run_rt_seed(lambda: db, {"fresh": "true", **SCORER}, tmp_path)
+
+    assert f"{MAX_SCHEMA_MB:.0f} MB MAX_SCHEMA_MB budget" in str(raised.value)
+    # Refused at step 2 of the documented order: before the lease and before the reset.
+    assert (GEN, 11, 12) in db.pairs
+    assert db.lease[LANE_NAME]["holder"] == "someone"
+    assert S.RT_FRESH_PAIRS_SQL not in db.statements
+
+
+def test_a_seed_that_is_not_fresh_is_budgeted_on_the_schema_as_it_stands(tmp_path) -> None:
+    """Only a seed that DELETES first may subtract what it deletes."""
+    db = _with_public(FakePg())
+    db.pairs[(GEN, 11, 12)] = _pair_row()
+    db.schema_bytes = int((MAX_SCHEMA_MB + 1) * _MB)
+    db.table_bytes = {"pairs": 1_000 * _MB}
+    with pytest.raises(SystemExit, match="over the"):
+        run_rt_seed(lambda: db, dict(SCORER), tmp_path)
+
+    assert S.RT_GENERATION_BYTES_SQL not in db.statements
+    assert not db.calibration and not db.lease
+
+
+def test_the_projection_subtracts_exactly_the_tables_the_reset_empties() -> None:
+    """The projection and the reset are two lists of one set of tables: a table the reset
+    stops emptying must stop being subtracted, or a fresh seed is budgeted on rows it keeps."""
+    counted = re.findall(r"from autodedup\.(\w+)", S.RT_GENERATION_BYTES_SQL)
+    sized = re.findall(r"'autodedup\.(\w+)'::regclass", S.RT_GENERATION_BYTES_SQL)
+    assert counted == sized == [name for name, _sql in RESET_TABLES]
+    # `cluster_conflicts` carries its generation in `detail`, read as the reset reads it.
+    assert "detail ->> 'generation' = %(generation)s::text" in S.RT_GENERATION_BYTES_SQL
+    assert "detail ->> 'generation' = %(generation)s::text" in S.RT_FRESH_CLUSTER_CONFLICTS_SQL
 
 
 # ------------------------------------------------- a seed and a pass never overlap (the lease)

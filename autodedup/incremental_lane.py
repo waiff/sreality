@@ -136,6 +136,7 @@ from autodedup.incremental_sql import (
     RT_FRESH_SCOPE_SCAN_SQL,
     RT_FP_READ_SQL,
     RT_FP_UPSERT_SQL,
+    RT_GENERATION_BYTES_SQL,
     RT_IDLE_GUARD_SQL,
     RT_LOCK_GUARD_SQL,
     RT_PHASH_POP_COUNT_SQL,
@@ -1602,12 +1603,35 @@ def rt_rows(conn: Any, generation: str, scope: Scope) -> dict[str, int]:
     return {str(row[0]): int(row[1] or 0) for row in _rows(conn, sql, params)}
 
 
+def generation_bytes(conn: Any, generation: str) -> dict[str, dict[str, int]]:
+    """What ONE generation holds of each table the fresh reset empties (E916): the table's
+    `pg_total_relation_size` times the generation's share of its rows — indexes, TOAST and the
+    table's dead space apportioned with them, because that is the space the next build reuses
+    once the reset's DELETE has made it free."""
+    held: dict[str, dict[str, int]] = {}
+    for name, total, n_rows, n_generation in _rows(conn, RT_GENERATION_BYTES_SQL,
+                                                   {"generation": generation}):
+        total, n_rows, n_generation = int(total or 0), int(n_rows or 0), int(n_generation or 0)
+        held[str(name)] = {
+            "bytes": total, "rows": n_rows, "generation_rows": n_generation,
+            "generation_bytes": (round(total * n_generation / n_rows) if n_rows else 0)}
+    return held
+
+
 def storage_guard(conn: Any, generation: str, scope: Scope,
-                  max_schema_mb: float = MAX_SCHEMA_MB) -> dict[str, Any]:
+                  max_schema_mb: float = MAX_SCHEMA_MB, *,
+                  replacing: bool = False) -> dict[str, Any]:
     """Read what schema `autodedup` costs BEFORE the pass writes anything, and refuse over
     budget (E79) — non-zero, cursor unmoved, nothing written, never a warning in a log line.
     It also holds the second half of the whole-corpus gate: `all` is a scope only when the
-    budget could hold what `all` costs."""
+    budget could hold what `all` costs.
+
+    `replacing=True` is `rt_seed fresh=true` and nothing else (E916): the budget is checked
+    against the PROJECTED size — the schema minus what this generation's rows hold
+    (`generation_bytes`) — because the seed deletes exactly those rows before it writes one.
+    A fresh seed can therefore never be refused by the generation it is about to drop, and is
+    still refused when what REMAINS is over budget. A pass and a non-fresh seed check the
+    schema as it stands."""
     bytes_now = schema_bytes(conn)
     mb = bytes_now / 1_048_576.0
     previous = lane_settings(conn, [STORAGE_WATERMARK]).get(STORAGE_WATERMARK) or {}
@@ -1620,7 +1644,24 @@ def storage_guard(conn: Any, generation: str, scope: Scope,
                       if last is not None else None),
         "scope": scope.as_json(),
     }
-    if mb > float(max_schema_mb):
+    checked_mb = mb
+    if replacing:
+        held = generation_bytes(conn, generation)
+        replaced = sum(table["generation_bytes"] for table in held.values())
+        checked_mb = max(bytes_now - replaced, 0) / 1_048_576.0
+        report["replaced_mb"] = round(replaced / 1_048_576.0, 2)
+        report["projected_mb"] = round(checked_mb, 2)
+        report["replaced_by_table_mb"] = {
+            name: round(table["generation_bytes"] / 1_048_576.0, 3)
+            for name, table in sorted(held.items())}
+    if checked_mb > float(max_schema_mb):
+        if replacing:
+            raise StorageRefusal(
+                f"schema autodedup is {mb:.1f} MB and {report['replaced_mb']:.1f} MB of it is "
+                f"generation {generation!r}, which this fresh seed deletes first — the "
+                f"projected {checked_mb:.1f} MB is still over the {float(max_schema_mb):.0f} "
+                "MB MAX_SCHEMA_MB budget, so refusing to write. Prune a batch generation "
+                "(score keep_generations=<n>) or raise the constant; nothing was written.")
         raise StorageRefusal(
             f"schema autodedup is {mb:.1f} MB, over the {float(max_schema_mb):.0f} MB "
             "MAX_SCHEMA_MB budget — refusing to write. Prune a generation or raise the "
@@ -2087,7 +2128,22 @@ def run_rt_seed(
     path the replay proof covers (E98). A generation already seeded is rebuilt only with
     `fresh=true`, which first empties it (E97) inside the same transaction; production merges
     are never touched. It takes the lane's lease and refuses while a pass holds it — stop the
-    worker's lane first (interval 0)."""
+    worker's lane first (interval 0).
+
+    THE ORDER (E916), every step before the transaction read-only:
+      1. refuse an unknown arg, an absent store, a seeded generation without `fresh=true`,
+         and a scope that does not resolve;
+      2. the storage guard. With `fresh=true` it reads the schema size AND what this
+         generation's rows hold of every table step 5 empties, and refuses only when the
+         PROJECTED size (schema minus those rows) is over MAX_SCHEMA_MB — re-measuring after
+         the DELETE would not do, because a DELETE does not shrink `pg_total_relation_size`
+         (the space is reused by the rebuild once VACUUM frees it; the file keeps its size).
+         Without `fresh=true` it checks the schema as it stands, exactly as a pass does;
+      3. release a named stale lease, if asked;
+      4. take the lease (refuse while a pass holds it);
+      5. ONE transaction: the reset (fresh only), the block walk, the calibration cut, the
+         cursors and the control rows. A refusal inside it rolls every row back, the reset's
+         included."""
     unknown = sorted(set(args) - RT_SEED_ARGS)
     if unknown:
         raise SystemExit(f"unknown arg(s) {', '.join(unknown)}; allowed: "
@@ -2120,7 +2176,9 @@ def run_rt_seed(
         except ScopeError as exc:
             raise SystemExit(f"{SCOPE_SETTING}: {exc}") from exc
         try:
-            storage = storage_guard(conn, generation, scope)
+            # E916: a fresh seed is budgeted on what the schema holds WITHOUT the rows it is
+            # about to delete; any other seed on the schema as it stands.
+            storage = storage_guard(conn, generation, scope, replacing=fresh)
         except StorageRefusal as exc:
             raise SystemExit(str(exc)) from exc
         released = (rt_lease.release_stale(conn, str(args[rt_lease.RELEASE_ARG]).strip())
