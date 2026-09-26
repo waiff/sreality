@@ -19,7 +19,15 @@
     "precedence": "operator > gold > vision > text (labels.TIER_PRECEDENCE, the harness default); within a tier a later file wins, and the j2-w30c files are passed AFTER the older runs so the newer judge version is the one that stands",
     "judge_recipe_w6_gold": {
       "files": "/home/hejtm/autodedup-artifacts/w6/labelfiles/<run>.judgements.jsonl with --sample <run>.sample.json in the same order",
-      "runs": ["35124676256 (gold j1)", "35116313682 (vision j1)", "35115036274 (text j1)", "35155058503 (gold j1)", "35149028995 (vision j1)", "35202925670 (vision j2)", "35203586251 (gold j2)"],
+      "runs": [
+        "35124676256 (gold j1)",
+        "35116313682 (vision j1)",
+        "35115036274 (text j1)",
+        "35155058503 (gold j1)",
+        "35149028995 (vision j1)",
+        "35202925670 (vision j2)",
+        "35203586251 (gold j2)"
+      ],
       "note": "exactly the seven files w5_gold/w6_gold were fitted on (w6_gold provenance.w5d.judgement_runs)",
       "weights": "labels.TIER_WEIGHTS: gold unanimous 1.0 / majority 0.67, vision 0.6, text 0.3, times the pooled Horvitz-Thompson design weight of each draw, capped at 10x the median (evaluate.WEIGHT_CAP_MEDIAN_MULTIPLE)"
     },
@@ -89,5 +97,15 @@
   "stop_conditions": [
     "a giant group (>10% of labelled rows) in the seal map, or no seed in 200 meeting the share rule: STOP and report",
     "the baseline replay on this branch not reproducing S14's stored w29+w6_gold clusters on a cohort: reported as code drift and the bars read against THIS branch's baseline only"
+  ],
+  "amendments": [
+    {
+      "id": "A1",
+      "written": "2026-09-26 ~10:05 local, after the composite substrate was built and the pre-registered seal construction hit its own STOP, BEFORE any seed was scanned and BEFORE any candidate was fitted (no model exists; nothing but group sizes was read)",
+      "what_stopped": "the map as registered (every classed labelled pair of every source unioned, plus the fourteen substrate runs' merge edges and cluster memberships) puts 910 of the 4,451 composite rows (20.44%) in ONE group (root 261) and 569 in the next (root 335): the registered 10% stop fired (refit_w7/seal_scan.json).",
+      "diagnosis": "refit_w7/scripts/seal_diag.py: the positives alone give a top group of 2.31% (103 rows), the cluster memberships alone 2.31%, positives + memberships + 401,021 merge edges 2.31%; adding the 3,896 labelled NEGATIVES gives 19.7%. The judge draws sample negatives inside address blocks and developments, so unioning them fuses whole blocks - the exact failure W14's seal measured for structural negatives (e1d8bb98..., SPENT registry: 'unioning them fuses whole blocks').",
+      "amended_map": "union-find over listing ids of every labelled POSITIVE (y = 1) of every source + the merge edges + the cluster memberships of the fourteen substrate runs. A labelled NEGATIVE is not an edge: its row goes to the fold of evaluate.group_of(key) (the smaller root), as harness evaluate/fit already do for any pair a map does not join. A negative is two properties by its own label, so it cannot put ONE property on both sides of the holdout; what it can do is put one LISTING's features in a train negative and a test row - that listing-level overlap is COUNTED and reported beside the sealed numbers, not hidden.",
+      "unchanged": "every other clause: the 10% stop (now read on the amended map), the seed rule, the bars, the decision rule"
+    }
   ]
 }
