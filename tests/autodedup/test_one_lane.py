@@ -9,15 +9,26 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
+from autodedup import apply as AP
+from autodedup import apply_sql as AS
+from autodedup import reconcile
 from autodedup.d43 import relation_for
 from autodedup.dataset import Dataset, Image, Meta
 from autodedup.incremental import Limits, PairRow, PassResult, _recluster, _Working
 from autodedup.incremental_lane import SqlStore
+from autodedup.incremental_sql import (
+    RT_CURSOR_READ_SQL,
+    RT_CURSOR_SET_SQL,
+    RT_SCOPE_SCAN_SEEN_SQL,
+)
 from autodedup.incremental_store import MemoryStore
 from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.replay import DatasetFacts
 from autodedup.settings import Settings
 from tests.autodedup.fake_pg import FakePg
+from tests.autodedup.test_apply import FakeDb, _pair_group
 from tests.autodedup.test_incremental import _listing
 
 A, B, C = 101, 202, 303
@@ -258,3 +269,222 @@ def test_the_sql_store_reads_the_newest_pair_ruling_only() -> None:
     db = FakePg()
     db.ml = {(A, C)}
     assert SqlStore(db, "rt").must_link() == {(A, C)}
+
+
+# ------------------------------------------------------------------ A9: the reconcile
+
+RT = "rt"
+BLOCK = "obec:563510"
+
+
+class LaneDb(FakeDb):
+    """test_apply's fake — THE apply path's statements, faked once — plus the lane's own reads
+    the reconcile adds: its cursor, the swept groups, which blocks the lane has fully read, and
+    the newest ledger row per member set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cursors: dict[str, int] = {}
+        self.walked: set[str] = {BLOCK}
+        self.snapshot: dict[int, str] = {}
+        self.read: set[int] = set()
+
+    def dispatch(self, sql: str, p: dict) -> list[tuple]:  # noqa: C901
+        if sql == RT_CURSOR_READ_SQL:
+            return [(name, self.cursors[name], None, None) for name in p["names"]
+                    if name in self.cursors]
+        if sql == RT_CURSOR_SET_SQL:
+            self.cursors[p["name"]] = int(p["last_listing_id"])
+            return []
+        if sql == AS.RC_SWEEP_SQL:
+            keys = sorted(k for g, k in self.clusters if g == p["generation"]
+                          and k > p["after"])
+            return [(k,) for k in keys[:p["limit"]]]
+        if sql == AS.RC_CLUSTERS_SQL:
+            return [row for row in self.dispatch(AS.CLUSTERS_SQL, p) if row[0] in p["keys"]]
+        if sql == AS.RC_MEMBERS_SQL:
+            return [row for row in self.dispatch(AS.MEMBERS_SQL, p) if row[0] in p["keys"]]
+        if sql == AS.RC_GROUP_OF_SQL:
+            return [(lid, k) for g, k, lid in self.members
+                    if g == p["generation"] and lid in p["listing_ids"]]
+        if sql == RT_SCOPE_SCAN_SEEN_SQL:
+            return [(block,) for block in sorted(self.walked)]
+        if sql == AS.RC_UNREAD_BLOCKS_SQL:
+            return sorted({(block,) for lid, block in self.snapshot.items()
+                           if lid not in self.read})
+        if sql == AS.RC_MEMBER_BLOCKS_SQL:
+            return [(lid, block) for lid, block in self.snapshot.items()
+                    if lid in p["listing_ids"]]
+        if sql == AS.RC_LAST_OUTCOME_SQL:
+            newest: dict[tuple[int, ...], tuple] = {}
+            for row in self.ledger:
+                members = tuple(sorted(row["member_ids"] or ()))
+                if (row["generation"] == p["generation"] and not row["dry_run"]
+                        and set(members) & set(p["listing_ids"])):
+                    newest[members] = (list(members), row["outcome"], row["error"])
+            return list(newest.values())
+        return super().dispatch(sql, p)
+
+
+def _lane(db: LaneDb, *, deadline: float = 10 ** 9, touched=(), merge=None) -> dict:
+    return reconcile.run(db, RT, list(touched), run_id="rt:test", deadline=deadline,
+                         blocks=[BLOCK], merge=merge or db.merge([]), clock=lambda: 0.0)
+
+
+def _read(db: LaneDb, *lids: int) -> None:
+    for lid in lids:
+        db.snapshot[lid] = BLOCK
+        db.read.add(lid)
+
+
+def test_the_reconcile_merges_an_rt_group_through_the_chokepoint() -> None:
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _read(db, 10, 11)
+    calls: list = []
+
+    out = _lane(db, merge=db.merge(calls))
+
+    assert out["counts"]["applied"] == 1 and out["counts"]["listings_moved"] == 1
+    assert [c["source"] for c in calls] == [AP.MERGE_SOURCE]
+    assert calls[0]["markers"]["generation"] == RT
+    assert db.listings[11]["property_id"] == 100
+    (row,) = [r for r in db.ledger if r["outcome"] == "applied"]
+    assert (row["generation"], row["run_id"], row["member_ids"]) == (RT, "rt:test", [10, 11])
+    assert db.cursors[reconcile.CURSOR] == 0, "a short sweep wraps the cursor"
+
+
+def test_the_reconciles_refusals_are_the_batch_applys_refusals() -> None:
+    """ONE brain (E903): the same groups under a batch generation and under `rt` are refused
+    for the same reasons, whichever path plans them."""
+    db = LaneDb()
+    db.live_scope()
+    for gen in ("g12", RT):
+        _pair_group(db, 10, [10, 11], [100, 200], gen=gen)
+        _pair_group(db, 20, [20, 21], [300, 400], gen=gen)
+        _pair_group(db, 30, [30, 31], [500, 600], gen=gen)
+        _pair_group(db, 40, [40, 41], [700, 800], gen=gen)
+        _pair_group(db, 50, [50, 51], [900, 901], gen=gen)
+        _pair_group(db, 60, [60, 61], [950, 951], gen=gen)
+    db.verdicts.append({"kind": "pair", "lo": 10, "hi": 11, "verdict": "different"})
+    db.mnl.append((20, 21, "operator"))
+    db.listing(31, 600, ct="pronajem")                   # a sale/rental mix
+    db.listing(42, 800)                                   # carried, grouped by nobody
+    db.listing(52, 901, where=(999999, None))             # carried, located outside
+    db.listing(61, None)                                  # unattached member
+    _read(db, 10, 11, 20, 21, 30, 31, 40, 41, 50, 51, 60, 61)
+    scope = AP.effective_scope(db.settings[AP.SCOPE_SETTING], {}, live=True)
+
+    batch = AP.plan_apply(db, "g12", scope)
+    lane = _lane(db)
+
+    assert lane["counts"]["skipped_by_reason"] == batch.counts["skipped_by_reason"]
+    assert lane["counts"]["out_of_scope_by_reason"] == batch.counts["out_of_scope_by_reason"]
+    assert set(lane["counts"]["skipped_by_reason"]) == {
+        AP.SKIP_PAIR_VERDICT, AP.SKIP_MUST_NOT_LINK, AP.SKIP_CARRIES_UNGROUPED,
+        AP.SKIP_CARRIES_OUT_OF_SCOPE, AP.SKIP_UNATTACHED}
+    assert lane["counts"]["out_of_scope_by_reason"] == {AP.OUT_CATEGORY: 1}
+    assert lane["counts"]["applied"] == 0
+
+
+def test_the_reconcile_never_splits() -> None:
+    """A property the stream groups apart is a PROPOSAL (Decision 9): nothing is detached, and
+    an operator negative over one property is reported, never acted on."""
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10], [100], gen=RT)
+    db.listing(11, 100)
+    _pair_group(db, 20, [20, 21], [300, 300], gen=RT)
+    db.verdicts.append({"kind": "pair", "lo": 20, "hi": 21, "verdict": "different"})
+    _read(db, 10, 11, 20, 21)
+    detached: list = []
+
+    out = _lane(db)
+
+    assert db.listings[11]["property_id"] == 100 and not detached
+    assert [g["cluster_key"] for g in out[AP.RULED_AFTER_MERGE]] == [20]
+    assert out["counts"]["applied"] == 0
+
+
+def test_the_reconcile_is_idempotent_and_files_a_waiting_reason_once() -> None:
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _pair_group(db, 20, [20, 21], [300, 400], gen=RT)
+    db.mnl.append((20, 21, "operator"))
+    _read(db, 10, 11, 20, 21)
+
+    first = _lane(db)
+    rows = len(db.ledger)
+    second = _lane(db)
+
+    assert first["counts"]["applied"] == 1 and second["counts"]["applied"] == 0
+    assert second["counts"]["already_one_property"] == 1
+    assert len(db.ledger) == rows, "the same group waiting on the same reason files nothing"
+    assert second["counts"]["skipped_rows_written"] == 0
+    db.mnl.clear()
+    db.verdicts.append({"kind": "pair", "lo": 20, "hi": 21, "verdict": "different"})
+    third = _lane(db)
+    assert third["counts"]["skipped_rows_written"] == 1, "a CHANGED first reason is filed"
+
+
+def test_the_reconcile_waits_on_a_block_it_has_not_fully_read() -> None:
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _read(db, 10, 11)
+    db.snapshot[99] = BLOCK                            # in the block, not fingerprinted yet
+
+    out = _lane(db)
+
+    assert out["counts"][reconcile.WAITING] == 1 and out["counts"]["applied"] == 0
+    db.read.add(99)
+    assert _lane(db)["counts"]["applied"] == 1
+
+
+def test_the_reconcile_stops_between_groups_when_the_pass_time_is_spent() -> None:
+    db = LaneDb()
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _read(db, 10, 11)
+
+    out = _lane(db, deadline=reconcile.GROUP_MARGIN_S - 1)
+
+    assert out["stopped"] and out["counts"]["not_attempted"] == 1
+    assert out["counts"]["applied"] == 0 and db.listings[11]["property_id"] == 200
+
+
+def test_a_closed_scope_row_is_the_reconciles_stop() -> None:
+    """Until W6 the operator's scope row gates the lane's merges: empty, it merges nothing."""
+    db = LaneDb()
+    _pair_group(db, 10, [10, 11], [100, 200], gen=RT)
+    _read(db, 10, 11)
+    out = _lane(db)
+    assert out["skipped"] == "scope_closed" and not db.ledger
+
+
+def test_a_live_dispatch_refuses_while_the_lane_holds_the_lease(tmp_path, monkeypatch) -> None:
+    """One writer (A9): a live apply or unapply takes the lane's lease for its run; a dry run
+    reads only and takes nothing."""
+    from autodedup.incremental_lane import LANE_NAME
+
+    db = LaneDb()
+    original = AP.apply_plan
+    monkeypatch.setattr(AP, "apply_plan", lambda conn, plan, dry_run: original(
+        conn, plan, dry_run, merge=db.merge([])))
+    db.live_scope()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    db.lease[LANE_NAME] = {"holder": "worker:1:1", "live": True}
+
+    with pytest.raises(SystemExit, match="rt_lease"):
+        AP.run_apply(lambda: db, {"generation": "g12", "dry_run": "0"}, tmp_path)
+    with pytest.raises(SystemExit, match="rt_lease"):
+        AP.run_unapply(lambda: db, {"generation": "g12", "dry_run": "0"}, tmp_path)
+    assert AP.run_apply(lambda: db, {"generation": "g12"}, tmp_path)["dry_run"]
+    assert db.listings[11]["property_id"] == 200
+
+    db.lease[LANE_NAME]["live"] = False
+    out = AP.run_apply(lambda: db, {"generation": "g12", "dry_run": "0"}, tmp_path)
+    assert out["counts"]["applied"] == 1
+    assert not db.lease[LANE_NAME]["live"], "and the run frees it"

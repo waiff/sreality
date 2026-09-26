@@ -1857,7 +1857,7 @@ def _write_rate(conn: Any, generation: str, rate: float, why: str) -> None:
 
 
 def run_incremental(conn_factory: Callable[[], Any], *,
-                    deadline_s: float = PASS_DEADLINE_S) -> dict[str, Any]:
+                    deadline_s: float | None = None) -> dict[str, Any]:
     """One bounded pass of THE lane, then its reconcile, under one lease (E914, A9).
 
     The worker's `autodedup` lane is the only caller and runs it only while its interval is
@@ -1865,8 +1865,9 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     what is left of its time, the reconcile turns the groups it re-clustered into production
     merges; then, when the pHash population has drifted below `COVERAGE_FLOOR`, the calibration
     is re-cut. A pass past its deadline rolls back and halves its rate (E913)."""
+    deadline_s = float(PASS_DEADLINE_S if deadline_s is None else deadline_s)
     started = time.perf_counter()
-    deadline = started + float(deadline_s)
+    deadline = started + deadline_s
     generation = GENERATION
     holder = f"{socket.gethostname()}:{os.getpid()}:{int(time.time())}"
     conn = conn_factory()

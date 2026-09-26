@@ -26,6 +26,7 @@ import pytest
 from autodedup import apply as A
 from autodedup import apply_sql as S
 from autodedup import lane
+from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL, RT_LEASE_TAKE_SQL
 from toolkit import property_identity
 from toolkit.property_identity import (
     AssetLinkConflict,
@@ -101,6 +102,8 @@ class FakeDb:
         self.closed = False
         self.now = T0
         self.depth = 0
+        # `autodedup.rt_lease`: the one-writer rail a live apply or unapply takes (A9).
+        self.lease: dict[str, dict[str, Any]] = {}
 
     # --- plumbing
     _STATE = ("listings", "properties", "ledger", "events", "settings")
@@ -153,6 +156,17 @@ class FakeDb:
 
     # --- the statements
     def dispatch(self, sql: str, p: dict[str, Any]) -> list[tuple]:  # noqa: C901
+        if sql == RT_LEASE_TAKE_SQL:
+            held = self.lease.get(p["name"])
+            if held and held["holder"] != p["holder"] and held["live"]:
+                return []
+            self.lease[p["name"]] = {"holder": p["holder"], "live": True}
+            return [(p["holder"],)]
+        if sql == RT_LEASE_RELEASE_SQL:
+            held = self.lease.get(p["name"])
+            if held and held["holder"] == p["holder"]:
+                held["live"] = False
+            return []
         if sql == S.SETTING_SQL:
             return [(self.settings[p["key"]],)] if p["key"] in self.settings else []
         if sql == S.CLUSTERS_SQL:

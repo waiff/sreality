@@ -1,14 +1,14 @@
-"""The realtime worker's `autodedup` lane: THE engine's real-time shadow pass, run from the
-always-on worker (AUTODEDUP rollout §7.3).
+"""The realtime worker's `autodedup` lane: THE engine's one path, run from the always-on worker
+(E914).
 
 Two halves. The lane's own contract — one integer, `app_settings.realtime_autodedup_interval_seconds`,
-as cadence and kill switch (seeded 0), fail-safe when the settings read raises, a claim the engine
-sizes under the lane's budget, a hard deadline, a refusal recorded rather than raised, heartbeat
-counters on every path — is pinned against stubs. And the pass
-itself is driven END TO END through `autodedup.incremental_lane.run_incremental` over the
+as cadence and kill switch (seeded 0), fail-safe when the settings read raises, a refusal
+recorded rather than raised, heartbeat counters on every path — is pinned against stubs. And the
+pass itself is driven END TO END through `autodedup.incremental_lane.run_incremental` over the
 engine's own Postgres stand-in (`tests/autodedup/fake_pg.py`, which raises on any statement it
-does not know), seeded the way `test_rt_gate` seeds it: so "the same code the GitHub lane runs"
-and "writes only schema autodedup" are measured, not asserted by inspection. No network, no DB.
+does not know), seeded from its `public` the way production is (A10): so "the engine bounds its
+own time" and "a closed scope writes only schema autodedup" are measured, not asserted by
+inspection. No network, no DB.
 """
 
 from __future__ import annotations
@@ -26,17 +26,19 @@ from psycopg.types.json import Jsonb
 
 from autodedup import incremental_lane
 from autodedup.incremental_lane import (
-    ENV_FLAG,
     LANE_NAME,
     LEASE_TTL_S,
+    PASS_BUDGET_S,
+    PASS_DEADLINE_S,
     STATEMENT_TIMEOUT_MS,
     run_incremental,
 )
-from autodedup.incremental_sql import RT_LEASE_RELEASE_SQL, RT_STORE_PRESENT_SQL
+from autodedup.incremental_sql import RT_STORE_PRESENT_SQL
 from scraper import realtime_worker as rw
 from scripts.verify_pipeline import DEFAULT_THRESHOLDS
 from tests.autodedup.fake_pg import FakePg
-from tests.autodedup.test_rt_gate import _seed, world  # noqa: F401 - `world` is a fixture
+from tests.autodedup.lane_world import seed_lane
+from tests.autodedup.lane_world import world as lane_world
 
 MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / (
     "557_realtime_autodedup_lane_settings.sql")
@@ -44,14 +46,16 @@ MIGRATION = Path(__file__).resolve().parents[2] / "migrations" / (
 
 @pytest.fixture(autouse=True)
 def _fresh_lane_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Per-process guards reset per test, and the workflow's variable ABSENT — the worker has
-    no repository variable, so every pass here must run without it."""
-    monkeypatch.delenv(ENV_FLAG, raising=False)
+    """Per-process guards reset per test."""
     monkeypatch.setattr(rw, "_AUTODEDUP_PASS_LOCK", threading.Lock())
     monkeypatch.setattr(rw, "_AUTODEDUP_WEDGE_LOGGED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_STORE_WARNED", False)
     monkeypatch.setattr(rw, "_AUTODEDUP_LAST_OUTCOME", None)
-    monkeypatch.setattr(rw, "_AUTODEDUP_BACKOFF", 1)
+
+
+@pytest.fixture()
+def world() -> FakePg:
+    return lane_world()
 
 
 def _settings(monkeypatch: pytest.MonkeyPatch, **values: Any) -> None:
@@ -95,11 +99,8 @@ def _stub_engine(monkeypatch: pytest.MonkeyPatch, result: Any) -> dict[str, Any]
     """Replace the engine's pass; capture what the lane handed it."""
     seen: dict[str, Any] = {}
 
-    def fake(conn_factory: Any, args: Any, out_dir: Path, *, enabled: Any = None,
-             max_pass_budget_s: Any = None) -> Any:
-        seen.update(args=dict(args), enabled=enabled, out_dir=out_dir,
-                    out_dir_existed=Path(out_dir).is_dir(), conn=conn_factory(),
-                    budget=max_pass_budget_s)
+    def fake(conn_factory: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs=dict(kwargs), conn=conn_factory())
         seen["calls"] = seen.get("calls", 0) + 1
         if callable(result) and not isinstance(result, BaseException):
             outcome = result(seen["calls"])
@@ -121,6 +122,7 @@ def _summary(**over: Any) -> dict[str, Any]:
         "aborted": "",
         "latency_s": {"n": 12, "p50": 310.2, "p95": 355.0},
         "claim_bound": {"bound_by": "count", "limit": 100},
+        "reconcile": {"counts": {"applied": 2}},
     }
     out.update(over)
     return out
@@ -195,90 +197,21 @@ def test_the_seeded_setting_ships_the_lane_dark() -> None:
 # ------------------------------------------------------------------------------ the bounds
 
 
-def test_the_deadline_sits_inside_every_bound_around_it() -> None:
-    """Deadline plus ONE statement at the engine's statement_timeout must end before the
-    stall monitor warns, before the lane abandons the pass, and before the engine's lease
-    expires — or the GH lane could take the lease while a pass here is still writing."""
-    worst = rw.AUTODEDUP_PASS_DEADLINE_SECONDS + STATEMENT_TIMEOUT_MS / 1000.0
+def test_the_engines_deadline_sits_inside_every_bound_around_it() -> None:
+    """E913: the engine bounds its own time. Its deadline plus ONE statement at its
+    statement_timeout must end before the stall monitor warns, before the lane abandons the
+    pass, and before the lease expires — or a seed could take the lease mid-write."""
+    worst = PASS_DEADLINE_S + STATEMENT_TIMEOUT_MS / 1000.0
     assert worst < DEFAULT_THRESHOLDS["worker_lane_stall_warn_seconds"]
     assert worst < rw.LANE_PASS_TIMEOUT_SECONDS
     assert worst < LEASE_TTL_S
+    assert PASS_BUDGET_S * 2 <= PASS_DEADLINE_S, "claims are sized well inside the deadline"
 
 
-def test_claims_are_sized_well_inside_the_deadline() -> None:
-    """The engine sizes a claim to FILL its time budget (budget x measured rate), and its own
-    900 s default would fill all but ~15% of the deadline: a pass a little slower than its rate
-    would trip, roll back without recording a rate, and trip again on the same claim."""
-    assert rw.AUTODEDUP_PASS_BUDGET_SECONDS * 2 <= rw.AUTODEDUP_PASS_DEADLINE_SECONDS
-    assert rw.AUTODEDUP_PASS_BUDGET_SECONDS < incremental_lane.PASS_BUDGET_S
-
-
-def _deadline_then(summaries: dict[int, Any]) -> Any:
-    def outcome(n: int) -> Any:
-        return summaries.get(n, rw._AutodedupDeadline("stopped at the deadline"))
-    return outcome
-
-
-def test_a_deadline_trip_halves_the_next_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
-    _settings(monkeypatch)
-    seen = _stub_engine(monkeypatch, _deadline_then({}))
-    budgets: list[float] = []
-
-    for _ in range(3):
-        last = rw._autodedup_sync()
-        budgets.append(seen["budget"])
-        assert last["errors"] == 1 and last["deadline_exceeded"] is True
-
-    base = rw.AUTODEDUP_PASS_BUDGET_SECONDS
-    assert budgets == [base, base / 2, base / 4]
-    assert seen["args"] == {}, "the claim is the engine's: its rate under this budget"
-    assert last["backoff"] == 8, "the heartbeat says what the next pass claims under"
-
-
-def test_the_back_off_bottoms_out_at_a_one_second_budget(
+def test_the_lane_hands_the_engine_its_connection_and_nothing_else(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    """One second of budget is a one-listing claim below two listings a second (the lane's only
-    production measurement is 0.088/s), and the divisor stops growing there."""
-    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
-    _settings(monkeypatch)
-    seen = _stub_engine(monkeypatch, _deadline_then({}))
-    for _ in range(15):
-        rw._autodedup_sync()
-    assert seen["budget"] == 1.0
-    assert rw._AUTODEDUP_BACKOFF == int(rw.AUTODEDUP_PASS_BUDGET_SECONDS)
-
-
-def test_the_back_off_holds_until_a_pass_re_measures_the_rate(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pass too small to re-measure the rate leaves the engine on the rate that tripped the
-    deadline, so going straight back to a full budget would just trip it again."""
-    enough = incremental_lane.PASS_RATE_MIN_CLAIM
-    small = _summary(counts={"claimed": enough - 1})
-    full = _summary(counts={"claimed": enough})
-    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
-    _settings(monkeypatch)
-    seen = _stub_engine(monkeypatch, _deadline_then({2: small, 3: full, 4: full}))
-    base = rw.AUTODEDUP_PASS_BUDGET_SECONDS
-
-    rw._autodedup_sync()                       # 1: tripped
-    assert rw._autodedup_sync()["backoff"] == 2   # 2: clean, too small to teach a rate
-    assert seen["budget"] == base / 2
-    assert rw._autodedup_sync()["backoff"] == 1   # 3: clean, re-measured: restored
-    assert seen["budget"] == base / 2
-    rw._autodedup_sync()                       # 4: the full budget again
-    assert seen["budget"] == base
-
-
-def test_a_refusal_is_not_a_reason_to_back_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A storage budget or a parity breach is not about the claim's size."""
-    monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
-    _settings(monkeypatch)
-    _stub_engine(monkeypatch, SystemExit("PARITY GATE"))
-    assert rw._autodedup_sync()["backoff"] == 1
-
-
-def test_the_budget_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No argument, no wrapper: the pass runs under the scope and scorer its generation was
+    seeded with, and under the engine's own deadline (E913, E914)."""
     conn = _Conn()
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: conn)
     _settings(monkeypatch)
@@ -286,21 +219,18 @@ def test_the_budget_and_the_switch_reach_the_engine(monkeypatch: pytest.MonkeyPa
 
     last = rw._autodedup_sync()
 
-    # No argument: no scope, settings or model — a pass runs under what its generation was
-    # seeded with, and the engine refuses a differing argument — and no count either.
-    assert seen["args"] == {}
-    assert seen["enabled"] is True, "the lane's interval stands in for the repo variable"
-    assert seen["budget"] == rw.AUTODEDUP_PASS_BUDGET_SECONDS
-    assert seen["out_dir_existed"]
-    assert not Path(seen["out_dir"]).exists(), "the summary file lives for the pass only"
-    assert isinstance(seen["conn"], rw._DeadlineConnection)
+    assert seen["kwargs"] == {} and seen["conn"] is conn
     assert conn.executed == [RT_STORE_PRESENT_SQL]
     assert conn.closed
     assert last == {
-        "ran": True, "claimed": 12, "scored": 40, "grouped": 3, "skipped": 0, "errors": 0,
-        "seconds": last["seconds"], "backoff": 1, "held": 1, "retired": 0,
-        "latency_p50_s": 310.2, "latency_p95_s": 355.0, "bound_by": "count",
+        "ran": True, "claimed": 12, "scored": 40, "grouped": 3, "merged": 2, "skipped": 0,
+        "errors": 0, "seconds": last["seconds"], "held": 1, "retired": 0, "reconcile": "ran",
+        "deadline_exceeded": False, "latency_p50_s": 310.2, "latency_p95_s": 355.0,
+        "bound_by": "count",
     }
+    for gone in ("AUTODEDUP_PASS_DEADLINE_SECONDS", "AUTODEDUP_PASS_BUDGET_SECONDS",
+                 "_AUTODEDUP_BACKOFF", "_DeadlineConnection", "_AutodedupDeadline"):
+        assert not hasattr(rw, gone), gone
 
 
 # --------------------------------------------------------------- every path is a heartbeat
@@ -326,7 +256,7 @@ def test_an_absent_store_skips_every_tick_with_one_warning(
                for r in caplog.records) == 1
 
 
-@pytest.mark.parametrize("reason", ["leased", "unseeded", "dark"])
+@pytest.mark.parametrize("reason", ["leased", "unseeded"])
 def test_the_engines_green_skips_are_skips_not_errors(
         monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
@@ -346,7 +276,7 @@ def test_a_refusal_is_recorded_never_raised(
     counts it where a lane's raised passes are counted."""
     monkeypatch.setattr(rw.db, "connect", lambda *a, **k: _Conn())
     _settings(monkeypatch)
-    _stub_engine(monkeypatch, SystemExit("PARITY GATE: 3 breaches " + "x" * 1000))
+    _stub_engine(monkeypatch, SystemExit("STORAGE: over the budget " + "x" * 1000))
     state = rw._new_state()
 
     with caplog.at_level(logging.WARNING, logger="scraper.realtime_worker"):
@@ -358,9 +288,8 @@ def test_a_refusal_is_recorded_never_raised(
     assert lane.get("passes", 0) == 0, "a refused pass is not a completed one"
     assert lane["started_at"] is None
     assert lane["last"]["errors"] == 1 and lane["last"]["ran"] is False
-    assert lane["last"]["refused"].startswith("PARITY GATE")
+    assert lane["last"]["refused"].startswith("STORAGE")
     assert len(lane["last"]["refused"]) == rw.AUTODEDUP_REASON_CHARS
-    assert lane["last"]["deadline_exceeded"] is False
     # Said on the transition, not once a minute for as long as the refusal stands.
     assert sum("AUTODEDUP lane pass stopped" in r.message for r in caplog.records) == 1
     Jsonb(rw._lane_snapshot(state["lanes"]))
@@ -428,9 +357,11 @@ def test_a_stopping_worker_opens_no_pass(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "autodedup" not in state["lanes"]
 
 
-def test_the_lane_never_reaches_the_merge_chokepoint() -> None:
+def test_the_worker_merges_only_through_the_engine() -> None:
+    """The lane's merges are the engine's reconcile (A9), which merges through THE chokepoint;
+    the worker itself never names it."""
     src = "".join(inspect.getsource(fn) for fn in (
-        rw._autodedup_sync, rw._autodedup_pass, rw._autodedup_outcome, rw._DeadlineConnection))
+        rw._autodedup_sync, rw._autodedup_pass, rw._autodedup_outcome))
     for forbidden in ("property_identity", "merge_properties", "operator_state"):
         assert forbidden not in src
 
@@ -460,153 +391,98 @@ def _write_targets(statements: list[str]) -> set[str]:
     return targets
 
 
-def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    """With the workflow's variable absent, the worker's interval alone opens a pass, and the
-    pass is the engine's: it claims, decides, moves its cursors under the shared lease, frees
-    the lease, and every row it writes is in schema autodedup."""
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    before = len(conn.statements)
-    _worker_on(monkeypatch, conn)
+def test_one_worker_pass_is_the_engines_pass(world, tmp_path, monkeypatch) -> None:
+    """The worker's interval alone opens a pass, and the pass is the engine's: it claims,
+    decides, moves its cursors under the lease, frees the lease, and — during the build and
+    with the scope row closed — every row it writes is in schema autodedup."""
+    seed_lane(world, tmp_path)
+    _worker_on(monkeypatch, world)
+    for expected in ("bootstrap", "scope_closed"):
+        before = len(world.statements)
 
-    last = rw._autodedup_sync()
+        last = rw._autodedup_sync()
 
-    assert last["ran"] is True and last["errors"] == 0 and last["skipped"] == 0, last
-    assert last["claimed"] > 0
-    assert conn.cursors, "the pass moved the engine's own watermark"
-    assert conn.lease[LANE_NAME]["expires_at"] <= conn.now, "the lease was released"
-    targets = _write_targets(conn.statements[before:])
-    assert targets, "the pass wrote nothing"
-    assert all(t.startswith("autodedup.") for t in targets), sorted(targets)
-    assert conn.statements_in_tx, "the pass ran as the engine's one transaction"
-
-
-def test_a_backed_off_budget_binds_the_engines_claim(
-        world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    """The bottom of the back-off, end to end: one second of budget is a one-listing claim."""
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    _worker_on(monkeypatch, conn)
-    monkeypatch.setattr(rw, "_AUTODEDUP_BACKOFF", int(rw.AUTODEDUP_PASS_BUDGET_SECONDS))
-
-    last = rw._autodedup_sync()
-
-    assert last["ran"] is True and last["errors"] == 0, last
-    assert last["claimed"] == 1 and last["bound_by"] == "time"
+        assert last["ran"] is True and last["errors"] == 0 and last["skipped"] == 0, last
+        assert last["reconcile"] == expected and last["merged"] == 0
+        assert world.cursors, "the pass moved the engine's own watermark"
+        assert world.lease[LANE_NAME]["expires_at"] <= world.now, "the lease was released"
+        targets = _write_targets(world.statements[before:])
+        assert targets, "the pass wrote nothing"
+        assert all(t.startswith("autodedup.") for t in targets), sorted(targets)
+        assert world.statements_in_tx, "the pass ran as the engine's one transaction"
 
 
-def test_the_engine_sizes_the_claim_by_the_smaller_budget(
-        world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    """`max_pass_budget_s` is a ceiling on `rt_pass_budget_s`, never a raise over it; the
-    workflow passes nothing and keeps the setting."""
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    conn.settings[incremental_lane.pass_rate_key(incremental_lane.GENERATION)] = 0.01
-
-    out = run_incremental(lambda: conn, {}, tmp_path / "a", enabled=True,
-                          max_pass_budget_s=300.0)
-    assert out["claim_bound"]["pass_budget_s"] == 300.0
-    assert out["claim_bound"]["by_time"] == 3 and out["claim_bound"]["bound_by"] == "time"
-
-    conn.settings[incremental_lane.PASS_BUDGET_SETTING] = 200
-    out = run_incremental(lambda: conn, {}, tmp_path / "b", enabled=True,
-                          max_pass_budget_s=300.0)
-    assert out["claim_bound"]["pass_budget_s"] == 200.0
-
-    del conn.settings[incremental_lane.PASS_BUDGET_SETTING]
-    monkeypatch.setenv(ENV_FLAG, "true")
-    out = run_incremental(lambda: conn, {}, tmp_path / "c")
-    assert out["claim_bound"]["pass_budget_s"] == incremental_lane.PASS_BUDGET_S
-
-
-def test_a_worker_pass_inside_a_seed_is_a_green_skip(
-        world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    """The worker ignores the repository variable, so switching the workflow off before a
-    re-seed no longer stops every pass. The seed holds the lane's own lease through its
-    transaction instead: a worker pass that fires mid-seed skips, and writes nothing into the
-    generation the seed is emptying."""
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path / "first")
-    _worker_on(monkeypatch, conn)
+def test_a_worker_pass_inside_a_seed_is_a_green_skip(world, tmp_path, monkeypatch) -> None:
+    """The seed holds the lane's own lease through its transaction: a worker pass that fires
+    mid-seed skips, and writes nothing into the generation the seed is emptying."""
+    seed_lane(world, tmp_path / "first")
+    _worker_on(monkeypatch, world)
     during: list[dict[str, Any]] = []
-    original = incremental_lane.write_population
+    original = incremental_lane.cut_calibration
 
-    def pass_mid_seed(c: Any, dataset: Any) -> Any:
+    def pass_mid_seed(conn: Any, *args: Any, **kwargs: Any) -> Any:
         during.append(rw._autodedup_sync())
-        return original(c, dataset)
+        return original(conn, *args, **kwargs)
 
-    monkeypatch.setattr(incremental_lane, "write_population", pass_mid_seed)
-    out = _seed(conn, artifact, tmp_path / "again", reseed="true", fresh="true")
+    monkeypatch.setattr(incremental_lane, "cut_calibration", pass_mid_seed)
+    out = seed_lane(world, tmp_path / "again", fresh="true")
 
     assert during and (during[0]["skipped"], during[0]["reason"]) == (1, "leased")
     assert out["reset"]["rt_lease"] == 0
-    assert conn.lease[LANE_NAME]["expires_at"] <= conn.now, "the seed freed the lease"
+    assert world.lease[LANE_NAME]["expires_at"] <= world.now, "the seed freed the lease"
     after = rw._autodedup_sync()
     assert after["ran"] is True and after["errors"] == 0, after
 
 
-def test_the_worker_and_the_workflow_never_pass_at_once(
-        world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    """One lease row, by name: while the GH lane holds it the worker is a green skip."""
+def test_another_writer_holding_the_lease_is_a_green_skip(world, tmp_path, monkeypatch) -> None:
+    """One lease row, by name: while a seed or a dispatched apply/unapply holds it, the worker
+    is a green skip."""
     from datetime import timedelta
 
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    conn.lease[LANE_NAME] = {"holder": "gh-runner:1:1",
-                             "expires_at": conn.now + timedelta(minutes=10)}
-    cursors = {k: dict(v) for k, v in conn.cursors.items()}
-    _worker_on(monkeypatch, conn)
+    seed_lane(world, tmp_path)
+    world.lease[LANE_NAME] = {"holder": "gh-apply:1:1",
+                              "expires_at": world.now + timedelta(minutes=10)}
+    cursors = {k: dict(v) for k, v in world.cursors.items()}
+    _worker_on(monkeypatch, world)
 
     last = rw._autodedup_sync()
 
     assert (last["skipped"], last["reason"], last["errors"]) == (1, "leased", 0)
-    assert conn.cursors == cursors
-    assert conn.lease[LANE_NAME]["holder"] == "gh-runner:1:1"
+    assert world.cursors == cursors
+    assert world.lease[LANE_NAME]["holder"] == "gh-apply:1:1"
 
 
-def test_the_deadline_rolls_the_pass_back_and_frees_the_lease(
-        world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    """Tripped INSIDE the engine's transaction: the rollback leaves the store as it was, and
-    the lease release — the one exempt statement — still goes out."""
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    cursors = {k: dict(v) for k, v in conn.cursors.items()}
-    pairs = dict(conn.pairs)
-    rolled_back = conn.rolled_back
-
-    def clock() -> float:
-        return 10.0 if conn.in_transaction and len(conn.statements_in_tx) >= 5 else 0.0
-
-    guarded = rw._DeadlineConnection(conn, 1.0, exempt=(RT_LEASE_RELEASE_SQL,), clock=clock)
-    with pytest.raises(rw._AutodedupDeadline):
-        run_incremental(lambda: guarded, {}, tmp_path, enabled=True)
-
-    assert guarded.tripped
-    assert conn.rolled_back == rolled_back + 1
-    assert conn.cursors == cursors and conn.pairs == pairs
-    assert conn.lease[LANE_NAME]["expires_at"] <= conn.now
-
-
-def test_a_pass_past_its_deadline_is_an_error_not_a_crash(
-        world, tmp_path, monkeypatch) -> None:  # noqa: F811
-    conn, artifact = world
-    _seed(conn, artifact, tmp_path)
-    cursors = {k: dict(v) for k, v in conn.cursors.items()}
-    monkeypatch.setattr(rw, "AUTODEDUP_PASS_DEADLINE_SECONDS", -1.0)
-    _worker_on(monkeypatch, conn)
+def test_a_pass_past_its_own_deadline_rolls_back_and_halves_its_rate(
+        world, tmp_path, monkeypatch) -> None:
+    """E913: the engine stops itself between steps; its one transaction rolls back (nothing
+    written, no cursor moved), the lease is freed and the next claim is half the size. To the
+    worker it is a pass that ran and counts as an error, never a crash."""
+    seed_lane(world, tmp_path)
+    cursors = {k: dict(v) for k, v in world.cursors.items()}
+    rolled_back = world.rolled_back
+    monkeypatch.setattr(incremental_lane, "PASS_DEADLINE_S", -1.0)
+    _worker_on(monkeypatch, world)
 
     last = rw._autodedup_sync()
 
-    assert last["errors"] == 1 and last["deadline_exceeded"] is True
-    assert "deadline" in last["refused"]
-    assert conn.cursors == cursors
+    assert last["ran"] is True and last["errors"] == 1 and last["deadline_exceeded"] is True
+    assert last["aborted"] == "deadline"
+    assert world.rolled_back == rolled_back + 1
+    assert world.cursors == cursors and not world.pairs and not world.rt_fp
+    rate = world.settings[incremental_lane.pass_rate_key(incremental_lane.GENERATION)]
+    assert rate == pytest.approx(incremental_lane.PASS_RATE_PER_S / 2)
+    assert world.lease[LANE_NAME]["expires_at"] <= world.now
+    assert last["reconcile"] == "pass_deadline"
 
 
-def test_the_workflow_path_keeps_its_own_gate(tmp_path) -> None:
-    """`enabled=True` is the worker's keyword; the workflow passes nothing and still needs
-    the repository variable."""
-    def never() -> Any:
-        raise AssertionError("a dark pass must not open a connection")
+def test_a_claim_the_budget_cut_still_measures_the_rate(world, tmp_path) -> None:
+    """A rate halved to a one-listing claim must be measurable again, or the lane would claim
+    one listing a pass for ever: a claim the time budget cut is a measurement at any size."""
+    seed_lane(world, tmp_path)
+    key = incremental_lane.pass_rate_key(incremental_lane.GENERATION)
+    world.settings[key] = 0.0001
 
-    out = run_incremental(never, {}, tmp_path)
-    assert out["skipped"] == "dark" and ENV_FLAG in out["reason"]
+    out = run_incremental(lambda: world)
+
+    assert out["claim_bound"]["bound_by"] == "time" and out["counts"]["claimed"] == 1
+    assert world.settings[key] > 0.0001

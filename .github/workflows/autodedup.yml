@@ -193,31 +193,9 @@ name: "AUTODEDUP: engine lane"
 #             from autodedup.operator_merges (never property_merge_events): every member with
 #             its origin side, where it sits today and the export block it lives in, and every
 #             pair with its standing - the file `harness yardstick` measures a generation
-#             against. Empty until 564 is applied. Every statement is a SELECT.
-#
-#   rt_parity - READS ONLY, and writes NOTHING - not a `public` row, not an `autodedup` row,
-#             not even a ledger row. The instrument that asks whether the real-time lane's
-#             FACTS are the batch engine's facts. The replay-equivalence proof feeds the
-#             incremental path from an export ARTIFACT while the live lane reads through
-#             `SqlFacts`, so a difference between those two readings is invisible to it - and
-#             the first live pass issued zero K-C certificates against the batch pass's 1,771.
-#             For a seeded, source-stratified sample of listings present both in an export
-#             run's cohort artifact and in the live database (`export_run=<run id>` or
-#             `cohort=<path>`, `n=200`, `seed=1`), it builds each Listing and its gallery
-#             twice - once from the artifact, once through SqlFacts - and diffs them field by
-#             field, reporting a listing whose content changed after the export as DRIFT
-#             rather than as a defect. It then scores `pairs=400` sampled pairs from both fact
-#             sets under one settings/model/calibration and reports every feature, score, zone
-#             and certificate that moved. out/parity.json is the deliverable. What it found:
-#             `autodedup.phash_pop` held ZERO rows and nothing in the repository wrote it, so
-#             every image read pop=0, every catalog_ratio went absent and K-C was structurally
-#             unreachable - 3 of 3 sampled K-C lost with the model held constant. The GATE that
-#             now stops that shipping again is not this mode: `rt_seed` writes a per-listing
-#             fact baseline and every scheduled pass re-checks a slice of it before it writes
-#             anything (E91). This mode remains the field-by-field report you run when the gate
-#             refuses. `population=artifact` makes the live side read the cohort's own pHash
-#             counts instead of the frozen table — the exact rows `rt_seed` writes — so a
-#             seed's effect on the certificates is measurable read-only, before seeding.
+#             against. Empty until 564 is applied. out/must_link.jsonl carries the pairs
+#             whose NEWEST pair ruling is `same` (E910): the must-links every clustering
+#             obeys, for `harness run --must-link` and the replay. Every statement is a SELECT.
 #
 #   rt_equivalence - READS ONLY, and writes NOTHING - not a `public` row, not an `autodedup`
 #             row, not a ledger row. The check the replay-equivalence proof cannot give.
@@ -260,38 +238,30 @@ name: "AUTODEDUP: engine lane"
 #             ok only when there are no defects, nothing is unexplained at pair, one-sided or
 #             cluster-component grain, and the build is finished.
 #
-#   rt_seed - READS the artifact and `public`, WRITES schema `autodedup` only. Cuts a
-#             generation's FROZEN calibration from an export run's cohort artifact, starts its
-#             cursors at TODAY, writes the scope it seeded, materialises the calibration's own
-#             pHash population into `autodedup.phash_pop` (the number the export already
-#             measured - no scan of public.images), and cuts the parity baseline the schedule
-#             is gated on. args: export_run or artifact, settings and model (BOTH REQUIRED and
-#             NAMED, e.g. settings=w8,model=w6_gold, or settings=default,model=prior for the
-#             uncalibrated ones - a generation is scored by one scorer and the lane will not
-#             pick it for you, E90a), generation, rt_scope, backfill, reseed, parity_n,
-#             fresh and rt_bootstrap.
-#             It is deliberately NOT behind the dark switch: seeding is the step before it.
-#             Every seed takes the real-time lane's lease (`autodedup.rt_lease`) for its
-#             transaction and refuses, writing nothing, while a pass holds it - the worker's
-#             `autodedup` lane ignores the repository variable, so stop both callers with
-#             `autodedup.settings` `realtime_enabled = false` before seeding.
-#             `fresh=true` (only valid with `reseed=true`) is the CLEAN RESET: inside the same
-#             transaction, before anything is written, it deletes THIS generation's pairs,
-#             clusters, cluster members, cluster conflicts, fingerprints, postings, census
-#             cells, scope snapshot, scan and retirement ledgers and cursors (keeping the
-#             seed's own lease) - and nothing else. Operator verdicts, must-not-links, judge
-#             verdicts, every other generation and every `public` table are untouched, and the
-#             summary reports the rows removed per table. Without it a re-seed re-cuts the
-#             calibration and leaves every pair the generation already holds in place, which
-#             is how 15,923 rows scored by a superseded scorer survived the 2026-09-20 re-seed.
-#             `rt_bootstrap=true` (which requires `backfill=false`) persists the BUILD PHASE
-#             as a settings row. A backfilled seed writes the fingerprints and not one pair,
-#             so a seeded generation never holds the pairs among the listings that already
-#             existed; with `backfill=false` every in-scope listing is an ARRIVAL, which is
-#             the one path the replay proof covers. During the phase the entrant claim is the
-#             whole `max_listings` rather than a seventh of it and every never-walked scope
-#             block is walked in the SAME pass (the cadence is suspended, the rolling-day scan
-#             cap is not); the phase ends by itself in the pass that empties the backlog.
+#   rt_seed - READS `public`, WRITES schema `autodedup` only. (Re)builds THE real-time lane's
+#             generation (`rt`) from the database (A10, E912): walks every block of the scope
+#             (`rt_scope`, else the row the last seed wrote, else the trial blocks), cuts the
+#             calibration's cohort statistics and the pHash population over what those blocks
+#             hold - read through the lane's own fact reader, and the population is the
+#             export's aggregate over public.images - starts the cursors at TODAY and opens
+#             the build phase, so every in-scope listing arrives through the worker's passes.
+#             args: settings and model (BOTH REQUIRED and NAMED, e.g.
+#             settings=w29,model=w6_gold; settings=default,model=prior are the uncalibrated
+#             ones - a generation is scored by one scorer and the lane will not pick it for
+#             you, E90a), rt_scope, fresh. A seeded generation is rebuilt only with
+#             `fresh=true`, which empties it first inside the same transaction (pairs,
+#             clusters, members, conflicts, fingerprints, postings, census cells, scope
+#             snapshot, scan and retirement ledgers, cursors) - never a verdict, a
+#             must-not-link, another generation, a `public` table or a production merge. The
+#             seed takes the lane's lease (`autodedup.rt_lease`) and refuses, writing nothing,
+#             while a pass holds it: set app_settings.realtime_autodedup_interval_seconds to 0
+#             first. The calibration re-cuts ITSELF afterwards, in the worker's pass, whenever
+#             the share of photographs whose population it can measure falls below 0.85.
+#
+#             The real-time PASS is not a mode (E914): the always-on worker's `autodedup` lane
+#             runs it, decides, groups and RECONCILES production inside the scope row (A9),
+#             and its interval (0 = stop) is its only switch. The GitHub schedule and its
+#             repository variable are gone.
 #
 #   town    - READS ONLY, writes nothing (not even a ledger row). Asks whether ONE property
 #             is ever recorded under two different TOWNS, corpus-wide, because the trial
@@ -346,8 +316,9 @@ name: "AUTODEDUP: engine lane"
 #             active again. Group size is capped by the engine alone, when it builds the
 #             group. A group already on one property that an operator negative covers is
 #             REPORTED (ruled_different_after_merge, with the unapply args when the engine
-#             made that merge), never acted on. Real-time lane generations (rt...) are
-#             refused. `dry_run=0` merges for real through
+#             made that merge), never acted on. The real-time generation (`rt`) is
+#             refused: the worker's lane reconciles it itself, under its lease (A9).
+#             `dry_run=0` takes that same lease (one writer) and merges for real through
 #             toolkit.property_identity.merge_properties (source 'autodedup', ONE merge group
 #             per engine group) ONLY inside app_settings.autodedup_apply_scope, the ONE
 #             rollout control (seeded by migration 558 with no area, edited on /settings),
@@ -360,7 +331,7 @@ name: "AUTODEDUP: engine lane"
 #             dry run. The run's own scope args can NARROW that row, never widen it; on a dry
 #             run they replace it key by key. At most max_clusters_per_run groups per run
 #             (default 200), in cluster_key order.
-#             `retire_legacy=1` (TEMPORARY, sprint A2, deleted in W5) first undoes, in the same
+#             `retire_legacy=1` (TEMPORARY, sprint A2, kept until W8) first undoes, in the same
 #             dispatch and under the same dry_run, the old engine's intact merges
 #             (property_merge_events source 'auto') whose adverts ALL sit inside the scope's
 #             blocks AND all carry one of its category_types - or whose merge CREATED a
@@ -389,8 +360,10 @@ name: "AUTODEDUP: engine lane"
 #             summary section; a dry run writes nothing.
 #
 #   unapply - A1. DRY RUN BY DEFAULT: lists every live merge group a generation, an apply run
-#             (run=) or a time window (since= / until=) applied, newest first. `dry_run=0`
-#             undoes them through unmerge_group in that order and marks them undone in
+#             or a lane pass (run=, e.g. run=rt:<holder>) or a time window (since= / until=)
+#             applied, newest first. The brake on the lane: interval 0, then this. `dry_run=0`
+#             takes the lane's lease (one writer) and undoes them in that order and marks them
+#             undone in
 #             autodedup.applied_merges; `cluster_key=` (with generation=) undoes one group.
 #             NOT gated by the scope - undo is the way back - and an undone group may merge
 #             again on a later apply. A group a later engine merge still builds on (more
@@ -448,12 +421,11 @@ name: "AUTODEDUP: engine lane"
 # its pairs are skipped rather than flooding the label set, default 12),
 # sample_seed (the seed the UI's unbiased group order ran under, default v1, which is
 # what each implied label's `sample_rank` is a rank UNDER) and timeout_ms; rt_seed accepts
-# export_run, artifact, settings (required), model (required), generation, rt_scope, backfill,
-# reseed, fresh (only with reseed=true), rt_bootstrap (only with backfill=false) and parity_n;
-# rt_parity accepts export_run, cohort, n, pairs, seed, generation, settings, model and
-# population (frozen, the default, or artifact); rt_equivalence accepts generation (default
-# rt), batch (REQUIRED - the batch generation to compare against) and tol (the score
-# tolerance, default 1e-6); apply accepts generation (REQUIRED), dry_run (1, the default, or
+# settings (required), model (required), rt_scope and fresh; rt_equivalence accepts
+# generation (default rt), batch (REQUIRED - the batch generation to compare against),
+# exported_at (the batch cohort's export time; default the batch pass's finish, which fails
+# closed) and tol (the score tolerance, default 1e-6); apply accepts generation (REQUIRED),
+# dry_run (1, the default, or
 # 0), retire_legacy (0, the default, or 1) and the scope fields category_types, blocks (SPACE-separated, e.g. `blocks=town:563510
 # quarter:490245`), listing_ids (SPACE-separated), all_blocks and max_clusters_per_run -
 # separate args, not one JSON `scope=`, because this workflow's charset check refuses braces

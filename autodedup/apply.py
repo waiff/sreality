@@ -30,8 +30,8 @@ it (the chokepoint's merge rows, `source='autodedup'` saying who merged; a detac
 an operator's native split's one closed row). A detach and its read-only preview,
 `detach_outcomes`, read it inside the toolkit. The apply path's own ledger is the only history
 it consults.
-The one carve-out is TEMPORARY: `retire_legacy=1` runs `autodedup.legacy_retire` (A2, deleted
-in W5) before the plan, which reads it to undo the old engine's merges in the scope's blocks and
+The one carve-out is TEMPORARY: `retire_legacy=1` runs `autodedup.legacy_retire` (A2, kept until
+W8) before the plan, which reads it to undo the old engine's merges in the scope's blocks and
 deal types (plus any that mixes deal types).
 """
 
@@ -77,7 +77,7 @@ ID_CHUNK: int = 5000
 SCOPE_KEYS: tuple[str, ...] = (
     "category_types", "blocks", "listing_ids", "all_blocks", "max_clusters_per_run",
 )
-# `retire_legacy`: A2's pre-step (autodedup/legacy_retire.py), temporary, deleted in W5.
+# `retire_legacy`: A2's pre-step (autodedup/legacy_retire.py), temporary, kept until W8.
 APPLY_ARGS: frozenset[str] = frozenset({"generation", "dry_run", "retire_legacy", *SCOPE_KEYS})
 # What `unapply` selects by: a generation (and one of its groups), a run, a time window.
 UNAPPLY_SELECTORS: tuple[str, ...] = ("generation", "cluster_key", "run", "since", "until")
@@ -1577,6 +1577,38 @@ def _step_summary(result: Mapping[str, Any], *, mode: str) -> None:
         pass
 
 
+class _Writer:
+    """THE lane's lease (`autodedup.rt_lease`), held by a live dispatch: one writer of
+    production merges at a time (A9). The worker's lane reconciles under it, so a live apply or
+    unapply takes it for its run and refuses while a pass holds it."""
+
+    def __init__(self, conn: Any, live: bool) -> None:
+        self.conn = conn
+        self.live = live
+        self.holder = f"dispatch:{new_run_id()}"
+        self.held = False
+
+    def __enter__(self) -> "_Writer":
+        if not self.live:
+            return self
+        from autodedup import incremental_lane
+
+        if not incremental_lane.take_lease(self.conn, self.holder,
+                                           ttl=incremental_lane.SEED_LEASE_TTL_S):
+            raise SystemExit(
+                "refused: the real-time lane holds autodedup.rt_lease. Set "
+                "app_settings.realtime_autodedup_interval_seconds to 0, wait for the lease to "
+                "clear, and run again. Nothing was written.")
+        self.held = True
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self.held:
+            from autodedup import incremental_lane
+
+            incremental_lane.release_lease(self.conn, self.holder)
+
+
 def run_apply(
     conn_factory: Callable[[], Any], args: dict[str, str], out_dir: Path
 ) -> dict[str, Any]:
@@ -1584,50 +1616,56 @@ def run_apply(
     generation = _generation_arg(args)
     if is_realtime_generation(generation):
         raise SystemExit(
-            f"generation={generation}: a real-time lane generation cannot be applied from "
-            "this lane (it is rewritten while a plan reads it)"
+            f"generation={generation}: the real-time lane's generation is reconciled by the "
+            "lane itself, under its own lease (A9) — it cannot be applied from here"
         )
     dry_run = _dry_run_arg(args)
     retire = _retire_arg(args)
     override = {key: args[key] for key in SCOPE_KEYS if key in args}
     out_dir = Path(out_dir)
     conn = conn_factory()
-    retired: dict[str, Any] | None = None
     try:
-        try:
-            scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
-        except ValueError as exc:
-            raise SystemExit(f"scope: {exc}") from exc
-        plan = plan_apply(conn, generation, scope)
-        if retire:
-            retired = _retire_legacy(conn, generation, scope, plan, dry_run=dry_run,
-                                     out_dir=out_dir)
-            if not dry_run:
-                plan = plan_apply(conn, generation, scope)
-            retired = legacy_retire.note_deferred(
-                out_dir, retired, deferred=plan.deferred,
-                planned=[g.cluster_key for g in plan.to_apply],
-                cap=plan.scope.max_clusters_per_run)
-        try:
-            result = apply_plan(conn, plan, dry_run)
-        except ApplyRefused as exc:
-            raise SystemExit(str(exc)) from exc
-        except BaseException as exc:
-            # A live run that stops mid-way (a crash, or a cancelled job's KeyboardInterrupt)
-            # has merged for real: publish what it did, then fail.
-            partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
-            if isinstance(partial, dict):
-                _publish_apply(out_dir, _with_retire(partial, retired), plan)
-            raise
+        with _Writer(conn, live=not dry_run):
+            return _apply_run(conn, generation, dry_run, retire, override, out_dir)
     finally:
         _close(conn)
+
+
+def _apply_run(conn: Any, generation: str, dry_run: bool, retire: bool,
+               override: Mapping[str, Any], out_dir: Path) -> dict[str, Any]:
+    retired: dict[str, Any] | None = None
+    try:
+        scope = effective_scope(read_scope_setting(conn), override, live=not dry_run)
+    except ValueError as exc:
+        raise SystemExit(f"scope: {exc}") from exc
+    plan = plan_apply(conn, generation, scope)
+    if retire:
+        retired = _retire_legacy(conn, generation, scope, plan, dry_run=dry_run,
+                                 out_dir=out_dir)
+        if not dry_run:
+            plan = plan_apply(conn, generation, scope)
+        retired = legacy_retire.note_deferred(
+            out_dir, retired, deferred=plan.deferred,
+            planned=[g.cluster_key for g in plan.to_apply],
+            cap=plan.scope.max_clusters_per_run)
+    try:
+        result = apply_plan(conn, plan, dry_run)
+    except ApplyRefused as exc:
+        raise SystemExit(str(exc)) from exc
+    except BaseException as exc:
+        # A live run that stops mid-way (a crash, or a cancelled job's KeyboardInterrupt)
+        # has merged for real: publish what it did, then fail.
+        partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
+        if isinstance(partial, dict):
+            _publish_apply(out_dir, _with_retire(partial, retired), plan)
+        raise
     return _publish_apply(out_dir, _with_retire(result, retired), plan)
 
 
 def _retire_legacy(
     conn: Any, generation: str, scope: Scope, plan: Plan, *, dry_run: bool, out_dir: Path,
 ) -> dict[str, Any]:
-    """A2 (temporary, deleted in W5): the old engine's merges in the scope undone first, in this
+    """A2 (temporary, kept until W8): the old engine's merges in the scope undone first, in this
     same dispatch, so the plan that follows reads them apart. Refused before anything moves when
     the run narrows by listing (the step reads blocks only) or when `plan`, read first, holds no
     proposed group inside the scope: a typo'd or unstored generation would re-merge nothing."""
@@ -1698,8 +1736,9 @@ def run_unapply(
         raise SystemExit("unapply needs generation=, run=, since= or until= (e.g. generation=g12)")
     conn = conn_factory()
     try:
-        result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key, run=run,
-                         since=since, until=until)
+        with _Writer(conn, live=not dry_run):
+            result = unapply(conn, generation, dry_run=dry_run, cluster_key=cluster_key,
+                             run=run, since=since, until=until)
     except BaseException as exc:
         # A live undo that stops mid-way has undone groups for real: publish them, then fail.
         partial = getattr(exc, PARTIAL_RESULT_ATTR, None)
