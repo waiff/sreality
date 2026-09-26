@@ -3253,10 +3253,10 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
 **THE RÚIAN MIRROR IS VERSIONED, NOT MUTATED.** `ruian_*` (migration 381) holds ČÚZK's address
 points, streets, parcels, building objects, admin units and a typo-tolerant gazetteer. ONE monthly
 `full` load stamps one `registry_versions` row (`ruian:YYYY-MM-DD`): stage → blocking assertions →
-merge → boundaries (the state SHP pack is the vintage's third sha-pinned artifact; three geometries
-per unit — authoritative, subdivided pip, render — an unchanged unit carried from the prior version)
-→ gazetteer → a **completeness assertion** (every member obec and KÚ has pip + authoritative) →
-**pointer swap**: a version becomes current only complete, never under a resolution pinned to another.
+merge → boundaries (the state SHP pack is the vintage's third archived artifact, a resume restores
+all three from R2; three geometries per unit — authoritative, subdivided pip, render — an unchanged
+unit's authoritative row carried) → gazetteer → a **completeness assertion** (the state and every
+member obec and KÚ have pip + authoritative) → **pointer swap**: only a complete version goes live.
 Křovák S-JTSK → WGS84 is ONE audited 1 m PROJ conversion (`location_data/krovak.py`, golden-point
 test); `location_town_coverage` goes red when the registry stops moving (40 d current / 24 h staged).
 
