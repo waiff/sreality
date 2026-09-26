@@ -226,9 +226,12 @@ def record_ruling(
 ) -> tuple[Any, ...] | None:
     """THE pair-ruling writer: appends the ruling when it changes the pair's newest word
     (migration 574) and mirrors it into the operator's must-not-link (a negative upserts it with
-    `veto_reason`, else the note; anything else retracts it). Returns the pair's newest row in
-    `usql.VERDICT_COLUMNS` order."""
+    `veto_reason`, else the note; anything else retracts it). A bare operator veto is first
+    written down as the `different` ruling it is, so the new word never erases it. Returns the
+    pair's newest row in `usql.VERDICT_COLUMNS` order."""
     with conn.cursor() as cur:
+        cur.execute(usql.VERDICT_PAIR_FROM_VETO_SQL,
+                    {"listing_lo": listing_lo, "listing_hi": listing_hi})
         cur.execute(usql.VERDICT_PAIR_APPEND_SQL, {
             "listing_lo": listing_lo, "listing_hi": listing_hi, "verdict": verdict,
             "note": note, "reasons": list(reasons), "decided_by": decided_by})

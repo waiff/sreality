@@ -190,9 +190,16 @@ def _merged(db: _Ledger, ids: list[int], *, source: str = "operator") -> dict[st
                               decided_by=OP)["data"]
 
 
+def _appended(db: _Ledger) -> list[Any]:
+    """The rulings appended, by the one pair writer's own statement (a bare veto written down
+    first is a different statement: `usql.VERDICT_PAIR_FROM_VETO_SQL`)."""
+    appended = " ".join(pi.usql.VERDICT_PAIR_APPEND_SQL.split())
+    return [p for s, p in db.log if s == appended]
+
+
 def _verdicts(db: _Ledger) -> list[tuple[int, int, str, str]]:
     return [(r["listing_lo"], r["listing_hi"], r["verdict"], r["note"])
-            for r in db.sql("INSERT INTO autodedup.verdicts")]
+            for r in _appended(db)]
 
 
 def test_one_advert_goes_back_to_the_merged_away_property_it_came_from():
@@ -321,7 +328,7 @@ def test_an_operator_detach_rules_the_advert_different_from_every_advert_that_st
     assert out["rulings_written"] == 2
     assert {(r["listing_lo"], r["listing_hi"]) for r in
             db.sql("INSERT INTO autodedup.must_not_link")} == {(1, 3), (2, 3)}
-    assert {r["decided_by"] for r in db.sql("INSERT INTO autodedup.verdicts")} == {OP}
+    assert {r["decided_by"] for r in _appended(db)} == {OP}
 
 
 def test_a_detach_leaves_curation_where_it_is_and_recomputes_both_once():

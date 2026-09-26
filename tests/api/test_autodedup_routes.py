@@ -81,6 +81,7 @@ _LABELS: dict[str, str] = {
     usql.VERDICT_CLUSTER_APPEND_SQL: "verdict_write",
     usql.MUST_NOT_LINK_UPSERT_SQL: "must_not_link",
     usql.MUST_NOT_LINK_RETRACT_SQL: "must_not_link_retract",
+    usql.VERDICT_PAIR_FROM_VETO_SQL: "veto_written_down",
     usql.CLUSTER_EXISTS_SQL: "cluster_exists",
     usql.PAIR_EXISTS_SQL: "pair_exists",
 }

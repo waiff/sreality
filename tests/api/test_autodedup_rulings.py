@@ -103,7 +103,8 @@ class _Cursor:
             if sql in (usql.RULINGS_PAIR_SQL, usql.RULINGS_GROUP_SQL) and limit is not None:
                 rows = rows[: int(limit)]
             self._rows = rows
-        elif sql in (usql.MUST_NOT_LINK_UPSERT_SQL, usql.MUST_NOT_LINK_RETRACT_SQL):
+        elif sql in (usql.MUST_NOT_LINK_UPSERT_SQL, usql.MUST_NOT_LINK_RETRACT_SQL,
+                     usql.VERDICT_PAIR_FROM_VETO_SQL):
             self._rows = []
         else:
             raise AssertionError(f"unexpected statement: {' '.join(sql.split())[:90]}")
@@ -361,7 +362,8 @@ def test_a_withdrawal_appends_unsure_and_retracts_the_veto_in_one_transaction(cl
     assert not conn.ran(usql.MUST_NOT_LINK_UPSERT_SQL)
     # The "still the newest" check runs over the LOCKED ruling, in the write's own transaction.
     assert conn.tx_calls == [usql.VERDICT_ONE_SQL, usql.PAIR_NEWEST_RULING_SQL,
-                             usql.VERDICT_PAIR_APPEND_SQL, usql.MUST_NOT_LINK_RETRACT_SQL]
+                             usql.VERDICT_PAIR_FROM_VETO_SQL, usql.VERDICT_PAIR_APPEND_SQL,
+                             usql.MUST_NOT_LINK_RETRACT_SQL]
     assert _flat(usql.VERDICT_ONE_SQL).endswith("FOR UPDATE")
     assert body["data"]["verdict"]["id"] == 12
     assert body["data"]["superseded"]["id"] == 7

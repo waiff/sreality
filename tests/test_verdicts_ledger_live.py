@@ -293,3 +293,28 @@ def test_a_set_ruled_again_under_another_key_implies_nothing_and_supersedes(cur)
             newest[usql.VERDICT_COLUMNS.index("verdict")]) == (d, "different")
     assert Negatives.read(cur.connection, [c, d], [c]).sets.get(min(c, d)), (
         "and apply refuses the set, which is what the page now says")
+
+
+def test_correcting_a_bare_veto_keeps_it_in_the_history(cur):
+    """A veto with no ruling behind it is the operator's `different`: a flip or a withdrawal first
+    writes it down (its reason, its date), so the pair reads `withdrawn`, not `unsure`, and the
+    veto's word survives the retraction."""
+    lo, hi = _pair(cur)
+    cur.execute(usql.MUST_NOT_LINK_UPSERT_SQL, {"listing_lo": lo, "listing_hi": hi,
+                                                "reason": "operator split: different"})
+    cur.execute("SELECT created_at FROM autodedup.must_not_link WHERE listing_lo = %s "
+                "AND listing_hi = %s", (lo, hi))
+    vetoed_at = cur.fetchone()[0]
+    _rule(cur, lo, hi, "unsure", "nejsem si jistý")
+    assert _rows(cur, lo, hi) == [("different", "operator split: different"),
+                                  ("unsure", "nejsem si jistý")]
+    cur.execute("SELECT decided_at, decided_by FROM autodedup.verdicts WHERE kind = 'pair' "
+                "AND listing_lo = %s AND listing_hi = %s AND verdict = 'different'", (lo, hi))
+    assert cur.fetchone() == (vetoed_at, "operator")
+    assert not _veto(cur, lo, hi)
+    (row,) = _page(cur, usql.RULINGS_PAIR_SQL, usql.RULING_PAIR_COLUMNS, listing=lo)
+    assert (row["source"], row["status"], row["n_rows"]) == ("pair", "withdrawn", 2)
+    # A pair that already carries a ruling writes no second copy of its veto.
+    _rule(cur, lo, hi, "different", "jiné patro")
+    _rule(cur, lo, hi, "same")
+    assert [v for v, _ in _rows(cur, lo, hi)] == ["different", "unsure", "different", "same"]

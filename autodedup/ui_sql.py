@@ -1502,6 +1502,27 @@ LIMIT 1
 
 # PERMANENT (§13's own word): an operator "not the same" outranks every machine source, so it
 # overwrites a `guard`/`model`/`llm` row rather than losing the conflict.
+# A VETO WITH NO RULING BEHIND IT is the operator's `different` all the same (the rulings page
+# lists it as one). Before a newer word is appended over it, it is written down as the ruling it
+# is -- its reason as the note, its own date -- so a flip or a withdrawal keeps it in the history
+# and reads as `withdrawn`, instead of the retraction deleting its only trace (E920). A no-op for
+# any pair that already carries a ruling, and for a machine veto (not the operator's word).
+VERDICT_PAIR_FROM_VETO_SQL = """
+INSERT INTO autodedup.verdicts (kind, listing_lo, listing_hi, verdict, note, reasons, decided_by,
+                                decided_at)
+SELECT 'pair', m.listing_lo, m.listing_hi, 'different', m.reason, '{}'::text[], m.source,
+       m.created_at
+  FROM autodedup.must_not_link m
+ WHERE m.listing_lo = %(listing_lo)s::bigint
+   AND m.listing_hi = %(listing_hi)s::bigint
+   AND m.source = 'operator'
+   AND NOT EXISTS (SELECT 1 FROM autodedup.verdicts x
+                    WHERE x.kind = 'pair'
+                      AND x.listing_lo = m.listing_lo
+                      AND x.listing_hi = m.listing_hi)
+ON CONFLICT DO NOTHING
+"""
+
 MUST_NOT_LINK_UPSERT_SQL = """
 INSERT INTO autodedup.must_not_link (listing_lo, listing_hi, source, reason)
 VALUES (%(listing_lo)s::bigint, %(listing_hi)s::bigint, 'operator', %(reason)s::text)
