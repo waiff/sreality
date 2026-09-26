@@ -334,7 +334,7 @@ def test_a_detach_leaves_curation_where_it_is_and_recomputes_both_once():
                   "notification_dispatches", "property_dismissals", "property_status_events",
                   "DELETE FROM properties", "DELETE FROM property_merge_events"):
         assert table not in written, f"a detach touched {table}"
-    assert db.sql("recompute_property_mf") == [(10,), (20,)]
+    assert [p["pid"] for p in db.sql("WITH batch AS")] == [10, 20]
     assert db.sql("DELETE FROM browse_list") == [([10, 20],)]
     (reactivate,) = [s for s, _p in db.log if "SET status = 'active'" in s]
     assert "merged_into = NULL, merged_at = NULL, is_active = EXISTS (" in reactivate
@@ -410,7 +410,7 @@ def test_a_native_split_takes_the_merges_lock_order_and_leaves_curation_behind()
                   "asset_membership_events", "DELETE FROM properties"):
         assert table not in written, f"a native split touched {table} (rules 18, 22)"
     born = db.listings[2]
-    assert db.sql("recompute_property_mf") == [(10,), (born,)]
+    assert [p["pid"] for p in db.sql("WITH batch AS")] == [10, born]
     assert db.sql("DELETE FROM browse_list") == [([10, born],)]
 
 
