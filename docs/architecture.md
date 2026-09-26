@@ -59,7 +59,7 @@ emits". That is now one table and one module rather than nine copies of each:
   A portal-specific placeholder is a contract **sentinel** instead (idnes's floor-select top,
   "20. patro a vyšší"). Rows stored before a band existed are NOT cleared by ingest (a `text`
   cell preserves on NULL, inactive rows never refetch, `reparse.py` never blanks): each such heal
-  is a backed-up data migration (573 for the 2026-09-26 bands).
+  is a backed-up data migration (573 for the 2026-09-26 bands, in its own PR #1633).
 
 **Data source (sreality v1 API).** In 2026 sreality rebuilt their site on Next.js and
 removed the old `/api/cs/v2/estates` API the scraper was born on. The scraper now

@@ -98,9 +98,10 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   blanks one by design. *(W7 correction: there is now ONE blank-allowed path, and it is deliberately not general —
   `scripts/clear_unmeasured_enrichment_fills.py` blanks only cells the DELETED enrichment lane's own `filled` ledger
   says it wrote AND that still hold exactly that value. Anything else is still a hand-written UPDATE.)*
-  *(2026-09-26 correction, PR #1630: the contract rails' leftovers have their hand-written UPDATE —
-  `migrations/573_portal_contract_leftovers_floor_area.sql` NULLs exactly the stored values the rails below
-  now decline at ingest (idnes floor placeholder, a storey or storey count out of band, a dwelling headline
+  *(2026-09-26 correction, PR #1630 + its follow-up #1633: the contract rails' leftovers have their
+  hand-written UPDATE — `migrations/573_portal_contract_leftovers_floor_area.sql`, its own PR so it is applied
+  from that branch after #1630 is deployed and merged only once applied — NULLs exactly the stored values the
+  rails below now decline at ingest (idnes floor placeholder, a storey or storey count out of band, a dwelling headline
   outside the dwelling band), each cell copied first into `backup_a4.listing_cells`, no snapshot (R9 / 554).
   It exists because none of those cells can clear itself: bazos's are `text` (this rule), inactive rows never
   refetch, and the seam never blanks. Inactive rows on the hashed portals then disagree with their last
