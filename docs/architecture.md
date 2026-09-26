@@ -2152,13 +2152,11 @@ renumber.** Navigate by area:
     unfloored) all yield NULL — a visible gap, never a guess. Rounded to 2dp so all six
     publishing relations return byte-identical figures.
 
-    **Its sibling, the MF reference rent** (migration 565), follows the same doctrine at property
-    grain: `public.mf_reference(...)` is one inlinable SQL function over the ingest-refreshed
-    `rent_map_cells` matview. `browse_projection` and `properties_public` call it through a LEFT
-    JOIN LATERAL (migration 566), the read models copy it, nothing stores it. It answers a value,
-    the town's published range (location known only to town level) or a reason — six codes whose
-    Czech notes live only in that migration — and every surface renders the result by its shape.
-    Contract and rules: the `llm-pipelines` skill.
+    **Its sibling, the MF reference rent** (migration 565): one inlinable SQL function,
+    `mf_reference(...)`, over the ingest-refreshed `rent_map_cells` matview — a value, the town's
+    published range or a reason (six codes, notes only in that migration), rendered by its shape.
+    Estimations call it; the serving views read the stored, writer-less `mf_*` columns until
+    PR-B's view swap passes `katastr_kod`. Rules: the `llm-pipelines` skill.
 
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
@@ -3227,11 +3225,10 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
 
 **WHAT REMAINS OUTSIDE THE STORE, AND WHY.**
 
-* `admin_boundaries` — price stats, the rent-map choropleth and city proximity still read its
-  geometry and population (MF itself reads only stored codes since migration 565). Its LOCATION
-  role died with trigger 289; re-keying those three onto
-  `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id` is an FK to it,
-  and already the RÚIAN obec code.
+* `admin_boundaries` — price stats, the rent-map choropleth (not the MF calc, since 565) and city
+  proximity read its geometry and population. Its LOCATION role died with trigger 289; re-keying
+  those three onto `ruian_admin_unit_geometries` is a later wave. `curated_cities.admin_boundary_id`
+  is an FK to it, and already the RÚIAN obec code.
 * `portal_raw_pages` / `portal_raw_payloads` — the preservation substrate, and the intake's second
   source; not a location path (`tests/test_portal_raw_pages_guard.py` fails CI on any DROP naming
   it). With it `listings.raw_json`, the content-hash substrate (rule 2) and the resolver's evidence,

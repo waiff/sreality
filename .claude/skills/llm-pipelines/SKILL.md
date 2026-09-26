@@ -138,18 +138,20 @@ adjustments. A secondary figure shown ALONGSIDE the comparables estimate — nev
   country_status)` → `mf_reference_rent_czk`, `mf_gross_yield_pct`, `mf_reference_rent` (detail
   jsonb). LANGUAGE sql, inlined into the caller's LEFT JOIN LATERAL (no `SET`/STRICT — CI plan
   test). It reads ONLY the matview `rent_map_cells` (latest revision as `ku`/`obec`/`town` cells
-  with the adjustments as columns), never geometry. Nothing stores MF: `browse_projection` and
-  `properties_public` call it on the golden facts + the representative's `listing_location`
-  codes (migration 566), the read models copy it like any column, and `listing_feed_public` takes
-  the PROPERTY's yield from `browse_list` (operator ruling Q8 b). The stored `listings.mf_*` /
-  `properties.mf_*` have had no writer since then and are dropped in the destructive cleanup.
+  with the adjustments as columns), never geometry. Nothing WRITES MF any more (the hourly job
+  and the merge/detach recompute are gone); estimations and `/estimate_yield` call the measure.
+- **Serving, until PR-B:** `browse_projection` / `properties_public` / `listing_feed_public`
+  still read the stored `properties.mf_*` / `listings.mf_*` — writer-less, frozen at their last
+  write. PR-B's ONE view swap calls the measure with `ll.katastr_kod` (the portal lane takes the
+  PROPERTY's yield from `browse_list`, Q8 b); swapping with a NULL KÚ would put every flat in a
+  KÚ-priced town (79 %) on a range and out of the yield filter. PR-F drops the stored columns.
 - **Rules:** flats only (else no row). VK = leading integer of the disposition clamped 1..4;
   novostavba = `condition = 'novostavba'` (NULL → older column, adjustments kept); rent =
   round((base + adjustments) × area); yield only for `prodej` with price ≥ 100 000, else the
   rent stands without one. Cell: a bound KÚ's cell → the obec's cell → (KÚ bound) `no_rent_cell`
   → the town row: one price across every current KÚ → value (`territory.basis='town_uniform'`),
   else the town's published range + note (`territory_coarse`). Until `listing_location.katastr_kod`
-  lands every view passes NULL, i.e. "location known to town level".
+  lands every caller passes NULL, i.e. "location known to town level".
 - **The result's SHAPE is the render contract:** value (`monthly_rent_czk`) | range
   (`range{per_m2_min/max, rent_min/max_czk, yield_min/max_pct?}` + `note`) | note (`status` +
   `note`) | none (NULL). Six codes (`ok`, `territory_coarse`, `no_rent_cell`, `not_in_cz`,
@@ -161,13 +163,14 @@ adjustments. A secondary figure shown ALONGSIDE the comparables estimate — nev
 - **Estimations:** rent runs store `estimation_runs.reference_rent` (migration 131) from
   `toolkit.rent_map.compute_reference_rent` — a thin wrapper running the measure on the
   service-role connection, stamped `engine: 'mf_sql_v1'`. Our advert → its property's golden
-  facts + stored codes (= the listing page); a URL-parsed or typed subject → obec from
-  `api.maps.containing_obec_kod`, KÚ NULL. Stored runs keep their frozen breakdown (rule #12).
+  facts + stored codes (`_SUBJECT_MF_FACTS_SQL`, the views' lateral inputs); a URL-parsed or
+  typed subject → obec from `api.maps.containing_obec_kod`, KÚ NULL. Stored runs keep their
+  frozen breakdown (rule #12).
 - **Store + ingest:** `rent_map_revisions` (`file_sha256` UNIQUE → a re-fetch no-ops) +
   `rent_map_values` + `rent_map_adjustments` (migration 132, history kept).
   `api.rent_map.insert_revision` parses (stdlib `zipfile`+`xml.etree`), COPYs, REFRESHes
   `rent_map_choropleth` (the Browse map layer, VK1–4 + Kraje overlay) and — CONCURRENTLY —
-  `rent_map_cells`, stamping both in `derived_artifacts`; the new revision is live at that
-  REFRESH, nothing to recompute. Fed by the monthly `fetch_rent_map.yml` and the Settings upload /
-  "Fetch latest now" (`POST /admin/rent-map/*`). Sheet sanity check: Litoměřice older 3+1, 68 m²,
-  +výtah +balkon +garáž → 291 Kč/m² → 19 788 Kč.
+  `rent_map_cells`, stamping both in `derived_artifacts`; every caller of the measure sees the
+  new revision at that REFRESH, nothing to recompute. Fed by the monthly `fetch_rent_map.yml` and
+  the Settings upload / "Fetch latest now" (`POST /admin/rent-map/*`). Sheet sanity check:
+  Litoměřice older 3+1, 68 m², +výtah +balkon +garáž → 291 Kč/m² → 19 788 Kč.

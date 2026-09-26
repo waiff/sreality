@@ -1928,7 +1928,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "float",
       "pg_column": "mf_gross_yield_pct",
       "default": null,
-      "description": "Lower bound on MF gross rental yield % (`mf_gross_yield_pct >= N`). Inclusive. The property's MF Cenová mapa reference monthly rent × 12 / asking price × 100, read at read time from `mf_reference()`: sale flats priced from 100 000 Kč with one rent cell only, so non-flats, rentals, unpriced listings and flats located only to a town priced per katastr fall out when set. Browse + Watchdog only.",
+      "description": "Lower bound on MF gross rental yield % (`mf_gross_yield_pct >= N`). Inclusive. Yield = MF Cenová mapa reference monthly rent × 12 / asking price × 100; sale apartments only, so non-apartment / rental / unpriced listings fall out when set. Browse + Watchdog only.",
       "category": "Property",
       "ui_control": "range_slider",
       "agendas": [
