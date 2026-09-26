@@ -660,9 +660,9 @@ export function corrections(
   const withdraw: Correction = {
     label: 'Odvolat',
     verdict: 'unsure',
-    explain: `Rozhodnutí o ${about} se odvolá: zapíše se nové „Nevím“ a engine se jím přestane řídit${
+    explain: `Rozhodnutí o ${about} se odvolá: zapíše se nové „Nevím“ a engine se jím od dalšího průchodu (do minuty) přestane řídit${
       scope === 'pair' ? ' (zákaz spojení se zruší)' : ''
-    }.`,
+    }. Co už bylo sloučeno, zůstává sloučené.`,
   };
   if (status !== 'standing') return [same, different];
   return NEGATIVE_VERDICTS.includes(verdict) ? [same, withdraw] : [different, withdraw];

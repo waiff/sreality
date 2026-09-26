@@ -541,6 +541,7 @@ class Store(Protocol):
                        conflicts: Sequence[dict[str, Any]]) -> None: ...
     def must_not_link(self) -> set[tuple[int, int]]: ...
     def must_link(self) -> set[tuple[int, int]]: ...
+    def rulings_changed(self) -> set[int]: ...
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]: ...
     def bump_cell(self, listing: Listing) -> None: ...
     def unbump_cell(self, cell: tuple[str, str]) -> None: ...
@@ -1395,10 +1396,12 @@ class _GuardLookup:
 class Rulings:
     """The operator's two binding answers, read once a pass: `different` (must-not-link) and
     `same` (must-link, Decision 8 / E910), the latter only between listings this generation
-    holds — a ruling reaching outside the store cannot be clustered here."""
+    holds — a ruling reaching outside the store cannot be clustered here. `changed` is every
+    stored listing a ruling written since the previous pass names (G4, E920)."""
 
     must_not_link: frozenset[tuple[int, int]] = frozenset()
     must_link: frozenset[tuple[int, int]] = frozenset()
+    changed: frozenset[int] = frozenset()
 
     def within(self, members: Iterable[int]) -> tuple[frozenset[tuple[int, int]],
                                                        frozenset[tuple[int, int]]]:
@@ -1409,28 +1412,35 @@ class Rulings:
 
 def read_rulings(store: Store) -> Rulings:
     same = {(min(lo, hi), max(lo, hi)) for lo, hi in store.must_link() if lo != hi}
-    known = store.known({i for pair in same for i in pair}) if same else set()
+    changed = {int(i) for i in store.rulings_changed()}
+    wanted = {i for pair in same for i in pair} | changed
+    known = store.known(wanted) if wanted else set()
     return Rulings(frozenset(store.must_not_link()),
-                   frozenset(p for p in same if p[0] in known and p[1] in known))
+                   frozenset(p for p in same if p[0] in known and p[1] in known),
+                   frozenset(changed & known))
 
 
 def _ruling_seeds(store: Store, rulings: Rulings) -> set[int]:
-    """Operator rulings that TODAY'S clusters contradict: a must-not-link inside one cluster,
-    or a must-link across two (or outside any).
+    """Operator rulings that TODAY'S clusters contradict — a must-not-link inside one cluster,
+    or a must-link across two (or outside any) — and every listing a ruling written since the
+    previous pass names.
 
     A ruling added after the clustering it contradicts would otherwise never be honoured:
     re-clustering is seeded by pairs whose zone moved, and a ruling moves no pair. The sets are
     operator-curated and small, so one membership read per pass settles both. A must-link the
     invariants refuse (E910's dissolved closure) seeds its component every pass, which is the
-    price of re-reading a contradiction rather than forgetting it."""
+    price of re-reading a contradiction rather than forgetting it. A CHANGED ruling contradicts
+    nothing when it withdraws a word (G4, E920): the group a withdrawn `same` held together
+    contradicts no ruling left, so only the change itself can re-cluster it before the
+    reconcile merges it."""
+    seeds: set[int] = set(rulings.changed)
     pairs = sorted(rulings.must_not_link | rulings.must_link)
     if not pairs:
-        return set()
+        return seeds
     members: dict[int, int] = {}
     for key, ids in store.clusters_touching({i for pair in pairs for i in pair}).items():
         for listing_id in ids:
             members[listing_id] = key
-    seeds: set[int] = set()
     for lo, hi in rulings.must_not_link:
         if lo in members and members[lo] == members.get(hi):
             seeds |= {lo, hi}

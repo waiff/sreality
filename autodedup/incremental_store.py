@@ -57,6 +57,11 @@ class MemoryStore:
         self.conflicts: list[dict[str, Any]] = []
         self.mnl: set[tuple[int, int]] = set()
         self.ml: set[tuple[int, int]] = set()
+        # G4 (E920): the listings a ruling changed since the last pass names — the SQL store's
+        # `rt_rulings` cursor. Whoever changes a ruling adds its listings; `flush` (the end of
+        # the pass that read them) consumes what was read.
+        self.ruled: set[int] = set()
+        self._ruled_read: set[int] = set()
         self.cell: dict[tuple[str, str], CellRow] = {}
         self._merge_adj: dict[int, set[int]] = {}
 
@@ -178,6 +183,10 @@ class MemoryStore:
     def must_link(self) -> set[tuple[int, int]]:
         return set(self.ml)
 
+    def rulings_changed(self) -> set[int]:
+        self._ruled_read = set(self.ruled)
+        return set(self.ruled)
+
     # ---------------------------------------------------------------------- live census
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]:
         return {key: self.cell[key] for key in keys if key in self.cell}
@@ -220,4 +229,7 @@ class MemoryStore:
         return out
 
     def flush(self) -> None:
-        """Nothing is buffered here — the SQL store's write buffer is what this verb is for."""
+        """Nothing is buffered here — the SQL store's write buffer is what this verb is for —
+        but the pass that read the changed rulings has now honoured them (G4)."""
+        self.ruled -= self._ruled_read
+        self._ruled_read = set()

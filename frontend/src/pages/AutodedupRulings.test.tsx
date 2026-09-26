@@ -390,6 +390,12 @@ describe('corrections', () => {
       'different',
     ]);
   });
+
+  it('a withdrawal says when the engine stops obeying it, and that it splits nothing (G4)', () => {
+    const withdraw = corrections('same', 'standing', 'pair').find((c) => c.verdict === 'unsure')!;
+    expect(withdraw.explain).toContain('od dalšího průchodu');
+    expect(withdraw.explain).toContain('zůstává sloučené');
+  });
 });
 
 describe('sanitizeRulingFilters', () => {
