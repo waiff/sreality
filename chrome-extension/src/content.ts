@@ -1482,8 +1482,8 @@ function mountPanel(): {
     lab.textContent = 'MF nájem';
     const val = document.createElement('span');
     val.className = 'mf-ledger-value';
-    /* The per-m² rate is the result's own (a value's total, a range's
-     * published span), never a quotient taken here. */
+    /* The per-m² rate is the result's own (a value's total, a range's two
+     * totals), never a quotient taken here. */
     const num = (n: number): string => Math.round(n).toLocaleString('cs-CZ');
     if (shape.kind === 'value') {
       val.textContent =

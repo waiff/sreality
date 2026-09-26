@@ -26,9 +26,9 @@ const STORED: ReferenceRent = {
 
 const NOTE_COARSE = '(the range note, from SQL)';
 
-/* A town-level location in a town priced per katastr: no value, the range —
- * the published per-m² span of the reference flat, this flat's adjustments,
- * and the rents they make at its area ((203 + 5) × 75, (232 + 5) × 75). */
+/* A town-level location in a town priced per katastr: no value, the range.
+ * Its per-m² ends are TOTAL rates — the published 203–232 plus this flat's
+ * 5 Kč balcony — so each rent is its total × area (208 × 75, 237 × 75). */
 const RANGE = {
   territory: { ruian_code: 586846, level: 'obec', name: 'Jihlava', kraj: 'Kraj Vysočina' },
   vk: 3,
@@ -42,8 +42,8 @@ const RANGE = {
   status: 'territory_coarse',
   note: NOTE_COARSE,
   range: {
-    per_m2_min: 203,
-    per_m2_max: 232,
+    per_m2_min: 208,
+    per_m2_max: 237,
     rent_min_czk: 15_600,
     rent_max_czk: 17_775,
     yield_min_pct: 3.6,
@@ -85,16 +85,16 @@ describe('MfReferenceCard', () => {
   it('renders a range with its note behind the (i), and the range yield', () => {
     const { container } = render(<MfReferenceCard refRent={RANGE} yieldPct={9.99} />);
     expect(container).toHaveTextContent('15 600–17 775 Kč/měs');
-    expect(container).toHaveTextContent('Nájemné referenčního bytu203–232 Kč/m²/měs');
     expect(container).toHaveTextContent('+ balkón+5 Kč/m²/měs');
+    expect(container).toHaveTextContent('Celkem za m²208–237 Kč/m²/měs');
     expect(container).toHaveTextContent('× plocha 75 m²15 600–17 775 Kč');
     expect(container).toHaveTextContent('hrubý výnos 3,60–4,10 %');
     // The range carries its own yields; the value yield is not borrowed.
     expect(container).not.toHaveTextContent('9,99');
     const hint = screen.getByRole('img', { name: NOTE_COARSE });
     expect(hint).toHaveAttribute('title', NOTE_COARSE);
-    // A range is not a value: no single total, no single rent.
-    expect(container).not.toHaveTextContent('Celkem za m²');
+    // A range is not a value: no reference-flat base, no single rent.
+    expect(container).not.toHaveTextContent('Nájemné referenčního bytu');
   });
 
   it('renders a range without yields for a rental flat', () => {

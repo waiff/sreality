@@ -72,12 +72,12 @@ export function MfReferenceCard({
           )}
         </div>
         <dl className="mt-2 space-y-0.5 text-[0.72rem] tabular-nums">
-          <Row label={baseLabel(ref)}>
+          <AdjustmentRows adjustments={adjustments} />
+          <Row label="Celkem za m²" strong>
             {fmtCount(Math.round(range.per_m2_min))}–{perM2(range.per_m2_max)}
           </Row>
-          <AdjustmentRows adjustments={adjustments} />
           {ref.area_m2 != null && (
-            <Row label={`× plocha ${ref.area_m2.toLocaleString('cs-CZ')} m²`} strong>
+            <Row label={`× plocha ${ref.area_m2.toLocaleString('cs-CZ')} m²`}>
               {fmtCount(range.rent_min_czk)}–{fmtCzk(range.rent_max_czk)}
             </Row>
           )}
@@ -98,7 +98,9 @@ export function MfReferenceCard({
         {yieldPct != null && <YieldFigure>{pct2(yieldPct)}</YieldFigure>}
       </div>
       <dl className="mt-2 space-y-0.5 text-[0.72rem] tabular-nums">
-        <Row label={baseLabel(ref)}>{perM2(ref.base_per_m2)}</Row>
+        <Row label={`Nájemné referenčního bytu${ref.is_novostavba ? ' (novostavba)' : ''}`}>
+          {perM2(ref.base_per_m2)}
+        </Row>
         <AdjustmentRows adjustments={adjustments} />
         <Row label="Celkem za m²" strong>{perM2(ref.total_per_m2)}</Row>
         <Row label={`× plocha ${ref.area_m2.toLocaleString('cs-CZ')} m²`}>
@@ -108,11 +110,6 @@ export function MfReferenceCard({
       <Source refRent={ref} />
     </div>
   );
-}
-
-/* The reference flat's rate — a value's one cell, or a range's published span. */
-function baseLabel(ref: ReferenceRent): string {
-  return `Nájemné referenčního bytu${ref.is_novostavba ? ' (novostavba)' : ''}`;
 }
 
 function Eyebrow() {
