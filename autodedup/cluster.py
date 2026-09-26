@@ -24,11 +24,17 @@ The pass is off unless a settings row asks for it, and a bridge it does not appl
 
 Cluster identity is the smallest listing id it ever admitted (E36), which is also the union
 representative, so identity never moves as a cluster grows.
+
+E910 (Decision 8): the operator's `same` rulings are MUST-LINKS. Their connected components
+(closures) enter as units: a closure the hard invariants accept is one node of the merge graph
+(the repartition works on the contracted graph, so every move shifts a whole closure), the D43
+relation and the machine vetoes do not separate two adverts of one closure, and the spreads are
+read across closures only. With no must-link every one of those is today's rule exactly.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from autodedup.d43 import ClusterRelation
@@ -123,6 +129,7 @@ def apply_bridges(
     settings: Settings,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
     relation: ClusterRelation | None = None,
+    closure_of: Mapping[int, int] | None = None,
 ) -> int:
     """E57: re-offer each recorded bridge once; apply it only if the MERGED set still holds.
 
@@ -143,7 +150,8 @@ def apply_bridges(
             continue
         members = union_find.members(root_lo) + union_find.members(root_hi)
         fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
-        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link, relation)
+        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link, relation,
+                                          closure_of)
         if invariant is not None:
             bridge["invariant"] = invariant
             continue
@@ -153,14 +161,71 @@ def apply_bridges(
     return applied
 
 
+def must_link_closures(
+    must_link: Iterable[tuple[int, int]], known: Mapping[int, Any] | None = None,
+) -> dict[int, list[int]]:
+    """E910: the connected components of the `same` rulings, keyed by their smallest id.
+
+    A ruling with a side outside `known` (a listing the pass cannot read) links nothing."""
+    parent: dict[int, int] = {}
+
+    def find(item: int) -> int:
+        root = parent.setdefault(item, item)
+        while root != parent[root]:
+            parent[root] = parent[parent[root]]
+            root = parent[root]
+        return root
+
+    for lo, hi in sorted(must_link):
+        if lo == hi or (known is not None and (lo not in known or hi not in known)):
+            continue
+        left, right = find(lo), find(hi)
+        if left != right:
+            parent[max(left, right)] = min(left, right)
+    out: dict[int, list[int]] = {}
+    for item in parent:
+        out.setdefault(find(item), []).append(item)
+    return {key: sorted(members) for key, members in sorted(out.items()) if len(members) > 1}
+
+
+def _valid_closures(
+    must_link: Iterable[tuple[int, int]],
+    fps: Mapping[int, Fingerprint],
+    settings: Settings,
+    must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
+) -> tuple[dict[int, list[int]], int]:
+    """The closures the hard limbs accept, and how many were dissolved.
+
+    Inside a closure only the size, the deal type, the category and an operator must-not-link
+    can refuse (the operator's own rulings contradicting each other); a refused closure binds
+    nothing rather than half of itself."""
+    kept: dict[int, list[int]] = {}
+    dissolved = 0
+    for key, members in must_link_closures(must_link, fps).items():
+        closure_of = {member: key for member in members}
+        if cluster_invariants_ok([fps[m] for m in members], settings, must_not_link, None,
+                                 closure_of) is None:
+            kept[key] = members
+        else:
+            dissolved += 1
+    return kept, dissolved
+
+
 def _repartition_clusters(
     edges: Sequence[Decision],
     fps: Mapping[int, Fingerprint],
     settings: Settings,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
     relation: ClusterRelation | None,
+    closures: Mapping[int, Sequence[int]] | None = None,
 ) -> tuple[dict[int, list[int]], list[dict[str, Any]], int]:
-    """E137: components of the merge graph, each cut into maximal consistent sub-groups."""
+    """E137: components of the merge graph, each cut into maximal consistent sub-groups.
+
+    E910: a must-link closure is CONTRACTED to one node (its smallest id) before the graph is
+    cut, so `partition` starts from the closures instead of singletons and every move it makes
+    shifts a whole closure; the invariants and the blockers read the expanded member sets."""
+    if closures:
+        return _repartition_contracted(edges, fps, settings, must_not_link, relation, closures)
 
     def invariants(members: Sequence[int]) -> str | None:
         fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
@@ -234,6 +299,110 @@ def _repartition_clusters(
     return grouped, conflicts, cut
 
 
+def _repartition_contracted(
+    edges: Sequence[Decision],
+    fps: Mapping[int, Fingerprint],
+    settings: Settings,
+    must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
+    relation: ClusterRelation | None,
+    closures: Mapping[int, Sequence[int]],
+) -> tuple[dict[int, list[int]], list[dict[str, Any]], int]:
+    """`_repartition_clusters` over the graph with every must-link closure contracted (E910).
+
+    A node is a closure's smallest id; an edge inside a closure disappears (the closure is one
+    node) and an edge out of one is re-attached to it. The repartition itself is untouched: it
+    sees nodes, and every node it moves is a whole closure."""
+    node_of = {member: key for key, members in closures.items() for member in members}
+
+    def node(listing_id: int) -> int:
+        return node_of.get(listing_id, listing_id)
+
+    def expand(nodes: Sequence[int]) -> list[int]:
+        return sorted(member for n in nodes for member in closures.get(n, (n,)))
+
+    contracted: list[Decision] = []
+    for decision in edges:
+        left, right = node(decision.lo), node(decision.hi)
+        if left == right:
+            continue
+        contracted.append(replace(decision, lo=min(left, right), hi=max(left, right)))
+    nodes_only = [key for key in closures
+                  if not any(key in (d.lo, d.hi) for d in contracted)]
+
+    def invariants(nodes: Sequence[int]) -> str | None:
+        fingerprints = [fps[m] for m in expand(nodes) if m in fps]
+        return cluster_invariants_ok(fingerprints, settings, must_not_link, relation, node_of)
+
+    strict_relation = (relation.strict()
+                       if settings.repartition_rejoin_cells and relation is not None else None)
+
+    def blockers(nodes: Sequence[int]) -> list[tuple[int, int]]:
+        members = expand(nodes)
+        out: set[tuple[int, int]] = set()
+        for index, left in enumerate(members):
+            for right in members[index + 1:]:
+                a, b = node(left), node(right)
+                if a == b:
+                    continue
+                if (left, right) in must_not_link or (
+                        relation is not None and not relation.ok(left, right)):
+                    out.add((min(a, b), max(a, b)))
+        return sorted(out)
+
+    def strict_invariants(nodes: Sequence[int]) -> str | None:
+        broken = invariants(nodes)
+        if broken is not None:
+            return broken
+        if strict_relation is not None and strict_relation.violating_pair(
+                expand(nodes)) is not None:
+            return "d43_strict"
+        return None
+
+    graph = [Edge(d.lo, d.hi, d.score, d.certificate is not None) for d in contracted]
+    nodes = {n for edge in contracted for n in (edge.lo, edge.hi)} | set(nodes_only)
+    grouped: dict[int, list[int]] = {}
+    cut = 0
+    for component in components(nodes, graph):
+        inside = set(component)
+        if invariants(component) is None:
+            cells = [component]
+        else:
+            cut += 1
+            local = [edge for edge in graph if edge.lo in inside and edge.hi in inside]
+            cells = partition(component, local, invariants, settings.repartition_max_rounds,
+                              settings.repartition_keep_factless,
+                              settings.repartition_rejoin_cells, strict_invariants,
+                              blockers if settings.repartition_shed_blockers else None,
+                              settings.repartition_shed_max,
+                              settings.repartition_shed_max_union,
+                              settings.repartition_outer_rounds,
+                              settings.repartition_shed_factless_guard,
+                              settings.repartition_reconcile_factless_first)
+        for cell in cells:
+            members = expand(cell)
+            grouped[min(members)] = members
+
+    membership = {listing_id: key for key, members in grouped.items() for listing_id in members}
+    conflicts: list[dict[str, Any]] = []
+    for decision in edges:
+        if membership.get(decision.lo) == membership.get(decision.hi):
+            continue
+        members = sorted(set(grouped.get(membership.get(decision.lo, -1), [decision.lo]))
+                         | set(grouped.get(membership.get(decision.hi, -1), [decision.hi])))
+        fingerprints = [fps[m] for m in members if m in fps]
+        conflicts.append({
+            "lo": decision.lo,
+            "hi": decision.hi,
+            "score": decision.score,
+            "certificate": decision.certificate,
+            "invariant": cluster_invariants_ok(fingerprints, settings, must_not_link, relation,
+                                               node_of) or "repartition",
+            "members": members,
+            "families": sorted(decision.families),
+        })
+    return grouped, conflicts, cut
+
+
 def cluster_pairs(
     decisions: Sequence[Decision],
     listings: Mapping[int, Listing],
@@ -241,14 +410,29 @@ def cluster_pairs(
     settings: Settings,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]] = frozenset(),
     relation: ClusterRelation | None = None,
+    must_link: frozenset[tuple[int, int]] | set[tuple[int, int]] = frozenset(),
+    machine_vetoes: frozenset[tuple[int, int]] | set[tuple[int, int]] = frozenset(),
 ) -> ClusterResult:
-    """Merge edges -> validated clusters, one conflict row per refused union, bridges recorded."""
+    """Merge edges -> validated clusters, one conflict row per refused union, bridges recorded.
+
+    `must_not_link` is the operator's; `machine_vetoes` (E61's designator vetoes) refuse like
+    it everywhere except inside a must-link closure (E910)."""
+    closures, dissolved = (_valid_closures(must_link, fps, settings, must_not_link)
+                           if must_link else ({}, 0))
+    closure_of = {member: key for key, members in closures.items() for member in members}
+    must_not_link = frozenset(must_not_link) | frozenset(
+        pair for pair in machine_vetoes
+        if closure_of.get(pair[0]) is None or closure_of.get(pair[0]) != closure_of.get(pair[1]))
+    if closure_of and relation is not None:
+        relation = relation.bound(closure_of)
+    linked = {"n_must_link": len(must_link), "n_must_link_closures": len(closures),
+              "n_must_link_dissolved": dissolved}
     edges = sorted(
         (decision for decision in decisions if decision.zone == "merge"), key=edge_rank
     )
     if settings.repartition:
         grouped, conflicts, cut = _repartition_clusters(
-            edges, fps, settings, must_not_link, relation
+            edges, fps, settings, must_not_link, relation, closures
         )
         clusters = {key: members for key, members in sorted(grouped.items())
                     if len(members) > 1}
@@ -263,6 +447,7 @@ def cluster_pairs(
                 n_bridges_applied=0,
                 n_bridges_refused=0,
                 n_components_repartitioned=cut,
+                **(linked if must_link else {}),
             ),
             bridges=[],
         )
@@ -271,6 +456,9 @@ def cluster_pairs(
     for decision in edges:
         union_find.add(decision.lo)
         union_find.add(decision.hi)
+    for members in closures.values():
+        for member in members:
+            union_find.union(members[0], member)
 
     conflicts: list[dict[str, Any]] = []
     bridges: list[dict[str, Any]] = []
@@ -302,7 +490,8 @@ def cluster_pairs(
             continue
         members = left + right
         fingerprints = [fps[listing_id] for listing_id in members if listing_id in fps]
-        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link, relation)
+        invariant = cluster_invariants_ok(fingerprints, settings, must_not_link, relation,
+                                          closure_of)
         if invariant is not None:
             conflicts.append({
                 "lo": decision.lo,
@@ -318,7 +507,7 @@ def cluster_pairs(
         accepted.append(decision)
 
     bridges_applied = apply_bridges(
-        bridges, union_find, fps, settings, must_not_link, relation
+        bridges, union_find, fps, settings, must_not_link, relation, closure_of
     )
 
     for root, members in union_find.groups.items():
@@ -333,6 +522,7 @@ def cluster_pairs(
         n_bridges_applied=bridges_applied,
         n_bridges_refused=len(bridges) - bridges_applied,
         n_components_repartitioned=0,
+        **(linked if must_link else {}),
     )
     return ClusterResult(
         clusters=clusters, conflicts=conflicts, stats=stats, bridges=bridges
@@ -345,6 +535,8 @@ def _cluster_stats(
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
     **counts: int,
 ) -> dict[str, Any]:
+    linked = {key: counts.pop(key) for key in
+              ("n_must_link", "n_must_link_closures", "n_must_link_dissolved") if key in counts}
     """One stats shape whichever pass built the clusters, so the two are comparable."""
     sizes = [len(members) for members in clusters.values()]
     histogram: dict[str, int] = {}
@@ -369,6 +561,7 @@ def _cluster_stats(
         "max_size": max(sizes) if sizes else 0,
         "mean_size": (sum(sizes) / len(sizes)) if sizes else 0.0,
         "conflicts_by_invariant": dict(sorted(by_invariant.items())),
+        **linked,
     }
 
 

@@ -38,7 +38,7 @@ from autodedup.dataset import Dataset, Image, Listing, load
 from autodedup.decide import decide_pair
 from autodedup.features import FeatureContext, pair_features
 from autodedup.fingerprint import build_all
-from autodedup.harness import load_model, load_settings
+from autodedup.harness import load_model, load_must_not_link, load_settings
 from autodedup.hazard_context import ContextIndex
 from autodedup.incremental import (
     EVIDENCE_HOLD_REASON,
@@ -202,7 +202,8 @@ def arrival_order(ds: Dataset, shuffle_seed: int | None = None) -> list[int]:
 
 
 def batch_state(
-    ds: Dataset, settings: Settings, model: LogisticModel
+    ds: Dataset, settings: Settings, model: LogisticModel,
+    must_link: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, float]]:
     """The reference: the cohort pass's decisions and clusters, in this process."""
     timings: dict[str, float] = {}
@@ -231,8 +232,9 @@ def batch_state(
                      "evidence": decision.evidence}, settings.store_floor):
             slots[(lo, hi)] = {name: feats[name] for name in FEATURE_SLOTS if name in feats}
         out[(lo, hi)] = _pair_view(decision, sorted(pairs[(lo, hi)]))
-    clustered = cluster_pairs(decisions, ds.listings, fps, settings, frozenset(vetoed),
-                              relation_for(settings, ds.listings, slots))
+    clustered = cluster_pairs(decisions, ds.listings, fps, settings, frozenset(),
+                              relation_for(settings, ds.listings, slots),
+                              must_link=must_link, machine_vetoes=frozenset(vetoed))
     timings["batch_s"] = time.perf_counter() - clock
     return out, {key: list(members) for key, members in clustered.clusters.items()}, timings
 
@@ -258,8 +260,10 @@ def incremental_state(
     batch_size: int,
     limits: Limits,
     score_column: str = PAIR_SCORE_SQL_TYPE,
+    must_link: frozenset[tuple[int, int]] = frozenset(),
 ) -> tuple[dict[tuple[int, int], dict[str, Any]], dict[int, list[int]], dict[str, Any]]:
     store = MemoryStore(score_sql_type=score_column)
+    store.ml = set(must_link)
     facts = DatasetFacts(ds)
     work = ScheduleWork(order)
     passes: list[PassResult] = []
@@ -474,7 +478,11 @@ def run(argv: Sequence[str] | None = None) -> int:
     # the scope: the SAME listings on both sides, the batch pass included. Passing it here
     # restricts the dataset once, before either path sees it.
     parser.add_argument("--scope", default=None)
+    # E910: the operator's `same` rulings (the labels lane's must_link.jsonl) bind BOTH sides,
+    # so G1's "re-run with rulings" arm is the same comparison with the rulings in force.
+    parser.add_argument("--must-link", default=None)
     ns = parser.parse_args(argv)
+    must_link = load_must_not_link(ns.must_link)
 
     settings = load_settings(ns.settings)
     model = load_model(ns.model)
@@ -497,7 +505,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     fps = build_all(ds, settings)
     calibration = Calibration.build(fps, ds.listings, settings)
 
-    reference, batch_clusters, timings = batch_state(ds, settings, model)
+    reference, batch_clusters, timings = batch_state(ds, settings, model, must_link)
     # The SHIPPED budget, not an unreachable one: `max_pairs` is the only cap the cohort pass
     # has no equivalent of, so a replay that raised it out of reach would prove equivalence
     # for a configuration production never runs.
@@ -505,7 +513,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                     max_component=ns.max_component)
     order = arrival_order(ds)
     pairs, clusters, stats = incremental_state(
-        ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column
+        ds, settings, model, calibration, order, ns.batch_size, limits, ns.score_column,
+        must_link,
     )
     # The third arm, and it always runs: production's entrant order at production's claim
     # size, against the same batch reference (E116).
@@ -513,7 +522,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                          max_component=ns.max_component)
     live_pairs, live_clusters, live_stats = incremental_state(
         ds, settings, model, calibration, entrant_order(ds), ns.live_claim_size, live_limits,
-        ns.score_column,
+        ns.score_column, must_link,
     )
 
     report: dict[str, Any] = {

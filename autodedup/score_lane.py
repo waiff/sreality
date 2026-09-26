@@ -60,6 +60,7 @@ from autodedup.score_sql import (
     STORE_PRESENT_SQL,
 )
 from autodedup.settings import Settings
+from autodedup.incremental_sql import RT_MUST_LINK_SQL
 from autodedup.store_score import storable
 
 RUN_FILE: str = "run.json"
@@ -606,6 +607,16 @@ def read_must_not_link(conn: Any) -> dict[str, frozenset[tuple[int, int]]]:
     return {source: frozenset(pairs) for source, pairs in sorted(by_source.items())}
 
 
+def read_must_link(conn: Any) -> frozenset[tuple[int, int]]:
+    """E910: the pairs whose newest pair ruling is `same` — the real-time lane's own read."""
+    out: set[tuple[int, int]] = set()
+    for row in _fetchall(conn, RT_MUST_LINK_SQL):
+        lo, hi = ((row[0], row[1]) if isinstance(row, (list, tuple))
+                  else (row.get("listing_lo"), row.get("listing_hi")))
+        out.add((int(min(lo, hi)), int(max(lo, hi))))
+    return frozenset(out)
+
+
 def read_judged_edges(
     conn: Any, edges: Sequence[tuple[int, int]]
 ) -> set[tuple[int, int]]:
@@ -755,6 +766,9 @@ def run_score(
         must_not_link = frozenset().union(*mnl_by_source.values()) if mnl_by_source else frozenset()
         if not settings.operator_must_not_link:
             must_not_link = must_not_link - mnl_by_source.get("operator", frozenset())
+        # E910: the operator's `same` rulings bind a scored generation exactly as they bind the
+        # real-time lane, so an evaluation pass and the live stream differ by the engine only.
+        must_link = read_must_link(conn)
 
         run_id = start_run(conn, {
             "fingerprint": fingerprint_of(settings, model, parsed.generation),
@@ -772,12 +786,14 @@ def run_score(
                 "must_not_link_by_source": {
                     source: len(pairs) for source, pairs in mnl_by_source.items()
                 },
+                "n_must_link": len(must_link),
             }, ensure_ascii=False, sort_keys=True, default=str),
         })
 
         try:
             dataset = load(cohort_path)
-            engine = harness.run_engine(dataset, settings, model, out_dir, must_not_link)
+            engine = harness.run_engine(dataset, settings, model, out_dir, must_not_link,
+                                        must_link)
             engine["artifact"] = str(cohort_path)
             engine["generation"] = parsed.generation
             (out_dir / RUN_FILE).write_text(

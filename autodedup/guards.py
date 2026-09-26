@@ -13,7 +13,7 @@ pair by dividing by the smaller number.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol, Sequence
 
 from autodedup.dataset import Listing
 from autodedup.settings import Settings
@@ -127,7 +127,8 @@ def floor_relation(a: GuardSide, b: GuardSide) -> str:
 
 
 def _spread_is_printed_one(
-    members: Sequence["Fingerprint"], cfg: Settings, relation: "ClusterRelation"
+    members: Sequence["Fingerprint"], cfg: Settings, relation: "ClusterRelation",
+    closure_of: Mapping[int, int] | None = None,
 ) -> bool:
     """E280 at cluster grain: every pair of members whose COLUMNS are further apart than the
     spread prints the same floor-area figures in both bodies, so the spread is the portals'."""
@@ -143,10 +144,27 @@ def _spread_is_printed_one(
         for right_id, right in sized[index + 1:]:
             if abs(left - right) / max(left, right) <= cfg.cluster_area_spread:
                 continue
+            if _same_closure(left_id, right_id, closure_of):
+                continue
             a, b = listings.get(left_id), listings.get(right_id)
             if a is None or b is None or not _printed_areas_prevail(a, b):
                 return False
     return True
+
+
+def _same_closure(left: int, right: int, closure_of: Mapping[int, int] | None) -> bool:
+    if not closure_of:
+        return False
+    key = closure_of.get(left)
+    return key is not None and key == closure_of.get(right)
+
+
+def _cross_closure_pairs(values: Sequence[tuple[int, Any]],
+                         closure_of: Mapping[int, int]) -> Iterable[tuple[Any, Any]]:
+    for index, (left_id, left) in enumerate(values):
+        for right_id, right in values[index + 1:]:
+            if not _same_closure(left_id, right_id, closure_of):
+                yield left, right
 
 
 def cluster_invariants_ok(
@@ -154,6 +172,7 @@ def cluster_invariants_ok(
     settings: Settings | None = None,
     must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]] = frozenset(),
     relation: "ClusterRelation | None" = None,
+    closure_of: Mapping[int, int] | None = None,
 ) -> str | None:
     """E34 on the MERGED member set: the violated invariant's name, or None when it holds.
 
@@ -161,8 +180,17 @@ def cluster_invariants_ok(
     pairwise gate alone lets A-B and B-C pass while A and C differ on the floor. It is the last
     limb because it is the expensive one and it reads the two BODIES, which a fingerprint
     cannot.
+
+    E910: `closure_of` maps a member to its must-link closure (the operator's `same` rulings,
+    Decision 8). The operator has ruled two adverts of one closure one property, so the spreads
+    are taken over CROSS-closure pairs only — which is today's rule exactly when no two members
+    share a closure — and the relation must be bound to the same closures by the caller.
     """
     cfg = settings or Settings()
+    if closure_of:
+        keys = [closure_of[fp.listing_id] for fp in members if fp.listing_id in closure_of]
+        if len(keys) != len(set(keys)):
+            return _closure_invariants(members, cfg, must_not_link, relation, closure_of)
     if len(members) > cfg.max_cluster_size:
         return "size"
 
@@ -201,6 +229,55 @@ def cluster_invariants_ok(
             if pair in must_not_link:
                 return "must_not_link"
 
+    if relation is not None and relation.violating_pair(ids) is not None:
+        return "d43_distinguishable"
+    return None
+
+
+def _closure_invariants(
+    members: Sequence["Fingerprint"],
+    cfg: Settings,
+    must_not_link: frozenset[tuple[int, int]] | set[tuple[int, int]],
+    relation: "ClusterRelation | None",
+    closure_of: Mapping[int, int],
+) -> str | None:
+    """`cluster_invariants_ok` for a member set in which some adverts share a must-link closure
+    (E910): the hard limbs (size, deal type, category) over the whole set, the spreads over the
+    pairs the operator has NOT ruled one property."""
+    if len(members) > cfg.max_cluster_size:
+        return "size"
+    types = {fp.category_type for fp in members if fp.category_type is not None}
+    if len(types) > 1:
+        return "category_type"
+    cats = sorted({fp.category_main for fp in members if fp.category_main is not None})
+    for index, left in enumerate(cats):
+        for right in cats[index + 1:]:
+            if not category_main_compatible(left, right):
+                return "compat_class"
+    sized = [(fp.listing_id, float(fp.area_m2)) for fp in members
+             if fp.area_m2 is not None and fp.area_m2 > 0.0]
+    if any(abs(a - b) / max(a, b) > cfg.cluster_area_spread
+           for a, b in _cross_closure_pairs(sized, closure_of)):
+        if not (cfg.d43_printed_area_prevails and relation is not None
+                and _spread_is_printed_one(members, cfg, relation, closure_of)):
+            return "area_spread"
+    is_land = any(fp.category_main == LAND_CATEGORY for fp in members)
+    if cfg.cluster_disposition and not is_land:
+        stated = [(fp.listing_id, fp.disposition) for fp in members
+                  if fp.disposition is not None]
+        if any(a != b for a, b in _cross_closure_pairs(stated, closure_of)):
+            return "disposition"
+    if cfg.cluster_floor_spread:
+        floors = [(fp.listing_id, fp.floor) for fp in members
+                  if fp.category_main == FLAT_CATEGORY and fp.floor is not None]
+        if any(a != b for a, b in _cross_closure_pairs(floors, closure_of)):
+            return "floor_spread"
+    ids = [fp.listing_id for fp in members]
+    for index, left in enumerate(ids):
+        for right in ids[index + 1:]:
+            pair = (left, right) if left < right else (right, left)
+            if pair in must_not_link:
+                return "must_not_link"
     if relation is not None and relation.violating_pair(ids) is not None:
         return "d43_distinguishable"
     return None

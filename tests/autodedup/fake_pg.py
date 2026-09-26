@@ -59,6 +59,7 @@ class FakePg:
         self.lease: dict[str, dict[str, Any]] = {}
         self.settings: dict[str, Any] = {}
         self.mnl: set[tuple[int, int]] = set()
+        self.ml: set[tuple[int, int]] = set()
         # `public`, read-only: what the four feeds page over AND what the fact source reads.
         # The rows carry whatever column a statement asks for, so a listing row here is the
         # same dict the feeds and `COHORT_LISTINGS_SQL` both read.
@@ -537,6 +538,8 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
 
     if sql == S.RT_MUST_NOT_LINK_SQL:
         return sorted(db.mnl)
+    if sql == S.RT_MUST_LINK_SQL:
+        return sorted(db.ml)
 
     # ---------------------------------------------------------------- the clean reset (E97)
     #

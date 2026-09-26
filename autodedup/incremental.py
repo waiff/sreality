@@ -498,6 +498,7 @@ class Store(Protocol):
     def write_clusters(self, drop_keys: Sequence[int], rows: Sequence[dict[str, Any]],
                        conflicts: Sequence[dict[str, Any]]) -> None: ...
     def must_not_link(self) -> set[tuple[int, int]]: ...
+    def must_link(self) -> set[tuple[int, int]]: ...
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]: ...
     def bump_cell(self, listing: Listing) -> None: ...
     def unbump_cell(self, cell: tuple[str, str]) -> None: ...
@@ -981,13 +982,14 @@ def run_pass(
     for item in items:
         result.feeds[item.feed] = result.feeds.get(item.feed, 0) + 1
     if not claimed and not retire_ids:
-        # An idle pass is still the only moment an operator's must-not-link row can be
-        # honoured: it moves no pair, so nothing else would ever seed its component (E78).
-        operator_mnl = store.must_not_link()
-        seeds = _mnl_seeds(store, operator_mnl)
+        # An idle pass is still the only moment an operator's ruling can be honoured: a
+        # must-not-link or a `same` moves no pair, so nothing else would ever seed its
+        # component (E78, E910).
+        rulings = read_rulings(store)
+        seeds = _ruling_seeds(store, rulings)
         if seeds:
             _recluster(store, facts, settings, _Working(facts, settings), seeds, caps,
-                       result, operator_mnl)
+                       result, rulings)
         store.flush()
         result.cursors = work.commit(items)
         result.timings["total_s"] = time.perf_counter() - clock
@@ -1237,19 +1239,19 @@ def run_pass(
         previous = stored.get(key)
         if previous is not None and previous.zone == "merge":
             seeds |= set(key)
-    operator_mnl = store.must_not_link()
-    seeds |= _mnl_seeds(store, operator_mnl)
+    rulings = read_rulings(store)
+    seeds |= _ruling_seeds(store, rulings)
     # A retired listing is not a seed: it has no postings, no pairs and no cell any more. Its
     # ex-partners are already seeds (they are the other side of every dropped edge), and they
     # are the component that has to re-cluster without it.
     seeds -= retired
-    _recluster(store, facts, settings, working, seeds, caps, result, operator_mnl)
+    _recluster(store, facts, settings, working, seeds, caps, result, rulings)
     result.timings["cluster_s"] = time.perf_counter() - clock
 
     # --- 7. E64: a census that has overtaken a stamped promotion re-opens it to the band ---
     clock = time.perf_counter()
     result.rail = _run_rail(store, facts, settings, working, result, sorted(touched_blocks),
-                            operator_mnl)
+                            rulings)
     result.timings["rail_s"] = time.perf_counter() - clock
 
     store.flush()
@@ -1320,13 +1322,39 @@ class _GuardLookup:
         return guard
 
 
-def _mnl_seeds(store: Store, must_not_link: Iterable[tuple[int, int]]) -> set[int]:
-    """Operator must-not-link rows that TODAY'S clusters contradict.
+@dataclass(frozen=True, slots=True)
+class Rulings:
+    """The operator's two binding answers, read once a pass: `different` (must-not-link) and
+    `same` (must-link, Decision 8 / E910), the latter only between listings this generation
+    holds — a ruling reaching outside the store cannot be clustered here."""
 
-    A refusal added after the merge it refuses would otherwise never be honoured: re-clustering
-    is seeded by pairs whose zone moved, and an operator row moves no pair. The set is
-    operator-curated and small, so one membership read per pass settles it."""
-    pairs = [(lo, hi) for lo, hi in must_not_link]
+    must_not_link: frozenset[tuple[int, int]] = frozenset()
+    must_link: frozenset[tuple[int, int]] = frozenset()
+
+    def within(self, members: Iterable[int]) -> tuple[frozenset[tuple[int, int]],
+                                                       frozenset[tuple[int, int]]]:
+        inside = set(members)
+        return (frozenset(p for p in self.must_not_link if p[0] in inside and p[1] in inside),
+                frozenset(p for p in self.must_link if p[0] in inside and p[1] in inside))
+
+
+def read_rulings(store: Store) -> Rulings:
+    same = {(min(lo, hi), max(lo, hi)) for lo, hi in store.must_link() if lo != hi}
+    known = store.known({i for pair in same for i in pair}) if same else set()
+    return Rulings(frozenset(store.must_not_link()),
+                   frozenset(p for p in same if p[0] in known and p[1] in known))
+
+
+def _ruling_seeds(store: Store, rulings: Rulings) -> set[int]:
+    """Operator rulings that TODAY'S clusters contradict: a must-not-link inside one cluster,
+    or a must-link across two (or outside any).
+
+    A ruling added after the clustering it contradicts would otherwise never be honoured:
+    re-clustering is seeded by pairs whose zone moved, and a ruling moves no pair. The sets are
+    operator-curated and small, so one membership read per pass settles both. A must-link the
+    invariants refuse (E910's dissolved closure) seeds its component every pass, which is the
+    price of re-reading a contradiction rather than forgetting it."""
+    pairs = sorted(rulings.must_not_link | rulings.must_link)
     if not pairs:
         return set()
     members: dict[int, int] = {}
@@ -1334,8 +1362,11 @@ def _mnl_seeds(store: Store, must_not_link: Iterable[tuple[int, int]]) -> set[in
         for listing_id in ids:
             members[listing_id] = key
     seeds: set[int] = set()
-    for lo, hi in pairs:
+    for lo, hi in rulings.must_not_link:
         if lo in members and members[lo] == members.get(hi):
+            seeds |= {lo, hi}
+    for lo, hi in rulings.must_link:
+        if members.get(lo) is None or members.get(lo) != members.get(hi):
             seeds |= {lo, hi}
     return seeds
 
@@ -1416,7 +1447,8 @@ class _Reach:
 
 
 def _components(
-    store: Store, seeds: Iterable[int], max_size: int
+    store: Store, seeds: Iterable[int], max_size: int,
+    must_link: Iterable[tuple[int, int]] = (),
 ) -> tuple[list[list[int]], list[int]]:
     """Connected components of the merge-edge graph reachable from the seeds, BFS-bounded.
 
@@ -1433,6 +1465,12 @@ def _components(
     wanted = sorted(set(seeds))
     if not wanted:
         return [], []
+    # E910: a must-link is an edge of the component graph like a merge edge — a closure is
+    # clustered whole or not at all, so its members are one component's.
+    linked: dict[int, set[int]] = {}
+    for lo, hi in must_link:
+        linked.setdefault(lo, set()).add(hi)
+        linked.setdefault(hi, set()).add(lo)
     reach = _Reach()
     for seed in wanted:
         reach.add(seed)
@@ -1441,7 +1479,12 @@ def _components(
     while frontier:
         seen |= frontier
         found: set[int] = set()
-        for listing_id, others in store.merge_neighbours(sorted(frontier)).items():
+        neighbours = store.merge_neighbours(sorted(frontier))
+        for listing_id in sorted(frontier):
+            if linked.get(listing_id):
+                neighbours.setdefault(listing_id, set())
+                neighbours[listing_id] = set(neighbours[listing_id]) | linked[listing_id]
+        for listing_id, others in neighbours.items():
             reach.add(listing_id)
             for other in others:
                 reach.add(other)
@@ -1467,7 +1510,7 @@ def _recluster(
     seeds: Iterable[int],
     caps: Limits,
     result: PassResult,
-    operator_mnl: frozenset[tuple[int, int]] | set[tuple[int, int]] | None = None,
+    rulings: Rulings | None = None,
 ) -> None:
     """Re-cluster every touched component, in a fixed number of statements (E74).
 
@@ -1484,10 +1527,10 @@ def _recluster(
     that same order — so nothing here grows a cluster edge by edge in arrival order, and the
     claim size a pass took cannot reach the partition. That holds exactly as far as
     `edge_rank` is a total order over the STORED rows (E115, E117)."""
-    components, oversized = _components(store, seeds, caps.max_component)
+    rulings = read_rulings(store) if rulings is None else rulings
+    components, oversized = _components(store, seeds, caps.max_component, rulings.must_link)
     result.oversized_components = sorted(set(result.oversized_components) | set(oversized))
     result.components += len(components)
-    operator_mnl = store.must_not_link() if operator_mnl is None else operator_mnl
     if not components:
         return
     every = sorted({i for members in components for i in members})
@@ -1514,14 +1557,13 @@ def _recluster(
     for index, members in enumerate(components):
         pairs = edges[index]
         decisions = [row.decision() for row in pairs]
-        vetoed = {(row.lo, row.hi) for row in pairs if row.veto == UNIT_DESIGNATOR_VETO}
-        inside = set(members)
-        mnl = frozenset(
-            {pair for pair in operator_mnl if pair[0] in inside and pair[1] in inside} | vetoed
-        )
+        vetoed = frozenset((row.lo, row.hi) for row in pairs
+                           if row.veto == UNIT_DESIGNATOR_VETO)
+        mnl, same = rulings.within(members)
         fps = {i: working.fps[i] for i in members if i in working.fps}
         listings = {i: working.listings[i] for i in members if i in working.listings}
-        clustered = cluster_pairs(decisions, listings, fps, settings, mnl, relation)
+        clustered = cluster_pairs(decisions, listings, fps, settings, mnl, relation,
+                                  must_link=same, machine_vetoes=vetoed)
         rows.extend(cluster_rows(clustered, decisions, fps))
         keep |= set(clustered.clusters)
         # Refused unions AND refused bridges: §8 calls these the highest-value rows in the UI,
@@ -1547,7 +1589,7 @@ def _run_rail(
     working: _Working,
     result: PassResult,
     blocks: Sequence[str],
-    operator_mnl: frozenset[tuple[int, int]] | set[tuple[int, int]] | None = None,
+    rulings: Rulings | None = None,
 ) -> dict[str, int]:
     """E64: every stamped E63 promotion a census limb has since overtaken goes back to the band.
 
@@ -1591,7 +1633,7 @@ def _run_rail(
         store.upsert_pairs(demoted)
         _recluster(store, facts, settings, working,
                    {i for row in demoted for i in (row.lo, row.hi)},
-                   Limits(), result, operator_mnl)
+                   Limits(), result, rulings)
     counters["owed"] = len(actions)
     return counters
 

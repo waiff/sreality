@@ -147,6 +147,7 @@ from autodedup.incremental_sql import (
     RT_LEASE_TAKE_SQL,
     RT_LOOKUP_MANY_SQL,
     RT_MERGE_NEIGHBOURS_SQL,
+    RT_MUST_LINK_SQL,
     RT_MUST_NOT_LINK_SQL,
     RT_NEW_LISTINGS_SQL,
     RT_NEW_STRAGGLERS_SQL,
@@ -723,6 +724,10 @@ class SqlStore:
     def must_not_link(self) -> set[tuple[int, int]]:
         return {(int(row[0]), int(row[1]))
                 for row in self._query(RT_MUST_NOT_LINK_SQL)}
+
+    def must_link(self) -> set[tuple[int, int]]:
+        return {(int(row[0]), int(row[1]))
+                for row in self._query(RT_MUST_LINK_SQL)}
 
     # ------------------------------------------------------------------ live census
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]:

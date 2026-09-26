@@ -119,3 +119,142 @@ def test_the_relation_is_the_batch_relation_on_the_same_slots() -> None:
     relation = relation_for(D43_ON, ds.listings, {})
     assert relation is not None
     assert relation.ok(A, B) and relation.ok(B, C) and not relation.ok(A, C)
+
+
+# ------------------------------------------------------------------ E910: must-links
+
+
+def _fps(ds: Dataset, settings: Settings) -> dict:
+    from autodedup.fingerprint import build_all
+
+    return build_all(ds, settings)
+
+
+def _decision(lo: int, hi: int, zone: str, score: float):
+    from autodedup.decide import Decision
+
+    return Decision(lo, hi, zone, score, {"ATTR", "TXT"}, None, None, "model")
+
+
+def _cluster(ds: Dataset, settings: Settings, decisions, **kw):
+    from autodedup.cluster import cluster_pairs
+
+    return cluster_pairs(decisions, ds.listings, _fps(ds, settings), settings,
+                         kw.pop("must_not_link", frozenset()),
+                         relation_for(settings, ds.listings, {}), **kw)
+
+
+def _groups(result) -> list[list[int]]:
+    return sorted(map(sorted, result.clusters.values()))
+
+
+EDGES = [_decision(A, B, "merge", 0.99), _decision(B, C, "merge", 0.98)]
+
+
+def test_a_same_ruling_joins_two_adverts_the_engine_never_paired() -> None:
+    ds = _floors_cohort()
+    for settings in (Settings(), Settings(repartition=True)):
+        result = _cluster(ds, settings, [], must_link=frozenset({(A, B)}))
+        assert _groups(result) == [[A, B]]
+        assert result.stats["n_must_link_closures"] == 1
+
+
+def test_a_same_ruling_overrides_the_relation_between_its_own_two_adverts() -> None:
+    """A and C state different house heights and the operator ruled them one flat anyway: the
+    relation may not separate what the ruling joined (Decision 8)."""
+    ds = _floors_cohort()
+    for settings in (D43_ON, replace(D43_ON, repartition=True)):
+        assert _groups(_cluster(ds, settings, EDGES)) == [[A, B]], "the control"
+        ruled = _cluster(ds, settings, EDGES, must_link=frozenset({(A, C)}))
+        assert _groups(ruled) == [[A, B, C]]
+
+
+def test_a_same_ruling_exempts_its_pair_from_the_machine_veto_only() -> None:
+    ds = _floors_cohort()
+    veto = frozenset({(A, B)})
+    blocked = _cluster(ds, Settings(), EDGES[:1], machine_vetoes=veto)
+    assert _groups(blocked) == [], "E61 refuses the union"
+    ruled = _cluster(ds, Settings(), EDGES[:1], machine_vetoes=veto,
+                     must_link=frozenset({(A, B)}))
+    assert _groups(ruled) == [[A, B]]
+    operator = _cluster(ds, Settings(), EDGES[:1], must_not_link=veto,
+                        must_link=frozenset({(A, B)}))
+    assert _groups(operator) == [], "an operator must-not-link inside the closure still binds"
+    assert operator.stats["n_must_link_dissolved"] == 1, "and the contradiction is counted"
+
+
+def test_the_spreads_are_read_across_closures_only() -> None:
+    """Two adverts the operator joined may state areas far apart (a portal typo); a third advert
+    is still held to the spread against each of them."""
+    listings = {A: _listing(A, area_m2=50.0), B: _listing(B, area_m2=70.0),
+                C: _listing(C, area_m2=58.0)}
+    ds = Dataset(meta=Meta(), listings=listings, images_by_listing={})
+    same = frozenset({(A, B)})
+    for settings in (Settings(), Settings(repartition=True)):
+        assert _groups(_cluster(ds, settings, [], must_link=same)) == [[A, B]]
+        joined = _cluster(ds, settings, [_decision(A, C, "merge", 0.9)], must_link=same)
+        assert [A, B, C] not in _groups(joined), "C is 16 % from A and 17 % from B"
+
+
+def test_the_repartition_moves_a_closure_as_one_node() -> None:
+    """Without the ruling the cut keeps A with B; the closure {A, C} cannot be split, so the
+    repartition answers with the whole closure or nothing."""
+    ds = _floors_cohort()
+    settings = replace(D43_ON, repartition=True)
+    edges = [_decision(A, B, "merge", 0.99), _decision(B, C, "merge", 0.98)]
+    ruled = _cluster(ds, settings, edges, must_link=frozenset({(A, C)}))
+    groups = _groups(ruled)
+    assert any({A, C} <= set(group) for group in groups)
+    assert not any(A in group and C not in group for group in groups)
+
+
+def _known(store: MemoryStore, *ids: int) -> None:
+    from autodedup.incremental import Evidence, FpRow, GuardRow
+
+    for listing_id in ids:
+        store.put_listing(listing_id, FpRow(GuardRow(listing_id, "byt", "prodej", 60.0, "2+kk",
+                                                      3), "d", "o1", "byt", True, Evidence()),
+                          [])
+
+
+def test_the_lane_walks_must_link_edges_and_clusters_the_closure() -> None:
+    ds = _floors_cohort()
+    store = MemoryStore()
+    _known(store, A, B, C)
+    store.ml = {(A, C)}
+    _recluster_all(store, ds, D43_ON)
+    assert sorted(map(sorted, store.clusters.values())) == [[A, C]]
+
+
+def test_an_idle_pass_honours_a_new_same_ruling() -> None:
+    """A ruling moves no pair, so nothing but the ruling itself can seed its component — the
+    must-not-link's E78 rule, for the positive word."""
+    from autodedup.incremental import Calibration, run_pass
+    from autodedup.model import hand_initialised
+    from autodedup.replay import ScheduleWork
+
+    ds = _floors_cohort()
+    store = MemoryStore()
+    _known(store, A, C)
+    store.ml = {(A, C), (B, 999)}
+    calibration = Calibration(generation="rt", feature_version=0, built_at="", n_listings=0)
+    run_pass(store, DatasetFacts(ds), ScheduleWork([]), D43_ON, hand_initialised(),
+             calibration)
+    assert sorted(map(sorted, store.clusters.values())) == [[A, C]], (
+        "joined; the ruling reaching outside the store (B, 999) links nothing")
+    # The operator changes their mind: the newest ruling is `different`, which also writes the
+    # must-not-link (api/routes/autodedup.py) — and that seeds the component on the next pass.
+    store.ml = set()
+    store.mnl = {(A, C)}
+    run_pass(store, DatasetFacts(ds), ScheduleWork([]), D43_ON, hand_initialised(),
+             calibration)
+    assert store.clusters == {}, "the pair the ruling held is released: nothing else joins it"
+
+
+def test_the_sql_store_reads_the_newest_pair_ruling_only() -> None:
+    from autodedup.incremental_sql import RT_MUST_LINK_SQL
+
+    assert "distinct on" in RT_MUST_LINK_SQL and "v.verdict = 'same'" in RT_MUST_LINK_SQL
+    db = FakePg()
+    db.ml = {(A, C)}
+    assert SqlStore(db, "rt").must_link() == {(A, C)}

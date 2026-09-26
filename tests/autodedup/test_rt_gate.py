@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from autodedup.incremental import Limits, PairRow, PassResult, _recluster, _Working
+from autodedup.incremental import Limits, PairRow, PassResult, Rulings, _recluster, _Working
 from autodedup.incremental_lane import (
     ENV_FLAG,
     SqlFacts,
@@ -307,7 +307,7 @@ def _recluster_cost(conn: FakePg, n: int) -> tuple[int, dict[str, int], PassResu
     working = _Working(SqlFacts(conn), Settings())
     _recluster(store, SqlFacts(conn), Settings(), working,
                {i for row in _components_world(conn, n) for i in (row.lo, row.hi)},
-               Limits(), result, frozenset())
+               Limits(), result, Rulings())
     counts = {
         "neighbours": conn.statements.count(RT_MERGE_NEIGHBOURS_SQL),
         "pairs_within": conn.statements.count(RT_PAIRS_WITHIN_SQL),

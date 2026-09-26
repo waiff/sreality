@@ -1014,6 +1014,22 @@ select listing_lo, listing_hi
   from autodedup.must_not_link
 """
 
+# Decision 8 / E910: the operator's `same` rulings are MUST-LINKS. Per unordered pair the NEWEST
+# pair ruling stands (a pair ruled same and later different is a negative, and the reverse a
+# must-link); only a pair whose newest word is `same` is read. Browse merges reach this table as
+# `same` rulings (migrations 559/560/564), so one read covers both of the operator's hands.
+RT_MUST_LINK_SQL = """
+select v.listing_lo, v.listing_hi
+  from (select distinct on (x.listing_lo, x.listing_hi)
+               x.listing_lo, x.listing_hi, x.verdict
+          from autodedup.verdicts x
+         where x.kind = 'pair'
+           and x.listing_lo is not null
+           and x.listing_hi is not null
+         order by x.listing_lo, x.listing_hi, x.decided_at desc, x.id desc) v
+ where v.verdict = 'same'
+"""
+
 
 # ------------------------------------------------------------------ the clean reset (E97)
 #

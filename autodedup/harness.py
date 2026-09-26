@@ -395,7 +395,7 @@ def _score_histogram(scores: Iterable[float]) -> dict[str, int]:
 
 
 def load_must_not_link(path: str | None) -> frozenset[tuple[int, int]]:
-    """E27's permanent negatives, normalised to lo<hi.
+    """E27's permanent negatives — or E910's must-links, in the same two shapes — lo<hi.
 
     Two shapes, because the batch build has to be able to read the one the labels lane
     actually uploads (N4): a JSON list of `[lo, hi]`, or the lane's `must_not_link.jsonl`
@@ -449,8 +449,12 @@ def run_engine(
     model: LogisticModel,
     out_dir: Path,
     must_not_link: frozenset[tuple[int, int]] = frozenset(),
+    must_link: frozenset[tuple[int, int]] = frozenset(),
 ) -> dict[str, Any]:
-    """Fingerprint -> block -> feature -> decide -> cluster, writing the three run artifacts."""
+    """Fingerprint -> block -> feature -> decide -> cluster, writing the three run artifacts.
+
+    `must_link` is the operator's `same` rulings (Decision 8, E910): they bind the clustering
+    exactly as the real-time lane binds it."""
     timings: dict[str, float] = {}
     clock = time.perf_counter()
     fps = build_all(dataset, settings)
@@ -617,8 +621,9 @@ def run_engine(
     # E61 refuses a UNION, not only an edge: two units of one building must not be joined
     # transitively through a third advert either, so the veto joins the must-not-link set.
     clusters = cluster_pairs(
-        decisions, dataset.listings, fps, settings, frozenset(must_not_link) | vetoed,
+        decisions, dataset.listings, fps, settings, frozenset(must_not_link),
         relation_for(settings, dataset.listings, pair_slots),
+        must_link=frozenset(must_link), machine_vetoes=frozenset(vetoed),
     )
     rows = cluster_rows(clusters, decisions, fps)
     timings["cluster_s"] = time.perf_counter() - clock
@@ -677,6 +682,7 @@ def run_engine(
             "total": len(frozenset(must_not_link) | vetoed),
             "loaded": bool(must_not_link),
         },
+        "must_link": {"loaded": len(must_link)},
         "family_guard": family_report,
         "development_hold": hold_report,
         "timings": timings,
@@ -741,7 +747,8 @@ def cmd_run(args: argparse.Namespace, out: Any) -> int:
     load_seconds = time.perf_counter() - clock
     out_dir = Path(args.out)
     must_not_link = load_must_not_link(getattr(args, "must_not_link", None))
-    summary = run_engine(dataset, settings, model, out_dir, must_not_link)
+    must_link = load_must_not_link(getattr(args, "must_link", None))
+    summary = run_engine(dataset, settings, model, out_dir, must_not_link, must_link)
     summary["artifact"] = str(args.artifact)
     summary["timings"]["load_s"] = load_seconds
     summary["timings"]["total_s"] = load_seconds + sum(
@@ -1369,6 +1376,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", default=None, help="model JSON; default is the hand priors")
     run.add_argument("--must-not-link", default=None,
                      help="JSON list of [lo, hi] pairs the clustering must never join (E27)")
+    run.add_argument("--must-link", default=None,
+                     help="the labels lane's must_link.jsonl: the operator's `same` rulings, "
+                          "which the clustering must join (E910)")
     run.set_defaults(func=cmd_run)
 
     pair = sub.add_parser("pair", help="side-by-side evidence for one pair")
