@@ -230,7 +230,12 @@ select
                               then round(s.rent_min_czk * 12.0 / p_price_czk * 100, 2) end,
         'yield_max_pct', case when p_category_type = 'prodej' and p_price_czk >= 100000
                               then round(s.rent_max_czk * 12.0 / p_price_czk * 100, 2) end) end))
-from (select least(greatest(substring(p_disposition from '^\s*([0-9]{1,3})')::integer, 1), 4) as vk,
+-- greatest()/least() IGNORE a NULL argument, so the clamp alone would turn a missing or
+-- non-numeric disposition into VK 1; the guard keeps it NULL (-> inputs_missing).
+from (select case when p_disposition ~ '^\s*[0-9]'
+                  then least(greatest(substring(p_disposition from '^\s*([0-9]{1,3})')::integer,
+                                      1), 4)
+             end as vk,
              coalesce(p_condition = 'novostavba', false) as nov) x
 -- At most one of the three matches (each later join requires the earlier ones to miss),
 -- so coalesce(ku.col, ob.col, tw.col) below reads exactly the chosen cell's row.
