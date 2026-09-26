@@ -17,8 +17,8 @@ def _flat(sql: str) -> str:
 
 def test_a_cluster_ruling_is_newest_per_key_and_pass() -> None:
     """The newest row per (cluster_key, coalesce(generation, '')) is the group's ruling
-    (migration 573): ruling the g5 group 38324 appends beside the operator's g4 ruling and never
-    touches it. The pre-573 in-place arm is keyed on the same pass, so it cannot reach another
+    (migration 574): ruling the g5 group 38324 appends beside the operator's g4 ruling and never
+    touches it. The pre-574 in-place arm is keyed on the same pass, so it cannot reach another
     pass's row either; `generation` is never reassigned, `member_ids` is part of what changed."""
     flat = _flat(usql.VERDICT_CLUSTER_APPEND_SQL)
     assert (

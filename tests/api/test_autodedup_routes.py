@@ -2661,7 +2661,7 @@ def test_a_split_that_agrees_with_what_is_stored_asks_nothing(admin_client, spli
 
 
 def test_the_newest_veto_is_taken_back_whoever_wrote_it(admin_client, split_conn):
-    """Migration 573 / E919: the newest ruling on a pair is the one every reader obeys, whoever
+    """Migration 574 / E919: the newest ruling on a pair is the one every reader obeys, whoever
     took it — so a split that would supersede anyone's standing negative asks first."""
     split_conn.canned["member_verdicts"] = [
         _verdict_row(listing_lo=11, listing_hi=12, verdict="different",
@@ -2830,8 +2830,8 @@ def test_a_split_stamps_its_reasons_on_the_cluster_row_ONLY(admin_client, split_
 
 
 def test_re_deciding_a_verdict_appends_with_its_own_reasons(admin_client, conn):
-    """Migration 573: a re-decision is a NEW row carrying its own reasons, and the newest row is
-    the ruling. A change of reasons alone is a change (it appends); the pre-573 in-place arm
+    """Migration 574: a re-decision is a NEW row carrying its own reasons, and the newest row is
+    the ruling. A change of reasons alone is a change (it appends); the pre-574 in-place arm
     rewrites the reasons with the verdict, so yesterday's evidence never sits under today's."""
     for sql in (usql.VERDICT_PAIR_APPEND_SQL, usql.VERDICT_CLUSTER_APPEND_SQL):
         flat = " ".join(sql.split())

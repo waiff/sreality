@@ -1,4 +1,4 @@
--- 573_autodedup_verdicts_append_only.sql
+-- 574_autodedup_verdicts_append_only.sql
 --
 -- AUTODEDUP: the operator's rulings become a ledger (Decision 8: "each correction keeps the
 -- evidence the engine saw at that moment"). Until now `autodedup.verdicts` held ONE row per
@@ -37,7 +37,7 @@ drop index if exists autodedup.autodedup_verdicts_pair_uidx;
 drop index if exists autodedup.autodedup_verdicts_cluster_gen_uidx;
 
 comment on table autodedup.verdicts is
-  'The operator''s rulings, append-only since migration 573: a flip or a withdrawal (verdict '
+  'The operator''s rulings, append-only since migration 574: a flip or a withdrawal (verdict '
   '''unsure'') is a NEW row, and per pair / per (cluster_key, generation) the newest row '
   '(decided_at desc, id desc) is the ruling every reader obeys.';
 

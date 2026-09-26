@@ -254,7 +254,7 @@ def test_a_propertys_last_own_advert_stays_while_merged_ones_share_it(cur):
 
 
 def _rulings(cur: Any, ids: list[int], by: str = OP) -> list[tuple[int, int, str]]:
-    """Each pair's NEWEST ruling by `by` — the ruling every reader obeys since migration 573
+    """Each pair's NEWEST ruling by `by` — the ruling every reader obeys since migration 574
     made the store a ledger (a detach after a merge is a second row, not an overwrite)."""
     cur.execute(
         "SELECT DISTINCT ON (listing_lo, listing_hi) listing_lo, listing_hi, verdict "

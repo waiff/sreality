@@ -2274,7 +2274,7 @@ def verdict(
     that row's: a pair's two listings, or a group's key, pass AND member set (E58, copied, never
     re-resolved -- the new word is about the set the old one was about). It is accepted only while
     that row is still the newest on its key (409: ruled again since the page loaded). Every write
-    APPENDS (migration 573): a withdrawal is a new `unsure` row, never a delete.
+    APPENDS (migration 574): a withdrawal is a new `unsure` row, never a delete.
     """
     _one_of("kind", body.kind, VERDICT_KINDS)
     _one_of("verdict", body.verdict, VERDICT_VALUES)
@@ -2586,7 +2586,7 @@ def verdict_split(
         return named.get(_unit_pair(assignment[lo], assignment[hi]), body.relation)
 
     # What is already ruled on these pairs: the NEWEST ruling per pair, whoever took it — it is
-    # the one every reader obeys (migration 573), so it is the one this split would take back.
+    # the one every reader obeys (migration 574), so it is the one this split would take back.
     stored_verdicts: dict[tuple[int, int], str] = {}
     for row in _rows(
         usql.VERDICT_COLUMNS,

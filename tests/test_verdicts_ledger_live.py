@@ -1,8 +1,8 @@
-"""Migration 573 executed (E919): the operator's rulings are a ledger, and every reader obeys the
+"""Migration 574 executed (E919): the operator's rulings are a ledger, and every reader obeys the
 newest row. A flip and a withdrawal are NEW rows; the lane's must-links (`RT_MUST_LINK_SQL`), the
 apply path's negatives (`apply_sql.PAIR_VERDICTS_SQL`, `Negatives.read` over group rulings) and
 the rulings page's own reads all take the newest word per pair / per set. The writes also hold on
-a store the migration has not reached (the pre-573 unique indexes, re-created inside the test's
+a store the migration has not reached (the pre-574 unique indexes, re-created inside the test's
 transaction). Runs in CI's migrations job (`TEST_DATABASE_URL`); every test rolls back.
 """
 
@@ -157,12 +157,12 @@ def test_a_group_correction_appends_on_its_set_and_apply_reads_the_newest(cur):
     assert cur.fetchone()[usql.VERDICT_COLUMNS.index("verdict")] == "unsure"
 
 
-def test_the_writes_hold_on_a_store_573_has_not_reached(cur):
-    """The code ships before the migration is applied: with the pre-573 unique indexes back,
+def test_the_writes_hold_on_a_store_574_has_not_reached(cur):
+    """The code ships before the migration is applied: with the pre-574 unique indexes back,
     a same-decider re-ruling updates that decider's row in place and never raises."""
-    cur.execute("CREATE UNIQUE INDEX pre573_pair_uidx ON autodedup.verdicts "
+    cur.execute("CREATE UNIQUE INDEX pre574_pair_uidx ON autodedup.verdicts "
                 "(kind, listing_lo, listing_hi, decided_by) WHERE kind = 'pair'")
-    cur.execute("CREATE UNIQUE INDEX pre573_cluster_uidx ON autodedup.verdicts "
+    cur.execute("CREATE UNIQUE INDEX pre574_cluster_uidx ON autodedup.verdicts "
                 "(kind, cluster_key, (coalesce(generation, ''::text)), decided_by) "
                 "WHERE kind = 'cluster'")
     lo, hi = _pair(cur)

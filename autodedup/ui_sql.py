@@ -1225,7 +1225,7 @@ LIMIT 1
 
 VERDICT_COUNT_COLUMNS: tuple[str, ...] = ("kind", "verdict", "n")
 
-# RULINGS, NOT ROWS (migration 573): the store keeps every correction, so a count over rows would
+# RULINGS, NOT ROWS (migration 574): the store keeps every correction, so a count over rows would
 # count a pair ruled `same` and later withdrawn once as each. The newest row per pair and per
 # (group key, pass) is the ruling, exactly as every engine reader takes it.
 _NEWEST_RULINGS = """
@@ -1299,7 +1299,7 @@ LIMIT 1
 
 # -------------------------------------------------------------------------- operator writes
 
-# THE STORE IS A LEDGER (Decision 8, migration 573, E919). A ruling is never overwritten: a flip,
+# THE STORE IS A LEDGER (Decision 8, migration 574, E919). A ruling is never overwritten: a flip,
 # a withdrawal (`unsure`) or a re-ruling with another note is a NEW row, and per pair the newest
 # row (`decided_at desc, id desc`) is the ruling every reader obeys -- the lane's must-links
 # (`incremental_sql.RT_MUST_LINK_SQL`), apply's negatives (`apply_sql.PAIR_VERDICTS_SQL`), the
@@ -1309,10 +1309,10 @@ LIMIT 1
 # note and reasons) appends nothing and answers that newest row, so a double click or a re-merge
 # of the same set does not stack identical rows.
 #
-# BOTH SIDES OF MIGRATION 573. Before it, a partial unique index allowed one row per (pair,
+# BOTH SIDES OF MIGRATION 574. Before it, a partial unique index allowed one row per (pair,
 # decider): `ON CONFLICT DO NOTHING` (no target, so it is valid with or without that index) lets
 # the conflicting insert fall through, and `restated` then updates that decider's own row in place
-# -- the pre-573 behaviour, reached only while the index still exists. After 573 the insert never
+# -- the pre-574 behaviour, reached only while the index still exists. After 574 the insert never
 # conflicts and `restated` never fires. The code therefore ships BEFORE the migration is applied
 # (the migration's header says why the reverse order is an outage).
 _VERDICT_RETURNING = """id, kind, cluster_key, listing_lo, listing_hi, verdict, weight, note, reasons,
@@ -1517,15 +1517,19 @@ SELECT 1 FROM autodedup.clusters WHERE generation = %(generation)s::text LIMIT 1
 
 # ANY generation: a pair verdict is about two adverts, not about the pass that proposed them
 # (E58), so a pair this engine scored under g4 is still a pair the operator may rule today. And
-# ANY earlier word about the pair: a Browse merge's or a detach's ruling, or a must-not-link, is
-# about a pair the engine may never have stored (Decision 7 keeps no machine reject), and the
-# operator must be able to correct it (the rulings page, E919).
+# ANY earlier word about the pair: a Browse merge's or a detach's ruling, a group ruling whose set
+# holds both adverts (an implied pair), or a must-not-link, is about a pair the engine may never
+# have stored (Decision 7 keeps no machine reject), and the operator must be able to correct it
+# (the rulings page, E919).
 PAIR_EXISTS_SQL = """
 SELECT 1
 WHERE EXISTS (SELECT 1 FROM autodedup.verdicts x
                WHERE x.kind = 'pair'
                  AND x.listing_lo = %(listing_lo)s::bigint
                  AND x.listing_hi = %(listing_hi)s::bigint)
+   OR EXISTS (SELECT 1 FROM autodedup.verdicts c
+               WHERE c.kind = 'cluster'
+                 AND c.member_ids @> ARRAY[%(listing_lo)s::bigint, %(listing_hi)s::bigint])
    OR EXISTS (SELECT 1 FROM autodedup.must_not_link n
                WHERE n.listing_lo = %(listing_lo)s::bigint
                  AND n.listing_hi = %(listing_hi)s::bigint)
@@ -1824,7 +1828,7 @@ SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
 # (`GET /autodedup/rulings`, the page `/autodedup/rulings`). No other surface lists the rulings:
 # a queue shows a ruling only while its pair or group sits in the chosen generation's queue.
 #
-# THE NEWEST ROW IS THE RULING (migration 573): per pair, and per (group key, pass). `status` is
+# THE NEWEST ROW IS THE RULING (migration 574): per pair, and per (group key, pass). `status` is
 # derived from the history, never parsed from a note: `standing` (the newest row states
 # something), `withdrawn` (the newest is `unsure` and an earlier row stated something) or `unsure`
 # (nothing else was ever said).

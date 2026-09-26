@@ -180,7 +180,7 @@ def test_a_ruling_typed_against_a_pair_is_never_linked(cur):
         "SELECT note, operator_merge_group_id::text FROM autodedup.verdicts "
         "WHERE kind = 'pair' AND listing_lo = %s AND listing_hi = %s ORDER BY id",
         _pair(c1, c2))
-    # The merge's ruling is a row of its own (migration 573: the store is a ledger), and only
+    # The merge's ruling is a row of its own (migration 574: the store is a ledger), and only
     # that row is linked; the typed ruling keeps its note and no link.
     assert cur.fetchall() == [("stejny byt", None), (f"operator merge {browse}", browse)]
 
