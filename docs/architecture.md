@@ -1176,7 +1176,9 @@ renumber.** Navigate by area:
     guard, and `toolkit/property_identity.py` lost its candidate-table stamps.
     **Consequences to hold in mind.** Nothing auto-merges any more, so cross-portal duplicates
     accumulate in Browse until the new engine ships — that build-up was accepted explicitly
-    (the one engine path since, AUTODEDUP's worker lane, is dark; see "Who orders a merge").
+    (since then AUTODEDUP merges only inside its scope row's area: the batch `mode=apply` is
+    live in the trial area, and the worker lane merges there once its interval is above 0; see
+    "Who orders a merge").
     The **publication gate is gone**: since migration 273 a new property stayed invisible in
     Browse/map/stats/watchdogs until something stamped `published_at`, and the only stamper for
     ordinary properties was the old engine, so leaving the gate up would have hidden the entire
@@ -2542,8 +2544,9 @@ renumber.** Navigate by area:
 
 ## Broker identity merges — auto-merge and the suppression rail
 
-Unlike property merges (rule #15: operator-ordered, plus the dark AUTODEDUP worker lane that
-merges only inside the area `autodedup_apply_scope` names), broker identities DO auto-merge. The nightly
+Unlike property merges (rule #15: operator-ordered, plus AUTODEDUP — the batch `mode=apply` and
+the worker lane — merging only inside the area `autodedup_apply_scope` names), broker identities
+DO auto-merge. The nightly
 sweep (`scripts/resolve_brokers.py::_auto_merge`, cron 04:35 UTC) hands the WHOLE identity +
 contact corpus to `toolkit.broker_resolver.decide_merges`, which since 2026-08-20 is
 **portal-agnostic and name-gated** — one rule, no per-portal exceptions:

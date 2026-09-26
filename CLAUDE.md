@@ -181,12 +181,12 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     deterministic replay), carries operator state (rule #18) + the deal pipeline (rule #22) onto the
     survivor, re-syncs the browse read model, and enforces **category compatibility** (sale≠rent,
     flat≠house — except the sanctioned **dům↔komerční**). `db.mark_inactive` / `active_count` are
-    source-scoped. **Merges are ordered by the operator, or by the dark AUTODEDUP apply lane (`autodedup/apply.py`,
-    source `autodedup`) only inside the area `app_settings.autodedup_apply_scope` names.** **The old automatic decision
-    engine was REMOVED wholesale (2026-08, the "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers
-    (pHash, CLIP, `/labeling`) stay live; the rebuild is **simulation-first** (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`).
-    **Never resurrect or consult the removed engine or its design docs**; the operator owns the apply scope (the one
-    rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
+    source-scoped. **Merges are ordered by the operator, or by the AUTODEDUP engine (source `autodedup`, through `merge_property_set`, never a split,
+    only inside `app_settings.autodedup_apply_scope`): the worker's autodedup lane reconciles its `rt` groups (`autodedup/reconcile.py`; interval 0,
+    then `mode=unapply`, is the brake), and batch `mode=apply` stays until C2.** **The old automatic decision engine was REMOVED wholesale (2026-08,
+    the "NEW DEDUP" cutoff)** — nothing else auto-merges; signal producers (pHash, CLIP, `/labeling`) stay live; the rebuild is **simulation-first**
+    (`docs/design/new-dedup/PROGRAM.md` + `CUTOFF.md`). **Never resurrect or consult the removed engine or its design docs**; the operator owns the
+    apply scope (the one rollout control) and every no-merge ruling. Full detail: `docs/architecture.md` § rule 15.
 16. **Watchdog + Browse share one definition of "matches"** (`_shared_filter_where` + `_city_quality_clauses`).
     `notification_dispatches` is the unified append-only event table with **three producers**: `watchdog` +
     `collection_monitor` (property-grain; `dedupe_key` `:new:` once-ever / `:price_drop:{snapshot_id}` per-snapshot;
