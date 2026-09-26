@@ -208,9 +208,21 @@ def resolve_active_property_id(
     return resolve_active_property_ids(conn, [property_id]).get(property_id)
 
 
+def lock_properties(conn: psycopg.Connection, ids: list[int]) -> dict[int, tuple[str, int | None]]:
+    """Row-lock these properties in id order, the merge's order; (status, merged_into) per id."""
+    with conn.cursor() as cur:
+        cur.execute(_STATUS_SQL + " FOR UPDATE", {"ids": sorted({int(i) for i in ids})})
+        return {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+
+
 def survivor_of(first_seen: Mapping[int, datetime | None]) -> int:
     """Decision 17: the oldest record (`first_seen_at`, unknown last), then the lowest id."""
     return min(first_seen, key=lambda pid: (first_seen[pid] is None, first_seen[pid] or 0, pid))
+
+
+# Every pair verdict the store holds (migration 532's CHECK): `unsure` is the withdrawal, which
+# every reader takes as "no ruling" and which retracts the operator's must-not-link like `same`.
+PAIR_VERDICTS = frozenset({"same", "unsure", *usql.NEGATIVE_VERDICTS})
 
 
 def record_ruling(

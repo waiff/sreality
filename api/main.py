@@ -312,7 +312,7 @@ app.include_router(new_dedup_candidates_router)
 # is not applied. ONE write exception (W5): `POST /autodedup/verdict` records the
 # operator's decision in `autodedup.verdicts` and, for a negative pair verdict, the
 # permanent `autodedup.must_not_link` (retracted when that verdict is reversed). The
-# operator merge and detach routes (`/properties/merge`, `/properties/{id}/detach`, through
+# operator merge and split routes (`/properties/merge`, `/properties/{id}/split`, through
 # toolkit.property_identity.record_rulings) write the same two tables. Both live inside schema `autodedup`, so shadow mode (D4) is
 # intact — no production table is written, and `listings`/`images` are read for display only. Everything else
 # is written by the lane (`python -m autodedup.lane`). See autodedup/progress_sql.py,

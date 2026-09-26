@@ -1,15 +1,16 @@
 """Property merge MECHANICS — the operator's curation surface, not a decision engine.
 
 Everything here starts from a merge the operator (or another caller) has already
-ORDERED: collapse this explicit set of properties, split one advert off, list what was
-merged, or link properties as one asset without collapsing them.
+ORDERED: collapse this explicit set of properties, state how one property's adverts split,
+list what was merged, or link properties as one asset without collapsing them.
 Nothing in this module decides *whether* two properties are the same.
 
 The one merge and the one undo live in `toolkit.property_identity` (`merge_property_set` /
 `detach_listing` — the survivor rule, the asset-link carry, operator state, pipeline
 reconcile, browse sync, the `property_merge_events` ledger and, for the operator, the
-rulings of decision 8) and `toolkit.asset_identity`; this module is the HTTP + read layer
-over them. Mounted under `/properties/*`, admin-gated.
+rulings of decision 8); the operator's split statement composes them in
+`toolkit.property_split` (E919); asset links live in `toolkit.asset_identity`. This module is
+the HTTP + read layer over them. Mounted under `/properties/*`, admin-gated.
 """
 
 from __future__ import annotations
@@ -30,12 +31,12 @@ from toolkit.asset_identity import (
 from toolkit.property_identity import (
     MOVED,
     MergeError,
-    detach_listing,
     detach_outcomes,
     listing_origins,
     merge_property_set,
     resolve_active_property_id,
 )
+from toolkit.property_split import REASON_MAX, SplitRefused, split_property, undo_split
 
 router = APIRouter(prefix="/properties", tags=["properties"])
 
@@ -53,10 +54,32 @@ class AssetUnlinkAction(BaseModel):
     property_id: int
 
 
-class DetachAction(BaseModel):
-    listing_id: int
-    # The operator's optional free-text reason (decision 8), kept on the "different" ruling.
-    reason: str | None = Field(default=None, max_length=500)
+class SplitUndoRuling(BaseModel):
+    listing_lo: int
+    listing_hi: int
+    verdict: str | None = None
+    note: str | None = None
+    reasons: list[str] = Field(default_factory=list)
+
+
+class SplitUndo(BaseModel):
+    """The undo a split's response issued, posted back verbatim."""
+
+    call_id: str
+    placements: dict[int, int] = Field(default_factory=dict)
+    rulings: list[SplitUndoRuling] = Field(default_factory=list)
+
+
+class SplitAction(BaseModel):
+    """A statement (`adverts` shown, `separate` units, `keep_together`) or, alone, an `undo`."""
+
+    adverts: list[int] | None = None
+    separate: list[list[int]] = Field(default_factory=list)
+    keep_together: bool | None = None
+    # The operator's optional free-text reason (decision 8), kept on every ruling's note.
+    reason: str | None = Field(default=None, max_length=REASON_MAX)
+    confirm_retract: bool = False
+    undo: SplitUndo | None = None
 
 
 def _decider(claims: dict) -> str:
@@ -235,39 +258,43 @@ def get_merges(
     return list_merges(conn, limit=limit, offset=offset)
 
 
-@router.post("/{property_id}/detach")
-def post_detach(
+@router.post("/{property_id}/split")
+def post_split(
     property_id: int,
-    body: DetachAction,
+    body: SplitAction,
     conn: Any = Depends(deps.get_db_conn),
     claims: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """One advert split off: back to where it came from, or (never merged) to a new record; ruled
-    "different" from every advert that stays. One no longer here answers `detached: false`."""
+    """The operator's partition of one property's adverts, made true in one transaction (E919):
+    each `separate` unit leaves as one record (back where it came from, or new), the rest stay,
+    ruled one property when `keep_together`; `different` + a must-not-link across units. The
+    property page's row split is `separate: [[id]], keep_together: false`. `{undo}` alone takes
+    back the split whose response issued it. A refusal is `{code, message, ids}`; nothing is
+    written."""
     decided_by = _decider(claims)
-    survivor = resolve_active_property_id(conn, property_id)
-    if survivor is None:
-        raise HTTPException(status_code=404, detail=f"property {property_id} not found")
     try:
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute("SELECT property_id FROM listings WHERE id = %s",
-                            (body.listing_id,))
-                row = cur.fetchone()
-            if row is None:
-                raise HTTPException(status_code=404,
-                                    detail=f"listing {body.listing_id} not found")
-            if row[0] != survivor:
-                return {"listing_id": body.listing_id, "detached": False,
-                        "outcome": "not_on_property", "survivor_property_id": survivor,
-                        "restored_property_id": row[0], "rulings_written": 0}
-            data = detach_listing(conn, body.listing_id, decided_by=decided_by,
-                                  reason=body.reason)["data"]
+        if body.undo is not None:
+            if body.model_fields_set - {"undo"}:
+                raise HTTPException(status_code=400, detail={
+                    "code": "invalid", "message": "an undo is sent alone", "ids": []})
+            return undo_split(
+                conn, property_id, call_id=body.undo.call_id, placements=body.undo.placements,
+                rulings=[r.model_dump() for r in body.undo.rulings], decided_by=decided_by,
+            )
+        if body.adverts is None or body.keep_together is None:
+            raise HTTPException(status_code=400, detail={
+                "code": "invalid", "message": "a statement names adverts and keep_together",
+                "ids": []})
+        return split_property(
+            conn, property_id, adverts=body.adverts, separate=body.separate,
+            keep_together=body.keep_together, decided_by=decided_by, reason=body.reason,
+            confirm_retract=body.confirm_retract,
+        )
+    except SplitRefused as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
     except MergeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return {key: data[key] for key in (
-        "listing_id", "detached", "outcome", "survivor_property_id", "restored_property_id",
-        "rulings_written")}
+        raise HTTPException(status_code=409, detail={
+            "code": "refused", "message": str(exc), "ids": []}) from exc
 
 
 @router.get("/{property_id}/origins")
@@ -276,7 +303,7 @@ def get_origins(
     conn: Any = Depends(deps.get_db_conn),
     _: dict = Depends(deps.require_admin),
 ) -> dict[str, Any]:
-    """Each advert's origin (where a detach returns it) and the source and time of the merge
+    """Each advert's origin (where a split returns it) and the source and time of the merge
     that took it from there, all null when no standing merge moved it; what a detach would
     answer now (`detach_outcomes`), and `splittable` = that moves it."""
     survivor = resolve_active_property_id(conn, property_id)
