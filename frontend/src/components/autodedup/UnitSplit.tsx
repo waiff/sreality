@@ -115,19 +115,24 @@ export function deriveSplit(
   verdicts: ReadonlyArray<AutodedupVerdictRow>,
 ): SplitState | null {
   const inside = new Set(members.map((m) => m.listing_id));
-  /* The server sends newest first, so the FIRST row for a pair is its live word. */
-  const latest = new Map<string, AutodedupVerdictValue>();
+  /* The server sends newest first, so the FIRST row for a pair is its live word
+   * — taken BEFORE anything is filtered: a withdrawal is a newer `unsure` row
+   * (migration 574), and skipping it first would read the older `same` it
+   * withdrew as still standing. */
+  const newest = new Map<string, AutodedupVerdictValue>();
   for (const v of verdicts) {
     if (v.kind && v.kind !== 'pair') continue;
     const lo = v.listing_lo;
     const hi = v.listing_hi;
     if (lo == null || hi == null || !inside.has(lo) || !inside.has(hi)) continue;
-    /* `unsure` says nothing about the partition; the two finer values a ruling
-     * taken before D39 carries separate two units exactly as `different` does. */
-    if (v.verdict !== 'same' && !NEGATIVE_VERDICTS.includes(v.verdict)) continue;
     const key = `${lo}:${hi}`;
-    if (!latest.has(key)) latest.set(key, v.verdict);
+    if (!newest.has(key)) newest.set(key, v.verdict);
   }
+  /* `unsure` says nothing about the partition; the two finer values a ruling
+   * taken before D39 carries separate two units exactly as `different` does. */
+  const latest = new Map(
+    [...newest].filter(([, verdict]) => verdict === 'same' || NEGATIVE_VERDICTS.includes(verdict)),
+  );
   if (latest.size === 0) return null;
 
   /* Members joined by a `same` verdict are one unit — the transitive closure, so

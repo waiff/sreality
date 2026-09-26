@@ -81,6 +81,7 @@ export function refreshAfterDetach(qc: QueryClient): void {
     ['snapshots'],
     mergedAdvertsKeys.all,
     ['autodedup', 'proposed-splits'],
+    ['autodedup', 'rulings'],
   ]) {
     qc.invalidateQueries({ queryKey: key });
   }

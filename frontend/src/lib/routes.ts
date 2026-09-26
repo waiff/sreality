@@ -140,6 +140,8 @@ export const ROUTES = {
   autodedupPair: def('/autodedup/pair/:lo/:hi'),
   // Decision 9: engine splits are propose-only; the operator splits from here.
   autodedupProposedSplits: def('/autodedup/proposed-splits'),
+  // E919: every operator ruling, beside the engine's view; flip / withdraw.
+  autodedupRulings: def('/autodedup/rulings'),
   scrapers: def('/scrapers'),
   devConfidenceIndicator: def('/dev/confidence-indicator'),
 } as const;
