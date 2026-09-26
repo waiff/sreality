@@ -261,14 +261,8 @@ FAMILY_BITS: tuple[tuple[str, int], ...] = (
 # breakdown bought no decision and cost clicks. The two finer values stay VALID here: 532's
 # CHECK is untouched, no row is rewritten, and a ruling taken under the older vocabulary has to
 # keep writing and reading back rather than becoming a 400 against its own history.
-VERDICT_VALUES: tuple[str, ...] = (
-    "same",
-    "different",
-    # E49, migration 532 — historical, never offered by the page since D39.
-    "same_building_different_unit",
-    "same_project_different_unit",
-    "unsure",
-)
+# E49's two finer negatives (migration 532) are historical, never offered by the page since D39.
+VERDICT_VALUES: tuple[str, ...] = usql.VERDICT_VALUES
 # A negative verdict is what writes the permanent must-not-link (§9): "unsure" is not one.
 # ONE definition, shared with the SQL that widens the `different` filter over all three.
 NEGATIVE_VERDICTS: frozenset[str] = frozenset(usql.NEGATIVE_VERDICTS)

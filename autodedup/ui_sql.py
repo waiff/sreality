@@ -137,6 +137,8 @@ NEGATIVE_VERDICTS: tuple[str, ...] = (
     "same_building_different_unit",
     "same_project_different_unit",
 )
+# Every word the store may hold (migration 532's CHECK), for a writer that is not the route.
+VERDICT_VALUES: tuple[str, ...] = ("same", *NEGATIVE_VERDICTS, "unsure")
 
 # Does this row carry the verdict the filter asked for? `different` is the widened one; every
 # other value is itself. ONE fragment, so the groups queue and the residual queue cannot come

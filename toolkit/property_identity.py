@@ -247,14 +247,18 @@ def record_rulings(
     conn: psycopg.Connection,
     pairs: set[tuple[int, int]],
     *,
-    verdict: Literal["same", "different"],
+    verdict: str,
     decided_by: str,
-    note: str,
+    note: str | None,
+    reasons: Sequence[str] = (),
 ) -> int:
     """Rule each (lo, hi) listings.id pair through `record_ruling`; returns the count."""
+    if verdict not in usql.VERDICT_VALUES:
+        raise ValueError(f"not a pair verdict: {verdict!r}")
     ordered = sorted(pairs)
     for lo, hi in ordered:
-        record_ruling(conn, lo, hi, verdict=verdict, decided_by=decided_by, note=note)
+        record_ruling(conn, lo, hi, verdict=verdict, decided_by=decided_by, note=note,
+                      reasons=reasons)
     return len(ordered)
 
 
