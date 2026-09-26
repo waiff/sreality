@@ -153,11 +153,11 @@ def test_the_lane_refuses_an_empty_scope_setting() -> None:
 
 def test_the_guard_refuses_a_pass_when_the_schema_is_over_budget() -> None:
     conn = _calibrated(FakePg())
-    conn.schema_bytes = 500 * 1_048_576
+    conn.schema_bytes = int((MAX_SCHEMA_MB + 100) * 1_048_576)
     conn.settings[scope_setting_key(GEN)] = [{"grain": "obec", "code": 563510}]
     with pytest.raises(SystemExit) as raised:
         run_incremental(lambda: conn)
-    assert "over the 400 MB" in str(raised.value)
+    assert f"over the {MAX_SCHEMA_MB:.0f} MB" in str(raised.value)
     # Loud, non-zero, and nothing moved: no lease taken, no cursor written, no row stored.
     assert not conn.lease and not conn.cursors and not conn.rt_fp and not conn.fp_key
 
@@ -198,6 +198,18 @@ def test_whole_corpus_needs_the_budget_to_agree_as_well_as_the_setting() -> None
     assert str(CORPUS_PROJECTION_MB) in str(raised.value)
     # With a budget that could hold it, `all` is allowed — the two halves are ONE decision.
     assert storage_guard(conn, GEN, every, CORPUS_PROJECTION_MB)["schema_mb"] == 10.0
+
+
+def test_the_trial_budget_never_enables_the_whole_corpus() -> None:
+    """E916 raised MAX_SCHEMA_MB for the TRIAL's working set; `all` stays a separate budget
+    decision, so the lane's own default must still refuse it."""
+    assert MAX_SCHEMA_MB < CORPUS_PROJECTION_MB
+    conn = FakePg()
+    conn.schema_bytes = 10 * 1_048_576
+    with pytest.raises(Exception) as raised:
+        storage_guard(conn, GEN, Scope((), whole_corpus=True))
+    assert str(CORPUS_PROJECTION_MB) in str(raised.value)
+    assert storage_guard(conn, GEN, SCOPE)["max_schema_mb"] == MAX_SCHEMA_MB
 
 
 # ------------------------------------------------------------------------- every feed
@@ -445,7 +457,7 @@ def test_the_pass_summary_carries_the_scope_the_budget_and_the_growth() -> None:
     out = run_incremental(lambda: conn)
     assert out["scope"] == [{"grain": "obec", "code": 563510}]
     assert out["storage"]["schema_mb"] == 64.0
-    assert out["storage"]["max_schema_mb"] == 400.0
+    assert out["storage"]["max_schema_mb"] == MAX_SCHEMA_MB
     assert "pass_growth_mb" in out["storage"] and "rows" in out["storage"]
     assert out["retention"]["store_floor"] > 0
     # The growth watermark is written, so the NEXT pass can report growth against this one.

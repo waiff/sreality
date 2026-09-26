@@ -337,9 +337,27 @@ RETIRE_WINDOW_HOURS: int = 24
 # and a store that has to be re-seeded.
 MAX_RETIRE_FRACTION: float = 0.05
 # The storage budget, in megabytes of schema `autodedup` (pg_total_relation_size, indexes and
-# TOAST included). The schema is ~148 MB today and the operator pays for it; a lane that has
-# not been watched for a week must not be able to double it.
-MAX_SCHEMA_MB: float = 400.0
+# TOAST included). It is the TRIAL's shadow rail and nothing more: the operator pays for the
+# schema by the megabyte, so a lane that has not been watched for a week must not be able to
+# double it. `rt_scope = all` is gated by `CORPUS_PROJECTION_MB` (17,000) through
+# `guard_agrees`, and this budget stays far below it, so raising it never enables the corpus.
+#
+# 800 MB since E916 (was 400, set when the schema was ~148 MB). Measured and recorded:
+#   * the schema reads 442.9 MB (2026-09-26); `rt_storage_last` = 403,996,672 B = 385.3 MB is
+#     the WHOLE schema at the last pass (`record_storage` writes `schema_bytes`), not rt's own;
+#   * rt's live rows, last full trial build (W9m artefacts: 4,985 rt_fp, 87,624 fp_key, 13,759
+#     pairs) at the measured 2,869 B a pair and 236.8 B an index row: ~59 MB, ~12 kB a listing
+#     — the per-listing cost CORPUS_PROJECTION_MB is built on (~11-12 kB); arrivals add ~12 MB
+#     a month (E79's 20 %/month on 4,985 listings);
+#   * one batch generation: ~40 MB on the trial cohort (score_sql, measured 2026-09-20).
+# The trial's working set is rt twice over (a fresh rebuild writes before VACUUM frees what the
+# reset deleted) plus five batch generations (`keep_generations=4` and the one written before
+# its prune): 2 x 59 + 5 x 40 = ~320 MB. Today's 442.9 MB is above that because a DELETE never
+# shrinks a file: pruned and re-scored generations leave space Postgres reuses but does not
+# return, so the size is a high-water mark. 800 MB holds that mark plus the whole working set
+# written once more with none of it reused (442.9 + 320 = ~763 MB) and is still under double
+# today's schema (886 MB).
+MAX_SCHEMA_MB: float = 800.0
 # How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
 # 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
 POP_CHUNK: int = 5_000
