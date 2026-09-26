@@ -51,13 +51,17 @@
 --    reader will see, and the location lane has stored the KÚ the views call it with. The
 --    last two are the re-resolve having FINISHED, stated as facts: no full-sweep row still
 --    waits for its first attempt, and every Czech ADDRESS-GRAIN row (`is_address_grain`,
---    never the enum's order) carries a KÚ -- an address point lies in exactly one, so this
---    is check_location_town_coverage's KÚ arm reading 0, with the arm's one excuse (an obec
---    holding a KÚ recorded `degenerate_boundary_geometry` at the current registry version).
+--    never the enum's order) carries a KÚ, whatever resolver version wrote it -- an address
+--    point lies in exactly one. That is the KÚ arm's predicate and its one excuse (an obec
+--    holding a KÚ recorded `degenerate_boundary_geometry` at the current registry version),
+--    but NOT the arm: check_location_town_coverage counts only rows at the current
+--    RESOLVER_VERSION, while this counts every row, so a row the re-resolve has not reached
+--    yet refuses here too. The refusal names the count per resolver_version.
 -- ---------------------------------------------------------------------------
 do $$
 declare
   n_unfilled bigint;
+  by_version text;
 begin
   if to_regclass('public.rent_map_cells') is null
      or to_regprocedure('public.mf_reference(text, text, text, numeric, bigint, text, boolean, '
@@ -82,26 +86,29 @@ begin
     raise exception '567 refused: the v5.4 re-resolve has not drained (full_sweep rows '
                     'still queued) -- retry later';
   end if;
-  select count(*) into n_unfilled
-    from public.listing_location ll
-    join public.location_granularity_rank gr on gr.granularity = ll.granularity
-   where ll.country_status = 'cz'
-     and gr.is_address_grain
-     and ll.katastr_kod is null
-     and ll.obec_kod not in (
-           select o.code
-             from public.registry_load_discrepancies d
-             join public.ruian_admin_units k
-               on k.level = 'katastralni_uzemi' and k.code = d.entity_code
-              and k.valid_to is null
-             join public.ruian_admin_units o on o.id = k.parent_id
-            where d.entity_kind = 'katastralni_uzemi'
-              and d.discrepancy = 'degenerate_boundary_geometry'
-              and d.registry_version_id = (select id from public.registry_versions
-                                            where is_current));
+  select coalesce(sum(n), 0), string_agg(format('%s %s', v, n), ', ' order by v)
+    into n_unfilled, by_version
+    from (select ll.resolver_version as v, count(*) as n
+            from public.listing_location ll
+            join public.location_granularity_rank gr on gr.granularity = ll.granularity
+           where ll.country_status = 'cz'
+             and gr.is_address_grain
+             and ll.katastr_kod is null
+             and ll.obec_kod not in (
+                   select o.code
+                     from public.registry_load_discrepancies d
+                     join public.ruian_admin_units k
+                       on k.level = 'katastralni_uzemi' and k.code = d.entity_code
+                      and k.valid_to is null
+                     join public.ruian_admin_units o on o.id = k.parent_id
+                    where d.entity_kind = 'katastralni_uzemi'
+                      and d.discrepancy = 'degenerate_boundary_geometry'
+                      and d.registry_version_id = (select id from public.registry_versions
+                                                    where is_current))
+           group by ll.resolver_version) s;
   if n_unfilled > 0 then
-    raise exception '567 refused: % Czech address-grain rows have no katastr_kod (the KÚ '
-                    'arm is not 0) -- retry after the re-resolve', n_unfilled;
+    raise exception '567 refused: % Czech address-grain rows have no katastr_kod (by '
+                    'resolver_version: %) -- retry after the re-resolve', n_unfilled, by_version;
   end if;
 end $$;
 
