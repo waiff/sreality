@@ -1,0 +1,83 @@
+name: "Ops: back up what a destructive migration drops"
+
+# Dumps what a DROP TABLE / DROP COLUMN migration is about to destroy, BEFORE it is applied
+# (CLAUDE.md rule 1 / the `database` skill: back up first, then the operator's explicit OK).
+# Each target is `table` (pg_dump of the whole relation) or `table:key,col[,col...]` (a CSV of
+# the key plus those columns, rows where one of them is set), uploaded to R2 under
+# backups/<label>/<UTC date>/ and read back. Never a workflow artifact: the repository is
+# public. workflow_dispatch only; safe to re-run (a same-day re-run overwrites).
+#
+# Migration 575 (the MF legacy columns):
+#   gh workflow run backup_before_drop.yml -f label=mf-legacy-columns -f targets="listings:id,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent properties:id,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent ruian_admin_units:id,has_polygon"
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: "Names the backup (a-z 0-9 -), e.g. mf-legacy-columns"
+        required: true
+        type: string
+      targets:
+        description: "Space-separated: `table` or `table:key,col[,col...]`"
+        required: true
+        type: string
+
+concurrency:
+  group: backup-before-drop
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install postgresql-client 17 (pg_dump)
+        # The runner's default postgresql-client is v16; the Supabase server is v17.x and
+        # pg_dump refuses to dump from a newer major version. Pull the matching client from
+        # the official PGDG apt repo instead of the Ubuntu default.
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
+      - name: Install
+        run: pip install -e .
+
+      # Free text reaches the shell only through the environment, charset-guarded and with
+      # globbing off; the script then validates the shape of every target.
+      - name: Back up the targets
+        env:
+          LABEL: ${{ inputs.label }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          set -f
+          case "$LABEL$TARGETS" in
+            *[!a-z0-9_:,\ -]*) echo "::error::label/targets may only contain a-z 0-9 _ : , - and spaces"; exit 1 ;;
+          esac
+          # shellcheck disable=SC2086  # word-splitting TARGETS into one argument per target
+          python -m scripts.backup_before_drop "$LABEL" $TARGETS
