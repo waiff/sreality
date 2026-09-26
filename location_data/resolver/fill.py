@@ -143,8 +143,9 @@ def position(filled: Fill, binding: Binding) -> Position:
 
 
 def _chain(binding: Binding, registry: RegistryView) -> tuple[AdminUnit, ...]:
-    """The ONE registry read FILL makes. The finest bound unit first, so its own level lands
-    on the row alongside every ancestor."""
+    """The registry read FILL makes for every row (the only other is `part_katastr_kod`, for
+    a část bound in a multi-KÚ obec). The finest bound unit first, so its own level lands on
+    the row alongside every ancestor, and a one-KÚ obec carries its sole KÚ."""
     if binding.cast_obce_unit_id is not None:
         chain = tuple(registry.admin_chain(binding.cast_obce_unit_id))
         if chain:
