@@ -7,6 +7,7 @@ CHECK, a UNIQUE or an FK, so nothing in this file claims the mirror accepted a r
 from __future__ import annotations
 
 import datetime
+import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -92,27 +93,24 @@ def _artifact(name: str) -> object:
                     bytes=10, sha256="abc", etag='"e"', last_modified="lm")
 
 
-def test_ensure_version_inserts_one_version_for_both_products():
-    conn = _FakeConn([("SELECT id, is_current, artifact_sha256", None),
-                      ("INSERT INTO registry_versions", (77,))])
+def test_create_version_inserts_one_version_for_both_products():
+    conn = _FakeConn([("INSERT INTO registry_versions", (77,))])
     artifacts = {"csv_ob_adr": _artifact("ob"), "csv_strukt_adr": _artifact("strukt")}
-    version_id, current = ruian_load.ensure_version(
+    version_id = ruian_load.create_version(
         conn, datetime.date(2026, 7, 31), artifacts,
         {"proj_version": "PROJ 9", "proj_pipeline": "S-JTSK to WGS 84 (5)"},
     )
-    assert (version_id, current) == (77, False)
-    insert = next(sql for sql, _ in conn.executed if sql.startswith("INSERT INTO registry_versions"))
-    assert "is_current" in insert
-    params = conn.executed[-1][1]
+    assert version_id == 77
+    [(insert, params)] = conn.executed
+    assert insert.startswith("INSERT INTO registry_versions") and "is_current" in insert
     assert params[0] == "ruian:2026-07-31"
     urls = json.loads(params[2])
     assert set(urls) == {"csv_ob_adr", "csv_strukt_adr"}
 
 
-def test_ensure_version_records_the_r2_archive_keys_alongside_the_source_urls():
-    conn = _FakeConn([("SELECT id, is_current, artifact_sha256", None),
-                      ("INSERT INTO registry_versions", (3,))])
-    ruian_load.ensure_version(
+def test_create_version_records_the_r2_archive_keys_alongside_the_source_urls():
+    conn = _FakeConn([("INSERT INTO registry_versions", (3,))])
+    ruian_load.create_version(
         conn, datetime.date(2026, 7, 31), {"csv_ob_adr": _artifact("ob")},
         {"proj_version": "p", "proj_pipeline": "q"},
         archive_keys={"csv_ob_adr_archive": "backups/ruian-archive/ruian:2026-07-31/ob.zip"},
@@ -121,47 +119,17 @@ def test_ensure_version_records_the_r2_archive_keys_alongside_the_source_urls():
     assert urls["csv_ob_adr_archive"].startswith("backups/ruian-archive/")
 
 
-def test_ensure_version_resumes_an_unpublished_load():
-    conn = _FakeConn([("SELECT id, is_current FROM registry_versions", (5, False))])
-    version_id, current = ruian_load.ensure_version(
-        conn, datetime.date(2026, 7, 31),
-        {"csv_ob_adr": _artifact("ob")},
-        {"proj_version": "p", "proj_pipeline": "q"},
+def test_a_version_recorded_without_an_archived_pack_cannot_be_resumed(tmp_path):
+    """A version from before the pack was a vintage artifact (v1, v2) has no archived
+    `shp_stat`; resuming it would have nothing to load boundaries from."""
+    from location_data import archive
+
+    recorded = ruian_load.Recorded(
+        1, False, {"csv_ob_adr_archive": "k/ob.zip", "csv_strukt_adr_archive": "k/st.zip"},
+        {}, {}, {}, {},
     )
-    assert (version_id, current) == (5, False)
-    assert any("UPDATE registry_versions" in sql for sql, _ in conn.executed)
-
-
-def test_a_resume_whose_pack_differs_from_the_recorded_sha_refuses():
-    """ČÚZK refreshes the boundary pack IN PLACE under one URL, so a resume that downloaded
-    other bytes would build one version out of two packs. It refuses — the audit trail's
-    sha256 is never rewritten — and the version stays staged."""
-    recorded = (5, False, {"csv_ob_adr": "abc", "shp_stat": "OTHER"},
-                {"csv_ob_adr": 10, "shp_stat": 10})
-    conn = _FakeConn()
-    with pytest.raises(loader_db.LoadAborted):
-        ruian_load.refuse_changed_artifacts(
-            conn, recorded,
-            {"csv_ob_adr": _artifact("ob"), "shp_stat": _artifact("shp_stat")},
-            "ruian:2026-09-30",
-        )
-    sql, params = conn.executed[-1]
-    assert "registry_load_discrepancies" in sql and params[3] == "load_aborted"
-    detail = json.loads(params[4])
-    assert detail["assertion"] == "artifact_bytes_are_immutable"
-    assert set(detail["artifacts"]) == {"shp_stat"}
-    assert not any(s.startswith("UPDATE registry_versions") for s, _ in conn.executed)
-
-
-def test_a_resume_with_the_recorded_bytes_goes_on():
-    recorded = (5, False, {"csv_ob_adr": "abc", "shp_stat": "abc"},
-                {"csv_ob_adr": 10, "shp_stat": 10})
-    conn = _FakeConn()
-    ruian_load.refuse_changed_artifacts(
-        conn, recorded, {"csv_ob_adr": _artifact("ob"), "shp_stat": _artifact("shp_stat")},
-        "ruian:2026-09-30",
-    )
-    assert conn.executed == []
+    with pytest.raises(archive.ArchiveError, match="shp_stat"):
+        ruian_load.restore_artifacts(recorded, datetime.date(2026, 7, 31), tmp_path)
 
 
 def test_artifact_mismatch_detection_covers_sha_and_bytes():
@@ -338,7 +306,9 @@ def test_the_phases_run_in_the_one_full_order():
     ]
     positions = [source.index(step) for step in order]
     assert positions == sorted(positions)
-    assert source.rindex("refresh_rent_map_cells(conn)") > positions[-1]
+    assert source.rindex("finish(conn, version_id") > positions[-1]
+    finish = inspect.getsource(ruian_load.finish)
+    assert finish.index("drop_staging(") < finish.index("refresh_rent_map_cells(conn)")
     assert source.count("name_index.rebuild(") == 1
     # The boundaries phase no longer rebuilds the gazetteer on its own.
     from location_data import ruian_boundaries
@@ -346,14 +316,13 @@ def test_the_phases_run_in_the_one_full_order():
     assert "name_index.rebuild" not in inspect.getsource(ruian_boundaries)
 
 
-def test_the_vintage_is_archived_before_anything_is_staged():
+def test_the_vintage_is_archived_before_it_is_recorded_or_staged():
     """04 §C1.8: a version that was never archived stops being reproducible the moment
     ČÚZK rotates the CSV directory or refreshes the pack, so the upload gates the load —
-    with no bypass — and the sha check runs before it, so R2 keeps the recorded bytes."""
+    with no bypass — and the version row that names the archive keys follows it."""
     source = inspect.getsource(ruian_load.run)
-    assert (source.index("refuse_changed_artifacts(")
-            < source.index("archive.archive_version(")
-            < source.index("ensure_version(")
+    assert (source.index("archive.archive_version(")
+            < source.index("create_version(")
             < source.index("create_staging("))
     assert "allow_unarchived" not in source
 
@@ -421,28 +390,33 @@ def test_stats_to_counts_round_trips_into_prior_load(ob_adr_zip: Path):
 
 
 class _Load:
-    """`ruian_load.run` with every I/O phase replaced by a recorder over ONE version row
-    that survives between dispatches, exactly as `registry_versions` does."""
+    """`ruian_load.run` over ONE version row that survives between dispatches, exactly as
+    `registry_versions` does, with ČÚZK and R2 faked at their byte-moving edges — the real
+    `fetch_artifacts`, `archive_version`, `restore_artifacts` and sha check run."""
 
     def __init__(self, monkeypatch, tmp_path: Path):
         self.tmp_path = tmp_path
         self.row: dict | None = None      # the registry_versions row, once created
-        self.pack_sha = "pack-a"          # what ČÚZK serves at STATE_PACK_URL today
+        self.cuzk = {"csv_ob_adr": b"ob", "csv_strukt_adr": b"strukt", "shp_stat": b"pack-a"}
+        self.r2: dict[str, bytes] = {}
         self.missing: list = []           # what missing_geometry answers
         self.kill_in_boundaries = False
+        self.packs_loaded: list[bytes] = []
         self.calls: dict[str, int] = {}
         self.conn = _FakeConn()
         self.conn.close = lambda: None
 
         def hit(name, result=None):
             def _call(*a, **k):
-                self.calls[name] = self.calls.get(name, 0) + 1
+                self._count(name)
                 return result
             return _call
 
         from location_data import archive, krovak, name_index, ruian_boundaries, ruian_csv
 
         monkeypatch.setattr(ruian_csv, "session", lambda: object())
+        monkeypatch.setattr(ruian_csv, "download", self._download)
+        monkeypatch.setattr(archive, "open_store", lambda: self)
         monkeypatch.setattr(krovak, "proj_environment",
                             lambda: {"proj_version": "p", "proj_pipeline": "q"})
         monkeypatch.setattr(loader_db, "open_loader_connection", lambda: self.conn)
@@ -450,9 +424,7 @@ class _Load:
                             lambda conn, v: dict(self.row["progress"]))
         monkeypatch.setattr(loader_db, "write_progress", self._write_progress)
         monkeypatch.setattr(ruian_load, "recorded_version", self._recorded)
-        monkeypatch.setattr(ruian_load, "fetch_artifacts", self._fetch)
-        monkeypatch.setattr(archive, "archive_version", hit("archive", {}))
-        monkeypatch.setattr(ruian_load, "ensure_version", self._ensure)
+        monkeypatch.setattr(ruian_load, "create_version", self._create)
         monkeypatch.setattr(ruian_load, "prior_load", lambda *a, **k: None)
         for name in ("create_staging", "truncate_staging", "index_staging", "drop_staging",
                      "record_product_skew", "upsert_units", "upsert_relations", "report"):
@@ -475,37 +447,52 @@ class _Load:
     def _count(self, name: str) -> None:
         self.calls[name] = self.calls.get(name, 0) + 1
 
+    # ČÚZK
+    def _download(self, sess, name, url, dest):
+        from location_data.ruian_csv import Artifact
+
+        self._count("cuzk_download")
+        dest.write_bytes(self.cuzk[name])
+        return Artifact(name=name, url=url, path=dest, bytes=len(self.cuzk[name]),
+                        sha256=hashlib.sha256(self.cuzk[name]).hexdigest(),
+                        etag=f'"{name}"', last_modified="Thu, 01 Oct 2026 08:00:00 GMT")
+
+    # R2 (archive.ObjectStore)
+    def upload_file(self, key, path, content_type="application/zip"):
+        self.r2[key] = Path(path).read_bytes()
+
+    def upload_bytes(self, key, data, content_type="application/json"):
+        self.r2[key] = data
+
+    def download_file(self, key, path):
+        self._count("r2_restore")
+        Path(path).write_bytes(self.r2[key])
+
+    # registry_versions
+    def _recorded(self, conn, label):
+        if self.row is None:
+            return None
+        return ruian_load.Recorded(7, self.row["current"], *(
+            dict(self.row[k]) for k in ("urls", "sha", "bytes", "etag", "lm")))
+
+    def _create(self, conn, vintage, artifacts, proj, *, archive_keys=None):
+        assert self.row is None, "a resume must never create a second version row"
+        self.row = {"current": False, "progress": {},
+                    "urls": {**{n: a.url for n, a in artifacts.items()}, **archive_keys},
+                    "sha": {n: a.sha256 for n, a in artifacts.items()},
+                    "bytes": {n: a.bytes for n, a in artifacts.items()},
+                    "etag": {n: a.etag for n, a in artifacts.items()},
+                    "lm": {n: a.last_modified for n, a in artifacts.items()}}
+        return 7
+
     def _write_progress(self, conn, version_id, *, phase=None, counts=None):
         done = self.row["progress"].setdefault("_phases_done", [])
         if phase and phase not in done:
             done.append(phase)
 
-    def _recorded(self, conn, label):
-        if self.row is None:
-            return None
-        return (7, self.row["current"], self.row["sha"], self.row["bytes"])
-
-    def _fetch(self, sess, vintage, work_dir, *, reuse):
-        self._count("fetch")
-        from location_data.ruian_csv import Artifact
-
-        return {
-            name: Artifact(name=name, url=f"https://x/{name}", path=self.tmp_path / name,
-                           bytes=10, sha256=sha, etag=None, last_modified=None)
-            for name, sha in (("csv_ob_adr", "ob"), ("csv_strukt_adr", "strukt"),
-                              ("shp_stat", self.pack_sha))
-        }
-
-    def _ensure(self, conn, vintage, artifacts, proj, *, archive_keys=None):
-        if self.row is None:
-            self.row = {"current": False, "progress": {},
-                        "sha": {n: a.sha256 for n, a in artifacts.items()},
-                        "bytes": {n: a.bytes for n, a in artifacts.items()}}
-        return 7, self.row["current"]
-
     def _load_pack(self, conn, pack, version_id):
         self._count("boundaries")
-        assert pack.name == "shp_stat"  # the archived, sha-recorded artifact, not a refetch
+        self.packs_loaded.append(pack.read_bytes())
         if self.kill_in_boundaries:
             raise RuntimeError("runner killed mid-pack")
         return {"loaded": 1, "carried": 0}, conn
@@ -515,7 +502,9 @@ class _Load:
         self.row["current"] = True
 
     def dispatch(self) -> int:
-        return ruian_load.run(vintage=datetime.date(2026, 9, 30), work_dir=self.tmp_path,
+        work_dir = self.tmp_path / f"run{sum(self.calls.values())}"
+        work_dir.mkdir()
+        return ruian_load.run(vintage=datetime.date(2026, 9, 30), work_dir=work_dir,
                               dry_run=False, reuse=False, keep_staging=False, limit=None)
 
 
@@ -538,10 +527,49 @@ def test_a_run_killed_mid_boundaries_resumes_and_publishes_exactly_once(monkeypa
     assert load.calls["load_address_points"] == 1
 
     # A third dispatch of a current vintage downloads nothing and publishes nothing; it
-    # only redoes the cells refresh, the one step after the pointer swap that can fail.
+    # only redoes the steps after the pointer swap.
     assert load.dispatch() == 0
-    assert load.calls["publish"] == 1 and load.calls["fetch"] == 2
+    assert load.calls["publish"] == 1 and load.calls["cuzk_download"] == 3
+    assert load.calls["r2_restore"] == 3
     assert load.calls["refresh_rent_map_cells"] == 2
+    assert load.calls["drop_staging"] == 2
+
+
+def test_a_resume_after_the_pack_was_refreshed_loads_the_archived_pack(monkeypatch, tmp_path):
+    """ČÚZK refreshes the pack in place daily, so a resume on a later day would download
+    other bytes than the version was started from. It never asks ČÚZK: it restores the
+    vintage's archive and publishes from the recorded pack."""
+    load = _Load(monkeypatch, tmp_path)
+    load.kill_in_boundaries = True
+    with pytest.raises(RuntimeError):
+        load.dispatch()
+    recorded_sha = load.row["sha"]["shp_stat"]
+
+    load.cuzk["shp_stat"], load.kill_in_boundaries = b"pack-b", False
+    assert load.dispatch() == 0
+    assert load.calls["cuzk_download"] == 3            # the first dispatch's three only
+    assert load.calls["r2_restore"] == 3
+    assert load.packs_loaded == [b"pack-a", b"pack-a"]
+    assert load.calls["publish"] == 1 and load.row["current"]
+    assert load.row["sha"]["shp_stat"] == recorded_sha
+
+
+def test_an_archive_that_no_longer_holds_the_recorded_bytes_refuses(monkeypatch, tmp_path):
+    load = _Load(monkeypatch, tmp_path)
+    load.kill_in_boundaries = True
+    with pytest.raises(RuntimeError):
+        load.dispatch()
+
+    load.r2[load.row["urls"]["shp_stat_archive"]] = b"pack-x"
+    load.kill_in_boundaries = False
+    with pytest.raises(loader_db.LoadAborted):
+        load.dispatch()
+    sql, params = load.conn.executed[-1]
+    assert "registry_load_discrepancies" in sql and params[3] == "load_aborted"
+    detail = json.loads(params[4])
+    assert detail["reason"] == "archive_corrupt"
+    assert set(detail["artifacts"]) == {"shp_stat"}
+    assert load.calls["boundaries"] == 1 and load.calls.get("publish", 0) == 0
 
 
 def test_an_incomplete_version_is_never_published(monkeypatch, tmp_path):
@@ -562,21 +590,3 @@ def test_an_incomplete_version_is_never_published(monkeypatch, tmp_path):
     load.missing = []
     assert load.dispatch() == 0
     assert load.calls["publish"] == 1
-
-
-def test_a_resume_after_the_pack_was_refreshed_refuses_before_archiving(
-    monkeypatch, tmp_path,
-):
-    load = _Load(monkeypatch, tmp_path)
-    load.kill_in_boundaries = True
-    with pytest.raises(RuntimeError):
-        load.dispatch()
-    assert load.row["sha"]["shp_stat"] == "pack-a"
-
-    load.pack_sha, load.kill_in_boundaries = "pack-b", False
-    with pytest.raises(loader_db.LoadAborted):
-        load.dispatch()
-    assert load.calls["archive"] == 1          # the refused bytes never reach R2
-    assert load.calls["boundaries"] == 1
-    assert load.calls.get("publish", 0) == 0
-    assert load.row["sha"]["shp_stat"] == "pack-a"

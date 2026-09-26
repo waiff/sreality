@@ -9,8 +9,11 @@ unreproducible the moment ČÚZK rotates.
 Design §C1.8 asks for a dedicated `ruian-archive` bucket; this ships into the platform's
 EXISTING R2 bucket under the `backups/ruian-archive/` prefix instead — same account, same
 credentials, one fewer piece of infrastructure to provision, and the key scheme keeps the
-design's `<registry_version_label>/<original_filename>` shape. Objects are immutable: a key
-that already holds the right byte count is left alone, never overwritten.
+design's `<registry_version_label>/<original_filename>` shape. The archive is the vintage's
+source of truth once recorded: a resumed load restores its artifacts from here, never from
+ČÚZK, which refreshes the boundary pack in place daily. Recorded objects are immutable by
+construction — only a vintage no `registry_versions` row records yet is uploaded, so the
+only object a key can already hold is the orphan of a run that died before recording it.
 
 The manifest carries the licence text in force at fetch time, per §4.8's "licence posture
 changes" scenario — CC BY 4.0 is irrevocable, so bytes obtained under it stay usable even
@@ -23,6 +26,7 @@ import datetime
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Protocol
 
 from location_data.ruian_csv import Artifact
@@ -57,7 +61,7 @@ class ArchiveError(RuntimeError):
 class ObjectStore(Protocol):
     def upload_file(self, key: str, path: str, content_type: str = ...) -> None: ...
     def upload_bytes(self, key: str, data: bytes, content_type: str = ...) -> None: ...
-    def object_size(self, key: str) -> int | None: ...
+    def download_file(self, key: str, path: str) -> None: ...
 
 
 def artefact_key(version_label: str, filename: str) -> str:
@@ -112,23 +116,16 @@ def archive_version(
 ) -> dict[str, str]:
     """Upload every artefact + the manifest; return the archive keys to record in
     `registry_versions.artifact_urls`. Raises ArchiveError on any failure — the caller
-    aborts BEFORE staging, so an unarchived vintage never becomes `is_current`."""
+    aborts BEFORE staging, so an unarchived vintage never becomes `is_current`. Called only
+    for a vintage no version row records, so an object already under a key is unreferenced
+    and replaced by the bytes this run records."""
     store = store or open_store()
     keys: dict[str, str] = {}
     try:
         for name, artifact in sorted(artifacts.items()):
             key = artefact_key(version_label, artifact.path.name)
-            existing = store.object_size(key)
-            if existing == artifact.bytes:
-                LOG.info("ARCHIVE already present key=%s bytes=%d", key, existing)
-            else:
-                if existing is not None:
-                    raise ArchiveError(
-                        f"{key} already exists with {existing} bytes, not {artifact.bytes} — "
-                        "archived vintages are immutable; refusing to overwrite"
-                    )
-                store.upload_file(key, str(artifact.path), "application/zip")
-                LOG.info("ARCHIVE uploaded key=%s bytes=%d", key, artifact.bytes)
+            store.upload_file(key, str(artifact.path), "application/zip")
+            LOG.info("ARCHIVE uploaded key=%s bytes=%d", key, artifact.bytes)
             keys[f"{name}_archive"] = key
         manifest = build_manifest(version_label, artifacts)
         store.upload_bytes(
@@ -137,8 +134,23 @@ def archive_version(
             "application/json",
         )
         keys["manifest_archive"] = manifest_key(version_label)
-    except ArchiveError:
-        raise
     except Exception as exc:  # noqa: BLE001 — any R2 failure is an archive failure
         raise ArchiveError(f"archiving {version_label} failed: {exc}") from exc
     return keys
+
+
+def restore(
+    keys: dict[str, str], work_dir: Path, *, store: ObjectStore | None = None,
+) -> dict[str, Path]:
+    """Download each archived artefact (name -> key) into `work_dir` under its archived
+    filename; return name -> path. Raises ArchiveError on any failure."""
+    store = store or open_store()
+    paths: dict[str, Path] = {}
+    for name, key in keys.items():
+        paths[name] = work_dir / key.rsplit("/", 1)[-1]
+        try:
+            store.download_file(key, str(paths[name]))
+        except Exception as exc:  # noqa: BLE001 — any R2 failure is an archive failure
+            raise ArchiveError(f"restoring {key} failed: {exc}") from exc
+        LOG.info("ARCHIVE restored key=%s", key)
+    return paths

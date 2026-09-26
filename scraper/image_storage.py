@@ -289,6 +289,10 @@ class R2Client:
                 handle, self.bucket, key, ExtraArgs={"ContentType": content_type}
             )
 
+    def download_file(self, key: str, path: str) -> None:
+        """Stream an object to disk — the registry resume restores 253 MB artefacts."""
+        self._client.download_file(self.bucket, key, path)
+
     def object_size(self, key: str) -> int | None:
         """Size in bytes, or None ONLY when the object does not exist."""
         from botocore.exceptions import ClientError

@@ -2891,7 +2891,7 @@
     {
       "filename": "location_registry_load.yml",
       "name": "Location: RÚIAN registry load",
-      "description": "The monthly RÚIAN registry load (design 04 §4.4.2): ONE `full` load per vintage, 1st 10:00 UTC. It HEAD-probes the vintage, archives both CSV zips AND the 253 MB state SHP boundary pack to R2, then stage -> blocking assertions -> merge -> boundaries (three geometries per unit, unchanged units carried from the previous version) -> gazetteer -> completeness assertion -> pointer swap into ONE new registry_version. A version publishes only when every obec and katastrální území has its geometry, so a killed or incomplete run leaves an inert staged version that the next dispatch resumes.",
+      "description": "The monthly RÚIAN registry load (design 04 §4.4.2): ONE `full` load per vintage, 1st 10:00 UTC. It HEAD-probes the vintage, archives both CSV zips AND the 253 MB state SHP boundary pack to R2, then stage -> blocking assertions -> merge -> boundaries (three geometries per unit, an unchanged unit's authoritative row carried from the previous version) -> gazetteer -> completeness assertion -> pointer swap into ONE new registry_version. A version publishes only when the state, every obec and every katastrální území has its geometry, so a killed or incomplete run leaves an inert staged version that any later dispatch resumes.",
       "portal": null,
       "manual": true,
       "schedules": [

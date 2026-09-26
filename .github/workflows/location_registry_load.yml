@@ -3,18 +3,20 @@ name: "Location: RÚIAN registry load"
 # The monthly RÚIAN registry load (design 04 §4.4.2): ONE `full` load per vintage, 1st 10:00
 # UTC. It HEAD-probes the vintage, archives both CSV zips AND the 253 MB state SHP boundary
 # pack to R2, then stage -> blocking assertions -> merge -> boundaries (three geometries per
-# unit, unchanged units carried from the previous version) -> gazetteer -> completeness
-# assertion -> pointer swap into ONE new registry_version. A version publishes only when every
-# obec and katastrální území has its geometry, so a killed or incomplete run leaves an inert
-# staged version that the next dispatch resumes.
+# unit, an unchanged unit's authoritative row carried from the previous version) -> gazetteer
+# -> completeness assertion -> pointer swap into ONE new registry_version. A version publishes
+# only when the state, every obec and every katastrální území has its geometry, so a killed or
+# incomplete run leaves an inert staged version that any later dispatch resumes.
 #
 # 10:00 UTC on the 1st is comfortably after the measured generation times (OB_ADR 08:04,
 # strukt_ADR 23:43 the prior day). The boundary pack has no vintage in its URL and ČÚZK
-# refreshes it in place, so its sha256 is recorded with the version: a resume that downloads
-# different bytes refuses (exit 1) rather than build one version out of two packs — re-dispatch
-# a killed run promptly. `registry liveness` in `location_town_coverage` goes red when the
-# current version is over 40 days old or a newer one has sat staged over 24 h. Everything here
-# is CC BY 4.0 ČÚZK open data — free, no key, no registration.
+# refreshes it in place daily, so a resume never downloads: it restores the vintage's archived
+# bytes from R2 and refuses (exit 1) only if they differ from the recorded sha256. A member
+# unit ČÚZK dissolves between the month-end CSV and the pack's load day would hold the
+# version back with no excuse path (none seen so far). `registry liveness` in
+# `location_town_coverage` goes red when the current version is over 40 days old or a newer
+# one has sat staged over 24 h. Everything here is CC BY 4.0 ČÚZK open data — free, no key,
+# no registration.
 #
 # Required secrets: LOCATION_DB_DIRECT_URL (a direct 5432 URL) or SUPABASE_DB_SESSION_URL —
 # a registry load wants a session it owns, never the transaction pooler — plus the R2_*
