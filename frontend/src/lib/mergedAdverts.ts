@@ -50,7 +50,6 @@ export function mergeOriginLabel(source: string): string {
 
 /* Why separating an advert moves nothing; an outcome not listed here is shown raw. */
 const UNMOVED: Record<string, string> = {
-  not_on_property: 'inzerát už v této nemovitosti není',
   not_merged: 'inzerát je v nemovitosti sám',
   on_origin: 'inzerát už je v nemovitosti, ze které přišel',
   moved_since: 'inzerát se mezitím přesunul jinam',

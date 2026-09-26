@@ -379,6 +379,52 @@ describe('<AutodedupProposedSplits> the statement per card', () => {
     );
   });
 
+  it("says when the record stays with a separated unit, and the outcome names it", async () => {
+    setup();
+    await screen.findByTestId('proposal-13393');
+    // only the property's own advert leaves: the record goes with it, the rest goes home
+    fireEvent.click(tick(13393, 202));
+    fireEvent.click(tick(13393, 303));
+    fireEvent.click(tick(13393, 101));
+    expect(
+      within(card(13393)).getByText(
+        'Plán: oddělit #101 (sreality) · zbytek (#202, #303) potvrdit jako jednu nemovitost · ' +
+          'záznam #13393 (poznámky, štítky, karta v pipeline) zůstane u #101, vlastního inzerátu ' +
+          'nemovitosti; zbytek se vrátí tam, odkud přišel',
+      ),
+    ).toBeInTheDocument();
+    // a kept own advert keeps the record: the plan says nothing more
+    expect(within(card(44)).getByText(/^Plán: oddělit #112 \(idnes\) \+ #113 \(bazos\) · zbytek \(#111\) potvrdit jako jednu nemovitost$/)).toBeInTheDocument();
+
+    vi.mocked(api.splitProperty).mockResolvedValue({
+      ...result(13393, [
+        {
+          unit: 'A',
+          role: 'kept',
+          listing_ids: [202, 303],
+          property_id: 90211,
+          moved: [
+            { listing_id: 202, outcome: 'detached', from: 13393, to: 90211 },
+            { listing_id: 303, outcome: 'detached', from: 13393, to: 90312 },
+          ],
+          merge_group_id: 'g-j',
+        },
+        { unit: 'B', role: 'separated', listing_ids: [101], property_id: 13393, moved: [], merge_group_id: null },
+      ]),
+      record_kept_by: 'B',
+    });
+    await run(13393);
+    const outcome = await screen.findByTestId('outcome-13393');
+    expect(
+      within(outcome).getByText(
+        /odděleno \(drží záznam nemovitosti: poznámky, štítky, karta v pipeline\): #101 \(sreality\)/,
+      ),
+    ).toBeInTheDocument();
+    expect(within(outcome).getByText(/zůstávají spolu: #202 \(bezrealitky\), #303 \(idnes\)/)).toBeInTheDocument();
+    expect(within(outcome).getByRole('link', { name: 'sloučeno do #90211' })).toBeInTheDocument();
+    expect(within(outcome).getByRole('link', { name: 'zůstává #13393' })).toBeInTheDocument();
+  });
+
   it('refuses to arm a card whose adverts are all ticked', async () => {
     setup();
     await screen.findByTestId('proposal-13393');
