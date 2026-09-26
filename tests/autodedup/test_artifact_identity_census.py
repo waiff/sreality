@@ -32,7 +32,8 @@ LANE_WRITERS: tuple[str, ...] = (
     "judge_lane.py", "judge_prompts.py",
     "judge_sql.py", "labels.py", "labels_lane.py", "labels_sql.py", "lane.py",
     "legacy_retire.py", "parity.py",
-    "progress_sql.py", "replay.py", "rt_equivalence.py", "score_lane.py", "score_sql.py",
+    "progress_sql.py", "reconcile.py", "replay.py", "rt_equivalence.py", "score_lane.py",
+    "score_sql.py",
     "seals.py",
     "structural_truth.py", "town_probe.py",
     # E299: writes yardstick.json / yardstick.md; reads the group file, where the operator's

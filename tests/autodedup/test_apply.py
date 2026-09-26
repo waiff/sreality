@@ -1903,7 +1903,8 @@ def test_the_run_summary_names_every_refusal(tmp_path: Path, monkeypatch: Any) -
 
 
 def test_nothing_but_the_lane_reaches_the_apply_path() -> None:
-    # Inert when off: no module, schedule or worker calls it, only an operator's dispatch.
+    # Two callers and no more: an operator's dispatch (lane.py) and the real-time lane's
+    # reconcile (A9), which the worker runs only while its interval is above 0.
     import re
 
     root = Path(A.__file__).resolve().parent.parent
@@ -1915,7 +1916,7 @@ def test_nothing_but_the_lane_reaches_the_apply_path() -> None:
         for path in (root / top).rglob("*.py")
         if importer.search(path.read_text(encoding="utf-8"))
     )
-    assert callers == ["autodedup/lane.py"]
+    assert callers == ["autodedup/lane.py", "autodedup/reconcile.py"]
     workflow = (root / ".github" / "workflows" / "autodedup.yml").read_text(encoding="utf-8")
     trigger = workflow.split("\non:\n", 1)[1].split("\nconcurrency:", 1)[0]
     assert "schedule" not in trigger and "workflow_dispatch" in trigger
