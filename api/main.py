@@ -1326,17 +1326,22 @@ def post_estimate_yield(
     # Secondary MF Cenová mapa reference (rent only). The amenity filters double as the
     # subject's facts on this ad-hoc surface; a typed point has no stored location, so
     # its obec comes from the one containing-obec statement and it never binds a KÚ.
+    # A secondary reference never fails the route: on an error the payload omits it.
     if body.estimate_kind == "rent":
-        reference_rent = compute_reference_rent(
-            conn,
-            category_main=body.category_main, category_type=body.category_type,
-            disposition=target.disposition, area_m2=target.area_m2,
-            price_czk=body.purchase_price_czk, condition=None,
-            has_balcony=body.has_balcony, terrace=body.terrace,
-            furnished="ano" if "ano" in (body.furnished or []) else None,
-            garage=body.garage, has_lift=body.has_lift, building_type=None,
-            obec_kod=maps.containing_obec_kod(conn, lat=target.lat, lng=target.lng),
-        )
+        try:
+            reference_rent = compute_reference_rent(
+                conn,
+                category_main=body.category_main, category_type=body.category_type,
+                disposition=target.disposition, area_m2=target.area_m2,
+                price_czk=body.purchase_price_czk, condition=None,
+                has_balcony=body.has_balcony, terrace=body.terrace,
+                furnished="ano" if "ano" in (body.furnished or []) else None,
+                garage=body.garage, has_lift=body.has_lift, building_type=None,
+                obec_kod=maps.containing_obec_kod(conn, lat=target.lat, lng=target.lng),
+            )
+        except Exception:  # noqa: BLE001 - secondary reference, never fatal
+            logging.warning("MF reference for /estimate_yield failed", exc_info=True)
+            reference_rent = None
         if reference_rent is not None:
             result["data"]["reference_rent"] = reference_rent
     return result

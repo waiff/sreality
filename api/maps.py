@@ -248,18 +248,14 @@ def _containing_chain(
 
 
 def containing_obec_kod(conn: Any, *, lat: float | None, lng: float | None) -> int | None:
-    """The RÚIAN code of the obec covering a point, or None (foreign / no registry).
-
-    The one containing-obec statement, for subjects with no stored location (an
-    estimation of a URL-parsed advert or a typed point). Best-effort like the MF
-    reference it feeds: a failure reads as "no obec", never as a failed request."""
+    """The RÚIAN code of the obec covering a point, or None (outside every obec / no
+    registry) -- the one containing-obec statement, for subjects with no stored location
+    (an estimation of a URL-parsed advert or a typed point). A query error raises: read
+    as "no obec" it would become a confident `location_unknown`, frozen into a run."""
     version = _registry_version(conn)
     if version is None or lat is None or lng is None:
         return None
-    try:
-        obec = _containing_chain(conn, version=version, lat=lat, lng=lng).get("obec")
-    except Exception:  # noqa: BLE001 - secondary reference, never fatal
-        return None
+    obec = _containing_chain(conn, version=version, lat=lat, lng=lng).get("obec")
     return obec[1] if obec else None
 
 

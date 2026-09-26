@@ -2009,6 +2009,7 @@ def _reference_rent_for_run(
                 **_subject_mf_facts(conn, resolution, target, body),
             )
         except Exception:  # noqa: BLE001 - secondary reference never fails a run
+            LOG.warning("MF reference for the run failed", exc_info=True)
             ref = None
         if ref is None:
             step.set_summary({"matched": False})
