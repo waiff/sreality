@@ -90,10 +90,6 @@ class ComparableFilters:
     # sub-floor price fall out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
-    # MF gross rental yield % (migration 133). Sale apartments only; NULL on
-    # everything else, so they fall out when either bound is set.
-    min_mf_gross_yield_pct: float | None = None
-    max_mf_gross_yield_pct: float | None = None
     # Default None means "no category filter" — search every category.
     # There is deliberately no implicit apartment-rental default: callers
     # that want one category pass it explicitly (the request schemas in
@@ -451,12 +447,6 @@ def _shared_filter_where(
     if filters.max_price_per_m2 is not None:
         where.append(f"{per_m2_sql('l')} <= %(max_price_per_m2)s")
         params["max_price_per_m2"] = filters.max_price_per_m2
-    if filters.min_mf_gross_yield_pct is not None:
-        where.append("l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s")
-        params["min_mf_gross_yield_pct"] = filters.min_mf_gross_yield_pct
-    if filters.max_mf_gross_yield_pct is not None:
-        where.append("l.mf_gross_yield_pct <= %(max_mf_gross_yield_pct)s")
-        params["max_mf_gross_yield_pct"] = filters.max_mf_gross_yield_pct
 
     if filters.category_sub_cb is not None:
         where.append("l.category_sub_cb = %(category_sub_cb)s")
@@ -763,8 +753,6 @@ def _filters_used(
         # _cohort_ppm2_basis). `mixed`, `unknown` and None all mean the same
         # thing to a consumer: render the gap, never a unit.
         "price_per_m2_basis": _cohort_ppm2_basis(filters, listings),
-        "min_mf_gross_yield_pct": filters.min_mf_gross_yield_pct,
-        "max_mf_gross_yield_pct": filters.max_mf_gross_yield_pct,
         "category_main": filters.category_main,
         "category_type": filters.category_type,
         "category_sub_cb": filters.category_sub_cb,

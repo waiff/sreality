@@ -1,7 +1,8 @@
-"""Tests for the MF rent-map parser + reference-rent calc (toolkit.rent_map).
+"""Tests for the MF rent-map parser + the reference-rent wrapper (toolkit.rent_map).
 
-Parser tests run against a committed fixture XLSX (hermetic, no network);
-compute_reference_rent uses a fake psycopg connection.
+Parser tests run against a committed fixture XLSX (hermetic, no network). The
+measure itself is SQL (`mf_reference()`, migration 565) and is tested live in
+tests/test_mf_reference.py; here only the wrapper's hand-off, on a fake connection.
 """
 
 from __future__ import annotations
@@ -13,8 +14,8 @@ import pytest
 
 from api.rent_map import find_latest_xlsx_url
 from toolkit.rent_map import (
+    MF_ENGINE,
     compute_reference_rent,
-    disposition_to_vk,
     parse_rent_map_xlsx,
     source_date_from_filename,
 )
@@ -71,15 +72,6 @@ def test_litomerice_worked_example(parsed):
     assert round(per_m2 * 68) == 19788
 
 
-@pytest.mark.parametrize("disp,vk", [
-    ("1+kk", 1), ("1+1", 1), ("0+1", 1), ("2+kk", 2), ("2+1", 2),
-    ("3+1", 3), ("3+kk", 3), ("4+kk", 4), ("5+1", 4), ("6+kk", 4),
-    (None, None), ("", None), ("atypicke", None),
-])
-def test_disposition_to_vk(disp, vk):
-    assert disposition_to_vk(disp) == vk
-
-
 def test_source_date_from_filename():
     assert source_date_from_filename("2026-05-15_Cenova-mapa.xlsx") == date(2026, 5, 15)
     assert source_date_from_filename("no-date.xlsx") is None
@@ -100,12 +92,28 @@ def test_find_latest_xlsx_url_none_when_absent():
     assert find_latest_xlsx_url("<a href='/assets/x.pdf'>no</a>") is None
 
 
-# --- compute_reference_rent (fake DB) --------------------------------------
+# --- compute_reference_rent: a thin hand-off to mf_reference() ---------------
+
+_FACTS = {
+    "category_main": "byt", "category_type": "prodej", "disposition": "3+1",
+    "area_m2": 75.0, "price_czk": 5_100_000, "condition": "dobry",
+    "has_balcony": True, "terrace": False, "furnished": "ne", "garage": None,
+    "has_lift": True, "building_type": "cihla", "obec_kod": 586846,
+    "katastr_kod": None, "country_status": "cz",
+}
+
+# mf_reference()'s declared parameter order (migration 565). The wrapper binds by name,
+# so this pins that every name lands in its own positional slot of the call.
+_SIGNATURE_ORDER = (
+    "category_main", "category_type", "disposition", "area_m2", "price_czk", "condition",
+    "has_balcony", "terrace", "furnished", "garage", "has_lift", "building_type",
+    "obec_kod", "katastr_kod", "country_status",
+)
+
 
 class _FakeCursor:
-    def __init__(self, territory, adjustments):
-        self._territory = territory
-        self._adjustments = adjustments
+    def __init__(self, conn):
+        self._conn = conn
 
     def __enter__(self):
         return self
@@ -114,79 +122,46 @@ class _FakeCursor:
         return False
 
     def execute(self, sql, params=None):
-        self._is_territory = "rent_map_values_public" in sql
+        if self._conn.error is not None:
+            raise self._conn.error
+        self._conn.calls.append((sql, params))
 
     def fetchone(self):
-        return self._territory
-
-    def fetchall(self):
-        return self._adjustments
+        return self._conn.row
 
 
 class _FakeConn:
-    def __init__(self, territory, adjustments):
-        self._territory = territory
-        self._adjustments = adjustments
+    def __init__(self, row=None, error=None):
+        self.row, self.error, self.calls = row, error, []
 
     def cursor(self):
-        return _FakeCursor(self._territory, self._adjustments)
+        return _FakeCursor(self)
 
 
-def _conn(ref_std=203, ref_nov=300, adjustments=None):
-    territory = (685429, "ku", "Ústecký kraj", ref_std, ref_nov, 1,
-                 date(2026, 5, 15), "Litoměřice")
-    if adjustments is None:
-        adjustments = [("elevator", 47), ("balcony", 4), ("garage", 37),
-                       ("terrace", 34), ("furnished", 28)]
-    return _FakeConn(territory, adjustments)
+def test_the_wrapper_hands_every_fact_to_mf_reference_in_signature_order():
+    detail = {"status": "ok", "monthly_rent_czk": 19125, "vk": 3}
+    conn = _FakeConn(row=(detail,))
+    out = compute_reference_rent(conn, **_FACTS)
+    ((sql, params),) = conn.calls
+    call = sql[sql.index("mf_reference("):]
+    slots = [call.index(f"%({name})s") for name in _SIGNATURE_ORDER]
+    assert slots == sorted(slots)
+    assert params == _FACTS
+    assert out == {**detail, "engine": MF_ENGINE}
 
 
-def test_compute_reference_rent_basic():
-    out = compute_reference_rent(
-        _conn(), lat=50.5, lng=14.1, area_m2=68, disposition="3+1",
-        amenities={"elevator": True, "balcony": True, "garage": True,
-                   "terrace": False, "furnished": False, "other_material": False},
-        is_novostavba=False,
-    )
-    assert out is not None
-    assert out["vk"] == 3
-    assert out["base_per_m2"] == 203
-    assert {a["attribute"] for a in out["adjustments"]} == {"elevator", "balcony", "garage"}
-    assert out["total_per_m2"] == 291
-    assert out["monthly_rent_czk"] == 19788
-    assert out["territory"]["name"] == "Litoměřice"
-    assert out["source_date"] == "2026-05-15"
+def test_katastr_and_country_default_to_unknown():
+    conn = _FakeConn(row=({"status": "location_unknown", "note": "x"},))
+    facts = {k: v for k, v in _FACTS.items() if k not in ("katastr_kod", "country_status")}
+    compute_reference_rent(conn, **facts)
+    ((_sql, params),) = conn.calls
+    assert params["katastr_kod"] is None and params["country_status"] is None
 
 
-def test_compute_reference_rent_novostavba_uses_nov_base():
-    out = compute_reference_rent(
-        _conn(ref_std=203, ref_nov=300), lat=50.5, lng=14.1, area_m2=50,
-        disposition="2+kk", amenities={}, is_novostavba=True,
-    )
-    assert out is not None
-    assert out["base_per_m2"] == 300
-    assert out["is_novostavba"] is True
-    assert out["adjustments"] == []
-    assert out["monthly_rent_czk"] == 300 * 50
+@pytest.mark.parametrize("row", [None, (None,)])
+def test_a_non_flat_reads_none(row):
+    assert compute_reference_rent(_FakeConn(row=row), **_FACTS) is None
 
 
-def test_compute_reference_rent_territory_miss_returns_none():
-    out = compute_reference_rent(
-        _FakeConn(None, []), lat=0.0, lng=0.0, area_m2=50,
-        disposition="2+1", amenities={},
-    )
-    assert out is None
-
-
-def test_compute_reference_rent_no_area_returns_none():
-    assert compute_reference_rent(
-        _conn(), lat=50.0, lng=14.0, area_m2=None,
-        disposition="2+1", amenities={},
-    ) is None
-
-
-def test_compute_reference_rent_unknown_disposition_returns_none():
-    assert compute_reference_rent(
-        _conn(), lat=50.0, lng=14.0, area_m2=50,
-        disposition=None, amenities={},
-    ) is None
+def test_a_database_error_reads_none():
+    assert compute_reference_rent(_FakeConn(error=RuntimeError("boom")), **_FACTS) is None

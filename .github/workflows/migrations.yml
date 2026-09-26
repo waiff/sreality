@@ -410,6 +410,18 @@ jobs:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest tests/test_measure_price_per_m2.py -q
 
+      # MF reference rent is ONE read-time measure (migration 565). Executed over a seeded
+      # rent map: every status code, the range for a town-level location, the VK clamp,
+      # the adjustments -- plus the plan assertion that the function INLINES into the
+      # property lateral that calls it (a SET clause or STRICT would make it one call per
+      # Browse row), and that an estimation hands the property's facts to it.
+      - name: MF reference rent is one inlined measure (migration 565)
+        timeout-minutes: 5
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          DB_RAILS_REQUIRED: "1"
+        run: pytest tests/test_mf_reference.py -q
+
       # W5's five per-m2 call sites are the one executed-SQL family the sweep
       # above CANNOT see: all five are assembled by in-function concatenation
       # into a local variable, so sql_corpus discovery reaches none of them
