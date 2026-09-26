@@ -448,23 +448,27 @@ class Negatives:
             out.pairs.setdefault(int(lo), []).append(int(hi))
         # Per set, only the NEWEST ruling stands, whoever took it (E903 as amended by E920: the
         # newest word wins at every reader, as it does for pairs): a set ruled different and
-        # later ruled same or withdrawn (`unsure`) no longer refuses. A setless row fails closed.
+        # later ruled same or withdrawn (`unsure`) no longer refuses. A setless row names only
+        # its key: the newest setless row of the key stands there, and refuses it (fail closed)
+        # only while it is negative.
         newest: dict[frozenset[int], tuple[tuple[float, int], str]] = {}
+        setless: dict[int, tuple[tuple[float, int], str]] = {}
         for key, verdict, _gen, member_ids, decided_at, vid in _rows(
                 conn, S.CLUSTER_VERDICTS_SQL, {
-                    "listing_ids": ids, "cluster_keys": sorted(set(cluster_keys)),
-                    "negatives": negatives}):
+                    "listing_ids": ids, "cluster_keys": sorted(set(cluster_keys))}):
+            order = (decided_at.timestamp() if isinstance(decided_at, datetime) else 0.0,
+                     int(vid or 0))
             if member_ids is None:
-                if verdict in NEGATIVE_VERDICTS:
-                    out.setless_keys.add(int(key))
+                if int(key) not in setless or order > setless[int(key)][0]:
+                    setless[int(key)] = (order, str(verdict))
                 continue
             ruled = frozenset(int(x) for x in member_ids)
             if len(ruled) < 2:
                 continue
-            order = (decided_at.timestamp() if isinstance(decided_at, datetime) else 0.0,
-                     int(vid or 0))
             if ruled not in newest or order > newest[ruled][0]:
                 newest[ruled] = (order, str(verdict))
+        out.setless_keys = {key for key, (_order, verdict) in setless.items()
+                            if verdict in NEGATIVE_VERDICTS}
         for ruled, (_order, verdict) in sorted(newest.items(), key=lambda kv: sorted(kv[0])):
             bucket = out.sets.setdefault(min(ruled), [])
             if verdict in NEGATIVE_VERDICTS and ruled not in bucket:

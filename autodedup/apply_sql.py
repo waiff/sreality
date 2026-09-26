@@ -116,15 +116,15 @@ select v.listing_lo, v.listing_hi, v.verdict
 # too: per set only the NEWEST ruling stands, whoever took it, so a set ruled different and
 # later ruled same or withdrawn no longer refuses (E903, E920). A row without `member_ids`
 # (538 backfilled every earlier ruling; only the old API's migration window can have left one)
-# names no set, so only its negatives are read, by key, and refuse that key in EVERY
-# generation (fail closed).
+# names no set, so it is read by key, whatever it says: the NEWEST setless row of a key stands,
+# and when it is negative it refuses that key in EVERY generation (fail closed). A withdrawal of
+# such a ruling (the rulings page copies its NULL set) is a newer setless `unsure`, which lifts it.
 CLUSTER_VERDICTS_SQL = """
 select v.cluster_key, v.verdict, v.generation, v.member_ids, v.decided_at, v.id
   from autodedup.verdicts v
  where v.kind = 'cluster'
    and ((v.member_ids is not null and v.member_ids && %(listing_ids)s::bigint[])
         or (v.member_ids is null
-            and v.verdict = any(%(negatives)s::text[])
             and v.cluster_key = any(%(cluster_keys)s::bigint[])))
 """
 

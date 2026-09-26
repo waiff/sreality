@@ -220,7 +220,6 @@ class FakeDb:
                     if v["kind"] == "cluster"
                     and ((v.get("member_ids") is not None and ids & set(v["member_ids"]))
                          or (v.get("member_ids") is None
-                             and v["verdict"] in p["negatives"]
                              and v["cluster_key"] in p["cluster_keys"]))]
         if sql == S.LEDGER_HISTORY_SQL:
             ids = set(p["listing_ids"])
@@ -511,6 +510,27 @@ def test_a_group_verdict_with_no_member_set_refuses_its_key_in_every_generation(
                         "generation": "g11", "member_ids": None})
     reasons = {g.cluster_key: g.reasons for g in _plan(db).groups}
     assert reasons == {10: [A.SKIP_CLUSTER_VERDICT], 20: [A.SKIP_CLUSTER_VERDICT], 30: []}
+
+
+def test_a_withdrawn_setless_group_verdict_no_longer_refuses_its_key() -> None:
+    """The rulings page offers a setless ruling only its withdrawal, which copies the NULL set:
+    a newer setless `unsure` on the key. The newest setless row of a key stands (E920 iii), so
+    the withdrawal lifts the refusal, and a newer negative restores it."""
+    db = FakeDb()
+    _pair_group(db, 10, [10, 11], [100, 200])
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
+                        "generation": None, "member_ids": None, "decided_at": T0})
+    assert _only(_plan(db)).reasons == [A.SKIP_CLUSTER_VERDICT]
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "unsure",
+                        "generation": None, "member_ids": None,
+                        "decided_at": T0 + timedelta(days=1)})
+    assert _only(_plan(db)).reasons == [], "a withdrawn setless ruling still refuses"
+    db.verdicts.append({"kind": "cluster", "cluster_key": 10, "verdict": "different",
+                        "generation": None, "member_ids": None,
+                        "decided_at": T0 + timedelta(days=2)})
+    assert _only(_plan(db)).reasons == [A.SKIP_CLUSTER_VERDICT]
+    flat = " ".join(S.CLUSTER_VERDICTS_SQL.split())
+    assert "negatives" not in flat, "the setless arm reads every row of the key, not negatives"
 
 
 def test_the_newest_group_verdict_on_a_set_is_the_one_that_stands_whoever_ruled() -> None:

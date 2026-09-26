@@ -157,6 +157,27 @@ def test_a_group_correction_appends_on_its_set_and_apply_reads_the_newest(cur):
     assert cur.fetchone()[usql.VERDICT_COLUMNS.index("verdict")] == "unsure"
 
 
+def test_a_withdrawn_setless_group_ruling_no_longer_refuses_its_key(cur):
+    """A ruling taken before 538 recorded no set; the page offers only its withdrawal, which
+    copies the NULL set. The newest setless row of the key stands (E920 iii)."""
+    a, b = _pair(cur)
+
+    def say(verdict: str) -> None:
+        cur.execute(usql.VERDICT_CLUSTER_APPEND_SQL, {
+            "cluster_key": a, "verdict": verdict, "note": None, "reasons": [],
+            "decided_by": OP, "generation": None, "member_ids": None})
+
+    def refused() -> bool:
+        return a in Negatives.read(cur.connection, [a, b], [a]).setless_keys
+
+    say("different")
+    assert refused()
+    say("unsure")
+    assert not refused(), "a withdrawn setless ruling still refuses its key"
+    say("different")
+    assert refused()
+
+
 def test_the_writes_hold_on_a_store_574_has_not_reached(cur):
     """The code ships before the migration is applied: with the pre-574 unique indexes back,
     a same-decider re-ruling updates that decider's row in place and never raises."""
