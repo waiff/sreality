@@ -18,6 +18,19 @@ store produce byte-identical output:
   * `must_not_link.jsonl` — the permanent operator negatives (`autodedup.must_not_link`,
     `source='operator'`), which are an INPUT to the next generation's clustering (E27/E33) and
     not merely a report on this one.
+  * `operator_merges.jsonl` (E299, migration 564) — the operator's own Browse merges at GROUP
+    grain, one row per merge group, sorted by `(merged_at, merge_group_id)`, provenance
+    `browse_merge`: every member with its origin side, where it sits today (portal, category,
+    property, and the export block it lives in, so a cohort covering the group can be
+    dispatched), and every pair the group asserts with that pair's STANDING — the merge's own
+    ruling, a verdict typed against the pair, a permanent negative, or none. Read from
+    `autodedup.operator_merges`, never from `property_merge_events`. Empty, and flagged in the
+    summary, while the store has no migration 564.
+
+A Browse merge's pair rulings used to reach `operator_labels.jsonl` as `explicit` — 560 wrote
+them as ordinary pair verdicts. Since 564 links each to its merge, they leave as `source =
+"browse_merge"` with the `merge_group_id` appended to the row; nothing else about the row
+changes, and a verdict typed by hand after the merge still leaves as `explicit`.
 
 The cap on implied labels is the point of the `max_members` argument. A confirmed group of n
 adverts asserts n*(n-1)/2 pairs, and the assertion gets weaker as n grows: an operator
@@ -54,12 +67,29 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
+from autodedup.cohort import PRAHA_OBEC_KOD
+from autodedup.labels import (
+    OPERATOR_MERGES_FILE,
+    OPERATOR_MERGES_FORMAT,
+    OPERATOR_POSITIVE_VERDICT,
+    SOURCE_BROWSE_MERGE,
+    MergePair,
+    STANDING_BROWSE_MERGE,
+    STANDING_EXPLICIT,
+    STANDING_MUST_NOT_LINK,
+    STANDING_UNRULED,
+    merge_pairs,
+)
 from autodedup.labels_sql import (
     CLUSTER_MEMBERS_SQL,
     CLUSTER_VERDICTS_SQL,
     ENGINE_PAIRS_SQL,
     GENERATION_CLUSTERS_SQL,
     MUST_NOT_LINK_SQL,
+    OPERATOR_MERGE_LINKS_SQL,
+    OPERATOR_MERGE_MEMBERS_SQL,
+    OPERATOR_MERGES_PRESENT_SQL,
+    OPERATOR_MERGES_SQL,
     PAIR_VERDICTS_SQL,
     SAMPLE_RANK_SQL,
     STORE_PRESENT_SQL,
@@ -67,6 +97,12 @@ from autodedup.labels_sql import (
 
 LABELS_FILE: str = "operator_labels.jsonl"
 MUST_NOT_LINK_FILE: str = "must_not_link.jsonl"
+# The labels file's own shape version. Version 2 appended `merge_group_id` and the third
+# `source` value `browse_merge` (E299); every version-1 field is unchanged.
+LABELS_FORMAT: int = 2
+# How many blocks the summary lists, ranked by the operator groups they would bring into a
+# cohort — the answer to "which export makes the yardstick cover the operator's merges".
+TOP_BLOCKS: int = 40
 
 DEFAULT_GENERATION: str = "g4"
 # Above the largest group the validation UI can build (eight members), so the cap bites only
@@ -82,6 +118,7 @@ CHUNK: int = 1_000
 
 SOURCE_EXPLICIT: str = "explicit"
 SOURCE_IMPLIED: str = "implied"
+PROVENANCE_BROWSE_MERGE: str = SOURCE_BROWSE_MERGE
 
 # `autodedup.verdicts.verdict` (migrations 528 + 532) -> the JUDGE's vocabulary, so an operator
 # row and a judge row about the same pair can be read side by side without a lookup table in
@@ -178,6 +215,16 @@ def store_ready(conn: Any) -> bool:
     return bool(rows and rows[0].get("present"))
 
 
+def merges_ready(conn: Any) -> bool:
+    """Migration 564's table AND its verdict column. Either missing reads as "not yet": the
+    pair labels still export, the group file is written empty and the summary says why."""
+    try:
+        rows = _run(conn, OPERATOR_MERGES_PRESENT_SQL, None, 10_000)
+    except Exception:  # noqa: BLE001 — an unreadable probe reads as "not ready"
+        return False
+    return bool(rows and rows[0].get("present"))
+
+
 def batched(items: Sequence[Any], size: int = CHUNK) -> Iterator[list[Any]]:
     for start in range(0, len(items), size):
         yield list(items[start:start + size])
@@ -257,6 +304,7 @@ def build_label_record(
     sample_rank: int | None,
     must_not_link: bool,
     engine: dict[str, Any] | None,
+    merge_group_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "listing_lo": int(lo),
@@ -274,6 +322,8 @@ def build_label_record(
         "sample_rank": sample_rank,
         "must_not_link": bool(must_not_link),
         "engine": engine,
+        # Appended in format 2 (E299): the Browse merge a `browse_merge` label was ruled by.
+        "merge_group_id": merge_group_id,
     }
 
 
@@ -329,6 +379,138 @@ def implied_from_clusters(
             })
             counts["pairs"] += 1
     return out, counts
+
+
+def export_block(obec_kod: Any, cast_obce_kod: Any) -> str | None:
+    """Where an advert lives, spelled as the export lane's `blocks=` takes it: its Praha quarter
+    (Praha is split by quarter everywhere in this programme), else its town; None unlocated."""
+    if obec_kod is None:
+        return None
+    if int(obec_kod) == PRAHA_OBEC_KOD and cast_obce_kod is not None:
+        return f"quarter:{int(cast_obce_kod)}"
+    return f"town:{int(obec_kod)}"
+
+
+def pair_standing(
+    latest: dict[str, Any] | None,
+    linked: dict[int, str],
+    must_not_link: bool,
+) -> tuple[str, str | None]:
+    """How one pair of a merge group stands, off its LATEST pair ruling (any operator login).
+
+    The merge's own `same` ruling is `browse_merge`; any other latest ruling — typed before
+    the merge (560 then left the pair alone) or after it — is `explicit` with its verdict; with
+    no ruling at all, a permanent negative is `must_not_link`, else the pair is `unruled`."""
+    if latest is not None:
+        verdict = str(latest.get("verdict") or "") or None
+        verdict_id = latest.get("verdict_id")
+        if (verdict == OPERATOR_POSITIVE_VERDICT and verdict_id is not None
+                and int(verdict_id) in linked):
+            return STANDING_BROWSE_MERGE, verdict
+        return STANDING_EXPLICIT, verdict
+    if must_not_link:
+        return STANDING_MUST_NOT_LINK, None
+    return STANDING_UNRULED, None
+
+
+def build_merge_record(
+    row: dict[str, Any],
+    *,
+    latest_by_pair: dict[tuple[int, int], dict[str, Any]],
+    linked: dict[int, str],
+    mnl_keys: set[tuple[int, int]],
+    facts: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    """One `operator_merges.jsonl` row: the group, its members as they sit today, its pairs."""
+    ids = [int(member) for member in (row.get("member_ids") or ())]
+    sides = [_int_or_none(side) for side in (row.get("member_sides") or [None] * len(ids))]
+    places = [_int_or_none(prop) for prop in
+              (row.get("member_property_ids") or [None] * len(ids))]
+    members: list[dict[str, Any]] = []
+    for listing_id, side, place in zip(ids, sides, places):
+        fact = facts.get(listing_id) or {}
+        members.append({
+            "listing_id": listing_id,
+            "side": side,
+            "property_id_at_copy": place,
+            "property_id": _int_or_none(fact.get("property_id")),
+            "source": (str(fact["source"]) if fact.get("source") else None),
+            "category_type": (str(fact["category_type"]) if fact.get("category_type") else None),
+            "category_main": (str(fact["category_main"]) if fact.get("category_main") else None),
+            "town": _int_or_none(fact.get("obec_kod")),
+            "quarter": _int_or_none(fact.get("cast_obce_kod")),
+            "block": export_block(fact.get("obec_kod"), fact.get("cast_obce_kod")),
+        })
+    pairs: list[dict[str, Any]] = []
+    n_same = 0
+    for lo, hi in merge_pairs(ids, sides, places):
+        vetoed = (lo, hi) in mnl_keys
+        standing, verdict = pair_standing(latest_by_pair.get((lo, hi)), linked, vetoed)
+        if MergePair(lo=lo, hi=hi, standing=standing, verdict=verdict, must_not_link=vetoed).same:
+            n_same += 1
+        pairs.append({"listing_lo": lo, "listing_hi": hi, "standing": standing,
+                      "verdict": verdict, "must_not_link": vetoed})
+    now = {member["property_id"] for member in members if member["property_id"] is not None}
+    return {
+        "format": OPERATOR_MERGES_FORMAT,
+        "merge_group_id": str(row["merge_group_id"]),
+        "provenance": PROVENANCE_BROWSE_MERGE,
+        "source": str(row.get("source") or "browse"),
+        "status": str(row.get("status") or "live"),
+        "status_note": (row.get("status_note") or None),
+        "status_at": _iso(row.get("status_at")),
+        "merged_at": _iso(row.get("merged_at")),
+        "copied_at": _iso(row.get("copied_at")),
+        "decided_by": decider(row.get("decided_by")),
+        "survivor_property_id": _int_or_none(row.get("survivor_property_id")),
+        "retired_property_ids": sorted(
+            int(pid) for pid in (row.get("retired_property_ids") or ())),
+        "members": members,
+        "pairs": pairs,
+        "n_members": len(members),
+        "n_sides": len(set(sides)),
+        "n_pairs": len(pairs),
+        "n_pairs_at_copy": _int_or_none(row.get("n_pairs")),
+        "n_pairs_same": n_same,
+        # Whether the merge still stands where the members sit TODAY: one property holds every
+        # located member. A group the operator (or anyone) took apart since reads False.
+        "one_property_now": len(now) == 1 and all(
+            member["property_id"] is not None for member in members),
+        "blocks": sorted({member["block"] for member in members if member["block"]}),
+        "category_types": sorted(
+            {member["category_type"] for member in members if member["category_type"]}),
+        "sources": sorted({member["source"] for member in members if member["source"]}),
+    }
+
+
+def merges_summary(
+    records: Sequence[dict[str, Any]], *, present: bool, linked: int
+) -> dict[str, Any]:
+    """The group file in numbers — and the blocks an export would have to name to cover it."""
+    block_groups: dict[str, int] = {}
+    for record in records:
+        for block in record["blocks"]:
+            block_groups[block] = block_groups.get(block, 0) + 1
+    ranked = sorted(block_groups.items(), key=lambda item: (-item[1], item[0]))
+    standings: dict[str, int] = {}
+    for record in records:
+        for pair in record["pairs"]:
+            standings[pair["standing"]] = standings.get(pair["standing"], 0) + 1
+    return {
+        "present": present,
+        "groups": len(records),
+        "by_status": _histogram(records, lambda r: r["status"]),
+        "members": sum(r["n_members"] for r in records),
+        "members_located": sum(
+            1 for r in records for member in r["members"] if member["block"]),
+        "pairs": sum(r["n_pairs"] for r in records),
+        "pairs_same": sum(r["n_pairs_same"] for r in records),
+        "pairs_by_standing": dict(sorted(standings.items())),
+        "groups_one_property_now": sum(1 for r in records if r["one_property_now"]),
+        "linked_rulings": linked,
+        "blocks_ranked": [{"block": block, "groups": n} for block, n in ranked[:TOP_BLOCKS]],
+        "n_blocks": len(ranked),
+    }
 
 
 def _write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> int:
@@ -392,6 +574,26 @@ def run_labels(
         mnl_rows = _run(conn, MUST_NOT_LINK_SQL, None, timeout)
         timings["read_s"] = round(time.monotonic() - started, 3)
 
+        # E299: the operator's Browse merges, off the engine's own copy (migration 564).
+        started = time.monotonic()
+        merges_present = merges_ready(conn)
+        merge_rows: list[dict[str, Any]] = []
+        linked: dict[int, str] = {}
+        member_facts: dict[int, dict[str, Any]] = {}
+        if merges_present:
+            merge_rows = _run(conn, OPERATOR_MERGES_SQL, None, timeout)
+            linked = {
+                int(row["verdict_id"]): str(row["operator_merge_group_id"])
+                for row in _run(conn, OPERATOR_MERGE_LINKS_SQL, None, timeout)
+            }
+            member_ids = sorted({
+                int(member) for row in merge_rows for member in (row.get("member_ids") or ())
+            })
+            for chunk in batched(member_ids):
+                for row in _run(conn, OPERATOR_MERGE_MEMBERS_SQL, {"ids": chunk}, timeout):
+                    member_facts[int(row["listing_id"])] = row
+        timings["merges_read_s"] = round(time.monotonic() - started, 3)
+
         implied_rows, cluster_counts = implied_from_clusters(
             cluster_rows, max_members=parsed.max_members
         )
@@ -407,20 +609,31 @@ def run_labels(
         for row in implied_rows:
             by_key[pair_key(row["lo"], row["hi"])] = {**row, "source": SOURCE_IMPLIED}
         n_implied_shadowed = 0
+        latest_by_pair: dict[tuple[int, int], dict[str, Any]] = {}
         for row in explicit_rows:
             key = pair_key(row["listing_lo"], row["listing_hi"])
+            latest_by_pair[key] = row
             if key in by_key:
                 n_implied_shadowed += 1
+            verdict = str(row.get("verdict") or "")
+            verdict_id = row.get("verdict_id")
+            # A pair ruling a Browse merge wrote is the merge's, not a verdict typed against the
+            # pair — only while it is still the pair's LATEST ruling and still says `same`.
+            merge_group = (
+                linked.get(int(verdict_id)) if verdict_id is not None
+                and verdict == OPERATOR_POSITIVE_VERDICT else None
+            )
             by_key[key] = {
                 "lo": key[0],
                 "hi": key[1],
-                "verdict": str(row.get("verdict") or ""),
+                "verdict": verdict,
                 "reasons": _reasons(row.get("reasons")),
                 "note": (row.get("note") or None),
                 "decided_by": (row.get("decided_by") or None),
                 "decided_at": row.get("decided_at"),
                 "cluster_key": None,
-                "source": SOURCE_EXPLICIT,
+                "source": (PROVENANCE_BROWSE_MERGE if merge_group else SOURCE_EXPLICIT),
+                "merge_group_id": merge_group,
             }
 
         keys_sorted = sorted(by_key)
@@ -453,8 +666,16 @@ def run_labels(
             sample_rank=sample_rank_by_cluster.get(by_key[key]["cluster_key"]),
             must_not_link=key in mnl_keys,
             engine=engine_view(engine_rows.get(key)),
+            merge_group_id=by_key[key].get("merge_group_id"),
         )
         for key in keys_sorted
+    ]
+    merge_records = [
+        build_merge_record(
+            row, latest_by_pair=latest_by_pair, linked=linked, mnl_keys=mnl_keys,
+            facts=member_facts,
+        )
+        for row in merge_rows
     ]
     mnl_records = [
         {
@@ -472,13 +693,18 @@ def run_labels(
 
     labels_path = out_dir / LABELS_FILE
     mnl_path = out_dir / MUST_NOT_LINK_FILE
+    merges_path = out_dir / OPERATOR_MERGES_FILE
     _write_jsonl(labels_path, records)
     _write_jsonl(mnl_path, mnl_records)
+    # Written on every path, empty without migration 564, so a consumer's path never moves.
+    _write_jsonl(merges_path, merge_records)
 
     counts = {
         "labels": len(records),
         "explicit": sum(1 for r in records if r["source"] == SOURCE_EXPLICIT),
         "implied": sum(1 for r in records if r["source"] == SOURCE_IMPLIED),
+        "browse_merge": sum(1 for r in records if r["source"] == PROVENANCE_BROWSE_MERGE),
+        "operator_merge_groups": len(merge_records),
         "implied_shadowed_by_explicit": n_implied_shadowed,
         "engine_view": sum(1 for r in records if r["engine"] is not None),
         "sample_ranked": sum(1 for r in records if r["sample_rank"] is not None),
@@ -487,12 +713,17 @@ def run_labels(
     }
     generation_stats = generation_rows[0] if generation_rows else {}
     summary = {
-        "artifacts": {"labels": str(labels_path), "must_not_link": str(mnl_path)},
+        "artifacts": {"labels": str(labels_path), "must_not_link": str(mnl_path),
+                      "operator_merges": str(merges_path)},
         "bytes": {
             "labels": labels_path.stat().st_size,
             "must_not_link": mnl_path.stat().st_size,
+            "operator_merges": merges_path.stat().st_size,
         },
+        "format": {"operator_labels": LABELS_FORMAT, "operator_merges": OPERATOR_MERGES_FORMAT},
         "counts": counts,
+        "operator_merges": merges_summary(
+            merge_records, present=merges_present, linked=len(linked)),
         "by_verdict": _histogram(records, lambda r: r["verdict"]),
         "by_source": _histogram(records, lambda r: r["source"]),
         "by_zone": _histogram(records, _zone_of),

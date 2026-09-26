@@ -24,6 +24,10 @@ from autodedup.labels_sql import (
     ENGINE_PAIRS_SQL,
     GENERATION_CLUSTERS_SQL,
     MUST_NOT_LINK_SQL,
+    OPERATOR_MERGE_LINKS_SQL,
+    OPERATOR_MERGE_MEMBERS_SQL,
+    OPERATOR_MERGES_PRESENT_SQL,
+    OPERATOR_MERGES_SQL,
     PAIR_VERDICTS_SQL,
     SAMPLE_RANK_SQL,
     STORE_PRESENT_SQL,
@@ -36,6 +40,7 @@ COLUMNS: dict[int, tuple[str, ...]] = {
     id(GENERATION_CLUSTERS_SQL): ("n_clusters", "max_size"),
     id(PAIR_VERDICTS_SQL): (
         "listing_lo", "listing_hi", "verdict", "note", "reasons", "decided_by", "decided_at",
+        "verdict_id",
     ),
     id(CLUSTER_VERDICTS_SQL): (
         "cluster_key", "verdict", "note", "reasons", "decided_by", "decided_at",
@@ -48,6 +53,17 @@ COLUMNS: dict[int, tuple[str, ...]] = {
     ),
     id(MUST_NOT_LINK_SQL): ("listing_lo", "listing_hi", "source", "reason", "created_at"),
     id(SAMPLE_RANK_SQL): ("cluster_key", "sample_rank"),
+    id(OPERATOR_MERGES_PRESENT_SQL): ("present",),
+    id(OPERATOR_MERGES_SQL): (
+        "merge_group_id", "merged_at", "survivor_property_id", "retired_property_ids",
+        "member_ids", "member_sides", "member_property_ids", "n_pairs", "decided_by", "source",
+        "status", "status_note", "status_at", "copied_at",
+    ),
+    id(OPERATOR_MERGE_LINKS_SQL): ("verdict_id", "operator_merge_group_id"),
+    id(OPERATOR_MERGE_MEMBERS_SQL): (
+        "listing_id", "source", "category_type", "category_main", "property_id", "obec_kod",
+        "cast_obce_kod",
+    ),
 }
 
 
@@ -76,6 +92,9 @@ class FakeCursor:
         if sql in (CLUSTER_MEMBERS_SQL, SAMPLE_RANK_SQL) and params:
             keys = set(params["keys"])
             self._rows = [row for row in self._rows if row[0] in keys]
+        if sql is OPERATOR_MERGE_MEMBERS_SQL and params:
+            ids = set(params["ids"])
+            self._rows = [row for row in self._rows if row[0] in ids]
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self._rows
@@ -105,10 +124,10 @@ def _store() -> dict[int, Any]:
         # 11/12: ruled same by hand. 21/22: ruled different. 31/32: inside a confirmed group
         # but separated explicitly — the case `explicit wins` exists for. 41/42: unsure.
         id(PAIR_VERDICTS_SQL): [
-            (11, 12, "same", "stejny byt", ["same_floor_plan"], "operator", DECIDED),
-            (21, 22, "different", None, [], "operator", DECIDED),
-            (31, 32, "same_project_different_unit", "jiny dum", [], "operator", DECIDED),
-            (41, 42, "unsure", None, [], "operator", DECIDED),
+            (11, 12, "same", "stejny byt", ["same_floor_plan"], "operator", DECIDED, 1),
+            (21, 22, "different", None, [], "operator", DECIDED, 2),
+            (31, 32, "same_project_different_unit", "jiny dum", [], "operator", DECIDED, 3),
+            (41, 42, "unsure", None, [], "operator", DECIDED, 4),
         ],
         # `member_ids` is the set the operator ruled on (E58) — the implied labels come off
         # THIS, not off `cluster_members`, which is read only for the run summary.
@@ -130,6 +149,8 @@ def _store() -> dict[int, Any]:
         id(MUST_NOT_LINK_SQL): [(21, 22, "operator", "different unit", DECIDED)],
         # The seeded order the UI served: 902 came up before 900, 901 last.
         id(SAMPLE_RANK_SQL): [(902, 1), (900, 2), (901, 3)],
+        # Migration 564 not applied: the default store is the pre-E299 one.
+        id(OPERATOR_MERGES_PRESENT_SQL): [(False,)],
     }
     return rows
 
@@ -546,3 +567,172 @@ def test_a_ruling_applies_to_a_generation_whose_group_it_names() -> None:
     # The string arm survives as a UNION, not as the test: it is what keeps a pass's own
     # rulings exportable while that pass's clusters are missing from the store.
     assert "v.generation = %(generation)s::text or (v.member_ids is not null" in flat
+
+
+# ------------------------------------ E299: the operator's Browse merges (migration 564)
+
+MERGED = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+COPIED = datetime(2026, 9, 25, 22, 0, tzinfo=timezone.utc)
+
+
+def _with_merges(lane: Any) -> None:
+    """Three Browse merges, as 564 copied them.
+
+    g-1 united 71 (from property 100) with 72 and 73 (both from 200); 74 came from 300 but
+    was detached since (it sits on 501), so it joins no pair. 71-72 still stands on the merge's
+    own ruling; 71-73 the operator separated by hand afterwards. g-2's one pair was never
+    ruled at all; g-3's pair carries a permanent negative and no ruling."""
+    rows = lane.rows
+    rows[id(OPERATOR_MERGES_PRESENT_SQL)] = [(True,)]
+    rows[id(PAIR_VERDICTS_SQL)] = rows[id(PAIR_VERDICTS_SQL)] + [
+        (71, 72, "same", "operator merge g-1 (copied by migration 560)", [], "operator",
+         MERGED, 5),
+        (71, 73, "different", "jiny byt", [], "op@example.cz", DECIDED, 6),
+    ]
+    rows[id(OPERATOR_MERGE_LINKS_SQL)] = [(5, "g-1")]
+    rows[id(MUST_NOT_LINK_SQL)] = rows[id(MUST_NOT_LINK_SQL)] + [
+        (91, 92, "operator", "jiny dum", DECIDED),
+    ]
+    rows[id(OPERATOR_MERGES_SQL)] = [
+        ("g-1", MERGED, 500, [200, 300], [71, 72, 73, 74], [100, 200, 200, 300],
+         [500, 500, 500, 501], 2, "operator", "browse", "live", None, None, COPIED),
+        ("g-2", MERGED.replace(day=2), 600, [601], [81, 82], [600, 601], [600, 600], 1,
+         "operator", "browse", "live", None, None, COPIED),
+        ("g-3", MERGED.replace(day=3), 700, [701], [91, 92], [700, 701], [700, 700], 1,
+         "operator", "browse", "undone", "operator unmerged", DECIDED, COPIED),
+    ]
+    rows[id(OPERATOR_MERGE_MEMBERS_SQL)] = [
+        (71, "sreality", "prodej", "byt", 500, 554782, 490245),
+        (72, "idnes", "prodej", "byt", 500, 554782, 490245),
+        (73, "bazos", "prodej", "byt", 500, 563510, 5001),
+        (81, "remax", "pronajem", "byt", 600, 577626, None),
+        (82, "idnes", "pronajem", "byt", 600, 577626, None),
+    ]
+
+
+def _merges(path: Path) -> dict[str, dict[str, Any]]:
+    return {row["merge_group_id"]: row for row in _read(path / labels_lane.OPERATOR_MERGES_FILE)}
+
+
+def test_a_browse_merge_ruling_leaves_as_browse_merge_with_its_group(lane, tmp_path: Path):
+    _with_merges(lane)
+    summary = lane(tmp_path)
+    records = {(r["listing_lo"], r["listing_hi"]): r for r in
+               _read(tmp_path / labels_lane.LABELS_FILE)}
+    assert records[(71, 72)]["source"] == "browse_merge"
+    assert records[(71, 72)]["merge_group_id"] == "g-1"
+    # Separated by hand after the merge: the operator's later word, and it is explicit.
+    assert records[(71, 73)]["source"] == labels_lane.SOURCE_EXPLICIT
+    assert records[(71, 73)]["merge_group_id"] is None
+    # Append-only: every row carries the new field, the old ones unchanged.
+    assert all("merge_group_id" in row for row in records.values())
+    assert records[(11, 12)]["merge_group_id"] is None
+    assert summary["counts"]["browse_merge"] == 1
+    assert summary["counts"]["explicit"] == 5
+    assert summary["format"] == {"operator_labels": labels_lane.LABELS_FORMAT,
+                                 "operator_merges": 1}
+
+
+def test_the_group_file_carries_members_sides_places_and_pair_standings(lane, tmp_path: Path):
+    _with_merges(lane)
+    lane(tmp_path)
+    groups = _merges(tmp_path)
+    assert list(groups) == ["g-1", "g-2", "g-3"]  # merged_at order
+    g1 = groups["g-1"]
+    assert g1["provenance"] == "browse_merge" and g1["source"] == "browse"
+    assert g1["status"] == "live" and g1["format"] == 1
+    assert [m["listing_id"] for m in g1["members"]] == [71, 72, 73, 74]
+    assert [m["side"] for m in g1["members"]] == [100, 200, 200, 300]
+    members = {m["listing_id"]: m for m in g1["members"]}
+    assert members[71]["block"] == "quarter:490245"  # Praha: its quarter
+    assert members[73]["block"] == "town:563510"     # elsewhere: its town
+    assert members[74]["block"] is None and members[74]["property_id"] is None
+    assert members[71]["source"] == "sreality" and members[71]["property_id_at_copy"] == 500
+    assert g1["pairs"] == [
+        {"listing_lo": 71, "listing_hi": 72, "standing": "browse_merge", "verdict": "same",
+         "must_not_link": False},
+        {"listing_lo": 71, "listing_hi": 73, "standing": "explicit", "verdict": "different",
+         "must_not_link": False},
+    ]
+    assert (g1["n_pairs"], g1["n_pairs_at_copy"], g1["n_pairs_same"]) == (2, 2, 1)
+    assert g1["blocks"] == ["quarter:490245", "town:563510"]
+    assert g1["one_property_now"] is False
+    assert groups["g-2"]["pairs"][0]["standing"] == "unruled"
+    assert groups["g-2"]["n_pairs_same"] == 1 and groups["g-2"]["one_property_now"] is True
+    g3 = groups["g-3"]
+    assert g3["pairs"][0]["standing"] == "must_not_link" and g3["n_pairs_same"] == 0
+    assert g3["status"] == "undone" and g3["status_note"] == "operator unmerged"
+    assert g1["decided_by"] == labels_lane.decider("operator")
+
+
+def test_the_group_file_round_trips_through_the_label_store(lane, tmp_path: Path):
+    from autodedup.labels import load_operator_merges
+
+    _with_merges(lane)
+    lane(tmp_path)
+    merges = {m.merge_group_id: m for m in
+              load_operator_merges(tmp_path / labels_lane.OPERATOR_MERGES_FILE)}
+    assert [p.key for p in merges["g-1"].ruled_pairs] == [(71, 72)]
+    assert [p.key for p in merges["g-2"].ruled_pairs] == [(81, 82)]
+    assert merges["g-3"].ruled_pairs == [] and merges["g-3"].status == "undone"
+
+
+def test_the_summary_ranks_the_blocks_an_export_would_need(lane, tmp_path: Path):
+    _with_merges(lane)
+    summary = lane(tmp_path)
+    merges = summary["operator_merges"]
+    assert merges["present"] is True and merges["groups"] == 3
+    assert merges["pairs"] == 4 and merges["pairs_same"] == 2
+    assert merges["pairs_by_standing"] == {"browse_merge": 1, "explicit": 1,
+                                           "must_not_link": 1, "unruled": 1}
+    assert merges["by_status"] == {"live": 2, "undone": 1}
+    assert merges["linked_rulings"] == 1
+    assert merges["blocks_ranked"][0] == {"block": "quarter:490245", "groups": 1}
+    assert {row["block"] for row in merges["blocks_ranked"]} == {
+        "quarter:490245", "town:563510", "town:577626"}
+    assert summary["artifacts"]["operator_merges"].endswith(labels_lane.OPERATOR_MERGES_FILE)
+
+
+def test_without_migration_564_the_group_file_is_empty_and_says_why(lane, tmp_path: Path):
+    summary = lane(tmp_path)
+    assert (tmp_path / labels_lane.OPERATOR_MERGES_FILE).read_text(encoding="utf-8") == ""
+    assert summary["operator_merges"]["present"] is False
+    assert summary["counts"]["browse_merge"] == 0
+    executed = {id(sql) for sql, _params in lane.executed}
+    assert id(OPERATOR_MERGES_SQL) not in executed
+    assert id(OPERATOR_MERGE_LINKS_SQL) not in executed
+
+
+def test_the_merge_reads_are_selects_and_never_touch_the_legacy_ledger(lane, tmp_path: Path):
+    _with_merges(lane)
+    lane(tmp_path / "a")
+    lane(tmp_path / "b")
+    for sql, _params in lane.executed:
+        assert sql.strip().split()[0].upper() in {"SELECT", "SET", "WITH"}, sql
+    for sql in (OPERATOR_MERGES_PRESENT_SQL, OPERATOR_MERGES_SQL, OPERATOR_MERGE_LINKS_SQL,
+                OPERATOR_MERGE_MEMBERS_SQL, PAIR_VERDICTS_SQL):
+        assert "property_merge_events" not in sql
+    assert "autodedup.operator_merges" in OPERATOR_MERGES_SQL
+    for name in (labels_lane.LABELS_FILE, labels_lane.OPERATOR_MERGES_FILE):
+        assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes()
+    assert "@" not in (tmp_path / "a" / labels_lane.OPERATOR_MERGES_FILE).read_text("utf-8")
+
+
+def test_the_browse_merge_flags_reach_the_operator_tier(tmp_path: Path) -> None:
+    from autodedup import harness
+
+    path = tmp_path / "operator_labels.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in [
+        {"listing_lo": 11, "listing_hi": 12, "verdict": "same", "source": "explicit"},
+        {"listing_lo": 71, "listing_hi": 72, "verdict": "same", "source": "browse_merge",
+         "merge_group_id": "g-1"},
+    ]) + "\n", encoding="utf-8")
+    base = ["fit", str(tmp_path), "--out", str(tmp_path), "--operator-labels", str(path)]
+    parser = harness.build_parser()
+    tier = harness.operator_tier(parser.parse_args(base))
+    assert set(tier) == {(11, 12), (71, 72)} and tier[(71, 72)].source == "browse_merge"
+    assert set(harness.operator_tier(parser.parse_args(base + ["--exclude-browse-merge"]))) \
+        == {(11, 12)}
+    weighted = harness.operator_tier(parser.parse_args(base + ["--browse-merge-weight", "0.5"]))
+    assert weighted[(71, 72)].weight == pytest.approx(0.5)
+    assert weighted[(11, 12)].weight == pytest.approx(1.0)

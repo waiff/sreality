@@ -183,6 +183,9 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     # A1's apply ledger (migration 558): what the engine merged in production, dry runs and
     # refusals included. MIRRORS tests/test_migration_rls_grants.py::_ADMIN_ONLY_RELATIONS.
     "autodedup.applied_merges",
+    # The operator's own Browse merges as engine data (migration 564, E299).
+    # MIRRORS tests/test_migration_rls_grants.py::_ADMIN_ONLY_RELATIONS.
+    "autodedup.operator_merges",
     # The sold-transaction fetch ledger (migration 542): fetched only where some account
     # holds a live deal-pipeline card, so its obec set is a projection of tenant state,
     # not market data. NO `_public` view; the ONE reader is `sold_coverage` below.
