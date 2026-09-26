@@ -99,7 +99,7 @@ def open_store() -> ObjectStore:
         raise ArchiveError(
             "R2 is not configured, so the vintage cannot be archived and a past "
             f"registry_version would be unreproducible (04 §C1.8). Missing: {', '.join(missing)}. "
-            "Pass --allow-unarchived to load anyway and state why in the run."
+            "A load never proceeds unarchived: set them and re-dispatch."
         )
     return image_storage.R2Client.from_env(max_pool_connections=4)
 

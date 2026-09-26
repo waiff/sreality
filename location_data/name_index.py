@@ -5,24 +5,20 @@ Normalization happens HERE, in the loader, not in a generated column or a trigge
 named Python function and the DB only stores the result.
 
 The table is REBUILDABLE — a pure function of the registry tables plus a version label —
-so a rebuild deletes this version's rows and re-inserts them.
-
-CLI:  python -m location_data.name_index [--version-id N]
+so a rebuild deletes this version's rows and re-inserts them. The registry load
+(`ruian_load`) runs it once per version, after the boundary pack has named the units.
 """
 
 from __future__ import annotations
 
-import argparse
 import logging
 import re
-import sys
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 import psycopg
 
-from location_data import loader_db
 
 LOG = logging.getLogger("location_data.name_index")
 
@@ -134,15 +130,6 @@ def count_homonyms(rows: list[NameRow]) -> dict[tuple[str, str], int]:
     return {key: len(ids) for key, ids in buckets.items()}
 
 
-def _current_version_id(conn: psycopg.Connection) -> int:
-    version_id = loader_db.scalar(
-        conn, "SELECT id FROM registry_versions WHERE is_current LIMIT 1"
-    )
-    if version_id is None:
-        raise RuntimeError("no current registry_version — run the baseline load first")
-    return int(version_id)
-
-
 def _psc_sets(conn: psycopg.Connection, column: str) -> dict[int, list[str]]:
     with conn.cursor() as cur:
         cur.execute(
@@ -238,21 +225,3 @@ def rebuild(conn: psycopg.Connection, version_id: int) -> int:
     LOG.info("NAME_INDEX rebuilt version=%s rows=%d", version_id, len(rows))
     return len(rows)
 
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version-id", type=int, default=None)
-    parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    with loader_db.open_loader_connection() as conn:
-        version_id = args.version_id or _current_version_id(conn)
-        rebuild(conn, version_id)
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

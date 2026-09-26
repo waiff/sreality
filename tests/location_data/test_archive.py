@@ -98,4 +98,4 @@ def test_missing_r2_credentials_name_the_env_vars(monkeypatch):
     with pytest.raises(archive.ArchiveError) as exc:
         archive.open_store()
     assert "R2_ACCOUNT_ID" in str(exc.value)
-    assert "--allow-unarchived" in str(exc.value)
+    assert "never proceeds unarchived" in str(exc.value)
