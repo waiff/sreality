@@ -300,15 +300,19 @@ def test_the_operator_merge_rules_the_cards_and_the_detach_rules_the_advert_agai
     assert _rulings(cur, ids) == sorted([(*card, "different"), (*veto, "different")])
     assert _vetoes(cur, ids) == sorted([card, veto])
 
-    # The adapter's negative read (autodedup/apply_sql.py PAIR_VERDICTS_SQL), verbatim in
-    # shape: any decider, a negative verdict, both sides in the candidate set.
-    cur.execute(
-        "SELECT v.listing_lo, v.listing_hi FROM autodedup.verdicts v "
-        "WHERE v.kind = 'pair' AND v.verdict = any(%(negatives)s::text[]) "
-        "AND v.listing_lo = any(%(ids)s::bigint[]) AND v.listing_hi = any(%(ids)s::bigint[]) "
-        "ORDER BY 1, 2",
-        {"negatives": list(usql.NEGATIVE_VERDICTS), "ids": ids})
-    assert [(int(lo), int(hi)) for lo, hi in cur.fetchall()] == sorted([card, veto])
+    # The adapter's negative read ITSELF (autodedup/apply_sql.py PAIR_VERDICTS_SQL): any
+    # decider, the newest ruling per pair, a negative verdict, both sides in the candidate set.
+    # The earlier veto on (s2, a1) was written down as its `different` before the detach's
+    # word (E920), so that pair has two negative rows and is read once, as its newest.
+    from autodedup import apply_sql
+
+    cur.execute(apply_sql.PAIR_VERDICTS_SQL,
+                {"negatives": list(usql.NEGATIVE_VERDICTS), "listing_ids": ids})
+    assert sorted((int(lo), int(hi)) for lo, hi, _v in cur.fetchall()) == sorted([card, veto])
+    cur.execute("SELECT verdict, note, decided_by FROM autodedup.verdicts WHERE kind = 'pair' "
+                "AND listing_lo = %s AND listing_hi = %s ORDER BY decided_at, id", veto)
+    assert cur.fetchall()[0] == ("different", "earlier", "operator"), (
+        "the bare veto's word is kept in the history before the detach's ruling")
 
 
 def _as_at_560(cur: Any) -> None:
