@@ -963,10 +963,12 @@ def run_equivalence(
         reasons.append(f"model_version {live_versions} against {batch_versions}")
     notes: list[str] = []
     if evidence_hold["explained"]:
+        oldest = evidence_hold["oldest_h"]
         notes.append(
             f"{evidence_hold['explained']} shared pairs are HELD for complete photo evidence "
             f"(E908) — a hold, not a decision; the oldest has waited "
-            f"{evidence_hold['oldest_h']:.1f} h of the {EVIDENCE_HORIZON_HOURS:.0f} h cap")
+            f"{'an unknown time' if oldest is None else f'{oldest:.1f} h'} of the "
+            f"{EVIDENCE_HORIZON_HOURS:.0f} h cap")
     if arrived:
         notes.append(f"{len(arrived)} listings reached the scope after the batch cohort's cut "
                      f"({_stamp(cut)}, from {cut_source})")
