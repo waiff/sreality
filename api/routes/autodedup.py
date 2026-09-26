@@ -48,6 +48,12 @@ from autodedup.dataset import Listing, hamming64
 from autodedup.incremental import GENERATION, bootstrap_key, seed_version_key, stream_live
 from autodedup.judge import listing_digest, scrubbed_text
 from autodedup.model import LogisticModel, hand_initialised
+from toolkit.property_split import (
+    operator_pair_verdicts,
+    reversal_message,
+    reversed_pairs,
+    split_summary,
+)
 
 try:  # the two SQLSTATEs a missing store raises, if the catalog probe ever misses it
     from psycopg import errors as _pg_errors
@@ -2436,18 +2442,6 @@ def _unit_pair(unit_a: str, unit_b: str) -> tuple[str, str]:
     return (unit_a, unit_b) if unit_a <= unit_b else (unit_b, unit_a)
 
 
-def _split_summary(assignment: dict[int, str]) -> str:
-    """`A: 94020,140903 | B: 94492` — the assignment as one line, stored as the cluster
-    verdict's note so the ruling is readable without re-deriving it from the pair rows."""
-    units: dict[str, list[int]] = {}
-    for listing_id, unit in assignment.items():
-        units.setdefault(unit, []).append(listing_id)
-    return " | ".join(
-        f"{unit}: {','.join(str(i) for i in sorted(ids))}"
-        for unit, ids in sorted(units.items())
-    )
-
-
 def _relation_summary(relations: dict[tuple[str, str], str]) -> str:
     """`A-B: same_building_different_unit · A-C: same_project_different_unit` — written only
     when the split says more than one thing, so the common case keeps its short note."""
@@ -2542,21 +2536,7 @@ def verdict_split(
     def relation_of(lo: int, hi: int) -> str:
         return named.get(_unit_pair(assignment[lo], assignment[hi]), body.relation)
 
-    # What the operator has already said about these pairs, under their OWN name — the upsert
-    # conflicts on `decided_by`, so nobody else's ruling is at stake here.
-    stored_verdicts: dict[tuple[int, int], str] = {}
-    for row in _rows(
-        usql.VERDICT_COLUMNS,
-        _fetch(conn, usql.MEMBER_PAIR_VERDICTS_SQL, {"ids": member_ids}),
-    ):
-        if row["decided_by"] != str(decided_by):
-            continue
-        key = (int(row["listing_lo"]), int(row["listing_hi"]))
-        # Newest first (the statement's own ORDER BY), so the first row per pair is the live one.
-        stored_verdicts.setdefault(key, row["verdict"])
-
     pairs: list[tuple[int, int, str, bool]] = []
-    reversed_pairs: list[tuple[int, int]] = []
     used: set[str] = set()
     for index, lo in enumerate(member_ids):
         for hi in member_ids[index + 1:]:
@@ -2564,22 +2544,19 @@ def verdict_split(
             relation = "same" if same_unit else relation_of(lo, hi)
             if not same_unit:
                 used.add(relation)
-            if same_unit and stored_verdicts.get((lo, hi)) in NEGATIVE_VERDICTS:
-                reversed_pairs.append((lo, hi))
             pairs.append((lo, hi, relation, same_unit))
 
-    if reversed_pairs and not body.confirm_retract:
-        listed = ", ".join(f"{lo}-{hi}" for lo, hi in reversed_pairs[:8])
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"this split takes back your earlier ruling on {len(reversed_pairs)} pair(s) "
-                f"({listed}) and drops their permanent must-not-link — re-send with "
-                "confirm_retract to go ahead"
-            ),
-        )
+    # E52 through the one helper `POST /properties/{id}/split` shares: what the operator has
+    # already said about these pairs under their OWN name (the upsert conflicts on `decided_by`).
+    stored = operator_pair_verdicts(conn, member_ids, str(decided_by))
+    taken_back = reversed_pairs(
+        {pair: row["verdict"] for pair, row in stored.items()},
+        [(lo, hi) for lo, hi, _relation, same_unit in pairs if same_unit],
+    )
+    if taken_back and not body.confirm_retract:
+        raise HTTPException(status_code=409, detail=reversal_message(taken_back))
 
-    summary = _split_summary(assignment)
+    summary = split_summary(assignment)
     if len(distinct) == 1:
         cluster_verdict = "same"
     else:
@@ -2669,7 +2646,7 @@ def verdict_split(
             "must_not_link_retracted": n_pairs_same,
             # The pairs this save actually took back — the operator had ruled them negative
             # and the split re-ruled them as one unit. Named, so the page can say which.
-            "reversed_pairs": [[lo, hi] for lo, hi in reversed_pairs],
+            "reversed_pairs": [[lo, hi] for lo, hi in taken_back],
         },
         "store_ready": True,
     }
@@ -2801,18 +2778,7 @@ def verdict_candidate_split(
             raise _bad(f"the units {key[0]} and {key[1]} are given two relations")
         named[key] = entry.relation
 
-    stored_verdicts: dict[tuple[int, int], str] = {}
-    for row in _rows(
-        usql.VERDICT_COLUMNS,
-        _fetch(conn, usql.MEMBER_PAIR_VERDICTS_SQL, {"ids": member_ids}),
-    ):
-        if row["decided_by"] != str(decided_by):
-            continue
-        key = (int(row["listing_lo"]), int(row["listing_hi"]))
-        stored_verdicts.setdefault(key, row["verdict"])
-
     pairs: list[tuple[int, int, str, bool]] = []
-    reversed_pairs: list[tuple[int, int]] = []
     n_skipped_locked = 0
     for index_lo, lo in enumerate(member_ids):
         for hi in member_ids[index_lo + 1:]:
@@ -2826,22 +2792,17 @@ def verdict_candidate_split(
                 if same_unit
                 else named.get(_unit_pair(assignment[lo], assignment[hi]), body.relation)
             )
-            if same_unit and stored_verdicts.get((lo, hi)) in NEGATIVE_VERDICTS:
-                reversed_pairs.append((lo, hi))
             pairs.append((lo, hi, relation, same_unit))
 
-    if reversed_pairs and not body.confirm_retract:
-        listed = ", ".join(f"{lo}-{hi}" for lo, hi in reversed_pairs[:8])
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"this split takes back your earlier ruling on {len(reversed_pairs)} pair(s) "
-                f"({listed}) and drops their permanent must-not-link — re-send with "
-                "confirm_retract to go ahead"
-            ),
-        )
+    stored = operator_pair_verdicts(conn, member_ids, str(decided_by))
+    taken_back = reversed_pairs(
+        {pair: row["verdict"] for pair, row in stored.items()},
+        [(lo, hi) for lo, hi, _relation, same_unit in pairs if same_unit],
+    )
+    if taken_back and not body.confirm_retract:
+        raise HTTPException(status_code=409, detail=reversal_message(taken_back))
 
-    summary = _split_summary(assignment)
+    summary = split_summary(assignment)
     note = f"operator candidate split: {summary}"
     if body.note:
         note = f"{body.note} · {note}"
@@ -2899,7 +2860,7 @@ def verdict_candidate_split(
             "must_not_link_retracted": n_pairs_same,
             # Pairs inside one already-merged group: the Groups page's ruling, untouched.
             "n_pairs_locked": n_skipped_locked,
-            "reversed_pairs": [[lo, hi] for lo, hi in reversed_pairs],
+            "reversed_pairs": [[lo, hi] for lo, hi in taken_back],
         },
         "store_ready": True,
     }
@@ -2920,7 +2881,7 @@ STREAM_NOT_LIVE = (
 def _proposed(conn: Any, generation: str | None, property_id: int | None = None) -> Any:
     """(generation, proposals, withheld) off `_resolve_generation`'s pass by default, or None:
     store not ready. `withheld` names why a named live stream proposes nothing yet.
-    Propose-only: the split itself is `POST /properties/{id}/detach`, advert by advert."""
+    Propose-only: the split itself is the operator's `POST /properties/{id}/split`, one per card."""
     if not store_ready(conn):
         return None
     try:
