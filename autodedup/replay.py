@@ -241,9 +241,11 @@ def batch_state(
 
 
 # What the real-time lane adds to a row's evidence for its own rails — E64's context stamp on a
-# promotion, E93's hold — and a batch decision never carries: it says nothing about the decision.
+# promotion, E93's hold, the shared reference codes a K-R certificate names for its read-back —
+# and a batch decision never carries: it says nothing about the decision.
 LANE_EVIDENCE_KEYS: frozenset[str] = frozenset(
-    {*ContextStamp(0, 0).to_evidence(), "held_zone", "held_reason", "held_certificate"})
+    {*ContextStamp(0, 0).to_evidence(), "held_zone", "held_reason", "held_certificate",
+     "ref_codes"})
 
 
 def decision_evidence(evidence: Mapping[str, Any] | None) -> bool:

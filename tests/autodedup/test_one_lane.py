@@ -819,4 +819,5 @@ def test_the_replay_compares_the_decisions_own_evidence_only() -> None:
     assert not decision_evidence({"context_cell_n": "3", "context_image_pop_min": "1"})
     assert not decision_evidence({"held_zone": "merge", "held_reason": "x",
                                   "held_certificate": ""})
+    assert not decision_evidence({"ref_codes": "N115423"}), "K-R's read-back, the lane's"
     assert not decision_evidence(None) and not decision_evidence({})
