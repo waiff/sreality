@@ -2498,7 +2498,7 @@ renumber.** Navigate by area:
     projection columns, 40 claim types, 5 claim-producing lanes, 19 workflows, 5 policy tables — and
     never flipped a consumer, so nothing exercised it end to end and nothing was ever deleted; 733
     verified findings came out of that shape, not out of any one bug. The corrective, and the
-    as-built state: ONE answer table (`listing_location`, 26 columns) written by ONE four-step
+    as-built state: ONE answer table (`listing_location`, 27 columns) written by ONE four-step
     resolver (bind → fill → grade → check); ONE hourly lane over the stored payload and the stored
     page body; ELEVEN claim types, at most one contract entry per type, the town entry mandatory and
     naming a reader; ONE label function and ONE four-level code predicate for every place display
@@ -2512,11 +2512,11 @@ renumber.** Navigate by area:
     listing has a town (`check_location_town_coverage` is red until both are zero), and foreign is a
     determination — a country field, a foreign section, a pin outside the country — never the
     default for "no town found". **Speed**: Browse and the map read `browse_list`, which copies the
-    fields at rebuild, so no consumer query joins the store; a field is added only after a measured
-    slowdown and only there. Full as-built detail — the store's 26 columns by role, the lane's two
-    halves and their cursors, the contract rails, the resolver's four stages, the served-listing
-    predicate, what deliberately stays outside the store, and the incident lessons — is
-    `docs/architecture.md` § Location data.
+    fields at rebuild, so no consumer query joins the store; a field is added only by operator
+    ruling (katastr_kod, 2026-09) or after a measured slowdown, and only there. Full as-built
+    detail — the store's 27 columns by role, the lane's two halves and their cursors, the contract
+    rails, the resolver's four stages, the served-listing predicate, what deliberately stays
+    outside the store, and the incident lessons — is `docs/architecture.md` § Location data.
 
 ## Broker identity merges — auto-merge and the suppression rail
 
@@ -2689,9 +2689,10 @@ addresses, bazos ran 5.56 listings per pin with 51.5 % in clusters of 20+, and a
 around a town-centroid pin is exactly the false-merge class the grade axes exist to prevent.
 
 **ONE STORE.** `listing_location` (migration 501) is the only place a listing's location is stored:
-**26 columns** in five roles — the listing (`listing_id`); one position (`geom`,
+**27 columns** in five roles — the listing (`listing_id`); one position (`geom`,
 `geometry(Point,4326)`); nine names (`country_code`, kraj, okres, obec, část obce, street, čp, čo,
-psč); six RÚIAN codes (kraj, okres, obec, část obce, ulice, `ruian_adm_kod`); three grade columns,
+psč); seven RÚIAN codes (kraj, okres, obec, část obce, ulice, `ruian_adm_kod`, and `katastr_kod` —
+the single KÚ of the BOUND entity, never a pin's: migration 566, resolver v5.4); three grade columns,
 all NOT NULL (`match_confidence`, `granularity`, `uncertainty_radius_m`); two status columns
 (`country_status` NOT NULL, `disputed`); and four housekeeping (`resolver_version`, `resolved_at`,
 `claim_set_hash`, `registry_version`). `location_data/resolver/projection.py`'s column tuple IS that
@@ -3124,7 +3125,8 @@ absolute counts, listings with no row and non-foreign listings with no `obec_kod
 WHOLE corpus, and is RED until both are zero — its per-portal series changed meaning on 2026-09-14
 and numbers either side of that date are not comparable. That is the invariant the whole shape exists
 for; the mandatory town entry, BIND's tail rungs and the sweep's fourth arm are all rails that serve
-it.
+it. Its KÚ arm (MF PR-B) is the same kind of zero: a Czech address-grain row written by the current
+`RESOLVER_VERSION` without a `katastr_kod` means KÚ geometry is missing at the registry version.
 
 **ONE LABEL, ONE CODE PREDICATE.** Every surface renders `location_display_label(...)` (migration
 503, one IMMUTABLE SQL function over seven columns): foreign country code, else street + čp/čo +

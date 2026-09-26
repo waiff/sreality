@@ -1086,11 +1086,26 @@ component is slimmed twice — each wave rewrites one component and slims its st
   is mined. **The fill is NOT automatic** — the bodies-half hash gate re-arms PAGE entries only and
   bezrealitky has none, so its payload claims re-mine on content change; the corpus-wide fill needs
   one dispatched `location_claims_intake.yml` at `mode=full`, `source=bezrealitky`.
+- **`katastr_kod` — the 27th column, resolver v5.4** (MF program PR-B, operator rulings D5 + Q7,
+  migration 566; built, rollout below): FILL stores the single KÚ of the BOUND entity — a KÚ/ZSJ on
+  the chain, the one KÚ of a one-KÚ obec (3,942 of 6,258), an address point's own KÚ (pip piece at
+  the row's registry version), a street or část obce whose EVERY RÚIAN door lies in one KÚ — and
+  never a portal pin (66,165 idnes + 13,176 sreality "not an address" pins read as precise). Every
+  answer but one rides a read FILL already makes; the door rule is one GiST probe + one covers test
+  of the KÚ's authoritative polygon by (unit_id, version) — 22 ms for the 9,193-door část where a
+  probe per door took 1.7 s, 150/150 agreement with the per-door answer. The one new question,
+  `part_katastr_kod`, is asked only for a část-bound row in a multi-KÚ obec. Also: ONE
+  containing-obec statement (the authoritative fallback branch and `api/maps.py`'s copy deleted;
+  pip = authoritative at every loaded version, checked 2026-09-26) and the KÚ arm on
+  `location_town_coverage` (Czech address-grain rows at the current version without a KÚ = 0).
+  **Rollout:** apply 566 → merge → the nightly sweep re-queues the corpus (~3 days) → the KÚ arm
+  reads 0 → apply 567 (the MF view swap, which refuses until then) → joint review of ~30
+  Praha/Brno/Jihlava rows incl. the Majakovského adverts and the idnes Brno shared-coordinate rows.
 
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
-campaigns or schedules; foreign is a determination, never a default; a field is added only after a
-measured Browse/map slowdown and only to `browse_list`.
+campaigns or schedules; foreign is a determination, never a default; a field is added only by
+operator ruling (katastr_kod, 2026-09) or after a measured Browse/map slowdown and only to `browse_list`.
 
 ## W0 — done
 

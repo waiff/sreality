@@ -246,7 +246,7 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     a green run) and `FilterDef.basis`. Full rationale: `docs/architecture.md` § rule 23.
 24. **Folded into 25** (kept so the citations don't break — rules are never renumbered).
 25. **Location: one store, one lane, one label, one code predicate; every location PR deletes at least
-    as much as it adds.** `listing_location` (26 columns, mig 501) is the ONLY place a listing's location
+    as much as it adds.** `listing_location` (27 columns, migs 501/566) is the ONLY place a listing's location
     is stored — `listings`/`properties` carry none (mig 508), and there is no serving flag and no
     granularity floor — so a place read joins `ll on ll.listing_id = l.id`, casting `ll.geom::geography`
     for metres (uncast = DEGREES). ONE hourly lane (`claims_intake`) writes `location_claims` off the
@@ -256,8 +256,8 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
     CONSUMERS (browse/map/feed/watchdog/dedup) serve a listing only when its location is resolved or
     determined foreign — ONE predicate (`claims_common.SERVED_LOCATION_PREDICATE`, mig 514); detail-by-id
     surfaces stay reachable. Invariant: **every served listing has a row, every active Czech listing has
-    a town** (`location_town_coverage` red until zero; foreign is a determination, never a default); a
-    field is added only after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
+    a town** (`location_town_coverage` red until zero; foreign is a determination, never a default); a field is
+    added only by operator ruling (katastr_kod, 2026-09) or after a measured slowdown, only to `browse_list`. § Location data in `docs/architecture.md`.
 ## Coding conventions
 
 - Python 3.12, type hints on every signature. Prefer the stdlib; justify each dependency.
