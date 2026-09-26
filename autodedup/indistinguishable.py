@@ -326,6 +326,9 @@ def photo_override(a: Listing, b: Listing, frames: float | None, cfg: Settings) 
         return False
     if cfg.photo_override_no_development and development_context(a, b, cfg):
         return False
+    if (cfg.photo_override_no_colive and a.source == b.source
+            and (honest_overlap_days(a, b) or 0.0) > 1.0):
+        return False
     return True
 
 

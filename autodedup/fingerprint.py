@@ -194,6 +194,7 @@ def build_fingerprint(
     images: Sequence[Image],
     settings: Settings,
     stock: "StockIndex | None" = None,
+    shared: frozenset[int] = frozenset(),
 ) -> Fingerprint:
     """One listing plus its gallery -> the row every probe and feature reads.
 
@@ -235,6 +236,8 @@ def build_fingerprint(
             if "*" not in settings.photo_override_rooms and room not in settings.photo_override_rooms:
                 continue
             if own > 0 and (image.pop is None or image.pop > own):
+                continue
+            if int(image.phash) in shared:
                 continue
             room_frames.append((room, int(image.phash)))
 
@@ -300,9 +303,39 @@ def build_fingerprint(
 def build_all(ds: Dataset, settings: Settings) -> dict[int, Fingerprint]:
     """Fingerprints for the whole cohort, in listing-id order so every pass is reproducible."""
     stock = StockIndex.of_dataset(ds, settings)
+    shared = (colive_shared_frames(ds) if settings.photo_override_frames > 0
+              and settings.photo_override_exclusive else frozenset())
     return {
         listing_id: build_fingerprint(
-            ds.listings[listing_id], ds.images(listing_id), settings, stock
+            ds.listings[listing_id], ds.images(listing_id), settings, stock, shared
         )
         for listing_id in sorted(ds.listings)
     }
+
+
+def colive_shared_frames(ds: Dataset, min_days: float = 1.0) -> frozenset[int]:
+    """C7: frames two adverts of ONE portal carried while both were live (a project's template
+    shoot, not one unit's photographs): exact dHash, carriers read inside the cohort."""
+    from autodedup.indistinguishable import honest_overlap_days as overlap_days
+
+    carriers: dict[int, list[Listing]] = {}
+    for listing_id, images in ds.images_by_listing.items():
+        listing = ds.listings.get(listing_id)
+        if listing is None:
+            continue
+        for image in images:
+            if image.phash is not None:
+                carriers.setdefault(int(image.phash), []).append(listing)
+    out: set[int] = set()
+    for phash, listings in carriers.items():
+        if len(listings) < 2:
+            continue
+        by_source: dict[str | None, list[Listing]] = {}
+        for listing in {x.id: x for x in listings}.values():
+            by_source.setdefault(listing.source, []).append(listing)
+        for group in by_source.values():
+            if any((overlap_days(a, b) or 0.0) > min_days
+                   for i, a in enumerate(group) for b in group[i + 1:]):
+                out.add(phash)
+                break
+    return frozenset(out)

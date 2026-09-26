@@ -190,6 +190,8 @@ class Settings:
     photo_override_own_pop_max: int = 0
     photo_override_price: bool = False
     photo_override_no_development: bool = False
+    photo_override_exclusive: bool = False
+    photo_override_no_colive: bool = False
     # E45: the merge zone needs one UNIT-specific corroboration. K-A + interior_match_ratio >= 0.5
     # scored 88.6% (n=35) against K-A's 52.6% overall; K-B (the disjoint-window re-post shape)
     # scored 100% (n=94).
