@@ -3,7 +3,6 @@ carry-forward, and the completeness read that gates publish."""
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import psycopg
@@ -224,29 +223,6 @@ def test_the_carry_copies_every_purpose_of_the_source_version_by_index():
                    "representative_point", "inscribed_radius_m", "centroid_point",
                    "containment_radius_m", "max_radius_m"):
         assert f"g.{column}" in sql
-
-
-def test_carried_rows_equal_the_previous_versions_rows():
-    """What the INSERT…SELECT writes, applied to rows: every row of the source version,
-    restamped, every other column verbatim; nothing from other units or versions."""
-    rows = [
-        {"id": 1, "unit_id": 7, "registry_version_id": 2, "purpose": "authoritative", "g": "A"},
-        {"id": 2, "unit_id": 7, "registry_version_id": 2, "purpose": "render", "g": "R"},
-        {"id": 3, "unit_id": 7, "registry_version_id": 2, "purpose": "pip", "g": "P1"},
-        {"id": 4, "unit_id": 7, "registry_version_id": 2, "purpose": "pip", "g": "P2"},
-        {"id": 5, "unit_id": 7, "registry_version_id": 1, "purpose": "pip", "g": "OLD"},
-        {"id": 6, "unit_id": 8, "registry_version_id": 2, "purpose": "pip", "g": "NEIGHBOUR"},
-    ]
-
-    def carry(unit_id: int, version_id: int, from_version_id: int) -> list[dict]:
-        source = [r for r in rows
-                  if r["unit_id"] == unit_id and r["registry_version_id"] == from_version_id]
-        return [{**r, "registry_version_id": version_id} for r in source]
-
-    carried = carry(7, 3, 2)
-    strip = lambda r: {k: v for k, v in r.items() if k not in ("id", "registry_version_id")}
-    assert [strip(r) for r in carried] == [strip(r) for r in rows[:4]]
-    assert {r["registry_version_id"] for r in carried} == {3}
 
 
 def test_a_degenerate_feature_is_counted_not_fatal(monkeypatch):
