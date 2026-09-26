@@ -55,6 +55,7 @@ from api.dependencies import SYSTEM_ACCOUNT_ID
 
 from psycopg.types.json import Jsonb
 
+from api import maps
 from api import schemas as s
 from scraper import source_dispatcher
 from toolkit import ComparableFilters, TargetSpec
@@ -1104,9 +1105,7 @@ def _execute_estimation_run(
         return
 
     d = result["data"]
-    reference_rent = _reference_rent_for_run(
-        conn, recorder, resolution, target, body.estimate_kind,
-    )
+    reference_rent = _reference_rent_for_run(conn, recorder, resolution, target, body)
     summary_text = _summary_line(d, filters.radius_m)
     trace = recorder.to_dict(summary_text)
     merged_warnings = list(resolution.parse_warnings)
@@ -1941,65 +1940,55 @@ def _load_subject_condition(
     }
 
 
-_STANDARD_MATERIALS = frozenset({"panel", "cihla"})
+# The subject's MF facts when it is one of our adverts: its PROPERTY's golden record and
+# the representative's stored location codes -- the inputs properties_public hands
+# mf_reference(), so a run's reference equals the listing page's. COALESCE keeps the
+# advert's own value for a pre-attach row.
+_SUBJECT_MF_FACTS_SQL = """
+    SELECT COALESCE(p.category_main, l.category_main),
+           COALESCE(p.category_type, l.category_type),
+           COALESCE(p.current_price_czk, l.price_czk),
+           COALESCE(p.condition, l.condition),
+           COALESCE(p.has_balcony, l.has_balcony), COALESCE(p.terrace, l.terrace),
+           COALESCE(p.furnished, l.furnished), COALESCE(p.garage, l.garage),
+           COALESCE(p.has_lift, l.has_lift), COALESCE(p.building_type, l.building_type),
+           ll.obec_kod, ll.country_status::text
+      FROM listings l
+      LEFT JOIN properties p ON p.id = l.property_id AND p.status = 'active'
+      LEFT JOIN listing_location ll ON ll.listing_id = COALESCE(p.repr_listing_ref_id, l.id)
+     WHERE l.id = %(listing_id)s
+"""
+_MF_FACT_KEYS = (
+    "category_main", "category_type", "price_czk", "condition", "has_balcony", "terrace",
+    "furnished", "garage", "has_lift", "building_type", "obec_kod", "country_status",
+)
 
 
-def _load_subject_amenities(
-    conn: "psycopg.Connection", sreality_id: int,
-) -> dict[str, Any] | None:
-    """Amenity flags + condition/building_type for the reference-rent calc, read off the
-    listing's PROPERTY (migration 561: the canonical advert's condition, the physical facts
-    first-non-empty) so the run's MF uses the property-grain MF's inputs; COALESCE keeps the
-    listing's own value for a pre-attach row."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COALESCE(p.has_balcony, l.has_balcony), "
-            "COALESCE(p.terrace, l.terrace), COALESCE(p.furnished, l.furnished), "
-            "COALESCE(p.garage, l.garage), COALESCE(p.has_lift, l.has_lift), "
-            "COALESCE(p.building_type, l.building_type), "
-            "COALESCE(p.condition, l.condition) "
-            "FROM listings l "
-            "LEFT JOIN properties p ON p.id = l.property_id AND p.status = 'active' "
-            "WHERE l.sreality_id = %s",
-            (sreality_id,),
-        )
-        row = cur.fetchone()
-    if row is None:
-        return None
-    keys = ("has_balcony", "terrace", "furnished", "garage", "has_lift",
-            "building_type", "condition")
-    return dict(zip(keys, row))
-
-
-def _subject_amenities(
-    conn: "psycopg.Connection", resolution: _Resolution,
-) -> tuple[dict[str, bool], bool]:
-    """Amenity flags + new-build signal for the reference-rent calc.
-
-    sreality runs read the authoritative `listings` columns; URL / spec
-    runs fall back to whatever the parsed spec carries (best-effort — the
-    base reference rent still computes from lat/lng/area/disposition).
-    """
-    src: dict[str, Any] | None = None
-    if resolution.input_sreality_id is not None:
-        src = _load_subject_amenities(conn, resolution.input_sreality_id)
-    if src is None:
-        src = resolution.target_spec or {}
-    is_novostavba = src.get("condition") == "novostavba"
-    building_type = src.get("building_type")
-    amenities = {
-        "balcony": bool(src.get("has_balcony")),
-        "terrace": bool(src.get("terrace")),
-        "furnished": src.get("furnished") == "ano",
-        "garage": bool(src.get("garage")),
-        "elevator": bool(src.get("has_lift")),
-        "other_material": bool(
-            is_novostavba
-            and building_type
-            and building_type not in _STANDARD_MATERIALS
-        ),
+def _subject_mf_facts(
+    conn: "psycopg.Connection", resolution: _Resolution, target: TargetSpec,
+    body: s.CreateEstimationIn,
+) -> dict[str, Any]:
+    """What mf_reference() needs about the run's subject besides the target's
+    disposition and area. A subject not in our database has no stored location: its
+    obec comes from the one containing-obec statement and it never binds a KÚ."""
+    if resolution.input_listing_id is not None:
+        with conn.cursor() as cur:
+            cur.execute(_SUBJECT_MF_FACTS_SQL, {"listing_id": resolution.input_listing_id})
+            row = cur.fetchone()
+        if row is not None:
+            return dict(zip(_MF_FACT_KEYS, row))
+    spec = resolution.target_spec or {}
+    return {
+        "category_main": body.category_main,
+        "category_type": resolution.subject_listing_category_type,
+        "price_czk": resolution.subject_listing_price_czk,
+        "condition": spec.get("condition"), "has_balcony": spec.get("has_balcony"),
+        "terrace": spec.get("terrace"), "furnished": spec.get("furnished"),
+        "garage": spec.get("garage"), "has_lift": spec.get("has_lift"),
+        "building_type": spec.get("building_type"),
+        "obec_kod": maps.containing_obec_kod(conn, lat=target.lat, lng=target.lng),
+        "country_status": None,
     }
-    return amenities, is_novostavba
 
 
 def _reference_rent_for_run(
@@ -2007,23 +1996,17 @@ def _reference_rent_for_run(
     recorder: TraceRecorder,
     resolution: _Resolution,
     target: TargetSpec,
-    estimate_kind: str,
+    body: s.CreateEstimationIn,
 ) -> dict[str, Any] | None:
-    """MF Cenová mapa secondary reference, emitted as a trace step.
-
-    Rent estimates only; best-effort (compute_reference_rent swallows
-    its own errors and returns None on any miss).
-    """
-    if estimate_kind != "rent":
+    """MF Cenová mapa secondary reference, emitted as a trace step. Rent estimates
+    only; best-effort -- a secondary reference never fails a run."""
+    if body.estimate_kind != "rent":
         return None
     with recorder.computation("reference rent (Cenová mapa MF)") as step:
         try:
-            amenities, is_novostavba = _subject_amenities(conn, resolution)
             ref = compute_reference_rent(
-                conn,
-                lat=target.lat, lng=target.lng, area_m2=target.area_m2,
-                disposition=target.disposition,
-                amenities=amenities, is_novostavba=is_novostavba,
+                conn, disposition=target.disposition, area_m2=target.area_m2,
+                **_subject_mf_facts(conn, resolution, target, body),
             )
         except Exception:  # noqa: BLE001 - secondary reference never fails a run
             ref = None
@@ -2031,13 +2014,14 @@ def _reference_rent_for_run(
             step.set_summary({"matched": False})
         else:
             step.set_summary({
-                "matched": True,
-                "territory": ref["territory"]["name"],
-                "vk": ref["vk"],
-                "is_novostavba": ref["is_novostavba"],
-                "base_per_m2": ref["base_per_m2"],
-                "total_per_m2": ref["total_per_m2"],
-                "monthly_rent_czk": ref["monthly_rent_czk"],
+                "matched": "monthly_rent_czk" in ref,
+                "status": ref.get("status"),
+                "territory": (ref.get("territory") or {}).get("name"),
+                "vk": ref.get("vk"),
+                "is_novostavba": ref.get("is_novostavba"),
+                "base_per_m2": ref.get("base_per_m2"),
+                "total_per_m2": ref.get("total_per_m2"),
+                "monthly_rent_czk": ref.get("monthly_rent_czk"),
             })
     return ref
 
@@ -2209,9 +2193,7 @@ def _run_agent_path(
     md = agent_result.metadata
     status = "success" if md.get("stop_reason") == "record_estimate" else "failed"
     reference_rent = (
-        _reference_rent_for_run(
-            conn, recorder, resolution, target, body.estimate_kind,
-        )
+        _reference_rent_for_run(conn, recorder, resolution, target, body)
         if status == "success"
         else None
     )

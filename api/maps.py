@@ -247,6 +247,18 @@ def _containing_chain(
     }
 
 
+def containing_obec_kod(conn: Any, *, lat: float, lng: float) -> int | None:
+    """The RÚIAN code of the obec covering a point, or None (foreign / no registry).
+
+    The one containing-obec statement, for subjects with no stored location (an
+    estimation of a URL-parsed advert or a typed point)."""
+    version = _registry_version(conn)
+    if version is None:
+        return None
+    obec = _containing_chain(conn, version=version, lat=lat, lng=lng).get("obec")
+    return obec[1] if obec else None
+
+
 def _lookup_name(
     conn: Any,
     *,
