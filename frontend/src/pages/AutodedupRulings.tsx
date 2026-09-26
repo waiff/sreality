@@ -13,7 +13,7 @@
  * things contradicts — the answer to "were my decisions right, and are they
  * obeyed?".
  *
- * A CORRECTION IS A NEW RULING, NEVER A DELETE (migration 573). Flip and
+ * A CORRECTION IS A NEW RULING, NEVER A DELETE (migration 574). Flip and
  * Withdraw post `POST /autodedup/verdict` with `supersedes` — the ruling the row
  * showed; the server answers 409 when it was ruled again since this page loaded.
  * A withdrawal is a newer `unsure`. The lane reads the newest word on its next

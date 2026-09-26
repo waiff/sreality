@@ -1,5 +1,5 @@
 /* deriveSplit — the stored split, read back from the pair rulings. The newest
- * row per pair is the ruling (migration 573), so a withdrawal (a newer `unsure`)
+ * row per pair is the ruling (migration 574), so a withdrawal (a newer `unsure`)
  * hides the older word it withdrew rather than letting it show through. */
 
 import { describe, expect, it } from 'vitest';

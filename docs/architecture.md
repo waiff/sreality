@@ -1274,8 +1274,10 @@ renumber.** Navigate by area:
     and share one now — `decided_by='operator'`, dated at the merge, never over an existing
     ruling or veto, so the engine can never undo them. **The rulings are a ledger (migration 574, PROGRAM.md
     E920):** a flip or a withdrawal (a newer `unsure`) is a NEW row and the newest row per pair /
-    per (group key, pass) is the ruling every reader obeys; `record_ruling` is the one pair
-    writer. `/autodedup/rulings` lists every ruling (typed, Browse merge, implied by a confirmed
+    per (group key, pass) is the ruling every reader obeys (apply's group negatives: the newest
+    per SET, whichever key or pass); `record_ruling` is the one pair writer; a changed ruling
+    seeds the autodedup lane's next pass (the `rt_rulings` cursor), so a withdrawn `same`
+    releases its group within a minute. `/autodedup/rulings` lists every ruling (typed, Browse merge, implied by a confirmed
     group, bare veto; group grain too) beside the engine's view and where the adverts sit now,
     and corrects it through `POST /autodedup/verdict` `supersedes` (409 when stale); the property
     page links to it for an admin. Labeling / annotation CRUD that the old
