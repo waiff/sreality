@@ -1,12 +1,14 @@
-/* The merged-adverts section on the property page: its query keys, its words for
- * a merge's origin and a detach's outcome, and the refresh after a detach. A row's
- * 'Rozdělit' is exact for any property size and any merge origin: it detaches that
- * one advert back to the property the merge ledger says it came from, or one no
- * merge brought to a new record (`GET /properties/{id}/origins`), offered on every
- * row a detach would move (`splittable`). The proposed-splits page detaches the
- * same way, advert by advert. */
+/* The merged-adverts section on the property page and the proposed-splits page:
+ * their query keys, their words for a merge's origin, a split's outcome and where
+ * a unit landed, and the refresh after a split. Both write through ONE route,
+ * `POST /properties/{id}/split` (E919): a row's 'Rozdělit' separates that one
+ * advert (back to the property the merge ledger says it came from, or one no
+ * merge brought to a new record; offered on every row that would move,
+ * `splittable`), and a proposal card states its whole partition in one call. */
 
 import type { QueryClient } from '@tanstack/react-query';
+
+import type { SplitUnit } from '@/lib/api';
 
 import { invalidateBrowseQueries } from '@/lib/browseInvalidation';
 import { revalidateCollections } from '@/lib/collectionCache';
@@ -46,7 +48,7 @@ export function mergeOriginLabel(source: string): string {
   }
 }
 
-/* Why a detach moves nothing; an outcome not listed here is shown raw. */
+/* Why separating an advert moves nothing; an outcome not listed here is shown raw. */
 const UNMOVED: Record<string, string> = {
   not_on_property: 'inzerát už v této nemovitosti není',
   not_merged: 'inzerát je v nemovitosti sám',
@@ -61,19 +63,24 @@ export function unmovedReason(outcome: string): string {
   return UNMOVED[outcome] ?? outcome;
 }
 
-export function detachOutcomeNote(outcome: string): string {
-  return `Nic se nepřesunulo — ${unmovedReason(outcome)}.`;
-}
-
 /* A native split of the advert the header speaks with: what stays behind (rules 18, 22). */
 export const STATE_STAYS =
   'Poznámky, štítky, kolekce a karta v pipeline zůstanou u zbylých inzerátů této nemovitosti.';
 
-/* Read-your-writes after a detach, for the property page, the proposals page
- * AND every Browse surface. The property page is keyed on the property, so a
- * plain invalidation re-reads the property (a detached canonical advert hands the
- * header to the next one) and its advert list. */
-export function refreshAfterDetach(qc: QueryClient): void {
+/* Where a split left one unit, as the link's words: the property it stays on,
+ * a new record, the property it came from, or the record two landings joined. */
+export function unitLanding(unit: SplitUnit, from: number): string {
+  if (unit.merge_group_id) return `sloučeno do #${unit.property_id}`;
+  if (unit.moved.some((m) => m.outcome === 'split_native')) return `nová nemovitost #${unit.property_id}`;
+  if (unit.moved.length > 0) return `vráceno do #${unit.property_id}`;
+  return unit.property_id === from ? `zůstává #${unit.property_id}` : `už v #${unit.property_id}`;
+}
+
+/* Read-your-writes after a split (or its undo), for the property page, the
+ * proposals page AND every Browse surface. The property page is keyed on the
+ * property, so a plain invalidation re-reads the property (a separated canonical
+ * advert hands the header to the next one) and its advert list. */
+export function refreshAfterSplit(qc: QueryClient): void {
   for (const key of [
     ['property'],
     ['property-sources'],

@@ -153,6 +153,11 @@ async function authHeader(useJwt: boolean | undefined): Promise<Record<string, s
  * tells the operator nothing about which parameter was rejected. */
 function detailText(detail: unknown): string {
   if (typeof detail === 'string') return detail;
+  /* A structured refusal (`{code, message, ids}`, the split route's): its message. */
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === 'string') return message;
+  }
   if (Array.isArray(detail)) {
     const parts = detail.map((item) => {
       if (typeof item === 'string') return item;
@@ -3050,37 +3055,119 @@ export const listMergedProperties = (
     jwt: true,
   });
 
-/* The one split: ONE advert back to the property its merge ledger says it came
- * from, or — no merge brought it — to a new record of its own (`outcome:
- * 'split_native'`), ruled "different" from every advert that stays, with the
- * operator's optional reason (≤ DETACH_REASON_MAX chars). `detached: false` says
- * why nothing moved (`outcome`) — a second click answers `not_on_property`. */
+/* The operator's split statement (E919), `POST /properties/{id}/split`: every
+ * advert the operator was shown (`adverts`, the stale-view guard), the units to
+ * separate (`separate`: each leaves as ONE record — back where it came from, or
+ * new), and `keep_together` (the rest ruled one property). Across units the
+ * adverts are ruled "different" with a permanent must-not-link. One transaction:
+ * all of it or nothing. The property page's row split is `separate: [[id]],
+ * keep_together: false`; the proposals page always keeps the rest together. */
 export const DETACH_REASON_MAX = 500;
 
-export interface DetachResult {
-  listing_id: number;
-  detached: boolean;
-  outcome: string;
-  survivor_property_id: number | null;
-  restored_property_id: number | null;
-  rulings_written: number;
+export interface SplitStatement {
+  adverts: number[];
+  separate: number[][];
+  keep_together: boolean;
+  reason?: string;
+  confirm_retract?: boolean;
 }
 
-export const detachListing = (
-  propertyId: number,
-  listingId: number,
-  reason?: string,
-): Promise<DetachResult> =>
-  request<DetachResult>(`/properties/${propertyId}/detach`, {
+/* Issued by the server in a split's response; `undoSplit` posts it back verbatim. */
+export interface SplitUndoBody {
+  call_id: string;
+  placements: Record<string, number>;
+  rulings: {
+    listing_lo: number;
+    listing_hi: number;
+    verdict: string | null;
+    note: string | null;
+    reasons: string[];
+  }[];
+}
+
+export interface SplitUnit {
+  unit: string;
+  /* 'kept' = the adverts the operator left together; 'separated' = a unit that left. */
+  role: 'kept' | 'separated';
+  listing_ids: number[];
+  /* Where the unit sits now. */
+  property_id: number;
+  moved: { listing_id: number; outcome: string; from: number; to: number }[];
+  /* Set when the unit landed on two records and the one merge joined them. */
+  merge_group_id: string | null;
+}
+
+export interface SplitResult {
+  call_id: string;
+  property_id: number;
+  /* The unit that keeps the property record (its notes, tags, pipeline card). */
+  record_kept_by: string;
+  units: SplitUnit[];
+  moved: number;
+  rulings: {
+    written: number;
+    same: number;
+    different: number;
+    must_not_link_written: number;
+    must_not_link_retracted: number;
+  };
+  reversed_pairs: [number, number][];
+  /* Null when the statement changed nothing (a re-send). */
+  undo: SplitUndoBody | null;
+}
+
+export interface SplitUndoResult {
+  call_id: string;
+  undone: true;
+  property_id: number | null;
+  merge_group_id: string | null;
+  rulings: { restored: number };
+}
+
+export type SplitRefusalCode =
+  | 'invalid'
+  | 'not_found'
+  | 'stale'
+  | 'reverses_rulings'
+  | 'cannot_move'
+  | 'join_would_drag'
+  | 'refused'
+  | 'busy';
+
+/* Why a statement wrote nothing: `reverses_rulings` names the pairs (E52) and a
+ * re-send with `confirm_retract` goes ahead; `stale` means the property changed
+ * since the page read it. */
+export interface SplitRefusal {
+  code: SplitRefusalCode;
+  message: string;
+  ids: unknown[];
+}
+
+export function splitRefusal(err: unknown): SplitRefusal | null {
+  if (!(err instanceof ApiError)) return null;
+  const detail = (err.body as { detail?: unknown } | null)?.detail;
+  if (detail && typeof detail === 'object' && 'code' in detail) return detail as SplitRefusal;
+  return null;
+}
+
+export const splitProperty = (propertyId: number, statement: SplitStatement): Promise<SplitResult> =>
+  request<SplitResult>(`/properties/${propertyId}/split`, {
     method: 'POST',
-    json: { listing_id: listingId, ...(reason ? { reason } : {}) },
+    json: statement,
+    jwt: true,
+  });
+
+export const undoSplit = (propertyId: number, undo: SplitUndoBody): Promise<SplitUndoResult> =>
+  request<SplitUndoResult>(`/properties/${propertyId}/split`, {
+    method: 'POST',
+    json: { undo },
     jwt: true,
   });
 
 /* Where each advert came from — the merge ledger is admin-only, hence a route and
  * not a view. All three origin fields null: no merge brought it. `detach_outcome`:
- * what a detach would answer now; `splittable`: that moves it (back to its origin,
- * or to a new record). */
+ * what separating it would do now; `splittable`: that moves it (back to its
+ * origin, or to a new record). */
 export interface AdvertOrigin {
   listing_id: number;
   origin_property_id: number | null;
@@ -3101,9 +3188,10 @@ export const fetchPropertyOrigins = (
 /* Decision 9: engine splits are PROPOSE-ONLY. One live multi-advert property as a
  * generation groups its adverts apart (the canonical advert's group first), each
  * split pair with the engine's stated reason and the operator's newest ruling.
- * The split itself is `detachListing`, advert by advert; `detach_outcome` is what
- * that detach would answer now and `splittable` says it moves the advert (one no
- * merge brought gets a new record while another own advert stays). */
+ * The split itself is the operator's statement, `splitProperty`, one per card;
+ * `detach_outcome` is what separating an advert would do now and `splittable`
+ * says it moves it (one no merge brought gets a new record while another own
+ * advert stays). */
 export interface ProposedSplitAdvert {
   listing_id: number;
   source: string;
