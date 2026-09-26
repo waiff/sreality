@@ -300,6 +300,18 @@ def test_a_floor_above_the_stated_total_is_refused() -> None:
     assert dropped["floor"] == "implausible_floor"
 
 
+def test_a_building_count_outside_the_storey_band_is_refused() -> None:
+    """The lane obeys the parsers' band (`scraper.floor.total_floors_from_portal`): the
+    backfill that NULLs a stored count outside 1..40 is source-agnostic, so any producer
+    left unbounded would write the healed shape back."""
+    for count in (0, 113):
+        values, dropped = merge({"total_floors": _cell(count, "Dům má celkem 5 pater")})
+        assert "total_floors" not in values
+        assert dropped["total_floors"] == "implausible_total_floors"
+    values, _ = merge({"total_floors": _cell(40, "Dům má celkem 5 pater")})
+    assert values == {"total_floors": 40}
+
+
 def test_false_needs_an_explicit_negation_in_the_quote() -> None:
     values, _ = merge({"has_lift": _cell(False, "V domě bohužel bez výtahu")})
     assert values["has_lift"] is False

@@ -34,7 +34,7 @@ from selectolax.parser import HTMLParser, Node
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area
 from scraper.attribute_contract import floor_convention, source_label, source_value, source_values
-from scraper.floor import floor_from_portal
+from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street, street_from_locality
 
@@ -484,7 +484,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     equipment = None if equipment is None else str(_to_int(equipment))
     overground, underground = (_to_int(v) for v in
                                source_values(SOURCE, "total_floors", obj))
-    total_floors = (
+    total_floors = total_floors_from_portal(
         (overground or 0) + (underground or 0)
         if overground is not None or underground is not None
         else None

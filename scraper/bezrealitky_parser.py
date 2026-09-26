@@ -16,7 +16,7 @@ from typing import Any
 from scraper import vocabulary
 from scraper.area import derive_headline_area
 from scraper.attribute_contract import floor_convention, source_value, source_values
-from scraper.floor import floor_from_portal
+from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.bezrealitky_client import detail_url
 from scraper.published import iso_datetime
 from scraper.scraped_listing import ScrapedListing
@@ -175,7 +175,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         # (it has never emitted one floor=0 row), and under ground=0 a bare 0 would
         # otherwise read as the ground storey instead of as silence.
         floor=floor_from_portal(floor_convention(SOURCE), _int(read("floor"))),
-        total_floors=_int(advert.get("totalFloors")),
+        total_floors=total_floors_from_portal(_int(advert.get("totalFloors"))),
         has_balcony=has_balcony,
         has_parking=has_parking,
         has_lift=bool(advert["lift"]) if advert.get("lift") is not None else None,

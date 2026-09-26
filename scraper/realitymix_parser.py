@@ -40,7 +40,7 @@ from selectolax.parser import HTMLParser, Node
 from scraper import street, vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.attribute_contract import floor_convention, source_value, source_values
-from scraper.floor import floor_from_portal
+from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 
@@ -536,7 +536,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         lat=lat,
         lon=lon,
         floor=floor_from_portal(floor_convention(SOURCE), read("floor")),
-        total_floors=_parse_int(read("total_floors")),
+        total_floors=total_floors_from_portal(_parse_int(read("total_floors"))),
         parking_lots=_parse_int(read("parking_lots")),
         # Each amenity is its OWN labelled row whose value is the size ("Balkon: 4 m²"),
         # so the label is the fact and the value only ever negates it.

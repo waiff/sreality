@@ -115,9 +115,9 @@ def test_floor_from_portal_ground0_is_a_passthrough():
     assert floor_from_portal("ground0", "2.") == 2
     assert floor_from_portal("ground0", 0) == 0
     assert floor_from_portal("ground0", "-1.") == -1
-    # ceskereality's own out-of-band values survive untouched: correcting them is not
-    # this conversion's job, and blanking a stated number is never a heal's to do.
-    assert floor_from_portal("ground0", "126.") == 126
+    # ceskereality's 126 is a keyed typo, not a storey: out of band is absence on either
+    # scale (the stored ones are NULLed by migration 573, backed up first).
+    assert floor_from_portal("ground0", "126.") is None
 
 
 def test_the_word_wins_over_the_keys_convention():
@@ -187,3 +187,26 @@ def test_the_label_arm_reads_its_own_value_not_the_next_clause():
     # 'přízemí' in that tail must not beat the label's own explicit storey.
     assert floor_from_text("Podlaží: 3. NP, přízemí s garáží") == (2, None)
     assert floor_from_text("Podlaží: přízemí, výtah") == (0, None)
+
+
+def test_a_bare_storey_outside_the_band_is_absence_on_either_scale():
+    """sreality 18700189 read floor_number 162 -> 161 (Podhorská 701, a five-storey house);
+    realitymix wrote 1,002, ceskereality 126. None is a storey."""
+    from scraper.floor import floor_from_portal
+
+    assert floor_from_portal("ground1", 162) is None
+    assert floor_from_portal("ground1", "1003") is None
+    assert floor_from_portal("ground0", 126) is None
+    assert floor_from_portal("ground1", 41) == 40
+    assert floor_from_portal("ground1", -3) == -3
+    assert floor_from_portal("ground1", -4) is None
+
+
+def test_a_building_count_outside_the_band_is_absence():
+    from scraper.floor import total_floors_from_portal
+
+    assert total_floors_from_portal(0) is None
+    assert total_floors_from_portal(113) is None
+    assert total_floors_from_portal(731463379) is None
+    assert total_floors_from_portal(32) == 32
+    assert total_floors_from_portal(None) is None

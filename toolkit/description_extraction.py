@@ -307,6 +307,8 @@ def _coerce(field: str, raw: Any, quote: str) -> tuple[Any, str | None]:
     if "integer" in value_type:
         if isinstance(raw, bool) or not isinstance(raw, int):
             return None, "not_integer"
+        if field == "total_floors" and floor_grammar.total_floors_from_portal(raw) is None:
+            return None, "implausible_total_floors"
         return raw, None
     if not isinstance(raw, str):
         return None, "not_string"

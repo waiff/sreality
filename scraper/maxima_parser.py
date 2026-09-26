@@ -38,7 +38,7 @@ from selectolax.parser import HTMLParser, Node
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area, parse_area_text
 from scraper.attribute_contract import floor_convention, source_value, source_values
-from scraper.floor import floor_from_portal
+from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.price_text import is_per_area_price
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -410,7 +410,7 @@ def parse_detail(
         # 2-segment case where the last token is a village, not a street.
         street=street_from_locality(locality, position="last", require_morphology=True),
         floor=floor,
-        total_floors=total_floors,
+        total_floors=total_floors_from_portal(total_floors),
         building_type=vocabulary.canonical("building_type", SOURCE, read("building_type")),
         condition=vocabulary.canonical("condition", SOURCE, read("condition")),
         ownership=vocabulary.canonical("ownership", SOURCE, read("ownership")),
