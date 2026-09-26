@@ -3251,14 +3251,14 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
   filters read them); and `scraper/street.py`, whose extraction is a CLAIM now, not a column.
 
 **THE RÚIAN MIRROR IS VERSIONED, NOT MUTATED.** `ruian_*` (migration 381) holds ČÚZK's address
-points, streets, parcels, building objects, admin units and a typo-tolerant gazetteer. Every load
-stamps one `registry_versions` row (`ruian:YYYY-MM-DD`) and publishes by **pointer swap** behind
-blocking assertions, so it never half-changes the world underneath a resolution that pinned a
-version. Křovák S-JTSK → WGS84 goes through ONE audited conversion on an explicitly chosen 1 m PROJ
-pipeline (`location_data/krovak.py`; the 6 m one is never used), guarded by a golden-point test;
-boundary packs carry three geometries per unit (authoritative, subdivided pip, render). Freshness is
-the monthly baseline — the VFR daily-delta lane ships as chain-verification only and fails loudly
-until the `ST_ZZSZ` element schema is pinned down.
+points, streets, parcels, building objects, admin units and a typo-tolerant gazetteer. ONE monthly
+`full` load stamps one `registry_versions` row (`ruian:YYYY-MM-DD`): stage → blocking assertions →
+merge → boundaries (the state SHP pack is the vintage's third sha-pinned artifact; three geometries
+per unit — authoritative, subdivided pip, render — an unchanged unit carried from the prior version)
+→ gazetteer → a **completeness assertion** (every member obec and KÚ has pip + authoritative) →
+**pointer swap**: a version becomes current only complete, never under a resolution pinned to another.
+Křovák S-JTSK → WGS84 is ONE audited 1 m PROJ conversion (`location_data/krovak.py`, golden-point
+test); `location_town_coverage` goes red when the registry stops moving (40 d current / 24 h staged).
 
 **OPS RULES THE INCIDENTS WROTE.** The heavy lanes — registry load and claim intake — share the OUTER
 `location-batch` concurrency group so **at most one runs at a time** (each keeps its own inner group

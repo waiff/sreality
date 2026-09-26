@@ -1087,6 +1087,13 @@ component is slimmed twice — each wave rewrites one component and slims its st
   bezrealitky has none, so its payload claims re-mine on content change; the corpus-wide fill needs
   one dispatched `location_claims_intake.yml` at `mode=full`, `source=bezrealitky`.
 
+- **Registry publishes only complete versions** (MF program PR-A, 2026-09-26): ONE `full` mode —
+  boundaries become a phase of the load (pack = sha-pinned third artifact, unchanged units carried),
+  gazetteer once, a completeness assertion (obec + KÚ pip + authoritative) gates publish, then
+  `rent_map_cells` refreshes; modes boundaries/gazetteer/deltas, `vfr_delta`, four inputs, the
+  bypass flags and three CLIs deleted; liveness arm on `location_town_coverage`. správní obvod left
+  out: the pack has no such layer (STU_P/PRARES_P are offices). NEXT: dispatch the October vintage.
+
 Standing rulings that bind every wave: no labelling campaign, ever (joint review is the gate); the
 ceskereality contract is settled (headline = granularity, `exact` = backup); no scope creep into LLM
 campaigns or schedules; foreign is a determination, never a default; a field is added only after a
