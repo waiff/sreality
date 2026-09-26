@@ -174,7 +174,7 @@ class _Conn:
 def test_a_changed_unit_is_derived_three_geometries_and_nothing_else():
     """No carry source (a new unit, or a boundary that moved): authoritative, render and
     pip are derived. No DELETE — a unit only gets here with nothing committed for this
-    version — and no `has_polygon` write (the column goes; nothing read it)."""
+    version."""
     conn = _Conn(7)  # unit_id_for -> 7; the carry probe finds nothing equal
     layer = next(x for x in rb.LAYERS if x.token == "OBCE_P")
     how, upgraded = rb.load_feature(conn, _feature("obec", 554782), layer, 3)
@@ -182,7 +182,6 @@ def test_a_changed_unit_is_derived_three_geometries_and_nothing_else():
     statements = conn.statements()
     assert sum("INSERT INTO ruian_admin_unit_geometries" in s for s in statements) == 3
     assert not any(s.startswith("DELETE") for s in statements)
-    assert not any("has_polygon" in s for s in statements)
 
 
 def test_an_unchanged_unit_carries_its_authoritative_row_and_recuts_the_rest():

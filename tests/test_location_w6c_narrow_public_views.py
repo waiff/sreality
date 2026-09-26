@@ -13,6 +13,9 @@ and swapping it in. Two things can go wrong silently and both are pinned here:
    reader, or removed from DETAIL_COLS without leaving the view, fails here.
    `npx tsc --noEmit` cannot see this: PostgREST select lists are strings.
 
+   The pin reads the EFFECTIVE definition (the highest-numbered migration that
+   creates the view): 575 narrowed it again, 44 -> 41, when the MF columns left.
+
 2. NO SCAFFOLDING SURVIVES. `_next` is a build artefact. A file that creates one
    and does not swap it leaves a stale duplicate of a multi-million-row matview
    on disk, and — because apply_migration.yml probes the live catalog for every
@@ -25,12 +28,17 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from scripts.migration_objects import parse_objects
 
 from tests.test_location_w3_projection import _columns, _sql
 
 ROOT = Path(__file__).resolve().parents[1]
 W6C = "517_location_w6c_narrow_public_views.sql"
+MF = "575_mf_legacy_columns.sql"
+# Every migration that narrows listings_public by 517's blue-green recipe.
+NARROWINGS = (W6C, MF)
 
 # The five matviews that hold the dependency, from pg_depend on the live
 # catalog: image_storage_overview_mv (115), scraper_health_checks_mv +
@@ -55,13 +63,22 @@ DROPPED = {
     "building_condition_level", "apartment_condition_level",
 }
 
+# 575: MF is property-grain (properties_public reads mf_reference()), so the
+# listing-grain copies left the view with the stored columns.
+MF_DROPPED = {"mf_reference_rent_czk", "mf_gross_yield_pct", "mf_reference_rent"}
 
-# Kept by 517 with a reader then; the MF readers left in the MF render-by-shape
-# PR (MF is property-grain: properties_public), and the columns leave the view
-# with the stored MF columns in the destructive MF cleanup. Delete this set there.
-READERLESS_UNTIL_MF_CLEANUP = {
-    "mf_reference_rent_czk", "mf_gross_yield_pct", "mf_reference_rent",
-}
+_CREATES_LISTINGS_PUBLIC = re.compile(
+    r"create\s+(?:or\s+replace\s+)?view\s+(?:public\.)?listings_public\b", re.IGNORECASE
+)
+
+
+def _effective() -> str:
+    """The highest-numbered migration that creates listings_public."""
+    hits = [
+        p for p in (ROOT / "migrations").glob("*.sql")
+        if _CREATES_LISTINGS_PUBLIC.search(_sql(p.name))
+    ]
+    return max(hits, key=lambda p: int(p.name.split("_", 1)[0])).name
 
 
 def _detail_cols() -> list[str]:
@@ -78,15 +95,17 @@ def _detail_cols() -> list[str]:
 
 
 def test_listings_public_is_exactly_its_readers() -> None:
-    cols = _columns(_sql(W6C), "listings_public")
-    assert len(cols) == len(set(cols)), f"517 projects a duplicate column: {cols}"
-    assert len(cols) == 44, f"517 leaves listings_public {len(cols)} columns wide, expected 44"
-    read = set(cols) - READERLESS_UNTIL_MF_CLEANUP
-    assert read == set(_detail_cols()), (
+    effective = _effective()
+    assert effective == MF, f"listings_public is defined last by {effective}, not {MF}"
+    cols = _columns(_sql(effective), "listings_public")
+    assert len(cols) == len(set(cols)), f"{effective} projects a duplicate column: {cols}"
+    assert set(cols) == set(_detail_cols()), (
         "listings_public and the SPA's DETAIL_COLS disagree — "
-        f"only in the view: {sorted(read - set(_detail_cols()))}; "
-        f"only in DETAIL_COLS: {sorted(set(_detail_cols()) - read)}"
+        f"only in the view: {sorted(set(cols) - set(_detail_cols()))}; "
+        f"only in DETAIL_COLS: {sorted(set(_detail_cols()) - set(cols))}"
     )
+    assert len(cols) == 41, f"{effective} leaves listings_public {len(cols)} wide, expected 41"
+    assert "expected 41 (was 44)" in _sql(MF), "575 lost its own width assertion"
 
 
 def test_the_seventeen_are_gone() -> None:
@@ -95,6 +114,10 @@ def test_the_seventeen_are_gone() -> None:
     # And the file says so itself, so a half-applied run cannot pass silently.
     sql = _sql(W6C)
     assert "expected 44 (was 61)" in sql, "517 lost its own width assertion"
+    # 575 is 517's projection minus exactly the three MF columns, in the same order.
+    assert _columns(_sql(MF), "listings_public") == [
+        c for c in _columns(sql, "listings_public") if c not in MF_DROPPED
+    ]
 
 
 def test_portal_listing_counts_is_not_touched() -> None:
@@ -108,42 +131,45 @@ def test_portal_listing_counts_is_not_touched() -> None:
     assert "expected 8" in sql, "517 does not assert portal_listing_counts keeps its width"
 
 
-def test_every_dependent_matview_is_rebuilt_and_swapped() -> None:
+@pytest.mark.parametrize("name", NARROWINGS)
+def test_every_dependent_matview_is_rebuilt_and_swapped(name: str) -> None:
     """Both loops must name all five. A matview missing from the build array is
-    left bound to the legacy view and section 5's DROP fails; one missing from
+    left bound to the legacy view and the legacy DROP fails; one missing from
     the swap array is left as a `_next` duplicate."""
-    sql = _sql(W6C)
+    sql = _sql(name)
     for mv in MATVIEWS:
         assert sql.count(f"'{mv}'") >= 3, (
-            f"{mv} is not named in all three of 517's arrays (build, swap, assert)"
+            f"{mv} is not named in all three of {name}'s arrays (build, swap, assert)"
         )
 
 
-def test_no_next_object_is_declared_or_left_behind() -> None:
+@pytest.mark.parametrize("name", NARROWINGS)
+def test_no_next_object_is_declared_or_left_behind(name: str) -> None:
     """`parse_objects` is what apply_migration.yml's receipt probes with. Every
     `_next` relation this file builds is created through dynamic SQL precisely so
     the receipt never looks for a name the same file renames away."""
-    declared = parse_objects((ROOT / "migrations" / W6C).read_text(encoding="utf-8"))
+    declared = parse_objects((ROOT / "migrations" / name).read_text(encoding="utf-8"))
     idents = {o.ident for o in declared}
     assert not any(i.endswith("_next") for i in idents), (
-        f"517 declares a transient object the receipt will probe for: {sorted(idents)}"
+        f"{name} declares a transient object the receipt will probe for: {sorted(idents)}"
     )
     assert "listings_public" in idents, (
-        "517 declares no listings_public — the receipt would confirm nothing"
+        f"{name} declares no listings_public — the receipt would confirm nothing"
     )
-    sql = _sql(W6C)
-    assert "_next objects left behind" in sql, "517 dropped its leftover-scaffolding guard"
-    assert "listings_public_legacy survived" in sql, "517 dropped its legacy-view guard"
+    sql = _sql(name)
+    assert "_next objects left behind" in sql, f"{name} dropped its leftover-scaffolding guard"
+    assert "listings_public_legacy survived" in sql, f"{name} dropped its legacy-view guard"
 
 
-def test_the_swap_is_idempotent_by_construction() -> None:
+@pytest.mark.parametrize("name", NARROWINGS)
+def test_the_swap_is_idempotent_by_construction(name: str) -> None:
     """apply_migration.yml re-runs the whole file on a lock timeout, and the
     refresh cron (*/10) can cause one. The drop is gated on `_next` still
     existing, which is what stops a second pass from dropping a matview it has
     already replaced and then failing on the rename."""
-    sql = _sql(W6C)
+    sql = _sql(name)
     assert "continue when to_regclass('public.' || nxt) is null;" in sql, (
-        "517's swap is no longer gated on `_next` existing — a re-run would drop "
+        f"{name}'s swap is no longer gated on `_next` existing — a re-run would drop "
         "a matview it already swapped"
     )
     assert "drop view if exists listings_public_legacy;" in sql

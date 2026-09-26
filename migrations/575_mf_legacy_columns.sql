@@ -387,11 +387,14 @@ begin
                       'public.properties_mf_yield_keyset_idx',
                       'public.properties_cat_mf_yield_idx',
                       'public.rent_map_values_public',
-                      'public.rent_map_adjustments_public',
-                      'public.listings_public_legacy']) n
+                      'public.rent_map_adjustments_public']) n
    where to_regclass(n) is not null;
   if stray is not null then
     raise exception '575: relations survived: %', stray;
+  end if;
+
+  if to_regclass('public.listings_public_legacy') is not null then
+    raise exception '575: listings_public_legacy survived the swap';
   end if;
 
   select string_agg(p.proname, ', ') into stray
