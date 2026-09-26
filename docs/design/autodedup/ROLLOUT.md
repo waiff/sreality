@@ -105,6 +105,18 @@ The engine that was live then was reported as having "zero known false merges". 
 - **No unseen ground is left.** All sixteen areas have now been used to build rules, so a further wave that merges more would need a seventeenth area, exported and read from scratch, to be confirmed honestly.
 <!-- PROGRAM.md wave rows W14-W29 (dates), W15 (region 16,809 -> 20,588 of 22,421; g7 8,618), W25-W29 (per-wave recall), W28 (seven merges across a fact in candidate builds), W29 + D82 ("no seventeenth cohort: all sixteen are dev ground"), D83/D84 -->
 
+## 5b. S15 (w30): the trial's leftovers, proposed and not yet confirmed
+
+Reading the live trial's remaining duplicates against the g13 export found one engine defect and three questions for you. **The defect:** the engine only compared adverts' size and layout inside the same town *part* when the location resolver had found one, so an advert placed only in "Jablonec" never met the same flat placed in "Mšeno nad Nisou". S15 adds a town-wide comparison, following your location rule (town parts split the town only in Praha, Brno and Ostrava). It also reads a floor and a building height that both differ by one storey in the same direction as one counting habit, not two differences.
+
+| version | areas | recall change (points) | certain pairs gained / lost | mixed groups made worse | pairs proven different merged | trial: operator pairs lost vs g7 |
+| --- | --- | --- | --- | --- | --- | --- |
+| g12 (S14, w29) | 16 | (the §4 table) | — | — | 0 | 23 |
+| S15 (w30) | 16 | −0.02 to +0.12 (two areas lower: 140-town region −0.01, Ostrava −0.02) | 240 / 128 | 0 | 0 | 23 |
+
+Because S15 can merge more, it needs a fresh, unseen area to be confirmed before it replaces g12 (D90). Three readings are **built and switched off, waiting for your ruling**, each measured on all sixteen areas: a building's storey count alone as a difference when floor, size, layout and price agree (D87: the Kolmá, Mozartova and 122 m² flats of the trial), a price that includes the agency's commission on an advert whose photos and house number match (D88: Pražská 930/47; as specified it does not yet join that flat, because one of its adverts files no house number), and a floor and building height that differ by one storey in opposite directions (D89: the Mechová flat). A fourth trial case, Krkonošská 353, was not an engine problem: the production-merge adapter refused to undo an old merge because it contained a pair you had ruled "same", although the engine keeps that pair together; it now proceeds when the engine re-joins the pair (E907).
+<!-- s15/rollout_table.txt (S14 vs S15 and the ablation rows), s15/trial_g13_s15.json (g13), s15/trial_tier_s15.json (operator tier), s15/preregistration_s15.json; PROGRAM.md W30, M667-M672, D87-D90, E907 -->
+
 ## 6. Latency, storage, spend
 
 - **Latency.** The batch engine decides a listing in under a second. The real-time shadow lane runs on GitHub's ten-minute schedule, which in practice fires hours apart; photo-dependent merges wait a median of 2.5 hours for the hourly fingerprint jobs. *Correction, 2026-09-24:* the photo fingerprint (pHash) has been taken at download time since July (PR #692), and its hourly job is only a backstop. That does not fit the program's measurement that about 80% of new listings were decided before any of their photos had a fingerprint, and the cause is not yet known: either the download-time fingerprint is failing, or the photos are stored later than the program measured. The 2.5-hour median was measured to the first room tag (CLIP, hourly at :40), not to the fingerprint. Every image run now reports `phash_missed`, the photos stored without a fingerprint; it should read 0.
