@@ -273,6 +273,81 @@ def test_the_sql_store_reads_the_newest_pair_ruling_only() -> None:
     assert SqlStore(db, "rt").must_link() == {(A, C)}
 
 
+def test_a_withdrawn_same_re_clusters_its_component_on_the_next_pass() -> None:
+    """G4 (E920): a withdrawal contradicts nothing — once the `same` is withdrawn, the group it
+    held together breaks no ruling — so only the change itself can seed the component. Without
+    that seed the group survives, and the reconcile, which sweeps every group, could still merge
+    the two adverts after the operator took the word back."""
+    from autodedup.incremental import Calibration, run_pass
+    from autodedup.model import hand_initialised
+    from autodedup.replay import ScheduleWork
+
+    ds = _floors_cohort()
+    store = MemoryStore()
+    _known(store, A, C)
+    store.ml = {(A, C)}
+    calibration = Calibration(generation="rt", feature_version=0, built_at="", n_listings=0)
+
+    def idle_pass() -> None:
+        run_pass(store, DatasetFacts(ds), ScheduleWork([]), D43_ON, hand_initialised(),
+                 calibration)
+
+    idle_pass()
+    assert sorted(map(sorted, store.clusters.values())) == [[A, C]], "the must-link joins them"
+    # The operator withdraws the word: a newer `unsure`, so the pair is no must-link, and no
+    # veto is written. The control: nothing contradicts the group, so nothing re-clusters it.
+    store.ml = set()
+    idle_pass()
+    assert sorted(map(sorted, store.clusters.values())) == [[A, C]]
+    # The changed ruling names its two adverts (the lane's `rt_rulings` read).
+    store.ruled = {A, C}
+    idle_pass()
+    assert store.clusters == {}, "the change seeds the component: nothing else holds the pair"
+    assert store.ruled == set(), "the pass that honoured the change consumed it"
+
+
+def test_a_changed_ruling_on_listings_the_store_never_read_seeds_nothing() -> None:
+    store = MemoryStore()
+    _known(store, A)
+    store.ruled = {A, 999}
+    from autodedup.incremental import read_rulings
+
+    assert read_rulings(store).changed == frozenset({A}), (
+        "a listing outside the store cannot be clustered here")
+
+
+def test_the_sql_store_reads_the_rulings_changed_since_the_previous_pass() -> None:
+    from datetime import timedelta
+
+    from autodedup.incremental_lane import CURSOR_RULINGS, RESET_CURSORS, RULINGS_OVERLAP_S
+    from autodedup.incremental_sql import RT_CURSOR_WRITE_SQL, RT_RULINGS_CHANGED_SQL
+
+    assert CURSOR_RULINGS in RESET_CURSORS, "a fresh seed restarts it at the present"
+    flat = " ".join(RT_RULINGS_CHANGED_SQL.split())
+    assert "v.kind = 'pair' then array[v.listing_lo, v.listing_hi] else v.member_ids" in flat
+    db = FakePg()
+    start = db.now
+    db.rulings.append((start - timedelta(days=3), [A, C]))
+    store = SqlStore(db, "rt")
+    assert store.rulings_changed() == set(), "the first pass starts at the present"
+    store.flush()
+    assert db.cursors[CURSOR_RULINGS]["watermark"] == start
+
+    db.now = start + timedelta(minutes=1)
+    db.rulings.append((db.now, [A, B]))
+    assert store.rulings_changed() == {A, B}
+    # A pass that rolls back never flushes, so the next pass reads the same change.
+    assert SqlStore(db, "rt").rulings_changed() == {A, B}
+    # A ruling whose transaction began before the previous pass started and committed after it
+    # read is inside the overlap; one older than the overlap was read by that pass.
+    db.rulings.append((start - timedelta(seconds=RULINGS_OVERLAP_S / 2), [C]))
+    db.rulings.append((start - timedelta(seconds=RULINGS_OVERLAP_S * 2), [999]))
+    assert store.rulings_changed() == {A, B, C}
+    store.flush()
+    assert db.cursors[CURSOR_RULINGS]["watermark"] == db.now
+    assert RT_CURSOR_WRITE_SQL in db.statements_in_tx or RT_CURSOR_WRITE_SQL in db.statements
+
+
 # ------------------------------------------------------------------ A9: the reconcile
 
 RT = "rt"

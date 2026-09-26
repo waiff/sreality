@@ -44,6 +44,7 @@ import {
   type AutodedupVerdictValue,
 } from '@/lib/api';
 import { useUrlFilters } from '@/lib/useUrlFilters';
+import { ROUTES, withQuery } from '@/lib/routes';
 import { fmtCount } from '@/lib/format';
 import Dialog from '@/components/Dialog';
 import ErrorBanner from '@/components/ErrorBanner';
@@ -284,6 +285,14 @@ export default function AutodedupGroups() {
           portals, or the same flat re-posted months later. <strong>Nothing has been merged</strong>
           : the trial runs in shadow mode and this page records your opinion inside the program's
           own schema. Weakest link first, because a group is only as right as its worst edge.
+        </p>
+        <p className="mt-1 text-[0.78rem]">
+          <Link
+            to={withQuery(ROUTES.autodedupRulings.build(), { grain: 'group' })}
+            className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
+          >
+            Všechna rozhodnutí o skupinách, i mimo tuto generaci
+          </Link>
         </p>
       </header>
 

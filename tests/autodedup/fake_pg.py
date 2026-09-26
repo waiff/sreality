@@ -60,6 +60,8 @@ class FakePg:
         self.settings: dict[str, Any] = {}
         self.mnl: set[tuple[int, int]] = set()
         self.ml: set[tuple[int, int]] = set()
+        # `autodedup.verdicts` as the G4 read sees it: (decided_at, the listings the row names).
+        self.rulings: list[tuple[datetime, list[int]]] = []
         # `public.app_settings`: the apply scope row the reconcile reads (A9). Absent = closed.
         self.app_settings: dict[str, Any] = {}
         # `public`, read-only: what the four feeds page over AND what the fact source reads.
@@ -570,6 +572,12 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         return sorted(db.mnl)
     if sql == S.RT_MUST_LINK_SQL:
         return sorted(db.ml)
+    if sql == S.RT_RULINGS_CHANGED_SQL:
+        since = db.cursors.get(str(p["name"]), {}).get("watermark")
+        if since is None:
+            return [(db.now, [])]
+        floor = since - timedelta(seconds=float(p["overlap_s"]))
+        return [(db.now, sorted({int(i) for at, ids in db.rulings if at > floor for i in ids}))]
 
     # ---------------------------------------------------------------- the clean reset (E97)
     #

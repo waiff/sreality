@@ -1103,6 +1103,34 @@ select v.listing_lo, v.listing_hi
  where v.verdict = 'same'
 """
 
+# G4 (E920): the listings named by a ruling written since the lane's previous pass -- a pair's two
+# sides, a group ruling's recorded set. A flip contradicts the clustering and seeds itself; a
+# withdrawal (or `different` -> `unsure` on two apart adverts) contradicts nothing, so without this
+# read its component would re-cluster only when something else touched it. `since` is the
+# previous pass's start (the `rt_rulings` cursor, written by `SqlStore.flush` inside the pass's
+# transaction) less `overlap_s`, so a ruling whose transaction began before that start and
+# committed after that pass read still seeds. No cursor yet names nothing: the first pass starts
+# at the present, as the seed does (E76). `now()` is this pass's start, the next cursor.
+RT_RULINGS_CHANGED_SQL = """
+with cursor_row as (
+    select max(c.watermark) as since
+      from autodedup.scan_cursor c
+     where c.name = %(name)s::text
+)
+select now(),
+       array(select distinct u.listing_id
+               from autodedup.verdicts v
+              cross join lateral unnest(case when v.kind = 'pair'
+                                             then array[v.listing_lo, v.listing_hi]
+                                             else v.member_ids end) as u(listing_id)
+              where cursor_row.since is not null
+                and v.decided_at > cursor_row.since
+                                   - make_interval(secs => %(overlap_s)s::double precision)
+                and u.listing_id is not null
+              order by 1)
+  from cursor_row
+"""
+
 
 # ------------------------------------------------------------------ the clean reset (E97)
 #

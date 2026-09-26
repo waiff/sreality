@@ -84,6 +84,14 @@ def _statement(path: Path, start: str, end: str) -> str:
     return sql[head:sql.index(end, head) + len(end)].strip().rstrip(";")
 
 
+def _as_at_560(cur: Any) -> None:
+    """Migration 560's one-time copy, as it ran: its conflict target is the per-decider pair
+    index of 528, which 574 dropped (the store is a ledger since), so the replay recreates that
+    index inside the test's transaction (rolled back with it) before running the statement."""
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS autodedup_verdicts_pair_uidx ON autodedup.verdicts "
+                "(kind, listing_lo, listing_hi, decided_by) WHERE kind = 'pair'")
+
+
 def _copy_560() -> str:
     sql = (_MIGRATIONS / "560_one_merge_one_undo.sql").read_text(encoding="utf-8")
     return sql[sql.index("with live as ("):].strip().rstrip(";")
@@ -117,6 +125,7 @@ def test_the_copy_records_560s_members_and_sides_and_links_the_rulings(cur):
     detach_listing(cur.connection, u1, decided_by=OP, source="autodedup")
     cur.execute("UPDATE property_merge_events SET source = 'operator' "
                 "WHERE merge_group_id = ANY(%s::uuid[])", ([old, gone],))
+    _as_at_560(cur)
     cur.execute(_copy_560())
 
     # A merge the operator made through Browse since 559 rules its own pairs.
@@ -180,8 +189,9 @@ def test_a_ruling_typed_against_a_pair_is_never_linked(cur):
         "SELECT note, operator_merge_group_id::text FROM autodedup.verdicts "
         "WHERE kind = 'pair' AND listing_lo = %s AND listing_hi = %s ORDER BY id",
         _pair(c1, c2))
-    # merge_property_set upserts the operator's own row: the note is now the merge's.
-    assert cur.fetchall() == [(f"operator merge {browse}", browse)]
+    # The merge's ruling is a row of its own (migration 574: the store is a ledger), and only
+    # that row is linked; the typed ruling keeps its note and no link.
+    assert cur.fetchall() == [("stejny byt", None), (f"operator merge {browse}", browse)]
 
 
 def test_the_labels_lane_reads_the_copy(cur):

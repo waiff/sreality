@@ -150,6 +150,7 @@ from autodedup.incremental_sql import (
     RT_MERGE_NEIGHBOURS_SQL,
     RT_MUST_LINK_SQL,
     RT_MUST_NOT_LINK_SQL,
+    RT_RULINGS_CHANGED_SQL,
     RT_NEW_LISTINGS_SQL,
     RT_NEW_STRAGGLERS_SQL,
     RT_PAIR_CLUSTER_SQL,
@@ -217,6 +218,11 @@ CURSOR_REVIVE: str = "rt_revive"
 CURSOR_SCOPE: str = "rt_scope_drift"
 CURSOR_ENTER: str = "rt_scope_enter"
 CURSOR_EVIDENCE: str = "rt_evidence"
+# G4 (E920): the previous pass's start, so a ruling changed since then seeds its listings. Read
+# back less RULINGS_OVERLAP_S: a ruling whose transaction began before that start and committed
+# after that pass read is still seen (a few passes re-seed it, which re-clusters to the same).
+CURSOR_RULINGS: str = "rt_rulings"
+RULINGS_OVERLAP_S: float = 300.0
 # The rows the lane still keeps in `autodedup.settings` are WRITTEN BY IT, never set by hand:
 # the scope the seed cut the generation for, the seed's version and the build phase the seed
 # opens and the pass closes (both named in `incremental`, which the API reads too), the rate
@@ -441,6 +447,8 @@ class SqlStore:
         self._cells: dict[tuple[str, str], CellRow] = {}
         self._cells_read: set[str] = set()
         self._cells_dirty: set[tuple[str, str]] = set()
+        # This pass's start, as `rulings_changed` read it: the `rt_rulings` cursor `flush` writes.
+        self._rulings_read_at: Any = None
 
     # ------------------------------------------------------------------ plumbing
     def _query(self, sql: str, params: Mapping[str, Any] | None = None) -> list[tuple]:
@@ -719,6 +727,14 @@ class SqlStore:
         return {(int(row[0]), int(row[1]))
                 for row in self._query(RT_MUST_LINK_SQL)}
 
+    def rulings_changed(self) -> set[int]:
+        rows = self._query(RT_RULINGS_CHANGED_SQL,
+                           {"name": CURSOR_RULINGS, "overlap_s": RULINGS_OVERLAP_S})
+        if not rows:
+            return set()
+        self._rulings_read_at = rows[0][0]
+        return {int(listing_id) for listing_id in (rows[0][1] or ())}
+
     # ------------------------------------------------------------------ live census
     def cells(self, keys: Iterable[tuple[str, str]]) -> dict[tuple[str, str], CellRow]:
         wanted = {(str(key), str(group)) for key, group in keys}
@@ -791,6 +807,12 @@ class SqlStore:
             "capped": self._cells[cell].capped,
         } for cell in sorted(self._cells_dirty)])
         self._cells_dirty.clear()
+        if self._rulings_read_at is not None:
+            # Inside the pass's transaction: a pass that rolls back re-reads the same rulings.
+            self._run(RT_CURSOR_WRITE_SQL, {
+                "name": CURSOR_RULINGS, "last_listing_id": None, "last_snapshot_id": None,
+                "watermark": self._rulings_read_at})
+            self._rulings_read_at = None
 
 
 def _slots(raw: Any) -> dict[str, tuple[float, bool]]:
@@ -1704,7 +1726,7 @@ def record_storage(conn: Any, generation: str, bytes_now: int) -> None:
 # the generation's rows are named here rather than filtered by a column the table does not have
 # — which is also why two real-time generations cannot run at once, and why the reset says so.
 RESET_CURSORS: tuple[str, ...] = (CURSOR_NEW, CURSOR_CHANGED, CURSOR_FLIPPED, CURSOR_REVIVE,
-                                  CURSOR_SCOPE, CURSOR_ENTER, CURSOR_EVIDENCE,
+                                  CURSOR_SCOPE, CURSOR_ENTER, CURSOR_EVIDENCE, CURSOR_RULINGS,
                                   reconcile.CURSOR)
 
 # The reset's statements, in the order they run: members and conflicts before the clusters they

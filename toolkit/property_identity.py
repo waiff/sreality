@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Sequence
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -213,32 +213,55 @@ def survivor_of(first_seen: Mapping[int, datetime | None]) -> int:
     return min(first_seen, key=lambda pid: (first_seen[pid] is None, first_seen[pid] or 0, pid))
 
 
+def record_ruling(
+    conn: psycopg.Connection,
+    listing_lo: int,
+    listing_hi: int,
+    *,
+    verdict: str,
+    decided_by: str,
+    note: str | None,
+    reasons: Sequence[str] = (),
+    veto_reason: str | None = None,
+) -> tuple[Any, ...] | None:
+    """THE pair-ruling writer: appends the ruling when it changes the pair's newest word
+    (migration 574) and mirrors it into the operator's must-not-link (a negative upserts it with
+    `veto_reason`, else the note; anything else retracts it). A bare operator veto is first
+    written down as the `different` ruling it is, so the new word never erases it. Returns the
+    pair's newest row in `usql.VERDICT_COLUMNS` order."""
+    with conn.cursor() as cur:
+        cur.execute(usql.VERDICT_PAIR_FROM_VETO_SQL,
+                    {"listing_lo": listing_lo, "listing_hi": listing_hi})
+        cur.execute(usql.VERDICT_PAIR_APPEND_SQL, {
+            "listing_lo": listing_lo, "listing_hi": listing_hi, "verdict": verdict,
+            "note": note, "reasons": list(reasons), "decided_by": decided_by})
+        stored = cur.fetchone()
+        if verdict in usql.NEGATIVE_VERDICTS:
+            cur.execute(usql.MUST_NOT_LINK_UPSERT_SQL, {
+                "listing_lo": listing_lo, "listing_hi": listing_hi,
+                "reason": veto_reason or note or f"operator: {verdict}"})
+        else:
+            cur.execute(usql.MUST_NOT_LINK_RETRACT_SQL, {
+                "listing_lo": listing_lo, "listing_hi": listing_hi})
+    return stored
+
+
 def record_rulings(
     conn: psycopg.Connection,
     pairs: set[tuple[int, int]],
     *,
-    verdict: Literal["same", "different"],
+    verdict: str,
     decided_by: str,
-    note: str,
+    note: str | None,
+    reasons: Sequence[str] = (),
 ) -> int:
-    """Rule each (lo, hi) listings.id pair as `POST /autodedup/verdict` does; returns the count."""
+    """Rule each (lo, hi) listings.id pair through `record_ruling`; returns the count."""
+    if verdict not in usql.VERDICT_VALUES:
+        raise ValueError(f"not a pair verdict: {verdict!r}")
     ordered = sorted(pairs)
-    if not ordered:
-        return 0
-    with conn.cursor() as cur:
-        cur.executemany(usql.VERDICT_PAIR_UPSERT_SQL, [
-            {"listing_lo": lo, "listing_hi": hi, "verdict": verdict, "note": note,
-             "reasons": [], "decided_by": decided_by}
-            for lo, hi in ordered
-        ])
-        if verdict in usql.NEGATIVE_VERDICTS:
-            cur.executemany(usql.MUST_NOT_LINK_UPSERT_SQL, [
-                {"listing_lo": lo, "listing_hi": hi, "reason": note} for lo, hi in ordered
-            ])
-        else:
-            cur.executemany(usql.MUST_NOT_LINK_RETRACT_SQL, [
-                {"listing_lo": lo, "listing_hi": hi} for lo, hi in ordered
-            ])
+    for lo, hi in ordered:
+        record_ruling(conn, lo, hi, verdict=verdict, decided_by=decided_by, note=note,
+                      reasons=reasons)
     return len(ordered)
 
 
