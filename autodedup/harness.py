@@ -684,6 +684,55 @@ def run_engine(
     return summary
 
 
+def score_pairs(
+    dataset: Dataset,
+    settings: Settings,
+    model: LogisticModel,
+    keys: Iterable[tuple[int, int]],
+) -> list[dict[str, Any]]:
+    """The engine's row for pairs a run did NOT store, in `run_engine`'s row shape plus
+    `stored: false` — the same fingerprints, features and decision `cmd_pair` prints.
+
+    A named judge list asks about pairs by id, and the pairs most worth asking about are often
+    ones the run never kept: below `store_floor`, or never paired at all because blocking keyed
+    the two adverts to different grains. `probes` is what blocking found the pair by, empty when
+    it never did. The K-B family guard and the development hold are properties of a whole pair
+    set and are NOT re-run, so a K-B row here is the pre-guard decision."""
+    wanted = sorted({
+        (min(lo, hi), max(lo, hi)) for lo, hi in keys
+        if lo != hi and lo in dataset.listings and hi in dataset.listings
+    })
+    if not wanted:
+        return []
+    fps = build_all(dataset, settings)
+    generated, _ = generate_pairs(fps, settings)
+    ctx = FeatureContext.build(fps, settings, dataset)
+    ctx.index_attrs(fps, dataset.listings)
+    hazard = ContextIndex.build(dataset.listings, dataset.images_by_listing)
+    rows: list[dict[str, Any]] = []
+    for lo, hi in wanted:
+        fa, fb = fps[lo], fps[hi]
+        la, lb = dataset.listings[lo], dataset.listings[hi]
+        probes = sorted(generated.get((lo, hi), ()))
+        feats = pair_features(fa, fb, la, lb, dataset.images(lo), dataset.images(hi), ctx, settings)
+        decision = decide_pair(fa, fb, la, lb, feats, probes, model, settings, hazard)
+        row = decision.to_json()
+        if decision.certificate == "K-R":
+            row.setdefault("evidence", {})["ref_codes"] = ",".join(ctx.shared_codes(lo, hi))
+        row.update({
+            "context": hazard.pair_context(la, lb).to_json(),
+            "block": pair_block(la, lb),
+            "block_key": pair_block_key(fa, fb),
+            "source_pair": source_pair(fa, fb),
+            "cross_source": fa.source != fb.source,
+            "probes": probes,
+            "feats": {name: [value, present] for name, (value, present) in feats.items()},
+            "stored": False,
+        })
+        rows.append(row)
+    return rows
+
+
 def cmd_run(args: argparse.Namespace, out: Any) -> int:
     settings = load_settings(args.settings)
     model = load_model(args.model)
@@ -825,6 +874,16 @@ def judge_stratum(row: dict[str, Any]) -> str:
             f"|{row.get('block') or '(none)'}|{side}")
 
 
+def drawn_stratum(row: dict[str, Any]) -> str:
+    """The stratum a judge draw files a pair under: the one a named pair list STAMPED on the row
+    (which contested set it was listed for, and why), else W3's `judge_stratum` grid.
+
+    `sample.json` carries the stamp on each drawn pair, which `labels.load_sample` reads as-is,
+    so a stamped draw needs no key function to be recomputed."""
+    stamped = row.get("stratum")
+    return str(stamped) if stamped else judge_stratum(row)
+
+
 def _shuffle_key(seed: int, row: dict[str, Any]) -> str:
     payload = f"{seed}:{row.get('lo')}:{row.get('hi')}".encode("utf-8")
     return hashlib.blake2b(payload, digest_size=8).hexdigest()
@@ -890,13 +949,13 @@ def stratified_sample(
 def sample_pairs(
     rows: Sequence[dict[str, Any]], n: int, seed: int = SAMPLE_SEED
 ) -> dict[str, Any]:
-    """The judge lane's sample (PROGRAM.md §9): `judge_stratum` at a floor of 8.
+    """The judge lane's sample (PROGRAM.md §9): `drawn_stratum` at a floor of 8.
 
     A pure function of (rows, n, seed), so the text and vision tiers of one seed judge the SAME
     pairs — which is the only way tier-vs-tier agreement (metric 8) measures the tiers rather
     than two different draws."""
     return stratified_sample(
-        rows, n, seed, key_fn=judge_stratum, floor=JUDGE_STRATUM_FLOOR
+        rows, n, seed, key_fn=drawn_stratum, floor=JUDGE_STRATUM_FLOOR
     )
 
 
