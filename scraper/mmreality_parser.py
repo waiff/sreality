@@ -34,7 +34,7 @@ from selectolax.parser import HTMLParser, Node
 from scraper import vocabulary
 from scraper.area import PortalAreas, derive_headline_area
 from scraper.attribute_contract import floor_convention, source_label, source_value, source_values
-from scraper.floor import floor_from_portal
+from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street, street_from_locality
 
@@ -397,6 +397,7 @@ def areas_from_params(
     obj: Mapping[str, Any],
     *,
     category_main: str | None,
+    disposition: str | None,
 ) -> PortalAreas:
     """mmreality's area keys, in ITS precedence — spelled here once and nowhere else.
 
@@ -436,6 +437,7 @@ def areas_from_params(
     plot = _to_float(obj.get("parcelArea"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main,
+        disposition=disposition,
         usable=_to_float(obj.get("usableArea")),
         plot=plot,
     )
@@ -484,14 +486,17 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     equipment = None if equipment is None else str(_to_int(equipment))
     overground, underground = (_to_int(v) for v in
                                source_values(SOURCE, "total_floors", obj))
-    total_floors = (
+    total_floors = total_floors_from_portal(
         (overground or 0) + (underground or 0)
         if overground is not None or underground is not None
         else None
     )
 
     cellar_flag, _ = source_values(SOURCE, "cellar", obj)
-    areas = areas_from_params(obj, category_main=category_main)
+    disposition = vocabulary.disposition(
+        SOURCE, *(_name_of(v) for v in source_values(SOURCE, "disposition", obj))
+    )
+    areas = areas_from_params(obj, category_main=category_main, disposition=disposition)
 
     image_urls = _image_urls(obj)
     raw = dict(obj)
@@ -509,9 +514,7 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         area_m2=areas.area_m2,
         area_basis=areas.area_basis,
         usable_area=areas.usable_area,
-        disposition=vocabulary.disposition(
-            SOURCE, *(_name_of(v) for v in source_values(SOURCE, "disposition", obj))
-        ),
+        disposition=disposition,
         locality=locality,
         district=district,
         # Structured street first; else the originalTitle "ul. <Street>"

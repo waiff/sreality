@@ -299,8 +299,12 @@ CONTRACT: dict[str, dict[str, Cell]] = {
         "disposition": _cell("derived", note="the h1 title"),
         # The only portal that states the scale in the VALUE: "2. patro (3. NP)",
         # "snížené přízemí (1. PP)". The number alone is meaningless here, so the cell
-        # declares `word` and `scraper.floor.normalize_floor` reads the Czech.
-        "floor": _cell("structured", "podlaží", convention="word"),
+        # declares `word` and `scraper.floor.normalize_floor` reads the Czech. The top
+        # option of the portal's select, "20. patro a vyšší", is a feed placeholder, not a
+        # storey: 2,995 rows carried it on 2026-09-23 (1,736 active, a Croatian coastal
+        # broker's flats "v přízemí"), and it read as 20 until it was declared absence.
+        "floor": _cell("structured", "podlaží", convention="word",
+                       sentinels=("20. patro a vyšší",)),
         # A flat's page labels the row "Počet podlaží budovy"; a HOUSE's page labels it
         # "Počet podlaží" — 29.7k active dum rows had total_floors NULL for want of the
         # second spelling (35.7% of a 1,000-row census carries it).

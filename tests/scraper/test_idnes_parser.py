@@ -563,7 +563,8 @@ def test_the_area_derivation_is_one_function_both_callers_share():
         category_main="dum", category_type="prodej",
     )
     replay = areas_from_params(
-        listing.raw["params"], title=listing.raw["title"], category_main="dum")
+        listing.raw["params"], title=listing.raw["title"], category_main="dum",
+        disposition=listing.disposition)
     assert (replay.area_m2, replay.area_basis) == (listing.area_m2, listing.area_basis)
     assert replay.usable_area == listing.usable_area
     assert replay.estate_area == listing.estate_area
@@ -607,3 +608,19 @@ def test_the_marker_survives_diacritics_and_whitespace() -> None:
     html = ("<html><body><strong>Momentalne   tu\n\tneni\n zadny "
             "inzerat, ktery odpovida vasemu hledani.</strong></body></html>")
     assert parse_index(html).empty_confirmed is True
+
+
+def test_the_top_of_the_floor_select_is_absence_and_the_page_keeps_saying_it():
+    """idnes_c1 is a real page (Malinska, Krk) whose floor row is the select's top option,
+    "20. patro a vyšší" — what a broker feed leaves there (2,995 stored rows on
+    2026-09-23). The column reads absence; raw_json keeps the portal's words, so the
+    evidence is never lost with the value."""
+    from pathlib import Path
+
+    html = (Path(__file__).parent.parent / "fixtures" / "location_w2a_refetch"
+            / "idnes_c1.html").read_text(encoding="utf-8")
+    listing = parse_detail(
+        html, source_url="https://reality.idnes.cz/detail/prodej/byt/malinska/c1/",
+        category_main="byt", category_type="prodej")
+    assert listing.floor is None
+    assert listing.raw["params"]["podlaží"] == "20. patro a vyšší"

@@ -181,6 +181,24 @@ def test_total_floors_present():
     assert row["total_floors"] == 6
 
 
+def test_out_of_band_storeys_are_absence_not_numbers(sample):
+    # sreality 18700189 (Podhorská 701, a five-storey house) carried floor_number 162
+    # and stored 161; a building count of 0 or 113 is no building. Both arms read
+    # through scraper.floor's one band, so the row says "unknown" instead.
+    row = parse_listing({**sample, "floor_number": 162, "floors": 113})
+    assert (row["floor"], row["total_floors"]) == (None, None)
+    assert parse_listing({**sample, "floors": 0})["total_floors"] is None
+
+
+def test_the_flat_band_is_read_with_the_advert_s_own_disposition(sample):
+    # A 3+kk of 20 m² is a room, and a flat of 1,800 m² is a site area: the resolver is
+    # handed the disposition the parser read, so both are absence (sreality's content
+    # hash is over raw_json, so a declined value churns no snapshot here).
+    assert parse_listing({**sample, "usable_area": 20})["area_m2"] is None
+    assert parse_listing({**sample, "usable_area": 1800})["area_m2"] is None
+    assert parse_listing({**sample, "usable_area": 24})["area_m2"] == 24.0
+
+
 def test_amenities(sample):
     row = parse_listing(sample)
     assert row["has_balcony"] is False  # R11: balcony/loggia both false

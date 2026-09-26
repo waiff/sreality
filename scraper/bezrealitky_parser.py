@@ -16,7 +16,7 @@ from typing import Any
 from scraper import vocabulary
 from scraper.area import derive_headline_area
 from scraper.attribute_contract import floor_convention, source_value, source_values
-from scraper.floor import floor_from_portal
+from scraper.floor import floor_from_portal, total_floors_from_portal
 from scraper.bezrealitky_client import detail_url
 from scraper.published import iso_datetime
 from scraper.scraped_listing import ScrapedListing
@@ -145,9 +145,10 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     # resolver — before W17 only `surface` did, and 2,654 of 2,667 land rows had a
     # parcel in `estate_area` and nothing in `area_m2`.
     surface_land = _num(advert.get("surfaceLand"))
+    disposition = vocabulary.disposition_code(read("disposition"))
     area_m2, area_basis = derive_headline_area(
         category_main=category_main, usable=_num(advert.get("surface")),
-        plot=surface_land,
+        plot=surface_land, disposition=disposition,
     )
 
     return ScrapedListing(
@@ -161,7 +162,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         price_unit="za mesic" if category_type == "pronajem" else "za nemovitost",
         area_m2=area_m2,
         area_basis=area_basis,
-        disposition=vocabulary.disposition_code(read("disposition")),
+        disposition=disposition,
         locality=_locality(advert),
         district=None,
         # bezrealitky's GraphQL advert carries structured street/houseNumber/zip
@@ -175,7 +176,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         # (it has never emitted one floor=0 row), and under ground=0 a bare 0 would
         # otherwise read as the ground storey instead of as silence.
         floor=floor_from_portal(floor_convention(SOURCE), _int(read("floor"))),
-        total_floors=_int(advert.get("totalFloors")),
+        total_floors=total_floors_from_portal(_int(advert.get("totalFloors"))),
         has_balcony=has_balcony,
         has_parking=has_parking,
         has_lift=bool(advert["lift"]) if advert.get("lift") is not None else None,

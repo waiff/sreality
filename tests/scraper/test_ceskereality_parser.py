@@ -497,10 +497,15 @@ def test_spaced_thousands_in_a_spec_cell_is_one_number():
         '<span class="i-info__value"> 5 870 m² </span>',
     ).replace("Prodej bytu 1+1 41 m²", "Prodej bytu 1+1 5 870 m²")
     listing = parse_detail(
-        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+        html, source_url=_DETAIL_URL, category_main="komercni", category_type="prodej",
     )
     assert listing.usable_area == 5870.0
     assert (listing.area_m2, listing.area_basis) == (5870.0, "usable")
+    # The same figure on a FLAT is a site area, never the unit (MAX_FLAT_AREA_M2).
+    flat = parse_detail(
+        html, source_url=_DETAIL_URL, category_main="byt", category_type="prodej",
+    )
+    assert (flat.usable_area, flat.area_m2) == (5870.0, None)
 
 
 _STREET_ONLY = DETAIL_HTML.replace("Garáž, Parkování na ulici", "Parkování na ulici")

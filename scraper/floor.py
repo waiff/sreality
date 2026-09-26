@@ -146,7 +146,9 @@ def floor_from_portal(convention: FloorConvention | None, value: Any) -> int | N
     decrement would invent basements).
 
     Raises on an undeclared convention rather than guessing: a bare integer whose Czech
-    meaning is written down nowhere is the defect this function exists to end.
+    meaning is written down nowhere is the defect this function exists to end. A number
+    outside the storey band is absence on either scale, exactly as the word arm already
+    reads it: sreality's 161 and realitymix's 1,002 were typed, not climbed.
     """
     if convention is None:
         raise ValueError(
@@ -169,7 +171,18 @@ def floor_from_portal(convention: FloorConvention | None, value: Any) -> int | N
         number = int(m.group(0))
     else:
         return None
-    return number - 1 if convention == "ground1" and number >= 1 else number
+    return _bounded(number - 1 if convention == "ground1" and number >= 1 else number)
+
+
+def total_floors_from_portal(value: int | None) -> int | None:
+    """A stated building PODLAŽÍ count, or None outside the storey band.
+
+    The one band every structured parser and the text lane read a count through, the
+    twin of the text miner's `1 <= n <= _FLOOR_MAX`: a count of 0 is mmreality's "not
+    stated", and 113 / 731,463,379 are a typo and an id (bezrealitky)."""
+    if value is None or isinstance(value, bool):
+        return None
+    return value if 1 <= value <= _FLOOR_MAX else None
 
 
 # --- Free-text miner ---------------------------------------------------------

@@ -48,6 +48,18 @@ emits". That is now one table and one module rather than nine copies of each:
   that is neither mapped nor ignored with a reason) and A3 (no unmapped live value), plus the
   characterisation goldens in `tests/fixtures/field_capture/golden/` — recorded from the
   parsers as they stood before the module existed, so a value that moves is visible.
+- **Value bands, declined BEFORE the content hash** (so a refused value never disagrees with its
+  own snapshot): a storey outside -3..40 is absence on either convention and a building count
+  outside 1..40 is absence (`scraper/floor.py` `floor_from_portal` / `total_floors_from_portal`,
+  every parser and the text lane); a dwelling headline must sit in `scraper/area.py`
+  `dwelling_area_band` — ≥ 5 m² on byt/dum/komercni, ≥ 8 m² a room when a byt/dum states
+  `N+kk`/`N+1`, and < 1,000 m² on a byt and on a house's UNLABELLED figure (bazos's first prose
+  m², a title figure: at 1,000 m² or more that is the parcel) — and a declined measure falls
+  through to the next one.
+  A portal-specific placeholder is a contract **sentinel** instead (idnes's floor-select top,
+  "20. patro a vyšší"). Rows stored before a band existed are NOT cleared by ingest (a `text`
+  cell preserves on NULL, inactive rows never refetch, `reparse.py` never blanks): each such heal
+  is a backed-up data migration (573 for the 2026-09-26 bands, in its own PR #1633).
 
 **Data source (sreality v1 API).** In 2026 sreality rebuilt their site on Next.js and
 removed the old `/api/cs/v2/estates` API the scraper was born on. The scraper now
@@ -92,7 +104,9 @@ that both suites run through their own normaliser, so a drift in the logic reds 
 
 **Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
 `bazos_parser.py`, `bazos_main.py`) lands bazos listings into the same
-`listings`/`listing_snapshots` contract, tagged `source='bazos'`. It walks 22 nationwide
+`listings`/`listing_snapshots` contract, tagged `source='bazos'`. bazos has no spec table: its
+`area_m2` is the FIRST m² figure in title + description, so the room-scaled dwelling band (above)
+is what keeps a cellar's "2 m²" from becoming a 3+1's area. It walks 22 nationwide
 scopes (byt/dum/chata/restaurace/kancelar/prostory/sklad/pozemek/zahrada/garaz/ostatni ×
 prodam/pronajmu). The last four closed a **silent** four-year coverage gap: migration 160
 deferred pozemek/garaz/ostatni ("left out for now") and never named zahrada at all, so ads
@@ -224,7 +238,8 @@ estimation preview — a separate entry point that is unchanged by the scheduled
 coordinates from the page's embedded map config** (`"center":[lon,lat]`), so there is no
 geocoding step. Typed fields are normalised to the SAME canonical labels sreality stores
 (`panelová→panel`, `velmi dobrý stav→velmi_dobry`, `osobní→osobni`) for one cross-source
-vocabulary. Search pages carry a result total and have **no deep-pagination cap** — page 1,052
+vocabulary. Its floor select tops out at "20. patro a vyšší", which broker feeds leave as a
+default (2,995 rows read 20 on 2026-09-23), so the contract declares it a sentinel: absence. Search pages carry a result total and have **no deep-pagination cap** — page 1,052
 of `prodej/byty` serves the declared tail exactly and 1,060 404s — so the catalogue is fully
 *reachable*. It has not been fully *reached*: **`supports_complete_walk` was parked to `false`
 in migration 453** because a portal cannot prove it saw everything if we have not. We hold
@@ -2189,7 +2204,7 @@ renumber.** Navigate by area:
 
     **The headline area has ONE rule, and every portal feeds it the same way** (W17,
     2026-09-15). `scraper/area.derive_headline_area(category_main, usable, floor, total, plot,
-    fallback)` picks `area_m2` and stamps `area_basis`; the land arm is
+    fallback, disposition)` picks `area_m2` and stamps `area_basis`; the land arm is
     `plot -> total -> usable -> floor -> fallback`, always stamped `plot`, and the dwelling arm
     never reads `plot` at all (a house's parcel sits beside its floor area in `estate_area`).
     All nine parsers now hand over their "plocha pozemku" / `surfaceLand` / `estate_area` value
@@ -2228,7 +2243,11 @@ renumber.** Navigate by area:
     had to handle (narrow NBSP, thin space), and deleted every copy — ceskereality,
     realitymix, remax, maxima and bazos now call it, so the grammar can no longer diverge per
     portal (rule 21). The negative lookbehind keeps a disposition from being swallowed
-    ("3+1 174 m²" stays 174, never 1174) and a per-m² price from reading as an area. Measured
+    ("3+1 174 m²" stays 174, never 1174) and a per-m² price from reading as an area. Brokers'
+    DOTTED thousands ("1.910 m2", "1.994,71 m²") are the same number (2026-09-26: a dot followed by
+    exactly three digits is a group, since a Czech decimal takes a comma) — with one caveat the
+    grammar cannot see: on a bazos HOUSE the first prose figure is usually the parcel, so the
+    resolver holds a house's unlabelled figure under 1,000 m² (see `dwelling_area_band` above). Measured
     on production 2026-09-17: **ceskereality 17,207 rows** of 98,126 carried the truncation
     fingerprint (stored area = title area mod 1000) and not one of its 19,088 land rows had an
     `area_m2` of 1000 or more; **realitymix 13,164** of 83,051 (its spec cells are unspaced —

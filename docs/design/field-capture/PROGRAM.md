@@ -98,6 +98,14 @@ mention "m²"). The investigation (26 agents, critic-checked) found what is actu
   blanks one by design. *(W7 correction: there is now ONE blank-allowed path, and it is deliberately not general —
   `scripts/clear_unmeasured_enrichment_fills.py` blanks only cells the DELETED enrichment lane's own `filled` ledger
   says it wrote AND that still hold exactly that value. Anything else is still a hand-written UPDATE.)*
+  *(2026-09-26 correction, PR #1630 + its follow-up #1633: the contract rails' leftovers have their
+  hand-written UPDATE — `migrations/573_portal_contract_leftovers_floor_area.sql`, its own PR so it is applied
+  from that branch after #1630 is deployed and merged only once applied — NULLs exactly the stored values the
+  rails below now decline at ingest (idnes floor placeholder, a storey or storey count out of band, a dwelling headline
+  outside the dwelling band), each cell copied first into `backup_a4.listing_cells`, no snapshot (R9 / 554).
+  It exists because none of those cells can clear itself: bazos's are `text` (this rule), inactive rows never
+  refetch, and the seam never blanks. Inactive rows on the hashed portals then disagree with their last
+  snapshot on that cell — the § 7 asymmetry, accepted.)*
   The finer rule the brief asked about (freeze W7's fill, still let a bazos regex clear its own cell) needs per-row
   provenance, which R3 forbids; and adding it as a contract axis would re-open exactly this wipe, because R3 has the
   text lane fill only NULLs — a cleared regex cell IS where W7 writes, and the next refetch would wipe that fill.)*
@@ -594,6 +602,38 @@ numeric "not specified" sentinel** (it has never emitted a floor=0 row), so its 
 `_int` before the converter — under ground = 0 a bare 0 would otherwise have become the ground storey.
 `is_plausible_floor`'s only other caller named in the design, `toolkit/bazos_enrichment.py`, no longer exists: W0
 deleted it, so the tightening reaches exactly one live producer, the bazos miner.
+
+**Value bands at ingest (2026-09-26, PR #1630; investigation A4 of the autodedup program).** Three data defects
+reached the dedup trial as vetoes (a wrong floor or area rejects a true pair before any feature is read), and each
+is now declined at the parse, BEFORE the content hash, in the one module that owns the grammar (rule 21):
+- **idnes `floor` sentinel `"20. patro a vyšší"`.** The top option of idnes's floor select is what a broker feed
+  leaves there: 2,995 rows (1,736 active) read 20 on 2026-09-23. The cell declares it a sentinel (R3), so it reads
+  as absence; idnes has no option above it, so every stored idnes 20 is unknown, not a storey.
+- **A bare storey outside -3..40 is absence on either scale** (`scraper.floor.floor_from_portal`): the word arm was
+  already bounded; the bare-number arm W8 left unbounded (sreality 161 / 126 / 139, realitymix 1,002, ceskereality
+  126 — the same broker feed garbles one flat as idnes 20 AND sreality 1xx, so F1 and F2 ship together).
+- **A building count outside 1..40 is absence** (`scraper.floor.total_floors_from_portal`): one function for the
+  seven structured reads and the text lane (bezrealitky 731,463,379 / 113, mmreality 0).
+- **The dwelling band scales with the advert's own rooms** (`scraper.area.dwelling_area_band`): beside the 5 m²
+  floor, a byt / dum stating `N+kk` / `N+1` is at least 8 m² a room, and a byt stays under 1,000 m². bazos's
+  headline is the FIRST m² figure in its prose, and in 32 of the 40,514 A4 rows that was a PART of the unit — the
+  cellar (Mechová 3+1, 2 m²), a room, a balcony; 0 of 19,345 dispositioned byt/dum rows on the eight structured
+  portals sit under the band, where a flat `dum < 20 m²` bound would have taken 133 real chaty. A declined measure
+  falls through to the next one, like the 5 m² rail; re-parsing to "the first plausible figure" instead was measured
+  and refused (14 of 20 checkable picks were another room).
+- **Dotted thousands** ("1.910 m2" read 1,91) are one number in the one area grammar (`AREA_NUMBER_SRC`,
+  `area_token_to_float`; the grammar half of PR #1595) — and on a HOUSE the unlabelled figure stays under the
+  flat ceiling (1,000 m², `derive_headline_area`), because bazos's first prose m² on a dum is its parcel: the
+  grammar alone turned 21 bazos dum adverts of the A4 union from unknown (1.1 declined) into a parcel-sized
+  headline — 186747 "pozemku o celkové výměře 1.139m²", 204860 "Zahrádka o celkové výměře 1.256 m2" beside a
+  24 m² chata (sreality 60671 / idnes 227954) — and a wrong area is a veto (`autodedup/guards.py`). A labelled
+  house measure keeps no such ceiling. The re-parse seam therefore heals land, halls and ostatni (A4 union: 31
+  bazos parcels, 10 halls, 1 ostatni, e.g. the Příbram hall 2,462 m² its sreality / ceskereality twins state);
+  a bazos dum re-parses to nothing. **Residuals, named:** the 157 bazos dum headlines of 1,000 m² or more
+  stored before the ceiling (spaced parcels, A4 union) stay — a `text` cell preserves on NULL (R4) and no
+  migration clears them; and a declined headline leaves `usable_area` at the declined figure (realitymix
+  378126: usable_area 1,800 m², area_m2 NULL) — the guards read only `area_m2`, but the LLM judge's digest
+  (`autodedup/judge.py` `DIGEST_ATTRS`) still shows it as "usable area".
 
 **W9.** Each item its own PR (status as of 2026-09-21, worked alongside W0):
 
