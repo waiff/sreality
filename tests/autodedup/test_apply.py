@@ -204,12 +204,16 @@ class FakeDb:
                              and v["verdict"] in p["negatives"]
                              and v["cluster_key"] in p["cluster_keys"]))]
         if sql == S.LEDGER_HISTORY_SQL:
+            ids = set(p["listing_ids"])
             return [(r["generation"], r["cluster_key"], r["retired_property_id"],
-                     r["outcome"], r["undone_at"] is not None, r["undone_by"])
+                     r["outcome"], r["undone_at"] is not None, r["undone_by"],
+                     list(r["member_ids"] or ()))
                     for r in self.ledger
-                    if not r["dry_run"] and r["outcome"] in ("applied", "refused")
-                    and (r["generation"] == p["generation"]
-                         or r["retired_property_id"] in p["property_ids"])]
+                    if not r["dry_run"]
+                    and ((r["outcome"] == "refused" and r["generation"] == p["generation"]
+                          and ids & set(r["member_ids"] or ()))
+                         or (r["outcome"] == "applied"
+                             and r["retired_property_id"] in p["property_ids"]))]
         if sql == S.ENGINE_MERGES_SQL:
             ids, seen, out = set(p["listing_ids"]), set(), []
             for r in self.ledger:

@@ -123,16 +123,19 @@ select v.cluster_key, v.verdict, v.generation, v.member_ids, v.decided_by, v.dec
 """
 
 # The engine's own history that can refuse a group: a live merge of one of these properties
-# (restored since, by `unapply` or by someone else) and a chokepoint refusal of this group.
+# (restored since, by `unapply` or by someone else) and a chokepoint refusal of this group's
+# MEMBER SET in this generation (a real-time generation's keys move with its groups, A9).
 # `undone_by` tells the two restorers apart: only `unapply`'s own stamp is the engine's undo.
 LEDGER_HISTORY_SQL = """
 select a.generation, a.cluster_key, a.retired_property_id, a.outcome,
-       a.undone_at is not null as undone, a.undone_by
+       a.undone_at is not null as undone, a.undone_by, a.member_ids
   from autodedup.applied_merges a
  where not a.dry_run
-   and a.outcome in ('applied', 'refused')
-   and (a.generation = %(generation)s::text
-        or a.retired_property_id = any(%(property_ids)s::bigint[]))
+   and ((a.outcome = 'refused'
+         and a.generation = %(generation)s::text
+         and a.member_ids && %(listing_ids)s::bigint[])
+        or (a.outcome = 'applied'
+            and a.retired_property_id = any(%(property_ids)s::bigint[])))
 """
 
 # Every engine merge whose group named one of these listings, undone or not. A LIVE one is the
@@ -234,4 +237,80 @@ update autodedup.applied_merges
    and not dry_run
    and outcome = 'applied'
    and undone_at is null
+"""
+
+# ------------------------------------------------------------------ A9: the lane's reconcile
+#
+# The real-time lane reconciles the groups a pass re-clustered plus a slice swept past its own
+# `rt_reconcile` cursor, under the lane's lease (autodedup/reconcile.py). The plan and the
+# merge are the statements above; these are the reads that pick the groups and the one that
+# keeps a waiting group from filing the same skip every pass.
+
+RC_SWEEP_SQL = """
+select c.cluster_key
+  from autodedup.clusters c
+ where c.generation = %(generation)s::text
+   and c.cluster_key > %(after)s::bigint
+ order by c.cluster_key
+ limit %(limit)s
+"""
+
+RC_CLUSTERS_SQL = """
+select c.cluster_key, c.size, c.status, c.min_edge_score, c.model_version, c.feature_version
+  from autodedup.clusters c
+ where c.generation = %(generation)s::text
+   and c.cluster_key = any(%(keys)s::bigint[])
+ order by c.cluster_key
+"""
+
+# MEMBERS_SQL for the groups the reconcile picked, in the same column order (`apply.Member`).
+RC_MEMBERS_SQL = """
+select m.cluster_key, m.listing_id, l.property_id, l.category_type, l.category_main,
+       ll.obec_kod, ll.cast_obce_kod
+  from autodedup.cluster_members m
+  left join public.listings l on l.id = m.listing_id
+  left join public.listing_location ll on ll.listing_id = l.id
+ where m.generation = %(generation)s::text
+   and m.cluster_key = any(%(keys)s::bigint[])
+ order by m.cluster_key, m.listing_id
+"""
+
+# Which group of the generation holds each carried advert (E37 at property grain): the
+# reconcile plans a few groups, the refusal reads the whole generation's membership.
+RC_GROUP_OF_SQL = """
+select m.listing_id, m.cluster_key
+  from autodedup.cluster_members m
+ where m.generation = %(generation)s::text
+   and m.listing_id = any(%(listing_ids)s::bigint[])
+"""
+
+# A group qualifies only when its adverts' blocks are FULLY READ: every advert the scope
+# snapshot holds there has a fingerprint (the build reached it). A block the lane has not read
+# yet may hold a member the group is still missing.
+RC_UNREAD_BLOCKS_SQL = """
+select distinct s.block_key
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and not exists (select 1
+                     from autodedup.rt_fp f
+                    where f.generation = s.generation
+                      and f.listing_id = s.listing_id)
+"""
+
+RC_MEMBER_BLOCKS_SQL = """
+select s.listing_id, s.block_key
+  from autodedup.rt_scope_ids s
+ where s.generation = %(generation)s::text
+   and s.listing_id = any(%(listing_ids)s::bigint[])
+"""
+
+# The newest ledger row per member set: a group waiting on the same first reason as last pass
+# files nothing new (A9), so the ledger records CHANGES rather than one row a minute.
+RC_LAST_OUTCOME_SQL = """
+select distinct on (a.member_ids) a.member_ids, a.outcome, a.error
+  from autodedup.applied_merges a
+ where a.generation = %(generation)s::text
+   and not a.dry_run
+   and a.member_ids && %(listing_ids)s::bigint[]
+ order by a.member_ids, a.id desc
 """
