@@ -335,10 +335,10 @@ def test_the_phases_run_in_the_one_full_order():
         "name_index.rebuild(",
         "ruian_boundaries.missing_geometry(",
         "publish(conn, version_id)",
-        "refresh_rent_map_cells(conn)",
     ]
     positions = [source.index(step) for step in order]
     assert positions == sorted(positions)
+    assert source.rindex("refresh_rent_map_cells(conn)") > positions[-1]
     assert source.count("name_index.rebuild(") == 1
     # The boundaries phase no longer rebuilds the gazetteer on its own.
     from location_data import ruian_boundaries
@@ -537,9 +537,11 @@ def test_a_run_killed_mid_boundaries_resumes_and_publishes_exactly_once(monkeypa
     assert load.calls["copy_address_points"] == 1
     assert load.calls["load_address_points"] == 1
 
-    # A third dispatch of a current vintage has nothing to do and downloads nothing.
+    # A third dispatch of a current vintage downloads nothing and publishes nothing; it
+    # only redoes the cells refresh, the one step after the pointer swap that can fail.
     assert load.dispatch() == 0
     assert load.calls["publish"] == 1 and load.calls["fetch"] == 2
+    assert load.calls["refresh_rent_map_cells"] == 2
 
 
 def test_an_incomplete_version_is_never_published(monkeypatch, tmp_path):

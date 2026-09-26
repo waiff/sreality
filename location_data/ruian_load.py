@@ -1157,12 +1157,14 @@ def run(
     conn = loader_db.open_loader_connection()
     try:
         recorded = recorded_version(conn, label)
-        # Publish is the last step and runs only after the completeness assertion, so a
-        # current version is complete by construction. Checked BEFORE any download: a
+        # Publish runs only after the completeness assertion, so a current version is
+        # complete by construction and a re-dispatch has one step left to redo: the cells
+        # refresh, the only step after the pointer swap. Checked BEFORE any download: a
         # re-dispatch of a finished vintage would otherwise fetch today's boundary pack and
-        # be refused below over a version that has nothing left to do.
+        # be refused below over a version that has nothing else to do.
         if recorded is not None and recorded[1]:
-            LOG.info("RUIAN %s is already current — nothing to do", label)
+            LOG.info("RUIAN %s is already current — refreshing rent_map_cells only", label)
+            refresh_rent_map_cells(conn)
             return 0
         artifacts = fetch_artifacts(sess, vintage, work_dir, reuse=reuse)
         if recorded is not None:
