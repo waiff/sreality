@@ -66,6 +66,8 @@ floor := floor_from_portal("ground1", <the portal's declared floor key>)
   scope, and it is the separate finding listed in §6. The one exception is a value that states an
   out-of-band storey in WORDS ("45. patro"): the grammar refuses it and the converter returns NULL
   rather than falling through to the key's convention, which would read it on the opposite scale.
+  *(Superseded 2026-09-26, PR #1630: the bare-number arm now bounds exactly like the word arm, so an
+  out-of-band storey is NULL at ingest on either scale, and migration 573 NULLs the stored ones.)*
 
 ## 3. Rows that move, and the before/after distribution
 
@@ -204,6 +206,9 @@ Everything below is **yours to re-measure**. We list the mechanism, not a prescr
 * **Out-of-band values survive every parser**: `floor` max 3,127 (sreality), 2,315 (realitymix),
   367 (ceskereality); min −390 on sreality and realitymix. 86 rows corpus-wide, 33 of them active.
   W8 deliberately does not blank them (blanking a stated value is not a heal's to do).
+  *(2026-09-26, PR #1630: the parsers now decline them — `floor` outside -3..40 and `total_floors` outside
+  1..40 on every portal, idnes's "20. patro a vyšší" as a declared sentinel — and migration 573 NULLs the
+  stored ones after a backup to `backup_a4.listing_cells`; that is a data migration, not this heal.)*
 
 ## 7. Heal runbook (not run by W8 — the operator runs it after merge)
 
