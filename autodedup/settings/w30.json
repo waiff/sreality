@@ -27,6 +27,7 @@
     "d43_body_obec": true,
     "d43_body_obec_colive_only": false,
     "d43_capacity_english": true,
+    "d43_cellar_area": true,
     "d43_charge_keywords_wide": true,
     "d43_cluster_image_facts": true,
     "d43_cluster_invariant": true,

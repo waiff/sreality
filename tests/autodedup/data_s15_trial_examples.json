@@ -1,6 +1,61 @@
 {
  "_provenance": "listing rows of the g13 TRIAL export (autodedup-score-36155865816/artifact/cohort.jsonl.gz, export run 36155223243, 2026-09-25), copied verbatim; the W30 (S15) trial examples. Not read from the database.",
  "listings": {
+  "13057838": {
+   "area_m2": 35.0,
+   "attrs": {
+    "building_type": "cihla",
+    "condition": "novostavba",
+    "energy_rating": "G",
+    "ownership": "druzstevni",
+    "price_unit": "za mesic",
+    "usable_area": 35.0
+   },
+   "block": "town563510",
+   "broker_firm_id": 74,
+   "broker_identity_id": 133328,
+   "broker_key": "06494d46ef0016b215f07ad41592052c0e142fc80154c8c233dbf5c13433949e",
+   "category_main": "byt",
+   "category_type": "pronajem",
+   "description": "Podnájem byty, 35 m², Jablonec nad NisouRýnovická Nabízíme k podnájmu světlý a útulný byt 1+kk v rezidenčním projektu Byty Podlesí v Jablonci nad Nisou s jižní orientací. Výměra bytu 35 m², balkónu 6,28 m², sklepní kóje 6,6 m². K bytu je možné pronajmout samostatnou místnost/pracovnu s výměrou 8,45 m². Samotný byt zaujme promyšleným dispozičním řešením, moderní kuchyňskou linkou se spotřebiči a prostorným balkonem s příjemným výhledem do zeleně. Díky velkoformátovým oknům je interiér krásně prosvětlený a působí vzdušným dojmem. Co byt nabízí? ✔ Moderní kuchyňská linka se spotřebiči ✔ Praktická šatna v zádveří ✔ Designová koupelna se sprchovým koutem, designová stěrka ✔ Podlahové vytápění v celém bytě ✔ Prostorný balkon ✔ Sklepní kóje ✔ Venkovní elektrické žaluzie ✔ Chytrá domácnost pro pohodlné ovládání bytu Loxone ✔ Energetická náročnost budovy A ✔ Nízké zálohy na bydlení cca 2 600 Kč měsíčně. Podnájem bytu 12 500 Kč. Parkovací stání 1 000 Kč. Pracovna 1 000 Kč. Vratná kauce 25 000 Kč. Provize RK - 13 500 Kč + DPH. Pro více informací nebo sjednání prohlídky mě neváhejte kontaktovat.",
+   "disposition": "1+kk",
+   "first_seen_at": "2026-08-02T19:34:14.897701+00:00",
+   "floor": 1,
+   "id": 13057838,
+   "inactive_at": "2026-08-24T15:57:37.413608+00:00",
+   "is_active": false,
+   "last_seen_at": "2026-08-22T09:34:09.488846+00:00",
+   "location": {
+    "cast_obce_kod": null,
+    "cast_obce_name": null,
+    "country_status": "cz",
+    "granularity": "street",
+    "granularity_rank": 60,
+    "house_number": null,
+    "is_address_grain": false,
+    "lat": 50.7262366667,
+    "lon": 15.1642655556,
+    "obec_kod": 563510,
+    "obec_name": "Jablonec nad Nisou",
+    "psc": null,
+    "ruian_adm_kod": null,
+    "street_key": "rynovicka",
+    "uncertainty_radius_m": 300.0
+   },
+   "price": 12500,
+   "price_history": [
+    [
+     "2026-08-02T19:50:57.298873+00:00",
+     12500
+    ]
+   ],
+   "source": "idnes",
+   "source_id_native": "6a6f9b15f53914fe960160eb",
+   "source_url": "https://reality.idnes.cz/detail/pronajem/byt/jablonec-nad-nisou-rynovicka/6a6f9b15f53914fe960160eb/",
+   "subtype": null,
+   "t": "listing",
+   "total_floors": 5
+  },
   "13988573": {
    "area_m2": 70.0,
    "attrs": {
@@ -476,6 +531,62 @@
    "subtype": null,
    "t": "listing",
    "total_floors": 3
+  },
+  "19042993": {
+   "area_m2": 35.0,
+   "attrs": {
+    "area_basis": "floor",
+    "building_type": "cihla",
+    "condition": "novostavba",
+    "energy_rating": "G",
+    "furnished": "ano",
+    "ownership": "druzstevni",
+    "price_unit": "za mesic"
+   },
+   "block": "town563510",
+   "broker_firm_id": null,
+   "broker_identity_id": 2056845,
+   "broker_key": "ed213c80c2099b0b8527dabee7c1503baf7185507a47c220732bec5524a91a1d",
+   "category_main": "byt",
+   "category_type": "pronajem",
+   "description": "Nabízíme k podnájmu světlý a útulný byt 1+kk v rezidenčním projektu Byty Podlesí v Jablonci nad Nisou s jižní orientací. Výměra bytu 35 m2, balkónu 6,28 m2, sklepní kóje cca 3,5 m2. Samotný byt zaujme promyšleným dispozičním řešením, moderní kuchyňskou linkou se spotřebiči, včetně myčky a menší lednice, a prostorným balkonem s příjemným výhledem do zeleně. Díky velkoformátovým oknům je interiér krásně prosvětlený a působí vzdušným dojmem. Fotografie interiéru obsahují vizualizace možného vybavení. Byt je nabízen bez nábytku a zařízení. Co byt nabízí? ✔ Moderní kuchyňská linka se spotřebiči ✔ Koupelna s vanou ✔ Podlahové vytápění v celém bytě ✔ Prostorný balkon ✔ Sklepní kóje ✔ Venkovní elektrické žaluzie ✔ Chytrá domácnost pro pohodlné ovládání bytu Loxone ✔ Energetická náročnost budovy A ✔ Nízké zálohy na bydlení cca 2 600 Kč měsíčně - pro 1 osobu. Podnájem bytu 12 500 Kč. Parkovací stání 1 000 Kč. Vratná kauce 25 000 Kč. Provize RK - 13 500 Kč + DPH. Pro více informací nebo sjednání prohlídky mě neváhejte kontaktovat.",
+   "disposition": "1+kk",
+   "first_seen_at": "2026-09-25T12:25:45.230864+00:00",
+   "floor": 2,
+   "id": 19042993,
+   "inactive_at": null,
+   "is_active": true,
+   "last_seen_at": "2026-09-25T12:25:45.230864+00:00",
+   "location": {
+    "cast_obce_kod": 408085,
+    "cast_obce_name": "Jablonec nad Nisou",
+    "country_status": "cz",
+    "granularity": "address_point",
+    "granularity_rank": 100,
+    "house_number": "887/2",
+    "is_address_grain": true,
+    "lat": 50.7262356868078,
+    "lon": 15.1642646464806,
+    "obec_kod": 563510,
+    "obec_name": "Jablonec nad Nisou",
+    "psc": "46601",
+    "ruian_adm_kod": 12170178,
+    "street_key": "rynovicka",
+    "uncertainty_radius_m": 10.0
+   },
+   "price": 12500,
+   "price_history": [
+    [
+     "2026-09-25T12:25:45.230864+00:00",
+     12500
+    ]
+   ],
+   "source": "realitymix",
+   "source_id_native": "8707631",
+   "source_url": "https://realitymix.cz/detail/jablonec-nad-nisou/podnajem-byty-1-kk-35-m2-rynovicka-887-2-46601-jablonec-nad-nisou-jablonec-nad-nisou-id-90651-8707631.html",
+   "subtype": null,
+   "t": "listing",
+   "total_floors": 5
   },
   "411764": {
    "area_m2": 73.0,

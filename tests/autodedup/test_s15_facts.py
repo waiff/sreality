@@ -51,7 +51,7 @@ FIXTURES: dict[str, dict[str, Any]] = json.loads(
 S14 = Settings.from_json(SETTINGS / "w29.json")
 S15 = Settings.from_json(SETTINGS / "w30.json")
 
-W30_ON = {"attr_probe_town_grain", "d43_floor_total_camp_shift"}
+W30_ON = {"attr_probe_town_grain", "d43_floor_total_camp_shift", "d43_cellar_area"}
 W30_PREPARED = {"d43_floor_total_camp_shift_mixed", "d43_total_floors_agreeing_unit",
                 "d43_cluster_price_kc_house_number"}
 W30_DIALS = W30_ON | W30_PREPARED
@@ -339,6 +339,37 @@ def test_E303_is_pair_grain_and_off_in_w30() -> None:
     rel = ClusterRelation({i: trial(i) for i in (18223015, 19032904)}, None, E303,
                           certificates={(18223015, 19032904): "K-C"})
     assert not rel.ok(18223015, 19032904)
+
+
+# --- E305: the one cellar two flat bodies state (tightening, ON in w30) -----------------------
+def test_E305_reads_the_one_cellar_and_abstains_on_a_list() -> None:
+    from autodedup.text_facts import cellar_areas
+
+    assert {v for v, _ in cellar_areas(trial(13057838).description)} == {6.6}
+    assert {v for v, _ in cellar_areas(trial(19042993).description)} == {3.5}
+    # Mechová: a 2 m² kóje AND a share of a 13,3 m² cellar room is a list, not one cellar
+    assert cellar_areas(trial(479152).description) == frozenset()
+    assert cellar_areas("byt se sklepem 60 m2 v centru") == frozenset()
+    assert cellar_areas("dva sklepy o velikosti 3 m2 a 4 m2") == frozenset()
+    assert cellar_areas("sklep o celkové ploše 9 m²") == frozenset()   # E215's total
+
+
+def test_E305_byty_podlesi_two_cellars_are_two_flats() -> None:
+    # idnes 13057838 `sklepní kóje 6,6 m²` (08-02..08-22) against realitymix 19042993
+    # `sklepní kóje cca 3,5 m2` (09-25): one template, one 35 m², one 12,500 rent.
+    a, b = trial(13057838), trial(19042993)
+    assert "cellar_area" not in names(a, b, variant(d43_cellar_area=False), GATE)
+    for mode in (PROMOTE, GATE, CLUSTER):
+        assert "cellar_area" in names(a, b, S15, mode)
+
+
+def test_E305_sizes_that_meet_are_one_cellar() -> None:
+    a = trial(19042993)
+    for body in ("sklepní kóje 3,5 m2", "sklepní kóje cca 3,6 m2", "sklep o velikosti 3.8 m2"):
+        b = trial(13057838, description=body)
+        assert "cellar_area" not in names(a, b, S15), body
+    land = trial(13057838, category_main="dum")
+    assert "cellar_area" not in names(a, land, S15)
 
 
 # --- the table itself ------------------------------------------------------------------------

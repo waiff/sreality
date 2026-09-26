@@ -1058,6 +1058,10 @@ class Settings:
     # E303 (prepared, awaiting a ruling): the cluster-grain price limb accepts a cross-portal
     # K-C pair on one street and house number within the cross-portal price tolerance.
     d43_cluster_price_kc_house_number: bool = False
+    # E305 (tightening, recorded as a cohort-17 addendum): the one cellar two flat bodies
+    # state, apart beyond E294's accessory tolerance, is a fact (`sklepní kóje 6,6 m²` against
+    # `sklepní kóje cca 3,5 m2`).
+    d43_cellar_area: bool = False
 
     def __post_init__(self) -> None:
         # A sweep file is JSON, so a tuple field arrives as a list: normalise before validating.

@@ -96,6 +96,7 @@ from autodedup.text_facts import (
     block_plot_area,
     named_villa_units,
     outdoor_accessory_areas,
+    cellar_areas,
     position_designators,
     residence_codes,
     CODE_KINDS,
@@ -246,6 +247,7 @@ FACT_NAMES: tuple[str, ...] = (
     "offered_storey",
     "labelled_unit",
     "accessory_area",
+    "cellar_area",
     "body_obec",
     "plot_prose_exact",
     "priced_row",
@@ -1241,6 +1243,28 @@ def accessory_area_conflict(
     if rounding_equal_values(value_a, 0, value_b, 0):
         return None
     return (str(value_a), str(value_b))
+
+
+def cellar_area_conflict(a: Listing, b: Listing, cfg: Settings) -> tuple[str, str] | None:
+    """E305: the one cellar two FLAT bodies state, apart beyond the accessory tolerance.
+
+    Byty Podlesí, Jablonec (g13 trial): one 1+kk template let on idnes `sklepní kóje 6,6 m²`
+    and on realitymix `sklepní kóje cca 3,5 m2` - one 35 m², one rent, one project - two
+    cellars, so two flats. Any portal, any timing: a re-post does not re-measure its cellar.
+    Sizes meet within the coarser print's rounding or within E294's relative tolerance."""
+    if not cfg.d43_cellar_area:
+        return None
+    if not (a.category_main == b.category_main == FLAT_CATEGORY):
+        return None
+    left, right = cellar_areas(a.description), cellar_areas(b.description)
+    if len(left) != 1 or len(right) != 1:
+        return None
+    (value_a, dec_a), (value_b, dec_b) = next(iter(left)), next(iter(right))
+    if rounding_equal_values(value_a, dec_a, value_b, dec_b):
+        return None
+    if rel_diff(value_a, value_b) <= cfg.d43_outdoor_accessory_rel_tol:
+        return None
+    return (f"cellar={value_a:g}", f"cellar={value_b:g}")
 
 
 def _stored_places(listing: Listing) -> frozenset[str]:
@@ -2904,6 +2928,10 @@ def distinguishing_facts(
         acc_area = accessory_area_conflict(a, b, cfg)
         if acc_area is not None:
             add("accessory_area", acc_area[0], acc_area[1])
+
+    cellar = cellar_area_conflict(a, b, cfg)
+    if cellar is not None:
+        add("cellar_area", cellar[0], cellar[1])
 
     if cfg.d43_body_obec:
         locality = body_obec_conflict(a, b, cfg)
