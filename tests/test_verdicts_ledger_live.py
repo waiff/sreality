@@ -318,3 +318,103 @@ def test_correcting_a_bare_veto_keeps_it_in_the_history(cur):
     _rule(cur, lo, hi, "different", "jiné patro")
     _rule(cur, lo, hi, "same")
     assert [v for v, _ in _rows(cur, lo, hi)] == ["different", "unsure", "different", "same"]
+
+
+# ------------------------------------------ the engine's view, over a real generation's rows
+
+GEN = "g-ledger-engine"
+
+
+def _one_property(cur: Any) -> tuple[int, int]:
+    pid = _property(cur)
+    a = _advert(cur, pid)
+    b = _advert(cur, pid, source="idnes")
+    return min(a, b), max(a, b)
+
+
+def _grouped(cur: Any, key: int, *listing_ids: int) -> None:
+    for listing_id in listing_ids:
+        cur.execute("INSERT INTO autodedup.cluster_members (generation, cluster_key, listing_id) "
+                    "VALUES (%s, %s, %s)", (GEN, key, listing_id))
+
+
+def _read(cur: Any, *listing_ids: int) -> None:
+    for listing_id in listing_ids:
+        cur.execute("INSERT INTO autodedup.rt_fp (generation, listing_id) VALUES (%s, %s)",
+                    (GEN, listing_id))
+
+
+def _engine(cur: Any, lo: int) -> tuple[str, str, bool]:
+    (row,) = _page(cur, usql.RULINGS_PAIR_SQL, usql.RULING_PAIR_COLUMNS, listing=lo,
+                   generation=GEN)
+    return row["engine_view"], row["agreement"], row["together_now"]
+
+
+def test_the_engine_view_and_the_agreement_read_a_real_generation(cur):
+    # `same`, on one property, one engine group: nothing disagrees.
+    a, b = _one_property(cur)
+    _rule(cur, a, b, "same")
+    _grouped(cur, a, a, b)
+    assert _engine(cur, a) == ("together", "agrees", True)
+    # `same`, on one property, both read but grouped apart: the engine disagrees.
+    c, d = _one_property(cur)
+    _rule(cur, c, d, "same")
+    _grouped(cur, c, c)
+    _read(cur, d)
+    assert _engine(cur, c) == ("apart", "disagrees", True)
+    # `different`, on two properties, one engine group: the engine disagrees ...
+    e, f = _pair(cur)
+    _rule(cur, e, f, "different")
+    _grouped(cur, e, e, f)
+    assert _engine(cur, e) == ("together", "disagrees", False)
+    # ... and apart, read: it agrees. Never read at all: unseen, and production alone agrees.
+    g, h = _pair(cur)
+    _rule(cur, g, h, "different")
+    _read(cur, g, h)
+    assert _engine(cur, g) == ("apart", "agrees", False)
+    i, j = _pair(cur)
+    _rule(cur, i, j, "different")
+    assert _engine(cur, i) == ("unseen", "agrees", False)
+    # The "Neshody" chip is that predicate: exactly the two disagreeing rulings above.
+    for lo, expected in ((a, 0), (c, 1), (e, 1), (g, 0), (i, 0)):
+        cur.execute(usql.RULINGS_PAIR_FACETS_SQL, _params(listing=lo, generation=GEN,
+                                                          engine="disagrees"))
+        totals = [n for facet, _value, n in cur.fetchall() if facet == "total"]
+        assert (totals[0] if totals else 0) == expected, lo
+    # At group grain: a confirmed set the engine holds in one group, on one property.
+    cur.execute(usql.VERDICT_CLUSTER_APPEND_SQL, {
+        "cluster_key": a, "verdict": "same", "note": None, "reasons": [], "decided_by": OP,
+        "generation": GEN, "member_ids": [a, b]})
+    (group,) = _page(cur, usql.RULINGS_GROUP_SQL, usql.RULING_GROUP_COLUMNS, listing=a,
+                     generation=GEN)
+    assert (group["engine_view"], group["n_engine_groups"], group["n_grouped"],
+            group["together_now"], group["agreement"]) == ("together", 1, 2, True, "agrees")
+
+
+def test_the_route_corrects_a_group_ruling_by_copying_its_pass_and_set(cur):
+    """`POST /autodedup/verdict` with `supersedes`, called over Postgres: the new row copies the
+    old one's generation and member set (E58), and a correction of the ruling it replaced is
+    stale (409)."""
+    from fastapi import HTTPException
+
+    from api.routes.autodedup import VerdictIn, verdict
+
+    a, b = _pair(cur)
+    cur.execute(usql.VERDICT_CLUSTER_APPEND_SQL, {
+        "cluster_key": a, "verdict": "different", "note": None, "reasons": [],
+        "decided_by": OP, "generation": "g-route", "member_ids": [a, b]})
+    old_id = cur.fetchone()[0]
+    claims = {"email": OP}
+    out = verdict(VerdictIn(kind="cluster", verdict="unsure", note="odvoláno",
+                            supersedes=old_id), claims, cur.connection)["data"]
+    written = out["verdict"]
+    assert (written["kind"], written["cluster_key"], written["generation"],
+            written["member_ids"], written["verdict"]) == (
+        "cluster", a, "g-route", [a, b], "unsure")
+    assert out["superseded"]["id"] == old_id and written["id"] != old_id
+    assert not Negatives.read(cur.connection, [a, b], [a]).sets.get(a), (
+        "the withdrawn set still refuses at apply")
+    with pytest.raises(HTTPException) as stale:
+        verdict(VerdictIn(kind="cluster", verdict="same", supersedes=old_id), claims,
+                cur.connection)
+    assert stale.value.status_code == 409
