@@ -70,7 +70,7 @@ _CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("blocks",
      usql.BLOCKS_SQL.rsplit("SELECT ", 1)[1].split("FROM blocks b")[0],
      usql.BLOCK_COLUMNS),
-    # The rulings page (E919): the OUTER select of each CTE chain, named exactly.
+    # The rulings page (E920): the OUTER select of each CTE chain, named exactly.
     ("rulings pair",
      usql.RULINGS_PAIR_SQL.rsplit("\nSELECT ", 1)[1].split("\n  FROM v\n")[0],
      usql.RULING_PAIR_COLUMNS),

@@ -2145,7 +2145,7 @@ def pair(
             {"listing_lo": listing_lo, "listing_hi": listing_hi,
              "generation": generation},
         )
-        # NO STORED ROW IS NOT "NO PAIR" (E919). The live stream keeps no machine reject
+        # NO STORED ROW IS NOT "NO PAIR" (E920). The live stream keeps no machine reject
         # (Decision 7) and a Browse merge or a detach rules pairs the engine never compared, so
         # most rulings name a pair with no row here; the page still opens on both adverts, their
         # photos and the ruling history, and says the engine kept nothing.
@@ -2230,7 +2230,7 @@ class VerdictIn(BaseModel):
     # WHY the operator ruled this way (migration 533), validated against the registry.
     reasons: list[str] = Field(default_factory=list,
                                max_length=reasons_registry.MAX_REASONS)
-    # THE RULING THIS ONE CORRECTS (the rulings page, E919): the `verdicts.id` the page was
+    # THE RULING THIS ONE CORRECTS (the rulings page, E920): the `verdicts.id` the page was
     # showing. The key comes from that row; a flip or a withdrawal is a new row, and it is taken
     # only while that row is still the newest word on its key (409 otherwise).
     supersedes: int | None = None
@@ -2270,7 +2270,7 @@ def verdict(
     Unlike the reads, an un-migrated store is a 503 here and not a `store_ready: false` 200: a
     write that silently did nothing would be recorded by the optimistic client as a decision.
 
-    A CORRECTION (`supersedes`, the rulings page, E919) names the ruling it replaces. Its key is
+    A CORRECTION (`supersedes`, the rulings page, E920) names the ruling it replaces. Its key is
     that row's: a pair's two listings, or a group's key, pass AND member set (E58, copied, never
     re-resolved -- the new word is about the set the old one was about). It is accepted only while
     that row is still the newest on its key (409: ruled again since the page loaded). Every write
@@ -2641,7 +2641,7 @@ def verdict_split(
     try:
         with conn.transaction():
             for lo, hi, relation, same_unit in pairs:
-                # The one pair writer (E919): the ruling and its must-not-link mirror — a
+                # The one pair writer (E920): the ruling and its must-not-link mirror — a
                 # same-unit pair drops the veto an earlier ruling wrote (§9), a negative writes
                 # one. The reasons ride on the CLUSTER row alone. A split is ONE ruling;
                 # stamping it on the fan-out would post C(n,2) rows from a single click, so the
@@ -2867,7 +2867,7 @@ def verdict_candidate_split(
     try:
         with conn.transaction():
             for lo, hi, relation, same_unit in pairs:
-                # The one pair writer (E919); the fan-out carries no reason chips — see the
+                # The one pair writer (E920); the fan-out carries no reason chips — see the
                 # body's own comment.
                 record_ruling(
                     conn, lo, hi, verdict=relation, decided_by=str(decided_by), note=note,
@@ -2964,7 +2964,7 @@ def proposed_split(
     return {"data": {"generation": found[0], **found[1][0]}, "store_ready": True}
 
 
-# ------------------------------------------------------------------ the rulings page (E919)
+# ------------------------------------------------------------------ the rulings page (E920)
 #
 # Every operator ruling in one list, beside the engine's current view and the state of
 # production (`autodedup/ui_sql.py`, the rulings section). Read-only: a flip or a withdrawal is

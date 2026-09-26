@@ -58,7 +58,7 @@ DECLARED: dict[str, frozenset[str]] = {
     # Reads the artifact, where the value is ALREADY a digest.
     "labels.py": frozenset({"decided_by"}),
     # Only the stamp `unapply` hands `detach_listing` (its own run, no person); the group rulings
-    # are read without their decider since E919 (the newest word on a set wins, whoever said it),
+    # are read without their decider since E920 (the newest word on a set wins, whoever said it),
     # so the plan names ruled SETS, never who ruled them (test_apply pins it).
     "apply.py": frozenset({"decided_by"}),
     # A2 (temporary): `decided_by` is the argument it hands `detach_listing`, the fixed stamp

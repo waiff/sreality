@@ -515,7 +515,7 @@ def test_a_group_verdict_with_no_member_set_refuses_its_key_in_every_generation(
 
 def test_the_newest_group_verdict_on_a_set_is_the_one_that_stands_whoever_ruled() -> None:
     # g10 {10, 11} ruled different, then g12's {10, 11} ruled same: the newer ruling retracts
-    # the older one, whoever took either (E919: the newest word wins at every reader, as the
+    # the older one, whoever took either (E920: the newest word wins at every reader, as the
     # lane's must-links and apply's pair negatives already read it). A negative newer than the
     # positive refuses again, and a withdrawal (`unsure`) after it lifts it.
     db = FakeDb()

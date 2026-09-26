@@ -1,4 +1,4 @@
-/* AUTODEDUP · Rozhodnutí — every operator ruling, beside the engine's view (E919).
+/* AUTODEDUP · Rozhodnutí — every operator ruling, beside the engine's view (E920).
  *
  * No other surface lists the rulings: a queue shows one only while its pair or
  * group sits in the chosen generation's queue. Here every ruling is a row, newest

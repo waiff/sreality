@@ -1,4 +1,4 @@
-/* The rulings page (E919): every ruling beside the engine's view, filters in the
+/* The rulings page (E920): every ruling beside the engine's view, filters in the
  * URL, and corrections that are NEW rulings — Flip / Withdraw post
  * `POST /autodedup/verdict` with `supersedes` (a 409 says someone ruled since),
  * never a delete; the split / merge a disagreeing property needs is the existing

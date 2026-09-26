@@ -114,7 +114,7 @@ select v.listing_lo, v.listing_hi, v.verdict
 # never by the key it was taken under: a later group holding that set plus one more listing may
 # carry another key and must still be refused. EVERY verdict on a set is read, positive ones
 # too: per set only the NEWEST ruling stands, whoever took it, so a set ruled different and
-# later ruled same or withdrawn no longer refuses (E903, E919). A row without `member_ids`
+# later ruled same or withdrawn no longer refuses (E903, E920). A row without `member_ids`
 # (538 backfilled every earlier ruling; only the old API's migration window can have left one)
 # names no set, so only its negatives are read, by key, and refuse that key in EVERY
 # generation (fail closed).

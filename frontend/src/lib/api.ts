@@ -3152,7 +3152,7 @@ export const getProposedSplits = (
 > =>
   request('/autodedup/proposed-splits', { query: f as Record<string, QueryValue>, jwt: true });
 
-/* ----- the rulings page (E919) ------------------------------------------------
+/* ----- the rulings page (E920) ------------------------------------------------
  *
  * EVERY operator ruling in one list (`GET /autodedup/rulings`), newest first,
  * beside the engine's current view and where the adverts sit now. The newest
@@ -4577,7 +4577,7 @@ export interface AutodedupVerdictInput {
   /* Reason CODES, never labels: the label is the registry's rendering of the
    * code and changing one must not change what a past verdict recorded. */
   reasons?: string[];
-  /* A CORRECTION (the rulings page, E919): the `verdicts.id` the page showed.
+  /* A CORRECTION (the rulings page, E920): the `verdicts.id` the page showed.
    * The server takes the key from that row — a group's pass and member set
    * included — and answers 409 when it is no longer the newest word on its key.
    * The write is a NEW row: a withdrawal is `unsure`, never a delete. */

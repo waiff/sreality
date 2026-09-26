@@ -8,7 +8,7 @@
 -- newest row per pair / per (group key, pass) is the ruling -- which is how every reader has
 -- always read the table (`incremental_sql.RT_MUST_LINK_SQL`, `apply_sql.PAIR_VERDICTS_SQL`,
 -- `labels_sql.PAIR_VERDICTS_SQL`, `ui_sql.OPERATOR_PAIR_VERDICTS_SQL`: DISTINCT ON the key,
--- `decided_at desc, id desc`). The rulings page (/autodedup/rulings, E919) writes flips and
+-- `decided_at desc, id desc`). The rulings page (/autodedup/rulings, E920) writes flips and
 -- withdrawals this way.
 --
 -- No row moves and no column changes. It DROPS two uniqueness rules, so it goes through the

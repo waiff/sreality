@@ -1,4 +1,4 @@
-"""The rulings page's API (E919): `GET /autodedup/rulings` and the corrections it writes through
+"""The rulings page's API (E920): `GET /autodedup/rulings` and the corrections it writes through
 `POST /autodedup/verdict` with `supersedes`.
 
 The connection is faked and dispatches on the statement constants, like the other review-page

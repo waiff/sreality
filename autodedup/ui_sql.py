@@ -1299,7 +1299,7 @@ LIMIT 1
 
 # -------------------------------------------------------------------------- operator writes
 
-# THE STORE IS A LEDGER (Decision 8, migration 574, E919). A ruling is never overwritten: a flip,
+# THE STORE IS A LEDGER (Decision 8, migration 574, E920). A ruling is never overwritten: a flip,
 # a withdrawal (`unsure`) or a re-ruling with another note is a NEW row, and per pair the newest
 # row (`decided_at desc, id desc`) is the ruling every reader obeys -- the lane's must-links
 # (`incremental_sql.RT_MUST_LINK_SQL`), apply's negatives (`apply_sql.PAIR_VERDICTS_SQL`), the
@@ -1520,7 +1520,7 @@ SELECT 1 FROM autodedup.clusters WHERE generation = %(generation)s::text LIMIT 1
 # ANY earlier word about the pair: a Browse merge's or a detach's ruling, a group ruling whose set
 # holds both adverts (an implied pair), or a must-not-link, is about a pair the engine may never
 # have stored (Decision 7 keeps no machine reject), and the operator must be able to correct it
-# (the rulings page, E919).
+# (the rulings page, E920).
 PAIR_EXISTS_SQL = """
 SELECT 1
 WHERE EXISTS (SELECT 1 FROM autodedup.verdicts x
@@ -1822,7 +1822,7 @@ SELECT l.property_id, l.id, l.source, l.is_active, pr.repr_listing_ref_id,
  ORDER BY l.property_id, l.id
 """
 
-# ------------------------------------------------------------------- the rulings page (E919)
+# ------------------------------------------------------------------- the rulings page (E920)
 #
 # EVERY operator ruling, in one list, beside the engine's current view of it
 # (`GET /autodedup/rulings`, the page `/autodedup/rulings`). No other surface lists the rulings:

@@ -446,7 +446,7 @@ class Negatives:
         for lo, hi, _verdict in _rows(conn, S.PAIR_VERDICTS_SQL, {
                 "listing_ids": ids, "negatives": negatives}):
             out.pairs.setdefault(int(lo), []).append(int(hi))
-        # Per set, only the NEWEST ruling stands, whoever took it (E903 as amended by E919: the
+        # Per set, only the NEWEST ruling stands, whoever took it (E903 as amended by E920: the
         # newest word wins at every reader, as it does for pairs): a set ruled different and
         # later ruled same or withdrawn (`unsure`) no longer refuses. A setless row fails closed.
         newest: dict[frozenset[int], tuple[tuple[float, int], str]] = {}

@@ -1027,7 +1027,7 @@ def test_the_pair_view_reads_and_echoes_the_pass_it_was_validated_against(client
 
 
 def test_a_pair_the_asked_for_pass_never_scored_still_opens(client, conn):
-    """E919: no stored row is "the engine kept nothing", not "no pair" — the live stream keeps
+    """E920: no stored row is "the engine kept nothing", not "no pair" — the live stream keeps
     no machine reject (Decision 7) and most rulings name pairs it never stored. The page still
     gets both digests, the photos and the ruling history, with `pair: null`."""
     conn.canned = {"pair_one": [], "pair_verdicts": [_verdict_row()]}
@@ -2661,7 +2661,7 @@ def test_a_split_that_agrees_with_what_is_stored_asks_nothing(admin_client, spli
 
 
 def test_the_newest_veto_is_taken_back_whoever_wrote_it(admin_client, split_conn):
-    """Migration 574 / E919: the newest ruling on a pair is the one every reader obeys, whoever
+    """Migration 574 / E920: the newest ruling on a pair is the one every reader obeys, whoever
     took it — so a split that would supersede anyone's standing negative asks first."""
     split_conn.canned["member_verdicts"] = [
         _verdict_row(listing_lo=11, listing_hi=12, verdict="different",

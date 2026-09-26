@@ -1,4 +1,4 @@
-"""Migration 574 executed (E919): the operator's rulings are a ledger, and every reader obeys the
+"""Migration 574 executed (E920): the operator's rulings are a ledger, and every reader obeys the
 newest row. A flip and a withdrawal are NEW rows; the lane's must-links (`RT_MUST_LINK_SQL`), the
 apply path's negatives (`apply_sql.PAIR_VERDICTS_SQL`, `Negatives.read` over group rulings) and
 the rulings page's own reads all take the newest word per pair / per set. The writes also hold on

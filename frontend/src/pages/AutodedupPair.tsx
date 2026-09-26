@@ -118,7 +118,7 @@ export default function AutodedupPair() {
           un-linkable, which is why it takes a second click.
         </p>
         <p className="mt-1 text-[0.78rem]">
-          {/* Every ruling on either advert, with its history and the corrections (E919). */}
+          {/* Every ruling on either advert, with its history and the corrections (E920). */}
           <Link
             to={withQuery(ROUTES.autodedupRulings.build(), { listing: lo })}
             className="text-[var(--color-copper-2)] underline decoration-dotted underline-offset-2"
