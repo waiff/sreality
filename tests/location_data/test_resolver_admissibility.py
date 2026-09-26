@@ -98,7 +98,8 @@ def test_the_claim_read_takes_a_listings_newest_evidence_per_claim_type():
 def test_the_w18b_rule_carries_its_own_resolver_version():
     """A rule that can change an output must move `RESOLVER_VERSION`, or the sweep's version
     arm never re-queues the rows the old rule got wrong — 29,545 live bazos listings here."""
-    assert RESOLVER_VERSION == "resolver:v5.3"
+    major, minor = RESOLVER_VERSION.removeprefix("resolver:v").split(".")
+    assert (int(major), int(minor)) >= (5, 3)
 
 
 class _ClaimCursor:

@@ -69,4 +69,10 @@ from __future__ import annotations
 #      version that actually carries it, so a PARTIAL re-mine can never blank a listing
 #      again; a claim type the ACTIVE contract no longer declares is not read at all. The
 #      bump re-queues the corpus so the blanked rows resolve on their real evidence.
-RESOLVER_VERSION = "resolver:v5.3"
+# v5.4 = MF program PR-B (operator rulings D5 + Q7, 2026-09-25). FILL stores `katastr_kod`,
+#      the single KÚ of the BOUND entity — a KÚ/ZSJ on the chain, the one KÚ of a one-KÚ
+#      obec, an address point's own KÚ, a street or část obce whose every RÚIAN door lies in
+#      one KÚ — and never a pin's. Containment reads the `pip` pieces only (the authoritative
+#      fallback branch is gone). The bump re-queues the corpus so every row gets its KÚ; the
+#      MF view swap (migration 567) refuses to apply until the address-grain rows have one.
+RESOLVER_VERSION = "resolver:v5.4"

@@ -235,6 +235,12 @@ def test_the_part_question_is_asked_only_for_a_part_bind_in_a_multi_ku_town():
     assert asked == [14]
 
 
+def test_the_katastr_rule_carries_its_own_resolver_version():
+    """A rule that changes an output moves `RESOLVER_VERSION`, or the sweep never re-queues
+    the corpus and no existing row ever gets its KÚ."""
+    assert RESOLVER_VERSION == "resolver:v5.4"
+
+
 # ------------------------------------------------------------------ the SQL side
 
 
